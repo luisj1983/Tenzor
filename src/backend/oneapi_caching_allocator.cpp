@@ -228,6 +228,31 @@ void OneAPICachingAllocator::empty_cache(int device) {
     }
 }
 
+void OneAPICachingAllocator::release_all() {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    for (auto& [dev_id, device_alloc] : device_allocators_) {
+        if (!device_alloc.initialized) continue;
+        sycl::queue* queue = static_cast<sycl::queue*>(device_alloc.queue);
+
+        // Free every tracked USM pointer (cached and still-allocated).
+        for (auto& [ptr, block] : device_alloc.all_blocks) {
+            if (ptr) {
+                try {
+                    sycl::free(ptr, *queue);
+                } catch (const sycl::exception&) {
+                    // Swallow — cleanup context
+                }
+            }
+        }
+
+        device_alloc.all_blocks.clear();
+        device_alloc.free_shared_blocks.clear();
+        device_alloc.free_device_blocks.clear();
+        device_alloc.stats = OneAPIMemoryStats{};
+    }
+}
+
 void OneAPICachingAllocator::garbage_collect(int device, bool aggressive) {
     std::lock_guard<std::mutex> lock(mutex_);
 

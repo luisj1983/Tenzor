@@ -1151,11 +1151,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // =========================================================================
 #ifdef TENZOR_HAS_CUDNN
     table.register_single_output_kernel(OpId::MaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        // inputs: [grad_output, input, output]
+        // inputs: [grad_output, indices, input, output]
         int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
         int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        return cuda::cudnn_maxpool2d_backward(inputs[0], inputs[1], inputs[2], kernel_size, stride, padding, get_cuda_stream(attrs));
+        return cuda::cudnn_maxpool2d_backward(inputs[0], inputs[2], inputs[3], kernel_size, stride, padding, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::AvgPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         // inputs: [grad_output, input]

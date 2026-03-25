@@ -186,8 +186,8 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 sum += in_ptr[idx];
             });
 
-            out_ptr[0] = sum_buf[0];
             queue.wait();
+            out_ptr[0] = sum_buf[0];
             sycl::free(sum_buf, queue);
         }
         else if (in_cont.dtype() == DType::Float64) {
@@ -202,8 +202,8 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 sum += in_ptr[idx];
             });
 
-            out_ptr[0] = sum_buf[0];
             queue.wait();
+            out_ptr[0] = sum_buf[0];
             sycl::free(sum_buf, queue);
         }
         else if (in_cont.dtype() == DType::Float16) {
@@ -219,8 +219,8 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 sum += static_cast<float>(in_ptr[idx]);
             });
 
-            out_ptr[0] = sycl::half(sum_buf[0]);
             queue.wait();
+            out_ptr[0] = sycl::half(sum_buf[0]);
             sycl::free(sum_buf, queue);
         }
         else if (in_cont.dtype() == DType::BFloat16) {
@@ -236,8 +236,8 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 sum += bf16_to_f32(in_ptr[idx]);
             });
 
-            out_ptr[0] = f32_to_bf16(sum_buf[0]);
             queue.wait();
+            out_ptr[0] = f32_to_bf16(sum_buf[0]);
             sycl::free(sum_buf, queue);
         }
         else if (in_cont.dtype() == DType::Int32) {
@@ -253,8 +253,8 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 sum += static_cast<int64_t>(in_ptr[idx]);
             });
 
-            out_ptr[0] = static_cast<int32_t>(sum_buf[0]);
             queue.wait();
+            out_ptr[0] = static_cast<int32_t>(sum_buf[0]);
             sycl::free(sum_buf, queue);
         }
         else if (in_cont.dtype() == DType::Int64) {
@@ -498,8 +498,8 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
                 sum += in_ptr[idx];
             });
 
-            out_ptr[0] = sum_buf[0] * scale;
             queue.wait();
+            out_ptr[0] = sum_buf[0] * scale;
             sycl::free(sum_buf, queue);
         }
         else if (in_cont.dtype() == DType::Float64) {
@@ -515,8 +515,8 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
                 sum += in_ptr[idx];
             });
 
-            out_ptr[0] = sum_buf[0] * scale;
             queue.wait();
+            out_ptr[0] = sum_buf[0] * scale;
             sycl::free(sum_buf, queue);
         }
         else if (in_cont.dtype() == DType::Float16) {
@@ -532,8 +532,8 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
                 sum += static_cast<float>(in_ptr[idx]);
             });
 
-            out_ptr[0] = sycl::half(sum_buf[0] * scale);
             queue.wait();
+            out_ptr[0] = sycl::half(sum_buf[0] * scale);
             sycl::free(sum_buf, queue);
         }
         else if (in_cont.dtype() == DType::BFloat16) {
@@ -549,8 +549,8 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
                 sum += bf16_to_f32(in_ptr[idx]);
             });
 
-            out_ptr[0] = f32_to_bf16(sum_buf[0] * scale);
             queue.wait();
+            out_ptr[0] = f32_to_bf16(sum_buf[0] * scale);
             sycl::free(sum_buf, queue);
         }
         else {

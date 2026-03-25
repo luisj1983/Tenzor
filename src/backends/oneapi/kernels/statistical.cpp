@@ -710,8 +710,9 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
     }
     else if (input.dtype() == DType::Int32) {
         const int32_t* in_ptr = get_data_ptr<const int32_t>(input);
-        Tensor output(out_shape, input.dtype(), input.device());
-        int32_t* out_ptr = get_data_ptr<int32_t>(output);
+        // Promote to Int64 to prevent overflow (matches PyTorch behavior)
+        Tensor output(out_shape, DType::Int64, input.device());
+        int64_t* out_ptr = get_data_ptr<int64_t>(output);
 
         if (dim == -1) {
             // Full reduction — use shared memory for int64 accumulator
@@ -726,8 +727,7 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
                 }
             );
             queue.wait();
-            out_ptr[0] = static_cast<int32_t>(prod_buf[0]);
-            queue.wait();
+            out_ptr[0] = prod_buf[0];
         } else {
             // Dimensional reduction on device
             const int64_t ndim = shape.size();
@@ -760,7 +760,64 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
                         prod_value *= static_cast<int64_t>(
                             in_ptr[base_in_idx + i * d_strides[dim]]);
                     }
-                    out_ptr[out_idx] = static_cast<int32_t>(prod_value);
+                    out_ptr[out_idx] = prod_value;
+                }
+            );
+            queue.wait();
+        }
+
+        return output;
+    }
+    else if (input.dtype() == DType::Int64) {
+        const int64_t* in_ptr = get_data_ptr<const int64_t>(input);
+        Tensor output(out_shape, DType::Int64, input.device());
+        int64_t* out_ptr = get_data_ptr<int64_t>(output);
+
+        if (dim == -1) {
+            // Full reduction using shared accumulator
+            auto prod_buf = sycl::malloc_shared<int64_t>(1, queue);
+            SyclDeviceGuard prod_guard(prod_buf, queue);
+            prod_buf[0] = 1;
+
+            queue.parallel_for(sycl::range<1>(total_size),
+                sycl::reduction(prod_buf, int64_t(1), std::multiplies<int64_t>()),
+                [=](sycl::id<1> idx, auto& prod) {
+                    prod.combine(in_ptr[idx]);
+                }
+            );
+            queue.wait();
+            out_ptr[0] = prod_buf[0];
+        } else {
+            // Dimensional reduction on device
+            const int64_t ndim = shape.size();
+            const int64_t dim_size = shape[dim];
+
+            auto d_strides = sycl::malloc_device<int64_t>(ndim, queue);
+            SyclDeviceGuard strides_guard(d_strides, queue);
+            auto d_shape = sycl::malloc_device<int64_t>(ndim, queue);
+            SyclDeviceGuard shape_guard(d_shape, queue);
+            queue.memcpy(d_strides, strides.data(), ndim * sizeof(int64_t));
+            queue.memcpy(d_shape, shape.data(), ndim * sizeof(int64_t));
+
+            queue.parallel_for(
+                sycl::range<1>(output_size), [=](sycl::id<1> gid) {
+                    int64_t out_idx = gid[0];
+                    int64_t tmp = out_idx;
+
+                    int64_t base_in_idx = 0;
+                    for (int64_t d = ndim - 1; d >= 0; --d) {
+                        if (d == dim) continue;
+                        int64_t s = d_shape[d];
+                        int64_t coord = tmp % s;
+                        tmp /= s;
+                        base_in_idx += coord * d_strides[d];
+                    }
+
+                    int64_t prod_value = 1;
+                    for (int64_t i = 0; i < dim_size; ++i) {
+                        prod_value *= in_ptr[base_in_idx + i * d_strides[dim]];
+                    }
+                    out_ptr[out_idx] = prod_value;
                 }
             );
             queue.wait();

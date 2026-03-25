@@ -65,9 +65,23 @@ inline uint16_t f32_to_bf16(float f32) {
 
 #ifdef TENZOR_HAS_ONEDNN
 
+// Forward declarations: pure SYCL implementations for non-Float32 dtypes
+static auto batchnorm2d_forward_sycl(const Tensor& input, const Tensor& mean, const Tensor& variance,
+                                      float epsilon, sycl::queue& queue) -> Tensor;
+static auto batchnorm2d_forward_affine_sycl(const Tensor& input, const Tensor& mean, const Tensor& variance,
+                                             const Tensor& gamma, const Tensor& beta, float epsilon, sycl::queue& queue) -> Tensor;
+static auto batchnorm2d_backward_sycl(const Tensor& grad_output, const Tensor& input, const Tensor& mean,
+                                       const Tensor& variance, const Tensor& gamma, float epsilon, sycl::queue& queue)
+                                       -> std::tuple<Tensor, Tensor, Tensor>;
+
 // Batch normalization forward using oneDNN
 auto batchnorm2d_forward(const Tensor& input, const Tensor& mean, const Tensor& variance,
                          float epsilon, sycl::queue& queue) -> Tensor {
+    // oneDNN BatchNorm descriptors are f32-only; delegate non-f32 to SYCL
+    if (input.dtype() != DType::Float32) {
+        return batchnorm2d_forward_sycl(input, mean, variance, epsilon, queue);
+    }
+
     using namespace dnnl;
 
     auto shape = input.shape();
@@ -138,6 +152,11 @@ auto batchnorm2d_forward(const Tensor& input, const Tensor& mean, const Tensor& 
 // Batch normalization forward with affine parameters
 auto batchnorm2d_forward_affine(const Tensor& input, const Tensor& mean, const Tensor& variance,
                                 const Tensor& gamma, const Tensor& beta, float epsilon, sycl::queue& queue) -> Tensor {
+    // oneDNN BatchNorm descriptors are f32-only; delegate non-f32 to SYCL
+    if (input.dtype() != DType::Float32) {
+        return batchnorm2d_forward_affine_sycl(input, mean, variance, gamma, beta, epsilon, queue);
+    }
+
     using namespace dnnl;
 
     auto shape = input.shape();
@@ -192,7 +211,7 @@ auto batchnorm2d_forward_affine(const Tensor& input, const Tensor& mean, const T
                                               const_cast<void*>(variance.data_ptr()));
 
     // Create scale-shift tensor (gamma and beta concatenated)
-    Tensor scale_shift({2, C}, input.dtype(), input.device());
+    Tensor scale_shift({2, C}, DType::Float32, input.device());
     float* ss_ptr = get_data_ptr<float>(scale_shift);
     const float* gamma_ptr = get_data_ptr<const float>(gamma);
     const float* beta_ptr = get_data_ptr<const float>(beta);
@@ -228,6 +247,11 @@ auto batchnorm2d_forward_affine(const Tensor& input, const Tensor& mean, const T
 auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& mean,
                           const Tensor& variance, const Tensor& gamma, float epsilon, sycl::queue& queue)
                           -> std::tuple<Tensor, Tensor, Tensor> {
+    // oneDNN BatchNorm backward descriptors are f32-only; delegate non-f32 to SYCL
+    if (input.dtype() != DType::Float32) {
+        return batchnorm2d_backward_sycl(grad_output, input, mean, variance, gamma, epsilon, queue);
+    }
+
     using namespace dnnl;
 
     auto shape = input.shape();
@@ -297,8 +321,8 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
                                               sycl_interop::memory_kind::usm,
                                               const_cast<void*>(variance.data_ptr()));
 
-    // Scale-shift for forward
-    Tensor scale_shift({2, C}, input.dtype(), input.device());
+    // Scale-shift for forward (always f32 for oneDNN)
+    Tensor scale_shift({2, C}, DType::Float32, input.device());
     float* ss_ptr = get_data_ptr<float>(scale_shift);
     const float* gamma_ptr = get_data_ptr<const float>(gamma);
 
@@ -314,8 +338,8 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
         const_cast<void*>(scale_shift.data_ptr())
     );
 
-    // Diff scale-shift for gradients
-    Tensor diff_scale_shift({2, C}, input.dtype(), input.device());
+    // Diff scale-shift for gradients (always f32 for oneDNN)
+    Tensor diff_scale_shift({2, C}, DType::Float32, input.device());
     auto diff_ss_mem = sycl_interop::make_memory(
         memory::desc({2, C}, memory::data_type::f32, memory::format_tag::nc),
         dnnl_engine,
@@ -347,6 +371,273 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
         grad_beta_ptr[i] = diff_ss_ptr[C + i];
     });
 
+    return {grad_input, grad_gamma, grad_beta};
+}
+
+// ============================================================================
+// Pure SYCL fallback implementations for non-Float32 dtypes (used when oneDNN is available
+// but the dtype is not f32, since oneDNN descriptors are hardcoded to f32).
+// ============================================================================
+
+static auto batchnorm2d_forward_sycl(const Tensor& input, const Tensor& mean, const Tensor& variance,
+                                      float epsilon, sycl::queue& queue) -> Tensor {
+    auto shape = input.shape();
+    const int64_t N = shape[0], C = shape[1], H = shape[2], W = shape[3];
+    Tensor output(std::vector<int64_t>{N, C, H, W}, input.dtype(), input.device());
+
+    if (input.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(input);
+        const double* mean_ptr = get_data_ptr<const double>(mean);
+        const double* var_ptr = get_data_ptr<const double>(variance);
+        double* out_ptr = get_data_ptr<double>(output);
+        queue.parallel_for<BatchNorm2dForwardKernelFloat64>(sycl::range<3>(N, C, H * W), [=](sycl::id<3> idx) {
+            const int64_t n = idx[0], c = idx[1], hw = idx[2];
+            const double std_inv = 1.0 / sycl::sqrt(var_ptr[c] + static_cast<double>(epsilon));
+            const int64_t i = ((n * C + c) * H * W) + hw;
+            out_ptr[i] = (in_ptr[i] - mean_ptr[c]) * std_inv;
+        });
+    } else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        const bool stats_f32 = (mean.dtype() == DType::Float32);
+        const float* mean_f32 = stats_f32 ? get_data_ptr<const float>(mean) : nullptr;
+        const float* var_f32 = stats_f32 ? get_data_ptr<const float>(variance) : nullptr;
+        const sycl::half* mean_f16 = !stats_f32 ? get_data_ptr<const sycl::half>(mean) : nullptr;
+        const sycl::half* var_f16 = !stats_f32 ? get_data_ptr<const sycl::half>(variance) : nullptr;
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<BatchNorm2dForwardKernelFloat16>(sycl::range<3>(N, C, H * W), [=](sycl::id<3> idx) {
+            const int64_t n = idx[0], c = idx[1], hw = idx[2];
+            const float m = stats_f32 ? mean_f32[c] : static_cast<float>(mean_f16[c]);
+            const float v = stats_f32 ? var_f32[c] : static_cast<float>(var_f16[c]);
+            const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
+            const int64_t i = ((n * C + c) * H * W) + hw;
+            out_ptr[i] = sycl::half((static_cast<float>(in_ptr[i]) - m) * std_inv);
+        });
+    } else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        const bool stats_f32 = (mean.dtype() == DType::Float32);
+        const float* mean_f32 = stats_f32 ? get_data_ptr<const float>(mean) : nullptr;
+        const float* var_f32 = stats_f32 ? get_data_ptr<const float>(variance) : nullptr;
+        const uint16_t* mean_bf16 = !stats_f32 ? get_data_ptr<const uint16_t>(mean) : nullptr;
+        const uint16_t* var_bf16 = !stats_f32 ? get_data_ptr<const uint16_t>(variance) : nullptr;
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for<BatchNorm2dForwardKernelBFloat16>(sycl::range<3>(N, C, H * W), [=](sycl::id<3> idx) {
+            const int64_t n = idx[0], c = idx[1], hw = idx[2];
+            const float m = stats_f32 ? mean_f32[c] : bf16_to_f32(mean_bf16[c]);
+            const float v = stats_f32 ? var_f32[c] : bf16_to_f32(var_bf16[c]);
+            const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
+            const int64_t i = ((n * C + c) * H * W) + hw;
+            out_ptr[i] = f32_to_bf16((bf16_to_f32(in_ptr[i]) - m) * std_inv);
+        });
+    } else {
+        throw std::runtime_error("Unsupported dtype for batchnorm2d_forward");
+    }
+    return output;
+}
+
+static auto batchnorm2d_forward_affine_sycl(const Tensor& input, const Tensor& mean, const Tensor& variance,
+                                             const Tensor& gamma, const Tensor& beta, float epsilon, sycl::queue& queue) -> Tensor {
+    auto shape = input.shape();
+    const int64_t N = shape[0], C = shape[1], H = shape[2], W = shape[3];
+    Tensor output(std::vector<int64_t>{N, C, H, W}, input.dtype(), input.device());
+
+    if (input.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(input);
+        const double* mean_ptr = get_data_ptr<const double>(mean);
+        const double* var_ptr = get_data_ptr<const double>(variance);
+        const double* g_ptr = get_data_ptr<const double>(gamma);
+        const double* b_ptr = get_data_ptr<const double>(beta);
+        double* out_ptr = get_data_ptr<double>(output);
+        queue.parallel_for<BatchNorm2dForwardAffineKernelFloat64>(sycl::range<3>(N, C, H * W), [=](sycl::id<3> idx) {
+            const int64_t n = idx[0], c = idx[1], hw = idx[2];
+            const double std_inv = 1.0 / sycl::sqrt(var_ptr[c] + static_cast<double>(epsilon));
+            const int64_t i = ((n * C + c) * H * W) + hw;
+            out_ptr[i] = g_ptr[c] * (in_ptr[i] - mean_ptr[c]) * std_inv + b_ptr[c];
+        });
+    } else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        const bool stats_f32 = (mean.dtype() == DType::Float32);
+        const float* mean_f32 = stats_f32 ? get_data_ptr<const float>(mean) : nullptr;
+        const float* var_f32 = stats_f32 ? get_data_ptr<const float>(variance) : nullptr;
+        const sycl::half* mean_f16 = !stats_f32 ? get_data_ptr<const sycl::half>(mean) : nullptr;
+        const sycl::half* var_f16 = !stats_f32 ? get_data_ptr<const sycl::half>(variance) : nullptr;
+        const sycl::half* g_ptr = get_data_ptr<const sycl::half>(gamma);
+        const sycl::half* b_ptr = get_data_ptr<const sycl::half>(beta);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<BatchNorm2dForwardAffineKernelFloat16>(sycl::range<3>(N, C, H * W), [=](sycl::id<3> idx) {
+            const int64_t n = idx[0], c = idx[1], hw = idx[2];
+            const float m = stats_f32 ? mean_f32[c] : static_cast<float>(mean_f16[c]);
+            const float v = stats_f32 ? var_f32[c] : static_cast<float>(var_f16[c]);
+            const float g = static_cast<float>(g_ptr[c]);
+            const float b = static_cast<float>(b_ptr[c]);
+            const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
+            const int64_t i = ((n * C + c) * H * W) + hw;
+            out_ptr[i] = sycl::half(g * (static_cast<float>(in_ptr[i]) - m) * std_inv + b);
+        });
+    } else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        const bool stats_f32 = (mean.dtype() == DType::Float32);
+        const float* mean_f32 = stats_f32 ? get_data_ptr<const float>(mean) : nullptr;
+        const float* var_f32 = stats_f32 ? get_data_ptr<const float>(variance) : nullptr;
+        const uint16_t* mean_bf16 = !stats_f32 ? get_data_ptr<const uint16_t>(mean) : nullptr;
+        const uint16_t* var_bf16 = !stats_f32 ? get_data_ptr<const uint16_t>(variance) : nullptr;
+        const uint16_t* g_ptr = get_data_ptr<const uint16_t>(gamma);
+        const uint16_t* b_ptr = get_data_ptr<const uint16_t>(beta);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for<BatchNorm2dForwardAffineKernelBFloat16>(sycl::range<3>(N, C, H * W), [=](sycl::id<3> idx) {
+            const int64_t n = idx[0], c = idx[1], hw = idx[2];
+            const float m = stats_f32 ? mean_f32[c] : bf16_to_f32(mean_bf16[c]);
+            const float v = stats_f32 ? var_f32[c] : bf16_to_f32(var_bf16[c]);
+            const float g = bf16_to_f32(g_ptr[c]);
+            const float b = bf16_to_f32(b_ptr[c]);
+            const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
+            const int64_t i = ((n * C + c) * H * W) + hw;
+            out_ptr[i] = f32_to_bf16(g * (bf16_to_f32(in_ptr[i]) - m) * std_inv + b);
+        });
+    } else {
+        throw std::runtime_error("Unsupported dtype for batchnorm2d_forward_affine");
+    }
+    return output;
+}
+
+static auto batchnorm2d_backward_sycl(const Tensor& grad_output, const Tensor& input, const Tensor& mean,
+                                       const Tensor& variance, const Tensor& gamma, float epsilon, sycl::queue& queue)
+                                       -> std::tuple<Tensor, Tensor, Tensor> {
+    auto shape = input.shape();
+    const int64_t N = shape[0], C = shape[1], H = shape[2], W = shape[3];
+    const int64_t spatial = H * W;
+
+    Tensor grad_input(std::vector<int64_t>{N, C, H, W}, input.dtype(), input.device());
+    Tensor grad_gamma({C}, input.dtype(), input.device());
+    Tensor grad_beta({C}, input.dtype(), input.device());
+
+    if (input.dtype() == DType::Float64) {
+        const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
+        const double* in_ptr = get_data_ptr<const double>(input);
+        const double* mean_ptr = get_data_ptr<const double>(mean);
+        const double* var_ptr = get_data_ptr<const double>(variance);
+        const double* gamma_ptr = get_data_ptr<const double>(gamma);
+        double* grad_in_ptr = get_data_ptr<double>(grad_input);
+        double* grad_gamma_ptr = get_data_ptr<double>(grad_gamma);
+        double* grad_beta_ptr = get_data_ptr<double>(grad_beta);
+
+        queue.parallel_for<BatchNorm2dBackwardGammaKernelFloat64>(sycl::range<1>(C), [=](sycl::id<1> c) {
+            double sum_go = 0.0, sum_go_norm = 0.0;
+            const double m = mean_ptr[c], std_inv = 1.0 / sycl::sqrt(var_ptr[c] + static_cast<double>(epsilon));
+            for (int64_t n = 0; n < N; ++n)
+                for (int64_t hw = 0; hw < spatial; ++hw) {
+                    const int64_t idx = ((n * C + c) * spatial) + hw;
+                    sum_go += grad_out_ptr[idx];
+                    sum_go_norm += grad_out_ptr[idx] * (in_ptr[idx] - m) * std_inv;
+                }
+            grad_gamma_ptr[c] = sum_go_norm;
+            grad_beta_ptr[c] = sum_go;
+        });
+
+        // The input gradient kernel reads grad_gamma and grad_beta written above
+        queue.wait();
+
+        const double scale = 1.0 / static_cast<double>(N * spatial);
+        queue.parallel_for<BatchNorm2dBackwardInputKernelFloat64>(sycl::range<3>(N, C, spatial), [=](sycl::id<3> idx) {
+            const int64_t n = idx[0], c = idx[1], hw = idx[2];
+            const double std_inv = 1.0 / sycl::sqrt(var_ptr[c] + static_cast<double>(epsilon));
+            const int64_t i = ((n * C + c) * spatial) + hw;
+            const double x_norm = (in_ptr[i] - mean_ptr[c]) * std_inv;
+            grad_in_ptr[i] = gamma_ptr[c] * std_inv * (grad_out_ptr[i] -
+                grad_beta_ptr[c] * scale - x_norm * grad_gamma_ptr[c] * scale);
+        });
+    } else if (input.dtype() == DType::Float16) {
+        const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        const bool stats_f32 = (mean.dtype() == DType::Float32);
+        const float* mean_f32 = stats_f32 ? get_data_ptr<const float>(mean) : nullptr;
+        const float* var_f32 = stats_f32 ? get_data_ptr<const float>(variance) : nullptr;
+        const sycl::half* mean_f16 = !stats_f32 ? get_data_ptr<const sycl::half>(mean) : nullptr;
+        const sycl::half* var_f16 = !stats_f32 ? get_data_ptr<const sycl::half>(variance) : nullptr;
+        const sycl::half* gamma_ptr = get_data_ptr<const sycl::half>(gamma);
+        sycl::half* grad_in_ptr = get_data_ptr<sycl::half>(grad_input);
+        sycl::half* grad_gamma_ptr = get_data_ptr<sycl::half>(grad_gamma);
+        sycl::half* grad_beta_ptr = get_data_ptr<sycl::half>(grad_beta);
+
+        queue.parallel_for<BatchNorm2dBackwardGammaKernelFloat16>(sycl::range<1>(C), [=](sycl::id<1> c) {
+            float sum_go = 0.0f, sum_go_norm = 0.0f;
+            const float m = stats_f32 ? mean_f32[c] : static_cast<float>(mean_f16[c]);
+            const float v = stats_f32 ? var_f32[c] : static_cast<float>(var_f16[c]);
+            const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
+            for (int64_t n = 0; n < N; ++n)
+                for (int64_t hw = 0; hw < spatial; ++hw) {
+                    const int64_t idx = ((n * C + c) * spatial) + hw;
+                    float go = static_cast<float>(grad_out_ptr[idx]);
+                    sum_go += go;
+                    sum_go_norm += go * (static_cast<float>(in_ptr[idx]) - m) * std_inv;
+                }
+            grad_gamma_ptr[c] = sycl::half(sum_go_norm);
+            grad_beta_ptr[c] = sycl::half(sum_go);
+        });
+
+        // The input gradient kernel reads grad_gamma and grad_beta written above
+        queue.wait();
+
+        const float scale = 1.0f / static_cast<float>(N * spatial);
+        queue.parallel_for<BatchNorm2dBackwardInputKernelFloat16>(sycl::range<3>(N, C, spatial), [=](sycl::id<3> idx) {
+            const int64_t n = idx[0], c = idx[1], hw = idx[2];
+            const float m = stats_f32 ? mean_f32[c] : static_cast<float>(mean_f16[c]);
+            const float v = stats_f32 ? var_f32[c] : static_cast<float>(var_f16[c]);
+            const float g = static_cast<float>(gamma_ptr[c]);
+            const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
+            const int64_t i = ((n * C + c) * spatial) + hw;
+            const float x_norm = (static_cast<float>(in_ptr[i]) - m) * std_inv;
+            grad_in_ptr[i] = sycl::half(g * std_inv * (static_cast<float>(grad_out_ptr[i]) -
+                static_cast<float>(grad_beta_ptr[c]) * scale -
+                x_norm * static_cast<float>(grad_gamma_ptr[c]) * scale));
+        });
+    } else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        const bool stats_f32 = (mean.dtype() == DType::Float32);
+        const float* mean_f32 = stats_f32 ? get_data_ptr<const float>(mean) : nullptr;
+        const float* var_f32 = stats_f32 ? get_data_ptr<const float>(variance) : nullptr;
+        const uint16_t* mean_bf16 = !stats_f32 ? get_data_ptr<const uint16_t>(mean) : nullptr;
+        const uint16_t* var_bf16 = !stats_f32 ? get_data_ptr<const uint16_t>(variance) : nullptr;
+        const uint16_t* gamma_ptr = get_data_ptr<const uint16_t>(gamma);
+        uint16_t* grad_in_ptr = get_data_ptr<uint16_t>(grad_input);
+        uint16_t* grad_gamma_ptr = get_data_ptr<uint16_t>(grad_gamma);
+        uint16_t* grad_beta_ptr = get_data_ptr<uint16_t>(grad_beta);
+
+        queue.parallel_for<BatchNorm2dBackwardGammaKernelBFloat16>(sycl::range<1>(C), [=](sycl::id<1> c) {
+            float sum_go = 0.0f, sum_go_norm = 0.0f;
+            const float m = stats_f32 ? mean_f32[c] : bf16_to_f32(mean_bf16[c]);
+            const float v = stats_f32 ? var_f32[c] : bf16_to_f32(var_bf16[c]);
+            const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
+            for (int64_t n = 0; n < N; ++n)
+                for (int64_t hw = 0; hw < spatial; ++hw) {
+                    const int64_t idx = ((n * C + c) * spatial) + hw;
+                    float go = bf16_to_f32(grad_out_ptr[idx]);
+                    sum_go += go;
+                    sum_go_norm += go * (bf16_to_f32(in_ptr[idx]) - m) * std_inv;
+                }
+            grad_gamma_ptr[c] = f32_to_bf16(sum_go_norm);
+            grad_beta_ptr[c] = f32_to_bf16(sum_go);
+        });
+
+        // The input gradient kernel reads grad_gamma and grad_beta written above
+        queue.wait();
+
+        const float scale = 1.0f / static_cast<float>(N * spatial);
+        queue.parallel_for<BatchNorm2dBackwardInputKernelBFloat16>(sycl::range<3>(N, C, spatial), [=](sycl::id<3> idx) {
+            const int64_t n = idx[0], c = idx[1], hw = idx[2];
+            const float m = stats_f32 ? mean_f32[c] : bf16_to_f32(mean_bf16[c]);
+            const float v = stats_f32 ? var_f32[c] : bf16_to_f32(var_bf16[c]);
+            const float g = bf16_to_f32(gamma_ptr[c]);
+            const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
+            const int64_t i = ((n * C + c) * spatial) + hw;
+            const float x_norm = (bf16_to_f32(in_ptr[i]) - m) * std_inv;
+            grad_in_ptr[i] = f32_to_bf16(g * std_inv * (bf16_to_f32(grad_out_ptr[i]) -
+                bf16_to_f32(grad_beta_ptr[c]) * scale -
+                x_norm * bf16_to_f32(grad_gamma_ptr[c]) * scale));
+        });
+    } else {
+        throw std::runtime_error("Unsupported dtype for batchnorm2d_backward");
+    }
     return {grad_input, grad_gamma, grad_beta};
 }
 
@@ -1167,6 +1458,7 @@ auto group_norm_kernel(const Tensor& input, int64_t num_groups,
                 mean_ptr[n * num_groups + g] = sum / static_cast<float>(group_size);
             }
         );
+        queue.wait();
 
         // Pass 2: compute per-group variance and inv_std
         queue.parallel_for<GroupNormVarianceKernelFloat32>(
@@ -1188,6 +1480,7 @@ auto group_norm_kernel(const Tensor& input, int64_t num_groups,
                 inv_std_ptr[n * num_groups + g] = 1.0f / sycl::sqrt(var + eps);
             }
         );
+        queue.wait();
 
         // Pass 3: normalize + affine
         queue.parallel_for<GroupNormNormalizeKernelFloat32>(
@@ -1232,6 +1525,7 @@ auto group_norm_kernel(const Tensor& input, int64_t num_groups,
                 mean_ptr[n * num_groups + g] = static_cast<float>(sum / static_cast<double>(group_size));
             }
         );
+        queue.wait();
 
         queue.parallel_for<GroupNormVarianceKernelFloat64>(
             sycl::range<2>(N, num_groups),
@@ -1252,6 +1546,7 @@ auto group_norm_kernel(const Tensor& input, int64_t num_groups,
                 inv_std_ptr[n * num_groups + g] = static_cast<float>(1.0 / sycl::sqrt(var + eps_d));
             }
         );
+        queue.wait();
 
         queue.parallel_for<GroupNormNormalizeKernelFloat64>(
             sycl::range<3>(N, C, spatial_size),
@@ -1294,6 +1589,7 @@ auto group_norm_kernel(const Tensor& input, int64_t num_groups,
                 mean_ptr[n * num_groups + g] = sum / static_cast<float>(group_size);
             }
         );
+        queue.wait();
 
         queue.parallel_for<GroupNormVarianceKernelFloat16>(
             sycl::range<2>(N, num_groups),
@@ -1314,6 +1610,7 @@ auto group_norm_kernel(const Tensor& input, int64_t num_groups,
                 inv_std_ptr[n * num_groups + g] = 1.0f / sycl::sqrt(var + eps);
             }
         );
+        queue.wait();
 
         queue.parallel_for<GroupNormNormalizeKernelFloat16>(
             sycl::range<3>(N, C, spatial_size),
@@ -1357,6 +1654,7 @@ auto group_norm_kernel(const Tensor& input, int64_t num_groups,
                 mean_ptr[n * num_groups + g] = sum / static_cast<float>(group_size);
             }
         );
+        queue.wait();
 
         queue.parallel_for<GroupNormVarianceKernelBFloat16>(
             sycl::range<2>(N, num_groups),
@@ -1377,6 +1675,7 @@ auto group_norm_kernel(const Tensor& input, int64_t num_groups,
                 inv_std_ptr[n * num_groups + g] = 1.0f / sycl::sqrt(var + eps);
             }
         );
+        queue.wait();
 
         queue.parallel_for<GroupNormNormalizeKernelBFloat16>(
             sycl::range<3>(N, C, spatial_size),

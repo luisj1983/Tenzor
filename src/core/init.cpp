@@ -13,6 +13,10 @@
 #include <omp.h>
 #endif
 
+#ifdef __x86_64__
+#include <cpuid.h>
+#endif
+
 namespace tenzor {
 
 // Flag to track initialization state (used by finalize() guard)
@@ -299,6 +303,30 @@ auto initialize() -> void {
     if (!std::getenv("ONEAPI_DEVICE_SELECTOR")) {
         setenv("ONEAPI_DEVICE_SELECTOR", "*:cpu", 0);
     }
+
+    // Configure Intel OpenCL CPU runtime target architecture BEFORE loading
+    // the OneAPI backend.  The runtime reads CL_CONFIG_CPU_TARGET_ARCH during
+    // static initialisation of libintelocl.so, which happens inside dlopen().
+    // Setting it after dlopen() is too late.
+#ifdef __x86_64__
+    if (!std::getenv("CL_CONFIG_CPU_TARGET_ARCH")) {
+        unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
+        __cpuid(0, eax, ebx, ecx, edx);
+        if (eax >= 7) {
+            __cpuid(1, eax, ebx, ecx, edx);
+            bool has_avx  = (ecx >> 28) & 1;
+            __cpuid_count(7, 0, eax, ebx, ecx, edx);
+            bool has_avx2    = (ebx >> 5) & 1;
+            bool has_avx512f = (ebx >> 16) & 1;
+            const char* arch = "corei7";
+            if (has_avx512f)     arch = "skx";
+            else if (has_avx2)   arch = "core-avx2";
+            else if (has_avx)    arch = "corei7-avx";
+            setenv("CL_CONFIG_CPU_TARGET_ARCH", arch, 1);
+            setenv("CL_CONFIG_CPU_FORCE_TARGET_ARCH", arch, 1);
+        }
+    }
+#endif
 
     if (std::filesystem::exists(oneapi_backend_path)) {
         std::cout << "Loading OneAPI backend from: " << oneapi_backend_path << std::endl;

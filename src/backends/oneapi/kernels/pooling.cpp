@@ -143,10 +143,32 @@ inline uint16_t f32_to_bf16(float f32) {
 
 #ifdef TENZOR_HAS_ONEDNN
 
+// Helper: map Tenzor DType to oneDNN memory data type (pooling-local)
+static auto to_dnnl_dtype(DType dt) -> dnnl::memory::data_type {
+    switch (dt) {
+        case DType::Float32:  return dnnl::memory::data_type::f32;
+        case DType::Float64:  return dnnl::memory::data_type::f64;
+        case DType::BFloat16: return dnnl::memory::data_type::bf16;
+        case DType::Float16:  return dnnl::memory::data_type::f16;
+        default: throw std::runtime_error("Unsupported dtype for oneDNN pooling");
+    }
+}
+
+// Forward declaration: pure SYCL maxpool implementation for non-Float32 dtypes
+static auto maxpool2d_forward_with_indices_sycl(const Tensor& input, int64_t kernel_size, int64_t stride,
+                                                 int64_t padding, int64_t dilation, sycl::queue& queue) -> std::pair<Tensor, Tensor>;
+
 // MaxPool2d forward with indices using oneDNN - returns both output and indices for backward pass
 auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, int64_t stride,
                                     int64_t padding, int64_t dilation, sycl::queue& queue) -> std::pair<Tensor, Tensor> {
     using namespace dnnl;
+
+    // oneDNN pooling only reliably supports f32 on all devices;
+    // for other dtypes use the pure SYCL implementation to avoid
+    // buffer-size mismatches between the tensor and the descriptor.
+    if (input.dtype() != DType::Float32) {
+        return maxpool2d_forward_with_indices_sycl(input, kernel_size, stride, padding, dilation, queue);
+    }
 
     auto shape = input.shape();
     if (shape.size() != 4) {
@@ -162,8 +184,8 @@ auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, in
     const int64_t W_out = (W_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
 
     Tensor output({N, C, H_out, W_out}, input.dtype(), input.device());
-    // Store indices as same dtype as input (following CPU path convention)
-    Tensor indices({N, C, H_out, W_out}, input.dtype(), input.device());
+    // Indices must be Int64 to correctly represent element positions for all tensor sizes.
+    Tensor indices({N, C, H_out, W_out}, DType::Int64, input.device());
 
     // Create oneDNN engine and stream
     auto dnnl_engine = sycl_interop::make_engine(queue.get_device(), queue.get_context());
@@ -216,42 +238,40 @@ auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, in
 
     // oneDNN workspace format is internal, so we need to compute indices manually
     // for compatibility with our backward pass that expects linear indices
-    if (input.dtype() == DType::Float32) {
-        const float* in_ptr = get_data_ptr<const float>(input);
-        float* idx_ptr = get_data_ptr<float>(indices);
+    const float* in_ptr = get_data_ptr<const float>(input);
+    int64_t* idx_ptr = get_data_ptr<int64_t>(indices);
 
-        const int64_t total_size = N * C * H_out * W_out;
-        queue.parallel_for(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
-            int64_t temp = flat_idx;
-            const int64_t w_out = temp % W_out;
-            temp /= W_out;
-            const int64_t h_out = temp % H_out;
-            temp /= H_out;
-            const int64_t c = temp % C;
-            const int64_t n = temp / C;
+    const int64_t total_size = N * C * H_out * W_out;
+    queue.parallel_for(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
+        int64_t temp = flat_idx;
+        const int64_t w_out = temp % W_out;
+        temp /= W_out;
+        const int64_t h_out = temp % H_out;
+        temp /= H_out;
+        const int64_t c = temp % C;
+        const int64_t n = temp / C;
 
-            float max_val = -3.4028235e+38f;
-            int64_t max_idx = 0;
+        float max_val = -3.4028235e+38f;
+        int64_t max_idx = 0;
 
-            for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                    int64_t h_in = h_out * stride - padding + kh * dilation;
-                    int64_t w_in = w_out * stride - padding + kw * dilation;
+        for (int64_t kh = 0; kh < kernel_size; ++kh) {
+            for (int64_t kw = 0; kw < kernel_size; ++kw) {
+                int64_t h_in = h_out * stride - padding + kh * dilation;
+                int64_t w_in = w_out * stride - padding + kw * dilation;
 
-                    if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
-                        int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
-                        float val = in_ptr[input_idx];
-                        if (val > max_val) {
-                            max_val = val;
-                            max_idx = input_idx;
-                        }
+                if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
+                    int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
+                    float val = in_ptr[input_idx];
+                    if (val > max_val) {
+                        max_val = val;
+                        max_idx = input_idx;
                     }
                 }
             }
+        }
 
-            idx_ptr[((n * C + c) * H_out + h_out) * W_out + w_out] = static_cast<float>(max_idx);
-        });
-    }
+        idx_ptr[((n * C + c) * H_out + h_out) * W_out + w_out] = max_idx;
+    });
 
     return {output, indices};
 }
@@ -294,8 +314,9 @@ auto avgpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
     memory::dims strides_dims = {stride, stride};
     memory::dims padding_dims = {padding, padding};
 
-    auto src_md = memory::desc(src_dims, memory::data_type::f32, memory::format_tag::nchw);
-    auto dst_md = memory::desc(dst_dims, memory::data_type::f32, memory::format_tag::nchw);
+    auto dt = to_dnnl_dtype(input.dtype());
+    auto src_md = memory::desc(src_dims, dt, memory::format_tag::nchw);
+    auto dst_md = memory::desc(dst_dims, dt, memory::format_tag::nchw);
 
     // Choose algorithm based on count_include_pad
     auto algo = count_include_pad ?
@@ -334,12 +355,9 @@ auto avgpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
     return output;
 }
 
-#else // !TENZOR_HAS_ONEDNN - Pure SYCL implementation
-#pragma message("WARNING: Building without oneDNN — using slower pooling fallback")
-
-// MaxPool2d forward with indices (pure SYCL) - returns both output and indices for backward pass
-auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, int64_t stride,
-                                    int64_t padding, int64_t dilation, sycl::queue& queue) -> std::pair<Tensor, Tensor> {
+// Pure SYCL maxpool implementation used for non-Float32 dtypes when oneDNN is available
+static auto maxpool2d_forward_with_indices_sycl(const Tensor& input, int64_t kernel_size, int64_t stride,
+                                                 int64_t padding, int64_t dilation, sycl::queue& queue) -> std::pair<Tensor, Tensor> {
     auto shape = input.shape();
     if (shape.size() != 4) {
         throw std::invalid_argument("MaxPool2d requires 4D input (N, C, H, W)");
@@ -354,52 +372,15 @@ auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, in
     const int64_t W_out = (W_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
 
     Tensor output({N, C, H_out, W_out}, input.dtype(), input.device());
-    // Store indices as same dtype as input (for simplicity, following CPU path convention)
-    Tensor indices({N, C, H_out, W_out}, input.dtype(), input.device());
+    // Indices must be Int64 to correctly represent element positions for all tensor sizes.
+    // Using the input's dtype (e.g. Float16) would silently truncate large indices,
+    // causing out-of-bounds access in the backward pass.
+    Tensor indices({N, C, H_out, W_out}, DType::Int64, input.device());
 
-    if (input.dtype() == DType::Float32) {
-        const float* in_ptr = get_data_ptr<const float>(input);
-        float* out_ptr = get_data_ptr<float>(output);
-        float* idx_ptr = get_data_ptr<float>(indices);
-
-        const int64_t total_size = N * C * H_out * W_out;
-        queue.parallel_for<MaxPool2dWithIndicesKernelFloat32>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
-            int64_t temp = flat_idx;
-            const int64_t w_out = temp % W_out;
-            temp /= W_out;
-            const int64_t h_out = temp % H_out;
-            temp /= H_out;
-            const int64_t c = temp % C;
-            const int64_t n = temp / C;
-
-            float max_val = -3.4028235e+38f;
-            int64_t max_idx = 0;
-
-            for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                    int64_t h_in = h_out * stride - padding + kh * dilation;
-                    int64_t w_in = w_out * stride - padding + kw * dilation;
-
-                    if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
-                        int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
-                        float val = in_ptr[input_idx];
-                        if (val > max_val) {
-                            max_val = val;
-                            max_idx = input_idx;
-                        }
-                    }
-                }
-            }
-
-            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-            out_ptr[out_idx] = max_val;
-            idx_ptr[out_idx] = static_cast<float>(max_idx);
-        });
-    }
-    else if (input.dtype() == DType::Float64) {
+    if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
         double* out_ptr = get_data_ptr<double>(output);
-        double* idx_ptr = get_data_ptr<double>(indices);
+        int64_t* idx_ptr = get_data_ptr<int64_t>(indices);
 
         const int64_t total_size = N * C * H_out * W_out;
         queue.parallel_for<MaxPool2dWithIndicesKernelFloat64>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
@@ -432,13 +413,199 @@ auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, in
 
             int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
             out_ptr[out_idx] = max_val;
-            idx_ptr[out_idx] = static_cast<double>(max_idx);
+            idx_ptr[out_idx] = max_idx;
         });
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
-        sycl::half* idx_ptr = get_data_ptr<sycl::half>(indices);
+        int64_t* idx_ptr = get_data_ptr<int64_t>(indices);
+
+        const int64_t total_size = N * C * H_out * W_out;
+        queue.parallel_for<MaxPool2dWithIndicesKernelFloat16>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
+            int64_t temp = flat_idx;
+            const int64_t w_out = temp % W_out;
+            temp /= W_out;
+            const int64_t h_out = temp % H_out;
+            temp /= H_out;
+            const int64_t c = temp % C;
+            const int64_t n = temp / C;
+
+            float max_val = -3.4028235e+38f;
+            int64_t max_idx = 0;
+
+            for (int64_t kh = 0; kh < kernel_size; ++kh) {
+                for (int64_t kw = 0; kw < kernel_size; ++kw) {
+                    int64_t h_in = h_out * stride - padding + kh * dilation;
+                    int64_t w_in = w_out * stride - padding + kw * dilation;
+
+                    if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
+                        int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
+                        float val = static_cast<float>(in_ptr[input_idx]);
+                        if (val > max_val) {
+                            max_val = val;
+                            max_idx = input_idx;
+                        }
+                    }
+                }
+            }
+
+            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+            out_ptr[out_idx] = sycl::half(max_val);
+            idx_ptr[out_idx] = max_idx;
+        });
+    }
+    else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        int64_t* idx_ptr = get_data_ptr<int64_t>(indices);
+
+        const int64_t total_size = N * C * H_out * W_out;
+        queue.parallel_for<MaxPool2dWithIndicesKernelBFloat16>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
+            int64_t temp = flat_idx;
+            const int64_t w_out = temp % W_out;
+            temp /= W_out;
+            const int64_t h_out = temp % H_out;
+            temp /= H_out;
+            const int64_t c = temp % C;
+            const int64_t n = temp / C;
+
+            float max_val = -3.4028235e+38f;
+            int64_t max_idx = 0;
+
+            for (int64_t kh = 0; kh < kernel_size; ++kh) {
+                for (int64_t kw = 0; kw < kernel_size; ++kw) {
+                    int64_t h_in = h_out * stride - padding + kh * dilation;
+                    int64_t w_in = w_out * stride - padding + kw * dilation;
+
+                    if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
+                        int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
+                        float val = bf16_to_f32(in_ptr[input_idx]);
+                        if (val > max_val) {
+                            max_val = val;
+                            max_idx = input_idx;
+                        }
+                    }
+                }
+            }
+
+            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+            out_ptr[out_idx] = f32_to_bf16(max_val);
+            idx_ptr[out_idx] = max_idx;
+        });
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for maxpool2d_forward_with_indices");
+    }
+
+    return {output, indices};
+}
+
+#else // !TENZOR_HAS_ONEDNN - Pure SYCL implementation
+#pragma message("WARNING: Building without oneDNN — using slower pooling fallback")
+
+// MaxPool2d forward with indices (pure SYCL) - returns both output and indices for backward pass
+auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, int64_t stride,
+                                    int64_t padding, int64_t dilation, sycl::queue& queue) -> std::pair<Tensor, Tensor> {
+    auto shape = input.shape();
+    if (shape.size() != 4) {
+        throw std::invalid_argument("MaxPool2d requires 4D input (N, C, H, W)");
+    }
+
+    const int64_t N = shape[0];
+    const int64_t C = shape[1];
+    const int64_t H_in = shape[2];
+    const int64_t W_in = shape[3];
+
+    const int64_t H_out = (H_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+    const int64_t W_out = (W_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+
+    Tensor output({N, C, H_out, W_out}, input.dtype(), input.device());
+    // Indices must be Int64 to correctly represent element positions for all tensor sizes.
+    Tensor indices({N, C, H_out, W_out}, DType::Int64, input.device());
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(input);
+        float* out_ptr = get_data_ptr<float>(output);
+        int64_t* idx_ptr = get_data_ptr<int64_t>(indices);
+
+        const int64_t total_size = N * C * H_out * W_out;
+        queue.parallel_for<MaxPool2dWithIndicesKernelFloat32>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
+            int64_t temp = flat_idx;
+            const int64_t w_out = temp % W_out;
+            temp /= W_out;
+            const int64_t h_out = temp % H_out;
+            temp /= H_out;
+            const int64_t c = temp % C;
+            const int64_t n = temp / C;
+
+            float max_val = -3.4028235e+38f;
+            int64_t max_idx = 0;
+
+            for (int64_t kh = 0; kh < kernel_size; ++kh) {
+                for (int64_t kw = 0; kw < kernel_size; ++kw) {
+                    int64_t h_in = h_out * stride - padding + kh * dilation;
+                    int64_t w_in = w_out * stride - padding + kw * dilation;
+
+                    if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
+                        int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
+                        float val = in_ptr[input_idx];
+                        if (val > max_val) {
+                            max_val = val;
+                            max_idx = input_idx;
+                        }
+                    }
+                }
+            }
+
+            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+            out_ptr[out_idx] = max_val;
+            idx_ptr[out_idx] = max_idx;
+        });
+    }
+    else if (input.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(input);
+        double* out_ptr = get_data_ptr<double>(output);
+        int64_t* idx_ptr = get_data_ptr<int64_t>(indices);
+
+        const int64_t total_size = N * C * H_out * W_out;
+        queue.parallel_for<MaxPool2dWithIndicesKernelFloat64>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
+            int64_t temp = flat_idx;
+            const int64_t w_out = temp % W_out;
+            temp /= W_out;
+            const int64_t h_out = temp % H_out;
+            temp /= H_out;
+            const int64_t c = temp % C;
+            const int64_t n = temp / C;
+
+            double max_val = -1.7976931348623157e+308;
+            int64_t max_idx = 0;
+
+            for (int64_t kh = 0; kh < kernel_size; ++kh) {
+                for (int64_t kw = 0; kw < kernel_size; ++kw) {
+                    int64_t h_in = h_out * stride - padding + kh * dilation;
+                    int64_t w_in = w_out * stride - padding + kw * dilation;
+
+                    if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
+                        int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
+                        double val = in_ptr[input_idx];
+                        if (val > max_val) {
+                            max_val = val;
+                            max_idx = input_idx;
+                        }
+                    }
+                }
+            }
+
+            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+            out_ptr[out_idx] = max_val;
+            idx_ptr[out_idx] = max_idx;
+        });
+    }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        int64_t* idx_ptr = get_data_ptr<int64_t>(indices);
 
         const int64_t total_size = N * C * H_out * W_out;
         queue.parallel_for<MaxPool2dWithIndicesKernelFloat16>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
@@ -472,13 +639,13 @@ auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, in
 
             int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
             out_ptr[out_idx] = sycl::half(max_val);
-            idx_ptr[out_idx] = sycl::half(static_cast<float>(max_idx));
+            idx_ptr[out_idx] = max_idx;
         });
     }
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
-        uint16_t* idx_ptr = get_data_ptr<uint16_t>(indices);
+        int64_t* idx_ptr = get_data_ptr<int64_t>(indices);
 
         const int64_t total_size = N * C * H_out * W_out;
         queue.parallel_for<MaxPool2dWithIndicesKernelBFloat16>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
@@ -512,7 +679,7 @@ auto maxpool2d_forward_with_indices(const Tensor& input, int64_t kernel_size, in
 
             int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
             out_ptr[out_idx] = f32_to_bf16(max_val);
-            idx_ptr[out_idx] = f32_to_bf16(static_cast<float>(max_idx));
+            idx_ptr[out_idx] = max_idx;
         });
     }
     else {
@@ -1968,9 +2135,11 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
     const int64_t input_size = N * C * H_in * W_in;
     const int64_t output_size = N * C * H_out * W_out;
 
+    // Indices are always stored as Int64 by the forward pass
+    const int64_t* idx_ptr = get_data_ptr<const int64_t>(indices);
+
     if (grad_output.dtype() == DType::Float32) {
         const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
-        const float* idx_ptr = get_data_ptr<const float>(indices);  // Indices stored as same dtype
         float* grad_in_ptr = get_data_ptr<float>(grad_input);
 
         // Initialize grad_input to zero
@@ -1988,7 +2157,7 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
                 const int64_t n = temp / C;
 
                 const float grad_val = grad_out_ptr[flat_idx];
-                const int64_t max_idx = static_cast<int64_t>(idx_ptr[flat_idx]);
+                const int64_t max_idx = idx_ptr[flat_idx];
 
                 // Convert flat index to spatial index
                 const int64_t h_in = max_idx / W_in;
@@ -2005,7 +2174,6 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
     }
     else if (grad_output.dtype() == DType::Float64) {
         const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
-        const double* idx_ptr = get_data_ptr<const double>(indices);
         double* grad_in_ptr = get_data_ptr<double>(grad_input);
 
         queue.fill(grad_in_ptr, 0.0, input_size);
@@ -2021,7 +2189,7 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
                 const int64_t n = temp / C;
 
                 const double grad_val = grad_out_ptr[flat_idx];
-                const int64_t max_idx = static_cast<int64_t>(idx_ptr[flat_idx]);
+                const int64_t max_idx = idx_ptr[flat_idx];
 
                 const int64_t h_in = max_idx / W_in;
                 const int64_t w_in = max_idx % W_in;
@@ -2037,7 +2205,6 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
     }
     else if (grad_output.dtype() == DType::Float16) {
         const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
-        const sycl::half* idx_ptr = get_data_ptr<const sycl::half>(indices);
         sycl::half* grad_in_ptr = get_data_ptr<sycl::half>(grad_input);
 
         // Use float accumulation buffer for Float16
@@ -2057,7 +2224,7 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
                 const int64_t n = temp / C;
 
                 const float grad_val = static_cast<float>(grad_out_ptr[flat_idx]);
-                const int64_t max_idx = static_cast<int64_t>(static_cast<float>(idx_ptr[flat_idx]));
+                const int64_t max_idx = idx_ptr[flat_idx];
 
                 const int64_t h_in = max_idx / W_in;
                 const int64_t w_in = max_idx % W_in;
@@ -2078,7 +2245,6 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
     }
     else if (grad_output.dtype() == DType::BFloat16) {
         const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
-        const uint16_t* idx_ptr = get_data_ptr<const uint16_t>(indices);
         uint16_t* grad_in_ptr = get_data_ptr<uint16_t>(grad_input);
 
         // Use float accumulation buffer for BFloat16
@@ -2098,7 +2264,7 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
                 const int64_t n = temp / C;
 
                 const float grad_val = bf16_to_f32(grad_out_ptr[flat_idx]);
-                const int64_t max_idx = static_cast<int64_t>(bf16_to_f32(idx_ptr[flat_idx]));
+                const int64_t max_idx = idx_ptr[flat_idx];
 
                 const int64_t h_in = max_idx / W_in;
                 const int64_t w_in = max_idx % W_in;

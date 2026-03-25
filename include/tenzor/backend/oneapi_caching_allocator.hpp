@@ -152,6 +152,14 @@ public:
     void empty_cache(int device = -1);
 
     /**
+     * @brief Release ALL blocks (both cached and allocated) for shutdown.
+     *
+     * Must be called while SYCL queues are still alive. After this call
+     * every USM pointer previously returned by this allocator is invalid.
+     */
+    void release_all();
+
+    /**
      * @brief Garbage collection - release unused cached blocks
      *
      * @param device Device ID (-1 for all devices)

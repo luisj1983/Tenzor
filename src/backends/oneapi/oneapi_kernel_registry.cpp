@@ -1614,8 +1614,9 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::MaxPool2dBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t H_in = attrs.get_int(AttrKey::InputH, 0);
-            int64_t W_in = attrs.get_int(AttrKey::InputW, 0);
+            auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+            int64_t H_in = input_shape.size() >= 3 ? input_shape[2] : 0;
+            int64_t W_in = input_shape.size() >= 4 ? input_shape[3] : 0;
             return {oneapi::max_pool2d_backward_with_indices(inputs[0], inputs[1], H_in, W_in, get_q(inputs))};
         });
 
@@ -1798,7 +1799,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::GroupNorm,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t num_groups = attrs.get_int(AttrKey::Groups, 1);
+            int64_t num_groups = attrs.get_int(AttrKey::NumGroups, 1);
             float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
             const Tensor* weight = inputs.size() > 1 ? &inputs[1] : nullptr;
             const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
@@ -1807,7 +1808,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::GroupNormBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t num_groups = attrs.get_int(AttrKey::Groups, 1);
+            int64_t num_groups = attrs.get_int(AttrKey::NumGroups, 1);
             return oneapi::group_norm_backward_kernel(inputs[0], inputs[1], inputs[2],
                                                       inputs[3], inputs[4], num_groups, get_q(inputs));
         });

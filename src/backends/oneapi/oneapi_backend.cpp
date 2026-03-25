@@ -397,7 +397,7 @@ static void configure_opencl_cpu_target_arch() {
     if (has_avx512f) {
         arch = "skx";                      // Skylake-X: AVX-512F
     } else if (has_avx2) {
-        arch = "corei7-avx";              // AVX2 (Haswell-class)
+        arch = "core-avx2";               // AVX2 (Haswell-class)
     } else if (has_avx) {
         arch = "corei7-avx";              // AVX (Sandy Bridge-class)
     } else if (has_sse42) {
@@ -486,7 +486,15 @@ public:
     }
 
     ~OneAPIBackend() override {
-        // Clean up queues
+        // Wait for all in-flight work to finish.
+        for (size_t i = 0; i < devices_.size(); ++i) {
+            devices_[i].queue->wait_and_throw();
+        }
+
+        // Release ALL USM allocations (cached and in-use) while SYCL
+        // queues are still alive.
+        backend::OneAPICachingAllocator::get().release_all();
+
         devices_.clear();
     }
 
@@ -657,10 +665,11 @@ public:
         if (queue_ptr) {
             try {
                 auto event = queue_ptr->memcpy(dst, src, bytes);
-                // Only block for D2H where caller expects data immediately
-                if (kind == CopyKind::DeviceToHost) {
-                    event.wait();
-                }
+                // Always wait for the copy to complete. For H2D/D2D the
+                // source memory may be freed by the caller immediately
+                // after this function returns, so the async copy must
+                // finish before that happens.
+                event.wait();
             } catch (const sycl::exception& e) {
                 throw std::runtime_error(
                     std::string("SYCL copy failed: ") + e.what()
@@ -813,6 +822,17 @@ private:
         return DType::Float32;
     }
 };
+
+// Library-level constructor: runs at dlopen() time, BEFORE create_backend().
+// The Intel OpenCL CPU runtime reads CL_CONFIG_CPU_TARGET_ARCH during its own
+// static initialisation which is triggered by the first SYCL platform/device
+// enumeration.  Setting the env-var inside the OneAPIBackend constructor is too
+// late — by then libintelocl.so has already been loaded and its JIT target has
+// been locked in.  A __attribute__((constructor)) function runs early enough.
+__attribute__((constructor))
+static void early_configure_opencl_cpu_target() {
+    configure_opencl_cpu_target_arch();
+}
 
 extern "C" {
     auto create_backend() -> std::unique_ptr<Backend> {

@@ -66,7 +66,7 @@ public:
 
         // Use OpId dispatch for non-CPU devices (CUDA, Vulkan, etc.)
         if (grad_output.device().type != Device::Type::CPU) {
-            std::vector<Tensor> inputs = {grad_output, indices, input};
+            std::vector<Tensor> inputs = {grad_output, indices, input, output};
             OpAttributes bwd_attrs;
             bwd_attrs.set(AttrKey::KernelSize, kernel_size_);
             bwd_attrs.set(AttrKey::Stride, stride_);
