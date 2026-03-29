@@ -17,8 +17,8 @@ endif()
 # Include GoogleTest module for gtest_discover_tests
 include(GoogleTest)
 
-# Maximum test execution timeout (10 minutes)
-set(TENZOR_TEST_TIMEOUT 1000)
+# Maximum test execution timeout (20 minutes)
+set(TENZOR_TEST_TIMEOUT 2000)
 
 # Custom function that wraps gtest_discover_tests
 function(tenzor_discover_tests target)

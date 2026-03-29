@@ -314,6 +314,13 @@ __global__ void scatter_slice_kernel(const T* __restrict__ sorted_vals,
 auto sort_kernel(const Tensor& input, int64_t dim, bool descending,
                  hipStream_t stream) -> std::pair<Tensor, Tensor>
 {
+    // Float16 upcast: convert to Float32, compute, convert values back
+    if (input.dtype() == DType::Float16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto [values, indices] = sort_kernel(input_f32, dim, descending, stream);
+        return {values.to(DType::Float16), indices};
+    }
+
     // BFloat16 upcast: convert to Float32, compute, convert values back
     if (input.dtype() == DType::BFloat16) {
         auto input_f32 = input.to(DType::Float32);
@@ -658,6 +665,13 @@ auto unique_kernel(const Tensor& input, bool sorted_output, bool return_inverse,
                    bool return_counts, hipStream_t stream)
     -> std::tuple<Tensor, Tensor, Tensor>
 {
+    // Float16 upcast: convert to Float32, compute, convert unique values back
+    if (input.dtype() == DType::Float16) {
+        auto [unique_vals, inverse, counts] = unique_kernel(input.to(DType::Float32),
+            sorted_output, return_inverse, return_counts, stream);
+        return {unique_vals.to(DType::Float16), inverse, counts};
+    }
+
     // BFloat16 upcast: convert to Float32, compute, convert unique values back
     if (input.dtype() == DType::BFloat16) {
         auto [unique_vals, inverse, counts] = unique_kernel(input.to(DType::Float32),

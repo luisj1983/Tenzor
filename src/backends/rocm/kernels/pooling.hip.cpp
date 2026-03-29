@@ -857,12 +857,16 @@ auto adaptive_maxpool2d_hip(
             batch_size, channels, input_h, input_w,
             output_h, output_w, return_indices
         );
+    } else if (input.dtype() == DType::Float16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto [output_f32, idx] = adaptive_maxpool2d_hip(input_f32, output_h, output_w, return_indices);
+        return {output_f32.to(DType::Float16), idx};
     } else if (input.dtype() == DType::BFloat16) {
         auto input_f32 = input.to(DType::Float32);
         auto [output_f32, idx] = adaptive_maxpool2d_hip(input_f32, output_h, output_w, return_indices);
         return {output_f32.to(DType::BFloat16), idx};
     } else {
-        throw std::runtime_error("adaptive_maxpool2d_hip: Only Float32 and Float64 supported");
+        throw std::runtime_error("adaptive_maxpool2d_hip: unsupported dtype");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -1052,6 +1056,11 @@ auto adaptive_maxpool2d_backward_hip(
             indices.data<int64_t>(),
             grad_input.data<double>(),
             N, C, in_H, in_W, out_H, out_W);
+    } else if (input.dtype() == DType::Float16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = adaptive_maxpool2d_backward_hip(grad_output_f32, indices, input_f32, stream);
+        return result_f32.to(DType::Float16);
     } else if (input.dtype() == DType::BFloat16) {
         auto grad_output_f32 = grad_output.to(DType::Float32);
         auto input_f32 = input.to(DType::Float32);

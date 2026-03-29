@@ -1520,6 +1520,11 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stre
             }
             break;
         }
+        case DType::Float16: {
+            auto input_f32 = input.to(DType::Float32);
+            auto result_f32 = max_kernel(input_f32, dim, keepdim, stream);
+            return result_f32.to(DType::Float16);
+        }
         case DType::BFloat16: {
             auto input_f32 = input.to(DType::Float32);
             auto result_f32 = max_kernel(input_f32, dim, keepdim, stream);
@@ -1622,6 +1627,11 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stre
                 );
             }
             break;
+        }
+        case DType::Float16: {
+            auto input_f32 = input.to(DType::Float32);
+            auto result_f32 = min_kernel(input_f32, dim, keepdim, stream);
+            return result_f32.to(DType::Float16);
         }
         case DType::BFloat16: {
             auto input_f32 = input.to(DType::Float32);
@@ -2097,7 +2107,7 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t s
 
             HIP_CHECK(hipFree(d_partial_idx));
             HIP_CHECK(hipFree(d_partial_vals));
-        } else if (dtype == DType::BFloat16) {
+        } else if (dtype == DType::Float16 || dtype == DType::BFloat16) {
             auto input_f32 = input.to(DType::Float32);
             return argmax_kernel(input_f32, dim, keepdim, stream);
         } else {
@@ -2105,7 +2115,7 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t s
         }
     } else {
         // Dimensional argmax
-        if (dtype == DType::BFloat16) {
+        if (dtype == DType::Float16 || dtype == DType::BFloat16) {
             auto input_f32 = input.to(DType::Float32);
             return argmax_kernel(input_f32, dim, keepdim, stream);
         }
@@ -2215,7 +2225,7 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t s
 
             HIP_CHECK(hipFree(d_partial_idx));
             HIP_CHECK(hipFree(d_partial_vals));
-        } else if (dtype == DType::BFloat16) {
+        } else if (dtype == DType::Float16 || dtype == DType::BFloat16) {
             auto input_f32 = input.to(DType::Float32);
             return argmin_kernel(input_f32, dim, keepdim, stream);
         } else {
@@ -2223,7 +2233,7 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t s
         }
     } else {
         // Dimensional argmin
-        if (dtype == DType::BFloat16) {
+        if (dtype == DType::Float16 || dtype == DType::BFloat16) {
             auto input_f32 = input.to(DType::Float32);
             return argmin_kernel(input_f32, dim, keepdim, stream);
         }
@@ -2351,6 +2361,10 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t str
             }
 
             HIP_CHECK(hipFree(d_partial));
+        } else if (dtype == DType::Float16) {
+            auto input_f32 = input.to(DType::Float32);
+            auto result_f32 = prod_kernel(input_f32, dim, keepdim, stream);
+            return result_f32.to(DType::Float16);
         } else if (dtype == DType::BFloat16) {
             auto input_f32 = input.to(DType::Float32);
             auto result_f32 = prod_kernel(input_f32, dim, keepdim, stream);
@@ -2360,6 +2374,11 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t str
         }
     } else {
         // Dimensional product
+        if (dtype == DType::Float16) {
+            auto input_f32 = input.to(DType::Float32);
+            auto result_f32 = prod_kernel(input_f32, dim, keepdim, stream);
+            return result_f32.to(DType::Float16);
+        }
         if (dtype == DType::BFloat16) {
             auto input_f32 = input.to(DType::Float32);
             auto result_f32 = prod_kernel(input_f32, dim, keepdim, stream);
@@ -2418,8 +2437,15 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, bool unbiased, h
     const auto& device = input.device();
     int64_t n = input.numel();
 
-    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::BFloat16) {
-        throw std::runtime_error("var: only Float32, Float64, and BFloat16 are supported");
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
+        throw std::runtime_error("var: only Float32, Float64, Float16, and BFloat16 are supported");
+    }
+
+    // Float16: upcast to Float32, compute variance, convert back
+    if (dtype == DType::Float16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = var_kernel(input_f32, dim, keepdim, unbiased, stream);
+        return result_f32.to(DType::Float16);
     }
 
     // BFloat16: upcast to Float32, compute variance, convert back
@@ -2502,6 +2528,13 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, bool unbiased, h
  * @brief Standard deviation reduction kernel
  */
 auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, bool unbiased, hipStream_t stream) -> Tensor {
+    // Float16: upcast to Float32, compute std, convert back
+    if (input.dtype() == DType::Float16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = std_kernel(input_f32, dim, keepdim, unbiased, stream);
+        return result_f32.to(DType::Float16);
+    }
+
     // BFloat16: upcast to Float32, compute std, convert back
     if (input.dtype() == DType::BFloat16) {
         auto input_f32 = input.to(DType::Float32);
@@ -2542,8 +2575,15 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, hipStr
     const auto& device = input.device();
     int64_t n = input.numel();
 
-    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::BFloat16) {
-        throw std::runtime_error("norm: only Float32, Float64, and BFloat16 are supported");
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
+        throw std::runtime_error("norm: only Float32, Float64, Float16, and BFloat16 are supported");
+    }
+
+    // Float16: upcast to Float32, compute norm, convert back
+    if (dtype == DType::Float16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = norm_kernel(input_f32, p, dim, keepdim, stream);
+        return result_f32.to(DType::Float16);
     }
 
     // BFloat16: upcast to Float32, compute norm, convert back
