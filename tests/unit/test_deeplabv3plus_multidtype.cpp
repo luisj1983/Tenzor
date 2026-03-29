@@ -29,7 +29,7 @@ using namespace tenzor::testing;
 
 class DeepLabV3PlusMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
-    std::unique_ptr<nn::OffloadContext> offload_ctx_;
+    std::vector<std::unique_ptr<nn::OffloadContext>> offload_ctxs_;
 
     template <typename ModuleT>
     void convert_model_with_offload(ModuleT& model) {
@@ -51,14 +51,16 @@ protected:
             config.pin_last_layer = true;
             config.target_device = device();
 
+            std::unique_ptr<nn::OffloadContext> ctx;
             if constexpr (requires { model.get(); }) {
-                offload_ctx_ = std::make_unique<nn::OffloadContext>(*model, config);
+                ctx = std::make_unique<nn::OffloadContext>(*model, config);
             } else if constexpr (requires { *model; }) {
-                offload_ctx_ = std::make_unique<nn::OffloadContext>(*model, config);
+                ctx = std::make_unique<nn::OffloadContext>(*model, config);
             } else {
-                offload_ctx_ = std::make_unique<nn::OffloadContext>(model, config);
+                ctx = std::make_unique<nn::OffloadContext>(model, config);
             }
-            offload_ctx_->enable();
+            ctx->enable();
+            offload_ctxs_.push_back(std::move(ctx));
         }
     }
 

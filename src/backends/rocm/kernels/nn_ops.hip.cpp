@@ -387,28 +387,14 @@ auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias
                 bias->data<double>(), output.data<double>(), batch_size, out_features);
         }
     } else if (input.dtype() == DType::Float16) {
-        const rocblas_half alpha = rocblas_half(1.0f);
-        const rocblas_half beta = rocblas_half(0.0f);
-
-        // Use rocblas_hgemm for half-precision
-        rocblas_hgemm(handle,
-            rocblas_operation_transpose, rocblas_operation_none,
-            out_features, batch_size, in_features,
-            &alpha,
-            reinterpret_cast<const rocblas_half*>(weight.data<Float16>()), in_features,
-            reinterpret_cast<const rocblas_half*>(input.data<Float16>()), in_features,
-            &beta,
-            reinterpret_cast<rocblas_half*>(output.data<Float16>()), out_features);
-
-        // Add bias if present
-        if (bias != nullptr) {
-            int64_t total = batch_size * out_features;
-            int num_blocks = get_num_blocks(total);
-            hipLaunchKernelGGL(add_bias_to_output_kernel_fp16,
-                dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-                reinterpret_cast<const __half*>(bias->data<Float16>()),
-                reinterpret_cast<__half*>(output.data<Float16>()), batch_size, out_features);
-        }
+        // Float16: upcast to Float32 to prevent FP16 accumulation overflow in hgemm
+        auto input_f32 = input.to(DType::Float32);
+        auto weight_f32 = weight.to(DType::Float32);
+        const Tensor* bias_f32_ptr = nullptr;
+        Tensor bias_f32;
+        if (bias) { bias_f32 = bias->to(DType::Float32); bias_f32_ptr = &bias_f32; }
+        auto result_f32 = linear_kernel(input_f32, weight_f32, bias_f32_ptr, stream);
+        return result_f32.to(DType::Float16);
     } else if (input.dtype() == DType::BFloat16) {
         auto input_f32 = input.to(DType::Float32);
         auto weight_f32 = weight.to(DType::Float32);
@@ -430,6 +416,15 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input, cons
     // grad_output: [batch, out_features]
     // input: [batch, in_features]
     // weight: [out_features, in_features]
+
+    // Float16: upcast to Float32 to prevent FP16 accumulation overflow in hgemm
+    if (input.dtype() == DType::Float16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto weight_f32 = weight.to(DType::Float32);
+        auto results_f32 = linear_backward_kernel(grad_output_f32, input_f32, weight_f32, stream);
+        return {results_f32[0].to(DType::Float16), results_f32[1].to(DType::Float16), results_f32[2].to(DType::Float16)};
+    }
 
     auto grad_shape = grad_output.shape();
     auto in_shape = input.shape();

@@ -791,6 +791,21 @@ auto conv2d_forward_kernel(
     hipStream_t stream,
     DataLayout layout = DataLayout::NCHW
 ) -> Tensor {
+    // Float16: upcast to Float32, compute, convert back
+    if (input.dtype() == DType::Float16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto weight_f32 = weight.to(DType::Float32);
+        Tensor bias_f32;
+        const Tensor* bias_f32_ptr = nullptr;
+        if (bias) {
+            bias_f32 = bias->to(DType::Float32);
+            bias_f32_ptr = &bias_f32;
+        }
+        auto result = conv2d_forward_kernel(input_f32, weight_f32, bias_f32_ptr,
+                                            stride, padding, dilation, groups, stream, layout);
+        return result.to(DType::Float16);
+    }
+
     // BFloat16: upcast to Float32, compute, convert back
     if (input.dtype() == DType::BFloat16) {
         auto input_f32 = input.to(DType::Float32);
@@ -1125,6 +1140,21 @@ auto conv2d_backward_kernel(
     hipStream_t stream,
     DataLayout layout = DataLayout::NCHW
 ) -> std::tuple<Tensor, Tensor, Tensor> {
+    // Float16: upcast to Float32, compute, convert back
+    if (input.dtype() == DType::Float16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto weight_f32 = weight.to(DType::Float32);
+        auto [gi, gw, gb] = conv2d_backward_kernel(grad_output_f32, input_f32, weight_f32,
+                                                     stride, padding, dilation, groups,
+                                                     compute_grad_input, compute_grad_weight,
+                                                     compute_grad_bias, stream, layout);
+        if (compute_grad_input) gi = gi.to(DType::Float16);
+        if (compute_grad_weight) gw = gw.to(DType::Float16);
+        if (compute_grad_bias) gb = gb.to(DType::Float16);
+        return {gi, gw, gb};
+    }
+
     // BFloat16: upcast to Float32, compute, convert back
     if (input.dtype() == DType::BFloat16) {
         auto grad_output_f32 = grad_output.to(DType::Float32);

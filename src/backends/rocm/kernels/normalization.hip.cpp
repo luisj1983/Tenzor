@@ -215,6 +215,18 @@ auto layer_norm_kernel(
     float eps,
     hipStream_t stream
 ) -> Tensor {
+    // Float16: upcast to Float32 to prevent precision loss in mean/rstd storage
+    if (input.dtype() == DType::Float16) {
+        auto input_f32 = input.to(DType::Float32);
+        const Tensor* weight_f32_ptr = nullptr;
+        const Tensor* bias_f32_ptr = nullptr;
+        Tensor weight_f32, bias_f32;
+        if (weight) { weight_f32 = weight->to(DType::Float32); weight_f32_ptr = &weight_f32; }
+        if (bias) { bias_f32 = bias->to(DType::Float32); bias_f32_ptr = &bias_f32; }
+        auto result_f32 = layer_norm_kernel(input_f32, normalized_shape, weight_f32_ptr, bias_f32_ptr, eps, stream);
+        return result_f32.to(DType::Float16);
+    }
+
     auto input_shape = input.shape();
     int64_t ndim = input_shape.size();
     int64_t norm_ndim = normalized_shape.size();
@@ -418,6 +430,21 @@ auto layer_norm_backward_kernel(
     const Tensor* weight,
     hipStream_t stream
 ) -> std::tuple<Tensor, Tensor, Tensor> {
+    // Float16: upcast to Float32 to prevent precision loss from rstd stored as half
+    if (input.dtype() == DType::Float16) {
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto mean_f32 = mean.to(DType::Float32);
+        auto rstd_f32 = rstd.to(DType::Float32);
+        const Tensor* weight_f32_ptr = nullptr;
+        Tensor weight_f32;
+        if (weight) { weight_f32 = weight->to(DType::Float32); weight_f32_ptr = &weight_f32; }
+        auto [gi_f32, gw_f32, gb_f32] = layer_norm_backward_kernel(grad_output_f32, input_f32, mean_f32, rstd_f32, weight_f32_ptr, stream);
+        return {gi_f32.to(DType::Float16),
+                gw_f32.numel() > 0 ? gw_f32.to(DType::Float16) : gw_f32,
+                gb_f32.numel() > 0 ? gb_f32.to(DType::Float16) : gb_f32};
+    }
+
     auto input_shape = input.shape();
     int64_t batch_size = mean.numel();
     int64_t normalized_size = input.numel() / batch_size;

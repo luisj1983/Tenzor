@@ -592,12 +592,14 @@ auto LinearBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
 
     // Use optimized LinearBackward kernel (supports Float32, Float64, Float16, BFloat16)
     if (grad_out.device().type == Device::Type::CUDA ||
+        grad_out.device().type == Device::Type::ROCm ||
         grad_out.dtype() == DType::Float32 || grad_out.dtype() == DType::Float64) {
-        // For Float16/BFloat16 on CUDA, upcast to Float32 for computation to
-        // prevent gradient overflow. cuBLAS GemmEx outputs Float16 which can't
-        // represent values > 65504, causing Inf in larger models.
+        // For Float16/BFloat16 on GPU backends, upcast to Float32 for computation to
+        // prevent gradient overflow. FP16 gemm can't represent values > 65504,
+        // causing Inf→NaN propagation in larger models.
         DType orig_dt = grad_out.dtype();
-        bool needs_upcast = (grad_out.device().type == Device::Type::CUDA &&
+        bool needs_upcast = ((grad_out.device().type == Device::Type::CUDA ||
+                              grad_out.device().type == Device::Type::ROCm) &&
                             (orig_dt == DType::Float16 || orig_dt == DType::BFloat16));
         if (needs_upcast) {
             std::vector<Tensor> inputs = {
