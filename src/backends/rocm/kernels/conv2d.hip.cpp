@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <vector>
 #include <iostream>
+#include "fp16_saturate.h"
 
 namespace tenzor {
 namespace rocm {
@@ -803,7 +804,9 @@ auto conv2d_forward_kernel(
         }
         auto result = conv2d_forward_kernel(input_f32, weight_f32, bias_f32_ptr,
                                             stride, padding, dilation, groups, stream, layout);
-        return result.to(DType::Float16);
+        auto result_f16 = result.to(DType::Float16);
+        fp16_saturate(result_f16.data_ptr(), result_f16.numel(), stream);
+        return result_f16;
     }
 
     // BFloat16: upcast to Float32, compute, convert back
@@ -1149,9 +1152,9 @@ auto conv2d_backward_kernel(
                                                      stride, padding, dilation, groups,
                                                      compute_grad_input, compute_grad_weight,
                                                      compute_grad_bias, stream, layout);
-        if (compute_grad_input) gi = gi.to(DType::Float16);
-        if (compute_grad_weight) gw = gw.to(DType::Float16);
-        if (compute_grad_bias) gb = gb.to(DType::Float16);
+        if (compute_grad_input) { gi = gi.to(DType::Float16); fp16_saturate(gi.data_ptr(), gi.numel(), stream); }
+        if (compute_grad_weight) { gw = gw.to(DType::Float16); fp16_saturate(gw.data_ptr(), gw.numel(), stream); }
+        if (compute_grad_bias) { gb = gb.to(DType::Float16); fp16_saturate(gb.data_ptr(), gb.numel(), stream); }
         return {gi, gw, gb};
     }
 
@@ -1840,7 +1843,9 @@ auto conv_transpose2d_forward_kernel(
         auto result = conv_transpose2d_forward_kernel(input_f32, weight_f32, bias_f32_ptr,
                                                        stride_h, stride_w, padding_h, padding_w,
                                                        output_padding_h, output_padding_w, stream);
-        return result.to(DType::Float16);
+        auto result_f16 = result.to(DType::Float16);
+        fp16_saturate(result_f16.data_ptr(), result_f16.numel(), stream);
+        return result_f16;
     } else if (input.dtype() == DType::BFloat16) {
         auto input_f32 = input.to(DType::Float32);
         auto weight_f32 = weight.to(DType::Float32);

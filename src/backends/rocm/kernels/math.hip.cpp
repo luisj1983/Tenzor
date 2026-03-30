@@ -13,6 +13,7 @@
 #include <vector>
 #include <chrono>
 #include <thread>
+#include "fp16_saturate.h"
 
 namespace tenzor {
 namespace rocm {
@@ -991,6 +992,9 @@ auto add_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
         }
 
         HIP_CHECK(hipGetLastError());
+        if (a.dtype() == DType::Float16) {
+            fp16_saturate(result.data_ptr(), result.numel(), stream);
+        }
         return result;
     }
 
@@ -1080,6 +1084,9 @@ auto add_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
     HIP_CHECK(hipFree(d_strides_b));
     HIP_CHECK(hipFree(d_output_shape));
     HIP_CHECK(hipGetLastError());
+    if (a.dtype() == DType::Float16) {
+        fp16_saturate(result.data_ptr(), result.numel(), stream);
+    }
 
     return result;
 }
@@ -1156,6 +1163,9 @@ auto sub_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
         }
 
         HIP_CHECK(hipGetLastError());
+        if (a.dtype() == DType::Float16) {
+            fp16_saturate(result.data_ptr(), result.numel(), stream);
+        }
         return result;
     }
 
@@ -1237,6 +1247,9 @@ auto sub_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
     HIP_CHECK(hipFree(d_strides_b));
     HIP_CHECK(hipFree(d_output_shape));
     HIP_CHECK(hipGetLastError());
+    if (a.dtype() == DType::Float16) {
+        fp16_saturate(result.data_ptr(), result.numel(), stream);
+    }
 
     return result;
 }
@@ -1311,6 +1324,9 @@ auto mul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
         }
 
         HIP_CHECK(hipGetLastError());
+        if (a.dtype() == DType::Float16) {
+            fp16_saturate(result.data_ptr(), result.numel(), stream);
+        }
         return result;
     }
 
@@ -1389,6 +1405,9 @@ auto mul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
     HIP_CHECK(hipFree(d_strides_b));
     HIP_CHECK(hipFree(d_output_shape));
     HIP_CHECK(hipGetLastError());
+    if (a.dtype() == DType::Float16) {
+        fp16_saturate(result.data_ptr(), result.numel(), stream);
+    }
 
     return result;
 }
@@ -1461,6 +1480,9 @@ auto div_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
         }
 
         HIP_CHECK(hipGetLastError());
+        if (a.dtype() == DType::Float16) {
+            fp16_saturate(result.data_ptr(), result.numel(), stream);
+        }
         return result;
     }
 
@@ -1534,6 +1556,9 @@ auto div_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
     HIP_CHECK(hipFree(d_strides_b));
     HIP_CHECK(hipFree(d_output_shape));
     HIP_CHECK(hipGetLastError());
+    if (a.dtype() == DType::Float16) {
+        fp16_saturate(result.data_ptr(), result.numel(), stream);
+    }
 
     return result;
 }

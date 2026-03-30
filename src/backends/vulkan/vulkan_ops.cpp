@@ -153,13 +153,18 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
     bool is_int32 = (a.dtype() == DType::Int32);
     bool is_int64 = (a.dtype() == DType::Int64);
 
+    // Sliced views have non-zero storage offsets.  The math shader indexes
+    // from 0, so copy them to dedicated buffers via dispatchContiguous.
+    Tensor a_op = (a.offset() != 0 || !a.is_contiguous()) ? dispatchContiguous(a) : a;
+    Tensor b_op = (b.offset() != 0 || !b.is_contiguous()) ? dispatchContiguous(b) : b;
+
     if (same_shape && (is_float32 || is_float64 || is_float16 || is_bfloat16 || is_int32 || is_int64)) {
         // Fast path: use math shader for same-shape operations
         // Select shader based on dtype
         std::string shader_name = is_float64 ? "math_f64" : is_float16 ? "math_f16" : is_bfloat16 ? "math_bf16" : is_int32 ? "math_i32" : is_int64 ? "math_i64" : "math";
         auto* pipeline = getPipeline(shader_name, device_id);
 
-        Tensor output(output_shape, a.dtype(), a.device());
+        Tensor output(output_shape, a_op.dtype(), a_op.device());
 
         // Prepare push constants - use different structure for Float32/Float16 vs Float64
         struct PushConstantsF32 {
@@ -181,14 +186,14 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
 
         if (is_float64 || is_int64) {
             // Float64 and Int64 shaders use 64-bit param field
-            push_constants_f64.n = static_cast<uint32_t>(a.numel());
+            push_constants_f64.n = static_cast<uint32_t>(a_op.numel());
             push_constants_f64.op = opcode;
             push_constants_f64.param = 0.0;
             push_constants_ptr = &push_constants_f64;
             push_constants_size = sizeof(PushConstantsF64);
         } else {
             // Float32, Float16, BFloat16, Int32 use 32-bit param field
-            push_constants_f32.n = static_cast<uint32_t>(a.numel());
+            push_constants_f32.n = static_cast<uint32_t>(a_op.numel());
             push_constants_f32.op = opcode;
             push_constants_f32.param = 0.0f;
             push_constants_ptr = &push_constants_f32;
@@ -196,19 +201,19 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         }
 
         // Get VkBuffer handles
-        const void* buffer_a = a.data_ptr();
-        const void* buffer_b = b.data_ptr();
+        const void* buffer_a = a_op.data_ptr();
+        const void* buffer_b = b_op.data_ptr();
         const void* buffer_out = output.data_ptr();
 
         // Calculate buffer sizes
         // For Float16, the shader reads uint32 words (2 elements per word),
         // so descriptor ranges must be rounded up to 4-byte boundaries
-        size_t buffer_size_a = a.numel() * a.dtype_size();
-        size_t buffer_size_b = b.numel() * b.dtype_size();
+        size_t buffer_size_a = a_op.numel() * a_op.dtype_size();
+        size_t buffer_size_b = b_op.numel() * b_op.dtype_size();
         size_t buffer_size_out = output.numel() * output.dtype_size();
         if (is_float16 || is_bfloat16) {
-            size_t num_pairs_a = (a.numel() + 1) / 2;
-            size_t num_pairs_b = (b.numel() + 1) / 2;
+            size_t num_pairs_a = (a_op.numel() + 1) / 2;
+            size_t num_pairs_b = (b_op.numel() + 1) / 2;
             size_t num_pairs_out = (output.numel() + 1) / 2;
             buffer_size_a = num_pairs_a * 4;
             buffer_size_b = num_pairs_b * 4;
@@ -236,10 +241,10 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         // Float16/BFloat16 shader processes pairs of elements, so we need fewer workgroups
         uint32_t workgroups;
         if (is_float16 || is_bfloat16) {
-            uint32_t num_pairs = (static_cast<uint32_t>(a.numel()) + 1) / 2;
+            uint32_t num_pairs = (static_cast<uint32_t>(a_op.numel()) + 1) / 2;
             workgroups = div_wg(num_pairs, devices_[device_id].workgroupSize);
         } else {
-            workgroups = div_wg(a.numel(), devices_[device_id].workgroupSize);
+            workgroups = div_wg(a_op.numel(), devices_[device_id].workgroupSize);
         }
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
@@ -2905,6 +2910,13 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
     insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
+
+    // For Float16 input, the shader accumulates grad_gamma/grad_beta in Float32
+    // for precision; convert back to match the input dtype.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        grad_gamma = grad_gamma.to(input.dtype());
+        grad_beta = grad_beta.to(input.dtype());
+    }
 
     return {grad_input, grad_gamma, grad_beta};
 }
@@ -6962,12 +6974,14 @@ auto VulkanBackend::dispatchUnsqueeze(const Tensor& input, int64_t dim) -> Tenso
 /**
  * @brief Contiguous - ensure tensor is contiguous in memory
  *
- * If already contiguous, returns the input tensor.
+ * If already contiguous with zero offset, returns the input tensor.
  * Otherwise, creates a new contiguous copy using GPU strided_copy kernel.
  */
 auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
-    // If already contiguous, return as-is
-    if (input.is_contiguous()) {
+    // If already contiguous AND starts at offset 0, return as-is.
+    // Views (slices) may be stride-contiguous but sit at an offset within
+    // a shared parent buffer; they need to be copied to own storage.
+    if (input.is_contiguous() && input.offset() == 0) {
         return input;
     }
 
@@ -7702,8 +7716,10 @@ auto VulkanBackend::dispatchFill(const Tensor& input, float value) -> Tensor {
     uint32_t workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-    // Add memory barrier
-    insertComputeOnlyBarrier(cmdBuffer);
+    // Full barrier: the filled buffer may be subsequently overwritten by a
+    // transfer (e.g. sort's DeviceToDevice copy of slice data into the padded
+    // work buffer).  insertComputeOnlyBarrier lacks TRANSFER_WRITE coverage.
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -12099,8 +12115,9 @@ auto VulkanBackend::dispatchLinear(const Tensor& input, const Tensor& weight, co
 
     // Select shader by dtype
     bool is_float64 = (input_contig.dtype() == DType::Float64);
+    bool is_float16_lin = (input_contig.dtype() == DType::Float16);
     bool is_bfloat16_lin = (input_contig.dtype() == DType::BFloat16);
-    std::string shader_name = is_float64 ? "linear_f64" : is_bfloat16_lin ? "linear_bf16" : "linear";
+    std::string shader_name = is_float64 ? "linear_f64" : is_float16_lin ? "linear_f16" : is_bfloat16_lin ? "linear_bf16" : "linear";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     // Output shape: (batch_dims..., N)
@@ -13447,13 +13464,59 @@ auto VulkanBackend::dispatchSort(const Tensor& input, int64_t dim, bool descendi
         init_indices[i] = (i < n) ? static_cast<int32_t>(i) : static_cast<int32_t>(n);
     }
 
-    for (int64_t slice = 0; slice < num_slices; ++slice) {
-        work_values = dispatchFill(work_values, pad_value);
+    // Prepare padded fill pattern on host — avoids dispatchFill which creates
+    // a new tensor each call and triggers deallocate → forced batch submit.
+    std::vector<uint8_t> host_padded(padded_n * elem_size);
+    {
+        uint32_t pad_bits;
+        if (work_dtype == DType::Int32) {
+            int32_t pv = static_cast<int32_t>(pad_value);
+            std::memcpy(&pad_bits, &pv, sizeof(pad_bits));
+        } else {
+            std::memcpy(&pad_bits, &pad_value, sizeof(pad_bits));
+        }
+        for (uint32_t i = 0; i < padded_n; ++i)
+            std::memcpy(host_padded.data() + i * elem_size, &pad_bits, elem_size);
+    }
 
+    // Also copy input to host so we can prepare each slice on the host side
+    Tensor input_contig = input.is_contiguous() ? input : dispatchContiguous(input);
+    synchronize(device_id);
+    std::vector<uint8_t> host_input(input_contig.numel() * elem_size);
+    copy(host_input.data(), input_contig.data_ptr(), host_input.size(), CopyKind::DeviceToHost);
+
+    // Pre-allocate the int64 cast tensor outside the loop.  Allocating it
+    // inside would destroy the old one each iteration, which calls deallocate
+    // → submitBatchIfNeeded(force=true), splitting operations across command
+    // buffers.  The descriptor set must still be re-allocated per iteration
+    // because synchronize() resets the descriptor pool.
+    auto* cast_pipeline = getPipeline("cast_i32_i64", device_id);
+    Tensor int64_chunk({sort_size}, DType::Int64, input.device());
+    size_t cast_out_bytes = sort_size * sizeof(int64_t);
+    struct { uint32_t n; } cast_pc;
+    cast_pc.n = static_cast<uint32_t>(sort_size);
+
+    for (int64_t slice = 0; slice < num_slices; ++slice) {
         size_t slice_bytes = sort_size * elem_size;
-        copy(work_values.data_ptr(),
-             static_cast<const char*>(input.data_ptr()) + slice * slice_bytes,
-             slice_bytes, CopyKind::DeviceToDevice);
+
+        // Overlay slice data onto the padded buffer on the host, then upload
+        // the whole thing in a single HostToDevice copy.
+        std::memcpy(host_padded.data(), host_input.data() + slice * slice_bytes, slice_bytes);
+
+        copy(work_values.data_ptr(), host_padded.data(),
+             padded_n * elem_size, CopyKind::HostToDevice);
+        // Restore padding for next iteration
+        {
+            uint32_t pad_bits;
+            if (work_dtype == DType::Int32) {
+                int32_t pv = static_cast<int32_t>(pad_value);
+                std::memcpy(&pad_bits, &pv, sizeof(pad_bits));
+            } else {
+                std::memcpy(&pad_bits, &pad_value, sizeof(pad_bits));
+            }
+            for (uint32_t i = 0; i < static_cast<uint32_t>(sort_size); ++i)
+                std::memcpy(host_padded.data() + i * elem_size, &pad_bits, elem_size);
+        }
 
         copy(work_indices.data_ptr(), init_indices.data(),
              padded_n * sizeof(int32_t), CopyKind::HostToDevice);
@@ -13467,7 +13530,7 @@ auto VulkanBackend::dispatchSort(const Tensor& input, int64_t dim, bool descendi
                 {0, buffer_values}, {1, buffer_indices}
             };
             std::vector<size_t> sizes = {values_bytes, indices_bytes};
-            VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+            VkDescriptorSet sort_ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
             VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
 
@@ -13488,7 +13551,7 @@ auto VulkanBackend::dispatchSort(const Tensor& input, int64_t dim, bool descendi
 
                     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
                     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+                                           pipeline->layout(), 0, 1, &sort_ds, 0, nullptr);
                     vkCmdPushConstants(cmd, pipeline->layout(),
                                      VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
                     vkCmdDispatch(cmd, workgroups, 1, 1);
@@ -13502,29 +13565,29 @@ auto VulkanBackend::dispatchSort(const Tensor& input, int64_t dim, bool descendi
 
         // Read sorted values and indices
         {
-            // Copy sorted values
-            copy(static_cast<char*>(sorted_values.data_ptr()) + slice * slice_bytes,
-                 work_values.data_ptr(), slice_bytes, CopyKind::DeviceToDevice);
-
-            // Convert Int32 indices to Int64 on GPU using cast shader
+            // Copy sorted values — use vkCmdCopyBuffer directly with known
+            // VkBuffer + offset to avoid getVulkanBufferAndOffset on offset
+            // pointers, which can resolve to the wrong slab sub-block.
             {
-                auto* cast_pipeline = getPipeline("cast_i32_i64", device_id);
-                Tensor int64_chunk({sort_size}, DType::Int64, input.device());
+                auto [sv_buf, sv_off] = getVulkanBufferAndOffset(sorted_values.data_ptr());
+                auto [wv_buf, wv_off] = getVulkanBufferAndOffset(work_values.data_ptr());
+                VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+                VkBufferCopy region{};
+                region.srcOffset = wv_off;
+                region.dstOffset = sv_off + slice * slice_bytes;
+                region.size = slice_bytes;
+                vkCmdCopyBuffer(cmd, wv_buf, sv_buf, 1, &region);
+                insertTransferToComputeBarrier(cmd);
+                endSingleTimeCommands(cmd, device_id);
+            }
 
-                size_t in_bytes = sort_size * sizeof(int32_t);
-                size_t out_bytes = sort_size * sizeof(int64_t);
-
-                std::vector<std::pair<uint32_t, const void*>> cast_bindings = {
-                    {0, work_indices.data_ptr()},
-                    {1, int64_chunk.data_ptr()}
+            // Convert Int32 indices to Int64 and copy to output
+            {
+                std::vector<std::pair<uint32_t, const void*>> cb = {
+                    {0, work_indices.data_ptr()}, {1, int64_chunk.data_ptr()}
                 };
-                std::vector<size_t> cast_sizes = {in_bytes, out_bytes};
-
-                VkDescriptorSet cast_ds = allocateAndWriteDescriptorSet(
-                    device_id, cast_pipeline, cast_bindings, cast_sizes);
-
-                struct { uint32_t n; } cast_pc;
-                cast_pc.n = static_cast<uint32_t>(sort_size);
+                std::vector<size_t> cs = {sort_size * sizeof(int32_t), cast_out_bytes};
+                VkDescriptorSet cast_ds = allocateAndWriteDescriptorSet(device_id, cast_pipeline, cb, cs);
 
                 VkCommandBuffer cast_cmd = beginSingleTimeCommands(device_id);
                 vkCmdBindPipeline(cast_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cast_pipeline->pipeline());
@@ -13537,9 +13600,20 @@ auto VulkanBackend::dispatchSort(const Tensor& input, int64_t dim, bool descendi
                 endSingleTimeCommands(cast_cmd, device_id);
                 synchronize(device_id);
 
-                void* dst_ptr = static_cast<char*>(sorted_indices.data_ptr()) +
-                                slice * sort_size * sizeof(int64_t);
-                copy(dst_ptr, int64_chunk.data_ptr(), out_bytes, CopyKind::DeviceToDevice);
+                // Copy int64 indices to sorted_indices at the slice offset —
+                // use vkCmdCopyBuffer directly to avoid offset pointer lookup.
+                {
+                    auto [si_buf, si_off] = getVulkanBufferAndOffset(sorted_indices.data_ptr());
+                    auto [ic_buf, ic_off] = getVulkanBufferAndOffset(int64_chunk.data_ptr());
+                    VkCommandBuffer icmd = beginSingleTimeCommands(device_id);
+                    VkBufferCopy iregion{};
+                    iregion.srcOffset = ic_off;
+                    iregion.dstOffset = si_off + slice * sort_size * sizeof(int64_t);
+                    iregion.size = cast_out_bytes;
+                    vkCmdCopyBuffer(icmd, ic_buf, si_buf, 1, &iregion);
+                    insertTransferToComputeBarrier(icmd);
+                    endSingleTimeCommands(icmd, device_id);
+                }
                 synchronize(device_id);
             }
         }

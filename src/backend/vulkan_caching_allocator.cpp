@@ -299,6 +299,35 @@ VkBuffer VulkanCachingAllocator::get_buffer(void* ptr, int device) const {
     return it->second->buffer;
 }
 
+std::pair<VkBuffer, size_t> VulkanCachingAllocator::find_buffer_and_offset(const void* ptr, int device) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    auto dev_it = device_allocators_.find(device);
+    if (dev_it == device_allocators_.end() || dev_it->second.shutdown) {
+        return {VK_NULL_HANDLE, 0};
+    }
+
+    const auto* ptr_u8 = reinterpret_cast<const uint8_t*>(ptr);
+    VulkanBlock* best = nullptr;
+
+    for (const auto& [block_ptr, block] : dev_it->second.all_blocks) {
+        if (!block->allocated) continue;  // Only search actively-allocated blocks
+        const auto* base = reinterpret_cast<const uint8_t*>(block->mapped_ptr);
+        if (ptr_u8 >= base && ptr_u8 < base + block->size) {
+            // Pick the block with the highest base (tightest enclosing)
+            if (!best || base > reinterpret_cast<const uint8_t*>(best->mapped_ptr)) {
+                best = block.get();
+            }
+        }
+    }
+
+    if (best) {
+        size_t offset = static_cast<size_t>(ptr_u8 - reinterpret_cast<const uint8_t*>(best->mapped_ptr));
+        return {best->buffer, offset};
+    }
+    return {VK_NULL_HANDLE, 0};
+}
+
 size_t VulkanCachingAllocator::memory_allocated(int device) const {
     std::lock_guard<std::mutex> lock(mutex_);
 

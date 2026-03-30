@@ -1038,8 +1038,12 @@ __global__ void cast_from_f16_kernel(const __half* input, DstT* output, int64_t 
 // Specialization for __half target
 template<typename SrcT>
 __global__ void cast_to_f16_kernel(const SrcT* input, __half* output, int64_t n) {
+    constexpr float kHalfMax = 65504.0f;
     HIP_GRID_STRIDE_LOOP(idx, n) {
-        output[idx] = __float2half(static_cast<float>(input[idx]));
+        // Saturating conversion: clamp to ±65504 to prevent Inf→NaN propagation
+        float val = static_cast<float>(input[idx]);
+        val = fminf(fmaxf(val, -kHalfMax), kHalfMax);
+        output[idx] = __float2half(val);
     }
 }
 

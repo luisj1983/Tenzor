@@ -880,28 +880,17 @@ std::pair<VkBuffer, VkDeviceSize> VulkanBackend::getVulkanBufferAndOffset(const 
         }
     }
 
-    // If not found directly, ptr might be base_ptr + offset
-    // Search through allocations_ to find a buffer where: base_ptr <= ptr < base_ptr + size
-    const auto* ptr_as_uint = reinterpret_cast<const uint8_t*>(ptr);
-
-    {
-        std::lock_guard<std::mutex> alloc_lock(allocations_mutex_);
-        for (const auto& [base_ptr, alloc_info] : allocations_) {
-            const auto* base_as_uint = reinterpret_cast<const uint8_t*>(base_ptr);
-            const size_t size = alloc_info.first;
-            const int32_t device_id = alloc_info.second;
-
-            // Check if ptr is in the range [base_ptr, base_ptr + size)
-            if (ptr_as_uint >= base_as_uint && ptr_as_uint < base_as_uint + size) {
-                // Found it! ptr is within this buffer's range
-                VkDeviceSize offset = static_cast<VkDeviceSize>(ptr_as_uint - base_as_uint);
-                try {
-                    VkBuffer buffer = allocator.get_buffer(base_ptr, device_id);
-                    return {buffer, offset};
-                } catch (...) {
-                    // Continue searching
-                }
-            }
+    // If not found directly, ptr might be base_ptr + offset (e.g. a sliced tensor
+    // view or an offset write into a larger tensor).  Ask the caching allocator to
+    // search its block list — it knows the ACTUAL block sizes (including slab
+    // sub-allocations) and can find the correct VkBuffer + byte offset.
+    // The allocations_ map cannot be used here because it stores the REQUESTED
+    // size which may be smaller than the actual block, causing mismatches when
+    // slab sub-allocation places adjacent blocks in overlapping address ranges.
+    for (int32_t device_id = 0; device_id < device_count(); ++device_id) {
+        auto [buffer, offset] = allocator.find_buffer_and_offset(ptr, device_id);
+        if (buffer != VK_NULL_HANDLE) {
+            return {buffer, static_cast<VkDeviceSize>(offset)};
         }
     }
 
@@ -958,6 +947,13 @@ VkDescriptorSet VulkanBackend::allocateAndWriteDescriptorSet(
         ctx.submittedFrames = 0;
         ctx.currentFrame = 0;
         ctx.hasPendingWork = false;
+        // Invalidate the active batch command buffer.  submitBatchIfNeeded skips
+        // submission when operationsInBatch == 0, leaving activeCommandBuffer
+        // pointing to a handle that vkResetCommandPool just put back into
+        // "initial" state.  Without this, the next getOrCreateBatchCommandBuffer
+        // returns the stale handle and callers record into an un-begun buffer.
+        ctx.activeCommandBuffer = VK_NULL_HANDLE;
+        ctx.operationsInBatch = 0;
 
         if (is_fragmented) {
             // Fragmentation means the pool has enough total capacity but can't

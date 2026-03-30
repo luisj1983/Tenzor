@@ -16,6 +16,7 @@
 #include <climits>
 #include <algorithm>
 #include <stdexcept>
+#include "fp16_saturate.h"
 
 namespace tenzor {
 namespace rocm {
@@ -1348,6 +1349,10 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stre
         throw std::runtime_error(std::string("HIP error in sum_kernel: ") + hipGetErrorString(err));
     }
 
+    if (dtype == DType::Float16) {
+        fp16_saturate(output.data_ptr(), output.numel(), stream);
+    }
+
     return output;
 }
 
@@ -1365,6 +1370,15 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t str
 
     if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
         throw std::runtime_error("mean: only Float32, Float64, Float16, and BFloat16 are supported");
+    }
+
+    // Float16: upcast to Float32, compute mean, convert back
+    if (dtype == DType::Float16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = mean_kernel(input_f32, dim, keepdim, stream);
+        auto result_f16 = result_f32.to(DType::Float16);
+        fp16_saturate(result_f16.data_ptr(), result_f16.numel(), stream);
+        return result_f16;
     }
 
     // BFloat16: upcast to Float32, compute mean, convert back

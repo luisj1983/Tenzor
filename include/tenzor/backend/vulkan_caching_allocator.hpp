@@ -172,6 +172,19 @@ public:
     VkBuffer get_buffer(void* ptr, int device = 0) const;
 
     /**
+     * @brief Find the VkBuffer and byte offset for a pointer that may be
+     *        interior to an allocated block (e.g. tensor offset pointer).
+     *
+     * Searches all allocated blocks to find the one that contains @p ptr.
+     * Returns the block's VkBuffer and the byte offset of ptr within it.
+     *
+     * @param ptr Pointer that may be base or interior to an allocation
+     * @param device Device index
+     * @return {VkBuffer, byte_offset} or {VK_NULL_HANDLE, 0} if not found
+     */
+    std::pair<VkBuffer, size_t> find_buffer_and_offset(const void* ptr, int device = 0) const;
+
+    /**
      * @brief Check if a pointer refers to host-visible (mappable) memory
      *
      * @param ptr Mapped pointer or synthetic address

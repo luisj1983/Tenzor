@@ -654,9 +654,12 @@ auto softmax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Ten
         const double* in_ptr = get_data_ptr<const double>(in_cont);
         double* out_ptr = get_data_ptr<double>(output);
 
-        queue.parallel_for<SoftmaxKernelFloat64>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
-            const int64_t outer_idx = idx[0];
-            const int64_t inner_idx = idx[1];
+        // Use 1D dispatch (matching Float32 path) for consistent SYCL behavior
+        const int64_t total_work_items = outer_size * inner_size;
+        queue.parallel_for<SoftmaxKernelFloat64>(sycl::range<1>(total_work_items), [=](sycl::id<1> idx) {
+            const int64_t work_idx = idx[0];
+            const int64_t outer_idx = work_idx / inner_size;
+            const int64_t inner_idx = work_idx % inner_size;
             const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
 
             double max_val = -1.7976931348623157e+308;  // -DBL_MAX (avoid INFINITY with -ffast-math)
@@ -785,9 +788,12 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
         const double* out_ptr = get_data_ptr<const double>(output);
         double* grad_in_ptr = get_data_ptr<double>(grad_input);
 
-        queue.parallel_for<SoftmaxBackwardKernelFloat64>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
-            const int64_t outer_idx = idx[0];
-            const int64_t inner_idx = idx[1];
+        // Use 1D dispatch (matching Float32 path) for consistent SYCL behavior
+        const int64_t total_work_items = outer_size * inner_size;
+        queue.parallel_for<SoftmaxBackwardKernelFloat64>(sycl::range<1>(total_work_items), [=](sycl::id<1> idx) {
+            const int64_t work_idx = idx[0];
+            const int64_t outer_idx = work_idx / inner_size;
+            const int64_t inner_idx = work_idx % inner_size;
             const int64_t offset = (outer_idx * dim_size * inner_size) + inner_idx;
 
             double dot = 0.0;

@@ -591,15 +591,14 @@ auto LinearBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
     const auto& grad_out = grad_outputs[0];  // (batch, out)
 
     // Use optimized LinearBackward kernel (supports Float32, Float64, Float16, BFloat16)
-    if (grad_out.device().type == Device::Type::CUDA ||
-        grad_out.device().type == Device::Type::ROCm ||
+    bool is_gpu = (grad_out.device().type != Device::Type::CPU);
+    if (is_gpu ||
         grad_out.dtype() == DType::Float32 || grad_out.dtype() == DType::Float64) {
         // For Float16/BFloat16 on GPU backends, upcast to Float32 for computation to
         // prevent gradient overflow. FP16 gemm can't represent values > 65504,
         // causing Inf→NaN propagation in larger models.
         DType orig_dt = grad_out.dtype();
-        bool needs_upcast = ((grad_out.device().type == Device::Type::CUDA ||
-                              grad_out.device().type == Device::Type::ROCm) &&
+        bool needs_upcast = (is_gpu &&
                             (orig_dt == DType::Float16 || orig_dt == DType::BFloat16));
         if (needs_upcast) {
             std::vector<Tensor> inputs = {
@@ -650,10 +649,26 @@ auto LinearBackward::backward_with_variables(std::vector<Variable> grad_outputs)
     }
     const auto& grad_out = grad_outputs[0];
 
-    auto grad_x = tenzor::matmul(grad_out, saved_w);
-    auto grad_out_t = tenzor::transpose(grad_out, 0, 1);
-    auto grad_w = tenzor::matmul(grad_out_t, saved_x);
-    auto grad_b = tenzor::sum(grad_out, 0, false);
+    // For Float16/BFloat16 on GPU backends, upcast to Float32 to prevent
+    // gradient overflow (FP16 max ~65504, easily exceeded in backward).
+    DType orig_dt = grad_out.tensor().dtype();
+    bool is_gpu = (grad_out.tensor().device().type != Device::Type::CPU);
+    bool needs_upcast = is_gpu && (orig_dt == DType::Float16 || orig_dt == DType::BFloat16);
+
+    Variable go = needs_upcast ? Variable(grad_out.tensor().to(DType::Float32), false) : grad_out;
+    Variable sx = needs_upcast ? Variable(saved_x.tensor().to(DType::Float32), false) : saved_x;
+    Variable sw = needs_upcast ? Variable(saved_w.tensor().to(DType::Float32), false) : saved_w;
+
+    auto grad_x = tenzor::matmul(go, sw);
+    auto grad_out_t = tenzor::transpose(go, 0, 1);
+    auto grad_w = tenzor::matmul(grad_out_t, sx);
+    auto grad_b = tenzor::sum(go, 0, false);
+
+    if (needs_upcast) {
+        grad_x = Variable(grad_x.tensor().to(orig_dt), grad_x.requires_grad());
+        grad_w = Variable(grad_w.tensor().to(orig_dt), grad_w.requires_grad());
+        grad_b = Variable(grad_b.tensor().to(orig_dt), grad_b.requires_grad());
+    }
     return {grad_x, grad_w, grad_b};
 }
 

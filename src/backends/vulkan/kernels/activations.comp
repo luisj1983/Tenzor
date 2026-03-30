@@ -13,8 +13,12 @@ layout(push_constant) uniform PushConstants {
 } params;
 
 const float PI = 3.14159265359;
-const float SELU_ALPHA = 1.6732632423543772848170429916717;
-const float SELU_SCALE = 1.0507009873554804934193349852946;
+// Use the exact Float32 representation that the C++ compiler produces for
+// these constants.  GLSL compilers may round the long decimal literal to
+// a different Float32 value (off by 1 ULP), which causes a systematic
+// 2^-22 error in SELU(x) for |x| >= ~2.
+const float SELU_ALPHA = 1.67326319217681884766;  // 0x3FD62D7D
+const float SELU_SCALE = 1.05070102214813232422;  // 0x3F867D5F
 
 float relu(float x) {
     return max(0.0, x);
@@ -45,8 +49,24 @@ float elu(float x, float alpha) {
 }
 
 float selu(float x) {
-    // SELU: scale * (x if x > 0, alpha * (exp(x) - 1) otherwise)
-    return x > 0.0 ? SELU_SCALE * x : SELU_SCALE * SELU_ALPHA * (exp(x) - 1.0);
+    if (x > 0.0)
+        return SELU_SCALE * x;
+    // Two paths for negative x to avoid precision loss:
+    // 1) For small |x| (<0.025): Taylor series for expm1 avoids catastrophic
+    //    cancellation in exp(x)-1 where GPU exp() 2-ULP error dominates.
+    //    5-term Taylor error at |x|=0.025: x^6/720 ≈ 3.4e-13 (negligible).
+    // 2) For larger |x|: rewrite as lambda*exp(x) - lambda to eliminate the
+    //    subtraction and keep one fewer rounding step.
+    float lambda = SELU_SCALE * SELU_ALPHA;
+    if (x > -0.025) {
+        // expm1(x) ≈ x(1 + x/2(1 + x/3(1 + x/4(1 + x/5))))
+        float t = x * 0.2 + 1.0;
+        t = x * 0.25 * t + 1.0;
+        t = x / 3.0 * t + 1.0;
+        t = x * 0.5 * t + 1.0;
+        return lambda * (x * t);
+    }
+    return lambda * exp(x) - lambda;
 }
 
 float softplus(float x, float beta) {

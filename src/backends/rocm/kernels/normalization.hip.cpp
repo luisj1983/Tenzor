@@ -9,6 +9,7 @@
 #include <hip/hip_fp16.h>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "fp16_saturate.h"
 #include <stdexcept>
 #include <cmath>
 #include <vector>
@@ -224,7 +225,9 @@ auto layer_norm_kernel(
         if (weight) { weight_f32 = weight->to(DType::Float32); weight_f32_ptr = &weight_f32; }
         if (bias) { bias_f32 = bias->to(DType::Float32); bias_f32_ptr = &bias_f32; }
         auto result_f32 = layer_norm_kernel(input_f32, normalized_shape, weight_f32_ptr, bias_f32_ptr, eps, stream);
-        return result_f32.to(DType::Float16);
+        auto result_f16 = result_f32.to(DType::Float16);
+        fp16_saturate(result_f16.data_ptr(), result_f16.numel(), stream);
+        return result_f16;
     }
 
     auto input_shape = input.shape();
@@ -440,9 +443,13 @@ auto layer_norm_backward_kernel(
         Tensor weight_f32;
         if (weight) { weight_f32 = weight->to(DType::Float32); weight_f32_ptr = &weight_f32; }
         auto [gi_f32, gw_f32, gb_f32] = layer_norm_backward_kernel(grad_output_f32, input_f32, mean_f32, rstd_f32, weight_f32_ptr, stream);
-        return {gi_f32.to(DType::Float16),
-                gw_f32.numel() > 0 ? gw_f32.to(DType::Float16) : gw_f32,
-                gb_f32.numel() > 0 ? gb_f32.to(DType::Float16) : gb_f32};
+        auto gi = gi_f32.to(DType::Float16);
+        fp16_saturate(gi.data_ptr(), gi.numel(), stream);
+        auto gw = gw_f32.numel() > 0 ? gw_f32.to(DType::Float16) : gw_f32;
+        if (gw.numel() > 0) fp16_saturate(gw.data_ptr(), gw.numel(), stream);
+        auto gb = gb_f32.numel() > 0 ? gb_f32.to(DType::Float16) : gb_f32;
+        if (gb.numel() > 0) fp16_saturate(gb.data_ptr(), gb.numel(), stream);
+        return {gi, gw, gb};
     }
 
     auto input_shape = input.shape();

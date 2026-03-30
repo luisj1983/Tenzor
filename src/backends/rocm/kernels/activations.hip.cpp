@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include "fp16_saturate.h"
 
 namespace tenzor {
 namespace rocm {
@@ -1706,6 +1707,10 @@ auto gelu_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         throw std::runtime_error(std::string("HIP error in gelu_kernel: ") + hipGetErrorString(err));
     }
 
+    if (input.dtype() == DType::Float16) {
+        fp16_saturate(result.data_ptr(), result.numel(), stream);
+    }
+
     return result;
 }
 
@@ -1745,6 +1750,10 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStr
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
         throw std::runtime_error(std::string("HIP error in gelu_backward_kernel: ") + hipGetErrorString(err));
+    }
+
+    if (input.dtype() == DType::Float16) {
+        fp16_saturate(result.data_ptr(), result.numel(), stream);
     }
 
     return result;

@@ -1574,6 +1574,8 @@ class CastF32ToI8;
 class CastI8ToF32;
 class CastF32ToBool;
 class CastBoolToF32;
+class CastI64ToF64;
+class CastF64ToI64;
 
 auto cast_kernel(const Tensor& input, DType target_dtype, sycl::queue& queue) -> Tensor {
     if (input.dtype() == target_dtype) {
@@ -1684,6 +1686,18 @@ auto cast_kernel(const Tensor& input, DType target_dtype, sycl::queue& queue) ->
         float* out = get_data_ptr<float>(output);
         queue.parallel_for<CastBoolToF32>(sycl::range<1>(numel), [=](sycl::id<1> i) {
             out[i] = in[i] ? 1.0f : 0.0f;
+        });
+    } else if (src == DType::Int64 && dst == DType::Float64) {
+        const int64_t* in = get_data_ptr<const int64_t>(input);
+        double* out = get_data_ptr<double>(output);
+        queue.parallel_for<CastI64ToF64>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            out[i] = static_cast<double>(in[i]);
+        });
+    } else if (src == DType::Float64 && dst == DType::Int64) {
+        const double* in = get_data_ptr<const double>(input);
+        int64_t* out = get_data_ptr<int64_t>(output);
+        queue.parallel_for<CastF64ToI64>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            out[i] = static_cast<int64_t>(in[i]);
         });
     } else {
         // Two-hop: src -> Float32 -> dst

@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <vector>
 #include <limits>
+#include "fp16_saturate.h"
 
 namespace tenzor {
 namespace rocm {
@@ -760,6 +761,11 @@ auto adaptive_avgpool2d_hip(
 
     HIP_CHECK(hipGetLastError());
 
+    if (input.dtype() == DType::Float16) {
+        hipStream_t stream = nullptr;
+        fp16_saturate(output.data_ptr(), output.numel(), stream);
+    }
+
     return output;
 }
 
@@ -982,6 +988,11 @@ auto adaptive_avgpool2d_backward_hip(
     }
 
     HIP_CHECK(hipGetLastError());
+
+    if (input.dtype() == DType::Float16) {
+        fp16_saturate(grad_input.data_ptr(), grad_input.numel(), stream);
+    }
+
     return grad_input;
 }
 

@@ -459,9 +459,12 @@ public:
             std::vector<Tensor> inputs_vec = {go, inp, mn, rs, wt};
             auto results = dispatch<OpId::LayerNormBackward>(inputs_vec, attrs);
 
-            // Convert results back to original dtype
-            if (needs_upcast) {
-                for (auto& r : results) r = r.to(orig_dt);
+            // Convert grad_input back to original dtype but keep grad_weight
+            // and grad_bias in Float32.  Accumulated parameter gradients can
+            // exceed Float16 range (~65504), so downcasting them would produce
+            // Inf.  This matches CPU behavior which always stores these in F32.
+            if (needs_upcast && results.size() >= 1) {
+                results[0] = results[0].to(orig_dt);  // grad_input
             }
             return results;
         }

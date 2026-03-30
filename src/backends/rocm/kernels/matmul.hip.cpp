@@ -19,6 +19,7 @@
 #include <stdexcept>
 #include <vector>
 #include <memory>
+#include "fp16_saturate.h"
 
 namespace tenzor {
 namespace rocm {
@@ -759,6 +760,9 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
                 return result_f32.to(DType::BFloat16);
             }
 
+            if (a_contig.dtype() == DType::Float16) {
+                fp16_saturate(result.data_ptr(), result.numel(), stream);
+            }
             return result;
         } catch (const std::runtime_error&) {
             // rocBLAS failed, use fallback native kernel
@@ -901,6 +905,9 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
                 return result_f32.to(DType::BFloat16);
             }
 
+            if (a_contig.dtype() == DType::Float16) {
+                fp16_saturate(result.data_ptr(), result.numel(), stream);
+            }
             return result;
         } catch (const std::runtime_error&) {
             // rocBLAS failed, use fallback
@@ -1195,6 +1202,9 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
         return matmul_native_hip(a_contig, b_contig, stream);
     }
 
+    if (a_contig.dtype() == DType::Float16) {
+        fp16_saturate(result.data_ptr(), result.numel(), stream);
+    }
     return result;
 }
 

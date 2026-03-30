@@ -6,6 +6,7 @@
 #include <cstdio>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "fp16_saturate.h"
 #include <stdexcept>
 
 namespace tenzor {
@@ -394,7 +395,9 @@ auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias
         Tensor bias_f32;
         if (bias) { bias_f32 = bias->to(DType::Float32); bias_f32_ptr = &bias_f32; }
         auto result_f32 = linear_kernel(input_f32, weight_f32, bias_f32_ptr, stream);
-        return result_f32.to(DType::Float16);
+        auto result_f16 = result_f32.to(DType::Float16);
+        fp16_saturate(result_f16.data_ptr(), result_f16.numel(), stream);
+        return result_f16;
     } else if (input.dtype() == DType::BFloat16) {
         auto input_f32 = input.to(DType::Float32);
         auto weight_f32 = weight.to(DType::Float32);
@@ -423,7 +426,13 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input, cons
         auto input_f32 = input.to(DType::Float32);
         auto weight_f32 = weight.to(DType::Float32);
         auto results_f32 = linear_backward_kernel(grad_output_f32, input_f32, weight_f32, stream);
-        return {results_f32[0].to(DType::Float16), results_f32[1].to(DType::Float16), results_f32[2].to(DType::Float16)};
+        auto gi = results_f32[0].to(DType::Float16);
+        auto gw = results_f32[1].to(DType::Float16);
+        auto gb = results_f32[2].to(DType::Float16);
+        fp16_saturate(gi.data_ptr(), gi.numel(), stream);
+        fp16_saturate(gw.data_ptr(), gw.numel(), stream);
+        fp16_saturate(gb.data_ptr(), gb.numel(), stream);
+        return {gi, gw, gb};
     }
 
     auto grad_shape = grad_output.shape();

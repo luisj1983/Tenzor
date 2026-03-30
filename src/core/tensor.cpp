@@ -388,6 +388,14 @@ auto Tensor::to(Device device) const -> Tensor {
         return contiguous().to(device);
     }
 
+    // GPU views with non-zero offset: copy to own storage via backend dispatch
+    // so the transfer path operates on a simple zero-offset buffer.
+    if (impl_->offset != 0 && impl_->device.type != Device::Type::CPU) {
+        std::array<Tensor, 1> inputs = {*this};
+        Tensor owned = dispatch(OpId::Contiguous, inputs)[0];
+        return owned.to(device);
+    }
+
     // Normal path: tensor is contiguous or on CPU
     auto cont = is_contiguous() ? *this : contiguous();
 
