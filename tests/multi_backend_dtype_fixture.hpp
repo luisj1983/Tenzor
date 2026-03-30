@@ -33,12 +33,70 @@
 #include <vector>
 #include <string>
 #include <memory>
+#include <mutex>
 
 namespace tenzor {
 namespace testing {
 
 // Bring Variable into scope for convenience
 using Variable = tenzor::Variable;
+
+// ============================================================================
+// Backend Name Parsing Utilities
+// ============================================================================
+
+/**
+ * @brief Extract the base backend name from a possibly-indexed string.
+ *
+ * "cuda:1" -> "cuda", "cuda" -> "cuda", "cpu" -> "cpu"
+ */
+inline std::string parseBackendName(const std::string& s) {
+    auto pos = s.find(':');
+    return (pos == std::string::npos) ? s : s.substr(0, pos);
+}
+
+/**
+ * @brief Extract the device index from a possibly-indexed string.
+ *
+ * "cuda:1" -> 1, "cuda" -> 0, "cpu" -> 0
+ */
+inline int32_t parseDeviceIndex(const std::string& s) {
+    auto pos = s.find(':');
+    if (pos == std::string::npos) return 0;
+    return std::stoi(s.substr(pos + 1));
+}
+
+/**
+ * @brief Map a base backend name to Device::Type.
+ *
+ * @throws std::runtime_error if name is unknown
+ */
+inline Device::Type nameToDeviceType(const std::string& name) {
+    if (name == "cpu") return Device::Type::CPU;
+    if (name == "cuda") return Device::Type::CUDA;
+    if (name == "vulkan") return Device::Type::Vulkan;
+    if (name == "oneapi") return Device::Type::OneAPI;
+    if (name == "rocm") return Device::Type::ROCm;
+    throw std::runtime_error("Unknown backend name: " + name);
+}
+
+/**
+ * @brief Format a backend string as a GTest-safe test name.
+ *
+ * "cuda:1" -> "Cuda1", "cpu" -> "Cpu", "cuda" -> "Cuda"
+ */
+inline std::string formatBackendTestName(const std::string& backend) {
+    auto base = parseBackendName(backend);
+    auto index = parseDeviceIndex(backend);
+    std::string result = base;
+    if (!result.empty()) {
+        result[0] = std::toupper(result[0]);
+    }
+    if (base != "cpu") {
+        result += std::to_string(index);
+    }
+    return result;
+}
 
 // ============================================================================
 // Test Parameter Types
@@ -69,12 +127,7 @@ inline std::string BackendDTypeParamName(
         case DType::Int64: dtype_str = "Int64"; break;
         default: dtype_str = "Unknown"; break;
     }
-    // Capitalize first letter of backend
-    std::string backend_cap = backend;
-    if (!backend_cap.empty()) {
-        backend_cap[0] = std::toupper(backend_cap[0]);
-    }
-    return backend_cap + "_" + dtype_str;
+    return formatBackendTestName(backend) + "_" + dtype_str;
 }
 
 /**
@@ -112,44 +165,37 @@ inline bool isBackendAvailable(Device::Type backend_type, int32_t index = 0) {
 }
 
 /**
- * @brief Get Device from backend name string
+ * @brief Get Device from backend name string.
+ *
+ * Handles both legacy format ("cuda" -> device 0) and indexed format ("cuda:1").
+ *
  * @throws std::runtime_error if backend name is unknown
  */
 inline Device getDeviceFromName(const std::string& backend_name) {
-    if (backend_name == "cpu") {
-        return Device::cpu();
-    } else if (backend_name == "cuda") {
-        return Device::cuda(0);
-    } else if (backend_name == "vulkan") {
-        return Device::vulkan(0);
-    } else if (backend_name == "oneapi") {
-        return Device::oneapi(0);
-    } else if (backend_name == "rocm") {
-        return Device::rocm(0);
-    }
-    throw std::runtime_error("Unknown backend: " + backend_name);
+    auto base = parseBackendName(backend_name);
+    auto index = parseDeviceIndex(backend_name);
+    if (base == "cpu") return Device::cpu();
+    return Device{nameToDeviceType(base), index};
 }
 
 /**
- * @brief Check if backend name corresponds to an available backend
+ * @brief Check if backend name corresponds to an available backend.
+ *
+ * Handles both legacy format ("cuda") and indexed format ("cuda:1").
  */
 inline bool isBackendNameAvailable(const std::string& backend_name) {
-    if (backend_name == "cpu") {
-        return true;  // CPU is always available
-    } else if (backend_name == "cuda") {
-        return isBackendAvailable(Device::Type::CUDA);
-    } else if (backend_name == "vulkan") {
-        return isBackendAvailable(Device::Type::Vulkan);
-    } else if (backend_name == "oneapi") {
-        return isBackendAvailable(Device::Type::OneAPI);
-    } else if (backend_name == "rocm") {
-        return isBackendAvailable(Device::Type::ROCm);
+    auto base = parseBackendName(backend_name);
+    auto index = parseDeviceIndex(backend_name);
+    if (base == "cpu") return true;
+    try {
+        return isBackendAvailable(nameToDeviceType(base), index);
+    } catch (...) {
+        return false;
     }
-    return false;
 }
 
 /**
- * @brief Get list of available backend names
+ * @brief Get list of available backend names (single device per backend).
  */
 inline std::vector<std::string> getAvailableBackends() {
     std::vector<std::string> backends = {"cpu"};  // CPU always available
@@ -168,6 +214,40 @@ inline std::vector<std::string> getAvailableBackends() {
     }
 
     return backends;
+}
+
+/**
+ * @brief Get list of available backends with all device indices enumerated.
+ *
+ * Queries each backend's device_count() and probes each device.
+ * Returns strings like {"cpu", "cuda:0", "cuda:1", "rocm:0"}.
+ */
+inline std::vector<std::string> getAvailableBackendsWithDevices() {
+    static std::once_flag init;
+    std::call_once(init, []() { tenzor::initialize(); });
+
+    std::vector<std::string> result = {"cpu"};
+
+    struct BackendInfo { const char* name; Device::Type type; };
+    constexpr BackendInfo backends[] = {
+        {"cuda", Device::Type::CUDA},
+        {"oneapi", Device::Type::OneAPI},
+        {"vulkan", Device::Type::Vulkan},
+        {"rocm", Device::Type::ROCm},
+    };
+
+    for (const auto& [name, type] : backends) {
+        auto* backend = backend_registry().get_backend(type);
+        if (!backend || !backend->is_available()) continue;
+        int32_t count = backend->device_count();
+        for (int32_t i = 0; i < count; ++i) {
+            if (isBackendAvailable(type, i)) {
+                result.push_back(std::string(name) + ":" + std::to_string(i));
+            }
+        }
+    }
+
+    return result;
 }
 
 // ============================================================================
@@ -759,6 +839,93 @@ inline auto GenerateBackendDTypeParams(
             return info.param; \
         } \
     )
+
+// ============================================================================
+// Multi-Device Test Instantiation Macros
+// ============================================================================
+
+/**
+ * @brief Runtime-discovered backends with per-device enumeration.
+ *
+ * Unlike STANDARD_BACKENDS which lists static backend names,
+ * this queries device_count() at runtime and emits entries like
+ * "cuda:0", "cuda:1", "rocm:0", etc.
+ */
+#define DISCOVERED_BACKENDS_WITH_DEVICES \
+    ::testing::ValuesIn(::tenzor::testing::getAvailableBackendsWithDevices())
+
+/**
+ * @brief Instantiate tests for all discovered devices + dtype combinations.
+ *
+ * Generates test instances like Cuda0_Float32, Cuda1_Float32, Rocm0_Float16, etc.
+ */
+#define INSTANTIATE_MULTI_DEVICE_DTYPE_TESTS(TestSuiteName) \
+    INSTANTIATE_TEST_SUITE_P( \
+        MultiDeviceDType, \
+        TestSuiteName, \
+        ::testing::Combine( \
+            DISCOVERED_BACKENDS_WITH_DEVICES, \
+            FLOAT_DTYPES \
+        ), \
+        [](const ::testing::TestParamInfo<BackendDTypeParam>& info) { \
+            return BackendDTypeParamName(info); \
+        } \
+    )
+
+/**
+ * @brief Instantiate tests for all discovered devices + all dtypes (including BFloat16).
+ */
+#define INSTANTIATE_MULTI_DEVICE_ALL_DTYPE_TESTS(TestSuiteName) \
+    INSTANTIATE_TEST_SUITE_P( \
+        MultiDeviceAllDType, \
+        TestSuiteName, \
+        ::testing::Combine( \
+            DISCOVERED_BACKENDS_WITH_DEVICES, \
+            ALL_FLOAT_DTYPES \
+        ), \
+        [](const ::testing::TestParamInfo<BackendDTypeParam>& info) { \
+            return BackendDTypeParamName(info); \
+        } \
+    )
+
+/**
+ * @brief Instantiate tests for all discovered devices only (Float32 dtype).
+ */
+#define INSTANTIATE_MULTI_DEVICE_TESTS(TestSuiteName) \
+    INSTANTIATE_TEST_SUITE_P( \
+        MultiDevice, \
+        TestSuiteName, \
+        DISCOVERED_BACKENDS_WITH_DEVICES, \
+        [](const ::testing::TestParamInfo<std::string>& info) { \
+            return ::tenzor::testing::formatBackendTestName(info.param); \
+        } \
+    )
+
+// ============================================================================
+// Global opt-in: -DTENZOR_TEST_ALL_DEVICES
+//
+// When TENZOR_TEST_ALL_DEVICES is defined (via CMake option), the standard
+// single-device macros are redirected to their multi-device equivalents.
+// This lets you enable multi-device testing for the entire test suite from
+// CMake without touching any test files:
+//
+//   cmake -B build -DTENZOR_TEST_ALL_DEVICES=ON ...
+// ============================================================================
+#ifdef TENZOR_TEST_ALL_DEVICES
+
+#undef INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS
+#define INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(TestSuiteName) \
+    INSTANTIATE_MULTI_DEVICE_DTYPE_TESTS(TestSuiteName)
+
+#undef INSTANTIATE_MULTI_BACKEND_ALL_DTYPE_TESTS
+#define INSTANTIATE_MULTI_BACKEND_ALL_DTYPE_TESTS(TestSuiteName) \
+    INSTANTIATE_MULTI_DEVICE_ALL_DTYPE_TESTS(TestSuiteName)
+
+#undef INSTANTIATE_MULTI_BACKEND_TESTS
+#define INSTANTIATE_MULTI_BACKEND_TESTS(TestSuiteName) \
+    INSTANTIATE_MULTI_DEVICE_TESTS(TestSuiteName)
+
+#endif // TENZOR_TEST_ALL_DEVICES
 
 } // namespace testing
 } // namespace tenzor

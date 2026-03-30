@@ -83,40 +83,75 @@ inline bool has_rocm(int32_t index = 0) {
 }
 
 /**
+ * @brief Parse the base backend name from a possibly-indexed string.
+ *
+ * "cuda:1" -> "cuda", "cuda" -> "cuda", "cpu" -> "cpu"
+ */
+inline std::string parse_backend_name(const std::string& s) {
+    auto pos = s.find(':');
+    return (pos == std::string::npos) ? s : s.substr(0, pos);
+}
+
+/**
+ * @brief Parse the device index from a possibly-indexed string.
+ *
+ * "cuda:1" -> 1, "cuda" -> 0, "cpu" -> 0
+ */
+inline int32_t parse_device_index(const std::string& s) {
+    auto pos = s.find(':');
+    if (pos == std::string::npos) return 0;
+    return std::stoi(s.substr(pos + 1));
+}
+
+/**
+ * @brief Map a base backend name to Device::Type.
+ */
+inline Device::Type name_to_device_type(const std::string& name) {
+    if (name == "cpu") return Device::Type::CPU;
+    if (name == "cuda") return Device::Type::CUDA;
+    if (name == "vulkan") return Device::Type::Vulkan;
+    if (name == "oneapi") return Device::Type::OneAPI;
+    if (name == "rocm") return Device::Type::ROCm;
+    throw std::runtime_error("Unknown backend name: " + name);
+}
+
+/**
  * @brief Check if a backend is available by name string.
  *
- * Accepts: "cpu", "cuda", "vulkan", "oneapi", "rocm"
+ * Accepts both legacy ("cuda") and indexed ("cuda:1") formats.
  *
  * @param name Backend name (case-sensitive, lowercase)
  * @return true if available
  */
 inline bool is_backend_name_available(const std::string& name) {
-    if (name == "cpu") return true;
-    if (name == "cuda") return has_cuda();
-    if (name == "vulkan") return has_vulkan();
-    if (name == "oneapi") return has_oneapi();
-    if (name == "rocm") return has_rocm();
-    return false;
+    auto base = parse_backend_name(name);
+    auto index = parse_device_index(name);
+    if (base == "cpu") return true;
+    try {
+        return is_backend_available(name_to_device_type(base), index);
+    } catch (...) {
+        return false;
+    }
 }
 
 /**
  * @brief Get Device object from a backend name string.
  *
- * @param name Backend name ("cpu", "cuda", "vulkan", "oneapi", "rocm", "metal")
+ * Accepts both legacy ("cuda") and indexed ("cuda:1") formats.
+ *
+ * @param name Backend name
  * @return Corresponding Device object
  * @throws std::runtime_error if name is unknown
  */
 inline Device device_from_name(const std::string& name) {
-    if (name == "cpu") return Device::cpu();
-    if (name == "cuda") return Device::cuda(0);
-    if (name == "vulkan") return Device::vulkan(0);
-    if (name == "oneapi") return Device::oneapi(0);
-    if (name == "rocm") return Device::rocm(0);
-    throw std::runtime_error("Unknown backend name: " + name);
+    auto base = parse_backend_name(name);
+    auto index = parse_device_index(name);
+    if (base == "cpu") return Device::cpu();
+    return Device{name_to_device_type(base), index};
 }
 
 /**
- * @brief Get list of all available backend Devices.
+ * @brief Get list of all available backend Devices (single device per backend).
  *
  * Always includes CPU. Checks CUDA, OneAPI, Vulkan, and ROCm.
  *
@@ -135,6 +170,32 @@ inline std::vector<Device> get_available_backends() {
 }
 
 /**
+ * @brief Get list of all available backend Devices with all device indices.
+ *
+ * Queries device_count() per backend and probes each device.
+ *
+ * @return Vector of available Device objects (e.g., cpu, cuda:0, cuda:1, rocm:0)
+ */
+inline std::vector<Device> get_available_backends_all_devices() {
+    std::vector<Device> backends;
+    backends.push_back(Device::cpu());
+
+    struct BackendInfo { Device::Type type; };
+    for (auto type : {Device::Type::CUDA, Device::Type::OneAPI,
+                      Device::Type::Vulkan, Device::Type::ROCm}) {
+        auto* backend = backend_registry().get_backend(type);
+        if (!backend || !backend->is_available()) continue;
+        for (int32_t i = 0; i < backend->device_count(); ++i) {
+            if (is_backend_available(type, i)) {
+                backends.push_back(Device{type, i});
+            }
+        }
+    }
+
+    return backends;
+}
+
+/**
  * @brief Get list of available backend names as strings.
  *
  * @return Vector of backend name strings (e.g., {"cpu", "cuda", "vulkan"})
@@ -146,6 +207,35 @@ inline std::vector<std::string> get_available_backend_names() {
     if (has_vulkan()) names.push_back("vulkan");
     if (has_rocm()) names.push_back("rocm");
     // Metal: planned for future release
+    return names;
+}
+
+/**
+ * @brief Get list of available backend names with all device indices.
+ *
+ * @return Vector like {"cpu", "cuda:0", "cuda:1", "rocm:0"}
+ */
+inline std::vector<std::string> get_available_backend_names_all_devices() {
+    std::vector<std::string> names = {"cpu"};
+
+    struct BackendInfo { const char* name; Device::Type type; };
+    constexpr BackendInfo infos[] = {
+        {"cuda", Device::Type::CUDA},
+        {"oneapi", Device::Type::OneAPI},
+        {"vulkan", Device::Type::Vulkan},
+        {"rocm", Device::Type::ROCm},
+    };
+
+    for (const auto& [name, type] : infos) {
+        auto* backend = backend_registry().get_backend(type);
+        if (!backend || !backend->is_available()) continue;
+        for (int32_t i = 0; i < backend->device_count(); ++i) {
+            if (is_backend_available(type, i)) {
+                names.push_back(std::string(name) + ":" + std::to_string(i));
+            }
+        }
+    }
+
     return names;
 }
 

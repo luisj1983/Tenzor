@@ -8,8 +8,49 @@
 namespace tenzor {
 namespace testing {
 
+// Forward declarations for parsing utilities (defined in multi_backend_dtype_fixture.hpp).
+// Duplicated here to keep this header self-contained.
+namespace detail {
+
+inline std::string parseBackendName(const std::string& s) {
+    auto pos = s.find(':');
+    return (pos == std::string::npos) ? s : s.substr(0, pos);
+}
+
+inline int32_t parseDeviceIndex(const std::string& s) {
+    auto pos = s.find(':');
+    if (pos == std::string::npos) return 0;
+    return std::stoi(s.substr(pos + 1));
+}
+
+inline Device::Type nameToDeviceType(const std::string& name) {
+    if (name == "cpu") return Device::Type::CPU;
+    if (name == "cuda") return Device::Type::CUDA;
+    if (name == "vulkan") return Device::Type::Vulkan;
+    if (name == "oneapi") return Device::Type::OneAPI;
+    if (name == "rocm") return Device::Type::ROCm;
+    throw std::runtime_error("Unknown backend name: " + name);
+}
+
+inline std::string formatBackendTestName(const std::string& backend) {
+    auto base = parseBackendName(backend);
+    auto index = parseDeviceIndex(backend);
+    std::string result = base;
+    if (!result.empty()) {
+        result[0] = std::toupper(result[0]);
+    }
+    if (base != "cpu") {
+        result += std::to_string(index);
+    }
+    return result;
+}
+
+} // namespace detail
+
 /**
  * @brief Base test fixture for backend parity testing
+ *
+ * Supports both legacy backend names ("cuda") and indexed names ("cuda:1").
  *
  * Usage:
  *   TEST_P(BackendTest, MyTestName) {
@@ -30,37 +71,18 @@ protected:
             tenzor::initialize();
         });
 
-        std::string backend_name = GetParam();
+        std::string backend_param = GetParam();
+        auto base = detail::parseBackendName(backend_param);
+        auto index = detail::parseDeviceIndex(backend_param);
 
-        if (backend_name == "cpu") {
+        if (base == "cpu") {
             device = Device::cpu();
-        }
-        else if (backend_name == "cuda") {
-            if (!isBackendAvailable(Device::Type::CUDA)) {
-                GTEST_SKIP() << "CUDA backend not available";
+        } else {
+            auto type = detail::nameToDeviceType(base);
+            if (!isBackendAvailable(type, index)) {
+                GTEST_SKIP() << backend_param << " not available";
             }
-            device = Device::cuda(0);
-        }
-        else if (backend_name == "vulkan") {
-            if (!isBackendAvailable(Device::Type::Vulkan)) {
-                GTEST_SKIP() << "Vulkan backend not available";
-            }
-            device = Device::vulkan(0);
-        }
-        else if (backend_name == "oneapi") {
-            if (!isBackendAvailable(Device::Type::OneAPI)) {
-                GTEST_SKIP() << "OneAPI backend not available";
-            }
-            device = Device::oneapi(0);
-        }
-        else if (backend_name == "rocm") {
-            if (!isBackendAvailable(Device::Type::ROCm)) {
-                GTEST_SKIP() << "ROCm backend not available";
-            }
-            device = Device::rocm(0);
-        }
-        else {
-            FAIL() << "Unknown backend: " << backend_name;
+            device = Device{type, index};
         }
     }
 
@@ -97,7 +119,7 @@ protected:
 // Define static member with inline to avoid multiple definition errors
 inline std::once_flag BackendTest::init_flag;
 
-// Instantiate tests for all available backends
+// Instantiate tests for all available backends (legacy, device index 0 only)
 #define INSTANTIATE_BACKEND_TESTS(TestSuiteName) \
     INSTANTIATE_TEST_SUITE_P( \
         AllBackends, \
@@ -107,6 +129,48 @@ inline std::once_flag BackendTest::init_flag;
             return info.param; \
         } \
     )
+
+// Instantiate tests for all discovered devices across all backends
+#define INSTANTIATE_MULTI_DEVICE_BACKEND_TESTS(TestSuiteName) \
+    INSTANTIATE_TEST_SUITE_P( \
+        AllDevices, \
+        TestSuiteName, \
+        ::testing::ValuesIn([]() -> std::vector<std::string> { \
+            static std::once_flag init; \
+            std::call_once(init, []() { tenzor::initialize(); }); \
+            std::vector<std::string> result = {"cpu"}; \
+            struct Info { const char* name; Device::Type type; }; \
+            constexpr Info backends[] = { \
+                {"cuda", Device::Type::CUDA}, \
+                {"oneapi", Device::Type::OneAPI}, \
+                {"vulkan", Device::Type::Vulkan}, \
+                {"rocm", Device::Type::ROCm}, \
+            }; \
+            for (const auto& [n, t] : backends) { \
+                auto* b = backend_registry().get_backend(t); \
+                if (!b || !b->is_available()) continue; \
+                for (int32_t i = 0; i < b->device_count(); ++i) { \
+                    try { \
+                        Device d{t, i}; \
+                        zeros({2, 2}, DType::Float32, d); \
+                        result.push_back(std::string(n) + ":" + std::to_string(i)); \
+                    } catch (...) {} \
+                } \
+            } \
+            return result; \
+        }()), \
+        [](const ::testing::TestParamInfo<std::string>& info) { \
+            return ::tenzor::testing::detail::formatBackendTestName(info.param); \
+        } \
+    )
+
+#ifdef TENZOR_TEST_ALL_DEVICES
+
+#undef INSTANTIATE_BACKEND_TESTS
+#define INSTANTIATE_BACKEND_TESTS(TestSuiteName) \
+    INSTANTIATE_MULTI_DEVICE_BACKEND_TESTS(TestSuiteName)
+
+#endif // TENZOR_TEST_ALL_DEVICES
 
 } // namespace testing
 } // namespace tenzor

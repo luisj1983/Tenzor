@@ -20,6 +20,13 @@ include(GoogleTest)
 # Maximum test execution timeout (20 minutes)
 set(TENZOR_TEST_TIMEOUT 2000)
 
+# When ON, tests enumerate all devices per backend (e.g. cuda:0, cuda:1)
+# instead of only testing device index 0.
+option(TENZOR_TEST_ALL_DEVICES "Test all devices per backend" ON)
+if(TENZOR_TEST_ALL_DEVICES)
+    add_compile_definitions(TENZOR_TEST_ALL_DEVICES)
+endif()
+
 # Custom function that wraps gtest_discover_tests
 function(tenzor_discover_tests target)
     cmake_parse_arguments(PARSE_ARGV 1 ARG "" "DISCOVERY_TIMEOUT;DISCOVERY_MODE" "PROPERTIES")
