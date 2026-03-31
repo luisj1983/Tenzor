@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include "fp16_saturate.h"
+#include "reduction_utils.hip.h"
 
 namespace tenzor {
 namespace rocm {
@@ -28,7 +29,7 @@ namespace rocm {
 // NOTE: Do NOT hardcode wavefront size — RDNA 3/4 GPUs use wave32, CDNA uses wave64.
 // Use the HIP built-in `warpSize` in device code instead.
 constexpr int MAX_BLOCK_SIZE = 1024;
-constexpr int REDUCTION_BLOCK_SIZE = 256;
+// REDUCTION_BLOCK_SIZE defined in reduction_utils.hip.h
 
 // ============================================================================
 // HIP Error Checking
@@ -56,21 +57,7 @@ __global__ void elementwise_sqrt_kernel(const T* __restrict__ input, T* __restri
     }
 }
 
-/**
- * @brief Wavefront-level sum reduction using AMD GPU warp shuffle
- * @tparam T Data type
- * @param val Value to reduce
- * @return Reduced sum (valid only in lane 0)
- *
- * Uses __shfl_down for efficient intra-wavefront communication
- */
-template<typename T>
-__device__ __forceinline__ T wavefront_reduce_sum(T val) {
-    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
-        val += __shfl_down(val, offset);
-    }
-    return val;
-}
+// wavefront_reduce_sum<T> is provided by reduction_utils.hip.h
 
 /**
  * @brief Wavefront-level max reduction
@@ -106,53 +93,7 @@ __device__ __forceinline__ T wavefront_reduce_min(T val) {
 // Block-level reduction kernels (full reduction)
 // ============================================================================
 
-/**
- * @brief Sum reduction kernel using LDS (Local Data Share)
- * @tparam T Data type
- * @param input Input tensor data
- * @param output Output buffer (one value per block)
- * @param n Total number of elements
- *
- * Two-level reduction:
- * 1. Grid-stride loop accumulates values per thread
- * 2. Block-level reduction in LDS (AMD's shared memory)
- * 3. Wavefront-level reduction for final sum
- */
-template<typename T>
-__global__ void sum_reduce_kernel(const T* input, T* output, int64_t n) {
-    __shared__ T shared[REDUCTION_BLOCK_SIZE];
-
-    int tid = threadIdx.x;
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int64_t grid_size = blockDim.x * gridDim.x;
-
-    // Grid-stride loop for better occupancy on AMD GPUs
-    T thread_sum = 0;
-    for (int64_t i = idx; i < n; i += grid_size) {
-        thread_sum += input[i];
-    }
-
-    shared[tid] = thread_sum;
-    __syncthreads();
-
-    // Block-level reduction in LDS
-    for (int stride = blockDim.x / 2; stride >= warpSize; stride >>= 1) {
-        if (tid < stride) {
-            shared[tid] += shared[tid + stride];
-        }
-        __syncthreads();
-    }
-
-    // Wavefront-level reduction for final stages
-    if (tid < warpSize) {
-        T val = shared[tid];
-        val = wavefront_reduce_sum(val);
-
-        if (tid == 0) {
-            output[blockIdx.x] = val;
-        }
-    }
-}
+// sum_reduce_kernel<T> is provided by reduction_utils.hip.h
 
 /**
  * @brief Max reduction kernel using LDS
@@ -757,42 +698,7 @@ static auto compute_reduction_shape(
  * @param n Number of elements
  * @param stream HIP stream
  */
-template<typename T>
-static void launch_full_reduction_sum(const T* d_input, T* d_output, int64_t n, hipStream_t stream) {
-    if (n == 0) {
-        T zero = 0;
-        HIP_CHECK(hipMemcpyAsync(d_output, &zero, sizeof(T), hipMemcpyHostToDevice, stream));
-        return;
-    }
-
-    if (n == 1) {
-        HIP_CHECK(hipMemcpyAsync(d_output, d_input, sizeof(T), hipMemcpyDeviceToDevice, stream));
-        return;
-    }
-
-    // Two-phase reduction for large arrays
-    int num_blocks = std::min<int>((n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE, 1024);
-
-    if (num_blocks == 1) {
-        hipLaunchKernelGGL(sum_reduce_kernel<T>, dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
-            d_input, d_output, n);
-    } else {
-        // Phase 1: Reduce to num_blocks intermediate results
-        T* d_temp;
-        HIP_CHECK(hipMalloc(&d_temp, num_blocks * sizeof(T)));
-        hipLaunchKernelGGL(sum_reduce_kernel<T>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
-            d_input, d_temp, n);
-
-        // Phase 2: Final reduction
-        hipLaunchKernelGGL(sum_reduce_kernel<T>, dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
-            d_temp, d_output, num_blocks);
-
-        // Synchronize before freeing temp buffer
-        HIP_CHECK(hipStreamSynchronize(stream));
-        HIP_CHECK(hipFree(d_temp));
-    }
-    HIP_CHECK(hipStreamSynchronize(stream));
-}
+// launch_full_reduction_sum<T> is provided by reduction_utils.hip.h
 
 /**
  * @brief Launch full reduction max

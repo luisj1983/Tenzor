@@ -127,7 +127,6 @@ struct alignas(64) BackendDispatchTable {
     void register_kernel(OpId op, KernelFn fn) noexcept {
         assert(!ready.load(std::memory_order_relaxed) &&
                "register_kernel called after table marked ready");
-#ifndef NDEBUG
         auto idx = static_cast<size_t>(op);
         if (kernels[idx] != nullptr) {
             fprintf(stderr, "[dispatch_table] WARNING: overwriting kernel for OpId %zu\n", idx);
@@ -135,8 +134,7 @@ struct alignas(64) BackendDispatchTable {
         if (single_output_kernels[idx] != nullptr || inplace_kernels[idx] != nullptr) {
             fprintf(stderr, "[dispatch_table] WARNING: OpId %zu already registered in a different kernel array\n", idx);
         }
-#endif
-        kernels[static_cast<size_t>(op)] = fn;
+        kernels[idx] = fn;
     }
 
     /**
@@ -151,7 +149,6 @@ struct alignas(64) BackendDispatchTable {
     void register_single_output_kernel(OpId op, SingleOutputKernelFn fn) noexcept {
         assert(!ready.load(std::memory_order_relaxed) &&
                "register_single_output_kernel called after table marked ready");
-#ifndef NDEBUG
         auto idx = static_cast<size_t>(op);
         if (single_output_kernels[idx] != nullptr) {
             fprintf(stderr, "[dispatch_table] WARNING: overwriting single_output kernel for OpId %zu\n", idx);
@@ -159,8 +156,7 @@ struct alignas(64) BackendDispatchTable {
         if (kernels[idx] != nullptr || inplace_kernels[idx] != nullptr) {
             fprintf(stderr, "[dispatch_table] WARNING: OpId %zu already registered in a different kernel array\n", idx);
         }
-#endif
-        single_output_kernels[static_cast<size_t>(op)] = fn;
+        single_output_kernels[idx] = fn;
     }
 
     /**
@@ -175,7 +171,6 @@ struct alignas(64) BackendDispatchTable {
     void register_inplace_kernel(OpId op, InplaceKernelFn fn) noexcept {
         assert(!ready.load(std::memory_order_relaxed) &&
                "register_inplace_kernel called after table marked ready");
-#ifndef NDEBUG
         auto idx = static_cast<size_t>(op);
         if (inplace_kernels[idx] != nullptr) {
             fprintf(stderr, "[dispatch_table] WARNING: overwriting inplace kernel for OpId %zu\n", idx);
@@ -183,8 +178,7 @@ struct alignas(64) BackendDispatchTable {
         if (kernels[idx] != nullptr || single_output_kernels[idx] != nullptr) {
             fprintf(stderr, "[dispatch_table] WARNING: OpId %zu already registered in a different kernel array\n", idx);
         }
-#endif
-        inplace_kernels[static_cast<size_t>(op)] = fn;
+        inplace_kernels[idx] = fn;
     }
 
     /**

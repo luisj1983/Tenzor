@@ -1736,9 +1736,10 @@ auto unique_kernel(const Tensor& input, bool sorted, bool return_inverse, bool r
     int64_t numel = input.numel();
 
 #ifdef TENZOR_HAS_ONEDPL
-    // Device-side unique using oneDPL: sort + unique on device
-    // Unique operates on flattened 1D input, so always contiguous
-    if (sorted && numel > 0) {
+    // Device-side unique using oneDPL: sort + unique on device.
+    // Used for both sorted=true and sorted=false — unique values have no canonical
+    // order, so sorting is acceptable even when the user did not request it.
+    if (numel > 0) {
         auto policy = ::oneapi::dpl::execution::make_device_policy(queue);
 
         auto device_unique_impl = [&](const auto* in_ptr) {

@@ -571,7 +571,9 @@ __global__ void group_norm_forward_kernel(
     int64_t HW,
     int64_t num_groups,
     int64_t channels_per_group,
-    float eps
+    float eps,
+    float* saved_mean = nullptr,
+    float* saved_rstd = nullptr
 ) {
     extern __shared__ unsigned char shared_mem[];
     T* shared = reinterpret_cast<T*>(shared_mem);
@@ -614,6 +616,12 @@ __global__ void group_norm_forward_kernel(
     T variance = var_sum / T(group_size);
     T rstd = rsqrt(variance + T(eps));
 
+    // Optionally save stats for backward pass
+    if (threadIdx.x == 0 && saved_mean) {
+        saved_mean[idx] = static_cast<float>(mean);
+        saved_rstd[idx] = static_cast<float>(rstd);
+    }
+
     // Normalize and apply affine
     for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
         int64_t c_local = i / HW;
@@ -645,7 +653,9 @@ __global__ void group_norm_forward_kernel_fp16(
     int64_t HW,
     int64_t num_groups,
     int64_t channels_per_group,
-    float eps
+    float eps,
+    float* saved_mean = nullptr,
+    float* saved_rstd = nullptr
 ) {
     extern __shared__ unsigned char shared_mem[];
     float* shared = reinterpret_cast<float*>(shared_mem);
@@ -685,6 +695,12 @@ __global__ void group_norm_forward_kernel_fp16(
 
     float variance = var_sum / static_cast<float>(group_size);
     float rstd = rsqrtf(variance + eps);
+
+    // Optionally save stats for backward pass
+    if (threadIdx.x == 0 && saved_mean) {
+        saved_mean[idx] = mean;
+        saved_rstd[idx] = rstd;
+    }
 
     // Normalize and apply affine
     for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
@@ -782,7 +798,7 @@ auto group_norm_kernel(
 }
 
 // Wrapper that returns (output, saved_mean, saved_rstd) for the backward pass.
-// Mean and rstd are computed per (N, num_groups).
+// Mean and rstd are computed on GPU alongside the forward pass (no CPU transfer).
 auto group_norm_forward_with_stats(
     const Tensor& input,
     int64_t num_groups,
@@ -791,59 +807,73 @@ auto group_norm_forward_with_stats(
     float eps,
     hipStream_t stream
 ) -> std::vector<Tensor> {
-    auto output = group_norm_kernel(input, num_groups, weight, bias, eps, stream);
-
-    // Compute mean and rstd for backward pass
     auto input_shape = input.shape();
+    if (input_shape.size() < 2) {
+        throw std::runtime_error("group_norm_forward_with_stats: input must have at least 2 dimensions");
+    }
+
     int64_t N = input_shape[0];
     int64_t C = input_shape[1];
     int64_t HW = 1;
     for (size_t i = 2; i < input_shape.size(); ++i) HW *= input_shape[i];
-    int64_t cpg = C / num_groups;
-    int64_t group_size = cpg * HW;
 
-    // Allocate mean/rstd on device
+    if (C % num_groups != 0) {
+        throw std::runtime_error("group_norm_forward_with_stats: num_groups must divide num_channels");
+    }
+
+    int64_t channels_per_group = C / num_groups;
+    int64_t group_size = channels_per_group * HW;
+
+    Tensor output(std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                  input.dtype(), input.device());
     Tensor saved_mean({N, num_groups}, DType::Float32, input.device());
     Tensor saved_rstd({N, num_groups}, DType::Float32, input.device());
 
-    // Compute on CPU (small: N * num_groups elements)
-    auto input_cpu = input.to(Device::cpu()).to(DType::Float32).contiguous();
-    const float* inp = input_cpu.data<float>();
+    int threads = std::min(static_cast<int64_t>(BLOCK_SIZE), group_size);
+    int blocks = N * num_groups;
+    int shared_mem_size = (threads / 32 + 1) * sizeof(float);
 
-    std::vector<float> mean_host(N * num_groups);
-    std::vector<float> rstd_host(N * num_groups);
-
-    for (int64_t n = 0; n < N; ++n) {
-        for (int64_t g = 0; g < num_groups; ++g) {
-            float sum = 0.0f;
-            for (int64_t cl = 0; cl < cpg; ++cl) {
-                int64_t c = g * cpg + cl;
-                for (int64_t hw = 0; hw < HW; ++hw) {
-                    sum += inp[n * C * HW + c * HW + hw];
-                }
-            }
-            float mean_val = sum / static_cast<float>(group_size);
-            float var_sum = 0.0f;
-            for (int64_t cl = 0; cl < cpg; ++cl) {
-                int64_t c = g * cpg + cl;
-                for (int64_t hw = 0; hw < HW; ++hw) {
-                    float diff = inp[n * C * HW + c * HW + hw] - mean_val;
-                    var_sum += diff * diff;
-                }
-            }
-            float var = var_sum / static_cast<float>(group_size);
-            mean_host[n * num_groups + g] = mean_val;
-            rstd_host[n * num_groups + g] = 1.0f / std::sqrt(var + eps);
-        }
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(group_norm_forward_kernel<float>,
+            dim3(blocks), dim3(threads), shared_mem_size, stream,
+            input.data<float>(),
+            weight ? weight->data<float>() : nullptr,
+            bias ? bias->data<float>() : nullptr,
+            output.data<float>(),
+            N, C, HW, num_groups, channels_per_group, eps,
+            saved_mean.data<float>(), saved_rstd.data<float>());
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(group_norm_forward_kernel<double>,
+            dim3(blocks), dim3(threads), shared_mem_size * 2, stream,
+            input.data<double>(),
+            weight ? weight->data<double>() : nullptr,
+            bias ? bias->data<double>() : nullptr,
+            output.data<double>(),
+            N, C, HW, num_groups, channels_per_group, eps,
+            saved_mean.data<float>(), saved_rstd.data<float>());
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(group_norm_forward_kernel_fp16,
+            dim3(blocks), dim3(threads), shared_mem_size, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            weight ? reinterpret_cast<const __half*>(weight->data<Float16>()) : nullptr,
+            bias ? reinterpret_cast<const __half*>(bias->data<Float16>()) : nullptr,
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            N, C, HW, num_groups, channels_per_group, eps,
+            saved_mean.data<float>(), saved_rstd.data<float>());
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        const Tensor* weight_f32_ptr = nullptr;
+        const Tensor* bias_f32_ptr = nullptr;
+        Tensor weight_f32, bias_f32;
+        if (weight) { weight_f32 = weight->to(DType::Float32); weight_f32_ptr = &weight_f32; }
+        if (bias) { bias_f32 = bias->to(DType::Float32); bias_f32_ptr = &bias_f32; }
+        auto result = group_norm_forward_with_stats(input_f32, num_groups, weight_f32_ptr, bias_f32_ptr, eps, stream);
+        return {result[0].to(DType::BFloat16), result[1], result[2]};
+    } else {
+        throw std::runtime_error("group_norm_forward_with_stats: unsupported dtype");
     }
 
-    // Copy to device
-    HIP_CHECK(hipMemcpyAsync(saved_mean.data<float>(), mean_host.data(),
-        N * num_groups * sizeof(float), hipMemcpyHostToDevice, stream));
-    HIP_CHECK(hipMemcpyAsync(saved_rstd.data<float>(), rstd_host.data(),
-        N * num_groups * sizeof(float), hipMemcpyHostToDevice, stream));
-    HIP_CHECK(hipStreamSynchronize(stream));
-
+    HIP_CHECK(hipGetLastError());
     return {output, saved_mean, saved_rstd};
 }
 

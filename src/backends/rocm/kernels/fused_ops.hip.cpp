@@ -2,6 +2,7 @@
 #include <hip/hip_fp16.h>
 #include <hip/hip_bfloat16.h>
 #include "tenzor/core/tensor.hpp"
+#include "reduction_utils.hip.h"
 #include <stdexcept>
 #include <cmath>
 #include <algorithm>
@@ -30,43 +31,26 @@ inline std::vector<int64_t> to_vec(std::span<const int64_t> s) {
     return std::vector<int64_t>(s.begin(), s.end());
 }
 
-// Simple reduction: sum all elements to a scalar tensor (host-side for small tensors)
+// GPU reduction: sum all elements to a scalar tensor using two-phase parallel reduction
 inline Tensor reduce_sum_hip(const Tensor& t) {
     int64_t n = t.numel();
     Tensor result({}, t.dtype(), t.device());
     if (t.dtype() == DType::Float32) {
-        std::vector<float> host(n);
-        hipMemcpy(host.data(), t.data<float>(), n * sizeof(float), hipMemcpyDeviceToHost);
-        float s = 0;
-        for (auto v : host) s += v;
-        hipMemcpy(result.data<float>(), &s, sizeof(float), hipMemcpyHostToDevice);
+        launch_full_reduction_sum<float>(t.data<float>(), result.data<float>(), n, nullptr);
     } else if (t.dtype() == DType::Float64) {
-        std::vector<double> host(n);
-        hipMemcpy(host.data(), t.data<double>(), n * sizeof(double), hipMemcpyDeviceToHost);
-        double s = 0;
-        for (auto v : host) s += v;
-        hipMemcpy(result.data<double>(), &s, sizeof(double), hipMemcpyHostToDevice);
+        launch_full_reduction_sum<double>(t.data<double>(), result.data<double>(), n, nullptr);
     }
     return result;
 }
 
+// GPU reduction: mean all elements to a scalar tensor (sum / n)
 inline Tensor reduce_mean_hip(const Tensor& t) {
     int64_t n = t.numel();
     Tensor result({}, t.dtype(), t.device());
     if (t.dtype() == DType::Float32) {
-        std::vector<float> host(n);
-        hipMemcpy(host.data(), t.data<float>(), n * sizeof(float), hipMemcpyDeviceToHost);
-        float s = 0;
-        for (auto v : host) s += v;
-        s /= static_cast<float>(n);
-        hipMemcpy(result.data<float>(), &s, sizeof(float), hipMemcpyHostToDevice);
+        launch_full_reduction_mean<float>(t.data<float>(), result.data<float>(), n, nullptr);
     } else if (t.dtype() == DType::Float64) {
-        std::vector<double> host(n);
-        hipMemcpy(host.data(), t.data<double>(), n * sizeof(double), hipMemcpyDeviceToHost);
-        double s = 0;
-        for (auto v : host) s += v;
-        s /= static_cast<double>(n);
-        hipMemcpy(result.data<double>(), &s, sizeof(double), hipMemcpyHostToDevice);
+        launch_full_reduction_mean<double>(t.data<double>(), result.data<double>(), n, nullptr);
     }
     return result;
 }

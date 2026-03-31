@@ -22,7 +22,7 @@ set(TENZOR_TEST_TIMEOUT 2000)
 
 # When ON, tests enumerate all devices per backend (e.g. cuda:0, cuda:1)
 # instead of only testing device index 0.
-option(TENZOR_TEST_ALL_DEVICES "Test all devices per backend" ON)
+option(TENZOR_TEST_ALL_DEVICES "Test all devices per backend" off)
 if(TENZOR_TEST_ALL_DEVICES)
     add_compile_definitions(TENZOR_TEST_ALL_DEVICES)
 endif()

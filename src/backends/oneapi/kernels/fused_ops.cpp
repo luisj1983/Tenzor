@@ -48,6 +48,14 @@ struct FusedRMSNormBackwardKernelFloat16 {};
 struct FusedRMSNormBackwardKernelBFloat16 {};
 struct FusedSoftmaxCrossEntropyKernelBFloat16 {};
 struct FusedLayerNormBackwardKernelFloat16 {};
+struct LayerNormBwdGradWB_F32 {};
+struct LayerNormBwdGradWB_F64 {};
+struct LayerNormBwdGradIn_F32 {};
+struct LayerNormBwdGradIn_F64 {};
+struct LayerNormBwdGradWB_F16 {};
+struct LayerNormBwdGradIn_F16 {};
+struct LayerNormBwdGradWB_BF16 {};
+struct LayerNormBwdGradIn_BF16 {};
 struct FlashAttentionKernelFloat32 {};
 struct FlashAttentionKernelFloat64 {};
 struct FlashAttentionKernelFloat16 {};
@@ -571,6 +579,122 @@ auto fused_layer_norm_backward_kernel(
     Tensor grad_weight({norm_size}, input.dtype(), input.device());
     Tensor grad_bias({norm_size}, input.dtype(), input.device());
 
+    // Helper: round up to next power of 2, capped at 256
+    auto round_up_pow2 = [](int64_t n) -> int64_t {
+        int64_t p = 1;
+        while (p < n) p *= 2;
+        return std::min(p, static_cast<int64_t>(256));
+    };
+
+    // Lambda to dispatch the backward pass for any dtype.
+    // All dtypes compute in float32 internally; the template handles load/store casts.
+    // KernelGradWB and KernelGradIn are SYCL kernel name classes.
+    // load_fn: device pointer index -> float
+    // store_gw_fn, store_gb_fn, store_gi_fn: float -> device write
+    auto dispatch_backward = [&]<typename GradWBKernel, typename GradInKernel>(
+        auto load_go, auto load_in, auto load_mean, auto load_inv_std, auto load_weight,
+        auto store_gw, auto store_gb, auto store_gi,
+        GradWBKernel /*tag*/, GradInKernel /*tag2*/) {
+
+        // Kernel A: grad_weight and grad_bias reduction (one work-group per feature)
+        // Each work-group reduces over all batches for one feature index.
+        int64_t wg_wb = round_up_pow2(batch_size);
+        queue.submit([&](sycl::handler& cgh) {
+            sycl::local_accessor<float, 1> local_gw(sycl::range<1>(wg_wb), cgh);
+            sycl::local_accessor<float, 1> local_gb(sycl::range<1>(wg_wb), cgh);
+            cgh.parallel_for<GradWBKernel>(
+                sycl::nd_range<1>(norm_size * wg_wb, wg_wb),
+                [=](sycl::nd_item<1> item) {
+                    int64_t f = item.get_group(0);      // feature index [0, norm_size)
+                    int64_t lid = item.get_local_id(0);
+                    int64_t lsize = item.get_local_range(0);
+
+                    float acc_gw = 0.0f, acc_gb = 0.0f;
+                    for (int64_t b = lid; b < batch_size; b += lsize) {
+                        float go = load_go(b * norm_size + f);
+                        float inp = load_in(b * norm_size + f);
+                        float m = load_mean(b);
+                        float rstd = load_inv_std(b);
+                        float normalized = (inp - m) * rstd;
+                        acc_gw += go * normalized;
+                        acc_gb += go;
+                    }
+
+                    local_gw[lid] = acc_gw;
+                    local_gb[lid] = acc_gb;
+                    item.barrier(sycl::access::fence_space::local_space);
+
+                    for (int64_t stride = lsize / 2; stride > 0; stride >>= 1) {
+                        if (lid < stride) {
+                            local_gw[lid] += local_gw[lid + stride];
+                            local_gb[lid] += local_gb[lid + stride];
+                        }
+                        item.barrier(sycl::access::fence_space::local_space);
+                    }
+
+                    if (lid == 0) {
+                        store_gw(f, local_gw[0]);
+                        store_gb(f, local_gb[0]);
+                    }
+                });
+        });
+
+        // Kernel B: grad_input (one work-group per batch)
+        // Phase 1: compute dot products ds, db via local memory reduction
+        // Phase 2: compute per-element grad_input with full correction formula
+        int64_t wg_in = round_up_pow2(norm_size);
+        queue.submit([&](sycl::handler& cgh) {
+            sycl::local_accessor<float, 1> local_ds(sycl::range<1>(wg_in), cgh);
+            sycl::local_accessor<float, 1> local_db(sycl::range<1>(wg_in), cgh);
+            cgh.parallel_for<GradInKernel>(
+                sycl::nd_range<1>(batch_size * wg_in, wg_in),
+                [=](sycl::nd_item<1> item) {
+                    int64_t b = item.get_group(0);       // batch index
+                    int64_t lid = item.get_local_id(0);
+                    int64_t lsize = item.get_local_range(0);
+                    float m = load_mean(b);
+                    float rstd = load_inv_std(b);
+
+                    // Phase 1: compute ds and db dot products
+                    float thread_ds = 0.0f, thread_db = 0.0f;
+                    for (int64_t i = lid; i < norm_size; i += lsize) {
+                        float normalized = (load_in(b * norm_size + i) - m) * rstd;
+                        float go_w = load_go(b * norm_size + i) * load_weight(i);
+                        thread_ds += go_w * normalized;
+                        thread_db += go_w;
+                    }
+
+                    local_ds[lid] = thread_ds;
+                    local_db[lid] = thread_db;
+                    item.barrier(sycl::access::fence_space::local_space);
+
+                    for (int64_t stride = lsize / 2; stride > 0; stride >>= 1) {
+                        if (lid < stride) {
+                            local_ds[lid] += local_ds[lid + stride];
+                            local_db[lid] += local_db[lid + stride];
+                        }
+                        item.barrier(sycl::access::fence_space::local_space);
+                    }
+
+                    float ds = local_ds[0];
+                    float db = local_db[0];
+                    float inv_n = 1.0f / static_cast<float>(norm_size);
+                    item.barrier(sycl::access::fence_space::local_space);
+
+                    // Phase 2: compute grad_input per element
+                    for (int64_t i = lid; i < norm_size; i += lsize) {
+                        float normalized = (load_in(b * norm_size + i) - m) * rstd;
+                        float go = load_go(b * norm_size + i);
+                        float w = load_weight(i);
+                        float gi = rstd * w * (go - inv_n * (db + normalized * ds));
+                        store_gi(b * norm_size + i, gi);
+                    }
+                });
+        });
+
+        queue.wait();
+    };
+
     if (input.dtype() == DType::Float32) {
         const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
         const float* in_ptr = get_data_ptr<const float>(input);
@@ -581,81 +705,16 @@ auto fused_layer_norm_backward_kernel(
         float* grad_weight_ptr = get_data_ptr<float>(grad_weight);
         float* grad_bias_ptr = get_data_ptr<float>(grad_bias);
 
-        // Initialize grad_weight and grad_bias to zero
-        queue.fill(grad_weight_ptr, 0.0f, norm_size);
-        queue.fill(grad_bias_ptr, 0.0f, norm_size);
-
-        // Accumulate gradients for weight and bias
-        for (int64_t b = 0; b < batch_size; ++b) {
-            const float* batch_grad = grad_out_ptr + b * norm_size;
-            const float* batch_in = in_ptr + b * norm_size;
-
-            std::vector<float> host_grad(norm_size);
-            std::vector<float> host_in(norm_size);
-            queue.memcpy(host_grad.data(), batch_grad, norm_size * sizeof(float)).wait();
-            queue.memcpy(host_in.data(), batch_in, norm_size * sizeof(float)).wait();
-
-            float batch_mean, batch_inv_std;
-            queue.memcpy(&batch_mean, mean_ptr + b, sizeof(float)).wait();
-            queue.memcpy(&batch_inv_std, inv_std_ptr + b, sizeof(float)).wait();
-
-            std::vector<float> grad_w_acc(norm_size, 0.0f);
-            std::vector<float> grad_b_acc(norm_size, 0.0f);
-
-            for (int64_t i = 0; i < norm_size; ++i) {
-                float normalized = (host_in[i] - batch_mean) * batch_inv_std;
-                grad_w_acc[i] += host_grad[i] * normalized;
-                grad_b_acc[i] += host_grad[i];
-            }
-
-            // Add to accumulator
-            std::vector<float> curr_gw(norm_size), curr_gb(norm_size);
-            queue.memcpy(curr_gw.data(), grad_weight_ptr, norm_size * sizeof(float)).wait();
-            queue.memcpy(curr_gb.data(), grad_bias_ptr, norm_size * sizeof(float)).wait();
-
-            for (int64_t i = 0; i < norm_size; ++i) {
-                curr_gw[i] += grad_w_acc[i];
-                curr_gb[i] += grad_b_acc[i];
-            }
-
-            queue.memcpy(grad_weight_ptr, curr_gw.data(), norm_size * sizeof(float));
-            queue.memcpy(grad_bias_ptr, curr_gb.data(), norm_size * sizeof(float));
-        }
-
-        // Full layer norm backward: compute grad_input with mean/variance corrections.
-        // Copy weight to host (constant across batch)
-        std::vector<float> host_w_f32(norm_size);
-        queue.memcpy(host_w_f32.data(), weight_ptr, norm_size * sizeof(float)).wait();
-
-        for (int64_t b = 0; b < batch_size; ++b) {
-            const float* batch_grad = grad_out_ptr + b * norm_size;
-            const float* batch_in = in_ptr + b * norm_size;
-            float* batch_grad_in = grad_in_ptr + b * norm_size;
-
-            float batch_mean, batch_inv_std;
-            queue.memcpy(&batch_mean, mean_ptr + b, sizeof(float)).wait();
-            queue.memcpy(&batch_inv_std, inv_std_ptr + b, sizeof(float)).wait();
-
-            std::vector<float> host_grad_f32(norm_size), host_in_f32(norm_size);
-            queue.memcpy(host_grad_f32.data(), batch_grad, norm_size * sizeof(float)).wait();
-            queue.memcpy(host_in_f32.data(), batch_in, norm_size * sizeof(float)).wait();
-
-            float ds = 0.0f, db = 0.0f;
-            for (int64_t i = 0; i < norm_size; ++i) {
-                float normalized = (host_in_f32[i] - batch_mean) * batch_inv_std;
-                float go_w = host_grad_f32[i] * host_w_f32[i];
-                ds += go_w * normalized;
-                db += go_w;
-            }
-
-            float inv_n = 1.0f / static_cast<float>(norm_size);
-            queue.parallel_for<class LayerNormBackward>(sycl::range<1>(norm_size), [=](sycl::id<1> idx) {
-                int64_t i = idx[0];
-                float normalized = (batch_in[i] - batch_mean) * batch_inv_std;
-                batch_grad_in[i] = batch_inv_std * weight_ptr[i] *
-                    (batch_grad[i] - inv_n * (db + normalized * ds));
-            });
-        }
+        dispatch_backward(
+            [=](int64_t i) { return grad_out_ptr[i]; },
+            [=](int64_t i) { return in_ptr[i]; },
+            [=](int64_t i) { return mean_ptr[i]; },
+            [=](int64_t i) { return inv_std_ptr[i]; },
+            [=](int64_t i) { return weight_ptr[i]; },
+            [=](int64_t i, float v) { grad_weight_ptr[i] = v; },
+            [=](int64_t i, float v) { grad_bias_ptr[i] = v; },
+            [=](int64_t i, float v) { grad_in_ptr[i] = v; },
+            LayerNormBwdGradWB_F32{}, LayerNormBwdGradIn_F32{});
     }
     else if (input.dtype() == DType::Float64) {
         const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
@@ -667,52 +726,16 @@ auto fused_layer_norm_backward_kernel(
         double* grad_weight_ptr = get_data_ptr<double>(grad_weight);
         double* grad_bias_ptr = get_data_ptr<double>(grad_bias);
 
-        // Complete host-based backward for Float64
-        queue.wait();  // Ensure all prior work is complete
-
-        // Copy all needed data to host
-        std::vector<double> h_go(batch_size * norm_size), h_in(batch_size * norm_size);
-        std::vector<double> h_mean(batch_size), h_inv_std(batch_size);
-        std::vector<double> h_weight(norm_size);
-        queue.memcpy(h_go.data(), grad_out_ptr, batch_size * norm_size * sizeof(double)).wait();
-        queue.memcpy(h_in.data(), in_ptr, batch_size * norm_size * sizeof(double)).wait();
-        queue.memcpy(h_mean.data(), mean_ptr, batch_size * sizeof(double)).wait();
-        queue.memcpy(h_inv_std.data(), inv_std_ptr, batch_size * sizeof(double)).wait();
-        queue.memcpy(h_weight.data(), weight_ptr, norm_size * sizeof(double)).wait();
-
-        // Compute on host
-        std::vector<double> h_gi(batch_size * norm_size);
-        std::vector<double> h_gw(norm_size, 0.0), h_gb(norm_size, 0.0);
-
-        for (int64_t b = 0; b < batch_size; ++b) {
-            const double* go_b = h_go.data() + b * norm_size;
-            const double* in_b = h_in.data() + b * norm_size;
-            double* gi_b = h_gi.data() + b * norm_size;
-            double m = h_mean[b];
-            double rstd = h_inv_std[b];
-
-            // Dot products for the full gradient formula
-            double ds = 0.0, db_val = 0.0;
-            for (int64_t j = 0; j < norm_size; ++j) {
-                double normalized = (in_b[j] - m) * rstd;
-                double go_w = go_b[j] * h_weight[j];
-                ds += go_w * normalized;
-                db_val += go_w;
-                h_gw[j] += go_b[j] * normalized;
-                h_gb[j] += go_b[j];
-            }
-
-            double inv_n = 1.0 / static_cast<double>(norm_size);
-            for (int64_t j = 0; j < norm_size; ++j) {
-                double normalized = (in_b[j] - m) * rstd;
-                gi_b[j] = rstd * h_weight[j] * (go_b[j] - inv_n * (db_val + normalized * ds));
-            }
-        }
-
-        // Copy results back to device
-        queue.memcpy(grad_in_ptr, h_gi.data(), batch_size * norm_size * sizeof(double)).wait();
-        queue.memcpy(grad_weight_ptr, h_gw.data(), norm_size * sizeof(double)).wait();
-        queue.memcpy(grad_bias_ptr, h_gb.data(), norm_size * sizeof(double)).wait();
+        dispatch_backward(
+            [=](int64_t i) { return static_cast<float>(grad_out_ptr[i]); },
+            [=](int64_t i) { return static_cast<float>(in_ptr[i]); },
+            [=](int64_t i) { return static_cast<float>(mean_ptr[i]); },
+            [=](int64_t i) { return static_cast<float>(inv_std_ptr[i]); },
+            [=](int64_t i) { return static_cast<float>(weight_ptr[i]); },
+            [=](int64_t i, float v) { grad_weight_ptr[i] = static_cast<double>(v); },
+            [=](int64_t i, float v) { grad_bias_ptr[i] = static_cast<double>(v); },
+            [=](int64_t i, float v) { grad_in_ptr[i] = static_cast<double>(v); },
+            LayerNormBwdGradWB_F64{}, LayerNormBwdGradIn_F64{});
     }
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
@@ -724,60 +747,16 @@ auto fused_layer_norm_backward_kernel(
         uint16_t* grad_weight_ptr = get_data_ptr<uint16_t>(grad_weight);
         uint16_t* grad_bias_ptr = get_data_ptr<uint16_t>(grad_bias);
 
-        // Initialize grad_weight and grad_bias to zero
-        uint16_t bf16_zero = f32_to_bf16(0.0f);
-        queue.fill(grad_weight_ptr, bf16_zero, norm_size);
-        queue.fill(grad_bias_ptr, bf16_zero, norm_size);
-
-        // Accumulate gradients for weight and bias (in float32 on host)
-        for (int64_t b = 0; b < batch_size; ++b) {
-            const uint16_t* batch_grad = grad_out_ptr + b * norm_size;
-            const uint16_t* batch_in = in_ptr + b * norm_size;
-
-            std::vector<uint16_t> host_grad(norm_size);
-            std::vector<uint16_t> host_in(norm_size);
-            queue.memcpy(host_grad.data(), batch_grad, norm_size * sizeof(uint16_t)).wait();
-            queue.memcpy(host_in.data(), batch_in, norm_size * sizeof(uint16_t)).wait();
-
-            uint16_t h_batch_mean, h_batch_inv_std;
-            queue.memcpy(&h_batch_mean, mean_ptr + b, sizeof(uint16_t)).wait();
-            queue.memcpy(&h_batch_inv_std, inv_std_ptr + b, sizeof(uint16_t)).wait();
-            float batch_mean = bf16_to_f32(h_batch_mean);
-            float batch_inv_std = bf16_to_f32(h_batch_inv_std);
-
-            std::vector<uint16_t> curr_gw(norm_size), curr_gb(norm_size);
-            queue.memcpy(curr_gw.data(), grad_weight_ptr, norm_size * sizeof(uint16_t)).wait();
-            queue.memcpy(curr_gb.data(), grad_bias_ptr, norm_size * sizeof(uint16_t)).wait();
-
-            for (int64_t i = 0; i < norm_size; ++i) {
-                float normalized = (bf16_to_f32(host_in[i]) - batch_mean) * batch_inv_std;
-                float gw = bf16_to_f32(curr_gw[i]) + bf16_to_f32(host_grad[i]) * normalized;
-                float gb = bf16_to_f32(curr_gb[i]) + bf16_to_f32(host_grad[i]);
-                curr_gw[i] = f32_to_bf16(gw);
-                curr_gb[i] = f32_to_bf16(gb);
-            }
-
-            queue.memcpy(grad_weight_ptr, curr_gw.data(), norm_size * sizeof(uint16_t));
-            queue.memcpy(grad_bias_ptr, curr_gb.data(), norm_size * sizeof(uint16_t));
-        }
-
-        // Compute grad_input
-        for (int64_t b = 0; b < batch_size; ++b) {
-            const uint16_t* batch_grad = grad_out_ptr + b * norm_size;
-            uint16_t* batch_grad_in = grad_in_ptr + b * norm_size;
-
-            uint16_t h_batch_mean, h_batch_inv_std;
-            queue.memcpy(&h_batch_mean, mean_ptr + b, sizeof(uint16_t)).wait();
-            queue.memcpy(&h_batch_inv_std, inv_std_ptr + b, sizeof(uint16_t)).wait();
-            float batch_inv_std = bf16_to_f32(h_batch_inv_std);
-
-            queue.parallel_for<FusedLayerNormBackwardKernelBFloat16>(sycl::range<1>(norm_size), [=](sycl::id<1> idx) {
-                int64_t i = idx[0];
-                float grad = bf16_to_f32(batch_grad[i]);
-                float w = bf16_to_f32(weight_ptr[i]);
-                batch_grad_in[i] = f32_to_bf16(grad * w * batch_inv_std);
-            });
-        }
+        dispatch_backward(
+            [=](int64_t i) { return bf16_to_f32(grad_out_ptr[i]); },
+            [=](int64_t i) { return bf16_to_f32(in_ptr[i]); },
+            [=](int64_t i) { return bf16_to_f32(mean_ptr[i]); },
+            [=](int64_t i) { return bf16_to_f32(inv_std_ptr[i]); },
+            [=](int64_t i) { return bf16_to_f32(weight_ptr[i]); },
+            [=](int64_t i, float v) { grad_weight_ptr[i] = f32_to_bf16(v); },
+            [=](int64_t i, float v) { grad_bias_ptr[i] = f32_to_bf16(v); },
+            [=](int64_t i, float v) { grad_in_ptr[i] = f32_to_bf16(v); },
+            LayerNormBwdGradWB_BF16{}, LayerNormBwdGradIn_BF16{});
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
@@ -789,82 +768,16 @@ auto fused_layer_norm_backward_kernel(
         sycl::half* grad_weight_ptr = get_data_ptr<sycl::half>(grad_weight);
         sycl::half* grad_bias_ptr = get_data_ptr<sycl::half>(grad_bias);
 
-        // Initialize grad_weight and grad_bias to zero
-        sycl::half h_zero = sycl::half(0.0f);
-        queue.fill(grad_weight_ptr, h_zero, norm_size);
-        queue.fill(grad_bias_ptr, h_zero, norm_size);
-
-        // Accumulate gradients for weight and bias (in float32 on host)
-        for (int64_t b = 0; b < batch_size; ++b) {
-            const sycl::half* batch_grad = grad_out_ptr + b * norm_size;
-            const sycl::half* batch_in = in_ptr + b * norm_size;
-
-            std::vector<sycl::half> host_grad(norm_size);
-            std::vector<sycl::half> host_in(norm_size);
-            queue.memcpy(host_grad.data(), batch_grad, norm_size * sizeof(sycl::half)).wait();
-            queue.memcpy(host_in.data(), batch_in, norm_size * sizeof(sycl::half)).wait();
-
-            sycl::half h_batch_mean, h_batch_inv_std;
-            queue.memcpy(&h_batch_mean, mean_ptr + b, sizeof(sycl::half)).wait();
-            queue.memcpy(&h_batch_inv_std, inv_std_ptr + b, sizeof(sycl::half)).wait();
-            float batch_mean = static_cast<float>(h_batch_mean);
-            float batch_inv_std = static_cast<float>(h_batch_inv_std);
-
-            std::vector<sycl::half> curr_gw(norm_size), curr_gb(norm_size);
-            queue.memcpy(curr_gw.data(), grad_weight_ptr, norm_size * sizeof(sycl::half)).wait();
-            queue.memcpy(curr_gb.data(), grad_bias_ptr, norm_size * sizeof(sycl::half)).wait();
-
-            for (int64_t i = 0; i < norm_size; ++i) {
-                float normalized = (static_cast<float>(host_in[i]) - batch_mean) * batch_inv_std;
-                float gw = static_cast<float>(curr_gw[i]) + static_cast<float>(host_grad[i]) * normalized;
-                float gb = static_cast<float>(curr_gb[i]) + static_cast<float>(host_grad[i]);
-                curr_gw[i] = sycl::half(gw);
-                curr_gb[i] = sycl::half(gb);
-            }
-
-            queue.memcpy(grad_weight_ptr, curr_gw.data(), norm_size * sizeof(sycl::half));
-            queue.memcpy(grad_bias_ptr, curr_gb.data(), norm_size * sizeof(sycl::half));
-        }
-
-        // Full layer norm backward: compute grad_input with mean/variance corrections.
-        // Copy weight to host (constant across batch)
-        std::vector<sycl::half> h_weight(norm_size);
-        queue.memcpy(h_weight.data(), weight_ptr, norm_size * sizeof(sycl::half)).wait();
-
-        for (int64_t b = 0; b < batch_size; ++b) {
-            const sycl::half* batch_grad = grad_out_ptr + b * norm_size;
-            const sycl::half* batch_in = in_ptr + b * norm_size;
-            sycl::half* batch_grad_in = grad_in_ptr + b * norm_size;
-
-            sycl::half h_batch_mean, h_batch_inv_std;
-            queue.memcpy(&h_batch_mean, mean_ptr + b, sizeof(sycl::half)).wait();
-            queue.memcpy(&h_batch_inv_std, inv_std_ptr + b, sizeof(sycl::half)).wait();
-            float batch_mean = static_cast<float>(h_batch_mean);
-            float batch_inv_std = static_cast<float>(h_batch_inv_std);
-
-            std::vector<sycl::half> h_grad(norm_size), h_in(norm_size);
-            queue.memcpy(h_grad.data(), batch_grad, norm_size * sizeof(sycl::half)).wait();
-            queue.memcpy(h_in.data(), batch_in, norm_size * sizeof(sycl::half)).wait();
-
-            float ds = 0.0f, db_val = 0.0f;
-            for (int64_t i = 0; i < norm_size; ++i) {
-                float normalized = (static_cast<float>(h_in[i]) - batch_mean) * batch_inv_std;
-                float go_w = static_cast<float>(h_grad[i]) * static_cast<float>(h_weight[i]);
-                ds += go_w * normalized;
-                db_val += go_w;
-            }
-
-            float inv_n = 1.0f / static_cast<float>(norm_size);
-            queue.parallel_for<FusedLayerNormBackwardKernelFloat16>(sycl::range<1>(norm_size), [=](sycl::id<1> idx) {
-                int64_t i = idx[0];
-                float in_val = static_cast<float>(batch_in[i]);
-                float normalized = (in_val - batch_mean) * batch_inv_std;
-                float grad = static_cast<float>(batch_grad[i]);
-                float w = static_cast<float>(weight_ptr[i]);
-                batch_grad_in[i] = sycl::half(batch_inv_std * w *
-                    (grad - inv_n * (db_val + normalized * ds)));
-            });
-        }
+        dispatch_backward(
+            [=](int64_t i) { return static_cast<float>(grad_out_ptr[i]); },
+            [=](int64_t i) { return static_cast<float>(in_ptr[i]); },
+            [=](int64_t i) { return static_cast<float>(mean_ptr[i]); },
+            [=](int64_t i) { return static_cast<float>(inv_std_ptr[i]); },
+            [=](int64_t i) { return static_cast<float>(weight_ptr[i]); },
+            [=](int64_t i, float v) { grad_weight_ptr[i] = sycl::half(v); },
+            [=](int64_t i, float v) { grad_bias_ptr[i] = sycl::half(v); },
+            [=](int64_t i, float v) { grad_in_ptr[i] = sycl::half(v); },
+            LayerNormBwdGradWB_F16{}, LayerNormBwdGradIn_F16{});
     }
     else {
         throw std::runtime_error("fused_layer_norm_backward: unsupported dtype");

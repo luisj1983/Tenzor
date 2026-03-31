@@ -4,6 +4,7 @@
  */
 
 #include <hip/hip_runtime.h>
+#include <hipcub/hipcub.hpp>
 #include <vector>
 #include <cstdint>
 #include <algorithm>
@@ -115,6 +116,126 @@ struct HipDevicePtr {
         } \
     } while(0)
 
+// Iota kernel: fill [0, padded_n) with 0, 1, 2, ..., n-1, n, n, n, ...
+// Padding positions get index n (sentinel), which the sort kernel treats as -inf score.
+__global__ void nms_iota_kernel(int64_t* indices, int64_t n, int64_t padded_n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < padded_n) {
+        indices[idx] = (idx < n) ? idx : n;
+    }
+}
+
+// Bitonic sort kernel for small arrays (up to 1024 elements).
+// Sorts indices in descending order by their associated scores.
+__global__ void nms_bitonic_sort_kernel(const float* scores, int64_t* indices,
+                                         int64_t n, int64_t padded_n,
+                                         int64_t sort_size, int64_t sort_stride) {
+    int64_t tid = threadIdx.x;
+    if (tid >= padded_n) return;
+
+    int64_t partner = tid ^ sort_stride;
+    if (partner <= tid || partner >= padded_n) return;
+
+    // Check the INDEX value (not position) to determine if it's a padding sentinel.
+    // After swaps, padding indices can be at any position.
+    int64_t idx_tid = indices[tid];
+    int64_t idx_partner = indices[partner];
+    float val_tid = (idx_tid < n) ? scores[idx_tid] : -1e30f;
+    float val_partner = (idx_partner < n) ? scores[idx_partner] : -1e30f;
+
+    // For descending sort: in the ascending half of bitonic merge, we want
+    // larger values first (so swap if tid has smaller value than partner).
+    // In the descending half, we want smaller values first (swap if tid > partner).
+    bool ascending_half = ((tid & sort_size) == 0);
+    // Invert for descending overall order
+    bool should_swap = ascending_half ? (val_tid < val_partner)
+                                       : (val_tid > val_partner);
+
+    if (should_swap) {
+        int64_t temp = indices[tid];
+        indices[tid] = indices[partner];
+        indices[partner] = temp;
+    }
+}
+
+// GPU sort for NMS: uses bitonic sort for small arrays, hipcub radix sort for larger.
+// Does NOT use thrust::sort_by_key or rocprim::radix_sort_single_helper
+// (which trigger ICE on gfx1150).
+static void nms_gpu_argsort_descending(const float* d_scores, int64_t* d_indices,
+                                        int64_t num_boxes) {
+    if (num_boxes <= 1) return;
+
+    if (num_boxes <= 1024) {
+        // Bitonic sort: O(n * log^2(n)) comparisons, all on GPU
+        int64_t padded_n = 1;
+        while (padded_n < num_boxes) padded_n *= 2;
+
+        // Allocate padded buffer (bitonic sort needs power-of-2 size)
+        HipDevicePtr d_padded_guard;
+        NMS_HIP_CHECK(hipMalloc(&d_padded_guard.ptr, padded_n * sizeof(int64_t)));
+        auto* d_padded = static_cast<int64_t*>(d_padded_guard.ptr);
+
+        int iota_blocks = (padded_n + 255) / 256;
+        hipLaunchKernelGGL(nms_iota_kernel, dim3(iota_blocks), dim3(256), 0, 0,
+                           d_padded, num_boxes, padded_n);
+
+        for (int64_t size = 2; size <= padded_n; size *= 2) {
+            for (int64_t stride = size / 2; stride > 0; stride /= 2) {
+                hipLaunchKernelGGL(nms_bitonic_sort_kernel,
+                    dim3(1), dim3(padded_n), 0, 0,
+                    d_scores, d_padded, num_boxes, padded_n, size, stride);
+            }
+        }
+
+        // Copy first num_boxes sorted indices to output
+        NMS_HIP_CHECK(hipMemcpy(d_indices, d_padded,
+                                 num_boxes * sizeof(int64_t), hipMemcpyDeviceToDevice));
+    } else {
+        // Initialize indices with iota for hipcub path
+        int iota_blocks = (num_boxes + 255) / 256;
+        hipLaunchKernelGGL(nms_iota_kernel, dim3(iota_blocks), dim3(256), 0, 0,
+                           d_indices, num_boxes, num_boxes);
+        // hipcub radix sort (different code path from thrust/rocprim ICE trigger).
+        // Sort scores descending, carrying indices as values.
+        // hipcub::DeviceRadixSort::SortPairsDescending sorts keys descending.
+        // We need to sort scores (keys) and carry indices (values).
+        HipDevicePtr d_scores_copy_guard, d_scores_out_guard, d_indices_out_guard, d_temp_guard;
+
+        // Copy scores to a mutable buffer (SortPairsDescending needs mutable input)
+        NMS_HIP_CHECK(hipMalloc(&d_scores_copy_guard.ptr, num_boxes * sizeof(float)));
+        NMS_HIP_CHECK(hipMemcpy(d_scores_copy_guard.ptr, d_scores,
+                                 num_boxes * sizeof(float), hipMemcpyDeviceToDevice));
+        auto* d_scores_in = static_cast<float*>(d_scores_copy_guard.ptr);
+
+        NMS_HIP_CHECK(hipMalloc(&d_scores_out_guard.ptr, num_boxes * sizeof(float)));
+        auto* d_scores_out = static_cast<float*>(d_scores_out_guard.ptr);
+
+        NMS_HIP_CHECK(hipMalloc(&d_indices_out_guard.ptr, num_boxes * sizeof(int64_t)));
+        auto* d_indices_out = static_cast<int64_t*>(d_indices_out_guard.ptr);
+
+        // Query temp storage size
+        size_t temp_bytes = 0;
+        hipcub::DeviceRadixSort::SortPairsDescending(
+            nullptr, temp_bytes, d_scores_in, d_scores_out,
+            d_indices, d_indices_out, num_boxes);
+
+        NMS_HIP_CHECK(hipMalloc(&d_temp_guard.ptr, temp_bytes));
+
+        // Execute sort
+        hipcub::DeviceRadixSort::SortPairsDescending(
+            d_temp_guard.ptr, temp_bytes, d_scores_in, d_scores_out,
+            d_indices, d_indices_out, num_boxes);
+
+        NMS_HIP_CHECK(hipDeviceSynchronize());
+
+        // Copy sorted indices back to d_indices
+        NMS_HIP_CHECK(hipMemcpy(d_indices, d_indices_out,
+                                 num_boxes * sizeof(int64_t), hipMemcpyDeviceToDevice));
+    }
+
+    NMS_HIP_CHECK(hipDeviceSynchronize());
+}
+
 // Host function to perform NMS on GPU
 extern "C" void nms_hip(const float* boxes, const float* scores,
                          int64_t num_boxes, float iou_threshold,
@@ -124,25 +245,16 @@ extern "C" void nms_hip(const float* boxes, const float* scores,
         return;
     }
 
-    // Sort indices by score on host (avoids HIP compiler ICE in rocprim
-    // radix_sort_single_helper triggered by thrust::sort_by_key on gfx1150).
-    // NMS box counts are typically small, so host sort is fast.
-    std::vector<float> h_scores(num_boxes);
-    NMS_HIP_CHECK(hipMemcpy(h_scores.data(), scores, num_boxes * sizeof(float),
-                             hipMemcpyDeviceToHost));
-
-    std::vector<int64_t> h_sorted(num_boxes);
-    std::iota(h_sorted.begin(), h_sorted.end(), int64_t(0));
-    std::sort(h_sorted.begin(), h_sorted.end(), [&](int64_t a, int64_t b) {
-        return h_scores[a] > h_scores[b];
-    });
-
-    // Upload sorted indices to device
+    // GPU-based argsort: sort indices by score descending (no host transfers for sorting)
     HipDevicePtr d_sorted_guard;
     NMS_HIP_CHECK(hipMalloc(&d_sorted_guard.ptr, num_boxes * sizeof(int64_t)));
     auto* d_sorted_indices = static_cast<int64_t*>(d_sorted_guard.ptr);
-    NMS_HIP_CHECK(hipMemcpy(d_sorted_indices, h_sorted.data(),
-                             num_boxes * sizeof(int64_t), hipMemcpyHostToDevice));
+    nms_gpu_argsort_descending(scores, d_sorted_indices, num_boxes);
+
+    // Copy sorted indices to host for suppression processing
+    std::vector<int64_t> h_sorted(num_boxes);
+    NMS_HIP_CHECK(hipMemcpy(h_sorted.data(), d_sorted_indices,
+                             num_boxes * sizeof(int64_t), hipMemcpyDeviceToHost));
 
     // Allocate suppression mask with RAII guard
     const int64_t num_chunks = (num_boxes + 63) / 64;

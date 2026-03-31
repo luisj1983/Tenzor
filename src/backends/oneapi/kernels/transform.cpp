@@ -1303,6 +1303,11 @@ auto take_kernel(const Tensor& input, const Tensor& indices, sycl::queue& queue)
 // Unfold kernel - extract sliding local blocks (im2col-like for 1D)
 // ============================================================================
 
+class UnfoldIm2colFloat32;
+class UnfoldIm2colFloat64;
+class FoldCol2imFloat32;
+class FoldCol2imFloat64;
+
 auto unfold_kernel(const Tensor& input, int64_t kernel_size, int64_t stride,
                     int64_t padding, int64_t dilation, sycl::queue& queue) -> Tensor {
     // 2D unfold: input [N, C, H, W] -> output [N, C*kH*kW, L]
@@ -1319,55 +1324,61 @@ auto unfold_kernel(const Tensor& input, int64_t kernel_size, int64_t stride,
 
     Tensor output({N, channels_col, L}, input.dtype(), input.device());
 
-    // Use existing im2col if available; otherwise simple host fallback
     Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
-    size_t elem_size = input.dtype_size();
 
-    // Host-based implementation for correctness
-    std::vector<uint8_t> in_host(in_cont.numel() * elem_size);
-    std::vector<uint8_t> out_host(output.numel() * elem_size, 0);
-    queue.memcpy(in_host.data(), in_cont.data_ptr(), in_host.size()).wait();
+    // GPU im2col: each work-item computes one output element per batch
+    int64_t col_size_per_batch = channels_col * L;
 
-    auto get_val = [&](int64_t n, int64_t c, int64_t h, int64_t w) -> float {
-        if (h < 0 || h >= H || w < 0 || w >= W) return 0.0f;
-        size_t idx = ((n * C + c) * H + h) * W + w;
-        if (input.dtype() == DType::Float32) {
-            float v; std::memcpy(&v, in_host.data() + idx * sizeof(float), sizeof(float)); return v;
-        } else if (input.dtype() == DType::Float64) {
-            double v; std::memcpy(&v, in_host.data() + idx * sizeof(double), sizeof(double)); return static_cast<float>(v);
+    if (input.dtype() == DType::Float32) {
+        const float* in_ptr = in_cont.data<float>();
+        float* out_ptr = output.data<float>();
+        for (int64_t n = 0; n < N; ++n) {
+            const float* batch_in = in_ptr + n * C * H * W;
+            float* batch_out = out_ptr + n * col_size_per_batch;
+            queue.parallel_for<UnfoldIm2colFloat32>(sycl::range<1>(col_size_per_batch),
+                [=](sycl::id<1> index) {
+                    int64_t w_o = index % W_out;
+                    int64_t idx = index / W_out;
+                    int64_t h_o = idx % H_out;
+                    idx /= H_out;
+                    int64_t kw = idx % kernel_size;
+                    idx /= kernel_size;
+                    int64_t kh = idx % kernel_size;
+                    int64_t c = idx / kernel_size;
+                    int64_t h_in = h_o * stride - padding + kh * dilation;
+                    int64_t w_in = w_o * stride - padding + kw * dilation;
+                    batch_out[index] = (h_in >= 0 && w_in >= 0 && h_in < H && w_in < W) ?
+                        batch_in[(c * H + h_in) * W + w_in] : 0.0f;
+                });
         }
-        return 0.0f;
-    };
-
-    auto set_val = [&](int64_t idx, float v) {
-        if (input.dtype() == DType::Float32) {
-            std::memcpy(out_host.data() + idx * sizeof(float), &v, sizeof(float));
-        } else if (input.dtype() == DType::Float64) {
-            double dv = static_cast<double>(v);
-            std::memcpy(out_host.data() + idx * sizeof(double), &dv, sizeof(double));
+        queue.wait();
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_ptr = in_cont.data<double>();
+        double* out_ptr = output.data<double>();
+        for (int64_t n = 0; n < N; ++n) {
+            const double* batch_in = in_ptr + n * C * H * W;
+            double* batch_out = out_ptr + n * col_size_per_batch;
+            queue.parallel_for<UnfoldIm2colFloat64>(sycl::range<1>(col_size_per_batch),
+                [=](sycl::id<1> index) {
+                    int64_t w_o = index % W_out;
+                    int64_t idx = index / W_out;
+                    int64_t h_o = idx % H_out;
+                    idx /= H_out;
+                    int64_t kw = idx % kernel_size;
+                    idx /= kernel_size;
+                    int64_t kh = idx % kernel_size;
+                    int64_t c = idx / kernel_size;
+                    int64_t h_in = h_o * stride - padding + kh * dilation;
+                    int64_t w_in = w_o * stride - padding + kw * dilation;
+                    batch_out[index] = (h_in >= 0 && w_in >= 0 && h_in < H && w_in < W) ?
+                        batch_in[(c * H + h_in) * W + w_in] : 0.0;
+                });
         }
-    };
-
-    for (int64_t n = 0; n < N; ++n) {
-        for (int64_t c = 0; c < C; ++c) {
-            for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                    int64_t col_idx = (c * kernel_size + kh) * kernel_size + kw;
-                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                            int64_t h_in = h_out * stride - padding + kh * dilation;
-                            int64_t w_in = w_out * stride - padding + kw * dilation;
-                            int64_t l = h_out * W_out + w_out;
-                            int64_t out_idx = (n * channels_col + col_idx) * L + l;
-                            set_val(out_idx, get_val(n, c, h_in, w_in));
-                        }
-                    }
-                }
-            }
-        }
+        queue.wait();
+    } else {
+        throw std::runtime_error("unfold_kernel: unsupported dtype (expected Float32 or Float64)");
     }
 
-    queue.memcpy(const_cast<void*>(output.data_ptr()), out_host.data(), out_host.size()).wait();
     return output;
 }
 
@@ -1392,60 +1403,80 @@ auto fold_kernel(const Tensor& input, const std::vector<int64_t>& output_size,
 
     Tensor output({N, C, H_out, W_out}, input.dtype(), input.device());
 
-    size_t elem_size = input.dtype_size();
-    std::vector<uint8_t> in_host(input.numel() * elem_size);
-    std::vector<uint8_t> out_host(output.numel() * elem_size, 0);
-
     Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
-    queue.memcpy(in_host.data(), in_cont.data_ptr(), in_host.size()).wait();
 
     int64_t H_col = (H_out + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
     int64_t W_col = (W_out + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+    int64_t col_size_per_batch = channels_col * L;
+    int64_t im_size_per_batch = C * H_out * W_out;
 
-    auto add_val = [&](int64_t idx, float v) {
-        if (input.dtype() == DType::Float32) {
-            float cur; std::memcpy(&cur, out_host.data() + idx * sizeof(float), sizeof(float));
-            cur += v;
-            std::memcpy(out_host.data() + idx * sizeof(float), &cur, sizeof(float));
-        } else if (input.dtype() == DType::Float64) {
-            double cur; std::memcpy(&cur, out_host.data() + idx * sizeof(double), sizeof(double));
-            cur += static_cast<double>(v);
-            std::memcpy(out_host.data() + idx * sizeof(double), &cur, sizeof(double));
-        }
-    };
+    // GPU col2im: each work-item handles one column entry, atomically accumulates into output
+    int64_t col2im_work_size = C * kernel_size * kernel_size * H_col * W_col;
 
-    auto get_col_val = [&](int64_t idx) -> float {
-        if (input.dtype() == DType::Float32) {
-            float v; std::memcpy(&v, in_host.data() + idx * sizeof(float), sizeof(float)); return v;
-        } else if (input.dtype() == DType::Float64) {
-            double v; std::memcpy(&v, in_host.data() + idx * sizeof(double), sizeof(double)); return static_cast<float>(v);
-        }
-        return 0.0f;
-    };
-
-    for (int64_t n = 0; n < N; ++n) {
-        for (int64_t c = 0; c < C; ++c) {
-            for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                    int64_t col_idx = (c * kernel_size + kh) * kernel_size + kw;
-                    for (int64_t h_col = 0; h_col < H_col; ++h_col) {
-                        for (int64_t w_col = 0; w_col < W_col; ++w_col) {
-                            int64_t h = h_col * stride - padding + kh * dilation;
-                            int64_t w = w_col * stride - padding + kw * dilation;
-                            if (h >= 0 && h < H_out && w >= 0 && w < W_out) {
-                                int64_t l = h_col * W_col + w_col;
-                                int64_t in_idx = (n * channels_col + col_idx) * L + l;
-                                int64_t out_idx = ((n * C + c) * H_out + h) * W_out + w;
-                                add_val(out_idx, get_col_val(in_idx));
-                            }
-                        }
+    if (input.dtype() == DType::Float32) {
+        const float* in_ptr = in_cont.data<float>();
+        float* out_ptr = output.data<float>();
+        for (int64_t n = 0; n < N; ++n) {
+            const float* batch_col = in_ptr + n * col_size_per_batch;
+            float* batch_im = out_ptr + n * im_size_per_batch;
+            queue.fill(batch_im, 0.0f, im_size_per_batch);
+            queue.parallel_for<FoldCol2imFloat32>(sycl::range<1>(col2im_work_size),
+                [=](sycl::id<1> index) {
+                    int64_t w_c = index % W_col;
+                    int64_t idx = index / W_col;
+                    int64_t h_c = idx % H_col;
+                    idx /= H_col;
+                    int64_t kw = idx % kernel_size;
+                    idx /= kernel_size;
+                    int64_t kh = idx % kernel_size;
+                    int64_t c = idx / kernel_size;
+                    int64_t h = h_c * stride - padding + kh * dilation;
+                    int64_t w = w_c * stride - padding + kw * dilation;
+                    if (h >= 0 && w >= 0 && h < H_out && w < W_out) {
+                        int64_t col_idx = ((c * kernel_size + kh) * kernel_size + kw);
+                        int64_t l = h_c * W_col + w_c;
+                        int64_t im_idx = (c * H_out + h) * W_out + w;
+                        sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                            atomic_val(batch_im[im_idx]);
+                        atomic_val.fetch_add(batch_col[col_idx * L + l]);
                     }
-                }
-            }
+                });
         }
+        queue.wait();
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_ptr = in_cont.data<double>();
+        double* out_ptr = output.data<double>();
+        for (int64_t n = 0; n < N; ++n) {
+            const double* batch_col = in_ptr + n * col_size_per_batch;
+            double* batch_im = out_ptr + n * im_size_per_batch;
+            queue.fill(batch_im, 0.0, im_size_per_batch);
+            queue.parallel_for<FoldCol2imFloat64>(sycl::range<1>(col2im_work_size),
+                [=](sycl::id<1> index) {
+                    int64_t w_c = index % W_col;
+                    int64_t idx = index / W_col;
+                    int64_t h_c = idx % H_col;
+                    idx /= H_col;
+                    int64_t kw = idx % kernel_size;
+                    idx /= kernel_size;
+                    int64_t kh = idx % kernel_size;
+                    int64_t c = idx / kernel_size;
+                    int64_t h = h_c * stride - padding + kh * dilation;
+                    int64_t w = w_c * stride - padding + kw * dilation;
+                    if (h >= 0 && w >= 0 && h < H_out && w < W_out) {
+                        int64_t col_idx = ((c * kernel_size + kh) * kernel_size + kw);
+                        int64_t l = h_c * W_col + w_c;
+                        int64_t im_idx = (c * H_out + h) * W_out + w;
+                        sycl::atomic_ref<double, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                            atomic_val(batch_im[im_idx]);
+                        atomic_val.fetch_add(batch_col[col_idx * L + l]);
+                    }
+                });
+        }
+        queue.wait();
+    } else {
+        throw std::runtime_error("fold_kernel: unsupported dtype (expected Float32 or Float64)");
     }
 
-    queue.memcpy(const_cast<void*>(output.data_ptr()), out_host.data(), out_host.size()).wait();
     return output;
 }
 

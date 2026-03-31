@@ -483,10 +483,19 @@ auto DivBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
         saved_b = Variable(saved_tensors_[1], false);
     }
 
+    // Zero-safe: replace zero denominator with epsilon (same guard as backward())
+    auto b_tensor = saved_b.tensor();
+    auto b_shape = std::vector<int64_t>(b_tensor.shape().begin(), b_tensor.shape().end());
+    auto zero_b = zeros(b_shape, b_tensor.dtype(), b_tensor.device());
+    auto eps_b = full(b_shape, detail::dtype_epsilon(b_tensor.dtype()),
+                      b_tensor.dtype(), b_tensor.device());
+    auto safe_b_tensor = where(eq(b_tensor, zero_b), eps_b, b_tensor);
+    Variable safe_b(safe_b_tensor, false);
+
     // Use Variable operations for higher-order gradient tracking
-    auto grad_a_unreduced = grad_outputs[0] / saved_b;
+    auto grad_a_unreduced = grad_outputs[0] / safe_b;
     // grad_b = -(a * grad_output) / (b * b)
-    auto grad_b_unreduced = tenzor::neg((saved_a * grad_outputs[0]) / (saved_b * saved_b));
+    auto grad_b_unreduced = tenzor::neg((saved_a * grad_outputs[0]) / (safe_b * safe_b));
 
     auto grad_a = reduce_grad_var_for_broadcasting(grad_a_unreduced, input_shape_a_);
     auto grad_b = reduce_grad_var_for_broadcasting(grad_b_unreduced, input_shape_b_);
@@ -580,7 +589,7 @@ auto LinearBackward::forward(std::vector<Variable> inputs) -> std::vector<Variab
 }
 
 auto LinearBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    require_saved_tensors(2);
+    require_saved_tensors(3);
     // For y = x @ W.T + b:
     // dL/dx = dL/dy @ W          -> (batch, out) @ (out, in) = (batch, in)
     // dL/dW = dL/dy.T @ x        -> (out, batch) @ (batch, in) = (out, in)
@@ -1013,9 +1022,9 @@ auto AbsBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     const auto& grad = grad_outputs[0];
     const auto& input = saved_tensors_[0];
 
-    float eps = 1e-7f; // default for Float32
-    if (input.dtype() == DType::Float64) eps = 1e-15f;
-    else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) eps = 1e-3f;
+    double eps = 1e-7; // default for Float32
+    if (input.dtype() == DType::Float64) eps = 1e-15;
+    else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) eps = 1e-3;
 
     auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     auto abs_input = tenzor::abs(input);
@@ -1032,9 +1041,9 @@ auto AbsBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     // sign is non-differentiable, so compute it at Tensor level.
     const auto& input = saved_tensors_[0];
 
-    float eps = 1e-7f;
-    if (input.dtype() == DType::Float64) eps = 1e-15f;
-    else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) eps = 1e-3f;
+    double eps = 1e-7;
+    if (input.dtype() == DType::Float64) eps = 1e-15;
+    else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) eps = 1e-3;
 
     auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     auto abs_input = tenzor::abs(input);
@@ -1654,7 +1663,9 @@ auto SqueezeBackward::backward_with_variables(std::vector<Variable> grad_outputs
     // This preserves the computation graph for higher-order gradients
     auto grad = grad_outputs[0];
     auto target_shape = std::vector<int64_t>(grad.shape().begin(), grad.shape().end());
-    target_shape.insert(target_shape.begin() + dim_, 1);
+    int64_t ndim_output = static_cast<int64_t>(target_shape.size()) + 1;
+    int64_t dim = dim_ < 0 ? dim_ + ndim_output : dim_;
+    target_shape.insert(target_shape.begin() + dim, 1);
     return {reshape(grad, target_shape)};
 }
 
