@@ -856,83 +856,95 @@ auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, De
     const int64_t numel = output.numel();
 
     if (dtype == DType::Float32) {
-        std::vector<float> host_data(numel, value);
+        float val = value;
         float* device_ptr = get_data_ptr<float>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(float)).wait();
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            device_ptr[i] = val;
+        }).wait();
     }
     else if (dtype == DType::Float64) {
-        const double value_d = static_cast<double>(value);
-        std::vector<double> host_data(numel, value_d);
+        double val = static_cast<double>(value);
         double* device_ptr = get_data_ptr<double>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(double)).wait();
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            device_ptr[i] = val;
+        }).wait();
     }
     else if (dtype == DType::Float16) {
         const sycl::half value_h(value);
         sycl::half* device_ptr = get_data_ptr<sycl::half>(output);
         queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
             device_ptr[i] = value_h;
-        });
+        }).wait();
     }
     else if (dtype == DType::BFloat16) {
         const uint16_t value_bf16 = f32_to_bf16(value);
         uint16_t* device_ptr = get_data_ptr<uint16_t>(output);
         queue.parallel_for<FullKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> i) {
             device_ptr[i] = value_bf16;
-        });
+        }).wait();
     }
     else if (dtype == DType::Int32) {
-        const int32_t value_i = static_cast<int32_t>(value);
-        std::vector<int32_t> host_data(numel, value_i);
+        int32_t val = static_cast<int32_t>(value);
         int32_t* device_ptr = get_data_ptr<int32_t>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(int32_t)).wait();
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            device_ptr[i] = val;
+        }).wait();
     }
     else if (dtype == DType::Int64) {
-        const int64_t value_i = static_cast<int64_t>(value);
-        std::vector<int64_t> host_data(numel, value_i);
+        int64_t val = static_cast<int64_t>(value);
         int64_t* device_ptr = get_data_ptr<int64_t>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(int64_t)).wait();
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            device_ptr[i] = val;
+        }).wait();
     }
     else if (dtype == DType::Int8) {
-        const int8_t value_i = static_cast<int8_t>(value);
-        std::vector<int8_t> host_data(numel, value_i);
+        int8_t val = static_cast<int8_t>(value);
         int8_t* device_ptr = get_data_ptr<int8_t>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(int8_t)).wait();
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            device_ptr[i] = val;
+        }).wait();
     }
     else if (dtype == DType::Int16) {
-        const int16_t value_i = static_cast<int16_t>(value);
-        std::vector<int16_t> host_data(numel, value_i);
+        int16_t val = static_cast<int16_t>(value);
         int16_t* device_ptr = get_data_ptr<int16_t>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(int16_t)).wait();
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            device_ptr[i] = val;
+        }).wait();
     }
     else if (dtype == DType::UInt8) {
-        const uint8_t value_i = static_cast<uint8_t>(value);
-        std::vector<uint8_t> host_data(numel, value_i);
+        uint8_t val = static_cast<uint8_t>(value);
         uint8_t* device_ptr = get_data_ptr<uint8_t>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint8_t)).wait();
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            device_ptr[i] = val;
+        }).wait();
     }
     else if (dtype == DType::UInt16) {
-        const uint16_t value_i = static_cast<uint16_t>(value);
-        std::vector<uint16_t> host_data(numel, value_i);
+        uint16_t val = static_cast<uint16_t>(value);
         uint16_t* device_ptr = get_data_ptr<uint16_t>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint16_t)).wait();
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            device_ptr[i] = val;
+        }).wait();
     }
     else if (dtype == DType::UInt32) {
-        const uint32_t value_i = static_cast<uint32_t>(value);
-        std::vector<uint32_t> host_data(numel, value_i);
+        uint32_t val = static_cast<uint32_t>(value);
         uint32_t* device_ptr = get_data_ptr<uint32_t>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint32_t)).wait();
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            device_ptr[i] = val;
+        }).wait();
     }
     else if (dtype == DType::UInt64) {
-        const uint64_t value_i = static_cast<uint64_t>(value);
-        std::vector<uint64_t> host_data(numel, value_i);
+        uint64_t val = static_cast<uint64_t>(value);
         uint64_t* device_ptr = get_data_ptr<uint64_t>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint64_t)).wait();
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            device_ptr[i] = val;
+        }).wait();
     }
     else if (dtype == DType::Bool) {
-        const uint8_t value_b = (value != 0.0f) ? 1 : 0;
-        std::vector<uint8_t> host_data(numel, value_b);
-        bool* device_ptr = get_data_ptr<bool>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(bool)).wait();
+        uint8_t val = (value != 0.0f) ? 1 : 0;
+        uint8_t* device_ptr = get_data_ptr<uint8_t>(output);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            device_ptr[i] = val;
+        }).wait();
     }
     else {
         throw std::runtime_error("Unsupported dtype for full");

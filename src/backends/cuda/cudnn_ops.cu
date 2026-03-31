@@ -3122,7 +3122,7 @@ __device__ __forceinline__ float blockReduceSum(float val, float* shared) {
 
     // Final reduction across warps (only first warp participates)
     constexpr int numWarps = BLOCK_SIZE / 32;
-    val = (threadIdx.x < numWarps) ? shared[lane] : 0.0f;
+    val = (threadIdx.x < numWarps) ? shared[threadIdx.x] : 0.0f;
     if (wid == 0) {
         val = warpReduceSum(val);
     }
@@ -3485,7 +3485,7 @@ __device__ __forceinline__ double blockReduceSumDouble(double val, double* share
     __syncthreads();
 
     constexpr int numWarps = BLOCK_SIZE / 32;
-    val = (threadIdx.x < numWarps) ? shared[lane] : 0.0;
+    val = (threadIdx.x < numWarps) ? shared[threadIdx.x] : 0.0;
     if (wid == 0) {
         val = warpReduceSumDouble(val);
     }

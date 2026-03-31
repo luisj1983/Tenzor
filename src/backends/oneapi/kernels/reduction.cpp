@@ -173,6 +173,13 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
             } else if (in_cont.dtype() == DType::Int32) {
                 int32_t* out_ptr = get_data_ptr<int32_t>(output);
                 queue.single_task([=]() { out_ptr[0] = 0; });
+            } else if (in_cont.dtype() == DType::Int64) {
+                int64_t* out_ptr = get_data_ptr<int64_t>(output);
+                queue.single_task([=]() { out_ptr[0] = 0; });
+            } else if (in_cont.dtype() == DType::Bool) {
+                output = Tensor({}, DType::Int64, output.device());
+                int64_t* out_ptr = get_data_ptr<int64_t>(output);
+                queue.single_task([=]() { out_ptr[0] = 0; });
             }
             return output;
         }
@@ -280,7 +287,7 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                         partial_buf[item.get_group(0)] = sum;
                     }
                 }
-            );
+            ).wait();
 
             // Second pass: reduce partial sums
             auto event2 = queue.parallel_for(
@@ -297,9 +304,9 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
         }
         else if (in_cont.dtype() == DType::Bool) {
             const uint8_t* in_ptr = get_data_ptr<const uint8_t>(in_cont);
-            // Sum of bools returns Int64
-            Tensor bool_output({}, DType::Int64, output.device());
-            int64_t* out_ptr = get_data_ptr<int64_t>(bool_output);
+            // Sum of bools returns Int64 — reassign output with correct dtype
+            output = Tensor({}, DType::Int64, output.device());
+            int64_t* out_ptr = get_data_ptr<int64_t>(output);
 
             auto sum_buf = sycl::malloc_shared<int32_t>(1, queue);
             sum_buf[0] = 0;
@@ -313,7 +320,7 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
             int64_t sum = static_cast<int64_t>(sum_buf[0]);
             queue.memcpy(out_ptr, &sum, sizeof(int64_t)).wait();
             sycl::free(sum_buf, queue);
-            return bool_output;
+            return output;
         }
         else {
             throw std::runtime_error("Unsupported dtype for sum reduction");
@@ -1783,7 +1790,7 @@ auto unique_kernel(const Tensor& input, bool sorted, bool return_inverse, bool r
                             hi = mid;
                         }
                     }
-                    inv_ptr[gid] = lo;
+                    inv_ptr[gid] = (lo < n_unique) ? lo : (n_unique - 1);
                 }).wait();
             }
 
@@ -1810,7 +1817,7 @@ auto unique_kernel(const Tensor& input, bool sorted, bool return_inverse, bool r
                             if (unique_ptr[mid] < val) lo = mid + 1;
                             else hi = mid;
                         }
-                        tmp_inv[gid] = lo;
+                        tmp_inv[gid] = (lo < n_unique) ? lo : (n_unique - 1);
                     }).wait();
                     inv_ptr = tmp_inv;
                 }
@@ -1856,30 +1863,134 @@ auto unique_kernel(const Tensor& input, bool sorted, bool return_inverse, bool r
     // Fall through to host-side unique for unsorted or unsupported dtypes
 #endif
 
-    // TODO: implement device-side unique (sort + adjacent-difference scan + compaction)
-    //       when oneDPL is available to avoid this host roundtrip
-    // Host-side unique fallback
-    auto host_unique_impl = [&](auto dummy) {
+    // Device-side unique for sorted=true without oneDPL:
+    // Sort on device -> mark boundaries -> prefix sum -> compact + inverse + counts
+    if (sorted && numel > 0) {
+        auto device_sorted_unique_impl = [&](const auto* in_ptr) {
+            using T = std::remove_const_t<std::remove_pointer_t<decltype(in_ptr)>>;
+
+            // Step 1: Sort input on device using existing sort_kernel (dim=0, ascending)
+            Tensor flat_input = input.reshape({numel});
+            auto [sorted_vals, sorted_indices] = sort_kernel(flat_input, /*dim=*/0, /*descending=*/false, queue);
+            const T* d_sorted = get_data_ptr<const T>(sorted_vals);
+
+            // Step 2: Mark boundaries — flags[i] = 1 if sorted[i] != sorted[i-1], flags[0] = 1
+            int32_t* d_flags = sycl::malloc_device<int32_t>(numel, queue);
+            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> gid) {
+                int64_t i = gid[0];
+                d_flags[i] = (i == 0 || d_sorted[i] != d_sorted[i - 1]) ? 1 : 0;
+            }).wait();
+
+            // Step 3: Inclusive prefix sum on flags to get group IDs (1-based)
+            // Use sequential single_task scan — flags array is size numel, but this
+            // avoids any host roundtrip. For very large inputs, the oneDPL path above
+            // should be preferred.
+            int32_t* d_group_ids = sycl::malloc_device<int32_t>(numel, queue);
+            queue.single_task([=]() {
+                int32_t running = 0;
+                for (int64_t i = 0; i < numel; ++i) {
+                    running += d_flags[i];
+                    d_group_ids[i] = running;
+                }
+            }).wait();
+
+            // Step 4: Read n_unique from last element (single scalar D2H)
+            int32_t n_unique_i32 = 0;
+            queue.memcpy(&n_unique_i32, d_group_ids + numel - 1, sizeof(int32_t)).wait();
+            int64_t n_unique = static_cast<int64_t>(n_unique_i32);
+
+            // Step 5: Compact unique values — scatter first element of each group
+            Tensor out_vals({n_unique}, input.dtype(), input.device());
+            T* d_unique = get_data_ptr<T>(out_vals);
+            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> gid) {
+                int64_t i = gid[0];
+                if (d_flags[i]) {
+                    // group_ids are 1-based, so output index is group_ids[i] - 1
+                    d_unique[d_group_ids[i] - 1] = d_sorted[i];
+                }
+            }).wait();
+
+            // Step 6: Build inverse indices — for each original element, binary search
+            // in the unique values to find its group index
+            Tensor out_inverse({numel}, DType::Int64, input.device());
+            if (return_inverse) {
+                int64_t* inv_ptr = get_data_ptr<int64_t>(out_inverse);
+                const T* unique_ptr = get_data_ptr<const T>(out_vals);
+                queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> gid) {
+                    T val = in_ptr[gid];
+                    int64_t lo = 0, hi = n_unique;
+                    while (lo < hi) {
+                        int64_t mid = lo + (hi - lo) / 2;
+                        if (unique_ptr[mid] < val) {
+                            lo = mid + 1;
+                        } else {
+                            hi = mid;
+                        }
+                    }
+                    inv_ptr[gid] = (lo < n_unique) ? lo : (n_unique - 1);
+                }).wait();
+            }
+
+            // Step 7: Count per-group using atomics (same pattern as oneDPL path)
+            Tensor out_counts({return_counts ? n_unique : 0}, DType::Int64, input.device());
+            if (return_counts && n_unique > 0) {
+                int64_t* cnt_ptr = get_data_ptr<int64_t>(out_counts);
+
+                // Use int32 atomics (widely supported), then widen
+                int32_t* d_counts32 = sycl::malloc_device<int32_t>(n_unique, queue);
+                queue.memset(d_counts32, 0, n_unique * sizeof(int32_t)).wait();
+
+                // We can count directly from group_ids (0-based = group_ids[i] - 1)
+                queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> gid) {
+                    int32_t group = d_group_ids[gid] - 1;
+                    sycl::atomic_ref<int32_t, sycl::memory_order::relaxed,
+                                     sycl::memory_scope::device,
+                                     sycl::access::address_space::global_space> aref(d_counts32[group]);
+                    aref.fetch_add(1);
+                }).wait();
+
+                // Widen int32 counts to int64
+                queue.parallel_for(sycl::range<1>(n_unique), [=](sycl::id<1> i) {
+                    cnt_ptr[i] = static_cast<int64_t>(d_counts32[i]);
+                }).wait();
+
+                sycl::free(d_counts32, queue);
+            }
+
+            sycl::free(d_flags, queue);
+            sycl::free(d_group_ids, queue);
+            return std::make_tuple(out_vals, out_inverse, out_counts);
+        };
+
+        if (input.dtype() == DType::Float32) {
+            return device_sorted_unique_impl(get_data_ptr<const float>(input));
+        } else if (input.dtype() == DType::Int64) {
+            return device_sorted_unique_impl(get_data_ptr<const int64_t>(input));
+        } else if (input.dtype() == DType::Float64) {
+            return device_sorted_unique_impl(get_data_ptr<const double>(input));
+        } else if (input.dtype() == DType::Int32) {
+            return device_sorted_unique_impl(get_data_ptr<const int32_t>(input));
+        } else {
+            throw std::runtime_error("unique: unsupported dtype (supported: Float32, Float64, Int32, Int64)");
+        }
+    }
+
+    // Host-side fallback for sorted=false without oneDPL — insertion-order unique
+    // has no simple parallel form, so a host roundtrip is acceptable here.
+    auto host_unsorted_unique_impl = [&](auto dummy) {
         using T = decltype(dummy);
         std::vector<T> h_in(numel);
         queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(T)).wait();
 
         std::vector<T> unique_vals;
-        std::vector<int64_t> inverse(numel, 0);
-        std::vector<int64_t> counts;
-
-        if (sorted) {
-            unique_vals = h_in;
-            std::sort(unique_vals.begin(), unique_vals.end());
-            unique_vals.erase(std::unique(unique_vals.begin(), unique_vals.end()), unique_vals.end());
-        } else {
-            std::unordered_set<T> seen;
-            for (auto v : h_in) {
-                if (seen.insert(v).second) {
-                    unique_vals.push_back(v);
-                }
+        std::unordered_set<T> seen;
+        for (auto v : h_in) {
+            if (seen.insert(v).second) {
+                unique_vals.push_back(v);
             }
         }
+
+        int64_t n_unique = unique_vals.size();
 
         // Build value-to-index map for O(1) lookup
         std::unordered_map<T, size_t> val_to_idx;
@@ -1889,20 +2000,21 @@ auto unique_kernel(const Tensor& input, bool sorted, bool return_inverse, bool r
             }
         }
 
+        std::vector<int64_t> inverse(numel, 0);
         if (return_inverse) {
             for (int64_t i = 0; i < numel; ++i) {
                 inverse[i] = static_cast<int64_t>(val_to_idx[h_in[i]]);
             }
         }
 
+        std::vector<int64_t> counts;
         if (return_counts) {
-            counts.resize(unique_vals.size(), 0);
+            counts.resize(n_unique, 0);
             for (int64_t i = 0; i < numel; ++i) {
                 counts[val_to_idx[h_in[i]]]++;
             }
         }
 
-        int64_t n_unique = unique_vals.size();
         Tensor out_vals({n_unique}, input.dtype(), input.device());
         queue.memcpy(const_cast<void*>(out_vals.data_ptr()), unique_vals.data(), n_unique * sizeof(T)).wait();
 
@@ -1918,13 +2030,13 @@ auto unique_kernel(const Tensor& input, bool sorted, bool return_inverse, bool r
     };
 
     if (input.dtype() == DType::Float32) {
-        return host_unique_impl(float{});
+        return host_unsorted_unique_impl(float{});
     } else if (input.dtype() == DType::Int64) {
-        return host_unique_impl(int64_t{});
+        return host_unsorted_unique_impl(int64_t{});
     } else if (input.dtype() == DType::Float64) {
-        return host_unique_impl(double{});
+        return host_unsorted_unique_impl(double{});
     } else if (input.dtype() == DType::Int32) {
-        return host_unique_impl(int32_t{});
+        return host_unsorted_unique_impl(int32_t{});
     } else {
         throw std::runtime_error("unique: unsupported dtype (supported: Float32, Float64, Int32, Int64)");
     }

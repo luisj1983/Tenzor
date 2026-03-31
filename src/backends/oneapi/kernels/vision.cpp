@@ -170,7 +170,8 @@ auto nms_kernel(
         sycl::free(d_order, queue);
     }
 #else
-    // Host fallback: sort indices by score descending
+    // Host fallback: sort indices by score descending.
+    // Acceptable for typical NMS workloads (< 10K boxes); scores are already on host.
     std::iota(order.begin(), order.end(), 0);
     std::sort(order.begin(), order.end(), [&](int64_t a, int64_t b) {
         return host_scores[a] > host_scores[b];

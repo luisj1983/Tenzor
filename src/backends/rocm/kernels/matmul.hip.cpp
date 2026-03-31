@@ -247,7 +247,10 @@ __global__ void matmul_tiled_i32_kernel(
     }
 
     if (row < M && col < N) {
-        C[row * N + col] = static_cast<int32_t>(sum);
+        int32_t result = (sum > static_cast<int64_t>(INT32_MAX)) ? INT32_MAX
+                       : (sum < static_cast<int64_t>(INT32_MIN)) ? INT32_MIN
+                       : static_cast<int32_t>(sum);
+        C[row * N + col] = result;
     }
 }
 

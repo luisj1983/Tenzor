@@ -150,7 +150,7 @@ __global__ void check_i64_overflow(const int64_t* __restrict__ src,
     int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
         if (src[i] > INT32_MAX || src[i] < INT32_MIN) {
-            atomicExch(overflow_flag, 1);
+            atomicOr(overflow_flag, 1);
         }
     }
 }

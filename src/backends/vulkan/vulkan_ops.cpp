@@ -390,9 +390,6 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
 
         endSingleTimeCommands(cmdBuffer, device_id);
 
-        // Synchronize to ensure GPU has completed before using the result
-        synchronize(device_id);
-
         return output;
     }
 }
@@ -11670,20 +11667,17 @@ auto VulkanBackend::dispatchArgSort(const Tensor& input, int64_t dim, bool desce
         // Cast to Int32, sort using i32 shader, indices are dtype-independent
         Tensor int32_input = input.to(DType::Int32);
         return dispatchArgSort(int32_input, dim, descending);
+    } else if (input.dtype() == DType::BFloat16) {
+        // Cast to Float32, argsort (indices are dtype-independent)
+        Tensor f32_input = input.to(DType::Float32);
+        return dispatchArgSort(f32_input, dim, descending);
     } else {
         sort_shader = "";
     }
 
-    // CPU fallback for any remaining unsupported dtypes
     if (sort_shader.empty()) {
-        Device cpu_device(Device::Type::CPU, 0);
-        Tensor cpu_input = input.to(cpu_device);
-        std::vector<Tensor> cpu_inputs = {cpu_input};
-        OpAttributes attrs;
-        attrs.set(AttrKey::Dim, dim);
-        attrs.set(AttrKey::Descending, descending);
-        auto result = tenzor::dispatch(OpId::ArgSort, cpu_inputs, attrs)[0];
-        return result.to(input.device());
+        throw std::runtime_error(std::string("Vulkan: ArgSort not supported for dtype ") +
+                                 std::string(dtype_name(input.dtype())));
     }
 
     // Non-last-dim: transpose so sort dim is last, argsort, transpose back
@@ -13324,20 +13318,17 @@ auto VulkanBackend::dispatchSort(const Tensor& input, int64_t dim, bool descendi
         Tensor int32_input = input.to(DType::Int32);
         auto [sorted_i32, indices] = dispatchSort(int32_input, dim, descending);
         return {sorted_i32.to(orig_dtype), indices};
+    } else if (input.dtype() == DType::BFloat16) {
+        Tensor f32_input = input.to(DType::Float32);
+        auto [sorted_f32, indices] = dispatchSort(f32_input, dim, descending);
+        return {sorted_f32.to(DType::BFloat16), indices};
     } else {
         sort_shader = "";
     }
 
-    // CPU fallback for any remaining unsupported dtypes
     if (sort_shader.empty()) {
-        Device cpu_device(Device::Type::CPU, 0);
-        Tensor cpu_input = input.to(cpu_device);
-        std::vector<Tensor> cpu_inputs = {cpu_input};
-        OpAttributes attrs;
-        attrs.set(AttrKey::Dim, dim);
-        attrs.set(AttrKey::Descending, descending);
-        auto result = tenzor::dispatch(OpId::Sort, cpu_inputs, attrs);
-        return {result[0].to(input.device()), result[1].to(input.device())};
+        throw std::runtime_error(std::string("Vulkan: Sort not supported for dtype ") +
+                                 std::string(dtype_name(input.dtype())));
     }
 
     // For large sorts (>2^24 elements along sort dim), use GPU radix sort
@@ -13453,26 +13444,14 @@ auto VulkanBackend::dispatchSort(const Tensor& input, int64_t dim, bool descendi
         init_indices[i] = (i < n) ? static_cast<int32_t>(i) : static_cast<int32_t>(n);
     }
 
-    // Prepare padded fill pattern on host — avoids dispatchFill which creates
-    // a new tensor each call and triggers deallocate → forced batch submit.
-    std::vector<uint8_t> host_padded(padded_n * elem_size);
-    {
-        uint32_t pad_bits;
-        if (work_dtype == DType::Int32) {
-            int32_t pv = static_cast<int32_t>(pad_value);
-            std::memcpy(&pad_bits, &pv, sizeof(pad_bits));
-        } else {
-            std::memcpy(&pad_bits, &pad_value, sizeof(pad_bits));
-        }
-        for (uint32_t i = 0; i < padded_n; ++i)
-            std::memcpy(host_padded.data() + i * elem_size, &pad_bits, elem_size);
-    }
-
-    // Also copy input to host so we can prepare each slice on the host side
+    // Ensure input is contiguous on the GPU for D2D slice copies.
     Tensor input_contig = input.is_contiguous() ? input : dispatchContiguous(input);
-    synchronize(device_id);
-    std::vector<uint8_t> host_input(input_contig.numel() * elem_size);
-    copy(host_input.data(), input_contig.data_ptr(), host_input.size(), CopyKind::DeviceToHost);
+
+    // Create a GPU-side pad template: fill once, then D2D copy each iteration.
+    // Allocated once outside the loop to avoid repeated alloc/dealloc which
+    // would trigger forced batch submits.
+    Tensor pad_template({static_cast<int64_t>(padded_n)}, work_dtype, input.device());
+    pad_template = dispatchFill(pad_template, pad_value);
 
     // Pre-allocate the int64 cast tensor outside the loop.  Allocating it
     // inside would destroy the old one each iteration, which calls deallocate
@@ -13488,24 +13467,15 @@ auto VulkanBackend::dispatchSort(const Tensor& input, int64_t dim, bool descendi
     for (int64_t slice = 0; slice < num_slices; ++slice) {
         size_t slice_bytes = sort_size * elem_size;
 
-        // Overlay slice data onto the padded buffer on the host, then upload
-        // the whole thing in a single HostToDevice copy.
-        std::memcpy(host_padded.data(), host_input.data() + slice * slice_bytes, slice_bytes);
+        // GPU-side fill: copy the pre-filled pad template into work_values
+        copy(work_values.data_ptr(), pad_template.data_ptr(),
+             padded_n * elem_size, CopyKind::DeviceToDevice);
 
-        copy(work_values.data_ptr(), host_padded.data(),
-             padded_n * elem_size, CopyKind::HostToDevice);
-        // Restore padding for next iteration
-        {
-            uint32_t pad_bits;
-            if (work_dtype == DType::Int32) {
-                int32_t pv = static_cast<int32_t>(pad_value);
-                std::memcpy(&pad_bits, &pv, sizeof(pad_bits));
-            } else {
-                std::memcpy(&pad_bits, &pad_value, sizeof(pad_bits));
-            }
-            for (uint32_t i = 0; i < static_cast<uint32_t>(sort_size); ++i)
-                std::memcpy(host_padded.data() + i * elem_size, &pad_bits, elem_size);
-        }
+        // GPU-side slice copy: overlay this slice's data into work_values
+        const void* slice_src = static_cast<const char*>(input_contig.data_ptr())
+                                + slice * slice_bytes;
+        copy(work_values.data_ptr(), slice_src,
+             slice_bytes, CopyKind::DeviceToDevice);
 
         copy(work_indices.data_ptr(), init_indices.data(),
              padded_n * sizeof(int32_t), CopyKind::HostToDevice);
@@ -13932,18 +13902,8 @@ auto VulkanBackend::dispatchUnique(const Tensor& input, bool sorted,
                            sorted_dtype == DType::Int32 || sorted_dtype == DType::Int64);
 
     if (!has_gpu_shader) {
-        // CPU fallback for any remaining unsupported dtypes
-        Device cpu_device(Device::Type::CPU, 0);
-        Tensor cpu_input = input.to(cpu_device);
-        std::vector<Tensor> cpu_inputs = {cpu_input};
-        OpAttributes attrs;
-        attrs.set(AttrKey::Sorted, sorted);
-        attrs.set(AttrKey::ReturnInverse, return_inverse);
-        attrs.set(AttrKey::ReturnCounts, return_counts);
-        auto result = tenzor::dispatch(OpId::Unique, cpu_inputs, attrs);
-        std::vector<Tensor> gpu_result;
-        for (auto& t : result) gpu_result.push_back(t.to(input.device()));
-        return gpu_result;
+        throw std::runtime_error(std::string("Vulkan: Unique not supported for dtype ") +
+                                 std::string(dtype_name(sorted_dtype)));
     }
 
     // Step 1: Mark boundaries on GPU — boundary[i] = 1 if sorted[i] != sorted[i-1]
@@ -13976,8 +13936,8 @@ auto VulkanBackend::dispatchUnique(const Tensor& input, bool sorted,
 
     // Step 3: Read n_unique from last element of prefix_sum (single int32 scalar readback,
     // not a CPU computation fallback — minimum sync required for variable-size output allocation)
-    Tensor last_elem = prefix_sum.slice(0, numel - 1, numel).to(Device::cpu());
     synchronize(device_id);
+    Tensor last_elem = prefix_sum.slice(0, numel - 1, numel).to(Device::cpu());
     int32_t n_unique_i32 = last_elem.data<int32_t>()[0];
     int64_t n_unique = static_cast<int64_t>(n_unique_i32);
 

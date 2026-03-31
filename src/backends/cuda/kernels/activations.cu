@@ -1232,7 +1232,7 @@ __device__ T block_reduce_max(T val, T* shared) {
     }
     __syncthreads();
 
-    val = (threadIdx.x < blockDim.x / 32) ? shared[lane] : numeric_min<T>();
+    val = (threadIdx.x < blockDim.x / 32) ? shared[threadIdx.x] : numeric_min<T>();
     if (wid == 0) {
         val = warp_reduce_max(val);
     }

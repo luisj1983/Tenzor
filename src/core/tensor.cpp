@@ -857,13 +857,15 @@ auto Tensor::fill_(double value) -> Tensor& {
             // Fast path: memset to zero directly on device
             backend->memset(data_ptr(), 0, size_bytes, device().index);
         } else {
-            // Create a small CPU buffer with one element, fill it, then tile-copy
-            // This avoids allocating a full CPU tensor for non-zero fills
-            std::vector<int64_t> shape_vec(shape().begin(), shape().end());
-            Tensor cpu_tensor(shape_vec, dtype(), Device::cpu());
-            cpu_tensor.fill_(value);  // Recursively fill on CPU
-            backend->copy(data_ptr(), cpu_tensor.data_ptr(),
-                         size_bytes, CopyKind::HostToDevice);
+            // Dispatch to backend's Fill kernel on the target device
+            auto& table = DispatchTableRegistry::get_table(impl_->device.type);
+            OpAttributes attrs;
+            attrs.set(AttrKey::Value, static_cast<double>(value));
+            std::array<Tensor, 1> inputs = {*this};
+            auto result = table.dispatch(OpId::Fill, inputs, attrs);
+            if (!result.empty()) {
+                impl_ = result[0].impl_;
+            }
         }
         bump_version();
         return *this;

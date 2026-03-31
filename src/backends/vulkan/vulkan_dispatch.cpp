@@ -908,14 +908,8 @@ static const std::unordered_map<std::string, VkDispatchHandler>& get_dispatch_ta
             if (inputs.size() < 2) throw std::invalid_argument("conv_transpose2d_forward requires at least 2 inputs (input, weight)");
             if (inputs[0].dtype() != DType::Float32 && inputs[0].dtype() != DType::Float64 &&
                 inputs[0].dtype() != DType::Float16 && inputs[0].dtype() != DType::BFloat16) {
-                TENZOR_LOG_WARNING(std::format("Vulkan: No shader for conv_transpose2d_forward with dtype {}; falling back to CPU",
-                                               dtype_name(inputs[0].dtype())));
-                Device original_device = inputs[0].device();
-                std::vector<Tensor> cpu_inputs;
-                cpu_inputs.reserve(inputs.size());
-                for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
-                auto cpu_results = tenzor::dispatch(OpId::ConvTranspose2dForward, cpu_inputs, attrs);
-                return std::vector<Tensor>{cpu_results[0].to(original_device)};
+                throw std::runtime_error(std::string("Vulkan: ConvTranspose2dForward not supported for dtype ") +
+                                        std::string(dtype_name(inputs[0].dtype())));
             }
             const Tensor* bias_ptr = (inputs.size() >= 3) ? &inputs[2] : nullptr;
             return std::vector<Tensor>{b->dispatchConvTranspose2dForward(inputs[0], inputs[1], bias_ptr, attrs)};

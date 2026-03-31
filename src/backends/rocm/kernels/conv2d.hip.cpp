@@ -436,29 +436,6 @@ __global__ void add_bias_kernel_nhwc(
 // Bias Gradient Kernel - Wavefront-Optimized
 // ============================================================================
 
-// Uses wavefront-level reduction for better performance on AMD GPUs
-__global__ void sum_bias_grad_kernel(
-    const float* __restrict__ grad_output,
-    float* __restrict__ grad_bias,
-    int64_t batch,
-    int64_t channels,
-    int64_t spatial_size
-) {
-    int64_t c = blockIdx.x * blockDim.x + threadIdx.x;
-    if (c < channels) {
-        float sum = 0.0f;
-
-        // Each thread processes one channel
-        for (int64_t b = 0; b < batch; ++b) {
-            for (int64_t s = 0; s < spatial_size; ++s) {
-                int64_t idx = b * (channels * spatial_size) + c * spatial_size + s;
-                sum += grad_output[idx];
-            }
-        }
-
-        grad_bias[c] = sum;
-    }
-}
 
 // Optimized version using wave-level reduction
 template<typename T>

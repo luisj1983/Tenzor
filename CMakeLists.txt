@@ -28,8 +28,13 @@ if(TENZOR_BUILD_ROCM AND _ROCM_AVAILABLE)
             COMMAND /opt/rocm/bin/rocm_agent_enumerator
             OUTPUT_VARIABLE ROCM_AGENTS
             OUTPUT_STRIP_TRAILING_WHITESPACE
-            ERROR_QUIET
+            RESULT_VARIABLE ROCM_ENUM_RESULT
+            ERROR_VARIABLE ROCM_ENUM_ERROR
         )
+        if(NOT ROCM_ENUM_RESULT EQUAL 0)
+            message(WARNING "ROCm agent enumeration failed (exit code ${ROCM_ENUM_RESULT}): ${ROCM_ENUM_ERROR}")
+            message(WARNING "Set CMAKE_HIP_ARCHITECTURES manually for best performance.")
+        endif()
 
         # Extract first gfx architecture (skip CPU)
         string(REGEX MATCH "gfx[0-9a-z]+" DETECTED_ARCH "${ROCM_AGENTS}")
@@ -125,7 +130,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     # Disabled by default for portable binaries. Enable for local dev builds.
     option(TENZOR_NATIVE_ARCH "Use -march=native for host-specific optimizations" OFF)
     if(TENZOR_NATIVE_ARCH)
-        list(APPEND TENZOR_WARNING_FLAGS -march=native)
+        add_compile_options(-march=native)
     endif()
 
     # Enable coverage if requested (must be global — applies to all compiled code)

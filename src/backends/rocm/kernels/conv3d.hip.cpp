@@ -338,8 +338,11 @@ auto conv3d_forward_hip(
             const float* weight_ptr = weight.data<float>() + out_start * C_in_per_group * kD * kH * kW;
             float* output_ptr = output.data<float>() + out_start * D_out * H_out * W_out;
 
-            // col_buffer: (M, K), weight: (N_gemm, K) => output = col @ weight^T => (M, N_gemm)
-            // rocBLAS column-major: C = alpha * op(A) * op(B) + beta * C
+            // Row-major: output(M,N_gemm) = col(M,K) @ weight(N_gemm,K)^T
+            // rocBLAS uses column-major, so we compute the transpose:
+            //   C^T(N_gemm,M) = weight(N_gemm,K) @ col(M,K)^T
+            // rocBLAS params: op_a=Transpose, op_b=None,
+            //   m=N_gemm, n=M, k=K, A=weight(lda=K), B=col(ldb=K), C=output(ldc=N_gemm)
             ROCBLAS_CHECK(rocblas_sgemm(
                 handle,
                 rocblas_operation_transpose, rocblas_operation_none,
@@ -382,6 +385,8 @@ auto conv3d_forward_hip(
             ));
 
         } else if (dtype == DType::Float16) {
+            static_assert(sizeof(Float16) == sizeof(__half) && alignof(Float16) == alignof(__half),
+                          "Float16 and __half must have identical size and alignment");
             HipBuffer col_buf(col_rows * col_cols * sizeof(__half));
             __half* col_buffer = col_buf.as<__half>();
 
