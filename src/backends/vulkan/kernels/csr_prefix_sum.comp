@@ -1,0 +1,25 @@
+#version 450
+
+// CSR prefix sum: converts row_counts[M] into crow_indices[M+1]
+// crow_indices[0] = 0, crow_indices[i+1] = crow_indices[i] + row_counts[i]
+// Sequential scan in a single thread — M (number of rows) is typically small
+// relative to GPU parallelism.
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0) readonly  buffer RowCounts   { uint row_counts[]; };
+layout(set = 0, binding = 1) writeonly buffer CrowIndices  { int  crow_indices[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_rows;
+};
+
+void main() {
+    if (gl_GlobalInvocationID.x != 0) return;
+
+    int running = 0;
+    crow_indices[0] = 0;
+    for (uint i = 0; i < n_rows; ++i) {
+        running += int(row_counts[i]);
+        crow_indices[i + 1] = running;
+    }
+}

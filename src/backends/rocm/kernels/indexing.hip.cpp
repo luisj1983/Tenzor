@@ -8,21 +8,10 @@
 #include <thrust/iterator/counting_iterator.h>
 #include <stdexcept>
 #include <vector>
+#include "../rocm_error.hpp"
 
 namespace tenzor {
 namespace rocm {
-
-// HIP Error checking macro
-#define HIP_CHECK(call) \
-    do { \
-        hipError_t err = call; \
-        if (err != hipSuccess) { \
-            throw std::runtime_error( \
-                std::string("HIP error at ") + __FILE__ + ":" + \
-                std::to_string(__LINE__) + " - " + hipGetErrorString(err) \
-            ); \
-        } \
-    } while(0)
 
 // Grid-stride loop for HIP kernels
 #define HIP_KERNEL_LOOP(i, n) \
@@ -167,6 +156,7 @@ auto gather_hip(
             inner_size,
             dim_size
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(gather_kernel<double>,
             dim3(blocks), dim3(threads), 0, 0,
@@ -178,6 +168,7 @@ auto gather_hip(
             inner_size,
             dim_size
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int32) {
         hipLaunchKernelGGL(gather_kernel<int32_t>,
             dim3(blocks), dim3(threads), 0, 0,
@@ -189,6 +180,7 @@ auto gather_hip(
             inner_size,
             dim_size
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int64) {
         hipLaunchKernelGGL(gather_kernel<int64_t>,
             dim3(blocks), dim3(threads), 0, 0,
@@ -200,6 +192,7 @@ auto gather_hip(
             inner_size,
             dim_size
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(gather_kernel<__half>,
             dim3(blocks), dim3(threads), 0, 0,
@@ -211,6 +204,7 @@ auto gather_hip(
             inner_size,
             dim_size
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::BFloat16) {
         hipLaunchKernelGGL(gather_kernel<hip_bfloat16>,
             dim3(blocks), dim3(threads), 0, 0,
@@ -222,11 +216,12 @@ auto gather_hip(
             inner_size,
             dim_size
         );
+        HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("gather_hip: Unsupported dtype");
     }
 
-    HIP_CHECK(hipGetLastError());
+    HIP_POST_LAUNCH_CHECK();
 
     return output;
 }
@@ -328,6 +323,7 @@ auto scatter_hip(
             total_scatter,
             reduce_add
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::Float64) {
         hipLaunchKernelGGL(scatter_kernel<double>,
             dim3(blocks), dim3(threads), 0, 0,
@@ -341,6 +337,7 @@ auto scatter_hip(
             total_scatter,
             reduce_add
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::Float16) {
         hipLaunchKernelGGL(scatter_kernel<__half>,
             dim3(blocks), dim3(threads), 0, 0,
@@ -354,6 +351,7 @@ auto scatter_hip(
             total_scatter,
             reduce_add
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::BFloat16) {
         hipLaunchKernelGGL(scatter_kernel<hip_bfloat16>,
             dim3(blocks), dim3(threads), 0, 0,
@@ -367,6 +365,7 @@ auto scatter_hip(
             total_scatter,
             reduce_add
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::Int32) {
         hipLaunchKernelGGL(scatter_kernel<int32_t>,
             dim3(blocks), dim3(threads), 0, 0,
@@ -380,6 +379,7 @@ auto scatter_hip(
             total_scatter,
             reduce_add
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::Int64) {
         hipLaunchKernelGGL(scatter_kernel<int64_t>,
             dim3(blocks), dim3(threads), 0, 0,
@@ -393,11 +393,12 @@ auto scatter_hip(
             total_scatter,
             reduce_add
         );
+        HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("scatter_hip: Unsupported dtype");
     }
 
-    HIP_CHECK(hipGetLastError());
+    HIP_POST_LAUNCH_CHECK();
 
     return output;
 }
@@ -482,6 +483,7 @@ auto index_select_hip(
             inner_size,
             num_indices
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(index_select_kernel<double>,
             dim3(blocks), dim3(threads), 0, 0,
@@ -493,6 +495,7 @@ auto index_select_hip(
             inner_size,
             num_indices
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int32) {
         hipLaunchKernelGGL(index_select_kernel<int32_t>,
             dim3(blocks), dim3(threads), 0, 0,
@@ -504,6 +507,7 @@ auto index_select_hip(
             inner_size,
             num_indices
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int64) {
         hipLaunchKernelGGL(index_select_kernel<int64_t>,
             dim3(blocks), dim3(threads), 0, 0,
@@ -515,6 +519,7 @@ auto index_select_hip(
             inner_size,
             num_indices
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(index_select_kernel<__half>,
             dim3(blocks), dim3(threads), 0, 0,
@@ -526,6 +531,7 @@ auto index_select_hip(
             inner_size,
             num_indices
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::BFloat16) {
         hipLaunchKernelGGL(index_select_kernel<hip_bfloat16>,
             dim3(blocks), dim3(threads), 0, 0,
@@ -537,11 +543,12 @@ auto index_select_hip(
             inner_size,
             num_indices
         );
+        HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("index_select_hip: Unsupported dtype");
     }
 
-    HIP_CHECK(hipGetLastError());
+    HIP_POST_LAUNCH_CHECK();
 
     return output;
 }
@@ -584,6 +591,7 @@ auto masked_fill_hip(
             static_cast<float>(value),
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::Float64) {
         hipLaunchKernelGGL(masked_fill_kernel<double>,
             dim3(blocks), dim3(threads), 0, 0,
@@ -592,6 +600,7 @@ auto masked_fill_hip(
             static_cast<double>(value),
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::Int32) {
         hipLaunchKernelGGL(masked_fill_kernel<int32_t>,
             dim3(blocks), dim3(threads), 0, 0,
@@ -600,6 +609,7 @@ auto masked_fill_hip(
             static_cast<int32_t>(value),
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::Int64) {
         hipLaunchKernelGGL(masked_fill_kernel<int64_t>,
             dim3(blocks), dim3(threads), 0, 0,
@@ -608,6 +618,7 @@ auto masked_fill_hip(
             static_cast<int64_t>(value),
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::Float16) {
         hipLaunchKernelGGL(masked_fill_kernel<__half>,
             dim3(blocks), dim3(threads), 0, 0,
@@ -616,6 +627,7 @@ auto masked_fill_hip(
             __float2half(static_cast<float>(value)),
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::BFloat16) {
         hipLaunchKernelGGL(masked_fill_kernel<hip_bfloat16>,
             dim3(blocks), dim3(threads), 0, 0,
@@ -624,11 +636,12 @@ auto masked_fill_hip(
             hip_bfloat16(static_cast<float>(value)),
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("masked_fill_hip: Unsupported dtype");
     }
 
-    HIP_CHECK(hipGetLastError());
+    HIP_POST_LAUNCH_CHECK();
 
     return output;
 }
@@ -704,6 +717,7 @@ auto masked_select_hip(
             d_count,
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(masked_select_count_kernel<double>,
             dim3(blocks), dim3(threads), 0, 0,
@@ -711,6 +725,7 @@ auto masked_select_hip(
             d_count,
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
     } else {
         HIP_CHECK(hipFree(d_count));
         throw std::runtime_error("masked_select_hip: Only Float32 and Float64 supported");
@@ -737,6 +752,7 @@ auto masked_select_hip(
             d_output_idx,
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(masked_select_kernel<double>,
             dim3(blocks), dim3(threads), 0, 0,
@@ -746,11 +762,12 @@ auto masked_select_hip(
             d_output_idx,
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
     }
 
     HIP_CHECK(hipFree(d_count));
     HIP_CHECK(hipFree(d_output_idx));
-    HIP_CHECK(hipGetLastError());
+    HIP_POST_LAUNCH_CHECK();
 
     return output;
 }
@@ -804,6 +821,7 @@ auto take_hip(
             input_size,
             indices_size
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(take_kernel<double>,
             dim3(blocks), dim3(threads), 0, 0,
@@ -813,6 +831,7 @@ auto take_hip(
             input_size,
             indices_size
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int32) {
         hipLaunchKernelGGL(take_kernel<int32_t>,
             dim3(blocks), dim3(threads), 0, 0,
@@ -822,6 +841,7 @@ auto take_hip(
             input_size,
             indices_size
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int64) {
         hipLaunchKernelGGL(take_kernel<int64_t>,
             dim3(blocks), dim3(threads), 0, 0,
@@ -831,11 +851,12 @@ auto take_hip(
             input_size,
             indices_size
         );
+        HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("take_hip: Unsupported dtype");
     }
 
-    HIP_CHECK(hipGetLastError());
+    HIP_POST_LAUNCH_CHECK();
 
     return output;
 }
@@ -885,6 +906,7 @@ auto where_hip(
             output.data<float>(),
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (x.dtype() == DType::Float64) {
         hipLaunchKernelGGL(where_kernel<double>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -894,6 +916,7 @@ auto where_hip(
             output.data<double>(),
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (x.dtype() == DType::Int32) {
         hipLaunchKernelGGL(where_kernel<int32_t>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -903,6 +926,7 @@ auto where_hip(
             output.data<int32_t>(),
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (x.dtype() == DType::Int64) {
         hipLaunchKernelGGL(where_kernel<int64_t>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -912,6 +936,7 @@ auto where_hip(
             output.data<int64_t>(),
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (x.dtype() == DType::Float16) {
         hipLaunchKernelGGL(where_kernel<__half>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -921,6 +946,7 @@ auto where_hip(
             reinterpret_cast<__half*>(output.data<Float16>()),
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (x.dtype() == DType::BFloat16) {
         hipLaunchKernelGGL(where_kernel<hip_bfloat16>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -930,11 +956,12 @@ auto where_hip(
             reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("where_hip: Unsupported dtype");
     }
 
-    HIP_CHECK(hipGetLastError());
+    HIP_POST_LAUNCH_CHECK();
     return output;
 }
 
@@ -1028,6 +1055,7 @@ auto slice_hip(
             step,
             output_dim_size
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(slice_kernel<double>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1041,6 +1069,7 @@ auto slice_hip(
             step,
             output_dim_size
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int32) {
         hipLaunchKernelGGL(slice_kernel<int32_t>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1054,6 +1083,7 @@ auto slice_hip(
             step,
             output_dim_size
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int64) {
         hipLaunchKernelGGL(slice_kernel<int64_t>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1067,6 +1097,7 @@ auto slice_hip(
             step,
             output_dim_size
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(slice_kernel<__half>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1080,6 +1111,7 @@ auto slice_hip(
             step,
             output_dim_size
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::BFloat16) {
         hipLaunchKernelGGL(slice_kernel<hip_bfloat16>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1093,11 +1125,12 @@ auto slice_hip(
             step,
             output_dim_size
         );
+        HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("slice_hip: Unsupported dtype");
     }
 
-    HIP_CHECK(hipGetLastError());
+    HIP_POST_LAUNCH_CHECK();
     return output;
 }
 
@@ -1234,6 +1267,7 @@ auto cat_hip(
             inner_size,
             d_dim_sizes
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (first.dtype() == DType::Float64) {
         hipLaunchKernelGGL(cat_kernel<double>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1246,6 +1280,7 @@ auto cat_hip(
             inner_size,
             d_dim_sizes
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (first.dtype() == DType::Int32) {
         hipLaunchKernelGGL(cat_kernel<int32_t>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1258,6 +1293,7 @@ auto cat_hip(
             inner_size,
             d_dim_sizes
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (first.dtype() == DType::Int64) {
         hipLaunchKernelGGL(cat_kernel<int64_t>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1270,6 +1306,7 @@ auto cat_hip(
             inner_size,
             d_dim_sizes
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (first.dtype() == DType::Float16) {
         hipLaunchKernelGGL(cat_kernel<__half>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1282,6 +1319,7 @@ auto cat_hip(
             inner_size,
             d_dim_sizes
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (first.dtype() == DType::BFloat16) {
         hipLaunchKernelGGL(cat_kernel<hip_bfloat16>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1294,6 +1332,7 @@ auto cat_hip(
             inner_size,
             d_dim_sizes
         );
+        HIP_POST_LAUNCH_CHECK();
     } else {
         HIP_CHECK(hipFree(d_input_ptrs));
         HIP_CHECK(hipFree(d_dim_sizes));
@@ -1305,7 +1344,7 @@ auto cat_hip(
     HIP_CHECK(hipFree(d_input_ptrs));
     HIP_CHECK(hipFree(d_dim_sizes));
     HIP_CHECK(hipFree(d_input_offsets));
-    HIP_CHECK(hipGetLastError());
+    HIP_POST_LAUNCH_CHECK();
 
     return output;
 }
@@ -1367,6 +1406,7 @@ auto put_hip(
             total_size,
             accumulate
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(put_kernel<double>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1377,6 +1417,7 @@ auto put_hip(
             total_size,
             accumulate
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int32) {
         hipLaunchKernelGGL(put_kernel<int32_t>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1387,6 +1428,7 @@ auto put_hip(
             total_size,
             accumulate
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int64) {
         hipLaunchKernelGGL(put_kernel<int64_t>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1397,11 +1439,12 @@ auto put_hip(
             total_size,
             accumulate
         );
+        HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("put_hip: Unsupported dtype");
     }
 
-    HIP_CHECK(hipGetLastError());
+    HIP_POST_LAUNCH_CHECK();
     return output;
 }
 
@@ -1458,6 +1501,7 @@ auto gather_hip(
             inner_size,
             dim_size
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(gather_kernel<double>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1469,6 +1513,7 @@ auto gather_hip(
             inner_size,
             dim_size
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int32) {
         hipLaunchKernelGGL(gather_kernel<int32_t>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1480,6 +1525,7 @@ auto gather_hip(
             inner_size,
             dim_size
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int64) {
         hipLaunchKernelGGL(gather_kernel<int64_t>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1491,6 +1537,7 @@ auto gather_hip(
             inner_size,
             dim_size
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(gather_kernel<__half>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1502,6 +1549,7 @@ auto gather_hip(
             inner_size,
             dim_size
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::BFloat16) {
         hipLaunchKernelGGL(gather_kernel<hip_bfloat16>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1513,11 +1561,12 @@ auto gather_hip(
             inner_size,
             dim_size
         );
+        HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("gather_hip: Unsupported dtype");
     }
 
-    HIP_CHECK(hipGetLastError());
+    HIP_POST_LAUNCH_CHECK();
     return output;
 }
 
@@ -1567,6 +1616,7 @@ auto scatter_hip(
             total_scatter,
             false
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::Float64) {
         hipLaunchKernelGGL(scatter_kernel<double>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1580,6 +1630,7 @@ auto scatter_hip(
             total_scatter,
             false
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::Float16) {
         hipLaunchKernelGGL(scatter_kernel<__half>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1593,6 +1644,7 @@ auto scatter_hip(
             total_scatter,
             false
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::BFloat16) {
         hipLaunchKernelGGL(scatter_kernel<hip_bfloat16>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1606,6 +1658,7 @@ auto scatter_hip(
             total_scatter,
             false
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::Int32) {
         hipLaunchKernelGGL(scatter_kernel<int32_t>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1619,6 +1672,7 @@ auto scatter_hip(
             total_scatter,
             false
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::Int64) {
         hipLaunchKernelGGL(scatter_kernel<int64_t>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1632,11 +1686,12 @@ auto scatter_hip(
             total_scatter,
             false
         );
+        HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("scatter_hip: Unsupported dtype");
     }
 
-    HIP_CHECK(hipGetLastError());
+    HIP_POST_LAUNCH_CHECK();
     return output;
 }
 
@@ -1682,6 +1737,7 @@ auto index_select_hip(
             inner_size,
             num_indices
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(index_select_kernel<double>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1693,6 +1749,7 @@ auto index_select_hip(
             inner_size,
             num_indices
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int32) {
         hipLaunchKernelGGL(index_select_kernel<int32_t>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1704,6 +1761,7 @@ auto index_select_hip(
             inner_size,
             num_indices
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int64) {
         hipLaunchKernelGGL(index_select_kernel<int64_t>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1715,6 +1773,7 @@ auto index_select_hip(
             inner_size,
             num_indices
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(index_select_kernel<__half>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1726,6 +1785,7 @@ auto index_select_hip(
             inner_size,
             num_indices
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::BFloat16) {
         hipLaunchKernelGGL(index_select_kernel<hip_bfloat16>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1737,11 +1797,12 @@ auto index_select_hip(
             inner_size,
             num_indices
         );
+        HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("index_select_hip: Unsupported dtype");
     }
 
-    HIP_CHECK(hipGetLastError());
+    HIP_POST_LAUNCH_CHECK();
     return output;
 }
 
@@ -1765,6 +1826,7 @@ auto masked_fill_hip(
             static_cast<float>(value),
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::Float64) {
         hipLaunchKernelGGL(masked_fill_kernel<double>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1773,6 +1835,7 @@ auto masked_fill_hip(
             static_cast<double>(value),
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::Int32) {
         hipLaunchKernelGGL(masked_fill_kernel<int32_t>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1781,6 +1844,7 @@ auto masked_fill_hip(
             static_cast<int32_t>(value),
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::Int64) {
         hipLaunchKernelGGL(masked_fill_kernel<int64_t>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1789,6 +1853,7 @@ auto masked_fill_hip(
             static_cast<int64_t>(value),
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::Float16) {
         hipLaunchKernelGGL(masked_fill_kernel<__half>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1797,6 +1862,7 @@ auto masked_fill_hip(
             __float2half(static_cast<float>(value)),
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::BFloat16) {
         hipLaunchKernelGGL(masked_fill_kernel<hip_bfloat16>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1805,11 +1871,12 @@ auto masked_fill_hip(
             hip_bfloat16(static_cast<float>(value)),
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("masked_fill_hip: Unsupported dtype");
     }
 
-    HIP_CHECK(hipGetLastError());
+    HIP_POST_LAUNCH_CHECK();
     return output;
 }
 
@@ -1834,6 +1901,7 @@ auto masked_select_hip(
             d_count,
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(masked_select_count_kernel<double>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1841,6 +1909,7 @@ auto masked_select_hip(
             d_count,
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
     } else {
         HIP_CHECK(hipFree(d_count));
         throw std::runtime_error("masked_select_hip: Only Float32 and Float64 supported");
@@ -1866,6 +1935,7 @@ auto masked_select_hip(
             d_output_idx,
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(masked_select_kernel<double>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1875,11 +1945,12 @@ auto masked_select_hip(
             d_output_idx,
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
     }
 
     HIP_CHECK(hipFree(d_count));
     HIP_CHECK(hipFree(d_output_idx));
-    HIP_CHECK(hipGetLastError());
+    HIP_POST_LAUNCH_CHECK();
 
     return output;
 }
@@ -1906,6 +1977,7 @@ auto take_hip(
             input_size,
             indices_size
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(take_kernel<double>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1915,6 +1987,7 @@ auto take_hip(
             input_size,
             indices_size
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int32) {
         hipLaunchKernelGGL(take_kernel<int32_t>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1924,6 +1997,7 @@ auto take_hip(
             input_size,
             indices_size
         );
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int64) {
         hipLaunchKernelGGL(take_kernel<int64_t>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1933,11 +2007,12 @@ auto take_hip(
             input_size,
             indices_size
         );
+        HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("take_hip: Unsupported dtype");
     }
 
-    HIP_CHECK(hipGetLastError());
+    HIP_POST_LAUNCH_CHECK();
     return output;
 }
 
@@ -1984,11 +2059,13 @@ auto gather_relative_position_bias_kernel(const Tensor& table, const Tensor& ind
             dim3(blocks), dim3(threads), 0, stream,
             table.data<float>(), indices_device.data<int64_t>(), output.data<float>(),
             num_positions, num_heads, num_heads);
+            HIP_POST_LAUNCH_CHECK();
     } else if (table.dtype() == DType::Float64) {
         hipLaunchKernelGGL(gather_2d_kernel<double>,
             dim3(blocks), dim3(threads), 0, stream,
             table.data<double>(), indices_device.data<int64_t>(), output.data<double>(),
             num_positions, num_heads, num_heads);
+            HIP_POST_LAUNCH_CHECK();
     } else if (table.dtype() == DType::Float16) {
         hipLaunchKernelGGL(gather_2d_kernel<__half>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1996,11 +2073,12 @@ auto gather_relative_position_bias_kernel(const Tensor& table, const Tensor& ind
             indices_device.data<int64_t>(),
             reinterpret_cast<__half*>(output.data<Float16>()),
             num_positions, num_heads, num_heads);
+            HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("gather_relative_position_bias: unsupported dtype");
     }
 
-    HIP_CHECK(hipGetLastError());
+    HIP_POST_LAUNCH_CHECK();
     return output;
 }
 
@@ -2097,7 +2175,7 @@ auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                 index.data<int64_t>(), src.data<T>(), output.data<T>(), \
                 outer_size, dim_size, inner_size, index_dim_size, total_scatter, \
                 d_error_flag); \
-        HIP_CHECK(hipGetLastError())
+        HIP_POST_LAUNCH_CHECK();
 
     switch (input.dtype()) {
         case DType::Float32: LAUNCH_SCATTER_ADD_HIP(float); break;
@@ -2115,19 +2193,21 @@ auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                                      hipMemcpyDeviceToDevice, stream));
             if (total_scatter > 0) {
                 int blocks_f32 = (total_scatter + threads - 1) / threads;
-                if (idx_is_int32)
+                if (idx_is_int32) {
                     hipLaunchKernelGGL((scatter_add_kernel_impl<float, int32_t>),
                         dim3(blocks_f32), dim3(threads), 0, stream,
                         index.data<int32_t>(), src_f32.data<float>(), output_f32.data<float>(),
                         outer_size, dim_size, inner_size, index_dim_size, total_scatter,
                         d_error_flag);
-                else
+                    HIP_POST_LAUNCH_CHECK();
+                } else {
                     hipLaunchKernelGGL((scatter_add_kernel_impl<float, int64_t>),
                         dim3(blocks_f32), dim3(threads), 0, stream,
                         index.data<int64_t>(), src_f32.data<float>(), output_f32.data<float>(),
                         outer_size, dim_size, inner_size, index_dim_size, total_scatter,
                         d_error_flag);
-                HIP_CHECK(hipGetLastError());
+                    HIP_POST_LAUNCH_CHECK();
+                }
             }
             output = output_f32.to(input.dtype());
             break;
@@ -2246,12 +2326,14 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
                     embeddings.data<float>(), offsets.data<int64_t>(),
                     output.data<float>(), num_bags, total_elements,
                     embedding_dim, offsets_size);
+                HIP_POST_LAUNCH_CHECK();
             } else {
                 hipLaunchKernelGGL(embedding_bag_sum_kernel_hip<float>,
                     dim3(blocks), dim3(threads), 0, stream,
                     embeddings.data<float>(), offsets.data<int64_t>(),
                     output.data<float>(), num_bags, total_elements,
                     embedding_dim, offsets_size, is_mean);
+                HIP_POST_LAUNCH_CHECK();
             }
             break;
         case DType::Float64:
@@ -2261,12 +2343,14 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
                     embeddings.data<double>(), offsets.data<int64_t>(),
                     output.data<double>(), num_bags, total_elements,
                     embedding_dim, offsets_size);
+                HIP_POST_LAUNCH_CHECK();
             } else {
                 hipLaunchKernelGGL(embedding_bag_sum_kernel_hip<double>,
                     dim3(blocks), dim3(threads), 0, stream,
                     embeddings.data<double>(), offsets.data<int64_t>(),
                     output.data<double>(), num_bags, total_elements,
                     embedding_dim, offsets_size, is_mean);
+                HIP_POST_LAUNCH_CHECK();
             }
             break;
         case DType::Float16:
@@ -2277,6 +2361,7 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
                     offsets.data<int64_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
                     num_bags, total_elements, embedding_dim, offsets_size);
+                HIP_POST_LAUNCH_CHECK();
             } else {
                 hipLaunchKernelGGL(embedding_bag_sum_kernel_hip<__half>,
                     dim3(blocks), dim3(threads), 0, stream,
@@ -2284,13 +2369,14 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
                     offsets.data<int64_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
                     num_bags, total_elements, embedding_dim, offsets_size, is_mean);
+                HIP_POST_LAUNCH_CHECK();
             }
             break;
         default:
             throw std::runtime_error("embedding_bag_forward: unsupported dtype");
     }
 
-    HIP_CHECK(hipGetLastError());
+    HIP_POST_LAUNCH_CHECK();
     return output;
 }
 
@@ -2369,6 +2455,7 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
                 grad_output.data<float>(), offsets.data<int64_t>(),
                 grad_weight.data<float>(), num_bags, total_elements,
                 embedding_dim, offsets_size, is_mean);
+            HIP_POST_LAUNCH_CHECK();
             break;
         case DType::Float64:
             hipLaunchKernelGGL(embedding_bag_backward_kernel_hip<double>,
@@ -2376,12 +2463,13 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
                 grad_output.data<double>(), offsets.data<int64_t>(),
                 grad_weight.data<double>(), num_bags, total_elements,
                 embedding_dim, offsets_size, is_mean);
+            HIP_POST_LAUNCH_CHECK();
             break;
         default:
             throw std::runtime_error("embedding_bag_backward: unsupported dtype");
     }
 
-    HIP_CHECK(hipGetLastError());
+    HIP_POST_LAUNCH_CHECK();
     return grad_weight;
 }
 
@@ -2421,17 +2509,19 @@ auto one_hot_kernel(const Tensor& indices, int64_t num_classes,
             hipLaunchKernelGGL(one_hot_kernel_impl<int32_t>,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                 indices.data<int32_t>(), output.data<float>(), batch_size, num_classes);
+            HIP_POST_LAUNCH_CHECK();
             break;
         case DType::Int64:
             hipLaunchKernelGGL(one_hot_kernel_impl<int64_t>,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                 indices.data<int64_t>(), output.data<float>(), batch_size, num_classes);
+            HIP_POST_LAUNCH_CHECK();
             break;
         default:
             throw std::runtime_error("one_hot: unsupported index dtype (expected Int32 or Int64)");
     }
 
-    HIP_CHECK(hipGetLastError());
+    HIP_POST_LAUNCH_CHECK();
     return output;
 }
 
@@ -2499,7 +2589,7 @@ auto nonzero_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(nonzero_flag_kernel_hip<T>, \
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream, \
             input.data<T>(), d_flags, n); \
-        HIP_CHECK(hipGetLastError())
+        HIP_POST_LAUNCH_CHECK();
 
     switch (input.dtype()) {
         case DType::Float32: LAUNCH_NONZERO_FLAG_HIP(float); break;
@@ -2513,7 +2603,7 @@ auto nonzero_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
             hipLaunchKernelGGL(nonzero_flag_kernel_hip<__half>,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                 reinterpret_cast<const __half*>(input.data_ptr()), d_flags, n);
-            HIP_CHECK(hipGetLastError());
+            HIP_POST_LAUNCH_CHECK();
             break;
         default:
             HIP_CHECK(hipFree(d_flags));
@@ -2569,7 +2659,7 @@ auto nonzero_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         dim3(decompose_blocks), dim3(BLOCK_SIZE), 0, stream,
         d_flat_indices, output.data<int64_t>(), d_shape, total_nonzero, ndim);
 
-    HIP_CHECK(hipGetLastError());
+    HIP_POST_LAUNCH_CHECK();
 
     HIP_CHECK(hipFree(d_flat_indices));
     HIP_CHECK(hipFree(d_shape));
@@ -2632,24 +2722,28 @@ auto searchsorted_hip(const Tensor& sorted_sequence, const Tensor& values,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                 seq_cont.data<float>(), val_cont.data<float>(), out_ptr,
                 seq_len, num_values, right);
+            HIP_POST_LAUNCH_CHECK();
             break;
         case DType::Float64:
             hipLaunchKernelGGL(searchsorted_kernel_hip<double>,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                 seq_cont.data<double>(), val_cont.data<double>(), out_ptr,
                 seq_len, num_values, right);
+            HIP_POST_LAUNCH_CHECK();
             break;
         case DType::Int32:
             hipLaunchKernelGGL(searchsorted_kernel_hip<int32_t>,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                 seq_cont.data<int32_t>(), val_cont.data<int32_t>(), out_ptr,
                 seq_len, num_values, right);
+            HIP_POST_LAUNCH_CHECK();
             break;
         case DType::Int64:
             hipLaunchKernelGGL(searchsorted_kernel_hip<int64_t>,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                 seq_cont.data<int64_t>(), val_cont.data<int64_t>(), out_ptr,
                 seq_len, num_values, right);
+            HIP_POST_LAUNCH_CHECK();
             break;
         case DType::Float16:
         case DType::BFloat16: {
@@ -2659,13 +2753,14 @@ auto searchsorted_hip(const Tensor& sorted_sequence, const Tensor& values,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                 seq_f32.data<float>(), val_f32.data<float>(), out_ptr,
                 seq_len, num_values, right);
+            HIP_POST_LAUNCH_CHECK();
             break;
         }
         default:
             throw std::runtime_error("searchsorted: unsupported dtype");
     }
 
-    HIP_CHECK(hipGetLastError());
+    HIP_POST_LAUNCH_CHECK();
     return result;
 }
 

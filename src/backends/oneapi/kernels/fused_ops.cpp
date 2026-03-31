@@ -1204,244 +1204,141 @@ auto fused_softmax_cross_entropy_kernel(
 
     Tensor losses({batch_size}, logits.dtype(), logits.device());
 
-    if (logits.dtype() == DType::Float32) {
-        const float* logits_ptr = get_data_ptr<const float>(logits);
+    // Device-side softmax cross-entropy: one work-item per batch element computes
+    // max, sum_exp, and loss entirely on device (no host roundtrip).
+    auto ce_impl = [&]<typename T>(T /*tag*/) {
+        using AccT = std::conditional_t<std::is_same_v<T, double>, double, float>;
+        const T* logits_ptr = get_data_ptr<const T>(logits);
         const int64_t* targets_ptr = get_data_ptr<const int64_t>(targets);
-        float* losses_ptr = get_data_ptr<float>(losses);
+        T* losses_ptr = get_data_ptr<T>(losses);
+        const int64_t nc = num_classes;
 
-        // Process each sample
-        for (int64_t b = 0; b < batch_size; ++b) {
-            const float* row = logits_ptr + b * num_classes;
+        queue.parallel_for(sycl::range<1>(batch_size), [=](sycl::id<1> idx) {
+            int64_t b = static_cast<int64_t>(idx[0]);
+            const T* row = logits_ptr + b * nc;
             int64_t target = targets_ptr[b];
 
             // Find max for numerical stability
-            std::vector<float> host_row(num_classes);
-            queue.memcpy(host_row.data(), row, num_classes * sizeof(float)).wait();
-
-            float max_val = host_row[0];
-            for (int64_t i = 1; i < num_classes; ++i) {
-                if (host_row[i] > max_val) max_val = host_row[i];
+            AccT max_val = static_cast<AccT>(row[0]);
+            for (int64_t i = 1; i < nc; ++i) {
+                AccT v = static_cast<AccT>(row[i]);
+                if (v > max_val) max_val = v;
             }
 
             // Compute sum(exp(x - max))
-            float sum_exp = 0.0f;
-            for (int64_t i = 0; i < num_classes; ++i) {
-                sum_exp += std::exp(host_row[i] - max_val);
+            AccT sum_exp = AccT(0);
+            for (int64_t i = 0; i < nc; ++i) {
+                sum_exp += sycl::exp(static_cast<AccT>(row[i]) - max_val);
             }
 
-            // Compute loss: log_sum_exp - target_logit
-            float log_sum_exp = std::log(sum_exp) + max_val;
-            float loss = log_sum_exp - host_row[target];
+            // loss = log_sum_exp - target_logit
+            AccT log_sum_exp = sycl::log(sum_exp) + max_val;
+            AccT loss = log_sum_exp - static_cast<AccT>(row[target]);
+            losses_ptr[b] = static_cast<T>(loss);
+        }).wait();
+    };
 
-            queue.fill(losses_ptr + b, loss, 1);
-        }
-
-        // Apply reduction
-        if (reduction == "mean") {
-            std::vector<float> host_losses(batch_size);
-            queue.memcpy(host_losses.data(), losses_ptr, batch_size * sizeof(float)).wait();
-
-            float mean_loss = 0.0f;
-            for (int64_t i = 0; i < batch_size; ++i) {
-                mean_loss += host_losses[i];
-            }
-            mean_loss /= static_cast<float>(batch_size);
-
-            Tensor result({1}, logits.dtype(), logits.device());
-            queue.fill(get_data_ptr<float>(result), mean_loss, 1);
-            return result;
-        }
-        else if (reduction == "sum") {
-            std::vector<float> host_losses(batch_size);
-            queue.memcpy(host_losses.data(), losses_ptr, batch_size * sizeof(float)).wait();
-
-            float sum_loss = 0.0f;
-            for (int64_t i = 0; i < batch_size; ++i) {
-                sum_loss += host_losses[i];
-            }
-
-            Tensor result({1}, logits.dtype(), logits.device());
-            queue.fill(get_data_ptr<float>(result), sum_loss, 1);
-            return result;
-        }
-    }
-    else if (logits.dtype() == DType::Float64) {
-        const double* logits_ptr = get_data_ptr<const double>(logits);
-        const int64_t* targets_ptr = get_data_ptr<const int64_t>(targets);
-        double* losses_ptr = get_data_ptr<double>(losses);
-
-        for (int64_t b = 0; b < batch_size; ++b) {
-            const double* row = logits_ptr + b * num_classes;
-            int64_t target = targets_ptr[b];
-
-            std::vector<double> host_row(num_classes);
-            queue.memcpy(host_row.data(), row, num_classes * sizeof(double)).wait();
-
-            double max_val = host_row[0];
-            for (int64_t i = 1; i < num_classes; ++i) {
-                if (host_row[i] > max_val) max_val = host_row[i];
-            }
-
-            double sum_exp = 0.0;
-            for (int64_t i = 0; i < num_classes; ++i) {
-                sum_exp += std::exp(host_row[i] - max_val);
-            }
-
-            double log_sum_exp = std::log(sum_exp) + max_val;
-            double loss = log_sum_exp - host_row[target];
-            queue.fill(losses_ptr + b, loss, 1);
-        }
-
-        if (reduction == "mean") {
-            std::vector<double> host_losses(batch_size);
-            queue.memcpy(host_losses.data(), losses_ptr, batch_size * sizeof(double)).wait();
-
-            double mean_loss = 0.0;
-            for (int64_t i = 0; i < batch_size; ++i) {
-                mean_loss += host_losses[i];
-            }
-            mean_loss /= static_cast<double>(batch_size);
-
-            Tensor result({1}, logits.dtype(), logits.device());
-            queue.fill(get_data_ptr<double>(result), mean_loss, 1);
-            return result;
-        }
-        else if (reduction == "sum") {
-            std::vector<double> host_losses(batch_size);
-            queue.memcpy(host_losses.data(), losses_ptr, batch_size * sizeof(double)).wait();
-
-            double sum_loss = 0.0;
-            for (int64_t i = 0; i < batch_size; ++i) {
-                sum_loss += host_losses[i];
-            }
-
-            Tensor result({1}, logits.dtype(), logits.device());
-            queue.fill(get_data_ptr<double>(result), sum_loss, 1);
-            return result;
-        }
-    }
-    else if (logits.dtype() == DType::Float16) {
-        // Float16: compute in float32 for numerical stability
+    if (logits.dtype() == DType::Float32) {
+        ce_impl(float{});
+    } else if (logits.dtype() == DType::Float64) {
+        ce_impl(double{});
+    } else if (logits.dtype() == DType::Float16) {
+        // Float16: compute in float32 via cast to float pointers isn't possible,
+        // so use a dedicated kernel that reads half and accumulates in float
         const sycl::half* logits_ptr = get_data_ptr<const sycl::half>(logits);
         const int64_t* targets_ptr = get_data_ptr<const int64_t>(targets);
         sycl::half* losses_ptr = get_data_ptr<sycl::half>(losses);
+        const int64_t nc = num_classes;
 
-        for (int64_t b = 0; b < batch_size; ++b) {
-            const sycl::half* row = logits_ptr + b * num_classes;
+        queue.parallel_for(sycl::range<1>(batch_size), [=](sycl::id<1> idx) {
+            int64_t b = static_cast<int64_t>(idx[0]);
+            const sycl::half* row = logits_ptr + b * nc;
             int64_t target = targets_ptr[b];
 
-            std::vector<sycl::half> host_row(num_classes);
-            queue.memcpy(host_row.data(), row, num_classes * sizeof(sycl::half)).wait();
-
-            float max_val = static_cast<float>(host_row[0]);
-            for (int64_t i = 1; i < num_classes; ++i) {
-                float v = static_cast<float>(host_row[i]);
+            float max_val = static_cast<float>(row[0]);
+            for (int64_t i = 1; i < nc; ++i) {
+                float v = static_cast<float>(row[i]);
                 if (v > max_val) max_val = v;
             }
-
             float sum_exp = 0.0f;
-            for (int64_t i = 0; i < num_classes; ++i) {
-                sum_exp += std::exp(static_cast<float>(host_row[i]) - max_val);
+            for (int64_t i = 0; i < nc; ++i) {
+                sum_exp += sycl::exp(static_cast<float>(row[i]) - max_val);
             }
-
-            float log_sum_exp = std::log(sum_exp) + max_val;
-            float loss = log_sum_exp - static_cast<float>(host_row[target]);
-            sycl::half h_loss = sycl::half(loss);
-            queue.fill(losses_ptr + b, h_loss, 1);
-        }
-
-        if (reduction == "mean") {
-            std::vector<sycl::half> host_losses(batch_size);
-            queue.memcpy(host_losses.data(), losses_ptr, batch_size * sizeof(sycl::half)).wait();
-
-            float mean_loss = 0.0f;
-            for (int64_t i = 0; i < batch_size; ++i) {
-                mean_loss += static_cast<float>(host_losses[i]);
-            }
-            mean_loss /= static_cast<float>(batch_size);
-
-            Tensor result({1}, logits.dtype(), logits.device());
-            sycl::half h_mean = sycl::half(mean_loss);
-            queue.fill(get_data_ptr<sycl::half>(result), h_mean, 1);
-            return result;
-        }
-        else if (reduction == "sum") {
-            std::vector<sycl::half> host_losses(batch_size);
-            queue.memcpy(host_losses.data(), losses_ptr, batch_size * sizeof(sycl::half)).wait();
-
-            float sum_loss = 0.0f;
-            for (int64_t i = 0; i < batch_size; ++i) {
-                sum_loss += static_cast<float>(host_losses[i]);
-            }
-
-            Tensor result({1}, logits.dtype(), logits.device());
-            sycl::half h_sum = sycl::half(sum_loss);
-            queue.fill(get_data_ptr<sycl::half>(result), h_sum, 1);
-            return result;
-        }
-    }
-    else if (logits.dtype() == DType::BFloat16) {
-        // BFloat16: compute in float32 for numerical stability
+            float loss = sycl::log(sum_exp) + max_val - static_cast<float>(row[target]);
+            losses_ptr[b] = sycl::half(loss);
+        }).wait();
+    } else if (logits.dtype() == DType::BFloat16) {
         const uint16_t* logits_ptr = get_data_ptr<const uint16_t>(logits);
         const int64_t* targets_ptr = get_data_ptr<const int64_t>(targets);
         uint16_t* losses_ptr = get_data_ptr<uint16_t>(losses);
+        const int64_t nc = num_classes;
 
-        for (int64_t b = 0; b < batch_size; ++b) {
-            const uint16_t* row = logits_ptr + b * num_classes;
+        queue.parallel_for(sycl::range<1>(batch_size), [=](sycl::id<1> idx) {
+            int64_t b = static_cast<int64_t>(idx[0]);
+            const uint16_t* row = logits_ptr + b * nc;
             int64_t target = targets_ptr[b];
 
-            std::vector<uint16_t> host_row(num_classes);
-            queue.memcpy(host_row.data(), row, num_classes * sizeof(uint16_t)).wait();
-
-            float max_val = bf16_to_f32(host_row[0]);
-            for (int64_t i = 1; i < num_classes; ++i) {
-                float v = bf16_to_f32(host_row[i]);
+            float max_val = bf16_to_f32(row[0]);
+            for (int64_t i = 1; i < nc; ++i) {
+                float v = bf16_to_f32(row[i]);
                 if (v > max_val) max_val = v;
             }
-
             float sum_exp = 0.0f;
-            for (int64_t i = 0; i < num_classes; ++i) {
-                sum_exp += std::exp(bf16_to_f32(host_row[i]) - max_val);
+            for (int64_t i = 0; i < nc; ++i) {
+                sum_exp += sycl::exp(bf16_to_f32(row[i]) - max_val);
             }
-
-            float log_sum_exp = std::log(sum_exp) + max_val;
-            float loss = log_sum_exp - bf16_to_f32(host_row[target]);
-            uint16_t bf_loss = f32_to_bf16(loss);
-            queue.fill(losses_ptr + b, bf_loss, 1);
-        }
-
-        if (reduction == "mean") {
-            std::vector<uint16_t> host_losses(batch_size);
-            queue.memcpy(host_losses.data(), losses_ptr, batch_size * sizeof(uint16_t)).wait();
-
-            float mean_loss = 0.0f;
-            for (int64_t i = 0; i < batch_size; ++i) {
-                mean_loss += bf16_to_f32(host_losses[i]);
-            }
-            mean_loss /= static_cast<float>(batch_size);
-
-            Tensor result({1}, logits.dtype(), logits.device());
-            uint16_t bf_mean = f32_to_bf16(mean_loss);
-            queue.fill(get_data_ptr<uint16_t>(result), bf_mean, 1);
-            return result;
-        }
-        else if (reduction == "sum") {
-            std::vector<uint16_t> host_losses(batch_size);
-            queue.memcpy(host_losses.data(), losses_ptr, batch_size * sizeof(uint16_t)).wait();
-
-            float sum_loss = 0.0f;
-            for (int64_t i = 0; i < batch_size; ++i) {
-                sum_loss += bf16_to_f32(host_losses[i]);
-            }
-
-            Tensor result({1}, logits.dtype(), logits.device());
-            uint16_t bf_sum = f32_to_bf16(sum_loss);
-            queue.fill(get_data_ptr<uint16_t>(result), bf_sum, 1);
-            return result;
-        }
-    }
-    else {
+            float loss = sycl::log(sum_exp) + max_val - bf16_to_f32(row[target]);
+            losses_ptr[b] = f32_to_bf16(loss);
+        }).wait();
+    } else {
         throw std::runtime_error("fused_softmax_cross_entropy: unsupported dtype");
+    }
+
+    // Apply reduction on device
+    if (reduction == "mean" || reduction == "sum") {
+        Tensor result({1}, logits.dtype(), logits.device());
+        if (logits.dtype() == DType::Float32) {
+            float* result_ptr = get_data_ptr<float>(result);
+            const float* losses_ptr = get_data_ptr<const float>(losses);
+            const float scale = (reduction == "mean") ? 1.0f / static_cast<float>(batch_size) : 1.0f;
+            const int64_t bs = batch_size;
+            queue.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                float sum = 0.0f;
+                for (int64_t i = 0; i < bs; ++i) sum += losses_ptr[i];
+                result_ptr[0] = sum * scale;
+            }).wait();
+        } else if (logits.dtype() == DType::Float64) {
+            double* result_ptr = get_data_ptr<double>(result);
+            const double* losses_ptr = get_data_ptr<const double>(losses);
+            const double scale = (reduction == "mean") ? 1.0 / static_cast<double>(batch_size) : 1.0;
+            const int64_t bs = batch_size;
+            queue.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                double sum = 0.0;
+                for (int64_t i = 0; i < bs; ++i) sum += losses_ptr[i];
+                result_ptr[0] = sum * scale;
+            }).wait();
+        } else if (logits.dtype() == DType::Float16) {
+            sycl::half* result_ptr = get_data_ptr<sycl::half>(result);
+            const sycl::half* losses_ptr = get_data_ptr<const sycl::half>(losses);
+            const float scale = (reduction == "mean") ? 1.0f / static_cast<float>(batch_size) : 1.0f;
+            const int64_t bs = batch_size;
+            queue.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                float sum = 0.0f;
+                for (int64_t i = 0; i < bs; ++i) sum += static_cast<float>(losses_ptr[i]);
+                result_ptr[0] = sycl::half(sum * scale);
+            }).wait();
+        } else if (logits.dtype() == DType::BFloat16) {
+            uint16_t* result_ptr = get_data_ptr<uint16_t>(result);
+            const uint16_t* losses_ptr = get_data_ptr<const uint16_t>(losses);
+            const float scale = (reduction == "mean") ? 1.0f / static_cast<float>(batch_size) : 1.0f;
+            const int64_t bs = batch_size;
+            queue.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                float sum = 0.0f;
+                for (int64_t i = 0; i < bs; ++i) sum += bf16_to_f32(losses_ptr[i]);
+                result_ptr[0] = f32_to_bf16(sum * scale);
+            }).wait();
+        }
+        return result;
     }
 
     return losses;
@@ -1640,22 +1537,15 @@ auto rms_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
             }
         );
 
-        // Compute grad_weight (accumulate across batch on host)
-        std::vector<float> go_host(batch_size * norm_size);
-        std::vector<float> in_host(batch_size * norm_size);
-        std::vector<float> rrms_host(batch_size);
-        queue.memcpy(go_host.data(), go_ptr, batch_size * norm_size * sizeof(float)).wait();
-        queue.memcpy(in_host.data(), in_ptr, batch_size * norm_size * sizeof(float)).wait();
-        queue.memcpy(rrms_host.data(), rrms_ptr, batch_size * sizeof(float)).wait();
-
-        std::vector<float> gw_host(norm_size, 0.0f);
-        for (int64_t b = 0; b < batch_size; ++b) {
-            float rr = rrms_host[b];
-            for (int64_t i = 0; i < norm_size; ++i) {
-                gw_host[i] += go_host[b * norm_size + i] * in_host[b * norm_size + i] * rr;
+        // Compute grad_weight on device: each work-item accumulates one feature over the batch
+        queue.parallel_for(sycl::range<1>(norm_size), [=](sycl::id<1> idx) {
+            int64_t i = static_cast<int64_t>(idx[0]);
+            float sum = 0.0f;
+            for (int64_t b = 0; b < batch_size; ++b) {
+                sum += go_ptr[b * norm_size + i] * in_ptr[b * norm_size + i] * rrms_ptr[b];
             }
-        }
-        queue.memcpy(gw_ptr, gw_host.data(), norm_size * sizeof(float)).wait();
+            gw_ptr[i] = sum;
+        }).wait();
     }
     else if (input.dtype() == DType::Float64) {
         const double* go_ptr = get_data_ptr<const double>(grad_output);
@@ -1686,21 +1576,15 @@ auto rms_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
             }
         );
 
-        std::vector<double> go_host(batch_size * norm_size);
-        std::vector<double> in_host(batch_size * norm_size);
-        std::vector<double> rrms_host(batch_size);
-        queue.memcpy(go_host.data(), go_ptr, batch_size * norm_size * sizeof(double)).wait();
-        queue.memcpy(in_host.data(), in_ptr, batch_size * norm_size * sizeof(double)).wait();
-        queue.memcpy(rrms_host.data(), rrms_ptr, batch_size * sizeof(double)).wait();
-
-        std::vector<double> gw_host(norm_size, 0.0);
-        for (int64_t b = 0; b < batch_size; ++b) {
-            double rr = rrms_host[b];
-            for (int64_t i = 0; i < norm_size; ++i) {
-                gw_host[i] += go_host[b * norm_size + i] * in_host[b * norm_size + i] * rr;
+        // Compute grad_weight on device: each work-item accumulates one feature over the batch
+        queue.parallel_for(sycl::range<1>(norm_size), [=](sycl::id<1> idx) {
+            int64_t i = static_cast<int64_t>(idx[0]);
+            double sum = 0.0;
+            for (int64_t b = 0; b < batch_size; ++b) {
+                sum += go_ptr[b * norm_size + i] * in_ptr[b * norm_size + i] * rrms_ptr[b];
             }
-        }
-        queue.memcpy(gw_ptr, gw_host.data(), norm_size * sizeof(double)).wait();
+            gw_ptr[i] = sum;
+        }).wait();
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* go_ptr = get_data_ptr<const sycl::half>(grad_output);
@@ -1732,24 +1616,17 @@ auto rms_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
             }
         );
 
-        // Compute grad_weight (accumulate across batch on host)
-        std::vector<sycl::half> go_host(batch_size * norm_size);
-        std::vector<sycl::half> in_host(batch_size * norm_size);
-        std::vector<sycl::half> rrms_host(batch_size);
-        queue.memcpy(go_host.data(), go_ptr, batch_size * norm_size * sizeof(sycl::half)).wait();
-        queue.memcpy(in_host.data(), in_ptr, batch_size * norm_size * sizeof(sycl::half)).wait();
-        queue.memcpy(rrms_host.data(), rrms_ptr, batch_size * sizeof(sycl::half)).wait();
-
-        std::vector<float> gw_host(norm_size, 0.0f);
-        for (int64_t b = 0; b < batch_size; ++b) {
-            float rr = static_cast<float>(rrms_host[b]);
-            for (int64_t i = 0; i < norm_size; ++i) {
-                gw_host[i] += static_cast<float>(go_host[b * norm_size + i]) * static_cast<float>(in_host[b * norm_size + i]) * rr;
+        // Compute grad_weight on device: each work-item accumulates one feature over the batch
+        queue.parallel_for(sycl::range<1>(norm_size), [=](sycl::id<1> idx) {
+            int64_t i = static_cast<int64_t>(idx[0]);
+            float sum = 0.0f;
+            for (int64_t b = 0; b < batch_size; ++b) {
+                sum += static_cast<float>(go_ptr[b * norm_size + i]) *
+                       static_cast<float>(in_ptr[b * norm_size + i]) *
+                       static_cast<float>(rrms_ptr[b]);
             }
-        }
-        std::vector<sycl::half> gw_half(norm_size);
-        for (int64_t i = 0; i < norm_size; ++i) gw_half[i] = sycl::half(gw_host[i]);
-        queue.memcpy(gw_ptr, gw_half.data(), norm_size * sizeof(sycl::half)).wait();
+            gw_ptr[i] = sycl::half(sum);
+        }).wait();
     }
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* go_ptr = get_data_ptr<const uint16_t>(grad_output);
@@ -1780,24 +1657,17 @@ auto rms_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
             }
         );
 
-        // Compute grad_weight (accumulate across batch on host)
-        std::vector<uint16_t> go_host(batch_size * norm_size);
-        std::vector<uint16_t> in_host(batch_size * norm_size);
-        std::vector<uint16_t> rrms_host(batch_size);
-        queue.memcpy(go_host.data(), go_ptr, batch_size * norm_size * sizeof(uint16_t)).wait();
-        queue.memcpy(in_host.data(), in_ptr, batch_size * norm_size * sizeof(uint16_t)).wait();
-        queue.memcpy(rrms_host.data(), rrms_ptr, batch_size * sizeof(uint16_t)).wait();
-
-        std::vector<float> gw_host(norm_size, 0.0f);
-        for (int64_t b = 0; b < batch_size; ++b) {
-            float rr = bf16_to_f32(rrms_host[b]);
-            for (int64_t i = 0; i < norm_size; ++i) {
-                gw_host[i] += bf16_to_f32(go_host[b * norm_size + i]) * bf16_to_f32(in_host[b * norm_size + i]) * rr;
+        // Compute grad_weight on device: each work-item accumulates one feature over the batch
+        queue.parallel_for(sycl::range<1>(norm_size), [=](sycl::id<1> idx) {
+            int64_t i = static_cast<int64_t>(idx[0]);
+            float sum = 0.0f;
+            for (int64_t b = 0; b < batch_size; ++b) {
+                sum += bf16_to_f32(go_ptr[b * norm_size + i]) *
+                       bf16_to_f32(in_ptr[b * norm_size + i]) *
+                       bf16_to_f32(rrms_ptr[b]);
             }
-        }
-        std::vector<uint16_t> gw_bf16(norm_size);
-        for (int64_t i = 0; i < norm_size; ++i) gw_bf16[i] = f32_to_bf16(gw_host[i]);
-        queue.memcpy(gw_ptr, gw_bf16.data(), norm_size * sizeof(uint16_t)).wait();
+            gw_ptr[i] = f32_to_bf16(sum);
+        }).wait();
     }
     else {
         throw std::runtime_error("rms_norm_backward: unsupported dtype (only Float32/Float64)");

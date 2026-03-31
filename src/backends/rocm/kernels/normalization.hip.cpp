@@ -10,24 +10,13 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "fp16_saturate.h"
+#include "../rocm_error.hpp"
 #include <stdexcept>
 #include <cmath>
 #include <vector>
 
 namespace tenzor {
 namespace rocm {
-
-// Error checking macro
-#define HIP_CHECK(call) \
-    do { \
-        hipError_t err = call; \
-        if (err != hipSuccess) { \
-            throw std::runtime_error( \
-                std::string("HIP error at ") + __FILE__ + ":" + \
-                std::to_string(__LINE__) + " - " + hipGetErrorString(err) \
-            ); \
-        } \
-    } while(0)
 
 // Grid-stride loop helper
 #define HIP_KERNEL_LOOP(i, n) \
@@ -260,6 +249,7 @@ auto layer_norm_kernel(
             output.data<float>(),
             nullptr, nullptr,
             batch_size, normalized_size, eps);
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(layer_norm_forward_kernel<double>,
             dim3(batch_size), dim3(threads), shared_mem_size * 2, stream,
@@ -269,6 +259,7 @@ auto layer_norm_kernel(
             output.data<double>(),
             nullptr, nullptr,
             batch_size, normalized_size, static_cast<float>(eps));
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(layer_norm_forward_kernel_fp16,
             dim3(batch_size), dim3(threads), shared_mem_size, stream,
@@ -278,6 +269,7 @@ auto layer_norm_kernel(
             reinterpret_cast<__half*>(output.data<Float16>()),
             nullptr, nullptr,
             batch_size, normalized_size, eps);
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::BFloat16) {
         auto input_f32 = input.to(DType::Float32);
         const Tensor* weight_f32_ptr = nullptr;
@@ -291,7 +283,6 @@ auto layer_norm_kernel(
         throw std::runtime_error("layer_norm_kernel: unsupported dtype");
     }
 
-    HIP_CHECK(hipGetLastError());
     return output;
 }
 
@@ -486,6 +477,7 @@ auto layer_norm_backward_kernel(
             weight ? grad_weight.data<float>() : nullptr,
             weight ? grad_bias.data<float>() : nullptr,
             batch_size, normalized_size);
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(layer_norm_backward_kernel<double>,
             dim3(batch_size), dim3(threads), shared_mem_size * 2, stream,
@@ -498,6 +490,7 @@ auto layer_norm_backward_kernel(
             weight ? grad_weight.data<double>() : nullptr,
             weight ? grad_bias.data<double>() : nullptr,
             batch_size, normalized_size);
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         // For Float16, we accumulate gradients in float then convert
         Tensor grad_weight_f32, grad_bias_f32;
@@ -521,6 +514,7 @@ auto layer_norm_backward_kernel(
             weight ? grad_weight_f32.data<float>() : nullptr,
             weight ? grad_bias_f32.data<float>() : nullptr,
             batch_size, normalized_size);
+        HIP_POST_LAUNCH_CHECK();
 
         // Convert float gradients back to Float16
         if (weight) {
@@ -530,11 +524,13 @@ auto layer_norm_backward_kernel(
                 grad_weight_f32.data<float>(),
                 reinterpret_cast<__half*>(grad_weight.data<Float16>()),
                 normalized_size);
+            HIP_POST_LAUNCH_CHECK();
             hipLaunchKernelGGL(convert_grad_f32_to_f16,
                 dim3(convert_blocks), dim3(BLOCK_SIZE), 0, stream,
                 grad_bias_f32.data<float>(),
                 reinterpret_cast<__half*>(grad_bias.data<Float16>()),
                 normalized_size);
+            HIP_POST_LAUNCH_CHECK();
         }
     } else if (input.dtype() == DType::BFloat16) {
         auto grad_output_f32 = grad_output.to(DType::Float32);
@@ -552,7 +548,6 @@ auto layer_norm_backward_kernel(
         throw std::runtime_error("layer_norm_backward_kernel: unsupported dtype");
     }
 
-    HIP_CHECK(hipGetLastError());
     return {grad_input, grad_weight, grad_bias};
 }
 
@@ -764,6 +759,7 @@ auto group_norm_kernel(
             bias ? bias->data<float>() : nullptr,
             output.data<float>(),
             N, C, HW, num_groups, channels_per_group, eps);
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(group_norm_forward_kernel<double>,
             dim3(blocks), dim3(threads), shared_mem_size * 2, stream,
@@ -772,6 +768,7 @@ auto group_norm_kernel(
             bias ? bias->data<double>() : nullptr,
             output.data<double>(),
             N, C, HW, num_groups, channels_per_group, static_cast<float>(eps));
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(group_norm_forward_kernel_fp16,
             dim3(blocks), dim3(threads), shared_mem_size, stream,
@@ -780,6 +777,7 @@ auto group_norm_kernel(
             bias ? reinterpret_cast<const __half*>(bias->data<Float16>()) : nullptr,
             reinterpret_cast<__half*>(output.data<Float16>()),
             N, C, HW, num_groups, channels_per_group, eps);
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::BFloat16) {
         auto input_f32 = input.to(DType::Float32);
         const Tensor* weight_f32_ptr = nullptr;
@@ -793,7 +791,6 @@ auto group_norm_kernel(
         throw std::runtime_error("group_norm_kernel: unsupported dtype");
     }
 
-    HIP_CHECK(hipGetLastError());
     return output;
 }
 
@@ -842,6 +839,7 @@ auto group_norm_forward_with_stats(
             output.data<float>(),
             N, C, HW, num_groups, channels_per_group, eps,
             saved_mean.data<float>(), saved_rstd.data<float>());
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(group_norm_forward_kernel<double>,
             dim3(blocks), dim3(threads), shared_mem_size * 2, stream,
@@ -851,6 +849,7 @@ auto group_norm_forward_with_stats(
             output.data<double>(),
             N, C, HW, num_groups, channels_per_group, eps,
             saved_mean.data<float>(), saved_rstd.data<float>());
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(group_norm_forward_kernel_fp16,
             dim3(blocks), dim3(threads), shared_mem_size, stream,
@@ -860,6 +859,7 @@ auto group_norm_forward_with_stats(
             reinterpret_cast<__half*>(output.data<Float16>()),
             N, C, HW, num_groups, channels_per_group, eps,
             saved_mean.data<float>(), saved_rstd.data<float>());
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::BFloat16) {
         auto input_f32 = input.to(DType::Float32);
         const Tensor* weight_f32_ptr = nullptr;
@@ -873,7 +873,6 @@ auto group_norm_forward_with_stats(
         throw std::runtime_error("group_norm_forward_with_stats: unsupported dtype");
     }
 
-    HIP_CHECK(hipGetLastError());
     return {output, saved_mean, saved_rstd};
 }
 
@@ -1028,6 +1027,7 @@ auto instance_norm_kernel(
             bias ? bias->data<float>() : nullptr,
             output.data<float>(),
             N, C, HW, eps);
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(instance_norm_forward_kernel<double>,
             dim3(blocks), dim3(threads), shared_mem_size * 2, stream,
@@ -1036,6 +1036,7 @@ auto instance_norm_kernel(
             bias ? bias->data<double>() : nullptr,
             output.data<double>(),
             N, C, HW, static_cast<float>(eps));
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(instance_norm_forward_kernel_fp16,
             dim3(blocks), dim3(threads), shared_mem_size, stream,
@@ -1044,6 +1045,7 @@ auto instance_norm_kernel(
             bias ? reinterpret_cast<const __half*>(bias->data<Float16>()) : nullptr,
             reinterpret_cast<__half*>(output.data<Float16>()),
             N, C, HW, eps);
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::BFloat16) {
         auto input_f32 = input.to(DType::Float32);
         const Tensor* weight_f32_ptr = nullptr;
@@ -1057,7 +1059,6 @@ auto instance_norm_kernel(
         throw std::runtime_error("instance_norm_kernel: unsupported dtype");
     }
 
-    HIP_CHECK(hipGetLastError());
     return output;
 }
 
@@ -1208,7 +1209,7 @@ auto group_norm_backward_kernel(
             mean.data<float>(), rstd.data<float>(),
             grad_input.data<float>(), grad_weight.data<float>(), grad_bias.data<float>(),
             N, C, HW, num_groups, channels_per_group);
-        HIP_CHECK(hipGetLastError());
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(group_norm_backward_hip_kernel<double>,
             dim3(num_group_instances), dim3(block_size), 0, stream,
@@ -1217,7 +1218,7 @@ auto group_norm_backward_kernel(
             mean.data<double>(), rstd.data<double>(),
             grad_input.data<double>(), grad_weight.data<double>(), grad_bias.data<double>(),
             N, C, HW, num_groups, channels_per_group);
-        HIP_CHECK(hipGetLastError());
+        HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         // Mixed precision: compute in Float32, convert back
         Tensor grad_out_f32 = grad_output.to(DType::Float32);
@@ -1235,7 +1236,6 @@ auto group_norm_backward_kernel(
         throw std::runtime_error("group_norm_backward: unsupported dtype");
     }
 
-    HIP_CHECK(hipGetLastError());
     return {grad_input, grad_weight, grad_bias};
 }
 

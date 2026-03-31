@@ -1002,26 +1002,7 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
             }
         }
 
-        // Create result tensor on CPU with identity value
-        Tensor result_cpu(out_shape, input.dtype(), Device::cpu());
-        // Fill with identity value based on dtype
-        if (input.dtype() == DType::Float64) {
-            double* data = result_cpu.data<double>();
-            for (int64_t i = 0; i < result_cpu.numel(); i++) {
-                data[i] = static_cast<double>(identity_value);
-            }
-        } else if (input.dtype() == DType::Float16) {
-            Float16* data = result_cpu.data<Float16>();
-            for (int64_t i = 0; i < result_cpu.numel(); i++) {
-                data[i] = Float16(identity_value);
-            }
-        } else {
-            float* data = result_cpu.data<float>();
-            for (int64_t i = 0; i < result_cpu.numel(); i++) {
-                data[i] = identity_value;
-            }
-        }
-        return result_cpu.to(input.device());
+        return dispatchFull(out_shape, identity_value, input.dtype());
     }
 
     int32_t device_id = input.device().index;
@@ -5025,23 +5006,9 @@ auto VulkanBackend::dispatchVariance(const Tensor& input, int64_t dim, bool unbi
     auto sum_shape = sum_squared.shape();
     std::vector<int64_t> divisor_shape(sum_shape.begin(), sum_shape.end());
     if (divisor_shape.empty()) {
-        divisor_shape = {1};  // Can't create empty tensor on CPU, use [1] for scalar
+        divisor_shape = {1};
     }
-    Tensor divisor_tensor_cpu(divisor_shape, input.dtype(), Device::cpu());
-    if (is_float64) {
-        double* divisor_data = static_cast<double*>(divisor_tensor_cpu.data_ptr());
-        for (int64_t i = 0; i < divisor_tensor_cpu.numel(); i++) {
-            divisor_data[i] = divisor;
-        }
-    } else {
-        float* divisor_data = static_cast<float*>(divisor_tensor_cpu.data_ptr());
-        for (int64_t i = 0; i < divisor_tensor_cpu.numel(); i++) {
-            divisor_data[i] = static_cast<float>(divisor);
-        }
-    }
-
-    // Copy to device
-    Tensor divisor_tensor = divisor_tensor_cpu.to(input.device());
+    Tensor divisor_tensor = dispatchFull(divisor_shape, static_cast<float>(divisor), input.dtype());
 
     // Divide variance by divisor and reshape to match expected output
     Tensor result = dispatchBinaryOp("div", sum_squared, divisor_tensor);
@@ -5231,12 +5198,7 @@ auto VulkanBackend::dispatchBooleanReduction(const std::string& op_name,
             if (keepdim) out_shape[dim < 0 ? dim + static_cast<int64_t>(input_shape.size()) : dim] = 1;
             else out_shape.erase(out_shape.begin() + (dim < 0 ? dim + static_cast<int64_t>(input_shape.size()) : dim));
         }
-        Tensor result_cpu(out_shape, DType::Bool, Device::cpu());
-        auto* data = result_cpu.data<uint8_t>();
-        for (int64_t i = 0; i < result_cpu.numel(); i++) {
-            data[i] = identity ? 1 : 0;
-        }
-        return result_cpu.to(input.device());
+        return dispatchFull(out_shape, identity ? 1.0f : 0.0f, DType::Bool);
     }
 
     // BFloat16: upcast to Float32
@@ -20603,88 +20565,85 @@ auto VulkanBackend::dispatchDenseToSparse(const Tensor& dense) -> std::vector<Te
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
 
-    // Pass 2: read back row_counts and dense data to CPU, build CSR components
-    Tensor row_counts_cpu = row_counts.to(Device::cpu());
-    Tensor dense_cpu = dense.to(Device::cpu());
+    // Pass 2: GPU prefix sum on row_counts → crow_indices
+    Tensor crow_indices = dispatchZeros({M + 1}, DType::Int32, dense.device());
+    {
+        auto* ps_pipeline = getPipeline("csr_prefix_sum", device_id);
+        size_t rc_size = row_counts.numel() * sizeof(int32_t);
+        size_t ci_size = crow_indices.numel() * sizeof(int32_t);
+        std::vector<std::pair<uint32_t, const void*>> ps_bindings = {
+            {0, row_counts.data_ptr()}, {1, crow_indices.data_ptr()},
+        };
+        std::vector<size_t> ps_sizes = {rc_size, ci_size};
+        VkDescriptorSet ps_ds = allocateAndWriteDescriptorSet(device_id, ps_pipeline, ps_bindings, ps_sizes);
 
-    auto* rc_ptr = row_counts_cpu.data<int32_t>();
+        struct { uint32_t n_rows; } ps_pc;
+        ps_pc.n_rows = static_cast<uint32_t>(M);
 
-    // Build crow_indices via prefix sum
-    std::vector<int64_t> crow(static_cast<size_t>(M) + 1, 0);
-    for (int64_t i = 0; i < M; ++i) {
-        crow[static_cast<size_t>(i) + 1] = crow[static_cast<size_t>(i)] + rc_ptr[i];
+        VkCommandBuffer ps_cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(ps_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ps_pipeline->pipeline());
+        vkCmdBindDescriptorSets(ps_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               ps_pipeline->layout(), 0, 1, &ps_ds, 0, nullptr);
+        vkCmdPushConstants(ps_cmd, ps_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(ps_pc), &ps_pc);
+        vkCmdDispatch(ps_cmd, 1, 1, 1);
+        insertComputeOnlyBarrier(ps_cmd);
+        endSingleTimeCommands(ps_cmd, device_id);
     }
-    int64_t nnz = crow[static_cast<size_t>(M)];
+    synchronize(device_id);
 
-    // Extract col_indices and values
-    std::vector<int64_t> col_indices_vec;
-    col_indices_vec.reserve(static_cast<size_t>(nnz));
+    // Read back only crow_indices[M] (total nnz) for output allocation
+    Tensor nnz_scalar = crow_indices.slice(0, M, M + 1).to(Device::cpu());
+    int64_t nnz = static_cast<int64_t>(nnz_scalar.data<int32_t>()[0]);
 
-    if (is_f64) {
-        auto* dense_ptr = dense_cpu.data<double>();
-        std::vector<double> values_vec;
-        values_vec.reserve(static_cast<size_t>(nnz));
-        for (int64_t row = 0; row < M; ++row) {
-            for (int64_t col = 0; col < K; ++col) {
-                double val = dense_ptr[row * K + col];
-                if (val != 0.0) {
-                    col_indices_vec.push_back(col);
-                    values_vec.push_back(val);
-                }
-            }
-        }
-
-        // Create output tensors on CPU then move to Vulkan device
-        Tensor crow_tensor({static_cast<int64_t>(crow.size())}, DType::Int64, Device::cpu());
-        std::memcpy(crow_tensor.data_ptr(), crow.data(), crow.size() * sizeof(int64_t));
-
-        Tensor col_tensor({nnz}, DType::Int64, Device::cpu());
-        if (nnz > 0) {
-            std::memcpy(col_tensor.data_ptr(), col_indices_vec.data(),
-                       static_cast<size_t>(nnz) * sizeof(int64_t));
-        }
-
-        Tensor val_tensor({nnz}, DType::Float64, Device::cpu());
-        if (nnz > 0) {
-            std::memcpy(val_tensor.data_ptr(), values_vec.data(),
-                       static_cast<size_t>(nnz) * sizeof(double));
-        }
-
-        return {crow_tensor.to(dense.device()), col_tensor.to(dense.device()),
-                val_tensor.to(dense.device())};
-    } else {
-        auto* dense_ptr = dense_cpu.data<float>();
-        std::vector<float> values_vec;
-        values_vec.reserve(static_cast<size_t>(nnz));
-        for (int64_t row = 0; row < M; ++row) {
-            for (int64_t col = 0; col < K; ++col) {
-                float val = dense_ptr[row * K + col];
-                if (val != 0.0f) {
-                    col_indices_vec.push_back(col);
-                    values_vec.push_back(val);
-                }
-            }
-        }
-
-        // Create output tensors on CPU then move to Vulkan device
-        Tensor crow_tensor({static_cast<int64_t>(crow.size())}, DType::Int64, Device::cpu());
-        std::memcpy(crow_tensor.data_ptr(), crow.data(), crow.size() * sizeof(int64_t));
-
-        Tensor col_tensor({nnz}, DType::Int64, Device::cpu());
-        if (nnz > 0) {
-            std::memcpy(col_tensor.data_ptr(), col_indices_vec.data(),
-                       static_cast<size_t>(nnz) * sizeof(int64_t));
-        }
-
-        Tensor val_tensor({nnz}, DType::Float32, Device::cpu());
-        if (nnz > 0) {
-            std::memcpy(val_tensor.data_ptr(), values_vec.data(),
-                       static_cast<size_t>(nnz) * sizeof(float));
-        }
-
-        return {crow_tensor.to(dense.device()), col_tensor.to(dense.device()),
-                val_tensor.to(dense.device())};
+    if (nnz == 0) {
+        // All zeros — return empty CSR
+        Tensor crow_out = crow_indices.to(DType::Int64);
+        Tensor col_out({0}, DType::Int64, dense.device());
+        Tensor val_out({0}, dtype, dense.device());
+        return {crow_out, col_out, val_out};
     }
+
+    // Pass 3: GPU extract — scatter col_indices and values using crow_indices offsets
+    Tensor col_indices_gpu({nnz}, DType::Int32, dense.device());
+    Tensor values_gpu({nnz}, dtype, dense.device());
+    {
+        std::string extract_shader = is_f64 ? "csr_extract_f64" : "csr_extract";
+        auto* ex_pipeline = getPipeline(extract_shader, device_id);
+
+        size_t ci_size = crow_indices.numel() * sizeof(int32_t);
+        size_t col_size = col_indices_gpu.numel() * sizeof(int32_t);
+        size_t val_size = values_gpu.numel() * elem_size;
+
+        std::vector<std::pair<uint32_t, const void*>> ex_bindings = {
+            {0, dense.data_ptr()},
+            {1, crow_indices.data_ptr()},
+            {2, col_indices_gpu.data_ptr()},
+            {3, values_gpu.data_ptr()},
+        };
+        std::vector<size_t> ex_sizes = {dense_size, ci_size, col_size, val_size};
+        VkDescriptorSet ex_ds = allocateAndWriteDescriptorSet(device_id, ex_pipeline, ex_bindings, ex_sizes);
+
+        struct { uint32_t n_rows; uint32_t n_cols; } ex_pc;
+        ex_pc.n_rows = static_cast<uint32_t>(M);
+        ex_pc.n_cols = static_cast<uint32_t>(K);
+
+        VkCommandBuffer ex_cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(ex_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ex_pipeline->pipeline());
+        vkCmdBindDescriptorSets(ex_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               ex_pipeline->layout(), 0, 1, &ex_ds, 0, nullptr);
+        vkCmdPushConstants(ex_cmd, ex_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(ex_pc), &ex_pc);
+        vkCmdDispatch(ex_cmd, static_cast<uint32_t>(M), 1, 1);
+        insertComputeOnlyBarrier(ex_cmd);
+        endSingleTimeCommands(ex_cmd, device_id);
+    }
+
+    // Convert Int32 outputs to Int64 for CSR format compatibility
+    Tensor crow_out = crow_indices.to(DType::Int64);
+    Tensor col_out = col_indices_gpu.to(DType::Int64);
+
+    return {crow_out, col_out, values_gpu};
 }
 
 } // namespace tenzor

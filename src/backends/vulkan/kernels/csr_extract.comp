@@ -1,0 +1,41 @@
+#version 450
+
+// CSR extract: Pass 3 of DenseToSparse
+// One workgroup per row. Each thread scans a stripe of columns.
+// For each nonzero element, atomically claim a write slot within the
+// row's range [crow_indices[row], crow_indices[row+1]) and write
+// the column index and value.
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly  buffer Dense       { float dense[];       };
+layout(set = 0, binding = 1) readonly  buffer CrowIndices  { int   crow_indices[]; };
+layout(set = 0, binding = 2) writeonly buffer ColIndices   { int   col_indices[];  };
+layout(set = 0, binding = 3) writeonly buffer Values       { float values[];       };
+
+layout(push_constant) uniform PushConstants {
+    uint n_rows;
+    uint n_cols;
+};
+
+// Per-row write offset, initialized to crow_indices[row]
+shared uint write_offset;
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (row >= n_rows) return;
+
+    if (tid == 0) {
+        write_offset = uint(crow_indices[row]);
+    }
+    barrier();
+
+    for (uint col = tid; col < n_cols; col += 256) {
+        float val = dense[row * n_cols + col];
+        if (val != 0.0) {
+            uint slot = atomicAdd(write_offset, 1);
+            col_indices[slot] = int(col);
+            values[slot] = val;
+        }
+    }
+}

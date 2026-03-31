@@ -7,24 +7,11 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "fp16_saturate.h"
+#include "../rocm_error.hpp"
 #include <stdexcept>
 
 namespace tenzor {
 namespace rocm {
-
-// ============================================================================
-// HIP Helper Functions
-// ============================================================================
-
-#define HIP_CHECK(call) \
-    do { \
-        hipError_t err = call; \
-        if (err != hipSuccess) { \
-            fprintf(stderr, "HIP error at %s:%d: %s\n", __FILE__, __LINE__, \
-                    hipGetErrorString(err)); \
-            throw std::runtime_error(std::string("HIP error: ") + hipGetErrorString(err)); \
-        } \
-    } while(0)
 
 constexpr int BLOCK_SIZE = 256;
 
@@ -352,14 +339,14 @@ auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias
 
         // output (batch x out_features) = input (batch x in_features) @ weight.T (in_features x out_features)
         // rocBLAS uses column-major, so we compute: output.T = weight @ input.T
-        rocblas_sgemm(handle,
+        ROCBLAS_CHECK(rocblas_sgemm(handle,
             rocblas_operation_transpose, rocblas_operation_none,
             out_features, batch_size, in_features,
             &alpha,
             weight.data<float>(), in_features,
             input.data<float>(), in_features,
             &beta,
-            output.data<float>(), out_features);
+            output.data<float>(), out_features));
 
         // Add bias if present
         if (bias != nullptr) {
@@ -373,14 +360,14 @@ auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias
         const double alpha = 1.0;
         const double beta = 0.0;
 
-        rocblas_dgemm(handle,
+        ROCBLAS_CHECK(rocblas_dgemm(handle,
             rocblas_operation_transpose, rocblas_operation_none,
             out_features, batch_size, in_features,
             &alpha,
             weight.data<double>(), in_features,
             input.data<double>(), in_features,
             &beta,
-            output.data<double>(), out_features);
+            output.data<double>(), out_features));
 
         // Add bias if present
         if (bias != nullptr) {
@@ -466,24 +453,24 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input, cons
         const float beta = 0.0f;
 
         // grad_input = grad_output @ weight
-        rocblas_sgemm(handle,
+        ROCBLAS_CHECK(rocblas_sgemm(handle,
             rocblas_operation_none, rocblas_operation_none,
             in_features, batch_size, out_features,
             &alpha,
             weight.data<float>(), in_features,
             grad_output.data<float>(), out_features,
             &beta,
-            grad_input.data<float>(), in_features);
+            grad_input.data<float>(), in_features));
 
         // grad_weight = grad_output.T @ input
-        rocblas_sgemm(handle,
+        ROCBLAS_CHECK(rocblas_sgemm(handle,
             rocblas_operation_none, rocblas_operation_transpose,
             in_features, out_features, batch_size,
             &alpha,
             input.data<float>(), in_features,
             grad_output.data<float>(), out_features,
             &beta,
-            grad_weight.data<float>(), in_features);
+            grad_weight.data<float>(), in_features));
 
         // grad_bias = sum over batch dimension
         HIP_CHECK(hipMemsetAsync(grad_bias.data<float>(), 0, out_features * sizeof(float), stream));
@@ -498,23 +485,23 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input, cons
         const double alpha = 1.0;
         const double beta = 0.0;
 
-        rocblas_dgemm(handle,
+        ROCBLAS_CHECK(rocblas_dgemm(handle,
             rocblas_operation_none, rocblas_operation_none,
             in_features, batch_size, out_features,
             &alpha,
             weight.data<double>(), in_features,
             grad_output.data<double>(), out_features,
             &beta,
-            grad_input.data<double>(), in_features);
+            grad_input.data<double>(), in_features));
 
-        rocblas_dgemm(handle,
+        ROCBLAS_CHECK(rocblas_dgemm(handle,
             rocblas_operation_none, rocblas_operation_transpose,
             in_features, out_features, batch_size,
             &alpha,
             input.data<double>(), in_features,
             grad_output.data<double>(), out_features,
             &beta,
-            grad_weight.data<double>(), in_features);
+            grad_weight.data<double>(), in_features));
 
         HIP_CHECK(hipMemsetAsync(grad_bias.data<double>(), 0, out_features * sizeof(double), stream));
         int num_blocks = get_num_blocks(out_features);
@@ -528,24 +515,24 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input, cons
         const rocblas_half beta = rocblas_half(0.0f);
 
         // grad_input = grad_output @ weight
-        rocblas_hgemm(handle,
+        ROCBLAS_CHECK(rocblas_hgemm(handle,
             rocblas_operation_none, rocblas_operation_none,
             in_features, batch_size, out_features,
             &alpha,
             reinterpret_cast<const rocblas_half*>(weight.data<Float16>()), in_features,
             reinterpret_cast<const rocblas_half*>(grad_output.data<Float16>()), out_features,
             &beta,
-            reinterpret_cast<rocblas_half*>(grad_input.data<Float16>()), in_features);
+            reinterpret_cast<rocblas_half*>(grad_input.data<Float16>()), in_features));
 
         // grad_weight = grad_output.T @ input
-        rocblas_hgemm(handle,
+        ROCBLAS_CHECK(rocblas_hgemm(handle,
             rocblas_operation_none, rocblas_operation_transpose,
             in_features, out_features, batch_size,
             &alpha,
             reinterpret_cast<const rocblas_half*>(input.data<Float16>()), in_features,
             reinterpret_cast<const rocblas_half*>(grad_output.data<Float16>()), out_features,
             &beta,
-            reinterpret_cast<rocblas_half*>(grad_weight.data<Float16>()), in_features);
+            reinterpret_cast<rocblas_half*>(grad_weight.data<Float16>()), in_features));
 
         // grad_bias = sum over batch dimension (accumulate in float, then convert)
         Tensor grad_bias_f32({out_features}, DType::Float32, input.device());

@@ -340,11 +340,14 @@ auto fused_batchnorm_relu_cuda(
         spatial_size *= input.shape()[i];
     }
 
-    Tensor output = create_cuda_zeros(to_vector(input.shape()), input.dtype(), input.device());
+    int32_t device_id = input.device().index;
+    auto stream_guard = cuda::CUDAStreamPool::instance().acquire_guard(device_id);
+    cudaStream_t stream = stream_guard.get();
+
+    Tensor output = create_cuda_zeros(to_vector(input.shape()), input.dtype(), input.device(), stream);
 
     int64_t total_elements = input.numel();
     int min_grid_size, block_size;
-    cudaStream_t stream = cudaStreamPerThread;
 
     if (input.dtype() == DType::Float32) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
@@ -546,11 +549,14 @@ __global__ void fused_add_relu_kernel(
 }
 
 auto fused_add_relu_cuda(const Tensor& a, const Tensor& b) -> Tensor {
-    Tensor result = create_cuda_zeros(to_vector(a.shape()), a.dtype(), a.device());
+    int32_t device_id = a.device().index;
+    auto stream_guard = cuda::CUDAStreamPool::instance().acquire_guard(device_id);
+    cudaStream_t stream = stream_guard.get();
+
+    Tensor result = create_cuda_zeros(to_vector(a.shape()), a.dtype(), a.device(), stream);
 
     int64_t n = a.numel();
     int min_grid_size, block_size;
-    cudaStream_t stream = cudaStreamPerThread;
 
     if (a.dtype() == DType::Float32) {
         cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,

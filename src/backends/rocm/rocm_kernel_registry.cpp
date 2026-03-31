@@ -21,6 +21,7 @@
 #include "tenzor/sparse/sparse_tensor.hpp"
 #include "tenzor/sparse/sparse_ops.hpp"
 #include <hip/hip_runtime.h>
+#include "rocm_error.hpp"
 #include <iostream>
 #include <cstdlib>
 #include <charconv>
@@ -1047,37 +1048,37 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // In-place activation operations
     table.register_inplace_kernel(OpId::ReLUInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
         auto result = rocm::relu_kernel(target, get_hip_stream(attrs));
-        hipMemcpyAsync(target.data_ptr(), result.data_ptr(), target.numel() * dtype_size(target.dtype()),
-                       hipMemcpyDeviceToDevice, get_hip_stream(attrs));
+        HIP_CHECK(hipMemcpyAsync(target.data_ptr(), result.data_ptr(), target.numel() * dtype_size(target.dtype()),
+                       hipMemcpyDeviceToDevice, get_hip_stream(attrs)));
         return target;
     });
 
     table.register_inplace_kernel(OpId::SigmoidInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
         auto result = rocm::sigmoid_kernel(target, get_hip_stream(attrs));
-        hipMemcpyAsync(target.data_ptr(), result.data_ptr(), target.numel() * dtype_size(target.dtype()),
-                       hipMemcpyDeviceToDevice, get_hip_stream(attrs));
+        HIP_CHECK(hipMemcpyAsync(target.data_ptr(), result.data_ptr(), target.numel() * dtype_size(target.dtype()),
+                       hipMemcpyDeviceToDevice, get_hip_stream(attrs)));
         return target;
     });
 
     table.register_inplace_kernel(OpId::TanhInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
         auto result = rocm::tanh_kernel(target, get_hip_stream(attrs));
-        hipMemcpyAsync(target.data_ptr(), result.data_ptr(), target.numel() * dtype_size(target.dtype()),
-                       hipMemcpyDeviceToDevice, get_hip_stream(attrs));
+        HIP_CHECK(hipMemcpyAsync(target.data_ptr(), result.data_ptr(), target.numel() * dtype_size(target.dtype()),
+                       hipMemcpyDeviceToDevice, get_hip_stream(attrs)));
         return target;
     });
 
     table.register_inplace_kernel(OpId::LeakyReLUInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
         float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
         auto result = rocm::leaky_relu_kernel(target, alpha, get_hip_stream(attrs));
-        hipMemcpyAsync(target.data_ptr(), result.data_ptr(), target.numel() * dtype_size(target.dtype()),
-                       hipMemcpyDeviceToDevice, get_hip_stream(attrs));
+        HIP_CHECK(hipMemcpyAsync(target.data_ptr(), result.data_ptr(), target.numel() * dtype_size(target.dtype()),
+                       hipMemcpyDeviceToDevice, get_hip_stream(attrs)));
         return target;
     });
 
     table.register_inplace_kernel(OpId::GeluInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
         auto result = rocm::gelu_kernel(target, get_hip_stream(attrs));
-        hipMemcpyAsync(target.data_ptr(), result.data_ptr(), target.numel() * dtype_size(target.dtype()),
-                       hipMemcpyDeviceToDevice, get_hip_stream(attrs));
+        HIP_CHECK(hipMemcpyAsync(target.data_ptr(), result.data_ptr(), target.numel() * dtype_size(target.dtype()),
+                       hipMemcpyDeviceToDevice, get_hip_stream(attrs)));
         return target;
     });
 

@@ -5,24 +5,12 @@
 #include <cstdio>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "../rocm_error.hpp"
 #include <stdexcept>
 #include <string>
 
 namespace tenzor {
 namespace rocm {
-
-// ============================================================================
-// HIP Helper Functions
-// ============================================================================
-
-#define HIP_CHECK(call) \
-    do { \
-        hipError_t err = call; \
-        if (err != hipSuccess) { \
-            throw std::runtime_error(std::string("HIP error at ") + __FILE__ + ":" + \
-                std::to_string(__LINE__) + ": " + hipGetErrorString(err)); \
-        } \
-    } while(0)
 
 #define HIP_GRID_STRIDE_LOOP(i, n) \
     for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; \
@@ -667,22 +655,22 @@ auto lstm_forward_kernel(
             // Compute input contribution: gates = x_t @ W_ih^T
             // x_t: (batch, input_size), W_ih: (4*hidden, input_size)
             // Result: (batch, 4*hidden)
-            rocblas_sgemm(handle, rocblas_operation_transpose, rocblas_operation_none,
+            ROCBLAS_CHECK(rocblas_sgemm(handle, rocblas_operation_transpose, rocblas_operation_none,
                          4 * hidden, batch, input_size,
                          &alpha,
                          W_ih_ptr, input_size,
                          x_t, input_size,
                          &beta_zero,
-                         gates_ptr, 4 * hidden);
+                         gates_ptr, 4 * hidden));
 
             // Add hidden contribution: gates += h_t @ W_hh^T
-            rocblas_sgemm(handle, rocblas_operation_transpose, rocblas_operation_none,
+            ROCBLAS_CHECK(rocblas_sgemm(handle, rocblas_operation_transpose, rocblas_operation_none,
                          4 * hidden, batch, hidden,
                          &alpha,
                          W_hh_ptr, hidden,
                          h_t_ptr, hidden,
                          &beta_one,
-                         gates_ptr, 4 * hidden);
+                         gates_ptr, 4 * hidden));
 
             // Add bias if present
             if (bias_ptr != nullptr) {
@@ -736,22 +724,22 @@ auto lstm_forward_kernel(
             const double* x_t = input_ptr + t * batch * input_size;
 
             // Compute input contribution: gates = x_t @ W_ih^T
-            rocblas_dgemm(handle, rocblas_operation_transpose, rocblas_operation_none,
+            ROCBLAS_CHECK(rocblas_dgemm(handle, rocblas_operation_transpose, rocblas_operation_none,
                          4 * hidden, batch, input_size,
                          &alpha,
                          W_ih_ptr, input_size,
                          x_t, input_size,
                          &beta_zero,
-                         gates_ptr, 4 * hidden);
+                         gates_ptr, 4 * hidden));
 
             // Add hidden contribution: gates += h_t @ W_hh^T
-            rocblas_dgemm(handle, rocblas_operation_transpose, rocblas_operation_none,
+            ROCBLAS_CHECK(rocblas_dgemm(handle, rocblas_operation_transpose, rocblas_operation_none,
                          4 * hidden, batch, hidden,
                          &alpha,
                          W_hh_ptr, hidden,
                          h_t_ptr, hidden,
                          &beta_one,
-                         gates_ptr, 4 * hidden);
+                         gates_ptr, 4 * hidden));
 
             // Add bias if present
             if (bias_ptr != nullptr) {

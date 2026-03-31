@@ -1855,6 +1855,8 @@ auto unique_kernel(const Tensor& input, bool sorted, bool return_inverse, bool r
     // Fall through to host-side unique for unsorted or unsupported dtypes
 #endif
 
+    // TODO: implement device-side unique (sort + adjacent-difference scan + compaction)
+    //       when oneDPL is available to avoid this host roundtrip
     // Host-side unique fallback
     auto host_unique_impl = [&](auto dummy) {
         using T = decltype(dummy);

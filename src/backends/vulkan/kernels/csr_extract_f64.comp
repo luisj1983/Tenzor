@@ -1,0 +1,37 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// CSR extract: Pass 3 of DenseToSparse (Float64)
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly  buffer Dense       { float64_t dense[];    };
+layout(set = 0, binding = 1) readonly  buffer CrowIndices  { int   crow_indices[]; };
+layout(set = 0, binding = 2) writeonly buffer ColIndices   { int   col_indices[];  };
+layout(set = 0, binding = 3) writeonly buffer Values       { float64_t values[];   };
+
+layout(push_constant) uniform PushConstants {
+    uint n_rows;
+    uint n_cols;
+};
+
+shared uint write_offset;
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (row >= n_rows) return;
+
+    if (tid == 0) {
+        write_offset = uint(crow_indices[row]);
+    }
+    barrier();
+
+    for (uint col = tid; col < n_cols; col += 256) {
+        float64_t val = dense[row * n_cols + col];
+        if (val != 0.0lf) {
+            uint slot = atomicAdd(write_offset, 1);
+            col_indices[slot] = int(col);
+            values[slot] = val;
+        }
+    }
+}

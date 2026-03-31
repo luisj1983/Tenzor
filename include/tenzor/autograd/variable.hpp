@@ -55,7 +55,7 @@ struct VariableImpl {
           grad_fn_(other.grad_fn_),
           requires_grad_(other.requires_grad_.load(std::memory_order_relaxed)),
           retain_grad_(other.retain_grad_.load(std::memory_order_relaxed)),
-          hooks_(other.hooks_),
+          hooks_([&]() { std::shared_lock lock(other.hooks_mutex_); return other.hooks_; }()),
           next_hook_id_(other.next_hook_id_.load(std::memory_order_relaxed)),
           grad_mutex_(other.grad_mutex_),  // Share mutex — copies share grad_ storage
           thread_safe_(other.thread_safe_.load(std::memory_order_relaxed)) {}
@@ -66,7 +66,7 @@ struct VariableImpl {
           grad_fn_(std::move(other.grad_fn_)),
           requires_grad_(other.requires_grad_.load(std::memory_order_relaxed)),
           retain_grad_(other.retain_grad_.load(std::memory_order_relaxed)),
-          hooks_(std::move(other.hooks_)),
+          hooks_([&]() { std::unique_lock lock(other.hooks_mutex_); return std::move(other.hooks_); }()),
           next_hook_id_(other.next_hook_id_.load(std::memory_order_relaxed)),
           grad_mutex_(std::move(other.grad_mutex_)),
           thread_safe_(other.thread_safe_.load(std::memory_order_relaxed)) {}
@@ -85,7 +85,10 @@ struct VariableImpl {
             grad_fn_ = other.grad_fn_;
             requires_grad_.store(other.requires_grad_.load(std::memory_order_relaxed), std::memory_order_relaxed);
             retain_grad_.store(other.retain_grad_.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            hooks_ = other.hooks_;
+            {
+                std::shared_lock hlock(other.hooks_mutex_);
+                hooks_ = other.hooks_;
+            }
             next_hook_id_.store(other.next_hook_id_.load(std::memory_order_relaxed), std::memory_order_relaxed);
             grad_mutex_ = other.grad_mutex_;
             thread_safe_.store(other.thread_safe_.load(std::memory_order_relaxed), std::memory_order_relaxed);
@@ -105,7 +108,10 @@ struct VariableImpl {
             grad_fn_ = std::move(other.grad_fn_);
             requires_grad_.store(other.requires_grad_.load(std::memory_order_relaxed), std::memory_order_relaxed);
             retain_grad_.store(other.retain_grad_.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            hooks_ = std::move(other.hooks_);
+            {
+                std::unique_lock hlock(hooks_mutex_);
+                hooks_ = std::move(other.hooks_);
+            }
             next_hook_id_.store(other.next_hook_id_.load(std::memory_order_relaxed), std::memory_order_relaxed);
             grad_mutex_ = std::move(other.grad_mutex_);
             thread_safe_.store(other.thread_safe_.load(std::memory_order_relaxed), std::memory_order_relaxed);
@@ -132,7 +138,7 @@ struct VariableImpl {
     /// Whether to retain gradient for non-leaf variables (atomic for thread-safe concurrent access)
     std::atomic<bool> retain_grad_{false};
 
-    /// Backward hooks keyed by ID, ordered by registration order
+    /// Backward hooks keyed by ID (monotonically increasing, so insertion-order coincides)
     std::map<size_t, std::function<Tensor(const Tensor&)>> hooks_;
 
     /// Mutex protecting hooks_ for concurrent register_hook + backward

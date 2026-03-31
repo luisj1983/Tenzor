@@ -798,76 +798,50 @@ auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
     const int64_t numel = output.numel();
 
     if (dtype == DType::Float32) {
-        std::vector<float> host_data(numel, 1.0f);
-        float* device_ptr = get_data_ptr<float>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(float)).wait();
+        queue.fill(get_data_ptr<float>(output), 1.0f, numel).wait();
     }
     else if (dtype == DType::Float64) {
-        std::vector<double> host_data(numel, 1.0);
-        double* device_ptr = get_data_ptr<double>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(double)).wait();
+        queue.fill(get_data_ptr<double>(output), 1.0, numel).wait();
     }
     else if (dtype == DType::Float16) {
-        // sycl::half doesn't work well with std::vector, so fill via kernel
         sycl::half* device_ptr = get_data_ptr<sycl::half>(output);
         queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
             device_ptr[i] = sycl::half(1.0f);
-        });
+        }).wait();
     }
     else if (dtype == DType::BFloat16) {
-        // BFloat16: convert 1.0f to bf16 representation, fill via kernel
         const uint16_t one_bf16 = f32_to_bf16(1.0f);
         uint16_t* device_ptr = get_data_ptr<uint16_t>(output);
         queue.parallel_for<OnesKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> i) {
             device_ptr[i] = one_bf16;
-        });
+        }).wait();
     }
     else if (dtype == DType::Int32) {
-        std::vector<int32_t> host_data(numel, 1);
-        int32_t* device_ptr = get_data_ptr<int32_t>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(int32_t)).wait();
+        queue.fill(get_data_ptr<int32_t>(output), static_cast<int32_t>(1), numel).wait();
     }
     else if (dtype == DType::Int64) {
-        std::vector<int64_t> host_data(numel, 1);
-        int64_t* device_ptr = get_data_ptr<int64_t>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(int64_t)).wait();
+        queue.fill(get_data_ptr<int64_t>(output), static_cast<int64_t>(1), numel).wait();
     }
     else if (dtype == DType::Int8) {
-        std::vector<int8_t> host_data(numel, 1);
-        int8_t* device_ptr = get_data_ptr<int8_t>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(int8_t)).wait();
+        queue.fill(get_data_ptr<int8_t>(output), static_cast<int8_t>(1), numel).wait();
     }
     else if (dtype == DType::Int16) {
-        std::vector<int16_t> host_data(numel, 1);
-        int16_t* device_ptr = get_data_ptr<int16_t>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(int16_t)).wait();
+        queue.fill(get_data_ptr<int16_t>(output), static_cast<int16_t>(1), numel).wait();
     }
     else if (dtype == DType::UInt8) {
-        std::vector<uint8_t> host_data(numel, 1);
-        uint8_t* device_ptr = get_data_ptr<uint8_t>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint8_t)).wait();
+        queue.fill(get_data_ptr<uint8_t>(output), static_cast<uint8_t>(1), numel).wait();
     }
     else if (dtype == DType::UInt16) {
-        std::vector<uint16_t> host_data(numel, 1);
-        uint16_t* device_ptr = get_data_ptr<uint16_t>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint16_t)).wait();
+        queue.fill(get_data_ptr<uint16_t>(output), static_cast<uint16_t>(1), numel).wait();
     }
     else if (dtype == DType::UInt32) {
-        std::vector<uint32_t> host_data(numel, 1);
-        uint32_t* device_ptr = get_data_ptr<uint32_t>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint32_t)).wait();
+        queue.fill(get_data_ptr<uint32_t>(output), static_cast<uint32_t>(1), numel).wait();
     }
     else if (dtype == DType::UInt64) {
-        std::vector<uint64_t> host_data(numel, 1);
-        uint64_t* device_ptr = get_data_ptr<uint64_t>(output);
-        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint64_t)).wait();
+        queue.fill(get_data_ptr<uint64_t>(output), static_cast<uint64_t>(1), numel).wait();
     }
     else if (dtype == DType::Bool) {
-        std::vector<bool> host_data(numel, true);
-        bool* device_ptr = get_data_ptr<bool>(output);
-        // std::vector<bool> is special, need to copy element by element
-        std::vector<uint8_t> temp_data(numel, 1);
-        queue.memcpy(device_ptr, temp_data.data(), numel * sizeof(bool)).wait();
+        queue.fill(get_data_ptr<uint8_t>(output), static_cast<uint8_t>(1), numel).wait();
     }
     else {
         throw std::runtime_error("Unsupported dtype for ones");
