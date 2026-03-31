@@ -331,25 +331,32 @@ namespace rocm {
     auto masked_select_hip(const Tensor& input, const Tensor& mask, hipStream_t stream) -> Tensor;
     auto searchsorted_hip(const Tensor& sorted_sequence, const Tensor& values, bool right, hipStream_t stream) -> Tensor;
 
-    // LSTM/GRU operations
-    auto lstm_cell_forward_kernel(const Tensor& input, const Tensor& hx, const Tensor& cx,
-                                  const Tensor& weight_ih, const Tensor& weight_hh,
-                                  const Tensor& bias_ih, const Tensor& bias_hh,
-                                  hipStream_t stream) -> std::tuple<Tensor, Tensor>;
-    auto lstm_cell_backward_kernel(const Tensor& grad_hy, const Tensor& grad_cy,
-                                   const Tensor& input, const Tensor& hx, const Tensor& cx,
-                                   const Tensor& hy, const Tensor& cy,
-                                   const Tensor& weight_ih, const Tensor& weight_hh,
-                                   hipStream_t stream)
-        -> std::tuple<Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor>;
-    auto gru_cell_forward_kernel(const Tensor& input, const Tensor& hx,
-                                 const Tensor& weight_ih, const Tensor& weight_hh,
-                                 const Tensor& bias_ih, const Tensor& bias_hh,
+    // LSTM/GRU cell operations (operate on pre-computed gates, matching CUDA pattern)
+    auto lstm_cell_forward_kernel(const Tensor& gates, const Tensor& c_prev,
+                                  int64_t batch_size, int64_t hidden_size,
+                                  hipStream_t stream) -> std::pair<Tensor, Tensor>;
+    auto lstm_cell_backward_kernel(const Tensor& grad_h, const Tensor& grad_c,
+                                   const Tensor& gates, const Tensor& c_prev,
+                                   const Tensor& c_out,
+                                   int64_t batch_size, int64_t hidden_size,
+                                   hipStream_t stream) -> std::pair<Tensor, Tensor>;
+    struct GRUBackwardOutputs {
+        Tensor grad_reset;
+        Tensor grad_update;
+        Tensor grad_new_input;
+        Tensor grad_new_hidden;
+        Tensor grad_h_prev;
+    };
+    auto gru_cell_forward_kernel(const Tensor& reset_gates, const Tensor& update_gates,
+                                 const Tensor& new_gates_input, const Tensor& new_gates_hidden,
+                                 const Tensor& h_prev,
+                                 int64_t batch_size, int64_t hidden_size,
                                  hipStream_t stream) -> Tensor;
-    auto gru_cell_backward_kernel(const Tensor& grad_hy, const Tensor& input, const Tensor& hx,
-                                  const Tensor& hy, const Tensor& weight_ih, const Tensor& weight_hh,
-                                  hipStream_t stream)
-        -> std::tuple<Tensor, Tensor, Tensor, Tensor, Tensor, Tensor>;
+    auto gru_cell_backward_kernel(const Tensor& grad_h, const Tensor& reset_gates,
+                                  const Tensor& update_gates, const Tensor& new_gates_input,
+                                  const Tensor& new_gates_hidden, const Tensor& h_prev,
+                                  int64_t batch_size, int64_t hidden_size,
+                                  hipStream_t stream) -> GRUBackwardOutputs;
 
     // Full sequence LSTM/GRU operations
     auto lstm_forward_kernel(const Tensor& input, const Tensor& W_ih, const Tensor& W_hh,
@@ -1653,32 +1660,41 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // RNN Operations (LSTM/GRU)
     // ========================================================================
     table.register_kernel(OpId::LSTMCellForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // inputs: input, hx, cx, weight_ih, weight_hh, bias_ih, bias_hh
-        auto [hy, cy] = rocm::lstm_cell_forward_kernel(inputs[0], inputs[1], inputs[2],
-            inputs[3], inputs[4], inputs[5], inputs[6], get_hip_stream(attrs));
-        return std::vector<Tensor>{hy, cy};
+        // inputs: [gates, c_prev]
+        int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 0);
+        int64_t hidden_size = attrs.get_int(AttrKey::HiddenSize, 0);
+        auto [h_out, c_out] = rocm::lstm_cell_forward_kernel(inputs[0], inputs[1], batch_size, hidden_size, get_hip_stream(attrs));
+        return std::vector<Tensor>{h_out, c_out};
     });
 
     table.register_kernel(OpId::LSTMCellBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // inputs: grad_hy, grad_cy, input, hx, cx, hy, cy, weight_ih, weight_hh
-        auto result = rocm::lstm_cell_backward_kernel(inputs[0], inputs[1], inputs[2],
-            inputs[3], inputs[4], inputs[5], inputs[6], inputs[7], inputs[8], get_hip_stream(attrs));
-        return std::vector<Tensor>{std::get<0>(result), std::get<1>(result), std::get<2>(result),
-            std::get<3>(result), std::get<4>(result), std::get<5>(result), std::get<6>(result)};
+        // inputs: [grad_h, grad_c, gates, c_prev, c_out]
+        int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 0);
+        int64_t hidden_size = attrs.get_int(AttrKey::HiddenSize, 0);
+        auto [grad_gates, grad_c_prev] = rocm::lstm_cell_backward_kernel(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+            batch_size, hidden_size, get_hip_stream(attrs));
+        return std::vector<Tensor>{grad_gates, grad_c_prev};
     });
 
     table.register_kernel(OpId::GRUCellForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // inputs: input, hx, weight_ih, weight_hh, bias_ih, bias_hh
-        return std::vector<Tensor>{rocm::gru_cell_forward_kernel(inputs[0], inputs[1],
-            inputs[2], inputs[3], inputs[4], inputs[5], get_hip_stream(attrs))};
+        // inputs: [reset_gates, update_gates, new_gates_input, new_gates_hidden, h_prev]
+        int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 0);
+        int64_t hidden_size = attrs.get_int(AttrKey::HiddenSize, 0);
+        auto h_out = rocm::gru_cell_forward_kernel(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+            batch_size, hidden_size, get_hip_stream(attrs));
+        return std::vector<Tensor>{h_out};
     });
 
     table.register_kernel(OpId::GRUCellBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // inputs: grad_hy, input, hx, hy, weight_ih, weight_hh
-        auto result = rocm::gru_cell_backward_kernel(inputs[0], inputs[1], inputs[2],
-            inputs[3], inputs[4], inputs[5], get_hip_stream(attrs));
-        return std::vector<Tensor>{std::get<0>(result), std::get<1>(result), std::get<2>(result),
-            std::get<3>(result), std::get<4>(result), std::get<5>(result)};
+        // inputs: [grad_h, reset_gates, update_gates, new_gates_input, new_gates_hidden, h_prev]
+        int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 0);
+        int64_t hidden_size = attrs.get_int(AttrKey::HiddenSize, 0);
+        auto result = rocm::gru_cell_backward_kernel(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5],
+            batch_size, hidden_size, get_hip_stream(attrs));
+        return std::vector<Tensor>{result.grad_reset, result.grad_update, result.grad_new_input, result.grad_new_hidden, result.grad_h_prev};
     });
 
     // Full-sequence RNN operations

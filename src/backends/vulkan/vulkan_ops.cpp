@@ -19412,7 +19412,7 @@ auto VulkanBackend::dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Ten
 }
 
 // ============================================================================
-// Cholesky Decomposition (GPU for ≤256×256, CPU fallback for larger)
+// Cholesky Decomposition (single-workgroup for small, tiled GPU for large)
 // ============================================================================
 
 auto VulkanBackend::dispatchLinalgCholesky(const Tensor& input, bool upper) -> Tensor {
@@ -19482,7 +19482,7 @@ auto VulkanBackend::dispatchLinalgCholesky(const Tensor& input, bool upper) -> T
 }
 
 // ============================================================================
-// QR Decomposition (GPU for ≤4096×4096, CPU fallback for larger)
+// QR Decomposition (single-workgroup for small, tiled GPU for large)
 // ============================================================================
 
 auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor> {
@@ -19611,7 +19611,7 @@ auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor>
 }
 
 // ============================================================================
-// SVD (GPU for ≤256×256, CPU fallback for larger)
+// SVD (single-workgroup for small, tiled GPU for large)
 // ============================================================================
 
 auto VulkanBackend::dispatchLinalgSVD(const Tensor& input, bool full_matrices) -> std::vector<Tensor> {

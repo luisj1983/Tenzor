@@ -21,6 +21,7 @@
 #include <memory>
 #include "fp16_saturate.h"
 #include "../rocm_error.hpp"
+#include "tenzor/utils/logging.hpp"
 
 namespace tenzor {
 namespace rocm {
@@ -1178,7 +1179,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
         // Log warning once (static to avoid spam)
         static bool warning_printed = false;
         if (!warning_printed) {
-            fprintf(stderr, "Warning: rocBLAS matmul failed (%s), using native HIP fallback\n", e.what());
+            TENZOR_LOG_WARNING(std::format("rocBLAS matmul failed ({}), using native HIP fallback", e.what()));
             warning_printed = true;
         }
 

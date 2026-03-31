@@ -625,7 +625,7 @@ public:
     // Radix sort for large arrays (> 65K elements)
     auto dispatchRadixSort(const Tensor& input, bool descending) -> std::pair<Tensor, Tensor>;
 
-    // Linear algebra operations (native Vulkan shaders for small matrices, CPU fallback for large)
+    // Linear algebra operations (single-workgroup shaders for small matrices, tiled GPU for large)
     auto dispatchLinalgDet(const Tensor& input) -> Tensor;
     auto dispatchLinalgInv(const Tensor& input) -> Tensor;
     auto dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Tensor;

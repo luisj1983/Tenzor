@@ -191,7 +191,12 @@ add_custom_command(
         -DUSE_PROF_API=1
         -D__HIP_PLATFORM_AMD__=1
         -Dtenzor_backend_rocm_EXPORTS
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/rocm_backend.cpp
+    DEPENDS
+        ${CMAKE_CURRENT_SOURCE_DIR}/rocm_backend.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/rocm_backend.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/rocm_error.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/hip_buffer.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/miopen_guards.hpp
     COMMENT "Compiling rocm_backend.cpp (pure C++, no HIP flags)"
     VERBATIM
 )
@@ -226,7 +231,11 @@ add_custom_command(
         -D__HIP_PLATFORM_AMD__=1
         -Dtenzor_backend_rocm_EXPORTS
         ${ROCM_REGISTRY_EXTRA_DEFS}
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/rocm_kernel_registry.cpp
+    DEPENDS
+        ${CMAKE_CURRENT_SOURCE_DIR}/rocm_kernel_registry.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/rocm_backend.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/rocm_error.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/hip_buffer.hpp
     COMMENT "Compiling rocm_kernel_registry.cpp (pure C++, no HIP flags)"
     VERBATIM
 )

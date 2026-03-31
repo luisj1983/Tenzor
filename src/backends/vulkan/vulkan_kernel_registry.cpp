@@ -1762,8 +1762,8 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return get_vulkan_backend()->dispatchPolar(inputs[0], inputs[1]);
     });
 
-    // Linear algebra ops — native Vulkan shaders for small matrices (<= 32x32),
-    // automatic CPU fallback for larger matrices (inside dispatch methods)
+    // Linear algebra ops — single-workgroup Vulkan shaders for small matrices,
+    // tiled GPU algorithms for larger matrices (inside dispatch methods)
     table.register_kernel(OpId::LinalgDet, [](std::span<const Tensor> inputs, const OpAttributes&)
         -> std::vector<Tensor> {
         return {get_vulkan_backend()->dispatchLinalgDet(inputs[0])};
@@ -1776,29 +1776,29 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         -> std::vector<Tensor> {
         return {get_vulkan_backend()->dispatchLinalgSolve(inputs[0], inputs[1])};
     });
-    // Cholesky — native GPU shader for ≤32×32, CPU fallback for larger
+    // Cholesky — single-workgroup for small, tiled GPU for larger
     table.register_kernel(OpId::LinalgCholesky, [](std::span<const Tensor> inputs, const OpAttributes& attrs)
         -> std::vector<Tensor> {
         bool upper = attrs.get_bool(AttrKey::Upper, false);
         return {get_vulkan_backend()->dispatchLinalgCholesky(inputs[0], upper)};
     });
-    // QR — native GPU shader for ≤32×32, CPU fallback for larger
+    // QR — single-workgroup for small, tiled GPU for larger
     table.register_kernel(OpId::LinalgQR, [](std::span<const Tensor> inputs, const OpAttributes&)
         -> std::vector<Tensor> {
         return get_vulkan_backend()->dispatchLinalgQR(inputs[0]);
     });
-    // SVD — native GPU Jacobi for ≤32×32, CPU fallback for larger
+    // SVD — single-workgroup Jacobi for small, tiled GPU for larger
     table.register_kernel(OpId::LinalgSVD, [](std::span<const Tensor> inputs, const OpAttributes& attrs)
         -> std::vector<Tensor> {
         bool full = attrs.get_bool(AttrKey::FullMatrices, true);
         return get_vulkan_backend()->dispatchLinalgSVD(inputs[0], full);
     });
-    // Eigh — native GPU Jacobi for ≤32×32, CPU fallback for larger
+    // Eigh — single-workgroup Jacobi for small, tiled GPU for larger
     table.register_kernel(OpId::LinalgEigh, [](std::span<const Tensor> inputs, const OpAttributes&)
         -> std::vector<Tensor> {
         return get_vulkan_backend()->dispatchLinalgEigh(inputs[0]);
     });
-    // Eig — general eigenvalue decomposition (GPU for ≤32×32, CPU fallback for larger)
+    // Eig — general eigenvalue decomposition (single-workgroup for small, tiled GPU for larger)
     table.register_kernel(OpId::LinalgEig, [](std::span<const Tensor> inputs, const OpAttributes&)
         -> std::vector<Tensor> {
         return get_vulkan_backend()->dispatchLinalgEig(inputs[0]);

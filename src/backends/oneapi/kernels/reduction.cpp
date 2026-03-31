@@ -1058,7 +1058,7 @@ static void sycl_arg_reduce_full(const ReadT* in_ptr, int64_t* out_ptr,
     int64_t* partial_idxs = sycl::malloc_device<int64_t>(num_wgs, queue);
 
     // Phase 1: Each work-group reduces its chunk
-    queue.submit([&](sycl::handler& cgh) {
+    auto phase1_event = queue.submit([&](sycl::handler& cgh) {
         sycl::local_accessor<T, 1> local_vals(sycl::range<1>(WG_SIZE), cgh);
         sycl::local_accessor<int64_t, 1> local_idxs(sycl::range<1>(WG_SIZE), cgh);
 
@@ -1129,6 +1129,7 @@ static void sycl_arg_reduce_full(const ReadT* in_ptr, int64_t* out_ptr,
     if (phase2_wg > WG_SIZE) phase2_wg = WG_SIZE; // cap at WG_SIZE
 
     queue.submit([&](sycl::handler& cgh) {
+        cgh.depends_on(phase1_event);
         sycl::local_accessor<T, 1> local_vals(sycl::range<1>(phase2_wg), cgh);
         sycl::local_accessor<int64_t, 1> local_idxs(sycl::range<1>(phase2_wg), cgh);
 

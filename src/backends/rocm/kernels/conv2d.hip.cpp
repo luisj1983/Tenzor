@@ -868,8 +868,8 @@ auto conv2d_forward_kernel(
         int64_t N = out_channels_per_group;
 
         if (dtype == DType::Float32) {
-            float* col_buffer;
-            HIP_CHECK(hipMalloc(&col_buffer, col_rows * col_cols * sizeof(float)));
+            HipBuffer col_buf(col_rows * col_cols * sizeof(float));
+            float* col_buffer = col_buf.as<float>();
 
             if (layout == DataLayout::NCHW) {
                 const float* input_ptr = input.data<float>() + in_start * height * width;
@@ -917,11 +917,9 @@ auto conv2d_forward_kernel(
                 N                            // leading dimension
             ));
 
-            // Free col buffer
-            HIP_CHECK(hipFree(col_buffer));
         } else if (dtype == DType::Float64) {
-            double* col_buffer;
-            HIP_CHECK(hipMalloc(&col_buffer, col_rows * col_cols * sizeof(double)));
+            HipBuffer col_buf(col_rows * col_cols * sizeof(double));
+            double* col_buffer = col_buf.as<double>();
 
             if (layout == DataLayout::NCHW) {
                 const double* input_ptr = input.data<double>() + in_start * height * width;
@@ -969,11 +967,9 @@ auto conv2d_forward_kernel(
                 N                            // leading dimension
             ));
 
-            // Free col buffer
-            HIP_CHECK(hipFree(col_buffer));
         } else if (dtype == DType::Float16) {
-            __half* col_buffer;
-            HIP_CHECK(hipMalloc(&col_buffer, col_rows * col_cols * sizeof(__half)));
+            HipBuffer col_buf(col_rows * col_cols * sizeof(__half));
+            __half* col_buffer = col_buf.as<__half>();
 
             if (layout == DataLayout::NCHW) {
                 const __half* input_ptr = reinterpret_cast<const __half*>(input.data<Float16>()) + in_start * height * width;
@@ -992,10 +988,11 @@ auto conv2d_forward_kernel(
             HIP_CHECK(hipGetLastError());
 
             // rocblas_half is compatible with __half
-            rocblas_half alpha_h, beta_h;
-            // Initialize alpha=1.0, beta=0.0 for half precision
-            alpha_h = rocblas_half{static_cast<uint16_t>(0x3C00)};  // 1.0 in FP16
-            beta_h = rocblas_half{static_cast<uint16_t>(0x0000)};   // 0.0 in FP16
+            // IEEE 754 half-precision constants
+            static constexpr uint16_t kFP16One  = 0x3C00;  // 1.0
+            static constexpr uint16_t kFP16Zero = 0x0000;  // 0.0
+            rocblas_half alpha_h = rocblas_half{kFP16One};
+            rocblas_half beta_h  = rocblas_half{kFP16Zero};
 
             const rocblas_half* weight_ptr = reinterpret_cast<const rocblas_half*>(weight.data<Float16>()) + out_start * in_channels_per_group * kernel_h * kernel_w;
             rocblas_half* output_ptr;
@@ -1024,8 +1021,6 @@ auto conv2d_forward_kernel(
                 N                            // leading dimension
             ));
 
-            // Free col buffer
-            HIP_CHECK(hipFree(col_buffer));
         } else {
             throw std::runtime_error("Conv2d: unsupported dtype (only Float32, Float64, and Float16 supported)");
         }
@@ -1216,8 +1211,8 @@ auto conv2d_backward_kernel(
 
             if (dtype == DType::Float16) {
                 // Float16 path using rocblas_hgemm
-                rocblas_half* grad_col;
-                HIP_CHECK(hipMalloc(&grad_col, col_rows * col_cols * sizeof(rocblas_half)));
+                HipBuffer grad_col_buf(col_rows * col_cols * sizeof(rocblas_half));
+                rocblas_half* grad_col = grad_col_buf.as<rocblas_half>();
 
                 rocblas_half alpha_h{static_cast<uint16_t>(0x3C00)};  // 1.0 in FP16
                 rocblas_half beta_h{static_cast<uint16_t>(0x0000)};   // 0.0 in FP16
@@ -1263,11 +1258,10 @@ auto conv2d_backward_kernel(
                     );
                 }
                 HIP_CHECK(hipGetLastError());
-                HIP_CHECK(hipFree(grad_col));
             } else if (dtype == DType::Float64) {
                 // Float64 path using rocblas_dgemm
-                double* grad_col;
-                HIP_CHECK(hipMalloc(&grad_col, col_rows * col_cols * sizeof(double)));
+                HipBuffer grad_col_buf(col_rows * col_cols * sizeof(double));
+                double* grad_col = grad_col_buf.as<double>();
 
                 double alpha = 1.0;
                 double beta = 0.0;
@@ -1313,11 +1307,10 @@ auto conv2d_backward_kernel(
                     );
                 }
                 HIP_CHECK(hipGetLastError());
-                HIP_CHECK(hipFree(grad_col));
             } else {
                 // Float32 path (original code)
-                float* grad_col;
-                HIP_CHECK(hipMalloc(&grad_col, col_rows * col_cols * sizeof(float)));
+                HipBuffer grad_col_buf(col_rows * col_cols * sizeof(float));
+                float* grad_col = grad_col_buf.as<float>();
 
                 float alpha = 1.0f;
                 float beta = 0.0f;
@@ -1368,7 +1361,6 @@ auto conv2d_backward_kernel(
                     );
                 }
                 HIP_CHECK(hipGetLastError());
-                HIP_CHECK(hipFree(grad_col));
             }
         }
 
@@ -1376,8 +1368,8 @@ auto conv2d_backward_kernel(
         if (compute_grad_weight) {
             if (dtype == DType::Float16) {
                 // Float16 path
-                rocblas_half* input_col;
-                HIP_CHECK(hipMalloc(&input_col, col_rows * col_cols * sizeof(rocblas_half)));
+                HipBuffer input_col_buf(col_rows * col_cols * sizeof(rocblas_half));
+                rocblas_half* input_col = input_col_buf.as<rocblas_half>();
 
                 dim3 grid, block;
                 int64_t total_elements = batch * out_h * out_w * in_channels_per_group * kernel_h * kernel_w;
@@ -1426,11 +1418,10 @@ auto conv2d_backward_kernel(
                     grad_weight_ptr, N
                 ));
 
-                HIP_CHECK(hipFree(input_col));
             } else if (dtype == DType::Float64) {
                 // Float64 path using rocblas_dgemm
-                double* input_col;
-                HIP_CHECK(hipMalloc(&input_col, col_rows * col_cols * sizeof(double)));
+                HipBuffer input_col_buf(col_rows * col_cols * sizeof(double));
+                double* input_col = input_col_buf.as<double>();
 
                 dim3 grid, block;
                 int64_t total_elements = batch * out_h * out_w * in_channels_per_group * kernel_h * kernel_w;
@@ -1479,11 +1470,10 @@ auto conv2d_backward_kernel(
                     grad_weight_ptr, N
                 ));
 
-                HIP_CHECK(hipFree(input_col));
             } else {
                 // Float32 path
-                float* input_col;
-                HIP_CHECK(hipMalloc(&input_col, col_rows * col_cols * sizeof(float)));
+                HipBuffer input_col_buf(col_rows * col_cols * sizeof(float));
+                float* input_col = input_col_buf.as<float>();
 
                 dim3 grid, block;
                 int64_t total_elements = batch * out_h * out_w * in_channels_per_group * kernel_h * kernel_w;
@@ -1532,7 +1522,6 @@ auto conv2d_backward_kernel(
                     grad_weight_ptr, N
                 ));
 
-                HIP_CHECK(hipFree(input_col));
             }
         }
     }

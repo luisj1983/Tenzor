@@ -1684,11 +1684,6 @@ auto relu_inplace_kernel(Tensor& input, cudaStream_t stream) -> void {
     } else {
         throw std::runtime_error("ReLU inplace only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
-
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        throw std::runtime_error(std::string("CUDA error in relu_inplace_kernel: ") + cudaGetErrorString(err));
-    }
 }
 
 // In-place Sigmoid wrapper
@@ -1716,11 +1711,6 @@ auto sigmoid_inplace_kernel(Tensor& input, cudaStream_t stream) -> void {
         CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Sigmoid inplace only supports Float32, Float64, Float16, and BFloat16 dtypes");
-    }
-
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        throw std::runtime_error(std::string("CUDA error in sigmoid_inplace_kernel: ") + cudaGetErrorString(err));
     }
 }
 
@@ -1750,11 +1740,6 @@ auto tanh_inplace_kernel(Tensor& input, cudaStream_t stream) -> void {
     } else {
         throw std::runtime_error("Tanh inplace only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
-
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        throw std::runtime_error(std::string("CUDA error in tanh_inplace_kernel: ") + cudaGetErrorString(err));
-    }
 }
 
 // In-place LeakyReLU wrapper
@@ -1783,11 +1768,6 @@ auto leaky_relu_inplace_kernel(Tensor& input, float alpha, cudaStream_t stream) 
     } else {
         throw std::runtime_error("LeakyReLU inplace only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
-
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        throw std::runtime_error(std::string("CUDA error in leaky_relu_inplace_kernel: ") + cudaGetErrorString(err));
-    }
 }
 
 // In-place GELU wrapper
@@ -1815,11 +1795,6 @@ auto gelu_inplace_kernel(Tensor& input, cudaStream_t stream) -> void {
         CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("GELU inplace only supports Float32, Float64, Float16, and BFloat16 dtypes");
-    }
-
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        throw std::runtime_error(std::string("CUDA error in gelu_inplace_kernel: ") + cudaGetErrorString(err));
     }
 }
 

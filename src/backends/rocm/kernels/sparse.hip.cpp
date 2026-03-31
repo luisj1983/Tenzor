@@ -24,6 +24,7 @@
 #include "../hip_buffer.hpp"
 #include <climits>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -158,9 +159,9 @@ __global__ void check_i64_overflow(const int64_t* __restrict__ src,
 static void verify_i64_fits_i32(const int64_t* d_data, int64_t n,
                                  hipStream_t stream = nullptr) {
     if (n == 0) return;
-    int* d_flag;
-    HIP_CHECK_SPARSE(hipMalloc(&d_flag, sizeof(int)));
-    HIP_CHECK_SPARSE(hipMemset(d_flag, 0, sizeof(int)));
+    HipBuffer flag_buf(sizeof(int));
+    int* d_flag = flag_buf.as<int>();
+    HIP_CHECK_SPARSE(hipMemsetAsync(d_flag, 0, sizeof(int), stream));
 
     int threads = 256;
     int blocks = static_cast<int>((n + threads - 1) / threads);
@@ -169,9 +170,9 @@ static void verify_i64_fits_i32(const int64_t* d_data, int64_t n,
     HIP_CHECK_SPARSE(hipGetLastError());
 
     int h_flag = 0;
-    HIP_CHECK_SPARSE(hipMemcpy(&h_flag, d_flag, sizeof(int),
-                                hipMemcpyDeviceToHost));
-    HIP_CHECK_SPARSE(hipFree(d_flag));
+    HIP_CHECK_SPARSE(hipMemcpyAsync(&h_flag, d_flag, sizeof(int),
+                                     hipMemcpyDeviceToHost, stream));
+    HIP_CHECK_SPARSE(hipStreamSynchronize(stream));
 
     if (h_flag != 0) {
         throw std::overflow_error(
@@ -209,6 +210,10 @@ SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse) {
         HIP_CHECK_SPARSE(hipGetLastError());
 
         // Convert COO row indices to CSR row pointers on GPU
+        if (nnz > static_cast<int64_t>(std::numeric_limits<int>::max()))
+            throw std::overflow_error("rocm_sparse: nnz exceeds int32 range for rocsparse_coo2csr");
+        if (nrows > static_cast<int64_t>(std::numeric_limits<int>::max()))
+            throw std::overflow_error("rocm_sparse: nrows exceeds int32 range for rocsparse_coo2csr");
         rocsparse_handle handle = get_rocsparse_handle();
         ROCSPARSE_CHECK(rocsparse_coo2csr(
             handle, row_i32_buf.as<int32_t>(), static_cast<int>(nnz), static_cast<int>(nrows),

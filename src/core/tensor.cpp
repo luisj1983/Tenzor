@@ -285,7 +285,8 @@ auto Tensor::data() const -> const T* {
     if constexpr (std::is_same_v<CleanT, uint8_t> || std::is_same_v<CleanT, char> ||
                   std::is_same_v<CleanT, unsigned char> || std::is_same_v<CleanT, signed char>) {
         const auto* base = static_cast<const uint8_t*>(impl_->storage->data());
-        return reinterpret_cast<const T*>(base + impl_->offset * tenzor::dtype_size(impl_->dtype));
+        return reinterpret_cast<const T*>(base + checked_mul(static_cast<int64_t>(impl_->offset),
+                                                              static_cast<int64_t>(tenzor::dtype_size(impl_->dtype))));
     } else {
         return static_cast<const T*>(impl_->storage->data()) + impl_->offset;
     }
@@ -1431,7 +1432,8 @@ auto Tensor::data_ptr() -> void* {
     }
     // Account for offset when accessing sliced tensors
     auto* base_ptr = static_cast<uint8_t*>(impl_->storage->data());
-    return base_ptr + impl_->offset * dtype_size();
+    return base_ptr + checked_mul(static_cast<int64_t>(impl_->offset),
+                                  static_cast<int64_t>(dtype_size()));
 }
 
 auto Tensor::data_ptr() const -> const void* {
@@ -1440,7 +1442,8 @@ auto Tensor::data_ptr() const -> const void* {
     }
     // Account for offset when accessing sliced tensors
     const auto* base_ptr = static_cast<const uint8_t*>(impl_->storage->data());
-    return base_ptr + impl_->offset * dtype_size();
+    return base_ptr + checked_mul(static_cast<int64_t>(impl_->offset),
+                                  static_cast<int64_t>(dtype_size()));
 }
 
 auto Tensor::zeros_like(const Tensor& other) -> Tensor {
