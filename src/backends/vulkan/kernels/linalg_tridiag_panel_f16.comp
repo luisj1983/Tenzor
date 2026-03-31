@@ -1,0 +1,166 @@
+#version 450
+
+// Blocked tridiagonalization — panel factorization — Float16 variant
+// Float16 elements packed 2 per 32-bit word, all computation in float32.
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer MatrixA { uint A[]; };
+layout(set = 0, binding = 1) buffer TauBuf  { uint tau_buf[]; };
+layout(set = 0, binding = 2) buffer WorkBuf { uint work_buf[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint col_start;
+    uint panel_cols;
+    uint batch_idx;
+};
+
+shared float norm_sq;
+shared float alpha_val;
+shared float tau_k;
+shared float dot_val;
+
+// Pack/unpack float16 from uint (2 per word)
+float f16_load(uint idx) {
+    uint word = A[idx >> 1];
+    uint bits = ((idx & 1u) == 0u) ? (word & 0xFFFFu) : (word >> 16);
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+void f16_store(uint idx, float val) {
+    uint bits = packHalf2x16(vec2(val, 0.0));
+    uint word_idx = idx >> 1;
+    uint old_word = A[word_idx];
+    if ((idx & 1u) == 0u) {
+        A[word_idx] = (old_word & 0xFFFF0000u) | (bits & 0xFFFFu);
+    } else {
+        A[word_idx] = (old_word & 0x0000FFFFu) | ((bits & 0xFFFFu) << 16);
+    }
+}
+
+float tau_load(uint idx) {
+    uint word = tau_buf[idx >> 1];
+    uint bits = ((idx & 1u) == 0u) ? (word & 0xFFFFu) : (word >> 16);
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+void tau_store(uint idx, float val) {
+    uint bits = packHalf2x16(vec2(val, 0.0));
+    uint word_idx = idx >> 1;
+    uint old_word = tau_buf[word_idx];
+    if ((idx & 1u) == 0u) {
+        tau_buf[word_idx] = (old_word & 0xFFFF0000u) | (bits & 0xFFFFu);
+    } else {
+        tau_buf[word_idx] = (old_word & 0x0000FFFFu) | ((bits & 0xFFFFu) << 16);
+    }
+}
+
+float work_load(uint idx) {
+    uint word = work_buf[idx >> 1];
+    uint bits = ((idx & 1u) == 0u) ? (word & 0xFFFFu) : (word >> 16);
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+void work_store(uint idx, float val) {
+    uint bits = packHalf2x16(vec2(val, 0.0));
+    uint word_idx = idx >> 1;
+    uint old_word = work_buf[word_idx];
+    if ((idx & 1u) == 0u) {
+        work_buf[word_idx] = (old_word & 0xFFFF0000u) | (bits & 0xFFFFu);
+    } else {
+        work_buf[word_idx] = (old_word & 0x0000FFFFu) | ((bits & 0xFFFFu) << 16);
+    }
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint base = batch_idx * n * n;
+    uint work_base = batch_idx * n;
+
+    for (uint k = 0; k < panel_cols; k++) {
+        uint col = col_start + k;
+        if (col + 1 >= n) break;
+
+        if (tid == 0) {
+            norm_sq = 0.0;
+            for (uint r = col + 1; r < n; r++) {
+                float v = f16_load(base + r * n + col);
+                norm_sq += v * v;
+            }
+
+            if (norm_sq < 1e-10) {
+                tau_k = 0.0;
+                alpha_val = f16_load(base + (col + 1) * n + col);
+            } else {
+                float a_val = f16_load(base + (col + 1) * n + col);
+                alpha_val = -sign(a_val) * sqrt(norm_sq);
+                float v0 = a_val - alpha_val;
+
+                float v_norm_sq = v0 * v0;
+                for (uint r = col + 2; r < n; r++) {
+                    float vr = f16_load(base + r * n + col);
+                    v_norm_sq += vr * vr;
+                }
+
+                if (abs(v0) < 1e-10) {
+                    tau_k = 0.0;
+                } else {
+                    tau_k = 2.0 / v_norm_sq;
+                    for (uint r = col + 2; r < n; r++) {
+                        float vr = f16_load(base + r * n + col);
+                        f16_store(base + r * n + col, vr / v0);
+                    }
+                }
+
+                f16_store(base + (col + 1) * n + col, alpha_val);
+                f16_store(base + col * n + (col + 1), alpha_val);
+            }
+
+            tau_store(work_base + col, tau_k);
+        }
+        barrier();
+
+        if (abs(tau_k) < 1e-10) continue;
+
+        // Compute p = tau * A * v
+        for (uint r = col + 1 + tid; r < n; r += 256) {
+            float sum = f16_load(base + r * n + (col + 1));
+            for (uint c = col + 2; c < n; c++) {
+                sum += f16_load(base + r * n + c) * f16_load(base + c * n + col);
+            }
+            work_store(work_base + r, tau_k * sum);
+        }
+        barrier();
+
+        if (tid == 0) {
+            float vtp = work_load(work_base + col + 1);
+            for (uint r = col + 2; r < n; r++) {
+                vtp += f16_load(base + r * n + col) * work_load(work_base + r);
+            }
+            dot_val = 0.5 * tau_k * vtp;
+        }
+        barrier();
+
+        for (uint r = col + 1 + tid; r < n; r += 256) {
+            float v_r = (r == col + 1) ? 1.0 : f16_load(base + r * n + col);
+            float w_val = work_load(work_base + r) - dot_val * v_r;
+            work_store(work_base + r, w_val);
+        }
+        barrier();
+
+        for (uint r = col + 1 + tid; r < n; r += 256) {
+            float v_r = (r == col + 1) ? 1.0 : f16_load(base + r * n + col);
+            float w_r = work_load(work_base + r);
+            for (uint c = col + 1; c <= r; c++) {
+                float v_c = (c == col + 1) ? 1.0 : f16_load(base + c * n + col);
+                float w_c = work_load(work_base + c);
+                float update = v_r * w_c + w_r * v_c;
+                f16_store(base + r * n + c, f16_load(base + r * n + c) - update);
+                if (r != c) {
+                    f16_store(base + c * n + r, f16_load(base + c * n + r) - update);
+                }
+            }
+        }
+        barrier();
+    }
+}

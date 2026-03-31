@@ -1,0 +1,217 @@
+#version 450
+
+// SVD of a bidiagonal matrix using Golub-Kahan implicit QR iteration
+// Input: diagonal (n) and superdiagonal (n-1) elements
+// Output: singular values in diag, Givens rotation parameters for U and V
+// The rotation parameters are stored as (cos, sin) pairs:
+//   u_rot[2*(iter*n + i)] = cos, u_rot[2*(iter*n + i)+1] = sin for left rotations
+//   v_rot[2*(iter*n + i)] = cos, v_rot[2*(iter*n + i)+1] = sin for right rotations
+// Single workgroup, single batch element.
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0) buffer Diag { float diag[]; };
+layout(set = 0, binding = 1) buffer SuperDiag { float sdiag[]; };
+layout(set = 0, binding = 2) buffer URot { float u_rot[]; };
+layout(set = 0, binding = 3) buffer VRot { float v_rot[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint max_iterations;
+    uint batch_idx;
+    uint rot_stride;  // n * 2, stride per sweep step in rotation arrays
+};
+
+void main() {
+    if (gl_WorkGroupID.x != batch_idx) return;
+
+    uint total_rots = 0;
+
+    // Golub-Kahan implicit QR with Wilkinson shift
+    // Work on submatrix [p, q] where p is the first non-negligible superdiagonal
+    // and q is the last non-negligible superdiagonal
+
+    for (uint iter = 0; iter < max_iterations; iter++) {
+        // Find active submatrix [p..q]
+        // q: largest index such that sdiag[q-1] is non-negligible
+        int q_int = int(n) - 1;
+        while (q_int > 0) {
+            float thresh = 1e-10 * (abs(diag[q_int - 1]) + abs(diag[q_int]));
+            if (abs(sdiag[q_int - 1]) > thresh) break;
+            sdiag[q_int - 1] = 0.0;
+            q_int--;
+        }
+        if (q_int <= 0) break;  // Fully diagonal — converged
+
+        // p: smallest index in [0..q-1] such that sdiag[p] is non-negligible
+        int p_int = q_int - 1;
+        while (p_int > 0) {
+            float thresh = 1e-10 * (abs(diag[p_int - 1]) + abs(diag[p_int]));
+            if (abs(sdiag[p_int - 1]) <= thresh) {
+                sdiag[p_int - 1] = 0.0;
+                break;
+            }
+            p_int--;
+        }
+
+        uint p = uint(p_int);
+        uint q = uint(q_int);
+
+        // Check for zero diagonal elements in [p..q-1] — if found, chase the
+        // superdiagonal element to zero via Givens rotations on rows
+        bool found_zero = false;
+        for (uint i = p; i < q; i++) {
+            if (abs(diag[i]) < 1e-30) {
+                found_zero = true;
+                // Zero out sdiag[i] by rotating row i with subsequent rows
+                float f = sdiag[i];
+                sdiag[i] = 0.0;
+                for (uint j = i + 1; j <= q; j++) {
+                    // Givens rotation to zero f against diag[j]
+                    float r = sqrt(diag[j] * diag[j] + f * f);
+                    float c = diag[j] / r;
+                    float s = f / r;
+                    diag[j] = r;
+                    if (j < q) {
+                        f = s * sdiag[j];
+                        sdiag[j] = c * sdiag[j];
+                    }
+                    // Store left rotation
+                    u_rot[total_rots * 2] = c;
+                    u_rot[total_rots * 2 + 1] = s;
+                    total_rots++;
+                }
+                break;
+            }
+        }
+        if (found_zero) continue;
+
+        // Wilkinson shift: eigenvalue of trailing 2x2 of B^T * B closest to b_qq^2
+        float d_qm1 = diag[q - 1];
+        float d_q = diag[q];
+        float e_qm1 = sdiag[q - 1];
+
+        float t11 = d_qm1 * d_qm1;
+        if (q >= 2) t11 += sdiag[q - 2] * sdiag[q - 2];
+        float t12 = d_qm1 * e_qm1;
+        float t22 = d_q * d_q + e_qm1 * e_qm1;
+
+        float mu;
+        {
+            float d_val = (t11 - t22) * 0.5;
+            float det_sign = (d_val >= 0.0) ? 1.0 : -1.0;
+            mu = t22 - t12 * t12 / (d_val + det_sign * sqrt(d_val * d_val + t12 * t12));
+        }
+
+        // Initial Givens rotation (right) to introduce bulge
+        float y = diag[p] * diag[p] - mu;
+        float z = diag[p] * sdiag[p];
+
+        // Chase the bulge
+        for (uint k = p; k < q; k++) {
+            // Right Givens rotation on columns k, k+1
+            float r = sqrt(y * y + z * z);
+            float c = y / r;
+            float s = -z / r;
+
+            if (k > p) {
+                sdiag[k - 1] = r;
+            }
+
+            float dk = diag[k];
+            float ek = sdiag[k];
+            float dk1 = diag[k + 1];
+
+            float new_dk = c * dk - s * ek;
+            float bulge_below = -s * dk1;
+            float new_ek = s * dk + c * ek;
+            float new_dk1 = c * dk1;
+
+            // Store right rotation
+            v_rot[total_rots * 2] = c;
+            v_rot[total_rots * 2 + 1] = s;
+            total_rots++;
+
+            // Left Givens rotation on rows k, k+1 to zero bulge
+            y = new_dk;
+            z = bulge_below;
+            r = sqrt(y * y + z * z);
+            c = y / r;
+            s = -z / r;
+
+            diag[k] = r;
+            diag[k + 1] = c * new_dk1 + s * new_ek;
+            sdiag[k] = -s * new_dk1 + c * new_ek;
+
+            if (k + 1 < q) {
+                float ek1 = sdiag[k + 1];
+                y = sdiag[k];
+                z = -s * ek1;
+                sdiag[k + 1] = c * ek1;
+                // Next iteration continues the chase
+                y = diag[k + 1];
+                z = -s * sdiag[k + 1];
+                // Re-derive for next step
+                y = sdiag[k];
+                z = -s * sdiag[k + 1];
+                sdiag[k] = c * sdiag[k];
+
+                // Correct: after left rotation, bulge appears in sdiag[k+1]
+                // Actually recompute properly:
+                sdiag[k] = -s * new_dk1 + c * new_ek;
+                y = c * sdiag[k + 1];
+                z = s * sdiag[k + 1];
+                // This will be chased in next iteration of k
+                y = sdiag[k];
+                z = -s * sdiag[k + 1];
+            }
+
+            // Store left rotation
+            u_rot[total_rots * 2] = c;
+            u_rot[total_rots * 2 + 1] = s;
+            total_rots++;
+        }
+    }
+
+    // Make all singular values non-negative
+    for (uint i = 0; i < n; i++) {
+        if (diag[i] < 0.0) {
+            diag[i] = -diag[i];
+            // Record a sign flip as a rotation with c=-1, s=0
+            v_rot[total_rots * 2] = -1.0;
+            v_rot[total_rots * 2 + 1] = 0.0;
+            total_rots++;
+        }
+    }
+
+    // Sort singular values in descending order using simple selection sort
+    // Also record the permutation as rotation parameters
+    for (uint i = 0; i < n - 1; i++) {
+        uint max_idx = i;
+        float max_val = diag[i];
+        for (uint j = i + 1; j < n; j++) {
+            if (diag[j] > max_val) {
+                max_val = diag[j];
+                max_idx = j;
+            }
+        }
+        if (max_idx != i) {
+            // Swap singular values
+            float tmp = diag[i];
+            diag[i] = diag[max_idx];
+            diag[max_idx] = tmp;
+            // Record swap as rotation parameter (index pair for U and V column swap)
+            // Encode swap: c = float(i), s = float(max_idx) — sentinel with c < 0 would conflict
+            // Use a special marker: c = -2.0, s encodes the swap pair
+            u_rot[total_rots * 2] = -2.0;
+            u_rot[total_rots * 2 + 1] = float(i) * 65536.0 + float(max_idx);
+            v_rot[total_rots * 2] = -2.0;
+            v_rot[total_rots * 2 + 1] = float(i) * 65536.0 + float(max_idx);
+            total_rots++;
+        }
+    }
+
+    // Store total rotation count at end of u_rot (overwrite last reserved slot)
+    // Convention: u_rot[rot_stride - 2] = float(total_rots) as metadata
+    u_rot[rot_stride - 2] = float(total_rots);
+    u_rot[rot_stride - 1] = 0.0;
+}

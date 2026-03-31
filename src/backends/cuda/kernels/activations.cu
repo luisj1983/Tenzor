@@ -464,30 +464,32 @@ __global__ void swish_backward_vectorized_kernel(const float4* __restrict__ grad
 
 // Host functions
 extern "C" {
-    void relu_forward_float(const float* input, float* output, int64_t n) {
+    void relu_forward_float(const float* input, float* output, int64_t n,
+                            cudaStream_t stream) {
         auto [grid_size, block_size] = optimal_launch_config(relu_forward_kernel<float>, n);
-        relu_forward_kernel<float><<<grid_size, block_size>>>(input, output, n);
+        relu_forward_kernel<float><<<grid_size, block_size, 0, stream>>>(input, output, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
-    void relu_forward_double(const double* input, double* output, int64_t n) {
+    void relu_forward_double(const double* input, double* output, int64_t n,
+                             cudaStream_t stream) {
         auto [grid_size, block_size] = optimal_launch_config(relu_forward_kernel<double>, n);
-        relu_forward_kernel<double><<<grid_size, block_size>>>(input, output, n);
+        relu_forward_kernel<double><<<grid_size, block_size, 0, stream>>>(input, output, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void relu_backward_float(const float* grad_output, const float* input,
-                            float* grad_input, int64_t n) {
+                            float* grad_input, int64_t n, cudaStream_t stream) {
         auto [grid_size, block_size] = optimal_launch_config(relu_backward_kernel<float>, n);
-        relu_backward_kernel<float><<<grid_size, block_size>>>(
+        relu_backward_kernel<float><<<grid_size, block_size, 0, stream>>>(
             grad_output, input, grad_input, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void relu_backward_double(const double* grad_output, const double* input,
-                             double* grad_input, int64_t n) {
+                             double* grad_input, int64_t n, cudaStream_t stream) {
         auto [grid_size, block_size] = optimal_launch_config(relu_backward_kernel<double>, n);
-        relu_backward_kernel<double><<<grid_size, block_size>>>(
+        relu_backward_kernel<double><<<grid_size, block_size, 0, stream>>>(
             grad_output, input, grad_input, n);
         CUDA_CHECK(cudaGetLastError());
     }
@@ -562,30 +564,32 @@ __global__ void swish_backward_cuda_kernel(const T* grad_output, const T* input,
 
 // Host functions
 extern "C" {
-    void sigmoid_forward_float(const float* input, float* output, int64_t n) {
+    void sigmoid_forward_float(const float* input, float* output, int64_t n,
+                               cudaStream_t stream) {
         auto [grid_size, block_size] = optimal_launch_config(sigmoid_forward_kernel<float>, n);
-        sigmoid_forward_kernel<float><<<grid_size, block_size>>>(input, output, n);
+        sigmoid_forward_kernel<float><<<grid_size, block_size, 0, stream>>>(input, output, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
-    void sigmoid_forward_double(const double* input, double* output, int64_t n) {
+    void sigmoid_forward_double(const double* input, double* output, int64_t n,
+                                cudaStream_t stream) {
         auto [grid_size, block_size] = optimal_launch_config(sigmoid_forward_kernel<double>, n);
-        sigmoid_forward_kernel<double><<<grid_size, block_size>>>(input, output, n);
+        sigmoid_forward_kernel<double><<<grid_size, block_size, 0, stream>>>(input, output, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void sigmoid_backward_float(const float* grad_output, const float* input,
-                               float* grad_input, int64_t n) {
+                               float* grad_input, int64_t n, cudaStream_t stream) {
         auto [grid_size, block_size] = optimal_launch_config(sigmoid_backward_kernel<float>, n);
-        sigmoid_backward_kernel<float><<<grid_size, block_size>>>(
+        sigmoid_backward_kernel<float><<<grid_size, block_size, 0, stream>>>(
             grad_output, input, grad_input, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void sigmoid_backward_double(const double* grad_output, const double* input,
-                                double* grad_input, int64_t n) {
+                                double* grad_input, int64_t n, cudaStream_t stream) {
         auto [grid_size, block_size] = optimal_launch_config(sigmoid_backward_kernel<double>, n);
-        sigmoid_backward_kernel<double><<<grid_size, block_size>>>(
+        sigmoid_backward_kernel<double><<<grid_size, block_size, 0, stream>>>(
             grad_output, input, grad_input, n);
         CUDA_CHECK(cudaGetLastError());
     }
@@ -651,30 +655,32 @@ __global__ void tanh_backward_kernel<__nv_bfloat16>(const __nv_bfloat16* grad_ou
 
 // Host functions
 extern "C" {
-    void tanh_forward_float(const float* input, float* output, int64_t n) {
+    void tanh_forward_float(const float* input, float* output, int64_t n,
+                            cudaStream_t stream) {
         auto [grid_size, block_size] = optimal_launch_config(tanh_forward_kernel<float>, n);
-        tanh_forward_kernel<float><<<grid_size, block_size>>>(input, output, n);
+        tanh_forward_kernel<float><<<grid_size, block_size, 0, stream>>>(input, output, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
-    void tanh_forward_double(const double* input, double* output, int64_t n) {
+    void tanh_forward_double(const double* input, double* output, int64_t n,
+                             cudaStream_t stream) {
         auto [grid_size, block_size] = optimal_launch_config(tanh_forward_kernel<double>, n);
-        tanh_forward_kernel<double><<<grid_size, block_size>>>(input, output, n);
+        tanh_forward_kernel<double><<<grid_size, block_size, 0, stream>>>(input, output, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void tanh_backward_float(const float* grad_output, const float* input,
-                            float* grad_input, int64_t n) {
+                            float* grad_input, int64_t n, cudaStream_t stream) {
         auto [grid_size, block_size] = optimal_launch_config(tanh_backward_kernel<float>, n);
-        tanh_backward_kernel<float><<<grid_size, block_size>>>(
+        tanh_backward_kernel<float><<<grid_size, block_size, 0, stream>>>(
             grad_output, input, grad_input, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void tanh_backward_double(const double* grad_output, const double* input,
-                             double* grad_input, int64_t n) {
+                             double* grad_input, int64_t n, cudaStream_t stream) {
         auto [grid_size, block_size] = optimal_launch_config(tanh_backward_kernel<double>, n);
-        tanh_backward_kernel<double><<<grid_size, block_size>>>(
+        tanh_backward_kernel<double><<<grid_size, block_size, 0, stream>>>(
             grad_output, input, grad_input, n);
         CUDA_CHECK(cudaGetLastError());
     }
@@ -813,30 +819,32 @@ __global__ void gelu_backward_kernel<__nv_bfloat16>(const __nv_bfloat16* grad_ou
 
 // Host functions
 extern "C" {
-    void gelu_forward_float(const float* input, float* output, int64_t n) {
+    void gelu_forward_float(const float* input, float* output, int64_t n,
+                            cudaStream_t stream) {
         auto [grid_size, block_size] = optimal_launch_config(gelu_forward_kernel<float>, n);
-        gelu_forward_kernel<float><<<grid_size, block_size>>>(input, output, n);
+        gelu_forward_kernel<float><<<grid_size, block_size, 0, stream>>>(input, output, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
-    void gelu_forward_double(const double* input, double* output, int64_t n) {
+    void gelu_forward_double(const double* input, double* output, int64_t n,
+                             cudaStream_t stream) {
         auto [grid_size, block_size] = optimal_launch_config(gelu_forward_kernel<double>, n);
-        gelu_forward_kernel<double><<<grid_size, block_size>>>(input, output, n);
+        gelu_forward_kernel<double><<<grid_size, block_size, 0, stream>>>(input, output, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void gelu_backward_float(const float* grad_output, const float* input,
-                            float* grad_input, int64_t n) {
+                            float* grad_input, int64_t n, cudaStream_t stream) {
         auto [grid_size, block_size] = optimal_launch_config(gelu_backward_kernel<float>, n);
-        gelu_backward_kernel<float><<<grid_size, block_size>>>(
+        gelu_backward_kernel<float><<<grid_size, block_size, 0, stream>>>(
             grad_output, input, grad_input, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void gelu_backward_double(const double* grad_output, const double* input,
-                             double* grad_input, int64_t n) {
+                             double* grad_input, int64_t n, cudaStream_t stream) {
         auto [grid_size, block_size] = optimal_launch_config(gelu_backward_kernel<double>, n);
-        gelu_backward_kernel<double><<<grid_size, block_size>>>(
+        gelu_backward_kernel<double><<<grid_size, block_size, 0, stream>>>(
             grad_output, input, grad_input, n);
         CUDA_CHECK(cudaGetLastError());
     }
@@ -886,29 +894,31 @@ __global__ void leaky_relu_backward_fp16_kernel(const __half* grad_output, const
 // Host functions
 extern "C" {
     void leaky_relu_forward_float(const float* input, float* output,
-                                 int64_t n, float alpha) {
-        LAUNCH_KERNEL(leaky_relu_forward_kernel<float>, n, nullptr,
+                                 int64_t n, float alpha, cudaStream_t stream) {
+        LAUNCH_KERNEL(leaky_relu_forward_kernel<float>, n, stream,
             input, output, n, alpha);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void leaky_relu_forward_double(const double* input, double* output,
-                                  int64_t n, double alpha) {
-        LAUNCH_KERNEL(leaky_relu_forward_kernel<double>, n, nullptr,
+                                  int64_t n, double alpha, cudaStream_t stream) {
+        LAUNCH_KERNEL(leaky_relu_forward_kernel<double>, n, stream,
             input, output, n, alpha);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void leaky_relu_backward_float(const float* grad_output, const float* input,
-                                  float* grad_input, int64_t n, float alpha) {
-        LAUNCH_KERNEL(leaky_relu_backward_kernel<float>, n, nullptr,
+                                  float* grad_input, int64_t n, float alpha,
+                                  cudaStream_t stream) {
+        LAUNCH_KERNEL(leaky_relu_backward_kernel<float>, n, stream,
             grad_output, input, grad_input, n, alpha);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void leaky_relu_backward_double(const double* grad_output, const double* input,
-                                   double* grad_input, int64_t n, double alpha) {
-        LAUNCH_KERNEL(leaky_relu_backward_kernel<double>, n, nullptr,
+                                   double* grad_input, int64_t n, double alpha,
+                                   cudaStream_t stream) {
+        LAUNCH_KERNEL(leaky_relu_backward_kernel<double>, n, stream,
             grad_output, input, grad_input, n, alpha);
         CUDA_CHECK(cudaGetLastError());
     }
@@ -939,26 +949,30 @@ __global__ void elu_backward_kernel(const T* grad_output, const T* input,
 }
 
 extern "C" {
-    void elu_forward_float(const float* input, float* output, int64_t n, float alpha) {
-        LAUNCH_KERNEL(elu_forward_kernel<float>, n, nullptr, input, output, n, alpha);
+    void elu_forward_float(const float* input, float* output, int64_t n, float alpha,
+                           cudaStream_t stream) {
+        LAUNCH_KERNEL(elu_forward_kernel<float>, n, stream, input, output, n, alpha);
         CUDA_CHECK(cudaGetLastError());
     }
 
-    void elu_forward_double(const double* input, double* output, int64_t n, float alpha) {
-        LAUNCH_KERNEL(elu_forward_kernel<double>, n, nullptr, input, output, n, alpha);
+    void elu_forward_double(const double* input, double* output, int64_t n, float alpha,
+                            cudaStream_t stream) {
+        LAUNCH_KERNEL(elu_forward_kernel<double>, n, stream, input, output, n, alpha);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void elu_backward_float(const float* grad_output, const float* input,
-                            float* grad_input, int64_t n, float alpha) {
-        LAUNCH_KERNEL(elu_backward_kernel<float>, n, nullptr,
+                            float* grad_input, int64_t n, float alpha,
+                            cudaStream_t stream) {
+        LAUNCH_KERNEL(elu_backward_kernel<float>, n, stream,
             grad_output, input, grad_input, n, alpha);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void elu_backward_double(const double* grad_output, const double* input,
-                             double* grad_input, int64_t n, float alpha) {
-        LAUNCH_KERNEL(elu_backward_kernel<double>, n, nullptr,
+                             double* grad_input, int64_t n, float alpha,
+                             cudaStream_t stream) {
+        LAUNCH_KERNEL(elu_backward_kernel<double>, n, stream,
             grad_output, input, grad_input, n, alpha);
         CUDA_CHECK(cudaGetLastError());
     }
@@ -993,30 +1007,32 @@ __global__ void selu_backward_kernel(const T* grad_output, const T* input,
 }
 
 extern "C" {
-    void selu_forward_float(const float* input, float* output, int64_t n) {
+    void selu_forward_float(const float* input, float* output, int64_t n,
+                            cudaStream_t stream) {
         int num_blocks = get_num_blocks(n);
-        selu_forward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(input, output, n);
+        selu_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(input, output, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
-    void selu_forward_double(const double* input, double* output, int64_t n) {
+    void selu_forward_double(const double* input, double* output, int64_t n,
+                             cudaStream_t stream) {
         int num_blocks = get_num_blocks(n);
-        selu_forward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(input, output, n);
+        selu_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(input, output, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void selu_backward_float(const float* grad_output, const float* input,
-                             float* grad_input, int64_t n) {
+                             float* grad_input, int64_t n, cudaStream_t stream) {
         int num_blocks = get_num_blocks(n);
-        selu_backward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(
+        selu_backward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output, input, grad_input, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void selu_backward_double(const double* grad_output, const double* input,
-                              double* grad_input, int64_t n) {
+                              double* grad_input, int64_t n, cudaStream_t stream) {
         int num_blocks = get_num_blocks(n);
-        selu_backward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(
+        selu_backward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output, input, grad_input, n);
         CUDA_CHECK(cudaGetLastError());
     }
@@ -1067,30 +1083,32 @@ __global__ void mish_backward_kernel(const T* grad_output, const T* input,
 }
 
 extern "C" {
-    void mish_forward_float(const float* input, float* output, int64_t n) {
+    void mish_forward_float(const float* input, float* output, int64_t n,
+                            cudaStream_t stream) {
         int num_blocks = get_num_blocks(n);
-        mish_forward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(input, output, n);
+        mish_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(input, output, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
-    void mish_forward_double(const double* input, double* output, int64_t n) {
+    void mish_forward_double(const double* input, double* output, int64_t n,
+                             cudaStream_t stream) {
         int num_blocks = get_num_blocks(n);
-        mish_forward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(input, output, n);
+        mish_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(input, output, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void mish_backward_float(const float* grad_output, const float* input,
-                             float* grad_input, int64_t n) {
+                             float* grad_input, int64_t n, cudaStream_t stream) {
         int num_blocks = get_num_blocks(n);
-        mish_backward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(
+        mish_backward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output, input, grad_input, n);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void mish_backward_double(const double* grad_output, const double* input,
-                              double* grad_input, int64_t n) {
+                              double* grad_input, int64_t n, cudaStream_t stream) {
         int num_blocks = get_num_blocks(n);
-        mish_backward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(
+        mish_backward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output, input, grad_input, n);
         CUDA_CHECK(cudaGetLastError());
     }
@@ -1139,33 +1157,33 @@ __global__ void softplus_backward_kernel(const T* grad_output, const T* input,
 
 extern "C" {
     void softplus_forward_float(const float* input, float* output, int64_t n,
-                                float beta, float threshold) {
+                                float beta, float threshold, cudaStream_t stream) {
         int num_blocks = get_num_blocks(n);
-        softplus_forward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(input, output, n, beta, threshold);
+        softplus_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(input, output, n, beta, threshold);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void softplus_forward_double(const double* input, double* output, int64_t n,
-                                 float beta, float threshold) {
+                                 float beta, float threshold, cudaStream_t stream) {
         int num_blocks = get_num_blocks(n);
-        softplus_forward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(input, output, n, beta, threshold);
+        softplus_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(input, output, n, beta, threshold);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void softplus_backward_float(const float* grad_output, const float* input,
                                  float* grad_input, int64_t n,
-                                 float beta, float threshold) {
+                                 float beta, float threshold, cudaStream_t stream) {
         int num_blocks = get_num_blocks(n);
-        softplus_backward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(
+        softplus_backward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output, input, grad_input, n, beta, threshold);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void softplus_backward_double(const double* grad_output, const double* input,
                                   double* grad_input, int64_t n,
-                                  float beta, float threshold) {
+                                  float beta, float threshold, cudaStream_t stream) {
         int num_blocks = get_num_blocks(n);
-        softplus_backward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(
+        softplus_backward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output, input, grad_input, n, beta, threshold);
         CUDA_CHECK(cudaGetLastError());
     }
@@ -1313,39 +1331,43 @@ __global__ void softmax_backward_kernel(const T* grad_output, const T* output,
 // Host functions
 extern "C" {
     void softmax_forward_float(const float* input, float* output,
-                              int64_t batch_size, int64_t dim_size) {
+                              int64_t batch_size, int64_t dim_size,
+                              cudaStream_t stream) {
         int num_blocks = batch_size;
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(float);
-        softmax_forward_kernel<float><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size>>>(
+        softmax_forward_kernel<float><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             input, output, batch_size, dim_size);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void softmax_forward_double(const double* input, double* output,
-                               int64_t batch_size, int64_t dim_size) {
+                               int64_t batch_size, int64_t dim_size,
+                               cudaStream_t stream) {
         int num_blocks = batch_size;
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(double);
-        softmax_forward_kernel<double><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size>>>(
+        softmax_forward_kernel<double><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             input, output, batch_size, dim_size);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void softmax_backward_float(const float* grad_output, const float* output,
                                float* grad_input,
-                               int64_t batch_size, int64_t dim_size) {
+                               int64_t batch_size, int64_t dim_size,
+                               cudaStream_t stream) {
         int num_blocks = batch_size;
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(float);
-        softmax_backward_kernel<float><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size>>>(
+        softmax_backward_kernel<float><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             grad_output, output, grad_input, batch_size, dim_size);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void softmax_backward_double(const double* grad_output, const double* output,
                                 double* grad_input,
-                                int64_t batch_size, int64_t dim_size) {
+                                int64_t batch_size, int64_t dim_size,
+                                cudaStream_t stream) {
         int num_blocks = batch_size;
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(double);
-        softmax_backward_kernel<double><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size>>>(
+        softmax_backward_kernel<double><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             grad_output, output, grad_input, batch_size, dim_size);
         CUDA_CHECK(cudaGetLastError());
     }
@@ -1444,39 +1466,43 @@ __global__ void log_softmax_backward_kernel(const T* grad_output, const T* outpu
 // Host functions
 extern "C" {
     void log_softmax_forward_float(const float* input, float* output,
-                                   int64_t batch_size, int64_t dim_size) {
+                                   int64_t batch_size, int64_t dim_size,
+                                   cudaStream_t stream) {
         int num_blocks = batch_size;
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(float);
-        log_softmax_forward_kernel<float><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size>>>(
+        log_softmax_forward_kernel<float><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             input, output, batch_size, dim_size);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void log_softmax_forward_double(const double* input, double* output,
-                                    int64_t batch_size, int64_t dim_size) {
+                                    int64_t batch_size, int64_t dim_size,
+                                    cudaStream_t stream) {
         int num_blocks = batch_size;
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(double);
-        log_softmax_forward_kernel<double><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size>>>(
+        log_softmax_forward_kernel<double><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             input, output, batch_size, dim_size);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void log_softmax_backward_float(const float* grad_output, const float* output,
                                     float* grad_input,
-                                    int64_t batch_size, int64_t dim_size) {
+                                    int64_t batch_size, int64_t dim_size,
+                                    cudaStream_t stream) {
         int num_blocks = batch_size;
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(float);
-        log_softmax_backward_kernel<float><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size>>>(
+        log_softmax_backward_kernel<float><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             grad_output, output, grad_input, batch_size, dim_size);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void log_softmax_backward_double(const double* grad_output, const double* output,
                                      double* grad_input,
-                                     int64_t batch_size, int64_t dim_size) {
+                                     int64_t batch_size, int64_t dim_size,
+                                     cudaStream_t stream) {
         int num_blocks = batch_size;
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(double);
-        log_softmax_backward_kernel<double><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size>>>(
+        log_softmax_backward_kernel<double><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             grad_output, output, grad_input, batch_size, dim_size);
         CUDA_CHECK(cudaGetLastError());
     }

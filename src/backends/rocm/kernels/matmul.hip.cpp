@@ -20,27 +20,10 @@
 #include <vector>
 #include <memory>
 #include "fp16_saturate.h"
+#include "../rocm_error.hpp"
 
 namespace tenzor {
 namespace rocm {
-
-// ============================================================================
-// Error Checking Macros
-// ============================================================================
-
-#define HIP_CHECK(call) do { \
-    hipError_t err = call; \
-    if (err != hipSuccess) { \
-        throw std::runtime_error(std::string("HIP error: ") + hipGetErrorString(err)); \
-    } \
-} while(0)
-
-#define ROCBLAS_CHECK(call) do { \
-    rocblas_status status = call; \
-    if (status != rocblas_status_success) { \
-        throw std::runtime_error(std::string("rocBLAS error: ") + rocblas_status_to_string(status)); \
-    } \
-} while(0)
 
 // ============================================================================
 // rocBLAS Handle Management

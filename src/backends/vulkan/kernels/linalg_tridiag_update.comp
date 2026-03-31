@@ -1,0 +1,69 @@
+#version 450
+
+// Blocked tridiagonalization — apply accumulated Householder reflections (WY form)
+// to trailing submatrix. Performs: A_trail -= V * W^T + W * V^T (symmetric rank-2k)
+// where V contains the panel Householder vectors and W = tau * A * V - beta * V.
+// Each workgroup handles one row of the trailing submatrix.
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer MatrixA { float A[]; };
+layout(set = 0, binding = 1) readonly buffer TauBuf { float tau[]; };
+layout(set = 0, binding = 2) buffer WorkV { float v_buf[]; };  // Accumulated Householder vectors: panel_cols * n
+layout(set = 0, binding = 3) buffer WorkW { float w_buf[]; };  // W = A * V * T (WY representation)
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint col_start;
+    uint panel_cols;
+    uint batch_idx;
+};
+
+shared float dot_val;
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint base = batch_idx * n * n;
+    uint tau_base = batch_idx * n;
+    uint trail_start = col_start + panel_cols;
+
+    // This workgroup handles trailing row r
+    uint r = trail_start + gl_WorkGroupID.x;
+    if (r >= n) return;
+
+    // Apply each Householder reflection from the panel sequentially
+    // For symmetric tridiag, each reflection k zeroes A[col_start+k+2:n, col_start+k]
+    for (uint k = 0; k < panel_cols; k++) {
+        uint col = col_start + k;
+        float tau_k = tau[tau_base + col];
+        if (abs(tau_k) < 1e-30) continue;
+
+        // Compute dot = v^T * A[r, :] restricted to rows col+1:n
+        // v[col+1] = 1, v[col+2:n] stored in A[col+2:n, col]
+        if (tid == 0) {
+            float dot = A[base + r * n + (col + 1)]; // v[col+1] = 1
+            for (uint c = col + 2; c < n; c++) {
+                dot += A[base + c * n + col] * A[base + r * n + c];
+            }
+            dot_val = dot;
+        }
+        barrier();
+
+        float dot = dot_val;
+
+        // For symmetric matrix, we also need to update column r
+        // Update row r: A[r, c] -= tau * dot * v[c] for c in [col+1, n)
+        // And symmetrically A[c, r] for the upper part
+        // But since we process rows independently, we handle A[r, :] here
+
+        // Update trailing columns of row r
+        for (uint c = trail_start + tid; c < n; c += 256) {
+            float v_c = (c == col + 1) ? 1.0 : ((c > col + 1) ? A[base + c * n + col] : 0.0);
+            A[base + r * n + c] -= tau_k * dot * v_c;
+        }
+        // Also update A[r, col+1] if col+1 is in trailing region
+        if (tid == 0 && col + 1 >= trail_start) {
+            A[base + r * n + (col + 1)] -= tau_k * dot;
+        }
+        barrier();
+    }
+}

@@ -1,0 +1,172 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// SVD of a bidiagonal matrix using Golub-Kahan implicit QR iteration (Float64)
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0) buffer Diag { float64_t diag[]; };
+layout(set = 0, binding = 1) buffer SuperDiag { float64_t sdiag[]; };
+layout(set = 0, binding = 2) buffer URot { float64_t u_rot[]; };
+layout(set = 0, binding = 3) buffer VRot { float64_t v_rot[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint max_iterations;
+    uint batch_idx;
+    uint rot_stride;
+};
+
+void main() {
+    if (gl_WorkGroupID.x != batch_idx) return;
+
+    uint total_rots = 0;
+
+    for (uint iter = 0; iter < max_iterations; iter++) {
+        // Find active submatrix [p..q]
+        int q_int = int(n) - 1;
+        while (q_int > 0) {
+            float64_t thresh = 1e-14lf * (abs(diag[q_int - 1]) + abs(diag[q_int]));
+            if (abs(sdiag[q_int - 1]) > thresh) break;
+            sdiag[q_int - 1] = 0.0lf;
+            q_int--;
+        }
+        if (q_int <= 0) break;
+
+        int p_int = q_int - 1;
+        while (p_int > 0) {
+            float64_t thresh = 1e-14lf * (abs(diag[p_int - 1]) + abs(diag[p_int]));
+            if (abs(sdiag[p_int - 1]) <= thresh) {
+                sdiag[p_int - 1] = 0.0lf;
+                break;
+            }
+            p_int--;
+        }
+
+        uint p = uint(p_int);
+        uint q = uint(q_int);
+
+        // Check for zero diagonal elements
+        bool found_zero = false;
+        for (uint i = p; i < q; i++) {
+            if (abs(diag[i]) < 1e-30lf) {
+                found_zero = true;
+                float64_t f = sdiag[i];
+                sdiag[i] = 0.0lf;
+                for (uint j = i + 1; j <= q; j++) {
+                    float64_t r = sqrt(diag[j] * diag[j] + f * f);
+                    float64_t c = diag[j] / r;
+                    float64_t s = f / r;
+                    diag[j] = r;
+                    if (j < q) {
+                        f = s * sdiag[j];
+                        sdiag[j] = c * sdiag[j];
+                    }
+                    u_rot[total_rots * 2] = c;
+                    u_rot[total_rots * 2 + 1] = s;
+                    total_rots++;
+                }
+                break;
+            }
+        }
+        if (found_zero) continue;
+
+        // Wilkinson shift
+        float64_t d_qm1 = diag[q - 1];
+        float64_t d_q = diag[q];
+        float64_t e_qm1 = sdiag[q - 1];
+
+        float64_t t11 = d_qm1 * d_qm1;
+        if (q >= 2) t11 += sdiag[q - 2] * sdiag[q - 2];
+        float64_t t12 = d_qm1 * e_qm1;
+        float64_t t22 = d_q * d_q + e_qm1 * e_qm1;
+
+        float64_t mu;
+        {
+            float64_t d_val = (t11 - t22) * 0.5lf;
+            float64_t det_sign = (d_val >= 0.0lf) ? 1.0lf : -1.0lf;
+            mu = t22 - t12 * t12 / (d_val + det_sign * sqrt(d_val * d_val + t12 * t12));
+        }
+
+        float64_t y = diag[p] * diag[p] - mu;
+        float64_t z = diag[p] * sdiag[p];
+
+        for (uint k = p; k < q; k++) {
+            float64_t r = sqrt(y * y + z * z);
+            float64_t c = y / r;
+            float64_t s = -z / r;
+
+            if (k > p) {
+                sdiag[k - 1] = r;
+            }
+
+            float64_t dk = diag[k];
+            float64_t ek = sdiag[k];
+            float64_t dk1 = diag[k + 1];
+
+            float64_t new_dk = c * dk - s * ek;
+            float64_t bulge_below = -s * dk1;
+            float64_t new_ek = s * dk + c * ek;
+            float64_t new_dk1 = c * dk1;
+
+            v_rot[total_rots * 2] = c;
+            v_rot[total_rots * 2 + 1] = s;
+            total_rots++;
+
+            y = new_dk;
+            z = bulge_below;
+            r = sqrt(y * y + z * z);
+            c = y / r;
+            s = -z / r;
+
+            diag[k] = r;
+            diag[k + 1] = c * new_dk1 + s * new_ek;
+            sdiag[k] = -s * new_dk1 + c * new_ek;
+
+            if (k + 1 < q) {
+                sdiag[k] = -s * new_dk1 + c * new_ek;
+                y = sdiag[k];
+                z = -s * sdiag[k + 1];
+                sdiag[k] = c * sdiag[k];
+            }
+
+            u_rot[total_rots * 2] = c;
+            u_rot[total_rots * 2 + 1] = s;
+            total_rots++;
+        }
+    }
+
+    // Make singular values non-negative
+    for (uint i = 0; i < n; i++) {
+        if (diag[i] < 0.0lf) {
+            diag[i] = -diag[i];
+            v_rot[total_rots * 2] = -1.0lf;
+            v_rot[total_rots * 2 + 1] = 0.0lf;
+            total_rots++;
+        }
+    }
+
+    // Sort descending
+    for (uint i = 0; i < n - 1; i++) {
+        uint max_idx = i;
+        float64_t max_val = diag[i];
+        for (uint j = i + 1; j < n; j++) {
+            if (diag[j] > max_val) {
+                max_val = diag[j];
+                max_idx = j;
+            }
+        }
+        if (max_idx != i) {
+            float64_t tmp = diag[i];
+            diag[i] = diag[max_idx];
+            diag[max_idx] = tmp;
+            u_rot[total_rots * 2] = -2.0lf;
+            u_rot[total_rots * 2 + 1] = float64_t(i) * 65536.0lf + float64_t(max_idx);
+            v_rot[total_rots * 2] = -2.0lf;
+            v_rot[total_rots * 2 + 1] = float64_t(i) * 65536.0lf + float64_t(max_idx);
+            total_rots++;
+        }
+    }
+
+    u_rot[rot_stride - 2] = float64_t(total_rots);
+    u_rot[rot_stride - 1] = 0.0lf;
+}

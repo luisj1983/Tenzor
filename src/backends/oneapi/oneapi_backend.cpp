@@ -695,8 +695,10 @@ public:
         try {
             auto& device = devices_[device_id].device;
             auto* queue = new sycl::queue(device,
-                [](sycl::exception_list elist) {
+                [this](sycl::exception_list elist) {
+                    std::lock_guard<std::mutex> lock(async_errors_mutex_);
                     for (auto& e : elist) {
+                        async_errors_.push_back(e);
                         try { std::rethrow_exception(e); }
                         catch (const sycl::exception& se) {
                             fprintf(stderr, "SYCL async error: %s\n", se.what());

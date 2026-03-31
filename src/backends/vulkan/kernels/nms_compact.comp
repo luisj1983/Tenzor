@@ -1,0 +1,26 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+// NMS compaction shader: scatter kept indices into compacted output.
+// For each i where not_suppressed[i] == 1, write sorted_indices[i]
+// to output[prefix_sum[i] - 1].
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer NotSuppressed { int not_suppressed[]; };
+layout(set = 0, binding = 1) readonly buffer PrefixSum { int prefix_sum[]; };
+layout(set = 0, binding = 2) readonly buffer SortedIndices { int64_t sorted_indices[]; };
+layout(set = 0, binding = 3) writeonly buffer Output { int64_t output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint N;
+};
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= N) return;
+
+    if (not_suppressed[gid] != 0) {
+        uint out_pos = uint(prefix_sum[gid]) - 1;
+        output_data[out_pos] = sorted_indices[gid];
+    }
+}

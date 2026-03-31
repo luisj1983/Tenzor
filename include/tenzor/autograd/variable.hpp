@@ -53,23 +53,23 @@ struct VariableImpl {
         : data_(other.data_),
           grad_(other.grad_),
           grad_fn_(other.grad_fn_),
-          requires_grad_(other.requires_grad_.load(std::memory_order_relaxed)),
-          retain_grad_(other.retain_grad_.load(std::memory_order_relaxed)),
+          requires_grad_(other.requires_grad_.load(std::memory_order_acquire)),
+          retain_grad_(other.retain_grad_.load(std::memory_order_acquire)),
           hooks_([&]() { std::shared_lock lock(other.hooks_mutex_); return other.hooks_; }()),
-          next_hook_id_(other.next_hook_id_.load(std::memory_order_relaxed)),
+          next_hook_id_(other.next_hook_id_.load(std::memory_order_acquire)),
           grad_mutex_(other.grad_mutex_),  // Share mutex — copies share grad_ storage
-          thread_safe_(other.thread_safe_.load(std::memory_order_relaxed)) {}
+          thread_safe_(other.thread_safe_.load(std::memory_order_acquire)) {}
 
     VariableImpl(VariableImpl&& other) noexcept
         : data_(std::move(other.data_)),
           grad_(std::move(other.grad_)),
           grad_fn_(std::move(other.grad_fn_)),
-          requires_grad_(other.requires_grad_.load(std::memory_order_relaxed)),
-          retain_grad_(other.retain_grad_.load(std::memory_order_relaxed)),
+          requires_grad_(other.requires_grad_.load(std::memory_order_acquire)),
+          retain_grad_(other.retain_grad_.load(std::memory_order_acquire)),
           hooks_([&]() { std::unique_lock lock(other.hooks_mutex_); return std::move(other.hooks_); }()),
-          next_hook_id_(other.next_hook_id_.load(std::memory_order_relaxed)),
+          next_hook_id_(other.next_hook_id_.load(std::memory_order_acquire)),
           grad_mutex_(std::move(other.grad_mutex_)),
-          thread_safe_(other.thread_safe_.load(std::memory_order_relaxed)) {}
+          thread_safe_(other.thread_safe_.load(std::memory_order_acquire)) {}
 
     VariableImpl& operator=(const VariableImpl& other) {
         if (this != &other) {

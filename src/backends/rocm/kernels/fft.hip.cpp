@@ -24,6 +24,7 @@
 
 #include <rocfft/rocfft.h>
 #include <hip/hip_runtime.h>
+#include "../hip_buffer.hpp"
 #include <cstdint>
 #include <stdexcept>
 #include <vector>
@@ -373,34 +374,22 @@ void execute_plan(rocfft_plan plan, void* in_buf, void* out_buf, hipStream_t str
     RocFFTExecutionInfo info;
     ROCFFT_CHECK(rocfft_execution_info_set_stream(info.handle, stream));
 
-    // Query and allocate work buffer
+    // Query and allocate work buffer (RAII — freed automatically on scope exit)
     size_t work_buf_size = 0;
     ROCFFT_CHECK(rocfft_plan_get_work_buffer_size(plan, &work_buf_size));
 
-    void* work_buf = nullptr;
+    tenzor::rocm::HipBuffer work_buf(work_buf_size);
     if (work_buf_size > 0) {
-        HIP_CHECK(hipMalloc(&work_buf, work_buf_size));
-        ROCFFT_CHECK(rocfft_execution_info_set_work_buffer(info.handle, work_buf, work_buf_size));
+        ROCFFT_CHECK(rocfft_execution_info_set_work_buffer(info.handle, work_buf.ptr, work_buf_size));
     }
 
     void* in_buffers[1] = { in_buf };
     void* out_buffers[1] = { out_buf };
 
     // For in-place transforms, out_buffers should be nullptr
-    rocfft_status status = rocfft_execute(plan, in_buffers,
-                                          (in_buf == out_buf) ? nullptr : out_buffers,
-                                          info.handle);
-
-    // Free work buffer before checking status
-    if (work_buf) {
-        HIP_CHECK(hipFree(work_buf));
-    }
-
-    if (status != rocfft_status_success) {
-        throw std::runtime_error(
-            std::string("rocFFT execute failed - error code ") +
-            std::to_string(static_cast<int>(status)));
-    }
+    ROCFFT_CHECK(rocfft_execute(plan, in_buffers,
+                                (in_buf == out_buf) ? nullptr : out_buffers,
+                                info.handle));
 }
 
 } // anonymous namespace

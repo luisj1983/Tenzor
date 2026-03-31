@@ -1,0 +1,27 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Extract diagonal and superdiagonal from bidiagonalized matrix (Float64)
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer MatrixA { float64_t A[]; };
+layout(set = 0, binding = 1) buffer Diag { float64_t diag[]; };
+layout(set = 0, binding = 2) buffer SuperDiag { float64_t sdiag[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint batch_idx;
+};
+
+void main() {
+    uint tid = gl_LocalInvocationID.x + gl_WorkGroupID.x * gl_WorkGroupSize.x;
+    uint base = batch_idx * n * n;
+
+    if (tid < n) {
+        diag[batch_idx * n + tid] = A[base + tid * n + tid];
+    }
+
+    if (tid < n - 1) {
+        sdiag[batch_idx * (n - 1) + tid] = A[base + tid * n + (tid + 1)];
+    }
+}

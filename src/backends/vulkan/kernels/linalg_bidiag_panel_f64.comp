@@ -1,0 +1,138 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Blocked bidiagonal reduction — panel factorization (Float64)
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer MatrixA { float64_t A[]; };
+layout(set = 0, binding = 1) buffer TauL { float64_t tau_l[]; };
+layout(set = 0, binding = 2) buffer TauR { float64_t tau_r[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint col_start;
+    uint panel_cols;
+    uint batch_idx;
+};
+
+shared float64_t col_data[256];
+shared float64_t norm_sq;
+shared float64_t alpha;
+shared float64_t tau_k;
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint base = batch_idx * n * n;
+
+    for (uint k = 0; k < panel_cols; k++) {
+        uint col = col_start + k;
+
+        // ---- Left Householder: zero A[col+1:n, col] ----
+        if (tid == 0) {
+            norm_sq = 0.0lf;
+            for (uint r = col; r < n; r++) {
+                float64_t v = A[base + r * n + col];
+                norm_sq += v * v;
+            }
+
+            float64_t a_diag = A[base + col * n + col];
+            alpha = -sign(a_diag) * sqrt(norm_sq);
+            float64_t v_k = a_diag - alpha;
+
+            if (abs(v_k) < 1e-30lf) {
+                tau_k = 0.0lf;
+            } else {
+                float64_t sub_norm = norm_sq - a_diag * a_diag;
+                tau_k = (sub_norm + v_k * v_k) / (v_k * v_k);
+                tau_k = 2.0lf / tau_k;
+            }
+
+            A[base + col * n + col] = alpha;
+            tau_l[batch_idx * n + col] = tau_k;
+        }
+        barrier();
+
+        float64_t left_tau = tau_k;
+
+        if (abs(left_tau) > 1e-30lf) {
+            for (uint j = col + 1; j < min(col_start + panel_cols, n); j++) {
+                if (tid == 0) {
+                    float64_t dot = A[base + col * n + j];
+                    for (uint r = col + 1; r < n; r++) {
+                        dot += A[base + r * n + col] * A[base + r * n + j];
+                    }
+                    col_data[0] = dot;
+                }
+                barrier();
+
+                float64_t dot = col_data[0];
+
+                for (uint r = col + 1 + tid; r < n; r += 256) {
+                    A[base + r * n + j] -= left_tau * A[base + r * n + col] * dot;
+                }
+                if (tid == 0) {
+                    A[base + col * n + j] -= left_tau * dot;
+                }
+                barrier();
+            }
+        }
+
+        // ---- Right Householder: zero A[col, col+2:n] ----
+        if (col + 2 >= n) {
+            if (tid == 0) {
+                tau_r[batch_idx * n + col] = 0.0lf;
+            }
+            barrier();
+            continue;
+        }
+
+        if (tid == 0) {
+            norm_sq = 0.0lf;
+            for (uint c = col + 1; c < n; c++) {
+                float64_t v = A[base + col * n + c];
+                norm_sq += v * v;
+            }
+
+            float64_t a_super = A[base + col * n + (col + 1)];
+            alpha = -sign(a_super) * sqrt(norm_sq);
+            float64_t v_k_r = a_super - alpha;
+
+            if (abs(v_k_r) < 1e-30lf) {
+                tau_k = 0.0lf;
+            } else {
+                float64_t sub_norm = norm_sq - a_super * a_super;
+                tau_k = (sub_norm + v_k_r * v_k_r) / (v_k_r * v_k_r);
+                tau_k = 2.0lf / tau_k;
+            }
+
+            A[base + col * n + (col + 1)] = alpha;
+            tau_r[batch_idx * n + col] = tau_k;
+        }
+        barrier();
+
+        float64_t right_tau = tau_k;
+
+        if (abs(right_tau) > 1e-30lf) {
+            for (uint i = col + 1; i < min(col_start + panel_cols, n); i++) {
+                if (tid == 0) {
+                    float64_t dot = A[base + i * n + (col + 1)];
+                    for (uint c = col + 2; c < n; c++) {
+                        dot += A[base + i * n + c] * A[base + col * n + c];
+                    }
+                    col_data[0] = dot;
+                }
+                barrier();
+
+                float64_t dot = col_data[0];
+
+                for (uint c = col + 2 + tid; c < n; c += 256) {
+                    A[base + i * n + c] -= right_tau * dot * A[base + col * n + c];
+                }
+                if (tid == 0) {
+                    A[base + i * n + (col + 1)] -= right_tau * dot;
+                }
+                barrier();
+            }
+        }
+    }
+}

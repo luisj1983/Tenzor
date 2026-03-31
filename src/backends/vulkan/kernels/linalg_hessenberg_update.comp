@@ -1,0 +1,64 @@
+#version 450
+
+// Blocked Hessenberg reduction — apply accumulated reflections to trailing columns.
+// After panel reduction of columns [col_start, col_start+panel_cols), apply the
+// reflections to the trailing block of columns [col_start+panel_cols, n).
+// Each workgroup handles one trailing column.
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer MatrixA { float A[]; };
+layout(set = 0, binding = 1) readonly buffer TauBuf { float tau[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint col_start;
+    uint panel_cols;
+    uint batch_idx;
+};
+
+shared float dot_left;
+shared float dot_right;
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint base = batch_idx * n * n;
+    uint tau_base = batch_idx * n;
+
+    // This workgroup handles trailing column j
+    uint j = col_start + panel_cols + gl_WorkGroupID.x;
+    if (j >= n) return;
+
+    // Apply each Householder reflection from the panel
+    for (uint k = 0; k < panel_cols; k++) {
+        uint col = col_start + k;
+        float tau_k = tau[tau_base + col];
+        if (abs(tau_k) < 1e-30) continue;
+
+        // Left apply: column j, rows col+1:n
+        // v[col+1] = 1, v[col+2:n] stored in A[col+2:n, col]
+        if (tid == 0) {
+            float dot = A[base + (col + 1) * n + j];
+            for (uint r = col + 2; r < n; r++) {
+                dot += A[base + r * n + col] * A[base + r * n + j];
+            }
+            dot_left = dot;
+        }
+        barrier();
+
+        float dl = dot_left * tau_k;
+
+        // Update column j rows
+        for (uint r = col + 1 + tid; r < n; r += 256) {
+            float v_r = (r == col + 1) ? 1.0 : A[base + r * n + col];
+            A[base + r * n + j] -= dl * v_r;
+        }
+        barrier();
+
+        // Right apply: row j is not needed per-column; right apply affects all rows
+        // For the blocked update, right-apply is done row-wise.
+        // However, since each workgroup handles a column, we apply the right
+        // transformation by updating A[i, col+1:n] for all rows.
+        // This is handled in the panel itself for intra-panel columns.
+        // For trailing columns, the right-apply was already done during panel factorization.
+    }
+}

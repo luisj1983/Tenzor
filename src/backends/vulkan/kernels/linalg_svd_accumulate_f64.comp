@@ -1,0 +1,93 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Accumulate Householder reflections for U and V reconstruction (Float64)
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer BidiagA { float64_t A[]; };
+layout(set = 0, binding = 1) readonly buffer TauL { float64_t tau_l[]; };
+layout(set = 0, binding = 2) readonly buffer TauR { float64_t tau_r[]; };
+layout(set = 0, binding = 3) buffer UMat { float64_t U[]; };
+layout(set = 0, binding = 4) buffer VtMat { float64_t Vt[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint batch_idx;
+    uint mode;  // 0 = build U, 1 = build Vt
+};
+
+shared float64_t dot_val;
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint base = batch_idx * n * n;
+    uint j = gl_WorkGroupID.x;
+    if (j >= n) return;
+
+    if (mode == 0) {
+        uint u_base = batch_idx * n * n;
+
+        for (uint r = tid; r < n; r += 256) {
+            U[u_base + r * n + j] = (r == j) ? 1.0lf : 0.0lf;
+        }
+        barrier();
+
+        for (int k = int(n) - 2; k >= 0; k--) {
+            uint col = uint(k);
+            float64_t left_tau = tau_l[batch_idx * n + col];
+            if (abs(left_tau) < 1e-30lf) continue;
+
+            if (tid == 0) {
+                float64_t dot = U[u_base + col * n + j];
+                for (uint r = col + 1; r < n; r++) {
+                    dot += A[base + r * n + col] * U[u_base + r * n + j];
+                }
+                dot_val = dot;
+            }
+            barrier();
+
+            float64_t dot = dot_val;
+
+            for (uint r = col + 1 + tid; r < n; r += 256) {
+                U[u_base + r * n + j] -= left_tau * A[base + r * n + col] * dot;
+            }
+            if (tid == 0) {
+                U[u_base + col * n + j] -= left_tau * dot;
+            }
+            barrier();
+        }
+    } else {
+        uint vt_base = batch_idx * n * n;
+
+        for (uint c = tid; c < n; c += 256) {
+            Vt[vt_base + j * n + c] = (j == c) ? 1.0lf : 0.0lf;
+        }
+        barrier();
+
+        for (int k = int(n) - 3; k >= 0; k--) {
+            uint col = uint(k);
+            float64_t right_tau = tau_r[batch_idx * n + col];
+            if (abs(right_tau) < 1e-30lf) continue;
+            if (col + 2 >= n) continue;
+
+            if (tid == 0) {
+                float64_t dot = Vt[vt_base + j * n + (col + 1)];
+                for (uint c = col + 2; c < n; c++) {
+                    dot += Vt[vt_base + j * n + c] * A[base + col * n + c];
+                }
+                dot_val = dot;
+            }
+            barrier();
+
+            float64_t dot = dot_val;
+
+            for (uint c = col + 2 + tid; c < n; c += 256) {
+                Vt[vt_base + j * n + c] -= right_tau * dot * A[base + col * n + c];
+            }
+            if (tid == 0) {
+                Vt[vt_base + j * n + (col + 1)] -= right_tau * dot;
+            }
+            barrier();
+        }
+    }
+}

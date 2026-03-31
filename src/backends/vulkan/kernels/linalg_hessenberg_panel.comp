@@ -1,0 +1,117 @@
+#version 450
+
+// Panel Hessenberg reduction via Householder reflections.
+// Reduces columns [col_start, col_start+panel_cols) of general matrix A to
+// upper Hessenberg form. Stores Householder vectors below sub-diagonal.
+// For each column j: zeros A[j+2:n, j] using H_j = I - tau * v * v^T
+// applied from both left and right: A = H * A * H^T (preserves Hessenberg structure).
+// One workgroup (256 threads) per batch element.
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer MatrixA { float A[]; };
+layout(set = 0, binding = 1) buffer TauBuf  { float tau[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint col_start;
+    uint panel_cols;
+    uint batch_idx;
+};
+
+shared float norm_sq;
+shared float alpha_val;
+shared float tau_k;
+shared float dot_buf[256];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint base = batch_idx * n * n;
+    uint tau_base = batch_idx * n;
+
+    for (uint k = 0; k < panel_cols; k++) {
+        uint col = col_start + k;
+        if (col + 2 > n) break; // Need at least 2 rows below diagonal
+
+        // Step 1: Compute Householder vector to zero A[col+2:n, col]
+        if (tid == 0) {
+            norm_sq = 0.0;
+            for (uint r = col + 1; r < n; r++) {
+                float v = A[base + r * n + col];
+                norm_sq += v * v;
+            }
+
+            float norm_val = sqrt(norm_sq);
+            if (norm_val < 1e-30) {
+                tau_k = 0.0;
+                alpha_val = A[base + (col + 1) * n + col];
+            } else {
+                alpha_val = -sign(A[base + (col + 1) * n + col]) * norm_val;
+                float v0 = A[base + (col + 1) * n + col] - alpha_val;
+
+                float v_norm_sq = v0 * v0;
+                for (uint r = col + 2; r < n; r++) {
+                    v_norm_sq += A[base + r * n + col] * A[base + r * n + col];
+                }
+
+                if (abs(v0) < 1e-30) {
+                    tau_k = 0.0;
+                } else {
+                    tau_k = 2.0 / v_norm_sq;
+                    // Normalize: v[col+2:n] /= v0, v[col+1] = 1
+                    for (uint r = col + 2; r < n; r++) {
+                        A[base + r * n + col] /= v0;
+                    }
+                }
+
+                // Set sub-diagonal
+                A[base + (col + 1) * n + col] = alpha_val;
+            }
+
+            tau[tau_base + col] = tau_k;
+        }
+        barrier();
+
+        if (abs(tau_k) < 1e-30) continue;
+
+        // Step 2: Apply from left: A = H * A (= (I - tau*v*v^T) * A)
+        // Affects rows col+1:n, all columns col:n
+        // v[col+1] = 1, v[col+2:n] stored in A[col+2:n, col]
+        for (uint j = col + tid; j < n; j += 256) {
+            // Compute dot = v^T * A[:, j] for rows col+1:n
+            float dot = A[base + (col + 1) * n + j]; // v[col+1] = 1
+            for (uint r = col + 2; r < n; r++) {
+                dot += A[base + r * n + col] * A[base + r * n + j];
+            }
+            dot *= tau_k;
+
+            // Update: A[r, j] -= tau * v[r] * dot
+            A[base + (col + 1) * n + j] -= dot; // v[col+1] = 1
+            for (uint r = col + 2; r < n; r++) {
+                A[base + r * n + j] -= A[base + r * n + col] * dot;
+            }
+        }
+        barrier();
+
+        // Step 3: Apply from right: A = A * H^T (= A * (I - tau*v*v^T))
+        // Affects all rows 0:n, columns col+1:n
+        for (uint i = tid; i < n; i += 256) {
+            // Compute dot = A[i, :] * v for cols col+1:n
+            float dot = A[base + i * n + (col + 1)]; // v[col+1] = 1
+            for (uint c = col + 2; c < n; c++) {
+                dot += A[base + i * n + c] * A[base + c * n + col];
+            }
+            dot *= tau_k;
+
+            // Update: A[i, c] -= tau * dot * v[c]
+            A[base + i * n + (col + 1)] -= dot; // v[col+1] = 1
+            for (uint c = col + 2; c < n; c++) {
+                A[base + i * n + c] -= dot * A[base + c * n + col];
+            }
+        }
+        barrier();
+
+        // Zero out below sub-diagonal (clean up stored Householder vectors)
+        // Keep vectors in A[col+2:n, col] for later use but zero for Hessenberg form
+        // Actually, we keep them stored — the dispatch code knows they're there
+    }
+}

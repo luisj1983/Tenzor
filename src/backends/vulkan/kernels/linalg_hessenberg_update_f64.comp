@@ -1,0 +1,49 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Blocked Hessenberg reduction — trailing column update (Float64 variant)
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer MatrixA { float64_t A[]; };
+layout(set = 0, binding = 1) readonly buffer TauBuf { float64_t tau[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint col_start;
+    uint panel_cols;
+    uint batch_idx;
+};
+
+shared float64_t dot_left;
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint base = batch_idx * n * n;
+    uint tau_base = batch_idx * n;
+
+    uint j = col_start + panel_cols + gl_WorkGroupID.x;
+    if (j >= n) return;
+
+    for (uint k = 0; k < panel_cols; k++) {
+        uint col = col_start + k;
+        float64_t tau_k = tau[tau_base + col];
+        if (abs(tau_k) < 1e-60lf) continue;
+
+        if (tid == 0) {
+            float64_t dot = A[base + (col + 1) * n + j];
+            for (uint r = col + 2; r < n; r++) {
+                dot += A[base + r * n + col] * A[base + r * n + j];
+            }
+            dot_left = dot;
+        }
+        barrier();
+
+        float64_t dl = dot_left * tau_k;
+
+        for (uint r = col + 1 + tid; r < n; r += 256) {
+            float64_t v_r = (r == col + 1) ? 1.0lf : A[base + r * n + col];
+            A[base + r * n + j] -= dl * v_r;
+        }
+        barrier();
+    }
+}

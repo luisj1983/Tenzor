@@ -1,0 +1,28 @@
+#version 450
+
+// Extract diagonal and superdiagonal from bidiagonalized matrix
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer MatrixA { float A[]; };
+layout(set = 0, binding = 1) buffer Diag { float diag[]; };
+layout(set = 0, binding = 2) buffer SuperDiag { float sdiag[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint batch_idx;
+};
+
+void main() {
+    uint tid = gl_LocalInvocationID.x + gl_WorkGroupID.x * gl_WorkGroupSize.x;
+    uint base = batch_idx * n * n;
+
+    // Extract diagonal
+    if (tid < n) {
+        diag[batch_idx * n + tid] = A[base + tid * n + tid];
+    }
+
+    // Extract superdiagonal
+    if (tid < n - 1) {
+        sdiag[batch_idx * (n - 1) + tid] = A[base + tid * n + (tid + 1)];
+    }
+}

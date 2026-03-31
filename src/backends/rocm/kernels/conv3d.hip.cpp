@@ -5,33 +5,16 @@
 #include <rocblas/rocblas.h>
 #include <stdexcept>
 #include <vector>
+#include "../rocm_error.hpp"
 
 namespace tenzor {
 namespace rocm {
-
-// ============================================================================
-// HIP Error Checking (duplicated from conv2d for compilation unit isolation)
-// ============================================================================
-
-#define HIP_CHECK_CONV3D(call) do { \
-    hipError_t err = call; \
-    if (err != hipSuccess) { \
-        throw std::runtime_error(std::string("HIP error in conv3d: ") + hipGetErrorString(err)); \
-    } \
-} while(0)
-
-#define ROCBLAS_CHECK_CONV3D(call) do { \
-    rocblas_status status = call; \
-    if (status != rocblas_status_success) { \
-        throw std::runtime_error(std::string("rocBLAS error in conv3d: ") + rocblas_status_to_string(status)); \
-    } \
-} while(0)
 
 // RAII wrapper for rocBLAS handle
 class RocBLASHandleGuardConv3d {
 public:
     RocBLASHandleGuardConv3d() {
-        ROCBLAS_CHECK_CONV3D(rocblas_create_handle(&handle_));
+        ROCBLAS_CHECK(rocblas_create_handle(&handle_));
     }
     ~RocBLASHandleGuardConv3d() {
         if (handle_) rocblas_destroy_handle(handle_);
@@ -40,7 +23,7 @@ public:
     RocBLASHandleGuardConv3d& operator=(const RocBLASHandleGuardConv3d&) = delete;
     rocblas_handle get() const { return handle_; }
     void set_stream(hipStream_t stream) {
-        ROCBLAS_CHECK_CONV3D(rocblas_set_stream(handle_, stream));
+        ROCBLAS_CHECK(rocblas_set_stream(handle_, stream));
     }
 private:
     rocblas_handle handle_ = nullptr;
@@ -313,7 +296,7 @@ auto conv3d_forward_hip(
 
     size_t elem_size = (dtype == DType::Float64) ? sizeof(double) :
                        (dtype == DType::Float16) ? sizeof(__half) : sizeof(float);
-    HIP_CHECK_CONV3D(hipMemsetAsync(output.data_ptr(), 0, output.numel() * elem_size, stream));
+    HIP_CHECK(hipMemsetAsync(output.data_ptr(), 0, output.numel() * elem_size, stream));
 
     RocBLASHandleGuardConv3d rocblas_guard;
     rocblas_handle handle = rocblas_guard.get();
@@ -337,7 +320,7 @@ auto conv3d_forward_hip(
 
         if (dtype == DType::Float32) {
             float* col_buffer;
-            HIP_CHECK_CONV3D(hipMalloc(&col_buffer, col_rows * col_cols * sizeof(float)));
+            HIP_CHECK(hipMalloc(&col_buffer, col_rows * col_cols * sizeof(float)));
 
             const float* input_ptr = input.data<float>() + in_start * D_in * H_in * W_in;
             im3col_kernel_nchw<<<grid, block, 0, stream>>>(
@@ -348,7 +331,7 @@ auto conv3d_forward_hip(
                 dil_d, dil_h, dil_w,
                 D_out, H_out, W_out
             );
-            HIP_CHECK_CONV3D(hipGetLastError());
+            HIP_CHECK(hipGetLastError());
 
             float alpha = 1.0f, beta = 0.0f;
             const float* weight_ptr = weight.data<float>() + out_start * C_in_per_group * kD * kH * kW;
@@ -356,7 +339,7 @@ auto conv3d_forward_hip(
 
             // col_buffer: (M, K), weight: (N_gemm, K) => output = col @ weight^T => (M, N_gemm)
             // rocBLAS column-major: C = alpha * op(A) * op(B) + beta * C
-            ROCBLAS_CHECK_CONV3D(rocblas_sgemm(
+            ROCBLAS_CHECK(rocblas_sgemm(
                 handle,
                 rocblas_operation_transpose, rocblas_operation_none,
                 N_gemm, M, K,
@@ -367,10 +350,10 @@ auto conv3d_forward_hip(
                 output_ptr, N_gemm
             ));
 
-            HIP_CHECK_CONV3D(hipFree(col_buffer));
+            HIP_CHECK(hipFree(col_buffer));
         } else if (dtype == DType::Float64) {
             double* col_buffer;
-            HIP_CHECK_CONV3D(hipMalloc(&col_buffer, col_rows * col_cols * sizeof(double)));
+            HIP_CHECK(hipMalloc(&col_buffer, col_rows * col_cols * sizeof(double)));
 
             const double* input_ptr = input.data<double>() + in_start * D_in * H_in * W_in;
             im3col_kernel_nchw<<<grid, block, 0, stream>>>(
@@ -381,13 +364,13 @@ auto conv3d_forward_hip(
                 dil_d, dil_h, dil_w,
                 D_out, H_out, W_out
             );
-            HIP_CHECK_CONV3D(hipGetLastError());
+            HIP_CHECK(hipGetLastError());
 
             double alpha = 1.0, beta = 0.0;
             const double* weight_ptr = weight.data<double>() + out_start * C_in_per_group * kD * kH * kW;
             double* output_ptr = output.data<double>() + out_start * D_out * H_out * W_out;
 
-            ROCBLAS_CHECK_CONV3D(rocblas_dgemm(
+            ROCBLAS_CHECK(rocblas_dgemm(
                 handle,
                 rocblas_operation_transpose, rocblas_operation_none,
                 N_gemm, M, K,
@@ -398,10 +381,10 @@ auto conv3d_forward_hip(
                 output_ptr, N_gemm
             ));
 
-            HIP_CHECK_CONV3D(hipFree(col_buffer));
+            HIP_CHECK(hipFree(col_buffer));
         } else if (dtype == DType::Float16) {
             __half* col_buffer;
-            HIP_CHECK_CONV3D(hipMalloc(&col_buffer, col_rows * col_cols * sizeof(__half)));
+            HIP_CHECK(hipMalloc(&col_buffer, col_rows * col_cols * sizeof(__half)));
 
             const __half* input_ptr = reinterpret_cast<const __half*>(input.data<Float16>()) + in_start * D_in * H_in * W_in;
             im3col_kernel_nchw<<<grid, block, 0, stream>>>(
@@ -412,7 +395,7 @@ auto conv3d_forward_hip(
                 dil_d, dil_h, dil_w,
                 D_out, H_out, W_out
             );
-            HIP_CHECK_CONV3D(hipGetLastError());
+            HIP_CHECK(hipGetLastError());
 
             rocblas_half alpha_h{static_cast<uint16_t>(0x3C00)};  // 1.0 in FP16
             rocblas_half beta_h{static_cast<uint16_t>(0x0000)};   // 0.0 in FP16
@@ -420,7 +403,7 @@ auto conv3d_forward_hip(
             const rocblas_half* weight_ptr = reinterpret_cast<const rocblas_half*>(weight.data<Float16>()) + out_start * C_in_per_group * kD * kH * kW;
             rocblas_half* output_ptr = reinterpret_cast<rocblas_half*>(output.data<Float16>()) + out_start * D_out * H_out * W_out;
 
-            ROCBLAS_CHECK_CONV3D(rocblas_hgemm(
+            ROCBLAS_CHECK(rocblas_hgemm(
                 handle,
                 rocblas_operation_transpose, rocblas_operation_none,
                 N_gemm, M, K,
@@ -431,7 +414,7 @@ auto conv3d_forward_hip(
                 output_ptr, N_gemm
             ));
 
-            HIP_CHECK_CONV3D(hipFree(col_buffer));
+            HIP_CHECK(hipFree(col_buffer));
         } else {
             throw std::runtime_error("Conv3d: unsupported dtype (only Float32, Float64, Float16)");
         }
@@ -457,7 +440,7 @@ auto conv3d_forward_hip(
                 reinterpret_cast<const __half*>(bias.data<Float16>()),
                 C_out, spatial_size, total);
         }
-        HIP_CHECK_CONV3D(hipGetLastError());
+        HIP_CHECK(hipGetLastError());
     }
 
     return output;
@@ -542,14 +525,14 @@ auto conv3d_backward_input_hip(
 
         if (dtype == DType::Float32) {
             float* grad_col;
-            HIP_CHECK_CONV3D(hipMalloc(&grad_col, col_rows * col_cols * sizeof(float)));
+            HIP_CHECK(hipMalloc(&grad_col, col_rows * col_cols * sizeof(float)));
 
             float alpha = 1.0f, beta = 0.0f;
             const float* grad_out_ptr = grad_output.data<float>() + out_start * D_out * H_out * W_out;
             const float* weight_ptr = weight.data<float>() + out_start * C_in_per_group * kD * kH * kW;
 
             // rocBLAS col-major: C = A * B^T => row-major: C = B * A^T
-            ROCBLAS_CHECK_CONV3D(rocblas_sgemm(
+            ROCBLAS_CHECK(rocblas_sgemm(
                 handle,
                 rocblas_operation_none, rocblas_operation_none,
                 N_col, M_gemm, K_gemm,
@@ -575,18 +558,18 @@ auto conv3d_backward_input_hip(
                 dil_d, dil_h, dil_w,
                 D_out, H_out, W_out
             );
-            HIP_CHECK_CONV3D(hipGetLastError());
-            HIP_CHECK_CONV3D(hipFree(grad_col));
+            HIP_CHECK(hipGetLastError());
+            HIP_CHECK(hipFree(grad_col));
 
         } else if (dtype == DType::Float64) {
             double* grad_col;
-            HIP_CHECK_CONV3D(hipMalloc(&grad_col, col_rows * col_cols * sizeof(double)));
+            HIP_CHECK(hipMalloc(&grad_col, col_rows * col_cols * sizeof(double)));
 
             double alpha = 1.0, beta = 0.0;
             const double* grad_out_ptr = grad_output.data<double>() + out_start * D_out * H_out * W_out;
             const double* weight_ptr = weight.data<double>() + out_start * C_in_per_group * kD * kH * kW;
 
-            ROCBLAS_CHECK_CONV3D(rocblas_dgemm(
+            ROCBLAS_CHECK(rocblas_dgemm(
                 handle,
                 rocblas_operation_none, rocblas_operation_none,
                 N_col, M_gemm, K_gemm,
@@ -611,12 +594,12 @@ auto conv3d_backward_input_hip(
                 dil_d, dil_h, dil_w,
                 D_out, H_out, W_out
             );
-            HIP_CHECK_CONV3D(hipGetLastError());
-            HIP_CHECK_CONV3D(hipFree(grad_col));
+            HIP_CHECK(hipGetLastError());
+            HIP_CHECK(hipFree(grad_col));
 
         } else if (dtype == DType::Float16) {
             rocblas_half* grad_col;
-            HIP_CHECK_CONV3D(hipMalloc(&grad_col, col_rows * col_cols * sizeof(rocblas_half)));
+            HIP_CHECK(hipMalloc(&grad_col, col_rows * col_cols * sizeof(rocblas_half)));
 
             rocblas_half alpha_h{static_cast<uint16_t>(0x3C00)};
             rocblas_half beta_h{static_cast<uint16_t>(0x0000)};
@@ -624,7 +607,7 @@ auto conv3d_backward_input_hip(
             const rocblas_half* grad_out_ptr = reinterpret_cast<const rocblas_half*>(grad_output.data<Float16>()) + out_start * D_out * H_out * W_out;
             const rocblas_half* weight_ptr = reinterpret_cast<const rocblas_half*>(weight.data<Float16>()) + out_start * C_in_per_group * kD * kH * kW;
 
-            ROCBLAS_CHECK_CONV3D(rocblas_hgemm(
+            ROCBLAS_CHECK(rocblas_hgemm(
                 handle,
                 rocblas_operation_none, rocblas_operation_none,
                 N_col, M_gemm, K_gemm,
@@ -649,8 +632,8 @@ auto conv3d_backward_input_hip(
                 dil_d, dil_h, dil_w,
                 D_out, H_out, W_out
             );
-            HIP_CHECK_CONV3D(hipGetLastError());
-            HIP_CHECK_CONV3D(hipFree(grad_col));
+            HIP_CHECK(hipGetLastError());
+            HIP_CHECK(hipFree(grad_col));
         } else {
             throw std::runtime_error("Conv3d backward input: unsupported dtype");
         }
@@ -718,7 +701,7 @@ auto conv3d_backward_weight_hip(
     Tensor grad_weight(weight_shape, dtype, input.device());
     size_t elem_size = (dtype == DType::Float64) ? sizeof(double) :
                        (dtype == DType::Float16) ? sizeof(__half) : sizeof(float);
-    HIP_CHECK_CONV3D(hipMemsetAsync(grad_weight.data_ptr(), 0, grad_weight.numel() * elem_size, stream));
+    HIP_CHECK(hipMemsetAsync(grad_weight.data_ptr(), 0, grad_weight.numel() * elem_size, stream));
 
     RocBLASHandleGuardConv3d rocblas_guard;
     rocblas_handle handle = rocblas_guard.get();
@@ -745,7 +728,7 @@ auto conv3d_backward_weight_hip(
 
         if (dtype == DType::Float32) {
             float* input_col;
-            HIP_CHECK_CONV3D(hipMalloc(&input_col, col_rows * col_cols * sizeof(float)));
+            HIP_CHECK(hipMalloc(&input_col, col_rows * col_cols * sizeof(float)));
 
             const float* input_ptr = input.data<float>() + in_start * D_in * H_in * W_in;
             im3col_kernel_nchw<<<grid, block, 0, stream>>>(
@@ -756,7 +739,7 @@ auto conv3d_backward_weight_hip(
                 dil_d, dil_h, dil_w,
                 D_out, H_out, W_out
             );
-            HIP_CHECK_CONV3D(hipGetLastError());
+            HIP_CHECK(hipGetLastError());
 
             float alpha = 1.0f, beta = 0.0f;
             const float* grad_out_ptr = grad_output.data<float>() + out_start * D_out * H_out * W_out;
@@ -764,7 +747,7 @@ auto conv3d_backward_weight_hip(
 
             // Row-major: C = A^T * B
             // rocBLAS col-major: C = B^T * A (with transposed args)
-            ROCBLAS_CHECK_CONV3D(rocblas_sgemm(
+            ROCBLAS_CHECK(rocblas_sgemm(
                 handle,
                 rocblas_operation_none, rocblas_operation_transpose,
                 N_weight, M_gemm, K_gemm,
@@ -775,11 +758,11 @@ auto conv3d_backward_weight_hip(
                 grad_weight_ptr, N_weight
             ));
 
-            HIP_CHECK_CONV3D(hipFree(input_col));
+            HIP_CHECK(hipFree(input_col));
 
         } else if (dtype == DType::Float64) {
             double* input_col;
-            HIP_CHECK_CONV3D(hipMalloc(&input_col, col_rows * col_cols * sizeof(double)));
+            HIP_CHECK(hipMalloc(&input_col, col_rows * col_cols * sizeof(double)));
 
             const double* input_ptr = input.data<double>() + in_start * D_in * H_in * W_in;
             im3col_kernel_nchw<<<grid, block, 0, stream>>>(
@@ -790,13 +773,13 @@ auto conv3d_backward_weight_hip(
                 dil_d, dil_h, dil_w,
                 D_out, H_out, W_out
             );
-            HIP_CHECK_CONV3D(hipGetLastError());
+            HIP_CHECK(hipGetLastError());
 
             double alpha = 1.0, beta = 0.0;
             const double* grad_out_ptr = grad_output.data<double>() + out_start * D_out * H_out * W_out;
             double* grad_weight_ptr = grad_weight.data<double>() + out_start * C_in_per_group * kD * kH * kW;
 
-            ROCBLAS_CHECK_CONV3D(rocblas_dgemm(
+            ROCBLAS_CHECK(rocblas_dgemm(
                 handle,
                 rocblas_operation_none, rocblas_operation_transpose,
                 N_weight, M_gemm, K_gemm,
@@ -807,11 +790,11 @@ auto conv3d_backward_weight_hip(
                 grad_weight_ptr, N_weight
             ));
 
-            HIP_CHECK_CONV3D(hipFree(input_col));
+            HIP_CHECK(hipFree(input_col));
 
         } else if (dtype == DType::Float16) {
             rocblas_half* input_col;
-            HIP_CHECK_CONV3D(hipMalloc(&input_col, col_rows * col_cols * sizeof(rocblas_half)));
+            HIP_CHECK(hipMalloc(&input_col, col_rows * col_cols * sizeof(rocblas_half)));
 
             const __half* input_ptr = reinterpret_cast<const __half*>(input.data<Float16>()) + in_start * D_in * H_in * W_in;
             im3col_kernel_nchw<<<grid, block, 0, stream>>>(
@@ -822,7 +805,7 @@ auto conv3d_backward_weight_hip(
                 dil_d, dil_h, dil_w,
                 D_out, H_out, W_out
             );
-            HIP_CHECK_CONV3D(hipGetLastError());
+            HIP_CHECK(hipGetLastError());
 
             rocblas_half alpha_h{static_cast<uint16_t>(0x3C00)};
             rocblas_half beta_h{static_cast<uint16_t>(0x0000)};
@@ -830,7 +813,7 @@ auto conv3d_backward_weight_hip(
             const rocblas_half* grad_out_ptr = reinterpret_cast<const rocblas_half*>(grad_output.data<Float16>()) + out_start * D_out * H_out * W_out;
             rocblas_half* grad_weight_ptr = reinterpret_cast<rocblas_half*>(grad_weight.data<Float16>()) + out_start * C_in_per_group * kD * kH * kW;
 
-            ROCBLAS_CHECK_CONV3D(rocblas_hgemm(
+            ROCBLAS_CHECK(rocblas_hgemm(
                 handle,
                 rocblas_operation_none, rocblas_operation_transpose,
                 N_weight, M_gemm, K_gemm,
@@ -841,7 +824,7 @@ auto conv3d_backward_weight_hip(
                 grad_weight_ptr, N_weight
             ));
 
-            HIP_CHECK_CONV3D(hipFree(input_col));
+            HIP_CHECK(hipFree(input_col));
         } else {
             throw std::runtime_error("Conv3d backward weight: unsupported dtype");
         }
@@ -877,7 +860,7 @@ auto conv3d_backward_bias_hip(
 
     size_t elem_size = (dtype == DType::Float64) ? sizeof(double) :
                        (dtype == DType::Float16) ? sizeof(__half) : sizeof(float);
-    HIP_CHECK_CONV3D(hipMemsetAsync(grad_bias.data_ptr(), 0, C_out * elem_size, stream));
+    HIP_CHECK(hipMemsetAsync(grad_bias.data_ptr(), 0, C_out * elem_size, stream));
 
     if (dtype == DType::Float32) {
         sum_bias_grad_3d_kernel<<<static_cast<unsigned int>(C_out), 256, 0, stream>>>(
@@ -895,7 +878,7 @@ auto conv3d_backward_bias_hip(
     } else {
         throw std::runtime_error("Conv3d backward bias: unsupported dtype");
     }
-    HIP_CHECK_CONV3D(hipGetLastError());
+    HIP_CHECK(hipGetLastError());
 
     return grad_bias;
 }
@@ -1055,7 +1038,7 @@ auto conv_transpose3d_forward_hip(
         throw std::runtime_error("ConvTranspose3d forward: unsupported dtype");
     }
 
-    HIP_CHECK_CONV3D(hipGetLastError());
+    HIP_CHECK(hipGetLastError());
     return output;
 }
 

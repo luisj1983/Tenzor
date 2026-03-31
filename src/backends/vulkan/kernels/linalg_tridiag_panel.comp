@@ -1,0 +1,137 @@
+#version 450
+
+// Blocked tridiagonalization — panel factorization using Householder reflections
+// for symmetric matrices. Reduces columns [col_start, col_start+panel_cols) to
+// tridiagonal form. Stores Householder vectors below sub-diagonal, tridiagonal
+// entries on diagonal and sub-diagonal.
+// One workgroup with 256 threads per batch element.
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer MatrixA { float A[]; };   // Symmetric n×n (in-place)
+layout(set = 0, binding = 1) buffer TauBuf  { float tau[]; }; // Householder scalars
+layout(set = 0, binding = 2) buffer WorkBuf { float work[]; };// Workspace (n floats for dot products)
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint col_start;
+    uint panel_cols;  // min(32, n - col_start - 1)
+    uint batch_idx;
+};
+
+shared float col_buf[256];
+shared float norm_sq;
+shared float alpha_val;
+shared float tau_k;
+shared float dot_val;
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint base = batch_idx * n * n;
+    uint work_base = batch_idx * n;
+
+    for (uint k = 0; k < panel_cols; k++) {
+        uint col = col_start + k;
+        // For symmetric tridiagonalization, we zero A[col+2:n, col]
+        // The Householder vector is in A[col+2:n, col], with implicit v[col+1] = 1
+
+        if (col + 1 >= n) break;
+
+        // Step 1: Compute norm of A[col+1:n, col] (the sub-diagonal and below)
+        if (tid == 0) {
+            norm_sq = 0.0;
+            for (uint r = col + 1; r < n; r++) {
+                float v = A[base + r * n + col];
+                norm_sq += v * v;
+            }
+
+            if (norm_sq < 1e-30) {
+                tau_k = 0.0;
+                alpha_val = A[base + (col + 1) * n + col];
+            } else {
+                alpha_val = -sign(A[base + (col + 1) * n + col]) * sqrt(norm_sq);
+                float v0 = A[base + (col + 1) * n + col] - alpha_val;
+
+                // Compute tau = 2 / (v^T v) where v[0] = v0, v[i] = A[col+1+i, col]
+                float v_norm_sq = v0 * v0;
+                for (uint r = col + 2; r < n; r++) {
+                    v_norm_sq += A[base + r * n + col] * A[base + r * n + col];
+                }
+
+                if (abs(v0) < 1e-30) {
+                    tau_k = 0.0;
+                } else {
+                    tau_k = 2.0 / v_norm_sq;
+                    // Normalize: v[col+2:n] /= v0, v[col+1] = 1
+                    for (uint r = col + 2; r < n; r++) {
+                        A[base + r * n + col] /= v0;
+                    }
+                }
+
+                // Set tridiagonal entries
+                A[base + (col + 1) * n + col] = alpha_val;
+                A[base + col * n + (col + 1)] = alpha_val; // symmetric
+            }
+
+            tau[work_base + col] = tau_k;
+        }
+        barrier();
+
+        if (abs(tau_k) < 1e-30) continue;
+
+        // Step 2: Apply symmetric Householder update: A = H * A * H^T
+        // where H = I - tau * v * v^T, v[col+1] = 1, v[col+2:n] stored in A[col+2:n, col]
+        // For symmetric matrix: A -= tau * (v * w^T + w * v^T)
+        // where w = A * v - (tau/2) * (v^T * A * v) * v
+
+        // Compute p = A * v (only rows col+1:n, using cols col+1:n of symmetric A)
+        for (uint r = col + 1 + tid; r < n; r += 256) {
+            float sum = A[base + r * n + (col + 1)]; // v[col+1] = 1
+            for (uint c = col + 2; c < n; c++) {
+                sum += A[base + r * n + c] * A[base + c * n + col]; // v stored in A[c, col]
+            }
+            work[work_base + r] = tau_k * sum;  // p = tau * A * v
+        }
+        barrier();
+
+        // Compute beta = (tau/2) * v^T * p
+        if (tid == 0) {
+            float vtp = work[work_base + col + 1]; // v[col+1] = 1
+            for (uint r = col + 2; r < n; r++) {
+                vtp += A[base + r * n + col] * work[work_base + r];
+            }
+            dot_val = 0.5 * tau_k * vtp;
+        }
+        barrier();
+
+        // w = p - beta * v
+        for (uint r = col + 1 + tid; r < n; r += 256) {
+            float v_r = (r == col + 1) ? 1.0 : A[base + r * n + col];
+            work[work_base + r] -= dot_val * v_r;
+        }
+        barrier();
+
+        // Update A: A[i,j] -= v[i]*w[j] + w[i]*v[j] for i,j in [col+1, n)
+        for (uint r = col + 1 + tid; r < n; r += 256) {
+            float v_r = (r == col + 1) ? 1.0 : A[base + r * n + col];
+            float w_r = work[work_base + r];
+            for (uint c = col + 1; c <= r; c++) {
+                float v_c = (c == col + 1) ? 1.0 : A[base + c * n + col];
+                float w_c = work[work_base + c];
+                float update = v_r * w_c + w_r * v_c;
+                A[base + r * n + c] -= update;
+                if (r != c) {
+                    A[base + c * n + r] -= update; // symmetric
+                }
+            }
+        }
+        barrier();
+
+        // Zero out the entries below the sub-diagonal in column col
+        for (uint r = col + 2 + tid; r < n; r += 256) {
+            // Keep Householder vector stored in A[r, col] but zero A[col, r] (symmetric cleanup)
+            // Actually, for tridiagonal: the sub-diagonal entries beyond col+1 should be zero
+            // The Householder vectors are stored in the zeroed-out region
+        }
+        barrier();
+    }
+}

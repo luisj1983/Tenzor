@@ -1,0 +1,30 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+// Scatter boundary positions for unique counts computation.
+// For each boundary element at position gid, writes the position into
+// boundary_positions[group_id]. Counts are then computed as differences
+// between consecutive boundary positions by the caller.
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer Boundaries { int boundaries[]; };
+layout(set = 0, binding = 1) readonly buffer PrefixSum { int prefix_sum[]; };
+layout(set = 0, binding = 2) writeonly buffer BoundaryPositions { int64_t boundary_pos[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint numel;
+    uint n_unique;
+};
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= numel) return;
+
+    // Check if this element is a group boundary
+    bool is_boundary = (gid == 0) || (boundaries[gid] != 0);
+
+    if (is_boundary) {
+        uint group = uint(prefix_sum[gid]) - 1;
+        boundary_pos[group] = int64_t(gid);
+    }
+}

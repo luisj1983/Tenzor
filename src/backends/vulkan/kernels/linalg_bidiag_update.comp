@@ -1,0 +1,94 @@
+#version 450
+
+// Blocked bidiagonal reduction — apply left and right Householder reflections
+// from panel to the trailing submatrix.
+// After panel factorization of columns [col_start, col_start+panel_cols),
+// apply the accumulated reflections to trailing rows and columns.
+// Each workgroup handles one trailing column for left reflections,
+// then one trailing row for right reflections.
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer MatrixA { float A[]; };
+layout(set = 0, binding = 1) readonly buffer TauL { float tau_l[]; };
+layout(set = 0, binding = 2) readonly buffer TauR { float tau_r[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint col_start;
+    uint panel_cols;
+    uint batch_idx;
+};
+
+shared float dot_val;
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint base = batch_idx * n * n;
+    uint trail_start = col_start + panel_cols;
+
+    // This workgroup handles trailing column/row index j
+    uint j = trail_start + gl_WorkGroupID.x;
+    if (j >= n) return;
+
+    // ---- Apply left Householder reflections to column j ----
+    // For each k in the panel, apply H_L_k to column j
+    for (uint k = 0; k < panel_cols; k++) {
+        uint col = col_start + k;
+        float left_tau = tau_l[batch_idx * n + col];
+        if (abs(left_tau) < 1e-30) continue;
+
+        // Compute dot = v_L^T * A[:,j]
+        // v_L[col] = 1, v_L[col+1:] stored in A[col+1:, col]
+        if (tid == 0) {
+            float dot = A[base + col * n + j];  // v_L[col] = 1
+            for (uint r = col + 1; r < n; r++) {
+                dot += A[base + r * n + col] * A[base + r * n + j];
+            }
+            dot_val = dot;
+        }
+        barrier();
+
+        float dot = dot_val;
+
+        // Update: A[r,j] -= tau_L * v_L[r] * dot
+        for (uint r = col + 1 + tid; r < n; r += 256) {
+            A[base + r * n + j] -= left_tau * A[base + r * n + col] * dot;
+        }
+        if (tid == 0) {
+            A[base + col * n + j] -= left_tau * dot;
+        }
+        barrier();
+    }
+
+    // ---- Apply right Householder reflections to row j ----
+    // For each k in the panel, apply H_R_k to row j
+    for (uint k = 0; k < panel_cols; k++) {
+        uint col = col_start + k;
+        if (col + 2 >= n) continue;
+
+        float right_tau = tau_r[batch_idx * n + col];
+        if (abs(right_tau) < 1e-30) continue;
+
+        // Compute dot = A[j,:] * v_R
+        // v_R[col+1] = 1, v_R[col+2:] stored in A[col, col+2:]
+        if (tid == 0) {
+            float dot = A[base + j * n + (col + 1)];  // v_R[col+1] = 1
+            for (uint c = col + 2; c < n; c++) {
+                dot += A[base + j * n + c] * A[base + col * n + c];
+            }
+            dot_val = dot;
+        }
+        barrier();
+
+        float dot = dot_val;
+
+        // Update: A[j,c] -= tau_R * dot * v_R[c]
+        for (uint c = col + 2 + tid; c < n; c += 256) {
+            A[base + j * n + c] -= right_tau * dot * A[base + col * n + c];
+        }
+        if (tid == 0) {
+            A[base + j * n + (col + 1)] -= right_tau * dot;
+        }
+        barrier();
+    }
+}

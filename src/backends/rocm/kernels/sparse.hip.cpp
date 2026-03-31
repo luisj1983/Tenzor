@@ -21,6 +21,7 @@
 
 #include <rocsparse/rocsparse.h>
 #include <hip/hip_runtime.h>
+#include "../hip_buffer.hpp"
 #include <climits>
 #include <cstdint>
 #include <stdexcept>
@@ -63,17 +64,7 @@ std::vector<int64_t> to_vec(std::span<const int64_t> s) {
     return {s.begin(), s.end()};
 }
 
-/// RAII wrapper for HIP device memory.
-struct HipBuffer {
-    void* ptr = nullptr;
-    explicit HipBuffer(size_t bytes) {
-        if (bytes > 0) HIP_CHECK_SPARSE(hipMalloc(&ptr, bytes));
-    }
-    ~HipBuffer() { if (ptr) hipFree(ptr); }
-    HipBuffer(const HipBuffer&) = delete;
-    HipBuffer& operator=(const HipBuffer&) = delete;
-    template<typename T> T* as() { return static_cast<T*>(ptr); }
-};
+// HipBuffer is provided by ../hip_buffer.hpp (in namespace tenzor::rocm)
 
 /// RAII guard for rocSPARSE sparse matrix descriptor.
 struct SpMatGuard {

@@ -8,6 +8,7 @@
  */
 
 #include "tenzor/core/tensor.hpp"
+#include "../sycl_buffer_guard.hpp"
 #include <sycl/sycl.hpp>
 #include <stdexcept>
 #include <vector>
@@ -166,27 +167,29 @@ auto linalg_det_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     Tensor output({1}, input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
-        float* d_a = sycl::malloc_device<float>(n * n, queue);
-        std::int64_t* d_ipiv = sycl::malloc_device<std::int64_t>(n, queue);
+        SyclDeviceBuffer<float> d_a(n * n, queue);
+        SyclDeviceBuffer<std::int64_t> d_ipiv(n, queue);
 
         // Row-major to column-major on device
         row_to_col_major<float, SyclTransposeDetF32>(
-            d_a, get_data_ptr<const float>(a), n, n, queue);
+            d_a.get(), get_data_ptr<const float>(a), n, n, queue);
 
         auto scratchpad_size = ::oneapi::mkl::lapack::getrf_scratchpad_size<float>(queue, n, n, n);
-        float* scratchpad = sycl::malloc_device<float>(scratchpad_size, queue);
-        ::oneapi::mkl::lapack::getrf(queue, n, n, d_a, n, d_ipiv, scratchpad, scratchpad_size).wait();
+        SyclDeviceBuffer<float> scratchpad(scratchpad_size, queue);
+        ::oneapi::mkl::lapack::getrf(queue, n, n, d_a.get(), n, d_ipiv.get(), scratchpad.get(), scratchpad_size).wait();
 
         // Extract diagonal on device (avoids O(n^2) memcpy)
-        float* d_diag = sycl::malloc_device<float>(n, queue);
+        SyclDeviceBuffer<float> d_diag(n, queue);
+        auto* d_diag_ptr = d_diag.get();
+        auto* d_a_ptr = d_a.get();
         queue.parallel_for<SyclDiagExtractDetF32>(sycl::range<1>(n), [=](sycl::id<1> i) {
-            d_diag[i] = d_a[i * n + i];  // column-major diagonal
+            d_diag_ptr[i] = d_a_ptr[i * n + i];  // column-major diagonal
         }).wait();
 
         std::vector<float> h_diag(n);
         std::vector<std::int64_t> h_ipiv(n);
-        queue.memcpy(h_diag.data(), d_diag, n * sizeof(float));
-        queue.memcpy(h_ipiv.data(), d_ipiv, n * sizeof(std::int64_t));
+        queue.memcpy(h_diag.data(), d_diag.get(), n * sizeof(float));
+        queue.memcpy(h_ipiv.data(), d_ipiv.get(), n * sizeof(std::int64_t));
         queue.wait();
 
         float det = 1.0f;
@@ -198,32 +201,29 @@ auto linalg_det_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         if (swaps % 2) det = -det;
 
         queue.memcpy(const_cast<void*>(output.data_ptr()), &det, sizeof(float)).wait();
-
-        sycl::free(d_diag, queue);
-        sycl::free(d_a, queue);
-        sycl::free(d_ipiv, queue);
-        sycl::free(scratchpad, queue);
     } else if (input.dtype() == DType::Float64) {
-        double* d_a = sycl::malloc_device<double>(n * n, queue);
-        std::int64_t* d_ipiv = sycl::malloc_device<std::int64_t>(n, queue);
+        SyclDeviceBuffer<double> d_a(n * n, queue);
+        SyclDeviceBuffer<std::int64_t> d_ipiv(n, queue);
 
         row_to_col_major<double, SyclTransposeDetF64>(
-            d_a, get_data_ptr<const double>(a), n, n, queue);
+            d_a.get(), get_data_ptr<const double>(a), n, n, queue);
 
         auto scratchpad_size = ::oneapi::mkl::lapack::getrf_scratchpad_size<double>(queue, n, n, n);
-        double* scratchpad = sycl::malloc_device<double>(scratchpad_size, queue);
-        ::oneapi::mkl::lapack::getrf(queue, n, n, d_a, n, d_ipiv, scratchpad, scratchpad_size).wait();
+        SyclDeviceBuffer<double> scratchpad(scratchpad_size, queue);
+        ::oneapi::mkl::lapack::getrf(queue, n, n, d_a.get(), n, d_ipiv.get(), scratchpad.get(), scratchpad_size).wait();
 
         // Extract diagonal on device (avoids O(n^2) memcpy)
-        double* d_diag = sycl::malloc_device<double>(n, queue);
+        SyclDeviceBuffer<double> d_diag(n, queue);
+        auto* d_diag_ptr = d_diag.get();
+        auto* d_a_ptr = d_a.get();
         queue.parallel_for<SyclDiagExtractDetF64>(sycl::range<1>(n), [=](sycl::id<1> i) {
-            d_diag[i] = d_a[i * n + i];  // column-major diagonal
+            d_diag_ptr[i] = d_a_ptr[i * n + i];  // column-major diagonal
         }).wait();
 
         std::vector<double> h_diag(n);
         std::vector<std::int64_t> h_ipiv(n);
-        queue.memcpy(h_diag.data(), d_diag, n * sizeof(double));
-        queue.memcpy(h_ipiv.data(), d_ipiv, n * sizeof(std::int64_t));
+        queue.memcpy(h_diag.data(), d_diag.get(), n * sizeof(double));
+        queue.memcpy(h_ipiv.data(), d_ipiv.get(), n * sizeof(std::int64_t));
         queue.wait();
 
         double det = 1.0;
@@ -235,11 +235,6 @@ auto linalg_det_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         if (swaps % 2) det = -det;
 
         queue.memcpy(const_cast<void*>(output.data_ptr()), &det, sizeof(double)).wait();
-
-        sycl::free(d_diag, queue);
-        sycl::free(d_a, queue);
-        sycl::free(d_ipiv, queue);
-        sycl::free(scratchpad, queue);
     } else {
         throw std::runtime_error("linalg_det: only Float32 and Float64 supported");
     }
@@ -255,52 +250,44 @@ auto linalg_inv_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     int64_t n = shape[shape.size() - 1];
 
     if (input.dtype() == DType::Float32) {
-        float* d_a = sycl::malloc_device<float>(n * n, queue);
-        std::int64_t* d_ipiv = sycl::malloc_device<std::int64_t>(n, queue);
+        SyclDeviceBuffer<float> d_a(n * n, queue);
+        SyclDeviceBuffer<std::int64_t> d_ipiv(n, queue);
 
         row_to_col_major<float, SyclTransposeInvF32>(
-            d_a, get_data_ptr<const float>(input), n, n, queue);
+            d_a.get(), get_data_ptr<const float>(input), n, n, queue);
 
         auto sp_rf = ::oneapi::mkl::lapack::getrf_scratchpad_size<float>(queue, n, n, n);
-        float* scratch_rf = sycl::malloc_device<float>(sp_rf, queue);
-        ::oneapi::mkl::lapack::getrf(queue, n, n, d_a, n, d_ipiv, scratch_rf, sp_rf).wait();
-        sycl::free(scratch_rf, queue);
+        SyclDeviceBuffer<float> scratch_rf(sp_rf, queue);
+        ::oneapi::mkl::lapack::getrf(queue, n, n, d_a.get(), n, d_ipiv.get(), scratch_rf.get(), sp_rf).wait();
 
         auto sp_ri = ::oneapi::mkl::lapack::getri_scratchpad_size<float>(queue, n, n);
-        float* scratch_ri = sycl::malloc_device<float>(sp_ri, queue);
-        ::oneapi::mkl::lapack::getri(queue, n, d_a, n, d_ipiv, scratch_ri, sp_ri).wait();
-        sycl::free(scratch_ri, queue);
+        SyclDeviceBuffer<float> scratch_ri(sp_ri, queue);
+        ::oneapi::mkl::lapack::getri(queue, n, d_a.get(), n, d_ipiv.get(), scratch_ri.get(), sp_ri).wait();
 
         Tensor output({n, n}, input.dtype(), input.device());
         col_to_row_major<float, SyclTransposeInvBackF32>(
-            get_data_ptr<float>(output), d_a, n, n, queue);
+            get_data_ptr<float>(output), d_a.get(), n, n, queue);
 
-        sycl::free(d_a, queue);
-        sycl::free(d_ipiv, queue);
         return output;
     } else if (input.dtype() == DType::Float64) {
-        double* d_a = sycl::malloc_device<double>(n * n, queue);
-        std::int64_t* d_ipiv = sycl::malloc_device<std::int64_t>(n, queue);
+        SyclDeviceBuffer<double> d_a(n * n, queue);
+        SyclDeviceBuffer<std::int64_t> d_ipiv(n, queue);
 
         row_to_col_major<double, SyclTransposeInvF64>(
-            d_a, get_data_ptr<const double>(input), n, n, queue);
+            d_a.get(), get_data_ptr<const double>(input), n, n, queue);
 
         auto sp_rf = ::oneapi::mkl::lapack::getrf_scratchpad_size<double>(queue, n, n, n);
-        double* scratch_rf = sycl::malloc_device<double>(sp_rf, queue);
-        ::oneapi::mkl::lapack::getrf(queue, n, n, d_a, n, d_ipiv, scratch_rf, sp_rf).wait();
-        sycl::free(scratch_rf, queue);
+        SyclDeviceBuffer<double> scratch_rf(sp_rf, queue);
+        ::oneapi::mkl::lapack::getrf(queue, n, n, d_a.get(), n, d_ipiv.get(), scratch_rf.get(), sp_rf).wait();
 
         auto sp_ri = ::oneapi::mkl::lapack::getri_scratchpad_size<double>(queue, n, n);
-        double* scratch_ri = sycl::malloc_device<double>(sp_ri, queue);
-        ::oneapi::mkl::lapack::getri(queue, n, d_a, n, d_ipiv, scratch_ri, sp_ri).wait();
-        sycl::free(scratch_ri, queue);
+        SyclDeviceBuffer<double> scratch_ri(sp_ri, queue);
+        ::oneapi::mkl::lapack::getri(queue, n, d_a.get(), n, d_ipiv.get(), scratch_ri.get(), sp_ri).wait();
 
         Tensor output({n, n}, input.dtype(), input.device());
         col_to_row_major<double, SyclTransposeInvBackF64>(
-            get_data_ptr<double>(output), d_a, n, n, queue);
+            get_data_ptr<double>(output), d_a.get(), n, n, queue);
 
-        sycl::free(d_a, queue);
-        sycl::free(d_ipiv, queue);
         return output;
     } else {
         throw std::runtime_error("linalg_inv: only Float32 and Float64 supported");
@@ -317,62 +304,52 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, sycl::queue& queue) -
     int64_t nrhs = (b_shape.size() > 1) ? b_shape[b_shape.size() - 1] : 1;
 
     if (A.dtype() == DType::Float32) {
-        float* d_a = sycl::malloc_device<float>(n * n, queue);
-        float* d_b = sycl::malloc_device<float>(n * nrhs, queue);
-        std::int64_t* d_ipiv = sycl::malloc_device<std::int64_t>(n, queue);
+        SyclDeviceBuffer<float> d_a(n * n, queue);
+        SyclDeviceBuffer<float> d_b(n * nrhs, queue);
+        SyclDeviceBuffer<std::int64_t> d_ipiv(n, queue);
 
         row_to_col_major<float, SyclTransposeSolveAF32>(
-            d_a, get_data_ptr<const float>(A), n, n, queue);
+            d_a.get(), get_data_ptr<const float>(A), n, n, queue);
         row_to_col_major<float, SyclTransposeSolveBF32>(
-            d_b, get_data_ptr<const float>(B), n, nrhs, queue);
+            d_b.get(), get_data_ptr<const float>(B), n, nrhs, queue);
 
         auto sp_rf = ::oneapi::mkl::lapack::getrf_scratchpad_size<float>(queue, n, n, n);
-        float* scratch_rf = sycl::malloc_device<float>(sp_rf, queue);
-        ::oneapi::mkl::lapack::getrf(queue, n, n, d_a, n, d_ipiv, scratch_rf, sp_rf).wait();
-        sycl::free(scratch_rf, queue);
+        SyclDeviceBuffer<float> scratch_rf(sp_rf, queue);
+        ::oneapi::mkl::lapack::getrf(queue, n, n, d_a.get(), n, d_ipiv.get(), scratch_rf.get(), sp_rf).wait();
 
         auto sp_rs = ::oneapi::mkl::lapack::getrs_scratchpad_size<float>(queue, ::oneapi::mkl::transpose::nontrans, n, nrhs, n, n);
-        float* scratch_rs = sycl::malloc_device<float>(sp_rs, queue);
-        ::oneapi::mkl::lapack::getrs(queue, ::oneapi::mkl::transpose::nontrans, n, nrhs, d_a, n, d_ipiv, d_b, n, scratch_rs, sp_rs).wait();
-        sycl::free(scratch_rs, queue);
+        SyclDeviceBuffer<float> scratch_rs(sp_rs, queue);
+        ::oneapi::mkl::lapack::getrs(queue, ::oneapi::mkl::transpose::nontrans, n, nrhs, d_a.get(), n, d_ipiv.get(), d_b.get(), n, scratch_rs.get(), sp_rs).wait();
 
         std::vector<int64_t> out_shape(b_shape.begin(), b_shape.end());
         Tensor output(out_shape, A.dtype(), A.device());
         col_to_row_major<float, SyclTransposeSolveBackF32>(
-            get_data_ptr<float>(output), d_b, n, nrhs, queue);
+            get_data_ptr<float>(output), d_b.get(), n, nrhs, queue);
 
-        sycl::free(d_a, queue);
-        sycl::free(d_b, queue);
-        sycl::free(d_ipiv, queue);
         return output;
     } else if (A.dtype() == DType::Float64) {
-        double* d_a = sycl::malloc_device<double>(n * n, queue);
-        double* d_b = sycl::malloc_device<double>(n * nrhs, queue);
-        std::int64_t* d_ipiv = sycl::malloc_device<std::int64_t>(n, queue);
+        SyclDeviceBuffer<double> d_a(n * n, queue);
+        SyclDeviceBuffer<double> d_b(n * nrhs, queue);
+        SyclDeviceBuffer<std::int64_t> d_ipiv(n, queue);
 
         row_to_col_major<double, SyclTransposeSolveAF64>(
-            d_a, get_data_ptr<const double>(A), n, n, queue);
+            d_a.get(), get_data_ptr<const double>(A), n, n, queue);
         row_to_col_major<double, SyclTransposeSolveBF64>(
-            d_b, get_data_ptr<const double>(B), n, nrhs, queue);
+            d_b.get(), get_data_ptr<const double>(B), n, nrhs, queue);
 
         auto sp_rf = ::oneapi::mkl::lapack::getrf_scratchpad_size<double>(queue, n, n, n);
-        double* scratch_rf = sycl::malloc_device<double>(sp_rf, queue);
-        ::oneapi::mkl::lapack::getrf(queue, n, n, d_a, n, d_ipiv, scratch_rf, sp_rf).wait();
-        sycl::free(scratch_rf, queue);
+        SyclDeviceBuffer<double> scratch_rf(sp_rf, queue);
+        ::oneapi::mkl::lapack::getrf(queue, n, n, d_a.get(), n, d_ipiv.get(), scratch_rf.get(), sp_rf).wait();
 
         auto sp_rs = ::oneapi::mkl::lapack::getrs_scratchpad_size<double>(queue, ::oneapi::mkl::transpose::nontrans, n, nrhs, n, n);
-        double* scratch_rs = sycl::malloc_device<double>(sp_rs, queue);
-        ::oneapi::mkl::lapack::getrs(queue, ::oneapi::mkl::transpose::nontrans, n, nrhs, d_a, n, d_ipiv, d_b, n, scratch_rs, sp_rs).wait();
-        sycl::free(scratch_rs, queue);
+        SyclDeviceBuffer<double> scratch_rs(sp_rs, queue);
+        ::oneapi::mkl::lapack::getrs(queue, ::oneapi::mkl::transpose::nontrans, n, nrhs, d_a.get(), n, d_ipiv.get(), d_b.get(), n, scratch_rs.get(), sp_rs).wait();
 
         std::vector<int64_t> out_shape(b_shape.begin(), b_shape.end());
         Tensor output(out_shape, A.dtype(), A.device());
         col_to_row_major<double, SyclTransposeSolveBackF64>(
-            get_data_ptr<double>(output), d_b, n, nrhs, queue);
+            get_data_ptr<double>(output), d_b.get(), n, nrhs, queue);
 
-        sycl::free(d_a, queue);
-        sycl::free(d_b, queue);
-        sycl::free(d_ipiv, queue);
         return output;
     } else {
         throw std::runtime_error("linalg_solve: only Float32 and Float64 supported");
@@ -394,63 +371,55 @@ auto linalg_svd_kernel(const Tensor& input, bool full_matrices, sycl::queue& que
     int64_t vt_rows = full_matrices ? n : k;
 
     if (input.dtype() == DType::Float32) {
-        float* d_a = sycl::malloc_device<float>(m * n, queue);
-        float* d_s = sycl::malloc_device<float>(k, queue);
-        float* d_u = sycl::malloc_device<float>(m * u_cols, queue);
-        float* d_vt = sycl::malloc_device<float>(vt_rows * n, queue);
+        SyclDeviceBuffer<float> d_a(m * n, queue);
+        SyclDeviceBuffer<float> d_s(k, queue);
+        SyclDeviceBuffer<float> d_u(m * u_cols, queue);
+        SyclDeviceBuffer<float> d_vt(vt_rows * n, queue);
 
         row_to_col_major<float, SyclTransposeSvdAF32>(
-            d_a, get_data_ptr<const float>(input), m, n, queue);
+            d_a.get(), get_data_ptr<const float>(input), m, n, queue);
 
         auto sp = ::oneapi::mkl::lapack::gesvd_scratchpad_size<float>(queue, jobz, jobz, m, n, m, m, n);
-        float* scratch = sycl::malloc_device<float>(sp, queue);
-        ::oneapi::mkl::lapack::gesvd(queue, jobz, jobz, m, n, d_a, m, d_s, d_u, m, d_vt, n, scratch, sp).wait();
+        SyclDeviceBuffer<float> scratch(sp, queue);
+        ::oneapi::mkl::lapack::gesvd(queue, jobz, jobz, m, n, d_a.get(), m, d_s.get(), d_u.get(), m, d_vt.get(), n, scratch.get(), sp).wait();
 
         Tensor S({k}, input.dtype(), input.device());
-        queue.memcpy(const_cast<void*>(S.data_ptr()), d_s, k * sizeof(float)).wait();
+        queue.memcpy(const_cast<void*>(S.data_ptr()), d_s.get(), k * sizeof(float)).wait();
 
         // U: column-major (m x u_cols) -> row-major on device
         Tensor U({m, u_cols}, input.dtype(), input.device());
         col_to_row_major<float, SyclTransposeSvdUF32>(
-            get_data_ptr<float>(U), d_u, m, u_cols, queue);
+            get_data_ptr<float>(U), d_u.get(), m, u_cols, queue);
 
         // Vt: column-major (vt_rows x n) -> row-major on device
         Tensor Vt({vt_rows, n}, input.dtype(), input.device());
         col_to_row_major<float, SyclTransposeSvdVtF32>(
-            get_data_ptr<float>(Vt), d_vt, vt_rows, n, queue);
-
-        sycl::free(d_a, queue); sycl::free(d_s, queue);
-        sycl::free(d_u, queue); sycl::free(d_vt, queue);
-        sycl::free(scratch, queue);
+            get_data_ptr<float>(Vt), d_vt.get(), vt_rows, n, queue);
 
         return {U, S, Vt};
     } else if (input.dtype() == DType::Float64) {
-        double* d_a = sycl::malloc_device<double>(m * n, queue);
-        double* d_s = sycl::malloc_device<double>(k, queue);
-        double* d_u = sycl::malloc_device<double>(m * u_cols, queue);
-        double* d_vt = sycl::malloc_device<double>(vt_rows * n, queue);
+        SyclDeviceBuffer<double> d_a(m * n, queue);
+        SyclDeviceBuffer<double> d_s(k, queue);
+        SyclDeviceBuffer<double> d_u(m * u_cols, queue);
+        SyclDeviceBuffer<double> d_vt(vt_rows * n, queue);
 
         row_to_col_major<double, SyclTransposeSvdAF64>(
-            d_a, get_data_ptr<const double>(input), m, n, queue);
+            d_a.get(), get_data_ptr<const double>(input), m, n, queue);
 
         auto sp = ::oneapi::mkl::lapack::gesvd_scratchpad_size<double>(queue, jobz, jobz, m, n, m, m, n);
-        double* scratch = sycl::malloc_device<double>(sp, queue);
-        ::oneapi::mkl::lapack::gesvd(queue, jobz, jobz, m, n, d_a, m, d_s, d_u, m, d_vt, n, scratch, sp).wait();
+        SyclDeviceBuffer<double> scratch(sp, queue);
+        ::oneapi::mkl::lapack::gesvd(queue, jobz, jobz, m, n, d_a.get(), m, d_s.get(), d_u.get(), m, d_vt.get(), n, scratch.get(), sp).wait();
 
         Tensor S({k}, input.dtype(), input.device());
-        queue.memcpy(const_cast<void*>(S.data_ptr()), d_s, k * sizeof(double)).wait();
+        queue.memcpy(const_cast<void*>(S.data_ptr()), d_s.get(), k * sizeof(double)).wait();
 
         Tensor U({m, u_cols}, input.dtype(), input.device());
         col_to_row_major<double, SyclTransposeSvdUF64>(
-            get_data_ptr<double>(U), d_u, m, u_cols, queue);
+            get_data_ptr<double>(U), d_u.get(), m, u_cols, queue);
 
         Tensor Vt({vt_rows, n}, input.dtype(), input.device());
         col_to_row_major<double, SyclTransposeSvdVtF64>(
-            get_data_ptr<double>(Vt), d_vt, vt_rows, n, queue);
-
-        sycl::free(d_a, queue); sycl::free(d_s, queue);
-        sycl::free(d_u, queue); sycl::free(d_vt, queue);
-        sycl::free(scratch, queue);
+            get_data_ptr<double>(Vt), d_vt.get(), vt_rows, n, queue);
 
         return {U, S, Vt};
     } else {
@@ -468,75 +437,69 @@ auto linalg_qr_kernel(const Tensor& input, sycl::queue& queue) -> std::pair<Tens
     int64_t k = std::min(m, n);
 
     if (input.dtype() == DType::Float32) {
-        float* d_a = sycl::malloc_device<float>(m * n, queue);
-        float* d_tau = sycl::malloc_device<float>(k, queue);
+        SyclDeviceBuffer<float> d_a(m * n, queue);
+        SyclDeviceBuffer<float> d_tau(k, queue);
 
         row_to_col_major<float, SyclTransposeQrAF32>(
-            d_a, get_data_ptr<const float>(input), m, n, queue);
+            d_a.get(), get_data_ptr<const float>(input), m, n, queue);
 
         auto sp_qr = ::oneapi::mkl::lapack::geqrf_scratchpad_size<float>(queue, m, n, m);
-        float* scratch_qr = sycl::malloc_device<float>(sp_qr, queue);
-        ::oneapi::mkl::lapack::geqrf(queue, m, n, d_a, m, d_tau, scratch_qr, sp_qr).wait();
-        sycl::free(scratch_qr, queue);
+        SyclDeviceBuffer<float> scratch_qr(sp_qr, queue);
+        ::oneapi::mkl::lapack::geqrf(queue, m, n, d_a.get(), m, d_tau.get(), scratch_qr.get(), sp_qr).wait();
 
-        // Extract R: upper triangular from d_a (column-major) → row-major on device
+        // Extract R: upper triangular from d_a (column-major) -> row-major on device
         // R[i][j] = d_a[j*m + i] for j >= i, else 0
         Tensor R({k, n}, input.dtype(), input.device());
         float* r_ptr = get_data_ptr<float>(R);
+        auto* d_a_ptr = d_a.get();
         queue.memset(r_ptr, 0, k * n * sizeof(float)).wait();
         queue.parallel_for(sycl::range<2>(k, n), [=](sycl::id<2> id) {
             int64_t i = id[0], j = id[1];
             if (j >= i) {
-                r_ptr[i * n + j] = d_a[j * m + i]; // col-major read
+                r_ptr[i * n + j] = d_a_ptr[j * m + i]; // col-major read
             }
         }).wait();
 
         // Generate Q via orgqr
         auto sp_oq = ::oneapi::mkl::lapack::orgqr_scratchpad_size<float>(queue, m, k, k, m);
-        float* scratch_oq = sycl::malloc_device<float>(sp_oq, queue);
-        ::oneapi::mkl::lapack::orgqr(queue, m, k, k, d_a, m, d_tau, scratch_oq, sp_oq).wait();
-        sycl::free(scratch_oq, queue);
+        SyclDeviceBuffer<float> scratch_oq(sp_oq, queue);
+        ::oneapi::mkl::lapack::orgqr(queue, m, k, k, d_a.get(), m, d_tau.get(), scratch_oq.get(), sp_oq).wait();
 
         Tensor Q({m, k}, input.dtype(), input.device());
         col_to_row_major<float, SyclTransposeQrQF32>(
-            get_data_ptr<float>(Q), d_a, m, k, queue);
+            get_data_ptr<float>(Q), d_a.get(), m, k, queue);
 
-        sycl::free(d_a, queue);
-        sycl::free(d_tau, queue);
         return {Q, R};
     } else if (input.dtype() == DType::Float64) {
-        double* d_a = sycl::malloc_device<double>(m * n, queue);
-        double* d_tau = sycl::malloc_device<double>(k, queue);
+        SyclDeviceBuffer<double> d_a(m * n, queue);
+        SyclDeviceBuffer<double> d_tau(k, queue);
 
         row_to_col_major<double, SyclTransposeQrAF64>(
-            d_a, get_data_ptr<const double>(input), m, n, queue);
+            d_a.get(), get_data_ptr<const double>(input), m, n, queue);
 
         auto sp_qr = ::oneapi::mkl::lapack::geqrf_scratchpad_size<double>(queue, m, n, m);
-        double* scratch_qr = sycl::malloc_device<double>(sp_qr, queue);
-        ::oneapi::mkl::lapack::geqrf(queue, m, n, d_a, m, d_tau, scratch_qr, sp_qr).wait();
-        sycl::free(scratch_qr, queue);
+        SyclDeviceBuffer<double> scratch_qr(sp_qr, queue);
+        ::oneapi::mkl::lapack::geqrf(queue, m, n, d_a.get(), m, d_tau.get(), scratch_qr.get(), sp_qr).wait();
 
         Tensor R({k, n}, input.dtype(), input.device());
         double* r_ptr = get_data_ptr<double>(R);
+        auto* d_a_ptr = d_a.get();
         queue.memset(r_ptr, 0, k * n * sizeof(double)).wait();
         queue.parallel_for(sycl::range<2>(k, n), [=](sycl::id<2> id) {
             int64_t i = id[0], j = id[1];
             if (j >= i) {
-                r_ptr[i * n + j] = d_a[j * m + i];
+                r_ptr[i * n + j] = d_a_ptr[j * m + i];
             }
         }).wait();
 
         auto sp_oq = ::oneapi::mkl::lapack::orgqr_scratchpad_size<double>(queue, m, k, k, m);
-        double* scratch_oq = sycl::malloc_device<double>(sp_oq, queue);
-        ::oneapi::mkl::lapack::orgqr(queue, m, k, k, d_a, m, d_tau, scratch_oq, sp_oq).wait();
-        sycl::free(scratch_oq, queue);
+        SyclDeviceBuffer<double> scratch_oq(sp_oq, queue);
+        ::oneapi::mkl::lapack::orgqr(queue, m, k, k, d_a.get(), m, d_tau.get(), scratch_oq.get(), sp_oq).wait();
 
         Tensor Q({m, k}, input.dtype(), input.device());
         col_to_row_major<double, SyclTransposeQrQF64>(
-            get_data_ptr<double>(Q), d_a, m, k, queue);
+            get_data_ptr<double>(Q), d_a.get(), m, k, queue);
 
-        sycl::free(d_a, queue);
-        sycl::free(d_tau, queue);
         return {Q, R};
     } else {
         throw std::runtime_error("linalg_qr: only Float32 and Float64 supported");
@@ -551,48 +514,46 @@ auto linalg_eigh_kernel(const Tensor& input, sycl::queue& queue) -> std::pair<Te
     int64_t n = shape[shape.size() - 1];
 
     if (input.dtype() == DType::Float32) {
-        float* d_a = sycl::malloc_device<float>(n * n, queue);
-        float* d_w = sycl::malloc_device<float>(n, queue);
+        SyclDeviceBuffer<float> d_a(n * n, queue);
+        SyclDeviceBuffer<float> d_w(n, queue);
 
         row_to_col_major<float, SyclTransposeEighF32>(
-            d_a, get_data_ptr<const float>(input), n, n, queue);
+            d_a.get(), get_data_ptr<const float>(input), n, n, queue);
 
         auto sp = ::oneapi::mkl::lapack::syevd_scratchpad_size<float>(
             queue, ::oneapi::mkl::job::vec, ::oneapi::mkl::uplo::lower, n, n);
-        float* scratch = sycl::malloc_device<float>(sp, queue);
+        SyclDeviceBuffer<float> scratch(sp, queue);
         ::oneapi::mkl::lapack::syevd(queue, ::oneapi::mkl::job::vec, ::oneapi::mkl::uplo::lower,
-                                   n, d_a, n, d_w, scratch, sp).wait();
+                                   n, d_a.get(), n, d_w.get(), scratch.get(), sp).wait();
 
         Tensor W({n}, input.dtype(), input.device());
-        queue.memcpy(const_cast<void*>(W.data_ptr()), d_w, n * sizeof(float)).wait();
+        queue.memcpy(const_cast<void*>(W.data_ptr()), d_w.get(), n * sizeof(float)).wait();
 
         Tensor V({n, n}, input.dtype(), input.device());
         col_to_row_major<float, SyclTransposeEighBackF32>(
-            get_data_ptr<float>(V), d_a, n, n, queue);
+            get_data_ptr<float>(V), d_a.get(), n, n, queue);
 
-        sycl::free(d_a, queue); sycl::free(d_w, queue); sycl::free(scratch, queue);
         return {W, V};
     } else if (input.dtype() == DType::Float64) {
-        double* d_a = sycl::malloc_device<double>(n * n, queue);
-        double* d_w = sycl::malloc_device<double>(n, queue);
+        SyclDeviceBuffer<double> d_a(n * n, queue);
+        SyclDeviceBuffer<double> d_w(n, queue);
 
         row_to_col_major<double, SyclTransposeEighF64>(
-            d_a, get_data_ptr<const double>(input), n, n, queue);
+            d_a.get(), get_data_ptr<const double>(input), n, n, queue);
 
         auto sp = ::oneapi::mkl::lapack::syevd_scratchpad_size<double>(
             queue, ::oneapi::mkl::job::vec, ::oneapi::mkl::uplo::lower, n, n);
-        double* scratch = sycl::malloc_device<double>(sp, queue);
+        SyclDeviceBuffer<double> scratch(sp, queue);
         ::oneapi::mkl::lapack::syevd(queue, ::oneapi::mkl::job::vec, ::oneapi::mkl::uplo::lower,
-                                   n, d_a, n, d_w, scratch, sp).wait();
+                                   n, d_a.get(), n, d_w.get(), scratch.get(), sp).wait();
 
         Tensor W({n}, input.dtype(), input.device());
-        queue.memcpy(const_cast<void*>(W.data_ptr()), d_w, n * sizeof(double)).wait();
+        queue.memcpy(const_cast<void*>(W.data_ptr()), d_w.get(), n * sizeof(double)).wait();
 
         Tensor V({n, n}, input.dtype(), input.device());
         col_to_row_major<double, SyclTransposeEighBackF64>(
-            get_data_ptr<double>(V), d_a, n, n, queue);
+            get_data_ptr<double>(V), d_a.get(), n, n, queue);
 
-        sycl::free(d_a, queue); sycl::free(d_w, queue); sycl::free(scratch, queue);
         return {W, V};
     } else {
         throw std::runtime_error("linalg_eigh: only Float32 and Float64 supported");
@@ -620,19 +581,19 @@ auto linalg_cholesky_kernel(const Tensor& input, bool upper, sycl::queue& queue)
     auto uplo = upper ? ::oneapi::mkl::uplo::upper : ::oneapi::mkl::uplo::lower;
 
     if (input.dtype() == DType::Float32) {
-        float* d_a = sycl::malloc_device<float>(n * n, queue);
+        SyclDeviceBuffer<float> d_a(n * n, queue);
 
         row_to_col_major<float, SyclTransposeCholeskyF32>(
-            d_a, get_data_ptr<const float>(input), n, n, queue);
+            d_a.get(), get_data_ptr<const float>(input), n, n, queue);
 
         auto sp = ::oneapi::mkl::lapack::potrf_scratchpad_size<float>(queue, uplo, n, n);
-        float* scratch = sycl::malloc_device<float>(sp, queue);
-        ::oneapi::mkl::lapack::potrf(queue, uplo, n, d_a, n, scratch, sp).wait();
+        SyclDeviceBuffer<float> scratch(sp, queue);
+        ::oneapi::mkl::lapack::potrf(queue, uplo, n, d_a.get(), n, scratch.get(), sp).wait();
 
         // Transpose back to row-major and zero the other triangle on device
         Tensor output({n, n}, input.dtype(), input.device());
         float* out_ptr = get_data_ptr<float>(output);
-        col_to_row_major<float, SyclTransposeCholeskyBackF32>(out_ptr, d_a, n, n, queue);
+        col_to_row_major<float, SyclTransposeCholeskyBackF32>(out_ptr, d_a.get(), n, n, queue);
 
         // Zero out the appropriate triangle on device
         bool is_upper = upper;
@@ -645,21 +606,20 @@ auto linalg_cholesky_kernel(const Tensor& input, bool upper, sycl::queue& queue)
             }
         }).wait();
 
-        sycl::free(d_a, queue); sycl::free(scratch, queue);
         return output;
     } else if (input.dtype() == DType::Float64) {
-        double* d_a = sycl::malloc_device<double>(n * n, queue);
+        SyclDeviceBuffer<double> d_a(n * n, queue);
 
         row_to_col_major<double, SyclTransposeCholeskyF64>(
-            d_a, get_data_ptr<const double>(input), n, n, queue);
+            d_a.get(), get_data_ptr<const double>(input), n, n, queue);
 
         auto sp = ::oneapi::mkl::lapack::potrf_scratchpad_size<double>(queue, uplo, n, n);
-        double* scratch = sycl::malloc_device<double>(sp, queue);
-        ::oneapi::mkl::lapack::potrf(queue, uplo, n, d_a, n, scratch, sp).wait();
+        SyclDeviceBuffer<double> scratch(sp, queue);
+        ::oneapi::mkl::lapack::potrf(queue, uplo, n, d_a.get(), n, scratch.get(), sp).wait();
 
         Tensor output({n, n}, input.dtype(), input.device());
         double* out_ptr = get_data_ptr<double>(output);
-        col_to_row_major<double, SyclTransposeCholeskyBackF64>(out_ptr, d_a, n, n, queue);
+        col_to_row_major<double, SyclTransposeCholeskyBackF64>(out_ptr, d_a.get(), n, n, queue);
 
         bool is_upper = upper;
         queue.parallel_for(sycl::range<2>(n, n), [=](sycl::id<2> id) {
@@ -671,7 +631,6 @@ auto linalg_cholesky_kernel(const Tensor& input, bool upper, sycl::queue& queue)
             }
         }).wait();
 
-        sycl::free(d_a, queue); sycl::free(scratch, queue);
         return output;
     } else {
         throw std::runtime_error("linalg_cholesky: only Float32 and Float64 supported");

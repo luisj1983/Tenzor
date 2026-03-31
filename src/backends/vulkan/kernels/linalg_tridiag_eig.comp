@@ -1,0 +1,143 @@
+#version 450
+
+// Tridiagonal eigendecomposition using implicit QR iteration with Wilkinson shift.
+// Operates on O(n) data: diagonal + subdiagonal arrays.
+// Outputs eigenvalues and accumulated Givens rotation parameters for eigenvector
+// reconstruction.
+// One workgroup per batch element (256 threads, thread 0 does serial QR).
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer DiagBuf    { float diag[]; };     // n diagonal elements
+layout(set = 0, binding = 1) buffer SubDiagBuf { float sdiag[]; };    // n-1 subdiagonal elements
+layout(set = 0, binding = 2) buffer EvalsBuf   { float evals[]; };    // Output eigenvalues (n)
+layout(set = 0, binding = 3) buffer RotsBuf    { float rots[]; };     // Givens rotation params: 2*n*max_iterations
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint max_iterations;
+    uint batch_idx;
+};
+
+// Work arrays in global memory (shared memory too small for large n)
+// diag/sdiag are modified in-place during iteration
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    if (tid != 0) return;  // Serial QR iteration on thread 0
+
+    uint d_base = batch_idx * n;
+    uint s_base = batch_idx * (n - 1);
+    uint r_base = batch_idx * 2 * n * max_iterations;
+
+    // Copy to local references
+    uint rot_idx = 0;
+
+    // Implicit QR iteration with Wilkinson shift on symmetric tridiagonal matrix
+    int lo = 0;
+    int hi = int(n) - 1;
+
+    for (uint iter = 0; iter < max_iterations && lo <= hi; iter++) {
+        // Find unreduced block: look for negligible subdiagonal entry from bottom
+        for (int i = hi; i > lo; i--) {
+            float tst = abs(diag[d_base + uint(i - 1)]) + abs(diag[d_base + uint(i)]);
+            if (tst == 0.0) tst = 1.0;
+            if (abs(sdiag[s_base + uint(i - 1)]) < 1e-7 * tst) {
+                sdiag[s_base + uint(i - 1)] = 0.0;
+                // Check if this splits the matrix
+                if (i == hi) {
+                    // Eigenvalue found at hi
+                    evals[d_base + uint(hi)] = diag[d_base + uint(hi)];
+                    hi--;
+                    break;
+                }
+            }
+        }
+
+        if (lo > hi) break;
+        if (lo == hi) {
+            evals[d_base + uint(lo)] = diag[d_base + uint(lo)];
+            break;
+        }
+
+        // Find the start of the unreduced block from lo
+        int block_start = hi;
+        for (int i = hi - 1; i >= lo; i--) {
+            if (abs(sdiag[s_base + uint(i)]) < 1e-30) {
+                block_start = i + 1;
+                break;
+            }
+            if (i == lo) {
+                block_start = lo;
+            }
+        }
+
+        // Wilkinson shift: eigenvalue of bottom-right 2x2 closer to d[hi]
+        float d_n = diag[d_base + uint(hi)];
+        float d_nm1 = diag[d_base + uint(hi - 1)];
+        float e_nm1 = sdiag[s_base + uint(hi - 1)];
+
+        float delta = (d_nm1 - d_n) * 0.5;
+        float shift;
+        if (abs(delta) < 1e-30) {
+            shift = d_n - abs(e_nm1);
+        } else {
+            float sgn = (delta >= 0.0) ? 1.0 : -1.0;
+            shift = d_n - e_nm1 * e_nm1 / (delta + sgn * sqrt(delta * delta + e_nm1 * e_nm1));
+        }
+
+        // Implicit QR step with shift
+        float bulge = diag[d_base + uint(block_start)] - shift;
+        float s_val = 1.0;
+        float c_val = 1.0;
+        float p = 0.0;
+
+        for (int i = block_start; i < hi; i++) {
+            float f = s_val * sdiag[s_base + uint(i)];
+            float b = c_val * sdiag[s_base + uint(i)];
+
+            // Givens rotation to zero out f
+            float r;
+            if (abs(f) >= abs(bulge)) {
+                c_val = bulge / f;
+                r = sqrt(c_val * c_val + 1.0);
+                sdiag[s_base + uint(i)] = f * r;
+                s_val = 1.0 / r;
+                c_val *= s_val;
+            } else {
+                s_val = f / bulge;
+                r = sqrt(s_val * s_val + 1.0);
+                sdiag[s_base + uint(i)] = bulge * r;
+                c_val = 1.0 / r;
+                s_val *= c_val;
+            }
+
+            // Store rotation parameters for eigenvector reconstruction
+            if (rot_idx < n * max_iterations) {
+                rots[r_base + 2 * rot_idx] = c_val;
+                rots[r_base + 2 * rot_idx + 1] = s_val;
+                rot_idx++;
+            }
+
+            float g = diag[d_base + uint(i + 1)] - p;
+            r = (diag[d_base + uint(i)] - g) * s_val + 2.0 * c_val * b;
+            p = s_val * r;
+            diag[d_base + uint(i + 1)] = g + p;
+            bulge = c_val * r - b;
+        }
+
+        diag[d_base + uint(block_start)] -= p;
+        sdiag[s_base + uint(block_start)] = bulge;
+
+        // Check convergence at hi
+        if (abs(sdiag[s_base + uint(hi - 1)]) < 1e-7 * (abs(diag[d_base + uint(hi - 1)]) + abs(diag[d_base + uint(hi)]))) {
+            sdiag[s_base + uint(hi - 1)] = 0.0;
+            evals[d_base + uint(hi)] = diag[d_base + uint(hi)];
+            hi--;
+        }
+    }
+
+    // Copy any remaining eigenvalues
+    for (int i = lo; i <= hi; i++) {
+        evals[d_base + uint(i)] = diag[d_base + uint(i)];
+    }
+}

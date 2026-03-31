@@ -89,9 +89,16 @@ if(GLSLC)
     set(EMBEDDED_SHADERS_HEADER ${CMAKE_CURRENT_BINARY_DIR}/embedded_shaders.hpp)
     set(EMBEDDED_SHADERS_IMPL ${CMAKE_CURRENT_BINARY_DIR}/embedded_shaders.cpp)
 
+    if(NOT Python_EXECUTABLE)
+        find_package(Python COMPONENTS Interpreter QUIET)
+        if(NOT Python_EXECUTABLE)
+            message(FATAL_ERROR "Python interpreter required for Vulkan shader embedding but not found")
+        endif()
+    endif()
+
     add_custom_command(
         OUTPUT ${EMBEDDED_SHADERS_HEADER} ${EMBEDDED_SHADERS_IMPL}
-        COMMAND ${CMAKE_COMMAND} -E env python3 ${CMAKE_SOURCE_DIR}/scripts/embed_shaders.py
+        COMMAND ${CMAKE_COMMAND} -E env ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/embed_shaders.py
                 ${SHADER_OUTPUT_DIR} ${EMBEDDED_SHADERS_HEADER}
         DEPENDS ${SHADER_OUTPUTS} ${CMAKE_SOURCE_DIR}/scripts/embed_shaders.py
         COMMENT "Embedding Vulkan shaders into C++ source"

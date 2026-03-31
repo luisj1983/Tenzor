@@ -1,5 +1,6 @@
 #include "numpy_interop.hpp"
 #include <tenzor/core/storage.hpp>
+#include <tenzor/core/checked_math.hpp>
 #include <stdexcept>
 #include <cstring>
 #include <sstream>
@@ -179,7 +180,9 @@ auto create_numpy_array(const Tensor& tensor, DType original_dtype) -> py::array
     int64_t max_offset = tensor.offset();
     for (size_t d = 0; d < shape.size(); ++d) {
         if (shape[d] > 0) {
-            max_offset += (shape[d] - 1) * strides[d];
+            max_offset = checked_add(max_offset,
+                checked_mul(static_cast<int64_t>(shape[d] - 1),
+                            static_cast<int64_t>(strides[d])));
         }
     }
     int64_t storage_elements = static_cast<int64_t>(
@@ -200,7 +203,8 @@ auto create_numpy_array(const Tensor& tensor, DType original_dtype) -> py::array
     // Account for storage offset
     auto* base_ptr = static_cast<char*>(
         const_cast<void*>(tensor.storage()->data()));
-    void* data_ptr = base_ptr + tensor.offset() * element_size;
+    void* data_ptr = base_ptr + checked_mul(static_cast<int64_t>(tensor.offset()),
+                                            static_cast<int64_t>(element_size));
 
     // Create capsule that keeps the tensor's storage alive via shared_ptr refcount.
     auto* storage_ptr = new std::shared_ptr<Storage>(tensor.storage());

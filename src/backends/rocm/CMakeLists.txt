@@ -171,6 +171,7 @@ endif()
 
 # Manually compile rocm_backend.cpp to avoid HIP flag pollution
 # CMake's HIP language support adds HIP flags to all CXX compilation in this directory
+string(TOUPPER "${CMAKE_BUILD_TYPE}" CMAKE_BUILD_TYPE_UPPER)
 set(ROCM_BACKEND_OBJ "${CMAKE_CURRENT_BINARY_DIR}/rocm_backend.cpp.o")
 add_custom_command(
     OUTPUT ${ROCM_BACKEND_OBJ}
@@ -178,13 +179,12 @@ add_custom_command(
         -c ${CMAKE_CURRENT_SOURCE_DIR}/rocm_backend.cpp
         -o ${ROCM_BACKEND_OBJ}
         -std=c++20 -fPIC
-        -O3 -DNDEBUG
+        ${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${CMAKE_BUILD_TYPE_UPPER}}
         -Wall -Wextra -pedantic
-        -march=native
         -Wno-unused-parameter -Wno-unused-variable
         -fopenmp
         -I${CMAKE_SOURCE_DIR}/include
-        -isystem /opt/rocm/include
+        -isystem ${ROCM_PATH}/include
         -DTENZOR_HAS_MIOPEN
         -DTENZOR_HAS_ROCBLAS
         -DTENZOR_ROCM_BACKEND
@@ -213,13 +213,12 @@ add_custom_command(
         -c ${CMAKE_CURRENT_SOURCE_DIR}/rocm_kernel_registry.cpp
         -o ${ROCM_KERNEL_REGISTRY_OBJ}
         -std=c++20 -fPIC
-        -O3 -DNDEBUG
+        ${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${CMAKE_BUILD_TYPE_UPPER}}
         -Wall -Wextra -pedantic
-        -march=native
         -Wno-unused-parameter -Wno-unused-variable
         -fopenmp
         -I${CMAKE_SOURCE_DIR}/include
-        -isystem /opt/rocm/include
+        -isystem ${ROCM_PATH}/include
         -DTENZOR_HAS_MIOPEN
         -DTENZOR_HAS_ROCBLAS
         -DTENZOR_ROCM_BACKEND

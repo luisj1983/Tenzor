@@ -642,6 +642,12 @@ public:
                             int64_t batch_size, int32_t device_id, bool is_f64, bool is_f16);
     void runBlockedQR(Tensor& A, Tensor& tau, int64_t m, int64_t n,
                       int64_t batch_size, int32_t device_id, bool is_f64, bool is_f16);
+    void runBlockedBidiag(Tensor& A, Tensor& tau_l, Tensor& tau_r, int64_t n,
+                          int64_t batch_size, int32_t device_id, bool is_f64, bool is_f16);
+    void runBlockedTridiag(Tensor& A, Tensor& tau, int64_t n,
+                           int64_t batch_size, int32_t device_id, bool is_f64, bool is_f16);
+    void runBlockedHessenberg(Tensor& A, Tensor& tau, int64_t n,
+                              int64_t batch_size, int32_t device_id, bool is_f64);
 
     // SearchSorted (native GPU binary search shader)
     auto dispatchSearchSorted(const Tensor& sorted, const Tensor& values) -> Tensor;

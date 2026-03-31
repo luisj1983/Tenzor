@@ -1,0 +1,171 @@
+#version 450
+
+// Accumulate Householder reflections for U and V reconstruction — Float16 variant
+// Float16 elements packed 2 per 32-bit word, all computation in float32.
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer BidiagA { uint A[]; };
+layout(set = 0, binding = 1) readonly buffer TauL { uint tau_l_buf[]; };
+layout(set = 0, binding = 2) readonly buffer TauR { uint tau_r_buf[]; };
+layout(set = 0, binding = 3) buffer UMat { uint U_buf[]; };
+layout(set = 0, binding = 4) buffer VtMat { uint Vt_buf[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint batch_idx;
+    uint mode;
+};
+
+shared float dot_val;
+
+float readF16A(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = A[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+float readF16TauL(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = tau_l_buf[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+float readF16TauR(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = tau_r_buf[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+float readF16U(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = U_buf[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+void writeF16U(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+    uint old_val = U_buf[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0; iter < 1024; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(U_buf[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    U_buf[word_idx] = new_val;
+}
+
+float readF16Vt(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = Vt_buf[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+void writeF16Vt(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+    uint old_val = Vt_buf[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0; iter < 1024; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(Vt_buf[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    Vt_buf[word_idx] = new_val;
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint elem_base = batch_idx * n * n;
+    uint j = gl_WorkGroupID.x;
+    if (j >= n) return;
+
+    if (mode == 0) {
+        // Build U
+        for (uint r = tid; r < n; r += 256) {
+            writeF16U(elem_base + r * n + j, (r == j) ? 1.0 : 0.0);
+        }
+        barrier();
+
+        for (int k = int(n) - 2; k >= 0; k--) {
+            uint col = uint(k);
+            float left_tau = readF16TauL(batch_idx * n + col);
+            if (abs(left_tau) < 1e-30) continue;
+
+            if (tid == 0) {
+                float dot = readF16U(elem_base + col * n + j);
+                for (uint r = col + 1; r < n; r++) {
+                    dot += readF16A(elem_base + r * n + col) * readF16U(elem_base + r * n + j);
+                }
+                dot_val = dot;
+            }
+            barrier();
+
+            float dot = dot_val;
+
+            for (uint r = col + 1 + tid; r < n; r += 256) {
+                float v_r = readF16A(elem_base + r * n + col);
+                float cur = readF16U(elem_base + r * n + j);
+                writeF16U(elem_base + r * n + j, cur - left_tau * v_r * dot);
+            }
+            if (tid == 0) {
+                float cur = readF16U(elem_base + col * n + j);
+                writeF16U(elem_base + col * n + j, cur - left_tau * dot);
+            }
+            barrier();
+        }
+    } else {
+        // Build Vt
+        for (uint c = tid; c < n; c += 256) {
+            writeF16Vt(elem_base + j * n + c, (j == c) ? 1.0 : 0.0);
+        }
+        barrier();
+
+        for (int k = int(n) - 3; k >= 0; k--) {
+            uint col = uint(k);
+            float right_tau = readF16TauR(batch_idx * n + col);
+            if (abs(right_tau) < 1e-30) continue;
+            if (col + 2 >= n) continue;
+
+            if (tid == 0) {
+                float dot = readF16Vt(elem_base + j * n + (col + 1));
+                for (uint c = col + 2; c < n; c++) {
+                    dot += readF16Vt(elem_base + j * n + c) * readF16A(elem_base + col * n + c);
+                }
+                dot_val = dot;
+            }
+            barrier();
+
+            float dot = dot_val;
+
+            for (uint c = col + 2 + tid; c < n; c += 256) {
+                float v_r = readF16A(elem_base + col * n + c);
+                float cur = readF16Vt(elem_base + j * n + c);
+                writeF16Vt(elem_base + j * n + c, cur - right_tau * dot * v_r);
+            }
+            if (tid == 0) {
+                float cur = readF16Vt(elem_base + j * n + (col + 1));
+                writeF16Vt(elem_base + j * n + (col + 1), cur - right_tau * dot);
+            }
+            barrier();
+        }
+    }
+}

@@ -1,0 +1,117 @@
+#version 450
+
+// Accumulate Householder reflections to reconstruct orthogonal matrices U and V
+// from bidiagonal reduction.
+// Given the bidiagonalized matrix A (with Householder vectors stored in it),
+// tau_l, tau_r, reconstruct U = product of left Householder reflections,
+// V = product of right Householder reflections.
+// Each workgroup handles one column of the output matrix.
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer BidiagA { float A[]; };
+layout(set = 0, binding = 1) readonly buffer TauL { float tau_l[]; };
+layout(set = 0, binding = 2) readonly buffer TauR { float tau_r[]; };
+layout(set = 0, binding = 3) buffer UMat { float U[]; };
+layout(set = 0, binding = 4) buffer VtMat { float Vt[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint batch_idx;
+    uint mode;  // 0 = build U, 1 = build Vt
+};
+
+shared float dot_val;
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint base = batch_idx * n * n;
+    uint j = gl_WorkGroupID.x;  // column index
+    if (j >= n) return;
+
+    if (mode == 0) {
+        // Build U: start with identity column j, apply left Householder reflections
+        // in reverse order: H_{n-2} ... H_1 H_0 * e_j
+
+        uint u_base = batch_idx * n * n;
+
+        // Initialize U[:,j] = e_j
+        for (uint r = tid; r < n; r += 256) {
+            U[u_base + r * n + j] = (r == j) ? 1.0 : 0.0;
+        }
+        barrier();
+
+        // Apply Householder reflections in reverse: k = n-2, ..., 0
+        // (bidiag reduction applies n-1 left reflections for columns 0..n-2)
+        for (int k = int(n) - 2; k >= 0; k--) {
+            uint col = uint(k);
+            float left_tau = tau_l[batch_idx * n + col];
+            if (abs(left_tau) < 1e-30) continue;
+
+            // v_L[col] = 1, v_L[col+1:] = A[col+1:, col]
+            // U[:,j] -= tau_L * v_L * (v_L^T * U[:,j])
+            if (tid == 0) {
+                float dot = U[u_base + col * n + j];  // v[col] = 1
+                for (uint r = col + 1; r < n; r++) {
+                    dot += A[base + r * n + col] * U[u_base + r * n + j];
+                }
+                dot_val = dot;
+            }
+            barrier();
+
+            float dot = dot_val;
+
+            for (uint r = col + 1 + tid; r < n; r += 256) {
+                U[u_base + r * n + j] -= left_tau * A[base + r * n + col] * dot;
+            }
+            if (tid == 0) {
+                U[u_base + col * n + j] -= left_tau * dot;
+            }
+            barrier();
+        }
+    } else {
+        // Build Vt: start with identity row j (= column j of V), apply right
+        // Householder reflections in reverse: H_{n-3} ... H_1 H_0 * e_j
+        // then transpose to get Vt
+
+        uint vt_base = batch_idx * n * n;
+
+        // Initialize Vt[j,:] = e_j (i.e., V[:,j] = e_j, Vt[j,c] = delta(j,c))
+        // We build V[:,j] first, then store as Vt[j,:]
+        // Actually, build V column j in Vt storage as row j
+        for (uint c = tid; c < n; c += 256) {
+            Vt[vt_base + j * n + c] = (j == c) ? 1.0 : 0.0;
+        }
+        barrier();
+
+        // Apply right Householder reflections in reverse: k = n-3, ..., 0
+        // Right reflection k: v_R[col+1] = 1, v_R[col+2:] = A[col, col+2:]
+        for (int k = int(n) - 3; k >= 0; k--) {
+            uint col = uint(k);
+            float right_tau = tau_r[batch_idx * n + col];
+            if (abs(right_tau) < 1e-30) continue;
+            if (col + 2 >= n) continue;
+
+            // Vt[j,:] is row j of Vt = column j of V
+            // V[:,j] -= tau_R * v_R * (v_R^T * V[:,j])
+            // In Vt storage: Vt[j,:] -= tau_R * (Vt[j,:] . v_R) * v_R
+            if (tid == 0) {
+                float dot = Vt[vt_base + j * n + (col + 1)];  // v_R[col+1] = 1
+                for (uint c = col + 2; c < n; c++) {
+                    dot += Vt[vt_base + j * n + c] * A[base + col * n + c];
+                }
+                dot_val = dot;
+            }
+            barrier();
+
+            float dot = dot_val;
+
+            for (uint c = col + 2 + tid; c < n; c += 256) {
+                Vt[vt_base + j * n + c] -= right_tau * dot * A[base + col * n + c];
+            }
+            if (tid == 0) {
+                Vt[vt_base + j * n + (col + 1)] -= right_tau * dot;
+            }
+            barrier();
+        }
+    }
+}

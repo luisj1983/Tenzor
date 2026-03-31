@@ -185,12 +185,12 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
             auto sum_buf = sycl::malloc_shared<float>(1, queue);
             sum_buf[0] = 0.0f;
 
-            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(sum_buf, sycl::plus<float>()),
+            auto event = queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(sum_buf, sycl::plus<float>()),
                               [=](sycl::id<1> idx, auto& sum) {
                 sum += in_ptr[idx];
             });
 
-            queue.wait_and_throw();
+            event.wait();
             out_ptr[0] = sum_buf[0];
             sycl::free(sum_buf, queue);
         }
@@ -201,12 +201,12 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
             auto sum_buf = sycl::malloc_shared<double>(1, queue);
             sum_buf[0] = 0.0;
 
-            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(sum_buf, sycl::plus<double>()),
+            auto event = queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(sum_buf, sycl::plus<double>()),
                               [=](sycl::id<1> idx, auto& sum) {
                 sum += in_ptr[idx];
             });
 
-            queue.wait_and_throw();
+            event.wait();
             out_ptr[0] = sum_buf[0];
             sycl::free(sum_buf, queue);
         }
@@ -218,12 +218,12 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
             auto sum_buf = sycl::malloc_shared<float>(1, queue);
             sum_buf[0] = 0.0f;
 
-            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(sum_buf, sycl::plus<float>()),
+            auto event = queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(sum_buf, sycl::plus<float>()),
                               [=](sycl::id<1> idx, auto& sum) {
                 sum += static_cast<float>(in_ptr[idx]);
             });
 
-            queue.wait_and_throw();
+            event.wait();
             out_ptr[0] = sycl::half(sum_buf[0]);
             sycl::free(sum_buf, queue);
         }
@@ -235,12 +235,12 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
             auto sum_buf = sycl::malloc_shared<float>(1, queue);
             sum_buf[0] = 0.0f;
 
-            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(sum_buf, sycl::plus<float>()),
+            auto event = queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(sum_buf, sycl::plus<float>()),
                               [=](sycl::id<1> idx, auto& sum) {
                 sum += bf16_to_f32(in_ptr[idx]);
             });
 
-            queue.wait_and_throw();
+            event.wait();
             out_ptr[0] = f32_to_bf16(sum_buf[0]);
             sycl::free(sum_buf, queue);
         }
@@ -252,12 +252,12 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
             auto sum_buf = sycl::malloc_shared<int64_t>(1, queue);
             sum_buf[0] = 0;
 
-            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(sum_buf, sycl::plus<int64_t>()),
+            auto event = queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(sum_buf, sycl::plus<int64_t>()),
                               [=](sycl::id<1> idx, auto& sum) {
                 sum += static_cast<int64_t>(in_ptr[idx]);
             });
 
-            queue.wait_and_throw();
+            event.wait();
             out_ptr[0] = static_cast<int32_t>(sum_buf[0]);
             sycl::free(sum_buf, queue);
         }
@@ -283,7 +283,7 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
             );
 
             // Second pass: reduce partial sums
-            queue.parallel_for(
+            auto event2 = queue.parallel_for(
                 sycl::nd_range<1>(WG_SIZE, WG_SIZE),
                 [=](sycl::nd_item<1> item) {
                     int64_t lid = item.get_local_id(0);
@@ -292,7 +292,7 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                     if (lid == 0) out_ptr[0] = sum;
                 }
             );
-            queue.wait_and_throw();
+            event2.wait();
             sycl::free(partial_buf, queue);
         }
         else if (in_cont.dtype() == DType::Bool) {
@@ -304,11 +304,11 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
             auto sum_buf = sycl::malloc_shared<int32_t>(1, queue);
             sum_buf[0] = 0;
 
-            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(sum_buf, sycl::plus<int32_t>()),
+            auto event = queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(sum_buf, sycl::plus<int32_t>()),
                               [=](sycl::id<1> idx, auto& s) {
                 s += static_cast<int32_t>(in_ptr[idx] ? 1 : 0);
             });
-            queue.wait_and_throw();
+            event.wait();
 
             int64_t sum = static_cast<int64_t>(sum_buf[0]);
             queue.memcpy(out_ptr, &sum, sizeof(int64_t)).wait();
@@ -497,12 +497,12 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
             auto sum_buf = sycl::malloc_shared<float>(1, queue);
             sum_buf[0] = 0.0f;
 
-            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(sum_buf, sycl::plus<float>()),
+            auto event = queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(sum_buf, sycl::plus<float>()),
                               [=](sycl::id<1> idx, auto& sum) {
                 sum += in_ptr[idx];
             });
 
-            queue.wait_and_throw();
+            event.wait();
             out_ptr[0] = sum_buf[0] * scale;
             sycl::free(sum_buf, queue);
         }
@@ -514,12 +514,12 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
             auto sum_buf = sycl::malloc_shared<double>(1, queue);
             sum_buf[0] = 0.0;
 
-            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(sum_buf, sycl::plus<double>()),
+            auto event = queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(sum_buf, sycl::plus<double>()),
                               [=](sycl::id<1> idx, auto& sum) {
                 sum += in_ptr[idx];
             });
 
-            queue.wait_and_throw();
+            event.wait();
             out_ptr[0] = sum_buf[0] * scale;
             sycl::free(sum_buf, queue);
         }
@@ -531,12 +531,12 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
             auto sum_buf = sycl::malloc_shared<float>(1, queue);
             sum_buf[0] = 0.0f;
 
-            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(sum_buf, sycl::plus<float>()),
+            auto event = queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(sum_buf, sycl::plus<float>()),
                               [=](sycl::id<1> idx, auto& sum) {
                 sum += static_cast<float>(in_ptr[idx]);
             });
 
-            queue.wait_and_throw();
+            event.wait();
             out_ptr[0] = sycl::half(sum_buf[0] * scale);
             sycl::free(sum_buf, queue);
         }
@@ -548,12 +548,12 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
             auto sum_buf = sycl::malloc_shared<float>(1, queue);
             sum_buf[0] = 0.0f;
 
-            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(sum_buf, sycl::plus<float>()),
+            auto event = queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(sum_buf, sycl::plus<float>()),
                               [=](sycl::id<1> idx, auto& sum) {
                 sum += bf16_to_f32(in_ptr[idx]);
             });
 
-            queue.wait_and_throw();
+            event.wait();
             out_ptr[0] = f32_to_bf16(sum_buf[0] * scale);
             sycl::free(sum_buf, queue);
         }
@@ -2567,9 +2567,9 @@ auto median_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& 
         auto* d_shape = sycl::malloc_device<int64_t>(ndim, queue);
         queue.memcpy(d_strides, in_strides.data(), ndim * sizeof(int64_t));
         queue.memcpy(d_shape, shape_vec.data(), ndim * sizeof(int64_t));
-        queue.wait_and_throw();
+        queue.wait();
 
-        queue.parallel_for(sycl::range<1>(outer_size), [=](sycl::id<1> id) {
+        auto event = queue.parallel_for(sycl::range<1>(outer_size), [=](sycl::id<1> id) {
             int64_t o = id[0];
 
             // Compute base offset for this slice
@@ -2599,7 +2599,7 @@ auto median_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& 
                 }
             }
         });
-        queue.wait_and_throw();
+        event.wait();
 
         sycl::free(d_strides, queue);
         sycl::free(d_shape, queue);
@@ -2686,9 +2686,9 @@ auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
         auto* d_shape = sycl::malloc_device<int64_t>(ndim, queue);
         queue.memcpy(d_strides, in_strides.data(), ndim * sizeof(int64_t));
         queue.memcpy(d_shape, shape_vec.data(), ndim * sizeof(int64_t));
-        queue.wait_and_throw();
+        queue.wait();
 
-        queue.parallel_for(sycl::range<1>(outer_size), [=](sycl::id<1> id) {
+        auto event = queue.parallel_for(sycl::range<1>(outer_size), [=](sycl::id<1> id) {
             int64_t o = id[0];
 
             int64_t tmp = o;
@@ -2723,7 +2723,7 @@ auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
             val_ptr[o] = best_val;
             idx_ptr[o] = best_idx;
         });
-        queue.wait_and_throw();
+        event.wait();
 
         sycl::free(d_strides, queue);
         sycl::free(d_shape, queue);

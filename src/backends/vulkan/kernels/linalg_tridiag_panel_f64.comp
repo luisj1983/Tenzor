@@ -1,0 +1,110 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Blocked tridiagonalization — panel factorization (Float64 variant)
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer MatrixA { float64_t A[]; };
+layout(set = 0, binding = 1) buffer TauBuf  { float64_t tau[]; };
+layout(set = 0, binding = 2) buffer WorkBuf { float64_t work[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint col_start;
+    uint panel_cols;
+    uint batch_idx;
+};
+
+shared float64_t norm_sq;
+shared float64_t alpha_val;
+shared float64_t tau_k;
+shared float64_t dot_val;
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint base = batch_idx * n * n;
+    uint work_base = batch_idx * n;
+
+    for (uint k = 0; k < panel_cols; k++) {
+        uint col = col_start + k;
+        if (col + 1 >= n) break;
+
+        if (tid == 0) {
+            norm_sq = 0.0lf;
+            for (uint r = col + 1; r < n; r++) {
+                float64_t v = A[base + r * n + col];
+                norm_sq += v * v;
+            }
+
+            if (norm_sq < 1e-60lf) {
+                tau_k = 0.0lf;
+                alpha_val = A[base + (col + 1) * n + col];
+            } else {
+                alpha_val = -sign(A[base + (col + 1) * n + col]) * sqrt(norm_sq);
+                float64_t v0 = A[base + (col + 1) * n + col] - alpha_val;
+
+                float64_t v_norm_sq = v0 * v0;
+                for (uint r = col + 2; r < n; r++) {
+                    v_norm_sq += A[base + r * n + col] * A[base + r * n + col];
+                }
+
+                if (abs(v0) < 1e-60lf) {
+                    tau_k = 0.0lf;
+                } else {
+                    tau_k = 2.0lf / v_norm_sq;
+                    for (uint r = col + 2; r < n; r++) {
+                        A[base + r * n + col] /= v0;
+                    }
+                }
+
+                A[base + (col + 1) * n + col] = alpha_val;
+                A[base + col * n + (col + 1)] = alpha_val;
+            }
+
+            tau[work_base + col] = tau_k;
+        }
+        barrier();
+
+        if (abs(tau_k) < 1e-60lf) continue;
+
+        // Compute p = tau * A * v
+        for (uint r = col + 1 + tid; r < n; r += 256) {
+            float64_t sum = A[base + r * n + (col + 1)];
+            for (uint c = col + 2; c < n; c++) {
+                sum += A[base + r * n + c] * A[base + c * n + col];
+            }
+            work[work_base + r] = tau_k * sum;
+        }
+        barrier();
+
+        if (tid == 0) {
+            float64_t vtp = work[work_base + col + 1];
+            for (uint r = col + 2; r < n; r++) {
+                vtp += A[base + r * n + col] * work[work_base + r];
+            }
+            dot_val = 0.5lf * tau_k * vtp;
+        }
+        barrier();
+
+        for (uint r = col + 1 + tid; r < n; r += 256) {
+            float64_t v_r = (r == col + 1) ? 1.0lf : A[base + r * n + col];
+            work[work_base + r] -= dot_val * v_r;
+        }
+        barrier();
+
+        for (uint r = col + 1 + tid; r < n; r += 256) {
+            float64_t v_r = (r == col + 1) ? 1.0lf : A[base + r * n + col];
+            float64_t w_r = work[work_base + r];
+            for (uint c = col + 1; c <= r; c++) {
+                float64_t v_c = (c == col + 1) ? 1.0lf : A[base + c * n + col];
+                float64_t w_c = work[work_base + c];
+                float64_t update = v_r * w_c + w_r * v_c;
+                A[base + r * n + c] -= update;
+                if (r != c) {
+                    A[base + c * n + r] -= update;
+                }
+            }
+        }
+        barrier();
+    }
+}

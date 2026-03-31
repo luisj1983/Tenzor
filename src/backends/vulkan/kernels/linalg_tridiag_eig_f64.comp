@@ -1,0 +1,122 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Tridiagonal eigendecomposition — implicit QR with Wilkinson shift (Float64)
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer DiagBuf    { float64_t diag[]; };
+layout(set = 0, binding = 1) buffer SubDiagBuf { float64_t sdiag[]; };
+layout(set = 0, binding = 2) buffer EvalsBuf   { float64_t evals[]; };
+layout(set = 0, binding = 3) buffer RotsBuf    { float64_t rots[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint max_iterations;
+    uint batch_idx;
+};
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    if (tid != 0) return;
+
+    uint d_base = batch_idx * n;
+    uint s_base = batch_idx * (n - 1);
+    uint r_base = batch_idx * 2 * n * max_iterations;
+    uint rot_idx = 0;
+
+    int lo = 0;
+    int hi = int(n) - 1;
+
+    for (uint iter = 0; iter < max_iterations && lo <= hi; iter++) {
+        for (int i = hi; i > lo; i--) {
+            float64_t tst = abs(diag[d_base + uint(i - 1)]) + abs(diag[d_base + uint(i)]);
+            if (tst == 0.0lf) tst = 1.0lf;
+            if (abs(sdiag[s_base + uint(i - 1)]) < 1e-15lf * tst) {
+                sdiag[s_base + uint(i - 1)] = 0.0lf;
+                if (i == hi) {
+                    evals[d_base + uint(hi)] = diag[d_base + uint(hi)];
+                    hi--;
+                    break;
+                }
+            }
+        }
+
+        if (lo > hi) break;
+        if (lo == hi) {
+            evals[d_base + uint(lo)] = diag[d_base + uint(lo)];
+            break;
+        }
+
+        int block_start = hi;
+        for (int i = hi - 1; i >= lo; i--) {
+            if (abs(sdiag[s_base + uint(i)]) < 1e-60lf) {
+                block_start = i + 1;
+                break;
+            }
+            if (i == lo) block_start = lo;
+        }
+
+        float64_t d_n = diag[d_base + uint(hi)];
+        float64_t d_nm1 = diag[d_base + uint(hi - 1)];
+        float64_t e_nm1 = sdiag[s_base + uint(hi - 1)];
+
+        float64_t delta = (d_nm1 - d_n) * 0.5lf;
+        float64_t shift;
+        if (abs(delta) < 1e-60lf) {
+            shift = d_n - abs(e_nm1);
+        } else {
+            float64_t sgn = (delta >= 0.0lf) ? 1.0lf : -1.0lf;
+            shift = d_n - e_nm1 * e_nm1 / (delta + sgn * sqrt(delta * delta + e_nm1 * e_nm1));
+        }
+
+        float64_t bulge = diag[d_base + uint(block_start)] - shift;
+        float64_t s_val = 1.0lf;
+        float64_t c_val = 1.0lf;
+        float64_t p = 0.0lf;
+
+        for (int i = block_start; i < hi; i++) {
+            float64_t f = s_val * sdiag[s_base + uint(i)];
+            float64_t b = c_val * sdiag[s_base + uint(i)];
+
+            float64_t r;
+            if (abs(f) >= abs(bulge)) {
+                c_val = bulge / f;
+                r = sqrt(c_val * c_val + 1.0lf);
+                sdiag[s_base + uint(i)] = f * r;
+                s_val = 1.0lf / r;
+                c_val *= s_val;
+            } else {
+                s_val = f / bulge;
+                r = sqrt(s_val * s_val + 1.0lf);
+                sdiag[s_base + uint(i)] = bulge * r;
+                c_val = 1.0lf / r;
+                s_val *= c_val;
+            }
+
+            if (rot_idx < n * max_iterations) {
+                rots[r_base + 2 * rot_idx] = c_val;
+                rots[r_base + 2 * rot_idx + 1] = s_val;
+                rot_idx++;
+            }
+
+            float64_t g = diag[d_base + uint(i + 1)] - p;
+            r = (diag[d_base + uint(i)] - g) * s_val + 2.0lf * c_val * b;
+            p = s_val * r;
+            diag[d_base + uint(i + 1)] = g + p;
+            bulge = c_val * r - b;
+        }
+
+        diag[d_base + uint(block_start)] -= p;
+        sdiag[s_base + uint(block_start)] = bulge;
+
+        if (abs(sdiag[s_base + uint(hi - 1)]) < 1e-15lf * (abs(diag[d_base + uint(hi - 1)]) + abs(diag[d_base + uint(hi)]))) {
+            sdiag[s_base + uint(hi - 1)] = 0.0lf;
+            evals[d_base + uint(hi)] = diag[d_base + uint(hi)];
+            hi--;
+        }
+    }
+
+    for (int i = lo; i <= hi; i++) {
+        evals[d_base + uint(i)] = diag[d_base + uint(i)];
+    }
+}

@@ -106,6 +106,11 @@ target_link_libraries(tenzor_unit_tests PRIVATE
     tenzor_backend_cpu
     GTest::gtest_main
 )
+foreach(backend cuda rocm oneapi vulkan)
+    if(TARGET tenzor_backend_${backend})
+        target_link_libraries(tenzor_unit_tests PRIVATE tenzor_backend_${backend})
+    endif()
+endforeach()
 
 # tenzor_unit_tests crashes during --gtest_list_tests (static destruction in linked
 # backends), so use add_test instead of gtest_discover_tests

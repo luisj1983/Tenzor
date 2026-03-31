@@ -11,6 +11,7 @@
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/utils/error.hpp"
 #include "tenzor/utils/safe_math.hpp"
+#include "tenzor/core/checked_math.hpp"
 #include <numeric>
 #include <algorithm>
 #include <array>
@@ -217,7 +218,7 @@ auto Tensor::data() -> T* {
         int64_t max_offset = static_cast<int64_t>(impl_->offset);
         for (int64_t d = 0; d < ndim(); ++d) {
             if (impl_->shape[d] > 0) {
-                int64_t extent = (impl_->shape[d] - 1) * impl_->strides[d];
+                int64_t extent = checked_mul(impl_->shape[d] - 1, impl_->strides[d]);
                 if (extent >= 0) {
                     max_offset += extent;
                 } else {
@@ -234,7 +235,8 @@ auto Tensor::data() -> T* {
     if constexpr (std::is_same_v<CleanT, uint8_t> || std::is_same_v<CleanT, char> ||
                   std::is_same_v<CleanT, unsigned char> || std::is_same_v<CleanT, signed char>) {
         auto* base = static_cast<uint8_t*>(impl_->storage->data());
-        return reinterpret_cast<T*>(base + impl_->offset * tenzor::dtype_size(impl_->dtype));
+        return reinterpret_cast<T*>(base + checked_mul(static_cast<int64_t>(impl_->offset),
+                                                       static_cast<int64_t>(tenzor::dtype_size(impl_->dtype))));
     } else {
         return static_cast<T*>(impl_->storage->data()) + impl_->offset;
     }
@@ -266,7 +268,7 @@ auto Tensor::data() const -> const T* {
         int64_t max_offset = static_cast<int64_t>(impl_->offset);
         for (int64_t d = 0; d < ndim(); ++d) {
             if (impl_->shape[d] > 0) {
-                int64_t extent = (impl_->shape[d] - 1) * impl_->strides[d];
+                int64_t extent = checked_mul(impl_->shape[d] - 1, impl_->strides[d]);
                 if (extent >= 0) {
                     max_offset += extent;
                 } else {
@@ -813,19 +815,20 @@ auto Tensor::fill_(double value) -> Tensor& {
         for (int64_t i = 0; i < numel(); ++i) {
             int64_t offset = 0;
             for (int64_t d = 0; d < ndims; ++d)
-                offset += indices[d] * str[d] * elem_size;
+                offset = checked_add(offset, checked_mul(checked_mul(indices[d], str[d]),
+                                                         static_cast<int64_t>(elem_size)));
             // Fill single element at base + offset
             switch (dtype()) {
                 case DType::Float32: *reinterpret_cast<float*>(base + offset) = static_cast<float>(value); break;
                 case DType::Float64: *reinterpret_cast<double*>(base + offset) = value; break;
-                case DType::Int32: *reinterpret_cast<int32_t*>(base + offset) = static_cast<int32_t>(value); break;
-                case DType::Int64: *reinterpret_cast<int64_t*>(base + offset) = static_cast<int64_t>(value); break;
-                case DType::Int16: *reinterpret_cast<int16_t*>(base + offset) = static_cast<int16_t>(value); break;
-                case DType::Int8: *reinterpret_cast<int8_t*>(base + offset) = static_cast<int8_t>(value); break;
-                case DType::UInt8: *reinterpret_cast<uint8_t*>(base + offset) = static_cast<uint8_t>(value); break;
-                case DType::UInt16: *reinterpret_cast<uint16_t*>(base + offset) = static_cast<uint16_t>(value); break;
-                case DType::UInt32: *reinterpret_cast<uint32_t*>(base + offset) = static_cast<uint32_t>(value); break;
-                case DType::UInt64: *reinterpret_cast<uint64_t*>(base + offset) = static_cast<uint64_t>(value); break;
+                case DType::Int32: *reinterpret_cast<int32_t*>(base + offset) = checked_narrow<int32_t>(value); break;
+                case DType::Int64: *reinterpret_cast<int64_t*>(base + offset) = checked_narrow<int64_t>(value); break;
+                case DType::Int16: *reinterpret_cast<int16_t*>(base + offset) = checked_narrow<int16_t>(value); break;
+                case DType::Int8: *reinterpret_cast<int8_t*>(base + offset) = checked_narrow<int8_t>(value); break;
+                case DType::UInt8: *reinterpret_cast<uint8_t*>(base + offset) = checked_narrow<uint8_t>(value); break;
+                case DType::UInt16: *reinterpret_cast<uint16_t*>(base + offset) = checked_narrow<uint16_t>(value); break;
+                case DType::UInt32: *reinterpret_cast<uint32_t*>(base + offset) = checked_narrow<uint32_t>(value); break;
+                case DType::UInt64: *reinterpret_cast<uint64_t*>(base + offset) = checked_narrow<uint64_t>(value); break;
                 case DType::Float16: *reinterpret_cast<Float16*>(base + offset) = Float16(static_cast<float>(value)); break;
                 case DType::BFloat16: *reinterpret_cast<BFloat16*>(base + offset) = BFloat16(static_cast<float>(value)); break;
                 case DType::Bool: *reinterpret_cast<bool*>(base + offset) = (value != 0.0f); break;
@@ -876,16 +879,16 @@ auto Tensor::fill_(double value) -> Tensor& {
     switch (impl_->dtype) {
         case DType::Float32: std::fill_n(data<float>(), n, static_cast<float>(value)); break;
         case DType::Float64: std::fill_n(data<double>(), n, static_cast<double>(value)); break;
-        case DType::Int32: std::fill_n(data<int32_t>(), n, static_cast<int32_t>(value)); break;
-        case DType::Int64: std::fill_n(data<int64_t>(), n, static_cast<int64_t>(value)); break;
-        case DType::UInt8: std::fill_n(data<uint8_t>(), n, static_cast<uint8_t>(value)); break;
-        case DType::UInt16: std::fill_n(data<uint16_t>(), n, static_cast<uint16_t>(value)); break;
-        case DType::UInt32: std::fill_n(data<uint32_t>(), n, static_cast<uint32_t>(value)); break;
-        case DType::UInt64: std::fill_n(data<uint64_t>(), n, static_cast<uint64_t>(value)); break;
+        case DType::Int32: std::fill_n(data<int32_t>(), n, checked_narrow<int32_t>(value)); break;
+        case DType::Int64: std::fill_n(data<int64_t>(), n, checked_narrow<int64_t>(value)); break;
+        case DType::UInt8: std::fill_n(data<uint8_t>(), n, checked_narrow<uint8_t>(value)); break;
+        case DType::UInt16: std::fill_n(data<uint16_t>(), n, checked_narrow<uint16_t>(value)); break;
+        case DType::UInt32: std::fill_n(data<uint32_t>(), n, checked_narrow<uint32_t>(value)); break;
+        case DType::UInt64: std::fill_n(data<uint64_t>(), n, checked_narrow<uint64_t>(value)); break;
         case DType::Float16: std::fill_n(data<Float16>(), n, Float16(static_cast<float>(value))); break;
         case DType::BFloat16: std::fill_n(data<BFloat16>(), n, BFloat16(static_cast<float>(value))); break;
-        case DType::Int8: std::fill_n(data<int8_t>(), n, static_cast<int8_t>(value)); break;
-        case DType::Int16: std::fill_n(data<int16_t>(), n, static_cast<int16_t>(value)); break;
+        case DType::Int8: std::fill_n(data<int8_t>(), n, checked_narrow<int8_t>(value)); break;
+        case DType::Int16: std::fill_n(data<int16_t>(), n, checked_narrow<int16_t>(value)); break;
         case DType::Bool: std::fill_n(data<bool>(), n, value != 0.0f); break;
         case DType::Complex64: std::fill_n(data<std::complex<float>>(), n, std::complex<float>(value, 0.0f)); break;
         case DType::Complex128: std::fill_n(data<std::complex<double>>(), n, std::complex<double>(static_cast<double>(value), 0.0)); break;

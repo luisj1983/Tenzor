@@ -10,27 +10,12 @@
 #include <vector>
 #include <iostream>
 #include "fp16_saturate.h"
+#include "../rocm_error.hpp"
+#include "../miopen_guards.hpp"
+#include "../hip_buffer.hpp"
 
 namespace tenzor {
 namespace rocm {
-
-// ============================================================================
-// HIP Error Checking
-// ============================================================================
-
-#define HIP_CHECK(call) do { \
-    hipError_t err = call; \
-    if (err != hipSuccess) { \
-        throw std::runtime_error(std::string("HIP error: ") + hipGetErrorString(err)); \
-    } \
-} while(0)
-
-#define ROCBLAS_CHECK(call) do { \
-    rocblas_status status = call; \
-    if (status != rocblas_status_success) { \
-        throw std::runtime_error(std::string("rocBLAS error: ") + rocblas_status_to_string(status)); \
-    } \
-} while(0)
 
 #ifdef USE_MIOPEN
 #define MIOPEN_CHECK(call) do { \
@@ -555,37 +540,34 @@ auto conv2d_forward_miopen(
     // Create output tensor
     Tensor output({batch, out_channels, out_h, out_w}, input.dtype(), input.device());
 
-    // Create MIOpen handle
-    miopenHandle_t miopen_handle;
-    MIOPEN_CHECK(miopenCreate(&miopen_handle));
-    MIOPEN_CHECK(miopenSetStream(miopen_handle, stream));
+    // Create MIOpen handle (RAII — automatically destroyed on scope exit)
+    tenzor::rocm::MiopenHandleGuard miopen_guard;
+    MIOPEN_CHECK(miopenSetStream(miopen_guard.handle, stream));
 
-    // Create tensor descriptors
-    miopenTensorDescriptor_t input_desc, output_desc;
-    MIOPEN_CHECK(miopenCreateTensorDescriptor(&input_desc));
-    MIOPEN_CHECK(miopenCreateTensorDescriptor(&output_desc));
+    // Create tensor descriptors (RAII)
+    tenzor::rocm::MiopenTensorDescGuard input_desc_guard;
+    tenzor::rocm::MiopenTensorDescGuard output_desc_guard;
 
     // Set input tensor descriptor (NCHW format)
     MIOPEN_CHECK(miopenSet4dTensorDescriptor(
-        input_desc,
+        input_desc_guard.desc,
         miopenFloat,  // data type
         batch, in_channels, height, width
     ));
 
     // Set output tensor descriptor
     MIOPEN_CHECK(miopenSet4dTensorDescriptor(
-        output_desc,
+        output_desc_guard.desc,
         miopenFloat,
         batch, out_channels, out_h, out_w
     ));
 
-    // Create convolution descriptor
-    miopenConvolutionDescriptor_t conv_desc;
-    MIOPEN_CHECK(miopenCreateConvolutionDescriptor(&conv_desc));
+    // Create convolution descriptor (RAII)
+    tenzor::rocm::MiopenConvDescGuard conv_desc_guard;
 
     // Initialize convolution descriptor with parameters
     MIOPEN_CHECK(miopenInitConvolutionDescriptor(
-        conv_desc,
+        conv_desc_guard.desc,
         miopenConvolution,  // mode
         padding, padding,   // pad_h, pad_w
         stride, stride,     // stride_h, stride_w
@@ -594,14 +576,13 @@ auto conv2d_forward_miopen(
 
     // Set group count for grouped convolutions
     if (groups > 1) {
-        MIOPEN_CHECK(miopenSetConvolutionGroupCount(conv_desc, groups));
+        MIOPEN_CHECK(miopenSetConvolutionGroupCount(conv_desc_guard.desc, groups));
     }
 
-    // Create filter descriptor
-    miopenTensorDescriptor_t filter_desc;
-    MIOPEN_CHECK(miopenCreateTensorDescriptor(&filter_desc));
+    // Create filter descriptor (RAII)
+    tenzor::rocm::MiopenFilterDescGuard filter_desc_guard;
     MIOPEN_CHECK(miopenSet4dTensorDescriptor(
-        filter_desc,
+        filter_desc_guard.desc,
         miopenFloat,
         out_channels, in_channels / groups, kernel_h, kernel_w
     ));
@@ -614,46 +595,36 @@ auto conv2d_forward_miopen(
     // Query workspace size needed for algorithm search
     size_t workspace_size = 0;
     MIOPEN_CHECK(miopenConvolutionForwardGetWorkSpaceSize(
-        miopen_handle,
-        filter_desc,
-        input_desc,
-        conv_desc,
-        output_desc,
+        miopen_guard.handle,
+        filter_desc_guard.desc,
+        input_desc_guard.desc,
+        conv_desc_guard.desc,
+        output_desc_guard.desc,
         &workspace_size
     ));
 
-    // Allocate workspace
-    void* workspace = nullptr;
-    if (workspace_size > 0) {
-        HIP_CHECK(hipMalloc(&workspace, workspace_size));
-    }
+    // Allocate workspace (RAII)
+    tenzor::rocm::HipBuffer workspace(workspace_size);
 
     // Find the best algorithm
     MIOPEN_CHECK(miopenFindConvolutionForwardAlgorithm(
-        miopen_handle,
-        input_desc,
+        miopen_guard.handle,
+        input_desc_guard.desc,
         input.data<float>(),
-        filter_desc,
+        filter_desc_guard.desc,
         weight.data<float>(),
-        conv_desc,
-        output_desc,
+        conv_desc_guard.desc,
+        output_desc_guard.desc,
         output.data<float>(),
         algo_request_count,
         &algo_count,
         perf_results,
-        workspace,
+        workspace.ptr,
         workspace_size,
         false  // exhaustive search (false for heuristics, true for benchmarking)
     ));
 
     if (algo_count == 0) {
-        // Cleanup
-        if (workspace) HIP_CHECK(hipFree(workspace));
-        MIOPEN_CHECK(miopenDestroyTensorDescriptor(filter_desc));
-        MIOPEN_CHECK(miopenDestroyConvolutionDescriptor(conv_desc));
-        MIOPEN_CHECK(miopenDestroyTensorDescriptor(output_desc));
-        MIOPEN_CHECK(miopenDestroyTensorDescriptor(input_desc));
-        MIOPEN_CHECK(miopenDestroy(miopen_handle));
         throw std::runtime_error("MIOpen: No suitable convolution algorithm found");
     }
 
@@ -665,27 +636,26 @@ auto conv2d_forward_miopen(
     float beta = 0.0f;
 
     MIOPEN_CHECK(miopenConvolutionForward(
-        miopen_handle,
+        miopen_guard.handle,
         &alpha,
-        input_desc,
+        input_desc_guard.desc,
         input.data<float>(),
-        filter_desc,
+        filter_desc_guard.desc,
         weight.data<float>(),
-        conv_desc,
+        conv_desc_guard.desc,
         algo,
         &beta,
-        output_desc,
+        output_desc_guard.desc,
         output.data<float>(),
-        workspace,
+        workspace.ptr,
         workspace_size
     ));
 
     // Add bias if present
     if (bias != nullptr) {
-        miopenTensorDescriptor_t bias_desc;
-        MIOPEN_CHECK(miopenCreateTensorDescriptor(&bias_desc));
+        tenzor::rocm::MiopenTensorDescGuard bias_desc_guard;
         MIOPEN_CHECK(miopenSet4dTensorDescriptor(
-            bias_desc,
+            bias_desc_guard.desc,
             miopenFloat,
             1, out_channels, 1, 1  // Bias shape: (1, C, 1, 1) for broadcasting
         ));
@@ -694,25 +664,15 @@ auto conv2d_forward_miopen(
         float beta_bias = 1.0f;  // Add to existing output
 
         MIOPEN_CHECK(miopenConvolutionForwardBias(
-            miopen_handle,
+            miopen_guard.handle,
             &alpha_bias,
-            bias_desc,
+            bias_desc_guard.desc,
             bias->data<float>(),
             &beta_bias,
-            output_desc,
+            output_desc_guard.desc,
             output.data<float>()
         ));
-
-        MIOPEN_CHECK(miopenDestroyTensorDescriptor(bias_desc));
     }
-
-    // Cleanup
-    if (workspace) HIP_CHECK(hipFree(workspace));
-    MIOPEN_CHECK(miopenDestroyTensorDescriptor(filter_desc));
-    MIOPEN_CHECK(miopenDestroyConvolutionDescriptor(conv_desc));
-    MIOPEN_CHECK(miopenDestroyTensorDescriptor(output_desc));
-    MIOPEN_CHECK(miopenDestroyTensorDescriptor(input_desc));
-    MIOPEN_CHECK(miopenDestroy(miopen_handle));
 
     return output;
 }

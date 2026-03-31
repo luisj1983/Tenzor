@@ -253,12 +253,6 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                 }
             }
 
-            // Release saved tensors immediately to free GPU memory for subsequent layers.
-            // This is safe because saved tensors are only needed during this backward() call.
-            if (!retain_graph) {
-                function->release_saved_tensors();
-            }
-
             // Accumulate gradients to input variables
             auto& input_vars = function->input_variables();
 
@@ -350,6 +344,13 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                 if (next_funcs[i]) {
                     accumulate_grad(next_funcs[i].get(), input_grads[i]);
                 }
+            }
+
+            // Release saved tensors after all gradient accumulation and hook
+            // execution is complete. This must happen after hooks since hooks
+            // may access saved tensors via closures.
+            if (!retain_graph) {
+                function->release_saved_tensors();
             }
         }
     }
