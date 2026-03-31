@@ -2,7 +2,7 @@
  * @file test_phase11_backends.cpp
  * @brief Comprehensive test suite for Phase 11 additional backend support
  *
- * Tests all Phase 11 backends (OneAPI, Vulkan, Metal, WebGPU)
+ * Tests all Phase 11 backends (OneAPI, Vulkan)
  * ROCm tests are intentionally EXCLUDED per user request (system crashes)
  *
  * Coverage:
@@ -178,26 +178,6 @@ TEST_F(VulkanBackendTest, BackendInitialization) {
 // The implementation exists but requires runtime backend loading
 
 // ============================================================================
-// Metal Backend Tests (macOS/iOS only)
-// ============================================================================
-
-class MetalBackendTest : public BackendTestBase {};
-
-TEST_F(MetalBackendTest, BackendSkipped) {
-    GTEST_SKIP() << "Metal backend requires macOS/iOS";
-}
-
-// ============================================================================
-// WebGPU Backend Tests (Browser/WASM)
-// ============================================================================
-
-class WebGPUBackendTest : public BackendTestBase {};
-
-TEST_F(WebGPUBackendTest, BackendSkipped) {
-    GTEST_SKIP() << "WebGPU backend requires browser/WASM environment";
-}
-
-// ============================================================================
 // Cross-Backend Compatibility Tests
 // ============================================================================
 
@@ -284,8 +264,6 @@ int main(int argc, char** argv) {
     std::cout << "Testing backends:\n";
     std::cout << "  ✓ OneAPI (Intel GPUs) - Fixed conv2d backward\n";
     std::cout << "  ⚠ Vulkan (Cross-platform) - Needs dynamic loading\n";
-    std::cout << "  ⚠ Metal (macOS/iOS) - Platform specific\n";
-    std::cout << "  ⚠ WebGPU (Browser/WASM) - Environment specific\n";
     std::cout << "  ✗ ROCm (AMD GPUs) - EXCLUDED (system crashes)\n";
     std::cout << "\n";
     std::cout << "Note: Backends will skip tests if not available\n";

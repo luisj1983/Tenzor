@@ -33,7 +33,6 @@ struct MemoryStats {
     size_t rocm_tensors{0};            ///< Tensors on ROCm
     size_t oneapi_tensors{0};          ///< Tensors on OneAPI
     size_t vulkan_tensors{0};          ///< Tensors on Vulkan
-    size_t webgpu_tensors{0};          ///< Tensors on WebGPU
     size_t gpu_tensors{0};             ///< Tensors on GPU (all types combined)
     size_t pinned_tensors{0};          ///< Tensors in pinned memory
 
@@ -42,7 +41,6 @@ struct MemoryStats {
     size_t rocm_memory_used{0};        ///< Bytes used on ROCm
     size_t oneapi_memory_used{0};      ///< Bytes used on OneAPI
     size_t vulkan_memory_used{0};      ///< Bytes used on Vulkan
-    size_t webgpu_memory_used{0};      ///< Bytes used on WebGPU
     size_t gpu_memory_used{0};         ///< Total GPU memory used (all types)
     size_t pinned_memory_used{0};      ///< Bytes in pinned memory
 
@@ -55,7 +53,6 @@ struct MemoryStats {
     float rocm_memory_pressure{0.0f};  ///< ROCm memory pressure (0.0-1.0)
     float oneapi_memory_pressure{0.0f}; ///< OneAPI memory pressure (0.0-1.0)
     float vulkan_memory_pressure{0.0f}; ///< Vulkan memory pressure (0.0-1.0)
-    float webgpu_memory_pressure{0.0f}; ///< WebGPU memory pressure (0.0-1.0)
     float gpu_memory_pressure{0.0f};   ///< Overall GPU memory pressure (0.0-1.0)
 
     size_t peak_cpu_memory{0};         ///< Peak CPU memory usage
@@ -63,7 +60,6 @@ struct MemoryStats {
     size_t peak_rocm_memory{0};        ///< Peak ROCm memory usage
     size_t peak_oneapi_memory{0};      ///< Peak OneAPI memory usage
     size_t peak_vulkan_memory{0};      ///< Peak Vulkan memory usage
-    size_t peak_webgpu_memory{0};      ///< Peak WebGPU memory usage
     size_t peak_gpu_memory{0};         ///< Peak GPU memory usage (all types)
 };
 
@@ -103,7 +99,6 @@ public:
         size_t rocm_memory_limit{8ULL * 1024 * 1024 * 1024};    ///< ROCm memory limit (8 GB)
         size_t oneapi_memory_limit{8ULL * 1024 * 1024 * 1024};  ///< OneAPI memory limit (8 GB)
         size_t vulkan_memory_limit{8ULL * 1024 * 1024 * 1024};  ///< Vulkan memory limit (8 GB)
-        size_t webgpu_memory_limit{8ULL * 1024 * 1024 * 1024};  ///< WebGPU memory limit (8 GB)
         size_t gpu_memory_limit{8ULL * 1024 * 1024 * 1024};     ///< Default GPU memory limit (backward compat)
         float eviction_threshold{0.9f};                         ///< Eviction threshold (0.0-1.0)
         bool track_statistics{true};                            ///< Enable statistics tracking
@@ -328,7 +323,6 @@ private:
     DeviceMemory rocm_memory_;                     ///< ROCm memory tracking
     DeviceMemory oneapi_memory_;                   ///< OneAPI memory tracking
     DeviceMemory vulkan_memory_;                   ///< Vulkan memory tracking
-    DeviceMemory webgpu_memory_;                   ///< WebGPU memory tracking
 
     // Statistics
     MemoryStats stats_;                            ///< Runtime statistics

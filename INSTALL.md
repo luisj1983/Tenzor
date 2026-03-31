@@ -180,8 +180,6 @@ cmake --install . --prefix /opt/tenzor
 | `TENZOR_BUILD_ROCM` | Enable AMD ROCm backend | OFF |
 | `TENZOR_BUILD_ONEAPI` | Enable Intel OneAPI backend | OFF |
 | `TENZOR_BUILD_VULKAN` | Enable Vulkan compute backend | OFF |
-| `TENZOR_BUILD_METAL` | Enable Apple Metal backend | OFF (macOS auto) |
-| `TENZOR_BUILD_WEBGPU` | Enable WebGPU backend | OFF |
 | `TENZOR_BUILD_PYTHON` | Build Python bindings | ON |
 | `TENZOR_BUILD_TESTS` | Build test suite | ON |
 | `TENZOR_BUILD_BENCHMARKS` | Build performance benchmarks | OFF |
@@ -230,16 +228,6 @@ source /opt/intel/oneapi/setvars.sh
 
 # Build with OneAPI
 cmake .. -DTENZOR_BUILD_ONEAPI=ON -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx
-```
-
-### macOS with Apple Silicon
-
-```bash
-# Metal backend is enabled by default on macOS
-cmake .. -DTENZOR_BUILD_METAL=ON -DCMAKE_BUILD_TYPE=Release
-
-# For x86_64 compatibility
-cmake .. -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
 ```
 
 ### Windows with Visual Studio

@@ -10,7 +10,7 @@ A high-performance, production-grade tensor computation and deep learning librar
 
 ## Features
 
-- **Multi-Backend Support**: CPU (SIMD-optimized), CUDA, ROCm, OneAPI, Vulkan, Metal
+- **Multi-Backend Support**: CPU (SIMD-optimized), CUDA, ROCm, OneAPI, Vulkan
 - **Automatic Differentiation**: Full reverse-mode autodiff with computational graph
 - **Thread-Safe**: Lockless algorithms and parallel execution
 - **Python Bindings**: First-class Python support via pybind11
@@ -208,7 +208,6 @@ Tenzor is designed for maximum performance:
 - [x] ROCm backend for AMD GPUs
 - [x] OneAPI backend for Intel GPUs
 - [x] Vulkan compute backend
-- [x] Metal backend for Apple Silicon
 - [x] ONNX import and export
 - [x] Pre-built models (ResNet, BERT, ViT, etc.)
 - [x] Mixed precision training (FP16/BF16)
@@ -216,7 +215,6 @@ Tenzor is designed for maximum performance:
 - [x] JIT compilation and tracing
 
 ### In Progress
-- [ ] WebGPU backend for browser deployment
 - [ ] Distributed training improvements
 - [ ] Enhanced model compression (pruning, distillation)
 - [ ] Additional pre-built architectures

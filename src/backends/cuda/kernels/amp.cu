@@ -14,12 +14,11 @@ namespace cuda {
 
 namespace {
 
-// Helper to create a Bool scalar tensor on the CPU (result is always a host-side bool)
+// Helper to create a Bool scalar tensor on the target device
 inline Tensor make_bool_scalar(bool value, Device device) {
-    // Create a CPU scalar, then move if needed — Bool scalars are tiny
     Tensor result({}, DType::Bool, Device::cpu());
     result.data<bool>()[0] = value;
-    return result;
+    return result.to(device);
 }
 
 } // anonymous namespace

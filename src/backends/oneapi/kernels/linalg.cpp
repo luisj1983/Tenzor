@@ -154,6 +154,8 @@ class SyclTransposeCholeskyF32;
 class SyclTransposeCholeskyF64;
 class SyclTransposeCholeskyBackF32;
 class SyclTransposeCholeskyBackF64;
+class SyclDiagExtractDetF32;
+class SyclDiagExtractDetF64;
 
 auto linalg_det_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     auto shape = input.shape();
@@ -175,24 +177,29 @@ auto linalg_det_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         float* scratchpad = sycl::malloc_device<float>(scratchpad_size, queue);
         ::oneapi::mkl::lapack::getrf(queue, n, n, d_a, n, d_ipiv, scratchpad, scratchpad_size).wait();
 
-        // Det = product of diagonal * sign from pivots
-        // Need to read diagonal and pivots — small D2H (O(n) not O(n^2))
-        std::vector<float> h_lu(n * n);
+        // Extract diagonal on device (avoids O(n^2) memcpy)
+        float* d_diag = sycl::malloc_device<float>(n, queue);
+        queue.parallel_for<SyclDiagExtractDetF32>(sycl::range<1>(n), [=](sycl::id<1> i) {
+            d_diag[i] = d_a[i * n + i];  // column-major diagonal
+        }).wait();
+
+        std::vector<float> h_diag(n);
         std::vector<std::int64_t> h_ipiv(n);
-        queue.memcpy(h_lu.data(), d_a, n * n * sizeof(float));
+        queue.memcpy(h_diag.data(), d_diag, n * sizeof(float));
         queue.memcpy(h_ipiv.data(), d_ipiv, n * sizeof(std::int64_t));
         queue.wait();
 
         float det = 1.0f;
         int swaps = 0;
         for (int64_t i = 0; i < n; ++i) {
-            det *= h_lu[i * n + i]; // diagonal of column-major
+            det *= h_diag[i];
             if (h_ipiv[i] != i + 1) swaps++;
         }
         if (swaps % 2) det = -det;
 
         queue.memcpy(const_cast<void*>(output.data_ptr()), &det, sizeof(float)).wait();
 
+        sycl::free(d_diag, queue);
         sycl::free(d_a, queue);
         sycl::free(d_ipiv, queue);
         sycl::free(scratchpad, queue);
@@ -207,22 +214,29 @@ auto linalg_det_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         double* scratchpad = sycl::malloc_device<double>(scratchpad_size, queue);
         ::oneapi::mkl::lapack::getrf(queue, n, n, d_a, n, d_ipiv, scratchpad, scratchpad_size).wait();
 
-        std::vector<double> h_lu(n * n);
+        // Extract diagonal on device (avoids O(n^2) memcpy)
+        double* d_diag = sycl::malloc_device<double>(n, queue);
+        queue.parallel_for<SyclDiagExtractDetF64>(sycl::range<1>(n), [=](sycl::id<1> i) {
+            d_diag[i] = d_a[i * n + i];  // column-major diagonal
+        }).wait();
+
+        std::vector<double> h_diag(n);
         std::vector<std::int64_t> h_ipiv(n);
-        queue.memcpy(h_lu.data(), d_a, n * n * sizeof(double));
+        queue.memcpy(h_diag.data(), d_diag, n * sizeof(double));
         queue.memcpy(h_ipiv.data(), d_ipiv, n * sizeof(std::int64_t));
         queue.wait();
 
         double det = 1.0;
         int swaps = 0;
         for (int64_t i = 0; i < n; ++i) {
-            det *= h_lu[i * n + i];
+            det *= h_diag[i];
             if (h_ipiv[i] != i + 1) swaps++;
         }
         if (swaps % 2) det = -det;
 
         queue.memcpy(const_cast<void*>(output.data_ptr()), &det, sizeof(double)).wait();
 
+        sycl::free(d_diag, queue);
         sycl::free(d_a, queue);
         sycl::free(d_ipiv, queue);
         sycl::free(scratchpad, queue);

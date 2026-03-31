@@ -18,7 +18,7 @@ env:
   CMAKE_GENERATOR: Ninja
 
   # GPU TESTING NOTE:
-  # GPU backends (CUDA, ROCm, Vulkan, OneAPI, Metal) are not tested in CI
+  # GPU backends (CUDA, ROCm, Vulkan, OneAPI) are not tested in CI
   # because GitHub-hosted runners don't have GPU hardware.
   # To test GPU backends locally:
   #   cd build && ninja && ctest -R "cuda|vulkan|rocm|oneapi" --output-on-failure
@@ -55,8 +55,6 @@ jobs:
             -DTENZOR_BUILD_ROCM=OFF \
             -DTENZOR_BUILD_ONEAPI=OFF \
             -DTENZOR_BUILD_VULKAN=OFF \
-            -DTENZOR_BUILD_METAL=OFF \
-            -DTENZOR_BUILD_WEBGPU=OFF \
             -DTENZOR_BUILD_PYTHON=ON \
             -DTENZOR_BUILD_TESTS=ON \
             -DTENZOR_BUILD_BENCHMARKS=OFF \
@@ -148,8 +146,6 @@ jobs:
             -DTENZOR_BUILD_ROCM=OFF \
             -DTENZOR_BUILD_ONEAPI=OFF \
             -DTENZOR_BUILD_VULKAN=OFF \
-            -DTENZOR_BUILD_METAL=OFF \
-            -DTENZOR_BUILD_WEBGPU=OFF \
             -DTENZOR_BUILD_PYTHON=OFF \
             -DTENZOR_BUILD_TESTS=ON \
             -DTENZOR_BUILD_BENCHMARKS=OFF \
@@ -203,8 +199,6 @@ jobs:
             -DTENZOR_BUILD_ROCM=OFF \
             -DTENZOR_BUILD_ONEAPI=OFF \
             -DTENZOR_BUILD_VULKAN=OFF \
-            -DTENZOR_BUILD_METAL=OFF \
-            -DTENZOR_BUILD_WEBGPU=OFF \
             -DTENZOR_BUILD_PYTHON=OFF \
             -DTENZOR_BUILD_TESTS=ON \
             -DTENZOR_BUILD_BENCHMARKS=OFF \
@@ -289,8 +283,6 @@ jobs:
             -DTENZOR_BUILD_ROCM=OFF \
             -DTENZOR_BUILD_ONEAPI=OFF \
             -DTENZOR_BUILD_VULKAN=OFF \
-            -DTENZOR_BUILD_METAL=OFF \
-            -DTENZOR_BUILD_WEBGPU=OFF \
             -DTENZOR_BUILD_PYTHON=OFF \
             -DTENZOR_BUILD_TESTS=ON \
             -DTENZOR_BUILD_BENCHMARKS=OFF \
@@ -314,7 +306,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Configure CMake
-        run: cmake -B build -DTENZOR_BUILD_CUDA=OFF -DTENZOR_BUILD_VULKAN=OFF -DTENZOR_BUILD_ROCM=OFF -DTENZOR_BUILD_ONEAPI=OFF -DTENZOR_BUILD_METAL=OFF -DTENZOR_BUILD_WEBGPU=OFF -DTENZOR_BUILD_PYTHON=OFF -DTENZOR_BUILD_MODEL_HUB=OFF
+        run: cmake -B build -DTENZOR_BUILD_CUDA=OFF -DTENZOR_BUILD_VULKAN=OFF -DTENZOR_BUILD_ROCM=OFF -DTENZOR_BUILD_ONEAPI=OFF -DTENZOR_BUILD_PYTHON=OFF -DTENZOR_BUILD_MODEL_HUB=OFF
       - name: Build
         run: cmake --build build --config Release -j 4
       - name: Test
@@ -326,11 +318,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Configure CMake
-        run: cmake -B build -DTENZOR_BUILD_CUDA=OFF -DTENZOR_BUILD_VULKAN=OFF -DTENZOR_BUILD_ROCM=OFF -DTENZOR_BUILD_ONEAPI=OFF -DTENZOR_BUILD_WEBGPU=OFF -DTENZOR_BUILD_METAL=ON -DTENZOR_BUILD_PYTHON=OFF -DTENZOR_BUILD_MODEL_HUB=OFF
+        run: cmake -B build -DTENZOR_BUILD_CUDA=OFF -DTENZOR_BUILD_VULKAN=OFF -DTENZOR_BUILD_ROCM=OFF -DTENZOR_BUILD_ONEAPI=OFF -DTENZOR_BUILD_PYTHON=OFF -DTENZOR_BUILD_MODEL_HUB=OFF
       - name: Build
         run: cmake --build build --config Release -j 3
-      - name: Test (CPU + Metal)
-        run: cd build && ctest --output-on-failure -R "cpu|metal" --timeout 120
+      - name: Test (CPU)
+        run: cd build && ctest --output-on-failure -R "cpu" --timeout 120
 
   # Tier 2: Full CPU tests (every PR, ~30 min)
   full-cpu-tests:
@@ -362,8 +354,6 @@ jobs:
             -DTENZOR_BUILD_ROCM=OFF \
             -DTENZOR_BUILD_ONEAPI=OFF \
             -DTENZOR_BUILD_VULKAN=OFF \
-            -DTENZOR_BUILD_METAL=OFF \
-            -DTENZOR_BUILD_WEBGPU=OFF \
             -DTENZOR_BUILD_PYTHON=ON \
             -DTENZOR_BUILD_TESTS=ON \
             -DTENZOR_BUILD_MODEL_HUB=OFF
@@ -408,8 +398,6 @@ jobs:
             -DTENZOR_BUILD_ROCM=OFF \
             -DTENZOR_BUILD_ONEAPI=OFF \
             -DTENZOR_BUILD_VULKAN=OFF \
-            -DTENZOR_BUILD_METAL=OFF \
-            -DTENZOR_BUILD_WEBGPU=OFF \
             -DTENZOR_BUILD_PYTHON=OFF \
             -DTENZOR_BUILD_TESTS=OFF \
             -DTENZOR_BUILD_BENCHMARKS=ON \
@@ -482,8 +470,6 @@ jobs:
             -DTENZOR_BUILD_ROCM=OFF \
             -DTENZOR_BUILD_ONEAPI=OFF \
             -DTENZOR_BUILD_VULKAN=OFF \
-            -DTENZOR_BUILD_METAL=OFF \
-            -DTENZOR_BUILD_WEBGPU=OFF \
             -DTENZOR_BUILD_PYTHON=ON \
             -DTENZOR_BUILD_TESTS=ON \
             -DTENZOR_BUILD_MODEL_HUB=OFF \

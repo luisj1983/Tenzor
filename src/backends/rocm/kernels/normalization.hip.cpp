@@ -1062,8 +1062,115 @@ auto instance_norm_kernel(
 }
 
 // ==============================================================================
-// Group Normalization Backward
+// Group Normalization Backward — HIP kernel
 // ==============================================================================
+
+// Each thread block handles one (sample, group) pair.
+// Pass 1: compute sum_dy and sum_dy_xhat via block reduction.
+// Pass 2: compute grad_input using the normalization backward formula.
+// Accumulate grad_weight/grad_bias via atomicAdd across samples.
+template<typename T>
+__global__ void group_norm_backward_hip_kernel(
+    const T* __restrict__ grad_output,
+    const T* __restrict__ input,
+    const T* __restrict__ weight,
+    const T* __restrict__ mean_saved,
+    const T* __restrict__ inv_std_saved,
+    T* __restrict__ grad_input,
+    T* __restrict__ grad_weight,
+    T* __restrict__ grad_bias,
+    int64_t N, int64_t C, int64_t HW,
+    int64_t num_groups, int64_t channels_per_group) {
+
+    int64_t group_idx = blockIdx.x;
+    int64_t n = group_idx / num_groups;
+    int64_t g = group_idx % num_groups;
+
+    if (n >= N || g >= num_groups) return;
+
+    int64_t c_start = g * channels_per_group;
+    int64_t group_size = channels_per_group * HW;
+
+    T mean_val = mean_saved[group_idx];
+    T inv_std = inv_std_saved[group_idx];
+
+    // Pass 1: compute sum_dy and sum_dy_xhat
+    T local_sum_dy = T(0);
+    T local_sum_dy_xhat = T(0);
+
+    for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
+        int64_t c_offset = i / HW;
+        int64_t hw = i % HW;
+        int64_t c = c_start + c_offset;
+        int64_t idx = (n * C + c) * HW + hw;
+        T dy = grad_output[idx];
+        if (weight) dy = dy * weight[c];
+        T xhat = (input[idx] - mean_val) * inv_std;
+        local_sum_dy += dy;
+        local_sum_dy_xhat += dy * xhat;
+    }
+
+    // Block-level reduction using existing warp_reduce_sum + shared memory
+    // Max warps per block: 1024/32=32 (RDNA) or 1024/64=16 (CDNA)
+    constexpr int MAX_WARPS = 32;
+    __shared__ T shared_dy[MAX_WARPS];
+    __shared__ T shared_dy_xhat[MAX_WARPS];
+
+    int lane = threadIdx.x % warpSize;
+    int warp_id = threadIdx.x / warpSize;
+
+    local_sum_dy = warp_reduce_sum(local_sum_dy);
+    local_sum_dy_xhat = warp_reduce_sum(local_sum_dy_xhat);
+
+    if (lane == 0) {
+        shared_dy[warp_id] = local_sum_dy;
+        shared_dy_xhat[warp_id] = local_sum_dy_xhat;
+    }
+    __syncthreads();
+
+    T sum_dy, sum_dy_xhat;
+    int num_warps = (blockDim.x + warpSize - 1) / warpSize;
+    if (warp_id == 0) {
+        local_sum_dy = (lane < num_warps) ? shared_dy[lane] : T(0);
+        local_sum_dy_xhat = (lane < num_warps) ? shared_dy_xhat[lane] : T(0);
+        local_sum_dy = warp_reduce_sum(local_sum_dy);
+        local_sum_dy_xhat = warp_reduce_sum(local_sum_dy_xhat);
+        if (lane == 0) {
+            shared_dy[0] = local_sum_dy;
+            shared_dy_xhat[0] = local_sum_dy_xhat;
+        }
+    }
+    __syncthreads();
+    sum_dy = shared_dy[0];
+    sum_dy_xhat = shared_dy_xhat[0];
+
+    T inv_group_size = T(1) / T(group_size);
+
+    // Pass 2: compute grad_input
+    for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
+        int64_t c_offset = i / HW;
+        int64_t hw = i % HW;
+        int64_t c = c_start + c_offset;
+        int64_t idx = (n * C + c) * HW + hw;
+        T dy = grad_output[idx];
+        if (weight) dy = dy * weight[c];
+        T xhat = (input[idx] - mean_val) * inv_std;
+        grad_input[idx] = inv_std * (dy - inv_group_size * (sum_dy + xhat * sum_dy_xhat));
+    }
+
+    // Accumulate grad_weight and grad_bias (atomic since multiple samples contribute)
+    if (weight && grad_weight && grad_bias) {
+        for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
+            int64_t c_offset = i / HW;
+            int64_t hw = i % HW;
+            int64_t c = c_start + c_offset;
+            int64_t idx = (n * C + c) * HW + hw;
+            T xhat = (input[idx] - mean_val) * inv_std;
+            atomicAdd(&grad_weight[c], grad_output[idx] * xhat);
+            atomicAdd(&grad_bias[c], grad_output[idx]);
+        }
+    }
+}
 
 auto group_norm_backward_kernel(
     const Tensor& grad_output,
@@ -1074,33 +1181,66 @@ auto group_norm_backward_kernel(
     const Tensor* weight,
     hipStream_t stream
 ) -> std::tuple<Tensor, Tensor, Tensor> {
-    // Similar to layer norm backward, but per-group
-    auto input_shape = input.shape();
-    Tensor grad_input(std::vector<int64_t>(input_shape.begin(), input_shape.end()),
-                      input.dtype(), input.device());
+    auto shape_span = input.shape();
+    std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t HW = 1;
+    for (size_t i = 2; i < shape.size(); ++i) HW *= shape[i];
+    int64_t channels_per_group = C / num_groups;
 
-    int64_t C = input_shape[1];
-    Tensor grad_weight, grad_bias;
-    if (weight) {
-        grad_weight = Tensor({C}, input.dtype(), input.device());
-        grad_bias = Tensor({C}, input.dtype(), input.device());
-        HIP_CHECK(hipMemsetAsync(grad_weight.data<uint8_t>(), 0,
-            grad_weight.numel() * dtype_size(input.dtype()), stream));
-        HIP_CHECK(hipMemsetAsync(grad_bias.data<uint8_t>(), 0,
-            grad_bias.numel() * dtype_size(input.dtype()), stream));
+    Tensor grad_input(shape, input.dtype(), input.device());
+    Tensor grad_weight({C}, input.dtype(), input.device());
+    Tensor grad_bias({C}, input.dtype(), input.device());
+
+    // Zero-initialize grad_weight and grad_bias (atomicAdd accumulation)
+    HIP_CHECK(hipMemsetAsync(grad_weight.data_ptr(), 0, C * dtype_size(input.dtype()), stream));
+    HIP_CHECK(hipMemsetAsync(grad_bias.data_ptr(), 0, C * dtype_size(input.dtype()), stream));
+
+    int64_t num_group_instances = N * num_groups;
+    int block_size = BLOCK_SIZE;
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(group_norm_backward_hip_kernel<float>,
+            dim3(num_group_instances), dim3(block_size), 0, stream,
+            grad_output.data<float>(), input.data<float>(),
+            weight ? weight->data<float>() : nullptr,
+            mean.data<float>(), rstd.data<float>(),
+            grad_input.data<float>(), grad_weight.data<float>(), grad_bias.data<float>(),
+            N, C, HW, num_groups, channels_per_group);
+        HIP_CHECK(hipGetLastError());
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(group_norm_backward_hip_kernel<double>,
+            dim3(num_group_instances), dim3(block_size), 0, stream,
+            grad_output.data<double>(), input.data<double>(),
+            weight ? weight->data<double>() : nullptr,
+            mean.data<double>(), rstd.data<double>(),
+            grad_input.data<double>(), grad_weight.data<double>(), grad_bias.data<double>(),
+            N, C, HW, num_groups, channels_per_group);
+        HIP_CHECK(hipGetLastError());
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        // Mixed precision: compute in Float32, convert back
+        Tensor grad_out_f32 = grad_output.to(DType::Float32);
+        Tensor input_f32 = input.to(DType::Float32);
+        Tensor mean_f32 = mean.to(DType::Float32);
+        Tensor rstd_f32 = rstd.to(DType::Float32);
+        Tensor weight_f32;
+        const Tensor* weight_f32_ptr = nullptr;
+        if (weight) { weight_f32 = weight->to(DType::Float32); weight_f32_ptr = &weight_f32; }
+
+        auto [gi, gw, gb] = group_norm_backward_kernel(
+            grad_out_f32, input_f32, mean_f32, rstd_f32, num_groups, weight_f32_ptr, stream);
+        return {gi.to(input.dtype()), gw.to(input.dtype()), gb.to(input.dtype())};
+    } else {
+        throw std::runtime_error("group_norm_backward: unsupported dtype");
     }
-
-    // For now, use a simple element-wise backward approximation
-    // A full implementation would mirror the forward pass structure
-    HIP_CHECK(hipMemcpyAsync(grad_input.data<uint8_t>(), grad_output.data<uint8_t>(),
-        grad_input.numel() * dtype_size(input.dtype()), hipMemcpyDeviceToDevice, stream));
 
     HIP_CHECK(hipGetLastError());
     return {grad_input, grad_weight, grad_bias};
 }
 
 // ==============================================================================
-// Instance Normalization Backward
+// Instance Normalization Backward (delegates to GroupNorm with groups=C)
 // ==============================================================================
 
 auto instance_norm_backward_kernel(
@@ -1111,27 +1251,8 @@ auto instance_norm_backward_kernel(
     const Tensor* weight,
     hipStream_t stream
 ) -> std::tuple<Tensor, Tensor, Tensor> {
-    auto input_shape = input.shape();
-    Tensor grad_input(std::vector<int64_t>(input_shape.begin(), input_shape.end()),
-                      input.dtype(), input.device());
-
-    int64_t C = input_shape[1];
-    Tensor grad_weight, grad_bias;
-    if (weight) {
-        grad_weight = Tensor({C}, input.dtype(), input.device());
-        grad_bias = Tensor({C}, input.dtype(), input.device());
-        HIP_CHECK(hipMemsetAsync(grad_weight.data<uint8_t>(), 0,
-            grad_weight.numel() * dtype_size(input.dtype()), stream));
-        HIP_CHECK(hipMemsetAsync(grad_bias.data<uint8_t>(), 0,
-            grad_bias.numel() * dtype_size(input.dtype()), stream));
-    }
-
-    // For now, use a simple element-wise backward approximation
-    HIP_CHECK(hipMemcpyAsync(grad_input.data<uint8_t>(), grad_output.data<uint8_t>(),
-        grad_input.numel() * dtype_size(input.dtype()), hipMemcpyDeviceToDevice, stream));
-
-    HIP_CHECK(hipGetLastError());
-    return {grad_input, grad_weight, grad_bias};
+    int64_t C = input.shape()[1];
+    return group_norm_backward_kernel(grad_output, input, mean, rstd, C, weight, stream);
 }
 
 } // namespace rocm

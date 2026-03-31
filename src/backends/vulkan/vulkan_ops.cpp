@@ -6,6 +6,7 @@
 #include "vulkan_helpers.hpp"
 #include "tenzor/backend/vulkan_caching_allocator.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/utils/logging.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -4210,6 +4211,7 @@ auto VulkanBackend::dispatchNMS(const Tensor& boxes, const Tensor& scores, float
     endSingleTimeCommands(cmdBuffer, device_id);
     synchronize(device_id);
 
+    // Hybrid GPU+CPU: GPU computes IoU and suppression mask, host compacts variable-length kept indices
     // Read back suppressed mask to CPU to compact results
     Tensor mask_cpu = suppressed_mask.to(Device::cpu());
     const int32_t* mask_data = mask_cpu.data<int32_t>();
@@ -13842,6 +13844,8 @@ auto VulkanBackend::dispatchMode(const Tensor& input, int64_t dim, bool keepdim)
         endSingleTimeCommands(cmd, device_id);
     }
 
+    // Hybrid GPU+CPU: GPU computes mode per slice, host maps sorted indices back to original order
+    // (variable output mapping requires host sync)
     // The mode shader returns indices into the sorted slice. We need the original
     // indices from the sort operation. Gather from indices_contig using mode_indices_flat.
     // Read mode_indices back to host to do the gather (small: one int per slice)
@@ -13986,6 +13990,7 @@ auto VulkanBackend::dispatchUnique(const Tensor& input, bool sorted,
         endSingleTimeCommands(cmd, device_id);
     }
 
+    // Hybrid GPU+CPU: GPU sorts and detects boundaries, host handles variable-size output compaction
     // Step 2: Prefix sum on boundary flags (gives compacted positions)
     Tensor prefix_sum = dispatchCumSum(boundaries, 0);
 
@@ -18933,10 +18938,9 @@ auto VulkanBackend::dispatchLinalgDet(const Tensor& input) -> Tensor {
     if (n > MAX_VULKAN_LINALG_SIZE) {
         static bool warned_det = false;
         if (!warned_det) {
-            fprintf(stderr, "Warning: Vulkan linalg.det falling back to CPU for %ldx%ld matrix "
-                    "(native shaders limited to %ldx%ld). This incurs a GPU->CPU->GPU roundtrip.\n",
-                    static_cast<long>(n), static_cast<long>(n),
-                    static_cast<long>(MAX_VULKAN_LINALG_SIZE), static_cast<long>(MAX_VULKAN_LINALG_SIZE));
+            TENZOR_LOG_WARNING(std::format("Vulkan linalg.det falling back to CPU for {}x{} matrix "
+                    "(native shaders limited to {}x{}). This incurs a GPU->CPU->GPU roundtrip.",
+                    n, n, MAX_VULKAN_LINALG_SIZE, MAX_VULKAN_LINALG_SIZE));
             warned_det = true;
         }
         auto cpu_input = input.to(Device::cpu());
@@ -19064,10 +19068,9 @@ auto VulkanBackend::dispatchLinalgInv(const Tensor& input) -> Tensor {
     if (n > MAX_VULKAN_LINALG_SIZE) {
         static bool warned_inv = false;
         if (!warned_inv) {
-            fprintf(stderr, "Warning: Vulkan linalg.inv falling back to CPU for %ldx%ld matrix "
-                    "(native shaders limited to %ldx%ld). This incurs a GPU->CPU->GPU roundtrip.\n",
-                    static_cast<long>(n), static_cast<long>(n),
-                    static_cast<long>(MAX_VULKAN_LINALG_SIZE), static_cast<long>(MAX_VULKAN_LINALG_SIZE));
+            TENZOR_LOG_WARNING(std::format("Vulkan linalg.inv falling back to CPU for {}x{} matrix "
+                    "(native shaders limited to {}x{}). This incurs a GPU->CPU->GPU roundtrip.",
+                    n, n, MAX_VULKAN_LINALG_SIZE, MAX_VULKAN_LINALG_SIZE));
             warned_inv = true;
         }
         auto cpu_input = input.to(Device::cpu());
@@ -19206,10 +19209,9 @@ auto VulkanBackend::dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Ten
     if (n > MAX_VULKAN_LINALG_SIZE) {
         static bool warned_solve = false;
         if (!warned_solve) {
-            fprintf(stderr, "Warning: Vulkan linalg.solve falling back to CPU for %ldx%ld matrix "
-                    "(native shaders limited to %ldx%ld). This incurs a GPU->CPU->GPU roundtrip.\n",
-                    static_cast<long>(n), static_cast<long>(n),
-                    static_cast<long>(MAX_VULKAN_LINALG_SIZE), static_cast<long>(MAX_VULKAN_LINALG_SIZE));
+            TENZOR_LOG_WARNING(std::format("Vulkan linalg.solve falling back to CPU for {}x{} matrix "
+                    "(native shaders limited to {}x{}). This incurs a GPU->CPU->GPU roundtrip.",
+                    n, n, MAX_VULKAN_LINALG_SIZE, MAX_VULKAN_LINALG_SIZE));
             warned_solve = true;
         }
         auto cpu_a = a.to(Device::cpu());

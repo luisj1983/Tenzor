@@ -1241,27 +1241,8 @@ auto VulkanBackend::dispatch(const std::string& op_name,
             };
 
             if (!f16_native_ops.contains(op_name)) {
-                // CPU fallback for any remaining ops not in the native set
-                // (This map should be empty — all known F16 ops are now handled natively)
-                static const std::unordered_map<std::string, OpId> op_name_to_id = {
-                };
-
-                auto it = op_name_to_id.find(op_name);
-                if (it != op_name_to_id.end()) {
-                    TENZOR_LOG_WARNING(std::format("Vulkan: No shader for {} with dtype Float16; falling back to CPU", op_name));
-                    std::vector<Tensor> cpu_inputs;
-                    cpu_inputs.reserve(inputs.size());
-                    for (const auto& t : inputs) {
-                        cpu_inputs.push_back(t.to(Device::cpu()));
-                    }
-                    auto cpu_results = tenzor::dispatch(it->second, cpu_inputs, attrs);
-                    std::vector<Tensor> vulkan_results;
-                    vulkan_results.reserve(cpu_results.size());
-                    for (auto& r : cpu_results) {
-                        vulkan_results.push_back(r.to(original_device));
-                    }
-                    return vulkan_results;
-                }
+                throw std::runtime_error(std::format(
+                    "Vulkan: unrecognized Float16 op '{}' — not in native F16 shader set", op_name));
             }
         }
     }

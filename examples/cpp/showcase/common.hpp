@@ -20,7 +20,7 @@ namespace showcase
     /**
      * @brief Parse backend type from command line argument
      *
-     * Supported backends: cpu, cuda, vulkan, rocm, metal, webgpu
+     * Supported backends: cpu, cuda, vulkan, rocm, oneapi
      *
      * @param backend_str Backend name string
      * @return Device configured for the specified backend
@@ -43,10 +43,6 @@ namespace showcase
         {
             return tenzor::Device::rocm(0);
         }
-        else if(backend_str == "webgpu")
-        {
-            return tenzor::Device::webgpu(0);
-        }
         else if(backend_str == "oneapi")
         {
             return tenzor::Device::oneapi(0);
@@ -54,7 +50,7 @@ namespace showcase
         else
         {
             throw std::runtime_error("Unknown backend: " + backend_str +
-                "\nSupported: cpu, cuda, vulkan, rocm, metal, webgpu, oneapi") ;
+                "\nSupported: cpu, cuda, vulkan, rocm, oneapi") ;
         }
     }
 
@@ -89,7 +85,7 @@ namespace showcase
                 std::cout << "Usage: " << argv[0] << " [options]\n"
                     << "Options:\n"
                     << "  --backend, -b <backend>  Select compute backend (default: cpu)\n"
-                    << "                           Supported: cpu, cuda, vulkan, rocm, metal, webgpu\n"
+                    << "                           Supported: cpu, cuda, vulkan, rocm, oneapi\n"
                     << "  --help, -h               Show this help message\n";
                 std::exit(0);
             }

@@ -40,8 +40,6 @@ struct Device {
         ROCm,        ///< AMD ROCm backend
         OneAPI,      ///< Intel OneAPI backend
         Vulkan,      ///< Vulkan cross-platform backend
-        // Metal: planned for future release
-        WebGPU,      ///< WebGPU browser/WASM backend
         COUNT        ///< Sentinel — must be last
     };
 
@@ -106,16 +104,6 @@ struct Device {
     }
 
     /**
-     * @brief Create a WebGPU device (browser/WASM).
-     *
-     * @param idx Device index (default: 0)
-     * @return Device configured for WebGPU execution
-     */
-    static auto webgpu(int32_t idx = 0) -> Device {
-        return Device{Type::WebGPU, idx};
-    }
-
-    /**
      * @brief Compare devices for equality.
      *
      * @param other Device to compare with
@@ -152,7 +140,6 @@ struct Device {
             case Type::ROCm: return "rocm:" + std::to_string(index);
             case Type::OneAPI: return "oneapi:" + std::to_string(index);
             case Type::Vulkan: return "vulkan:" + std::to_string(index);
-            case Type::WebGPU: return "webgpu:" + std::to_string(index);
             case Type::COUNT: break;
         }
         return "unknown";

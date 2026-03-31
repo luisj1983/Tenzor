@@ -7,8 +7,6 @@ set(Tenzor_CUDA_FOUND @TENZOR_BUILD_CUDA@)
 set(Tenzor_ROCM_FOUND @TENZOR_BUILD_ROCM@)
 set(Tenzor_ONEAPI_FOUND @TENZOR_BUILD_ONEAPI@)
 set(Tenzor_VULKAN_FOUND @TENZOR_BUILD_VULKAN@)
-set(Tenzor_METAL_FOUND @TENZOR_BUILD_METAL@)
-set(Tenzor_WEBGPU_FOUND @TENZOR_BUILD_WEBGPU@)
 
 # Find required dependencies
 include(CMakeFindDependencyMacro)

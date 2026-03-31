@@ -206,7 +206,6 @@ inline std::vector<std::string> get_available_backend_names() {
     if (has_oneapi()) names.push_back("oneapi");
     if (has_vulkan()) names.push_back("vulkan");
     if (has_rocm()) names.push_back("rocm");
-    // Metal: planned for future release
     return names;
 }
 

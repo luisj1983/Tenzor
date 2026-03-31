@@ -44,16 +44,6 @@ auto Device::from_string(std::string_view str) -> Device {
         return Device::vulkan(parse_device_index(str, 7));
     }
 
-    if (str.starts_with("webgpu:")) {
-        return Device::webgpu(parse_device_index(str, 7));
-    }
-
-    if (str == "metal" || str.starts_with("metal:")) {
-        throw DeviceException(
-            "Metal backend is planned but not yet supported. "
-            "Available backends: cpu, cuda, rocm, oneapi, vulkan, webgpu");
-    }
-
     throw DeviceException("Invalid device string: " + std::string(str));
 }
 

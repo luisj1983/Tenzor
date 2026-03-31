@@ -543,7 +543,6 @@ inline const char* device_type_to_string(Device::Type type) noexcept {
         case Device::Type::ROCm:   return "ROCm";
         case Device::Type::OneAPI: return "OneAPI";
         case Device::Type::Vulkan: return "Vulkan";
-        case Device::Type::WebGPU: return "WebGPU";
         case Device::Type::COUNT:  break;
     }
     return "Unknown";

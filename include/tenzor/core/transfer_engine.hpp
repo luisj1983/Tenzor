@@ -27,17 +27,8 @@
 #include <hip/hip_runtime.h>
 #endif
 
-#ifdef TENZOR_USE_WEBGPU
-#include <webgpu/webgpu.h>
-#endif
-
 #ifdef TENZOR_USE_ONEAPI
 #include <sycl/sycl.hpp>
-#endif
-
-#ifdef TENZOR_USE_METAL
-// Forward declarations for Metal types (Objective-C objects wrapped in C++ containers)
-// Actual Metal includes are in the .mm/.cpp implementation file
 #endif
 
 #ifdef TENZOR_USE_VULKAN
@@ -381,18 +372,6 @@ private:
     // Cleanup ROCm resources
     auto cleanup_rocm_resources() -> void;
 
-#ifdef TENZOR_USE_WEBGPU
-    // WebGPU device and queue
-    WGPUDevice wgpu_device_{nullptr};
-    WGPUQueue wgpu_queue_{nullptr};
-
-    // Initialize WebGPU resources
-    auto initialize_webgpu_resources() -> void;
-
-    // Cleanup WebGPU resources
-    auto cleanup_webgpu_resources() -> void;
-#endif
-
 #ifdef TENZOR_USE_ONEAPI
     // SYCL queues for parallel transfers
     std::vector<sycl::queue> sycl_queues_;
@@ -408,18 +387,6 @@ private:
 
     // Cleanup OneAPI resources
     auto cleanup_oneapi_resources() -> void;
-#endif
-
-#ifdef TENZOR_USE_METAL
-    // Opaque pointer to Metal resources (defined in .cpp/.mm)
-    struct MetalResources;
-    std::unique_ptr<MetalResources> metal_resources_;
-
-    // Initialize Metal resources
-    auto initialize_metal_resources() -> void;
-
-    // Cleanup Metal resources
-    auto cleanup_metal_resources() -> void;
 #endif
 
 #ifdef TENZOR_USE_VULKAN
@@ -504,26 +471,10 @@ public:
     bool has_error{false};
     std::string error_message;
 
-#ifdef TENZOR_USE_WEBGPU
-    // WebGPU transfer tracking
-    WGPUBuffer wgpu_staging_buffer{nullptr};
-    bool wgpu_map_complete{false};
-    std::atomic<bool> wgpu_transfer_done{false};
-    bool has_webgpu_transfer{false};
-#endif
-
 #ifdef TENZOR_USE_ONEAPI
     // SYCL event for async completion tracking
     sycl::event sycl_event;
     bool has_sycl_event{false};
-#endif
-
-#ifdef TENZOR_USE_METAL
-    // Metal command buffer for async completion tracking (id<MTLCommandBuffer>)
-    void* metal_command_buffer{nullptr};
-
-    // Flag indicating this transfer uses Metal
-    bool has_metal_transfer{false};
 #endif
 
 #ifdef TENZOR_USE_VULKAN

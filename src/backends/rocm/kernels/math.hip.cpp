@@ -3759,11 +3759,11 @@ __global__ void check_inf_nan_kernel<double>(const double* data, int64_t n, int*
 auto has_inf_nan_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     const int64_t numel = input.numel();
 
-    // Helper to create a CPU Bool scalar
+    // Helper to create a Bool scalar tensor on the target device
     auto make_bool_scalar = [](bool value, Device device) -> Tensor {
         Tensor result({}, DType::Bool, Device::cpu());
         result.data<bool>()[0] = value;
-        return result;
+        return result.to(device);
     };
 
     if (numel == 0) {

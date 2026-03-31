@@ -58,7 +58,7 @@ Tensor Operations           →  include/tenzor/ops/, src/ops/
          ↓
 Backend Abstraction         →  include/tenzor/backend/
          ↓
-Backend Implementations     →  src/backends/{cpu,cuda,rocm,vulkan,oneapi,metal}/
+Backend Implementations     →  src/backends/{cpu,cuda,rocm,vulkan,oneapi}/
 ```
 
 ### Key Directories

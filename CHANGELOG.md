@@ -100,11 +100,6 @@ This is the first public release of Tenzor, a high-performance tensor computatio
 - Support for all major GPU vendors
 - Optimized kernels for Float16, Float32, Float64
 
-#### Metal Backend (Apple Silicon)
-- macOS 12+ and iOS 15+ support
-- Metal Performance Shaders integration
-- Optimized for M1/M2/M3 chips
-
 ### Pre-built Models
 
 #### Vision Models
@@ -192,7 +187,6 @@ This is the first public release of Tenzor, a high-performance tensor computatio
 ## [Unreleased]
 
 ### Planned Features
-- WebGPU backend for browser deployment
 - Distributed training improvements
 - More pre-built model architectures
 - Enhanced JIT optimization

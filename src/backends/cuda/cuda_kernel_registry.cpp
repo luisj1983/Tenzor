@@ -2636,6 +2636,29 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         bool upper = attrs.get_bool(AttrKey::Upper, false);
         return cuda::linalg_cholesky_kernel(inputs[0], upper, get_cuda_stream(attrs));
     });
+#else // !TENZOR_HAS_CUSOLVER
+    auto cusolver_stub = [](const char* op_name) {
+        return [op_name](std::span<const Tensor>, const OpAttributes&) -> Tensor {
+            throw std::runtime_error(
+                std::string("Operation '") + op_name + "' requires cuSOLVER. "
+                "Rebuild with CUDA Toolkit including cuSOLVER.");
+        };
+    };
+    auto cusolver_multi_stub = [](const char* op_name) {
+        return [op_name](std::span<const Tensor>, const OpAttributes&) -> std::vector<Tensor> {
+            throw std::runtime_error(
+                std::string("Operation '") + op_name + "' requires cuSOLVER. "
+                "Rebuild with CUDA Toolkit including cuSOLVER.");
+        };
+    };
+    table.register_single_output_kernel(OpId::LinalgDet, cusolver_stub("LinalgDet"));
+    table.register_single_output_kernel(OpId::LinalgInv, cusolver_stub("LinalgInv"));
+    table.register_single_output_kernel(OpId::LinalgSolve, cusolver_stub("LinalgSolve"));
+    table.register_kernel(OpId::LinalgSVD, cusolver_multi_stub("LinalgSVD"));
+    table.register_kernel(OpId::LinalgQR, cusolver_multi_stub("LinalgQR"));
+    table.register_kernel(OpId::LinalgEigh, cusolver_multi_stub("LinalgEigh"));
+    table.register_kernel(OpId::LinalgEig, cusolver_multi_stub("LinalgEig"));
+    table.register_single_output_kernel(OpId::LinalgCholesky, cusolver_stub("LinalgCholesky"));
 #endif // TENZOR_HAS_CUSOLVER
 
     // =========================================================================
@@ -2736,6 +2759,22 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
         return cuda::cuda_ifftn_kernel(inputs[0], dims, n_vec, norm, get_cuda_stream(attrs));
     });
+#else // !TENZOR_HAS_CUFFT
+    auto cufft_stub = [](const char* op_name) {
+        return [op_name](std::span<const Tensor>, const OpAttributes&) -> Tensor {
+            throw std::runtime_error(
+                std::string("Operation '") + op_name + "' requires cuFFT. "
+                "Rebuild with CUDA Toolkit including cuFFT.");
+        };
+    };
+    table.register_single_output_kernel(OpId::FFT, cufft_stub("FFT"));
+    table.register_single_output_kernel(OpId::IFFT, cufft_stub("IFFT"));
+    table.register_single_output_kernel(OpId::RFFT, cufft_stub("RFFT"));
+    table.register_single_output_kernel(OpId::IRFFT, cufft_stub("IRFFT"));
+    table.register_single_output_kernel(OpId::FFT2, cufft_stub("FFT2"));
+    table.register_single_output_kernel(OpId::IFFT2, cufft_stub("IFFT2"));
+    table.register_single_output_kernel(OpId::FFTN, cufft_stub("FFTN"));
+    table.register_single_output_kernel(OpId::IFFTN, cufft_stub("IFFTN"));
 #endif // TENZOR_HAS_CUFFT
 
     // =========================================================================
@@ -2900,6 +2939,16 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
             return sparse::spmv(sp, inputs[3]);
         });
+#else // !TENZOR_HAS_CUSPARSE
+    auto cusparse_stub = [](const char* op_name) {
+        return [op_name](std::span<const Tensor>, const OpAttributes&) -> Tensor {
+            throw std::runtime_error(
+                std::string("Operation '") + op_name + "' requires cuSPARSE. "
+                "Rebuild with CUDA Toolkit including cuSPARSE.");
+        };
+    };
+    table.register_single_output_kernel(OpId::SparseSpMM, cusparse_stub("SparseSpMM"));
+    table.register_single_output_kernel(OpId::SparseSpMV, cusparse_stub("SparseSpMV"));
 #endif // TENZOR_HAS_CUSPARSE
 
     // SparseToDense: CSR components -> dense tensor (works on any device)

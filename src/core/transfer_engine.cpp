@@ -45,10 +45,6 @@
 
 #endif
 
-#ifdef TENZOR_USE_WEBGPU
-#include <webgpu/webgpu.h>
-#endif
-
 #ifdef TENZOR_USE_VULKAN
 // Vulkan error checking macro
 #define VK_CHECK(call) \
@@ -65,25 +61,6 @@
 
 namespace tenzor {
 namespace core {
-
-// ============================================================================
-// WebGPU Implementation
-// ============================================================================
-
-#ifdef TENZOR_USE_WEBGPU
-auto TransferEngine::initialize_webgpu_resources() -> void {
-    if (wgpu_device_) {
-        wgpu_queue_ = wgpuDeviceGetQueue(wgpu_device_);
-    }
-}
-
-auto TransferEngine::cleanup_webgpu_resources() -> void {
-    if (wgpu_queue_) {
-        wgpuQueueRelease(wgpu_queue_);
-        wgpu_queue_ = nullptr;
-    }
-}
-#endif
 
 // ============================================================================
 // OneAPI/SYCL Implementation
@@ -283,13 +260,6 @@ TransferState::~TransferState() {
     if (pinned_buffer && engine) {
         engine->return_pinned_buffer(pinned_buffer);
     }
-
-#ifdef TENZOR_USE_WEBGPU
-    if (wgpu_staging_buffer) {
-        wgpuBufferRelease(wgpu_staging_buffer);
-        wgpu_staging_buffer = nullptr;
-    }
-#endif
 
 #ifdef TENZOR_USE_VULKAN
     if (engine && has_vulkan_transfer) {
@@ -495,20 +465,12 @@ TransferEngine::TransferEngine(const Config& config)
     initialize_cuda_resources();
     initialize_rocm_resources();
 
-#ifdef TENZOR_USE_WEBGPU
-    initialize_webgpu_resources();
-#endif
-
 #ifdef TENZOR_USE_ONEAPI
     initialize_oneapi_resources();
 #endif
 
 #ifdef TENZOR_USE_VULKAN
     initialize_vulkan_resources();
-#endif
-
-#ifdef TENZOR_USE_METAL
-    initialize_metal_resources();
 #endif
 
     worker_thread_ = std::thread(&TransferEngine::transfer_worker, this);
@@ -528,10 +490,6 @@ TransferEngine::~TransferEngine() {
     cleanup_cuda_resources();
     cleanup_rocm_resources();
 
-#ifdef TENZOR_USE_WEBGPU
-    cleanup_webgpu_resources();
-#endif
-
 #ifdef TENZOR_USE_ONEAPI
     cleanup_oneapi_resources();
 #endif
@@ -540,9 +498,6 @@ TransferEngine::~TransferEngine() {
     cleanup_vulkan_resources();
 #endif
 
-#ifdef TENZOR_USE_METAL
-    cleanup_metal_resources();
-#endif
 }
 
 auto TransferEngine::initialize_cuda_resources() -> void {
@@ -927,9 +882,8 @@ auto TransferEngine::cpu_to_gpu_async(
 
     if (gpu_device.type != Device::Type::CUDA &&
         gpu_device.type != Device::Type::ROCm &&
-        gpu_device.type != Device::Type::OneAPI &&
-        gpu_device.type != Device::Type::WebGPU) {
-        throw std::runtime_error("Target device must be CUDA, ROCm, OneAPI, or WebGPU");
+        gpu_device.type != Device::Type::OneAPI) {
+        throw std::runtime_error("Target device must be CUDA, ROCm, or OneAPI");
     }
 
     auto state = std::make_shared<TransferState>();
@@ -1040,9 +994,8 @@ auto TransferEngine::cpu_to_gpu_async(
 auto TransferEngine::gpu_to_cpu_async(const Tensor& gpu_tensor) -> TransferHandle {
     if (gpu_tensor.device().type != Device::Type::CUDA &&
         gpu_tensor.device().type != Device::Type::ROCm &&
-        gpu_tensor.device().type != Device::Type::OneAPI &&
-        gpu_tensor.device().type != Device::Type::WebGPU) {
-        throw std::runtime_error("Source tensor must be on CUDA, ROCm, OneAPI, or WebGPU");
+        gpu_tensor.device().type != Device::Type::OneAPI) {
+        throw std::runtime_error("Source tensor must be on CUDA, ROCm, or OneAPI");
     }
 
     auto state = std::make_shared<TransferState>();

@@ -17,7 +17,7 @@
 
 ### What is Tenzor?
 
-Tenzor is a high-performance tensor computation and deep learning library written in modern C++23. It provides a PyTorch-like API with support for multiple hardware backends (CPU, NVIDIA CUDA, AMD ROCm, Intel OneAPI, Vulkan, Apple Metal).
+Tenzor is a high-performance tensor computation and deep learning library written in modern C++23. It provides a PyTorch-like API with support for multiple hardware backends (CPU, NVIDIA CUDA, AMD ROCm, Intel OneAPI, Vulkan).
 
 ### How does Tenzor compare to PyTorch/TensorFlow?
 
@@ -25,7 +25,7 @@ Tenzor is a high-performance tensor computation and deep learning library writte
 |---------|--------|---------|------------|
 | Language | C++23 | Python/C++ | Python/C++ |
 | Performance | Comparable/faster | Baseline | Comparable |
-| Multi-backend | 6 backends | 2 backends | 2 backends |
+| Multi-backend | 5 backends | 2 backends | 2 backends |
 | Binary size | ~50 MB | ~500 MB | ~1 GB |
 | Startup time | <100ms | ~2s | ~3s |
 | Memory footprint | Lower | Baseline | Higher |
@@ -33,7 +33,7 @@ Tenzor is a high-performance tensor computation and deep learning library writte
 Tenzor is ideal when you need:
 - Native C++ integration
 - Smaller deployment size
-- Support for diverse hardware (Vulkan, Metal, OneAPI)
+- Support for diverse hardware (Vulkan, OneAPI)
 - Fine-grained control over execution
 
 ### What license is Tenzor released under?

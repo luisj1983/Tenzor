@@ -547,8 +547,7 @@ auto OffloadEngine::is_gpu_device(const Device& device) const -> bool {
     return device.type == Device::Type::CUDA ||
            device.type == Device::Type::ROCm ||
            device.type == Device::Type::OneAPI ||
-           device.type == Device::Type::Vulkan ||
-           device.type == Device::Type::WebGPU;
+           device.type == Device::Type::Vulkan;
 }
 
 auto OffloadEngine::sort_auto_offload_registry() -> void {

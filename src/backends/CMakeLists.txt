@@ -20,6 +20,3 @@ if(TENZOR_BUILD_VULKAN)
     add_subdirectory(vulkan)
 endif()
 
-if(TENZOR_BUILD_WEBGPU)
-    add_subdirectory(webgpu)
-endif()

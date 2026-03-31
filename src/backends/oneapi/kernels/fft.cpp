@@ -1286,6 +1286,109 @@ void bluestein_fft_sycl(const T* d_in, T* d_out,
 
 }
 
+// Bluestein FFT on device for non-power-of-2 sizes with COMPLEX input.
+// Same algorithm as bluestein_fft_sycl but d_in is interleaved complex:
+//   layout [batch_size, signal_len, inner_size, 2]
+// sign = -1.0 for forward, +1.0 for inverse (before normalization).
+// Output: d_out — interleaved complex, layout [batch_size, signal_len, inner_size, 2]
+template<typename T>
+void bluestein_fft_complex_sycl(const T* d_in, T* d_out,
+                                int64_t signal_len, int64_t batch_size, int64_t inner_size,
+                                T sign, sycl::queue& queue) {
+    const int64_t N = signal_len;
+    const int64_t M = next_pow2(2 * N - 1);
+    constexpr T PI = static_cast<T>(3.14159265358979323846);
+
+    SyclDevicePtr<T> chirp_owner(2 * N, queue);
+    T* chirp   = chirp_owner.get();
+    SyclDevicePtr<T> b_buf_owner(2 * M, queue);
+    T* b_buf   = b_buf_owner.get();
+    SyclDevicePtr<T> B_buf_owner(2 * M, queue);
+    T* B_buf   = B_buf_owner.get();
+    SyclDevicePtr<T> a_buf_owner(2 * M, queue);
+    T* a_buf   = a_buf_owner.get();
+
+    // Step 1: chirp[k] = exp(sign * j * pi * k^2 / N)
+    // For forward (sign=-1): exp(-j*pi*k^2/N), for inverse (sign=+1): exp(+j*pi*k^2/N)
+    queue.parallel_for(sycl::range<1>(N), [=](sycl::id<1> idx) {
+        int64_t k = idx[0];
+        T angle = sign * PI * static_cast<T>(k) * static_cast<T>(k) / static_cast<T>(N);
+        chirp[2 * k]     = sycl::cos(angle);
+        chirp[2 * k + 1] = sycl::sin(angle);
+    }).wait();
+
+    // Step 2: b[k] = conj(chirp[k])
+    queue.memset(b_buf, 0, 2 * M * sizeof(T)).wait();
+    queue.parallel_for(sycl::range<1>(N), [=](sycl::id<1> idx) {
+        int64_t k = idx[0];
+        b_buf[2 * k]     = chirp[2 * k];
+        b_buf[2 * k + 1] = -chirp[2 * k + 1];
+    }).wait();
+    if (N > 1) {
+        queue.parallel_for(sycl::range<1>(N - 1), [=](sycl::id<1> idx) {
+            int64_t k = idx[0] + 1;
+            int64_t m_idx = M - k;
+            b_buf[2 * m_idx]     = chirp[2 * k];
+            b_buf[2 * m_idx + 1] = -chirp[2 * k + 1];
+        }).wait();
+    }
+
+    // Step 3: B = FFT(b)
+    queue.memcpy(B_buf, b_buf, 2 * M * sizeof(T)).wait();
+    cooley_tukey_fft_sycl(B_buf, M, static_cast<T>(-1.0), queue);
+
+    // Steps 4-8: Process each (batch, inner) slice
+    for (int64_t b = 0; b < batch_size; ++b) {
+        for (int64_t inner = 0; inner < inner_size; ++inner) {
+            // Step 4: a[k] = x[k] * chirp[k] (complex multiply), zero-pad to M
+            queue.memset(a_buf, 0, 2 * M * sizeof(T)).wait();
+            queue.parallel_for(sycl::range<1>(N), [=](sycl::id<1> idx) {
+                int64_t k = idx[0];
+                int64_t in_idx = (b * N * inner_size + k * inner_size + inner) * 2;
+                T x_re = d_in[in_idx];
+                T x_im = d_in[in_idx + 1];
+                T c_re = chirp[2 * k];
+                T c_im = chirp[2 * k + 1];
+                a_buf[2 * k]     = x_re * c_re - x_im * c_im;
+                a_buf[2 * k + 1] = x_re * c_im + x_im * c_re;
+            }).wait();
+
+            // Step 5: A = FFT(a)
+            cooley_tukey_fft_sycl(a_buf, M, static_cast<T>(-1.0), queue);
+
+            // Step 6: Pointwise multiply A[k] *= B[k]
+            queue.parallel_for(sycl::range<1>(M), [=](sycl::id<1> idx) {
+                int64_t k = idx[0];
+                T a_re = a_buf[2 * k];
+                T a_im = a_buf[2 * k + 1];
+                T b_re = B_buf[2 * k];
+                T b_im = B_buf[2 * k + 1];
+                a_buf[2 * k]     = a_re * b_re - a_im * b_im;
+                a_buf[2 * k + 1] = a_re * b_im + a_im * b_re;
+            }).wait();
+
+            // Step 7: IFFT via forward FFT with sign=+1, divide by M
+            cooley_tukey_fft_sycl(a_buf, M, static_cast<T>(1.0), queue);
+            T inv_M = static_cast<T>(1.0) / static_cast<T>(M);
+            queue.parallel_for(sycl::range<1>(2 * M), [=](sycl::id<1> idx) {
+                a_buf[idx[0]] *= inv_M;
+            }).wait();
+
+            // Step 8: result[k] = a[k] * conj(chirp[k])
+            queue.parallel_for(sycl::range<1>(N), [=](sycl::id<1> idx) {
+                int64_t k = idx[0];
+                T a_re = a_buf[2 * k];
+                T a_im = a_buf[2 * k + 1];
+                T c_re = chirp[2 * k];
+                T c_im = -chirp[2 * k + 1]; // conj
+                int64_t out_idx = (b * N * inner_size + k * inner_size + inner) * 2;
+                d_out[out_idx]     = a_re * c_re - a_im * c_im;
+                d_out[out_idx + 1] = a_re * c_im + a_im * c_re;
+            }).wait();
+        }
+    }
+}
+
 } // anonymous namespace
 
 // ============================================================================
@@ -1442,7 +1545,7 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
 }
 
 // ============================================================================
-// IFFT - 1D Complex-to-Complex Inverse FFT (naive fallback)
+// IFFT - 1D Complex-to-Complex Inverse FFT (device-side Cooley-Tukey / Bluestein)
 // ============================================================================
 auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
                  const std::string& norm, sycl::queue& queue) -> Tensor {
@@ -1461,84 +1564,113 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
     int64_t inner_size = 1;
     for (int64_t i = dim + 1; i < ndim - 1; ++i) inner_size *= shape[i];
 
+    bool use_cooley_tukey = is_power_of_2(signal_len) && inner_size == 1;
+
     if (input.dtype() == DType::Float32) {
         int64_t numel = input.numel();
-        std::vector<float> h_in(numel);
-        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(float)).wait();
-
         std::vector<int64_t> out_shape = shape;
         int64_t out_numel = numel;
-        std::vector<float> h_out(out_numel, 0.0f);
 
-        for (int64_t b = 0; b < batch_size; ++b) {
-            for (int64_t inner = 0; inner < inner_size; ++inner) {
-                for (int64_t k = 0; k < signal_len; ++k) {
-                    float re_sum = 0.0f, im_sum = 0.0f;
-                    for (int64_t t = 0; t < signal_len; ++t) {
-                        int64_t in_idx = (b * signal_len * inner_size + t * inner_size + inner) * 2;
-                        float re_in = h_in[in_idx];
-                        float im_in = h_in[in_idx + 1];
-                        float angle = 2.0f * 3.14159265358979323846f * k * t / signal_len;
-                        re_sum += re_in * std::cos(angle) - im_in * std::sin(angle);
-                        im_sum += re_in * std::sin(angle) + im_in * std::cos(angle);
-                    }
-                    float scale = 1.0f / static_cast<float>(signal_len);
-                    if (norm == "ortho") {
-                        scale = 1.0f / std::sqrt(static_cast<float>(signal_len));
-                    } else if (norm == "forward") {
-                        scale = 1.0f;
-                    }
-                    re_sum *= scale;
-                    im_sum *= scale;
-                    int64_t out_idx = (b * signal_len * inner_size + k * inner_size + inner) * 2;
-                    h_out[out_idx] = re_sum;
-                    h_out[out_idx + 1] = im_sum;
-                }
+        if (use_cooley_tukey) {
+            // Input is [batch, signal_len, 2] — already interleaved complex
+            // Copy to working buffer and apply Cooley-Tukey with sign=+1
+            SyclDevicePtr<float> d_buf_owner(2 * signal_len * batch_size, queue);
+            float* d_buf = d_buf_owner.get();
+            const float* d_in = static_cast<const float*>(input.data_ptr());
+            queue.memcpy(d_buf, d_in, 2 * signal_len * batch_size * sizeof(float)).wait();
+
+            for (int64_t b = 0; b < batch_size; ++b) {
+                cooley_tukey_fft_sycl(d_buf + b * 2 * signal_len, signal_len, 1.0f, queue);
             }
-        }
 
-        Tensor output(out_shape, DType::Float32, input.device());
-        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), out_numel * sizeof(float)).wait();
-        return output;
+            // Apply normalization: backward=1/N (default), ortho=1/sqrt(N), forward=1
+            float scale = 1.0f / static_cast<float>(signal_len);
+            if (norm == "ortho") {
+                scale = 1.0f / std::sqrt(static_cast<float>(signal_len));
+            } else if (norm == "forward") {
+                scale = 1.0f;
+            }
+            int64_t total_elems = 2 * signal_len * batch_size;
+            queue.parallel_for(sycl::range<1>(total_elems), [=](sycl::id<1> idx) {
+                d_buf[idx[0]] *= scale;
+            }).wait();
+
+            Tensor output(out_shape, DType::Float32, input.device());
+            queue.memcpy(const_cast<void*>(output.data_ptr()), d_buf, out_numel * sizeof(float)).wait();
+            return output;
+        } else {
+            // Bluestein IFFT for non-power-of-2 (complex input, sign=+1)
+            const float* d_in = static_cast<const float*>(input.data_ptr());
+            SyclDevicePtr<float> d_out_owner(out_numel, queue);
+            float* d_out = d_out_owner.get();
+            queue.memset(d_out, 0, out_numel * sizeof(float)).wait();
+            bluestein_fft_complex_sycl(d_in, d_out, signal_len, batch_size, inner_size, 1.0f, queue);
+
+            // Apply normalization
+            float scale = 1.0f / static_cast<float>(signal_len);
+            if (norm == "ortho") {
+                scale = 1.0f / std::sqrt(static_cast<float>(signal_len));
+            } else if (norm == "forward") {
+                scale = 1.0f;
+            }
+            queue.parallel_for(sycl::range<1>(out_numel), [=](sycl::id<1> idx) {
+                d_out[idx[0]] *= scale;
+            }).wait();
+
+            Tensor output(out_shape, DType::Float32, input.device());
+            queue.memcpy(const_cast<void*>(output.data_ptr()), d_out, out_numel * sizeof(float)).wait();
+            return output;
+        }
     } else if (input.dtype() == DType::Float64) {
         int64_t numel = input.numel();
-        std::vector<double> h_in(numel);
-        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(double)).wait();
-
         std::vector<int64_t> out_shape = shape;
         int64_t out_numel = numel;
-        std::vector<double> h_out(out_numel, 0.0);
 
-        for (int64_t b = 0; b < batch_size; ++b) {
-            for (int64_t inner = 0; inner < inner_size; ++inner) {
-                for (int64_t k = 0; k < signal_len; ++k) {
-                    double re_sum = 0.0, im_sum = 0.0;
-                    for (int64_t t = 0; t < signal_len; ++t) {
-                        int64_t in_idx = (b * signal_len * inner_size + t * inner_size + inner) * 2;
-                        double re_in = h_in[in_idx];
-                        double im_in = h_in[in_idx + 1];
-                        double angle = 2.0 * 3.14159265358979323846 * k * t / signal_len;
-                        re_sum += re_in * std::cos(angle) - im_in * std::sin(angle);
-                        im_sum += re_in * std::sin(angle) + im_in * std::cos(angle);
-                    }
-                    double scale = 1.0 / static_cast<double>(signal_len);
-                    if (norm == "ortho") {
-                        scale = 1.0 / std::sqrt(static_cast<double>(signal_len));
-                    } else if (norm == "forward") {
-                        scale = 1.0;
-                    }
-                    re_sum *= scale;
-                    im_sum *= scale;
-                    int64_t out_idx = (b * signal_len * inner_size + k * inner_size + inner) * 2;
-                    h_out[out_idx] = re_sum;
-                    h_out[out_idx + 1] = im_sum;
-                }
+        if (use_cooley_tukey) {
+            SyclDevicePtr<double> d_buf_owner(2 * signal_len * batch_size, queue);
+            double* d_buf = d_buf_owner.get();
+            const double* d_in = static_cast<const double*>(input.data_ptr());
+            queue.memcpy(d_buf, d_in, 2 * signal_len * batch_size * sizeof(double)).wait();
+
+            for (int64_t b = 0; b < batch_size; ++b) {
+                cooley_tukey_fft_sycl(d_buf + b * 2 * signal_len, signal_len, 1.0, queue);
             }
-        }
 
-        Tensor output(out_shape, DType::Float64, input.device());
-        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), out_numel * sizeof(double)).wait();
-        return output;
+            double scale = 1.0 / static_cast<double>(signal_len);
+            if (norm == "ortho") {
+                scale = 1.0 / std::sqrt(static_cast<double>(signal_len));
+            } else if (norm == "forward") {
+                scale = 1.0;
+            }
+            int64_t total_elems = 2 * signal_len * batch_size;
+            queue.parallel_for(sycl::range<1>(total_elems), [=](sycl::id<1> idx) {
+                d_buf[idx[0]] *= scale;
+            }).wait();
+
+            Tensor output(out_shape, DType::Float64, input.device());
+            queue.memcpy(const_cast<void*>(output.data_ptr()), d_buf, out_numel * sizeof(double)).wait();
+            return output;
+        } else {
+            const double* d_in = static_cast<const double*>(input.data_ptr());
+            SyclDevicePtr<double> d_out_owner(out_numel, queue);
+            double* d_out = d_out_owner.get();
+            queue.memset(d_out, 0, out_numel * sizeof(double)).wait();
+            bluestein_fft_complex_sycl(d_in, d_out, signal_len, batch_size, inner_size, 1.0, queue);
+
+            double scale = 1.0 / static_cast<double>(signal_len);
+            if (norm == "ortho") {
+                scale = 1.0 / std::sqrt(static_cast<double>(signal_len));
+            } else if (norm == "forward") {
+                scale = 1.0;
+            }
+            queue.parallel_for(sycl::range<1>(out_numel), [=](sycl::id<1> idx) {
+                d_out[idx[0]] *= scale;
+            }).wait();
+
+            Tensor output(out_shape, DType::Float64, input.device());
+            queue.memcpy(const_cast<void*>(output.data_ptr()), d_out, out_numel * sizeof(double)).wait();
+            return output;
+        }
     } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         DType orig_dtype = input.dtype();
         int64_t in_numel = input.numel();
@@ -1563,7 +1695,7 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
 }
 
 // ============================================================================
-// RFFT - 1D Real-to-Complex Forward FFT (naive fallback)
+// RFFT - 1D Real-to-Complex Forward FFT (device-side Cooley-Tukey / Bluestein)
 // ============================================================================
 auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                  const std::string& norm, sycl::queue& queue) -> Tensor {
@@ -1580,90 +1712,161 @@ auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
     int64_t inner_size = 1;
     for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
 
+    bool use_cooley_tukey = is_power_of_2(signal_len) && inner_size == 1;
+
+    // Strategy: compute full N-point forward FFT on device, then truncate to N/2+1 bins
+    std::vector<int64_t> out_shape = shape;
+    out_shape[dim] = out_len;
+    out_shape.push_back(2);
+    int64_t out_numel = 1;
+    for (auto s : out_shape) out_numel *= s;
+
     if (input.dtype() == DType::Float32) {
-        int64_t numel = input.numel();
-        std::vector<float> h_in(numel);
-        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(float)).wait();
+        if (use_cooley_tukey) {
+            // Pack real input into interleaved complex buffer [re, 0, re, 0, ...]
+            SyclDevicePtr<float> d_buf_owner(2 * signal_len * batch_size, queue);
+            float* d_buf = d_buf_owner.get();
+            const float* d_in = static_cast<const float*>(input.data_ptr());
+            int64_t total = signal_len * batch_size;
+            queue.parallel_for(sycl::range<1>(total), [=](sycl::id<1> idx) {
+                int64_t i = idx[0];
+                d_buf[2 * i] = d_in[i];
+                d_buf[2 * i + 1] = 0.0f;
+            }).wait();
 
-        std::vector<int64_t> out_shape = shape;
-        out_shape[dim] = out_len;
-        out_shape.push_back(2);
-        int64_t out_numel = 1;
-        for (auto s : out_shape) out_numel *= s;
-        std::vector<float> h_out(out_numel, 0.0f);
-
-        for (int64_t b = 0; b < batch_size; ++b) {
-            for (int64_t inner = 0; inner < inner_size; ++inner) {
-                for (int64_t k = 0; k < out_len; ++k) {
-                    float re_sum = 0.0f, im_sum = 0.0f;
-                    for (int64_t t = 0; t < signal_len; ++t) {
-                        int64_t in_idx = b * signal_len * inner_size + t * inner_size + inner;
-                        float val = h_in[in_idx];
-                        float angle = -2.0f * 3.14159265358979323846f * k * t / signal_len;
-                        re_sum += val * std::cos(angle);
-                        im_sum += val * std::sin(angle);
-                    }
-                    if (norm == "ortho") {
-                        float scale = 1.0f / std::sqrt(static_cast<float>(signal_len));
-                        re_sum *= scale;
-                        im_sum *= scale;
-                    } else if (norm == "forward") {
-                        float scale = 1.0f / static_cast<float>(signal_len);
-                        re_sum *= scale;
-                        im_sum *= scale;
-                    }
-                    int64_t out_idx = (b * out_len * inner_size + k * inner_size + inner) * 2;
-                    h_out[out_idx] = re_sum;
-                    h_out[out_idx + 1] = im_sum;
-                }
+            for (int64_t b = 0; b < batch_size; ++b) {
+                cooley_tukey_fft_sycl(d_buf + b * 2 * signal_len, signal_len, -1.0f, queue);
             }
-        }
 
-        Tensor output(out_shape, DType::Float32, input.device());
-        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), out_numel * sizeof(float)).wait();
-        return output;
+            // Apply normalization
+            if (norm == "ortho" || norm == "forward") {
+                float scale = (norm == "ortho")
+                    ? 1.0f / std::sqrt(static_cast<float>(signal_len))
+                    : 1.0f / static_cast<float>(signal_len);
+                queue.parallel_for(sycl::range<1>(2 * total), [=](sycl::id<1> idx) {
+                    d_buf[idx[0]] *= scale;
+                }).wait();
+            }
+
+            // Truncate: copy first out_len complex bins per batch to output
+            Tensor output(out_shape, DType::Float32, input.device());
+            float* d_out = static_cast<float*>(const_cast<void*>(output.data_ptr()));
+            queue.parallel_for(sycl::range<1>(batch_size * out_len), [=](sycl::id<1> idx) {
+                int64_t flat = idx[0];
+                int64_t b = flat / out_len;
+                int64_t k = flat % out_len;
+                int64_t src = b * 2 * signal_len + 2 * k;
+                int64_t dst = (b * out_len + k) * 2;
+                d_out[dst]     = d_buf[src];
+                d_out[dst + 1] = d_buf[src + 1];
+            }).wait();
+            return output;
+        } else {
+            // Bluestein: compute full N-point FFT, then truncate
+            const float* d_in = static_cast<const float*>(input.data_ptr());
+            int64_t full_complex_numel = batch_size * signal_len * inner_size * 2;
+            SyclDevicePtr<float> d_full_owner(full_complex_numel, queue);
+            float* d_full = d_full_owner.get();
+            queue.memset(d_full, 0, full_complex_numel * sizeof(float)).wait();
+            bluestein_fft_sycl(d_in, d_full, signal_len, batch_size, inner_size, queue);
+
+            // Apply normalization to full output
+            if (norm == "ortho" || norm == "forward") {
+                float scale = (norm == "ortho")
+                    ? 1.0f / std::sqrt(static_cast<float>(signal_len))
+                    : 1.0f / static_cast<float>(signal_len);
+                queue.parallel_for(sycl::range<1>(full_complex_numel), [=](sycl::id<1> idx) {
+                    d_full[idx[0]] *= scale;
+                }).wait();
+            }
+
+            // Truncate: copy first out_len bins per (batch, inner)
+            Tensor output(out_shape, DType::Float32, input.device());
+            float* d_out = static_cast<float*>(const_cast<void*>(output.data_ptr()));
+            int64_t copy_count = batch_size * out_len * inner_size;
+            queue.parallel_for(sycl::range<1>(copy_count), [=](sycl::id<1> idx) {
+                int64_t flat = idx[0];
+                int64_t b = flat / (out_len * inner_size);
+                int64_t rem = flat % (out_len * inner_size);
+                int64_t k = rem / inner_size;
+                int64_t inner = rem % inner_size;
+                int64_t src = (b * signal_len * inner_size + k * inner_size + inner) * 2;
+                int64_t dst = (b * out_len * inner_size + k * inner_size + inner) * 2;
+                d_out[dst]     = d_full[src];
+                d_out[dst + 1] = d_full[src + 1];
+            }).wait();
+            return output;
+        }
     } else if (input.dtype() == DType::Float64) {
-        int64_t numel = input.numel();
-        std::vector<double> h_in(numel);
-        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(double)).wait();
+        if (use_cooley_tukey) {
+            SyclDevicePtr<double> d_buf_owner(2 * signal_len * batch_size, queue);
+            double* d_buf = d_buf_owner.get();
+            const double* d_in = static_cast<const double*>(input.data_ptr());
+            int64_t total = signal_len * batch_size;
+            queue.parallel_for(sycl::range<1>(total), [=](sycl::id<1> idx) {
+                int64_t i = idx[0];
+                d_buf[2 * i] = d_in[i];
+                d_buf[2 * i + 1] = 0.0;
+            }).wait();
 
-        std::vector<int64_t> out_shape = shape;
-        out_shape[dim] = out_len;
-        out_shape.push_back(2);
-        int64_t out_numel = 1;
-        for (auto s : out_shape) out_numel *= s;
-        std::vector<double> h_out(out_numel, 0.0);
-
-        for (int64_t b = 0; b < batch_size; ++b) {
-            for (int64_t inner = 0; inner < inner_size; ++inner) {
-                for (int64_t k = 0; k < out_len; ++k) {
-                    double re_sum = 0.0, im_sum = 0.0;
-                    for (int64_t t = 0; t < signal_len; ++t) {
-                        int64_t in_idx = b * signal_len * inner_size + t * inner_size + inner;
-                        double val = h_in[in_idx];
-                        double angle = -2.0 * 3.14159265358979323846 * k * t / signal_len;
-                        re_sum += val * std::cos(angle);
-                        im_sum += val * std::sin(angle);
-                    }
-                    if (norm == "ortho") {
-                        double scale = 1.0 / std::sqrt(static_cast<double>(signal_len));
-                        re_sum *= scale;
-                        im_sum *= scale;
-                    } else if (norm == "forward") {
-                        double scale = 1.0 / static_cast<double>(signal_len);
-                        re_sum *= scale;
-                        im_sum *= scale;
-                    }
-                    int64_t out_idx = (b * out_len * inner_size + k * inner_size + inner) * 2;
-                    h_out[out_idx] = re_sum;
-                    h_out[out_idx + 1] = im_sum;
-                }
+            for (int64_t b = 0; b < batch_size; ++b) {
+                cooley_tukey_fft_sycl(d_buf + b * 2 * signal_len, signal_len, -1.0, queue);
             }
-        }
 
-        Tensor output(out_shape, DType::Float64, input.device());
-        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), out_numel * sizeof(double)).wait();
-        return output;
+            if (norm == "ortho" || norm == "forward") {
+                double scale = (norm == "ortho")
+                    ? 1.0 / std::sqrt(static_cast<double>(signal_len))
+                    : 1.0 / static_cast<double>(signal_len);
+                queue.parallel_for(sycl::range<1>(2 * total), [=](sycl::id<1> idx) {
+                    d_buf[idx[0]] *= scale;
+                }).wait();
+            }
+
+            Tensor output(out_shape, DType::Float64, input.device());
+            double* d_out = static_cast<double*>(const_cast<void*>(output.data_ptr()));
+            queue.parallel_for(sycl::range<1>(batch_size * out_len), [=](sycl::id<1> idx) {
+                int64_t flat = idx[0];
+                int64_t b = flat / out_len;
+                int64_t k = flat % out_len;
+                int64_t src = b * 2 * signal_len + 2 * k;
+                int64_t dst = (b * out_len + k) * 2;
+                d_out[dst]     = d_buf[src];
+                d_out[dst + 1] = d_buf[src + 1];
+            }).wait();
+            return output;
+        } else {
+            const double* d_in = static_cast<const double*>(input.data_ptr());
+            int64_t full_complex_numel = batch_size * signal_len * inner_size * 2;
+            SyclDevicePtr<double> d_full_owner(full_complex_numel, queue);
+            double* d_full = d_full_owner.get();
+            queue.memset(d_full, 0, full_complex_numel * sizeof(double)).wait();
+            bluestein_fft_sycl(d_in, d_full, signal_len, batch_size, inner_size, queue);
+
+            if (norm == "ortho" || norm == "forward") {
+                double scale = (norm == "ortho")
+                    ? 1.0 / std::sqrt(static_cast<double>(signal_len))
+                    : 1.0 / static_cast<double>(signal_len);
+                queue.parallel_for(sycl::range<1>(full_complex_numel), [=](sycl::id<1> idx) {
+                    d_full[idx[0]] *= scale;
+                }).wait();
+            }
+
+            Tensor output(out_shape, DType::Float64, input.device());
+            double* d_out = static_cast<double*>(const_cast<void*>(output.data_ptr()));
+            int64_t copy_count = batch_size * out_len * inner_size;
+            queue.parallel_for(sycl::range<1>(copy_count), [=](sycl::id<1> idx) {
+                int64_t flat = idx[0];
+                int64_t b = flat / (out_len * inner_size);
+                int64_t rem = flat % (out_len * inner_size);
+                int64_t k = rem / inner_size;
+                int64_t inner = rem % inner_size;
+                int64_t src = (b * signal_len * inner_size + k * inner_size + inner) * 2;
+                int64_t dst = (b * out_len * inner_size + k * inner_size + inner) * 2;
+                d_out[dst]     = d_full[src];
+                d_out[dst + 1] = d_full[src + 1];
+            }).wait();
+            return output;
+        }
     } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         DType orig_dtype = input.dtype();
         int64_t in_numel = input.numel();
@@ -1675,12 +1878,12 @@ auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                              in_numel, orig_dtype, queue);
         Tensor f32_result = rfft_kernel(f32_input, dim, n, norm, queue);
 
-        int64_t out_numel = f32_result.numel();
+        int64_t out_numel_f16 = f32_result.numel();
         Tensor output(std::vector<int64_t>(f32_result.shape().begin(), f32_result.shape().end()),
                       orig_dtype, input.device());
         device_downcast_from_f32(static_cast<const float*>(f32_result.data_ptr()),
                                  const_cast<void*>(output.data_ptr()),
-                                 out_numel, orig_dtype, queue);
+                                 out_numel_f16, orig_dtype, queue);
         return output;
     } else {
         throw std::runtime_error("rfft_kernel: unsupported dtype (expected Float32 or Float64)");
@@ -1688,7 +1891,7 @@ auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 }
 
 // ============================================================================
-// IRFFT - 1D Complex-to-Real Inverse FFT (naive fallback)
+// IRFFT - 1D Complex-to-Real Inverse FFT (device-side Cooley-Tukey / Bluestein)
 // ============================================================================
 auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                   const std::string& norm, sycl::queue& queue) -> Tensor {
@@ -1701,104 +1904,230 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
         throw std::runtime_error("irfft_kernel: expected complex input (last dim = 2)");
     }
 
-    int64_t complex_len = shape[dim];
-    int64_t output_len = n;
+    int64_t complex_len = shape[dim];  // N/2+1 input bins
+    int64_t output_len = n;            // N output points
 
     int64_t batch_size = 1;
     for (int64_t i = 0; i < dim; ++i) batch_size *= shape[i];
     int64_t inner_size = 1;
     for (int64_t i = dim + 1; i < ndim - 1; ++i) inner_size *= shape[i];
 
+    bool use_cooley_tukey = is_power_of_2(output_len) && inner_size == 1;
+
+    // Build real output shape (no trailing 2 dim)
+    std::vector<int64_t> out_shape;
+    for (int64_t i = 0; i < dim; ++i) out_shape.push_back(shape[i]);
+    out_shape.push_back(output_len);
+    for (int64_t i = dim + 1; i < ndim - 1; ++i) out_shape.push_back(shape[i]);
+    int64_t out_numel = 1;
+    for (auto s : out_shape) out_numel *= s;
+
+    // Strategy: reconstruct full N-point complex spectrum from N/2+1 bins
+    // using conjugate symmetry: X[k] = conj(X[N-k]) for k = complex_len..N-1
+    // Then apply inverse FFT (sign=+1, normalize), take real part.
+
     if (input.dtype() == DType::Float32) {
-        int64_t numel = input.numel();
-        std::vector<float> h_in(numel);
-        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(float)).wait();
+        const float* d_in = static_cast<const float*>(input.data_ptr());
 
-        std::vector<int64_t> out_shape;
-        for (int64_t i = 0; i < dim; ++i) out_shape.push_back(shape[i]);
-        out_shape.push_back(output_len);
-        for (int64_t i = dim + 1; i < ndim - 1; ++i) out_shape.push_back(shape[i]);
+        if (use_cooley_tukey) {
+            // Allocate full N-point interleaved complex buffer per batch
+            SyclDevicePtr<float> d_buf_owner(2 * output_len * batch_size, queue);
+            float* d_buf = d_buf_owner.get();
 
-        int64_t out_numel = 1;
-        for (auto s : out_shape) out_numel *= s;
-        std::vector<float> h_out(out_numel, 0.0f);
+            // Reconstruct full spectrum on device
+            queue.parallel_for(sycl::range<1>(batch_size * output_len), [=](sycl::id<1> idx) {
+                int64_t flat = idx[0];
+                int64_t b = flat / output_len;
+                int64_t k = flat % output_len;
+                int64_t dst = b * 2 * output_len + 2 * k;
 
-        for (int64_t b = 0; b < batch_size; ++b) {
-            for (int64_t inner = 0; inner < inner_size; ++inner) {
-                for (int64_t t = 0; t < output_len; ++t) {
-                    float re_sum = 0.0f;
-                    for (int64_t k = 0; k < complex_len; ++k) {
-                        int64_t in_idx = (b * complex_len * inner_size + k * inner_size + inner) * 2;
-                        float re_in = h_in[in_idx];
-                        float im_in = h_in[in_idx + 1];
-                        float angle = 2.0f * 3.14159265358979323846f * k * t / output_len;
-                        float contribution = re_in * std::cos(angle) - im_in * std::sin(angle);
-                        if (k > 0 && k < output_len - k) {
-                            contribution *= 2.0f;
-                        }
-                        re_sum += contribution;
-                    }
-                    float scale = 1.0f / static_cast<float>(output_len);
-                    if (norm == "ortho") {
-                        scale = 1.0f / std::sqrt(static_cast<float>(output_len));
-                    } else if (norm == "forward") {
-                        scale = 1.0f;
-                    }
-                    re_sum *= scale;
-                    int64_t out_idx = b * output_len * inner_size + t * inner_size + inner;
-                    h_out[out_idx] = re_sum;
+                if (k < complex_len) {
+                    // Direct copy from input
+                    int64_t src = (b * complex_len + k) * 2;
+                    d_buf[dst]     = d_in[src];
+                    d_buf[dst + 1] = d_in[src + 1];
+                } else {
+                    // Conjugate symmetry: X[k] = conj(X[N-k])
+                    int64_t mirror = output_len - k;
+                    int64_t src = (b * complex_len + mirror) * 2;
+                    d_buf[dst]     = d_in[src];
+                    d_buf[dst + 1] = -d_in[src + 1];
                 }
-            }
-        }
+            }).wait();
 
-        Tensor output(out_shape, DType::Float32, input.device());
-        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), out_numel * sizeof(float)).wait();
-        return output;
+            // Apply inverse FFT (sign=+1)
+            for (int64_t b = 0; b < batch_size; ++b) {
+                cooley_tukey_fft_sycl(d_buf + b * 2 * output_len, output_len, 1.0f, queue);
+            }
+
+            // Normalize and extract real part
+            float scale = 1.0f / static_cast<float>(output_len);
+            if (norm == "ortho") {
+                scale = 1.0f / std::sqrt(static_cast<float>(output_len));
+            } else if (norm == "forward") {
+                scale = 1.0f;
+            }
+
+            Tensor output(out_shape, DType::Float32, input.device());
+            float* d_out = static_cast<float*>(const_cast<void*>(output.data_ptr()));
+            queue.parallel_for(sycl::range<1>(batch_size * output_len), [=](sycl::id<1> idx) {
+                int64_t flat = idx[0];
+                int64_t b = flat / output_len;
+                int64_t t = flat % output_len;
+                d_out[b * output_len + t] = d_buf[b * 2 * output_len + 2 * t] * scale;
+            }).wait();
+            return output;
+        } else {
+            // Bluestein path: reconstruct full spectrum with inner_size support
+            int64_t full_complex_numel = batch_size * output_len * inner_size * 2;
+            SyclDevicePtr<float> d_full_owner(full_complex_numel, queue);
+            float* d_full = d_full_owner.get();
+
+            // Reconstruct full N-point spectrum on device
+            int64_t total_entries = batch_size * output_len * inner_size;
+            queue.parallel_for(sycl::range<1>(total_entries), [=](sycl::id<1> idx) {
+                int64_t flat = idx[0];
+                int64_t b = flat / (output_len * inner_size);
+                int64_t rem = flat % (output_len * inner_size);
+                int64_t k = rem / inner_size;
+                int64_t inner = rem % inner_size;
+                int64_t dst = (b * output_len * inner_size + k * inner_size + inner) * 2;
+
+                if (k < complex_len) {
+                    int64_t src = (b * complex_len * inner_size + k * inner_size + inner) * 2;
+                    d_full[dst]     = d_in[src];
+                    d_full[dst + 1] = d_in[src + 1];
+                } else {
+                    int64_t mirror = output_len - k;
+                    int64_t src = (b * complex_len * inner_size + mirror * inner_size + inner) * 2;
+                    d_full[dst]     = d_in[src];
+                    d_full[dst + 1] = -d_in[src + 1];
+                }
+            }).wait();
+
+            // Apply inverse Bluestein FFT (sign=+1)
+            SyclDevicePtr<float> d_ifft_owner(full_complex_numel, queue);
+            float* d_ifft = d_ifft_owner.get();
+            queue.memset(d_ifft, 0, full_complex_numel * sizeof(float)).wait();
+            bluestein_fft_complex_sycl(d_full, d_ifft, output_len, batch_size, inner_size, 1.0f, queue);
+
+            // Normalize and extract real part
+            float scale = 1.0f / static_cast<float>(output_len);
+            if (norm == "ortho") {
+                scale = 1.0f / std::sqrt(static_cast<float>(output_len));
+            } else if (norm == "forward") {
+                scale = 1.0f;
+            }
+
+            Tensor output(out_shape, DType::Float32, input.device());
+            float* d_out = static_cast<float*>(const_cast<void*>(output.data_ptr()));
+            queue.parallel_for(sycl::range<1>(out_numel), [=](sycl::id<1> idx) {
+                int64_t flat = idx[0];
+                int64_t b = flat / (output_len * inner_size);
+                int64_t rem = flat % (output_len * inner_size);
+                int64_t t = rem / inner_size;
+                int64_t inner = rem % inner_size;
+                int64_t src = (b * output_len * inner_size + t * inner_size + inner) * 2;
+                d_out[flat] = d_ifft[src] * scale;
+            }).wait();
+            return output;
+        }
     } else if (input.dtype() == DType::Float64) {
-        int64_t numel = input.numel();
-        std::vector<double> h_in(numel);
-        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(double)).wait();
+        const double* d_in = static_cast<const double*>(input.data_ptr());
 
-        std::vector<int64_t> out_shape;
-        for (int64_t i = 0; i < dim; ++i) out_shape.push_back(shape[i]);
-        out_shape.push_back(output_len);
-        for (int64_t i = dim + 1; i < ndim - 1; ++i) out_shape.push_back(shape[i]);
+        if (use_cooley_tukey) {
+            SyclDevicePtr<double> d_buf_owner(2 * output_len * batch_size, queue);
+            double* d_buf = d_buf_owner.get();
 
-        int64_t out_numel = 1;
-        for (auto s : out_shape) out_numel *= s;
-        std::vector<double> h_out(out_numel, 0.0);
+            queue.parallel_for(sycl::range<1>(batch_size * output_len), [=](sycl::id<1> idx) {
+                int64_t flat = idx[0];
+                int64_t b = flat / output_len;
+                int64_t k = flat % output_len;
+                int64_t dst = b * 2 * output_len + 2 * k;
 
-        for (int64_t b = 0; b < batch_size; ++b) {
-            for (int64_t inner = 0; inner < inner_size; ++inner) {
-                for (int64_t t = 0; t < output_len; ++t) {
-                    double re_sum = 0.0;
-                    for (int64_t k = 0; k < complex_len; ++k) {
-                        int64_t in_idx = (b * complex_len * inner_size + k * inner_size + inner) * 2;
-                        double re_in = h_in[in_idx];
-                        double im_in = h_in[in_idx + 1];
-                        double angle = 2.0 * 3.14159265358979323846 * k * t / output_len;
-                        double contribution = re_in * std::cos(angle) - im_in * std::sin(angle);
-                        if (k > 0 && k < output_len - k) {
-                            contribution *= 2.0;
-                        }
-                        re_sum += contribution;
-                    }
-                    double scale = 1.0 / static_cast<double>(output_len);
-                    if (norm == "ortho") {
-                        scale = 1.0 / std::sqrt(static_cast<double>(output_len));
-                    } else if (norm == "forward") {
-                        scale = 1.0;
-                    }
-                    re_sum *= scale;
-                    int64_t out_idx = b * output_len * inner_size + t * inner_size + inner;
-                    h_out[out_idx] = re_sum;
+                if (k < complex_len) {
+                    int64_t src = (b * complex_len + k) * 2;
+                    d_buf[dst]     = d_in[src];
+                    d_buf[dst + 1] = d_in[src + 1];
+                } else {
+                    int64_t mirror = output_len - k;
+                    int64_t src = (b * complex_len + mirror) * 2;
+                    d_buf[dst]     = d_in[src];
+                    d_buf[dst + 1] = -d_in[src + 1];
                 }
-            }
-        }
+            }).wait();
 
-        Tensor output(out_shape, DType::Float64, input.device());
-        queue.memcpy(const_cast<void*>(output.data_ptr()), h_out.data(), out_numel * sizeof(double)).wait();
-        return output;
+            for (int64_t b = 0; b < batch_size; ++b) {
+                cooley_tukey_fft_sycl(d_buf + b * 2 * output_len, output_len, 1.0, queue);
+            }
+
+            double scale = 1.0 / static_cast<double>(output_len);
+            if (norm == "ortho") {
+                scale = 1.0 / std::sqrt(static_cast<double>(output_len));
+            } else if (norm == "forward") {
+                scale = 1.0;
+            }
+
+            Tensor output(out_shape, DType::Float64, input.device());
+            double* d_out = static_cast<double*>(const_cast<void*>(output.data_ptr()));
+            queue.parallel_for(sycl::range<1>(batch_size * output_len), [=](sycl::id<1> idx) {
+                int64_t flat = idx[0];
+                int64_t b = flat / output_len;
+                int64_t t = flat % output_len;
+                d_out[b * output_len + t] = d_buf[b * 2 * output_len + 2 * t] * scale;
+            }).wait();
+            return output;
+        } else {
+            int64_t full_complex_numel = batch_size * output_len * inner_size * 2;
+            SyclDevicePtr<double> d_full_owner(full_complex_numel, queue);
+            double* d_full = d_full_owner.get();
+
+            int64_t total_entries = batch_size * output_len * inner_size;
+            queue.parallel_for(sycl::range<1>(total_entries), [=](sycl::id<1> idx) {
+                int64_t flat = idx[0];
+                int64_t b = flat / (output_len * inner_size);
+                int64_t rem = flat % (output_len * inner_size);
+                int64_t k = rem / inner_size;
+                int64_t inner = rem % inner_size;
+                int64_t dst = (b * output_len * inner_size + k * inner_size + inner) * 2;
+
+                if (k < complex_len) {
+                    int64_t src = (b * complex_len * inner_size + k * inner_size + inner) * 2;
+                    d_full[dst]     = d_in[src];
+                    d_full[dst + 1] = d_in[src + 1];
+                } else {
+                    int64_t mirror = output_len - k;
+                    int64_t src = (b * complex_len * inner_size + mirror * inner_size + inner) * 2;
+                    d_full[dst]     = d_in[src];
+                    d_full[dst + 1] = -d_in[src + 1];
+                }
+            }).wait();
+
+            SyclDevicePtr<double> d_ifft_owner(full_complex_numel, queue);
+            double* d_ifft = d_ifft_owner.get();
+            queue.memset(d_ifft, 0, full_complex_numel * sizeof(double)).wait();
+            bluestein_fft_complex_sycl(d_full, d_ifft, output_len, batch_size, inner_size, 1.0, queue);
+
+            double scale = 1.0 / static_cast<double>(output_len);
+            if (norm == "ortho") {
+                scale = 1.0 / std::sqrt(static_cast<double>(output_len));
+            } else if (norm == "forward") {
+                scale = 1.0;
+            }
+
+            Tensor output(out_shape, DType::Float64, input.device());
+            double* d_out = static_cast<double*>(const_cast<void*>(output.data_ptr()));
+            queue.parallel_for(sycl::range<1>(out_numel), [=](sycl::id<1> idx) {
+                int64_t flat = idx[0];
+                int64_t b = flat / (output_len * inner_size);
+                int64_t rem = flat % (output_len * inner_size);
+                int64_t t = rem / inner_size;
+                int64_t inner = rem % inner_size;
+                int64_t src = (b * output_len * inner_size + t * inner_size + inner) * 2;
+                d_out[flat] = d_ifft[src] * scale;
+            }).wait();
+            return output;
+        }
     } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         DType orig_dtype = input.dtype();
         int64_t numel = input.numel();
@@ -1810,12 +2139,12 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                              numel, orig_dtype, queue);
         Tensor f32_result = irfft_kernel(f32_input, dim, n, norm, queue);
 
-        int64_t out_numel = f32_result.numel();
+        int64_t out_numel_f16 = f32_result.numel();
         Tensor output(std::vector<int64_t>(f32_result.shape().begin(), f32_result.shape().end()),
                       orig_dtype, input.device());
         device_downcast_from_f32(static_cast<const float*>(f32_result.data_ptr()),
                                  const_cast<void*>(output.data_ptr()),
-                                 out_numel, orig_dtype, queue);
+                                 out_numel_f16, orig_dtype, queue);
         return output;
     } else {
         throw std::runtime_error("irfft_kernel: unsupported dtype (expected Float32 or Float64)");

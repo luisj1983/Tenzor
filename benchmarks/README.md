@@ -232,7 +232,6 @@ Benchmarks automatically use the default device. All backends are supported:
 - **CUDA:** GPU acceleration
 - **OneAPI:** Intel hardware
 - **Vulkan:** Cross-platform GPU
-- **WebGPU:** Browser-based (future)
 
 ## Statistical Rigor
 

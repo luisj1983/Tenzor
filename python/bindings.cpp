@@ -468,8 +468,7 @@ PYBIND11_MODULE(tenzor_core, m) {
         .value("CUDA", tenzor::Device::Type::CUDA)
         .value("ROCm", tenzor::Device::Type::ROCm)
         .value("OneAPI", tenzor::Device::Type::OneAPI)
-        .value("Vulkan", tenzor::Device::Type::Vulkan)
-        .value("WebGPU", tenzor::Device::Type::WebGPU);
+        .value("Vulkan", tenzor::Device::Type::Vulkan);
 
     // Device
     py::class_<tenzor::Device>(m, "Device")

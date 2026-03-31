@@ -43,7 +43,6 @@ auto BackendLoader::shutdown() -> void {
     const std::vector<std::string> destruction_order = {
         "oneapi",       // Independent SYCL runtime
         "vulkan",       // Independent GPU API
-        "webgpu",       // Independent GPU API
         "rocm",         // AMD runtime
         "cuda",         // NVIDIA runtime
         "cpu"           // Always safe last (destructor calls mkl_cleanup)
@@ -243,8 +242,6 @@ auto BackendLoader::register_backend(std::string_view name,
         device_type = Device::Type::OneAPI;
     } else if (backend_name == "vulkan") {
         device_type = Device::Type::Vulkan;
-    } else if (backend_name == "webgpu") {
-        device_type = Device::Type::WebGPU;
     } else {
         device_type = Device::Type::CPU; // Default fallback
     }

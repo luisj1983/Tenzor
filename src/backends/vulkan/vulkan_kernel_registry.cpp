@@ -1645,25 +1645,6 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     // ========================================================================
-    // CPU fallback ops (no dedicated Vulkan shaders)
-    // ========================================================================
-
-    #define VULKAN_CPU_FALLBACK(OP_ID) \
-    table.register_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes& attrs) \
-        -> std::vector<Tensor> { \
-        auto device = inputs[0].device(); \
-        std::vector<Tensor> cpu_inputs; \
-        cpu_inputs.reserve(inputs.size()); \
-        for (size_t i = 0; i < inputs.size(); ++i) { \
-            cpu_inputs.push_back(inputs[i].to(Device::cpu())); \
-        } \
-        auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU); \
-        auto results = cpu_table.dispatch(OpId::OP_ID, cpu_inputs, attrs); \
-        for (auto& r : results) r = r.to(device); \
-        return results; \
-    })
-
-    // ========================================================================
     // Stack/Take/Tile/Put (native Vulkan shaders)
     // ========================================================================
     table.register_single_output_kernel(OpId::Stack, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -1930,8 +1911,6 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
             return get_vulkan_backend()->dispatchSearchSorted(inputs[0], inputs[1]);
         });
-
-    #undef VULKAN_CPU_FALLBACK
 
     // GumbelSoftmax — composed from existing Vulkan ops (no dedicated shader needed)
     table.register_single_output_kernel(OpId::GumbelSoftmax,

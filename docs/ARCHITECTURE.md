@@ -61,13 +61,13 @@ Tenzor is designed as a modular, high-performance tensor computation library wit
 │  │  Backend Interface ─── Operation Registry ─── Kernel Dispatch    │  │
 │  └──────────────────────────────────────────────────────────────────┘  │
 ├─────────────────────────────────────────────────────────────────────────┤
-│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌──────┐ │
-│  │   CPU   │ │  CUDA   │ │  ROCm   │ │ OneAPI  │ │ Vulkan  │ │Metal │ │
-│  │  (SIMD) │ │(cuBLAS) │ │(hipBLAS)│ │ (oneMKL)│ │(Compute)│ │(MPS) │ │
-│  └─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘ └──────┘ │
+│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐           │
+│  │   CPU   │ │  CUDA   │ │  ROCm   │ │ OneAPI  │ │ Vulkan  │           │
+│  │  (SIMD) │ │(cuBLAS) │ │(hipBLAS)│ │ (oneMKL)│ │(Compute)│           │
+│  └─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘           │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                      Hardware Layer                                     │
-│     CPU (x86/ARM)  │  NVIDIA GPU  │  AMD GPU  │  Intel GPU  │  Apple   │
+│     CPU (x86/ARM)  │  NVIDIA GPU  │  AMD GPU  │  Intel GPU            │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -127,7 +127,7 @@ Represents execution targets:
 ```cpp
 struct Device {
     enum class Type : uint8_t {
-        CPU, CUDA, ROCm, OneAPI, Vulkan, Metal, WebGPU
+        CPU, CUDA, ROCm, OneAPI, Vulkan
     };
     Type type;
     int32_t index;  // Device index for multi-device systems
