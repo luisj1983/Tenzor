@@ -73,6 +73,13 @@ struct VariableImpl {
 
     VariableImpl& operator=(const VariableImpl& other) {
         if (this != &other) {
+            // Lock both mutexes to prevent race during grad_mutex_ reassignment.
+            // Use std::lock to avoid deadlock if two assignments happen concurrently.
+            auto old_mutex = grad_mutex_;
+            std::unique_lock<std::mutex> lock1(*old_mutex, std::defer_lock);
+            std::unique_lock<std::mutex> lock2(*other.grad_mutex_, std::defer_lock);
+            std::lock(lock1, lock2);
+
             data_ = other.data_;
             grad_ = other.grad_;
             grad_fn_ = other.grad_fn_;
@@ -88,6 +95,11 @@ struct VariableImpl {
 
     VariableImpl& operator=(VariableImpl&& other) noexcept {
         if (this != &other) {
+            // Lock old mutex before replacing it to prevent racing with
+            // concurrent gradient accumulation on this Variable.
+            auto old_mutex = grad_mutex_;
+            std::lock_guard<std::mutex> lock(*old_mutex);
+
             data_ = std::move(other.data_);
             grad_ = std::move(other.grad_);
             grad_fn_ = std::move(other.grad_fn_);

@@ -938,7 +938,14 @@ VkDescriptorSet VulkanBackend::allocateAndWriteDescriptorSet(
         // Full device idle ensures no command buffer is still referencing pool descriptors.
         // ensurePendingWorkComplete only waits on fences we track, but there may be
         // in-flight commands from other code paths. vkDeviceWaitIdle is the safe barrier.
-        vkDeviceWaitIdle(ctx.device);
+        {
+            VkResult waitResult = vkDeviceWaitIdle(ctx.device);
+            if (waitResult == VK_ERROR_DEVICE_LOST) {
+                ctx.device_lost = true;
+                throw std::runtime_error("Device lost during descriptor pool recovery");
+            }
+            vulkan::checkVk(waitResult, "vkDeviceWaitIdle in descriptor pool recovery");
+        }
 
         // Reset command pool and descriptor pool
         vulkan::checkVk(vkResetCommandPool(ctx.device, ctx.commandPool, 0),
@@ -954,6 +961,9 @@ VkDescriptorSet VulkanBackend::allocateAndWriteDescriptorSet(
         // returns the stale handle and callers record into an un-begun buffer.
         ctx.activeCommandBuffer = VK_NULL_HANDLE;
         ctx.operationsInBatch = 0;
+
+        // Clear pipeline cache — pipelines may reference invalidated descriptor layouts
+        pipelineCaches_[device_id].pipelines.clear();
 
         if (is_fragmented) {
             // Fragmentation means the pool has enough total capacity but can't

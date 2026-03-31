@@ -2541,7 +2541,7 @@ void add_inplace_kernel(Tensor& a, const Tensor& b, hipStream_t stream) {
             throw std::runtime_error("add_inplace operation unsupported dtype");
         }
         HIP_CHECK(hipGetLastError());
-        HIP_CHECK(hipDeviceSynchronize());
+        HIP_CHECK(hipStreamSynchronize(stream));
         meta.free();
         return;
     }
@@ -2609,7 +2609,7 @@ void sub_inplace_kernel(Tensor& a, const Tensor& b, hipStream_t stream) {
             throw std::runtime_error("sub_inplace operation unsupported dtype");
         }
         HIP_CHECK(hipGetLastError());
-        HIP_CHECK(hipDeviceSynchronize());
+        HIP_CHECK(hipStreamSynchronize(stream));
         meta.free();
         return;
     }
@@ -2677,7 +2677,7 @@ void mul_inplace_kernel(Tensor& a, const Tensor& b, hipStream_t stream) {
             throw std::runtime_error("mul_inplace operation unsupported dtype");
         }
         HIP_CHECK(hipGetLastError());
-        HIP_CHECK(hipDeviceSynchronize());
+        HIP_CHECK(hipStreamSynchronize(stream));
         meta.free();
         return;
     }
@@ -2734,7 +2734,7 @@ void div_inplace_kernel(Tensor& a, const Tensor& b, hipStream_t stream) {
             throw std::runtime_error("div_inplace operation unsupported dtype");
         }
         HIP_CHECK(hipGetLastError());
-        HIP_CHECK(hipDeviceSynchronize());
+        HIP_CHECK(hipStreamSynchronize(stream));
         meta.free();
         return;
     }

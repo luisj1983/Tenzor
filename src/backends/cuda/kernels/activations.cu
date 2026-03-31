@@ -1394,7 +1394,7 @@ __global__ void log_softmax_forward_kernel(const T* input, T* output,
 
     // Broadcast sum to all threads
     if (threadIdx.x == 0) {
-        shared[0] = device_log(sum_exp);
+        shared[0] = (sum_exp > T(0)) ? device_log(sum_exp) : T(-1e30);
     }
     __syncthreads();
     T log_sum_exp = shared[0];

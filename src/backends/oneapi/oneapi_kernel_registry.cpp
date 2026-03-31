@@ -622,7 +622,15 @@ static sycl::queue& get_q(std::span<const Tensor> inputs) {
 }
 
 static sycl::queue& get_q_device(int32_t device_id) {
-    return oneapi_internal::get_queue(device_id);
+    if (device_id < 0) {
+        throw std::runtime_error("Invalid OneAPI device ID: " + std::to_string(device_id));
+    }
+    try {
+        return oneapi_internal::get_queue(device_id);
+    } catch (const std::exception& e) {
+        throw std::runtime_error("Failed to get OneAPI queue for device " +
+                                 std::to_string(device_id) + ": " + e.what());
+    }
 }
 
 // ============================================================================

@@ -9,6 +9,8 @@
 #include <mma.h>              // For Tensor Cores (WMMA)
 #include <stdexcept>
 #include <string>
+#include <limits>
+#include <climits>
 
 #ifdef TENZOR_HAS_CUBLAS
 #include <cublas_v2.h>
@@ -19,6 +21,13 @@
 
 namespace tenzor {
 namespace cuda {
+
+// Overflow-checked multiplication for stride/size calculations
+inline int64_t checked_stride_mul(int64_t a, int64_t b) {
+    if (a != 0 && std::abs(b) > std::numeric_limits<int64_t>::max() / std::abs(a))
+        throw std::overflow_error("Stride overflow in batched matmul");
+    return a * b;
+}
 
 // ============================================================================
 // FP16/BF16 Conversion Utilities
@@ -68,8 +77,10 @@ __global__ void matmul_fp16_saturate_kernel(__half* data, int64_t n) {
 static void saturate_fp16(__half* data, int64_t n, cudaStream_t stream) {
     if (n <= 0) return;
     constexpr int kBlock = 256;
-    int grid = static_cast<int>((n + kBlock - 1) / kBlock);
+    int64_t grid64 = (n + kBlock - 1) / kBlock;
+    int grid = static_cast<int>(std::min(grid64, static_cast<int64_t>(INT_MAX)));
     matmul_fp16_saturate_kernel<<<grid, kBlock, 0, stream>>>(data, n);
+    TENZOR_CUDA_CHECK(cudaGetLastError());
 }
 
 // ============================================================================
@@ -1598,9 +1609,9 @@ void batched_matmul_f32(
     int64_t batch_size, int64_t M, int64_t N, int64_t K,
     cudaStream_t stream = 0) {
 
-    int64_t stride_a = M * K;
-    int64_t stride_b = K * N;
-    int64_t stride_c = M * N;
+    int64_t stride_a = checked_stride_mul(M, K);
+    int64_t stride_b = checked_stride_mul(K, N);
+    int64_t stride_c = checked_stride_mul(M, N);
 
 #ifdef TENZOR_HAS_CUBLAS
     // Always use cuBLAS for batched matmul - cublasSgemmStridedBatched is
@@ -1646,9 +1657,9 @@ void batched_matmul_f64(
     int64_t batch_size, int64_t M, int64_t N, int64_t K,
     cudaStream_t stream = 0) {
 
-    int64_t stride_a = M * K;
-    int64_t stride_b = K * N;
-    int64_t stride_c = M * N;
+    int64_t stride_a = checked_stride_mul(M, K);
+    int64_t stride_b = checked_stride_mul(K, N);
+    int64_t stride_c = checked_stride_mul(M, N);
 
 #ifdef TENZOR_HAS_CUBLAS
     // Always use cuBLAS for batched matmul - cublasDgemmStridedBatched is
@@ -1701,9 +1712,9 @@ void batched_matmul_f16(
     int64_t batch_size, int64_t M, int64_t N, int64_t K,
     cudaStream_t stream = 0) {
 
-    int64_t stride_a = M * K;
-    int64_t stride_b = K * N;
-    int64_t stride_c = M * N;
+    int64_t stride_a = checked_stride_mul(M, K);
+    int64_t stride_b = checked_stride_mul(K, N);
+    int64_t stride_c = checked_stride_mul(M, N);
 
 #ifdef TENZOR_HAS_CUBLAS
     // Use cuBLAS for large matrices (FP16 benefits from Tensor Core acceleration)
@@ -1819,9 +1830,9 @@ void batched_matmul_bf16(
     int64_t batch_size, int64_t M, int64_t N, int64_t K,
     cudaStream_t stream = 0) {
 
-    int64_t stride_a = M * K;
-    int64_t stride_b = K * N;
-    int64_t stride_c = M * N;
+    int64_t stride_a = checked_stride_mul(M, K);
+    int64_t stride_b = checked_stride_mul(K, N);
+    int64_t stride_c = checked_stride_mul(M, N);
 
 #ifdef TENZOR_HAS_CUBLAS
     // Always use cuBLAS for batched matmul - BF16 benefits from Tensor Core acceleration

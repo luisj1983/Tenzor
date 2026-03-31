@@ -325,7 +325,7 @@ auto linalg_det_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
             data, d_ipiv, result.data<double>(), n, nbatch);
     }
 
-    HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : 0));
+    HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
     backend::rocm::RocmCachingAllocator::get().free(d_ipiv);
     return result;
 }
@@ -403,7 +403,7 @@ auto linalg_inv_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
         }
     }
 
-    HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : 0));
+    HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
     backend::rocm::RocmCachingAllocator::get().free(d_ipiv);
     return identity;
 }
@@ -470,7 +470,7 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, hipStream_t stream) -
         }
     }
 
-    HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : 0));
+    HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
     backend::rocm::RocmCachingAllocator::get().free(d_ipiv);
     return work_b;
 }
@@ -594,7 +594,7 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, hipStream_t stream)
         }
     }
 
-    HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : 0));
+    HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
     backend::rocm::RocmCachingAllocator::get().free(d_e);
     return {U, S, Vt};
 }
@@ -707,7 +707,7 @@ auto linalg_qr_kernel(const Tensor& A, hipStream_t stream)
         backend::rocm::RocmCachingAllocator::get().free(d_tau);
     }
 
-    HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : 0));
+    HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
     return {Q, R};
 }
 
@@ -775,7 +775,7 @@ auto linalg_eigh_kernel(const Tensor& A, hipStream_t stream)
         }
     }
 
-    HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : 0));
+    HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
     backend::rocm::RocmCachingAllocator::get().free(d_e);
     // work now contains eigenvectors (columns of orthogonal matrix)
     return {W, work};
@@ -871,7 +871,7 @@ auto linalg_eig_kernel(const Tensor& A, hipStream_t stream)
         }
     }
 
-    HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : 0));
+    HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
     return {WR, WI, V};
 #else
     (void)stream;
@@ -930,7 +930,7 @@ auto linalg_cholesky_kernel(const Tensor& A, bool upper, hipStream_t stream) -> 
         zero_triangle_f64<<<blocks, threads, 0, stream>>>(data, n, nbatch, upper);
     }
 
-    HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : 0));
+    HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
     return work;
 }
 

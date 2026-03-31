@@ -306,6 +306,10 @@ inline float bf16_to_f32(uint16_t bf16) {
 inline uint16_t f32_to_bf16(float f32) {
     uint32_t bits;
     __builtin_memcpy(&bits, &f32, sizeof(uint32_t));
+    // Round to nearest even (banker's rounding) for BFloat16
+    uint32_t lsb = (bits >> 16) & 1;
+    uint32_t rounding_bias = 0x7FFF + lsb;
+    bits += rounding_bias;
     return static_cast<uint16_t>(bits >> 16);
 }
 
@@ -1368,7 +1372,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
 
         queue.memcpy(d_a.get(), a_ptr, m * k * sizeof(float));
         queue.memcpy(d_b.get(), b_ptr, k * n * sizeof(float));
-        queue.wait();
+        // In-order queue: GEMM will wait for memcpy to complete
 
         const float alpha = 1.0f;
         const float beta = 0.0f;
@@ -1387,7 +1391,6 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
                 beta,
                 d_c.get(), n
             );
-            queue.wait_and_throw();
         } catch (const ::oneapi::mkl::exception& e) {
             throw std::runtime_error(std::string("oneMKL GEMM (F32) failed: ") + e.what());
         } catch (const sycl::exception& e) {
@@ -1395,7 +1398,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
         }
 
         queue.memcpy(out_ptr, d_c.get(), m * n * sizeof(float));
-        queue.wait();
+        queue.wait_and_throw();
     }
     else if (a_cont.dtype() == DType::Float64) {
         const double* a_ptr = get_data_ptr<const double>(a_cont);
@@ -1412,7 +1415,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
 
         queue.memcpy(d_a.get(), a_ptr, m * k * sizeof(double));
         queue.memcpy(d_b.get(), b_ptr, k * n * sizeof(double));
-        queue.wait();
+        // In-order queue: GEMM will wait for memcpy to complete
 
         const double alpha = 1.0;
         const double beta = 0.0;
@@ -1429,7 +1432,6 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
                 beta,
                 d_c.get(), n
             );
-            queue.wait_and_throw();
         } catch (const ::oneapi::mkl::exception& e) {
             throw std::runtime_error(std::string("oneMKL GEMM (F64) failed: ") + e.what());
         } catch (const sycl::exception& e) {
@@ -1437,7 +1439,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
         }
 
         queue.memcpy(out_ptr, d_c.get(), m * n * sizeof(double));
-        queue.wait();
+        queue.wait_and_throw();
     }
     else if (a_cont.dtype() == DType::Float16) {
         const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a_cont);

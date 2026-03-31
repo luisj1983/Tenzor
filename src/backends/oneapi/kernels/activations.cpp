@@ -108,6 +108,10 @@ inline float bf16_to_f32(uint16_t bf16) {
 inline uint16_t f32_to_bf16(float f32) {
     uint32_t bits;
     __builtin_memcpy(&bits, &f32, sizeof(uint32_t));
+    // Round to nearest even (banker's rounding) for BFloat16
+    uint32_t lsb = (bits >> 16) & 1;
+    uint32_t rounding_bias = 0x7FFF + lsb;
+    bits += rounding_bias;
     return static_cast<uint16_t>(bits >> 16);
 }
 

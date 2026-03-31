@@ -1031,29 +1031,16 @@ static void launch_full_reduction_sum(const T* d_input, T* d_output, int64_t n, 
     if (num_blocks == 1) {
         sum_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
         CUDA_CHECK(cudaGetLastError());
-        // Check for kernel launch errors
-        cudaError_t err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            throw std::runtime_error(std::string("CUDA kernel launch failed in sum_reduce_kernel: ") + cudaGetErrorString(err));
-        }
     } else {
         // Phase 1: Reduce to num_blocks intermediate results
         backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(T));
         auto* d_temp = static_cast<T*>(d_temp_guard.get());
         sum_reduce_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
         CUDA_CHECK(cudaGetLastError());
-        // Check for kernel launch errors
-        cudaError_t err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            throw std::runtime_error(std::string("CUDA kernel launch failed in sum_reduce_kernel phase 1: ") + cudaGetErrorString(err));
-        }
 
         // Phase 2: Final reduction
         sum_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
-        err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            throw std::runtime_error(std::string("CUDA kernel launch failed in sum_reduce_kernel phase 2: ") + cudaGetErrorString(err));
-        }
+        CUDA_CHECK(cudaGetLastError());
     }
     // Check for any errors during synchronization
     cudaError_t err = cudaGetLastError();

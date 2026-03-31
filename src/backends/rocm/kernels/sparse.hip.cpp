@@ -110,9 +110,10 @@ struct RocsparseHandleRAII {
         ROCSPARSE_CHECK(rocsparse_create_handle(&handle));
     }
 
-    ~RocsparseHandleRAII() {
+    ~RocsparseHandleRAII() noexcept {
         if (handle && is_backend_registry_alive()) {
-            rocsparse_destroy_handle(handle);
+            try { rocsparse_destroy_handle(handle); }
+            catch (...) { /* suppress — destructor must not throw */ }
         }
     }
 

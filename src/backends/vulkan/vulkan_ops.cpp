@@ -11978,9 +11978,19 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
                (target_dtype == DType::Int32 || target_dtype == DType::Int8 || target_dtype == DType::Bool)) {
         // Two-step via Float32: Float64/Float16 -> Float32 -> target
         two_step = true;
+    } else if (src_dtype != DType::Float32 && target_dtype != DType::Float32) {
+        // Generic two-step via Float32 for any remaining dtype pair
+        two_step = true;
     } else {
         // Unsupported direct GPU cast — fall back to CPU round-trip
-        // Transfer raw bytes to CPU first, then cast there (avoid recursive dispatchCast)
+        // This should only occur for truly unsupported src/target dtype pairs
+        static bool warned_cast = false;
+        if (!warned_cast) {
+            TENZOR_LOG_WARNING("Vulkan Cast: unsupported GPU cast from " +
+                std::string(dtype_name(src_dtype)) + " to " +
+                std::string(dtype_name(target_dtype)) + " - falling back to CPU");
+            warned_cast = true;
+        }
         Tensor cpu_copy = input.cpu();
         Tensor casted = cpu_copy.to(target_dtype);
         return casted.to(input.device());
@@ -17889,6 +17899,13 @@ auto VulkanBackend::dispatchFFT(const Tensor& input, int64_t dim, int64_t n,
 
     if (!can_cooley_tukey && !can_mixed_radix && !can_bluestein) {
         // CPU fallback
+        static bool warned_fft = false;
+        if (!warned_fft) {
+            TENZOR_LOG_WARNING(std::format("Vulkan FFT falling back to CPU for size {} "
+                    "(unsupported for GPU Cooley-Tukey/mixed-radix/Bluestein). "
+                    "This incurs a GPU->CPU->GPU roundtrip.", signal_len));
+            warned_fft = true;
+        }
         auto cpu_input = input.to(Device::cpu());
         auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
         NewOpAttributes attrs;
@@ -17993,6 +18010,13 @@ auto VulkanBackend::dispatchIFFT(const Tensor& input, int64_t dim, int64_t n,
     bool can_bluestein = size_ok;
 
     if (!can_cooley_tukey && !can_mixed_radix && !can_bluestein) {
+        static bool warned_ifft = false;
+        if (!warned_ifft) {
+            TENZOR_LOG_WARNING(std::format("Vulkan IFFT falling back to CPU for size {} "
+                    "(unsupported for GPU Cooley-Tukey/mixed-radix/Bluestein). "
+                    "This incurs a GPU->CPU->GPU roundtrip.", signal_len));
+            warned_ifft = true;
+        }
         auto cpu_input = input.to(Device::cpu());
         auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
         NewOpAttributes attrs;
@@ -18096,6 +18120,13 @@ auto VulkanBackend::dispatchRFFT(const Tensor& input, int64_t dim, int64_t n,
     bool can_bluestein = size_ok;
 
     if (!can_cooley_tukey && !can_mixed_radix && !can_bluestein) {
+        static bool warned_rfft = false;
+        if (!warned_rfft) {
+            TENZOR_LOG_WARNING(std::format("Vulkan RFFT falling back to CPU for size {} "
+                    "(unsupported for GPU Cooley-Tukey/mixed-radix/Bluestein). "
+                    "This incurs a GPU->CPU->GPU roundtrip.", signal_len));
+            warned_rfft = true;
+        }
         auto cpu_input = input.to(Device::cpu());
         auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
         NewOpAttributes attrs;
@@ -18326,6 +18357,13 @@ auto VulkanBackend::dispatchIRFFT(const Tensor& input, int64_t dim, int64_t n,
     bool can_bluestein = size_ok;
 
     if (!can_cooley_tukey && !can_mixed_radix && !can_bluestein) {
+        static bool warned_irfft = false;
+        if (!warned_irfft) {
+            TENZOR_LOG_WARNING(std::format("Vulkan IRFFT falling back to CPU for size {} "
+                    "(unsupported for GPU Cooley-Tukey/mixed-radix/Bluestein). "
+                    "This incurs a GPU->CPU->GPU roundtrip.", output_len));
+            warned_irfft = true;
+        }
         auto cpu_input = input.to(Device::cpu());
         auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
         NewOpAttributes attrs;
@@ -19346,6 +19384,13 @@ auto VulkanBackend::dispatchLinalgCholesky(const Tensor& input, bool upper) -> T
     if (shape[ndim - 2] != n) throw std::runtime_error("linalg.cholesky: input must be square");
 
     if (n > MAX_VULKAN_LINALG_SIZE) {
+        static bool warned_cholesky = false;
+        if (!warned_cholesky) {
+            TENZOR_LOG_WARNING(std::format("Vulkan linalg.cholesky falling back to CPU for {}x{} matrix "
+                    "(native shaders limited to {}x{}). This incurs a GPU->CPU->GPU roundtrip.",
+                    n, n, MAX_VULKAN_LINALG_SIZE, MAX_VULKAN_LINALG_SIZE));
+            warned_cholesky = true;
+        }
         auto cpu_input = input.to(Device::cpu());
         auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
         NewOpAttributes attrs;
@@ -19426,6 +19471,13 @@ auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor>
     int64_t n = shape[ndim - 1];
 
     if (m > MAX_VULKAN_LINALG_SIZE || n > MAX_VULKAN_LINALG_SIZE) {
+        static bool warned_qr = false;
+        if (!warned_qr) {
+            TENZOR_LOG_WARNING(std::format("Vulkan linalg.qr falling back to CPU for {}x{} matrix "
+                    "(native shaders limited to {}x{}). This incurs a GPU->CPU->GPU roundtrip.",
+                    m, n, MAX_VULKAN_LINALG_SIZE, MAX_VULKAN_LINALG_SIZE));
+            warned_qr = true;
+        }
         auto cpu_input = input.to(Device::cpu());
         auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
         NewOpAttributes attrs;
@@ -19567,6 +19619,13 @@ auto VulkanBackend::dispatchLinalgSVD(const Tensor& input, bool full_matrices) -
     // SVD only has single-workgroup shaders — no tiled path.
     // Falls back to CPU LAPACK for matrices larger than MAX_VULKAN_SVD_EIGH_SIZE.
     if (m > MAX_VULKAN_SVD_EIGH_SIZE || n > MAX_VULKAN_SVD_EIGH_SIZE) {
+        static bool warned_svd = false;
+        if (!warned_svd) {
+            TENZOR_LOG_WARNING(std::format("Vulkan linalg.svd falling back to CPU for {}x{} matrix "
+                    "(native shaders limited to {}x{}). This incurs a GPU->CPU->GPU roundtrip.",
+                    m, n, MAX_VULKAN_SVD_EIGH_SIZE, MAX_VULKAN_SVD_EIGH_SIZE));
+            warned_svd = true;
+        }
         auto cpu_input = input.to(Device::cpu());
         auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
         NewOpAttributes attrs;
@@ -19651,6 +19710,13 @@ auto VulkanBackend::dispatchLinalgEigh(const Tensor& input) -> std::vector<Tenso
     // Eigh only has single-workgroup shaders — no tiled path.
     // Falls back to CPU LAPACK for matrices larger than MAX_VULKAN_SVD_EIGH_SIZE.
     if (n > MAX_VULKAN_SVD_EIGH_SIZE) {
+        static bool warned_eigh = false;
+        if (!warned_eigh) {
+            TENZOR_LOG_WARNING(std::format("Vulkan linalg.eigh falling back to CPU for {}x{} matrix "
+                    "(native shaders limited to {}x{}). This incurs a GPU->CPU->GPU roundtrip.",
+                    n, n, MAX_VULKAN_SVD_EIGH_SIZE, MAX_VULKAN_SVD_EIGH_SIZE));
+            warned_eigh = true;
+        }
         auto cpu_input = input.to(Device::cpu());
         auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
         NewOpAttributes attrs;
@@ -19721,6 +19787,13 @@ auto VulkanBackend::dispatchLinalgEig(const Tensor& input) -> std::vector<Tensor
 
     // GPU shader limited to 32x32 (shared memory constraint)
     if (n > 32) {
+        static bool warned_eig = false;
+        if (!warned_eig) {
+            TENZOR_LOG_WARNING(std::format("Vulkan linalg.eig falling back to CPU for {}x{} matrix "
+                    "(native shaders limited to 32x32). This incurs a GPU->CPU->GPU roundtrip.",
+                    n, n));
+            warned_eig = true;
+        }
         auto cpu_input = input.to(Device::cpu());
         auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
         NewOpAttributes attrs;

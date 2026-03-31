@@ -446,8 +446,10 @@ public:
                     // Create queue for each device
                     try {
                         auto queue = std::make_shared<sycl::queue>(device,
-                            [](sycl::exception_list elist) {
+                            [this](sycl::exception_list elist) {
+                                std::lock_guard<std::mutex> lock(async_errors_mutex_);
                                 for (auto& e : elist) {
+                                    async_errors_.push_back(e);
                                     try { std::rethrow_exception(e); }
                                     catch (const sycl::exception& se) {
                                         fprintf(stderr, "SYCL async error: %s\n", se.what());
@@ -684,6 +686,7 @@ public:
     auto synchronize(int32_t device_id) -> void override {
         validate_device_id(device_id);
         get_queue(device_id).wait_and_throw();
+        check_async_errors();
     }
 
     auto create_stream(int32_t device_id) -> StreamHandle override {
@@ -771,6 +774,17 @@ private:
 
     std::vector<OneAPIDeviceData> devices_;
     std::unordered_map<void*, int32_t> allocations_;
+    std::mutex async_errors_mutex_;
+    std::vector<std::exception_ptr> async_errors_;
+
+    void check_async_errors() {
+        std::lock_guard<std::mutex> lock(async_errors_mutex_);
+        if (!async_errors_.empty()) {
+            auto e = async_errors_.front();
+            async_errors_.clear();
+            std::rethrow_exception(e);
+        }
+    }
 
     auto get_queue(int32_t device_id) -> sycl::queue& {
         return *devices_[device_id].queue;

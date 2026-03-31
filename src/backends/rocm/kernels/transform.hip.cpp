@@ -38,6 +38,15 @@ public:
          i < (n); \
          i += blockDim.x * gridDim.x)
 
+// RAII guard for HIP device memory allocations
+struct HipMemGuard {
+    void* ptr = nullptr;
+    ~HipMemGuard() { if (ptr) hipFree(ptr); }
+    HipMemGuard() = default;
+    HipMemGuard(const HipMemGuard&) = delete;
+    HipMemGuard& operator=(const HipMemGuard&) = delete;
+};
+
 constexpr int BLOCK_SIZE = 256;
 
 inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
@@ -87,10 +96,11 @@ auto contiguous_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     // Copy strides and shape to device memory
     std::vector<int64_t> strides_vec(input.strides().begin(), input.strides().end());
 
-    int64_t* d_strides;
-    int64_t* d_shape;
-    HIP_CHECK(hipMalloc(&d_strides, ndim * sizeof(int64_t)));
-    HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
+    HipMemGuard strides_guard, shape_guard;
+    HIP_CHECK(hipMalloc(&strides_guard.ptr, ndim * sizeof(int64_t)));
+    HIP_CHECK(hipMalloc(&shape_guard.ptr, ndim * sizeof(int64_t)));
+    int64_t* d_strides = static_cast<int64_t*>(strides_guard.ptr);
+    int64_t* d_shape = static_cast<int64_t*>(shape_guard.ptr);
     HIP_CHECK(hipMemcpy(d_strides, strides_vec.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
     HIP_CHECK(hipMemcpy(d_shape, shape.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
 
@@ -145,21 +155,13 @@ auto contiguous_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
             input.data<bool>(), result.data<bool>(),
             d_strides, d_shape, ndim, total_elements);
     } else {
-        HIP_CHECK(hipFree(d_strides));
-        HIP_CHECK(hipFree(d_shape));
         throw std::runtime_error("Contiguous: unsupported dtype");
     }
 
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
-        HIP_CHECK(hipFree(d_strides));
-        HIP_CHECK(hipFree(d_shape));
         throw std::runtime_error(std::string("HIP error in contiguous_kernel: ") + hipGetErrorString(err));
     }
-
-    // Free device memory
-    HIP_CHECK(hipFree(d_strides));
-    HIP_CHECK(hipFree(d_shape));
 
     return result;
 }

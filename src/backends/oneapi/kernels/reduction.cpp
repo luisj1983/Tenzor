@@ -90,6 +90,10 @@ inline float bf16_to_f32(uint16_t bf16) {
 inline uint16_t f32_to_bf16(float f32) {
     uint32_t bits;
     __builtin_memcpy(&bits, &f32, sizeof(uint32_t));
+    // Round to nearest even (banker's rounding) for BFloat16
+    uint32_t lsb = (bits >> 16) & 1;
+    uint32_t rounding_bias = 0x7FFF + lsb;
+    bits += rounding_bias;
     return static_cast<uint16_t>(bits >> 16);
 }
 
@@ -186,7 +190,7 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 sum += in_ptr[idx];
             });
 
-            queue.wait();
+            queue.wait_and_throw();
             out_ptr[0] = sum_buf[0];
             sycl::free(sum_buf, queue);
         }
@@ -202,7 +206,7 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 sum += in_ptr[idx];
             });
 
-            queue.wait();
+            queue.wait_and_throw();
             out_ptr[0] = sum_buf[0];
             sycl::free(sum_buf, queue);
         }
@@ -219,7 +223,7 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 sum += static_cast<float>(in_ptr[idx]);
             });
 
-            queue.wait();
+            queue.wait_and_throw();
             out_ptr[0] = sycl::half(sum_buf[0]);
             sycl::free(sum_buf, queue);
         }
@@ -236,7 +240,7 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 sum += bf16_to_f32(in_ptr[idx]);
             });
 
-            queue.wait();
+            queue.wait_and_throw();
             out_ptr[0] = f32_to_bf16(sum_buf[0]);
             sycl::free(sum_buf, queue);
         }
@@ -253,7 +257,7 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 sum += static_cast<int64_t>(in_ptr[idx]);
             });
 
-            queue.wait();
+            queue.wait_and_throw();
             out_ptr[0] = static_cast<int32_t>(sum_buf[0]);
             sycl::free(sum_buf, queue);
         }
@@ -288,7 +292,7 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                     if (lid == 0) out_ptr[0] = sum;
                 }
             );
-            queue.wait();
+            queue.wait_and_throw();
             sycl::free(partial_buf, queue);
         }
         else if (in_cont.dtype() == DType::Bool) {
@@ -304,7 +308,7 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                               [=](sycl::id<1> idx, auto& s) {
                 s += static_cast<int32_t>(in_ptr[idx] ? 1 : 0);
             });
-            queue.wait();
+            queue.wait_and_throw();
 
             int64_t sum = static_cast<int64_t>(sum_buf[0]);
             queue.memcpy(out_ptr, &sum, sizeof(int64_t)).wait();
@@ -498,7 +502,7 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
                 sum += in_ptr[idx];
             });
 
-            queue.wait();
+            queue.wait_and_throw();
             out_ptr[0] = sum_buf[0] * scale;
             sycl::free(sum_buf, queue);
         }
@@ -515,7 +519,7 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
                 sum += in_ptr[idx];
             });
 
-            queue.wait();
+            queue.wait_and_throw();
             out_ptr[0] = sum_buf[0] * scale;
             sycl::free(sum_buf, queue);
         }
@@ -532,7 +536,7 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
                 sum += static_cast<float>(in_ptr[idx]);
             });
 
-            queue.wait();
+            queue.wait_and_throw();
             out_ptr[0] = sycl::half(sum_buf[0] * scale);
             sycl::free(sum_buf, queue);
         }
@@ -549,7 +553,7 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
                 sum += bf16_to_f32(in_ptr[idx]);
             });
 
-            queue.wait();
+            queue.wait_and_throw();
             out_ptr[0] = f32_to_bf16(sum_buf[0] * scale);
             sycl::free(sum_buf, queue);
         }
@@ -2561,7 +2565,7 @@ auto median_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& 
         auto* d_shape = sycl::malloc_device<int64_t>(ndim, queue);
         queue.memcpy(d_strides, in_strides.data(), ndim * sizeof(int64_t));
         queue.memcpy(d_shape, shape_vec.data(), ndim * sizeof(int64_t));
-        queue.wait();
+        queue.wait_and_throw();
 
         queue.parallel_for(sycl::range<1>(outer_size), [=](sycl::id<1> id) {
             int64_t o = id[0];
@@ -2593,7 +2597,7 @@ auto median_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& 
                 }
             }
         });
-        queue.wait();
+        queue.wait_and_throw();
 
         sycl::free(d_strides, queue);
         sycl::free(d_shape, queue);
@@ -2680,7 +2684,7 @@ auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
         auto* d_shape = sycl::malloc_device<int64_t>(ndim, queue);
         queue.memcpy(d_strides, in_strides.data(), ndim * sizeof(int64_t));
         queue.memcpy(d_shape, shape_vec.data(), ndim * sizeof(int64_t));
-        queue.wait();
+        queue.wait_and_throw();
 
         queue.parallel_for(sycl::range<1>(outer_size), [=](sycl::id<1> id) {
             int64_t o = id[0];
@@ -2717,7 +2721,7 @@ auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
             val_ptr[o] = best_val;
             idx_ptr[o] = best_idx;
         });
-        queue.wait();
+        queue.wait_and_throw();
 
         sycl::free(d_strides, queue);
         sycl::free(d_shape, queue);

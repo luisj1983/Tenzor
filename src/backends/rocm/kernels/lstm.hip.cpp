@@ -55,7 +55,10 @@ public:
     rocblas_handle get() const { return handle_; }
 
     void set_stream(hipStream_t stream) {
-        rocblas_set_stream(handle_, stream);
+        rocblas_status status = rocblas_set_stream(handle_, stream);
+        if (status != rocblas_status_success) {
+            throw std::runtime_error("rocblas_set_stream failed: " + std::to_string(status));
+        }
     }
 private:
     rocblas_handle handle_ = nullptr;

@@ -32,7 +32,7 @@ inline Tensor create_cuda_zeros(const std::vector<int64_t>& shape, DType dtype, 
     Tensor t(shape, dtype, device);
     size_t bytes = t.numel() * dtype_size(dtype);
     // Use data_ptr() which returns void* for any dtype
-    cudaMemsetAsync(t.data_ptr(), 0, bytes, stream);
+    TENZOR_CUDA_CHECK(cudaMemsetAsync(t.data_ptr(), 0, bytes, stream));
     return t;
 }
 
