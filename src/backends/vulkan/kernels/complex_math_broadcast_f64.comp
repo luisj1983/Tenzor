@@ -1,0 +1,65 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Broadcasting-aware complex binary operations for Vulkan (Float64/Complex128)
+// Combines broadcasting logic from math_broadcast_f64.comp with complex
+// arithmetic from complex_math_f64.comp. Complex numbers are stored as
+// interleaved (real, imag) float64 pairs.
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer InputA { float64_t a_data[]; };
+layout(binding = 1) buffer InputB { float64_t b_data[]; };
+layout(binding = 2) buffer Output { float64_t out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint output_size;      // Number of complex output elements
+    uint op;               // 0=add, 1=sub, 2=mul, 3=div
+    uint _pad0;            // Alignment padding
+    uint ndim_a;
+    uint ndim_b;
+    uint ndim_out;
+    uint strides_a[8];     // Broadcast strides in complex-element units
+    uint strides_b[8];
+    uint shape_out[8];
+} params;
+
+void main() {
+    uint out_idx = gl_GlobalInvocationID.x;
+    if (out_idx >= params.output_size) return;
+
+    // Convert flat output index to multi-dimensional coordinates
+    uint idx_a = 0;
+    uint idx_b = 0;
+    uint tmp = out_idx;
+
+    for (uint i = 0; i < params.ndim_out; i++) {
+        uint dim_idx = params.ndim_out - 1 - i;
+        uint coord = tmp % params.shape_out[dim_idx];
+        tmp /= params.shape_out[dim_idx];
+
+        idx_a += coord * params.strides_a[dim_idx];
+        idx_b += coord * params.strides_b[dim_idx];
+    }
+
+    // Read complex values (interleaved: element index * 2 for real, * 2 + 1 for imag)
+    float64_t ar = a_data[idx_a * 2], ai = a_data[idx_a * 2 + 1];
+    float64_t br = b_data[idx_b * 2], bi = b_data[idx_b * 2 + 1];
+
+    float64_t rr, ri;
+    switch (params.op) {
+        case 0: rr = ar + br; ri = ai + bi; break;
+        case 1: rr = ar - br; ri = ai - bi; break;
+        case 2: rr = ar * br - ai * bi; ri = ar * bi + ai * br; break;
+        case 3: {
+            float64_t denom = br * br + bi * bi;
+            rr = (ar * br + ai * bi) / denom;
+            ri = (ai * br - ar * bi) / denom;
+            break;
+        }
+        default: rr = 0.0lf; ri = 0.0lf; break;
+    }
+
+    out_data[out_idx * 2] = rr;
+    out_data[out_idx * 2 + 1] = ri;
+}

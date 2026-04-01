@@ -1,15 +1,17 @@
 #version 450
-#extension GL_EXT_shader_explicit_arithmetic_types_float64 : enable
-#extension GL_EXT_shader_atomic_float : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
-// Batch Normalization 2D Backward Pass - Float64 variant
-// Computes gradients w.r.t. input, scale (gamma), and bias (beta)
+// Batch Normalization 2D Backward Pass - Float64 variant (two-pass, no atomics)
+// Pass 1: Each workgroup computes grad_input directly and writes per-workgroup
+// partial sums for grad_gamma and grad_beta into intermediate buffers.
+// Pass 2 uses reduce_partial_sums_f64.comp to sum partials across workgroups.
 //
-// Note: Uses buffer atomicAdd (shaderBufferFloat64AtomicAdd) instead of
-// shared memory atomicAdd, since shaderSharedFloat64AtomicAdd is not
-// available in standard Vulkan extensions.
+// Dispatch: one workgroup per (batch, channel) pair.
+//   gl_WorkGroupID.x = batch_idx * channels + channel_idx
+// Each workgroup iterates over the spatial dimension (H * W).
 
 layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
 
 layout(binding = 0) buffer GradOutput { double grad_output[]; };  // (N, C, H, W)
 layout(binding = 1) buffer Input { double input_data[]; };         // (N, C, H, W)
@@ -17,8 +19,8 @@ layout(binding = 2) buffer Mean { double mean_data[]; };           // (C)
 layout(binding = 3) buffer InvStd { double invstd_data[]; };        // (C) - pre-computed 1/sqrt(var+eps)
 layout(binding = 4) buffer Gamma { double gamma_data[]; };         // (C)
 layout(binding = 5) buffer GradInput { double grad_input[]; };     // (N, C, H, W)
-layout(binding = 6) buffer GradGamma { double grad_gamma[]; };     // (C) - accumulated atomically
-layout(binding = 7) buffer GradBeta { double grad_beta[]; };       // (C) - accumulated atomically
+layout(binding = 6) buffer PartialGradGamma { double partial_grad_gamma[]; };  // (N * C) partials for C channels
+layout(binding = 7) buffer PartialGradBeta { double partial_grad_beta[]; };    // (N * C) partials for C channels
 
 layout(push_constant) uniform PushConstants {
     uint n_elements;     // Total elements (N * C * H * W)
@@ -29,43 +31,68 @@ layout(push_constant) uniform PushConstants {
     uint has_gamma;      // 1 if gamma is provided, 0 otherwise
 } params;
 
-void main() {
-    uint idx = gl_GlobalInvocationID.x;
+shared double shared_grad_gamma[WORKGROUP_SIZE];
+shared double shared_grad_beta[WORKGROUP_SIZE];
 
-    if (idx >= params.n_elements) {
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint wg_id = gl_WorkGroupID.x;  // batch_idx * channels + channel_idx
+
+    uint c = wg_id % params.channels;
+    uint b = wg_id / params.channels;
+
+    if (b >= params.batch) {
         return;
     }
 
-    // Decode flat index to (b, c, hw)
-    uint temp = idx;
-    uint w = temp % params.spatial_size;
-    temp /= params.spatial_size;
-    uint c = temp % params.channels;
+    // Base offset into the (b, c) slice of the (N, C, H, W) tensor
+    uint base_idx = (b * params.channels + c) * params.spatial_size;
 
-    // Get values
-    double x = input_data[idx];
-    double grad_out = grad_output[idx];
     double mean = mean_data[c];
     double inv_std = invstd_data[c];
-
-    // Compute normalized input
-    double x_normalized = (x - mean) * inv_std;
-
-    // Compute gradient w.r.t. normalized input
-    double grad_x_normalized = grad_out;
+    double gamma = 1.0lf;
     if (params.has_gamma != 0) {
-        double gamma = gamma_data[c];
-        grad_x_normalized = grad_out * gamma;
+        gamma = gamma_data[c];
     }
 
-    // Accumulate gradients for gamma and beta using buffer atomicAdd
-    // (supported by VK_EXT_shader_atomic_float shaderBufferFloat64AtomicAdd)
-    atomicAdd(grad_gamma[c], grad_out * x_normalized);
-    atomicAdd(grad_beta[c], grad_out);
+    // Each thread accumulates over a strided portion of the spatial dimension
+    double local_gg = 0.0lf;
+    double local_gb = 0.0lf;
 
-    // Compute grad_input
-    double grad_in = grad_x_normalized * inv_std;
+    for (uint s = tid; s < params.spatial_size; s += WORKGROUP_SIZE) {
+        uint idx = base_idx + s;
+        double x = input_data[idx];
+        double grad_out = grad_output[idx];
+        double x_normalized = (x - mean) * inv_std;
 
-    // Write gradient w.r.t. input
-    grad_input[idx] = grad_in;
+        // grad_input: no contention, one thread per element
+        double grad_x_normalized = grad_out * gamma;
+        grad_input[idx] = grad_x_normalized * inv_std;
+
+        // Accumulate partial sums for grad_gamma and grad_beta
+        local_gg += grad_out * x_normalized;
+        local_gb += grad_out;
+    }
+
+    // Shared memory reduction within workgroup
+    shared_grad_gamma[tid] = local_gg;
+    shared_grad_beta[tid] = local_gb;
+    barrier();
+
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_grad_gamma[tid] += shared_grad_gamma[tid + s];
+            shared_grad_beta[tid] += shared_grad_beta[tid + s];
+        }
+        barrier();
+    }
+
+    // Thread 0 writes the workgroup's partial sum
+    // Index: one partial per workgroup, and there are (batch * channels) workgroups.
+    // The reduction shader will sum over the batch dimension for each channel.
+    // Layout: partial_grad_gamma[b * channels + c] for workgroup (b, c)
+    if (tid == 0) {
+        partial_grad_gamma[wg_id] = shared_grad_gamma[0];
+        partial_grad_beta[wg_id] = shared_grad_beta[0];
+    }
 }

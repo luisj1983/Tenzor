@@ -1,0 +1,65 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Reusable reduction shader for Float64 partial sums (Pass 2)
+// Reduces per-workgroup partial sums from the backward norm shaders into
+// final grad_weight and grad_bias buffers.
+//
+// Layout of partial buffers: partial_buf[partial_idx * channels + channel]
+// where partial_idx is in [0, num_partials).
+//
+// Dispatch: one workgroup per channel. gl_WorkGroupID.x = channel index.
+// Each workgroup sums num_partials entries for its channel.
+
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer PartialA { double partial_buf_a[]; };   // (num_partials, channels) - e.g. partial grad_weight
+layout(binding = 1) buffer PartialB { double partial_buf_b[]; };   // (num_partials, channels) - e.g. partial grad_bias
+layout(binding = 2) buffer OutputA { double output_a[]; };          // (channels) - final grad_weight
+layout(binding = 3) buffer OutputB { double output_b[]; };          // (channels) - final grad_bias
+
+layout(push_constant) uniform PushConstants {
+    uint num_partials;   // Number of workgroups from pass 1
+    uint channels;       // Number of output channels
+} params;
+
+shared double shared_sum_a[WORKGROUP_SIZE];
+shared double shared_sum_b[WORKGROUP_SIZE];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint c = gl_WorkGroupID.x;
+
+    if (c >= params.channels) {
+        return;
+    }
+
+    // Each thread accumulates over a strided portion of the partials
+    double local_sum_a = 0.0lf;
+    double local_sum_b = 0.0lf;
+
+    for (uint p = tid; p < params.num_partials; p += WORKGROUP_SIZE) {
+        local_sum_a += partial_buf_a[p * params.channels + c];
+        local_sum_b += partial_buf_b[p * params.channels + c];
+    }
+
+    shared_sum_a[tid] = local_sum_a;
+    shared_sum_b[tid] = local_sum_b;
+    barrier();
+
+    // Parallel reduction within workgroup
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_sum_a[tid] += shared_sum_a[tid + s];
+            shared_sum_b[tid] += shared_sum_b[tid + s];
+        }
+        barrier();
+    }
+
+    // Thread 0 writes final result
+    if (tid == 0) {
+        output_a[c] = shared_sum_a[0];
+        output_b[c] = shared_sum_b[0];
+    }
+}

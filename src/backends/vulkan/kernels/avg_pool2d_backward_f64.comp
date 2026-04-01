@@ -1,10 +1,8 @@
 #version 450
-#extension GL_EXT_shader_explicit_arithmetic_types_float64 : enable
-#extension GL_EXT_shader_atomic_float : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
 // Average Pooling 2D Backward Pass - Float64 variant
-// Distributes gradient evenly across pooling window
-// Uses atomic operations for overlapping regions
+// Input-centric gather pattern: one thread per input element, no atomics needed.
 
 layout(local_size_x_id = 0) in;
 
@@ -12,7 +10,7 @@ layout(binding = 0) buffer GradOutput { double grad_output[]; };  // (N, C, H_ou
 layout(binding = 1) buffer GradInput { double grad_input[]; };    // (N, C, H, W)
 
 layout(push_constant) uniform PushConstants {
-    uint n_elements;          // Total output gradient elements (N * C * H_out * W_out)
+    uint n_elements;          // Total input gradient elements (N * C * H * W)
     uint batch;               // N
     uint channels;            // C
     uint in_height;           // H
@@ -31,71 +29,76 @@ layout(push_constant) uniform PushConstants {
 void main() {
     uint idx = gl_GlobalInvocationID.x;
 
-    // Bounds check
     if (idx >= params.n_elements) {
         return;
     }
 
-    // Decode flat index to (n, c, h_out, w_out)
+    // Decode flat index to (n, c, h_in, w_in) - now over INPUT elements
     uint temp = idx;
-    uint w_out = temp % params.out_width;
-    temp /= params.out_width;
-    uint h_out = temp % params.out_height;
-    temp /= params.out_height;
+    uint w_in = temp % params.in_width;
+    temp /= params.in_width;
+    uint h_in = temp % params.in_height;
+    temp /= params.in_height;
     uint c = temp % params.channels;
     uint n = temp / params.channels;
 
-    // Get output gradient
-    double grad_out = grad_output[idx];
+    // Which output positions have pooling windows that cover (h_in, w_in)?
+    // For h dimension:
+    int num_h = int(h_in) + int(params.padding_h) - int(params.kernel_h) + 1;
+    int h_out_min;
+    if (num_h <= 0) {
+        h_out_min = 0;
+    } else {
+        h_out_min = (num_h + int(params.stride_h) - 1) / int(params.stride_h);
+    }
+    int h_out_max = min((int(h_in) + int(params.padding_h)) / int(params.stride_h),
+                        int(params.out_height) - 1);
 
-    // Compute input window bounds
-    int h_start = int(h_out * params.stride_h) - int(params.padding_h);
-    int w_start = int(w_out * params.stride_w) - int(params.padding_w);
+    // For w dimension:
+    int num_w = int(w_in) + int(params.padding_w) - int(params.kernel_w) + 1;
+    int w_out_min;
+    if (num_w <= 0) {
+        w_out_min = 0;
+    } else {
+        w_out_min = (num_w + int(params.stride_w) - 1) / int(params.stride_w);
+    }
+    int w_out_max = min((int(w_in) + int(params.padding_w)) / int(params.stride_w),
+                        int(params.out_width) - 1);
 
-    // Count valid elements in pooling window
-    uint count = 0;
+    double sum = 0.0lf;
 
-    // First pass: count valid elements
-    for (uint kh = 0; kh < params.kernel_h; kh++) {
-        for (uint kw = 0; kw < params.kernel_w; kw++) {
-            int h_in = h_start + int(kh);
-            int w_in = w_start + int(kw);
+    for (int h_out = h_out_min; h_out <= h_out_max; h_out++) {
+        int h_start = h_out * int(params.stride_h) - int(params.padding_h);
 
-            if (h_in >= 0 && h_in < int(params.in_height) &&
-                w_in >= 0 && w_in < int(params.in_width)) {
-                count++;
-            } else if (params.count_include_pad != 0) {
-                count++;
+        for (int w_out = w_out_min; w_out <= w_out_max; w_out++) {
+            int w_start = w_out * int(params.stride_w) - int(params.padding_w);
+
+            // Compute pool count for this output position
+            uint count = 0;
+            if (params.count_include_pad != 0) {
+                count = params.kernel_h * params.kernel_w;
+            } else {
+                for (uint kh = 0; kh < params.kernel_h; kh++) {
+                    int ph = h_start + int(kh);
+                    if (ph < 0 || ph >= int(params.in_height)) continue;
+                    for (uint kw = 0; kw < params.kernel_w; kw++) {
+                        int pw = w_start + int(kw);
+                        if (pw >= 0 && pw < int(params.in_width)) {
+                            count++;
+                        }
+                    }
+                }
+            }
+
+            if (count > 0) {
+                uint out_idx = n * params.channels * params.out_height * params.out_width +
+                              c * params.out_height * params.out_width +
+                              uint(h_out) * params.out_width +
+                              uint(w_out);
+                sum += grad_output[out_idx] / double(count);
             }
         }
     }
 
-    // Compute gradient per input element
-    double grad_per_element = 0.0lf;
-    if (count > 0) {
-        grad_per_element = grad_out / double(count);
-    }
-
-    // Second pass: distribute gradient to input
-    // Use uint64_t atomicCompSwap for double since atomicAdd for double may not be available
-    for (uint kh = 0; kh < params.kernel_h; kh++) {
-        for (uint kw = 0; kw < params.kernel_w; kw++) {
-            int h_in = h_start + int(kh);
-            int w_in = w_start + int(kw);
-
-            // Check if within input bounds
-            if (h_in >= 0 && h_in < int(params.in_height) &&
-                w_in >= 0 && w_in < int(params.in_width)) {
-
-                // Compute input index: (n, c, h_in, w_in)
-                uint input_idx = n * params.channels * params.in_height * params.in_width +
-                                c * params.in_height * params.in_width +
-                                uint(h_in) * params.in_width +
-                                uint(w_in);
-
-                // Atomically add gradient (for overlapping pooling windows)
-                atomicAdd(grad_input[input_idx], grad_per_element);
-            }
-        }
-    }
+    grad_input[idx] = sum;
 }

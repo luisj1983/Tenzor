@@ -1,0 +1,79 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Eigenvector back-transformation for symmetric eigendecomposition (Float64).
+// Applies accumulated Givens rotations from tridiagonal QR iteration, then
+// applies Householder reflections backward (LAPACK ORMTR equivalent) to
+// recover eigenvectors in the original basis.
+// One workgroup per batch element; thread 0 does serial work.
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer ABuf    { float64_t A[]; };      // n*n Householder vectors in lower triangle
+layout(set = 0, binding = 1) buffer TauBuf  { float64_t tau[]; };    // n Householder scalars
+layout(set = 0, binding = 2) buffer RotsBuf { float64_t rots[]; };   // 3*num_rotations rotation triplets (row_i, c, s)
+layout(set = 0, binding = 3) buffer VBuf    { float64_t V[]; };      // n*n output eigenvectors
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint num_rotations;
+    uint batch_idx;
+};
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    if (tid != 0) return;
+
+    uint a_base = batch_idx * n * n;
+    uint t_base = batch_idx * n;
+    uint r_base = batch_idx * 3 * num_rotations;
+    uint v_base = batch_idx * n * n;
+
+    // Step 1: Initialize V = I (n x n identity)
+    for (uint i = 0; i < n; i++) {
+        for (uint j = 0; j < n; j++) {
+            V[v_base + i * n + j] = (i == j) ? 1.0lf : 0.0lf;
+        }
+    }
+
+    // Step 2: Apply Givens rotations forward
+    for (uint r = 0; r < num_rotations; r++) {
+        float64_t row_f = rots[r_base + 3 * r];
+        float64_t c = rots[r_base + 3 * r + 1];
+        float64_t s = rots[r_base + 3 * r + 2];
+
+        // Sentinel: end of stored rotations
+        if (c == 0.0lf && s == 0.0lf) break;
+
+        uint row_i = uint(row_f);
+
+        for (uint j = 0; j < n; j++) {
+            float64_t v0 = V[v_base + row_i * n + j];
+            float64_t v1 = V[v_base + (row_i + 1) * n + j];
+            V[v_base + row_i * n + j]       = c * v0 - s * v1;
+            V[v_base + (row_i + 1) * n + j] = s * v0 + c * v1;
+        }
+    }
+
+    // Step 3: Apply Householder reflections backward (ORMTR)
+    if (n > 2) {
+        for (int col = int(n) - 3; col >= 0; col--) {
+            float64_t t = tau[t_base + uint(col)];
+            if (abs(t) < 1e-60lf) continue;
+
+            for (uint j = 0; j < n; j++) {
+                // Compute dot = v^T * V[:,j]
+                // v[col+1] = 1 (implicit)
+                float64_t dot = V[v_base + uint(col + 1) * n + j];
+                for (uint i = uint(col + 2); i < n; i++) {
+                    dot += A[a_base + i * n + uint(col)] * V[v_base + i * n + j];
+                }
+
+                // V[:,j] -= t * dot * v
+                V[v_base + uint(col + 1) * n + j] -= t * dot;
+                for (uint i = uint(col + 2); i < n; i++) {
+                    V[v_base + i * n + j] -= t * dot * A[a_base + i * n + uint(col)];
+                }
+            }
+        }
+    }
+}

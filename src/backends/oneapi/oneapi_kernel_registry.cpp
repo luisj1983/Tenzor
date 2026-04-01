@@ -3056,6 +3056,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         });
 
 #else // !TENZOR_HAS_ONEMKL
+    // Linalg ops require oneMKL — no SYCL-native fallback
 #define ONEMKL_STUB(OpName) \
     table.register_kernel(OpId::OpName, \
         [](std::span<const Tensor>, const OpAttributes&) -> std::vector<Tensor> { \
@@ -3071,15 +3072,104 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     ONEMKL_STUB(LinalgEigh);
     ONEMKL_STUB(LinalgEig);
     ONEMKL_STUB(LinalgCholesky);
-    ONEMKL_STUB(FFT);
-    ONEMKL_STUB(IFFT);
-    ONEMKL_STUB(RFFT);
-    ONEMKL_STUB(IRFFT);
-    ONEMKL_STUB(FFT2);
-    ONEMKL_STUB(IFFT2);
-    ONEMKL_STUB(FFTN);
-    ONEMKL_STUB(IFFTN);
 #undef ONEMKL_STUB
+
+    // FFT ops: use SYCL-native Cooley-Tukey + Bluestein fallback (implemented in fft.cpp)
+    table.register_kernel(OpId::FFT,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            int64_t n = attrs.get_int(AttrKey::N, inputs[0].shape()[dim < 0 ? dim + inputs[0].ndim() : dim]);
+            auto norm = std::string(attrs.get_string(AttrKey::Norm, "backward"));
+            return {oneapi::fft_kernel(inputs[0], dim, n, norm, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::IFFT,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            int64_t n = attrs.get_int(AttrKey::N, inputs[0].shape()[dim < 0 ? dim + inputs[0].ndim() : dim]);
+            auto norm = std::string(attrs.get_string(AttrKey::Norm, "backward"));
+            return {oneapi::ifft_kernel(inputs[0], dim, n, norm, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::RFFT,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            int64_t n = attrs.get_int(AttrKey::N, inputs[0].shape()[dim < 0 ? dim + inputs[0].ndim() : dim]);
+            auto norm = std::string(attrs.get_string(AttrKey::Norm, "backward"));
+            return {oneapi::rfft_kernel(inputs[0], dim, n, norm, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::IRFFT,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            int64_t n = attrs.get_int(AttrKey::N, 2 * (inputs[0].shape()[dim < 0 ? dim + inputs[0].ndim() : dim] - 1));
+            auto norm = std::string(attrs.get_string(AttrKey::Norm, "backward"));
+            return {oneapi::irfft_kernel(inputs[0], dim, n, norm, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::FFT2,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto dims = attrs.get_int_list(AttrKey::Dims);
+            if (dims.empty()) {
+                int64_t ndim = inputs[0].ndim();
+                dims = {ndim - 2, ndim - 1};
+            }
+            std::vector<int64_t> signal_lengths(dims.size());
+            for (size_t i = 0; i < dims.size(); ++i) {
+                int64_t d = dims[i] < 0 ? dims[i] + inputs[0].ndim() : dims[i];
+                signal_lengths[i] = inputs[0].shape()[d];
+            }
+            auto norm = std::string(attrs.get_string(AttrKey::Norm, "backward"));
+            return {oneapi::fft2_kernel(inputs[0], dims, signal_lengths, norm, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::IFFT2,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto dims = attrs.get_int_list(AttrKey::Dims);
+            if (dims.empty()) {
+                int64_t ndim = inputs[0].ndim();
+                dims = {ndim - 2, ndim - 1};
+            }
+            std::vector<int64_t> signal_lengths(dims.size());
+            for (size_t i = 0; i < dims.size(); ++i) {
+                int64_t d = dims[i] < 0 ? dims[i] + inputs[0].ndim() : dims[i];
+                signal_lengths[i] = inputs[0].shape()[d];
+            }
+            auto norm = std::string(attrs.get_string(AttrKey::Norm, "backward"));
+            return {oneapi::ifft2_kernel(inputs[0], dims, signal_lengths, norm, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::FFTN,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto dims = attrs.get_int_list(AttrKey::Dims);
+            if (dims.empty()) {
+                dims.resize(inputs[0].ndim());
+                for (int64_t i = 0; i < inputs[0].ndim(); ++i) dims[i] = i;
+            }
+            std::vector<int64_t> signal_lengths(dims.size());
+            for (size_t i = 0; i < dims.size(); ++i) {
+                int64_t d = dims[i] < 0 ? dims[i] + inputs[0].ndim() : dims[i];
+                signal_lengths[i] = inputs[0].shape()[d];
+            }
+            auto norm = std::string(attrs.get_string(AttrKey::Norm, "backward"));
+            return {oneapi::fftn_kernel(inputs[0], dims, signal_lengths, norm, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::IFFTN,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto dims = attrs.get_int_list(AttrKey::Dims);
+            if (dims.empty()) {
+                dims.resize(inputs[0].ndim());
+                for (int64_t i = 0; i < inputs[0].ndim(); ++i) dims[i] = i;
+            }
+            std::vector<int64_t> signal_lengths(dims.size());
+            for (size_t i = 0; i < dims.size(); ++i) {
+                int64_t d = dims[i] < 0 ? dims[i] + inputs[0].ndim() : dims[i];
+                signal_lengths[i] = inputs[0].shape()[d];
+            }
+            auto norm = std::string(attrs.get_string(AttrKey::Norm, "backward"));
+            return {oneapi::ifftn_kernel(inputs[0], dims, signal_lengths, norm, get_q(inputs))};
+        });
 #endif // TENZOR_HAS_ONEMKL
 
     // =========================================================================
@@ -3219,16 +3309,22 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return sparse::spmv(sp, inputs[3]);
         });
 #else // !TENZOR_HAS_ONEMKL
-#define ONEMKL_SPARSE_STUB(OpName) \
-    table.register_single_output_kernel(OpId::OpName, \
-        [](std::span<const Tensor>, const OpAttributes&) -> Tensor { \
-            throw std::runtime_error( \
-                "Operation '" #OpName "' requires oneMKL. " \
-                "Rebuild with oneMKL support enabled."); \
-        })
-    ONEMKL_SPARSE_STUB(SparseSpMM);
-    ONEMKL_SPARSE_STUB(SparseSpMV);
-#undef ONEMKL_SPARSE_STUB
+    // SYCL-native CSR SpMM/SpMV fallbacks (no oneMKL dependency)
+    table.register_single_output_kernel(OpId::SparseSpMM,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            return sparse::spmm(sp, inputs[3]);
+        });
+
+    table.register_single_output_kernel(OpId::SparseSpMV,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            return sparse::spmv(sp, inputs[3]);
+        });
 #endif // TENZOR_HAS_ONEMKL
 
     // SparseToDense: CSR components -> dense tensor

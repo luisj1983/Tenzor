@@ -1,14 +1,14 @@
 #version 450
-#extension GL_EXT_shader_explicit_arithmetic_types_float64 : enable
-#extension GL_EXT_shader_atomic_float : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
-// Group Normalization Backward Pass - Float64 variant
-// Computes gradients w.r.t. input, weight (gamma), and bias (beta)
+// Group Normalization Backward Pass - Float64 variant (two-pass, no atomics)
+// Pass 1: One workgroup per (batch, group) pair. Each workgroup computes:
+//   1. Shared memory reductions for sum_dy and sum_dy_xhat (within the group)
+//   2. Per-element grad_input (no contention)
+//   3. Per-workgroup partial sums for grad_weight and grad_bias per channel
+// Pass 2 uses reduce_partial_sums_f64.comp to sum partials across workgroups.
 //
-// One workgroup per (batch, group) pair.
-// Note: Uses buffer atomicAdd (shaderBufferFloat64AtomicAdd) instead of
-// shared memory atomicAdd, since shaderSharedFloat64AtomicAdd is not
-// available in standard Vulkan extensions.
+// Dispatch: batch_size * num_groups workgroups.
 
 layout(local_size_x_id = 0) in;
 layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
@@ -19,8 +19,8 @@ layout(binding = 2) buffer Mean { double mean_data[]; };           // (N * num_g
 layout(binding = 3) buffer Rstd { double rstd_data[]; };           // (N * num_groups)
 layout(binding = 4) buffer Weight { double weight_data[]; };       // (C)
 layout(binding = 5) buffer GradInput { double grad_input[]; };     // (N, C, H, W)
-layout(binding = 6) buffer GradWeight { double grad_weight[]; };   // (C) - accumulated atomically
-layout(binding = 7) buffer GradBias { double grad_bias[]; };       // (C) - accumulated atomically
+layout(binding = 6) buffer PartialGradWeight { double partial_grad_weight[]; };  // (N * num_groups, C)
+layout(binding = 7) buffer PartialGradBias { double partial_grad_bias[]; };      // (N * num_groups, C)
 
 layout(push_constant) uniform PushConstants {
     uint batch_size;
@@ -35,11 +35,14 @@ layout(push_constant) uniform PushConstants {
 
 shared double shared_sum_dy[WORKGROUP_SIZE];
 shared double shared_sum_dy_xhat[WORKGROUP_SIZE];
+shared double shared_grad_w[WORKGROUP_SIZE];
+shared double shared_grad_b[WORKGROUP_SIZE];
 
 void main() {
     uint tid = gl_LocalInvocationID.x;
-    uint batch_idx = gl_WorkGroupID.x / params.num_groups;
-    uint group_idx = gl_WorkGroupID.x % params.num_groups;
+    uint wg_id = gl_WorkGroupID.x;
+    uint batch_idx = wg_id / params.num_groups;
+    uint group_idx = wg_id % params.num_groups;
 
     if (batch_idx >= params.batch_size) {
         return;
@@ -96,7 +99,7 @@ void main() {
     double sum_dy_xhat = shared_sum_dy_xhat[0];
     barrier();
 
-    // Step 2: Compute grad_input and accumulate grad_weight, grad_bias
+    // Step 2: Compute grad_input (no contention)
     double fgroup_size = double(group_size);
 
     for (uint i = tid; i < group_size; i += WORKGROUP_SIZE) {
@@ -113,15 +116,58 @@ void main() {
             w = weight_data[global_channel];
         }
 
-        // Compute grad_input
         double grad_in = rstd * (grad_out * w - sum_dy / fgroup_size - xhat * sum_dy_xhat / fgroup_size);
         grad_input[idx] = grad_in;
+    }
 
-        // Accumulate grad_weight and grad_bias using buffer atomicAdd
-        // (supported by VK_EXT_shader_atomic_float shaderBufferFloat64AtomicAdd)
-        if (params.affine > 0) {
-            atomicAdd(grad_weight[global_channel], grad_out * xhat);
-            atomicAdd(grad_bias[global_channel], grad_out);
+    // Step 3: Compute per-workgroup partial sums for grad_weight and grad_bias
+    // per channel within this group. We iterate over channels_per_group, doing a
+    // shared memory reduction for each channel.
+    uint partial_base = wg_id * params.num_channels;
+
+    // Zero out channels outside this workgroup's group (not strictly needed if
+    // the reduction shader only sums the relevant entries, but keeps things clean)
+    for (uint gc = tid; gc < params.num_channels; gc += WORKGROUP_SIZE) {
+        partial_grad_weight[partial_base + gc] = 0.0lf;
+        partial_grad_bias[partial_base + gc] = 0.0lf;
+    }
+    barrier();
+
+    for (uint lc = 0; lc < channels_per_group; lc++) {
+        uint global_channel = group_idx * channels_per_group + lc;
+        uint channel_start = group_start + lc * spatial_size;
+
+        // Each thread accumulates over its portion of the spatial dimension
+        double local_gw = 0.0lf;
+        double local_gb = 0.0lf;
+
+        for (uint s = tid; s < spatial_size; s += WORKGROUP_SIZE) {
+            uint idx = channel_start + s;
+            double grad_out = grad_output[idx];
+            double x = input_data[idx];
+            double xhat = (x - mean) * rstd;
+
+            local_gw += grad_out * xhat;
+            local_gb += grad_out;
         }
+
+        shared_grad_w[tid] = local_gw;
+        shared_grad_b[tid] = local_gb;
+        barrier();
+
+        // Parallel reduction
+        for (uint rs = WORKGROUP_SIZE / 2; rs > 0; rs >>= 1) {
+            if (tid < rs) {
+                shared_grad_w[tid] += shared_grad_w[tid + rs];
+                shared_grad_b[tid] += shared_grad_b[tid + rs];
+            }
+            barrier();
+        }
+
+        if (tid == 0) {
+            partial_grad_weight[partial_base + global_channel] = shared_grad_w[0];
+            partial_grad_bias[partial_base + global_channel] = shared_grad_b[0];
+        }
+        barrier();
     }
 }

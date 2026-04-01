@@ -89,8 +89,57 @@ auto spmv_kernel(const SparseTensor& A, const Tensor& x, sycl::queue& queue) -> 
 
     return y;
 #else
-    (void)A; (void)x; (void)queue;
-    throw std::runtime_error("oneapi spmv_kernel requires oneMKL");
+    // SYCL-native CSR SpMV fallback (one work-item per row)
+    if (A.layout() != SparseLayout::CSR) {
+        throw std::runtime_error("oneapi spmv_kernel requires CSR format");
+    }
+
+    const auto& shape = A.shape();
+    int64_t m = shape[0];
+
+    auto crow = A.crow_indices();
+    auto col = A.col_indices();
+    auto vals = A.values();
+
+    Tensor y({m}, vals.dtype(), vals.device());
+
+    if (vals.dtype() == DType::Float32) {
+        auto* crow_ptr = crow.data<std::int32_t>();
+        auto* col_ptr = col.data<std::int32_t>();
+        auto* val_ptr = vals.data<float>();
+        auto* x_ptr = x.data<float>();
+        auto* y_ptr = y.data<float>();
+
+        queue.parallel_for(sycl::range<1>(static_cast<size_t>(m)),
+            [=](sycl::id<1> idx) {
+                int64_t row = static_cast<int64_t>(idx[0]);
+                float sum = 0.0f;
+                for (std::int32_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
+                    sum += val_ptr[j] * x_ptr[col_ptr[j]];
+                }
+                y_ptr[row] = sum;
+            }).wait();
+    } else if (vals.dtype() == DType::Float64) {
+        auto* crow_ptr = crow.data<std::int32_t>();
+        auto* col_ptr = col.data<std::int32_t>();
+        auto* val_ptr = vals.data<double>();
+        auto* x_ptr = x.data<double>();
+        auto* y_ptr = y.data<double>();
+
+        queue.parallel_for(sycl::range<1>(static_cast<size_t>(m)),
+            [=](sycl::id<1> idx) {
+                int64_t row = static_cast<int64_t>(idx[0]);
+                double sum = 0.0;
+                for (std::int32_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
+                    sum += val_ptr[j] * x_ptr[col_ptr[j]];
+                }
+                y_ptr[row] = sum;
+            }).wait();
+    } else {
+        throw std::runtime_error("oneapi spmv_kernel: unsupported dtype (requires Float32 or Float64)");
+    }
+
+    return y;
 #endif
 }
 
@@ -169,8 +218,61 @@ auto spmm_kernel(const SparseTensor& A, const Tensor& B, sycl::queue& queue) -> 
 
     return C;
 #else
-    (void)A; (void)B; (void)queue;
-    throw std::runtime_error("oneapi spmm_kernel requires oneMKL");
+    // SYCL-native CSR SpMM fallback (one work-item per output element)
+    if (A.layout() != SparseLayout::CSR) {
+        throw std::runtime_error("oneapi spmm_kernel requires CSR format");
+    }
+
+    const auto& shape = A.shape();
+    int64_t m = shape[0];
+    int64_t k = shape[1];
+    int64_t n = B.shape()[1];
+
+    auto crow = A.crow_indices();
+    auto col = A.col_indices();
+    auto vals = A.values();
+
+    Tensor C({m, n}, B.dtype(), vals.device());
+
+    if (vals.dtype() == DType::Float32) {
+        auto* crow_ptr = crow.data<std::int32_t>();
+        auto* col_ptr = col.data<std::int32_t>();
+        auto* val_ptr = vals.data<float>();
+        auto* b_ptr = B.data<float>();
+        auto* c_ptr = C.data<float>();
+
+        queue.parallel_for(sycl::range<2>(static_cast<size_t>(m), static_cast<size_t>(n)),
+            [=](sycl::id<2> idx) {
+                int64_t row = static_cast<int64_t>(idx[0]);
+                int64_t c = static_cast<int64_t>(idx[1]);
+                float sum = 0.0f;
+                for (std::int32_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
+                    sum += val_ptr[j] * b_ptr[col_ptr[j] * n + c];
+                }
+                c_ptr[row * n + c] = sum;
+            }).wait();
+    } else if (vals.dtype() == DType::Float64) {
+        auto* crow_ptr = crow.data<std::int32_t>();
+        auto* col_ptr = col.data<std::int32_t>();
+        auto* val_ptr = vals.data<double>();
+        auto* b_ptr = B.data<double>();
+        auto* c_ptr = C.data<double>();
+
+        queue.parallel_for(sycl::range<2>(static_cast<size_t>(m), static_cast<size_t>(n)),
+            [=](sycl::id<2> idx) {
+                int64_t row = static_cast<int64_t>(idx[0]);
+                int64_t c = static_cast<int64_t>(idx[1]);
+                double sum = 0.0;
+                for (std::int32_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
+                    sum += val_ptr[j] * b_ptr[col_ptr[j] * n + c];
+                }
+                c_ptr[row * n + c] = sum;
+            }).wait();
+    } else {
+        throw std::runtime_error("oneapi spmm_kernel: unsupported dtype (requires Float32 or Float64)");
+    }
+
+    return C;
 #endif
 }
 

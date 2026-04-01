@@ -1,8 +1,8 @@
 #version 450
-#extension GL_EXT_shader_explicit_arithmetic_types_float64 : enable
-#extension GL_EXT_shader_atomic_float : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
 // Average Pooling 1D Backward Pass - Float64 variant
+// Input-centric gather pattern: one thread per input element, no atomics needed.
 
 layout(local_size_x_id = 0) in;
 
@@ -25,37 +25,56 @@ void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= params.n_elements) return;
 
+    // Decode flat index to (n, c, l_in) - now over INPUT elements
     uint temp = idx;
-    uint l_out = temp % params.out_length;
-    temp /= params.out_length;
+    uint l_in = temp % params.in_length;
+    temp /= params.in_length;
     uint c = temp % params.channels;
     uint n = temp / params.channels;
 
-    double grad_out = grad_output[idx];
+    // Which output positions have pooling windows that cover l_in?
+    // Window for l_out starts at: l_out * stride - padding
+    // It covers [l_out * stride - padding, l_out * stride - padding + kernel_size - 1]
+    // We need: l_out * stride - padding <= l_in <= l_out * stride - padding + kernel_size - 1
+    // => l_in - kernel_size + 1 + padding <= l_out * stride <= l_in + padding
+    // => ceil((l_in + padding - kernel_size + 1) / stride) <= l_out <= (l_in + padding) / stride
 
-    int l_start = int(l_out * params.stride) - int(params.padding);
+    int numerator = int(l_in) + int(params.padding) - int(params.kernel_size) + 1;
+    int l_out_min;
+    if (numerator <= 0) {
+        l_out_min = 0;
+    } else {
+        // Ceiling division for positive integers: (a + b - 1) / b
+        l_out_min = (numerator + int(params.stride) - 1) / int(params.stride);
+    }
 
-    uint count = 0;
-    for (uint k = 0; k < params.kernel_size; k++) {
-        int l_in = l_start + int(k);
-        if (l_in >= 0 && l_in < int(params.in_length)) {
-            count++;
-        } else if (params.count_include_pad != 0) {
-            count++;
+    int l_out_max_candidate = (int(l_in) + int(params.padding)) / int(params.stride);
+    int l_out_max = min(l_out_max_candidate, int(params.out_length) - 1);
+
+    double sum = 0.0lf;
+
+    for (int l_out = l_out_min; l_out <= l_out_max; l_out++) {
+        int l_start = l_out * int(params.stride) - int(params.padding);
+
+        // Compute the pool count for this output position
+        uint count = 0;
+        if (params.count_include_pad != 0) {
+            count = params.kernel_size;
+        } else {
+            for (uint k = 0; k < params.kernel_size; k++) {
+                int pos = l_start + int(k);
+                if (pos >= 0 && pos < int(params.in_length)) {
+                    count++;
+                }
+            }
+        }
+
+        if (count > 0) {
+            uint out_idx = n * params.channels * params.out_length +
+                          c * params.out_length + uint(l_out);
+            sum += grad_output[out_idx] / double(count);
         }
     }
 
-    double grad_per_element = 0.0lf;
-    if (count > 0) {
-        grad_per_element = grad_out / double(count);
-    }
-
-    for (uint k = 0; k < params.kernel_size; k++) {
-        int l_in = l_start + int(k);
-        if (l_in >= 0 && l_in < int(params.in_length)) {
-            uint input_idx = n * params.channels * params.in_length +
-                            c * params.in_length + uint(l_in);
-            atomicAdd(grad_input[input_idx], grad_per_element);
-        }
-    }
+    grad_input[idx] = sum;
 }

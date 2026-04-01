@@ -1,8 +1,8 @@
 #version 450
-#extension GL_EXT_shader_explicit_arithmetic_types_float64 : enable
-#extension GL_EXT_shader_atomic_float : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
 // Average Pooling 3D Backward Pass - Float64 variant
+// Input-centric gather pattern: one thread per input element, no atomics needed.
 
 layout(local_size_x_id = 0) in;
 
@@ -34,60 +34,95 @@ void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= params.n_elements) return;
 
+    // Decode flat index to (bc, d_in, h_in, w_in) - now over INPUT elements
     uint temp = idx;
-    uint w_out = temp % params.out_width;
-    temp /= params.out_width;
-    uint h_out = temp % params.out_height;
-    temp /= params.out_height;
-    uint d_out = temp % params.out_depth;
-    uint bc = temp / params.out_depth;
+    uint w_in = temp % params.in_width;
+    temp /= params.in_width;
+    uint h_in = temp % params.in_height;
+    temp /= params.in_height;
+    uint d_in = temp % params.in_depth;
+    uint bc = temp / params.in_depth;
 
-    double grad_out = grad_output[idx];
+    // Which output positions have pooling windows that cover (d_in, h_in, w_in)?
 
-    int d_start = int(d_out * params.stride_d) - int(params.padding_d);
-    int h_start = int(h_out * params.stride_h) - int(params.padding_h);
-    int w_start = int(w_out * params.stride_w) - int(params.padding_w);
+    // Depth dimension
+    int num_d = int(d_in) + int(params.padding_d) - int(params.kernel_d) + 1;
+    int d_out_min;
+    if (num_d <= 0) {
+        d_out_min = 0;
+    } else {
+        d_out_min = (num_d + int(params.stride_d) - 1) / int(params.stride_d);
+    }
+    int d_out_max = min((int(d_in) + int(params.padding_d)) / int(params.stride_d),
+                        int(params.out_depth) - 1);
 
-    uint count = 0;
-    for (uint kd = 0; kd < params.kernel_d; kd++) {
-        int d_in = d_start + int(kd);
-        for (uint kh = 0; kh < params.kernel_h; kh++) {
-            int h_in = h_start + int(kh);
-            for (uint kw = 0; kw < params.kernel_w; kw++) {
-                int w_in = w_start + int(kw);
-                if (d_in >= 0 && d_in < int(params.in_depth) &&
-                    h_in >= 0 && h_in < int(params.in_height) &&
-                    w_in >= 0 && w_in < int(params.in_width)) {
-                    count++;
-                } else if (params.count_include_pad != 0) {
-                    count++;
+    // Height dimension
+    int num_h = int(h_in) + int(params.padding_h) - int(params.kernel_h) + 1;
+    int h_out_min;
+    if (num_h <= 0) {
+        h_out_min = 0;
+    } else {
+        h_out_min = (num_h + int(params.stride_h) - 1) / int(params.stride_h);
+    }
+    int h_out_max = min((int(h_in) + int(params.padding_h)) / int(params.stride_h),
+                        int(params.out_height) - 1);
+
+    // Width dimension
+    int num_w = int(w_in) + int(params.padding_w) - int(params.kernel_w) + 1;
+    int w_out_min;
+    if (num_w <= 0) {
+        w_out_min = 0;
+    } else {
+        w_out_min = (num_w + int(params.stride_w) - 1) / int(params.stride_w);
+    }
+    int w_out_max = min((int(w_in) + int(params.padding_w)) / int(params.stride_w),
+                        int(params.out_width) - 1);
+
+    uint in_spatial = params.in_depth * params.in_height * params.in_width;
+    uint out_spatial = params.out_depth * params.out_height * params.out_width;
+
+    double sum = 0.0lf;
+
+    for (int d_out = d_out_min; d_out <= d_out_max; d_out++) {
+        int d_start = d_out * int(params.stride_d) - int(params.padding_d);
+
+        for (int h_out = h_out_min; h_out <= h_out_max; h_out++) {
+            int h_start = h_out * int(params.stride_h) - int(params.padding_h);
+
+            for (int w_out = w_out_min; w_out <= w_out_max; w_out++) {
+                int w_start = w_out * int(params.stride_w) - int(params.padding_w);
+
+                // Compute pool count for this output position
+                uint count = 0;
+                if (params.count_include_pad != 0) {
+                    count = params.kernel_d * params.kernel_h * params.kernel_w;
+                } else {
+                    for (uint kd = 0; kd < params.kernel_d; kd++) {
+                        int pd = d_start + int(kd);
+                        if (pd < 0 || pd >= int(params.in_depth)) continue;
+                        for (uint kh = 0; kh < params.kernel_h; kh++) {
+                            int ph = h_start + int(kh);
+                            if (ph < 0 || ph >= int(params.in_height)) continue;
+                            for (uint kw = 0; kw < params.kernel_w; kw++) {
+                                int pw = w_start + int(kw);
+                                if (pw >= 0 && pw < int(params.in_width)) {
+                                    count++;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (count > 0) {
+                    uint out_idx = bc * out_spatial +
+                                  uint(d_out) * params.out_height * params.out_width +
+                                  uint(h_out) * params.out_width +
+                                  uint(w_out);
+                    sum += grad_output[out_idx] / double(count);
                 }
             }
         }
     }
 
-    double grad_per_element = 0.0lf;
-    if (count > 0) {
-        grad_per_element = grad_out / double(count);
-    }
-
-    uint in_spatial = params.in_depth * params.in_height * params.in_width;
-
-    for (uint kd = 0; kd < params.kernel_d; kd++) {
-        int d_in = d_start + int(kd);
-        if (d_in < 0 || d_in >= int(params.in_depth)) continue;
-        for (uint kh = 0; kh < params.kernel_h; kh++) {
-            int h_in = h_start + int(kh);
-            if (h_in < 0 || h_in >= int(params.in_height)) continue;
-            for (uint kw = 0; kw < params.kernel_w; kw++) {
-                int w_in = w_start + int(kw);
-                if (w_in < 0 || w_in >= int(params.in_width)) continue;
-
-                uint input_idx = bc * in_spatial +
-                                uint(d_in) * params.in_height * params.in_width +
-                                uint(h_in) * params.in_width + uint(w_in);
-                atomicAdd(grad_input[input_idx], grad_per_element);
-            }
-        }
-    }
+    grad_input[idx] = sum;
 }
