@@ -27,20 +27,27 @@ layout(set = 0, binding = 0) buffer InputBuf  { uint data_in[];  };  // N/2 comp
 layout(set = 0, binding = 1) buffer OutputBuf { uint data_out[]; };  // N real (packed)
 
 layout(push_constant) uniform PushConstants {
-    uint n;            // Original real FFT size (N)
-    uint batch_offset; // Offset in real elements for output
+    uint n;                // Original real FFT size (N)
+    uint batch_size;       // Number of independent FFTs
+    uint in_batch_stride;  // Stride between input batches (in uint32 words / complex elements)
+    uint out_batch_stride; // Stride between output batches (in uint32 words)
 };
 
 void main() {
     uint tid = gl_GlobalInvocationID.x;
     uint half_n = n / 2;
-    if (tid >= half_n) return;
+    uint total_items = half_n * batch_size;
+    if (tid >= total_items) return;
+
+    uint batch_idx = tid / half_n;
+    uint local_tid = tid % half_n;
 
     // Complex element k holds (real[2k], real[2k+1])
-    vec2 complex_val = unpackBF16x2(data_in[tid]);
+    uint src_word = batch_idx * in_batch_stride + local_tid;
+    vec2 complex_val = unpackBF16x2(data_in[src_word]);
 
     // Write two real values to output as one packed uint32
     // real[2k] = complex_val.x, real[2k+1] = complex_val.y
-    uint dst_word = (batch_offset / 2) + tid;
+    uint dst_word = batch_idx * out_batch_stride + local_tid;
     data_out[dst_word] = packBF16x2(complex_val);
 }

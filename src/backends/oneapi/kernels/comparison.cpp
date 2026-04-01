@@ -3,16 +3,6 @@
 #include <sycl/sycl.hpp>
 #include <stdexcept>
 
-// Forward declaration for broadcasting fallback
-namespace tenzor {
-    auto eq(const Tensor& a, const Tensor& b) -> Tensor;
-    auto ne(const Tensor& a, const Tensor& b) -> Tensor;
-    auto lt(const Tensor& a, const Tensor& b) -> Tensor;
-    auto le(const Tensor& a, const Tensor& b) -> Tensor;
-    auto gt(const Tensor& a, const Tensor& b) -> Tensor;
-    auto ge(const Tensor& a, const Tensor& b) -> Tensor;
-}
-
 namespace tenzor {
 namespace oneapi {
 

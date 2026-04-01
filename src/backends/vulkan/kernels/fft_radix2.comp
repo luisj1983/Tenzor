@@ -12,7 +12,8 @@ layout(push_constant) uniform PushConstants {
     uint N;             // Total FFT size
     uint stage_stride;  // Stride for this stage (product of previous radices)
     uint direction;     // 0 = forward, 1 = inverse
-    uint batch_offset;  // Offset for batched FFTs (in complex elements)
+    uint batch_size;    // Number of batches
+    uint batch_stride;  // Stride between batches (in complex elements)
 };
 
 const float PI = 3.14159265358979323846;
@@ -20,11 +21,14 @@ const float PI = 3.14159265358979323846;
 void main() {
     uint tid = gl_GlobalInvocationID.x;
     uint n_butterflies = N / 2;
-    if (tid >= n_butterflies) return;
+    uint total_items = n_butterflies * batch_size;
+    if (tid >= total_items) return;
+    uint batch_idx = tid / n_butterflies;
+    uint local_tid = tid % n_butterflies;
 
     // Determine position in the butterfly structure
-    uint group = tid / stage_stride;
-    uint pos = tid % stage_stride;
+    uint group = local_tid / stage_stride;
+    uint pos = local_tid % stage_stride;
 
     // Input indices (Stockham layout)
     uint i0 = group * stage_stride * 2 + pos;
@@ -35,10 +39,10 @@ void main() {
     uint o1 = o0 + n_butterflies;
 
     // Apply batch offset
-    uint b0_in = (batch_offset + i0) * 2;
-    uint b1_in = (batch_offset + i1) * 2;
-    uint b0_out = (batch_offset + o0) * 2;
-    uint b1_out = (batch_offset + o1) * 2;
+    uint b0_in = (batch_idx * batch_stride + i0) * 2;
+    uint b1_in = (batch_idx * batch_stride + i1) * 2;
+    uint b0_out = (batch_idx * batch_stride + o0) * 2;
+    uint b1_out = (batch_idx * batch_stride + o1) * 2;
 
     // Load
     float a0_re = data_in[b0_in], a0_im = data_in[b0_in + 1];

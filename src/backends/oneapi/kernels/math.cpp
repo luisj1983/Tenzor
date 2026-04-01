@@ -8,14 +8,6 @@
 #include <oneapi/mkl.hpp>
 #endif
 
-// Forward declaration for broadcasting fallback
-namespace tenzor {
-    auto add(const Tensor& a, const Tensor& b) -> Tensor;
-    auto sub(const Tensor& a, const Tensor& b) -> Tensor;
-    auto mul(const Tensor& a, const Tensor& b) -> Tensor;
-    auto div(const Tensor& a, const Tensor& b) -> Tensor;
-}
-
 // Forward declaration for contiguous kernel
 namespace tenzor {
 namespace oneapi {

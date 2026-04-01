@@ -9,8 +9,10 @@ layout(set = 0, binding = 0) buffer InputBuf  { double data_in[];  };
 layout(set = 0, binding = 1) buffer OutputBuf { double data_out[]; };
 
 layout(push_constant) uniform PushConstants {
-    uint n;
-    uint batch_offset;
+    uint n;                // Original real FFT size (N)
+    uint batch_size;       // Number of independent FFTs
+    uint in_batch_stride;  // Stride between input batches (in double elements)
+    uint out_batch_stride; // Stride between output batches (in complex elements)
 };
 
 const double PI_D = 3.14159265358979323846LF;
@@ -18,24 +20,30 @@ const double PI_D = 3.14159265358979323846LF;
 void main() {
     uint tid = gl_GlobalInvocationID.x;
     uint half_n = n / 2;
+    uint total_items = half_n * batch_size;
+    if (tid >= total_items) return;
 
-    if (tid >= half_n) return;
+    uint batch_idx = tid / half_n;
+    uint local_tid = tid % half_n;
 
-    if (tid == 0) {
-        double x0_re = data_in[0];
-        double xn_re = data_in[half_n * 2];
-        data_out[batch_offset * 2]     = x0_re + xn_re;
-        data_out[batch_offset * 2 + 1] = x0_re - xn_re;
+    uint in_base = batch_idx * in_batch_stride;
+    uint out_base = batch_idx * out_batch_stride;
+
+    if (local_tid == 0) {
+        double x0_re = data_in[in_base];
+        double xn_re = data_in[in_base + half_n * 2];
+        data_out[out_base * 2]     = x0_re + xn_re;
+        data_out[out_base * 2 + 1] = x0_re - xn_re;
         return;
     }
 
-    uint k = tid;
+    uint k = local_tid;
     uint conj_k = half_n - k;
 
-    double xk_re = data_in[k * 2];
-    double xk_im = data_in[k * 2 + 1];
-    double xc_re =  data_in[conj_k * 2];
-    double xc_im = -data_in[conj_k * 2 + 1];
+    double xk_re = data_in[in_base + k * 2];
+    double xk_im = data_in[in_base + k * 2 + 1];
+    double xc_re =  data_in[in_base + conj_k * 2];
+    double xc_im = -data_in[in_base + conj_k * 2 + 1];
 
     double a_re = xk_re + xc_re;
     double a_im = xk_im + xc_im;
@@ -50,6 +58,6 @@ void main() {
     double iw_b_re = -(w_im * b_re + w_re * b_im);
     double iw_b_im =   w_re * b_re - w_im * b_im;
 
-    data_out[(batch_offset + k) * 2]     = a_re + iw_b_re;
-    data_out[(batch_offset + k) * 2 + 1] = a_im + iw_b_im;
+    data_out[(out_base + k) * 2]     = a_re + iw_b_re;
+    data_out[(out_base + k) * 2 + 1] = a_im + iw_b_im;
 }

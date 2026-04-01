@@ -12,7 +12,8 @@ layout(push_constant) uniform PushConstants {
     uint N;
     uint stage_stride;
     uint direction;
-    uint batch_offset;
+    uint batch_size;
+    uint batch_stride;
 };
 
 const float PI = 3.14159265358979323846;
@@ -47,10 +48,13 @@ void writeF16Element(uint element_idx, float val) {
 void main() {
     uint tid = gl_GlobalInvocationID.x;
     uint n_butterflies = N / 7;
-    if (tid >= n_butterflies) return;
+    uint total_items = n_butterflies * batch_size;
+    if (tid >= total_items) return;
+    uint batch_idx = tid / n_butterflies;
+    uint local_tid = tid % n_butterflies;
 
-    uint group = tid / stage_stride;
-    uint pos = tid % stage_stride;
+    uint group = local_tid / stage_stride;
+    uint pos = local_tid % stage_stride;
 
     // Input indices (Stockham layout)
     uint i0 = group * stage_stride * 7 + pos;
@@ -75,30 +79,30 @@ void main() {
     if (direction == 1) base_angle = -base_angle;
 
     // Load with twiddle (read in F32 for precision)
-    float a0_re = readF16Element((batch_offset+i0)*2), a0_im = readF16Element((batch_offset+i0)*2+1);
+    float a0_re = readF16Element((batch_idx * batch_stride+i0)*2), a0_im = readF16Element((batch_idx * batch_stride+i0)*2+1);
 
     float w1_re = cos(base_angle), w1_im = sin(base_angle);
-    float r1 = readF16Element((batch_offset+i1)*2), j1 = readF16Element((batch_offset+i1)*2+1);
+    float r1 = readF16Element((batch_idx * batch_stride+i1)*2), j1 = readF16Element((batch_idx * batch_stride+i1)*2+1);
     float a1_re = r1*w1_re - j1*w1_im, a1_im = r1*w1_im + j1*w1_re;
 
     float w2_re = cos(2.0*base_angle), w2_im = sin(2.0*base_angle);
-    float r2 = readF16Element((batch_offset+i2)*2), j2 = readF16Element((batch_offset+i2)*2+1);
+    float r2 = readF16Element((batch_idx * batch_stride+i2)*2), j2 = readF16Element((batch_idx * batch_stride+i2)*2+1);
     float a2_re = r2*w2_re - j2*w2_im, a2_im = r2*w2_im + j2*w2_re;
 
     float w3_re = cos(3.0*base_angle), w3_im = sin(3.0*base_angle);
-    float r3 = readF16Element((batch_offset+i3)*2), j3 = readF16Element((batch_offset+i3)*2+1);
+    float r3 = readF16Element((batch_idx * batch_stride+i3)*2), j3 = readF16Element((batch_idx * batch_stride+i3)*2+1);
     float a3_re = r3*w3_re - j3*w3_im, a3_im = r3*w3_im + j3*w3_re;
 
     float w4_re = cos(4.0*base_angle), w4_im = sin(4.0*base_angle);
-    float r4 = readF16Element((batch_offset+i4)*2), j4 = readF16Element((batch_offset+i4)*2+1);
+    float r4 = readF16Element((batch_idx * batch_stride+i4)*2), j4 = readF16Element((batch_idx * batch_stride+i4)*2+1);
     float a4_re = r4*w4_re - j4*w4_im, a4_im = r4*w4_im + j4*w4_re;
 
     float w5_re = cos(5.0*base_angle), w5_im = sin(5.0*base_angle);
-    float r5 = readF16Element((batch_offset+i5)*2), j5 = readF16Element((batch_offset+i5)*2+1);
+    float r5 = readF16Element((batch_idx * batch_stride+i5)*2), j5 = readF16Element((batch_idx * batch_stride+i5)*2+1);
     float a5_re = r5*w5_re - j5*w5_im, a5_im = r5*w5_im + j5*w5_re;
 
     float w6_re = cos(6.0*base_angle), w6_im = sin(6.0*base_angle);
-    float r6 = readF16Element((batch_offset+i6)*2), j6 = readF16Element((batch_offset+i6)*2+1);
+    float r6 = readF16Element((batch_idx * batch_stride+i6)*2), j6 = readF16Element((batch_idx * batch_stride+i6)*2+1);
     float a6_re = r6*w6_re - j6*w6_im, a6_im = r6*w6_im + j6*w6_re;
 
     // 7-point DFT using symmetric decomposition
@@ -110,42 +114,42 @@ void main() {
     float d3_re = a3_re - a4_re, d3_im = a3_im - a4_im;
 
     // X[0]
-    writeF16Element((batch_offset+o0)*2,   a0_re + s1_re + s2_re + s3_re);
-    writeF16Element((batch_offset+o0)*2+1, a0_im + s1_im + s2_im + s3_im);
+    writeF16Element((batch_idx * batch_stride+o0)*2,   a0_re + s1_re + s2_re + s3_re);
+    writeF16Element((batch_idx * batch_stride+o0)*2+1, a0_im + s1_im + s2_im + s3_im);
 
     // k=1
-    writeF16Element((batch_offset+o1)*2,   a0_re + COS_2PI_7*s1_re + COS_4PI_7*s2_re + COS_6PI_7*s3_re
+    writeF16Element((batch_idx * batch_stride+o1)*2,   a0_re + COS_2PI_7*s1_re + COS_4PI_7*s2_re + COS_6PI_7*s3_re
                                                   - SIN_2PI_7*d1_im - SIN_4PI_7*d2_im - SIN_6PI_7*d3_im);
-    writeF16Element((batch_offset+o1)*2+1, a0_im + COS_2PI_7*s1_im + COS_4PI_7*s2_im + COS_6PI_7*s3_im
+    writeF16Element((batch_idx * batch_stride+o1)*2+1, a0_im + COS_2PI_7*s1_im + COS_4PI_7*s2_im + COS_6PI_7*s3_im
                                                   + SIN_2PI_7*d1_re + SIN_4PI_7*d2_re + SIN_6PI_7*d3_re);
 
     // k=2
-    writeF16Element((batch_offset+o2)*2,   a0_re + COS_4PI_7*s1_re + COS_6PI_7*s2_re + COS_2PI_7*s3_re
+    writeF16Element((batch_idx * batch_stride+o2)*2,   a0_re + COS_4PI_7*s1_re + COS_6PI_7*s2_re + COS_2PI_7*s3_re
                                                   - SIN_4PI_7*d1_im - SIN_6PI_7*d2_im + SIN_2PI_7*d3_im);
-    writeF16Element((batch_offset+o2)*2+1, a0_im + COS_4PI_7*s1_im + COS_6PI_7*s2_im + COS_2PI_7*s3_im
+    writeF16Element((batch_idx * batch_stride+o2)*2+1, a0_im + COS_4PI_7*s1_im + COS_6PI_7*s2_im + COS_2PI_7*s3_im
                                                   + SIN_4PI_7*d1_re + SIN_6PI_7*d2_re - SIN_2PI_7*d3_re);
 
     // k=3
-    writeF16Element((batch_offset+o3)*2,   a0_re + COS_6PI_7*s1_re + COS_2PI_7*s2_re + COS_4PI_7*s3_re
+    writeF16Element((batch_idx * batch_stride+o3)*2,   a0_re + COS_6PI_7*s1_re + COS_2PI_7*s2_re + COS_4PI_7*s3_re
                                                   - SIN_6PI_7*d1_im + SIN_2PI_7*d2_im + SIN_4PI_7*d3_im);
-    writeF16Element((batch_offset+o3)*2+1, a0_im + COS_6PI_7*s1_im + COS_2PI_7*s2_im + COS_4PI_7*s3_im
+    writeF16Element((batch_idx * batch_stride+o3)*2+1, a0_im + COS_6PI_7*s1_im + COS_2PI_7*s2_im + COS_4PI_7*s3_im
                                                   + SIN_6PI_7*d1_re - SIN_2PI_7*d2_re - SIN_4PI_7*d3_re);
 
     // k=4
-    writeF16Element((batch_offset+o4)*2,   a0_re + COS_6PI_7*s1_re + COS_2PI_7*s2_re + COS_4PI_7*s3_re
+    writeF16Element((batch_idx * batch_stride+o4)*2,   a0_re + COS_6PI_7*s1_re + COS_2PI_7*s2_re + COS_4PI_7*s3_re
                                                   + SIN_6PI_7*d1_im - SIN_2PI_7*d2_im - SIN_4PI_7*d3_im);
-    writeF16Element((batch_offset+o4)*2+1, a0_im + COS_6PI_7*s1_im + COS_2PI_7*s2_im + COS_4PI_7*s3_im
+    writeF16Element((batch_idx * batch_stride+o4)*2+1, a0_im + COS_6PI_7*s1_im + COS_2PI_7*s2_im + COS_4PI_7*s3_im
                                                   - SIN_6PI_7*d1_re + SIN_2PI_7*d2_re + SIN_4PI_7*d3_re);
 
     // k=5
-    writeF16Element((batch_offset+o5)*2,   a0_re + COS_4PI_7*s1_re + COS_6PI_7*s2_re + COS_2PI_7*s3_re
+    writeF16Element((batch_idx * batch_stride+o5)*2,   a0_re + COS_4PI_7*s1_re + COS_6PI_7*s2_re + COS_2PI_7*s3_re
                                                   + SIN_4PI_7*d1_im + SIN_6PI_7*d2_im - SIN_2PI_7*d3_im);
-    writeF16Element((batch_offset+o5)*2+1, a0_im + COS_4PI_7*s1_im + COS_6PI_7*s2_im + COS_2PI_7*s3_im
+    writeF16Element((batch_idx * batch_stride+o5)*2+1, a0_im + COS_4PI_7*s1_im + COS_6PI_7*s2_im + COS_2PI_7*s3_im
                                                   - SIN_4PI_7*d1_re - SIN_6PI_7*d2_re + SIN_2PI_7*d3_re);
 
     // k=6
-    writeF16Element((batch_offset+o6)*2,   a0_re + COS_2PI_7*s1_re + COS_4PI_7*s2_re + COS_6PI_7*s3_re
+    writeF16Element((batch_idx * batch_stride+o6)*2,   a0_re + COS_2PI_7*s1_re + COS_4PI_7*s2_re + COS_6PI_7*s3_re
                                                   + SIN_2PI_7*d1_im + SIN_4PI_7*d2_im + SIN_6PI_7*d3_im);
-    writeF16Element((batch_offset+o6)*2+1, a0_im + COS_2PI_7*s1_im + COS_4PI_7*s2_im + COS_6PI_7*s3_im
+    writeF16Element((batch_idx * batch_stride+o6)*2+1, a0_im + COS_2PI_7*s1_im + COS_4PI_7*s2_im + COS_6PI_7*s3_im
                                                   - SIN_2PI_7*d1_re - SIN_4PI_7*d2_re - SIN_6PI_7*d3_re);
 }

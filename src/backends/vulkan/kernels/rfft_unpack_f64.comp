@@ -9,8 +9,10 @@ layout(set = 0, binding = 0) buffer InputBuf  { double data_in[];  };
 layout(set = 0, binding = 1) buffer OutputBuf { double data_out[]; };
 
 layout(push_constant) uniform PushConstants {
-    uint n;
-    uint batch_offset;
+    uint n;                // Original real FFT size (N)
+    uint batch_size;       // Number of independent FFTs
+    uint in_batch_stride;  // Stride between input batches (in complex elements)
+    uint out_batch_stride; // Stride between output batches (in double elements)
 };
 
 const double PI_D = 3.14159265358979323846LF;
@@ -18,31 +20,38 @@ const double PI_D = 3.14159265358979323846LF;
 void main() {
     uint tid = gl_GlobalInvocationID.x;
     uint half_n = n / 2;
+    uint items_per_batch = half_n + 1;
+    uint total_items = items_per_batch * batch_size;
+    if (tid >= total_items) return;
 
-    if (tid > half_n) return;
+    uint batch_idx = tid / items_per_batch;
+    uint local_tid = tid % items_per_batch;
 
-    if (tid == 0) {
-        double z0_re = data_in[batch_offset * 2];
-        double z0_im = data_in[batch_offset * 2 + 1];
-        data_out[0] = z0_re + z0_im;
-        data_out[1] = 0.0LF;
+    uint in_base = batch_idx * in_batch_stride;
+    uint out_base = batch_idx * out_batch_stride;
+
+    if (local_tid == 0) {
+        double z0_re = data_in[in_base * 2];
+        double z0_im = data_in[in_base * 2 + 1];
+        data_out[out_base] = z0_re + z0_im;
+        data_out[out_base + 1] = 0.0LF;
         return;
     }
-    if (tid == half_n) {
-        double z0_re = data_in[batch_offset * 2];
-        double z0_im = data_in[batch_offset * 2 + 1];
-        data_out[half_n * 2] = z0_re - z0_im;
-        data_out[half_n * 2 + 1] = 0.0LF;
+    if (local_tid == half_n) {
+        double z0_re = data_in[in_base * 2];
+        double z0_im = data_in[in_base * 2 + 1];
+        data_out[out_base + half_n * 2] = z0_re - z0_im;
+        data_out[out_base + half_n * 2 + 1] = 0.0LF;
         return;
     }
 
-    uint k = tid;
+    uint k = local_tid;
     uint conj_k = half_n - k;
 
-    double zk_re = data_in[(batch_offset + k) * 2];
-    double zk_im = data_in[(batch_offset + k) * 2 + 1];
-    double zc_re =  data_in[(batch_offset + conj_k) * 2];
-    double zc_im = -data_in[(batch_offset + conj_k) * 2 + 1];
+    double zk_re = data_in[(in_base + k) * 2];
+    double zk_im = data_in[(in_base + k) * 2 + 1];
+    double zc_re =  data_in[(in_base + conj_k) * 2];
+    double zc_im = -data_in[(in_base + conj_k) * 2 + 1];
 
     double a_re = zk_re + zc_re;
     double a_im = zk_im + zc_im;
@@ -57,6 +66,6 @@ void main() {
     double iw_b_re = w_re * b_im + w_im * b_re;
     double iw_b_im = -w_re * b_re + w_im * b_im;
 
-    data_out[k * 2]     = 0.5LF * (a_re + iw_b_re);
-    data_out[k * 2 + 1] = 0.5LF * (a_im + iw_b_im);
+    data_out[out_base + k * 2]     = 0.5LF * (a_re + iw_b_re);
+    data_out[out_base + k * 2 + 1] = 0.5LF * (a_im + iw_b_im);
 }

@@ -17618,7 +17618,8 @@ static constexpr int64_t MAX_SMALL_LINALG_SIZE = 128;  // single-workgroup shade
 static constexpr int64_t TILED_BLOCK_SIZE = 32;        // panel width for blocked algorithms
 
 auto VulkanBackend::runFFTButterfly(const Tensor& input, uint32_t fft_size,
-                                     uint32_t direction, uint32_t batch_offset) -> Tensor {
+                                     uint32_t direction, uint32_t batch_size,
+                                     uint32_t batch_stride) -> Tensor {
     int32_t device_id = input.device().index;
     bool is_f64 = (input.dtype() == DType::Complex128);
     bool is_f16 = (input.dtype() == DType::Float16);
@@ -17638,11 +17639,13 @@ auto VulkanBackend::runFFTButterfly(const Tensor& input, uint32_t fft_size,
         struct PushConstants {
             uint32_t n;
             uint32_t log2_n;
-            uint32_t batch_offset;
+            uint32_t batch_size;
+            uint32_t batch_stride;
         } pc;
         pc.n = fft_size;
         pc.log2_n = num_stages;
-        pc.batch_offset = batch_offset;
+        pc.batch_size = batch_size;
+        pc.batch_stride = batch_stride;
 
         // F16: 1 uint32 per complex element; F64: 16 bytes; F32: 8 bytes
         size_t elem_size = is_f16 ? 4 : (is_f64 ? 16 : 8);
@@ -17660,7 +17663,7 @@ auto VulkanBackend::runFFTButterfly(const Tensor& input, uint32_t fft_size,
                                pipeline->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(pc), &pc);
-        vkCmdDispatch(cmd, div_wg(fft_size, devices_[device_id].workgroupSize), 1, 1);
+        vkCmdDispatch(cmd, div_wg(fft_size * batch_size, devices_[device_id].workgroupSize), 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
 
@@ -17678,12 +17681,14 @@ auto VulkanBackend::runFFTButterfly(const Tensor& input, uint32_t fft_size,
             uint32_t n;
             uint32_t stage;
             uint32_t direction;
-            uint32_t batch_offset;
+            uint32_t batch_size;
+            uint32_t batch_stride;
         } pc;
         pc.n = fft_size;
         pc.stage = stage;
         pc.direction = direction;
-        pc.batch_offset = batch_offset;
+        pc.batch_size = batch_size;
+        pc.batch_stride = batch_stride;
 
         size_t elem_size = is_f16 ? 4 : (is_f64 ? 16 : 8);
         size_t buf_size = input.numel() * elem_size;
@@ -17701,7 +17706,7 @@ auto VulkanBackend::runFFTButterfly(const Tensor& input, uint32_t fft_size,
                                pipeline->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(pc), &pc);
-        vkCmdDispatch(cmd, div_wg(num_butterflies, devices_[device_id].workgroupSize), 1, 1);
+        vkCmdDispatch(cmd, div_wg(num_butterflies * batch_size, devices_[device_id].workgroupSize), 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
 
@@ -17712,7 +17717,7 @@ auto VulkanBackend::runFFTButterfly(const Tensor& input, uint32_t fft_size,
 }
 
 auto VulkanBackend::runMixedRadixFFT(const Tensor& input, int64_t N, uint32_t direction,
-                                       uint32_t batch_offset) -> Tensor {
+                                       uint32_t batch_size, uint32_t batch_stride) -> Tensor {
     auto factors = factorize_fft(N);
     if (factors.empty()) {
         throw std::runtime_error("runMixedRadixFFT: N not factorable into {2,3,5,7}");
@@ -17742,12 +17747,14 @@ auto VulkanBackend::runMixedRadixFFT(const Tensor& input, int64_t N, uint32_t di
             uint32_t N_val;
             uint32_t stage_stride;
             uint32_t direction;
-            uint32_t batch_offset;
+            uint32_t batch_size;
+            uint32_t batch_stride;
         } pc;
         pc.N_val = static_cast<uint32_t>(N);
         pc.stage_stride = static_cast<uint32_t>(stage_stride);
         pc.direction = direction;
-        pc.batch_offset = batch_offset;
+        pc.batch_size = batch_size;
+        pc.batch_stride = batch_stride;
 
         uint32_t n_butterflies = static_cast<uint32_t>(N) / radix;
 
@@ -17763,7 +17770,7 @@ auto VulkanBackend::runMixedRadixFFT(const Tensor& input, int64_t N, uint32_t di
                                pipeline->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(pc), &pc);
-        vkCmdDispatch(cmd, div_wg(n_butterflies, devices_[device_id].workgroupSize), 1, 1);
+        vkCmdDispatch(cmd, div_wg(n_butterflies * batch_size, devices_[device_id].workgroupSize), 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
 
@@ -18032,14 +18039,14 @@ auto VulkanBackend::dispatchFFTBluestein(const Tensor& input, int64_t signal_len
     runFFTConjKernelGen(b_padded, static_cast<uint32_t>(N), static_cast<uint32_t>(M), sign_int);
 
     // Step 4: FFT(a), FFT(b) using power-of-2 Cooley-Tukey
-    Tensor A = runFFTButterfly(a_padded, static_cast<uint32_t>(M), 0, 0);
-    Tensor B = runFFTButterfly(b_padded, static_cast<uint32_t>(M), 0, 0);
+    Tensor A = runFFTButterfly(a_padded, static_cast<uint32_t>(M), 0, 1, static_cast<uint32_t>(M));
+    Tensor B = runFFTButterfly(b_padded, static_cast<uint32_t>(M), 0, 1, static_cast<uint32_t>(M));
 
     // Step 5: Pointwise multiply A *= B
     runFFTChirpMultiply(A, B, static_cast<uint32_t>(M), /*conjugate=*/false);
 
     // Step 6: IFFT of the product
-    Tensor conv_result = runFFTButterfly(A, static_cast<uint32_t>(M), 1, 0);
+    Tensor conv_result = runFFTButterfly(A, static_cast<uint32_t>(M), 1, 1, static_cast<uint32_t>(M));
 
     // Scale by 1/M for the IFFT
     runFFTScale(conv_result, static_cast<uint32_t>(M), 1.0 / static_cast<double>(M));
@@ -18115,17 +18122,15 @@ auto VulkanBackend::dispatchFFT(const Tensor& input, int64_t dim, int64_t n,
     auto result = working_input.contiguous();
 
     if (can_cooley_tukey) {
-        // Power-of-2: use Cooley-Tukey directly (fastest)
-        for (int64_t b = 0; b < batch_size; ++b) {
-            result = runFFTButterfly(result, static_cast<uint32_t>(signal_len), 0,
-                                      static_cast<uint32_t>(b * signal_len));
-        }
+        // Power-of-2: use Cooley-Tukey directly (fastest) — batched dispatch
+        result = runFFTButterfly(result, static_cast<uint32_t>(signal_len), 0,
+                                  static_cast<uint32_t>(batch_size),
+                                  static_cast<uint32_t>(signal_len));
     } else if (can_mixed_radix && !is_power_of_2(signal_len)) {
-        // Factorable into {2,3,5,7}: use mixed-radix Stockham
-        for (int64_t b = 0; b < batch_size; ++b) {
-            result = runMixedRadixFFT(result, signal_len, 0,
-                                       static_cast<uint32_t>(b * signal_len));
-        }
+        // Factorable into {2,3,5,7}: use mixed-radix Stockham — batched dispatch
+        result = runMixedRadixFFT(result, signal_len, 0,
+                                    static_cast<uint32_t>(batch_size),
+                                    static_cast<uint32_t>(signal_len));
     } else {
         // Non-power-of-2: use Bluestein's algorithm per batch element
         size_t elem_size = (input.dtype() == DType::Complex128) ? 16 : 8;
@@ -18223,16 +18228,14 @@ auto VulkanBackend::dispatchIFFT(const Tensor& input, int64_t dim, int64_t n,
     auto result = working_input.contiguous();
 
     if (can_cooley_tukey) {
-        for (int64_t b = 0; b < batch_size; ++b) {
-            result = runFFTButterfly(result, static_cast<uint32_t>(signal_len), 1,
-                                      static_cast<uint32_t>(b * signal_len));
-        }
+        result = runFFTButterfly(result, static_cast<uint32_t>(signal_len), 1,
+                                  static_cast<uint32_t>(batch_size),
+                                  static_cast<uint32_t>(signal_len));
     } else if (can_mixed_radix && !is_power_of_2(signal_len)) {
         // Factorable into {2,3,5,7}: use mixed-radix Stockham with direction=1 (inverse)
-        for (int64_t b = 0; b < batch_size; ++b) {
-            result = runMixedRadixFFT(result, signal_len, 1,
-                                       static_cast<uint32_t>(b * signal_len));
-        }
+        result = runMixedRadixFFT(result, signal_len, 1,
+                                    static_cast<uint32_t>(batch_size),
+                                    static_cast<uint32_t>(signal_len));
     } else {
         // Non-factorable: use Bluestein's algorithm per batch element
         size_t elem_size = (input.dtype() == DType::Complex128) ? 16 : 8;
@@ -18400,7 +18403,7 @@ auto VulkanBackend::dispatchRFFT(const Tensor& input, int64_t dim, int64_t n,
 
         for (int64_t b = 0; b < batch_size; ++b) {
             Tensor complex_input = run_real_to_complex(cont, b);
-            Tensor full_fft = runMixedRadixFFT(complex_input, signal_len, 0, 0);
+            Tensor full_fft = runMixedRadixFFT(complex_input, signal_len, 0, 1, static_cast<uint32_t>(signal_len));
             copy_half_bins_to_output(full_fft, b);
         }
 
@@ -18437,80 +18440,84 @@ auto VulkanBackend::dispatchRFFT(const Tensor& input, int64_t dim, int64_t n,
 
     auto cont = working_input.contiguous();
 
-    for (int64_t b = 0; b < batch_size; ++b) {
-        // Step 1: Pack N real values into N/2 complex
-        std::vector<int64_t> packed_shape = {half_n};
-        Tensor packed(packed_shape, complex_dtype, input.device());
+    // Step 1: Pack N real values into N/2 complex — batched
+    std::vector<int64_t> packed_shape = {batch_size * half_n};
+    Tensor packed(packed_shape, complex_dtype, input.device());
 
-        {
-            std::string shader = is_f16 ? "rfft_pack_f16" : is_f64 ? "rfft_pack_f64" : "rfft_pack";
-            auto* pipeline = getPipeline(shader, device_id);
+    {
+        std::string shader = is_f16 ? "rfft_pack_f16" : is_f64 ? "rfft_pack_f64" : "rfft_pack";
+        auto* pipeline = getPipeline(shader, device_id);
 
-            struct PushConstants {
-                uint32_t n;
-                uint32_t batch_offset;
-            } pc;
-            pc.n = static_cast<uint32_t>(signal_len);
-            pc.batch_offset = static_cast<uint32_t>(b * signal_len);
+        struct PushConstants {
+            uint32_t n;
+            uint32_t batch_size;
+            uint32_t in_batch_stride;
+            uint32_t out_batch_stride;
+        } pc;
+        pc.n = static_cast<uint32_t>(signal_len);
+        pc.batch_size = static_cast<uint32_t>(batch_size);
+        pc.in_batch_stride = static_cast<uint32_t>(signal_len);
+        pc.out_batch_stride = static_cast<uint32_t>(half_n * 2);  // complex interleaved
 
-            size_t in_size = cont.numel() * (is_f64 ? 8 : 4);
-            size_t out_size = half_n * complex_elem_size;
+        size_t in_size = cont.numel() * (is_f64 ? 8 : 4);
+        size_t out_size = batch_size * half_n * complex_elem_size;
 
-            std::vector<std::pair<uint32_t, const void*>> bindings = {
-                {0, cont.data_ptr()}, {1, packed.data_ptr()}
-            };
-            std::vector<size_t> sizes = {in_size, out_size};
-            VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, cont.data_ptr()}, {1, packed.data_ptr()}
+        };
+        std::vector<size_t> sizes = {in_size, out_size};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
-            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                   pipeline->layout(), 0, 1, &ds, 0, nullptr);
-            vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                              0, sizeof(pc), &pc);
-            vkCmdDispatch(cmd, div_wg(half_n, devices_[device_id].workgroupSize), 1, 1);
-            insertComputeOnlyBarrier(cmd);
-            endSingleTimeCommands(cmd, device_id);
-        }
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, div_wg(half_n * batch_size, devices_[device_id].workgroupSize), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+    }
 
-        // Step 2: Run N/2-point complex FFT on packed data
-        Tensor fft_result = runFFTButterfly(packed, static_cast<uint32_t>(half_n), 0, 0);
+    // Step 2: Run N/2-point complex FFT on packed data — batched
+    Tensor fft_result = runFFTButterfly(packed, static_cast<uint32_t>(half_n), 0,
+                                        static_cast<uint32_t>(batch_size),
+                                        static_cast<uint32_t>(half_n));
 
-        // Step 3: Unpack to N/2+1 complex output
-        {
-            std::string shader = is_f16 ? "rfft_unpack_f16" : is_f64 ? "rfft_unpack_f64" : "rfft_unpack";
-            auto* pipeline = getPipeline(shader, device_id);
+    // Step 3: Unpack to N/2+1 complex output — batched
+    {
+        std::string shader = is_f16 ? "rfft_unpack_f16" : is_f64 ? "rfft_unpack_f64" : "rfft_unpack";
+        auto* pipeline = getPipeline(shader, device_id);
 
-            struct PushConstants {
-                uint32_t n;
-                uint32_t batch_offset;
-            } pc;
-            pc.n = static_cast<uint32_t>(signal_len);
-            pc.batch_offset = 0;
+        struct PushConstants {
+            uint32_t n;
+            uint32_t batch_size;
+            uint32_t in_batch_stride;
+            uint32_t out_batch_stride;
+        } pc;
+        pc.n = static_cast<uint32_t>(signal_len);
+        pc.batch_size = static_cast<uint32_t>(batch_size);
+        pc.in_batch_stride = static_cast<uint32_t>(half_n * 2);
+        pc.out_batch_stride = static_cast<uint32_t>((half_n + 1) * 2);
 
-            size_t in_size = half_n * complex_elem_size;
-            size_t out_size = (half_n + 1) * complex_elem_size;
+        size_t in_size = batch_size * half_n * complex_elem_size;
+        size_t out_size = output.numel() * (is_f64 ? 8 : (is_f16 ? 2 : 4));
 
-            // Output goes to the correct batch slice
-            const void* out_ptr = static_cast<const char*>(output.data_ptr())
-                                  + b * (half_n + 1) * complex_elem_size;
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, fft_result.data_ptr()}, {1, output.data_ptr()}
+        };
+        std::vector<size_t> sizes = {in_size, out_size};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
-            std::vector<std::pair<uint32_t, const void*>> bindings = {
-                {0, fft_result.data_ptr()}, {1, out_ptr}
-            };
-            std::vector<size_t> sizes = {in_size, out_size};
-            VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
-
-            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                   pipeline->layout(), 0, 1, &ds, 0, nullptr);
-            vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                              0, sizeof(pc), &pc);
-            vkCmdDispatch(cmd, div_wg(half_n + 1, devices_[device_id].workgroupSize), 1, 1);
-            insertComputeOnlyBarrier(cmd);
-            endSingleTimeCommands(cmd, device_id);
-        }
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, div_wg((half_n + 1) * batch_size, devices_[device_id].workgroupSize), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
     }
 
     // Apply normalization
@@ -18664,7 +18671,7 @@ auto VulkanBackend::dispatchIRFFT(const Tensor& input, int64_t dim, int64_t n,
             Tensor full_spectrum = run_hermitian_mirror(cont, b);
 
             // Run inverse mixed-radix FFT
-            Tensor ifft_result = runMixedRadixFFT(full_spectrum, output_len, 1, 0);
+            Tensor ifft_result = runMixedRadixFFT(full_spectrum, output_len, 1, 1, static_cast<uint32_t>(output_len));
 
             // Scale by 1/N for the IFFT (mixed-radix does not apply normalization)
             runFFTScale(ifft_result, static_cast<uint32_t>(output_len),
@@ -18729,81 +18736,87 @@ auto VulkanBackend::dispatchIRFFT(const Tensor& input, int64_t dim, int64_t n,
 
     auto cont = working_input.contiguous();
 
-    for (int64_t b = 0; b < batch_size; ++b) {
-        // Step 1: Pack N/2+1 complex freq bins into N/2 complex values
-        std::vector<int64_t> packed_shape = {half_n};
-        Tensor packed(packed_shape, complex_dtype, input.device());
+    // Step 1: Pack N/2+1 complex freq bins into N/2 complex values — batched
+    std::vector<int64_t> packed_shape = {batch_size * half_n};
+    Tensor packed(packed_shape, complex_dtype, input.device());
 
-        {
-            std::string shader = is_f16 ? "irfft_pack_f16" : is_f64 ? "irfft_pack_f64" : "irfft_pack";
-            auto* pipeline = getPipeline(shader, device_id);
+    {
+        std::string shader = is_f16 ? "irfft_pack_f16" : is_f64 ? "irfft_pack_f64" : "irfft_pack";
+        auto* pipeline = getPipeline(shader, device_id);
 
-            struct PushConstants {
-                uint32_t n;
-                uint32_t batch_offset;
-            } pc;
-            pc.n = static_cast<uint32_t>(output_len);
-            pc.batch_offset = 0;
+        struct PushConstants {
+            uint32_t n;
+            uint32_t batch_size;
+            uint32_t in_batch_stride;
+            uint32_t out_batch_stride;
+        } pc;
+        pc.n = static_cast<uint32_t>(output_len);
+        pc.batch_size = static_cast<uint32_t>(batch_size);
+        pc.in_batch_stride = static_cast<uint32_t>(freq_bins * 2);  // complex interleaved
+        pc.out_batch_stride = static_cast<uint32_t>(half_n * 2);
 
-            const void* in_ptr = static_cast<const char*>(cont.data_ptr())
-                                 + b * freq_bins * complex_elem_size;
-            size_t in_size = freq_bins * complex_elem_size;
-            size_t out_size = half_n * complex_elem_size;
+        size_t in_size = cont.numel() * (is_f64 ? 8 : (is_f16 ? 2 : 4));
+        size_t out_size = batch_size * half_n * complex_elem_size;
 
-            std::vector<std::pair<uint32_t, const void*>> bindings = {
-                {0, in_ptr}, {1, packed.data_ptr()}
-            };
-            std::vector<size_t> sizes = {in_size, out_size};
-            VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, cont.data_ptr()}, {1, packed.data_ptr()}
+        };
+        std::vector<size_t> sizes = {in_size, out_size};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
-            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                   pipeline->layout(), 0, 1, &ds, 0, nullptr);
-            vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                              0, sizeof(pc), &pc);
-            vkCmdDispatch(cmd, div_wg(half_n, devices_[device_id].workgroupSize), 1, 1);
-            insertComputeOnlyBarrier(cmd);
-            endSingleTimeCommands(cmd, device_id);
-        }
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, div_wg(half_n * batch_size, devices_[device_id].workgroupSize), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+    }
 
-        // Step 2: Run N/2-point inverse complex FFT
-        Tensor ifft_result = runFFTButterfly(packed, static_cast<uint32_t>(half_n), 1, 0);
+    // Step 2: Run N/2-point inverse complex FFT — batched
+    Tensor ifft_result = runFFTButterfly(packed, static_cast<uint32_t>(half_n), 1,
+                                          static_cast<uint32_t>(batch_size),
+                                          static_cast<uint32_t>(half_n));
 
-        // Scale by 1/(N/2) for the IFFT
-        runFFTScale(ifft_result, static_cast<uint32_t>(half_n), 1.0 / static_cast<double>(half_n));
+    // Scale by 1/(N/2) for the IFFT
+    runFFTScale(ifft_result, static_cast<uint32_t>(half_n * batch_size), 1.0 / static_cast<double>(half_n));
 
-        // Step 3: Unpack N/2 complex values to N real values
-        {
-            std::string shader = is_f16 ? "irfft_unpack_f16" : is_f64 ? "irfft_unpack_f64" : "irfft_unpack";
-            auto* pipeline = getPipeline(shader, device_id);
+    // Step 3: Unpack N/2 complex values to N real values — batched
+    {
+        std::string shader = is_f16 ? "irfft_unpack_f16" : is_f64 ? "irfft_unpack_f64" : "irfft_unpack";
+        auto* pipeline = getPipeline(shader, device_id);
 
-            struct PushConstants {
-                uint32_t n;
-                uint32_t batch_offset;
-            } pc;
-            pc.n = static_cast<uint32_t>(output_len);
-            pc.batch_offset = static_cast<uint32_t>(b * output_len);
+        struct PushConstants {
+            uint32_t n;
+            uint32_t batch_size;
+            uint32_t in_batch_stride;
+            uint32_t out_batch_stride;
+        } pc;
+        pc.n = static_cast<uint32_t>(output_len);
+        pc.batch_size = static_cast<uint32_t>(batch_size);
+        pc.in_batch_stride = static_cast<uint32_t>(half_n * 2);
+        pc.out_batch_stride = static_cast<uint32_t>(output_len);
 
-            size_t in_size = half_n * complex_elem_size;
-            size_t out_size = output.numel() * real_elem_size;
+        size_t in_size = batch_size * half_n * complex_elem_size;
+        size_t out_size = output.numel() * real_elem_size;
 
-            std::vector<std::pair<uint32_t, const void*>> bindings = {
-                {0, ifft_result.data_ptr()}, {1, output.data_ptr()}
-            };
-            std::vector<size_t> sizes = {in_size, out_size};
-            VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, ifft_result.data_ptr()}, {1, output.data_ptr()}
+        };
+        std::vector<size_t> sizes = {in_size, out_size};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
-            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                   pipeline->layout(), 0, 1, &ds, 0, nullptr);
-            vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                              0, sizeof(pc), &pc);
-            vkCmdDispatch(cmd, div_wg(half_n, devices_[device_id].workgroupSize), 1, 1);
-            insertComputeOnlyBarrier(cmd);
-            endSingleTimeCommands(cmd, device_id);
-        }
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, div_wg(half_n * batch_size, devices_[device_id].workgroupSize), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
     }
 
     // Apply IRFFT normalization correction.

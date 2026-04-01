@@ -13,8 +13,10 @@ layout(set = 0, binding = 0) buffer InputBuf  { float data_in[];  };  // N/2+1 c
 layout(set = 0, binding = 1) buffer OutputBuf { float data_out[]; };  // N/2 complex (interleaved)
 
 layout(push_constant) uniform PushConstants {
-    uint n;            // Original real FFT size (N)
-    uint batch_offset; // Offset in complex elements into data_out
+    uint n;                // Original real FFT size (N)
+    uint batch_size;       // Number of independent FFTs
+    uint in_batch_stride;  // Stride between input batches (in float elements)
+    uint out_batch_stride; // Stride between output batches (in complex elements)
 };
 
 const float PI = 3.14159265358979323846;
@@ -22,28 +24,34 @@ const float PI = 3.14159265358979323846;
 void main() {
     uint tid = gl_GlobalInvocationID.x;
     uint half_n = n / 2;
+    uint total_items = half_n * batch_size;
+    if (tid >= total_items) return;
 
-    if (tid >= half_n) return;
+    uint batch_idx = tid / half_n;
+    uint local_tid = tid % half_n;
 
-    if (tid == 0) {
+    uint in_base = batch_idx * in_batch_stride;
+    uint out_base = batch_idx * out_batch_stride;
+
+    if (local_tid == 0) {
         // Z[0] = (X[0].re + X[N/2].re, X[0].re - X[N/2].re)
         // (X[0] and X[N/2] are both purely real)
-        float x0_re = data_in[0];
-        float xn_re = data_in[half_n * 2];
-        data_out[batch_offset * 2]     = x0_re + xn_re;
-        data_out[batch_offset * 2 + 1] = x0_re - xn_re;
+        float x0_re = data_in[in_base];
+        float xn_re = data_in[in_base + half_n * 2];
+        data_out[out_base * 2]     = x0_re + xn_re;
+        data_out[out_base * 2 + 1] = x0_re - xn_re;
         return;
     }
 
-    uint k = tid;
+    uint k = local_tid;
     uint conj_k = half_n - k;
 
     // X[k]
-    float xk_re = data_in[k * 2];
-    float xk_im = data_in[k * 2 + 1];
+    float xk_re = data_in[in_base + k * 2];
+    float xk_im = data_in[in_base + k * 2 + 1];
     // conj(X[N/2-k])
-    float xc_re =  data_in[conj_k * 2];
-    float xc_im = -data_in[conj_k * 2 + 1];
+    float xc_re =  data_in[in_base + conj_k * 2];
+    float xc_im = -data_in[in_base + conj_k * 2 + 1];
 
     // A = X[k] + conj(X[N/2-k])
     float a_re = xk_re + xc_re;
@@ -66,6 +74,6 @@ void main() {
     float iw_b_im =   w_re * b_re - w_im * b_im;
 
     // Z[k] = A + i*W^{-k}*B  (no 0.5 factor — that's absorbed by the IFFT normalization)
-    data_out[(batch_offset + k) * 2]     = a_re + iw_b_re;
-    data_out[(batch_offset + k) * 2 + 1] = a_im + iw_b_im;
+    data_out[(out_base + k) * 2]     = a_re + iw_b_re;
+    data_out[(out_base + k) * 2 + 1] = a_im + iw_b_im;
 }

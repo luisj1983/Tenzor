@@ -27,15 +27,16 @@ layout(set = 0, binding = 0) buffer InputBuf  { uint data_in[];  };
 layout(set = 0, binding = 1) buffer OutputBuf { uint data_out[]; };
 
 layout(push_constant) uniform PushConstants {
-    uint n;            // Original real FFT size (N)
-    uint batch_offset; // Offset in real elements for batching
+    uint n;                // Original real FFT size (N)
+    uint batch_size;       // Number of independent FFTs
+    uint in_batch_stride;  // Stride between input batches (in real elements)
+    uint out_batch_stride; // Stride between output batches (in uint32 words)
 };
 
 // Read a single bfloat16 from packed real buffer
 float readReal(uint element_idx) {
-    uint adjusted = batch_offset + element_idx;
-    uint word_idx = adjusted / 2;
-    uint half_sel = adjusted % 2;
+    uint word_idx = element_idx / 2;
+    uint half_sel = element_idx % 2;
     vec2 unpacked = unpackBF16x2(data_in[word_idx]);
     return (half_sel == 0) ? unpacked.x : unpacked.y;
 }
@@ -43,11 +44,17 @@ float readReal(uint element_idx) {
 void main() {
     uint tid = gl_GlobalInvocationID.x;
     uint half_n = n / 2;
-    if (tid >= half_n) return;
+    uint total_items = half_n * batch_size;
+    if (tid >= total_items) return;
+
+    uint batch_idx = tid / half_n;
+    uint local_tid = tid % half_n;
 
     // Pack real[2k] as real part, real[2k+1] as imag part
-    float re = readReal(tid * 2);
-    float im = readReal(tid * 2 + 1);
+    uint src_base = batch_idx * in_batch_stride;
+    float re = readReal(src_base + local_tid * 2);
+    float im = readReal(src_base + local_tid * 2 + 1);
 
-    data_out[tid] = packBF16x2(vec2(re, im));
+    uint dst_base = batch_idx * out_batch_stride;
+    data_out[dst_base + local_tid] = packBF16x2(vec2(re, im));
 }

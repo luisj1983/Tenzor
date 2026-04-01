@@ -2855,7 +2855,7 @@ auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& inpu
     Tensor grad_input(std::vector<int64_t>(shape.begin(), shape.end()),
                       input.dtype(), input.device());
     // grad_weight and grad_bias need atomic reduction across N
-    // Allocate on host, compute, copy back
+    // Compute grad_input, grad_weight, grad_bias on device
     Tensor grad_weight({C}, weight.dtype(), weight.device());
     Tensor grad_bias({C}, weight.dtype(), weight.device());
 

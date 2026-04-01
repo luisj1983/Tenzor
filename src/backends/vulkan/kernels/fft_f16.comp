@@ -11,44 +11,55 @@ layout(set = 0, binding = 0) buffer InputBuf  { uint data_in[];  };
 layout(set = 0, binding = 1) buffer OutputBuf { uint data_out[]; };
 
 layout(push_constant) uniform PushConstants {
-    uint n;           // FFT size (power of 2)
-    uint stage;       // Current butterfly stage (0 to log2(n)-1)
-    uint direction;   // 0 = forward, 1 = inverse
-    uint batch_offset; // Offset into buffer for batched FFTs (in complex elements)
+    uint n;            // FFT size (power of 2)
+    uint stage;        // Current butterfly stage (0 to log2(n)-1)
+    uint direction;    // 0 = forward, 1 = inverse
+    uint batch_size;   // Number of independent FFTs
+    uint batch_stride; // Stride between batches (in complex elements)
 };
 
 const float PI = 3.14159265358979323846;
 
 // Read one complex element (stored as one uint32 word with real in low 16, imag in high 16)
-vec2 readComplex(uint complex_idx) {
-    uint packed = data_in[batch_offset + complex_idx];
+vec2 readComplex(uint base, uint complex_idx) {
+    uint packed = data_in[base + complex_idx];
     vec2 unpacked = unpackHalf2x16(packed);
     return unpacked; // .x = real, .y = imag
 }
 
 // Write one complex element
-void writeComplex(uint complex_idx, vec2 val) {
-    data_out[batch_offset + complex_idx] = packHalf2x16(val);
+void writeComplex(uint base, uint complex_idx, vec2 val) {
+    data_out[base + complex_idx] = packHalf2x16(val);
 }
 
 void main() {
     uint tid = gl_GlobalInvocationID.x;
 
+    uint n_butterflies = n / 2;
+    uint total_items = n_butterflies * batch_size;
+    if (tid >= total_items) return;
+
+    uint batch_idx = tid / n_butterflies;
+    uint local_tid = tid % n_butterflies;
+
     // Each thread handles one butterfly pair
     uint half_size = 1u << stage;
     uint group_size = half_size << 1;
 
-    uint group_idx = tid / half_size;
-    uint pos_in_group = tid % half_size;
+    uint group_idx = local_tid / half_size;
+    uint pos_in_group = local_tid % half_size;
 
     uint idx_top = group_idx * group_size + pos_in_group;
     uint idx_bot = idx_top + half_size;
 
     if (idx_bot >= n) return;
 
+    // Apply batch stride
+    uint base = batch_idx * batch_stride;
+
     // Load data
-    vec2 a = readComplex(idx_top);  // (a_re, a_im)
-    vec2 b = readComplex(idx_bot);  // (b_re, b_im)
+    vec2 a = readComplex(base, idx_top);  // (a_re, a_im)
+    vec2 b = readComplex(base, idx_bot);  // (b_re, b_im)
 
     // Compute twiddle factor
     float angle = -2.0 * PI * float(pos_in_group) / float(group_size);
@@ -62,6 +73,6 @@ void main() {
     float tw_im = b.x * w_im + b.y * w_re;
 
     // Write results
-    writeComplex(idx_top, vec2(a.x + tw_re, a.y + tw_im));
-    writeComplex(idx_bot, vec2(a.x - tw_re, a.y - tw_im));
+    writeComplex(base, idx_top, vec2(a.x + tw_re, a.y + tw_im));
+    writeComplex(base, idx_bot, vec2(a.x - tw_re, a.y - tw_im));
 }

@@ -28,48 +28,57 @@ layout(set = 0, binding = 0) buffer InputBuf  { uint data_in[];  };  // N/2 comp
 layout(set = 0, binding = 1) buffer OutputBuf { uint data_out[]; };  // N/2+1 complex
 
 layout(push_constant) uniform PushConstants {
-    uint n;            // Original real FFT size (N)
-    uint batch_offset; // Offset in complex elements into data_in
+    uint n;                // Original real FFT size (N)
+    uint batch_size;       // Number of independent FFTs
+    uint in_batch_stride;  // Stride between input batches (in complex elements / uint32 words)
+    uint out_batch_stride; // Stride between output batches (in uint32 words)
 };
 
 const float PI = 3.14159265358979323846;
 
-vec2 readComplex(uint idx) {
-    return unpackBF16x2(data_in[batch_offset + idx]);
+vec2 readComplex(uint in_base, uint idx) {
+    return unpackBF16x2(data_in[in_base + idx]);
 }
 
-void writeComplex(uint idx, vec2 val) {
-    data_out[idx] = packBF16x2(val);
+void writeComplex(uint out_base, uint idx, vec2 val) {
+    data_out[out_base + idx] = packBF16x2(val);
 }
 
 void main() {
     uint tid = gl_GlobalInvocationID.x;
     uint half_n = n / 2;
+    uint items_per_batch = half_n + 1;
+    uint total_items = items_per_batch * batch_size;
+    if (tid >= total_items) return;
 
-    if (tid > half_n) return;  // Output has N/2+1 elements
+    uint batch_idx = tid / items_per_batch;
+    uint local_tid = tid % items_per_batch;
+
+    uint in_base = batch_idx * in_batch_stride;
+    uint out_base = batch_idx * out_batch_stride;
 
     // Special cases: DC and Nyquist
-    if (tid == 0) {
-        vec2 z0 = readComplex(0);
+    if (local_tid == 0) {
+        vec2 z0 = readComplex(in_base, 0);
         // X[0] = Z[0].re + Z[0].im (DC component, purely real)
-        writeComplex(0, vec2(z0.x + z0.y, 0.0));
+        writeComplex(out_base, 0, vec2(z0.x + z0.y, 0.0));
         return;
     }
-    if (tid == half_n) {
-        vec2 z0 = readComplex(0);
+    if (local_tid == half_n) {
+        vec2 z0 = readComplex(in_base, 0);
         // X[N/2] = Z[0].re - Z[0].im (Nyquist component, purely real)
-        writeComplex(half_n, vec2(z0.x - z0.y, 0.0));
+        writeComplex(out_base, half_n, vec2(z0.x - z0.y, 0.0));
         return;
     }
 
     // General case: k in [1, N/2-1]
-    uint k = tid;
+    uint k = local_tid;
     uint conj_k = half_n - k;
 
     // Z[k]
-    vec2 zk = readComplex(k);
+    vec2 zk = readComplex(in_base, k);
     // conj(Z[N/2 - k])
-    vec2 zc_raw = readComplex(conj_k);
+    vec2 zc_raw = readComplex(in_base, conj_k);
     vec2 zc = vec2(zc_raw.x, -zc_raw.y);
 
     // A = Z[k] + conj(Z[N/2-k])
@@ -90,5 +99,5 @@ void main() {
     float iw_b_im = -w_re * b_re + w_im * b_im;
 
     // X[k] = 0.5 * (A + (-i*W*B))
-    writeComplex(k, vec2(0.5 * (a_re + iw_b_re), 0.5 * (a_im + iw_b_im)));
+    writeComplex(out_base, k, vec2(0.5 * (a_re + iw_b_re), 0.5 * (a_im + iw_b_im)));
 }

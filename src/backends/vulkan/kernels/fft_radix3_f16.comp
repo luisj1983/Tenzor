@@ -12,7 +12,8 @@ layout(push_constant) uniform PushConstants {
     uint N;
     uint stage_stride;
     uint direction;
-    uint batch_offset;
+    uint batch_size;    // Number of independent FFTs
+    uint batch_stride;  // Stride between batches (in complex elements)
 };
 
 const float PI = 3.14159265358979323846;
@@ -43,10 +44,14 @@ void writeF16Element(uint element_idx, float val) {
 void main() {
     uint tid = gl_GlobalInvocationID.x;
     uint n_butterflies = N / 3;
-    if (tid >= n_butterflies) return;
+    uint total_items = n_butterflies * batch_size;
+    if (tid >= total_items) return;
 
-    uint group = tid / stage_stride;
-    uint pos = tid % stage_stride;
+    uint batch_idx = tid / n_butterflies;
+    uint local_tid = tid % n_butterflies;
+
+    uint group = local_tid / stage_stride;
+    uint pos = local_tid % stage_stride;
 
     uint i0 = group * stage_stride * 3 + pos;
     uint i1 = i0 + stage_stride;
@@ -56,13 +61,14 @@ void main() {
     uint o1 = o0 + n_butterflies;
     uint o2 = o1 + n_butterflies;
 
-    // Each complex = 2 f16 elements
-    uint b0_in = (batch_offset + i0) * 2;
-    uint b1_in = (batch_offset + i1) * 2;
-    uint b2_in = (batch_offset + i2) * 2;
-    uint b0_out = (batch_offset + o0) * 2;
-    uint b1_out = (batch_offset + o1) * 2;
-    uint b2_out = (batch_offset + o2) * 2;
+    // Apply batch stride
+    uint base = batch_idx * batch_stride;
+    uint b0_in = (base + i0) * 2;
+    uint b1_in = (base + i1) * 2;
+    uint b2_in = (base + i2) * 2;
+    uint b0_out = (base + o0) * 2;
+    uint b1_out = (base + o1) * 2;
+    uint b2_out = (base + o2) * 2;
 
     // Read and compute in F32
     float a0_re = readF16Element(b0_in), a0_im = readF16Element(b0_in + 1);

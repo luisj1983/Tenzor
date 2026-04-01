@@ -1106,17 +1106,23 @@ inline bool is_power_of_2(int64_t n) {
 }
 
 // Templated Cooley-Tukey FFT on device using SYCL parallel_for kernels.
-// Operates on interleaved complex data: [re0, im0, re1, im1, ...] of length 2*N.
+// Operates on interleaved complex data: [re0, im0, re1, im1, ...].
+// Supports batched execution: data contains batch_size independent FFTs,
+// each of length N complex elements, separated by batch_stride floats.
 // sign = -1.0 for forward FFT, +1.0 for inverse FFT.
 template<typename T>
-void cooley_tukey_fft_sycl(T* data, int64_t N, T sign, sycl::queue& queue) {
+void cooley_tukey_fft_sycl(T* data, int64_t N, int64_t batch_size, int64_t batch_stride,
+                           T sign, sycl::queue& queue) {
     int log2N = 0;
     { int64_t tmp = N; while (tmp > 1) { tmp >>= 1; log2N++; } }
 
-    // Step 1: Bit-reverse permutation (on device)
+    // Step 1: Bit-reverse permutation (on device) — all batches in one dispatch
     const int bits = log2N;
-    queue.parallel_for(sycl::range<1>(N), [=](sycl::id<1> idx) {
-        int64_t i = idx[0];
+    int64_t total_items = N * batch_size;
+    queue.parallel_for(sycl::range<1>(total_items), [=](sycl::id<1> idx) {
+        int64_t global_id = idx[0];
+        int64_t batch_idx = global_id / N;
+        int64_t i = global_id % N;
         uint32_t rev = 0;
         uint32_t x = static_cast<uint32_t>(i);
         for (int b = 0; b < bits; ++b) {
@@ -1125,25 +1131,29 @@ void cooley_tukey_fft_sycl(T* data, int64_t N, T sign, sycl::queue& queue) {
         }
         int64_t j = static_cast<int64_t>(rev);
         if (i < j) {
-            T tmp_re = data[2 * i];
-            T tmp_im = data[2 * i + 1];
-            data[2 * i] = data[2 * j];
-            data[2 * i + 1] = data[2 * j + 1];
-            data[2 * j] = tmp_re;
-            data[2 * j + 1] = tmp_im;
+            int64_t base = batch_idx * batch_stride;
+            T tmp_re = data[base + 2 * i];
+            T tmp_im = data[base + 2 * i + 1];
+            data[base + 2 * i] = data[base + 2 * j];
+            data[base + 2 * i + 1] = data[base + 2 * j + 1];
+            data[base + 2 * j] = tmp_re;
+            data[base + 2 * j + 1] = tmp_im;
         }
     }).wait();
 
     constexpr T PI = static_cast<T>(3.14159265358979323846);
 
-    // Step 2: Butterfly stages
+    // Step 2: Butterfly stages — all batches in one dispatch per stage
+    int64_t num_butterflies = N / 2;
+    int64_t total_butterflies = num_butterflies * batch_size;
     for (int s = 1; s <= log2N; ++s) {
         int64_t stride = static_cast<int64_t>(1) << s;
         int64_t half = stride / 2;
-        int64_t num_butterflies = N / 2;
 
-        queue.parallel_for(sycl::range<1>(num_butterflies), [=](sycl::id<1> idx) {
-            int64_t flat = idx[0];
+        queue.parallel_for(sycl::range<1>(total_butterflies), [=](sycl::id<1> idx) {
+            int64_t global_id = idx[0];
+            int64_t batch_idx = global_id / num_butterflies;
+            int64_t flat = global_id % num_butterflies;
             int64_t group = flat / half;
             int64_t k = flat % half;
             int64_t base_idx = group * stride;
@@ -1152,21 +1162,22 @@ void cooley_tukey_fft_sycl(T* data, int64_t N, T sign, sycl::queue& queue) {
             T w_re = sycl::cos(angle);
             T w_im = sycl::sin(angle);
 
+            int64_t base = batch_idx * batch_stride;
             int64_t even_i = base_idx + k;
             int64_t odd_i = base_idx + k + half;
 
-            T e_re = data[2 * even_i];
-            T e_im = data[2 * even_i + 1];
-            T o_re = data[2 * odd_i];
-            T o_im = data[2 * odd_i + 1];
+            T e_re = data[base + 2 * even_i];
+            T e_im = data[base + 2 * even_i + 1];
+            T o_re = data[base + 2 * odd_i];
+            T o_im = data[base + 2 * odd_i + 1];
 
             T t_re = w_re * o_re - w_im * o_im;
             T t_im = w_re * o_im + w_im * o_re;
 
-            data[2 * even_i] = e_re + t_re;
-            data[2 * even_i + 1] = e_im + t_im;
-            data[2 * odd_i] = e_re - t_re;
-            data[2 * odd_i + 1] = e_im - t_im;
+            data[base + 2 * even_i] = e_re + t_re;
+            data[base + 2 * even_i + 1] = e_im + t_im;
+            data[base + 2 * odd_i] = e_re - t_re;
+            data[base + 2 * odd_i + 1] = e_im - t_im;
         }).wait();
     }
 }
@@ -1204,7 +1215,9 @@ void bluestein_fft_sycl(const T* d_in, T* d_out,
     T* b_buf   = b_buf_owner.get();
     SyclDevicePtr<T> B_buf_owner(2 * M, queue);
     T* B_buf   = B_buf_owner.get();
-    SyclDevicePtr<T> a_buf_owner(2 * M, queue);
+    // Batched working buffer: one a_buf per (batch, inner) slice
+    int64_t total_slices = batch_size * inner_size;
+    SyclDevicePtr<T> a_buf_owner(2 * M * total_slices, queue);
     T* a_buf   = a_buf_owner.get();
 
     // Step 1: Generate chirp sequence: chirp[k] = exp(-j * pi * k^2 / N)
@@ -1217,15 +1230,12 @@ void bluestein_fft_sycl(const T* d_in, T* d_out,
 
     // Step 2: Build convolution kernel b[k] = conj(chirp[k]) for k=0..N-1,
     //         b[M-k] = conj(chirp[k]) for k=1..N-1, zeros elsewhere
-    // First zero the entire buffer
     queue.memset(b_buf, 0, 2 * M * sizeof(T)).wait();
-    // b[0..N-1] = conj(chirp[0..N-1])
     queue.parallel_for(sycl::range<1>(N), [=](sycl::id<1> idx) {
         int64_t k = idx[0];
-        b_buf[2 * k]     = chirp[2 * k];       // real part (conj doesn't change)
-        b_buf[2 * k + 1] = -chirp[2 * k + 1];  // negate imaginary
+        b_buf[2 * k]     = chirp[2 * k];
+        b_buf[2 * k + 1] = -chirp[2 * k + 1];
     }).wait();
-    // b[M-k] = conj(chirp[k]) for k=1..N-1 (wrap-around for circular convolution)
     if (N > 1) {
         queue.parallel_for(sycl::range<1>(N - 1), [=](sycl::id<1> idx) {
             int64_t k = idx[0] + 1;
@@ -1235,58 +1245,70 @@ void bluestein_fft_sycl(const T* d_in, T* d_out,
         }).wait();
     }
 
-    // Step 3: Precompute B = FFT(b) — power-of-2 size M
+    // Step 3: Precompute B = FFT(b) — power-of-2 size M (single, shared across all slices)
     queue.memcpy(B_buf, b_buf, 2 * M * sizeof(T)).wait();
-    cooley_tukey_fft_sycl(B_buf, M, static_cast<T>(-1.0), queue);
+    cooley_tukey_fft_sycl(B_buf, M, static_cast<int64_t>(1), static_cast<int64_t>(2 * M),
+                          static_cast<T>(-1.0), queue);
 
-    // Steps 4-8: Process each (batch, inner) slice
-    for (int64_t b = 0; b < batch_size; ++b) {
-        for (int64_t inner = 0; inner < inner_size; ++inner) {
-            // Step 4: Build a[k] = x[k] * chirp[k] for k=0..N-1, zero-pad to M
-            queue.memset(a_buf, 0, 2 * M * sizeof(T)).wait();
-            queue.parallel_for(sycl::range<1>(N), [=](sycl::id<1> idx) {
-                int64_t k = idx[0];
-                int64_t in_idx = b * N * inner_size + k * inner_size + inner;
-                T val = d_in[in_idx];
-                // a[k] = val * chirp[k] (val is real, so: re = val*chirp_re, im = val*chirp_im)
-                a_buf[2 * k]     = val * chirp[2 * k];
-                a_buf[2 * k + 1] = val * chirp[2 * k + 1];
-            }).wait();
+    // Steps 4-8: Process all (batch, inner) slices in parallel
 
-            // Step 5: A = FFT(a)
-            cooley_tukey_fft_sycl(a_buf, M, static_cast<T>(-1.0), queue);
+    // Step 4: Zero a_buf and build a[s][k] = x[b,k,inner] * chirp[k] for all slices
+    queue.memset(a_buf, 0, 2 * M * total_slices * sizeof(T)).wait();
+    queue.parallel_for(sycl::range<1>(N * total_slices), [=](sycl::id<1> idx) {
+        int64_t global_id = idx[0];
+        int64_t s = global_id / N;
+        int64_t k = global_id % N;
+        int64_t b = s / inner_size;
+        int64_t inner = s % inner_size;
+        int64_t in_idx = b * N * inner_size + k * inner_size + inner;
+        T val = d_in[in_idx];
+        int64_t a_base = s * 2 * M;
+        a_buf[a_base + 2 * k]     = val * chirp[2 * k];
+        a_buf[a_base + 2 * k + 1] = val * chirp[2 * k + 1];
+    }).wait();
 
-            // Step 6: Pointwise multiply A[k] *= B[k] (complex multiply)
-            queue.parallel_for(sycl::range<1>(M), [=](sycl::id<1> idx) {
-                int64_t k = idx[0];
-                T a_re = a_buf[2 * k];
-                T a_im = a_buf[2 * k + 1];
-                T b_re = B_buf[2 * k];
-                T b_im = B_buf[2 * k + 1];
-                a_buf[2 * k]     = a_re * b_re - a_im * b_im;
-                a_buf[2 * k + 1] = a_re * b_im + a_im * b_re;
-            }).wait();
+    // Step 5: A = FFT(a) — batched over all slices
+    cooley_tukey_fft_sycl(a_buf, M, total_slices, static_cast<int64_t>(2 * M),
+                          static_cast<T>(-1.0), queue);
 
-            // Step 7: IFFT — forward FFT with sign=+1, then divide by M
-            cooley_tukey_fft_sycl(a_buf, M, static_cast<T>(1.0), queue);
-            T inv_M = static_cast<T>(1.0) / static_cast<T>(M);
-            queue.parallel_for(sycl::range<1>(2 * M), [=](sycl::id<1> idx) {
-                a_buf[idx[0]] *= inv_M;
-            }).wait();
+    // Step 6: Pointwise multiply A[s][k] *= B[k] for all slices
+    queue.parallel_for(sycl::range<1>(M * total_slices), [=](sycl::id<1> idx) {
+        int64_t global_id = idx[0];
+        int64_t s = global_id / M;
+        int64_t k = global_id % M;
+        int64_t a_base = s * 2 * M;
+        T a_re = a_buf[a_base + 2 * k];
+        T a_im = a_buf[a_base + 2 * k + 1];
+        T b_re = B_buf[2 * k];
+        T b_im = B_buf[2 * k + 1];
+        a_buf[a_base + 2 * k]     = a_re * b_re - a_im * b_im;
+        a_buf[a_base + 2 * k + 1] = a_re * b_im + a_im * b_re;
+    }).wait();
 
-            // Step 8: result[k] = a[k] * conj(chirp[k]) for k=0..N-1
-            queue.parallel_for(sycl::range<1>(N), [=](sycl::id<1> idx) {
-                int64_t k = idx[0];
-                T a_re = a_buf[2 * k];
-                T a_im = a_buf[2 * k + 1];
-                T c_re = chirp[2 * k];
-                T c_im = -chirp[2 * k + 1]; // conj
-                int64_t out_idx = (b * N * inner_size + k * inner_size + inner) * 2;
-                d_out[out_idx]     = a_re * c_re - a_im * c_im;
-                d_out[out_idx + 1] = a_re * c_im + a_im * c_re;
-            }).wait();
-        }
-    }
+    // Step 7: IFFT via forward FFT with sign=+1, divide by M — batched
+    cooley_tukey_fft_sycl(a_buf, M, total_slices, static_cast<int64_t>(2 * M),
+                          static_cast<T>(1.0), queue);
+    T inv_M = static_cast<T>(1.0) / static_cast<T>(M);
+    queue.parallel_for(sycl::range<1>(2 * M * total_slices), [=](sycl::id<1> idx) {
+        a_buf[idx[0]] *= inv_M;
+    }).wait();
+
+    // Step 8: result[b,k,inner] = a[s][k] * conj(chirp[k]) for all slices
+    queue.parallel_for(sycl::range<1>(N * total_slices), [=](sycl::id<1> idx) {
+        int64_t global_id = idx[0];
+        int64_t s = global_id / N;
+        int64_t k = global_id % N;
+        int64_t b = s / inner_size;
+        int64_t inner = s % inner_size;
+        int64_t a_base = s * 2 * M;
+        T a_re = a_buf[a_base + 2 * k];
+        T a_im = a_buf[a_base + 2 * k + 1];
+        T c_re = chirp[2 * k];
+        T c_im = -chirp[2 * k + 1]; // conj
+        int64_t out_idx = (b * N * inner_size + k * inner_size + inner) * 2;
+        d_out[out_idx]     = a_re * c_re - a_im * c_im;
+        d_out[out_idx + 1] = a_re * c_im + a_im * c_re;
+    }).wait();
 
 }
 
@@ -1309,11 +1331,12 @@ void bluestein_fft_complex_sycl(const T* d_in, T* d_out,
     T* b_buf   = b_buf_owner.get();
     SyclDevicePtr<T> B_buf_owner(2 * M, queue);
     T* B_buf   = B_buf_owner.get();
-    SyclDevicePtr<T> a_buf_owner(2 * M, queue);
+    // Batched working buffer: one a_buf per (batch, inner) slice
+    int64_t total_slices = batch_size * inner_size;
+    SyclDevicePtr<T> a_buf_owner(2 * M * total_slices, queue);
     T* a_buf   = a_buf_owner.get();
 
     // Step 1: chirp[k] = exp(sign * j * pi * k^2 / N)
-    // For forward (sign=-1): exp(-j*pi*k^2/N), for inverse (sign=+1): exp(+j*pi*k^2/N)
     queue.parallel_for(sycl::range<1>(N), [=](sycl::id<1> idx) {
         int64_t k = idx[0];
         T angle = sign * PI * static_cast<T>(k) * static_cast<T>(k) / static_cast<T>(N);
@@ -1337,60 +1360,73 @@ void bluestein_fft_complex_sycl(const T* d_in, T* d_out,
         }).wait();
     }
 
-    // Step 3: B = FFT(b)
+    // Step 3: B = FFT(b) — single FFT, shared across all slices
     queue.memcpy(B_buf, b_buf, 2 * M * sizeof(T)).wait();
-    cooley_tukey_fft_sycl(B_buf, M, static_cast<T>(-1.0), queue);
+    cooley_tukey_fft_sycl(B_buf, M, static_cast<int64_t>(1), static_cast<int64_t>(2 * M),
+                          static_cast<T>(-1.0), queue);
 
-    // Steps 4-8: Process each (batch, inner) slice
-    for (int64_t b = 0; b < batch_size; ++b) {
-        for (int64_t inner = 0; inner < inner_size; ++inner) {
-            // Step 4: a[k] = x[k] * chirp[k] (complex multiply), zero-pad to M
-            queue.memset(a_buf, 0, 2 * M * sizeof(T)).wait();
-            queue.parallel_for(sycl::range<1>(N), [=](sycl::id<1> idx) {
-                int64_t k = idx[0];
-                int64_t in_idx = (b * N * inner_size + k * inner_size + inner) * 2;
-                T x_re = d_in[in_idx];
-                T x_im = d_in[in_idx + 1];
-                T c_re = chirp[2 * k];
-                T c_im = chirp[2 * k + 1];
-                a_buf[2 * k]     = x_re * c_re - x_im * c_im;
-                a_buf[2 * k + 1] = x_re * c_im + x_im * c_re;
-            }).wait();
+    // Steps 4-8: Process all (batch, inner) slices in parallel
 
-            // Step 5: A = FFT(a)
-            cooley_tukey_fft_sycl(a_buf, M, static_cast<T>(-1.0), queue);
+    // Step 4: Zero a_buf and build a[s][k] = x[b,k,inner] * chirp[k] (complex multiply)
+    queue.memset(a_buf, 0, 2 * M * total_slices * sizeof(T)).wait();
+    queue.parallel_for(sycl::range<1>(N * total_slices), [=](sycl::id<1> idx) {
+        int64_t global_id = idx[0];
+        int64_t s = global_id / N;
+        int64_t k = global_id % N;
+        int64_t b = s / inner_size;
+        int64_t inner = s % inner_size;
+        int64_t in_idx = (b * N * inner_size + k * inner_size + inner) * 2;
+        T x_re = d_in[in_idx];
+        T x_im = d_in[in_idx + 1];
+        T c_re = chirp[2 * k];
+        T c_im = chirp[2 * k + 1];
+        int64_t a_base = s * 2 * M;
+        a_buf[a_base + 2 * k]     = x_re * c_re - x_im * c_im;
+        a_buf[a_base + 2 * k + 1] = x_re * c_im + x_im * c_re;
+    }).wait();
 
-            // Step 6: Pointwise multiply A[k] *= B[k]
-            queue.parallel_for(sycl::range<1>(M), [=](sycl::id<1> idx) {
-                int64_t k = idx[0];
-                T a_re = a_buf[2 * k];
-                T a_im = a_buf[2 * k + 1];
-                T b_re = B_buf[2 * k];
-                T b_im = B_buf[2 * k + 1];
-                a_buf[2 * k]     = a_re * b_re - a_im * b_im;
-                a_buf[2 * k + 1] = a_re * b_im + a_im * b_re;
-            }).wait();
+    // Step 5: A = FFT(a) — batched over all slices
+    cooley_tukey_fft_sycl(a_buf, M, total_slices, static_cast<int64_t>(2 * M),
+                          static_cast<T>(-1.0), queue);
 
-            // Step 7: IFFT via forward FFT with sign=+1, divide by M
-            cooley_tukey_fft_sycl(a_buf, M, static_cast<T>(1.0), queue);
-            T inv_M = static_cast<T>(1.0) / static_cast<T>(M);
-            queue.parallel_for(sycl::range<1>(2 * M), [=](sycl::id<1> idx) {
-                a_buf[idx[0]] *= inv_M;
-            }).wait();
+    // Step 6: Pointwise multiply A[s][k] *= B[k] for all slices
+    queue.parallel_for(sycl::range<1>(M * total_slices), [=](sycl::id<1> idx) {
+        int64_t global_id = idx[0];
+        int64_t s = global_id / M;
+        int64_t k = global_id % M;
+        int64_t a_base = s * 2 * M;
+        T a_re = a_buf[a_base + 2 * k];
+        T a_im = a_buf[a_base + 2 * k + 1];
+        T b_re = B_buf[2 * k];
+        T b_im = B_buf[2 * k + 1];
+        a_buf[a_base + 2 * k]     = a_re * b_re - a_im * b_im;
+        a_buf[a_base + 2 * k + 1] = a_re * b_im + a_im * b_re;
+    }).wait();
 
-            // Step 8: result[k] = a[k] * conj(chirp[k])
-            queue.parallel_for(sycl::range<1>(N), [=](sycl::id<1> idx) {
-                int64_t k = idx[0];
-                T a_re = a_buf[2 * k];
-                T a_im = a_buf[2 * k + 1];
-                T c_re = chirp[2 * k];
-                T c_im = -chirp[2 * k + 1]; // conj
-                int64_t out_idx = (b * N * inner_size + k * inner_size + inner) * 2;
-                d_out[out_idx]     = a_re * c_re - a_im * c_im;
-                d_out[out_idx + 1] = a_re * c_im + a_im * c_re;
-            }).wait();
-        }
-    }
+    // Step 7: IFFT via forward FFT with sign=+1, divide by M — batched
+    cooley_tukey_fft_sycl(a_buf, M, total_slices, static_cast<int64_t>(2 * M),
+                          static_cast<T>(1.0), queue);
+    T inv_M = static_cast<T>(1.0) / static_cast<T>(M);
+    queue.parallel_for(sycl::range<1>(2 * M * total_slices), [=](sycl::id<1> idx) {
+        a_buf[idx[0]] *= inv_M;
+    }).wait();
+
+    // Step 8: result[b,k,inner] = a[s][k] * conj(chirp[k]) for all slices
+    queue.parallel_for(sycl::range<1>(N * total_slices), [=](sycl::id<1> idx) {
+        int64_t global_id = idx[0];
+        int64_t s = global_id / N;
+        int64_t k = global_id % N;
+        int64_t b = s / inner_size;
+        int64_t inner = s % inner_size;
+        int64_t a_base = s * 2 * M;
+        T a_re = a_buf[a_base + 2 * k];
+        T a_im = a_buf[a_base + 2 * k + 1];
+        T c_re = chirp[2 * k];
+        T c_im = -chirp[2 * k + 1]; // conj
+        int64_t out_idx = (b * N * inner_size + k * inner_size + inner) * 2;
+        d_out[out_idx]     = a_re * c_re - a_im * c_im;
+        d_out[out_idx + 1] = a_re * c_im + a_im * c_re;
+    }).wait();
 }
 
 } // anonymous namespace
@@ -1433,9 +1469,8 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                 d_buf[2 * i + 1] = 0.0f;
             }).wait();
 
-            for (int64_t b = 0; b < batch_size; ++b) {
-                cooley_tukey_fft_sycl(d_buf + b * 2 * signal_len, signal_len, -1.0f, queue);
-            }
+            cooley_tukey_fft_sycl(d_buf, signal_len, batch_size,
+                                  static_cast<int64_t>(2 * signal_len), -1.0f, queue);
 
             if (norm == "ortho" || norm == "forward") {
                 float scale = (norm == "ortho")
@@ -1488,9 +1523,8 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                 d_buf[2 * i + 1] = 0.0;
             }).wait();
 
-            for (int64_t b = 0; b < batch_size; ++b) {
-                cooley_tukey_fft_sycl(d_buf + b * 2 * signal_len, signal_len, -1.0, queue);
-            }
+            cooley_tukey_fft_sycl(d_buf, signal_len, batch_size,
+                                  static_cast<int64_t>(2 * signal_len), -1.0, queue);
 
             if (norm == "ortho" || norm == "forward") {
                 double scale = (norm == "ortho")
@@ -1583,9 +1617,8 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
             const float* d_in = static_cast<const float*>(input.data_ptr());
             queue.memcpy(d_buf, d_in, 2 * signal_len * batch_size * sizeof(float)).wait();
 
-            for (int64_t b = 0; b < batch_size; ++b) {
-                cooley_tukey_fft_sycl(d_buf + b * 2 * signal_len, signal_len, 1.0f, queue);
-            }
+            cooley_tukey_fft_sycl(d_buf, signal_len, batch_size,
+                                  static_cast<int64_t>(2 * signal_len), 1.0f, queue);
 
             // Apply normalization: backward=1/N (default), ortho=1/sqrt(N), forward=1
             float scale = 1.0f / static_cast<float>(signal_len);
@@ -1636,9 +1669,8 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
             const double* d_in = static_cast<const double*>(input.data_ptr());
             queue.memcpy(d_buf, d_in, 2 * signal_len * batch_size * sizeof(double)).wait();
 
-            for (int64_t b = 0; b < batch_size; ++b) {
-                cooley_tukey_fft_sycl(d_buf + b * 2 * signal_len, signal_len, 1.0, queue);
-            }
+            cooley_tukey_fft_sycl(d_buf, signal_len, batch_size,
+                                  static_cast<int64_t>(2 * signal_len), 1.0, queue);
 
             double scale = 1.0 / static_cast<double>(signal_len);
             if (norm == "ortho") {
@@ -1738,9 +1770,8 @@ auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                 d_buf[2 * i + 1] = 0.0f;
             }).wait();
 
-            for (int64_t b = 0; b < batch_size; ++b) {
-                cooley_tukey_fft_sycl(d_buf + b * 2 * signal_len, signal_len, -1.0f, queue);
-            }
+            cooley_tukey_fft_sycl(d_buf, signal_len, batch_size,
+                                  static_cast<int64_t>(2 * signal_len), -1.0f, queue);
 
             // Apply normalization
             if (norm == "ortho" || norm == "forward") {
@@ -1813,9 +1844,8 @@ auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                 d_buf[2 * i + 1] = 0.0;
             }).wait();
 
-            for (int64_t b = 0; b < batch_size; ++b) {
-                cooley_tukey_fft_sycl(d_buf + b * 2 * signal_len, signal_len, -1.0, queue);
-            }
+            cooley_tukey_fft_sycl(d_buf, signal_len, batch_size,
+                                  static_cast<int64_t>(2 * signal_len), -1.0, queue);
 
             if (norm == "ortho" || norm == "forward") {
                 double scale = (norm == "ortho")
@@ -1960,9 +1990,8 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
             }).wait();
 
             // Apply inverse FFT (sign=+1)
-            for (int64_t b = 0; b < batch_size; ++b) {
-                cooley_tukey_fft_sycl(d_buf + b * 2 * output_len, output_len, 1.0f, queue);
-            }
+            cooley_tukey_fft_sycl(d_buf, output_len, batch_size,
+                                  static_cast<int64_t>(2 * output_len), 1.0f, queue);
 
             // Normalize and extract real part
             float scale = 1.0f / static_cast<float>(output_len);
@@ -2061,9 +2090,8 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                 }
             }).wait();
 
-            for (int64_t b = 0; b < batch_size; ++b) {
-                cooley_tukey_fft_sycl(d_buf + b * 2 * output_len, output_len, 1.0, queue);
-            }
+            cooley_tukey_fft_sycl(d_buf, output_len, batch_size,
+                                  static_cast<int64_t>(2 * output_len), 1.0, queue);
 
             double scale = 1.0 / static_cast<double>(output_len);
             if (norm == "ortho") {

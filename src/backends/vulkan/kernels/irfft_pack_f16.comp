@@ -13,41 +13,49 @@ layout(set = 0, binding = 0) buffer InputBuf  { uint data_in[];  };  // N/2+1 co
 layout(set = 0, binding = 1) buffer OutputBuf { uint data_out[]; };  // N/2 complex
 
 layout(push_constant) uniform PushConstants {
-    uint n;            // Original real FFT size (N)
-    uint batch_offset; // Offset in complex elements into data_out
+    uint n;                // Original real FFT size (N)
+    uint batch_size;       // Number of independent FFTs
+    uint in_batch_stride;  // Stride between input batches (in uint32 words)
+    uint out_batch_stride; // Stride between output batches (in uint32 words / complex elements)
 };
 
 const float PI = 3.14159265358979323846;
 
-vec2 readInput(uint idx) {
-    return unpackHalf2x16(data_in[idx]);
+vec2 readInput(uint in_base, uint idx) {
+    return unpackHalf2x16(data_in[in_base + idx]);
 }
 
-void writeOutput(uint idx, vec2 val) {
-    data_out[batch_offset + idx] = packHalf2x16(val);
+void writeOutput(uint out_base, uint idx, vec2 val) {
+    data_out[out_base + idx] = packHalf2x16(val);
 }
 
 void main() {
     uint tid = gl_GlobalInvocationID.x;
     uint half_n = n / 2;
+    uint total_items = half_n * batch_size;
+    if (tid >= total_items) return;
 
-    if (tid >= half_n) return;
+    uint batch_idx = tid / half_n;
+    uint local_tid = tid % half_n;
 
-    if (tid == 0) {
+    uint in_base = batch_idx * in_batch_stride;
+    uint out_base = batch_idx * out_batch_stride;
+
+    if (local_tid == 0) {
         // Z[0] = (X[0].re + X[N/2].re, X[0].re - X[N/2].re)
-        vec2 x0 = readInput(0);
-        vec2 xn = readInput(half_n);
-        writeOutput(0, vec2(x0.x + xn.x, x0.x - xn.x));
+        vec2 x0 = readInput(in_base, 0);
+        vec2 xn = readInput(in_base, half_n);
+        writeOutput(out_base, 0, vec2(x0.x + xn.x, x0.x - xn.x));
         return;
     }
 
-    uint k = tid;
+    uint k = local_tid;
     uint conj_k = half_n - k;
 
     // X[k]
-    vec2 xk = readInput(k);
+    vec2 xk = readInput(in_base, k);
     // conj(X[N/2-k])
-    vec2 xc_raw = readInput(conj_k);
+    vec2 xc_raw = readInput(in_base, conj_k);
     vec2 xc = vec2(xc_raw.x, -xc_raw.y);
 
     // A = X[k] + conj(X[N/2-k])
@@ -68,5 +76,5 @@ void main() {
     float iw_b_im =   w_re * b_re - w_im * b_im;
 
     // Z[k] = A + i*W^{-k}*B
-    writeOutput(k, vec2(a_re + iw_b_re, a_im + iw_b_im));
+    writeOutput(out_base, k, vec2(a_re + iw_b_re, a_im + iw_b_im));
 }

@@ -614,7 +614,7 @@ public:
 
     // FFT internal helpers
     auto runFFTButterfly(const Tensor& input, uint32_t fft_size, uint32_t direction,
-                         uint32_t batch_offset) -> Tensor;
+                         uint32_t batch_size, uint32_t batch_stride) -> Tensor;
     auto runFFTScale(Tensor& data, uint32_t n, double scale_factor) -> void;
     auto runFFTChirpMultiply(Tensor& data, const Tensor& chirp, uint32_t n,
                               bool conjugate) -> void;
@@ -623,7 +623,7 @@ public:
     auto dispatchFFTBluestein(const Tensor& input, int64_t signal_len,
                                uint32_t direction) -> Tensor;
     auto runMixedRadixFFT(const Tensor& input, int64_t N, uint32_t direction,
-                           uint32_t batch_offset) -> Tensor;
+                           uint32_t batch_size, uint32_t batch_stride) -> Tensor;
 
     // Radix sort for large arrays (> 65K elements)
     auto dispatchRadixSort(const Tensor& input, bool descending) -> std::pair<Tensor, Tensor>;

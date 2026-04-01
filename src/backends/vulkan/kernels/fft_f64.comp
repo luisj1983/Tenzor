@@ -13,7 +13,8 @@ layout(push_constant) uniform PushConstants {
     uint n;           // FFT size (power of 2)
     uint stage;       // Current butterfly stage (0 to log2(n)-1)
     uint direction;   // 0 = forward, 1 = inverse
-    uint batch_offset; // Offset into buffer for batched FFTs (in complex elements)
+    uint batch_size;  // Number of batches
+    uint batch_stride; // Stride between batches (in complex elements)
 };
 
 const double PI_D = 3.14159265358979323846LF;
@@ -21,19 +22,26 @@ const double PI_D = 3.14159265358979323846LF;
 void main() {
     uint tid = gl_GlobalInvocationID.x;
 
+    uint n_butterflies = n / 2;
+    uint total_items = n_butterflies * batch_size;
+    if (tid >= total_items) return;
+
+    uint batch_idx = tid / n_butterflies;
+    uint local_tid = tid % n_butterflies;
+
     uint half_size = 1u << stage;
     uint group_size = half_size << 1;
 
-    uint group_idx = tid / half_size;
-    uint pos_in_group = tid % half_size;
+    uint group_idx = local_tid / half_size;
+    uint pos_in_group = local_tid % half_size;
 
     uint idx_top = group_idx * group_size + pos_in_group;
     uint idx_bot = idx_top + half_size;
 
     if (idx_bot >= n) return;
 
-    uint base_top = (batch_offset + idx_top) * 2;
-    uint base_bot = (batch_offset + idx_bot) * 2;
+    uint base_top = (batch_idx * batch_stride + idx_top) * 2;
+    uint base_bot = (batch_idx * batch_stride + idx_bot) * 2;
 
     double a_re = data_in[base_top];
     double a_im = data_in[base_top + 1];

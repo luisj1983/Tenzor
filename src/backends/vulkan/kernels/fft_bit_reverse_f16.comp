@@ -10,9 +10,10 @@ layout(set = 0, binding = 0) buffer InputBuf  { uint data_in[];  };
 layout(set = 0, binding = 1) buffer OutputBuf { uint data_out[]; };
 
 layout(push_constant) uniform PushConstants {
-    uint n;            // FFT size (power of 2)
-    uint log2_n;       // log2(n)
-    uint batch_offset; // Offset in complex elements
+    uint n;             // FFT size (power of 2)
+    uint log2_n;        // log2(n)
+    uint batch_size;    // Number of independent FFTs
+    uint batch_stride;  // Stride between batches (in complex elements)
 };
 
 uint bit_reverse(uint x, uint bits) {
@@ -26,11 +27,16 @@ uint bit_reverse(uint x, uint bits) {
 
 void main() {
     uint tid = gl_GlobalInvocationID.x;
-    if (tid >= n) return;
+    uint total_items = n * batch_size;
+    if (tid >= total_items) return;
 
-    uint rev = bit_reverse(tid, log2_n);
+    uint batch_idx = tid / n;
+    uint local_tid = tid % n;
 
-    // Copy complex element from position tid to position rev
+    uint rev = bit_reverse(local_tid, log2_n);
+
+    // Copy complex element from position local_tid to position rev
     // Each complex element = 1 uint32 word
-    data_out[batch_offset + rev] = data_in[batch_offset + tid];
+    uint base = batch_idx * batch_stride;
+    data_out[base + rev] = data_in[base + local_tid];
 }

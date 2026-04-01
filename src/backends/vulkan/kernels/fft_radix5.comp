@@ -11,7 +11,8 @@ layout(push_constant) uniform PushConstants {
     uint N;
     uint stage_stride;
     uint direction;
-    uint batch_offset;
+    uint batch_size;
+    uint batch_stride;
 };
 
 const float PI = 3.14159265358979323846;
@@ -23,10 +24,13 @@ const float SIN_4PI_5 = 0.58778525229247;
 void main() {
     uint tid = gl_GlobalInvocationID.x;
     uint n_butterflies = N / 5;
-    if (tid >= n_butterflies) return;
+    uint total_items = n_butterflies * batch_size;
+    if (tid >= total_items) return;
+    uint batch_idx = tid / n_butterflies;
+    uint local_tid = tid % n_butterflies;
 
-    uint group = tid / stage_stride;
-    uint pos = tid % stage_stride;
+    uint group = local_tid / stage_stride;
+    uint pos = local_tid % stage_stride;
 
     uint i0 = group * stage_stride * 5 + pos;
     uint i1 = i0 + stage_stride;
@@ -45,22 +49,22 @@ void main() {
     if (direction == 1) base_angle = -base_angle;
 
     // Load with twiddle
-    float a0_re = data_in[(batch_offset+i0)*2], a0_im = data_in[(batch_offset+i0)*2+1];
+    float a0_re = data_in[(batch_idx * batch_stride+i0)*2], a0_im = data_in[(batch_idx * batch_stride+i0)*2+1];
 
     float w1_re = cos(base_angle), w1_im = sin(base_angle);
-    float r1 = data_in[(batch_offset+i1)*2], j1 = data_in[(batch_offset+i1)*2+1];
+    float r1 = data_in[(batch_idx * batch_stride+i1)*2], j1 = data_in[(batch_idx * batch_stride+i1)*2+1];
     float a1_re = r1*w1_re - j1*w1_im, a1_im = r1*w1_im + j1*w1_re;
 
     float w2_re = cos(2.0*base_angle), w2_im = sin(2.0*base_angle);
-    float r2 = data_in[(batch_offset+i2)*2], j2 = data_in[(batch_offset+i2)*2+1];
+    float r2 = data_in[(batch_idx * batch_stride+i2)*2], j2 = data_in[(batch_idx * batch_stride+i2)*2+1];
     float a2_re = r2*w2_re - j2*w2_im, a2_im = r2*w2_im + j2*w2_re;
 
     float w3_re = cos(3.0*base_angle), w3_im = sin(3.0*base_angle);
-    float r3 = data_in[(batch_offset+i3)*2], j3 = data_in[(batch_offset+i3)*2+1];
+    float r3 = data_in[(batch_idx * batch_stride+i3)*2], j3 = data_in[(batch_idx * batch_stride+i3)*2+1];
     float a3_re = r3*w3_re - j3*w3_im, a3_im = r3*w3_im + j3*w3_re;
 
     float w4_re = cos(4.0*base_angle), w4_im = sin(4.0*base_angle);
-    float r4 = data_in[(batch_offset+i4)*2], j4 = data_in[(batch_offset+i4)*2+1];
+    float r4 = data_in[(batch_idx * batch_stride+i4)*2], j4 = data_in[(batch_idx * batch_stride+i4)*2+1];
     float a4_re = r4*w4_re - j4*w4_im, a4_im = r4*w4_im + j4*w4_re;
 
     // 5-point DFT using Rader's trick
@@ -69,18 +73,18 @@ void main() {
     float s2_re = a2_re + a3_re, s2_im = a2_im + a3_im;
     float d2_re = a2_re - a3_re, d2_im = a2_im - a3_im;
 
-    data_out[(batch_offset+o0)*2]   = a0_re + s1_re + s2_re;
-    data_out[(batch_offset+o0)*2+1] = a0_im + s1_im + s2_im;
+    data_out[(batch_idx * batch_stride+o0)*2]   = a0_re + s1_re + s2_re;
+    data_out[(batch_idx * batch_stride+o0)*2+1] = a0_im + s1_im + s2_im;
 
-    data_out[(batch_offset+o1)*2]   = a0_re + COS_2PI_5*s1_re + COS_4PI_5*s2_re - SIN_2PI_5*d1_im - SIN_4PI_5*d2_im;
-    data_out[(batch_offset+o1)*2+1] = a0_im + COS_2PI_5*s1_im + COS_4PI_5*s2_im + SIN_2PI_5*d1_re + SIN_4PI_5*d2_re;
+    data_out[(batch_idx * batch_stride+o1)*2]   = a0_re + COS_2PI_5*s1_re + COS_4PI_5*s2_re - SIN_2PI_5*d1_im - SIN_4PI_5*d2_im;
+    data_out[(batch_idx * batch_stride+o1)*2+1] = a0_im + COS_2PI_5*s1_im + COS_4PI_5*s2_im + SIN_2PI_5*d1_re + SIN_4PI_5*d2_re;
 
-    data_out[(batch_offset+o2)*2]   = a0_re + COS_4PI_5*s1_re + COS_2PI_5*s2_re - SIN_4PI_5*d1_im + SIN_2PI_5*d2_im;
-    data_out[(batch_offset+o2)*2+1] = a0_im + COS_4PI_5*s1_im + COS_2PI_5*s2_im + SIN_4PI_5*d1_re - SIN_2PI_5*d2_re;
+    data_out[(batch_idx * batch_stride+o2)*2]   = a0_re + COS_4PI_5*s1_re + COS_2PI_5*s2_re - SIN_4PI_5*d1_im + SIN_2PI_5*d2_im;
+    data_out[(batch_idx * batch_stride+o2)*2+1] = a0_im + COS_4PI_5*s1_im + COS_2PI_5*s2_im + SIN_4PI_5*d1_re - SIN_2PI_5*d2_re;
 
-    data_out[(batch_offset+o3)*2]   = a0_re + COS_4PI_5*s1_re + COS_2PI_5*s2_re + SIN_4PI_5*d1_im - SIN_2PI_5*d2_im;
-    data_out[(batch_offset+o3)*2+1] = a0_im + COS_4PI_5*s1_im + COS_2PI_5*s2_im - SIN_4PI_5*d1_re + SIN_2PI_5*d2_re;
+    data_out[(batch_idx * batch_stride+o3)*2]   = a0_re + COS_4PI_5*s1_re + COS_2PI_5*s2_re + SIN_4PI_5*d1_im - SIN_2PI_5*d2_im;
+    data_out[(batch_idx * batch_stride+o3)*2+1] = a0_im + COS_4PI_5*s1_im + COS_2PI_5*s2_im - SIN_4PI_5*d1_re + SIN_2PI_5*d2_re;
 
-    data_out[(batch_offset+o4)*2]   = a0_re + COS_2PI_5*s1_re + COS_4PI_5*s2_re + SIN_2PI_5*d1_im + SIN_4PI_5*d2_im;
-    data_out[(batch_offset+o4)*2+1] = a0_im + COS_2PI_5*s1_im + COS_4PI_5*s2_im - SIN_2PI_5*d1_re - SIN_4PI_5*d2_re;
+    data_out[(batch_idx * batch_stride+o4)*2]   = a0_re + COS_2PI_5*s1_re + COS_4PI_5*s2_re + SIN_2PI_5*d1_im + SIN_4PI_5*d2_im;
+    data_out[(batch_idx * batch_stride+o4)*2+1] = a0_im + COS_2PI_5*s1_im + COS_4PI_5*s2_im - SIN_2PI_5*d1_re - SIN_4PI_5*d2_re;
 }

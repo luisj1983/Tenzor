@@ -1871,7 +1871,7 @@ auto unique_kernel(const Tensor& input, bool sorted, bool return_inverse, bool r
         }
         // Unsupported dtypes fall through to host path
     }
-    // Fall through to host-side unique for unsorted or unsupported dtypes
+    // SYCL device-side unique (sorted path only; unsorted throws)
 #endif
 
     // Device-side unique for sorted=true without oneDPL:

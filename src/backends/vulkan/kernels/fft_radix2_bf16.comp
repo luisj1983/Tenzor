@@ -11,7 +11,8 @@ layout(push_constant) uniform PushConstants {
     uint N;
     uint stage_stride;
     uint direction;
-    uint batch_offset;
+    uint batch_size;
+    uint batch_stride;
 };
 
 const float PI = 3.14159265358979323846;
@@ -41,10 +42,13 @@ void writeBF16Element(uint element_idx, float val) {
 void main() {
     uint tid = gl_GlobalInvocationID.x;
     uint n_butterflies = N / 2;
-    if (tid >= n_butterflies) return;
+    uint total_items = n_butterflies * batch_size;
+    if (tid >= total_items) return;
+    uint batch_idx = tid / n_butterflies;
+    uint local_tid = tid % n_butterflies;
 
-    uint group = tid / stage_stride;
-    uint pos = tid % stage_stride;
+    uint group = local_tid / stage_stride;
+    uint pos = local_tid % stage_stride;
 
     uint i0 = group * stage_stride * 2 + pos;
     uint i1 = i0 + stage_stride;
@@ -52,10 +56,10 @@ void main() {
     uint o0 = group * stage_stride + pos;
     uint o1 = o0 + n_butterflies;
 
-    uint b0_in = (batch_offset + i0) * 2;
-    uint b1_in = (batch_offset + i1) * 2;
-    uint b0_out = (batch_offset + o0) * 2;
-    uint b1_out = (batch_offset + o1) * 2;
+    uint b0_in = (batch_idx * batch_stride + i0) * 2;
+    uint b1_in = (batch_idx * batch_stride + i1) * 2;
+    uint b0_out = (batch_idx * batch_stride + o0) * 2;
+    uint b1_out = (batch_idx * batch_stride + o1) * 2;
 
     // Read and compute in F32
     float a0_re = readBF16Element(b0_in), a0_im = readBF16Element(b0_in + 1);

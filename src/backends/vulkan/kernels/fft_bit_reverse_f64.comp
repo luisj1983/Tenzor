@@ -11,7 +11,8 @@ layout(set = 0, binding = 1) buffer OutputBuf { double data_out[]; };
 layout(push_constant) uniform PushConstants {
     uint n;
     uint log2_n;
-    uint batch_offset;
+    uint batch_size;
+    uint batch_stride;
 };
 
 uint bit_reverse(uint x, uint bits) {
@@ -25,12 +26,17 @@ uint bit_reverse(uint x, uint bits) {
 
 void main() {
     uint tid = gl_GlobalInvocationID.x;
-    if (tid >= n) return;
 
-    uint rev = bit_reverse(tid, log2_n);
+    uint total_items = n * batch_size;
+    if (tid >= total_items) return;
 
-    uint src = (batch_offset + tid) * 2;
-    uint dst = (batch_offset + rev) * 2;
+    uint batch_idx = tid / n;
+    uint local_tid = tid % n;
+
+    uint rev = bit_reverse(local_tid, log2_n);
+
+    uint src = (batch_idx * batch_stride + local_tid) * 2;
+    uint dst = (batch_idx * batch_stride + rev) * 2;
 
     data_out[dst]     = data_in[src];
     data_out[dst + 1] = data_in[src + 1];
