@@ -1112,7 +1112,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
 
     // =========================================================================
     // Float16 handling: operations with native F16 shaders use them directly;
-    // operations without F16 support fall back to CPU computation.
+    // operations without F16 support throw a runtime error.
     // Accumulation-heavy operations (softmax, layer_norm) upcast to F32 in
     // their individual dispatch functions for numerical stability.
     // =========================================================================

@@ -1959,8 +1959,9 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         });
 
     // ========================================================================
-    // FFT Operations — Native Vulkan compute shaders (Cooley-Tukey radix-2)
-    // Falls back to CPU for non-power-of-2 sizes or non-last-dim transforms
+    // FFT Operations — Native Vulkan compute shaders (Cooley-Tukey radix-2,
+    // mixed-radix Stockham for factorable sizes, Bluestein for others — all on GPU).
+    // Non-last-dim transforms use GPU transpose.
     // ========================================================================
 
     table.register_single_output_kernel(OpId::FFT, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {

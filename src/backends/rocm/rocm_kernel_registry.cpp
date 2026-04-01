@@ -33,16 +33,11 @@ namespace tenzor {
 
 // Forward declarations for creation functions (from creation.hpp, which can't be
 // included here due to its loader.hpp dependency using std::expected / C++23)
-auto zeros(std::vector<int64_t> shape, DType dtype = DType::Float32,
-           Device device = Device::cpu()) -> Tensor;
-auto full(std::vector<int64_t> shape, float value, DType dtype = DType::Float32,
-          Device device = Device::cpu()) -> Tensor;
+auto zeros(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor;
+auto full(std::vector<int64_t> shape, float value, DType dtype, Device device) -> Tensor;
 auto full(std::vector<int64_t> shape, double value, DType dtype, Device device) -> Tensor;
-auto rand(std::vector<int64_t> shape, DType dtype = DType::Float32,
-          Device device = Device::cpu()) -> Tensor;
-auto arange(double start, double end, double step = 1.0,
-           DType dtype = DType::Float32,
-           Device device = Device::cpu()) -> Tensor;
+auto rand(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor;
+auto arange(double start, double end, double step, DType dtype, Device device) -> Tensor;
 
 // Helper to extract HIP stream from attributes
 inline hipStream_t get_hip_stream(const OpAttributes& attrs) {
