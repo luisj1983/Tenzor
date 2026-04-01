@@ -603,71 +603,49 @@ auto embedding_renorm_kernel(Tensor& weights, const Tensor& indices,
 
     const int64_t* idx_ptr = get_data_ptr<const int64_t>(indices);
 
-    // For small index counts, use host path (GPU overhead exceeds benefit)
+    // Device-side dedup using atomic flag array
     int64_t n_unique = 0;
     int64_t* d_unique_idx = nullptr;
 
-    if (num_indices < 128) {
-        // Host-side dedup for small inputs
-        std::vector<int64_t> h_indices(num_indices);
-        queue.memcpy(h_indices.data(), idx_ptr, num_indices * sizeof(int64_t)).wait();
+    uint8_t* d_seen = sycl::malloc_device<uint8_t>(num_embeddings, queue);
+    queue.memset(d_seen, 0, num_embeddings * sizeof(uint8_t));
 
-        std::vector<int64_t> unique_indices;
-        std::vector<bool> seen(num_embeddings, false);
-        for (int64_t i = 0; i < num_indices; ++i) {
-            int64_t idx = h_indices[i];
-            if (idx >= 0 && idx < num_embeddings && !seen[idx]) {
-                seen[idx] = true;
-                unique_indices.push_back(idx);
-            }
+    // Mark seen indices on device (idempotent writes, no atomics needed)
+    queue.parallel_for(sycl::range<1>(num_indices), [=](sycl::id<1> i) {
+        int64_t idx = idx_ptr[i];
+        if (idx >= 0 && idx < num_embeddings) {
+            d_seen[idx] = 1;
         }
+    }).wait();
 
-        if (unique_indices.empty()) return;
-        n_unique = static_cast<int64_t>(unique_indices.size());
-        d_unique_idx = sycl::malloc_device<int64_t>(n_unique, queue);
-        queue.memcpy(d_unique_idx, unique_indices.data(), n_unique * sizeof(int64_t)).wait();
-    } else {
-        // Device-side dedup using atomic flag array
-        uint8_t* d_seen = sycl::malloc_device<uint8_t>(num_embeddings, queue);
-        queue.memset(d_seen, 0, num_embeddings * sizeof(uint8_t));
+    // Device-side stream compaction: prefix sum on flags + scatter
+    int32_t* d_flags_i32 = sycl::malloc_device<int32_t>(num_embeddings, queue);
+    queue.parallel_for<EmbeddingRenormCastFlagsKernel>(
+        sycl::range<1>(num_embeddings), [=](sycl::id<1> i) {
+            d_flags_i32[i] = static_cast<int32_t>(d_seen[i]);
+        }).wait();
 
-        // Mark seen indices on device (idempotent writes, no atomics needed)
-        queue.parallel_for(sycl::range<1>(num_indices), [=](sycl::id<1> i) {
-            int64_t idx = idx_ptr[i];
-            if (idx >= 0 && idx < num_embeddings) {
-                d_seen[idx] = 1;
+    int64_t total_unique = sycl_exclusive_prefix_sum(d_flags_i32, num_embeddings, queue);
+
+    if (total_unique == 0) {
+        sycl::free(d_seen, queue);
+        sycl::free(d_flags_i32, queue);
+        return;
+    }
+    n_unique = total_unique;
+    d_unique_idx = sycl::malloc_device<int64_t>(n_unique, queue);
+
+    // Compact: scatter embedding indices where flag was set
+    auto* prefix_ptr = d_flags_i32;
+    queue.parallel_for<EmbeddingRenormCompactKernel>(
+        sycl::range<1>(num_embeddings), [=](sycl::id<1> i) {
+            if (d_seen[i]) {
+                d_unique_idx[prefix_ptr[i]] = static_cast<int64_t>(i[0]);
             }
         }).wait();
 
-        // Device-side stream compaction: prefix sum on flags + scatter
-        int32_t* d_flags_i32 = sycl::malloc_device<int32_t>(num_embeddings, queue);
-        queue.parallel_for<EmbeddingRenormCastFlagsKernel>(
-            sycl::range<1>(num_embeddings), [=](sycl::id<1> i) {
-                d_flags_i32[i] = static_cast<int32_t>(d_seen[i]);
-            }).wait();
-
-        int64_t total_unique = sycl_exclusive_prefix_sum(d_flags_i32, num_embeddings, queue);
-
-        if (total_unique == 0) {
-            sycl::free(d_seen, queue);
-            sycl::free(d_flags_i32, queue);
-            return;
-        }
-        n_unique = total_unique;
-        d_unique_idx = sycl::malloc_device<int64_t>(n_unique, queue);
-
-        // Compact: scatter embedding indices where flag was set
-        auto* prefix_ptr = d_flags_i32;
-        queue.parallel_for<EmbeddingRenormCompactKernel>(
-            sycl::range<1>(num_embeddings), [=](sycl::id<1> i) {
-                if (d_seen[i]) {
-                    d_unique_idx[prefix_ptr[i]] = static_cast<int64_t>(i[0]);
-                }
-            }).wait();
-
-        sycl::free(d_seen, queue);
-        sycl::free(d_flags_i32, queue);
-    }
+    sycl::free(d_seen, queue);
+    sycl::free(d_flags_i32, queue);
 
     // Allocate device buffer for norms
     float* d_norms = sycl::malloc_device<float>(n_unique, queue);

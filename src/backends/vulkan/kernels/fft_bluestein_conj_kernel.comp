@@ -1,0 +1,37 @@
+#version 450
+
+// Generate zero-padded conjugate chirp kernel for Bluestein convolution
+// Output buffer must be pre-zeroed (length M complex elements).
+// Thread k writes: b[k] = conj(chirp[k]), and if k > 0: b[M-k] = conj(chirp[k])
+// Output: interleaved real/imag pairs — [re0, im0, re1, im1, ...]
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer OutputBuf { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint N;          // Signal length
+    uint M;          // Padded length (power of 2, >= 2*N-1)
+    int sign;        // +1 or -1 (same sign used for chirp generation)
+};
+
+void main() {
+    uint k = gl_GlobalInvocationID.x;
+    if (k >= N) return;
+
+    float angle = float(sign) * 3.14159265358979323846 * float(k) * float(k) / float(N);
+    float conj_re = cos(angle);
+    float conj_im = -sin(angle);  // conjugate: negate imaginary
+
+    // Write b[k]
+    uint base_k = k * 2;
+    output_data[base_k]     = conj_re;
+    output_data[base_k + 1] = conj_im;
+
+    // Write b[M-k] for k > 0 (the wrap-around tail)
+    if (k > 0) {
+        uint base_mk = (M - k) * 2;
+        output_data[base_mk]     = conj_re;
+        output_data[base_mk + 1] = conj_im;
+    }
+}

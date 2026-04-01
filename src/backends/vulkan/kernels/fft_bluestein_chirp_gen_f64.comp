@@ -1,0 +1,30 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Generate Bluestein chirp sequence on GPU — Float64
+// chirp[k] = cos(angle) + j*sin(angle), where angle = sign * pi * k^2 / N
+// Output: interleaved real/imag pairs — [re0, im0, re1, im1, ...]
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer OutputBuf { double output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint N;          // Signal length
+    int sign;        // +1 or -1 (forward = -1, inverse = +1)
+};
+
+void main() {
+    uint k = gl_GlobalInvocationID.x;
+    if (k >= N) return;
+
+    double angle = double(sign) * 3.14159265358979323846lf * double(k) * double(k) / double(N);
+    // GLSL trig functions only work on float; cast down for cos/sin
+    float angle_f = float(angle);
+    double c = double(cos(angle_f));
+    double s = double(sin(angle_f));
+
+    uint base = k * 2;
+    output_data[base]     = c;
+    output_data[base + 1] = s;
+}

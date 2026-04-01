@@ -1,0 +1,28 @@
+#version 450
+
+// Generate Bluestein chirp sequence on GPU
+// chirp[k] = exp(sign * j * pi * k^2 / N)
+//          = cos(angle) + j*sin(angle), where angle = sign * pi * k^2 / N
+// Output: interleaved real/imag pairs — [re0, im0, re1, im1, ...]
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer OutputBuf { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint N;          // Signal length
+    int sign;        // +1 or -1 (forward = -1, inverse = +1)
+};
+
+void main() {
+    uint k = gl_GlobalInvocationID.x;
+    if (k >= N) return;
+
+    float angle = float(sign) * 3.14159265358979323846 * float(k) * float(k) / float(N);
+    float c = cos(angle);
+    float s = sin(angle);
+
+    uint base = k * 2;
+    output_data[base]     = c;
+    output_data[base + 1] = s;
+}

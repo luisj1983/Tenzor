@@ -617,6 +617,8 @@ public:
     auto runFFTScale(Tensor& data, uint32_t n, double scale_factor) -> void;
     auto runFFTChirpMultiply(Tensor& data, const Tensor& chirp, uint32_t n,
                               bool conjugate) -> void;
+    auto runFFTChirpGen(Tensor& output, uint32_t N, int32_t sign) -> void;
+    auto runFFTConjKernelGen(Tensor& output, uint32_t N, uint32_t M, int32_t sign) -> void;
     auto dispatchFFTBluestein(const Tensor& input, int64_t signal_len,
                                uint32_t direction) -> Tensor;
     auto runMixedRadixFFT(const Tensor& input, int64_t N, uint32_t direction,

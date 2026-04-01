@@ -17691,6 +17691,77 @@ auto VulkanBackend::runFFTChirpMultiply(Tensor& data, const Tensor& chirp,
     endSingleTimeCommands(cmd, device_id);
 }
 
+auto VulkanBackend::runFFTChirpGen(Tensor& output, uint32_t N, int32_t sign) -> void {
+    int32_t device_id = output.device().index;
+    bool is_f64 = (output.dtype() == DType::Complex128);
+
+    std::string shader = is_f64 ? "fft_bluestein_chirp_gen_f64" : "fft_bluestein_chirp_gen";
+    auto* pipeline = getPipeline(shader, device_id);
+
+    struct PushConstants {
+        uint32_t N;
+        int32_t sign;
+    } pc;
+    pc.N = N;
+    pc.sign = sign;
+
+    size_t elem_size = is_f64 ? 16 : 8;
+    size_t buf_size = N * elem_size;
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, output.data_ptr()}
+    };
+    std::vector<size_t> sizes = {buf_size};
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(N, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+}
+
+auto VulkanBackend::runFFTConjKernelGen(Tensor& output, uint32_t N, uint32_t M,
+                                          int32_t sign) -> void {
+    int32_t device_id = output.device().index;
+    bool is_f64 = (output.dtype() == DType::Complex128);
+
+    std::string shader = is_f64 ? "fft_bluestein_conj_kernel_f64" : "fft_bluestein_conj_kernel";
+    auto* pipeline = getPipeline(shader, device_id);
+
+    struct PushConstants {
+        uint32_t N;
+        uint32_t M;
+        int32_t sign;
+    } pc;
+    pc.N = N;
+    pc.M = M;
+    pc.sign = sign;
+
+    size_t elem_size = is_f64 ? 16 : 8;
+    size_t buf_size = M * elem_size;
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, output.data_ptr()}
+    };
+    std::vector<size_t> sizes = {buf_size};
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(N, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+}
+
 auto VulkanBackend::dispatchFFTBluestein(const Tensor& input, int64_t signal_len,
                                            uint32_t direction) -> Tensor {
     // Bluestein's algorithm converts N-point DFT to circular convolution of
@@ -17708,35 +17779,13 @@ auto VulkanBackend::dispatchFFTBluestein(const Tensor& input, int64_t signal_len
     int32_t device_id = input.device().index;
     Device vulkan_dev = input.device();
 
-    // Step 1: Compute chirp sequence on CPU
+    // Step 1: Generate chirp sequence on GPU
     // chirp[k] = exp(sign * j * pi * k^2 / N)
     // Forward: sign = -1, Inverse: sign = +1
-    double sign = (direction == 0) ? -1.0 : 1.0;
+    int32_t sign_int = (direction == 0) ? -1 : 1;
 
-    std::vector<double> chirp_re(N), chirp_im(N);
-    for (int64_t k = 0; k < N; ++k) {
-        double angle = sign * M_PI * static_cast<double>(k) * static_cast<double>(k)
-                       / static_cast<double>(N);
-        chirp_re[k] = std::cos(angle);
-        chirp_im[k] = std::sin(angle);
-    }
-
-    // Create CPU chirp tensor (length N, complex interleaved) and upload to GPU
-    Tensor chirp_cpu({N}, complex_dtype, Device::cpu());
-    if (is_f64) {
-        auto* ptr = static_cast<double*>(chirp_cpu.data_ptr());
-        for (int64_t k = 0; k < N; ++k) {
-            ptr[k * 2]     = chirp_re[k];
-            ptr[k * 2 + 1] = chirp_im[k];
-        }
-    } else {
-        auto* ptr = static_cast<float*>(chirp_cpu.data_ptr());
-        for (int64_t k = 0; k < N; ++k) {
-            ptr[k * 2]     = static_cast<float>(chirp_re[k]);
-            ptr[k * 2 + 1] = static_cast<float>(chirp_im[k]);
-        }
-    }
-    Tensor chirp_gpu = chirp_cpu.to(vulkan_dev);
+    Tensor chirp_gpu({N}, complex_dtype, vulkan_dev);
+    runFFTChirpGen(chirp_gpu, static_cast<uint32_t>(N), sign_int);
 
     // Step 2: Create zero-padded a[M] with a[0..N-1] = input[0..N-1] * chirp[0..N-1]
     // Tensor constructor zero-initializes, so padding is already zero
@@ -17761,33 +17810,12 @@ auto VulkanBackend::dispatchFFTBluestein(const Tensor& input, int64_t signal_len
     // Multiply first N elements of a_padded by chirp
     runFFTChirpMultiply(a_padded, chirp_gpu, static_cast<uint32_t>(N), /*conjugate=*/false);
 
-    // Step 3: Build convolution kernel b of length M on CPU, upload to GPU
+    // Step 3: Generate conjugate chirp convolution kernel of length M on GPU
     // b[0] = conj(chirp[0]), b[k] = conj(chirp[k]) for k=1..N-1,
     // b[M-k] = conj(chirp[k]) for k=1..N-1, rest = 0
-    Tensor b_cpu({M}, complex_dtype, Device::cpu());
-    if (is_f64) {
-        auto* ptr = static_cast<double*>(b_cpu.data_ptr());
-        // Already zero-initialized
-        for (int64_t k = 0; k < N; ++k) {
-            ptr[k * 2]     = chirp_re[k];
-            ptr[k * 2 + 1] = -chirp_im[k];
-            if (k > 0) {
-                ptr[(M - k) * 2]     = chirp_re[k];
-                ptr[(M - k) * 2 + 1] = -chirp_im[k];
-            }
-        }
-    } else {
-        auto* ptr = static_cast<float*>(b_cpu.data_ptr());
-        for (int64_t k = 0; k < N; ++k) {
-            ptr[k * 2]     = static_cast<float>(chirp_re[k]);
-            ptr[k * 2 + 1] = static_cast<float>(-chirp_im[k]);
-            if (k > 0) {
-                ptr[(M - k) * 2]     = static_cast<float>(chirp_re[k]);
-                ptr[(M - k) * 2 + 1] = static_cast<float>(-chirp_im[k]);
-            }
-        }
-    }
-    Tensor b_padded = b_cpu.to(vulkan_dev);
+    // Tensor constructor zero-initializes, so padding is already zero
+    Tensor b_padded({M}, complex_dtype, vulkan_dev);
+    runFFTConjKernelGen(b_padded, static_cast<uint32_t>(N), static_cast<uint32_t>(M), sign_int);
 
     // Step 4: FFT(a), FFT(b) using power-of-2 Cooley-Tukey
     Tensor A = runFFTButterfly(a_padded, static_cast<uint32_t>(M), 0, 0);

@@ -88,6 +88,31 @@ endif()
 set(ONEMKL_COMPILE_FLAGS "")
 if(ONEMKL_SYCL_FOUND)
     list(APPEND ONEMKL_COMPILE_FLAGS -DTENZOR_HAS_ONEMKL -I${ONEMKL_SYCL_INCLUDE_DIR})
+
+    # Check if oneMKL exposes geev (non-symmetric eigendecomposition)
+    include(CheckCXXSourceCompiles)
+    set(CMAKE_REQUIRED_INCLUDES ${ONEMKL_SYCL_INCLUDE_DIR})
+    set(CMAKE_REQUIRED_FLAGS "-fsycl")
+    set(CMAKE_REQUIRED_DEFINITIONS -DTENZOR_HAS_ONEMKL)
+    check_cxx_source_compiles("
+        #include <oneapi/mkl.hpp>
+        #include <sycl/sycl.hpp>
+        int main() {
+            sycl::queue q;
+            (void)::oneapi::mkl::lapack::geev_scratchpad_size<float>(
+                q, ::oneapi::mkl::compvl::vec, ::oneapi::mkl::compvr::novec, 1, 1);
+            return 0;
+        }
+    " TENZOR_ONEMKL_HAS_GEEV)
+    unset(CMAKE_REQUIRED_INCLUDES)
+    unset(CMAKE_REQUIRED_FLAGS)
+    unset(CMAKE_REQUIRED_DEFINITIONS)
+    if(TENZOR_ONEMKL_HAS_GEEV)
+        list(APPEND ONEMKL_COMPILE_FLAGS -DTENZOR_HAS_ONEMKL_GEEV)
+        message(STATUS "oneMKL: geev (non-symmetric eigendecomposition) detected")
+    else()
+        message(STATUS "oneMKL: geev not available — LinalgEig will use stub")
+    endif()
 endif()
 
 # =========================================================================

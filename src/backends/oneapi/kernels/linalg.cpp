@@ -155,6 +155,10 @@ class SyclTransposeCholeskyF32;
 class SyclTransposeCholeskyF64;
 class SyclTransposeCholeskyBackF32;
 class SyclTransposeCholeskyBackF64;
+class SyclTransposeEigF32;
+class SyclTransposeEigF64;
+class SyclTransposeEigBackF32;
+class SyclTransposeEigBackF64;
 class SyclDiagExtractDetF32;
 class SyclDiagExtractDetF64;
 class SyclDetReduceF32;
@@ -582,15 +586,106 @@ auto linalg_eigh_kernel(const Tensor& input, sycl::queue& queue) -> std::pair<Te
 
 // ============================================================================
 // LinalgEig - Non-symmetric eigendecomposition via geev
-// NOTE: geev is not available in all oneMKL versions/implementations.
-// When unavailable, this falls back to the CPU LAPACK path.
 // ============================================================================
+#ifdef TENZOR_HAS_ONEMKL_GEEV
+auto linalg_eig_kernel(const Tensor& input, sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor> {
+    auto shape = input.shape();
+    int64_t n = shape[shape.size() - 1];
+
+    // Compute batch dimensions (all dims except last two)
+    int64_t nbatch = 1;
+    std::vector<int64_t> batch_dims;
+    for (size_t i = 0; i + 2 < shape.size(); i++) {
+        batch_dims.push_back(shape[i]);
+        nbatch *= shape[i];
+    }
+    if (nbatch == 0) nbatch = 1;
+
+    std::vector<int64_t> w_shape = batch_dims;
+    w_shape.push_back(n);
+    std::vector<int64_t> v_shape = batch_dims;
+    v_shape.push_back(n);
+    v_shape.push_back(n);
+
+    if (n == 0) {
+        return {Tensor(w_shape, input.dtype(), input.device()),
+                Tensor(w_shape, input.dtype(), input.device()),
+                Tensor(v_shape, input.dtype(), input.device())};
+    }
+
+    // Row-major input: feeding to column-major geev gives A^T.
+    // Left eigenvectors of A^T = right eigenvectors of A.
+    // Output VL in column-major = right eigenvectors in row-major.
+    auto work = clone_kernel(input, queue);
+
+    auto WR = Tensor(w_shape, input.dtype(), input.device());
+    auto WI = Tensor(w_shape, input.dtype(), input.device());
+    auto V = Tensor(v_shape, input.dtype(), input.device());
+
+    if (input.dtype() == DType::Float32) {
+        float* a_data = get_data_ptr<float>(work);
+        float* wr_data = get_data_ptr<float>(WR);
+        float* wi_data = get_data_ptr<float>(WI);
+        float* v_data = get_data_ptr<float>(V);
+
+        for (int64_t b = 0; b < nbatch; b++) {
+            float* mat = a_data + b * n * n;
+            float* wr_vec = wr_data + b * n;
+            float* wi_vec = wi_data + b * n;
+            float* vl = v_data + b * n * n;
+
+            auto sp = ::oneapi::mkl::lapack::geev_scratchpad_size<float>(
+                queue, ::oneapi::mkl::compvl::vec, ::oneapi::mkl::compvr::novec,
+                n, n);
+            SyclDeviceBuffer<float> scratch(sp, queue);
+
+            ::oneapi::mkl::lapack::geev(
+                queue, ::oneapi::mkl::compvl::vec, ::oneapi::mkl::compvr::novec,
+                n, mat, n, wr_vec, wi_vec,
+                vl, n,       // VL (left eigenvectors of A^T = right of A)
+                nullptr, n,  // VR (not computed)
+                scratch.get(), sp).wait();
+        }
+    } else if (input.dtype() == DType::Float64) {
+        double* a_data = get_data_ptr<double>(work);
+        double* wr_data = get_data_ptr<double>(WR);
+        double* wi_data = get_data_ptr<double>(WI);
+        double* v_data = get_data_ptr<double>(V);
+
+        for (int64_t b = 0; b < nbatch; b++) {
+            double* mat = a_data + b * n * n;
+            double* wr_vec = wr_data + b * n;
+            double* wi_vec = wi_data + b * n;
+            double* vl = v_data + b * n * n;
+
+            auto sp = ::oneapi::mkl::lapack::geev_scratchpad_size<double>(
+                queue, ::oneapi::mkl::compvl::vec, ::oneapi::mkl::compvr::novec,
+                n, n);
+            SyclDeviceBuffer<double> scratch(sp, queue);
+
+            ::oneapi::mkl::lapack::geev(
+                queue, ::oneapi::mkl::compvl::vec, ::oneapi::mkl::compvr::novec,
+                n, mat, n, wr_vec, wi_vec,
+                vl, n,
+                nullptr, n,
+                scratch.get(), sp).wait();
+        }
+    } else {
+        throw std::runtime_error("linalg_eig: only Float32 and Float64 supported");
+    }
+
+    // V contains left eigenvectors of A^T (= right eigenvectors of A) in column-major
+    // which is the same as right eigenvectors in row-major — no transpose needed
+    return {WR, WI, V};
+}
+#else
 auto linalg_eig_kernel(const Tensor& input, sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor> {
     (void)input; (void)queue;
     throw std::runtime_error(
         "linalg_eig: oneapi::mkl::lapack::geev is not available in the installed oneMKL version. "
-        "Non-symmetric eigendecomposition will fall back to the CPU backend.");
+        "Non-symmetric eigendecomposition requires a newer oneMKL or the CPU backend.");
 }
+#endif // TENZOR_HAS_ONEMKL_GEEV
 
 // ============================================================================
 // LinalgCholesky - Cholesky factorization via potrf

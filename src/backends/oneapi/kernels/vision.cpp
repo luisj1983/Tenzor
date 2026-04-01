@@ -141,65 +141,55 @@ auto nms_kernel(
 #else
     {
         // Device-side bitonic argsort descending (no oneDPL dependency)
-        // For very small inputs, host sort is faster due to kernel launch overhead
-        if (num_boxes < 64) {
-            std::vector<float> h_scores(num_boxes);
-            queue.memcpy(h_scores.data(), scores_f32_ptr, num_boxes * sizeof(float)).wait();
-            std::iota(order.begin(), order.end(), 0);
-            std::sort(order.begin(), order.end(), [&](int64_t a, int64_t b) {
-                return h_scores[a] > h_scores[b];
-            });
-        } else {
-            // Pad to next power of 2 for bitonic sort
-            int64_t padded = 1;
-            while (padded < num_boxes) padded <<= 1;
+        // Pad to next power of 2 for bitonic sort
+        int64_t padded = 1;
+        while (padded < num_boxes) padded <<= 1;
 
-            float* d_scores = sycl::malloc_device<float>(padded, queue);
-            int64_t* d_order = sycl::malloc_device<int64_t>(padded, queue);
+        float* d_scores = sycl::malloc_device<float>(padded, queue);
+        int64_t* d_order = sycl::malloc_device<int64_t>(padded, queue);
 
-            queue.memcpy(d_scores, scores_f32_ptr, num_boxes * sizeof(float));
-            // Initialize indices and pad with sentinel values
-            queue.parallel_for(sycl::range<1>(padded), [=](sycl::id<1> i) {
-                int64_t idx = static_cast<int64_t>(i[0]);
-                d_order[idx] = idx;
-                if (idx >= num_boxes) {
-                    d_scores[idx] = -std::numeric_limits<float>::infinity();
-                }
-            }).wait();
-
-            // Bitonic sort: descending order
-            for (int64_t k = 2; k <= padded; k <<= 1) {
-                for (int64_t j = k >> 1; j > 0; j >>= 1) {
-                    queue.parallel_for(sycl::range<1>(padded / 2),
-                        [=](sycl::id<1> gid) {
-                            int64_t tid = static_cast<int64_t>(gid[0]);
-                            int64_t ixj = tid ^ j;
-                            // Map tid to the actual element index
-                            int64_t l = tid | (tid & ~(j - 1));
-                            int64_t r = l ^ j;
-                            if (r <= l) return;
-                            // Descending: swap if left < right in ascending half
-                            bool ascending_half = ((l & k) == 0);
-                            float lv = d_scores[l], rv = d_scores[r];
-                            // For descending sort: swap in ascending half if l < r
-                            bool should_swap = ascending_half ? (lv < rv) : (lv > rv);
-                            if (should_swap) {
-                                d_scores[l] = rv;
-                                d_scores[r] = lv;
-                                int64_t tmp = d_order[l];
-                                d_order[l] = d_order[r];
-                                d_order[r] = tmp;
-                            }
-                        }).wait();
-                }
+        queue.memcpy(d_scores, scores_f32_ptr, num_boxes * sizeof(float));
+        // Initialize indices and pad with sentinel values
+        queue.parallel_for(sycl::range<1>(padded), [=](sycl::id<1> i) {
+            int64_t idx = static_cast<int64_t>(i[0]);
+            d_order[idx] = idx;
+            if (idx >= num_boxes) {
+                d_scores[idx] = -std::numeric_limits<float>::infinity();
             }
+        }).wait();
 
-            // Copy sorted order (only valid elements) back to host
-            queue.memcpy(order.data(), d_order, num_boxes * sizeof(int64_t)).wait();
-
-            sycl::free(d_scores, queue);
-            sycl::free(d_order, queue);
+        // Bitonic sort: descending order
+        for (int64_t k = 2; k <= padded; k <<= 1) {
+            for (int64_t j = k >> 1; j > 0; j >>= 1) {
+                queue.parallel_for(sycl::range<1>(padded / 2),
+                    [=](sycl::id<1> gid) {
+                        int64_t tid = static_cast<int64_t>(gid[0]);
+                        int64_t ixj = tid ^ j;
+                        // Map tid to the actual element index
+                        int64_t l = tid | (tid & ~(j - 1));
+                        int64_t r = l ^ j;
+                        if (r <= l) return;
+                        // Descending: swap if left < right in ascending half
+                        bool ascending_half = ((l & k) == 0);
+                        float lv = d_scores[l], rv = d_scores[r];
+                        // For descending sort: swap in ascending half if l < r
+                        bool should_swap = ascending_half ? (lv < rv) : (lv > rv);
+                        if (should_swap) {
+                            d_scores[l] = rv;
+                            d_scores[r] = lv;
+                            int64_t tmp = d_order[l];
+                            d_order[l] = d_order[r];
+                            d_order[r] = tmp;
+                        }
+                    }).wait();
+            }
         }
+
+        // Copy sorted order (only valid elements) back to host
+        queue.memcpy(order.data(), d_order, num_boxes * sizeof(int64_t)).wait();
+
+        sycl::free(d_scores, queue);
+        sycl::free(d_order, queue);
     }
 #endif
 
