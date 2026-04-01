@@ -9560,9 +9560,13 @@ auto VulkanBackend::dispatchAdaptiveAvgPool1dBackward(const Tensor& grad_output,
         return dispatchAvgPool1dBackward(grad_output, dummy_input, backward_attrs);
     }
 
-    // For non-divisible case, return zero-initialized grad_input
-    // TODO: Create dedicated adaptive_avg_pool1d_backward shader for general case
-    return grad_input;
+    // Non-divisible case: delegate to adaptive_avg_pool2d_backward by treating
+    // the 1D problem as 2D with H=1. The 2D shader computes per-element adaptive
+    // window boundaries (start = j * L_in / L_out, end = (j+1) * L_in / L_out)
+    // and distributes grad_output[j] / window_size to each input in the window.
+    Tensor grad_output_4d = grad_output.reshape({batch, channels, 1, L_out});
+    Tensor grad_input_4d = dispatchAdaptiveAvgPool2dBackward(grad_output_4d, /*H_in=*/1, /*W_in=*/L_in);
+    return grad_input_4d.reshape({batch, channels, L_in});
 }
 
 // ============================================================================
@@ -11953,18 +11957,9 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
         // Generic two-step via Float32 for any remaining dtype pair
         two_step = true;
     } else {
-        // Unsupported direct GPU cast — fall back to CPU round-trip
-        // This should only occur for truly unsupported src/target dtype pairs
-        static bool warned_cast = false;
-        if (!warned_cast) {
-            TENZOR_LOG_WARNING("Vulkan Cast: unsupported GPU cast from " +
-                std::string(dtype_name(src_dtype)) + " to " +
-                std::string(dtype_name(target_dtype)) + " - falling back to CPU");
-            warned_cast = true;
-        }
-        Tensor cpu_copy = input.cpu();
-        Tensor casted = cpu_copy.to(target_dtype);
-        return casted.to(input.device());
+        // Two-step GPU cast through Float32 for any remaining dtype pairs
+        Tensor intermediate = dispatchCast(input, DType::Float32);
+        return dispatchCast(intermediate, target_dtype);
     }
 
     // Two-step casts via Float32 intermediate

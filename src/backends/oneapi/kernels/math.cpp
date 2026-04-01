@@ -449,7 +449,7 @@ static void sycl_broadcast_binary(
             b_idx += coord * bs_[d];
         }
         out_ptr[gid] = op(a_ptr[a_idx], b_ptr[b_idx]);
-    });
+    }).wait();
 }
 
 // Generic SYCL broadcast binary operation for complex types
@@ -485,7 +485,7 @@ static void sycl_broadcast_complex_binary(
         }
         // Indices are in complex element units, multiply by 2 for real/imag pair access
         op(a_ptr, b_ptr, out_ptr, a_idx * 2, b_idx * 2, flat * 2);
-    });
+    }).wait();
 }
 
 // Element-wise addition kernel
@@ -576,7 +576,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<AddKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] + b_ptr[idx];
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::Float64) {
         const double* a_ptr = get_data_ptr<const double>(a_cont);
@@ -585,7 +585,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<AddKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] + b_ptr[idx];
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::Float16) {
         const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a_cont);
@@ -595,7 +595,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
         queue.parallel_for<AddKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             // Use float accumulation for precision
             out_ptr[idx] = sycl::half(static_cast<float>(a_ptr[idx]) + static_cast<float>(b_ptr[idx]));
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::BFloat16) {
         const uint16_t* a_ptr = get_data_ptr<const uint16_t>(a_cont);
@@ -604,7 +604,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<AddKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = f32_to_bf16(bf16_to_f32(a_ptr[idx]) + bf16_to_f32(b_ptr[idx]));
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::Int8) {
         const int8_t* a_ptr = get_data_ptr<const int8_t>(a_cont);
@@ -613,7 +613,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<AddKernelInt8>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] + b_ptr[idx];
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::Int32) {
         const int32_t* a_ptr = get_data_ptr<const int32_t>(a_cont);
@@ -622,7 +622,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<AddKernelInt32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] + b_ptr[idx];
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::Int64) {
         const int64_t* a_ptr = get_data_ptr<const int64_t>(a_cont);
@@ -631,7 +631,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<AddKernelInt64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] + b_ptr[idx];
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::UInt8) {
         const uint8_t* a_ptr = get_data_ptr<const uint8_t>(a_cont);
@@ -640,7 +640,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<AddKernelUInt8>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] + b_ptr[idx];
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::Bool) {
         // Bool addition acts as logical OR
@@ -650,7 +650,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<AddKernelBool>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] || b_ptr[idx];
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::Complex64) {
         const float* a_ptr = get_data_ptr<const float>(a_cont);
@@ -661,7 +661,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             int64_t base = idx[0] * 2;
             out_ptr[base]     = a_ptr[base]     + b_ptr[base];
             out_ptr[base + 1] = a_ptr[base + 1] + b_ptr[base + 1];
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::Complex128) {
         const double* a_ptr = get_data_ptr<const double>(a_cont);
@@ -672,7 +672,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             int64_t base = idx[0] * 2;
             out_ptr[base]     = a_ptr[base]     + b_ptr[base];
             out_ptr[base + 1] = a_ptr[base + 1] + b_ptr[base + 1];
-        });
+        }).wait();
     }
     else {
         throw std::runtime_error("Unsupported dtype for addition");
@@ -762,7 +762,7 @@ auto sub_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<SubKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] - b_ptr[idx];
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::Float64) {
         const double* a_ptr = get_data_ptr<const double>(a_cont);
@@ -771,7 +771,7 @@ auto sub_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<SubKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] - b_ptr[idx];
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::Float16) {
         const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a_cont);
@@ -780,7 +780,7 @@ auto sub_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<SubKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::half(static_cast<float>(a_ptr[idx]) - static_cast<float>(b_ptr[idx]));
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::BFloat16) {
         const uint16_t* a_ptr = get_data_ptr<const uint16_t>(a_cont);
@@ -789,7 +789,7 @@ auto sub_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<SubKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = f32_to_bf16(bf16_to_f32(a_ptr[idx]) - bf16_to_f32(b_ptr[idx]));
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::Int8) {
         const int8_t* a_ptr = get_data_ptr<const int8_t>(a_cont);
@@ -798,7 +798,7 @@ auto sub_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<SubKernelInt8>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] - b_ptr[idx];
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::Int32) {
         const int32_t* a_ptr = get_data_ptr<const int32_t>(a_cont);
@@ -807,7 +807,7 @@ auto sub_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<SubKernelInt32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] - b_ptr[idx];
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::Int64) {
         const int64_t* a_ptr = get_data_ptr<const int64_t>(a_cont);
@@ -816,7 +816,7 @@ auto sub_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<SubKernelInt64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] - b_ptr[idx];
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::UInt8) {
         const uint8_t* a_ptr = get_data_ptr<const uint8_t>(a_cont);
@@ -825,7 +825,7 @@ auto sub_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<SubKernelUInt8>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] - b_ptr[idx];
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::Complex64) {
         const float* a_ptr = get_data_ptr<const float>(a_cont);
@@ -836,7 +836,7 @@ auto sub_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             int64_t base = idx[0] * 2;
             out_ptr[base]     = a_ptr[base]     - b_ptr[base];
             out_ptr[base + 1] = a_ptr[base + 1] - b_ptr[base + 1];
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::Complex128) {
         const double* a_ptr = get_data_ptr<const double>(a_cont);
@@ -847,7 +847,7 @@ auto sub_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             int64_t base = idx[0] * 2;
             out_ptr[base]     = a_ptr[base]     - b_ptr[base];
             out_ptr[base + 1] = a_ptr[base + 1] - b_ptr[base + 1];
-        });
+        }).wait();
     }
     else {
         throw std::runtime_error("Unsupported dtype for subtraction");
@@ -939,7 +939,7 @@ auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<MulKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] * b_ptr[idx];
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::Float64) {
         const double* a_ptr = get_data_ptr<const double>(a_cont);
@@ -948,7 +948,7 @@ auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<MulKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] * b_ptr[idx];
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::Float16) {
         const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a_cont);
@@ -957,7 +957,7 @@ auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<MulKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::half(static_cast<float>(a_ptr[idx]) * static_cast<float>(b_ptr[idx]));
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::BFloat16) {
         const uint16_t* a_ptr = get_data_ptr<const uint16_t>(a_cont);
@@ -966,7 +966,7 @@ auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<MulKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = f32_to_bf16(bf16_to_f32(a_ptr[idx]) * bf16_to_f32(b_ptr[idx]));
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::Int32) {
         const int32_t* a_ptr = get_data_ptr<const int32_t>(a_cont);
@@ -975,7 +975,7 @@ auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<MulKernelInt32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] * b_ptr[idx];
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::Bool) {
         // Bool multiplication acts as logical AND
@@ -985,7 +985,7 @@ auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<MulKernelBool>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] && b_ptr[idx];
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::Complex64) {
         const float* a_ptr = get_data_ptr<const float>(a_cont);
@@ -998,7 +998,7 @@ auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             float br = b_ptr[base], bi = b_ptr[base + 1];
             out_ptr[base]     = ar * br - ai * bi;
             out_ptr[base + 1] = ar * bi + ai * br;
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::Complex128) {
         const double* a_ptr = get_data_ptr<const double>(a_cont);
@@ -1011,7 +1011,7 @@ auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             double br = b_ptr[base], bi = b_ptr[base + 1];
             out_ptr[base]     = ar * br - ai * bi;
             out_ptr[base + 1] = ar * bi + ai * br;
-        });
+        }).wait();
     }
     else {
         throw std::runtime_error("Unsupported dtype for multiplication");
@@ -1033,7 +1033,7 @@ inline void check_integer_divisor_for_zeros(const T* data, int64_t n, sycl::queu
                             sycl::access::address_space::global_space> flag(*has_zero);
             flag.store(1);
         }
-    });
+    }).wait();
 
     bool found_zero = (*has_zero != 0);
     sycl::free(has_zero, queue);
@@ -1128,7 +1128,7 @@ auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<DivKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] / b_ptr[idx];
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::Float64) {
         const double* a_ptr = get_data_ptr<const double>(a_cont);
@@ -1137,7 +1137,7 @@ auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<DivKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] / b_ptr[idx];
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::Float16) {
         const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a_cont);
@@ -1146,7 +1146,7 @@ auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<DivKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::half(static_cast<float>(a_ptr[idx]) / static_cast<float>(b_ptr[idx]));
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::BFloat16) {
         const uint16_t* a_ptr = get_data_ptr<const uint16_t>(a_cont);
@@ -1155,7 +1155,7 @@ auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<DivKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = f32_to_bf16(bf16_to_f32(a_ptr[idx]) / bf16_to_f32(b_ptr[idx]));
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::Int32) {
         const int32_t* a_ptr = get_data_ptr<const int32_t>(a_cont);
@@ -1167,7 +1167,7 @@ auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<DivKernelInt32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] / b_ptr[idx];
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::Complex64) {
         const float* a_ptr = get_data_ptr<const float>(a_cont);
@@ -1181,7 +1181,7 @@ auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             float denom = br * br + bi * bi;
             out_ptr[base]     = (ar * br + ai * bi) / denom;
             out_ptr[base + 1] = (ai * br - ar * bi) / denom;
-        });
+        }).wait();
     }
     else if (a_cont.dtype() == DType::Complex128) {
         const double* a_ptr = get_data_ptr<const double>(a_cont);
@@ -1195,7 +1195,7 @@ auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             double denom = br * br + bi * bi;
             out_ptr[base]     = (ar * br + ai * bi) / denom;
             out_ptr[base + 1] = (ai * br - ar * bi) / denom;
-        });
+        }).wait();
     }
     else {
         throw std::runtime_error("Unsupported dtype for division");

@@ -244,13 +244,13 @@ __global__ void roi_align_backward_kernel(
 auto roi_align_forward(const Tensor& features, const Tensor& rois,
                        int64_t output_h, int64_t output_w,
                        float spatial_scale, int64_t sampling_ratio,
-                       bool aligned) -> Tensor {
+                       bool aligned, hipStream_t stream) -> Tensor {
     // Non-Float32 types: compute in Float32 and convert back to original dtype
     const DType orig_dtype = features.dtype();
     if (orig_dtype != DType::Float32) {
         auto features_f32 = features.to(DType::Float32);
         auto result_f32 = roi_align_forward(features_f32, rois, output_h, output_w,
-                                            spatial_scale, sampling_ratio, aligned);
+                                            spatial_scale, sampling_ratio, aligned, stream);
         return result_f32.to(orig_dtype);
     }
 
@@ -274,7 +274,7 @@ auto roi_align_forward(const Tensor& features, const Tensor& rois,
     const int threads = 512;
     const int blocks = (total_outputs + threads - 1) / threads;
 
-    hipLaunchKernelGGL(roi_align_forward_kernel, dim3(blocks), dim3(threads), 0, 0,
+    hipLaunchKernelGGL(roi_align_forward_kernel, dim3(blocks), dim3(threads), 0, stream,
                       features.data<float>(), rois_ptr, output.data<float>(),
                       num_rois, channels, feat_height, feat_width,
                       output_h, output_w, spatial_scale, sampling_ratio, aligned);
@@ -286,13 +286,13 @@ auto roi_align_forward(const Tensor& features, const Tensor& rois,
 auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
                         int64_t batch_size, int64_t feat_height, int64_t feat_width,
                         float spatial_scale, int64_t sampling_ratio,
-                        bool aligned) -> Tensor {
+                        bool aligned, hipStream_t stream) -> Tensor {
     // Non-Float32 types: compute in Float32 and convert back to original dtype
     const DType orig_dtype = grad_output.dtype();
     if (orig_dtype != DType::Float32) {
         auto grad_f32 = grad_output.to(DType::Float32);
         auto result_f32 = roi_align_backward(grad_f32, rois, batch_size, feat_height,
-                                             feat_width, spatial_scale, sampling_ratio, aligned);
+                                             feat_width, spatial_scale, sampling_ratio, aligned, stream);
         return result_f32.to(orig_dtype);
     }
 
@@ -306,7 +306,7 @@ auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
     int64_t total_grads = num_rois * channels * output_h * output_w;
 
     Tensor grad_features(grad_shape, DType::Float32, grad_output.device());
-    HIP_ROI_CHECK(hipMemset(grad_features.data<float>(), 0, total_features * sizeof(float)));
+    HIP_ROI_CHECK(hipMemsetAsync(grad_features.data<float>(), 0, total_features * sizeof(float), stream));
 
     if (total_grads == 0) return grad_features;
 
@@ -320,7 +320,7 @@ auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
     const int threads = 512;
     const int blocks = (total_grads + threads - 1) / threads;
 
-    hipLaunchKernelGGL(roi_align_backward_kernel, dim3(blocks), dim3(threads), 0, 0,
+    hipLaunchKernelGGL(roi_align_backward_kernel, dim3(blocks), dim3(threads), 0, stream,
                       grad_f32.data<float>(), rois_ptr, grad_features.data<float>(),
                       num_rois, channels, feat_height, feat_width,
                       output_h, output_w, spatial_scale, sampling_ratio, aligned);

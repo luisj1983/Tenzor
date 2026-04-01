@@ -160,6 +160,142 @@ __global__ void fold_kernel(
 }
 
 // ============================================================================
+// Fold FP16 Kernel — arch-guarded atomicAdd for __half
+// ============================================================================
+
+__global__ void fold_kernel_fp16(
+    const __half* input,
+    __half* output,
+    int64_t batch,
+    int64_t channels,
+    int64_t height,
+    int64_t width,
+    int64_t kernel_size,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t out_h,
+    int64_t out_w
+) {
+    int64_t num_blocks = out_h * out_w;
+    int64_t col_channels = channels * kernel_size * kernel_size;
+    int64_t total_elements = batch * col_channels * num_blocks;
+
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_elements) {
+        int64_t temp = idx;
+        int64_t block_idx = temp % num_blocks; temp /= num_blocks;
+        int64_t col_c = temp % col_channels; temp /= col_channels;
+        int64_t b = temp;
+
+        int64_t kw = col_c % kernel_size;
+        int64_t kh = (col_c / kernel_size) % kernel_size;
+        int64_t c = col_c / (kernel_size * kernel_size);
+
+        int64_t oh = block_idx / out_w;
+        int64_t ow = block_idx % out_w;
+
+        int64_t ih = oh * stride - padding + kh * dilation;
+        int64_t iw = ow * stride - padding + kw * dilation;
+
+        if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
+            int64_t input_idx = b * (col_channels * num_blocks) +
+                               col_c * num_blocks +
+                               block_idx;
+
+            int64_t output_idx = b * (channels * height * width) +
+                                c * (height * width) +
+                                ih * width + iw;
+
+#if __CUDA_ARCH__ >= 700
+            atomicAdd(&output[output_idx], input[input_idx]);
+#else
+            // CAS-based fallback for SM < 70
+            float val = __half2float(input[input_idx]);
+            unsigned int* addr = reinterpret_cast<unsigned int*>(
+                &output[output_idx & ~int64_t(1)]);
+            unsigned int old_val, new_val;
+            int lane = output_idx & 1;
+            do {
+                old_val = atomicCAS(addr, 0u, 0u);
+                __half* h = reinterpret_cast<__half*>(&old_val);
+                __half result = __float2half(__half2float(h[lane]) + val);
+                new_val = old_val;
+                reinterpret_cast<__half*>(&new_val)[lane] = result;
+            } while (atomicCAS(addr, old_val, new_val) != old_val);
+#endif
+        }
+    }
+}
+
+// ============================================================================
+// Fold BF16 Kernel — arch-guarded atomicAdd for __nv_bfloat16
+// ============================================================================
+
+__global__ void fold_kernel_bf16(
+    const __nv_bfloat16* input,
+    __nv_bfloat16* output,
+    int64_t batch,
+    int64_t channels,
+    int64_t height,
+    int64_t width,
+    int64_t kernel_size,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t out_h,
+    int64_t out_w
+) {
+    int64_t num_blocks = out_h * out_w;
+    int64_t col_channels = channels * kernel_size * kernel_size;
+    int64_t total_elements = batch * col_channels * num_blocks;
+
+    TENZOR_CUDA_KERNEL_LOOP(idx, total_elements) {
+        int64_t temp = idx;
+        int64_t block_idx = temp % num_blocks; temp /= num_blocks;
+        int64_t col_c = temp % col_channels; temp /= col_channels;
+        int64_t b = temp;
+
+        int64_t kw = col_c % kernel_size;
+        int64_t kh = (col_c / kernel_size) % kernel_size;
+        int64_t c = col_c / (kernel_size * kernel_size);
+
+        int64_t oh = block_idx / out_w;
+        int64_t ow = block_idx % out_w;
+
+        int64_t ih = oh * stride - padding + kh * dilation;
+        int64_t iw = ow * stride - padding + kw * dilation;
+
+        if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
+            int64_t input_idx = b * (col_channels * num_blocks) +
+                               col_c * num_blocks +
+                               block_idx;
+
+            int64_t output_idx = b * (channels * height * width) +
+                                c * (height * width) +
+                                ih * width + iw;
+
+#if __CUDA_ARCH__ >= 800
+            atomicAdd(&output[output_idx], input[input_idx]);
+#else
+            // CAS-based fallback for SM < 80
+            float val = __bfloat162float(input[input_idx]);
+            unsigned int* addr = reinterpret_cast<unsigned int*>(
+                &output[output_idx & ~int64_t(1)]);
+            unsigned int old_val, new_val;
+            int lane = output_idx & 1;
+            do {
+                old_val = atomicCAS(addr, 0u, 0u);
+                __nv_bfloat16* h = reinterpret_cast<__nv_bfloat16*>(&old_val);
+                __nv_bfloat16 result = __float2bfloat16(__bfloat162float(h[lane]) + val);
+                new_val = old_val;
+                reinterpret_cast<__nv_bfloat16*>(&new_val)[lane] = result;
+            } while (atomicCAS(addr, old_val, new_val) != old_val);
+#endif
+        }
+    }
+}
+
+// ============================================================================
 // Interpolation CUDA Kernels
 // ============================================================================
 
@@ -478,7 +614,8 @@ auto unfold_cuda(const Tensor& input,
                  int64_t kernel_size,
                  int64_t stride,
                  int64_t padding,
-                 int64_t dilation) -> Tensor {
+                 int64_t dilation,
+                 cudaStream_t stream) -> Tensor {
     auto shape = input.shape();
     int64_t batch = shape[0];
     int64_t channels = shape[1];
@@ -500,7 +637,7 @@ auto unfold_cuda(const Tensor& input,
     compute_launch_config_1d(total_elements, grid, block);
 
     TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "unfold_cuda", [&]() {
-        unfold_kernel<scalar_t><<<grid, block>>>(
+        unfold_kernel<scalar_t><<<grid, block, 0, stream>>>(
             input.data<scalar_t>(),
             output.data<scalar_t>(),
             batch, channels, height, width,
@@ -521,7 +658,8 @@ auto fold_cuda(const Tensor& input,
                int64_t kernel_size,
                int64_t stride,
                int64_t padding,
-               int64_t dilation) -> Tensor {
+               int64_t dilation,
+               cudaStream_t stream) -> Tensor {
     auto shape = input.shape();
     int64_t batch = shape[0];
     int64_t col_channels = shape[1];
@@ -540,23 +678,41 @@ auto fold_cuda(const Tensor& input,
     Tensor output(output_shape, input.dtype(), input.device());
 
     // Initialize to zero
-    TENZOR_CUDA_CHECK(cudaMemset(output.data_ptr(), 0, output.numel() * output.dtype_size()));
+    TENZOR_CUDA_CHECK(cudaMemsetAsync(output.data_ptr(), 0, output.numel() * output.dtype_size(), stream));
 
     // Launch kernel
     int64_t total_elements = batch * col_channels * num_blocks;
     dim3 grid, block;
     compute_launch_config_1d(total_elements, grid, block);
 
-    TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "fold_cuda", [&]() {
-        fold_kernel<scalar_t><<<grid, block>>>(
-            input.data<scalar_t>(),
-            output.data<scalar_t>(),
+    if (input.dtype() == DType::Float16) {
+        fold_kernel_fp16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(output.data_ptr()),
             batch, channels, height, width,
             kernel_size, stride, padding, dilation,
-            out_h, out_w
-        );
-        TENZOR_CUDA_POST_LAUNCH_CHECK();
-    });
+            out_h, out_w);
+        TENZOR_CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::BFloat16) {
+        fold_kernel_bf16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+            batch, channels, height, width,
+            kernel_size, stride, padding, dilation,
+            out_h, out_w);
+        TENZOR_CUDA_CHECK(cudaGetLastError());
+    } else {
+        TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "fold_cuda", [&]() {
+            fold_kernel<scalar_t><<<grid, block, 0, stream>>>(
+                input.data<scalar_t>(),
+                output.data<scalar_t>(),
+                batch, channels, height, width,
+                kernel_size, stride, padding, dilation,
+                out_h, out_w
+            );
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
+        });
+    }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
 

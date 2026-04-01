@@ -276,8 +276,8 @@ namespace cuda {
 
     // Vision/Interpolation operations
     auto interpolate_cuda(const Tensor& input, const std::vector<int64_t>& size, const std::string& mode, bool align_corners) -> Tensor;
-    auto unfold_cuda(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation) -> Tensor;
-    auto fold_cuda(const Tensor& input, const std::vector<int64_t>& output_size, int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation) -> Tensor;
+    auto unfold_cuda(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation, cudaStream_t stream) -> Tensor;
+    auto fold_cuda(const Tensor& input, const std::vector<int64_t>& output_size, int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation, cudaStream_t stream) -> Tensor;
     auto box_iou_cuda(const Tensor& boxes1, const Tensor& boxes2, int iou_type) -> Tensor;
     auto nms_cuda_wrapper(const Tensor& boxes, const Tensor& scores, float iou_threshold) -> Tensor;
     auto gather_relative_position_bias(const Tensor& table, const Tensor& indices,
@@ -2512,7 +2512,8 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         int64_t stride = attrs.get_int(AttrKey::Stride, 1);
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        return cuda::unfold_cuda(inputs[0], kernel_size, stride, padding, dilation);
+        cudaStream_t stream = get_cuda_stream(attrs);
+        return cuda::unfold_cuda(inputs[0], kernel_size, stride, padding, dilation, stream);
     });
 
     // inputs: [input]
@@ -2523,7 +2524,8 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         int64_t stride = attrs.get_int(AttrKey::Stride, 1);
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
-        return cuda::fold_cuda(inputs[0], output_size, kernel_size, stride, padding, dilation);
+        cudaStream_t stream = get_cuda_stream(attrs);
+        return cuda::fold_cuda(inputs[0], output_size, kernel_size, stride, padding, dilation, stream);
     });
 
     // =========================================================================

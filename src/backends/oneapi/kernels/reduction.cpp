@@ -4,8 +4,6 @@
 #include <numeric>
 #include <algorithm>
 #include <stdexcept>
-#include <unordered_set>
-#include <unordered_map>
 
 #ifdef TENZOR_HAS_ONEDPL
 #include <oneapi/dpl/algorithm>
@@ -1975,71 +1973,19 @@ auto unique_kernel(const Tensor& input, bool sorted, bool return_inverse, bool r
         }
     }
 
-    // Host-side fallback for sorted=false without oneDPL — insertion-order unique
-    // has no simple parallel form, so a host roundtrip is acceptable here.
-    auto host_unsorted_unique_impl = [&](auto dummy) {
-        using T = decltype(dummy);
-        std::vector<T> h_in(numel);
-        queue.memcpy(h_in.data(), input.data_ptr(), numel * sizeof(T)).wait();
-
-        std::vector<T> unique_vals;
-        std::unordered_set<T> seen;
-        for (auto v : h_in) {
-            if (seen.insert(v).second) {
-                unique_vals.push_back(v);
-            }
-        }
-
-        int64_t n_unique = unique_vals.size();
-
-        // Build value-to-index map for O(1) lookup
-        std::unordered_map<T, size_t> val_to_idx;
-        if (return_inverse || return_counts) {
-            for (size_t j = 0; j < unique_vals.size(); ++j) {
-                val_to_idx[unique_vals[j]] = j;
-            }
-        }
-
-        std::vector<int64_t> inverse(numel, 0);
-        if (return_inverse) {
-            for (int64_t i = 0; i < numel; ++i) {
-                inverse[i] = static_cast<int64_t>(val_to_idx[h_in[i]]);
-            }
-        }
-
-        std::vector<int64_t> counts;
-        if (return_counts) {
-            counts.resize(n_unique, 0);
-            for (int64_t i = 0; i < numel; ++i) {
-                counts[val_to_idx[h_in[i]]]++;
-            }
-        }
-
-        Tensor out_vals({n_unique}, input.dtype(), input.device());
-        queue.memcpy(const_cast<void*>(out_vals.data_ptr()), unique_vals.data(), n_unique * sizeof(T)).wait();
-
-        Tensor out_inverse({numel}, DType::Int64, input.device());
-        queue.memcpy(const_cast<void*>(out_inverse.data_ptr()), inverse.data(), numel * sizeof(int64_t)).wait();
-
-        Tensor out_counts({return_counts ? n_unique : 0}, DType::Int64, input.device());
-        if (return_counts && n_unique > 0) {
-            queue.memcpy(const_cast<void*>(out_counts.data_ptr()), counts.data(), n_unique * sizeof(int64_t)).wait();
-        }
-
-        return std::make_tuple(out_vals, out_inverse, out_counts);
-    };
-
-    if (input.dtype() == DType::Float32) {
-        return host_unsorted_unique_impl(float{});
-    } else if (input.dtype() == DType::Int64) {
-        return host_unsorted_unique_impl(int64_t{});
-    } else if (input.dtype() == DType::Float64) {
-        return host_unsorted_unique_impl(double{});
-    } else if (input.dtype() == DType::Int32) {
-        return host_unsorted_unique_impl(int32_t{});
-    } else {
-        throw std::runtime_error("unique: unsupported dtype (supported: Float32, Float64, Int32, Int64)");
+    // Without oneDPL, device-side unique with insertion-order preservation
+    // is not supported. Require oneDPL for this operation.
+    if (!sorted) {
+        throw std::runtime_error(
+            "unique(sorted=false) requires oneDPL for device-side execution. "
+            "Build with -DTENZOR_HAS_ONEDPL=ON or use unique(sorted=true).");
     }
+
+    // sorted=true with numel==0 — return empty tensors
+    return std::make_tuple(
+        Tensor({0}, input.dtype(), input.device()),
+        Tensor({numel}, DType::Int64, input.device()),
+        Tensor({0}, DType::Int64, input.device()));
 }
 
 // ============================================================================

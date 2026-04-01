@@ -1,4 +1,5 @@
 #include "tenzor/nn/layers/conv.hpp"
+#include "tenzor/nn/utils/variable_cast.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/math.hpp"
@@ -353,41 +354,20 @@ auto Conv2d::forward_impl(const Variable& input) -> Variable {
     Device original_device = input.tensor().device();
 
     // Handle dtype and device mismatch: convert weight and bias to input's dtype and device if needed
-    Variable weight_matched = weight;
-    bool weight_needs_conversion = (input.dtype() != weight.dtype()) ||
-                                   (input.tensor().device().type != weight.tensor().device().type);
-    if (weight_needs_conversion) {
-        auto weight_converted = weight.tensor();
-        if (input.tensor().device().type != weight.tensor().device().type) {
-            weight_converted = weight_converted.to(original_device);
-        }
-        if (input.dtype() != weight_converted.dtype()) {
-            weight_converted = weight_converted.to(input.dtype());
-        }
-        weight_matched = Variable(weight_converted, weight.requires_grad());
-        weight_matched.set_grad_fn(weight.grad_fn());
+    Variable weight_matched = variable_cast(weight, input.dtype());
+    if (input.tensor().device().type != weight.tensor().device().type) {
+        weight_matched = Variable(weight_matched.tensor().to(original_device), weight_matched.requires_grad());
     }
 
     const Tensor* bias_ptr = nullptr;
     Variable bias_matched;
     if (bias_it != parameters_.end()) {
         auto& bias = *bias_it->second;
-        bool bias_needs_conversion = (input.dtype() != bias.dtype()) ||
-                                     (input.tensor().device().type != bias.tensor().device().type);
-        if (bias_needs_conversion) {
-            auto bias_converted = bias.tensor();
-            if (input.tensor().device().type != bias.tensor().device().type) {
-                bias_converted = bias_converted.to(original_device);
-            }
-            if (input.dtype() != bias_converted.dtype()) {
-                bias_converted = bias_converted.to(input.dtype());
-            }
-            bias_matched = Variable(bias_converted, bias.requires_grad());
-            bias_matched.set_grad_fn(bias.grad_fn());
-            bias_ptr = &bias_matched.tensor();
-        } else {
-            bias_ptr = &bias.tensor();
+        bias_matched = variable_cast(bias, input.dtype());
+        if (input.tensor().device().type != bias.tensor().device().type) {
+            bias_matched = Variable(bias_matched.tensor().to(original_device), bias_matched.requires_grad());
         }
+        bias_ptr = &bias_matched.tensor();
     }
 
     Tensor output;
@@ -866,41 +846,20 @@ auto ConvTranspose2d::forward_impl(const Variable& input) -> Variable {
     Device original_device = input.tensor().device();
 
     // Handle dtype and device mismatch
-    Variable weight_matched = weight;
-    bool weight_needs_conversion = (input.dtype() != weight.dtype()) ||
-                                   (input.tensor().device().type != weight.tensor().device().type);
-    if (weight_needs_conversion) {
-        auto weight_converted = weight.tensor();
-        if (input.tensor().device().type != weight.tensor().device().type) {
-            weight_converted = weight_converted.to(original_device);
-        }
-        if (input.dtype() != weight_converted.dtype()) {
-            weight_converted = weight_converted.to(input.dtype());
-        }
-        weight_matched = Variable(weight_converted, weight.requires_grad());
-        weight_matched.set_grad_fn(weight.grad_fn());
+    Variable weight_matched = variable_cast(weight, input.dtype());
+    if (input.tensor().device().type != weight.tensor().device().type) {
+        weight_matched = Variable(weight_matched.tensor().to(original_device), weight_matched.requires_grad());
     }
 
     const Tensor* bias_ptr = nullptr;
     Variable bias_matched;
     if (bias_it != parameters_.end()) {
         auto& bias = *bias_it->second;
-        bool bias_needs_conversion = (input.dtype() != bias.dtype()) ||
-                                     (input.tensor().device().type != bias.tensor().device().type);
-        if (bias_needs_conversion) {
-            auto bias_converted = bias.tensor();
-            if (input.tensor().device().type != bias.tensor().device().type) {
-                bias_converted = bias_converted.to(original_device);
-            }
-            if (input.dtype() != bias_converted.dtype()) {
-                bias_converted = bias_converted.to(input.dtype());
-            }
-            bias_matched = Variable(bias_converted, bias.requires_grad());
-            bias_matched.set_grad_fn(bias.grad_fn());
-            bias_ptr = &bias_matched.tensor();
-        } else {
-            bias_ptr = &bias.tensor();
+        bias_matched = variable_cast(bias, input.dtype());
+        if (input.tensor().device().type != bias.tensor().device().type) {
+            bias_matched = Variable(bias_matched.tensor().to(original_device), bias_matched.requires_grad());
         }
+        bias_ptr = &bias_matched.tensor();
     }
 
     Tensor output;
@@ -1117,41 +1076,20 @@ auto Conv3d::forward_impl(const Variable& input) -> Variable {
     Device original_device = input.tensor().device();
 
     // Match weight dtype/device to input
-    Variable weight_matched = weight;
-    bool weight_needs_conversion = (input.dtype() != weight.dtype()) ||
-                                   (input.tensor().device().type != weight.tensor().device().type);
-    if (weight_needs_conversion) {
-        auto weight_converted = weight.tensor();
-        if (input.tensor().device().type != weight.tensor().device().type) {
-            weight_converted = weight_converted.to(original_device);
-        }
-        if (input.dtype() != weight_converted.dtype()) {
-            weight_converted = weight_converted.to(input.dtype());
-        }
-        weight_matched = Variable(weight_converted, weight.requires_grad());
-        weight_matched.set_grad_fn(weight.grad_fn());
+    Variable weight_matched = variable_cast(weight, input.dtype());
+    if (input.tensor().device().type != weight.tensor().device().type) {
+        weight_matched = Variable(weight_matched.tensor().to(original_device), weight_matched.requires_grad());
     }
 
     const Tensor* bias_ptr = nullptr;
     Variable bias_matched;
     if (bias_it != parameters_.end()) {
         auto& bias = *bias_it->second;
-        bool bias_needs_conversion = (input.dtype() != bias.dtype()) ||
-                                     (input.tensor().device().type != bias.tensor().device().type);
-        if (bias_needs_conversion) {
-            auto bias_converted = bias.tensor();
-            if (input.tensor().device().type != bias.tensor().device().type) {
-                bias_converted = bias_converted.to(original_device);
-            }
-            if (input.dtype() != bias_converted.dtype()) {
-                bias_converted = bias_converted.to(input.dtype());
-            }
-            bias_matched = Variable(bias_converted, bias.requires_grad());
-            bias_matched.set_grad_fn(bias.grad_fn());
-            bias_ptr = &bias_matched.tensor();
-        } else {
-            bias_ptr = &bias.tensor();
+        bias_matched = variable_cast(bias, input.dtype());
+        if (input.tensor().device().type != bias.tensor().device().type) {
+            bias_matched = Variable(bias_matched.tensor().to(original_device), bias_matched.requires_grad());
         }
+        bias_ptr = &bias_matched.tensor();
     }
 
     // Backend dispatch
@@ -1340,41 +1278,20 @@ auto ConvTranspose3d::forward_impl(const Variable& input) -> Variable {
     Device original_device = input.tensor().device();
 
     // Handle dtype and device mismatch
-    Variable weight_matched = weight;
-    bool weight_needs_conversion = (input.dtype() != weight.dtype()) ||
-                                   (input.tensor().device().type != weight.tensor().device().type);
-    if (weight_needs_conversion) {
-        auto weight_converted = weight.tensor();
-        if (input.tensor().device().type != weight.tensor().device().type) {
-            weight_converted = weight_converted.to(original_device);
-        }
-        if (input.dtype() != weight_converted.dtype()) {
-            weight_converted = weight_converted.to(input.dtype());
-        }
-        weight_matched = Variable(weight_converted, weight.requires_grad());
-        weight_matched.set_grad_fn(weight.grad_fn());
+    Variable weight_matched = variable_cast(weight, input.dtype());
+    if (input.tensor().device().type != weight.tensor().device().type) {
+        weight_matched = Variable(weight_matched.tensor().to(original_device), weight_matched.requires_grad());
     }
 
     const Tensor* bias_ptr = nullptr;
     Variable bias_matched;
     if (bias_it != parameters_.end()) {
         auto& bias = *bias_it->second;
-        bool bias_needs_conversion = (input.dtype() != bias.dtype()) ||
-                                     (input.tensor().device().type != bias.tensor().device().type);
-        if (bias_needs_conversion) {
-            auto bias_converted = bias.tensor();
-            if (input.tensor().device().type != bias.tensor().device().type) {
-                bias_converted = bias_converted.to(original_device);
-            }
-            if (input.dtype() != bias_converted.dtype()) {
-                bias_converted = bias_converted.to(input.dtype());
-            }
-            bias_matched = Variable(bias_converted, bias.requires_grad());
-            bias_matched.set_grad_fn(bias.grad_fn());
-            bias_ptr = &bias_matched.tensor();
-        } else {
-            bias_ptr = &bias.tensor();
+        bias_matched = variable_cast(bias, input.dtype());
+        if (input.tensor().device().type != bias.tensor().device().type) {
+            bias_matched = Variable(bias_matched.tensor().to(original_device), bias_matched.requires_grad());
         }
+        bias_ptr = &bias_matched.tensor();
     }
 
     // Dispatch forward via OpId
@@ -1592,41 +1509,20 @@ auto ConvTranspose1d::forward_impl(const Variable& input) -> Variable {
     Device original_device = input.tensor().device();
 
     // Handle dtype and device mismatch
-    Variable weight_matched = weight;
-    bool weight_needs_conversion = (input.dtype() != weight.dtype()) ||
-                                   (input.tensor().device().type != weight.tensor().device().type);
-    if (weight_needs_conversion) {
-        auto weight_converted = weight.tensor();
-        if (input.tensor().device().type != weight.tensor().device().type) {
-            weight_converted = weight_converted.to(original_device);
-        }
-        if (input.dtype() != weight_converted.dtype()) {
-            weight_converted = weight_converted.to(input.dtype());
-        }
-        weight_matched = Variable(weight_converted, weight.requires_grad());
-        weight_matched.set_grad_fn(weight.grad_fn());
+    Variable weight_matched = variable_cast(weight, input.dtype());
+    if (input.tensor().device().type != weight.tensor().device().type) {
+        weight_matched = Variable(weight_matched.tensor().to(original_device), weight_matched.requires_grad());
     }
 
     const Tensor* bias_ptr = nullptr;
     Variable bias_matched;
     if (bias_it != parameters_.end()) {
         auto& bias = *bias_it->second;
-        bool bias_needs_conversion = (input.dtype() != bias.dtype()) ||
-                                     (input.tensor().device().type != bias.tensor().device().type);
-        if (bias_needs_conversion) {
-            auto bias_converted = bias.tensor();
-            if (input.tensor().device().type != bias.tensor().device().type) {
-                bias_converted = bias_converted.to(original_device);
-            }
-            if (input.dtype() != bias_converted.dtype()) {
-                bias_converted = bias_converted.to(input.dtype());
-            }
-            bias_matched = Variable(bias_converted, bias.requires_grad());
-            bias_matched.set_grad_fn(bias.grad_fn());
-            bias_ptr = &bias_matched.tensor();
-        } else {
-            bias_ptr = &bias.tensor();
+        bias_matched = variable_cast(bias, input.dtype());
+        if (input.tensor().device().type != bias.tensor().device().type) {
+            bias_matched = Variable(bias_matched.tensor().to(original_device), bias_matched.requires_grad());
         }
+        bias_ptr = &bias_matched.tensor();
     }
 
     // Unsqueeze to 4D: [N, C, L] -> [N, C, 1, L]

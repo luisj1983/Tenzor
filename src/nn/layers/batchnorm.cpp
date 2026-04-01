@@ -646,6 +646,11 @@ auto BatchNorm2d::reset_parameters() -> void {
         buffers_["running_var"]->tensor().fill_(1.0f);
         buffers_["num_batches_tracked"]->tensor().zero_();
     }
+    // Refresh cached pointers in case parameters were re-registered
+    if (affine_) {
+        cached_weight_ = parameters_["weight"];
+        cached_bias_ = parameters_["bias"];
+    }
 }
 
 // ============================================================================

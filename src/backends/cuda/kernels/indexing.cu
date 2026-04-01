@@ -597,6 +597,41 @@ __device__ void warp_reduce_atomic_add(T* output, int64_t output_offset, T value
                             static_cast<int64_t>(assumed) + reduced);
                         old_val = atomicCAS(addr, assumed, desired);
                     } while (assumed != old_val);
+                } else if constexpr (std::is_same_v<T, __half>) {
+#if __CUDA_ARCH__ >= 700
+                    atomicAdd(&output[output_offset], reduced);
+#else
+                    // CAS-based fallback for SM < 70
+                    float val = __half2float(reduced);
+                    unsigned int* addr = reinterpret_cast<unsigned int*>(
+                        &output[output_offset & ~int64_t(1)]);
+                    unsigned int old_val, new_val;
+                    int lane = output_offset & 1;
+                    do {
+                        old_val = *addr;
+                        __half* h = reinterpret_cast<__half*>(&old_val);
+                        __half result = __float2half(__half2float(h[lane]) + val);
+                        new_val = old_val;
+                        reinterpret_cast<__half*>(&new_val)[lane] = result;
+                    } while (atomicCAS(addr, old_val, new_val) != old_val);
+#endif
+                } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+#if __CUDA_ARCH__ >= 800
+                    atomicAdd(&output[output_offset], reduced);
+#else
+                    float val = __bfloat162float(reduced);
+                    unsigned int* addr = reinterpret_cast<unsigned int*>(
+                        &output[output_offset & ~int64_t(1)]);
+                    unsigned int old_val, new_val;
+                    int lane = output_offset & 1;
+                    do {
+                        old_val = *addr;
+                        __nv_bfloat16* h = reinterpret_cast<__nv_bfloat16*>(&old_val);
+                        __nv_bfloat16 result = __float2bfloat16(__bfloat162float(h[lane]) + val);
+                        new_val = old_val;
+                        reinterpret_cast<__nv_bfloat16*>(&new_val)[lane] = result;
+                    } while (atomicCAS(addr, old_val, new_val) != old_val);
+#endif
                 } else {
                     atomicAdd(&output[output_offset], reduced);
                 }

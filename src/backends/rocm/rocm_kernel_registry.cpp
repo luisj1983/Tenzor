@@ -305,22 +305,28 @@ namespace rocm {
     auto maxpool2d_forward_hip(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
                                int64_t stride_h, int64_t stride_w,
                                int64_t pad_h, int64_t pad_w,
-                               bool return_indices)
+                               bool return_indices,
+                               hipStream_t stream)
         -> std::pair<Tensor, Tensor>;
     auto maxpool2d_backward_hip(const Tensor& grad_output, const Tensor& indices,
-                                const std::vector<int64_t>& input_shape) -> Tensor;
+                                const std::vector<int64_t>& input_shape,
+                                hipStream_t stream) -> Tensor;
     auto avgpool2d_forward_hip(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
                                int64_t stride_h, int64_t stride_w,
                                int64_t pad_h, int64_t pad_w,
-                               bool count_include_pad) -> Tensor;
+                               bool count_include_pad,
+                               hipStream_t stream) -> Tensor;
     auto avgpool2d_backward_hip(const Tensor& grad_output, const std::vector<int64_t>& input_shape,
                                 int64_t kernel_h, int64_t kernel_w,
                                 int64_t stride_h, int64_t stride_w,
                                 int64_t pad_h, int64_t pad_w,
-                                bool count_include_pad) -> Tensor;
-    auto adaptive_avgpool2d_hip(const Tensor& input, int64_t output_h, int64_t output_w) -> Tensor;
+                                bool count_include_pad,
+                                hipStream_t stream) -> Tensor;
+    auto adaptive_avgpool2d_hip(const Tensor& input, int64_t output_h, int64_t output_w,
+                                hipStream_t stream) -> Tensor;
     auto adaptive_maxpool2d_hip(const Tensor& input, int64_t output_h, int64_t output_w,
-                                bool return_indices) -> std::pair<Tensor, Tensor>;
+                                bool return_indices,
+                                hipStream_t stream) -> std::pair<Tensor, Tensor>;
 
     // Indexing operations
     auto gather_hip(const Tensor& input, int64_t dim, const Tensor& index, hipStream_t stream) -> Tensor;
@@ -654,7 +660,7 @@ namespace rocm {
     auto box_iou_hip(const Tensor& boxes1, const Tensor& boxes2, int iou_type) -> Tensor;
 
     // NMS (nms.hip.cpp)
-    auto nms_forward(const Tensor& boxes, const Tensor& scores, float iou_threshold) -> Tensor;
+    auto nms_forward(const Tensor& boxes, const Tensor& scores, float iou_threshold, hipStream_t stream) -> Tensor;
 
     // EmbeddingBagForward/Backward (indexing.hip.cpp)
     auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offsets,
@@ -697,11 +703,11 @@ namespace rocm {
     auto roi_align_forward(const Tensor& features, const Tensor& rois,
                            int64_t output_h, int64_t output_w,
                            float spatial_scale, int64_t sampling_ratio,
-                           bool aligned) -> Tensor;
+                           bool aligned, hipStream_t stream) -> Tensor;
     auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
                             int64_t batch_size, int64_t feat_height, int64_t feat_width,
                             float spatial_scale, int64_t sampling_ratio,
-                            bool aligned) -> Tensor;
+                            bool aligned, hipStream_t stream) -> Tensor;
 
     // RMSNorm backward (fused_ops.hip.cpp)
     auto fused_rms_norm_backward_hip(const Tensor& grad_output, const Tensor& input,
@@ -1373,15 +1379,17 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
         int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        hipStream_t stream = get_hip_stream(attrs);
         auto [output, indices] = rocm::maxpool2d_forward_hip(inputs[0],
-            kernel_size, kernel_size, stride, stride, padding, padding, true);
+            kernel_size, kernel_size, stride, stride, padding, padding, true, stream);
         return std::vector<Tensor>{output, indices};
     });
 
     table.register_kernel(OpId::MaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        hipStream_t stream = get_hip_stream(attrs);
         return std::vector<Tensor>{rocm::maxpool2d_backward_hip(inputs[0], inputs[1],
-            input_shape)};
+            input_shape, stream)};
     });
 
     table.register_kernel(OpId::AvgPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -1389,8 +1397,9 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, true);
+        hipStream_t stream = get_hip_stream(attrs);
         return std::vector<Tensor>{rocm::avgpool2d_forward_hip(inputs[0],
-            kernel_size, kernel_size, stride, stride, padding, padding, count_include_pad)};
+            kernel_size, kernel_size, stride, stride, padding, padding, count_include_pad, stream)};
     });
 
     table.register_kernel(OpId::AvgPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -1399,21 +1408,24 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, true);
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        hipStream_t stream = get_hip_stream(attrs);
         return std::vector<Tensor>{rocm::avgpool2d_backward_hip(inputs[0], input_shape,
-            kernel_size, kernel_size, stride, stride, padding, padding, count_include_pad)};
+            kernel_size, kernel_size, stride, stride, padding, padding, count_include_pad, stream)};
     });
 
     table.register_kernel(OpId::AdaptiveAvgPool2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t output_h = attrs.get_int(AttrKey::OutputSizeH, 1);
         int64_t output_w = attrs.get_int(AttrKey::OutputSizeW, 1);
-        return std::vector<Tensor>{rocm::adaptive_avgpool2d_hip(inputs[0], output_h, output_w)};
+        hipStream_t stream = get_hip_stream(attrs);
+        return std::vector<Tensor>{rocm::adaptive_avgpool2d_hip(inputs[0], output_h, output_w, stream)};
     });
 
     table.register_kernel(OpId::AdaptiveMaxPool2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t output_h = attrs.get_int(AttrKey::OutputSizeH, 1);
         int64_t output_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        hipStream_t stream = get_hip_stream(attrs);
         auto [output, indices] = rocm::adaptive_maxpool2d_hip(inputs[0], output_h, output_w,
-            true);
+            true, stream);
         return std::vector<Tensor>{output, indices};
     });
 
@@ -2546,7 +2558,8 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         // inputs: [boxes (N,4), scores (N)]
         // attrs: IouThreshold
         float iou_threshold = static_cast<float>(attrs.get_float(AttrKey::IouThreshold, 0.5));
-        return {rocm::nms_forward(inputs[0], inputs[1], iou_threshold)};
+        hipStream_t stream = get_hip_stream(attrs);
+        return {rocm::nms_forward(inputs[0], inputs[1], iou_threshold, stream)};
     });
 
     // ========================================================================
@@ -2655,7 +2668,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
         return {rocm::roi_align_forward(inputs[0], inputs[1],
                                         output_h, output_w, spatial_scale,
-                                        sampling_ratio, aligned)};
+                                        sampling_ratio, aligned, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::ROIAlignBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
@@ -2668,7 +2681,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
         return {rocm::roi_align_backward(inputs[0], inputs[1],
                                          batch_size, feat_height, feat_width,
-                                         spatial_scale, sampling_ratio, aligned)};
+                                         spatial_scale, sampling_ratio, aligned, get_hip_stream(attrs))};
     });
 
     // ========================================================================
@@ -3477,8 +3490,9 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, true);
+        hipStream_t stream = get_hip_stream(attrs);
         return rocm::avgpool2d_forward_hip(inputs[0],
-            kernel_size, kernel_size, stride, stride, padding, padding, count_include_pad);
+            kernel_size, kernel_size, stride, stride, padding, padding, count_include_pad, stream);
     });
     table.register_single_output_kernel(OpId::AvgPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
@@ -3486,18 +3500,21 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, true);
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        hipStream_t stream = get_hip_stream(attrs);
         return rocm::avgpool2d_backward_hip(inputs[0], input_shape,
-            kernel_size, kernel_size, stride, stride, padding, padding, count_include_pad);
+            kernel_size, kernel_size, stride, stride, padding, padding, count_include_pad, stream);
     });
     table.register_single_output_kernel(OpId::MaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        hipStream_t stream = get_hip_stream(attrs);
         return rocm::maxpool2d_backward_hip(inputs[0], inputs[1],
-            input_shape);
+            input_shape, stream);
     });
     table.register_single_output_kernel(OpId::AdaptiveAvgPool2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t output_h = attrs.get_int(AttrKey::OutputSizeH, 1);
         int64_t output_w = attrs.get_int(AttrKey::OutputSizeW, 1);
-        return rocm::adaptive_avgpool2d_hip(inputs[0], output_h, output_w);
+        hipStream_t stream = get_hip_stream(attrs);
+        return rocm::adaptive_avgpool2d_hip(inputs[0], output_h, output_w, stream);
     });
     table.register_single_output_kernel(OpId::AdaptiveAvgPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         return rocm::adaptive_avgpool2d_backward_hip(inputs[0], inputs[1], get_hip_stream(attrs));

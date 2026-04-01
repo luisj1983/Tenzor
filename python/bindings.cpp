@@ -628,7 +628,7 @@ PYBIND11_MODULE(tenzor_core, m) {
                 throw std::runtime_error("Buffer protocol only supported for CPU tensors");
             }
             if (!t.is_contiguous()) {
-                throw std::runtime_error("Buffer protocol only supported for contiguous tensors");
+                throw std::runtime_error("Buffer protocol requires a contiguous tensor. Call .contiguous() first.");
             }
 
             // Map DType to Python struct format string

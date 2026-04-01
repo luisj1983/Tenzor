@@ -122,29 +122,35 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
     // Execute convolution
     auto conv_prim = convolution_forward(conv_pd);
 
-    if (bias != nullptr) {
-        auto bias_mem = sycl_interop::make_memory(
-            memory::desc({C_out}, dt, memory::format_tag::x),
-            dnnl_engine,
-            sycl_interop::memory_kind::usm,
-            const_cast<void*>(bias->data_ptr())
-        );
+    try {
+        if (bias != nullptr) {
+            auto bias_mem = sycl_interop::make_memory(
+                memory::desc({C_out}, dt, memory::format_tag::x),
+                dnnl_engine,
+                sycl_interop::memory_kind::usm,
+                const_cast<void*>(bias->data_ptr())
+            );
 
-        conv_prim.execute(dnnl_stream, {
-            {DNNL_ARG_SRC, src_mem},
-            {DNNL_ARG_WEIGHTS, weights_mem},
-            {DNNL_ARG_BIAS, bias_mem},
-            {DNNL_ARG_DST, dst_mem}
-        });
-    } else {
-        conv_prim.execute(dnnl_stream, {
-            {DNNL_ARG_SRC, src_mem},
-            {DNNL_ARG_WEIGHTS, weights_mem},
-            {DNNL_ARG_DST, dst_mem}
-        });
+            conv_prim.execute(dnnl_stream, {
+                {DNNL_ARG_SRC, src_mem},
+                {DNNL_ARG_WEIGHTS, weights_mem},
+                {DNNL_ARG_BIAS, bias_mem},
+                {DNNL_ARG_DST, dst_mem}
+            });
+        } else {
+            conv_prim.execute(dnnl_stream, {
+                {DNNL_ARG_SRC, src_mem},
+                {DNNL_ARG_WEIGHTS, weights_mem},
+                {DNNL_ARG_DST, dst_mem}
+            });
+        }
+
+        dnnl_stream.wait();
+    } catch (const dnnl::error& e) {
+        throw std::runtime_error(std::string("oneDNN Conv2d forward failed: ") + e.what());
+    } catch (const sycl::exception& e) {
+        throw std::runtime_error(std::string("SYCL error in Conv2d forward: ") + e.what());
     }
-
-    dnnl_stream.wait();
 
     return output;
 }
@@ -225,11 +231,17 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
                                                        const_cast<void*>(grad_output.data_ptr()));
 
         auto conv_bwd_data_prim = convolution_backward_data(conv_bwd_data_pd);
-        conv_bwd_data_prim.execute(dnnl_stream, {
-            {DNNL_ARG_DIFF_DST, diff_dst_mem},
-            {DNNL_ARG_WEIGHTS, weights_mem},
-            {DNNL_ARG_DIFF_SRC, diff_src_mem}
-        });
+        try {
+            conv_bwd_data_prim.execute(dnnl_stream, {
+                {DNNL_ARG_DIFF_DST, diff_dst_mem},
+                {DNNL_ARG_WEIGHTS, weights_mem},
+                {DNNL_ARG_DIFF_SRC, diff_src_mem}
+            });
+        } catch (const dnnl::error& e) {
+            throw std::runtime_error(std::string("oneDNN Conv2d backward (input grad) failed: ") + e.what());
+        } catch (const sycl::exception& e) {
+            throw std::runtime_error(std::string("SYCL error in Conv2d backward (input grad): ") + e.what());
+        }
     }
 
     // Compute grad_weight and grad_bias
@@ -278,22 +290,40 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
                 const_cast<void*>(grad_bias.data_ptr())
             );
 
-            conv_bwd_weights_prim.execute(dnnl_stream, {
-                {DNNL_ARG_SRC, src_mem},
-                {DNNL_ARG_DIFF_DST, diff_dst_mem},
-                {DNNL_ARG_DIFF_WEIGHTS, diff_weights_mem},
-                {DNNL_ARG_DIFF_BIAS, diff_bias_mem}
-            });
+            try {
+                conv_bwd_weights_prim.execute(dnnl_stream, {
+                    {DNNL_ARG_SRC, src_mem},
+                    {DNNL_ARG_DIFF_DST, diff_dst_mem},
+                    {DNNL_ARG_DIFF_WEIGHTS, diff_weights_mem},
+                    {DNNL_ARG_DIFF_BIAS, diff_bias_mem}
+                });
+            } catch (const dnnl::error& e) {
+                throw std::runtime_error(std::string("oneDNN Conv2d backward (weight grad) failed: ") + e.what());
+            } catch (const sycl::exception& e) {
+                throw std::runtime_error(std::string("SYCL error in Conv2d backward (weight grad): ") + e.what());
+            }
         } else {
-            conv_bwd_weights_prim.execute(dnnl_stream, {
-                {DNNL_ARG_SRC, src_mem},
-                {DNNL_ARG_DIFF_DST, diff_dst_mem},
-                {DNNL_ARG_DIFF_WEIGHTS, diff_weights_mem}
-            });
+            try {
+                conv_bwd_weights_prim.execute(dnnl_stream, {
+                    {DNNL_ARG_SRC, src_mem},
+                    {DNNL_ARG_DIFF_DST, diff_dst_mem},
+                    {DNNL_ARG_DIFF_WEIGHTS, diff_weights_mem}
+                });
+            } catch (const dnnl::error& e) {
+                throw std::runtime_error(std::string("oneDNN Conv2d backward (weight grad) failed: ") + e.what());
+            } catch (const sycl::exception& e) {
+                throw std::runtime_error(std::string("SYCL error in Conv2d backward (weight grad): ") + e.what());
+            }
         }
     }
 
-    dnnl_stream.wait();
+    try {
+        dnnl_stream.wait();
+    } catch (const dnnl::error& e) {
+        throw std::runtime_error(std::string("oneDNN Conv2d backward failed: ") + e.what());
+    } catch (const sycl::exception& e) {
+        throw std::runtime_error(std::string("SYCL error in Conv2d backward: ") + e.what());
+    }
 
     return {grad_input, grad_weight, grad_bias};
 }

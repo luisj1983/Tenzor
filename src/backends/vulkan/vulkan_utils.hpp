@@ -458,6 +458,8 @@ private:
  * @brief RAII wrapper for Vulkan descriptor pool
  */
 class DescriptorPool {
+    static constexpr uint32_t MAX_DESCRIPTOR_POOL_SETS = 65536;
+
 public:
     DescriptorPool(VkDevice device, uint32_t maxSets)
         : device_(device), max_sets_(maxSets) {
@@ -535,6 +537,14 @@ public:
      */
     void grow() {
         uint32_t new_max = max_sets_ * 2;
+        if (new_max > MAX_DESCRIPTOR_POOL_SETS) {
+            new_max = MAX_DESCRIPTOR_POOL_SETS;
+            if (max_sets_ >= MAX_DESCRIPTOR_POOL_SETS) {
+                std::cerr << "[Vulkan WARNING] Descriptor pool reached maximum capacity ("
+                          << MAX_DESCRIPTOR_POOL_SETS << " sets)\n";
+                return;
+            }
+        }
         std::cerr << "[Vulkan WARNING] Descriptor pool exhausted/fragmented (capacity="
                   << max_sets_ << "). Growing to " << new_max << " sets.\n";
 

@@ -99,43 +99,12 @@ auto nms_kernel(
         return Tensor({0}, DType::Int64, boxes.device());
     }
 
-    // Copy boxes/scores to host (needed for sort + greedy suppression)
-    std::vector<float> host_boxes(num_boxes * 4);
-    std::vector<float> host_scores(num_boxes);
+    // Convert to Float32 on device if needed (avoids host roundtrip for FP16/BF16/FP64)
+    Tensor boxes_f32 = (boxes.dtype() != DType::Float32) ? boxes.to(DType::Float32) : boxes;
+    Tensor scores_f32 = (scores.dtype() != DType::Float32) ? scores.to(DType::Float32) : scores;
 
-    if (boxes.dtype() == DType::Float16) {
-        std::vector<sycl::half> host_boxes_h(num_boxes * 4);
-        std::vector<sycl::half> host_scores_h(num_boxes);
-        const sycl::half* boxes_ptr_h = get_data_ptr<const sycl::half>(boxes);
-        const sycl::half* scores_ptr_h = get_data_ptr<const sycl::half>(scores);
-        queue.memcpy(host_boxes_h.data(), boxes_ptr_h, num_boxes * 4 * sizeof(sycl::half)).wait();
-        queue.memcpy(host_scores_h.data(), scores_ptr_h, num_boxes * sizeof(sycl::half)).wait();
-        for (int64_t i = 0; i < num_boxes * 4; ++i) host_boxes[i] = static_cast<float>(host_boxes_h[i]);
-        for (int64_t i = 0; i < num_boxes; ++i) host_scores[i] = static_cast<float>(host_scores_h[i]);
-    } else if (boxes.dtype() == DType::BFloat16) {
-        std::vector<uint16_t> host_boxes_bf(num_boxes * 4);
-        std::vector<uint16_t> host_scores_bf(num_boxes);
-        const uint16_t* boxes_ptr_bf = get_data_ptr<const uint16_t>(boxes);
-        const uint16_t* scores_ptr_bf = get_data_ptr<const uint16_t>(scores);
-        queue.memcpy(host_boxes_bf.data(), boxes_ptr_bf, num_boxes * 4 * sizeof(uint16_t)).wait();
-        queue.memcpy(host_scores_bf.data(), scores_ptr_bf, num_boxes * sizeof(uint16_t)).wait();
-        for (int64_t i = 0; i < num_boxes * 4; ++i) host_boxes[i] = bf16_to_f32(host_boxes_bf[i]);
-        for (int64_t i = 0; i < num_boxes; ++i) host_scores[i] = bf16_to_f32(host_scores_bf[i]);
-    } else if (boxes.dtype() == DType::Float64) {
-        std::vector<double> host_boxes_d(num_boxes * 4);
-        std::vector<double> host_scores_d(num_boxes);
-        const double* boxes_ptr_d = get_data_ptr<const double>(boxes);
-        const double* scores_ptr_d = get_data_ptr<const double>(scores);
-        queue.memcpy(host_boxes_d.data(), boxes_ptr_d, num_boxes * 4 * sizeof(double)).wait();
-        queue.memcpy(host_scores_d.data(), scores_ptr_d, num_boxes * sizeof(double)).wait();
-        for (int64_t i = 0; i < num_boxes * 4; ++i) host_boxes[i] = static_cast<float>(host_boxes_d[i]);
-        for (int64_t i = 0; i < num_boxes; ++i) host_scores[i] = static_cast<float>(host_scores_d[i]);
-    } else {
-        const float* boxes_ptr = get_data_ptr<const float>(boxes);
-        const float* scores_ptr = get_data_ptr<const float>(scores);
-        queue.memcpy(host_boxes.data(), boxes_ptr, num_boxes * 4 * sizeof(float)).wait();
-        queue.memcpy(host_scores.data(), scores_ptr, num_boxes * sizeof(float)).wait();
-    }
+    const float* boxes_f32_ptr = get_data_ptr<const float>(boxes_f32);
+    const float* scores_f32_ptr = get_data_ptr<const float>(scores_f32);
 
     // Sort boxes by score (descending)
     std::vector<int64_t> order(num_boxes);
@@ -145,10 +114,10 @@ auto nms_kernel(
         // Device-side sort by score descending using oneDPL
         auto policy = ::oneapi::dpl::execution::make_device_policy(queue);
 
-        // Allocate device buffers for scores and indices
+        // Allocate device buffers for scores copy and indices
         float* d_scores = sycl::malloc_device<float>(num_boxes, queue);
         int64_t* d_order = sycl::malloc_device<int64_t>(num_boxes, queue);
-        queue.memcpy(d_scores, host_scores.data(), num_boxes * sizeof(float));
+        queue.memcpy(d_scores, scores_f32_ptr, num_boxes * sizeof(float));
 
         // Initialize indices [0, 1, 2, ..., num_boxes-1] on device
         queue.parallel_for(sycl::range<1>(num_boxes), [=](sycl::id<1> i) {
@@ -170,20 +139,24 @@ auto nms_kernel(
         sycl::free(d_order, queue);
     }
 #else
-    // Host fallback: sort indices by score descending.
-    // Acceptable for typical NMS workloads (< 10K boxes); scores are already on host.
-    std::iota(order.begin(), order.end(), 0);
-    std::sort(order.begin(), order.end(), [&](int64_t a, int64_t b) {
-        return host_scores[a] > host_scores[b];
-    });
+    {
+        // Host fallback: sort indices by score descending.
+        // Acceptable for typical NMS workloads (< 10K boxes); oneDPL not available.
+        std::vector<float> h_scores(num_boxes);
+        queue.memcpy(h_scores.data(), scores_f32_ptr, num_boxes * sizeof(float)).wait();
+        std::iota(order.begin(), order.end(), 0);
+        std::sort(order.begin(), order.end(), [&](int64_t a, int64_t b) {
+            return h_scores[a] > h_scores[b];
+        });
+    }
 #endif
 
     // Compute IoU on device and produce a thresholded bitmask.
     // Instead of copying an N*N float IoU matrix to host (4*N*N bytes),
     // we threshold on-device and pack results into uint64 words,
     // transferring only N * ceil(N/64) * 8 bytes — up to 256x smaller.
-    float* d_boxes = sycl::malloc_device<float>(num_boxes * 4, queue);
-    queue.memcpy(d_boxes, host_boxes.data(), num_boxes * 4 * sizeof(float)).wait();
+    // boxes_f32 already lives on device, so point d_boxes directly at it.
+    const float* d_boxes = boxes_f32_ptr;
 
     // Each row i has ceil(num_boxes/64) uint64 words; bit j is set if IoU(i,j) > threshold
     int64_t cols_u64 = (num_boxes + 63) / 64;
@@ -256,10 +229,13 @@ auto nms_kernel(
     std::vector<uint64_t> h_bitmask(bitmask_elems);
     queue.memcpy(h_bitmask.data(), d_bitmask, bitmask_elems * sizeof(uint64_t)).wait();
 
-    sycl::free(d_boxes, queue);
     sycl::free(d_bitmask, queue);
 
-    // Greedy suppression using bitmask (inherently sequential)
+    // Greedy suppression using bitmask (inherently sequential).
+    // This loop is O(N) on the compact bitmask and is the standard approach
+    // used by all major frameworks (torchvision, detectron2). Parallelizing it
+    // would require speculative execution with rollback, which is slower for
+    // typical NMS box counts (< 10K).
     std::vector<bool> suppressed(num_boxes, false);
     std::vector<int64_t> keep;
 

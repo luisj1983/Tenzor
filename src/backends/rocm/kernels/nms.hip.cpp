@@ -162,7 +162,7 @@ __global__ void nms_bitonic_sort_kernel(const float* scores, int64_t* indices,
 // Does NOT use thrust::sort_by_key or rocprim::radix_sort_single_helper
 // (which trigger ICE on gfx1150).
 static void nms_gpu_argsort_descending(const float* d_scores, int64_t* d_indices,
-                                        int64_t num_boxes) {
+                                        int64_t num_boxes, hipStream_t stream) {
     if (num_boxes <= 1) return;
 
     if (num_boxes <= 1024) {
@@ -176,24 +176,24 @@ static void nms_gpu_argsort_descending(const float* d_scores, int64_t* d_indices
         auto* d_padded = static_cast<int64_t*>(d_padded_guard.ptr);
 
         int iota_blocks = (padded_n + 255) / 256;
-        hipLaunchKernelGGL(nms_iota_kernel, dim3(iota_blocks), dim3(256), 0, 0,
+        hipLaunchKernelGGL(nms_iota_kernel, dim3(iota_blocks), dim3(256), 0, stream,
                            d_padded, num_boxes, padded_n);
 
         for (int64_t size = 2; size <= padded_n; size *= 2) {
             for (int64_t stride = size / 2; stride > 0; stride /= 2) {
                 hipLaunchKernelGGL(nms_bitonic_sort_kernel,
-                    dim3(1), dim3(padded_n), 0, 0,
+                    dim3(1), dim3(padded_n), 0, stream,
                     d_scores, d_padded, num_boxes, padded_n, size, stride);
             }
         }
 
         // Copy first num_boxes sorted indices to output
-        NMS_HIP_CHECK(hipMemcpy(d_indices, d_padded,
-                                 num_boxes * sizeof(int64_t), hipMemcpyDeviceToDevice));
+        NMS_HIP_CHECK(hipMemcpyAsync(d_indices, d_padded,
+                                      num_boxes * sizeof(int64_t), hipMemcpyDeviceToDevice, stream));
     } else {
         // Initialize indices with iota for hipcub path
         int iota_blocks = (num_boxes + 255) / 256;
-        hipLaunchKernelGGL(nms_iota_kernel, dim3(iota_blocks), dim3(256), 0, 0,
+        hipLaunchKernelGGL(nms_iota_kernel, dim3(iota_blocks), dim3(256), 0, stream,
                            d_indices, num_boxes, num_boxes);
         // hipcub radix sort (different code path from thrust/rocprim ICE trigger).
         // Sort scores descending, carrying indices as values.
@@ -203,8 +203,8 @@ static void nms_gpu_argsort_descending(const float* d_scores, int64_t* d_indices
 
         // Copy scores to a mutable buffer (SortPairsDescending needs mutable input)
         NMS_HIP_CHECK(hipMalloc(&d_scores_copy_guard.ptr, num_boxes * sizeof(float)));
-        NMS_HIP_CHECK(hipMemcpy(d_scores_copy_guard.ptr, d_scores,
-                                 num_boxes * sizeof(float), hipMemcpyDeviceToDevice));
+        NMS_HIP_CHECK(hipMemcpyAsync(d_scores_copy_guard.ptr, d_scores,
+                                      num_boxes * sizeof(float), hipMemcpyDeviceToDevice, stream));
         auto* d_scores_in = static_cast<float*>(d_scores_copy_guard.ptr);
 
         NMS_HIP_CHECK(hipMalloc(&d_scores_out_guard.ptr, num_boxes * sizeof(float)));
@@ -217,29 +217,30 @@ static void nms_gpu_argsort_descending(const float* d_scores, int64_t* d_indices
         size_t temp_bytes = 0;
         hipcub::DeviceRadixSort::SortPairsDescending(
             nullptr, temp_bytes, d_scores_in, d_scores_out,
-            d_indices, d_indices_out, num_boxes);
+            d_indices, d_indices_out, num_boxes, 0, sizeof(float) * 8, stream);
 
         NMS_HIP_CHECK(hipMalloc(&d_temp_guard.ptr, temp_bytes));
 
         // Execute sort
         hipcub::DeviceRadixSort::SortPairsDescending(
             d_temp_guard.ptr, temp_bytes, d_scores_in, d_scores_out,
-            d_indices, d_indices_out, num_boxes);
+            d_indices, d_indices_out, num_boxes, 0, sizeof(float) * 8, stream);
 
-        NMS_HIP_CHECK(hipDeviceSynchronize());
+        NMS_HIP_CHECK(hipStreamSynchronize(stream));
 
         // Copy sorted indices back to d_indices
-        NMS_HIP_CHECK(hipMemcpy(d_indices, d_indices_out,
-                                 num_boxes * sizeof(int64_t), hipMemcpyDeviceToDevice));
+        NMS_HIP_CHECK(hipMemcpyAsync(d_indices, d_indices_out,
+                                      num_boxes * sizeof(int64_t), hipMemcpyDeviceToDevice, stream));
     }
 
-    NMS_HIP_CHECK(hipDeviceSynchronize());
+    NMS_HIP_CHECK(hipStreamSynchronize(stream));
 }
 
 // Host function to perform NMS on GPU
 extern "C" void nms_hip(const float* boxes, const float* scores,
                          int64_t num_boxes, float iou_threshold,
-                         int64_t* keep_indices, int64_t* num_keep) {
+                         int64_t* keep_indices, int64_t* num_keep,
+                         hipStream_t stream) {
     if (num_boxes == 0) {
         *num_keep = 0;
         return;
@@ -249,31 +250,33 @@ extern "C" void nms_hip(const float* boxes, const float* scores,
     HipDevicePtr d_sorted_guard;
     NMS_HIP_CHECK(hipMalloc(&d_sorted_guard.ptr, num_boxes * sizeof(int64_t)));
     auto* d_sorted_indices = static_cast<int64_t*>(d_sorted_guard.ptr);
-    nms_gpu_argsort_descending(scores, d_sorted_indices, num_boxes);
+    nms_gpu_argsort_descending(scores, d_sorted_indices, num_boxes, stream);
 
     // Copy sorted indices to host for suppression processing
     std::vector<int64_t> h_sorted(num_boxes);
-    NMS_HIP_CHECK(hipMemcpy(h_sorted.data(), d_sorted_indices,
-                             num_boxes * sizeof(int64_t), hipMemcpyDeviceToHost));
+    NMS_HIP_CHECK(hipMemcpyAsync(h_sorted.data(), d_sorted_indices,
+                                  num_boxes * sizeof(int64_t), hipMemcpyDeviceToHost, stream));
+    NMS_HIP_CHECK(hipStreamSynchronize(stream));
 
     // Allocate suppression mask with RAII guard
     const int64_t num_chunks = (num_boxes + 63) / 64;
     HipDevicePtr d_mask_guard;
     NMS_HIP_CHECK(hipMalloc(&d_mask_guard.ptr, num_boxes * num_chunks * sizeof(uint64_t)));
     auto* d_suppression_mask = static_cast<uint64_t*>(d_mask_guard.ptr);
-    NMS_HIP_CHECK(hipMemset(d_suppression_mask, 0, num_boxes * num_chunks * sizeof(uint64_t)));
+    NMS_HIP_CHECK(hipMemsetAsync(d_suppression_mask, 0, num_boxes * num_chunks * sizeof(uint64_t), stream));
 
     // Launch NMS kernel
     const int threads_per_block = 256;
-    hipLaunchKernelGGL(nms_kernel, dim3(num_boxes), dim3(threads_per_block), 0, 0,
+    hipLaunchKernelGGL(nms_kernel, dim3(num_boxes), dim3(threads_per_block), 0, stream,
                       boxes, d_sorted_indices, d_suppression_mask, num_boxes, iou_threshold);
     NMS_HIP_CHECK(hipGetLastError());
 
     // Copy suppression mask to host
     std::vector<uint64_t> suppression_mask(num_boxes * num_chunks);
-    NMS_HIP_CHECK(hipMemcpy(suppression_mask.data(), d_suppression_mask,
-                             num_boxes * num_chunks * sizeof(uint64_t),
-                             hipMemcpyDeviceToHost));
+    NMS_HIP_CHECK(hipMemcpyAsync(suppression_mask.data(), d_suppression_mask,
+                                  num_boxes * num_chunks * sizeof(uint64_t),
+                                  hipMemcpyDeviceToHost, stream));
+    NMS_HIP_CHECK(hipStreamSynchronize(stream));
 
     // Process suppression mask to get keep indices
     std::vector<bool> suppressed(num_boxes, false);
@@ -305,8 +308,8 @@ extern "C" void nms_hip(const float* boxes, const float* scores,
     // Copy results
     *num_keep = static_cast<int64_t>(keep.size());
     if (!keep.empty()) {
-        NMS_HIP_CHECK(hipMemcpy(keep_indices, keep.data(), keep.size() * sizeof(int64_t),
-                                 hipMemcpyHostToDevice));
+        NMS_HIP_CHECK(hipMemcpyAsync(keep_indices, keep.data(), keep.size() * sizeof(int64_t),
+                                      hipMemcpyHostToDevice, stream));
     }
 
     // RAII guards handle cleanup automatically
@@ -314,7 +317,7 @@ extern "C" void nms_hip(const float* boxes, const float* scores,
 
 // Tensor-level NMS wrapper with BFloat16 support
 auto nms_forward(const Tensor& boxes, const Tensor& scores,
-                 float iou_threshold) -> Tensor {
+                 float iou_threshold, hipStream_t stream) -> Tensor {
     // BFloat16: convert boxes and scores to Float32 (output is Int64 indices)
     const Tensor boxes_f32 = (boxes.dtype() == DType::BFloat16)
         ? boxes.to(DType::Float32)
@@ -335,13 +338,13 @@ auto nms_forward(const Tensor& boxes, const Tensor& scores,
 
     int64_t num_keep = 0;
     nms_hip(boxes_f32.data<float>(), scores_f32.data<float>(),
-            num_boxes, iou_threshold, d_keep_indices, &num_keep);
+            num_boxes, iou_threshold, d_keep_indices, &num_keep, stream);
 
     // Create output tensor and copy results
     Tensor result({num_keep}, DType::Int64, boxes.device());
     if (num_keep > 0) {
-        NMS_HIP_CHECK(hipMemcpy(result.data<int64_t>(), d_keep_indices,
-                                 num_keep * sizeof(int64_t), hipMemcpyDeviceToDevice));
+        NMS_HIP_CHECK(hipMemcpyAsync(result.data<int64_t>(), d_keep_indices,
+                                      num_keep * sizeof(int64_t), hipMemcpyDeviceToDevice, stream));
     }
 
     return result;

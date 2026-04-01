@@ -8,6 +8,7 @@
 #include "tenzor/utils/error.hpp"
 #include <unordered_set>
 #include <functional>
+#include <iostream>
 #include <stdexcept>
 #include <typeinfo>
 
@@ -257,8 +258,22 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
             auto& input_vars = function->input_variables();
 
             if (input_grads.size() < input_vars.size()) {
-                // Backward returned fewer gradients than inputs — warn and pad with empty
-                // (this could be intentional for ops that don't need all input gradients)
+                // Backward returned fewer gradients than inputs — check if any
+                // skipped inputs actually require grad (likely a bug in backward())
+                size_t skipped_requiring_grad = 0;
+                for (size_t i = input_grads.size(); i < input_vars.size(); ++i) {
+                    if (input_vars[i].requires_grad()) {
+                        ++skipped_requiring_grad;
+                    }
+                }
+                if (skipped_requiring_grad > 0) {
+                    std::cerr << "[tenzor::autograd] Warning: backward function '"
+                              << function->name()
+                              << "' returned " << input_grads.size()
+                              << " gradients but has " << input_vars.size()
+                              << " inputs (" << skipped_requiring_grad
+                              << " skipped inputs require grad)" << std::endl;
+                }
             }
 
             for (size_t i = 0; i < input_vars.size() && i < input_grads.size(); ++i) {
