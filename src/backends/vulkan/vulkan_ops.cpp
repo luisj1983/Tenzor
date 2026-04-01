@@ -5354,17 +5354,7 @@ auto VulkanBackend::dispatchLogSumExp(const Tensor& input, int64_t dim, bool kee
                 out_shape.erase(out_shape.begin() + d);
             }
         }
-        Tensor result_cpu(out_shape, input.dtype(), Device::cpu());
-        if (input.dtype() == DType::Float64) {
-            double* data = result_cpu.data<double>();
-            for (int64_t i = 0; i < result_cpu.numel(); i++)
-                data[i] = -std::numeric_limits<double>::infinity();
-        } else {
-            float* data = result_cpu.data<float>();
-            for (int64_t i = 0; i < result_cpu.numel(); i++)
-                data[i] = -std::numeric_limits<float>::infinity();
-        }
-        return result_cpu.to(input.device());
+        return dispatchFull(out_shape, -std::numeric_limits<float>::infinity(), input.dtype());
     }
 
     int32_t device_id = input.device().index;
@@ -20343,20 +20333,38 @@ auto VulkanBackend::dispatchLinalgEig(const Tensor& input) -> std::vector<Tensor
         Tensor shifts({batch_size, 4}, input.dtype(), input.device());
         size_t shift_size = batch_size * 4 * elem_size;
 
-        // Track active block boundaries per batch element on host
+        // Track active block boundaries on GPU; host vectors kept in sync via readback
         std::vector<uint32_t> active_start(batch_size, 0);
         std::vector<uint32_t> active_end(batch_size, static_cast<uint32_t>(n - 1));
-        std::vector<bool> batch_converged(batch_size, false);
+
+        // GPU buffers for convergence check shader
+        Tensor gpu_active_end({batch_size}, DType::Int32, input.device());
+        Tensor gpu_active_start({batch_size}, DType::Int32, input.device());
+        Tensor gpu_converged({batch_size}, DType::Int32, input.device());
+        Tensor gpu_all_converged({1}, DType::Int32, input.device());
+
+        // Initialize GPU buffers
+        {
+            auto ae_cpu = Tensor({batch_size}, DType::Int32, Device::cpu());
+            auto as_cpu = Tensor({batch_size}, DType::Int32, Device::cpu());
+            auto conv_cpu = Tensor({batch_size}, DType::Int32, Device::cpu());
+            for (int64_t b = 0; b < batch_size; ++b) {
+                as_cpu.data<int32_t>()[b] = 0;
+                ae_cpu.data<int32_t>()[b] = static_cast<int32_t>(n - 1);
+                conv_cpu.data<int32_t>()[b] = 0;
+            }
+            gpu_active_start = as_cpu.to(input.device());
+            gpu_active_end = ae_cpu.to(input.device());
+            gpu_converged = conv_cpu.to(input.device());
+        }
+
+        size_t uint_buf_size = batch_size * sizeof(uint32_t);
 
         for (uint32_t iter = 0; iter < max_qr_iterations; ++iter) {
             bool all_converged = true;
 
             for (int64_t b = 0; b < batch_size; ++b) {
-                if (batch_converged[b]) continue;
-                if (active_end[b] <= active_start[b]) {
-                    batch_converged[b] = true;
-                    continue;
-                }
+                if (active_end[b] <= active_start[b]) continue;
                 all_converged = false;
 
                 std::string shader = is_f64 ? "linalg_hessenberg_qr_f64" : "linalg_hessenberg_qr";
@@ -20392,34 +20400,55 @@ auto VulkanBackend::dispatchLinalgEig(const Tensor& input) -> std::vector<Tensor
 
             if (all_converged) break;
 
-            // Minimal scalar readback of deflation info to update active block boundaries.
-            // This is O(batch_size) scalars per iter, not a CPU computation fallback.
-            synchronize(device_id);
-            Tensor shifts_cpu = shifts.to(Device::cpu());
+            // GPU-side convergence check: updates active_end and batch_converged on device,
+            // produces a single all_converged flag to minimize readback.
+            {
+                // Initialize all_converged = 1 (will be AND-ed to 0 if any batch not done)
+                gpu_all_converged = dispatchFull({1}, 1.0f, DType::Int32);
 
-            if (is_f64) {
-                auto* sd = shifts_cpu.data<double>();
-                for (int64_t b = 0; b < batch_size; ++b) {
-                    if (batch_converged[b]) continue;
-                    uint32_t deflated = static_cast<uint32_t>(sd[b * 4]);
-                    if (deflated > 0 && deflated >= active_end[b]) {
-                        active_end[b] = deflated > 0 ? deflated - 1 : 0;
-                    }
-                    if (active_end[b] <= active_start[b]) {
-                        batch_converged[b] = true;
-                    }
-                }
-            } else {
-                auto* sd = shifts_cpu.data<float>();
-                for (int64_t b = 0; b < batch_size; ++b) {
-                    if (batch_converged[b]) continue;
-                    uint32_t deflated = static_cast<uint32_t>(sd[b * 4]);
-                    if (deflated > 0 && deflated >= active_end[b]) {
-                        active_end[b] = deflated > 0 ? deflated - 1 : 0;
-                    }
-                    if (active_end[b] <= active_start[b]) {
-                        batch_converged[b] = true;
-                    }
+                std::string conv_shader = is_f64 ? "eig_convergence_check_f64" : "eig_convergence_check";
+                auto* conv_pipeline = getPipeline(conv_shader, device_id);
+
+                struct ConvPC { uint32_t batch_size; } conv_pc;
+                conv_pc.batch_size = static_cast<uint32_t>(batch_size);
+
+                std::vector<std::pair<uint32_t, const void*>> conv_bindings = {
+                    {0, shifts.data_ptr()},
+                    {1, gpu_active_end.data_ptr()},
+                    {2, gpu_active_start.data_ptr()},
+                    {3, gpu_converged.data_ptr()},
+                    {4, gpu_all_converged.data_ptr()}
+                };
+                std::vector<size_t> conv_sizes = {
+                    shift_size, uint_buf_size, uint_buf_size,
+                    uint_buf_size, sizeof(uint32_t)
+                };
+                VkDescriptorSet conv_ds = allocateAndWriteDescriptorSet(
+                    device_id, conv_pipeline, conv_bindings, conv_sizes);
+
+                VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, conv_pipeline->pipeline());
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                       conv_pipeline->layout(), 0, 1, &conv_ds, 0, nullptr);
+                vkCmdPushConstants(cmd, conv_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                                  0, sizeof(conv_pc), &conv_pc);
+                uint32_t num_groups = (static_cast<uint32_t>(batch_size) + 63u) / 64u;
+                vkCmdDispatch(cmd, num_groups, 1, 1);
+                insertComputeOnlyBarrier(cmd);
+                endSingleTimeCommands(cmd, device_id);
+            }
+
+            // Single sync + small readback of uint32 metadata (not the full shifts tensor)
+            synchronize(device_id);
+
+            Tensor ae_cpu = gpu_active_end.to(Device::cpu());
+            Tensor conv_cpu = gpu_converged.to(Device::cpu());
+            auto* ae_data = ae_cpu.data<int32_t>();
+            auto* conv_data = conv_cpu.data<int32_t>();
+            for (int64_t b = 0; b < batch_size; ++b) {
+                active_end[b] = static_cast<uint32_t>(ae_data[b]);
+                if (conv_data[b] != 0) {
+                    active_start[b] = active_end[b]; // mark converged for host-side skip
                 }
             }
         }

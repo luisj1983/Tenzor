@@ -16,9 +16,11 @@ namespace {
 
 // Helper to create a Bool scalar tensor on the target device
 inline Tensor make_bool_scalar(bool value, Device device) {
-    Tensor result({}, DType::Bool, Device::cpu());
-    result.data<bool>()[0] = value;
-    return result.to(device);
+    Tensor result({}, DType::Bool, device);
+    bool v = value;
+    TENZOR_CUDA_CHECK(cudaMemcpy(result.data<bool>(), &v, sizeof(bool),
+                                  cudaMemcpyHostToDevice));
+    return result;
 }
 
 } // anonymous namespace

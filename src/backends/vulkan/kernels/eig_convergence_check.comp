@@ -1,0 +1,41 @@
+#version 450
+
+// Convergence check for tiled LinalgEig QR iteration.
+// Reads deflation indices from shifts buffer, updates active_end per batch,
+// and computes a single all_converged flag to minimize GPU->CPU readback.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) buffer ShiftBuf      { float shifts[]; };
+layout(set = 0, binding = 1) buffer ActiveEndBuf   { uint active_end[]; };
+layout(set = 0, binding = 2) buffer ActiveStartBuf { uint active_start[]; };
+layout(set = 0, binding = 3) buffer ConvergedBuf   { uint batch_converged[]; };
+layout(set = 0, binding = 4) buffer AllConvBuf     { uint all_converged; };
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+};
+
+void main() {
+    uint b = gl_GlobalInvocationID.x;
+    if (b >= batch_size) return;
+
+    // Already converged — skip
+    if (batch_converged[b] != 0u) return;
+
+    uint deflated = uint(shifts[b * 4]);
+    uint aend = active_end[b];
+    uint astart = active_start[b];
+
+    if (deflated > 0u && deflated >= aend) {
+        aend = (deflated > 0u) ? deflated - 1u : 0u;
+        active_end[b] = aend;
+    }
+
+    if (aend <= astart) {
+        batch_converged[b] = 1u;
+    } else {
+        // Signal that at least one batch element has not converged
+        atomicAnd(all_converged, 0u);
+    }
+}
