@@ -5,10 +5,7 @@
 
 #include <hip/hip_runtime.h>
 #include <hipcub/hipcub.hpp>
-#include <vector>
 #include <cstdint>
-#include <algorithm>
-#include <numeric>
 #include "tenzor/core/tensor.hpp"
 
 namespace tenzor {
@@ -94,6 +91,58 @@ __global__ void nms_kernel(const float* boxes, const int64_t* sorted_indices,
         if (threadIdx.x == 0) {
             suppression_mask[ref_idx * num_chunks + chunk] = shared_mask;
         }
+    }
+}
+
+// Device kernel for greedy suppression — parallelizes inner chunk-OR loop
+// Thread 0 drives sequential keep/suppress decisions; all threads cooperate on OR
+__global__ void nms_greedy_suppression_kernel(
+    const uint64_t* suppression_mask,
+    const int64_t* sorted_indices,
+    int64_t* keep_indices,
+    int64_t* num_keep,
+    int64_t num_boxes,
+    int64_t num_chunks
+) {
+    extern __shared__ uint64_t s_remv[];
+    int64_t* s_keep_count = reinterpret_cast<int64_t*>(s_remv + num_chunks);
+
+    int tid = threadIdx.x;
+
+    for (int64_t c = tid; c < num_chunks; c += blockDim.x) {
+        s_remv[c] = 0;
+    }
+    if (tid == 0) {
+        *s_keep_count = 0;
+    }
+    __syncthreads();
+
+    for (int64_t i = 0; i < num_boxes; ++i) {
+        __shared__ int s_keep;
+        if (tid == 0) {
+            int64_t chunk_i = i / 64;
+            int64_t bit_i = i % 64;
+            if (s_remv[chunk_i] & (1ULL << bit_i)) {
+                s_keep = 0;
+            } else {
+                keep_indices[*s_keep_count] = sorted_indices[i];
+                (*s_keep_count)++;
+                s_keep = 1;
+            }
+        }
+        __syncthreads();
+
+        if (s_keep) {
+            const uint64_t* row = suppression_mask + i * num_chunks;
+            for (int64_t c = tid; c < num_chunks; c += blockDim.x) {
+                s_remv[c] |= row[c];
+            }
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        *num_keep = *s_keep_count;
     }
 }
 
@@ -252,12 +301,6 @@ extern "C" void nms_hip(const float* boxes, const float* scores,
     auto* d_sorted_indices = static_cast<int64_t*>(d_sorted_guard.ptr);
     nms_gpu_argsort_descending(scores, d_sorted_indices, num_boxes, stream);
 
-    // Copy sorted indices to host for suppression processing
-    std::vector<int64_t> h_sorted(num_boxes);
-    NMS_HIP_CHECK(hipMemcpyAsync(h_sorted.data(), d_sorted_indices,
-                                  num_boxes * sizeof(int64_t), hipMemcpyDeviceToHost, stream));
-    NMS_HIP_CHECK(hipStreamSynchronize(stream));
-
     // Allocate suppression mask with RAII guard
     const int64_t num_chunks = (num_boxes + 63) / 64;
     HipDevicePtr d_mask_guard;
@@ -265,52 +308,27 @@ extern "C" void nms_hip(const float* boxes, const float* scores,
     auto* d_suppression_mask = static_cast<uint64_t*>(d_mask_guard.ptr);
     NMS_HIP_CHECK(hipMemsetAsync(d_suppression_mask, 0, num_boxes * num_chunks * sizeof(uint64_t), stream));
 
-    // Launch NMS kernel
+    // Launch NMS IoU kernel — one block per reference box
     const int threads_per_block = 256;
     hipLaunchKernelGGL(nms_kernel, dim3(num_boxes), dim3(threads_per_block), 0, stream,
                       boxes, d_sorted_indices, d_suppression_mask, num_boxes, iou_threshold);
     NMS_HIP_CHECK(hipGetLastError());
 
-    // Copy suppression mask to host
-    std::vector<uint64_t> suppression_mask(num_boxes * num_chunks);
-    NMS_HIP_CHECK(hipMemcpyAsync(suppression_mask.data(), d_suppression_mask,
-                                  num_boxes * num_chunks * sizeof(uint64_t),
-                                  hipMemcpyDeviceToHost, stream));
+    // Allocate device-side num_keep scalar
+    HipDevicePtr d_num_keep_guard;
+    NMS_HIP_CHECK(hipMalloc(&d_num_keep_guard.ptr, sizeof(int64_t)));
+    auto* d_num_keep = static_cast<int64_t*>(d_num_keep_guard.ptr);
+
+    // Launch greedy suppression on GPU — 256 threads cooperate on inner chunk-OR loop
+    size_t shared_bytes = num_chunks * sizeof(uint64_t) + sizeof(int64_t);
+    hipLaunchKernelGGL(nms_greedy_suppression_kernel, dim3(1), dim3(256), shared_bytes, stream,
+                      d_suppression_mask, d_sorted_indices, keep_indices, d_num_keep,
+                      num_boxes, num_chunks);
+    NMS_HIP_CHECK(hipGetLastError());
+
+    // Only transfer num_keep (8 bytes) back to host
+    NMS_HIP_CHECK(hipMemcpyAsync(num_keep, d_num_keep, sizeof(int64_t), hipMemcpyDeviceToHost, stream));
     NMS_HIP_CHECK(hipStreamSynchronize(stream));
-
-    // Process suppression mask to get keep indices
-    std::vector<bool> suppressed(num_boxes, false);
-    std::vector<int64_t> keep;
-    keep.reserve(num_boxes);
-
-    for (int64_t i = 0; i < num_boxes; ++i) {
-        const int64_t idx = h_sorted[i];
-        if (suppressed[idx]) continue;
-
-        keep.push_back(idx);
-
-        // Mark suppressed boxes
-        for (int64_t chunk = 0; chunk < num_chunks; ++chunk) {
-            uint64_t mask = suppression_mask[i * num_chunks + chunk];
-            const int64_t start_idx = chunk * 64;
-
-            for (int bit = 0; bit < 64; ++bit) {
-                if (mask & (1ULL << bit)) {
-                    const int64_t box_idx = start_idx + bit;
-                    if (box_idx < num_boxes) {
-                        suppressed[h_sorted[box_idx]] = true;
-                    }
-                }
-            }
-        }
-    }
-
-    // Copy results
-    *num_keep = static_cast<int64_t>(keep.size());
-    if (!keep.empty()) {
-        NMS_HIP_CHECK(hipMemcpyAsync(keep_indices, keep.data(), keep.size() * sizeof(int64_t),
-                                      hipMemcpyHostToDevice, stream));
-    }
 
     // RAII guards handle cleanup automatically
 }

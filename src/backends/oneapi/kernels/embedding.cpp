@@ -598,29 +598,64 @@ auto embedding_renorm_kernel(Tensor& weights, const Tensor& indices,
 
     if (num_indices == 0) return;
 
-    // Get unique indices on host (small set typically)
-    std::vector<int64_t> h_indices(num_indices);
-    queue.memcpy(h_indices.data(), get_data_ptr<const int64_t>(indices),
-                 num_indices * sizeof(int64_t)).wait();
+    const int64_t* idx_ptr = get_data_ptr<const int64_t>(indices);
 
-    std::vector<int64_t> unique_indices;
-    std::vector<bool> seen(num_embeddings, false);
-    for (int64_t i = 0; i < num_indices; ++i) {
-        int64_t idx = h_indices[i];
-        if (idx >= 0 && idx < num_embeddings && !seen[idx]) {
-            seen[idx] = true;
-            unique_indices.push_back(idx);
+    // For small index counts, use host path (GPU overhead exceeds benefit)
+    int64_t n_unique = 0;
+    int64_t* d_unique_idx = nullptr;
+
+    if (num_indices < 128) {
+        // Host-side dedup for small inputs
+        std::vector<int64_t> h_indices(num_indices);
+        queue.memcpy(h_indices.data(), idx_ptr, num_indices * sizeof(int64_t)).wait();
+
+        std::vector<int64_t> unique_indices;
+        std::vector<bool> seen(num_embeddings, false);
+        for (int64_t i = 0; i < num_indices; ++i) {
+            int64_t idx = h_indices[i];
+            if (idx >= 0 && idx < num_embeddings && !seen[idx]) {
+                seen[idx] = true;
+                unique_indices.push_back(idx);
+            }
         }
+
+        if (unique_indices.empty()) return;
+        n_unique = static_cast<int64_t>(unique_indices.size());
+        d_unique_idx = sycl::malloc_device<int64_t>(n_unique, queue);
+        queue.memcpy(d_unique_idx, unique_indices.data(), n_unique * sizeof(int64_t)).wait();
+    } else {
+        // Device-side dedup using atomic flag array
+        uint8_t* d_seen = sycl::malloc_device<uint8_t>(num_embeddings, queue);
+        queue.memset(d_seen, 0, num_embeddings * sizeof(uint8_t));
+
+        // Mark seen indices on device (idempotent writes, no atomics needed)
+        queue.parallel_for(sycl::range<1>(num_indices), [=](sycl::id<1> i) {
+            int64_t idx = idx_ptr[i];
+            if (idx >= 0 && idx < num_embeddings) {
+                d_seen[idx] = 1;
+            }
+        }).wait();
+
+        // Prefix sum to count unique and compute compacted positions
+        // Use host-side scan of the flag array (num_embeddings flags, not indices)
+        std::vector<uint8_t> h_seen(num_embeddings);
+        queue.memcpy(h_seen.data(), d_seen, num_embeddings * sizeof(uint8_t)).wait();
+        sycl::free(d_seen, queue);
+
+        std::vector<int64_t> unique_indices;
+        unique_indices.reserve(num_indices);
+        for (int64_t i = 0; i < num_embeddings; ++i) {
+            if (h_seen[i]) unique_indices.push_back(i);
+        }
+
+        if (unique_indices.empty()) return;
+        n_unique = static_cast<int64_t>(unique_indices.size());
+        d_unique_idx = sycl::malloc_device<int64_t>(n_unique, queue);
+        queue.memcpy(d_unique_idx, unique_indices.data(), n_unique * sizeof(int64_t)).wait();
     }
 
-    if (unique_indices.empty()) return;
-
-    int64_t n_unique = static_cast<int64_t>(unique_indices.size());
-
-    // Allocate device buffer for unique indices and norms
-    int64_t* d_unique_idx = sycl::malloc_device<int64_t>(n_unique, queue);
+    // Allocate device buffer for norms
     float* d_norms = sycl::malloc_device<float>(n_unique, queue);
-    queue.memcpy(d_unique_idx, unique_indices.data(), n_unique * sizeof(int64_t)).wait();
 
     float* w_ptr = get_data_ptr<float>(weights);
     float max_norm_f = static_cast<float>(max_norm);

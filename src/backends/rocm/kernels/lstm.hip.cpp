@@ -354,12 +354,13 @@ extern "C" {
         float* h_out,
         float* c_out,
         int64_t batch_size,
-        int64_t hidden_size) {
+        int64_t hidden_size,
+        hipStream_t stream) {
 
         int64_t total = batch_size * hidden_size;
         int num_blocks = get_num_blocks(total);
 
-        hipLaunchKernelGGL(lstm_cell_forward_fused<float>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, 0,
+        hipLaunchKernelGGL(lstm_cell_forward_fused<float>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           gates, c_prev, h_out, c_out, batch_size, hidden_size);
 
         HIP_CHECK(hipGetLastError());
@@ -374,12 +375,13 @@ extern "C" {
         double* h_out,
         double* c_out,
         int64_t batch_size,
-        int64_t hidden_size) {
+        int64_t hidden_size,
+        hipStream_t stream) {
 
         int64_t total = batch_size * hidden_size;
         int num_blocks = get_num_blocks(total);
 
-        hipLaunchKernelGGL(lstm_cell_forward_fused<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, 0,
+        hipLaunchKernelGGL(lstm_cell_forward_fused<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           gates, c_prev, h_out, c_out, batch_size, hidden_size);
 
         HIP_CHECK(hipGetLastError());
@@ -397,12 +399,13 @@ extern "C" {
         float* grad_gates,
         float* grad_c_prev,
         int64_t batch_size,
-        int64_t hidden_size) {
+        int64_t hidden_size,
+        hipStream_t stream) {
 
         int64_t total = batch_size * hidden_size;
         int num_blocks = get_num_blocks(total);
 
-        hipLaunchKernelGGL(lstm_cell_backward_fused<float>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, 0,
+        hipLaunchKernelGGL(lstm_cell_backward_fused<float>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           grad_h, grad_c, gates, c_prev, c_out,
                           grad_gates, grad_c_prev, batch_size, hidden_size);
 
@@ -421,12 +424,13 @@ extern "C" {
         double* grad_gates,
         double* grad_c_prev,
         int64_t batch_size,
-        int64_t hidden_size) {
+        int64_t hidden_size,
+        hipStream_t stream) {
 
         int64_t total = batch_size * hidden_size;
         int num_blocks = get_num_blocks(total);
 
-        hipLaunchKernelGGL(lstm_cell_backward_fused<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, 0,
+        hipLaunchKernelGGL(lstm_cell_backward_fused<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           grad_h, grad_c, gates, c_prev, c_out,
                           grad_gates, grad_c_prev, batch_size, hidden_size);
 

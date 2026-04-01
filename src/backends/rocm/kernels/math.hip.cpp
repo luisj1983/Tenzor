@@ -1013,9 +1013,9 @@ auto add_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
     HIP_CHECK(hipMalloc(&d_strides_a, output_shape.size() * sizeof(int64_t)));
     HIP_CHECK(hipMalloc(&d_strides_b, output_shape.size() * sizeof(int64_t)));
     HIP_CHECK(hipMalloc(&d_output_shape, output_shape.size() * sizeof(int64_t)));
-    HIP_CHECK(hipMemcpy(d_strides_a, strides_a.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice));
-    HIP_CHECK(hipMemcpy(d_strides_b, strides_b.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice));
-    HIP_CHECK(hipMemcpy(d_output_shape, output_shape.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpyAsync(d_strides_a, strides_a.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice, stream));
+    HIP_CHECK(hipMemcpyAsync(d_strides_b, strides_b.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice, stream));
+    HIP_CHECK(hipMemcpyAsync(d_output_shape, output_shape.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice, stream));
 
     int64_t n = result.numel();
     int64_t ndim = output_shape.size();
@@ -1182,9 +1182,9 @@ auto sub_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
     HIP_CHECK(hipMalloc(&d_strides_a, output_shape.size() * sizeof(int64_t)));
     HIP_CHECK(hipMalloc(&d_strides_b, output_shape.size() * sizeof(int64_t)));
     HIP_CHECK(hipMalloc(&d_output_shape, output_shape.size() * sizeof(int64_t)));
-    HIP_CHECK(hipMemcpy(d_strides_a, strides_a.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice));
-    HIP_CHECK(hipMemcpy(d_strides_b, strides_b.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice));
-    HIP_CHECK(hipMemcpy(d_output_shape, output_shape.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpyAsync(d_strides_a, strides_a.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice, stream));
+    HIP_CHECK(hipMemcpyAsync(d_strides_b, strides_b.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice, stream));
+    HIP_CHECK(hipMemcpyAsync(d_output_shape, output_shape.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice, stream));
 
     int64_t n = result.numel();
     int64_t ndim = output_shape.size();
@@ -1343,9 +1343,9 @@ auto mul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
     HIP_CHECK(hipMalloc(&d_strides_a, output_shape.size() * sizeof(int64_t)));
     HIP_CHECK(hipMalloc(&d_strides_b, output_shape.size() * sizeof(int64_t)));
     HIP_CHECK(hipMalloc(&d_output_shape, output_shape.size() * sizeof(int64_t)));
-    HIP_CHECK(hipMemcpy(d_strides_a, strides_a.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice));
-    HIP_CHECK(hipMemcpy(d_strides_b, strides_b.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice));
-    HIP_CHECK(hipMemcpy(d_output_shape, output_shape.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpyAsync(d_strides_a, strides_a.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice, stream));
+    HIP_CHECK(hipMemcpyAsync(d_strides_b, strides_b.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice, stream));
+    HIP_CHECK(hipMemcpyAsync(d_output_shape, output_shape.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice, stream));
 
     int64_t n = result.numel();
     int64_t ndim = output_shape.size();
@@ -1499,9 +1499,9 @@ auto div_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
     HIP_CHECK(hipMalloc(&d_strides_a, output_shape.size() * sizeof(int64_t)));
     HIP_CHECK(hipMalloc(&d_strides_b, output_shape.size() * sizeof(int64_t)));
     HIP_CHECK(hipMalloc(&d_output_shape, output_shape.size() * sizeof(int64_t)));
-    HIP_CHECK(hipMemcpy(d_strides_a, strides_a.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice));
-    HIP_CHECK(hipMemcpy(d_strides_b, strides_b.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice));
-    HIP_CHECK(hipMemcpy(d_output_shape, output_shape.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpyAsync(d_strides_a, strides_a.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice, stream));
+    HIP_CHECK(hipMemcpyAsync(d_strides_b, strides_b.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice, stream));
+    HIP_CHECK(hipMemcpyAsync(d_output_shape, output_shape.data(), output_shape.size() * sizeof(int64_t), hipMemcpyHostToDevice, stream));
 
     int64_t n = result.numel();
     int64_t ndim = output_shape.size();
@@ -3759,11 +3759,14 @@ __global__ void check_inf_nan_kernel<double>(const double* data, int64_t n, int*
 auto has_inf_nan_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     const int64_t numel = input.numel();
 
-    // Helper to create a Bool scalar tensor on the target device
-    auto make_bool_scalar = [](bool value, Device device) -> Tensor {
-        Tensor result({}, DType::Bool, Device::cpu());
-        result.data<bool>()[0] = value;
-        return result.to(device);
+    // Helper to create a Bool scalar tensor directly on the target device
+    auto make_bool_scalar = [&stream](bool value, Device device) -> Tensor {
+        Tensor result({}, DType::Bool, device);
+        bool tmp = value;
+        HIP_CHECK(hipMemcpyAsync(result.data<bool>(), &tmp, sizeof(bool),
+                                 hipMemcpyHostToDevice, stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
+        return result;
     };
 
     if (numel == 0) {

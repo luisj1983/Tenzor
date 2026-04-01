@@ -422,8 +422,8 @@ public:
         original_device_ = original_device;
         original_dtype_ = original_dtype;
 
-        // Try dispatching to backend kernel (avoids CPU roundtrip on GPU)
-        try {
+        // Dispatch to backend kernel if available (avoids CPU roundtrip on GPU)
+        if (is_op_supported(OpId::EmbeddingBagForward, original_device.type)) {
             OpAttributes bag_attrs;
             bag_attrs.set(AttrKey::Mode, mode_);
             bag_attrs.set(AttrKey::EmbeddingDim, embedding_dim_);
@@ -439,8 +439,11 @@ public:
             std::array<Tensor, 2> bag_inputs = {emb_tensor, offsets_dev};
             auto result = dispatch_single<OpId::EmbeddingBagForward>(bag_inputs, bag_attrs);
             return {Variable(result, inputs[0].requires_grad())};
-        } catch (const std::runtime_error&) {
-            // Fall through to CPU computation
+        }
+
+        if (original_device != Device::cpu()) {
+            std::cerr << "Warning: EmbeddingBag falling back to CPU computation for device "
+                      << static_cast<int>(original_device.type) << ". Performance will be degraded." << std::endl;
         }
 
         // CPU fallback: transfer to CPU Float32 for computation

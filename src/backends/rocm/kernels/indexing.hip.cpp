@@ -1889,7 +1889,7 @@ auto masked_select_hip(
 
     int64_t* d_count;
     HIP_CHECK(hipMalloc(&d_count, sizeof(int64_t)));
-    HIP_CHECK(hipMemset(d_count, 0, sizeof(int64_t)));
+    HIP_CHECK(hipMemsetAsync(d_count, 0, sizeof(int64_t), stream));
 
     int threads = 256;
     int blocks = (total_elements + threads - 1) / threads;
@@ -1924,7 +1924,7 @@ auto masked_select_hip(
 
     int64_t* d_output_idx;
     HIP_CHECK(hipMalloc(&d_output_idx, sizeof(int64_t)));
-    HIP_CHECK(hipMemset(d_output_idx, 0, sizeof(int64_t)));
+    HIP_CHECK(hipMemsetAsync(d_output_idx, 0, sizeof(int64_t), stream));
 
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(masked_select_kernel<float>,

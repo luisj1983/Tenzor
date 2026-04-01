@@ -166,7 +166,11 @@ auto initialize() -> void {
         if (register_fn) {
             register_fn(&cpu_table);
             DispatchTableRegistry::mark_ready(Device::Type::CPU);
-            std::cout << "CPU dispatch table initialized with O(1) lookup" << std::endl;
+            auto cpu_op_count = cpu_table.op_count();
+            std::cout << "CPU dispatch table initialized (" << cpu_op_count << " operations registered)" << std::endl;
+            if (cpu_op_count == 0) {
+                std::cerr << "Warning: CPU backend registered 0 operations" << std::endl;
+            }
         } else {
             std::cerr << "Warning: Could not find register_kernels in CPU backend" << std::endl;
         }
@@ -207,7 +211,11 @@ auto initialize() -> void {
                     if (register_fn) {
                         register_fn(&cuda_table);
                         DispatchTableRegistry::mark_ready(Device::Type::CUDA);
-                        std::cout << "CUDA dispatch table initialized with O(1) lookup" << std::endl;
+                        auto cuda_op_count = cuda_table.op_count();
+                        std::cout << "CUDA dispatch table initialized (" << cuda_op_count << " operations registered)" << std::endl;
+                        if (cuda_op_count == 0) {
+                            std::cerr << "Warning: CUDA backend registered 0 operations" << std::endl;
+                        }
                     } else {
                         std::cerr << "Warning: Could not find register_kernels in CUDA backend" << std::endl;
                     }
@@ -264,7 +272,11 @@ auto initialize() -> void {
                     if (register_fn) {
                         register_fn(&rocm_table);
                         DispatchTableRegistry::mark_ready(Device::Type::ROCm);
-                        std::cout << "ROCm dispatch table initialized with O(1) lookup" << std::endl;
+                        auto rocm_op_count = rocm_table.op_count();
+                        std::cout << "ROCm dispatch table initialized (" << rocm_op_count << " operations registered)" << std::endl;
+                        if (rocm_op_count == 0) {
+                            std::cerr << "Warning: ROCm backend registered 0 operations" << std::endl;
+                        }
                     } else {
                         std::cerr << "Warning: Could not find register_kernels in ROCm backend" << std::endl;
                     }
@@ -358,7 +370,11 @@ auto initialize() -> void {
                     if (register_fn) {
                         register_fn(&oneapi_table);
                         DispatchTableRegistry::mark_ready(Device::Type::OneAPI);
-                        std::cout << "OneAPI dispatch table initialized with O(1) lookup" << std::endl;
+                        auto oneapi_op_count = oneapi_table.op_count();
+                        std::cout << "OneAPI dispatch table initialized (" << oneapi_op_count << " operations registered)" << std::endl;
+                        if (oneapi_op_count == 0) {
+                            std::cerr << "Warning: OneAPI backend registered 0 operations" << std::endl;
+                        }
                     } else {
                         std::cerr << "Warning: Could not find register_kernels in OneAPI backend" << std::endl;
                     }
@@ -409,7 +425,11 @@ auto initialize() -> void {
                     if (register_fn) {
                         register_fn(&vulkan_table);
                         DispatchTableRegistry::mark_ready(Device::Type::Vulkan);
-                        std::cout << "Vulkan dispatch table initialized with O(1) lookup" << std::endl;
+                        auto vulkan_op_count = vulkan_table.op_count();
+                        std::cout << "Vulkan dispatch table initialized (" << vulkan_op_count << " operations registered)" << std::endl;
+                        if (vulkan_op_count == 0) {
+                            std::cerr << "Warning: Vulkan backend registered 0 operations" << std::endl;
+                        }
                     } else {
                         std::cerr << "Warning: Could not find register_kernels in Vulkan backend" << std::endl;
                     }
@@ -427,7 +447,7 @@ auto initialize() -> void {
         std::cout << "Vulkan backend not found at: " << vulkan_backend_path << std::endl;
     }
 
-    std::cout << "Tenzor initialization complete - 51 CPU operations registered" << std::endl;
+    std::cout << "Tenzor initialization complete" << std::endl;
 
     g_initialized.store(true, std::memory_order_release);
 

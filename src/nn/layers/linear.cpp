@@ -6,6 +6,8 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/autograd/function.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include <cmath>
 #include <iostream>
 
@@ -60,8 +62,7 @@ static auto linear_via_matmul(const Variable& input, const Variable& weight,
 
 // Check if fused linear kernel is available for this backend
 static bool has_fused_linear_kernel(Device device) {
-    // CPU and CUDA backends have fused linear kernels
-    return device.type == Device::Type::CPU || device.type == Device::Type::CUDA;
+    return is_op_supported(OpId::Linear, device.type);
 }
 
 auto Linear::forward_impl(const Variable& input) -> Variable {

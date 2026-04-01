@@ -323,7 +323,7 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
     // CUDA: cuDNN LSTM forward/backward available in cudnn_ops.cu (enable #if 0 → #if 1)
     //        Requires reserve_space from forward to be passed to backward for correct gradients
     // =========================================================================
-    bool can_use_fused = input.device().type == Device::Type::CPU &&
+    bool can_use_fused = is_op_supported(OpId::LSTMForward, input.device().type) &&
                          input.dtype() == DType::Float32 &&
                          !is_training();
 

@@ -91,6 +91,10 @@ auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
 
         if (input.dtype() == DType::Float32) {
             const float* in_ptr = get_data_ptr<const float>(input);
+            const float f_total = static_cast<float>(total_size);
+            int64_t divisor = total_size - correction;
+            if (divisor <= 0) divisor = 1;
+            const float f_divisor = static_cast<float>(divisor);
 
             float* mean_device = sycl::malloc_device<float>(1, queue);
             SyclDeviceGuard mean_guard(mean_device, queue);
@@ -103,37 +107,34 @@ auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
                     atomic_mean += in_ptr[idx];
             });
 
-            float mean_host;
-            queue.memcpy(&mean_host, mean_device, sizeof(float)).wait();
-            mean_host /= static_cast<float>(total_size);
-
             float* var_device = sycl::malloc_device<float>(1, queue);
             SyclDeviceGuard var_guard(var_device, queue);
             queue.fill(var_device, 0.0f, 1);
 
+            // Read mean from device memory directly — avoids D-to-H round-trip
             queue.parallel_for<class VarAllKernelFloat32>(sycl::range<1>(total_size),
                 [=](sycl::id<1> idx) {
-                    float diff = in_ptr[idx] - mean_host;
+                    float mean_val = mean_device[0] / f_total;
+                    float diff = in_ptr[idx] - mean_val;
                     sycl::atomic_ref<float, sycl::memory_order::relaxed,
                                    sycl::memory_scope::device> atomic_var(var_device[0]);
                     atomic_var += diff * diff;
             });
 
-            float var_host;
-            queue.memcpy(&var_host, var_device, sizeof(float)).wait();
-            int64_t divisor = total_size - correction;
-            if (divisor <= 0) divisor = 1;
-            var_host /= static_cast<float>(divisor);
-
-            float std_val = sycl::sqrt(var_host + 1e-8f);
-
+            // Compute final std on device and write directly to output
             Tensor output(out_shape, input.dtype(), input.device());
             float* out_ptr = get_data_ptr<float>(output);
-            queue.fill(out_ptr, std_val, 1).wait();
+            queue.single_task<class StdFinalizeFloat32>([=]() {
+                out_ptr[0] = sycl::sqrt(var_device[0] / f_divisor + 1e-8f);
+            }).wait();
             return output;
         }
         else if (input.dtype() == DType::Float64) {
             const double* in_ptr = get_data_ptr<const double>(input);
+            const double d_total = static_cast<double>(total_size);
+            int64_t divisor = total_size - correction;
+            if (divisor <= 0) divisor = 1;
+            const double d_divisor = static_cast<double>(divisor);
 
             double* mean_device = sycl::malloc_device<double>(1, queue);
             SyclDeviceGuard mean_guard(mean_device, queue);
@@ -146,33 +147,26 @@ auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
                     atomic_mean += in_ptr[idx];
             });
 
-            double mean_host;
-            queue.memcpy(&mean_host, mean_device, sizeof(double)).wait();
-            mean_host /= static_cast<double>(total_size);
-
             double* var_device = sycl::malloc_device<double>(1, queue);
             SyclDeviceGuard var_guard(var_device, queue);
             queue.fill(var_device, 0.0, 1);
 
+            // Read mean from device memory directly — avoids D-to-H round-trip
             queue.parallel_for<class VarAllKernelFloat64>(sycl::range<1>(total_size),
                 [=](sycl::id<1> idx) {
-                    double diff = in_ptr[idx] - mean_host;
+                    double mean_val = mean_device[0] / d_total;
+                    double diff = in_ptr[idx] - mean_val;
                     sycl::atomic_ref<double, sycl::memory_order::relaxed,
                                    sycl::memory_scope::device> atomic_var(var_device[0]);
                     atomic_var += diff * diff;
             });
 
-            double var_host;
-            queue.memcpy(&var_host, var_device, sizeof(double)).wait();
-            int64_t divisor = total_size - correction;
-            if (divisor <= 0) divisor = 1;
-            var_host /= static_cast<double>(divisor);
-
-            double std_val = sycl::sqrt(var_host + 1e-8);
-
+            // Compute final std on device and write directly to output
             Tensor output(out_shape, input.dtype(), input.device());
             double* out_ptr = get_data_ptr<double>(output);
-            queue.fill(out_ptr, std_val, 1).wait();
+            queue.single_task<class StdFinalizeFloat64>([=]() {
+                out_ptr[0] = sycl::sqrt(var_device[0] / d_divisor + 1e-8);
+            }).wait();
             return output;
         }
         else {
@@ -314,6 +308,10 @@ auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
 
         if (input.dtype() == DType::Float32) {
             const float* in_ptr = get_data_ptr<const float>(input);
+            const float f_total = static_cast<float>(total_size);
+            int64_t divisor = total_size - correction;
+            if (divisor <= 0) divisor = 1;
+            const float f_divisor = static_cast<float>(divisor);
 
             float* mean_device = sycl::malloc_device<float>(1, queue);
             SyclDeviceGuard mean_guard(mean_device, queue);
@@ -326,35 +324,34 @@ auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
                     atomic_mean += in_ptr[idx];
             });
 
-            float mean_host;
-            queue.memcpy(&mean_host, mean_device, sizeof(float)).wait();
-            mean_host /= static_cast<float>(total_size);
-
             float* var_device = sycl::malloc_device<float>(1, queue);
             SyclDeviceGuard var_guard(var_device, queue);
             queue.fill(var_device, 0.0f, 1);
 
+            // Read mean from device memory directly — avoids D-to-H round-trip
             queue.parallel_for<class VarKernelFloat32>(sycl::range<1>(total_size),
                 [=](sycl::id<1> idx) {
-                    float diff = in_ptr[idx] - mean_host;
+                    float mean_val = mean_device[0] / f_total;
+                    float diff = in_ptr[idx] - mean_val;
                     sycl::atomic_ref<float, sycl::memory_order::relaxed,
                                    sycl::memory_scope::device> atomic_var(var_device[0]);
                     atomic_var += diff * diff;
             });
 
-            float var_host;
-            queue.memcpy(&var_host, var_device, sizeof(float)).wait();
-            int64_t divisor = total_size - correction;
-            if (divisor <= 0) divisor = 1;
-            var_host /= static_cast<float>(divisor);
-
+            // Compute final variance on device and write directly to output
             Tensor output(out_shape, input.dtype(), input.device());
             float* out_ptr = get_data_ptr<float>(output);
-            queue.fill(out_ptr, var_host, 1).wait();
+            queue.single_task<class VarFinalizeFloat32>([=]() {
+                out_ptr[0] = var_device[0] / f_divisor;
+            }).wait();
             return output;
         }
         else if (input.dtype() == DType::Float64) {
             const double* in_ptr = get_data_ptr<const double>(input);
+            const double d_total = static_cast<double>(total_size);
+            int64_t divisor = total_size - correction;
+            if (divisor <= 0) divisor = 1;
+            const double d_divisor = static_cast<double>(divisor);
 
             double* mean_device = sycl::malloc_device<double>(1, queue);
             SyclDeviceGuard mean_guard(mean_device, queue);
@@ -367,31 +364,26 @@ auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
                     atomic_mean += in_ptr[idx];
             });
 
-            double mean_host;
-            queue.memcpy(&mean_host, mean_device, sizeof(double)).wait();
-            mean_host /= static_cast<double>(total_size);
-
             double* var_device = sycl::malloc_device<double>(1, queue);
             SyclDeviceGuard var_guard(var_device, queue);
             queue.fill(var_device, 0.0, 1);
 
+            // Read mean from device memory directly — avoids D-to-H round-trip
             queue.parallel_for<class VarKernelFloat64>(sycl::range<1>(total_size),
                 [=](sycl::id<1> idx) {
-                    double diff = in_ptr[idx] - mean_host;
+                    double mean_val = mean_device[0] / d_total;
+                    double diff = in_ptr[idx] - mean_val;
                     sycl::atomic_ref<double, sycl::memory_order::relaxed,
                                    sycl::memory_scope::device> atomic_var(var_device[0]);
                     atomic_var += diff * diff;
             });
 
-            double var_host;
-            queue.memcpy(&var_host, var_device, sizeof(double)).wait();
-            int64_t divisor = total_size - correction;
-            if (divisor <= 0) divisor = 1;
-            var_host /= static_cast<double>(divisor);
-
+            // Compute final variance on device and write directly to output
             Tensor output(out_shape, input.dtype(), input.device());
             double* out_ptr = get_data_ptr<double>(output);
-            queue.fill(out_ptr, var_host, 1).wait();
+            queue.single_task<class VarFinalizeFloat64>([=]() {
+                out_ptr[0] = var_device[0] / d_divisor;
+            }).wait();
             return output;
         }
         else {

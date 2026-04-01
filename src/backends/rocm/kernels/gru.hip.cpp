@@ -455,12 +455,13 @@ extern "C" {
         const float* h_prev,
         float* h_out,
         int64_t batch_size,
-        int64_t hidden_size) {
+        int64_t hidden_size,
+        hipStream_t stream) {
 
         int64_t total = batch_size * hidden_size;
         int num_blocks = get_num_blocks(total);
 
-        hipLaunchKernelGGL(gru_cell_forward_fused<float>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, 0,
+        hipLaunchKernelGGL(gru_cell_forward_fused<float>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           reset_gates, update_gates, new_gates_input, new_gates_hidden,
                           h_prev, h_out, batch_size, hidden_size);
 
@@ -478,12 +479,13 @@ extern "C" {
         const double* h_prev,
         double* h_out,
         int64_t batch_size,
-        int64_t hidden_size) {
+        int64_t hidden_size,
+        hipStream_t stream) {
 
         int64_t total = batch_size * hidden_size;
         int num_blocks = get_num_blocks(total);
 
-        hipLaunchKernelGGL(gru_cell_forward_fused<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, 0,
+        hipLaunchKernelGGL(gru_cell_forward_fused<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           reset_gates, update_gates, new_gates_input, new_gates_hidden,
                           h_prev, h_out, batch_size, hidden_size);
 
@@ -506,12 +508,13 @@ extern "C" {
         float* grad_new_hidden,
         float* grad_h_prev,
         int64_t batch_size,
-        int64_t hidden_size) {
+        int64_t hidden_size,
+        hipStream_t stream) {
 
         int64_t total = batch_size * hidden_size;
         int num_blocks = get_num_blocks(total);
 
-        hipLaunchKernelGGL(gru_cell_backward_fused<float>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, 0,
+        hipLaunchKernelGGL(gru_cell_backward_fused<float>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           grad_h, reset_gates, update_gates, new_gates_input, new_gates_hidden,
                           h_prev, grad_reset, grad_update, grad_new_input, grad_new_hidden,
                           grad_h_prev, batch_size, hidden_size);
@@ -535,12 +538,13 @@ extern "C" {
         double* grad_new_hidden,
         double* grad_h_prev,
         int64_t batch_size,
-        int64_t hidden_size) {
+        int64_t hidden_size,
+        hipStream_t stream) {
 
         int64_t total = batch_size * hidden_size;
         int num_blocks = get_num_blocks(total);
 
-        hipLaunchKernelGGL(gru_cell_backward_fused<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, 0,
+        hipLaunchKernelGGL(gru_cell_backward_fused<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           grad_h, reset_gates, update_gates, new_gates_input, new_gates_hidden,
                           h_prev, grad_reset, grad_update, grad_new_input, grad_new_hidden,
                           grad_h_prev, batch_size, hidden_size);

@@ -74,7 +74,8 @@ public:
         // FAST GPU PATH: Use dedicated backward kernel (single kernel launch)
         // Works for CUDA (cuDNN) and Vulkan (compute shader)
         // ================================================================
-        if ((input.device().type == Device::Type::CUDA || input.device().type == Device::Type::Vulkan) &&
+        if (input.device().type != Device::Type::CPU &&
+            is_op_supported(OpId::BatchNorm2dBackward, input.device().type) &&
             (input.dtype() == DType::Float32 || input.dtype() == DType::Float16 || input.dtype() == DType::Float64)) {
             // Dispatch to backend kernel for BatchNorm backward
             // inputs: [grad_output, input, gamma, saved_mean, saved_inv_var]

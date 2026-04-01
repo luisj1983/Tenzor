@@ -11,6 +11,8 @@
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/backend/op_attributes.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <limits>
@@ -257,7 +259,7 @@ auto MultiheadAttention::scaled_dot_product_attention(
     bool is_fp16 = query.dtype() == DType::Float16 || query.dtype() == DType::BFloat16;
     bool can_use_cudnn_sdpa = !need_weights &&
         is_fp16 &&
-        (query.device().type == Device::Type::CUDA) &&
+        is_op_supported(OpId::FusedAttention, query.device().type) &&
         (head_dim == 32 || head_dim == 64 || head_dim == 128 || head_dim == 256) &&
         !is_training();  // Only use cuDNN SDPA in inference mode
 

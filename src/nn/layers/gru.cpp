@@ -253,7 +253,7 @@ auto GRU::forward(const Variable& input, const Variable& hx,
     // Conditions: CPU, Float32, not training, not bidirectional
     // Uses oneDNN fused multi-layer GRU primitive for optimal performance
     // =========================================================================
-    bool can_use_fused = input.device().type == Device::Type::CPU &&
+    bool can_use_fused = is_op_supported(OpId::GRUForward, input.device().type) &&
                          input.dtype() == DType::Float32 &&
                          !is_training() &&
                          !bidirectional_;
