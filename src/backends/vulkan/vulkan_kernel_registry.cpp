@@ -1804,10 +1804,8 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return get_vulkan_backend()->dispatchLinalgEig(inputs[0]);
     });
 
-    // Flash Attention — composed from existing matmul + softmax shaders (not fused)
-    // This avoids the CPU roundtrip of VULKAN_CPU_FALLBACK by keeping all
-    // intermediate data on GPU. FlashAttentionBackward still uses CPU fallback
-    // since backward requires access to intermediate attention weights.
+    // Flash Attention — composed from existing matmul + softmax shaders (not fused).
+    // Both forward and backward are fully GPU-based using composed Vulkan dispatches.
     table.register_kernel(OpId::FlashAttention,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));

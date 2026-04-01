@@ -11077,7 +11077,7 @@ auto VulkanBackend::dispatchRepeat(const Tensor& input, const std::vector<int64_
 }
 
 /**
- * @brief Dispatch masked_select operation using CPU fallback
+ * @brief Dispatch masked_select operation using GPU prefix-sum and gather shaders.
  */
 auto VulkanBackend::dispatchMaskedSelect(const Tensor& input, const Tensor& mask) -> Tensor {
     // Validate shapes match
@@ -11873,8 +11873,8 @@ auto VulkanBackend::dispatchArgSort(const Tensor& input, int64_t dim, bool desce
  *   Float16 -> Float64   (two-step: f16->f32->f64)
  *   Float64 -> Float16   (two-step: f64->f32->f16)
  *
- * For unsupported conversion paths the input is transferred to CPU, cast
- * there, then transferred back to the Vulkan device.
+ * For unsupported conversion paths, a two-step GPU cast through Float32
+ * is used, keeping all computation on the Vulkan device.
  */
 auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Tensor {
     if (input.dtype() == target_dtype) {

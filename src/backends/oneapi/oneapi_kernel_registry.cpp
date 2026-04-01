@@ -3055,6 +3055,31 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return {oneapi::ifftn_kernel(inputs[0], dims, signal_lengths, norm, get_q(inputs))};
         });
 
+#else // !TENZOR_HAS_ONEMKL
+#define ONEMKL_STUB(OpName) \
+    table.register_kernel(OpId::OpName, \
+        [](std::span<const Tensor>, const OpAttributes&) -> std::vector<Tensor> { \
+            throw std::runtime_error( \
+                "Operation '" #OpName "' requires oneMKL. " \
+                "Rebuild with oneMKL support enabled."); \
+        })
+    ONEMKL_STUB(LinalgDet);
+    ONEMKL_STUB(LinalgInv);
+    ONEMKL_STUB(LinalgSolve);
+    ONEMKL_STUB(LinalgSVD);
+    ONEMKL_STUB(LinalgQR);
+    ONEMKL_STUB(LinalgEigh);
+    ONEMKL_STUB(LinalgEig);
+    ONEMKL_STUB(LinalgCholesky);
+    ONEMKL_STUB(FFT);
+    ONEMKL_STUB(IFFT);
+    ONEMKL_STUB(RFFT);
+    ONEMKL_STUB(IRFFT);
+    ONEMKL_STUB(FFT2);
+    ONEMKL_STUB(IFFT2);
+    ONEMKL_STUB(FFTN);
+    ONEMKL_STUB(IFFTN);
+#undef ONEMKL_STUB
 #endif // TENZOR_HAS_ONEMKL
 
     // =========================================================================
@@ -3193,6 +3218,17 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
             return sparse::spmv(sp, inputs[3]);
         });
+#else // !TENZOR_HAS_ONEMKL
+#define ONEMKL_SPARSE_STUB(OpName) \
+    table.register_single_output_kernel(OpId::OpName, \
+        [](std::span<const Tensor>, const OpAttributes&) -> Tensor { \
+            throw std::runtime_error( \
+                "Operation '" #OpName "' requires oneMKL. " \
+                "Rebuild with oneMKL support enabled."); \
+        })
+    ONEMKL_SPARSE_STUB(SparseSpMM);
+    ONEMKL_SPARSE_STUB(SparseSpMV);
+#undef ONEMKL_SPARSE_STUB
 #endif // TENZOR_HAS_ONEMKL
 
     // SparseToDense: CSR components -> dense tensor
