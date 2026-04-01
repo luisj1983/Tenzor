@@ -1,5 +1,6 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/backend/backend.hpp"
+#include "../sycl_prefix_sum.hpp"
 #include <sycl/sycl.hpp>
 #include <stdexcept>
 #include <cmath>
@@ -587,6 +588,8 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& embe
  */
 struct EmbeddingRenormNormKernel {};
 struct EmbeddingRenormScaleKernel {};
+struct EmbeddingRenormCastFlagsKernel {};
+struct EmbeddingRenormCompactKernel {};
 
 auto embedding_renorm_kernel(Tensor& weights, const Tensor& indices,
                              double max_norm, double norm_type,
@@ -636,22 +639,34 @@ auto embedding_renorm_kernel(Tensor& weights, const Tensor& indices,
             }
         }).wait();
 
-        // Prefix sum to count unique and compute compacted positions
-        // Use host-side scan of the flag array (num_embeddings flags, not indices)
-        std::vector<uint8_t> h_seen(num_embeddings);
-        queue.memcpy(h_seen.data(), d_seen, num_embeddings * sizeof(uint8_t)).wait();
-        sycl::free(d_seen, queue);
+        // Device-side stream compaction: prefix sum on flags + scatter
+        int32_t* d_flags_i32 = sycl::malloc_device<int32_t>(num_embeddings, queue);
+        queue.parallel_for<EmbeddingRenormCastFlagsKernel>(
+            sycl::range<1>(num_embeddings), [=](sycl::id<1> i) {
+                d_flags_i32[i] = static_cast<int32_t>(d_seen[i]);
+            }).wait();
 
-        std::vector<int64_t> unique_indices;
-        unique_indices.reserve(num_indices);
-        for (int64_t i = 0; i < num_embeddings; ++i) {
-            if (h_seen[i]) unique_indices.push_back(i);
+        int64_t total_unique = sycl_exclusive_prefix_sum(d_flags_i32, num_embeddings, queue);
+
+        if (total_unique == 0) {
+            sycl::free(d_seen, queue);
+            sycl::free(d_flags_i32, queue);
+            return;
         }
-
-        if (unique_indices.empty()) return;
-        n_unique = static_cast<int64_t>(unique_indices.size());
+        n_unique = total_unique;
         d_unique_idx = sycl::malloc_device<int64_t>(n_unique, queue);
-        queue.memcpy(d_unique_idx, unique_indices.data(), n_unique * sizeof(int64_t)).wait();
+
+        // Compact: scatter embedding indices where flag was set
+        auto* prefix_ptr = d_flags_i32;
+        queue.parallel_for<EmbeddingRenormCompactKernel>(
+            sycl::range<1>(num_embeddings), [=](sycl::id<1> i) {
+                if (d_seen[i]) {
+                    d_unique_idx[prefix_ptr[i]] = static_cast<int64_t>(i[0]);
+                }
+            }).wait();
+
+        sycl::free(d_seen, queue);
+        sycl::free(d_flags_i32, queue);
     }
 
     // Allocate device buffer for norms

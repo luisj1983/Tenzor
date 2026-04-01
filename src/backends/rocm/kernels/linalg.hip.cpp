@@ -782,6 +782,258 @@ auto linalg_eigh_kernel(const Tensor& A, hipStream_t stream)
 }
 
 // ============================================================================
+// QR iteration fallback for eigendecomposition (rocSOLVER < 6.0)
+// Ported from Vulkan compute shader: linalg_eig.comp
+// Computes eigenvalues only (not eigenvectors) for matrices up to 32x32.
+// ============================================================================
+
+static constexpr int QR_EIG_FALLBACK_MAX_N = 32;
+
+template<typename T>
+__global__ void qr_eig_fallback_kernel(
+    const T* __restrict__ A_in,
+    T* __restrict__ wr_out,
+    T* __restrict__ wi_out,
+    int n, int max_iterations)
+{
+    constexpr T eps = std::is_same_v<T, float> ? T(1e-7) : T(1e-14);
+    constexpr T zero_tol = std::is_same_v<T, float> ? T(1e-30) : T(1e-60);
+
+    uint32_t tid = threadIdx.x;
+
+    __shared__ T H[32][32];
+
+    // Load matrix into shared memory
+    for (int row = 0; row < n; row++) {
+        if (static_cast<int>(tid) < n) {
+            H[row][tid] = A_in[row * n + tid];
+        }
+    }
+    __syncthreads();
+
+    // Step 1: Reduce to upper Hessenberg form via Householder reflections
+    if (tid == 0) {
+        for (int k = 0; k + 2 < n; k++) {
+            T sigma = T(0);
+            for (int i = k + 1; i < n; i++) {
+                sigma += H[i][k] * H[i][k];
+            }
+            T norm_x = sqrt(sigma);
+            if (norm_x < zero_tol) continue;
+
+            T alpha = -copysign(norm_x, H[k + 1][k]);
+            T v0 = H[k + 1][k] - alpha;
+            T v_norm_sq = v0 * v0;
+            for (int i = k + 2; i < n; i++) {
+                v_norm_sq += H[i][k] * H[i][k];
+            }
+            if (v_norm_sq < zero_tol) continue;
+
+            T tau = T(2) / v_norm_sq;
+
+            // Apply H = (I - tau * v * v^T) * H
+            for (int j = k; j < n; j++) {
+                T dot = v0 * H[k + 1][j];
+                for (int i = k + 2; i < n; i++) {
+                    dot += H[i][k] * H[i][j];
+                }
+                dot *= tau;
+                H[k + 1][j] -= v0 * dot;
+                for (int i = k + 2; i < n; i++) {
+                    H[i][j] -= H[i][k] * dot;
+                }
+            }
+
+            // Apply H = H * (I - tau * v * v^T)
+            for (int i = 0; i < n; i++) {
+                T dot = v0 * H[i][k + 1];
+                for (int j = k + 2; j < n; j++) {
+                    dot += H[j][k] * H[i][j];
+                }
+                dot *= tau;
+                H[i][k + 1] -= v0 * dot;
+                for (int j = k + 2; j < n; j++) {
+                    H[i][j] -= H[j][k] * dot;
+                }
+            }
+
+            // Clean up subdiagonal
+            H[k + 1][k] = alpha;
+            for (int i = k + 2; i < n; i++) {
+                H[i][k] = T(0);
+            }
+        }
+    }
+    __syncthreads();
+
+    // Step 2: QR iteration with implicit double shifts on Hessenberg matrix
+    if (tid == 0) {
+        int nn = n;  // active matrix size
+
+        for (int iter = 0; iter < max_iterations && nn > 0; iter++) {
+            // Check for 1x1 deflation
+            if (nn >= 2) {
+                T tst = fabs(H[nn - 2][nn - 2]) + fabs(H[nn - 1][nn - 1]);
+                if (tst == T(0)) tst = T(1);
+                if (fabs(H[nn - 1][nn - 2]) < eps * tst) {
+                    wr_out[nn - 1] = H[nn - 1][nn - 1];
+                    wi_out[nn - 1] = T(0);
+                    H[nn - 1][nn - 2] = T(0);
+                    nn--;
+                    continue;
+                }
+            }
+
+            // Check for 2x2 deflation
+            if (nn >= 3) {
+                T tst = fabs(H[nn - 3][nn - 3]) + fabs(H[nn - 2][nn - 2]);
+                if (tst == T(0)) tst = T(1);
+                if (fabs(H[nn - 2][nn - 3]) < eps * tst) {
+                    T a = H[nn - 2][nn - 2], b = H[nn - 2][nn - 1];
+                    T c = H[nn - 1][nn - 2], d = H[nn - 1][nn - 1];
+                    T trace = a + d;
+                    T det = a * d - b * c;
+                    T disc = trace * trace - T(4) * det;
+
+                    if (disc >= T(0)) {
+                        T sq = sqrt(disc);
+                        wr_out[nn - 2] = T(0.5) * (trace + sq);
+                        wi_out[nn - 2] = T(0);
+                        wr_out[nn - 1] = T(0.5) * (trace - sq);
+                        wi_out[nn - 1] = T(0);
+                    } else {
+                        T sq = sqrt(-disc);
+                        wr_out[nn - 2] = T(0.5) * trace;
+                        wi_out[nn - 2] = T(0.5) * sq;
+                        wr_out[nn - 1] = T(0.5) * trace;
+                        wi_out[nn - 1] = T(-0.5) * sq;
+                    }
+
+                    H[nn - 2][nn - 3] = T(0);
+                    nn -= 2;
+                    continue;
+                }
+            }
+
+            if (nn == 1) {
+                wr_out[0] = H[0][0];
+                wi_out[0] = T(0);
+                nn = 0;
+                continue;
+            }
+
+            // Implicit double-shift QR step (Francis QR step)
+            T s = H[nn - 2][nn - 2] + H[nn - 1][nn - 1];
+            T t = H[nn - 2][nn - 2] * H[nn - 1][nn - 1] - H[nn - 2][nn - 1] * H[nn - 1][nn - 2];
+
+            T x = H[0][0] * H[0][0] + H[0][1] * H[1][0] - s * H[0][0] + t;
+            T y = H[1][0] * (H[0][0] + H[1][1] - s);
+            T z = (nn > 2) ? H[1][0] * H[2][1] : T(0);
+
+            // Chase the bulge
+            for (int k = 0; k + 2 < nn; k++) {
+                T norm_v = sqrt(x * x + y * y + z * z);
+                if (norm_v < zero_tol) {
+                    x = H[k + 1][k];
+                    y = (k + 2 < nn) ? H[k + 2][k] : T(0);
+                    z = (k + 3 < nn) ? H[k + 3][k] : T(0);
+                    continue;
+                }
+
+                T alpha_h = -copysign(norm_v, x);
+                T v0 = x - alpha_h;
+                T v1 = y;
+                T v2 = z;
+                T v_sq = v0 * v0 + v1 * v1 + v2 * v2;
+                if (v_sq < zero_tol) {
+                    x = H[k + 1][k];
+                    y = (k + 2 < nn) ? H[k + 2][k] : T(0);
+                    z = (k + 3 < nn) ? H[k + 3][k] : T(0);
+                    continue;
+                }
+                T tau_h = T(2) / v_sq;
+
+                int m = (k + 4 < nn) ? k + 4 : nn;
+
+                // Left multiplication: H = (I - tau * v * v^T) * H
+                for (int j = k; j < nn; j++) {
+                    T dot = v0 * H[k][j] + v1 * H[k + 1][j];
+                    if (k + 2 < nn) dot += v2 * H[k + 2][j];
+                    dot *= tau_h;
+                    H[k][j] -= v0 * dot;
+                    H[k + 1][j] -= v1 * dot;
+                    if (k + 2 < nn) H[k + 2][j] -= v2 * dot;
+                }
+
+                // Right multiplication: H = H * (I - tau * v * v^T)
+                for (int i = 0; i < m; i++) {
+                    T dot = v0 * H[i][k] + v1 * H[i][k + 1];
+                    if (k + 2 < nn) dot += v2 * H[i][k + 2];
+                    dot *= tau_h;
+                    H[i][k] -= v0 * dot;
+                    H[i][k + 1] -= v1 * dot;
+                    if (k + 2 < nn) H[i][k + 2] -= v2 * dot;
+                }
+
+                // Zero out below subdiagonal
+                if (k > 0) H[k][k - 1] = alpha_h;
+                if (k + 2 < nn) H[k + 2][k] = T(0);
+                if (k + 3 < nn) H[k + 3][k] = T(0);
+
+                // Update for next iteration
+                x = H[k + 1][k];
+                y = (k + 2 < nn) ? H[k + 2][k] : T(0);
+                z = (k + 3 < nn) ? H[k + 3][k] : T(0);
+            }
+
+            // Final 2x2 Givens rotation
+            if (nn >= 2) {
+                T norm_v = sqrt(x * x + y * y);
+                if (norm_v > zero_tol) {
+                    int k = nn - 2;
+                    T c = x / norm_v;
+                    T s_val = -y / norm_v;
+                    for (int j = k; j < nn; j++) {
+                        T tmp = c * H[k][j] - s_val * H[k + 1][j];
+                        H[k + 1][j] = s_val * H[k][j] + c * H[k + 1][j];
+                        H[k][j] = tmp;
+                    }
+                    for (int i = 0; i < nn; i++) {
+                        T tmp = c * H[i][k] - s_val * H[i][k + 1];
+                        H[i][k + 1] = s_val * H[i][k] + c * H[i][k + 1];
+                        H[i][k] = tmp;
+                    }
+                }
+            }
+        }
+
+        // Handle remaining 1x1 or 2x2 blocks
+        if (nn == 1) {
+            wr_out[0] = H[0][0];
+            wi_out[0] = T(0);
+        } else if (nn == 2) {
+            T a = H[0][0], b = H[0][1], c = H[1][0], d = H[1][1];
+            T trace = a + d;
+            T det = a * d - b * c;
+            T disc = trace * trace - T(4) * det;
+            if (disc >= T(0)) {
+                T sq = sqrt(disc);
+                wr_out[0] = T(0.5) * (trace + sq);
+                wi_out[0] = T(0);
+                wr_out[1] = T(0.5) * (trace - sq);
+                wi_out[1] = T(0);
+            } else {
+                T sq = sqrt(-disc);
+                wr_out[0] = T(0.5) * trace;
+                wi_out[0] = T(0.5) * sq;
+                wr_out[1] = T(0.5) * trace;
+                wi_out[1] = T(-0.5) * sq;
+            }
+        }
+    }
+}
+
+// ============================================================================
 // Eigendecomposition (non-symmetric)
 // ============================================================================
 
@@ -874,8 +1126,35 @@ auto linalg_eig_kernel(const Tensor& A, hipStream_t stream)
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
     return {WR, WI, V};
 #else
-    (void)stream;
-    throw std::runtime_error("linalg.eig requires rocSOLVER >= 6.0 — falling back to CPU");
+    // QR iteration fallback for rocSOLVER < 6.0 (eigenvalues only, max 32x32)
+    if (n > QR_EIG_FALLBACK_MAX_N) {
+        throw std::runtime_error(
+            "linalg.eig: matrix " + std::to_string(n) + "x" + std::to_string(n) +
+            " exceeds QR fallback limit (32x32). Upgrade to rocSOLVER >= 6.0 for larger matrices.");
+    }
+
+    constexpr int max_qr_iters = 200;
+
+    if (A.dtype() == DType::Float32) {
+        for (int64_t b = 0; b < nbatch; b++) {
+            qr_eig_fallback_kernel<float><<<1, 32, 0, stream>>>(
+                work.data<float>() + b * n * n,
+                WR.data<float>() + b * n,
+                WI.data<float>() + b * n,
+                static_cast<int>(n), max_qr_iters);
+        }
+    } else {
+        for (int64_t b = 0; b < nbatch; b++) {
+            qr_eig_fallback_kernel<double><<<1, 32, 0, stream>>>(
+                work.data<double>() + b * n * n,
+                WR.data<double>() + b * n,
+                WI.data<double>() + b * n,
+                static_cast<int>(n), max_qr_iters);
+        }
+    }
+
+    HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
+    // Note: eigenvectors not computed in QR fallback — V remains zeros
     return {WR, WI, V};
 #endif
 }

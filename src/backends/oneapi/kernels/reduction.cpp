@@ -11,10 +11,11 @@
 #include <oneapi/dpl/iterator>
 #endif
 
-// Forward declaration for contiguous kernel
+// Forward declarations
 namespace tenzor {
 namespace oneapi {
     auto contiguous_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto cast_kernel(const Tensor& input, DType target_dtype, sycl::queue& queue) -> Tensor;
 }
 }
 
@@ -1744,6 +1745,18 @@ auto topk_kernel(const Tensor& input, int64_t k, int64_t dim, bool largest, bool
 auto unique_kernel(const Tensor& input, bool sorted, bool return_inverse, bool return_counts,
                    sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor> {
     int64_t numel = input.numel();
+
+    // Upcast unsupported dtypes to wider types supported by the device paths
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto f32 = cast_kernel(input, DType::Float32, queue);
+        auto [u, inv, cnt] = unique_kernel(f32, sorted, return_inverse, return_counts, queue);
+        return {cast_kernel(u, input.dtype(), queue), inv, cnt};
+    }
+    if (input.dtype() == DType::Int8 || input.dtype() == DType::UInt8) {
+        auto i32 = cast_kernel(input, DType::Int32, queue);
+        auto [u, inv, cnt] = unique_kernel(i32, sorted, return_inverse, return_counts, queue);
+        return {cast_kernel(u, input.dtype(), queue), inv, cnt};
+    }
 
 #ifdef TENZOR_HAS_ONEDPL
     // Device-side unique using oneDPL: sort + unique on device.

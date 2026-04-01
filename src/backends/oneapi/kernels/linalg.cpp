@@ -157,6 +157,10 @@ class SyclTransposeCholeskyBackF32;
 class SyclTransposeCholeskyBackF64;
 class SyclDiagExtractDetF32;
 class SyclDiagExtractDetF64;
+class SyclDetReduceF32;
+class SyclDetReduceF64;
+class SyclDetCombineF32;
+class SyclDetCombineF64;
 
 auto linalg_det_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     auto shape = input.shape();
@@ -186,21 +190,29 @@ auto linalg_det_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             d_diag_ptr[i] = d_a_ptr[i * n + i];  // column-major diagonal
         }).wait();
 
-        std::vector<float> h_diag(n);
-        std::vector<std::int64_t> h_ipiv(n);
-        queue.memcpy(h_diag.data(), d_diag.get(), n * sizeof(float));
-        queue.memcpy(h_ipiv.data(), d_ipiv.get(), n * sizeof(std::int64_t));
-        queue.wait();
+        // Device-side reduction: product of diagonal * (-1)^swaps
+        auto* prod_buf = sycl::malloc_shared<float>(1, queue);
+        auto* swap_buf = sycl::malloc_shared<int32_t>(1, queue);
+        prod_buf[0] = 1.0f;
+        swap_buf[0] = 0;
 
-        float det = 1.0f;
-        int swaps = 0;
-        for (int64_t i = 0; i < n; ++i) {
-            det *= h_diag[i];
-            if (h_ipiv[i] != i + 1) swaps++;
-        }
-        if (swaps % 2) det = -det;
+        auto* ipiv_ptr = d_ipiv.get();
+        queue.parallel_for<SyclDetReduceF32>(
+            sycl::range<1>(n),
+            sycl::reduction(prod_buf, sycl::multiplies<float>()),
+            sycl::reduction(swap_buf, sycl::plus<int32_t>()),
+            [=](sycl::id<1> i, auto& prod, auto& swaps) {
+                prod *= d_diag_ptr[i];
+                swaps += (ipiv_ptr[i] != static_cast<std::int64_t>(i[0]) + 1) ? 1 : 0;
+            }).wait();
 
-        queue.memcpy(const_cast<void*>(output.data_ptr()), &det, sizeof(float)).wait();
+        auto* out_ptr = static_cast<float*>(const_cast<void*>(output.data_ptr()));
+        queue.single_task<SyclDetCombineF32>([=]() {
+            out_ptr[0] = prod_buf[0] * ((swap_buf[0] % 2) ? -1.0f : 1.0f);
+        }).wait();
+
+        sycl::free(prod_buf, queue);
+        sycl::free(swap_buf, queue);
     } else if (input.dtype() == DType::Float64) {
         SyclDeviceBuffer<double> d_a(n * n, queue);
         SyclDeviceBuffer<std::int64_t> d_ipiv(n, queue);
@@ -220,21 +232,29 @@ auto linalg_det_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             d_diag_ptr[i] = d_a_ptr[i * n + i];  // column-major diagonal
         }).wait();
 
-        std::vector<double> h_diag(n);
-        std::vector<std::int64_t> h_ipiv(n);
-        queue.memcpy(h_diag.data(), d_diag.get(), n * sizeof(double));
-        queue.memcpy(h_ipiv.data(), d_ipiv.get(), n * sizeof(std::int64_t));
-        queue.wait();
+        // Device-side reduction: product of diagonal * (-1)^swaps
+        auto* prod_buf = sycl::malloc_shared<double>(1, queue);
+        auto* swap_buf = sycl::malloc_shared<int32_t>(1, queue);
+        prod_buf[0] = 1.0;
+        swap_buf[0] = 0;
 
-        double det = 1.0;
-        int swaps = 0;
-        for (int64_t i = 0; i < n; ++i) {
-            det *= h_diag[i];
-            if (h_ipiv[i] != i + 1) swaps++;
-        }
-        if (swaps % 2) det = -det;
+        auto* ipiv_ptr = d_ipiv.get();
+        queue.parallel_for<SyclDetReduceF64>(
+            sycl::range<1>(n),
+            sycl::reduction(prod_buf, sycl::multiplies<double>()),
+            sycl::reduction(swap_buf, sycl::plus<int32_t>()),
+            [=](sycl::id<1> i, auto& prod, auto& swaps) {
+                prod *= d_diag_ptr[i];
+                swaps += (ipiv_ptr[i] != static_cast<std::int64_t>(i[0]) + 1) ? 1 : 0;
+            }).wait();
 
-        queue.memcpy(const_cast<void*>(output.data_ptr()), &det, sizeof(double)).wait();
+        auto* out_ptr = static_cast<double*>(const_cast<void*>(output.data_ptr()));
+        queue.single_task<SyclDetCombineF64>([=]() {
+            out_ptr[0] = prod_buf[0] * ((swap_buf[0] % 2) ? -1.0 : 1.0);
+        }).wait();
+
+        sycl::free(prod_buf, queue);
+        sycl::free(swap_buf, queue);
     } else {
         throw std::runtime_error("linalg_det: only Float32 and Float64 supported");
     }
