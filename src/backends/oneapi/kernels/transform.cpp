@@ -1121,7 +1121,7 @@ auto slice_kernel(const Tensor& input,
                 queue.memcpy(dst + dst_off, src + src_off, chunk_bytes);
             }
         } else {
-            // General strided copy via host
+            // General strided copy via multiple device memcpy commands
             const uint8_t* src = static_cast<const uint8_t*>(cont.data_ptr());
             uint8_t* dst = static_cast<uint8_t*>(const_cast<void*>(next.data_ptr()));
 
@@ -1211,6 +1211,8 @@ class TakeKernelFloat32;
 class TakeKernelFloat64;
 class TakeKernelFloat16;
 class TakeKernelBFloat16;
+class TakeKernelInt32;
+class TakeKernelInt64;
 
 auto take_kernel(const Tensor& input, const Tensor& indices, sycl::queue& queue) -> Tensor {
     Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
@@ -1256,34 +1258,57 @@ auto take_kernel(const Tensor& input, const Tensor& indices, sycl::queue& queue)
             });
         }
     }
-    else {
-        // Generic byte copy via host for other dtypes
-        size_t elem_size = in_cont.dtype_size();
-        int64_t input_numel = in_cont.numel();
+    else if (in_cont.dtype() == DType::Float16 || in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
 
-        std::vector<uint8_t> in_host(input_numel * elem_size);
-        std::vector<uint8_t> out_host(num_indices * elem_size);
-        queue.memcpy(in_host.data(), in_cont.data_ptr(), in_host.size());
-        // No wait — in-order queue guarantees next memcpy completes after this one
-
-        // Read indices to host
         if (is_int64) {
-            std::vector<int64_t> idx_host(num_indices);
-            queue.memcpy(idx_host.data(), idx_cont.data_ptr(), num_indices * sizeof(int64_t)).wait();
-            for (int64_t i = 0; i < num_indices; ++i) {
-                std::memcpy(out_host.data() + i * elem_size,
-                           in_host.data() + idx_host[i] * elem_size, elem_size);
-            }
+            const int64_t* idx_ptr = get_data_ptr<const int64_t>(idx_cont);
+            queue.parallel_for<TakeKernelFloat16>(sycl::range<1>(num_indices), [=](sycl::id<1> i) {
+                out_ptr[i] = in_ptr[idx_ptr[i]];
+            });
         } else {
-            std::vector<int32_t> idx_host(num_indices);
-            queue.memcpy(idx_host.data(), idx_cont.data_ptr(), num_indices * sizeof(int32_t)).wait();
-            for (int64_t i = 0; i < num_indices; ++i) {
-                std::memcpy(out_host.data() + i * elem_size,
-                           in_host.data() + idx_host[i] * elem_size, elem_size);
-            }
+            const int32_t* idx_ptr = get_data_ptr<const int32_t>(idx_cont);
+            queue.parallel_for<TakeKernelBFloat16>(sycl::range<1>(num_indices), [=](sycl::id<1> i) {
+                out_ptr[i] = in_ptr[idx_ptr[i]];
+            });
         }
+    }
+    else if (in_cont.dtype() == DType::Int32) {
+        const int32_t* in_ptr = get_data_ptr<const int32_t>(in_cont);
+        int32_t* out_ptr = get_data_ptr<int32_t>(output);
 
-        queue.memcpy(const_cast<void*>(output.data_ptr()), out_host.data(), out_host.size()).wait();
+        if (is_int64) {
+            const int64_t* idx_ptr = get_data_ptr<const int64_t>(idx_cont);
+            queue.parallel_for<TakeKernelInt32>(sycl::range<1>(num_indices), [=](sycl::id<1> i) {
+                out_ptr[i] = in_ptr[idx_ptr[i]];
+            });
+        } else {
+            const int32_t* idx_ptr = get_data_ptr<const int32_t>(idx_cont);
+            queue.parallel_for(sycl::range<1>(num_indices), [=](sycl::id<1> i) {
+                out_ptr[i] = in_ptr[idx_ptr[i]];
+            });
+        }
+    }
+    else if (in_cont.dtype() == DType::Int64) {
+        const int64_t* in_ptr = get_data_ptr<const int64_t>(in_cont);
+        int64_t* out_ptr = get_data_ptr<int64_t>(output);
+
+        if (is_int64) {
+            const int64_t* idx_ptr = get_data_ptr<const int64_t>(idx_cont);
+            queue.parallel_for<TakeKernelInt64>(sycl::range<1>(num_indices), [=](sycl::id<1> i) {
+                out_ptr[i] = in_ptr[idx_ptr[i]];
+            });
+        } else {
+            const int32_t* idx_ptr = get_data_ptr<const int32_t>(idx_cont);
+            queue.parallel_for(sycl::range<1>(num_indices), [=](sycl::id<1> i) {
+                out_ptr[i] = in_ptr[idx_ptr[i]];
+            });
+        }
+    }
+    else {
+        throw std::runtime_error("take_kernel: unsupported dtype " +
+                                 std::to_string(static_cast<int>(in_cont.dtype())));
     }
 
     return output;
@@ -1478,6 +1503,8 @@ class RollKernelFloat32;
 class RollKernelFloat64;
 class RollKernelFloat16;
 class RollKernelBFloat16;
+class RollKernelInt32;
+class RollKernelInt64;
 
 auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim, sycl::queue& queue) -> Tensor {
     Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
@@ -1553,24 +1580,35 @@ auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim, sycl::queue& q
             out_ptr[out_i] = in_ptr[i];
         });
     }
-    else {
-        // Generic copy via host for other dtypes
-        size_t elem_size = in_cont.dtype_size();
-        std::vector<uint8_t> in_host(numel * elem_size);
-        std::vector<uint8_t> out_host(numel * elem_size);
-        queue.memcpy(in_host.data(), in_cont.data_ptr(), in_host.size()).wait();
-
-        for (int64_t i = 0; i < numel; ++i) {
+    else if (in_cont.dtype() == DType::Int32) {
+        const int32_t* in_ptr = get_data_ptr<const int32_t>(in_cont);
+        int32_t* out_ptr = get_data_ptr<int32_t>(output);
+        queue.parallel_for<RollKernelInt32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            int64_t i = idx;
             int64_t inner_idx = i % inner_size;
             int64_t dim_idx = (i / inner_size) % dim_size;
             int64_t outer_idx = i / (inner_size * dim_size);
             int64_t new_dim_idx = (dim_idx + shift) % dim_size;
             int64_t out_i = (outer_idx * dim_size + new_dim_idx) * inner_size + inner_idx;
-            std::memcpy(out_host.data() + out_i * elem_size,
-                       in_host.data() + i * elem_size, elem_size);
-        }
-
-        queue.memcpy(const_cast<void*>(output.data_ptr()), out_host.data(), out_host.size()).wait();
+            out_ptr[out_i] = in_ptr[i];
+        });
+    }
+    else if (in_cont.dtype() == DType::Int64) {
+        const int64_t* in_ptr = get_data_ptr<const int64_t>(in_cont);
+        int64_t* out_ptr = get_data_ptr<int64_t>(output);
+        queue.parallel_for<RollKernelInt64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            int64_t i = idx;
+            int64_t inner_idx = i % inner_size;
+            int64_t dim_idx = (i / inner_size) % dim_size;
+            int64_t outer_idx = i / (inner_size * dim_size);
+            int64_t new_dim_idx = (dim_idx + shift) % dim_size;
+            int64_t out_i = (outer_idx * dim_size + new_dim_idx) * inner_size + inner_idx;
+            out_ptr[out_i] = in_ptr[i];
+        });
+    }
+    else {
+        throw std::runtime_error("roll_kernel: unsupported dtype " +
+                                 std::to_string(static_cast<int>(in_cont.dtype())));
     }
 
     return output;
