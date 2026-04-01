@@ -17,7 +17,6 @@
 #include <limits>
 #include <vector>
 #include <algorithm>
-#include <iostream>
 
 namespace tenzor::linalg {
 
@@ -25,45 +24,23 @@ namespace {
 
 /// Try GPU dispatch for a single-output linalg op. Returns true and sets result on success.
 /// CPU linalg ops are registered in the CPU dispatch table (cpu_kernel_registry.cpp) as
-/// wrappers around the LAPACKE implementations below. GPU backends (CUDA/ROCm/OneAPI)
-/// register native kernels. Vulkan falls back to CPU LAPACKE.
+/// wrappers around the LAPACKE implementations below. GPU backends (CUDA/ROCm/Vulkan/OneAPI)
+/// register native kernels.
 /// Note: The CPU dispatch table wrappers call these functions, which check device==CPU
 /// and skip try_gpu_dispatch, so there is no circular dispatch.
 bool try_gpu_dispatch(OpId op, std::span<const Tensor> inputs,
                       const OpAttributes& attrs, Tensor& result) {
     if (inputs[0].device().type == Device::Type::CPU) return false;
-    try {
-        result = dispatch_single(op, inputs, attrs);
-        return true;
-    } catch (const std::exception& e) {
-        std::cerr << "[tenzor::linalg] GPU dispatch failed for "
-                  << op_id_to_name(op) << ", falling back to CPU LAPACK: "
-                  << e.what() << "\n";
-        return false;
-    } catch (...) {
-        std::cerr << "[tenzor::linalg] GPU dispatch failed for "
-                  << op_id_to_name(op) << ", falling back to CPU LAPACK\n";
-        return false;
-    }
+    result = dispatch_single(op, inputs, attrs);
+    return true;
 }
 
 /// Try GPU dispatch for a multi-output linalg op. Returns true and sets results on success.
 bool try_gpu_dispatch_multi(OpId op, std::span<const Tensor> inputs,
                             const OpAttributes& attrs, std::vector<Tensor>& results) {
     if (inputs[0].device().type == Device::Type::CPU) return false;
-    try {
-        results = dispatch(op, inputs, attrs);
-        return true;
-    } catch (const std::exception& e) {
-        std::cerr << "[tenzor::linalg] GPU dispatch failed for "
-                  << op_id_to_name(op) << ", falling back to CPU LAPACK: "
-                  << e.what() << "\n";
-        return false;
-    } catch (...) {
-        std::cerr << "[tenzor::linalg] GPU dispatch failed for "
-                  << op_id_to_name(op) << ", falling back to CPU LAPACK\n";
-        return false;
-    }
+    results = dispatch(op, inputs, attrs);
+    return true;
 }
 
 // Check if dtype is a low-precision float that needs upcasting for LAPACK
@@ -81,15 +58,19 @@ bool needs_upcast(DType dt) {
 
 // Ensure tensor is contiguous Float32 or Float64 on CPU, return a working copy.
 // Float16 and BFloat16 inputs are upcast to Float32.
+// Only called for CPU tensors — GPU tensors are handled by try_gpu_dispatch.
 auto prepare_matrix(const Tensor& A) -> Tensor {
+    if (A.device().type != Device::Type::CPU) {
+        throw std::logic_error("prepare_matrix: expected CPU tensor, got GPU tensor. "
+                               "GPU linalg ops should go through backend dispatch.");
+    }
     auto dt = A.dtype();
     if (dt != DType::Float32 && dt != DType::Float64 &&
         dt != DType::Float16 && dt != DType::BFloat16) {
         throw std::runtime_error("linalg: only Float32, Float64, Float16, and BFloat16 supported");
     }
-    // If not on CPU, move to CPU for LAPACK fallback
-    auto cpu_tensor = (A.device().type != Device::Type::CPU) ? A.to(Device::cpu()) : A;
     // Upcast low-precision floats to Float32 for LAPACK compatibility
+    auto cpu_tensor = A;
     if (needs_upcast(cpu_tensor.dtype())) {
         cpu_tensor = cpu_tensor.to(DType::Float32);
     }

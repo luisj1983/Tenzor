@@ -247,6 +247,7 @@ public:
     auto dispatchBoolPredicateOp(const std::string& op_name, const Tensor& input) -> Tensor;
     auto dispatchLogicalOp(const std::string& op_name, const Tensor& a, const Tensor& b) -> Tensor;
     auto dispatchLerp(const Tensor& start, const Tensor& end, const Tensor& weight) -> Tensor;
+    auto dispatchCross(const Tensor& a, const Tensor& b, int64_t dim) -> Tensor;
     auto dispatchReduction(const std::string& op_name, const Tensor& input,
                           int64_t dim, bool keepdim) -> Tensor;
     auto dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor;

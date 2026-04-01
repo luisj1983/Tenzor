@@ -676,6 +676,7 @@ namespace cuda {
     Tensor imag_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor angle_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor polar_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor cross_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
 
 } // namespace cuda
 
@@ -913,6 +914,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::Imag, cuda::imag_dispatch);
     table.register_single_output_kernel(OpId::Angle, cuda::angle_dispatch);
     table.register_single_output_kernel(OpId::Polar, cuda::polar_dispatch);
+    table.register_single_output_kernel(OpId::Cross, cuda::cross_dispatch);
 
     // =========================================================================
     // Comparison Operations (using direct function pointers)

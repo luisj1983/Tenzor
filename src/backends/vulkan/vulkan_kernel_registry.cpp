@@ -1453,6 +1453,14 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     // ========================================================================
+    // Cross Product
+    // ========================================================================
+    table.register_single_output_kernel(OpId::Cross, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        return get_vulkan_backend()->dispatchCross(inputs[0], inputs[1], dim);
+    });
+
+    // ========================================================================
     // Boolean Reduction Operations
     // ========================================================================
     table.register_kernel(OpId::Any, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {

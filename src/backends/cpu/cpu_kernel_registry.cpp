@@ -85,6 +85,7 @@ namespace cpu {
     auto logical_xor_kernel(const Tensor& a, const Tensor& b) -> Tensor;
     auto minimum_kernel(const Tensor& a, const Tensor& b) -> Tensor;
     auto maximum_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto cross_kernel(const Tensor& a, const Tensor& b, int64_t dim) -> Tensor;
 
     // Complex operations
     auto conj_kernel(const Tensor& input) -> Tensor;
@@ -679,6 +680,11 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, LogicalXor, cpu::logical_xor_kernel);
     TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Minimum, cpu::minimum_kernel);
     TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Maximum, cpu::maximum_kernel);
+
+    table.register_single_output_kernel(OpId::Cross, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        return cpu::cross_kernel(inputs[0], inputs[1], dim);
+    });
 
     // =========================================================================
     // Comparison Operations

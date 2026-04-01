@@ -105,6 +105,7 @@ namespace oneapi {
     auto imag_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
     auto angle_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
     auto polar_kernel(const Tensor& abs_t, const Tensor& angle_t, sycl::queue& queue) -> Tensor;
+    auto cross_kernel(const Tensor& a, const Tensor& b, int64_t dim, sycl::queue& queue) -> Tensor;
 
     // Additional math
     auto clamp_min_kernel(const Tensor& input, float min_val, sycl::queue& queue) -> Tensor;
@@ -1000,6 +1001,12 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::Polar,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
             return {oneapi::polar_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    table.register_single_output_kernel(OpId::Cross,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            return oneapi::cross_kernel(inputs[0], inputs[1], dim, get_q(inputs));
         });
 
     // =========================================================================

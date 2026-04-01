@@ -1,0 +1,34 @@
+#version 450
+
+// Cross product along a dimension for Float32
+// Each thread computes one (outer, inner) pair, writing 3 output values
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer InputA { uint a_buf[]; };
+layout(binding = 1) buffer InputB { uint b_buf[]; };
+layout(binding = 2) buffer Output { uint result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_pairs;   // outer * inner
+    uint dim_stride;  // inner (stride along cross dimension)
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_pairs) return;
+
+    uint o = idx / params.dim_stride;
+    uint i = idx % params.dim_stride;
+    uint base = o * 3 * params.dim_stride + i;
+
+    float a0 = uintBitsToFloat(a_buf[base]);
+    float a1 = uintBitsToFloat(a_buf[base + params.dim_stride]);
+    float a2 = uintBitsToFloat(a_buf[base + 2 * params.dim_stride]);
+    float b0 = uintBitsToFloat(b_buf[base]);
+    float b1 = uintBitsToFloat(b_buf[base + params.dim_stride]);
+    float b2 = uintBitsToFloat(b_buf[base + 2 * params.dim_stride]);
+
+    result[base]                           = floatBitsToUint(a1*b2 - a2*b1);
+    result[base + params.dim_stride]       = floatBitsToUint(a2*b0 - a0*b2);
+    result[base + 2 * params.dim_stride]   = floatBitsToUint(a0*b1 - a1*b0);
+}

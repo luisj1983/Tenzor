@@ -21584,4 +21584,69 @@ auto VulkanBackend::dispatchDenseToSparse(const Tensor& dense) -> std::vector<Te
     return {crow_out, col_out, values_gpu};
 }
 
+// ============================================================================
+// Cross Product
+// ============================================================================
+
+auto VulkanBackend::dispatchCross(const Tensor& a, const Tensor& b,
+                                   int64_t dim) -> Tensor {
+    auto shape = a.shape();
+    int64_t ndim = shape.size();
+    std::vector<int64_t> out_shape(shape.begin(), shape.end());
+
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < dim; ++d) outer *= shape[d];
+    for (int64_t d = dim + 1; d < ndim; ++d) inner *= shape[d];
+    int64_t num_pairs = outer * inner;
+
+    Tensor output(out_shape, a.dtype(), a.device());
+    if (num_pairs == 0) return output;
+
+    int32_t device_id = a.device().index;
+    bool is_float64 = (a.dtype() == DType::Float64);
+    bool is_float16 = (a.dtype() == DType::Float16);
+    bool is_bfloat16 = (a.dtype() == DType::BFloat16);
+
+    std::string shader_name = is_float64 ? "cross_f64" : is_float16 ? "cross_f16" : is_bfloat16 ? "cross_bf16" : "cross";
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    struct PushConstants {
+        uint32_t num_pairs;
+        uint32_t dim_stride;
+    } push_constants;
+    push_constants.num_pairs = static_cast<uint32_t>(num_pairs);
+    push_constants.dim_stride = static_cast<uint32_t>(inner);
+
+    size_t total_elems = a.numel();
+    size_t elem_size = a.dtype_size();
+    size_t buffer_size = total_elems * elem_size;
+    if (is_float16 || is_bfloat16) {
+        buffer_size = ((total_elems + 1) / 2) * 4;
+    }
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, a.data_ptr()}, {1, b.data_ptr()}, {2, output.data_ptr()}
+    };
+    std::vector<size_t> sizes = {buffer_size, buffer_size, buffer_size};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &push_constants);
+
+    uint32_t workgroups = div_wg(static_cast<uint32_t>(num_pairs), devices_[device_id].workgroupSize);
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    insertComputeOnlyBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
 } // namespace tenzor

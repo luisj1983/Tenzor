@@ -5758,5 +5758,55 @@ auto polar_kernel(const Tensor& abs_t, const Tensor& angle_t) -> Tensor {
     });
 }
 
+auto cross_kernel(const Tensor& a, const Tensor& b, int64_t dim) -> Tensor {
+    auto shape_a = a.shape();
+    int64_t ndim = shape_a.size();
+
+    auto a_cont = a.contiguous();
+    auto b_cont = b.contiguous();
+    auto result = Tensor(std::vector<int64_t>(shape_a.begin(), shape_a.end()),
+                         a.dtype(), a.device());
+
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < dim; ++d) outer *= shape_a[d];
+    for (int64_t d = dim + 1; d < ndim; ++d) inner *= shape_a[d];
+    int64_t dim_stride = inner;
+
+    auto cross_typed = [&](auto* a_ptr, auto* b_ptr, auto* c_ptr) {
+        #pragma omp parallel for if(outer * inner > 4096)
+        for (int64_t idx = 0; idx < outer * inner; ++idx) {
+            int64_t o = idx / inner, i = idx % inner;
+            int64_t base = o * 3 * inner + i;
+            auto a0 = a_ptr[base], a1 = a_ptr[base + dim_stride], a2 = a_ptr[base + 2*dim_stride];
+            auto b0 = b_ptr[base], b1 = b_ptr[base + dim_stride], b2 = b_ptr[base + 2*dim_stride];
+            c_ptr[base]                  = a1*b2 - a2*b1;
+            c_ptr[base + dim_stride]     = a2*b0 - a0*b2;
+            c_ptr[base + 2*dim_stride]   = a0*b1 - a1*b0;
+        }
+    };
+
+    switch (a.dtype()) {
+        case DType::Float32:
+            cross_typed(a_cont.data<float>(), b_cont.data<float>(), result.data<float>());
+            break;
+        case DType::Float64:
+            cross_typed(a_cont.data<double>(), b_cont.data<double>(), result.data<double>());
+            break;
+        case DType::Float16:
+        case DType::BFloat16: {
+            // Upcast to Float32, compute, downcast back
+            auto a_f32 = a_cont.to(DType::Float32);
+            auto b_f32 = b_cont.to(DType::Float32);
+            auto r_f32 = Tensor(std::vector<int64_t>(shape_a.begin(), shape_a.end()),
+                                DType::Float32, a.device());
+            cross_typed(a_f32.data<float>(), b_f32.data<float>(), r_f32.data<float>());
+            return r_f32.to(a.dtype());
+        }
+        default:
+            throw std::runtime_error("cross: unsupported dtype");
+    }
+    return result;
+}
+
 } // namespace cpu
 } // namespace tenzor

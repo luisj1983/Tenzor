@@ -4700,5 +4700,89 @@ auto polar_kernel(const Tensor& abs_t, const Tensor& angle_t, sycl::queue& queue
     throw std::runtime_error("polar: only Float32 and Float64 inputs are supported");
 }
 
+// ============================================================================
+// Cross Product Kernel
+// ============================================================================
+
+struct CrossKernelFloat32 {};
+struct CrossKernelFloat64 {};
+struct CrossKernelFloat16 {};
+struct CrossKernelBFloat16 {};
+
+auto cross_kernel(const Tensor& a, const Tensor& b, int64_t dim, sycl::queue& queue) -> Tensor {
+    auto shape = a.shape();
+    int64_t ndim = shape.size();
+    std::vector<int64_t> out_shape(shape.begin(), shape.end());
+    Tensor output(out_shape, a.dtype(), a.device());
+
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < dim; ++d) outer *= shape[d];
+    for (int64_t d = dim + 1; d < ndim; ++d) inner *= shape[d];
+    int64_t num_pairs = outer * inner;
+
+    if (num_pairs == 0) return output;
+
+    if (a.dtype() == DType::Float32) {
+        const float* a_ptr = get_data_ptr<const float>(a);
+        const float* b_ptr = get_data_ptr<const float>(b);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for<CrossKernelFloat32>(sycl::range<1>(num_pairs), [=](sycl::id<1> idx) {
+            int64_t o = idx / inner;
+            int64_t i = idx % inner;
+            int64_t base = o * 3 * inner + i;
+            float a0 = a_ptr[base], a1 = a_ptr[base + inner], a2 = a_ptr[base + 2*inner];
+            float b0 = b_ptr[base], b1 = b_ptr[base + inner], b2 = b_ptr[base + 2*inner];
+            out_ptr[base]            = a1*b2 - a2*b1;
+            out_ptr[base + inner]    = a2*b0 - a0*b2;
+            out_ptr[base + 2*inner]  = a0*b1 - a1*b0;
+        });
+    } else if (a.dtype() == DType::Float64) {
+        const double* a_ptr = get_data_ptr<const double>(a);
+        const double* b_ptr = get_data_ptr<const double>(b);
+        double* out_ptr = get_data_ptr<double>(output);
+        queue.parallel_for<CrossKernelFloat64>(sycl::range<1>(num_pairs), [=](sycl::id<1> idx) {
+            int64_t o = idx / inner;
+            int64_t i = idx % inner;
+            int64_t base = o * 3 * inner + i;
+            double a0 = a_ptr[base], a1 = a_ptr[base + inner], a2 = a_ptr[base + 2*inner];
+            double b0 = b_ptr[base], b1 = b_ptr[base + inner], b2 = b_ptr[base + 2*inner];
+            out_ptr[base]            = a1*b2 - a2*b1;
+            out_ptr[base + inner]    = a2*b0 - a0*b2;
+            out_ptr[base + 2*inner]  = a0*b1 - a1*b0;
+        });
+    } else if (a.dtype() == DType::Float16) {
+        const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a);
+        const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<CrossKernelFloat16>(sycl::range<1>(num_pairs), [=](sycl::id<1> idx) {
+            int64_t o = idx / inner;
+            int64_t i = idx % inner;
+            int64_t base = o * 3 * inner + i;
+            float a0 = float(a_ptr[base]), a1 = float(a_ptr[base + inner]), a2 = float(a_ptr[base + 2*inner]);
+            float b0 = float(b_ptr[base]), b1 = float(b_ptr[base + inner]), b2 = float(b_ptr[base + 2*inner]);
+            out_ptr[base]            = sycl::half(a1*b2 - a2*b1);
+            out_ptr[base + inner]    = sycl::half(a2*b0 - a0*b2);
+            out_ptr[base + 2*inner]  = sycl::half(a0*b1 - a1*b0);
+        });
+    } else if (a.dtype() == DType::BFloat16) {
+        const uint16_t* a_ptr = get_data_ptr<const uint16_t>(a);
+        const uint16_t* b_ptr = get_data_ptr<const uint16_t>(b);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for<CrossKernelBFloat16>(sycl::range<1>(num_pairs), [=](sycl::id<1> idx) {
+            int64_t o = idx / inner;
+            int64_t i = idx % inner;
+            int64_t base = o * 3 * inner + i;
+            float a0 = bf16_to_f32(a_ptr[base]), a1 = bf16_to_f32(a_ptr[base + inner]), a2 = bf16_to_f32(a_ptr[base + 2*inner]);
+            float b0 = bf16_to_f32(b_ptr[base]), b1 = bf16_to_f32(b_ptr[base + inner]), b2 = bf16_to_f32(b_ptr[base + 2*inner]);
+            out_ptr[base]            = f32_to_bf16(a1*b2 - a2*b1);
+            out_ptr[base + inner]    = f32_to_bf16(a2*b0 - a0*b2);
+            out_ptr[base + 2*inner]  = f32_to_bf16(a0*b1 - a1*b0);
+        });
+    } else {
+        throw std::runtime_error("cross: unsupported dtype");
+    }
+    return output;
+}
+
 } // namespace oneapi
 } // namespace tenzor

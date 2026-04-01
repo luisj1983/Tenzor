@@ -6481,5 +6481,100 @@ Tensor polar_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs)
     return polar_kernel(inputs[0], inputs[1], stream);
 }
 
+// ============================================================================
+// Cross Product Kernel
+// ============================================================================
+
+template<typename T>
+__global__ void cross_kernel_device(const T* a, const T* b, T* c,
+                                     int64_t num_pairs, int64_t dim_stride) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, num_pairs) {
+        int64_t o = idx / dim_stride;
+        int64_t i = idx % dim_stride;
+        int64_t base = o * 3 * dim_stride + i;
+        T a0 = a[base], a1 = a[base + dim_stride], a2 = a[base + 2*dim_stride];
+        T b0 = b[base], b1 = b[base + dim_stride], b2 = b[base + 2*dim_stride];
+        c[base]                  = a1*b2 - a2*b1;
+        c[base + dim_stride]     = a2*b0 - a0*b2;
+        c[base + 2*dim_stride]   = a0*b1 - a1*b0;
+    }
+}
+
+__global__ void cross_kernel_f16(const __half* a, const __half* b, __half* c,
+                                  int64_t num_pairs, int64_t dim_stride) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, num_pairs) {
+        int64_t o = idx / dim_stride;
+        int64_t i = idx % dim_stride;
+        int64_t base = o * 3 * dim_stride + i;
+        float a0 = __half2float(a[base]), a1 = __half2float(a[base + dim_stride]), a2 = __half2float(a[base + 2*dim_stride]);
+        float b0 = __half2float(b[base]), b1 = __half2float(b[base + dim_stride]), b2 = __half2float(b[base + 2*dim_stride]);
+        c[base]                  = __float2half(a1*b2 - a2*b1);
+        c[base + dim_stride]     = __float2half(a2*b0 - a0*b2);
+        c[base + 2*dim_stride]   = __float2half(a0*b1 - a1*b0);
+    }
+}
+
+__global__ void cross_kernel_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b, __nv_bfloat16* c,
+                                   int64_t num_pairs, int64_t dim_stride) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, num_pairs) {
+        int64_t o = idx / dim_stride;
+        int64_t i = idx % dim_stride;
+        int64_t base = o * 3 * dim_stride + i;
+        float a0 = __bfloat162float(a[base]), a1 = __bfloat162float(a[base + dim_stride]), a2 = __bfloat162float(a[base + 2*dim_stride]);
+        float b0 = __bfloat162float(b[base]), b1 = __bfloat162float(b[base + dim_stride]), b2 = __bfloat162float(b[base + 2*dim_stride]);
+        c[base]                  = __float2bfloat16(a1*b2 - a2*b1);
+        c[base + dim_stride]     = __float2bfloat16(a2*b0 - a0*b2);
+        c[base + 2*dim_stride]   = __float2bfloat16(a0*b1 - a1*b0);
+    }
+}
+
+auto cross_kernel(const Tensor& a, const Tensor& b, int64_t dim, cudaStream_t stream) -> Tensor {
+    auto shape = a.shape();
+    int64_t ndim = shape.size();
+    std::vector<int64_t> out_shape(shape.begin(), shape.end());
+    Tensor result(out_shape, a.dtype(), a.device());
+
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < dim; ++d) outer *= shape[d];
+    for (int64_t d = dim + 1; d < ndim; ++d) inner *= shape[d];
+    int64_t num_pairs = outer * inner;
+
+    if (num_pairs == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(num_pairs, grid, block);
+
+    if (a.dtype() == DType::Float32) {
+        cross_kernel_device<<<grid, block, 0, stream>>>(
+            a.data<float>(), b.data<float>(), result.data<float>(), num_pairs, inner);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::Float64) {
+        cross_kernel_device<<<grid, block, 0, stream>>>(
+            a.data<double>(), b.data<double>(), result.data<double>(), num_pairs, inner);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::Float16) {
+        cross_kernel_f16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(b.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), num_pairs, inner);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::BFloat16) {
+        cross_kernel_bf16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(a.data<BFloat16>()),
+            reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), num_pairs, inner);
+        CUDA_CHECK(cudaGetLastError());
+    } else {
+        throw std::runtime_error("cross: unsupported dtype");
+    }
+    return result;
+}
+
+Tensor cross_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
+    int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+    return cross_kernel(inputs[0], inputs[1], dim, stream);
+}
+
 } // namespace cuda
 } // namespace tenzor

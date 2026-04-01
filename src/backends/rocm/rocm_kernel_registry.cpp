@@ -166,6 +166,7 @@ namespace rocm {
     auto imag_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
     auto angle_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
     auto polar_kernel(const Tensor& abs_t, const Tensor& angle_t, hipStream_t stream) -> Tensor;
+    auto cross_kernel(const Tensor& a, const Tensor& b, int64_t dim, hipStream_t stream) -> Tensor;
 
     // Dot product
     auto dot_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor;
@@ -3229,6 +3230,10 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
     table.register_single_output_kernel(OpId::Polar, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         return rocm::polar_kernel(inputs[0], inputs[1], get_hip_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::Cross, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        return rocm::cross_kernel(inputs[0], inputs[1], dim, get_hip_stream(attrs));
     });
 
     // --- Activation Functions --------------------------------------------------

@@ -717,22 +717,11 @@ auto roll(const Tensor& input, int64_t shifts, int64_t dim) -> Tensor {
         return input.clone();
     }
 
-    // Try OpId dispatch for GPU backends
-    try {
-        std::array<Tensor, 1> inputs = {input};
-        NewOpAttributes attrs;
-        attrs.set(AttrKey::Shift, shifts);
-        attrs.set(AttrKey::Dim, dim);
-        return dispatch<OpId::Roll>(inputs, attrs)[0];
-    } catch (const std::runtime_error&) {
-        // Fall through to slice+cat fallback (CPU or unregistered backends)
-    }
-
-    // CPU fallback: roll by splitting and concatenating
-    Tensor part1 = input.slice(dim, 0, dim_size - shifts);
-    Tensor part2 = input.slice(dim, dim_size - shifts, dim_size);
-
-    return cat({part2, part1}, dim);
+    std::array<Tensor, 1> inputs = {input};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Shift, shifts);
+    attrs.set(AttrKey::Dim, dim);
+    return dispatch<OpId::Roll>(inputs, attrs)[0];
 }
 
 // =========================================================================

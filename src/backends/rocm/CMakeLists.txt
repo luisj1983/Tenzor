@@ -89,8 +89,9 @@ set_source_files_properties(
 
 # Workaround: ROCm clang-22 ICE (segfault in correlated-propagation pass)
 # on rocprim::radix_sort_single_helper template at -O3 -ffast-math.
-# Disable fast-math for sort.hip.cpp to avoid triggering the compiler bug.
-set_source_files_properties(kernels/sort.hip.cpp
+# Disable fast-math for sort.hip.cpp and nms.hip.cpp (hipcub::DeviceRadixSort)
+# to avoid triggering the compiler bug on gfx1150.
+set_source_files_properties(kernels/sort.hip.cpp kernels/nms.hip.cpp
     PROPERTIES COMPILE_FLAGS "-fno-fast-math"
 )
 
@@ -172,6 +173,9 @@ endif()
 # Manually compile rocm_backend.cpp to avoid HIP flag pollution
 # CMake's HIP language support adds HIP flags to all CXX compilation in this directory
 string(TOUPPER "${CMAKE_BUILD_TYPE}" CMAKE_BUILD_TYPE_UPPER)
+# Separate multi-value flag strings into proper lists for VERBATIM custom commands
+separate_arguments(ROCM_CXX_FLAGS_LIST NATIVE_COMMAND "${CMAKE_CXX_FLAGS}")
+separate_arguments(ROCM_CXX_FLAGS_BUILD_LIST NATIVE_COMMAND "${CMAKE_CXX_FLAGS_${CMAKE_BUILD_TYPE_UPPER}}")
 set(ROCM_BACKEND_OBJ "${CMAKE_CURRENT_BINARY_DIR}/rocm_backend.cpp.o")
 add_custom_command(
     OUTPUT ${ROCM_BACKEND_OBJ}
@@ -179,7 +183,7 @@ add_custom_command(
         -c ${CMAKE_CURRENT_SOURCE_DIR}/rocm_backend.cpp
         -o ${ROCM_BACKEND_OBJ}
         -std=c++20 -fPIC
-        ${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${CMAKE_BUILD_TYPE_UPPER}}
+        ${ROCM_CXX_FLAGS_LIST} ${ROCM_CXX_FLAGS_BUILD_LIST}
         -Wall -Wextra -pedantic
         -Wno-unused-parameter -Wno-unused-variable
         -fopenmp
@@ -218,7 +222,7 @@ add_custom_command(
         -c ${CMAKE_CURRENT_SOURCE_DIR}/rocm_kernel_registry.cpp
         -o ${ROCM_KERNEL_REGISTRY_OBJ}
         -std=c++20 -fPIC
-        ${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${CMAKE_BUILD_TYPE_UPPER}}
+        ${ROCM_CXX_FLAGS_LIST} ${ROCM_CXX_FLAGS_BUILD_LIST}
         -Wall -Wextra -pedantic
         -Wno-unused-parameter -Wno-unused-variable
         -fopenmp
