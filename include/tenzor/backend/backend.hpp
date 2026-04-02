@@ -229,6 +229,34 @@ public:
     virtual auto synchronize_stream(StreamHandle stream) -> void = 0;
 
     /**
+     * @brief Set the active device for this backend.
+     *
+     * Switches the hardware context to the specified device index.
+     * Used by DeviceGuard for RAII device management. GPU backends
+     * (CUDA, ROCm) must override this; CPU backend uses the default no-op.
+     *
+     * @param device_id Device index to switch to (0 to device_count()-1)
+     *
+     * @note This is thread-safe per CUDA/HIP specifications — each host
+     *       thread maintains its own current device.
+     * @see DeviceGuard for RAII usage
+     */
+    virtual auto set_device(int32_t device_id) -> void {
+        (void)device_id;  // No-op for CPU and backends without device switching
+    }
+
+    /**
+     * @brief Get the currently active device index for this backend.
+     *
+     * @return Current device index in the calling thread
+     *
+     * @note Default returns 0 (correct for CPU). GPU backends should override.
+     */
+    virtual auto get_current_device() const -> int32_t {
+        return 0;
+    }
+
+    /**
      * @brief Fill device memory with a byte value.
      *
      * Sets all bytes in the specified memory region to the given value.

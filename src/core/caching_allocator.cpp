@@ -1,6 +1,7 @@
 #include "tenzor/core/caching_allocator.hpp"
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/utils/logging.hpp"
+#include "tenzor/utils/memory_profiler.hpp"
 #include <cstdlib>
 #include <cstdio>
 #include <sstream>
@@ -129,6 +130,9 @@ auto CachingAllocator::allocate(size_t bytes) -> void* {
         allocated_blocks_[result_ptr] = bytes;
         total_allocated_bytes_ += bytes;
         ++backend_allocations_;
+
+        // Record in global memory profiler
+        MemoryProfiler::instance().on_allocate(bytes);
     }
 
     // Periodic diagnostics when TENZOR_ALLOCATOR_DEBUG=1
@@ -176,6 +180,9 @@ auto CachingAllocator::deallocate(void* ptr) -> void {
     allocated_blocks_.erase(it);
     free_blocks_.insert({size, ptr});
     total_cached_bytes_ += size;
+
+    // Record in global memory profiler
+    MemoryProfiler::instance().on_deallocate(size);
 }
 
 auto CachingAllocator::defragment() -> void {

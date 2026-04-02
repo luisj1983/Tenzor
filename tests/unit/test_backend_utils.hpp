@@ -57,6 +57,12 @@ inline bool is_backend_available(Device::Type type) {
             return true;  // Trust the device count, don't launch kernels
         }
 
+        // For OneAPI, trust the device count — SYCL queue creation can segfault
+        // during GTest's static initialization (test discovery phase)
+        if (type == Device::Type::OneAPI) {
+            return true;
+        }
+
         // For CUDA and other backends, verify with actual tensor creation
         auto device = Device(type, 0);
         auto test_tensor = ones({2, 2}, DType::Float32, device);

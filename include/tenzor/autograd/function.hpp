@@ -106,10 +106,31 @@ public:
      * **create_graph coverage:** Currently the following ops have full
      * higher-order gradient support via backward_with_variables():
      *   - AddBackward, SubBackward, MulBackward, DivBackward, MatMulBackward
-     *   - LinearBackward, SumBackward, MeanBackward, LogBackward
+     *   - LinearBackward, SumBackward, MeanBackward, LogBackward, ExpBackward, NegBackward
+     *   - SigmoidBackward_AG, TanhBackward_AG, GeluBackward, EluBackward, SeluBackward
+     *   - MishBackward, LeakyReluBackward, SoftplusBackward, ReLUBackward
+     *   - SinBackward, CosBackward, TanBackward, AsinBackward, AcosBackward, AtanBackward
+     *   - SinhBackward, CoshBackward
+     *   - ErfBackward, ErfcBackward, Log2Backward, Log10Backward, Log1pBackward
+     *   - Exp2Backward, Expm1Backward, Atan2Backward
+     *   - SqrtBackward, PowBackward, ReciprocalBackward, AbsBackward, ClampBackward
+     *   - VarBackward, StdBackward, ProdBackward, LogSumExpBackward
+     *   - ReshapeBackward, TransposeBackward, PermuteBackward, SqueezeBackward
+     *   - UnsqueezeBackward, ExpandBackward, FlattenBackward, RollBackward
+     *   - BmmBackward, CatBackward, SliceBackward, WhereBackward
+     *   - FlipBackward, RepeatBackward, CumSumBackward, CumProdBackward
+     *   - DiagBackward, TraceBackward, TriuBackward, TrilBackward
+     *   - FFTBackward, IFFTBackward, RFFTBackward, IRFFTBackward
+     *   - LogSoftmaxBackward, SoftmaxBackward
      *   - DetBackward, InvBackward, SolveBackward, NormBackward_Linalg, SlogdetBackward
      *   - CholeskyBackward, SvdBackward, QrBackward, EighBackward, EigvalshBackward
      *   - SpMMBackward, SpMVBackward
+     *
+     * Ops with passthrough stubs (second derivative is zero or requires
+     * Variable-level scatter_add which is not yet available):
+     *   - MaxBackward, MinBackward (non-differentiable mask)
+     *   - GatherBackward, ScatterBackward, IndexSelectBackward, NarrowBackward
+     *   - TopKBackward, SortBackward, UpsampleBilinearBackward
      *
      * @param grad_outputs Gradient Variables with respect to outputs
      * @return Gradient Variables with respect to inputs (with grad_fn set)
@@ -1175,6 +1196,30 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+};
+
+/**
+ * @brief Backward for advanced (fancy) indexing.
+ *
+ * Forward:  y = x[idx0, idx1, ...]   (gather)
+ * Backward: grad_x = zeros_like(x); grad_x.index_put(indices, grad_y, accumulate=true)
+ *
+ * Saved tensors:
+ *   [0] = input shape (1D Int64)
+ *   [1..N] = index tensors (0-element sentinel for null dims)
+ *   N stored in num_indices_.
+ */
+class IndexBackward : public Function {
+public:
+    void set_num_indices(int64_t n) { num_indices_ = n; }
+
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto name() const -> std::string override { return "IndexBackward"; }
+
+private:
+    int64_t num_indices_ = 0;
 };
 
 class NarrowBackward : public Function {

@@ -46,4 +46,38 @@ DeviceStorage& DeviceStorage::operator=(DeviceStorage&& other) noexcept {
     return *this;
 }
 
+// ExternalStorage implementation
+
+ExternalStorage::ExternalStorage(void* ptr, size_t size_bytes, Device device,
+                                 Deleter deleter)
+    : ptr_(ptr), size_(size_bytes), device_(device),
+      deleter_(std::move(deleter)) {}
+
+ExternalStorage::~ExternalStorage() {
+    if (ptr_ && deleter_) {
+        deleter_(ptr_);
+    }
+    // If no deleter: external memory is not our responsibility
+}
+
+ExternalStorage::ExternalStorage(ExternalStorage&& other) noexcept
+    : ptr_(other.ptr_), size_(other.size_),
+      device_(other.device_), deleter_(std::move(other.deleter_)) {
+    other.ptr_ = nullptr;
+}
+
+ExternalStorage& ExternalStorage::operator=(ExternalStorage&& other) noexcept {
+    if (this != &other) {
+        if (ptr_ && deleter_) {
+            deleter_(ptr_);
+        }
+        ptr_ = other.ptr_;
+        size_ = other.size_;
+        device_ = other.device_;
+        deleter_ = std::move(other.deleter_);
+        other.ptr_ = nullptr;
+    }
+    return *this;
+}
+
 } // namespace tenzor

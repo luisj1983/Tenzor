@@ -167,6 +167,8 @@ enum class OpId : uint16_t {
     Put,
     Nonzero,
     OneHot,
+    AdvancedIndex,    // = 132, NumPy-style fancy indexing (gather with multiple index tensors)
+    AdvancedIndexPut, // = 133, In-place scatter with multiple index tensors
 
     // =========================================================================
     // Comparison Operations (140-149)
@@ -502,6 +504,17 @@ static_assert(OP_COUNT <= 1024, "OpId::OP_COUNT exceeds 1024; review sparse layo
  * @return String representation of the operation
  */
 auto op_id_to_name(OpId id) noexcept -> std::string_view;
+
+/**
+ * @brief Convert operation name string to OpId.
+ *
+ * Performs reverse lookup from the name table built by op_id_to_name.
+ * Returns OpId::OP_COUNT if the name is not recognized.
+ *
+ * @param name Operation name (e.g. "matmul", "relu")
+ * @return Corresponding OpId, or OpId::OP_COUNT if unknown
+ */
+auto string_to_op_id(std::string_view name) noexcept -> OpId;
 
 /**
  * @brief Check if an OpId is valid (within range).

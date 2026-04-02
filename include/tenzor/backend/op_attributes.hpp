@@ -219,6 +219,9 @@ enum class AttrKey : uint16_t {
     Low,               // Randint lower bound (inclusive)
     High,              // Randint upper bound (exclusive)
 
+    // Advanced indexing
+    NumIndices,        // Number of index tensors (for AdvancedIndex/AdvancedIndexPut)
+
     // Sentinel
     _Count
 };

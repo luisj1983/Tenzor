@@ -5,6 +5,8 @@
 #include <iostream>
 #include <sstream>
 #include <tenzor/tenzor.hpp>
+#include <tenzor/core/device_guard.hpp>
+#include <tenzor/ops/custom_op.hpp>
 #include <tenzor/ops/indexing.hpp>
 #include <tenzor/ops/advanced.hpp>
 #include <tenzor/ops/reduction.hpp>
@@ -79,6 +81,7 @@
 #include <tenzor/nn/utils/rnn_utils.hpp>
 #include <tenzor/utils/error.hpp>
 #include <tenzor/utils/config.hpp>
+#include <tenzor/utils/memory_profiler.hpp>
 #include "numpy_interop.hpp"
 #include <thread>
 #include <cstdlib>
@@ -484,6 +487,24 @@ PYBIND11_MODULE(tenzor_core, m) {
             return d.to_string();
         });
 
+    // DeviceGuard — RAII device context manager
+    py::class_<tenzor::DeviceGuard>(m, "DeviceGuard",
+        "RAII guard that sets a device on construction and restores on destruction.\n"
+        "Use as a context manager: with tz.DeviceGuard(tz.Device.cuda(1)): ...")
+        .def(py::init<tenzor::Device>(), py::arg("device"))
+        .def("__enter__", [](tenzor::DeviceGuard& self) -> tenzor::DeviceGuard& {
+            return self;
+        })
+        .def("__exit__", [](tenzor::DeviceGuard& self,
+                            py::object /*exc_type*/, py::object /*exc_val*/, py::object /*exc_tb*/) {
+            // Destructor handles restore; force it now by calling detail::switch_device
+            tenzor::detail::switch_device(self.device().type, self.previous_device_index());
+        });
+
+    // current_device utility
+    m.def("current_device", &tenzor::current_device, py::arg("type"),
+        "Get the current device for a backend type in this thread.");
+
     // DType enum
     py::enum_<tenzor::DType>(m, "dtype")
         .value("float32", tenzor::DType::Float32)
@@ -525,6 +546,27 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("shape"),
              py::arg("dtype") = tenzor::DType::Float32,
              py::arg("device") = tenzor::Device::cpu())
+        .def_static("from_blob", [](py::object obj,
+                                     std::vector<int64_t> shape,
+                                     tenzor::DType dtype,
+                                     tenzor::Device device) {
+            // Get raw pointer from Python buffer protocol
+            py::buffer buf = py::buffer(obj);
+            py::buffer_info info = buf.request();
+            // Keep the Python object alive by capturing it in the deleter closure.
+            // When the last Tensor sharing this storage is destroyed, the shared_ptr
+            // to ExternalStorage dies, which destroys the std::function deleter,
+            // which drops the py::object reference, allowing Python GC.
+            auto obj_ref = std::make_shared<py::object>(std::move(obj));
+            return tenzor::Tensor::from_blob(
+                info.ptr, std::move(shape), dtype, device,
+                [obj_ref](void*) { /* prevent GC until tensor dies */ });
+        },
+        py::arg("buffer"), py::arg("shape"),
+        py::arg("dtype") = tenzor::DType::Float32,
+        py::arg("device") = tenzor::Device::cpu(),
+        "Wrap a buffer (e.g. numpy array) as a Tensor without copying data.\n"
+        "The buffer must remain alive while the tensor exists.")
         .def_property_readonly("shape",
             [](const tenzor::Tensor& t) {
                 auto s = t.shape();
@@ -1257,7 +1299,7 @@ PYBIND11_MODULE(tenzor_core, m) {
         // Python-style indexing
         .def("__getitem__", [](const tenzor::Tensor& self, py::object key) -> tenzor::Tensor {
             // Phase A (GIL held): Parse Python key into C++ types
-            enum class IndexKind { Int, Slice, Tuple, TensorMask };
+            enum class IndexKind { Int, Slice, Tuple, TensorMask, FancyIndex };
             IndexKind kind;
             int64_t int_idx = 0;
             int64_t slice_start = 0, slice_stop = 0, slice_step = 1;
@@ -1269,6 +1311,36 @@ PYBIND11_MODULE(tenzor_core, m) {
             };
             std::vector<TupleEntry> tuple_entries;
             tenzor::Tensor mask_tensor;
+
+            // For fancy indexing: vector of optional<Tensor> index tensors
+            std::vector<std::optional<tenzor::Tensor>> fancy_indices;
+
+            // Helper: convert a py::list of ints to an Int64 Tensor on self's device
+            auto list_to_index_tensor = [&](py::list lst) -> tenzor::Tensor {
+                std::vector<int64_t> vals;
+                vals.reserve(lst.size());
+                for (auto& item : lst) {
+                    vals.push_back(py::cast<int64_t>(item));
+                }
+                auto t = tenzor::from_data(vals.data(),
+                                           {static_cast<int64_t>(vals.size())},
+                                           tenzor::Device::cpu());
+                if (self.device() != tenzor::Device::cpu()) {
+                    t = t.to(self.device());
+                }
+                return t;
+            };
+
+            // Helper: check if a py::object is a fancy-index element (list or int Tensor)
+            auto is_fancy_element = [](py::object obj) -> bool {
+                if (py::isinstance<py::list>(obj)) return true;
+                if (py::isinstance<tenzor::Tensor>(obj)) {
+                    auto t = obj.cast<tenzor::Tensor>();
+                    return t.dtype() == tenzor::DType::Int32 ||
+                           t.dtype() == tenzor::DType::Int64;
+                }
+                return false;
+            };
 
             if (py::isinstance<py::int_>(key)) {
                 kind = IndexKind::Int;
@@ -1286,38 +1358,90 @@ PYBIND11_MODULE(tenzor_core, m) {
                         "Invalid slice for dimension 0 with size " + std::to_string(shape[0]));
                 }
                 slice_start = start; slice_stop = stop; slice_step = step;
+            } else if (py::isinstance<py::list>(key)) {
+                // Single list of ints -> fancy index on dim 0
+                kind = IndexKind::FancyIndex;
+                fancy_indices.push_back(list_to_index_tensor(py::cast<py::list>(key)));
             } else if (py::isinstance<py::tuple>(key)) {
-                kind = IndexKind::Tuple;
                 py::tuple indices = py::cast<py::tuple>(key);
-                // Pre-parse all tuple entries: need current shape to resolve slices
-                // We parse slices lazily during Phase B since shape changes with each op
-                tuple_entries.reserve(indices.size());
+
+                // Check if any tuple element triggers fancy indexing
+                bool has_fancy = false;
                 for (size_t i = 0; i < indices.size(); ++i) {
-                    TupleEntry entry{};
-                    if (py::isinstance<py::int_>(indices[i])) {
-                        entry.is_int = true;
-                        entry.int_val = py::cast<int64_t>(indices[i]);
-                    } else if (py::isinstance<py::slice>(indices[i])) {
-                        entry.is_int = false;
-                        // Extract raw start/stop/step from Python slice object.
-                        // None values get sentinel min/max — resolved against dim size in Phase B.
-                        py::slice slice_obj = py::cast<py::slice>(indices[i]);
-                        auto s_start = slice_obj.attr("start");
-                        auto s_stop = slice_obj.attr("stop");
-                        auto s_step = slice_obj.attr("step");
-                        entry.start = s_start.is_none() ? std::numeric_limits<int64_t>::min() : py::cast<int64_t>(s_start);
-                        entry.stop = s_stop.is_none() ? std::numeric_limits<int64_t>::max() : py::cast<int64_t>(s_stop);
-                        entry.step = s_step.is_none() ? 1 : py::cast<int64_t>(s_step);
-                    } else {
-                        throw std::runtime_error("Unsupported index type in tuple");
+                    if (is_fancy_element(indices[i])) {
+                        has_fancy = true;
+                        break;
                     }
-                    tuple_entries.push_back(entry);
+                }
+
+                if (has_fancy) {
+                    kind = IndexKind::FancyIndex;
+                    fancy_indices.reserve(indices.size());
+                    for (size_t i = 0; i < indices.size(); ++i) {
+                        if (py::isinstance<py::list>(indices[i])) {
+                            fancy_indices.push_back(list_to_index_tensor(py::cast<py::list>(indices[i])));
+                        } else if (py::isinstance<tenzor::Tensor>(indices[i])) {
+                            auto t = indices[i].cast<tenzor::Tensor>();
+                            if (t.dtype() == tenzor::DType::Int32 || t.dtype() == tenzor::DType::Int64) {
+                                fancy_indices.push_back(t);
+                            } else {
+                                throw std::runtime_error(
+                                    "Tensor index must be integer dtype (Int32/Int64), not boolean or float");
+                            }
+                        } else if (py::isinstance<py::slice>(indices[i])) {
+                            // Slice in a fancy-index context => nullopt (full dim passthrough)
+                            fancy_indices.push_back(std::nullopt);
+                        } else if (py::isinstance<py::int_>(indices[i])) {
+                            // Scalar int in fancy context -> 0-d index tensor
+                            int64_t val = py::cast<int64_t>(indices[i]);
+                            auto t = tenzor::from_data(&val, {}, tenzor::Device::cpu());
+                            if (self.device() != tenzor::Device::cpu()) {
+                                t = t.to(self.device());
+                            }
+                            fancy_indices.push_back(t);
+                        } else {
+                            throw std::runtime_error("Unsupported index type in tuple");
+                        }
+                    }
+                } else {
+                    kind = IndexKind::Tuple;
+                    // Pre-parse all tuple entries: need current shape to resolve slices
+                    // We parse slices lazily during Phase B since shape changes with each op
+                    tuple_entries.reserve(indices.size());
+                    for (size_t i = 0; i < indices.size(); ++i) {
+                        TupleEntry entry{};
+                        if (py::isinstance<py::int_>(indices[i])) {
+                            entry.is_int = true;
+                            entry.int_val = py::cast<int64_t>(indices[i]);
+                        } else if (py::isinstance<py::slice>(indices[i])) {
+                            entry.is_int = false;
+                            // Extract raw start/stop/step from Python slice object.
+                            // None values get sentinel min/max — resolved against dim size in Phase B.
+                            py::slice slice_obj = py::cast<py::slice>(indices[i]);
+                            auto s_start = slice_obj.attr("start");
+                            auto s_stop = slice_obj.attr("stop");
+                            auto s_step = slice_obj.attr("step");
+                            entry.start = s_start.is_none() ? std::numeric_limits<int64_t>::min() : py::cast<int64_t>(s_start);
+                            entry.stop = s_stop.is_none() ? std::numeric_limits<int64_t>::max() : py::cast<int64_t>(s_stop);
+                            entry.step = s_step.is_none() ? 1 : py::cast<int64_t>(s_step);
+                        } else {
+                            throw std::runtime_error("Unsupported index type in tuple");
+                        }
+                        tuple_entries.push_back(entry);
+                    }
                 }
             } else if (py::isinstance<tenzor::Tensor>(key)) {
-                kind = IndexKind::TensorMask;
-                mask_tensor = key.cast<tenzor::Tensor>();
+                auto t = key.cast<tenzor::Tensor>();
+                if (t.dtype() == tenzor::DType::Int32 || t.dtype() == tenzor::DType::Int64) {
+                    // Integer tensor -> fancy index on dim 0
+                    kind = IndexKind::FancyIndex;
+                    fancy_indices.push_back(t);
+                } else {
+                    kind = IndexKind::TensorMask;
+                    mask_tensor = t;
+                }
             } else {
-                throw std::runtime_error("Unsupported index type: expected int, slice, or Tensor");
+                throw std::runtime_error("Unsupported index type: expected int, slice, list, or Tensor");
             }
 
             // Phase B (GIL released): Perform tensor operations
@@ -1389,6 +1513,9 @@ PYBIND11_MODULE(tenzor_core, m) {
                         return tenzor::masked_select(self, mask_tensor);
                     }
                     throw std::runtime_error("Unsupported index type: expected bool Tensor");
+                }
+                case IndexKind::FancyIndex: {
+                    return tenzor::index(self, fancy_indices);
                 }
             }
             throw std::runtime_error("Unreachable");  // silence compiler warning
@@ -8411,6 +8538,61 @@ void bind_compression(py::module& m) {
         }
     }, py::arg("device") = "cpu",
     "Reset memory statistics counters for the specified device");
+
+    // -------------------------------------------------------------------------
+    // Global Memory Profiler
+    // -------------------------------------------------------------------------
+
+    m.def("memory_profiler_stats", []() -> py::dict {
+        auto s = tenzor::MemoryProfiler::instance().memory_stats();
+        py::dict d;
+        d["current_allocated_bytes"] = s.current_allocated_bytes;
+        d["peak_allocated_bytes"]    = s.peak_allocated_bytes;
+        d["total_allocated_bytes"]   = s.total_allocated_bytes;
+        d["allocation_count"]        = s.allocation_count;
+        d["deallocation_count"]      = s.deallocation_count;
+        return d;
+    }, "Get global memory profiler statistics (all devices)");
+
+    m.def("reset_peak_memory_stats", []() {
+        tenzor::MemoryProfiler::instance().reset_peak_memory_stats();
+    }, "Reset peak memory counter to current allocated bytes");
+
+    m.def("memory_profiler_summary", []() -> std::string {
+        return tenzor::MemoryProfiler::instance().memory_summary();
+    }, "Get human-readable global memory profiler summary");
+
+    // =========================================================================
+    // Custom Op Registration API
+    // =========================================================================
+    m.def("register_custom_op", [](const std::string& name,
+                                    const std::string& device_str,
+                                    py::function py_kernel) -> uint32_t {
+        auto device_type = tenzor::Device::from_string(device_str).type;
+        // Wrap Python callable in a CustomKernelFn
+        auto kernel = [py_kernel](std::span<const tenzor::Tensor> inputs,
+                                   const tenzor::OpAttributes& /*attrs*/) -> tenzor::Tensor {
+            py::gil_scoped_acquire gil;
+            py::list py_inputs;
+            for (const auto& t : inputs) py_inputs.append(t);
+            py::object result = py_kernel(py_inputs);
+            return result.cast<tenzor::Tensor>();
+        };
+        auto id = tenzor::register_custom_op(name, device_type, std::move(kernel));
+        return id.value;
+    }, py::arg("name"), py::arg("device"), py::arg("kernel"),
+    "Register a custom operation kernel.\n"
+    "Returns an integer op ID for use with dispatch_custom_op().");
+
+    m.def("dispatch_custom_op", [](uint32_t op_id,
+                                    py::list py_inputs) -> tenzor::Tensor {
+        std::vector<tenzor::Tensor> inputs;
+        for (auto& item : py_inputs) {
+            inputs.push_back(item.cast<tenzor::Tensor>());
+        }
+        return tenzor::dispatch_custom_op(tenzor::CustomOpId(op_id), inputs);
+    }, py::arg("op_id"), py::arg("inputs"),
+    "Dispatch a custom operation by its ID.");
 
     m.def("set_max_cached_bytes", [](size_t bytes, const std::string& device) {
         if (device == "cpu" || device.empty()) {

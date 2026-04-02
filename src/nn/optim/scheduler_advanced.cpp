@@ -654,4 +654,86 @@ auto CosineAnnealingWarmRestarts::set_optimizer_lr(double lr) -> void {
     }
 }
 
+//==============================================================================
+// LambdaLR Implementation
+//==============================================================================
+
+LambdaLR::LambdaLR(Optimizer& optimizer, LrLambda lr_lambda)
+    : optimizer_(optimizer)
+    , lr_lambda_(std::move(lr_lambda))
+    , epoch_(0) {
+    if (!lr_lambda_) {
+        throw std::invalid_argument("LambdaLR: lr_lambda must not be null");
+    }
+    base_lr_ = optimizer_.get_lr();
+    last_lr_ = base_lr_ * lr_lambda_(0);
+    optimizer_.set_lr(last_lr_);
+}
+
+auto LambdaLR::step() -> void {
+    epoch_++;
+    last_lr_ = base_lr_ * lr_lambda_(epoch_);
+    optimizer_.set_lr(last_lr_);
+}
+
+//==============================================================================
+// MultiStepLR Implementation
+//==============================================================================
+
+MultiStepLR::MultiStepLR(Optimizer& optimizer, std::vector<int> milestones, double gamma)
+    : optimizer_(optimizer)
+    , milestones_(std::move(milestones))
+    , gamma_(gamma)
+    , epoch_(0) {
+    // Sort milestones for binary search
+    std::sort(milestones_.begin(), milestones_.end());
+    base_lr_ = optimizer_.get_lr();
+    last_lr_ = base_lr_;
+}
+
+auto MultiStepLR::step() -> void {
+    epoch_++;
+    // Count how many milestones have been passed
+    int num_decays = 0;
+    for (int milestone : milestones_) {
+        if (epoch_ >= milestone) {
+            num_decays++;
+        } else {
+            break;  // milestones are sorted
+        }
+    }
+    last_lr_ = base_lr_ * std::pow(gamma_, num_decays);
+    optimizer_.set_lr(last_lr_);
+}
+
+//==============================================================================
+// PolynomialLR Implementation
+//==============================================================================
+
+PolynomialLR::PolynomialLR(Optimizer& optimizer, int total_iters, double end_lr,
+                           double power)
+    : optimizer_(optimizer)
+    , total_iters_(total_iters)
+    , end_lr_(end_lr)
+    , power_(power)
+    , epoch_(0) {
+    if (total_iters_ <= 0) {
+        throw std::invalid_argument("PolynomialLR: total_iters must be positive, got " +
+                                    std::to_string(total_iters_));
+    }
+    base_lr_ = optimizer_.get_lr();
+    last_lr_ = base_lr_;
+}
+
+auto PolynomialLR::step() -> void {
+    epoch_++;
+    if (epoch_ >= total_iters_) {
+        last_lr_ = end_lr_;
+    } else {
+        double progress = 1.0 - static_cast<double>(epoch_) / static_cast<double>(total_iters_);
+        last_lr_ = (base_lr_ - end_lr_) * std::pow(progress, power_) + end_lr_;
+    }
+    optimizer_.set_lr(last_lr_);
+}
+
 } // namespace tenzor::optim

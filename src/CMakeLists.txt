@@ -12,6 +12,7 @@ set(TENZOR_CORE_SOURCES
     core/transfer_engine.cpp
     core/pinned_allocator.cpp
     core/offload_engine.cpp
+    core/device_guard.cpp
     backend/backend.cpp
     backend/loader.cpp
     backend/registry.cpp
@@ -35,6 +36,7 @@ set(TENZOR_CORE_SOURCES
     ops/detection.cpp
     ops/async_ops.cpp
     ops/linalg.cpp
+    ops/custom_op.cpp
     autograd/variable.cpp
     autograd/graph.cpp
     autograd/function.cpp
@@ -146,6 +148,7 @@ set(TENZOR_CORE_SOURCES
     utils/config.cpp
     utils/benchmark.cpp
     utils/tensorboard.cpp
+    utils/memory_profiler.cpp
     backends/cpu/kernels/quantization/quantized_linear.cpp
     backends/cpu/kernels/quantization/quantized_conv2d.cpp
     onnx/exporter.cpp

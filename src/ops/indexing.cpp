@@ -4,7 +4,9 @@
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/core/shape.hpp"
 #include <cstdint>
+#include <optional>
 
 namespace tenzor {
 
@@ -173,6 +175,146 @@ auto narrow(const Tensor& input, int64_t dim, int64_t start, int64_t length) -> 
                                std::to_string(input.shape()[dim]) + ")");
     }
     return input.slice(dim, start, start + length, 1);
+}
+
+auto index(const Tensor& input,
+           const std::vector<std::optional<Tensor>>& indices) -> Tensor {
+    if (indices.empty()) {
+        throw std::runtime_error("index: at least one index tensor must be provided");
+    }
+    if (static_cast<int64_t>(indices.size()) > input.ndim()) {
+        throw std::runtime_error("index: too many index tensors (" +
+                                 std::to_string(indices.size()) + ") for tensor with " +
+                                 std::to_string(input.ndim()) + " dimensions");
+    }
+
+    // Validate index dtypes and collect non-null indices for broadcasting
+    std::vector<size_t> non_null_dims;
+    for (size_t i = 0; i < indices.size(); ++i) {
+        if (indices[i].has_value()) {
+            const auto& idx = indices[i].value();
+            if (idx.dtype() != DType::Int32 && idx.dtype() != DType::Int64) {
+                throw std::runtime_error(
+                    "index: index tensors must be Int32 or Int64, got index at dim " +
+                    std::to_string(i));
+            }
+            non_null_dims.push_back(i);
+        }
+    }
+
+    if (non_null_dims.empty()) {
+        throw std::runtime_error("index: at least one non-null index tensor is required");
+    }
+
+    // Broadcast all non-null index tensors to a common shape
+    auto first_shape = indices[non_null_dims[0]].value().shape();
+    std::vector<int64_t> broadcast_shape(first_shape.begin(), first_shape.end());
+    for (size_t k = 1; k < non_null_dims.size(); ++k) {
+        broadcast_shape = broadcast_shapes(
+            broadcast_shape, indices[non_null_dims[k]].value().shape());
+    }
+
+    // Pack index tensors (expanded to broadcast shape, cast to Int64) into inputs vector
+    // Convention: inputs[0] = source tensor, inputs[1..N] = index tensors (one per indexed dim)
+    // Non-null indices are passed as actual tensors; null positions are represented by
+    // a 0-element Int64 sentinel tensor so the kernel knows which dims are indexed.
+    std::vector<Tensor> dispatch_inputs;
+    dispatch_inputs.reserve(1 + indices.size());
+    dispatch_inputs.push_back(input);
+
+    for (size_t i = 0; i < indices.size(); ++i) {
+        if (indices[i].has_value()) {
+            auto idx = indices[i].value();
+            if (idx.dtype() == DType::Int32) {
+                // Cast to Int64 for uniform handling
+                NewOpAttributes cast_attrs;
+                cast_attrs.set(AttrKey::TargetDtype, static_cast<int64_t>(DType::Int64));
+                std::vector<Tensor> cast_inputs = {idx};
+                idx = dispatch_single(OpId::Cast, cast_inputs, cast_attrs);
+            }
+            // Expand to broadcast shape
+            idx = idx.expand(broadcast_shape);
+            dispatch_inputs.push_back(std::move(idx));
+        } else {
+            // Sentinel: 0-element tensor signals "full slice on this dimension"
+            dispatch_inputs.push_back(empty({0}, DType::Int64, input.device()));
+        }
+    }
+
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::NumIndices, static_cast<int64_t>(indices.size()));
+
+    return dispatch_single(OpId::AdvancedIndex, dispatch_inputs, attrs);
+}
+
+void index_put(Tensor& input,
+               const std::vector<std::optional<Tensor>>& indices,
+               const Tensor& values) {
+    if (indices.empty()) {
+        throw std::runtime_error("index_put: at least one index tensor must be provided");
+    }
+    if (static_cast<int64_t>(indices.size()) > input.ndim()) {
+        throw std::runtime_error("index_put: too many index tensors (" +
+                                 std::to_string(indices.size()) + ") for tensor with " +
+                                 std::to_string(input.ndim()) + " dimensions");
+    }
+
+    // Validate and collect non-null indices
+    std::vector<size_t> non_null_dims;
+    for (size_t i = 0; i < indices.size(); ++i) {
+        if (indices[i].has_value()) {
+            const auto& idx = indices[i].value();
+            if (idx.dtype() != DType::Int32 && idx.dtype() != DType::Int64) {
+                throw std::runtime_error(
+                    "index_put: index tensors must be Int32 or Int64, got index at dim " +
+                    std::to_string(i));
+            }
+            non_null_dims.push_back(i);
+        }
+    }
+
+    if (non_null_dims.empty()) {
+        throw std::runtime_error("index_put: at least one non-null index tensor is required");
+    }
+
+    // Broadcast non-null index tensors
+    auto first_shape_put = indices[non_null_dims[0]].value().shape();
+    std::vector<int64_t> broadcast_shape(first_shape_put.begin(), first_shape_put.end());
+    for (size_t k = 1; k < non_null_dims.size(); ++k) {
+        broadcast_shape = broadcast_shapes(
+            broadcast_shape, indices[non_null_dims[k]].value().shape());
+    }
+
+    // Pack inputs: [input, values, idx0, idx1, ...]
+    std::vector<Tensor> dispatch_inputs;
+    dispatch_inputs.reserve(2 + indices.size());
+    dispatch_inputs.push_back(input);
+    dispatch_inputs.push_back(values);
+
+    for (size_t i = 0; i < indices.size(); ++i) {
+        if (indices[i].has_value()) {
+            auto idx = indices[i].value();
+            if (idx.dtype() == DType::Int32) {
+                NewOpAttributes cast_attrs;
+                cast_attrs.set(AttrKey::TargetDtype, static_cast<int64_t>(DType::Int64));
+                std::vector<Tensor> cast_inputs = {idx};
+                idx = dispatch_single(OpId::Cast, cast_inputs, cast_attrs);
+            }
+            idx = idx.expand(broadcast_shape);
+            dispatch_inputs.push_back(std::move(idx));
+        } else {
+            dispatch_inputs.push_back(empty({0}, DType::Int64, input.device()));
+        }
+    }
+
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::NumIndices, static_cast<int64_t>(indices.size()));
+
+    auto result = dispatch_single(OpId::AdvancedIndexPut, dispatch_inputs, attrs);
+
+    // Copy result back into input (in-place semantics)
+    // The kernel returns the modified tensor; overwrite input's data
+    input = result;
 }
 
 } // namespace tenzor

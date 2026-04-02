@@ -10,6 +10,9 @@
 
 #include "../core/tensor.hpp"
 
+#include <optional>
+#include <vector>
+
 namespace tenzor {
 
 /**
@@ -106,6 +109,37 @@ auto select(const Tensor& input, int64_t dim, int64_t index) -> Tensor;
  */
 auto narrow(const Tensor& input, int64_t dim, int64_t start, int64_t length) -> Tensor;
 
+/**
+ * @brief NumPy-style advanced (fancy) indexing.
+ *
+ * Selects elements using integer index tensors. Each non-nullopt index
+ * corresponds to one dimension. All non-null index tensors must be
+ * broadcastable to a common shape. The output shape is formed by replacing
+ * the indexed dimensions with the broadcast shape, with non-indexed
+ * (nullopt) dimensions passing through.
+ *
+ * @param input   Source tensor
+ * @param indices Vector of optional index tensors (Int32 or Int64).
+ *                nullopt entries act as full-slice (`:`) for that dimension.
+ * @return Gathered tensor
+ */
+auto index(const Tensor& input,
+           const std::vector<std::optional<Tensor>>& indices) -> Tensor;
+
+/**
+ * @brief In-place advanced indexing assignment.
+ *
+ * Scatters values into input at positions specified by index tensors.
+ * Semantics match NumPy `a[indices] = values`.
+ *
+ * @param input   Destination tensor (modified in-place)
+ * @param indices Vector of optional index tensors (Int32 or Int64)
+ * @param values  Values to scatter (must be broadcastable to the indexed shape)
+ */
+void index_put(Tensor& input,
+               const std::vector<std::optional<Tensor>>& indices,
+               const Tensor& values);
+
 /** @} */ // end of tensor_indexing group
 
 } // namespace tenzor
@@ -122,5 +156,7 @@ using tenzor::masked_select;
 using tenzor::masked_fill;
 using tenzor::where;
 using tenzor::slice;
+using tenzor::index;
+using tenzor::index_put;
 } // namespace ops
 } // namespace tenzor

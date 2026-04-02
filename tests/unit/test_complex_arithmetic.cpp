@@ -195,6 +195,157 @@ TEST_P(ComplexArithmeticTest, ComplexRealAdd) {
 }
 
 // ============================================================================
+// Complex division (non-trivial divisor)
+// ============================================================================
+
+TEST_P(ComplexArithmeticTest, ComplexDivNonTrivial) {
+    auto a = Tensor({int64_t(1)}, DType::Complex64, device);
+    auto b = Tensor({int64_t(1)}, DType::Complex64, device);
+
+    // (1+2i) / (3+4i) = (1*3+2*4)/(3^2+4^2) + (2*3-1*4)/(3^2+4^2)i = 11/25 + 2/25i
+    a.data<std::complex<float>>()[0] = {1.0f, 2.0f};
+    b.data<std::complex<float>>()[0] = {3.0f, 4.0f};
+
+    try {
+        auto c = div(a, b).to(Device::cpu());
+        auto* cp = c.data<std::complex<float>>();
+        EXPECT_NEAR(cp[0].real(), 0.44f, 1e-5f);
+        EXPECT_NEAR(cp[0].imag(), 0.08f, 1e-5f);
+    } catch (const std::runtime_error&) {
+        GTEST_SKIP() << "Complex div not yet supported on " << device.to_string();
+    }
+}
+
+// ============================================================================
+// Complex negation
+// ============================================================================
+
+TEST_P(ComplexArithmeticTest, ComplexNeg) {
+    auto a = Tensor({int64_t(2)}, DType::Complex64, device);
+    a.data<std::complex<float>>()[0] = {1.0f, -2.0f};
+    a.data<std::complex<float>>()[1] = {-3.0f, 4.0f};
+
+    try {
+        auto c = neg(a).to(Device::cpu());
+        auto* cp = c.data<std::complex<float>>();
+        EXPECT_FLOAT_EQ(cp[0].real(), -1.0f);
+        EXPECT_FLOAT_EQ(cp[0].imag(), 2.0f);
+        EXPECT_FLOAT_EQ(cp[1].real(), 3.0f);
+        EXPECT_FLOAT_EQ(cp[1].imag(), -4.0f);
+    } catch (const std::runtime_error&) {
+        GTEST_SKIP() << "Complex neg not yet supported on " << device.to_string();
+    }
+}
+
+// ============================================================================
+// Complex exp: exp(a+bi) = exp(a)(cos(b) + i*sin(b))
+// ============================================================================
+
+TEST_P(ComplexArithmeticTest, ComplexExp) {
+    auto a = Tensor({int64_t(1)}, DType::Complex64, device);
+    // exp(0+pi*i) = cos(pi) + i*sin(pi) = -1 + 0i
+    a.data<std::complex<float>>()[0] = {0.0f, static_cast<float>(M_PI)};
+
+    try {
+        auto c = exp(a).to(Device::cpu());
+        auto* cp = c.data<std::complex<float>>();
+        EXPECT_NEAR(cp[0].real(), -1.0f, 1e-5f);
+        EXPECT_NEAR(cp[0].imag(), 0.0f, 1e-5f);
+    } catch (const std::runtime_error&) {
+        GTEST_SKIP() << "Complex exp not yet supported on " << device.to_string();
+    }
+}
+
+// ============================================================================
+// Complex log: log(r*e^(i*theta)) = log(r) + i*theta
+// ============================================================================
+
+TEST_P(ComplexArithmeticTest, ComplexLog) {
+    auto a = Tensor({int64_t(1)}, DType::Complex64, device);
+    // log(1+0i) = 0+0i
+    a.data<std::complex<float>>()[0] = {1.0f, 0.0f};
+
+    try {
+        auto c = log(a).to(Device::cpu());
+        auto* cp = c.data<std::complex<float>>();
+        EXPECT_NEAR(cp[0].real(), 0.0f, 1e-5f);
+        EXPECT_NEAR(cp[0].imag(), 0.0f, 1e-5f);
+    } catch (const std::runtime_error&) {
+        GTEST_SKIP() << "Complex log not yet supported on " << device.to_string();
+    }
+}
+
+// ============================================================================
+// Complex broadcasting
+// ============================================================================
+
+TEST_P(ComplexArithmeticTest, ComplexBroadcastAdd) {
+    auto a = Tensor({int64_t(2), int64_t(3)}, DType::Complex64, device);
+    auto b = Tensor({int64_t(3)}, DType::Complex64, device);  // broadcasts to (2,3)
+
+    auto* ap = a.data<std::complex<float>>();
+    for (int i = 0; i < 6; ++i) ap[i] = {static_cast<float>(i), 0.0f};
+    auto* bp = b.data<std::complex<float>>();
+    for (int i = 0; i < 3; ++i) bp[i] = {0.0f, static_cast<float>(i)};
+
+    try {
+        auto c = add(a, b).to(Device::cpu());
+        EXPECT_EQ(c.shape()[0], 2);
+        EXPECT_EQ(c.shape()[1], 3);
+        auto* cp = c.data<std::complex<float>>();
+        // First row: (0+0i, 1+1i, 2+2i)
+        EXPECT_FLOAT_EQ(cp[0].real(), 0.0f);
+        EXPECT_FLOAT_EQ(cp[0].imag(), 0.0f);
+        EXPECT_FLOAT_EQ(cp[1].real(), 1.0f);
+        EXPECT_FLOAT_EQ(cp[1].imag(), 1.0f);
+    } catch (const std::runtime_error&) {
+        GTEST_SKIP() << "Complex broadcast add not yet supported on " << device.to_string();
+    }
+}
+
+// ============================================================================
+// Complex128 arithmetic
+// ============================================================================
+
+TEST_P(ComplexArithmeticTest, Complex128MulAccuracy) {
+    auto a = Tensor({int64_t(1)}, DType::Complex128, device);
+    auto b = Tensor({int64_t(1)}, DType::Complex128, device);
+
+    // (1e-10 + 2e-10i) * (3e-10 + 4e-10i)
+    // = (3e-20 - 8e-20) + (4e-20 + 6e-20)i = -5e-20 + 10e-20i
+    a.data<std::complex<double>>()[0] = {1e-10, 2e-10};
+    b.data<std::complex<double>>()[0] = {3e-10, 4e-10};
+
+    try {
+        auto c = mul(a, b).to(Device::cpu());
+        auto* cp = c.data<std::complex<double>>();
+        EXPECT_NEAR(cp[0].real(), -5e-20, 1e-30);
+        EXPECT_NEAR(cp[0].imag(), 10e-20, 1e-30);
+    } catch (const std::runtime_error&) {
+        GTEST_SKIP() << "Complex128 mul not yet supported on " << device.to_string();
+    }
+}
+
+// ============================================================================
+// Complex sqrt
+// ============================================================================
+
+TEST_P(ComplexArithmeticTest, ComplexSqrt) {
+    auto a = Tensor({int64_t(1)}, DType::Complex64, device);
+    // sqrt(-1+0i) = 0+1i
+    a.data<std::complex<float>>()[0] = {-1.0f, 0.0f};
+
+    try {
+        auto c = sqrt(a).to(Device::cpu());
+        auto* cp = c.data<std::complex<float>>();
+        EXPECT_NEAR(cp[0].real(), 0.0f, 1e-5f);
+        EXPECT_NEAR(std::abs(cp[0].imag()), 1.0f, 1e-5f);
+    } catch (const std::runtime_error&) {
+        GTEST_SKIP() << "Complex sqrt not yet supported on " << device.to_string();
+    }
+}
+
+// ============================================================================
 // Instantiate for CPU backend
 // ============================================================================
 

@@ -153,6 +153,7 @@ auto attr_key_name(AttrKey key) -> std::string_view {
         case AttrKey::Upper: return "upper";
         case AttrKey::Low: return "low";
         case AttrKey::High: return "high";
+        case AttrKey::NumIndices: return "num_indices";
         case AttrKey::_Count: return "_count";
     }
     return "unknown";

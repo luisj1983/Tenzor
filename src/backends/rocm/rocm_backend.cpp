@@ -1,6 +1,7 @@
 #include "rocm_backend.hpp"
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/backend/rocm_caching_allocator.hip.hpp"
+#include "tenzor/core/device_guard.hpp"
 #include "tenzor/utils/logging.hpp"
 #include <hip/hip_runtime.h>
 #include <stdexcept>
@@ -44,6 +45,16 @@ auto ROCmBackend::is_available() const -> bool {
     return device_count() > 0;
 }
 
+auto ROCmBackend::set_device(int32_t device_id) -> void {
+    check_hip_error(hipSetDevice(device_id), "hipSetDevice");
+}
+
+auto ROCmBackend::get_current_device() const -> int32_t {
+    int device_id = 0;
+    check_hip_error(hipGetDevice(&device_id), "hipGetDevice");
+    return device_id;
+}
+
 auto ROCmBackend::get_device_info(int32_t device_id) const -> DeviceInfo {
     int count = device_count();
     if (device_id < 0 || device_id >= count) {
@@ -67,11 +78,10 @@ auto ROCmBackend::get_device_info(int32_t device_id) const -> DeviceInfo {
     // Memory info
     info.total_memory = props.totalGlobalMem;
     size_t free_mem = 0, total_mem = 0;
-    int current_device;
-    check_hip_error(hipGetDevice(&current_device), "hipGetDevice");
-    check_hip_error(hipSetDevice(device_id), "hipSetDevice");
-    check_hip_error(hipMemGetInfo(&free_mem, &total_mem), "hipMemGetInfo");
-    check_hip_error(hipSetDevice(current_device), "hipSetDevice restore");
+    {
+        DeviceGuard guard(Device::rocm(device_id));
+        check_hip_error(hipMemGetInfo(&free_mem, &total_mem), "hipMemGetInfo");
+    }
     info.available_memory = free_mem;
 
     // Compute info

@@ -23,6 +23,7 @@
 #include <memory>
 #include <vector>
 #include <span>
+#include <functional>
 #include <optional>
 #include "dtype.hpp"
 #include "device.hpp"
@@ -173,6 +174,42 @@ public:
     static auto empty_uninitialized(std::vector<int64_t> shape,
                                      DType dtype = DType::Float32,
                                      Device device = Device::cpu()) -> Tensor;
+
+    /**
+     * @brief Wrap externally-owned memory as a Tensor without copying.
+     *
+     * Creates a tensor that references the given data pointer directly.
+     * No memory allocation or copy occurs. The caller must ensure the data
+     * remains valid for the lifetime of the tensor (and any views of it).
+     *
+     * @param data Pointer to existing memory (must not be null if numel > 0)
+     * @param shape Tensor dimensions
+     * @param dtype Element data type (default: Float32)
+     * @param device Device where the memory resides (default: CPU)
+     * @param deleter Optional deleter called when the last tensor sharing this
+     *                storage is destroyed. If null, memory is not freed.
+     * @return Tensor wrapping the external memory
+     *
+     * @code
+     * // Wrap a raw C array
+     * float data[] = {1.0f, 2.0f, 3.0f, 4.0f};
+     * auto t = Tensor::from_blob(data, {2, 2});
+     *
+     * // Wrap with custom deleter
+     * float* gpu_data = my_gpu_alloc(1024);
+     * auto t = Tensor::from_blob(gpu_data, {1024}, DType::Float32,
+     *     Device::cuda(0), [](void* p) { my_gpu_free(p); });
+     * @endcode
+     *
+     * @warning Modifying the tensor modifies the underlying memory. If the
+     *          external memory is freed while the tensor is alive, behavior
+     *          is undefined.
+     */
+    static auto from_blob(void* data,
+                          std::vector<int64_t> shape,
+                          DType dtype = DType::Float32,
+                          Device device = Device::cpu(),
+                          std::function<void(void*)> deleter = nullptr) -> Tensor;
 
     /**
      * @brief Shallow copy — shares underlying storage with other.
@@ -1198,6 +1235,22 @@ public:
      */
     TensorImpl(std::vector<int64_t> shape, DType dtype, Device device,
                bool zero_init = true);
+
+    /**
+     * @brief Construct from pre-existing storage (no allocation).
+     *
+     * Used by Tensor::from_blob() to wrap external memory.
+     *
+     * @param storage Shared storage to use
+     * @param shape Tensor dimensions
+     * @param strides Memory strides per dimension
+     * @param dtype Element data type
+     * @param device Device location
+     */
+    TensorImpl(std::shared_ptr<Storage> storage,
+               std::vector<int64_t> shape,
+               std::vector<int64_t> strides,
+               DType dtype, Device device);
 
     /// Copy constructor (needed because std::atomic is not copyable)
     TensorImpl(const TensorImpl& other)

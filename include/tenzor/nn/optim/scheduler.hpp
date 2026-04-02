@@ -9,6 +9,7 @@
 #pragma once
 
 #include "optimizer.hpp"
+#include <functional>
 #include <memory>
 #include <cmath>
 #include <numbers>
@@ -903,6 +904,101 @@ private:
     double base_lr_;
     double last_lr_;
     int64_t step_count_{0};
+};
+
+/**
+ * @brief Lambda learning rate scheduler
+ *
+ * Sets the learning rate to base_lr * lr_lambda(epoch) each step.
+ * Provides maximum flexibility via a user-defined function.
+ *
+ * @code
+ * auto scheduler = LambdaLR(optimizer, [](int epoch) {
+ *     return 1.0 / (1.0 + 0.1 * epoch);  // Inverse time decay
+ * });
+ * @endcode
+ */
+class LambdaLR : public LRScheduler {
+public:
+    using LrLambda = std::function<double(int)>;
+
+    LambdaLR(Optimizer& optimizer, LrLambda lr_lambda);
+
+    auto step() -> void override;
+    auto get_last_lr() const -> double override { return last_lr_; }
+    auto get_epoch() const -> int { return epoch_; }
+
+private:
+    Optimizer& optimizer_;
+    LrLambda lr_lambda_;
+    double base_lr_;
+    double last_lr_;
+    int epoch_{0};
+};
+
+/**
+ * @brief Multi-step learning rate scheduler
+ *
+ * Decays the learning rate by gamma at each milestone epoch:
+ *
+ * @code
+ * auto scheduler = MultiStepLR(optimizer, {30, 60, 90}, 0.1);
+ * // LR = base_lr         for epochs 0-29
+ * // LR = base_lr * 0.1   for epochs 30-59
+ * // LR = base_lr * 0.01  for epochs 60-89
+ * // LR = base_lr * 0.001 for epochs 90+
+ * @endcode
+ */
+class MultiStepLR : public LRScheduler {
+public:
+    MultiStepLR(Optimizer& optimizer, std::vector<int> milestones, double gamma = 0.1);
+
+    auto step() -> void override;
+    auto get_last_lr() const -> double override { return last_lr_; }
+    auto get_epoch() const -> int { return epoch_; }
+
+private:
+    Optimizer& optimizer_;
+    std::vector<int> milestones_;
+    double gamma_;
+    double base_lr_;
+    double last_lr_;
+    int epoch_{0};
+};
+
+/**
+ * @brief Polynomial learning rate scheduler
+ *
+ * Decays the learning rate using a polynomial schedule:
+ *
+ * \f[
+ * \eta_t = (\eta_0 - \eta_{end}) \cdot \left(1 - \frac{t}{T}\right)^{p} + \eta_{end}
+ * \f]
+ *
+ * where \f$p\f$ is the polynomial power (default: 1.0 for linear decay).
+ *
+ * @code
+ * auto scheduler = PolynomialLR(optimizer, 100, 1e-7, 2.0);
+ * // Quadratic decay from base_lr to 1e-7 over 100 epochs
+ * @endcode
+ */
+class PolynomialLR : public LRScheduler {
+public:
+    PolynomialLR(Optimizer& optimizer, int total_iters, double end_lr = 0.0,
+                 double power = 1.0);
+
+    auto step() -> void override;
+    auto get_last_lr() const -> double override { return last_lr_; }
+    auto get_epoch() const -> int { return epoch_; }
+
+private:
+    Optimizer& optimizer_;
+    int total_iters_;
+    double end_lr_;
+    double power_;
+    double base_lr_;
+    double last_lr_;
+    int epoch_{0};
 };
 
 } // namespace optim

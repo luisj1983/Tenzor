@@ -133,10 +133,10 @@ void main() {
         }
         result[out_idx] = res_bits;
     } else {
-        // Int32 operations - reinterpret uint as int
+        // Int32 operations
         int val_a = int(a[idx_a]);
         int val_b = int(b[idx_b]);
-        int res = 0;  // IMPORTANT: Initialize to avoid undefined behavior
+        int res = 0;
 
         switch (params.op) {
             case 0: // add
@@ -155,6 +155,7 @@ void main() {
                 res = 0;
                 break;
         }
+
         result[out_idx] = uint(res);
     }
 }

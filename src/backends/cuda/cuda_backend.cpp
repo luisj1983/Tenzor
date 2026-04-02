@@ -1,6 +1,7 @@
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/backend/caching_allocator.hpp"
 #include "tenzor/backend/loader.hpp"
+#include "tenzor/core/device_guard.hpp"
 #ifdef TENZOR_HAS_CUDNN
 #include "tenzor/backend/cudnn_wrapper.hpp"
 #else
@@ -261,6 +262,21 @@ public:
         return device_count() > 0;
     }
 
+    auto set_device(int32_t device_id) -> void override {
+        cudaError_t err = cudaSetDevice(device_id);
+        if (err != cudaSuccess) {
+            throw std::runtime_error(
+                std::string("cudaSetDevice failed for device ") +
+                std::to_string(device_id) + ": " + cudaGetErrorString(err));
+        }
+    }
+
+    auto get_current_device() const -> int32_t override {
+        int device_id = 0;
+        cudaGetDevice(&device_id);
+        return device_id;
+    }
+
     auto get_device_info(int32_t device_id) const -> DeviceInfo override {
         int count = device_count();
         if (device_id < 0 || device_id >= count) {
@@ -281,14 +297,13 @@ public:
         info.driver_version = std::to_string(driver_version / 1000) + "." +
                               std::to_string((driver_version % 1000) / 10);
 
-        // Memory info
+        // Memory info — use DeviceGuard for exception-safe device switching
         info.total_memory = props.totalGlobalMem;
         size_t free_mem = 0, total_mem = 0;
-        int current_device;
-        cudaGetDevice(&current_device);
-        cudaSetDevice(device_id);
-        cudaMemGetInfo(&free_mem, &total_mem);
-        cudaSetDevice(current_device);
+        {
+            DeviceGuard guard(Device::cuda(device_id));
+            cudaMemGetInfo(&free_mem, &total_mem);
+        }
         info.available_memory = free_mem;
 
         // Compute info

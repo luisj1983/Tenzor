@@ -11,6 +11,7 @@
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/utils/error.hpp"
 #include "tenzor/utils/safe_math.hpp"
+#include "tenzor/utils/memory_profiler.hpp"
 #include "tenzor/core/checked_math.hpp"
 #include <numeric>
 #include <algorithm>
@@ -53,6 +54,11 @@ TensorImpl::TensorImpl(std::vector<int64_t> shape_, DType dtype_, Device device_
     void* ptr = backend->allocate(size_bytes, device.index);
     if (!ptr && size_bytes > 0) {
         throw std::runtime_error("Failed to allocate memory for tensor");
+    }
+
+    // Record allocation in global memory profiler
+    if (size_bytes > 0) {
+        MemoryProfiler::instance().on_allocate(size_bytes);
     }
 
     // Use DeviceStorage for ALL devices (including CPU)
@@ -102,6 +108,49 @@ auto Tensor::empty_uninitialized(std::vector<int64_t> shape, DType dtype, Device
     -> Tensor {
     Tensor t;
     t.impl_ = std::make_shared<TensorImpl>(std::move(shape), dtype, device, false);
+    return t;
+}
+
+// TensorImpl: construct from pre-existing storage (no allocation)
+TensorImpl::TensorImpl(std::shared_ptr<Storage> storage_,
+                       std::vector<int64_t> shape_,
+                       std::vector<int64_t> strides_,
+                       DType dtype_, Device device_)
+    : storage(std::move(storage_))
+    , shape(std::move(shape_))
+    , strides(std::move(strides_))
+    , dtype(dtype_)
+    , device(device_) {
+    is_contiguous_cache_.store(-1, std::memory_order_relaxed);  // lazily computed
+}
+
+auto Tensor::from_blob(void* data,
+                       std::vector<int64_t> shape,
+                       DType dtype,
+                       Device device,
+                       std::function<void(void*)> deleter) -> Tensor {
+    // Compute element count and validate
+    auto strides = compute_strides(shape);
+    int64_t n = 1;
+    for (auto dim : shape) {
+        n *= dim;
+    }
+
+    if (n > 0 && data == nullptr) {
+        throw std::runtime_error("from_blob: data must not be null for non-empty tensor");
+    }
+
+    size_t size_bytes = static_cast<size_t>(n) * tenzor::dtype_size(dtype);
+
+    // Create ExternalStorage (does NOT take ownership unless deleter is provided)
+    auto storage = std::make_shared<ExternalStorage>(
+        data, size_bytes, device, std::move(deleter));
+
+    // Build tensor from pre-existing storage
+    Tensor t;
+    t.impl_ = std::make_shared<TensorImpl>(
+        std::move(storage), std::move(shape), std::move(strides),
+        dtype, device);
     return t;
 }
 

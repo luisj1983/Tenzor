@@ -143,6 +143,10 @@ public:
     auto is_available() const -> bool override;
     auto get_device_info(int32_t device_id) const -> DeviceInfo override;
 
+    // Device context management
+    auto set_device(int32_t device_id) -> void override;
+    auto get_current_device() const -> int32_t override;
+
     // Memory management
     auto allocate(size_t bytes, int32_t device_id) -> void* override;
     auto deallocate(void* ptr) -> void override;

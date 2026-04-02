@@ -5,6 +5,8 @@
 
 #include "tenzor/ops/op_id.hpp"
 #include <array>
+#include <string>
+#include <unordered_map>
 
 namespace tenzor {
 
@@ -141,6 +143,8 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::Put)] = "put";
     names[static_cast<size_t>(OpId::Nonzero)] = "nonzero";
     names[static_cast<size_t>(OpId::OneHot)] = "one_hot";
+    names[static_cast<size_t>(OpId::AdvancedIndex)] = "advanced_index";
+    names[static_cast<size_t>(OpId::AdvancedIndexPut)] = "advanced_index_put";
 
     // Comparison
     names[static_cast<size_t>(OpId::Eq)] = "eq";
@@ -400,7 +404,7 @@ constexpr size_t count_named_ops() {
 
 // Count of actual OpId enum values (excluding gap slots).
 // Update this when adding new OpIds to catch missing name entries at compile time.
-inline constexpr size_t EXPECTED_NAMED_OPS = 296;
+inline constexpr size_t EXPECTED_NAMED_OPS = 298;
 
 // If this fires, a new OpId was added without a corresponding name in op_names above
 static_assert(count_named_ops() == EXPECTED_NAMED_OPS,
@@ -414,6 +418,26 @@ auto op_id_to_name(OpId id) noexcept -> std::string_view {
         return op_names[idx];
     }
     return "unknown";
+}
+
+auto string_to_op_id(std::string_view name) noexcept -> OpId {
+    // Build the reverse map once on first call
+    static const auto& reverse_map = *[]() {
+        auto* m = new std::unordered_map<std::string, OpId>();
+        m->reserve(EXPECTED_NAMED_OPS * 2);  // low load factor for speed
+        for (size_t i = 0; i < OP_COUNT; ++i) {
+            if (op_names[i] != "unknown") {
+                m->emplace(std::string(op_names[i]), static_cast<OpId>(i));
+            }
+        }
+        return m;
+    }();
+
+    auto it = reverse_map.find(std::string(name));
+    if (it != reverse_map.end()) {
+        return it->second;
+    }
+    return OpId::OP_COUNT;
 }
 
 } // namespace tenzor

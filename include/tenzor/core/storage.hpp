@@ -9,6 +9,7 @@
 #pragma once
 
 #include <memory>
+#include <functional>
 #include <cstddef>
 #include "device.hpp"
 
@@ -128,6 +129,63 @@ private:
     void* device_ptr_{nullptr};                   ///< Device memory pointer
     size_t size_{0};                              ///< Size in bytes
     Device device_;                               ///< Device specification
+};
+
+/**
+ * @brief Storage backed by externally-owned memory with optional custom deleter.
+ *
+ * Unlike DeviceStorage, this class does NOT deallocate through the backend.
+ * Instead, it calls an optional user-provided deleter when the storage is
+ * destroyed. If no deleter is provided, the memory is not freed (caller
+ * manages lifetime).
+ *
+ * Used by Tensor::from_blob() to wrap pre-allocated memory (NumPy arrays,
+ * external C libraries, mapped files, etc.) without copying.
+ *
+ * @code
+ * float* external_data = my_allocator(1024 * sizeof(float));
+ * auto storage = std::make_shared<ExternalStorage>(
+ *     external_data, 1024 * sizeof(float), Device::cpu(),
+ *     [](void* p) { my_deallocator(p); }
+ * );
+ * @endcode
+ *
+ * @note This class is move-only (non-copyable).
+ * @warning The caller must ensure the external memory remains valid for the
+ *          lifetime of all tensors sharing this storage.
+ */
+class ExternalStorage : public Storage {
+public:
+    using Deleter = std::function<void(void*)>;
+
+    /**
+     * @brief Construct from externally-owned memory.
+     *
+     * @param ptr Pointer to external memory
+     * @param size_bytes Size of the memory region in bytes
+     * @param device Device where the memory resides
+     * @param deleter Optional custom deleter called on destruction (nullptr = no-op)
+     */
+    ExternalStorage(void* ptr, size_t size_bytes, Device device,
+                    Deleter deleter = nullptr);
+
+    ~ExternalStorage() override;
+
+    ExternalStorage(const ExternalStorage&) = delete;
+    ExternalStorage& operator=(const ExternalStorage&) = delete;
+    ExternalStorage(ExternalStorage&&) noexcept;
+    ExternalStorage& operator=(ExternalStorage&&) noexcept;
+
+    auto data() -> void* override { return ptr_; }
+    auto data() const -> const void* override { return ptr_; }
+    auto size_bytes() const -> size_t override { return size_; }
+    auto device() const -> Device override { return device_; }
+
+private:
+    void* ptr_{nullptr};
+    size_t size_{0};
+    Device device_;
+    Deleter deleter_;
 };
 
 } // namespace tenzor

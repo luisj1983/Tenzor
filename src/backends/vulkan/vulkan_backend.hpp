@@ -413,6 +413,10 @@ public:
     auto dispatchScatterAdd(const Tensor& self, int64_t dim,
                             const Tensor& index, const Tensor& src) -> Tensor;
     auto dispatchIndexSelect(const Tensor& input, int64_t dim, const Tensor& indices) -> Tensor;
+    auto dispatchMaskedSelect(const Tensor& input, const Tensor& mask) -> Tensor;
+    auto dispatchMaskedFill(const Tensor& input, const Tensor& mask, float value) -> Tensor;
+    auto dispatchWhere(const Tensor& condition, const Tensor& x, const Tensor& y) -> Tensor;
+    auto dispatchRepeat(const Tensor& input, const std::vector<int64_t>& repeats) -> Tensor;
 
     // Vision operations
     auto dispatchGatherRelativePositionBias(const Tensor& table, const Tensor& indices,
@@ -516,13 +520,7 @@ public:
     auto dispatchChunk(const Tensor& input, int64_t chunks, int64_t dim) -> std::vector<Tensor>;
     auto dispatchFlatten(const Tensor& input, int64_t start_dim, int64_t end_dim) -> Tensor;
 
-    // Repeat and masked operations
-    auto dispatchRepeat(const Tensor& input, const std::vector<int64_t>& repeats) -> Tensor;
-    auto dispatchMaskedSelect(const Tensor& input, const Tensor& mask) -> Tensor;
-    auto dispatchMaskedFill(const Tensor& input, const Tensor& mask, float value) -> Tensor;
-    auto dispatchWhere(const Tensor& condition, const Tensor& x, const Tensor& y) -> Tensor;
-
-    // Tensor manipulation operations
+    // Tensor manipulation operations (Repeat/Masked already declared above)
     auto dispatchExpand(const Tensor& input, const std::vector<int64_t>& shape) -> Tensor;
     auto dispatchCat(const std::vector<Tensor>& inputs, int64_t dim) -> Tensor;
     auto dispatchClamp(const Tensor& input, float min_value, float max_value) -> Tensor;

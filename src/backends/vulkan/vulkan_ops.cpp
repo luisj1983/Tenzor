@@ -12838,7 +12838,8 @@ auto VulkanBackend::dispatchFlatten(const Tensor& input, int64_t start_dim, int6
 
 auto VulkanBackend::dispatchBatchNorm2dUpdateRunningStats(
     std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-    return dispatch("batchnorm2d_update_running_stats", inputs, attrs);
+    auto& table = DispatchTableRegistry::get_table(Device::Type::Vulkan);
+    return table.dispatch(OpId::BatchNorm2dUpdateRunningStats, inputs, attrs);
 }
 
 auto VulkanBackend::dispatchFusedRMSPropStep(

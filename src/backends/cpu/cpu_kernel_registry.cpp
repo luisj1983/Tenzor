@@ -1601,6 +1601,240 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     });
 
     // =========================================================================
+    // Advanced (Fancy) Indexing
+    // =========================================================================
+    table.register_single_output_kernel(OpId::AdvancedIndex,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // inputs[0] = source tensor
+        // inputs[1..N] = index tensors (0-element sentinel means full-slice)
+        int64_t num_indices = attrs.get_int(AttrKey::NumIndices, 0);
+        const auto& src = inputs[0];
+        auto src_shape = src.shape();
+        int64_t src_ndim = static_cast<int64_t>(src_shape.size());
+
+        // Identify which dims are indexed vs full-slice
+        std::vector<bool> is_indexed(num_indices, false);
+        std::vector<int64_t> broadcast_shape;
+        for (int64_t i = 0; i < num_indices; ++i) {
+            const auto& idx_t = inputs[1 + i];
+            if (idx_t.numel() > 0) {
+                is_indexed[i] = true;
+                if (broadcast_shape.empty()) {
+                    auto s = idx_t.shape();
+                    broadcast_shape.assign(s.begin(), s.end());
+                }
+            }
+        }
+
+        if (broadcast_shape.empty()) {
+            throw std::runtime_error("AdvancedIndex: no non-null index tensors");
+        }
+
+        // Compute output shape:
+        //   [broadcast_shape...] + [passthrough dims...]
+        // passthrough dims = dims not covered by indices + nullopt-indexed dims
+        std::vector<int64_t> output_shape;
+        output_shape.insert(output_shape.end(), broadcast_shape.begin(), broadcast_shape.end());
+
+        // Nullopt dims within the indices range
+        for (int64_t i = 0; i < num_indices; ++i) {
+            if (!is_indexed[i]) {
+                output_shape.push_back(src_shape[i]);
+            }
+        }
+        // Dims beyond the indices range
+        for (int64_t i = num_indices; i < src_ndim; ++i) {
+            output_shape.push_back(src_shape[i]);
+        }
+
+        // Allocate output
+        auto result = tenzor::empty(output_shape, src.dtype(), src.device());
+        int64_t bc_numel = 1;
+        for (auto d : broadcast_shape) bc_numel *= d;
+
+        // Compute strides for source to do flat-index arithmetic
+        std::vector<int64_t> src_strides(src_ndim);
+        src_strides[src_ndim - 1] = 1;
+        for (int64_t d = src_ndim - 2; d >= 0; --d) {
+            src_strides[d] = src_strides[d + 1] * src_shape[d + 1];
+        }
+
+        // Compute passthrough dims info
+        std::vector<int64_t> pass_dims;      // which source dims are passthrough
+        for (int64_t i = 0; i < num_indices; ++i) {
+            if (!is_indexed[i]) pass_dims.push_back(i);
+        }
+        for (int64_t i = num_indices; i < src_ndim; ++i) {
+            pass_dims.push_back(i);
+        }
+
+        int64_t pass_numel = 1;
+        for (auto d : pass_dims) pass_numel *= src_shape[d];
+
+        // Collect contiguous index data pointers
+        std::vector<const int64_t*> idx_ptrs(num_indices, nullptr);
+        std::vector<Tensor> idx_contig(num_indices); // keep alive
+        for (int64_t i = 0; i < num_indices; ++i) {
+            if (is_indexed[i]) {
+                idx_contig[i] = inputs[1 + i].contiguous();
+                idx_ptrs[i] = idx_contig[i].data<int64_t>();
+            }
+        }
+
+        auto src_contig = src.contiguous();
+        size_t elem_size = tenzor::dtype_size(src.dtype());
+        const auto* src_bytes = static_cast<const uint8_t*>(src_contig.data_ptr());
+        auto* dst_bytes = static_cast<uint8_t*>(result.data_ptr());
+
+        // For each broadcast position, compute the base offset into source
+        // from the indexed dims, then copy the passthrough slice.
+        for (int64_t bc = 0; bc < bc_numel; ++bc) {
+            int64_t src_offset = 0;
+            for (int64_t i = 0; i < num_indices; ++i) {
+                if (is_indexed[i]) {
+                    int64_t idx_val = idx_ptrs[i][bc];
+                    if (idx_val < 0) idx_val += src_shape[i];
+                    if (idx_val < 0 || idx_val >= src_shape[i]) {
+                        throw std::out_of_range(
+                            "AdvancedIndex: index " + std::to_string(idx_val) +
+                            " out of range for dim " + std::to_string(i) +
+                            " with size " + std::to_string(src_shape[i]));
+                    }
+                    src_offset += idx_val * src_strides[i];
+                }
+            }
+
+            // Copy all passthrough elements
+            if (pass_dims.empty()) {
+                // Scalar case: just copy one element
+                std::memcpy(dst_bytes + bc * elem_size,
+                           src_bytes + src_offset * elem_size,
+                           elem_size);
+            } else {
+                // Iterate over all combinations of passthrough dims
+                for (int64_t p = 0; p < pass_numel; ++p) {
+                    int64_t pass_offset = 0;
+                    int64_t remaining = p;
+                    for (int64_t k = static_cast<int64_t>(pass_dims.size()) - 1; k >= 0; --k) {
+                        int64_t d = pass_dims[k];
+                        int64_t coord = remaining % src_shape[d];
+                        remaining /= src_shape[d];
+                        pass_offset += coord * src_strides[d];
+                    }
+
+                    std::memcpy(dst_bytes + (bc * pass_numel + p) * elem_size,
+                               src_bytes + (src_offset + pass_offset) * elem_size,
+                               elem_size);
+                }
+            }
+        }
+
+        return result;
+    });
+
+    table.register_single_output_kernel(OpId::AdvancedIndexPut,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // inputs[0] = destination tensor, inputs[1] = values, inputs[2..] = index tensors
+        int64_t num_indices = attrs.get_int(AttrKey::NumIndices, 0);
+        auto result = inputs[0].clone();
+        const auto& values = inputs[1];
+        auto src_shape = result.shape();
+        int64_t src_ndim = static_cast<int64_t>(src_shape.size());
+
+        std::vector<bool> is_indexed(num_indices, false);
+        std::vector<int64_t> broadcast_shape;
+        for (int64_t i = 0; i < num_indices; ++i) {
+            const auto& idx_t = inputs[2 + i];
+            if (idx_t.numel() > 0) {
+                is_indexed[i] = true;
+                if (broadcast_shape.empty()) {
+                    auto s = idx_t.shape();
+                    broadcast_shape.assign(s.begin(), s.end());
+                }
+            }
+        }
+
+        if (broadcast_shape.empty()) {
+            throw std::runtime_error("AdvancedIndexPut: no non-null index tensors");
+        }
+
+        int64_t bc_numel = 1;
+        for (auto d : broadcast_shape) bc_numel *= d;
+
+        std::vector<int64_t> src_strides(src_ndim);
+        src_strides[src_ndim - 1] = 1;
+        for (int64_t d = src_ndim - 2; d >= 0; --d) {
+            src_strides[d] = src_strides[d + 1] * src_shape[d + 1];
+        }
+
+        std::vector<int64_t> pass_dims;
+        for (int64_t i = 0; i < num_indices; ++i) {
+            if (!is_indexed[i]) pass_dims.push_back(i);
+        }
+        for (int64_t i = num_indices; i < src_ndim; ++i) {
+            pass_dims.push_back(i);
+        }
+
+        int64_t pass_numel = 1;
+        for (auto d : pass_dims) pass_numel *= src_shape[d];
+
+        std::vector<const int64_t*> idx_ptrs(num_indices, nullptr);
+        std::vector<Tensor> idx_contig(num_indices);
+        for (int64_t i = 0; i < num_indices; ++i) {
+            if (is_indexed[i]) {
+                idx_contig[i] = inputs[2 + i].contiguous();
+                idx_ptrs[i] = idx_contig[i].data<int64_t>();
+            }
+        }
+
+        auto result_contig = result.contiguous();
+        auto values_contig = values.contiguous();
+        size_t elem_size = tenzor::dtype_size(result.dtype());
+        auto* dst_bytes = static_cast<uint8_t*>(result_contig.data_ptr());
+        const auto* val_bytes = static_cast<const uint8_t*>(values_contig.data_ptr());
+
+        for (int64_t bc = 0; bc < bc_numel; ++bc) {
+            int64_t dst_offset = 0;
+            for (int64_t i = 0; i < num_indices; ++i) {
+                if (is_indexed[i]) {
+                    int64_t idx_val = idx_ptrs[i][bc];
+                    if (idx_val < 0) idx_val += src_shape[i];
+                    if (idx_val < 0 || idx_val >= src_shape[i]) {
+                        throw std::out_of_range(
+                            "AdvancedIndexPut: index " + std::to_string(idx_val) +
+                            " out of range for dim " + std::to_string(i) +
+                            " with size " + std::to_string(src_shape[i]));
+                    }
+                    dst_offset += idx_val * src_strides[i];
+                }
+            }
+
+            if (pass_dims.empty()) {
+                std::memcpy(dst_bytes + dst_offset * elem_size,
+                           val_bytes + bc * elem_size,
+                           elem_size);
+            } else {
+                for (int64_t p = 0; p < pass_numel; ++p) {
+                    int64_t pass_offset = 0;
+                    int64_t remaining = p;
+                    for (int64_t k = static_cast<int64_t>(pass_dims.size()) - 1; k >= 0; --k) {
+                        int64_t d = pass_dims[k];
+                        int64_t coord = remaining % src_shape[d];
+                        remaining /= src_shape[d];
+                        pass_offset += coord * src_strides[d];
+                    }
+
+                    std::memcpy(dst_bytes + (dst_offset + pass_offset) * elem_size,
+                               val_bytes + (bc * pass_numel + p) * elem_size,
+                               elem_size);
+                }
+            }
+        }
+
+        return result_contig;
+    });
+
+    // =========================================================================
     // Advanced Operations (TopK, Sort, CumSum, CumProd, Unique)
     // =========================================================================
     table.register_kernel(OpId::TopK, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {

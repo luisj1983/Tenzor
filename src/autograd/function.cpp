@@ -2007,8 +2007,25 @@ auto GeluBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 }
 
 auto GeluBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // GELU backward: grad * (cdf + x * pdf)
+    // where cdf = 0.5 * (1 + erf(x/sqrt(2))), pdf = (1/sqrt(2*pi)) * exp(-x^2/2)
+    Variable input_var(saved_tensors_[0], false);
+
+    constexpr double sqrt2 = 1.4142135623730951;
+    constexpr double inv_sqrt_2pi = 0.3989422804014327;
+
+    // cdf = 0.5 * (1 + erf(x / sqrt(2)))
+    auto x_over_sqrt2 = input_var * (1.0 / sqrt2);
+    auto erf_val = tenzor::erf(x_over_sqrt2);
+    auto cdf = (erf_val + 1.0) * 0.5;
+
+    // pdf = (1/sqrt(2*pi)) * exp(-x^2/2)
+    auto x_sq = input_var * input_var;
+    auto neg_half_x_sq = x_sq * (-0.5);
+    auto pdf = tenzor::exp(neg_half_x_sq) * inv_sqrt_2pi;
+
+    // grad_input = grad * (cdf + x * pdf)
+    return {grad_outputs[0] * (cdf + input_var * pdf)};
 }
 
 // EluBackward implementation
@@ -2043,8 +2060,28 @@ auto EluBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
 }
 
 auto EluBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // ELU backward: grad * where(input > 0, 1, alpha * exp(input))
+    // The mask is non-differentiable; compute it at Tensor level
+    const auto& input = saved_tensors_[0];
+    const auto& alpha_tensor = saved_tensors_[1];
+    float alpha_val = alpha_tensor.data<float>()[0];
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+
+    auto zero_tensor = zeros(shape_vec, input.dtype(), input.device());
+    auto mask = gt(input, zero_tensor);  // Tensor-level (non-differentiable)
+
+    auto ones_tensor = ones(shape_vec, input.dtype(), input.device());
+
+    // For the negative branch, use Variable ops so exp(input) is tracked
+    Variable input_var(input, false);
+    auto neg_grad = tenzor::exp(input_var) * static_cast<double>(alpha_val);
+
+    // where with non-differentiable mask: wrap Tensor constants as Variables
+    Variable mask_var(mask, false);
+    Variable ones_var(ones_tensor, false);
+    auto grad_factor = tenzor::where(mask_var, ones_var, neg_grad);
+
+    return {grad_outputs[0] * grad_factor};
 }
 
 // SeluBackward implementation
@@ -2076,8 +2113,27 @@ auto SeluBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 }
 
 auto SeluBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // SELU backward: grad * where(input > 0, lambda, lambda * alpha * exp(input))
+    const auto& input = saved_tensors_[0];
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+
+    constexpr double lambda = 1.0507009873554804934193349852946;
+    constexpr double alpha = 1.6732632423543772848170429916717;
+
+    auto zero_tensor = zeros(shape_vec, input.dtype(), input.device());
+    auto mask = gt(input, zero_tensor);  // Non-differentiable mask
+
+    auto pos_grad_tensor = full(shape_vec, lambda, input.dtype(), input.device());
+
+    // Negative branch uses Variable exp for tracking
+    Variable input_var(input, false);
+    auto neg_grad = tenzor::exp(input_var) * (lambda * alpha);
+
+    Variable mask_var(mask, false);
+    Variable pos_var(pos_grad_tensor, false);
+    auto grad_factor = tenzor::where(mask_var, pos_var, neg_grad);
+
+    return {grad_outputs[0] * grad_factor};
 }
 
 // MishBackward implementation
@@ -2113,8 +2169,31 @@ auto MishBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 }
 
 auto MishBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // Mish backward: grad * (tanh(sp) + x * sigmoid(x) * (1 - tanh(sp)^2))
+    // where sp = softplus(x) = log(1 + exp(x))
+    Variable input_var(saved_tensors_[0], false);
+
+    // softplus(x) = log(1 + exp(x))
+    auto exp_x = tenzor::exp(input_var);
+    auto sp = tenzor::log(exp_x + 1.0);
+
+    // tanh_sp = tanh(sp)
+    auto tanh_sp = tenzor::tanh(sp);
+
+    // sigmoid(x)
+    auto sig_x = tenzor::sigmoid(input_var);
+
+    // 1 - tanh(sp)^2
+    auto one_tensor = ones(std::vector<int64_t>(saved_tensors_[0].shape().begin(),
+                                                 saved_tensors_[0].shape().end()),
+                           saved_tensors_[0].dtype(), saved_tensors_[0].device());
+    Variable one_var(one_tensor, false);
+    auto one_minus_tanh_sq = one_var - tanh_sp * tanh_sp;
+
+    // x * sigmoid(x) * (1 - tanh(sp)^2)
+    auto second_term = input_var * sig_x * one_minus_tanh_sq;
+
+    return {grad_outputs[0] * (tanh_sp + second_term)};
 }
 
 // LeakyReluBackward implementation
@@ -2142,8 +2221,23 @@ auto LeakyReluBackward::backward(std::vector<Tensor> grad_outputs) -> std::vecto
 }
 
 auto LeakyReluBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // LeakyReLU backward: grad * where(input > 0, 1, negative_slope)
+    // The mask is non-differentiable, compute at Tensor level
+    const auto& input = saved_tensors_[0];
+    const auto& slope_tensor = saved_tensors_[1];
+    float slope_val = slope_tensor.data<float>()[0];
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+
+    auto zero_tensor = zeros(shape_vec, input.dtype(), input.device());
+    auto mask = gt(input, zero_tensor);
+
+    auto ones_tensor = ones(shape_vec, input.dtype(), input.device());
+    auto slope_full = full(shape_vec, static_cast<double>(slope_val), input.dtype(), input.device());
+
+    // Mask-based selection is non-differentiable, so Tensor-level where is fine
+    auto grad_factor = where(mask, ones_tensor, slope_full);
+    Variable factor_var(grad_factor, false);
+    return {grad_outputs[0] * factor_var};
 }
 
 // SoftplusBackward implementation
@@ -2167,8 +2261,14 @@ auto SoftplusBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector
 }
 
 auto SoftplusBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // Softplus backward: grad * sigmoid(beta * input)
+    Variable input_var(saved_tensors_[0], false);
+    float beta_val = saved_tensors_[1].data<float>()[0];
+
+    auto beta_x = input_var * static_cast<double>(beta_val);
+    auto sig = tenzor::sigmoid(beta_x);
+
+    return {grad_outputs[0] * sig};
 }
 
 // =========================================================================
@@ -2232,8 +2332,32 @@ auto PowBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
 }
 
 auto PowBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // pow backward: grad * exponent * pow(input, exponent - 1)
+    const auto& input = saved_tensors_[0];
+    float exp_val = saved_tensors_[1].data<float>()[0];
+
+    if (exp_val == 0.0f) {
+        // d/dx(x^0) = 0
+        return {Variable(zeros(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                               input.dtype(), input.device()), false)};
+    }
+    if (exp_val == 1.0f) {
+        // d/dx(x^1) = 1
+        return {grad_outputs[0]};
+    }
+
+    // General case: grad * exponent * pow(input, exponent - 1) * sign(input)
+    // Use Variable ops for pow and sign tracking
+    Variable input_var(input, false);
+    auto eps_tensor = full(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                           detail::dtype_epsilon(input.dtype()), input.dtype(), input.device());
+    Variable eps_var(eps_tensor, false);
+    auto safe_input = tenzor::abs(input_var) + eps_var;
+    auto pow_term = tenzor::pow(safe_input, exp_val - 1.0f);
+    auto scaled = pow_term * static_cast<double>(exp_val);
+    auto sign_tensor = sign(input);
+    Variable sign_var(sign_tensor, false);
+    return {grad_outputs[0] * scaled * sign_var};
 }
 
 // ReciprocalBackward implementation
@@ -2268,9 +2392,9 @@ auto SinBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
 }
 
 auto SinBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // sin backward: grad * cos(input)
     Variable input_var(saved_tensors_[0], false);
-    auto cos_val = Variable(cos(saved_tensors_[0]), false);
-    return {grad_outputs[0] * cos_val};
+    return {grad_outputs[0] * tenzor::cos(input_var)};
 }
 
 // CosBackward implementation
@@ -2286,8 +2410,9 @@ auto CosBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
 }
 
 auto CosBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto neg_sin_val = Variable(neg(sin(saved_tensors_[0])), false);
-    return {grad_outputs[0] * neg_sin_val};
+    // cos backward: grad * (-sin(input))
+    Variable input_var(saved_tensors_[0], false);
+    return {grad_outputs[0] * tenzor::neg(tenzor::sin(input_var))};
 }
 
 // TanBackward implementation
@@ -2306,8 +2431,10 @@ auto TanBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
 }
 
 auto TanBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // tan backward: grad * (1 + tan(x)^2) = grad * sec^2(x)
+    // saved_tensors_[0] = tan(x) (output)
     Variable output_var(saved_tensors_[0], false);
-    auto sec_sq = Variable(add(mul(saved_tensors_[0], saved_tensors_[0]), 1.0), false);
+    auto sec_sq = output_var * output_var + 1.0;
     return {grad_outputs[0] * sec_sq};
 }
 
@@ -2332,8 +2459,21 @@ auto AsinBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 }
 
 auto AsinBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // asin backward: grad / sqrt(1 - x^2)
+    Variable input_var(saved_tensors_[0], false);
+    auto one_tensor = ones(std::vector<int64_t>(saved_tensors_[0].shape().begin(),
+                                                 saved_tensors_[0].shape().end()),
+                           saved_tensors_[0].dtype(), saved_tensors_[0].device());
+    Variable one_var(one_tensor, false);
+    auto one_minus_sq = one_var - input_var * input_var;
+    // Clamp at Tensor level for numerical safety, wrap as constant
+    auto clamped = clamp_min(one_minus_sq.tensor(), 0.0);
+    auto eps = full(std::vector<int64_t>(saved_tensors_[0].shape().begin(),
+                                          saved_tensors_[0].shape().end()),
+                    detail::dtype_epsilon(saved_tensors_[0].dtype()),
+                    saved_tensors_[0].dtype(), saved_tensors_[0].device());
+    auto denom = Variable(sqrt(add(clamped, eps)), false);
+    return {grad_outputs[0] / denom};
 }
 
 // AcosBackward implementation
@@ -2357,8 +2497,21 @@ auto AcosBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 }
 
 auto AcosBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // acos backward: -grad / sqrt(1 - x^2)
+    Variable input_var(saved_tensors_[0], false);
+    auto one_tensor = ones(std::vector<int64_t>(saved_tensors_[0].shape().begin(),
+                                                 saved_tensors_[0].shape().end()),
+                           saved_tensors_[0].dtype(), saved_tensors_[0].device());
+    Variable one_var(one_tensor, false);
+    auto one_minus_sq = one_var - input_var * input_var;
+    // Clamp at Tensor level for numerical safety, wrap as constant
+    auto clamped = clamp_min(one_minus_sq.tensor(), 0.0);
+    auto eps = full(std::vector<int64_t>(saved_tensors_[0].shape().begin(),
+                                          saved_tensors_[0].shape().end()),
+                    detail::dtype_epsilon(saved_tensors_[0].dtype()),
+                    saved_tensors_[0].dtype(), saved_tensors_[0].device());
+    auto denom = Variable(sqrt(add(clamped, eps)), false);
+    return {tenzor::neg(grad_outputs[0] / denom)};
 }
 
 // AtanBackward implementation
@@ -2377,8 +2530,9 @@ auto AtanBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 }
 
 auto AtanBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // atan backward: grad / (1 + x^2)
     Variable input_var(saved_tensors_[0], false);
-    auto denom = Variable(add(mul(saved_tensors_[0], saved_tensors_[0]), 1.0), false);
+    auto denom = input_var * input_var + 1.0;
     return {grad_outputs[0] / denom};
 }
 
@@ -2395,8 +2549,9 @@ auto SinhBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 }
 
 auto SinhBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto cosh_val = Variable(cosh(saved_tensors_[0]), false);
-    return {grad_outputs[0] * cosh_val};
+    // sinh backward: grad * cosh(input)
+    Variable input_var(saved_tensors_[0], false);
+    return {grad_outputs[0] * tenzor::cosh(input_var)};
 }
 
 // CoshBackward implementation
@@ -2412,8 +2567,9 @@ auto CoshBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 }
 
 auto CoshBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto sinh_val = Variable(sinh(saved_tensors_[0]), false);
-    return {grad_outputs[0] * sinh_val};
+    // cosh backward: grad * sinh(input)
+    Variable input_var(saved_tensors_[0], false);
+    return {grad_outputs[0] * tenzor::sinh(input_var)};
 }
 
 // =========================================================================
@@ -2439,8 +2595,13 @@ auto ErfBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
 }
 
 auto ErfBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // erf backward: grad * (2/sqrt(pi)) * exp(-x^2)
+    Variable input_var(saved_tensors_[0], false);
+    constexpr double two_over_sqrt_pi = 1.1283791670955126;
+
+    auto neg_x_sq = tenzor::neg(input_var * input_var);
+    auto exp_term = tenzor::exp(neg_x_sq);
+    return {grad_outputs[0] * exp_term * two_over_sqrt_pi};
 }
 
 // ErfcBackward implementation
@@ -2462,8 +2623,13 @@ auto ErfcBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 }
 
 auto ErfcBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // erfc backward: grad * (-2/sqrt(pi)) * exp(-x^2)
+    Variable input_var(saved_tensors_[0], false);
+    constexpr double neg_two_over_sqrt_pi = -1.1283791670955126;
+
+    auto neg_x_sq = tenzor::neg(input_var * input_var);
+    auto exp_term = tenzor::exp(neg_x_sq);
+    return {grad_outputs[0] * exp_term * neg_two_over_sqrt_pi};
 }
 
 // Log2Backward implementation
@@ -2524,9 +2690,9 @@ auto Log1pBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Te
 }
 
 auto Log1pBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // log1p backward: grad / (1 + x)
     Variable input_var(saved_tensors_[0], false);
-    auto denom = Variable(add(saved_tensors_[0], 1.0), false);
-    return {grad_outputs[0] / denom};
+    return {grad_outputs[0] / (input_var + 1.0)};
 }
 
 // Exp2Backward implementation
@@ -2564,8 +2730,9 @@ auto Expm1Backward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Te
 }
 
 auto Expm1Backward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto exp_val = Variable(exp(saved_tensors_[0]), false);
-    return {grad_outputs[0] * exp_val};
+    // expm1 backward: grad * exp(input)
+    Variable input_var(saved_tensors_[0], false);
+    return {grad_outputs[0] * tenzor::exp(input_var)};
 }
 
 // Atan2Backward implementation
@@ -2592,10 +2759,10 @@ auto Atan2Backward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Te
 }
 
 auto Atan2Backward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // atan2 backward: grad_y = grad * x / (x^2 + y^2), grad_x = grad * (-y) / (x^2 + y^2)
     Variable y_var(saved_tensors_[0], false);
     Variable x_var(saved_tensors_[1], false);
-    auto denom = Variable(add(mul(saved_tensors_[1], saved_tensors_[1]),
-                              mul(saved_tensors_[0], saved_tensors_[0])), false);
+    auto denom = x_var * x_var + y_var * y_var;
     auto grad_y = grad_outputs[0] * x_var / denom;
     auto grad_x = grad_outputs[0] * tenzor::neg(y_var) / denom;
     return {grad_y, grad_x};
@@ -2777,8 +2944,52 @@ auto StdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
 }
 
 auto StdBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // std backward: grad * (input - mean) / (N * std)
+    // diff and n_std are constants (don't depend on grad); compute at Tensor level
+    const auto& input = saved_tensors_[0];
+    const auto& std_out = saved_tensors_[1];
+    auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+
+    bool has_dim = saved_tensors_.size() > 2;
+    std::optional<int64_t> dim_opt;
+    int64_t N;
+    bool keepdim;
+
+    if (has_dim) {
+        int64_t dim = saved_tensors_[2].data<int64_t>()[0];
+        if (dim < 0) dim += input.shape().size();
+        dim_opt = dim;
+        N = input.shape()[dim];
+        keepdim = (std_out.ndim() == input.ndim());
+    } else {
+        N = input.numel();
+        keepdim = false;
+    }
+
+    auto input_mean = mean(input, dim_opt, true);
+    auto diff = sub(input, expand(input_mean, input_shape_vec));
+
+    auto std_expanded = std_out;
+    if (dim_opt.has_value() && !keepdim) {
+        std_expanded = unsqueeze(std_out, dim_opt.value());
+    } else if (!dim_opt.has_value()) {
+        std_expanded = reshape(std_out, std::vector<int64_t>(input_shape_vec.size(), 1));
+    }
+    std_expanded = expand(std_expanded, input_shape_vec);
+    auto n_std = mul(std_expanded, static_cast<double>(N));
+    auto factor = div(diff, n_std);
+    Variable factor_var(factor, false);
+
+    // Expand grad at Variable level so reshape/expand are tracked for higher-order
+    auto grad_var = grad_outputs[0];
+    if (dim_opt.has_value() && !keepdim) {
+        grad_var = tenzor::unsqueeze(grad_var, dim_opt.value());
+    } else if (!dim_opt.has_value()) {
+        grad_var = tenzor::reshape(grad_var, std::vector<int64_t>(input_shape_vec.size(), 1));
+    }
+    grad_var = tenzor::expand(grad_var, input_shape_vec);
+
+    return {grad_var * factor_var};
 }
 
 // VarBackward implementation
@@ -2838,8 +3049,44 @@ auto VarBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
 }
 
 auto VarBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // var backward: grad * 2 * (input - mean) / N
+    const auto& input = saved_tensors_[0];
+    const auto& var_out = saved_tensors_[1];
+    auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+
+    bool has_dim = saved_tensors_.size() > 2;
+    std::optional<int64_t> dim_opt;
+    int64_t N;
+    bool keepdim;
+
+    if (has_dim) {
+        int64_t dim = saved_tensors_[2].data<int64_t>()[0];
+        if (dim < 0) dim += input.shape().size();
+        dim_opt = dim;
+        N = input.shape()[dim];
+        keepdim = (var_out.ndim() == input.ndim());
+    } else {
+        N = input.numel();
+        keepdim = false;
+    }
+
+    // diff = (input - mean) is a constant w.r.t. higher-order gradients
+    auto input_mean = mean(input, dim_opt, true);
+    auto diff = sub(input, expand(input_mean, input_shape_vec));
+    double scale = 2.0 / static_cast<double>(N);
+    auto factor = mul(diff, scale);
+    Variable factor_var(factor, false);
+
+    // Expand grad at Variable level
+    auto grad_var = grad_outputs[0];
+    if (dim_opt.has_value() && !keepdim) {
+        grad_var = tenzor::unsqueeze(grad_var, dim_opt.value());
+    } else if (!dim_opt.has_value()) {
+        grad_var = tenzor::reshape(grad_var, std::vector<int64_t>(input_shape_vec.size(), 1));
+    }
+    grad_var = tenzor::expand(grad_var, input_shape_vec);
+
+    return {grad_var * factor_var};
 }
 
 // ProdBackward implementation
@@ -2898,8 +3145,50 @@ auto ProdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 }
 
 auto ProdBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // prod backward: grad * prod / input (with zero handling)
+    // prod and input are constants; compute factor at Tensor level
+    const auto& input = saved_tensors_[0];
+    const auto& prod_out = saved_tensors_[1];
+    auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+
+    bool has_dim = saved_tensors_.size() > 2;
+    std::optional<int64_t> dim_opt;
+    bool keepdim;
+
+    if (has_dim) {
+        int64_t dim = saved_tensors_[2].data<int64_t>()[0];
+        if (dim < 0) dim += input.shape().size();
+        dim_opt = dim;
+        keepdim = (prod_out.ndim() == input.ndim());
+    } else {
+        keepdim = false;
+    }
+
+    // Expand prod_out to input shape
+    auto prod_expanded = prod_out;
+    if (dim_opt.has_value() && !keepdim) {
+        prod_expanded = unsqueeze(prod_out, dim_opt.value());
+    } else if (!dim_opt.has_value()) {
+        prod_expanded = reshape(prod_out, std::vector<int64_t>(input_shape_vec.size(), 1));
+    }
+    prod_expanded = expand(prod_expanded, input_shape_vec);
+
+    // Safe division: replace zeros with ones
+    auto mask_zero = eq(input, zeros(input_shape_vec, input.dtype(), input.device()));
+    auto safe_input = where(mask_zero, ones(input_shape_vec, input.dtype(), input.device()), input);
+    auto factor = div(prod_expanded, safe_input);
+    Variable factor_var(factor, false);
+
+    // Expand grad at Variable level
+    auto grad_var = grad_outputs[0];
+    if (dim_opt.has_value() && !keepdim) {
+        grad_var = tenzor::unsqueeze(grad_var, dim_opt.value());
+    } else if (!dim_opt.has_value()) {
+        grad_var = tenzor::reshape(grad_var, std::vector<int64_t>(input_shape_vec.size(), 1));
+    }
+    grad_var = tenzor::expand(grad_var, input_shape_vec);
+
+    return {grad_var * factor_var};
 }
 
 // LogSumExpBackward implementation
@@ -2937,8 +3226,32 @@ auto LogSumExpBackward::backward(std::vector<Tensor> grad_outputs) -> std::vecto
 }
 
 auto LogSumExpBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // logsumexp backward: grad * softmax(input, dim)
+    // softmax = exp(input - logsumexp) is a constant; compute at Tensor level
+    const auto& input = saved_tensors_[0];
+    const auto& lse_out = saved_tensors_[1];
+    auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+
+    int64_t dim = saved_tensors_[2].data<int64_t>()[0];
+    if (dim < 0) dim += input.shape().size();
+    bool keepdim = (lse_out.ndim() == input.ndim());
+
+    auto lse_expanded = lse_out;
+    if (!keepdim) {
+        lse_expanded = unsqueeze(lse_out, dim);
+    }
+    lse_expanded = expand(lse_expanded, input_shape_vec);
+    auto softmax_val = exp(sub(input, lse_expanded));
+    Variable softmax_var(softmax_val, false);
+
+    // Expand grad at Variable level
+    auto grad_var = grad_outputs[0];
+    if (!keepdim) {
+        grad_var = tenzor::unsqueeze(grad_var, dim);
+    }
+    grad_var = tenzor::expand(grad_var, input_shape_vec);
+
+    return {grad_var * softmax_var};
 }
 
 // =========================================================================
@@ -3047,9 +3360,19 @@ auto WhereBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Te
 }
 
 auto WhereBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad()),
-            Variable(result[1], grad_outputs[0].requires_grad())};
+    // where backward: grad_x = where(condition, grad, 0), grad_y = where(condition, 0, grad)
+    // condition is non-differentiable
+    const auto& condition = saved_tensors_[0];
+    auto shape_vec = std::vector<int64_t>(grad_outputs[0].shape().begin(), grad_outputs[0].shape().end());
+    auto zeros_tensor = zeros(shape_vec, grad_outputs[0].tensor().dtype(), grad_outputs[0].tensor().device());
+
+    Variable cond_var(condition, false);
+    Variable zeros_var(zeros_tensor, false);
+
+    auto grad_x = tenzor::where(cond_var, grad_outputs[0], zeros_var);
+    auto grad_y = tenzor::where(cond_var, zeros_var, grad_outputs[0]);
+
+    return {grad_x, grad_y};
 }
 
 // GatherBackward implementation
@@ -3166,6 +3489,47 @@ auto IndexSelectBackward::backward_with_variables(std::vector<Variable> grad_out
     return {Variable(result[0], grad_outputs[0].requires_grad())};
 }
 
+// IndexBackward implementation
+// Backward of advanced (fancy) indexing: scatter_add grad into zeros of input shape
+auto IndexBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("IndexBackward::forward should not be called");
+}
+
+auto IndexBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    const auto& grad = grad_outputs[0];
+
+    // saved_tensors_[0] = input shape (1D Int64)
+    // saved_tensors_[1..num_indices_] = index tensors (0-element = nullopt)
+    const auto& shape_tensor = saved_tensors_[0];
+    auto shape_ptr = shape_tensor.data<int64_t>();
+    auto input_shape = std::vector<int64_t>(shape_ptr, shape_ptr + shape_tensor.numel());
+
+    // Create zeros of input shape
+    auto grad_input = zeros(input_shape, grad.dtype(), grad.device());
+
+    // Reconstruct optional indices
+    std::vector<std::optional<Tensor>> indices;
+    indices.reserve(num_indices_);
+    for (int64_t i = 0; i < num_indices_; ++i) {
+        const auto& idx = saved_tensors_[1 + i];
+        if (idx.numel() > 0) {
+            indices.push_back(idx);
+        } else {
+            indices.push_back(std::nullopt);
+        }
+    }
+
+    // index_put with accumulation: grad_input[indices] += grad
+    index_put(grad_input, indices, grad);
+
+    return {grad_input};
+}
+
+auto IndexBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    auto result = backward({grad_outputs[0].tensor()});
+    return {Variable(result[0], grad_outputs[0].requires_grad())};
+}
+
 // NarrowBackward implementation
 // Saves dim, start, original_shape. backward: zero-pad grad to original shape
 auto NarrowBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
@@ -3234,8 +3598,11 @@ auto FlipBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 }
 
 auto FlipBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // flip backward: flip(grad, dims)
+    const auto& dims_tensor = saved_tensors_[0];
+    auto dims_ptr = dims_tensor.data<int64_t>();
+    auto dims = std::vector<int64_t>(dims_ptr, dims_ptr + dims_tensor.numel());
+    return {tenzor::flip(grad_outputs[0], dims)};
 }
 
 // RepeatBackward implementation
@@ -3288,8 +3655,35 @@ auto RepeatBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
 }
 
 auto RepeatBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // repeat backward: reshape grad to split repeated dims, sum over repeat dims
+    const auto& shape_tensor = saved_tensors_[0];
+    auto shape_ptr = shape_tensor.data<int64_t>();
+    auto original_shape = std::vector<int64_t>(shape_ptr, shape_ptr + shape_tensor.numel());
+
+    const auto& repeats_tensor = saved_tensors_[1];
+    auto repeats_ptr = repeats_tensor.data<int64_t>();
+    auto repeats = std::vector<int64_t>(repeats_ptr, repeats_ptr + repeats_tensor.numel());
+
+    auto ndim = original_shape.size();
+
+    // Build reshape: [repeats[0], orig[0], repeats[1], orig[1], ...]
+    std::vector<int64_t> expanded_shape;
+    expanded_shape.reserve(2 * ndim);
+    for (size_t i = 0; i < ndim; ++i) {
+        expanded_shape.push_back(repeats[i]);
+        expanded_shape.push_back(original_shape[i]);
+    }
+
+    auto grad_reshaped = tenzor::reshape(grad_outputs[0], expanded_shape);
+
+    // Sum over repeat dimensions (0, 2, 4, ...) from highest to avoid index shift
+    Variable result = grad_reshaped;
+    for (int64_t i = static_cast<int64_t>(ndim) - 1; i >= 0; --i) {
+        int64_t repeat_dim = 2 * i;
+        result = tenzor::sum(result, repeat_dim, false);
+    }
+
+    return {result};
 }
 
 // =========================================================================
@@ -4168,8 +4562,10 @@ auto CumSumBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
 }
 
 auto CumSumBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // cumsum backward: flip(cumsum(flip(grad, dim), dim), dim)
+    auto flipped = tenzor::flip(grad_outputs[0], {dim_});
+    auto cum = tenzor::cumsum(flipped, dim_);
+    return {tenzor::flip(cum, {dim_})};
 }
 
 // ============================================================================
@@ -4206,8 +4602,31 @@ auto CumProdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<
 }
 
 auto CumProdBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // cumprod backward: flip(cumsum(flip(output * grad, dim), dim), dim) / input
+    const auto& input = saved_tensors_[0];
+    const auto& output = saved_tensors_[1];
+    Variable output_var(output, false);
+
+    auto prod_grad = output_var * grad_outputs[0];
+    auto flipped = tenzor::flip(prod_grad, {dim_});
+    auto cum = tenzor::cumsum(flipped, dim_);
+    auto rev_cum = tenzor::flip(cum, {dim_});
+
+    // Zero-safe division at Tensor level (input is constant)
+    auto zero_t = zeros(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                        input.dtype(), input.device());
+    auto eps = full(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                    detail::dtype_epsilon(input.dtype()), input.dtype(), input.device());
+    auto zero_mask = eq(input, zero_t);
+    auto safe_input = where(zero_mask, eps, input);
+    Variable safe_input_var(safe_input, false);
+
+    auto result = rev_cum / safe_input_var;
+
+    // Zero out positions where input was zero
+    Variable zero_var(zero_t, false);
+    Variable mask_var(zero_mask, false);
+    return {tenzor::where(mask_var, zero_var, result)};
 }
 
 // ============================================================================
@@ -4281,8 +4700,8 @@ auto DiagBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 }
 
 auto DiagBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // diag backward: diag(grad, diagonal) reverses the operation
+    return {tenzor::diag(grad_outputs[0], diagonal_)};
 }
 
 // ============================================================================
@@ -4304,8 +4723,12 @@ auto TraceBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Te
 }
 
 auto TraceBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // trace backward: dL/dA = grad_scalar * eye(n)
+    const auto& input = saved_tensors_[0];
+    auto identity = eye(n_, std::nullopt, input.dtype(), input.device());
+    Variable eye_var(identity, false);
+    // grad is scalar; multiply broadcasts
+    return {grad_outputs[0] * eye_var};
 }
 
 // ============================================================================
@@ -4321,8 +4744,7 @@ auto TriuBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 }
 
 auto TriuBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    return {tenzor::triu(grad_outputs[0], diagonal_)};
 }
 
 // ============================================================================
@@ -4338,8 +4760,7 @@ auto TrilBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 }
 
 auto TrilBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    return {tenzor::tril(grad_outputs[0], diagonal_)};
 }
 
 // ============================================================================
@@ -4355,8 +4776,7 @@ auto FFTBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
 }
 
 auto FFTBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    return {fft_autograd::ifft(grad_outputs[0], n_, dim_, norm_)};
 }
 
 // ============================================================================
@@ -4372,8 +4792,7 @@ auto IFFTBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 }
 
 auto IFFTBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    return {fft_autograd::fft(grad_outputs[0], n_, dim_, norm_)};
 }
 
 // ============================================================================
@@ -4390,8 +4809,7 @@ auto RFFTBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 }
 
 auto RFFTBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    return {fft_autograd::irfft(grad_outputs[0], signal_length_, dim_, norm_)};
 }
 
 // ============================================================================
@@ -4407,8 +4825,7 @@ auto IRFFTBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Te
 }
 
 auto IRFFTBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    return {fft_autograd::rfft(grad_outputs[0], std::nullopt, dim_, norm_)};
 }
 
 // ============================================================================
