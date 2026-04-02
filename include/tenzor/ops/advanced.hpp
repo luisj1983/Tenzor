@@ -161,6 +161,19 @@ auto mode(const Tensor& input,
           int64_t dim = -1,
           bool keepdim = false) -> std::tuple<Tensor, Tensor>;
 
+/**
+ * @brief Assign each element to a bucket based on sorted boundaries.
+ *
+ * For each element in input, finds the bucket index via binary search
+ * in the sorted boundaries tensor.
+ *
+ * @param input Input tensor of values to bucketize
+ * @param boundaries 1-D sorted tensor of bucket boundaries
+ * @param right If true, use right-closed intervals (default: false, left-closed)
+ * @return Int64 tensor of bucket indices with same shape as input
+ */
+auto bucketize(const Tensor& input, const Tensor& boundaries, bool right = false) -> Tensor;
+
 /** @} */ // end of tensor_advanced group
 
 } // namespace tenzor

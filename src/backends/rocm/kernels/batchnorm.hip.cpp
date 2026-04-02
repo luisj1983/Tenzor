@@ -1,5 +1,8 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
+#ifdef USE_MIOPEN
+#include <miopen/miopen.h>
+#endif
 #include <cmath>
 #include <cfloat>
 #include <cstdio>
@@ -8,9 +11,21 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#ifdef USE_MIOPEN
+#include "../miopen_guards.hpp"
+#endif
 
 namespace tenzor {
 namespace rocm {
+
+#ifdef USE_MIOPEN
+#define MIOPEN_CHECK(call) do { \
+    miopenStatus_t status = call; \
+    if (status != miopenStatusSuccess) { \
+        throw std::runtime_error(std::string("MIOpen error in batchnorm: ") + std::to_string(status)); \
+    } \
+} while(0)
+#endif
 
 // ============================================================================
 // HIP Helper Functions
@@ -1116,6 +1131,206 @@ __global__ void groupnorm_backward_kernel(const T* grad_output,
 // ============================================================================
 
 // Compute mean and variance for a batch
+// ==============================================================================
+// MIOpen-Accelerated Batch Normalization Paths
+// ==============================================================================
+
+#ifdef USE_MIOPEN
+
+// MIOpen batch normalization forward (training mode).
+// Computes output, saves mean/invVariance, and updates running stats.
+auto batchnorm2d_forward_training_miopen(
+    const Tensor& input,
+    const Tensor& gamma,        // scale (C,)
+    const Tensor& beta,         // bias (C,)
+    Tensor& running_mean,       // (C,) — updated in-place
+    Tensor& running_var,        // (C,) — updated in-place
+    float momentum,
+    float epsilon,
+    hipStream_t stream
+) -> std::tuple<Tensor, Tensor, Tensor> {
+    // input: (N, C, H, W)
+    auto shape = input.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t H = shape[2];
+    int64_t W = shape[3];
+
+    std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+    Tensor output(shape_vec, input.dtype(), input.device());
+    Tensor saved_mean({C}, DType::Float32, input.device());
+    Tensor saved_inv_var({C}, DType::Float32, input.device());
+
+    tenzor::rocm::MiopenHandleGuard miopen_guard;
+    MIOPEN_CHECK(miopenSetStream(miopen_guard.handle, stream));
+
+    tenzor::rocm::MiopenTensorDescGuard input_desc_guard;
+    MIOPEN_CHECK(miopenSet4dTensorDescriptor(
+        input_desc_guard.desc, miopenFloat,
+        N, C, H, W));
+
+    // MIOpen uses a tensor descriptor for the per-channel BN parameters
+    tenzor::rocm::MiopenTensorDescGuard bn_desc_guard;
+    MIOPEN_CHECK(miopenDeriveBNTensorDescriptor(
+        bn_desc_guard.desc,
+        input_desc_guard.desc,
+        miopenBNSpatial));
+
+    float alpha = 1.0f;
+    float beta_blend = 0.0f;
+    // MIOpen uses exponentialAverageFactor = 1 - momentum (opposite convention
+    // to PyTorch).  MIOpen: running = running*(1-factor) + batch*factor
+    // PyTorch:  running = running*(1-momentum) + batch*momentum
+    // So factor == momentum in our convention.
+    double exp_avg_factor = static_cast<double>(momentum);
+
+    MIOPEN_CHECK(miopenBatchNormalizationForwardTraining(
+        miopen_guard.handle,
+        miopenBNSpatial,
+        &alpha,
+        &beta_blend,
+        input_desc_guard.desc,
+        input.data<float>(),
+        input_desc_guard.desc,
+        output.data<float>(),
+        bn_desc_guard.desc,
+        const_cast<float*>(gamma.data<float>()),
+        const_cast<float*>(beta.data<float>()),
+        exp_avg_factor,
+        running_mean.data<float>(),
+        running_var.data<float>(),
+        epsilon,
+        saved_mean.data<float>(),
+        saved_inv_var.data<float>()));
+
+    return {output, saved_mean, saved_inv_var};
+}
+
+// MIOpen batch normalization forward (inference mode).
+auto batchnorm2d_forward_inference_miopen(
+    const Tensor& input,
+    const Tensor& gamma,
+    const Tensor& beta,
+    const Tensor& running_mean,
+    const Tensor& running_var,
+    float epsilon,
+    hipStream_t stream
+) -> Tensor {
+    auto shape = input.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t H = shape[2];
+    int64_t W = shape[3];
+
+    std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+    Tensor output(shape_vec, input.dtype(), input.device());
+
+    tenzor::rocm::MiopenHandleGuard miopen_guard;
+    MIOPEN_CHECK(miopenSetStream(miopen_guard.handle, stream));
+
+    tenzor::rocm::MiopenTensorDescGuard input_desc_guard;
+    MIOPEN_CHECK(miopenSet4dTensorDescriptor(
+        input_desc_guard.desc, miopenFloat,
+        N, C, H, W));
+
+    tenzor::rocm::MiopenTensorDescGuard bn_desc_guard;
+    MIOPEN_CHECK(miopenDeriveBNTensorDescriptor(
+        bn_desc_guard.desc,
+        input_desc_guard.desc,
+        miopenBNSpatial));
+
+    float alpha = 1.0f;
+    float beta_blend = 0.0f;
+
+    MIOPEN_CHECK(miopenBatchNormalizationForwardInference(
+        miopen_guard.handle,
+        miopenBNSpatial,
+        &alpha,
+        &beta_blend,
+        input_desc_guard.desc,
+        input.data<float>(),
+        input_desc_guard.desc,
+        output.data<float>(),
+        bn_desc_guard.desc,
+        const_cast<float*>(gamma.data<float>()),
+        const_cast<float*>(beta.data<float>()),
+        const_cast<float*>(running_mean.data<float>()),
+        const_cast<float*>(running_var.data<float>()),
+        epsilon));
+
+    return output;
+}
+
+// MIOpen batch normalization backward.
+auto batchnorm2d_backward_miopen(
+    const Tensor& grad_output,
+    const Tensor& input,
+    const Tensor& gamma,
+    const Tensor& saved_mean,
+    const Tensor& saved_inv_var,
+    float epsilon,
+    hipStream_t stream
+) -> std::tuple<Tensor, Tensor, Tensor> {
+    auto shape = input.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t H = shape[2];
+    int64_t W = shape[3];
+
+    std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+    Tensor grad_input(shape_vec, input.dtype(), input.device());
+    Tensor grad_gamma({C}, DType::Float32, input.device());
+    Tensor grad_beta({C}, DType::Float32, input.device());
+
+    tenzor::rocm::MiopenHandleGuard miopen_guard;
+    MIOPEN_CHECK(miopenSetStream(miopen_guard.handle, stream));
+
+    tenzor::rocm::MiopenTensorDescGuard input_desc_guard;
+    MIOPEN_CHECK(miopenSet4dTensorDescriptor(
+        input_desc_guard.desc, miopenFloat,
+        N, C, H, W));
+
+    tenzor::rocm::MiopenTensorDescGuard bn_desc_guard;
+    MIOPEN_CHECK(miopenDeriveBNTensorDescriptor(
+        bn_desc_guard.desc,
+        input_desc_guard.desc,
+        miopenBNSpatial));
+
+    float alpha_data = 1.0f;
+    float beta_data = 0.0f;
+    float alpha_param = 1.0f;
+    float beta_param = 0.0f;
+
+    MIOPEN_CHECK(miopenBatchNormalizationBackward(
+        miopen_guard.handle,
+        miopenBNSpatial,
+        &alpha_data,
+        &beta_data,
+        &alpha_param,
+        &beta_param,
+        input_desc_guard.desc,
+        input.data<float>(),
+        input_desc_guard.desc,
+        grad_output.data<float>(),
+        input_desc_guard.desc,
+        grad_input.data<float>(),
+        bn_desc_guard.desc,
+        const_cast<float*>(gamma.data<float>()),
+        grad_gamma.data<float>(),
+        grad_beta.data<float>(),
+        epsilon,
+        const_cast<float*>(saved_mean.data<float>()),
+        const_cast<float*>(saved_inv_var.data<float>())));
+
+    return {grad_input, grad_gamma, grad_beta};
+}
+
+#endif // USE_MIOPEN
+
+// ==============================================================================
+// HIP Kernel-Based Batch Normalization (fallback when MIOpen unavailable)
+// ==============================================================================
+
 auto batchnorm2d_mean_var(const Tensor& input,
                           Tensor& mean,
                           Tensor& variance,

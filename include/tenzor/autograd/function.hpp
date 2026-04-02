@@ -8,9 +8,11 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <vector>
 #include <atomic>
 #include "../core/tensor.hpp"
@@ -1718,6 +1720,51 @@ public:
 
 private:
     std::optional<SparseTensor> sparse_transposed_;  ///< S^T stored in sparse format
+};
+
+/**
+ * @brief Backward function for sparse-dense addition.
+ *
+ * For Y = S + D (sparse + dense = dense):
+ * - grad_D = grad_Y  (gradient passes through to the dense input)
+ * - The sparse matrix S is not differentiated (treated as constant).
+ */
+class SparseAddBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto name() const -> std::string override { return "SparseAddBackward"; }
+};
+
+// ============================================================================
+// Custom Op Autograd
+// ============================================================================
+
+/// Forward declaration of custom op backward function type
+using CustomBackwardFn = std::function<std::vector<Tensor>(
+    std::span<const Tensor> saved_tensors,
+    std::span<const Tensor> grad_outputs)>;
+
+/**
+ * @brief Autograd function for user-registered custom operations.
+ *
+ * Created by autograd::dispatch_custom_op() when inputs require gradients.
+ * Stores the user-provided backward function and calls it during backpropagation.
+ *
+ * @see register_custom_op_with_backward()
+ */
+class CustomOpBackward : public Function {
+public:
+    explicit CustomOpBackward(CustomBackwardFn backward_fn)
+        : backward_fn_(std::move(backward_fn)) {}
+
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "CustomOpBackward"; }
+
+private:
+    CustomBackwardFn backward_fn_;
 };
 
 } // namespace tenzor

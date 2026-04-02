@@ -490,5 +490,139 @@ auto eye_kernel(int64_t n, int64_t m, DType dtype, const Device& device) -> Tens
     return result;
 }
 
+// ============================================================================
+// Multinomial Kernel - Weighted random sampling
+// ============================================================================
+
+auto multinomial_kernel(const Tensor& probs, int64_t num_samples, bool replacement) -> Tensor {
+    // probs: (N, C) or (C,) - probability weights (not necessarily normalized)
+    // Returns: (N, num_samples) or (num_samples,) of Int64 indices
+    auto shape = probs.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+
+    bool batched = (ndim == 2);
+    int64_t batch_size = batched ? shape[0] : 1;
+    int64_t num_categories = batched ? shape[1] : shape[0];
+
+    if (num_samples <= 0) {
+        throw std::runtime_error("multinomial: num_samples must be > 0");
+    }
+    if (!replacement && num_samples > num_categories) {
+        throw std::runtime_error("multinomial: cannot sample more than num_categories without replacement");
+    }
+
+    Tensor probs_f32 = (probs.dtype() != DType::Float32) ? probs.to(DType::Float32) : probs;
+    const float* p_data = probs_f32.data<float>();
+
+    std::vector<int64_t> out_shape;
+    if (batched) out_shape.push_back(batch_size);
+    out_shape.push_back(num_samples);
+
+    Tensor result(out_shape, DType::Int64, probs.device());
+    int64_t* out_data = result.data<int64_t>();
+
+    std::mt19937 rng(detail::get_base_seed());
+    std::uniform_real_distribution<float> uniform(0.0f, 1.0f);
+
+    for (int64_t b = 0; b < batch_size; ++b) {
+        const float* row = p_data + b * num_categories;
+
+        // Compute cumulative sum (unnormalized CDF)
+        std::vector<float> cumsum(static_cast<size_t>(num_categories));
+        cumsum[0] = row[0];
+        for (int64_t i = 1; i < num_categories; ++i) {
+            cumsum[static_cast<size_t>(i)] = cumsum[static_cast<size_t>(i - 1)] + row[i];
+        }
+        float total = cumsum[static_cast<size_t>(num_categories - 1)];
+        if (total <= 0.0f) {
+            throw std::runtime_error("multinomial: sum of probabilities must be > 0");
+        }
+
+        // Normalize
+        for (int64_t i = 0; i < num_categories; ++i) {
+            cumsum[static_cast<size_t>(i)] /= total;
+        }
+
+        int64_t* out_row = out_data + b * num_samples;
+
+        if (replacement) {
+            for (int64_t s = 0; s < num_samples; ++s) {
+                float u = uniform(rng);
+                // Binary search in cumsum
+                auto it = std::lower_bound(cumsum.begin(), cumsum.end(), u);
+                int64_t idx = static_cast<int64_t>(std::distance(cumsum.begin(), it));
+                if (idx >= num_categories) idx = num_categories - 1;
+                out_row[s] = idx;
+            }
+        } else {
+            // Without replacement: use modified cumsum, zero out sampled
+            std::vector<float> weights(row, row + num_categories);
+            for (int64_t s = 0; s < num_samples; ++s) {
+                // Recompute cumsum from current weights
+                std::vector<float> cs(static_cast<size_t>(num_categories));
+                cs[0] = weights[0];
+                for (int64_t i = 1; i < num_categories; ++i) {
+                    cs[static_cast<size_t>(i)] = cs[static_cast<size_t>(i - 1)] + weights[static_cast<size_t>(i)];
+                }
+                float t = cs[static_cast<size_t>(num_categories - 1)];
+                if (t <= 0.0f) {
+                    throw std::runtime_error("multinomial: ran out of positive-weight categories");
+                }
+
+                float u = uniform(rng) * t;
+                auto it = std::lower_bound(cs.begin(), cs.end(), u);
+                int64_t idx = static_cast<int64_t>(std::distance(cs.begin(), it));
+                if (idx >= num_categories) idx = num_categories - 1;
+                out_row[s] = idx;
+                weights[static_cast<size_t>(idx)] = 0.0f; // Remove sampled index
+            }
+        }
+    }
+
+    return result;
+}
+
+// ============================================================================
+// Bernoulli Kernel - Bernoulli distribution sampling
+// ============================================================================
+
+auto bernoulli_kernel(const Tensor& probs) -> Tensor {
+    // probs: any shape tensor of probabilities in [0, 1]
+    // Returns: same shape tensor of 0.0 or 1.0 (Float32)
+    Tensor probs_f32 = (probs.dtype() != DType::Float32) ? probs.to(DType::Float32) : probs;
+    int64_t n = probs_f32.numel();
+
+    Tensor result(std::vector<int64_t>(probs.shape().begin(), probs.shape().end()),
+                  DType::Float32, probs.device());
+    const float* p_data = probs_f32.data<float>();
+    float* out_data = result.data<float>();
+
+    if (n > static_cast<int64_t>(OMP_THRESHOLD)) {
+        unsigned int base_seed = detail::get_base_seed();
+        #pragma omp parallel
+        {
+#ifdef _OPENMP
+            int tid = omp_get_thread_num();
+#else
+            int tid = 0;
+#endif
+            std::mt19937 local_rng(base_seed + static_cast<unsigned int>(tid));
+            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+            #pragma omp for schedule(static)
+            for (int64_t i = 0; i < n; ++i) {
+                out_data[i] = (dist(local_rng) < p_data[i]) ? 1.0f : 0.0f;
+            }
+        }
+    } else {
+        std::mt19937 rng(detail::get_base_seed());
+        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+        for (int64_t i = 0; i < n; ++i) {
+            out_data[i] = (dist(rng) < p_data[i]) ? 1.0f : 0.0f;
+        }
+    }
+
+    return result;
+}
+
 } // namespace cpu
 } // namespace tenzor

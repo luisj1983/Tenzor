@@ -192,4 +192,20 @@ auto logsumexp(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
     return tenzor::where(inf_mask, max_val, result);
 }
 
+auto histogram(const Tensor& input, int64_t bins, double min_val, double max_val)
+    -> std::pair<Tensor, Tensor> {
+    if (bins <= 0) {
+        throw std::invalid_argument("histogram: bins must be positive");
+    }
+
+    auto inp = input.contiguous();
+    std::array<Tensor, 1> inputs = {inp};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::NumBins, bins);
+    attrs.set(AttrKey::Min, min_val);
+    attrs.set(AttrKey::Max, max_val);
+    auto results = dispatch<OpId::Histogram>(inputs, attrs);
+    return {results[0], results[1]};
+}
+
 } // namespace tenzor

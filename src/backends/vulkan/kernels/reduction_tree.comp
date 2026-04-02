@@ -1,0 +1,81 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint LOCAL_SIZE_X = 256;
+
+layout(binding = 0) buffer InputBuffer { float data[]; } input_buf;
+layout(binding = 1) buffer OutputBuffer { float data[]; } output_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint input_size;
+    uint output_size;
+    uint reduce_op;  // 0=sum, 1=max, 2=min
+} params;
+
+shared float shared_data[256];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint gid = gl_GlobalInvocationID.x;
+    uint group_id = gl_WorkGroupID.x;
+
+    // Load data (or identity element if out of bounds)
+    float val;
+    if (gid < params.input_size) {
+        val = input_buf.data[gid];
+    } else {
+        if (params.reduce_op == 0u) val = 0.0;       // sum identity
+        else if (params.reduce_op == 1u) val = -1e38; // max identity
+        else val = 1e38;                               // min identity
+    }
+
+    // Subgroup reduction (within wavefront/warp)
+    float subgroup_result;
+    if (params.reduce_op == 0u) {
+        subgroup_result = subgroupAdd(val);
+    } else if (params.reduce_op == 1u) {
+        subgroup_result = subgroupMax(val);
+    } else {
+        subgroup_result = subgroupMin(val);
+    }
+
+    // Write subgroup result to shared memory (one per subgroup)
+    if (gl_SubgroupInvocationID == 0u) {
+        shared_data[gl_SubgroupID] = subgroup_result;
+    }
+    barrier();
+
+    // Final reduction across subgroups in shared memory
+    uint num_subgroups = gl_NumSubgroups;
+    if (tid < num_subgroups) {
+        val = shared_data[tid];
+    } else {
+        if (params.reduce_op == 0u) val = 0.0;
+        else if (params.reduce_op == 1u) val = -1e38;
+        else val = 1e38;
+    }
+
+    // Tree reduction in shared memory
+    if (tid < num_subgroups) {
+        shared_data[tid] = val;
+    }
+    barrier();
+
+    for (uint stride = num_subgroups / 2u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) {
+            if (params.reduce_op == 0u)
+                shared_data[tid] += shared_data[tid + stride];
+            else if (params.reduce_op == 1u)
+                shared_data[tid] = max(shared_data[tid], shared_data[tid + stride]);
+            else
+                shared_data[tid] = min(shared_data[tid], shared_data[tid + stride]);
+        }
+        barrier();
+    }
+
+    // Write result
+    if (tid == 0u) {
+        output_buf.data[group_id] = shared_data[0];
+    }
+}

@@ -76,4 +76,92 @@ struct MiopenConvDescGuard {
 /// (MIOpen uses tensor descriptors for filters, not a separate type.)
 using MiopenFilterDescGuard = MiopenTensorDescGuard;
 
+/// RAII guard for miopenPoolingDescriptor_t.
+struct MiopenPoolingDescGuard {
+    miopenPoolingDescriptor_t desc = nullptr;
+
+    MiopenPoolingDescGuard() {
+        auto status = miopenCreatePoolingDescriptor(&desc);
+        if (status != miopenStatusSuccess) {
+            throw std::runtime_error(
+                std::string("miopenCreatePoolingDescriptor failed with status ") +
+                std::to_string(static_cast<int>(status)));
+        }
+    }
+
+    ~MiopenPoolingDescGuard() noexcept {
+        if (desc) miopenDestroyPoolingDescriptor(desc);
+    }
+
+    MiopenPoolingDescGuard(const MiopenPoolingDescGuard&) = delete;
+    MiopenPoolingDescGuard& operator=(const MiopenPoolingDescGuard&) = delete;
+};
+
+/// RAII guard for miopenActivationDescriptor_t.
+struct MiopenActivationDescGuard {
+    miopenActivationDescriptor_t desc = nullptr;
+
+    MiopenActivationDescGuard() {
+        auto status = miopenCreateActivationDescriptor(&desc);
+        if (status != miopenStatusSuccess) {
+            throw std::runtime_error(
+                std::string("miopenCreateActivationDescriptor failed with status ") +
+                std::to_string(static_cast<int>(status)));
+        }
+    }
+
+    ~MiopenActivationDescGuard() noexcept {
+        if (desc) miopenDestroyActivationDescriptor(desc);
+    }
+
+    MiopenActivationDescGuard(const MiopenActivationDescGuard&) = delete;
+    MiopenActivationDescGuard& operator=(const MiopenActivationDescGuard&) = delete;
+};
+
+/// RAII guard for miopenRNNDescriptor_t.
+struct MiopenRNNDescGuard {
+    miopenRNNDescriptor_t desc = nullptr;
+
+    MiopenRNNDescGuard() {
+        auto status = miopenCreateRNNDescriptor(&desc);
+        if (status != miopenStatusSuccess) {
+            throw std::runtime_error(
+                std::string("miopenCreateRNNDescriptor failed with status ") +
+                std::to_string(static_cast<int>(status)));
+        }
+    }
+
+    ~MiopenRNNDescGuard() noexcept {
+        if (desc) miopenDestroyRNNDescriptor(desc);
+    }
+
+    MiopenRNNDescGuard(const MiopenRNNDescGuard&) = delete;
+    MiopenRNNDescGuard& operator=(const MiopenRNNDescGuard&) = delete;
+};
+
+/// RAII guard for miopenLRNDescriptor_t (Local Response Normalization).
+struct MiopenLRNDescGuard {
+    miopenLRNDescriptor_t desc = nullptr;
+
+    MiopenLRNDescGuard() {
+        auto status = miopenCreateLRNDescriptor(&desc);
+        if (status != miopenStatusSuccess) {
+            throw std::runtime_error(
+                std::string("miopenCreateLRNDescriptor failed with status ") +
+                std::to_string(static_cast<int>(status)));
+        }
+    }
+
+    ~MiopenLRNDescGuard() noexcept {
+        if (desc) miopenDestroyLRNDescriptor(desc);
+    }
+
+    MiopenLRNDescGuard(const MiopenLRNDescGuard&) = delete;
+    MiopenLRNDescGuard& operator=(const MiopenLRNDescGuard&) = delete;
+};
+
+/// Note: MIOpen batch normalization uses miopenTensorDescriptor_t for the
+/// per-channel parameters (mean, variance, scale, bias), not a dedicated
+/// batchnorm descriptor. Use MiopenTensorDescGuard for those descriptors.
+
 }  // namespace tenzor::rocm

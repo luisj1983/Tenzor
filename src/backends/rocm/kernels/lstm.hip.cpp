@@ -1,16 +1,32 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <rocblas/rocblas.h>
+#ifdef USE_MIOPEN
+#include <miopen/miopen.h>
+#endif
 #include <cmath>
 #include <cstdio>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "../rocm_error.hpp"
+#ifdef USE_MIOPEN
+#include "../miopen_guards.hpp"
+#include "../hip_buffer.hpp"
+#endif
 #include <stdexcept>
 #include <string>
 
 namespace tenzor {
 namespace rocm {
+
+#ifdef USE_MIOPEN
+#define MIOPEN_CHECK(call) do { \
+    miopenStatus_t status = call; \
+    if (status != miopenStatusSuccess) { \
+        throw std::runtime_error(std::string("MIOpen error in LSTM: ") + std::to_string(status)); \
+    } \
+} while(0)
+#endif
 
 #define HIP_GRID_STRIDE_LOOP(i, n) \
     for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; \
@@ -596,6 +612,171 @@ auto lstm_cell_backward_kernel(
  * @param stream HIP stream for async execution
  * @return vector of [output, h_n, c_n]
  */
+// ==============================================================================
+// MIOpen-Accelerated LSTM Forward
+// ==============================================================================
+
+#ifdef USE_MIOPEN
+
+auto lstm_forward_miopen(
+    const Tensor& input,        // (seq_len, batch, input_size)
+    const Tensor& W_ih,         // (4*hidden, input_size)
+    const Tensor& W_hh,         // (4*hidden, hidden)
+    const Tensor& bias,         // (4*hidden) or empty
+    const Tensor& h0,           // (batch, hidden)
+    const Tensor& c0,           // (batch, hidden)
+    hipStream_t stream) -> std::vector<Tensor> {
+
+    auto input_shape = input.shape();
+    int64_t seq_len = input_shape[0];
+    int64_t batch = input_shape[1];
+    int64_t input_size = input_shape[2];
+    int64_t hidden = h0.shape()[1];
+
+    // Allocate output tensors
+    Tensor output({seq_len, batch, hidden}, input.dtype(), input.device());
+    Tensor h_n({batch, hidden}, input.dtype(), input.device());
+    Tensor c_n({batch, hidden}, input.dtype(), input.device());
+
+    tenzor::rocm::MiopenHandleGuard miopen_guard;
+    MIOPEN_CHECK(miopenSetStream(miopen_guard.handle, stream));
+
+    // Create RNN descriptor
+    tenzor::rocm::MiopenRNNDescGuard rnn_desc_guard;
+
+    MIOPEN_CHECK(miopenSetRNNDescriptor(
+        rnn_desc_guard.desc,
+        hidden,
+        1,                          // num_layers
+        miopenRNNlinear,            // input mode (linear transform)
+        miopenRNNunidirection,      // direction
+        miopenLSTM,                 // RNN mode
+        miopenRNNNoBias,            // bias mode (we handle bias separately if needed)
+        miopenRNNdefault,           // algorithm
+        miopenFloat));              // data type
+
+    // If bias is present, re-set with bias mode
+    if (bias.numel() > 0) {
+        MIOPEN_CHECK(miopenSetRNNDescriptor(
+            rnn_desc_guard.desc,
+            hidden, 1,
+            miopenRNNlinear,
+            miopenRNNunidirection,
+            miopenLSTM,
+            miopenRNNwithBias,
+            miopenRNNdefault,
+            miopenFloat));
+    }
+
+    // Create input/output tensor descriptors for each timestep
+    // MIOpen RNN API expects an array of tensor descriptors, one per timestep
+    std::vector<miopenTensorDescriptor_t> x_descs(seq_len);
+    std::vector<miopenTensorDescriptor_t> y_descs(seq_len);
+
+    int dims[2] = {static_cast<int>(batch), static_cast<int>(input_size)};
+    int strides[2] = {static_cast<int>(input_size), 1};
+    int out_dims[2] = {static_cast<int>(batch), static_cast<int>(hidden)};
+    int out_strides[2] = {static_cast<int>(hidden), 1};
+
+    for (int64_t t = 0; t < seq_len; ++t) {
+        MIOPEN_CHECK(miopenCreateTensorDescriptor(&x_descs[t]));
+        MIOPEN_CHECK(miopenSetTensorDescriptor(x_descs[t], miopenFloat, 2, dims, strides));
+        MIOPEN_CHECK(miopenCreateTensorDescriptor(&y_descs[t]));
+        MIOPEN_CHECK(miopenSetTensorDescriptor(y_descs[t], miopenFloat, 2, out_dims, out_strides));
+    }
+
+    // Hidden state descriptors (num_layers * directions, batch, hidden)
+    miopenTensorDescriptor_t hx_desc, cx_desc, hy_desc, cy_desc;
+    int h_dims[3] = {1, static_cast<int>(batch), static_cast<int>(hidden)};
+    int h_strides[3] = {static_cast<int>(batch * hidden), static_cast<int>(hidden), 1};
+    MIOPEN_CHECK(miopenCreateTensorDescriptor(&hx_desc));
+    MIOPEN_CHECK(miopenSetTensorDescriptor(hx_desc, miopenFloat, 3, h_dims, h_strides));
+    MIOPEN_CHECK(miopenCreateTensorDescriptor(&cx_desc));
+    MIOPEN_CHECK(miopenSetTensorDescriptor(cx_desc, miopenFloat, 3, h_dims, h_strides));
+    MIOPEN_CHECK(miopenCreateTensorDescriptor(&hy_desc));
+    MIOPEN_CHECK(miopenSetTensorDescriptor(hy_desc, miopenFloat, 3, h_dims, h_strides));
+    MIOPEN_CHECK(miopenCreateTensorDescriptor(&cy_desc));
+    MIOPEN_CHECK(miopenSetTensorDescriptor(cy_desc, miopenFloat, 3, h_dims, h_strides));
+
+    // Query and allocate weight space
+    size_t weight_space_size = 0;
+    MIOPEN_CHECK(miopenGetRNNParamsSize(
+        miopen_guard.handle, rnn_desc_guard.desc, x_descs[0],
+        &weight_space_size, miopenFloat));
+
+    tenzor::rocm::HipBuffer weight_buf(weight_space_size);
+    HIP_CHECK(hipMemsetAsync(weight_buf.ptr, 0, weight_space_size, stream));
+
+    // Copy our W_ih, W_hh, bias into MIOpen's packed weight layout
+    // MIOpen weight layout for LSTM layer 0:
+    //   W_ih (input_size x 4*hidden), W_hh (hidden x 4*hidden), bias_ih, bias_hh
+    size_t W_ih_bytes = W_ih.numel() * sizeof(float);
+    size_t W_hh_bytes = W_hh.numel() * sizeof(float);
+    HIP_CHECK(hipMemcpyAsync(weight_buf.ptr, W_ih.data<float>(),
+                   W_ih_bytes, hipMemcpyDeviceToDevice, stream));
+    HIP_CHECK(hipMemcpyAsync(
+        static_cast<char*>(weight_buf.ptr) + W_ih_bytes,
+        W_hh.data<float>(), W_hh_bytes, hipMemcpyDeviceToDevice, stream));
+
+    if (bias.numel() > 0) {
+        size_t bias_bytes = bias.numel() * sizeof(float);
+        HIP_CHECK(hipMemcpyAsync(
+            static_cast<char*>(weight_buf.ptr) + W_ih_bytes + W_hh_bytes,
+            bias.data<float>(), bias_bytes, hipMemcpyDeviceToDevice, stream));
+    }
+
+    // Get workspace size
+    size_t workspace_size = 0;
+    MIOPEN_CHECK(miopenGetRNNWorkspaceSize(
+        miopen_guard.handle, rnn_desc_guard.desc,
+        seq_len, x_descs.data(), &workspace_size));
+
+    tenzor::rocm::HipBuffer workspace(workspace_size);
+
+    // Create weight descriptor for MIOpen
+    MiopenTensorDescGuard w_desc_guard;
+    // MIOpen expects weights as 1D flattened tensor
+    std::array<int, 1> w_dim = {static_cast<int>(weight_space_size / sizeof(float))};
+    std::array<int, 1> w_stride = {1};
+    MIOPEN_CHECK(miopenSetTensorDescriptor(w_desc_guard.desc, miopenFloat, 1, w_dim.data(), w_stride.data()));
+
+    // Run forward inference (training would also need reserve space)
+    MIOPEN_CHECK(miopenRNNForwardInference(
+        miopen_guard.handle,
+        rnn_desc_guard.desc,
+        seq_len,
+        x_descs.data(),
+        input.data<float>(),
+        hx_desc,
+        h0.data<float>(),
+        cx_desc,
+        c0.data<float>(),
+        w_desc_guard.desc,
+        weight_buf.ptr,
+        y_descs.data(),
+        output.data<float>(),
+        hy_desc,
+        h_n.data<float>(),
+        cy_desc,
+        c_n.data<float>(),
+        workspace.ptr,
+        workspace_size));
+
+    // Cleanup per-timestep descriptors
+    for (int64_t t = 0; t < seq_len; ++t) {
+        miopenDestroyTensorDescriptor(x_descs[t]);
+        miopenDestroyTensorDescriptor(y_descs[t]);
+    }
+    miopenDestroyTensorDescriptor(hx_desc);
+    miopenDestroyTensorDescriptor(cx_desc);
+    miopenDestroyTensorDescriptor(hy_desc);
+    miopenDestroyTensorDescriptor(cy_desc);
+
+    return {output, h_n, c_n};
+}
+
+#endif // USE_MIOPEN
+
 auto lstm_forward_kernel(
     const Tensor& input,
     const Tensor& W_ih,
@@ -604,6 +785,13 @@ auto lstm_forward_kernel(
     const Tensor& h0,
     const Tensor& c0,
     hipStream_t stream) -> std::vector<Tensor> {
+
+#ifdef USE_MIOPEN
+    // Use MIOpen for Float32 LSTM forward (optimized fused kernels)
+    if (input.dtype() == DType::Float32) {
+        return lstm_forward_miopen(input, W_ih, W_hh, bias, h0, c0, stream);
+    }
+#endif
 
     // Get dimensions
     auto input_shape = input.shape();

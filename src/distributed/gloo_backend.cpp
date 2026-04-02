@@ -453,6 +453,46 @@ auto GlooBackend::reduce_scatter(const std::vector<Tensor>& tensors, Tensor& out
     }
 }
 
+auto GlooBackend::send(const Tensor& tensor, int dst_rank) -> void {
+    if (!initialized_) {
+        throw std::runtime_error("GlooBackend: not initialized");
+    }
+
+    if (dst_rank < 0 || dst_rank >= world_size_) {
+        throw std::invalid_argument(
+            "GlooBackend::send: invalid dst_rank " + std::to_string(dst_rank)
+        );
+    }
+    if (dst_rank == rank_) {
+        throw std::invalid_argument(
+            "GlooBackend::send: cannot send to self (rank " + std::to_string(rank_) + ")"
+        );
+    }
+
+    // Ensure tensor is on CPU (Gloo is CPU-only)
+    Tensor cpu_tensor = get_cpu_buffer(tensor);
+    send_tensor(cpu_tensor, dst_rank);
+}
+
+auto GlooBackend::recv(Tensor& tensor, int src_rank) -> void {
+    if (!initialized_) {
+        throw std::runtime_error("GlooBackend: not initialized");
+    }
+
+    if (src_rank < 0 || src_rank >= world_size_) {
+        throw std::invalid_argument(
+            "GlooBackend::recv: invalid src_rank " + std::to_string(src_rank)
+        );
+    }
+    if (src_rank == rank_) {
+        throw std::invalid_argument(
+            "GlooBackend::recv: cannot recv from self (rank " + std::to_string(rank_) + ")"
+        );
+    }
+
+    recv_tensor(tensor, src_rank);
+}
+
 auto GlooBackend::barrier() -> void {
     // Simple barrier: all-reduce on dummy tensor
     Tensor dummy = zeros({1}, DType::Float32, Device::cpu());
@@ -525,7 +565,7 @@ auto GlooBackend::init_connections() -> void {
 
             // Receive peer rank ID for verification
             int received_rank = -1;
-            ssize_t n = recv(client_fd, &received_rank, sizeof(int), 0);
+            ssize_t n = ::recv(client_fd, &received_rank, sizeof(int), 0);
             if (n != sizeof(int) || received_rank != peer_rank) {
                 ::close(client_fd);
                 throw std::runtime_error("Handshake failed: expected rank " + std::to_string(peer_rank) +
@@ -533,7 +573,7 @@ auto GlooBackend::init_connections() -> void {
             }
 
             // Send our rank ID
-            send(client_fd, &rank_, sizeof(int), 0);
+            ::send(client_fd, &rank_, sizeof(int), 0);
 
             connections_[peer_rank] = std::make_shared<TCPConnection>(client_fd);
         } else {
@@ -619,11 +659,11 @@ auto GlooBackend::connect_to_rank(int peer_rank) -> std::shared_ptr<TCPConnectio
         if (connect(sockfd, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
             // Connection successful - perform handshake
             // Send our rank ID
-            send(sockfd, &rank_, sizeof(int), 0);
+            ::send(sockfd, &rank_, sizeof(int), 0);
 
             // Receive peer rank ID for verification
             int received_rank = -1;
-            ssize_t n = recv(sockfd, &received_rank, sizeof(int), 0);
+            ssize_t n = ::recv(sockfd, &received_rank, sizeof(int), 0);
             if (n != sizeof(int) || received_rank != peer_rank) {
                 ::close(sockfd);
                 throw std::runtime_error("Handshake failed: expected rank " + std::to_string(peer_rank) +

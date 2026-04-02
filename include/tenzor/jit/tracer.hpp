@@ -110,6 +110,18 @@ enum class OpType {
     Input,
     Output,
 
+    // Fused operations
+    FlashAttention,   ///< Fused multi-head attention (Q*K^T -> scale -> softmax -> *V)
+    FusedFFN,         ///< Fused feed-forward network (Linear -> GELU/ReLU -> Linear)
+    ResidualAdd,      ///< Residual connection marker (x + sublayer(x))
+
+    // Shape guard (for dynamic shape support)
+    ShapeGuard,       ///< Runtime shape check that triggers re-trace on mismatch
+
+    // Memory management pseudo-ops
+    SwapOut,          ///< GPU -> CPU async transfer for memory pressure relief
+    SwapIn,           ///< CPU -> GPU async prefetch before reuse
+
     // Control flow
     If,     ///< Conditional branch: cond → then_branch / else_branch subgraphs
     Loop    ///< Loop: (max_iter, cond, carried...) → body subgraph → (carried...)

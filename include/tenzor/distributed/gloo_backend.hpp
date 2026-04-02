@@ -122,6 +122,10 @@ public:
 
     auto reduce_scatter(const std::vector<Tensor>& tensors, Tensor& output, ReduceOp op) -> void override;
 
+    auto send(const Tensor& tensor, int dst_rank) -> void override;
+
+    auto recv(Tensor& tensor, int src_rank) -> void override;
+
     auto barrier() -> void override;
 
     auto finalize() -> void override;

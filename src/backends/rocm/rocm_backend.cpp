@@ -307,6 +307,16 @@ void ROCmBackend::check_hip_error(hipError_t err, const char* operation) const {
     }
 }
 
+auto ROCmBackend::create_hip_graph(int32_t device_id) -> std::unique_ptr<rocm::HIPGraph> {
+    int count = device_count();
+    if (count == 0 || device_id >= count) {
+        throw std::runtime_error(
+            "create_hip_graph: invalid device_id " + std::to_string(device_id) +
+            " (available devices: " + std::to_string(count) + ")");
+    }
+    return std::make_unique<rocm::HIPGraph>();
+}
+
 // Factory function for backend creation
 extern "C" {
     auto create_backend() -> std::unique_ptr<Backend> {

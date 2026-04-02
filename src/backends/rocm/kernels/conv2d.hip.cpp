@@ -13,6 +13,7 @@
 #include "../rocm_error.hpp"
 #include "../miopen_guards.hpp"
 #include "../hip_buffer.hpp"
+#include "../rocm_arch_detect.hpp"
 
 namespace tenzor {
 namespace rocm {
@@ -53,10 +54,10 @@ private:
 // Kernel Launch Helpers - Optimized for AMD GPUs
 // ============================================================================
 
-// AMD GPUs have wavefront size of 64 (RDNA/CDNA) or 32 (older architectures)
-// We'll use 256 threads per block (4 wavefronts of 64) for good occupancy
+// Use 4 wavefronts per block (optimal for most kernels).
+// Wavefront size is queried from the device (64 for CDNA/GCN, 32 for RDNA3+).
 inline void compute_launch_config_1d(int64_t n, dim3& grid, dim3& block) {
-    const int block_size = 256;  // 4 wavefronts of 64 threads
+    const int block_size = rocm::get_wavefront_size() * 4;
     block = dim3(block_size, 1, 1);
     grid = dim3((n + block_size - 1) / block_size, 1, 1);
 }
@@ -1736,7 +1737,7 @@ auto conv_transpose2d_forward_kernel(
     Tensor output({batch, out_channels, out_h, out_w}, input.dtype(), input.device());
 
     int64_t total_elements = output.numel();
-    int threads = 256;
+    int threads = rocm::get_wavefront_size() * 4;  // 4 wavefronts per block
     int blocks = (total_elements + threads - 1) / threads;
 
     if (input.dtype() == DType::Float32) {
@@ -1879,7 +1880,7 @@ auto depthwise_conv2d_kernel(
     Tensor output({batch, channels, out_h, out_w}, input.dtype(), input.device());
 
     int64_t total_elements = output.numel();
-    int threads = 256;
+    int threads = rocm::get_wavefront_size() * 4;  // 4 wavefronts per block
     int blocks = (total_elements + threads - 1) / threads;
 
     if (input.dtype() == DType::Float32) {

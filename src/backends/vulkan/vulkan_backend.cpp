@@ -17,6 +17,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
@@ -861,6 +862,93 @@ vulkan::ComputePipeline* VulkanBackend::getPipeline(const std::string& shader_na
     return pipelinePtr;
 }
 
+vulkan::ComputePipeline* VulkanBackend::getPipelineSpecialized(
+    const std::string& shader_name, int32_t device_id,
+    const std::vector<VkSpecializationMapEntry>& specEntries,
+    const void* specData, size_t specDataSize) {
+
+    // Build a cache key that incorporates the specialization data so that
+    // the same shader compiled with different constants gets separate entries.
+    // We hash the raw specialization bytes and append to the shader name.
+    size_t spec_hash = 0;
+    auto* bytes = static_cast<const uint8_t*>(specData);
+    for (size_t i = 0; i < specDataSize; ++i) {
+        spec_hash ^= std::hash<uint8_t>{}(bytes[i]) + 0x9e3779b9 + (spec_hash << 6) + (spec_hash >> 2);
+    }
+    std::string cache_key = shader_name + "_spec_" + std::to_string(spec_hash);
+
+    std::lock_guard<std::recursive_mutex> lock(devices_[device_id].mutex);
+
+    auto& cache = pipelineCaches_[device_id];
+    auto it = cache.pipelines.find(cache_key);
+    if (it != cache.pipelines.end()) {
+        return it->second.get();
+    }
+
+    // Load shader code (same logic as getPipeline)
+    std::vector<uint32_t> shaderCode;
+
+#ifdef TENZOR_HAS_EMBEDDED_SHADERS
+    const auto& registry = vulkan::embedded_shaders::getShaderRegistry();
+    auto shader_it = registry.find(shader_name);
+    if (shader_it != registry.end()) {
+        const auto& shaderData = shader_it->second;
+        shaderCode.assign(shaderData.data, shaderData.data + shaderData.size);
+    } else {
+        throw std::runtime_error("Embedded shader '" + shader_name + "' not found in registry.");
+    }
+#else
+    std::string shaderFile = shaderPath_ + shader_name + ".spv";
+    try {
+        shaderCode = vulkan::loadShader(shaderFile);
+    } catch (const std::exception& e) {
+        throw std::runtime_error(
+            "Failed to load Vulkan shader '" + shader_name + "'\n"
+            "  Expected location: " + shaderFile + "\n"
+            "  Error: " + e.what());
+    }
+#endif
+
+    // Create descriptor bindings (up to 8 buffers)
+    std::vector<VkDescriptorSetLayoutBinding> bindings;
+    for (uint32_t i = 0; i < 8; i++) {
+        VkDescriptorSetLayoutBinding binding{};
+        binding.binding = i;
+        binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        binding.descriptorCount = 1;
+        binding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        bindings.push_back(binding);
+    }
+
+    // Determine push constant size via SPIR-V reflection
+    std::vector<VkPushConstantRange> pushConstants;
+    uint32_t pushConstantSize = vulkan::reflectPushConstantSize(shaderCode);
+    if (pushConstantSize > 0) {
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = pushConstantSize;
+        pushConstants.push_back(push_range);
+    }
+
+    // Build specialization info from caller-provided entries
+    auto& ctx = devices_[device_id];
+    VkSpecializationInfo specInfo{};
+    specInfo.mapEntryCount = static_cast<uint32_t>(specEntries.size());
+    specInfo.pMapEntries = specEntries.data();
+    specInfo.dataSize = specDataSize;
+    specInfo.pData = specData;
+
+    auto pipeline = std::make_unique<vulkan::ComputePipeline>(
+        ctx.device, shaderCode, bindings, pushConstants, ctx.pipelineCache, &specInfo
+    );
+
+    auto* pipelinePtr = pipeline.get();
+    cache.pipelines[cache_key] = std::move(pipeline);
+
+    return pipelinePtr;
+}
+
 // Helper to get VkBuffer and offset from a potentially-offset pointer
 std::pair<VkBuffer, VkDeviceSize> VulkanBackend::getVulkanBufferAndOffset(const void* ptr) const {
     if (ptr == nullptr) {
@@ -1622,7 +1710,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() < 2) {
             throw std::invalid_argument("conv2d_forward requires at least 2 inputs (input, weight)");
         }
-        return {dispatchConv2dForward(inputs[0], inputs[1], attrs)};
+        return {dispatchConv2dForward(inputs[0], inputs[1], inputs.size() >= 3 ? &inputs[2] : nullptr, attrs)};
     }
 
     // Full operation - create tensor filled with specific value
@@ -6217,7 +6305,7 @@ auto VulkanBackend::dispatchMaxPool2dBackward(const Tensor& grad_output, const T
 // Conv2d Forward Operation (OpAttributes version)
 // ============================================================================
 
-auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& weight, const OpAttributes& attrs) -> Tensor {
+auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& weight, const Tensor* bias, const OpAttributes& attrs) -> Tensor {
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
 
@@ -6233,7 +6321,7 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
     int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
     int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
     int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
-    bool has_bias = attrs.contains("bias") && attrs.at("bias") == "true";
+    bool has_bias = bias != nullptr && bias->is_valid();
 
     int64_t batch = input_shape[0];
     int64_t in_channels = input_shape[1];
@@ -6280,12 +6368,12 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
         buffer_size_output
     };
 
-    // If bias is present, update binding 2
+    // If bias is present, bind the actual bias buffer
     if (has_bias) {
-        // Bias is typically passed as an additional input tensor
-        // For now, we'll create a dummy bias buffer
-        // TODO: Extract bias from inputs if available
-        bindings[2] = {2, buffer_output};  // Use output buffer as dummy for now
+        VkBuffer buffer_bias = getVulkanBuffer(bias->data_ptr());
+        size_t buffer_size_bias = bias->numel() * bias->dtype_size();
+        bindings[2] = {2, buffer_bias};
+        sizes[2] = buffer_size_bias;
     }
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(

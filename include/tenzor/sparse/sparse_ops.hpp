@@ -50,5 +50,38 @@ auto add(const SparseTensor& a, const SparseTensor& b) -> SparseTensor;
  */
 auto mul(const SparseTensor& sparse, double scalar) -> SparseTensor;
 
+/**
+ * @brief Sparse-sparse matrix multiplication (SpGEMM).
+ *
+ * Computes C = A @ B where both A and B are sparse matrices.
+ * Result is returned in CSR format.
+ *
+ * CPU: symbolic + numeric two-phase algorithm.
+ * CUDA: uses cusparseSpGEMM when available.
+ * ROCm: uses rocsparse_spgemm when available.
+ *
+ * @param a Sparse matrix (M, K)
+ * @param b Sparse matrix (K, N)
+ * @return Sparse result matrix (M, N) in CSR format
+ */
+auto spgemm(const SparseTensor& a, const SparseTensor& b) -> SparseTensor;
+
+/**
+ * @brief Sparse triangular solve.
+ *
+ * Solves L @ x = b (lower triangular) or U @ x = b (upper triangular)
+ * where L/U is a sparse triangular matrix and b is a dense vector/matrix.
+ *
+ * CPU: forward/backward substitution.
+ * CUDA: uses cusparseSpSV_solve when available.
+ * ROCm: uses rocsparse_csrsv_solve when available.
+ *
+ * @param L Sparse triangular matrix (N, N)
+ * @param b Dense right-hand side vector (N,) or matrix (N, K)
+ * @param upper If true, treat L as upper triangular (default: false = lower)
+ * @return Dense solution tensor with same shape as b
+ */
+auto sparse_triangular_solve(const SparseTensor& L, const Tensor& b, bool upper = false) -> Tensor;
+
 } // namespace sparse
 } // namespace tenzor

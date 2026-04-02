@@ -46,6 +46,10 @@ set(TENZOR_CORE_SOURCES
     autograd/gradcheck.cpp
     autograd/graph_optimizer.cpp
     autograd/graph_viz.cpp
+    autograd/dual.cpp
+    autograd/jvp_rules.cpp
+    autograd/functional.cpp
+    autograd/vmap.cpp
     nn/module.cpp
     nn/serialize.cpp
     nn/pytorch_loader.cpp
@@ -158,6 +162,7 @@ set(TENZOR_CORE_SOURCES
     jit/compiler.cpp
     jit/compiled_module.cpp
     jit/memory_planner.cpp
+    jit/autotune.cpp
     jit/serialization.cpp
     nn/compression/pruning.cpp
     nn/compression/distillation.cpp
@@ -166,6 +171,8 @@ set(TENZOR_CORE_SOURCES
     distributed/gloo_backend.cpp
     distributed/process_group.cpp
     distributed/ddp.cpp
+    distributed/fsdp.cpp
+    distributed/tensor_parallel.cpp
     distributed/launch.cpp
     distributed/gradient_compression.cpp
     sparse/sparse_tensor.cpp
@@ -312,6 +319,22 @@ if(TENZOR_BUILD_CUDA)
         target_compile_definitions(tenzor_core PRIVATE TENZOR_HAS_NCCL)
     else()
         message(WARNING "NCCL library not found, distributed GPU training will not be available")
+    endif()
+endif()
+
+# Add ROCm/HIP definition and includes if ROCm backend is enabled
+if(TENZOR_BUILD_ROCM)
+    find_package(hip QUIET CONFIG PATHS /opt/rocm)
+    if(hip_FOUND)
+        target_compile_definitions(tenzor_core PRIVATE
+            TENZOR_HAS_ROCM
+        )
+        target_include_directories(tenzor_core PRIVATE
+            /opt/rocm/include
+        )
+        target_link_libraries(tenzor_core PRIVATE
+            hip::host
+        )
     endif()
 endif()
 

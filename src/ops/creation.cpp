@@ -906,4 +906,26 @@ auto meshgrid(const std::vector<Tensor>& tensors, const std::string& indexing) -
     return result;
 }
 
+auto multinomial(const Tensor& input, int64_t num_samples, bool replacement) -> Tensor {
+    if (input.ndim() < 1 || input.ndim() > 2) {
+        throw std::invalid_argument("multinomial: input must be 1D or 2D");
+    }
+    if (num_samples <= 0) {
+        throw std::invalid_argument("multinomial: num_samples must be positive");
+    }
+
+    auto inp = input.contiguous();
+    std::array<Tensor, 1> inputs = {inp};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::NumSamples, num_samples);
+    attrs.set(AttrKey::Replacement, replacement);
+    return dispatch<OpId::Multinomial>(inputs, attrs)[0];
+}
+
+auto bernoulli(const Tensor& probs) -> Tensor {
+    auto inp = probs.contiguous();
+    std::array<Tensor, 1> inputs = {inp};
+    return dispatch<OpId::Bernoulli>(inputs)[0];
+}
+
 } // namespace tenzor

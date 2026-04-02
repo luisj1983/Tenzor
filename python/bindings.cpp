@@ -76,6 +76,9 @@
 #include <tenzor/sparse/sparse_tensor.hpp>
 #include <tenzor/sparse/sparse_ops.hpp>
 #include <tenzor/autograd/anomaly_mode.hpp>
+#include <tenzor/autograd/functional.hpp>
+#include <tenzor/autograd/vmap.hpp>
+#include <tenzor/autograd/dual.hpp>
 #include <tenzor/backend/cpu_caching_allocator.hpp>
 #include <tenzor/nn/utils/clip_grad.hpp>
 #include <tenzor/nn/utils/rnn_utils.hpp>
@@ -8730,4 +8733,59 @@ void bind_compression(py::module& m) {
         "Scalar multiplication of sparse tensor",
         py::arg("sparse"), py::arg("scalar"),
         py::call_guard<py::gil_scoped_release>());
+
+    // =========================================================================
+    // Forward-mode AD and composable transforms
+    // =========================================================================
+
+    m.def("jvp", [](py::function py_func,
+                     const tenzor::Variable& input,
+                     const tenzor::Tensor& tangent) {
+        auto func = [&py_func](const tenzor::Variable& x) -> tenzor::Variable {
+            py::gil_scoped_acquire gil;
+            py::object result = py_func(x);
+            return result.cast<tenzor::Variable>();
+        };
+        auto [output, tangent_out] = tenzor::jvp(func, input, tangent);
+        return py::make_tuple(output, tangent_out);
+    }, py::arg("func"), py::arg("input"), py::arg("tangent"),
+    "Compute Jacobian-Vector Product (forward-mode AD).\n"
+    "Returns (output, tangent_output) where tangent_output = J @ tangent.");
+
+    m.def("jacobian", [](py::function py_func,
+                          const tenzor::Variable& input) {
+        auto func = [&py_func](const tenzor::Variable& x) -> tenzor::Variable {
+            py::gil_scoped_acquire gil;
+            py::object result = py_func(x);
+            return result.cast<tenzor::Variable>();
+        };
+        return tenzor::jacobian(func, input);
+    }, py::arg("func"), py::arg("input"),
+    "Compute full Jacobian matrix of func at input.\n"
+    "Returns tensor of shape (output_size, input_size).");
+
+    m.def("hessian", [](py::function py_func,
+                         const tenzor::Variable& input) {
+        auto func = [&py_func](const tenzor::Variable& x) -> tenzor::Variable {
+            py::gil_scoped_acquire gil;
+            py::object result = py_func(x);
+            return result.cast<tenzor::Variable>();
+        };
+        return tenzor::hessian(func, input);
+    }, py::arg("func"), py::arg("input"),
+    "Compute Hessian matrix of scalar function at input.\n"
+    "Returns tensor of shape (input_size, input_size).");
+
+    m.def("vmap", [](py::function py_func,
+                      const tenzor::Variable& batched_input,
+                      int64_t batch_dim) {
+        auto func = [&py_func](const tenzor::Variable& x) -> tenzor::Variable {
+            py::gil_scoped_acquire gil;
+            py::object result = py_func(x);
+            return result.cast<tenzor::Variable>();
+        };
+        return tenzor::vmap(func, batched_input, batch_dim);
+    }, py::arg("func"), py::arg("batched_input"), py::arg("batch_dim") = 0,
+    "Vectorized map: apply func independently to each element along batch dim.\n"
+    "Equivalent to torch.vmap.");
 }

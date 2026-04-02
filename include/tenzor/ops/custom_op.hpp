@@ -75,6 +75,16 @@ struct CustomOpId {
 /// Custom kernel function type (uses std::function to support closures/lambdas)
 using CustomKernelFn = std::function<Tensor(std::span<const Tensor>, const OpAttributes&)>;
 
+/// Custom backward function type: (saved_tensors, grad_outputs) -> grad_inputs
+using CustomBackwardFn = std::function<std::vector<Tensor>(
+    std::span<const Tensor> saved_tensors,
+    std::span<const Tensor> grad_outputs)>;
+
+/// Custom save-for-backward function type: (inputs, output) -> tensors_to_save
+/// If nullptr, all inputs are saved by default.
+using CustomSaveForBackwardFn = std::function<std::vector<Tensor>(
+    std::span<const Tensor> inputs, const Tensor& output)>;
+
 /**
  * @brief Singleton registry for custom operations.
  *
@@ -146,6 +156,30 @@ public:
      */
     bool has_kernel(CustomOpId id, Device::Type device_type) const;
 
+    /**
+     * @brief Register backward function for a custom op.
+     *
+     * @param id Custom op ID
+     * @param backward Backward function computing gradients
+     * @param save_fn Function selecting which tensors to save (nullptr = save all inputs)
+     */
+    void register_backward(CustomOpId id, CustomBackwardFn backward,
+                           CustomSaveForBackwardFn save_fn = nullptr);
+
+    /**
+     * @brief Get backward function for a custom op.
+     *
+     * @param id Custom op ID
+     * @return Pair of (backward_fn, save_fn) if registered, nullopt otherwise
+     */
+    auto get_backward(CustomOpId id) const
+        -> std::optional<std::pair<CustomBackwardFn, CustomSaveForBackwardFn>>;
+
+    /**
+     * @brief Check if a backward function is registered for a custom op.
+     */
+    bool has_backward(CustomOpId id) const;
+
 private:
     CustomOpRegistry() = default;
 
@@ -160,6 +194,14 @@ private:
         std::unordered_map<uint32_t, CustomKernelFn> kernels;
     };
     std::array<DeviceKernels, static_cast<size_t>(Device::Type::COUNT)> device_kernels_;
+
+    // Backward function storage
+    struct BackwardInfo {
+        CustomBackwardFn backward;
+        CustomSaveForBackwardFn save_fn;  // nullptr means save all inputs
+    };
+    mutable std::shared_mutex backward_mutex_;
+    std::unordered_map<uint32_t, BackwardInfo> backward_fns_;
 };
 
 // ============================================================================
@@ -200,5 +242,73 @@ auto register_custom_op(const std::string& name,
 auto dispatch_custom_op(CustomOpId id,
                         std::span<const Tensor> inputs,
                         const OpAttributes& attrs = OpAttributes{}) -> Tensor;
+
+/**
+ * @brief Register a custom operation with a backward function for autograd.
+ *
+ * The forward kernel computes the output tensor. The backward function
+ * computes input gradients given saved tensors and output gradients.
+ * The save function selects which tensors to save for backward
+ * (defaults to saving all inputs if nullptr).
+ *
+ * @param name Unique operation name
+ * @param device_type Device type for the kernel
+ * @param forward_kernel Forward computation kernel
+ * @param backward_fn Backward function for gradient computation
+ * @param save_fn Function selecting tensors to save (nullptr = save all inputs)
+ * @return CustomOpId for dispatching the operation
+ *
+ * @code
+ * auto my_op = register_custom_op_with_backward(
+ *     "my_ns::square",
+ *     Device::Type::CPU,
+ *     // forward
+ *     [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+ *         return inputs[0] * inputs[0];
+ *     },
+ *     // backward: d/dx(x^2) = 2x * grad_out
+ *     [](std::span<const Tensor> saved, std::span<const Tensor> grads) -> std::vector<Tensor> {
+ *         return {saved[0] * grads[0] * 2.0f};
+ *     }
+ * );
+ * @endcode
+ */
+auto register_custom_op_with_backward(
+    const std::string& name,
+    Device::Type device_type,
+    CustomKernelFn forward_kernel,
+    CustomBackwardFn backward_fn,
+    CustomSaveForBackwardFn save_fn = nullptr) -> CustomOpId;
+
+/**
+ * @brief Register a custom operation with backward on multiple devices.
+ */
+auto register_custom_op_with_backward(
+    const std::string& name,
+    std::initializer_list<std::pair<Device::Type, CustomKernelFn>> kernels,
+    CustomBackwardFn backward_fn,
+    CustomSaveForBackwardFn save_fn = nullptr) -> CustomOpId;
+
+// ============================================================================
+// Autograd-aware dispatch (Variable-based)
+// ============================================================================
+
+class Variable;  // Forward declaration (defined in autograd/variable.hpp)
+
+/**
+ * @brief Dispatch a custom op with autograd support.
+ *
+ * If any input Variable requires grad and the custom op has a registered
+ * backward function, creates a CustomOpBackward node in the computation graph.
+ * Otherwise, falls back to plain tensor dispatch.
+ *
+ * @param id Custom op ID returned by register_custom_op_with_backward()
+ * @param inputs Input Variables
+ * @param attrs Operation attributes
+ * @return Variable with gradient function if applicable
+ */
+auto dispatch_custom_op(CustomOpId id,
+                        std::vector<Variable> inputs,
+                        const OpAttributes& attrs = OpAttributes{}) -> Variable;
 
 } // namespace tenzor

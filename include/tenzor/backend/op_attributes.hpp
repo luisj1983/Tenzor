@@ -222,6 +222,24 @@ enum class AttrKey : uint16_t {
     // Advanced indexing
     NumIndices,        // Number of index tensors (for AdvancedIndex/AdvancedIndexPut)
 
+    // STFT/ISTFT parameters
+    HopLength,         // STFT hop length
+    WinLength,         // STFT window length
+    NFft,              // STFT FFT size
+    Normalized,        // STFT normalized flag
+    OnesidedAttr,      // STFT onesided flag
+    ReturnComplex,     // STFT return complex flag
+
+    // Sampling parameters
+    NumSamples,        // Multinomial number of samples
+    Replacement,       // Multinomial with/without replacement
+
+    // Histogram parameters
+    NumBins,           // Histogram bin count
+
+    // Distance parameters
+    DistP,             // CDist p-norm value
+
     // Sentinel
     _Count
 };

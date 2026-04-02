@@ -329,7 +329,7 @@ auto ONNXExporter::op_to_onnx(OpId op) -> std::string {
         case OpId::RFFT:         return "DFT";
 
         // Accumulation operations
-        case OpId::CumProd:      return "CumSum";       // Custom: requires Scan op (TODO)
+        case OpId::CumProd:      return "CumProd";       // Decomposed: Log + CumSum + Exp
 
         // Roll (custom: Slice + Concat decomposition)
         case OpId::Roll:         return "Roll";         // No native ONNX op; decomposed in export
@@ -348,12 +348,11 @@ auto ONNXExporter::op_to_onnx(OpId op) -> std::string {
 
         // Unfold/Fold — complex subgraph ops
         // Unfold → custom (Slice + Reshape); Fold → Col2Im (opset 18+)
-        case OpId::Unfold:       return "Unfold";       // TODO: decompose to Slice + Reshape
+        case OpId::Unfold:       return "Unfold";       // Decomposed: Slice + Reshape
         case OpId::Fold:         return "Col2Im";       // opset 18+
 
-        // SearchSorted — requires loop construct
-        // TODO: complex ONNX subgraph with Loop or Bucketize
-        case OpId::SearchSorted: return "SearchSorted"; // TODO: no native ONNX op
+        // SearchSorted — registered as custom ONNX op in "tenzor" domain
+        case OpId::SearchSorted: return "SearchSorted"; // Custom op: tenzor domain
 
         default:
             throw std::runtime_error(
@@ -3182,9 +3181,171 @@ auto ONNXExporter::export_scatter_add(const Tensor& data, const Tensor& indices,
     context_.register_tensor(output, output_name);
 }
 
-// Unfold: TODO — requires complex Slice + Reshape subgraph. Skipped for now.
-// Fold: TODO — ONNX Col2Im (opset 18+) requires careful attribute mapping. Skipped for now.
-// SearchSorted: TODO — requires ONNX Loop construct or custom op. Skipped for now.
+auto ONNXExporter::export_unfold(const Tensor& input, int64_t dimension,
+                                  int64_t size, int64_t step,
+                                  const Tensor& output,
+                                  const std::string& output_name) -> void {
+    // Unfold(dim, size, step) extracts sliding windows of `size` along `dim`
+    // with stride `step`. Decompose to a sequence of Slice ops + Concat + Reshape.
+    //
+    // For input shape [..., L, ...] along dim, output has shape
+    // [..., n_windows, ..., size] where n_windows = (L - size) / step + 1.
+    std::string input_name = get_tensor_name(input, "unfold_input");
+
+    auto in_shape = input.shape();
+    int64_t ndim = static_cast<int64_t>(in_shape.size());
+    int64_t dim = dimension >= 0 ? dimension : ndim + dimension;
+    int64_t dim_size = in_shape[dim];
+    int64_t n_windows = (dim_size - size) / step + 1;
+
+    // Create Slice for each window, then Concat + Reshape
+    std::vector<std::string> window_names;
+    window_names.reserve(n_windows);
+
+    for (int64_t i = 0; i < n_windows; ++i) {
+        int64_t start = i * step;
+        int64_t end = start + size;
+
+        std::string prefix = "unfold_w" + std::to_string(i);
+
+        // Create starts/ends/axes initializers for Slice
+        std::string starts_name = context_.generate_name(prefix + "_starts");
+        Tensor starts_t({1}, DType::Int64, Device::cpu());
+        *starts_t.data<int64_t>() = start;
+        add_initializer_tensor(starts_t, starts_name);
+
+        std::string ends_name = context_.generate_name(prefix + "_ends");
+        Tensor ends_t({1}, DType::Int64, Device::cpu());
+        *ends_t.data<int64_t>() = end;
+        add_initializer_tensor(ends_t, ends_name);
+
+        std::string axes_name = context_.generate_name(prefix + "_axes");
+        Tensor axes_t({1}, DType::Int64, Device::cpu());
+        *axes_t.data<int64_t>() = dim;
+        add_initializer_tensor(axes_t, axes_name);
+
+        // Slice node
+        std::string slice_out = context_.generate_name(prefix + "_slice");
+        ONNXExportNode slice_node("Slice", context_.generate_name(prefix + "_slice"));
+        slice_node.add_input(input_name);
+        slice_node.add_input(starts_name);
+        slice_node.add_input(ends_name);
+        slice_node.add_input(axes_name);
+        slice_node.add_output(slice_out);
+        graph_.add_node(slice_node);
+
+        // Unsqueeze the sliced window to add a dimension for stacking
+        std::string unsq_axes_name = context_.generate_name(prefix + "_unsq_axes");
+        Tensor unsq_axes_t({1}, DType::Int64, Device::cpu());
+        *unsq_axes_t.data<int64_t>() = dim;
+        add_initializer_tensor(unsq_axes_t, unsq_axes_name);
+
+        std::string unsq_out = context_.generate_name(prefix + "_unsqueeze");
+        ONNXExportNode unsq_node("Unsqueeze", context_.generate_name(prefix + "_unsqueeze"));
+        unsq_node.add_input(slice_out);
+        unsq_node.add_input(unsq_axes_name);
+        unsq_node.add_output(unsq_out);
+        graph_.add_node(unsq_node);
+
+        window_names.push_back(unsq_out);
+    }
+
+    // Concat all windows along dim
+    std::string concat_out = context_.generate_name("unfold_concat");
+    ONNXExportNode concat_node("Concat", context_.generate_name("unfold_concat"));
+    for (const auto& wname : window_names) {
+        concat_node.add_input(wname);
+    }
+    concat_node.add_output(concat_out);
+    concat_node.set_attr("axis", dim);
+    graph_.add_node(concat_node);
+
+    // Reshape to final output shape
+    auto out_shape = output.shape();
+    std::string shape_name = context_.generate_name("unfold_shape");
+    Tensor shape_t({static_cast<int64_t>(out_shape.size())}, DType::Int64, Device::cpu());
+    for (size_t i = 0; i < out_shape.size(); ++i) {
+        shape_t.data<int64_t>()[i] = out_shape[i];
+    }
+    add_initializer_tensor(shape_t, shape_name);
+
+    ONNXExportNode reshape_node("Reshape", context_.generate_name("unfold_reshape"));
+    reshape_node.add_input(concat_out);
+    reshape_node.add_input(shape_name);
+    reshape_node.add_output(output_name);
+    graph_.add_node(reshape_node);
+    context_.register_tensor(output, output_name);
+}
+
+auto ONNXExporter::export_fold(const Tensor& input,
+                                const std::vector<int64_t>& output_size,
+                                const std::vector<int64_t>& kernel_size,
+                                const std::vector<int64_t>& dilation,
+                                const std::vector<int64_t>& padding,
+                                const std::vector<int64_t>& stride,
+                                const Tensor& output,
+                                const std::string& output_name) -> void {
+    // Fold is the inverse of Unfold. ONNX Col2Im (opset 18+) provides this.
+    // Col2Im(input, image_shape) with kernel_shape, dilations, pads, strides.
+    ONNXExportNode node("Col2Im", context_.generate_name("fold"));
+    std::string input_name = get_tensor_name(input, "fold_input");
+    node.add_input(input_name);
+
+    // image_shape input (the spatial dimensions of the output)
+    std::string img_shape_name = context_.generate_name("fold_image_shape");
+    Tensor img_shape_t({static_cast<int64_t>(output_size.size())}, DType::Int64, Device::cpu());
+    for (size_t i = 0; i < output_size.size(); ++i) {
+        img_shape_t.data<int64_t>()[i] = output_size[i];
+    }
+    add_initializer_tensor(img_shape_t, img_shape_name);
+    node.add_input(img_shape_name);
+
+    // block_shape input (kernel size)
+    std::string block_name = context_.generate_name("fold_block_shape");
+    Tensor block_t({static_cast<int64_t>(kernel_size.size())}, DType::Int64, Device::cpu());
+    for (size_t i = 0; i < kernel_size.size(); ++i) {
+        block_t.data<int64_t>()[i] = kernel_size[i];
+    }
+    add_initializer_tensor(block_t, block_name);
+    node.add_input(block_name);
+
+    node.add_output(output_name);
+
+    // Set attributes
+    node.set_attr("dilations", dilation);
+    // ONNX pads format: [begin1, begin2, ..., end1, end2, ...]
+    std::vector<int64_t> onnx_pads;
+    onnx_pads.reserve(padding.size() * 2);
+    for (int64_t p : padding) { onnx_pads.push_back(p); }
+    for (int64_t p : padding) { onnx_pads.push_back(p); }
+    node.set_attr("pads", onnx_pads);
+    node.set_attr("strides", stride);
+
+    graph_.add_node(node);
+    context_.register_tensor(output, output_name);
+}
+
+auto ONNXExporter::export_search_sorted(const Tensor& sorted_sequence,
+                                         const Tensor& values,
+                                         bool right,
+                                         const Tensor& output,
+                                         const std::string& output_name) -> void {
+    // SearchSorted has no native ONNX op. Register as a custom op in the
+    // "tenzor" domain. ONNX runtimes that support custom ops (e.g.,
+    // onnxruntime with custom op library) can provide the implementation.
+    ONNXExportNode node("SearchSorted", context_.generate_name("search_sorted"));
+    node.set_attr("domain", std::string("tenzor"));
+
+    std::string seq_name = get_tensor_name(sorted_sequence, "search_sorted_seq");
+    std::string val_name = get_tensor_name(values, "search_sorted_values");
+    node.add_input(seq_name);
+    node.add_input(val_name);
+    node.add_output(output_name);
+    node.set_attr("right", static_cast<int64_t>(right ? 1 : 0));
+
+    graph_.add_node(node);
+    context_.register_tensor(output, output_name);
+}
 
 // --- Group 3: Signal processing ---
 
@@ -3259,8 +3420,43 @@ auto ONNXExporter::export_cumsum(const Tensor& input, int64_t axis,
     context_.register_tensor(output, output_name);
 }
 
-// CumProd: TODO — ONNX has no native CumProd. Requires Scan op decomposition.
-// For now, CumProd maps to "CumSum" in op_to_onnx as a placeholder.
+auto ONNXExporter::export_cumprod(const Tensor& input, int64_t axis,
+                                   const Tensor& output,
+                                   const std::string& output_name) -> void {
+    // ONNX has no native CumProd. Decompose via log-domain:
+    //   cumprod(x) = exp(cumsum(log(x)))
+    // This is numerically valid for positive inputs (the common case for
+    // probability chains, attention products, etc.).
+    std::string input_name = get_tensor_name(input, "cumprod_input");
+
+    // Step 1: Log(x)
+    std::string log_out = context_.generate_name("cumprod_log");
+    ONNXExportNode log_node("Log", context_.generate_name("cumprod_log"));
+    log_node.add_input(input_name);
+    log_node.add_output(log_out);
+    graph_.add_node(log_node);
+
+    // Step 2: CumSum(log(x), axis)
+    std::string cumsum_out = context_.generate_name("cumprod_cumsum");
+    ONNXExportNode cumsum_node("CumSum", context_.generate_name("cumprod_cumsum"));
+    cumsum_node.add_input(log_out);
+
+    std::string axis_name = context_.generate_name("cumprod_axis");
+    Tensor axis_tensor({1}, DType::Int64, Device::cpu());
+    *axis_tensor.data<int64_t>() = axis;
+    add_initializer_tensor(axis_tensor, axis_name);
+    cumsum_node.add_input(axis_name);
+
+    cumsum_node.add_output(cumsum_out);
+    graph_.add_node(cumsum_node);
+
+    // Step 3: Exp(cumsum(log(x)))
+    ONNXExportNode exp_node("Exp", context_.generate_name("cumprod_exp"));
+    exp_node.add_input(cumsum_out);
+    exp_node.add_output(output_name);
+    graph_.add_node(exp_node);
+    context_.register_tensor(output, output_name);
+}
 
 auto ONNXExporter::export_roll(const Tensor& input, int64_t shift, int64_t axis,
                                 const Tensor& output,

@@ -1,0 +1,94 @@
+#version 450
+
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint LOCAL_SIZE_X = 256;
+
+// Winograd F(2,3) output transform: Y = A^T * M * A
+// Transforms 4x4 element-wise products back to 2x2 spatial output.
+//
+// A^T = [ 1   1   1   0 ]
+//       [ 0   1  -1  -1 ]
+//
+// M[alpha][beta] = sum_c( U[alpha][beta][k][c] * V[alpha][beta][n][c] )
+// i.e. M is the result of batched matmul in the Winograd domain.
+
+layout(binding = 0) buffer readonly MBuffer { float data[]; } m_buf;     // Winograd-domain products [16][N][K][tiles_h][tiles_w]
+layout(binding = 1) buffer readonly BiasBuffer { float data[]; } bias_buf;
+layout(binding = 2) buffer writeonly OutputBuffer { float data[]; } output_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint batch;
+    uint out_channels;
+    uint out_height;
+    uint out_width;
+    uint tiles_h;
+    uint tiles_w;
+    uint has_bias;
+} params;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint total_tiles = params.batch * params.out_channels * params.tiles_h * params.tiles_w;
+    if (gid >= total_tiles) return;
+
+    // Decode tile indices
+    uint tmp = gid;
+    uint tw = tmp % params.tiles_w; tmp /= params.tiles_w;
+    uint th = tmp % params.tiles_h; tmp /= params.tiles_h;
+    uint k  = tmp % params.out_channels; tmp /= params.out_channels;
+    uint n  = tmp;
+
+    // Load 4x4 Winograd-domain product M[i][j]
+    // Layout: [alpha][beta][N][K][tiles_h][tiles_w]
+    uint tile_idx = ((n * params.out_channels + k) * params.tiles_h + th) * params.tiles_w + tw;
+    uint tile_stride = params.batch * params.out_channels * params.tiles_h * params.tiles_w;
+
+    float M[4][4];
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            uint in_idx = (uint(i) * 4u + uint(j)) * tile_stride + tile_idx;
+            M[i][j] = m_buf.data[in_idx];
+        }
+    }
+
+    // Compute temp = M * A (right-multiply by A)
+    // A = [ 1   0 ]
+    //     [ 1   1 ]
+    //     [ 1  -1 ]
+    //     [ 0  -1 ]
+    float tmp_mat[4][2];
+    for (int i = 0; i < 4; i++) {
+        tmp_mat[i][0] = M[i][0] + M[i][1] + M[i][2];
+        tmp_mat[i][1] = M[i][1] - M[i][2] - M[i][3];
+    }
+
+    // Compute Y = A^T * tmp (left-multiply by A^T)
+    // A^T = [ 1   1   1   0 ]
+    //       [ 0   1  -1  -1 ]
+    float Y[2][2];
+    Y[0][0] = tmp_mat[0][0] + tmp_mat[1][0] + tmp_mat[2][0];
+    Y[0][1] = tmp_mat[0][1] + tmp_mat[1][1] + tmp_mat[2][1];
+    Y[1][0] = tmp_mat[1][0] - tmp_mat[2][0] - tmp_mat[3][0];
+    Y[1][1] = tmp_mat[1][1] - tmp_mat[2][1] - tmp_mat[3][1];
+
+    // Add bias if present
+    float bias_val = 0.0;
+    if (params.has_bias != 0u) {
+        bias_val = bias_buf.data[k];
+    }
+
+    // Write 2x2 output tile to output tensor [N, K, out_h, out_w]
+    uint out_y = th * 2u;
+    uint out_x = tw * 2u;
+
+    for (int i = 0; i < 2; i++) {
+        for (int j = 0; j < 2; j++) {
+            uint oy = out_y + uint(i);
+            uint ox = out_x + uint(j);
+            if (oy < params.out_height && ox < params.out_width) {
+                uint out_idx = ((n * params.out_channels + k) * params.out_height + oy) * params.out_width + ox;
+                output_buf.data[out_idx] = Y[i][j] + bias_val;
+            }
+        }
+    }
+}

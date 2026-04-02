@@ -68,6 +68,12 @@ auto op_type_to_string(OpType type) -> std::string {
         case OpType::Eigvalsh: return "Eigvalsh";
         case OpType::Norm: return "Norm";
         case OpType::Slogdet: return "Slogdet";
+        case OpType::FlashAttention: return "FlashAttention";
+        case OpType::FusedFFN: return "FusedFFN";
+        case OpType::ResidualAdd: return "ResidualAdd";
+        case OpType::ShapeGuard: return "ShapeGuard";
+        case OpType::SwapOut: return "SwapOut";
+        case OpType::SwapIn: return "SwapIn";
         case OpType::Constant: return "Constant";
         case OpType::Input: return "Input";
         case OpType::Output: return "Output";
@@ -129,6 +135,12 @@ auto string_to_op_type(const std::string& str) -> OpType {
         {"Eigvalsh", OpType::Eigvalsh},
         {"Norm", OpType::Norm},
         {"Slogdet", OpType::Slogdet},
+        {"FlashAttention", OpType::FlashAttention},
+        {"FusedFFN", OpType::FusedFFN},
+        {"ResidualAdd", OpType::ResidualAdd},
+        {"ShapeGuard", OpType::ShapeGuard},
+        {"SwapOut", OpType::SwapOut},
+        {"SwapIn", OpType::SwapIn},
         {"Constant", OpType::Constant},
         {"Input", OpType::Input},
         {"Output", OpType::Output},

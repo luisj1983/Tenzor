@@ -199,5 +199,195 @@ private:
     size_t alignment_{64};  ///< Buffer offset alignment (bytes)
 };
 
+// ============================================================================
+// Rematerialization Support
+// ============================================================================
+
+/**
+ * @brief Cost model for deciding whether to rematerialize a value.
+ *
+ * Compares the FLOPS cost of recomputing a value against the memory
+ * saved by not keeping it alive. Operations that are cheap to recompute
+ * (elementwise, activations) are good candidates for rematerialization.
+ */
+struct RematerializationCandidate {
+    std::string value_id;           ///< ID of the value to potentially recompute
+    std::string producer_node_name; ///< Name of the node that produces this value
+    OpType producer_op;             ///< Operation type of the producer
+    size_t memory_saved;            ///< Bytes freed by dropping this value
+    double recompute_flops;         ///< Estimated FLOPS to recompute
+    double cost_ratio;              ///< memory_saved / recompute_flops (higher = better candidate)
+};
+
+/**
+ * @brief Rematerialization planner that identifies values to recompute.
+ *
+ * Analyzes the graph to find intermediate values with long live ranges
+ * whose producers are cheap to recompute (activations, elementwise ops).
+ * By dropping these values and recomputing them when needed, peak memory
+ * usage can be reduced at the cost of extra compute.
+ *
+ * The planner uses a cost model:
+ *   score = memory_saved_bytes / recompute_flops
+ * Values above a threshold score are selected for rematerialization.
+ *
+ * @code
+ * RematerializationPlanner planner;
+ * planner.set_memory_budget(1024 * 1024 * 512);  // 512 MB
+ * auto candidates = planner.find_candidates(graph);
+ * planner.apply(graph, candidates);
+ * @endcode
+ */
+class RematerializationPlanner {
+public:
+    /**
+     * @brief Find rematerialization candidates in the graph.
+     *
+     * Scans intermediate values for those whose producers are cheap
+     * to recompute and whose live ranges consume significant memory.
+     *
+     * @param graph Graph to analyze
+     * @return Sorted candidates (best ratio first)
+     */
+    auto find_candidates(const Graph& graph) -> std::vector<RematerializationCandidate>;
+
+    /**
+     * @brief Apply rematerialization by inserting recompute nodes.
+     *
+     * For each selected candidate, inserts a duplicate of the producer
+     * node at the point of last use, allowing the original value's
+     * memory to be freed earlier.
+     *
+     * @param graph Graph to modify
+     * @param candidates Candidates to rematerialize
+     * @return Number of values rematerialized
+     */
+    auto apply(Graph& graph,
+               const std::vector<RematerializationCandidate>& candidates) -> size_t;
+
+    /**
+     * @brief Set the memory budget. Only rematerialize if peak usage
+     *        exceeds this budget.
+     *
+     * @param bytes Memory budget in bytes (0 = always rematerialize good candidates)
+     */
+    auto set_memory_budget(size_t bytes) -> void { memory_budget_ = bytes; }
+
+    /**
+     * @brief Set the minimum cost ratio for a candidate to be selected.
+     *
+     * @param ratio Minimum memory_saved / recompute_flops ratio
+     */
+    auto set_min_cost_ratio(double ratio) -> void { min_cost_ratio_ = ratio; }
+
+private:
+    /**
+     * @brief Check if an operation is cheap to recompute.
+     *
+     * Activations (ReLU, GELU, Sigmoid, Tanh) and elementwise ops
+     * (Add, Mul, Exp, Log, Sqrt, etc.) are considered cheap.
+     *
+     * @param op Operation type
+     * @return true if operation is cheap
+     */
+    auto is_cheap_to_recompute(OpType op) -> bool;
+
+    /**
+     * @brief Estimate FLOPS for recomputing a value.
+     *
+     * For elementwise ops: FLOPS = numel
+     * For activations: FLOPS = numel * activation_cost_factor
+     *
+     * @param op Operation type
+     * @param shape Output shape
+     * @return Estimated FLOPS
+     */
+    auto estimate_flops(OpType op, const std::vector<int64_t>& shape) -> double;
+
+    size_t memory_budget_{0};        ///< Memory budget (0 = unlimited)
+    double min_cost_ratio_{1.0};     ///< Minimum cost ratio for selection
+};
+
+// ============================================================================
+// Memory Swapping Support
+// ============================================================================
+
+/**
+ * @brief Describes a swap-out/swap-in pair for a value.
+ *
+ * When a large activation cannot be rematerialized, it can be swapped
+ * out to CPU memory and prefetched back before it is needed.
+ */
+struct SwapSchedule {
+    std::string value_id;     ///< Value to swap
+    size_t swap_out_after;    ///< Node index after which to schedule SwapOut
+    size_t swap_in_before;    ///< Node index before which to schedule SwapIn
+    size_t size_bytes;        ///< Size of the value in bytes
+};
+
+/**
+ * @brief Memory swap planner that inserts SwapOut/SwapIn pseudo-nodes.
+ *
+ * For large activations that cannot be cheaply rematerialized, schedules
+ * asynchronous GPU->CPU transfers (SwapOut) after the value is produced
+ * and CPU->GPU prefetches (SwapIn) before the value is next consumed.
+ *
+ * The planner inserts pseudo-nodes into the graph:
+ * - SwapOut: Placed immediately after the producer, triggers async D2H copy
+ * - SwapIn: Placed before the last consumer, triggers async H2D prefetch
+ *
+ * @code
+ * MemorySwapPlanner planner;
+ * planner.set_swap_threshold(64 * 1024 * 1024);  // 64 MB
+ * auto schedule = planner.plan(graph);
+ * planner.apply(graph, schedule);
+ * @endcode
+ */
+class MemorySwapPlanner {
+public:
+    /**
+     * @brief Plan swap schedules for large activations.
+     *
+     * Identifies values whose live ranges are long and sizes exceed
+     * the swap threshold. Computes optimal swap-out and swap-in points.
+     *
+     * @param graph Graph to analyze
+     * @return Vector of swap schedules
+     */
+    auto plan(const Graph& graph) -> std::vector<SwapSchedule>;
+
+    /**
+     * @brief Apply swap schedules by inserting SwapOut/SwapIn nodes.
+     *
+     * @param graph Graph to modify
+     * @param schedules Swap schedules to apply
+     * @return Number of swap pairs inserted
+     */
+    auto apply(Graph& graph, const std::vector<SwapSchedule>& schedules) -> size_t;
+
+    /**
+     * @brief Set the minimum value size for swapping consideration.
+     *
+     * Values smaller than this threshold will not be swapped.
+     *
+     * @param bytes Minimum size in bytes (default: 64 MB)
+     */
+    auto set_swap_threshold(size_t bytes) -> void { swap_threshold_ = bytes; }
+
+    /**
+     * @brief Set the minimum live range gap for swapping.
+     *
+     * Only swap values whose live range spans at least this many nodes,
+     * to ensure there is enough time for async transfer.
+     *
+     * @param gap Minimum node gap (default: 5)
+     */
+    auto set_min_gap(size_t gap) -> void { min_gap_ = gap; }
+
+private:
+    size_t swap_threshold_{64 * 1024 * 1024};  ///< Min value size for swap (bytes)
+    size_t min_gap_{5};                         ///< Min live range gap (nodes)
+};
+
 } // namespace jit
 } // namespace tenzor

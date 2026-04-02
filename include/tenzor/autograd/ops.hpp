@@ -862,6 +862,23 @@ auto spmm(const SparseTensor& sparse, const Variable& dense) -> Variable;
  */
 auto spmv(const SparseTensor& sparse, const Variable& vec) -> Variable;
 
+/**
+ * @brief Sparse-dense addition with gradient tracking.
+ *
+ * Computes Y = S + D where S is a sparse tensor and D is a dense tensor.
+ * Only the dense input D receives a gradient during backpropagation:
+ *   grad_D = grad_Y  (gradient passes through directly)
+ *
+ * The sparse tensor S is treated as a constant (no gradient computed).
+ *
+ * @param sparse Sparse tensor -- not differentiated
+ * @param dense Dense tensor variable -- receives gradient
+ * @return Variable containing the dense result with gradient function
+ *
+ * @see SparseAddBackward for gradient implementation
+ */
+auto sparse_add(const SparseTensor& sparse, const Variable& dense) -> Variable;
+
 } // namespace tenzor
 
 namespace tenzor {

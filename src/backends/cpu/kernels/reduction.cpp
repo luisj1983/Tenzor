@@ -1,6 +1,7 @@
 #include "tenzor/core/tensor.hpp"
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <cmath>
@@ -3810,6 +3811,68 @@ auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim) -> std::vector<
     }
 
     return {values, indices};
+}
+
+// ============================================================================
+// Histogram Kernel - Compute histogram of tensor values
+// ============================================================================
+
+auto histogram_kernel(const Tensor& input, int64_t bins, double min_val, double max_val)
+    -> std::pair<Tensor, Tensor> {
+    if (bins <= 0) {
+        throw std::runtime_error("histogram: bins must be > 0");
+    }
+
+    Tensor input_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
+    const float* data = input_f32.data<float>();
+    int64_t n = input_f32.numel();
+
+    // Auto-detect range if min == max
+    float fmin = static_cast<float>(min_val);
+    float fmax = static_cast<float>(max_val);
+    if (fmin >= fmax) {
+        if (n == 0) {
+            fmin = 0.0f;
+            fmax = 1.0f;
+        } else {
+            fmin = data[0];
+            fmax = data[0];
+            for (int64_t i = 1; i < n; ++i) {
+                if (data[i] < fmin) fmin = data[i];
+                if (data[i] > fmax) fmax = data[i];
+            }
+            if (fmin == fmax) {
+                fmin -= 0.5f;
+                fmax += 0.5f;
+            }
+        }
+    }
+
+    // Compute bin edges (bins + 1 edges)
+    Tensor edges({bins + 1}, DType::Float32, input.device());
+    float* edge_data = edges.data<float>();
+    float step = (fmax - fmin) / static_cast<float>(bins);
+    for (int64_t i = 0; i <= bins; ++i) {
+        edge_data[i] = fmin + static_cast<float>(i) * step;
+    }
+
+    // Count elements per bin
+    Tensor counts({bins}, DType::Int64, input.device());
+    int64_t* count_data = counts.data<int64_t>();
+    std::memset(count_data, 0, static_cast<size_t>(bins) * sizeof(int64_t));
+
+    for (int64_t i = 0; i < n; ++i) {
+        float v = data[i];
+        if (v < fmin || v > fmax) continue;
+
+        int64_t bin = static_cast<int64_t>((v - fmin) / step);
+        // Last bin is closed on the right: [edge[bins-1], edge[bins]]
+        if (bin >= bins) bin = bins - 1;
+        if (bin < 0) bin = 0;
+        count_data[bin]++;
+    }
+
+    return {counts, edges};
 }
 
 } // namespace cpu

@@ -9,8 +9,14 @@
 #include "../../include/tenzor/jit/compiler.hpp"
 #include "../../include/tenzor/jit/tracer.hpp"
 #include "../../include/tenzor/jit/serialization.hpp"
+#include "../../include/tenzor/core/device.hpp"
 #include <algorithm>
 #include <stdexcept>
+
+#ifdef TENZOR_HAS_ROCM
+#include "../backends/rocm/hip_graph.hpp"
+#include <hip/hip_runtime.h>
+#endif
 
 namespace tenzor {
 namespace jit {
@@ -113,7 +119,65 @@ auto CompiledModule::all_metadata() const -> const std::unordered_map<std::strin
 }
 
 // ============================================================================
-// CUDA Graph Capture/Replay
+// ROCm Graph Adapter (wraps HIPGraph behind the CUDAGraph interface)
+// ============================================================================
+
+#ifdef TENZOR_HAS_ROCM
+namespace {
+
+class ROCmGraphAdapter : public CUDAGraph {
+public:
+    explicit ROCmGraphAdapter(int32_t device_id) : device_id_(device_id) {
+        hipSetDevice(device_id_);
+        auto err = hipStreamCreate(&stream_);
+        if (err != hipSuccess) {
+            throw std::runtime_error(
+                std::string("ROCmGraphAdapter: failed to create stream: ") +
+                hipGetErrorString(err));
+        }
+    }
+
+    ~ROCmGraphAdapter() override {
+        if (hip_graph_.is_capturing()) {
+            // Abort capture to leave stream in valid state
+            hipGraph_t dummy = nullptr;
+            hipStreamEndCapture(stream_, &dummy);
+            if (dummy) hipGraphDestroy(dummy);
+        }
+        if (stream_) {
+            hipStreamDestroy(stream_);
+        }
+    }
+
+    void begin_capture() override {
+        hipSetDevice(device_id_);
+        hip_graph_.begin_capture(stream_);
+    }
+
+    void end_capture() override {
+        hip_graph_.end_capture(stream_);
+    }
+
+    void replay() override {
+        hipSetDevice(device_id_);
+        hip_graph_.replay(stream_);
+    }
+
+    bool is_ready() const override {
+        return hip_graph_.is_compiled();
+    }
+
+private:
+    int32_t device_id_;
+    hipStream_t stream_ = nullptr;
+    rocm::HIPGraph hip_graph_;
+};
+
+} // anonymous namespace
+#endif // TENZOR_HAS_ROCM
+
+// ============================================================================
+// CUDA / ROCm Graph Capture/Replay
 // ============================================================================
 
 auto CompiledModule::capture_cuda_graph(std::vector<Tensor> sample_inputs) -> void {
@@ -124,17 +188,34 @@ auto CompiledModule::capture_cuda_graph(std::vector<Tensor> sample_inputs) -> vo
     // Invalidate any existing captured graph
     invalidate_cuda_graph();
 
-    // Determine device ID from the first input tensor
+    // Determine device ID and type from the first input tensor
     int32_t device_id = 0;
+    Device::Type device_type = Device::Type::CPU;
     if (!sample_inputs.empty()) {
         device_id = sample_inputs[0].device().index;
+        device_type = sample_inputs[0].device().type;
     }
 
-    // Create the CUDA graph capture object (returns nullptr if CUDA unavailable)
-    cuda_graph_ = CUDAGraph::create(device_id);
-    if (!cuda_graph_) {
-        throw std::runtime_error(
-            "CUDA is not available; cannot capture CUDA graph");
+    // Create graph capture object based on device type
+#ifdef TENZOR_HAS_ROCM
+    if (device_type == Device::Type::ROCm) {
+        int hip_count = 0;
+        hipGetDeviceCount(&hip_count);
+        if (hip_count == 0 || device_id >= hip_count) {
+            throw std::runtime_error(
+                "ROCm is not available; cannot capture HIP graph");
+        }
+        cuda_graph_ = std::make_unique<ROCmGraphAdapter>(device_id);
+    } else
+#endif
+    {
+        // CUDA path (or fallback)
+        cuda_graph_ = CUDAGraph::create(device_id);
+        if (!cuda_graph_) {
+            throw std::runtime_error(
+                "GPU is not available; cannot capture graph (device type: " +
+                Device{device_type, device_id}.to_string() + ")");
+        }
     }
 
     // Record input shapes for validation during replay

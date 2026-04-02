@@ -1302,13 +1302,25 @@ auto QuantizedConv3d::from_float(Module& fp_conv3d, const QConfig& qconfig)
     int64_t in_ch_per_group = shape[1];
     std::array<int64_t, 3> ks = {shape[2], shape[3], shape[4]};
 
-    // TODO: extract stride/padding/dilation/groups from module metadata
+    // Extract stride/padding/dilation/groups from the source Conv3d module
+    std::array<int64_t, 3> stride = {1, 1, 1};
+    std::array<int64_t, 3> padding = {0, 0, 0};
+    std::array<int64_t, 3> dilation = {1, 1, 1};
+    int64_t groups = 1;
+    if (auto* conv3d = dynamic_cast<nn::Conv3d*>(&fp_conv3d)) {
+        stride = {conv3d->stride(), conv3d->stride(), conv3d->stride()};
+        padding = {conv3d->padding(), conv3d->padding(), conv3d->padding()};
+        dilation = {conv3d->dilation(), conv3d->dilation(), conv3d->dilation()};
+        groups = conv3d->groups();
+        in_ch_per_group = in_ch_per_group * groups;  // Convert per-group to total in_channels
+    }
+
     auto weight_cpu = (weight.device() == Device::cpu()) ? weight : weight.to(Device::cpu());
     auto q_weight = quantize_per_tensor_symmetric(weight_cpu);
 
     auto result = std::make_shared<QuantizedConv3d>(
-        in_ch_per_group, out_ch, ks, std::array<int64_t,3>{1,1,1},
-        std::array<int64_t,3>{0,0,0}, std::array<int64_t,3>{1,1,1}, 1,
+        in_ch_per_group, out_ch, ks, stride,
+        padding, dilation, groups,
         q_weight.params());
     result->set_weight(q_weight);
 

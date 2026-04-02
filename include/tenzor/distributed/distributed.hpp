@@ -129,6 +129,30 @@ public:
     virtual auto reduce_scatter(const std::vector<Tensor>& tensors, Tensor& output, ReduceOp op) -> void = 0;
 
     /**
+     * @brief Point-to-point send to a specific rank.
+     *
+     * Sends the tensor to the destination rank. Blocks until the send
+     * buffer is safe to reuse (but the receiver may not have completed
+     * the receive yet on some backends).
+     *
+     * @param tensor Tensor to send
+     * @param dst_rank Destination rank
+     */
+    virtual auto send(const Tensor& tensor, int dst_rank) -> void = 0;
+
+    /**
+     * @brief Point-to-point receive from a specific rank.
+     *
+     * Receives a tensor from the source rank into the provided tensor.
+     * The tensor must be pre-allocated with the correct shape and dtype.
+     * Blocks until the receive is complete.
+     *
+     * @param tensor Pre-allocated tensor to receive into
+     * @param src_rank Source rank
+     */
+    virtual auto recv(Tensor& tensor, int src_rank) -> void = 0;
+
+    /**
      * @brief Barrier synchronization.
      */
     virtual auto barrier() -> void = 0;
@@ -254,6 +278,22 @@ public:
      * @param op Reduction operation
      */
     auto reduce_scatter(const std::vector<Tensor>& tensors, Tensor& output, ReduceOp op = ReduceOp::SUM) -> void;
+
+    /**
+     * @brief Point-to-point send to a specific rank.
+     *
+     * @param tensor Tensor to send
+     * @param dst_rank Destination rank
+     */
+    auto send(const Tensor& tensor, int dst_rank) -> void;
+
+    /**
+     * @brief Point-to-point receive from a specific rank.
+     *
+     * @param tensor Pre-allocated tensor to receive into
+     * @param src_rank Source rank
+     */
+    auto recv(Tensor& tensor, int src_rank) -> void;
 
     /**
      * @brief Barrier synchronization across all processes.
@@ -480,6 +520,16 @@ auto all_reduce(Tensor& tensor, ReduceOp op = ReduceOp::SUM) -> void;
  * @brief Broadcast tensor from source rank.
  */
 auto broadcast(Tensor& tensor, int src_rank = 0) -> void;
+
+/**
+ * @brief Point-to-point send tensor to destination rank.
+ */
+auto send(const Tensor& tensor, int dst_rank) -> void;
+
+/**
+ * @brief Point-to-point receive tensor from source rank.
+ */
+auto recv(Tensor& tensor, int src_rank) -> void;
 
 } // namespace distributed
 } // namespace tenzor

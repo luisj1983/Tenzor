@@ -130,5 +130,15 @@ tenzor_discover_tests(test_segmentation_multidtype DISCOVERY_TIMEOUT 60)
 add_executable(test_pytorch_loader test_pytorch_loader.cpp)
 target_link_libraries(test_pytorch_loader PRIVATE tenzor_core GTest::gtest_main)
 
+# FSDP tests
+add_executable(test_fsdp test_fsdp.cpp)
+target_link_libraries(test_fsdp PRIVATE tenzor_core GTest::gtest_main)
+
+# Tensor Parallelism tests
+add_executable(test_tensor_parallel test_tensor_parallel.cpp)
+target_link_libraries(test_tensor_parallel PRIVATE tenzor_core GTest::gtest_main)
+
 tenzor_discover_tests(test_hrm DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_pytorch_loader DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_fsdp DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_tensor_parallel DISCOVERY_TIMEOUT 60)

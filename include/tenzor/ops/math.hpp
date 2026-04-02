@@ -382,6 +382,18 @@ auto polar(const Tensor& abs, const Tensor& angle) -> Tensor;
 
 /// @}
 
+/**
+ * @brief Compute pairwise distance between two sets of vectors.
+ *
+ * Computes batched pairwise p-norm distance: output[b][i][j] = ||x1[b][i] - x2[b][j]||_p
+ *
+ * @param x1 Input tensor (B, P, M) or (P, M)
+ * @param x2 Input tensor (B, R, M) or (R, M)
+ * @param p p-norm value (default: 2.0)
+ * @return Distance tensor (B, P, R) or (P, R)
+ */
+auto cdist(const Tensor& x1, const Tensor& x2, double p = 2.0) -> Tensor;
+
 /** @} */ // end of tensor_math group
 
 } // namespace tenzor

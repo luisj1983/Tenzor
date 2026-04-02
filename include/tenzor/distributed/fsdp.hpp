@@ -1,0 +1,409 @@
+/**
+ * @file fsdp.hpp
+ * @brief Fully Sharded Data Parallel (FSDP) training wrapper
+ *
+ * Implements ZeRO-3 style parameter sharding where each rank holds only a
+ * shard of the model parameters. Parameters are all-gathered before each
+ * forward pass and gradients are reduce-scattered during the backward pass,
+ * enabling training of models that exceed single-GPU memory.
+ */
+
+#pragma once
+
+#include "distributed.hpp"
+#include "../nn/module.hpp"
+#include "../autograd/variable.hpp"
+#include <vector>
+#include <memory>
+#include <mutex>
+#include <atomic>
+#include <functional>
+
+namespace tenzor::distributed {
+
+/**
+ * @brief Sharding strategy controlling what gets sharded across ranks.
+ */
+enum class ShardingStrategy {
+    /** @brief Full ZeRO-3: shard parameters, gradients, and optimizer states */
+    FULL_SHARD,
+
+    /** @brief ZeRO-2: shard only gradients and optimizer states (keep full params) */
+    SHARD_GRAD_OP,
+
+    /** @brief No sharding: equivalent to DDP (for debugging/comparison) */
+    NO_SHARD
+};
+
+/**
+ * @brief Configuration for FSDP wrapping.
+ */
+struct FSDPConfig {
+    /** @brief Sharding strategy (default: FULL_SHARD) */
+    ShardingStrategy strategy{ShardingStrategy::FULL_SHARD};
+
+    /** @brief Offload parameters to CPU when not in use */
+    bool cpu_offload{false};
+
+    /** @brief Minimum parameter count for auto-wrapping a submodule as an FSDP unit */
+    size_t auto_wrap_min_params{100000};
+
+    /** @brief Whether to use mixed precision for communication (future) */
+    bool mixed_precision{false};
+
+    /** @brief Limit all-gather to this many FSDP units in flight at once (0 = no limit) */
+    size_t forward_prefetch_limit{2};
+
+    /** @brief Whether to prefetch parameters for the next FSDP unit during forward */
+    bool forward_prefetch{true};
+
+    /** @brief Whether to prefetch parameters for backward during forward */
+    bool backward_prefetch{true};
+};
+
+/**
+ * @brief An FSDP unit wrapping a subtree of the model.
+ *
+ * Each FSDPUnit manages a flat parameter buffer that contains all parameters
+ * from its wrapped module subtree. The buffer is sharded across ranks, with
+ * each rank holding a contiguous chunk of size total_params / world_size.
+ *
+ * Lifecycle during training:
+ * 1. Pre-forward: all-gather to reconstruct full parameters
+ * 2. Forward: compute with full parameters
+ * 3. Post-forward: free non-local shards (FULL_SHARD only)
+ * 4. Pre-backward: all-gather parameters again (FULL_SHARD only)
+ * 5. Post-backward: reduce-scatter gradients, re-shard parameters
+ */
+class FSDPUnit {
+public:
+    /**
+     * @brief Construct an FSDP unit for a module subtree.
+     *
+     * Flattens all parameters in the module into a contiguous buffer,
+     * then shards the buffer across ranks.
+     *
+     * @param module The module subtree to wrap
+     * @param pg Process group for communication
+     * @param config FSDP configuration
+     */
+    FSDPUnit(nn::Module& module, ProcessGroup& pg, const FSDPConfig& config);
+
+    ~FSDPUnit();
+
+    // Non-copyable
+    FSDPUnit(const FSDPUnit&) = delete;
+    FSDPUnit& operator=(const FSDPUnit&) = delete;
+
+    /**
+     * @brief All-gather parameters from all ranks to reconstruct full buffer.
+     *
+     * After this call, all parameters in the wrapped module have their full
+     * (unsharded) values and can be used for computation.
+     */
+    auto all_gather_params() -> void;
+
+    /**
+     * @brief Free non-local parameter shards to reclaim memory.
+     *
+     * After forward, we only need to keep our local shard. This frees
+     * the full parameter buffer and restores parameters to their sharded state.
+     * Only effective when strategy is FULL_SHARD.
+     */
+    auto free_full_params() -> void;
+
+    /**
+     * @brief Reduce-scatter gradients and re-shard parameters.
+     *
+     * Called during the backward pass. Performs reduce-scatter on the
+     * gradient buffer (each rank gets its shard of the averaged gradient)
+     * and optionally divides by world_size.
+     */
+    auto reduce_scatter_grads() -> void;
+
+    /**
+     * @brief Offload local shard to CPU (if cpu_offload is enabled).
+     */
+    auto offload_to_cpu() -> void;
+
+    /**
+     * @brief Reload local shard from CPU back to GPU.
+     */
+    auto reload_from_cpu() -> void;
+
+    /**
+     * @brief Get the wrapped module.
+     */
+    auto module() -> nn::Module& { return module_; }
+    auto module() const -> const nn::Module& { return module_; }
+
+    /**
+     * @brief Check if parameters are currently in the full (all-gathered) state.
+     */
+    auto is_full() const -> bool { return params_full_; }
+
+    /**
+     * @brief Get total number of elements across all parameters in this unit.
+     */
+    auto total_numel() const -> size_t { return total_numel_; }
+
+    /**
+     * @brief Get the local shard size (elements this rank is responsible for).
+     */
+    auto shard_numel() const -> size_t { return shard_numel_; }
+
+    /**
+     * @brief Get the flat parameter buffer (full or sharded depending on state).
+     */
+    auto flat_param() const -> const Tensor& { return flat_param_; }
+
+    /**
+     * @brief Get the flat gradient buffer.
+     */
+    auto flat_grad() const -> const Tensor& { return flat_grad_; }
+
+private:
+    nn::Module& module_;
+    ProcessGroup& pg_;
+    FSDPConfig config_;
+
+    /** @brief Flat contiguous buffer holding all parameters */
+    Tensor flat_param_;
+
+    /** @brief Flat contiguous buffer holding all gradients */
+    Tensor flat_grad_;
+
+    /** @brief Local shard of the flat parameter buffer */
+    Tensor local_shard_;
+
+    /** @brief CPU copy of local shard (used when cpu_offload is enabled) */
+    Tensor cpu_shard_;
+
+    /** @brief Original parameter shapes for unflattening */
+    std::vector<std::vector<int64_t>> param_shapes_;
+
+    /** @brief Original parameter numels for offset computation */
+    std::vector<size_t> param_numels_;
+
+    /** @brief Shared pointers to original parameters (for writing back) */
+    std::vector<std::shared_ptr<Variable>> original_params_;
+
+    /** @brief Total number of elements across all parameters */
+    size_t total_numel_{0};
+
+    /** @brief Number of elements in this rank's shard */
+    size_t shard_numel_{0};
+
+    /** @brief Offset into flat buffer where this rank's shard starts */
+    size_t shard_offset_{0};
+
+    /** @brief Whether parameters are currently in full (all-gathered) state */
+    bool params_full_{false};
+
+    /** @brief Whether local shard is currently on CPU */
+    bool offloaded_{false};
+
+    // ---- GPU communication resources ----
+
+    /** @brief Whether the process group uses GPU backend */
+    bool use_gpu_comm_{false};
+
+    /** @brief Dedicated communication stream (void* to avoid cuda header) */
+    void* comm_stream_{nullptr};
+
+    /** @brief CUDA event for synchronization */
+    void* comm_event_{nullptr};
+
+    /**
+     * @brief Flatten all module parameters into a single contiguous buffer.
+     */
+    auto flatten_params() -> void;
+
+    /**
+     * @brief Shard the flat buffer: each rank keeps its contiguous chunk.
+     */
+    auto shard_params() -> void;
+
+    /**
+     * @brief Write values from flat_param_ back into original parameter Variables.
+     */
+    auto unflatten_params() -> void;
+
+    /**
+     * @brief Collect gradients from original parameters into flat_grad_.
+     */
+    auto collect_grads() -> void;
+
+    /**
+     * @brief Write reduced gradient shard back to original parameter Variables.
+     */
+    auto scatter_grads_to_params() -> void;
+
+    /**
+     * @brief Initialize GPU communication resources.
+     */
+    auto init_comm_resources() -> void;
+
+    /**
+     * @brief Destroy GPU communication resources.
+     */
+    auto destroy_comm_resources() -> void;
+};
+
+/**
+ * @brief Fully Sharded Data Parallel wrapper for memory-efficient distributed training.
+ *
+ * Wraps an nn::Module and automatically shards parameters across processes
+ * using the ZeRO-3 algorithm. Each rank holds only 1/N of the parameters
+ * (where N is world_size), with parameters being all-gathered on demand
+ * for computation and freed immediately after.
+ *
+ * Memory savings: approximately world_size reduction in parameter memory,
+ * enabling training of models that don't fit on a single GPU.
+ *
+ * Usage:
+ * @code
+ * // Initialize distributed context
+ * distributed::init_process_group("nccl", rank, world_size);
+ * auto pg = DistributedContext::get_process_group();
+ *
+ * // Create model and wrap with FSDP
+ * auto model = std::make_shared<LargeModel>();
+ * FSDPConfig config;
+ * config.strategy = ShardingStrategy::FULL_SHARD;
+ * config.cpu_offload = true;
+ * FullyShardedDataParallel fsdp(*model, *pg, config);
+ *
+ * // Training loop
+ * for (auto& batch : dataloader) {
+ *     auto output = fsdp.forward(input);
+ *     auto loss = criterion(output, target);
+ *     loss.backward();
+ *     fsdp.finalize_backward();  // reduce-scatter gradients
+ *     optimizer.step();
+ *     model->zero_grad();
+ * }
+ * @endcode
+ */
+class FullyShardedDataParallel {
+public:
+    /**
+     * @brief Construct FSDP wrapper.
+     *
+     * Applies auto-wrap policy to identify FSDP units (submodules with
+     * parameter count >= auto_wrap_min_params), flattens and shards
+     * parameters for each unit, and registers forward/backward hooks.
+     *
+     * @param module The neural network module to wrap
+     * @param pg The process group for communication
+     * @param config FSDP configuration
+     */
+    FullyShardedDataParallel(nn::Module& module, ProcessGroup& pg,
+                             const FSDPConfig& config = FSDPConfig{});
+
+    ~FullyShardedDataParallel();
+
+    // Non-copyable
+    FullyShardedDataParallel(const FullyShardedDataParallel&) = delete;
+    FullyShardedDataParallel& operator=(const FullyShardedDataParallel&) = delete;
+
+    /**
+     * @brief Forward pass with automatic parameter gathering.
+     *
+     * For each FSDP unit in execution order:
+     * 1. All-gather parameters (restore full params from shards)
+     * 2. Execute the unit's forward computation
+     * 3. Free non-local shards (FULL_SHARD only)
+     *
+     * @param input Input variable
+     * @return Output variable from the wrapped module
+     */
+    auto forward(const Variable& input) -> Variable;
+
+    /**
+     * @brief Finalize backward pass: reduce-scatter all gradients.
+     *
+     * Must be called after loss.backward() to perform the reduce-scatter
+     * on each FSDP unit's gradient buffer. After this call, each rank holds
+     * only its shard of the averaged gradient.
+     */
+    auto finalize_backward() -> void;
+
+    /**
+     * @brief Get reference to the wrapped module.
+     */
+    auto module() -> nn::Module& { return module_; }
+    auto module() const -> const nn::Module& { return module_; }
+
+    /**
+     * @brief Get the FSDP units.
+     */
+    auto units() const -> const std::vector<std::unique_ptr<FSDPUnit>>& { return units_; }
+
+    /**
+     * @brief Get the FSDP configuration.
+     */
+    auto config() const -> const FSDPConfig& { return config_; }
+
+    /**
+     * @brief Summon full parameters temporarily for saving/inspection.
+     *
+     * All-gathers all parameters across all FSDP units. The caller
+     * should call release_full_params() when done.
+     */
+    auto summon_full_params() -> void;
+
+    /**
+     * @brief Release full parameters and return to sharded state.
+     */
+    auto release_full_params() -> void;
+
+    /**
+     * @brief Get total number of parameters across all FSDP units.
+     */
+    auto total_params() const -> size_t;
+
+    /**
+     * @brief Get total sharded parameter memory (bytes on this rank).
+     */
+    auto sharded_param_bytes() const -> size_t;
+
+private:
+    nn::Module& module_;
+    ProcessGroup& pg_;
+    FSDPConfig config_;
+
+    /** @brief FSDP units (one per wrapped submodule or the root) */
+    std::vector<std::unique_ptr<FSDPUnit>> units_;
+
+    /** @brief Mutex for thread-safe operations */
+    std::mutex mutex_;
+
+    /**
+     * @brief Apply auto-wrap policy to identify submodules that should
+     *        become FSDP units based on parameter count threshold.
+     */
+    auto apply_auto_wrap() -> void;
+
+    /**
+     * @brief Wrap a single module as an FSDP unit.
+     *
+     * @param module Module to wrap
+     */
+    auto wrap_module(nn::Module& module) -> void;
+
+    /**
+     * @brief Count parameters in a module (non-recursive: only own params).
+     *
+     * @param module Module to count
+     * @return Number of parameters
+     */
+    auto count_params(nn::Module& module) const -> size_t;
+
+    /**
+     * @brief Register forward pre-hooks for all-gathering.
+     */
+    auto register_hooks() -> void;
+};
+
+} // namespace tenzor::distributed

@@ -9,6 +9,7 @@
 #pragma once
 
 #include <optional>
+#include <utility>
 #include <vector>
 #include "../core/tensor.hpp"
 
@@ -139,6 +140,18 @@ auto all(const Tensor& input,
 
 /** @brief Check if tensor contains any inf or nan values. Returns Bool scalar tensor. */
 auto has_inf_nan(const Tensor& input) -> Tensor;
+
+/**
+ * @brief Compute histogram of a tensor.
+ *
+ * @param input Input tensor (flattened for histogram computation)
+ * @param bins Number of equal-width bins
+ * @param min Minimum value of the range (inclusive). If min == max, uses data range.
+ * @param max Maximum value of the range (exclusive). If min == max, uses data range.
+ * @return Pair of (histogram counts as Int64 tensor, bin edges as Float tensor)
+ */
+auto histogram(const Tensor& input, int64_t bins = 10, double min = 0.0, double max = 0.0)
+    -> std::pair<Tensor, Tensor>;
 
 /** @} */ // end of tensor_reduction group
 

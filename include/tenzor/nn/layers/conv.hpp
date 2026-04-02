@@ -365,6 +365,14 @@ public:
                ", bias=" + (parameters_.count("bias") ? "True" : "False");
     }
 
+    auto in_channels() const -> int64_t { return in_channels_; }
+    auto out_channels() const -> int64_t { return out_channels_; }
+    auto kernel_size() const -> int64_t { return kernel_size_; }
+    auto stride() const -> int64_t { return stride_; }
+    auto padding() const -> int64_t { return padding_; }
+    auto dilation() const -> int64_t { return dilation_; }
+    auto groups() const -> int64_t { return groups_; }
+
 private:
     int64_t in_channels_;
     int64_t out_channels_;

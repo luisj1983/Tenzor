@@ -486,6 +486,21 @@ enum class OpId : uint16_t {
     SparseAdd,                 // Sparse + Dense addition
 
     // =========================================================================
+    // Signal Processing Operations (470-479)
+    // =========================================================================
+    STFT = 470,                // Short-time Fourier transform
+    ISTFT,                     // Inverse short-time Fourier transform
+    CDist,                     // Pairwise distance computation
+
+    // =========================================================================
+    // Sampling and Statistics Operations (480-489)
+    // =========================================================================
+    Multinomial = 480,         // Weighted random sampling
+    Bernoulli,                 // Bernoulli distribution sampling
+    Histogram,                 // Histogram computation
+    Bucketize,                 // Bucket assignment via binary search
+
+    // =========================================================================
     // Sentinel (MUST BE LAST)
     // =========================================================================
     OP_COUNT

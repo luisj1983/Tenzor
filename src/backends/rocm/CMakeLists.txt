@@ -194,6 +194,8 @@ add_custom_command(
         ${CMAKE_CURRENT_SOURCE_DIR}/rocm_backend.hpp
         ${CMAKE_CURRENT_SOURCE_DIR}/rocm_error.hpp
         ${CMAKE_CURRENT_SOURCE_DIR}/hip_buffer.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/hip_graph.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/rocm_arch_detect.hpp
         ${CMAKE_CURRENT_SOURCE_DIR}/miopen_guards.hpp
     COMMENT "Compiling rocm_backend.cpp (pure C++, no HIP flags)"
     VERBATIM
@@ -321,9 +323,16 @@ if(MIOpen_FOUND)
     target_include_directories(tenzor_backend_rocm PRIVATE ${MIOpen_INCLUDE_DIRS})
     target_link_libraries(tenzor_backend_rocm PRIVATE MIOpen)
     target_compile_definitions(tenzor_backend_rocm PRIVATE TENZOR_HAS_MIOPEN)
-    message(STATUS "ROCm Backend: MIOpen support enabled")
+
+    # Also add MIOpen to the HIP kernels library so that kernel sources
+    # (pooling, batchnorm, lstm, gru) can use MIOpen under #ifdef USE_MIOPEN
+    target_include_directories(tenzor_rocm_kernels PRIVATE ${MIOpen_INCLUDE_DIRS})
+    target_link_libraries(tenzor_rocm_kernels PRIVATE MIOpen)
+    target_compile_definitions(tenzor_rocm_kernels PRIVATE USE_MIOPEN)
+
+    message(STATUS "ROCm Backend: MIOpen support enabled (conv2d, pooling, batchnorm, LSTM, GRU)")
 else()
-    message(STATUS "ROCm Backend: MIOpen not found, using built-in convolution kernels")
+    message(STATUS "ROCm Backend: MIOpen not found, using built-in HIP kernels")
 endif()
 
 # C++ backend definitions (HIP definitions are on the kernels library)

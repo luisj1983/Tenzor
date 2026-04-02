@@ -765,6 +765,478 @@ auto FuseLayerNormActivationPass::fuse_pair(std::shared_ptr<Node> ln_node,
 }
 
 // ============================================================================
+// Flash Attention Fusion Pass
+// ============================================================================
+
+auto FuseAttentionPass::validate_attention_shapes(
+    const std::vector<int64_t>& q_shape,
+    const std::vector<int64_t>& k_shape,
+    const std::vector<int64_t>& v_shape) -> bool {
+    // Q, K, V must be 3D (batch, seq, dim) or 4D (batch, heads, seq, dim)
+    if (q_shape.size() != k_shape.size() || q_shape.size() != v_shape.size()) {
+        return false;
+    }
+    if (q_shape.size() != 3 && q_shape.size() != 4) {
+        return false;
+    }
+
+    if (q_shape.size() == 4) {
+        // 4D: batch dims and head dims must match
+        if (q_shape[0] != k_shape[0] || q_shape[0] != v_shape[0]) return false;
+        if (q_shape[1] != k_shape[1] || q_shape[1] != v_shape[1]) return false;
+        // Q and K must have same head dim (last dim)
+        if (q_shape[3] != k_shape[3]) return false;
+        // K and V must have same seq len
+        if (k_shape[2] != v_shape[2]) return false;
+    } else {
+        // 3D: batch dims must match
+        if (q_shape[0] != k_shape[0] || q_shape[0] != v_shape[0]) return false;
+        // Q and K must have same head dim (last dim)
+        if (q_shape[2] != k_shape[2]) return false;
+        // K and V must have same seq len
+        if (k_shape[1] != v_shape[1]) return false;
+    }
+
+    return true;
+}
+
+auto FuseAttentionPass::run(Graph& graph) -> bool {
+    bool modified = false;
+    const auto& nodes = graph.nodes();
+
+    // Look for the pattern: MatMul -> Mul(scale) -> [optional Add(mask)] -> Softmax -> MatMul
+    // We scan for Softmax nodes and trace backward/forward to verify the pattern.
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        if (nodes[i]->op_type() != OpType::Softmax) continue;
+
+        auto softmax_node = nodes[i];
+        if (softmax_node->inputs().empty()) continue;
+
+        // Trace backward from Softmax: expect Scale (Mul) or Add (mask) then Mul
+        auto softmax_input = softmax_node->inputs()[0];
+        auto pre_softmax = softmax_input->node();
+        if (!pre_softmax) continue;
+
+        std::shared_ptr<Node> mask_add_node;
+        std::shared_ptr<Node> scale_node;
+
+        if (pre_softmax->op_type() == OpType::Add) {
+            // Optional mask: Add(scaled_qk, mask)
+            mask_add_node = pre_softmax;
+            if (mask_add_node->inputs().empty()) continue;
+            auto add_input = mask_add_node->inputs()[0];
+            auto maybe_scale = add_input->node();
+            if (!maybe_scale || maybe_scale->op_type() != OpType::Mul) continue;
+            scale_node = maybe_scale;
+        } else if (pre_softmax->op_type() == OpType::Mul) {
+            scale_node = pre_softmax;
+        } else {
+            continue;
+        }
+
+        if (!scale_node || scale_node->inputs().size() < 2) continue;
+
+        // One input to Mul should be a constant scalar (the scale factor),
+        // the other should come from MatMul(Q, K^T)
+        std::shared_ptr<Node> qk_matmul;
+        for (size_t inp = 0; inp < scale_node->inputs().size(); ++inp) {
+            auto producer = scale_node->inputs()[inp]->node();
+            if (producer && producer->op_type() == OpType::MatMul) {
+                qk_matmul = producer;
+                break;
+            }
+        }
+        if (!qk_matmul || qk_matmul->inputs().size() < 2) continue;
+
+        // Verify Q*K^T matmul output is only used by the scale node
+        if (!qk_matmul->outputs().empty() && qk_matmul->outputs()[0]->uses().size() > 1) {
+            continue;
+        }
+
+        // Trace forward from Softmax: expect MatMul(attn, V)
+        if (softmax_node->outputs().empty()) continue;
+        auto softmax_output = softmax_node->outputs()[0];
+
+        // Find the MatMul consuming the softmax output
+        std::shared_ptr<Node> av_matmul;
+        for (const auto& use : softmax_output->uses()) {
+            auto user = use.lock();
+            if (user && user->op_type() == OpType::MatMul) {
+                av_matmul = user;
+                break;
+            }
+        }
+        if (!av_matmul || av_matmul->inputs().size() < 2) continue;
+
+        // Identify Q, K, V tensors and validate shapes
+        auto q_value = qk_matmul->inputs()[0];
+        auto k_value = qk_matmul->inputs()[1];
+
+        // V is the other input to the av_matmul (not the softmax output)
+        std::shared_ptr<Value> v_value;
+        for (const auto& inp : av_matmul->inputs()) {
+            if (inp->id() != softmax_output->id()) {
+                v_value = inp;
+                break;
+            }
+        }
+        if (!v_value) continue;
+
+        if (!validate_attention_shapes(q_value->shape(), k_value->shape(), v_value->shape())) {
+            continue;
+        }
+
+        // Pattern matched - fuse
+        if (fuse_attention(qk_matmul, scale_node, softmax_node, av_matmul, mask_add_node, graph)) {
+            modified = true;
+        }
+    }
+
+    return modified;
+}
+
+auto FuseAttentionPass::fuse_attention(
+    std::shared_ptr<Node> qk_matmul,
+    std::shared_ptr<Node> scale_node,
+    std::shared_ptr<Node> softmax_node,
+    std::shared_ptr<Node> av_matmul,
+    std::shared_ptr<Node> mask_add_node,
+    Graph& graph) -> bool {
+
+    // Create FlashAttention node
+    auto flash_node = graph.create_node(OpType::FlashAttention, "flash_attention");
+
+    // Inputs: Q, K, V from the original matmuls
+    auto q_value = qk_matmul->inputs()[0];
+    auto k_value = qk_matmul->inputs()[1];
+
+    // V is the non-softmax input to av_matmul
+    std::shared_ptr<Value> v_value;
+    auto softmax_out_id = softmax_node->outputs()[0]->id();
+    for (const auto& inp : av_matmul->inputs()) {
+        if (inp->id() != softmax_out_id) {
+            v_value = inp;
+            break;
+        }
+    }
+    if (!v_value) return false;
+
+    flash_node->add_input(q_value);
+    flash_node->add_input(k_value);
+    flash_node->add_input(v_value);
+
+    // Extract scale factor from the Mul node
+    for (const auto& inp : scale_node->inputs()) {
+        auto producer = inp->node();
+        if (producer && producer->op_type() == OpType::Constant) {
+            Tensor scale_tensor = producer->get_tensor_attr("value");
+            if (scale_tensor.numel() == 1) {
+                flash_node->set_attr("scale", scale_tensor.item<float>());
+            }
+            break;
+        }
+    }
+
+    // If there's a mask, add it as the 4th input
+    if (mask_add_node) {
+        // The mask is the input to Add that is NOT the scale output
+        auto scale_out_id = scale_node->outputs()[0]->id();
+        for (const auto& inp : mask_add_node->inputs()) {
+            if (inp->id() != scale_out_id) {
+                flash_node->add_input(inp);
+                flash_node->set_bool_attr("has_mask", true);
+                break;
+            }
+        }
+    }
+
+    // Create output value matching av_matmul's output
+    if (!av_matmul->outputs().empty()) {
+        auto old_output = av_matmul->outputs()[0];
+        std::string out_id = flash_node->name() + "_out";
+        auto new_output = graph.create_value(
+            out_id, old_output->shape(), old_output->dtype(), old_output->device());
+        new_output->set_node(flash_node);
+        flash_node->add_output(new_output);
+
+        graph.add_node(flash_node);
+
+        // Redirect consumers
+        graph.replace_value(old_output->id(), out_id);
+
+        // Remove fused nodes in reverse dependency order
+        graph.remove_node(av_matmul);
+        graph.remove_node(softmax_node);
+        if (mask_add_node) {
+            graph.remove_node(mask_add_node);
+        }
+        graph.remove_node(scale_node);
+        graph.remove_node(qk_matmul);
+    }
+
+    return true;
+}
+
+// ============================================================================
+// Residual Add Fusion Pass
+// ============================================================================
+
+auto FuseResidualAddPass::is_sublayer_op(const Node& node) -> bool {
+    switch (node.op_type()) {
+        case OpType::Linear:
+        case OpType::Conv2d:
+        case OpType::LayerNorm:
+        case OpType::BatchNorm2d:
+        case OpType::MatMul:
+        case OpType::Softmax:
+        case OpType::GELU:
+        case OpType::ReLU:
+        case OpType::FlashAttention:
+        case OpType::FusedFFN:
+            return true;
+        default:
+            // Also consider any node with fused attributes
+            return node.get_bool_attr("fused_bn") ||
+                   node.get_bool_attr("fused_relu") ||
+                   node.get_bool_attr("fused_activation");
+    }
+}
+
+auto FuseResidualAddPass::value_feeds_into(
+    const std::string& source_value,
+    const std::shared_ptr<Value>& target_value,
+    int max_depth) -> bool {
+    if (max_depth <= 0) return false;
+
+    auto producer = target_value->node();
+    if (!producer) return false;
+
+    for (const auto& input : producer->inputs()) {
+        if (input->id() == source_value) {
+            return true;
+        }
+        if (value_feeds_into(source_value, input, max_depth - 1)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+auto FuseResidualAddPass::run(Graph& graph) -> bool {
+    bool modified = false;
+
+    for (const auto& node : graph.nodes()) {
+        if (node->op_type() != OpType::Add) continue;
+        if (node->inputs().size() < 2) continue;
+
+        // Already marked as residual
+        if (node->get_bool_attr("residual")) continue;
+
+        auto input0 = node->inputs()[0];
+        auto input1 = node->inputs()[1];
+
+        // Check if one input feeds into the chain producing the other.
+        // Pattern: x + sublayer(x) where sublayer is recognized.
+        // Check both orderings.
+        bool is_residual = false;
+
+        // Case 1: input0 = x, input1 = sublayer(x)
+        auto producer1 = input1->node();
+        if (producer1 && is_sublayer_op(*producer1)) {
+            if (value_feeds_into(input0->id(), input1, 10)) {
+                is_residual = true;
+            }
+        }
+
+        // Case 2: input1 = x, input0 = sublayer(x)
+        if (!is_residual) {
+            auto producer0 = input0->node();
+            if (producer0 && is_sublayer_op(*producer0)) {
+                if (value_feeds_into(input1->id(), input0, 10)) {
+                    is_residual = true;
+                }
+            }
+        }
+
+        if (is_residual) {
+            node->set_bool_attr("residual", true);
+            modified = true;
+        }
+    }
+
+    return modified;
+}
+
+// ============================================================================
+// Feed-Forward Network Fusion Pass
+// ============================================================================
+
+auto FuseFFNPass::run(Graph& graph) -> bool {
+    bool modified = false;
+
+    for (size_t i = 0; i + 2 < graph.nodes().size(); ++i) {
+        auto& node1 = graph.nodes()[i];
+        auto& node2 = graph.nodes()[i + 1];
+        auto& node3 = graph.nodes()[i + 2];
+
+        if (node1->op_type() == OpType::Linear &&
+            (node2->op_type() == OpType::GELU || node2->op_type() == OpType::ReLU) &&
+            node3->op_type() == OpType::Linear) {
+
+            // Verify data flow: linear1 -> activation -> linear2
+            bool flow_valid = true;
+            if (!node1->outputs().empty() && !node2->inputs().empty()) {
+                if (node1->outputs()[0]->id() != node2->inputs()[0]->id()) {
+                    flow_valid = false;
+                }
+                if (node1->outputs()[0]->uses().size() > 1) {
+                    flow_valid = false;
+                }
+            } else {
+                flow_valid = false;
+            }
+            if (!node2->outputs().empty() && !node3->inputs().empty()) {
+                if (node2->outputs()[0]->id() != node3->inputs()[0]->id()) {
+                    flow_valid = false;
+                }
+                if (node2->outputs()[0]->uses().size() > 1) {
+                    flow_valid = false;
+                }
+            } else {
+                flow_valid = false;
+            }
+
+            if (flow_valid && fuse_triple(node1, node2, node3, graph)) {
+                modified = true;
+            }
+        }
+    }
+
+    return modified;
+}
+
+auto FuseFFNPass::fuse_triple(std::shared_ptr<Node> linear1,
+                               std::shared_ptr<Node> act_node,
+                               std::shared_ptr<Node> linear2,
+                               Graph& graph) -> bool {
+    // Create FusedFFN node
+    auto ffn_node = graph.create_node(OpType::FusedFFN, "fused_ffn");
+
+    // Transfer inputs from linear1 (the data input)
+    if (!linear1->inputs().empty()) {
+        ffn_node->add_input(linear1->inputs()[0]);
+    }
+
+    // Store weights from both linear layers
+    Tensor w1 = linear1->get_tensor_attr("weight");
+    Tensor b1 = linear1->get_tensor_attr("bias");
+    Tensor w2 = linear2->get_tensor_attr("weight");
+    Tensor b2 = linear2->get_tensor_attr("bias");
+
+    if (w1.numel() > 0) ffn_node->set_tensor_attr("weight1", w1);
+    if (b1.numel() > 0) ffn_node->set_tensor_attr("bias1", b1);
+    if (w2.numel() > 0) ffn_node->set_tensor_attr("weight2", w2);
+    if (b2.numel() > 0) ffn_node->set_tensor_attr("bias2", b2);
+
+    // Store activation type
+    ffn_node->set_int_attr("activation_type",
+                           act_node->op_type() == OpType::ReLU ? 1 : 2);
+
+    // Create output value matching linear2's output
+    if (!linear2->outputs().empty()) {
+        auto old_output = linear2->outputs()[0];
+        std::string out_id = ffn_node->name() + "_out";
+        auto new_output = graph.create_value(
+            out_id, old_output->shape(), old_output->dtype(), old_output->device());
+        new_output->set_node(ffn_node);
+        ffn_node->add_output(new_output);
+
+        graph.add_node(ffn_node);
+
+        // Redirect consumers
+        graph.replace_value(old_output->id(), out_id);
+
+        // Also redirect any remaining references to intermediate values
+        if (!linear1->outputs().empty()) {
+            graph.replace_value(linear1->outputs()[0]->id(), out_id);
+        }
+        if (!act_node->outputs().empty()) {
+            graph.replace_value(act_node->outputs()[0]->id(), out_id);
+        }
+
+        // Remove fused nodes
+        graph.remove_node(linear2);
+        graph.remove_node(act_node);
+        graph.remove_node(linear1);
+    }
+
+    return true;
+}
+
+// ============================================================================
+// Shape Guard Insertion Pass
+// ============================================================================
+
+auto ShapeGuardInsertionPass::run(Graph& graph) -> bool {
+    bool modified = false;
+
+    // Insert a ShapeGuard node for each graph input
+    auto inputs = graph.inputs();  // Copy since we'll modify the graph
+    for (size_t idx = 0; idx < inputs.size(); ++idx) {
+        auto input_value = inputs[idx];
+
+        // Skip if a guard already exists for this input
+        bool already_guarded = false;
+        for (const auto& use : input_value->uses()) {
+            auto user = use.lock();
+            if (user && user->op_type() == OpType::ShapeGuard) {
+                already_guarded = true;
+                break;
+            }
+        }
+        if (already_guarded) continue;
+
+        // Skip inputs with unknown shapes
+        if (input_value->shape().empty()) continue;
+
+        // Create ShapeGuard node
+        auto guard_node = graph.create_node(OpType::ShapeGuard,
+                                             "shape_guard_" + std::to_string(idx));
+
+        // Store expected shape
+        guard_node->set_vec_attr("expected_shape", input_value->shape());
+        guard_node->set_int_attr("input_index", static_cast<int64_t>(idx));
+
+        // Guard takes the input value and produces a new value with the same
+        // shape/dtype/device (identity semantics)
+        guard_node->add_input(input_value);
+
+        std::string guard_out_id = guard_node->name() + "_out";
+        auto guard_output = graph.create_value(
+            guard_out_id, input_value->shape(), input_value->dtype(), input_value->device());
+        guard_output->set_node(guard_node);
+        guard_node->add_output(guard_output);
+
+        graph.add_node(guard_node);
+
+        // Redirect all uses of the input (except by the guard itself) to use
+        // the guard output instead
+        graph.replace_value(input_value->id(), guard_out_id);
+
+        // Restore the guard's own input to point back to the original input value
+        guard_node->replace_input(0, input_value);
+
+        modified = true;
+    }
+
+    if (modified) {
+        graph.topological_sort();
+    }
+
+    return modified;
+}
+
+// ============================================================================
 // Algebraic Simplification Pass - Helpers
 // ============================================================================
 
@@ -1024,9 +1496,13 @@ Compiler::Compiler(bool enable_default_passes) {
         add_pass(std::make_unique<FuseLinearReluPass>());
         add_pass(std::make_unique<FuseMatMulAddPass>());
         add_pass(std::make_unique<FuseLayerNormActivationPass>());
+        add_pass(std::make_unique<FuseAttentionPass>());        // Transformer attention fusion
+        add_pass(std::make_unique<FuseFFNPass>());              // FFN fusion (Linear->Act->Linear)
+        add_pass(std::make_unique<FuseResidualAddPass>());      // Residual connection marking
         add_pass(std::make_unique<AlgebraicSimplificationPass>());
         add_pass(std::make_unique<ReshapeEliminationPass>());
         add_pass(std::make_unique<CommonSubexpressionEliminationPass>());
+        add_pass(std::make_unique<ShapeGuardInsertionPass>());  // Dynamic shape guards (runs once)
     }
 }
 

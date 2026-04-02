@@ -1,0 +1,95 @@
+#version 450
+
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint LOCAL_SIZE_X = 256;
+
+// Winograd F(2,3) input transform: V = B^T * d * B
+// Transforms 4x4 input tiles for 3x3 convolution producing 2x2 output tiles.
+//
+// B^T = [ 1   0  -1   0 ]
+//       [ 0   1   1   0 ]
+//       [ 0  -1   1   0 ]
+//       [ 0   1   0  -1 ]
+
+layout(binding = 0) buffer readonly InputBuffer { float data[]; } input_buf;
+layout(binding = 1) buffer writeonly OutputBuffer { float data[]; } output_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint batch;
+    uint channels;
+    uint in_height;
+    uint in_width;
+    uint tiles_h;       // number of 2x2 output tiles vertically
+    uint tiles_w;       // number of 2x2 output tiles horizontally
+    uint pad;           // input padding
+} params;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint total_tiles = params.batch * params.channels * params.tiles_h * params.tiles_w;
+    if (gid >= total_tiles) return;
+
+    // Decode tile indices
+    uint tmp = gid;
+    uint tw = tmp % params.tiles_w; tmp /= params.tiles_w;
+    uint th = tmp % params.tiles_h; tmp /= params.tiles_h;
+    uint c  = tmp % params.channels; tmp /= params.channels;
+    uint n  = tmp;
+
+    // Top-left corner of the 4x4 input tile (accounting for padding)
+    int tile_y = int(th) * 2 - int(params.pad);
+    int tile_x = int(tw) * 2 - int(params.pad);
+
+    // Load 4x4 input tile d[i][j]
+    float d[4][4];
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            int iy = tile_y + i;
+            int ix = tile_x + j;
+            if (iy >= 0 && iy < int(params.in_height) && ix >= 0 && ix < int(params.in_width)) {
+                uint idx = ((n * params.channels + c) * params.in_height + uint(iy)) * params.in_width + uint(ix);
+                d[i][j] = input_buf.data[idx];
+            } else {
+                d[i][j] = 0.0;
+            }
+        }
+    }
+
+    // Compute temp = d * B (right-multiply by B)
+    // B = [ 1   0   0   0 ]
+    //     [ 0   1  -1   1 ]
+    //     [-1   1   1   0 ]
+    //     [ 0   0   0  -1 ]
+    float tmp_mat[4][4];
+    for (int i = 0; i < 4; i++) {
+        tmp_mat[i][0] = d[i][0] - d[i][2];
+        tmp_mat[i][1] = d[i][1] + d[i][2];
+        tmp_mat[i][2] = -d[i][1] + d[i][2];
+        tmp_mat[i][3] = d[i][1] - d[i][3];
+    }
+
+    // Compute V = B^T * tmp (left-multiply by B^T)
+    // B^T = [ 1   0  -1   0 ]
+    //       [ 0   1   1   0 ]
+    //       [ 0  -1   1   0 ]
+    //       [ 0   1   0  -1 ]
+    float V[4][4];
+    for (int j = 0; j < 4; j++) {
+        V[0][j] = tmp_mat[0][j] - tmp_mat[2][j];
+        V[1][j] = tmp_mat[1][j] + tmp_mat[2][j];
+        V[2][j] = -tmp_mat[1][j] + tmp_mat[2][j];
+        V[3][j] = tmp_mat[1][j] - tmp_mat[3][j];
+    }
+
+    // Store transformed tile: layout [alpha][beta][N][C][tiles_h][tiles_w]
+    // where alpha, beta index the 4x4 Winograd domain
+    uint tile_idx = ((n * params.channels + c) * params.tiles_h + th) * params.tiles_w + tw;
+    uint tile_stride = params.batch * params.channels * params.tiles_h * params.tiles_w;
+
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            uint out_idx = (uint(i) * 4u + uint(j)) * tile_stride + tile_idx;
+            output_buf.data[out_idx] = V[i][j];
+        }
+    }
+}

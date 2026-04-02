@@ -37,7 +37,7 @@ function(tenzor_discover_tests target)
     set(PROPS ${ARG_PROPERTIES})
     set(MODE ${ARG_DISCOVERY_MODE})
     if(NOT MODE)
-        set(MODE "POST_BUILD")
+        set(MODE "PRE_TEST")
     endif()
 
     # Inject TIMEOUT into properties if not already specified

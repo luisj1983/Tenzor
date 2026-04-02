@@ -40,7 +40,7 @@ set(SHADERS "")
 foreach(SHADER_FILE ${SHADER_FILES})
     get_filename_component(SHADER_NAME ${SHADER_FILE} NAME_WE)
     # Exclude shaders that need SPIR-V 1.3 (handled separately below)
-    if(NOT SHADER_NAME STREQUAL "reduction_subgroup")
+    if(NOT SHADER_NAME STREQUAL "reduction_subgroup" AND NOT SHADER_NAME STREQUAL "reduction_tree")
         list(APPEND SHADERS ${SHADER_NAME})
     endif()
 endforeach()
@@ -49,6 +49,7 @@ list(SORT SHADERS)
 # Shaders requiring SPIR-V 1.3 (subgroup operations, Vulkan 1.1+)
 set(SHADERS_SPIRV13
     reduction_subgroup
+    reduction_tree
 )
 
 # Compile each shader

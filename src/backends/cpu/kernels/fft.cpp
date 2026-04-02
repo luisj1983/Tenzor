@@ -911,5 +911,277 @@ auto ifftn_kernel(const Tensor&, const std::vector<int64_t>&,
 
 #endif // TENZOR_USE_MKL
 
+// ============================================================================
+// STFT Kernel - Short-Time Fourier Transform
+// ============================================================================
+
+auto stft_kernel(const Tensor& input, int64_t n_fft, int64_t hop_length, int64_t win_length,
+                 const Tensor& window, bool center, bool normalized, bool onesided) -> Tensor {
+    if (n_fft <= 0) {
+        throw std::runtime_error("stft: n_fft must be > 0");
+    }
+    if (hop_length <= 0) hop_length = n_fft / 4;
+    if (win_length <= 0) win_length = n_fft;
+    if (win_length > n_fft) {
+        throw std::runtime_error("stft: win_length must be <= n_fft");
+    }
+
+    // Determine batch dimensions: input is (..., signal_length)
+    auto in_shape = input.shape();
+    int64_t ndim = static_cast<int64_t>(in_shape.size());
+    if (ndim < 1) {
+        throw std::runtime_error("stft: input must have at least 1 dimension");
+    }
+
+    int64_t signal_length = in_shape[ndim - 1];
+    int64_t batch_size = 1;
+    for (int64_t d = 0; d < ndim - 1; ++d) {
+        batch_size *= in_shape[d];
+    }
+
+    // Center padding: reflect-pad by n_fft/2 on both sides
+    int64_t padded_length = signal_length;
+    std::vector<float> padded_data;
+    const float* src_data = nullptr;
+    Tensor input_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
+
+    if (center) {
+        int64_t pad = n_fft / 2;
+        padded_length = signal_length + 2 * pad;
+
+        padded_data.resize(static_cast<size_t>(batch_size * padded_length));
+        const float* in_ptr = input_f32.data<float>();
+
+        for (int64_t b = 0; b < batch_size; ++b) {
+            const float* sig = in_ptr + b * signal_length;
+            float* out = padded_data.data() + b * padded_length;
+
+            // Left reflect padding
+            for (int64_t i = 0; i < pad; ++i) {
+                int64_t idx = pad - i;
+                if (idx >= signal_length) idx = signal_length - 1;
+                out[i] = sig[idx];
+            }
+            // Copy original signal
+            std::memcpy(out + pad, sig, static_cast<size_t>(signal_length) * sizeof(float));
+            // Right reflect padding
+            for (int64_t i = 0; i < pad; ++i) {
+                int64_t idx = signal_length - 2 - i;
+                if (idx < 0) idx = 0;
+                out[pad + signal_length + i] = sig[idx];
+            }
+        }
+        src_data = padded_data.data();
+    } else {
+        src_data = input_f32.data<float>();
+    }
+
+    // Number of frames
+    int64_t num_frames = (padded_length - n_fft) / hop_length + 1;
+    if (num_frames <= 0) {
+        throw std::runtime_error("stft: signal too short for given n_fft and hop_length");
+    }
+
+    // Frequency bins
+    int64_t freq_bins = onesided ? (n_fft / 2 + 1) : n_fft;
+
+    // Build window data (pad win_length to n_fft if needed)
+    std::vector<float> win_data(static_cast<size_t>(n_fft), 0.0f);
+    int64_t win_offset = (n_fft - win_length) / 2;
+    if (window.is_valid() && window.numel() > 0) {
+        Tensor win_f32 = (window.dtype() != DType::Float32) ? window.to(DType::Float32) : window;
+        const float* wp = win_f32.data<float>();
+        for (int64_t i = 0; i < win_length; ++i) {
+            win_data[static_cast<size_t>(win_offset + i)] = wp[i];
+        }
+    } else {
+        // Default: rectangular window (all ones)
+        for (int64_t i = 0; i < win_length; ++i) {
+            win_data[static_cast<size_t>(win_offset + i)] = 1.0f;
+        }
+    }
+
+    // Output: (..., freq_bins, num_frames) as Complex64
+    std::vector<int64_t> out_shape;
+    for (int64_t d = 0; d < ndim - 1; ++d) {
+        out_shape.push_back(in_shape[d]);
+    }
+    out_shape.push_back(freq_bins);
+    out_shape.push_back(num_frames);
+
+    Tensor result(out_shape, DType::Complex64, input.device());
+    auto* out_ptr = reinterpret_cast<std::complex<float>*>(result.data_ptr());
+
+    // Process each batch and frame
+    for (int64_t b = 0; b < batch_size; ++b) {
+        const float* sig = src_data + b * padded_length;
+
+        for (int64_t f = 0; f < num_frames; ++f) {
+            // Extract windowed frame
+            const float* frame_start = sig + f * hop_length;
+
+            // Create a 1D tensor for the windowed frame
+            Tensor frame_tensor({n_fft}, DType::Float32, input.device());
+            float* frame_data = frame_tensor.data<float>();
+            for (int64_t i = 0; i < n_fft; ++i) {
+                frame_data[i] = frame_start[i] * win_data[static_cast<size_t>(i)];
+            }
+
+            // Apply FFT
+            Tensor fft_result;
+            if (onesided) {
+                fft_result = rfft_kernel(frame_tensor, 0, n_fft, normalized ? "ortho" : "backward");
+            } else {
+                fft_result = fft_kernel(frame_tensor, 0, n_fft, normalized ? "ortho" : "backward");
+            }
+
+            // Copy FFT result into output
+            auto* fft_ptr = reinterpret_cast<const std::complex<float>*>(fft_result.data_ptr());
+            for (int64_t k = 0; k < freq_bins; ++k) {
+                out_ptr[b * freq_bins * num_frames + k * num_frames + f] = fft_ptr[k];
+            }
+        }
+    }
+
+    return result;
+}
+
+// ============================================================================
+// ISTFT Kernel - Inverse Short-Time Fourier Transform
+// ============================================================================
+
+auto istft_kernel(const Tensor& input, int64_t n_fft, int64_t hop_length, int64_t win_length,
+                  const Tensor& window, bool center, bool normalized, bool onesided,
+                  int64_t length) -> Tensor {
+    if (n_fft <= 0) {
+        throw std::runtime_error("istft: n_fft must be > 0");
+    }
+    if (hop_length <= 0) hop_length = n_fft / 4;
+    if (win_length <= 0) win_length = n_fft;
+
+    // Input shape: (..., freq_bins, num_frames)
+    auto in_shape = input.shape();
+    int64_t ndim = static_cast<int64_t>(in_shape.size());
+    if (ndim < 2) {
+        throw std::runtime_error("istft: input must have at least 2 dimensions");
+    }
+
+    int64_t freq_bins = in_shape[ndim - 2];
+    int64_t num_frames = in_shape[ndim - 1];
+    int64_t batch_size = 1;
+    for (int64_t d = 0; d < ndim - 2; ++d) {
+        batch_size *= in_shape[d];
+    }
+
+    // Build window
+    std::vector<float> win_data(static_cast<size_t>(n_fft), 0.0f);
+    int64_t win_offset = (n_fft - win_length) / 2;
+    if (window.is_valid() && window.numel() > 0) {
+        Tensor win_f32 = (window.dtype() != DType::Float32) ? window.to(DType::Float32) : window;
+        const float* wp = win_f32.data<float>();
+        for (int64_t i = 0; i < win_length; ++i) {
+            win_data[static_cast<size_t>(win_offset + i)] = wp[i];
+        }
+    } else {
+        for (int64_t i = 0; i < win_length; ++i) {
+            win_data[static_cast<size_t>(win_offset + i)] = 1.0f;
+        }
+    }
+
+    // Expected output length before trimming
+    int64_t expected_length = n_fft + (num_frames - 1) * hop_length;
+
+    // Ensure input is Complex64
+    Tensor input_c64 = (input.dtype() != DType::Complex64) ? input.to(DType::Complex64) : input;
+    auto* in_ptr = reinterpret_cast<const std::complex<float>*>(input_c64.data_ptr());
+
+    // Output shape: (..., signal_length)
+    std::vector<int64_t> out_shape;
+    for (int64_t d = 0; d < ndim - 2; ++d) {
+        out_shape.push_back(in_shape[d]);
+    }
+    out_shape.push_back(expected_length);
+
+    // Allocate output and window normalization buffer
+    std::vector<float> output_data(static_cast<size_t>(batch_size * expected_length), 0.0f);
+    std::vector<float> window_sum(static_cast<size_t>(batch_size * expected_length), 0.0f);
+
+    for (int64_t b = 0; b < batch_size; ++b) {
+        float* out = output_data.data() + b * expected_length;
+        float* wsum = window_sum.data() + b * expected_length;
+
+        for (int64_t f = 0; f < num_frames; ++f) {
+            // Extract frequency column for this frame
+            Tensor frame_freq({freq_bins}, DType::Complex64, input.device());
+            auto* freq_data = reinterpret_cast<std::complex<float>*>(frame_freq.data_ptr());
+            for (int64_t k = 0; k < freq_bins; ++k) {
+                freq_data[k] = in_ptr[b * freq_bins * num_frames + k * num_frames + f];
+            }
+
+            // Apply inverse FFT
+            Tensor time_frame;
+            if (onesided) {
+                time_frame = irfft_kernel(frame_freq, 0, n_fft, normalized ? "ortho" : "backward");
+            } else {
+                time_frame = ifft_kernel(frame_freq, 0, n_fft, normalized ? "ortho" : "backward");
+            }
+
+            // Get real part of time-domain frame
+            Tensor real_frame = (time_frame.dtype() == DType::Complex64 || time_frame.dtype() == DType::Complex128)
+                ? time_frame.to(DType::Float32)
+                : time_frame;
+            const float* frame_data = real_frame.data<float>();
+
+            // Overlap-add with window
+            int64_t frame_offset = f * hop_length;
+            for (int64_t i = 0; i < n_fft; ++i) {
+                out[frame_offset + i] += frame_data[i] * win_data[static_cast<size_t>(i)];
+                wsum[frame_offset + i] += win_data[static_cast<size_t>(i)] * win_data[static_cast<size_t>(i)];
+            }
+        }
+
+        // Normalize by window sum (COLA constraint)
+        for (int64_t i = 0; i < expected_length; ++i) {
+            if (wsum[i] > 1e-10f) {
+                out[i] /= wsum[i];
+            }
+        }
+    }
+
+    // Trim if center padding was used
+    int64_t final_length = expected_length;
+    int64_t trim_start = 0;
+    if (center) {
+        trim_start = n_fft / 2;
+        final_length = expected_length - 2 * (n_fft / 2);
+    }
+    if (length > 0) {
+        final_length = length;
+    }
+
+    // Build final output shape
+    std::vector<int64_t> final_shape;
+    for (int64_t d = 0; d < ndim - 2; ++d) {
+        final_shape.push_back(in_shape[d]);
+    }
+    final_shape.push_back(final_length);
+
+    Tensor result(final_shape, DType::Float32, input.device());
+    float* result_data = result.data<float>();
+
+    for (int64_t b = 0; b < batch_size; ++b) {
+        const float* src = output_data.data() + b * expected_length + trim_start;
+        float* dst = result_data + b * final_length;
+        int64_t copy_len = std::min(final_length, expected_length - trim_start);
+        std::memcpy(dst, src, static_cast<size_t>(copy_len) * sizeof(float));
+        // Zero-fill if length extends beyond available data
+        if (copy_len < final_length) {
+            std::memset(dst + copy_len, 0, static_cast<size_t>(final_length - copy_len) * sizeof(float));
+        }
+    }
+
+    return result;
+}
+
 } // namespace cpu
 } // namespace tenzor

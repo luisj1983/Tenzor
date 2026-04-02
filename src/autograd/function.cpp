@@ -4843,4 +4843,37 @@ auto SpMVBackward::backward_with_variables(std::vector<Variable> grad_outputs) -
     return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
 }
 
+// ============================================================================
+// SparseAddBackward
+// ============================================================================
+
+auto SparseAddBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> {
+    throw std::runtime_error("SparseAddBackward::forward should not be called directly");
+}
+
+auto SparseAddBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    // Y = S + D  =>  grad_D = grad_Y  (identity, gradient passes through)
+    return {grad_outputs[0]};
+}
+
+auto SparseAddBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    auto result_tensors = backward({grad_outputs[0].tensor()});
+    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+}
+
+// ============================================================================
+// Custom Op backward implementation
+// ============================================================================
+
+auto CustomOpBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+    // CustomOpBackward is only used as a grad_fn — forward() is never called
+    // through this class. The actual forward is dispatched via CustomOpRegistry.
+    throw std::runtime_error("CustomOpBackward::forward() should not be called directly");
+}
+
+auto CustomOpBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    validate_saved_tensors();
+    return backward_fn_(saved_tensors_, grad_outputs);
+}
+
 } // namespace tenzor

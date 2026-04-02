@@ -118,6 +118,16 @@ auto ProcessGroup::reduce_scatter(const std::vector<Tensor>& tensors, Tensor& ou
     backend_->reduce_scatter(tensors, output, op);
 }
 
+auto ProcessGroup::send(const Tensor& tensor, int dst_rank) -> void {
+    std::lock_guard<std::mutex> lock(mutex_);
+    backend_->send(tensor, dst_rank);
+}
+
+auto ProcessGroup::recv(Tensor& tensor, int src_rank) -> void {
+    std::lock_guard<std::mutex> lock(mutex_);
+    backend_->recv(tensor, src_rank);
+}
+
 auto ProcessGroup::barrier() -> void {
     std::lock_guard<std::mutex> lock(mutex_);
     backend_->barrier();
@@ -353,6 +363,16 @@ auto all_reduce(Tensor& tensor, ReduceOp op) -> void {
 auto broadcast(Tensor& tensor, int src_rank) -> void {
     auto pg = DistributedContext::get_process_group();
     pg->broadcast(tensor, src_rank);
+}
+
+auto send(const Tensor& tensor, int dst_rank) -> void {
+    auto pg = DistributedContext::get_process_group();
+    pg->send(tensor, dst_rank);
+}
+
+auto recv(Tensor& tensor, int src_rank) -> void {
+    auto pg = DistributedContext::get_process_group();
+    pg->recv(tensor, src_rank);
 }
 
 } // namespace distributed

@@ -40,3 +40,23 @@ tenzor_discover_tests(test_gradcheck_extended DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_autograd_additional DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_hooks DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_inplace_autograd DISCOVERY_TIMEOUT 60)
+
+# Custom Op Autograd Integration Tests
+add_executable(test_custom_op_autograd test_custom_op_autograd.cpp)
+target_link_libraries(test_custom_op_autograd PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_custom_op_autograd DISCOVERY_TIMEOUT 60)
+
+# Forward-mode AD (JVP) tests
+add_executable(test_jvp test_jvp.cpp)
+target_link_libraries(test_jvp PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_jvp DISCOVERY_TIMEOUT 60)
+
+# Jacobian and Hessian tests
+add_executable(test_jacobian_hessian test_jacobian_hessian.cpp)
+target_link_libraries(test_jacobian_hessian PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_jacobian_hessian DISCOVERY_TIMEOUT 60)
+
+# Vectorized map (vmap) tests
+add_executable(test_vmap test_vmap.cpp)
+target_link_libraries(test_vmap PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_vmap DISCOVERY_TIMEOUT 60)

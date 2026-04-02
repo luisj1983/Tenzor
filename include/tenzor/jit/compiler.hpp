@@ -336,6 +336,195 @@ private:
 };
 
 /**
+ * @brief Operator fusion pass - Flash Attention.
+ *
+ * Detects the multi-head attention pattern:
+ *   MatMul(Q, K^T) -> Scale -> (optional Mask + Add) -> Softmax -> MatMul(attn, V)
+ * and fuses the entire sequence into a single FlashAttention node.
+ *
+ * Requirements:
+ * - Q, K, V must be 3D (batch, seq, dim) or 4D (batch, heads, seq, dim)
+ * - The Scale must be a scalar multiply (typically 1/sqrt(d_k))
+ * - The MatMul(Q, K^T) output must not be used by other nodes (besides the chain)
+ *
+ * Example:
+ * @code
+ * attn_weights = matmul(Q, transpose(K))
+ * attn_weights = attn_weights * scale
+ * attn_weights = softmax(attn_weights)
+ * output = matmul(attn_weights, V)
+ * # Becomes:
+ * output = flash_attention(Q, K, V, scale)
+ * @endcode
+ *
+ * Speedup: ~2-4x for long sequences (reduced memory traffic)
+ */
+class FuseAttentionPass : public Pass {
+public:
+    auto run(Graph& graph) -> bool override;
+    auto name() const -> std::string override { return "FuseAttention"; }
+
+private:
+    /**
+     * @brief Validate that tensors have compatible attention shapes.
+     *
+     * @param q_shape Q tensor shape
+     * @param k_shape K tensor shape
+     * @param v_shape V tensor shape
+     * @return true if shapes are valid for attention
+     */
+    auto validate_attention_shapes(const std::vector<int64_t>& q_shape,
+                                    const std::vector<int64_t>& k_shape,
+                                    const std::vector<int64_t>& v_shape) -> bool;
+
+    /**
+     * @brief Fuse a matched attention pattern into a FlashAttention node.
+     *
+     * @param qk_matmul The MatMul(Q, K^T) node
+     * @param scale_node The Scale (Mul) node
+     * @param softmax_node The Softmax node
+     * @param av_matmul The MatMul(attn, V) node
+     * @param mask_add_node Optional mask Add node (nullptr if no mask)
+     * @param graph Graph containing nodes
+     * @return true if fusion succeeded
+     */
+    auto fuse_attention(std::shared_ptr<Node> qk_matmul,
+                        std::shared_ptr<Node> scale_node,
+                        std::shared_ptr<Node> softmax_node,
+                        std::shared_ptr<Node> av_matmul,
+                        std::shared_ptr<Node> mask_add_node,
+                        Graph& graph) -> bool;
+};
+
+/**
+ * @brief Operator fusion pass - Residual Add.
+ *
+ * Detects residual connection patterns where a value is added to the
+ * output of a sublayer applied to that same value: x + sublayer(x).
+ * Marks the Add node as a residual connection, enabling memory optimizations
+ * such as in-place addition.
+ *
+ * Example:
+ * @code
+ * y = layer_norm(x)
+ * z = linear(y)
+ * out = x + z      // Residual connection
+ * # Becomes:
+ * out = x + z      // with residual=true attribute
+ * @endcode
+ */
+class FuseResidualAddPass : public Pass {
+public:
+    auto run(Graph& graph) -> bool override;
+    auto name() const -> std::string override { return "FuseResidualAdd"; }
+
+private:
+    /**
+     * @brief Check if a node is a recognized sublayer operation.
+     *
+     * Recognized sublayers include Linear, Conv2d, LayerNorm, BatchNorm2d,
+     * MatMul, and any node with fused attributes.
+     *
+     * @param node Node to check
+     * @return true if node is a sublayer
+     */
+    auto is_sublayer_op(const Node& node) -> bool;
+
+    /**
+     * @brief Check if a value is reachable from another value through a chain.
+     *
+     * Traces backward from target_value through producing nodes to see
+     * if source_value appears as an input to any node in the chain.
+     *
+     * @param source_value The original input value ID
+     * @param target_value The sublayer output value
+     * @param max_depth Maximum chain depth to search
+     * @return true if source feeds into the chain producing target
+     */
+    auto value_feeds_into(const std::string& source_value,
+                          const std::shared_ptr<Value>& target_value,
+                          int max_depth) -> bool;
+};
+
+/**
+ * @brief Operator fusion pass - Feed-Forward Network.
+ *
+ * Detects the FFN pattern commonly found in transformers:
+ *   Linear -> GELU/ReLU -> Linear
+ * and fuses them into a single FusedFFN node.
+ *
+ * Example:
+ * @code
+ * h = linear1(x)
+ * h = gelu(h)
+ * y = linear2(h)
+ * # Becomes:
+ * y = fused_ffn(x)  // with weights from linear1, linear2
+ * @endcode
+ *
+ * Speedup: ~10-20% for transformer inference (reduced memory traffic)
+ */
+class FuseFFNPass : public Pass {
+public:
+    auto run(Graph& graph) -> bool override;
+    auto name() const -> std::string override { return "FuseFFN"; }
+
+private:
+    /**
+     * @brief Fuse a matched Linear -> Activation -> Linear pattern.
+     *
+     * @param linear1 First Linear node
+     * @param act_node Activation node (GELU or ReLU)
+     * @param linear2 Second Linear node
+     * @param graph Graph containing nodes
+     * @return true if fusion succeeded
+     */
+    auto fuse_triple(std::shared_ptr<Node> linear1,
+                     std::shared_ptr<Node> act_node,
+                     std::shared_ptr<Node> linear2,
+                     Graph& graph) -> bool;
+};
+
+/**
+ * @brief Shape guard insertion pass for dynamic shape support.
+ *
+ * Inserts ShapeGuard nodes at graph inputs that check tensor dimensions
+ * at runtime. On a shape mismatch, a retrace flag is set so the caller
+ * can re-trace the graph with the new shapes.
+ *
+ * Each ShapeGuard node stores the expected shape as a vector attribute
+ * and produces its input unchanged as output (identity operation).
+ *
+ * Example:
+ * @code
+ * // Before:
+ * input -> conv -> relu -> output
+ * // After:
+ * input -> ShapeGuard(expected=[1,3,224,224]) -> conv -> relu -> output
+ * @endcode
+ */
+class ShapeGuardInsertionPass : public Pass {
+public:
+    auto run(Graph& graph) -> bool override;
+    auto name() const -> std::string override { return "ShapeGuardInsertion"; }
+
+    /**
+     * @brief Check if a retrace is needed (shape mismatch detected).
+     *
+     * @return true if runtime shapes did not match expected shapes
+     */
+    auto needs_retrace() const -> bool { return needs_retrace_; }
+
+    /**
+     * @brief Reset the retrace flag.
+     */
+    auto reset_retrace() -> void { needs_retrace_ = false; }
+
+private:
+    bool needs_retrace_{false};  ///< Set when a shape mismatch is detected
+};
+
+/**
  * @brief Algebraic simplification pass.
  *
  * Applies algebraic identities to simplify expressions:

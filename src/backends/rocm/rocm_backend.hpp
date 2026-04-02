@@ -11,6 +11,7 @@
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/device.hpp"
+#include "hip_graph.hpp"
 #include <hip/hip_runtime.h>
 #include <memory>
 #include <mutex>
@@ -182,6 +183,17 @@ public:
      * @return true if using caching allocator
      */
     auto is_using_caching_allocator() const -> bool { return use_caching_allocator_; }
+
+    /**
+     * @brief Create a HIP graph capture object for the given device.
+     *
+     * The returned HIPGraph can be used to capture and replay sequences
+     * of HIP kernel launches for reduced dispatch overhead.
+     *
+     * @param device_id Device index (default: 0)
+     * @return Unique pointer to a HIPGraph instance
+     */
+    auto create_hip_graph(int32_t device_id = 0) -> std::unique_ptr<rocm::HIPGraph>;
 
 private:
     bool use_caching_allocator_{false};

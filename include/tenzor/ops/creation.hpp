@@ -156,6 +156,27 @@ auto randint(int64_t low, int64_t high, std::vector<int64_t> shape,
             Device device = Device::cpu()) -> Tensor;
 
 /**
+ * @brief Draw samples from a multinomial distribution.
+ *
+ * @param input Tensor of probabilities (unnormalized weights)
+ * @param num_samples Number of samples to draw
+ * @param replacement Whether to sample with replacement (default: false)
+ * @return Int64 tensor of sampled indices
+ */
+auto multinomial(const Tensor& input, int64_t num_samples, bool replacement = false) -> Tensor;
+
+/**
+ * @brief Sample from a Bernoulli distribution.
+ *
+ * Each element is independently sampled from Bernoulli(p) where p comes
+ * from the input tensor.
+ *
+ * @param probs Tensor of probabilities in [0, 1]
+ * @return Tensor with same shape, values 0.0 or 1.0
+ */
+auto bernoulli(const Tensor& probs) -> Tensor;
+
+/**
  * @brief Create 1D tensor with evenly spaced values.
  *
  * Creates sequence [start, start+step, start+2*step, ..., end).

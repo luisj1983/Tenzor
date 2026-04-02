@@ -259,8 +259,6 @@ auto DistributedDataParallel::all_reduce_bucket_async(
     }
 
 #if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
-    int ws = pg_.world_size();
-
     for (auto& param : bucket.params) {
         if (!param || !param->has_grad()) {
             continue;
@@ -279,19 +277,11 @@ auto DistributedDataParallel::all_reduce_bucket_async(
         // However, we must NOT read the gradient on the compute stream
         // until the all-reduce completes, which is handled by the event
         // recorded below.
-        pg_.all_reduce_async(grad, ReduceOp::SUM, comm_stream_);
-
-        // Divide by world_size to compute average gradient.
-        // Note: This division kernel runs on the comm stream too, so it
-        // executes after the all-reduce completes on this stream.
-        // TODO: For maximum efficiency, this could be fused into the
-        // all-reduce by using a pre-multiplied scaling factor.
-        if (ws > 1) {
-            // The division is a simple element-wise operation. Since we're
-            // on the comm stream and the all-reduce just finished on this
-            // same stream, data ordering is guaranteed.
-            param->set_grad(grad / static_cast<double>(ws));
-        }
+        // Use ReduceOp::AVG to fuse the division by world_size into the
+        // all-reduce kernel, eliminating a separate element-wise division.
+        // NCCL natively supports AVG reduction (ncclAvg), so this is a
+        // single fused communication + scaling operation.
+        pg_.all_reduce_async(grad, ReduceOp::AVG, comm_stream_);
     }
 
     // Record a CUDA event on the communication stream after this bucket's

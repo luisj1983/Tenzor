@@ -70,3 +70,16 @@ if(TENZOR_BUILD_CUDA)
     tenzor_discover_tests(test_parameter_offload DISCOVERY_TIMEOUT 60)
     tenzor_discover_tests(test_cuda_training DISCOVERY_TIMEOUT 60)
 endif()
+
+# =============================================================================
+# CPU-only core tests (new ops)
+# =============================================================================
+tenzor_add_test(NAME test_stft SOURCE test_stft.cpp)
+tenzor_add_test(NAME test_cdist SOURCE test_cdist.cpp)
+tenzor_add_test(NAME test_multinomial SOURCE test_multinomial.cpp)
+tenzor_add_test(NAME test_bernoulli SOURCE test_bernoulli.cpp)
+tenzor_add_test(NAME test_histogram SOURCE test_histogram.cpp)
+tenzor_add_test(NAME test_bucketize SOURCE test_bucketize.cpp)
+tenzor_add_test(NAME test_memory_profiler SOURCE test_memory_profiler.cpp)
+tenzor_add_test(NAME test_dimname SOURCE test_dimname.cpp)
+tenzor_add_test(NAME test_sparse_bsr SOURCE test_sparse_bsr.cpp)

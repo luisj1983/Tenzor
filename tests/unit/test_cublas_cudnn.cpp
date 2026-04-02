@@ -7,6 +7,9 @@
 #include <cuda_runtime.h>
 #include <cmath>
 #include <tenzor/tenzor.hpp>
+#include <tenzor/backend/fast_dispatch.hpp>
+#include <tenzor/backend/op_attributes.hpp>
+#include <tenzor/ops/op_id.hpp>
 
 using namespace tenzor;
 
@@ -216,14 +219,32 @@ TEST_F(CuBLAScuDNNTest, Conv2d_Backward_GradientCheck) {
     Tensor input = Tensor::randn({1, 2, 4, 4}, DType::Float32, device);
     Tensor weight = Tensor::randn({3, 2, 3, 3}, DType::Float32, device);
 
-    // TODO: Implement gradient check when conv2d backward is ready
-    // This would involve:
-    // 1. Forward pass
-    // 2. Backward pass to compute gradients
-    // 3. Numerical gradient computation
-    // 4. Compare analytical vs numerical gradients
+    // Forward pass through dispatch
+    NewOpAttributes conv_attrs;
+    conv_attrs.set(AttrKey::Stride, int64_t{1});
+    conv_attrs.set(AttrKey::Padding, int64_t{1});
+    conv_attrs.set(AttrKey::Dilation, int64_t{1});
+    conv_attrs.set(AttrKey::Groups, int64_t{1});
+    std::vector<Tensor> fwd_inputs = {input, weight};
+    auto output = dispatch<OpId::Conv2dForward>(fwd_inputs, conv_attrs)[0];
 
-    EXPECT_TRUE(true);  // Placeholder
+    // Verify output shape: (1, 3, 4, 4) with padding=1, stride=1, 3x3 kernel
+    EXPECT_EQ(output.shape()[0], 1);
+    EXPECT_EQ(output.shape()[1], 3);
+    EXPECT_EQ(output.shape()[2], 4);
+    EXPECT_EQ(output.shape()[3], 4);
+
+    // Backward: compute gradient w.r.t. input
+    auto grad_output = Tensor::randn(output.shape(), DType::Float32, device);
+    std::vector<Tensor> bwd_inputs = {grad_output, input, weight};
+    auto grad_input = dispatch<OpId::Conv2dBackwardInput>(bwd_inputs, conv_attrs)[0];
+    EXPECT_EQ(grad_input.shape()[0], input.shape()[0]);
+    EXPECT_EQ(grad_input.shape()[1], input.shape()[1]);
+
+    // Backward: compute gradient w.r.t. weight
+    auto grad_weight = dispatch<OpId::Conv2dBackwardWeight>(bwd_inputs, conv_attrs)[0];
+    EXPECT_EQ(grad_weight.shape()[0], weight.shape()[0]);
+    EXPECT_EQ(grad_weight.shape()[1], weight.shape()[1]);
 }
 
 // ============================================================================

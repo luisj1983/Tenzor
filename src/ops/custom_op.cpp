@@ -87,6 +87,27 @@ bool CustomOpRegistry::has_kernel(CustomOpId id, Device::Type device_type) const
     return dk.kernels.contains(id.value);
 }
 
+void CustomOpRegistry::register_backward(CustomOpId id, CustomBackwardFn backward,
+                                         CustomSaveForBackwardFn save_fn) {
+    std::unique_lock lock(backward_mutex_);
+    backward_fns_[id.value] = BackwardInfo{std::move(backward), std::move(save_fn)};
+}
+
+auto CustomOpRegistry::get_backward(CustomOpId id) const
+    -> std::optional<std::pair<CustomBackwardFn, CustomSaveForBackwardFn>> {
+    std::shared_lock lock(backward_mutex_);
+    auto it = backward_fns_.find(id.value);
+    if (it == backward_fns_.end()) {
+        return std::nullopt;
+    }
+    return std::make_pair(it->second.backward, it->second.save_fn);
+}
+
+bool CustomOpRegistry::has_backward(CustomOpId id) const {
+    std::shared_lock lock(backward_mutex_);
+    return backward_fns_.contains(id.value);
+}
+
 // ============================================================================
 // Public API
 // ============================================================================
@@ -120,6 +141,33 @@ auto dispatch_custom_op(CustomOpId id,
 
     Device::Type device_type = inputs[0].device().type;
     return CustomOpRegistry::instance().dispatch(id, device_type, inputs, attrs);
+}
+
+auto register_custom_op_with_backward(
+    const std::string& name,
+    Device::Type device_type,
+    CustomKernelFn forward_kernel,
+    CustomBackwardFn backward_fn,
+    CustomSaveForBackwardFn save_fn) -> CustomOpId {
+    auto& registry = CustomOpRegistry::instance();
+    auto id = registry.register_op(name);
+    registry.register_kernel(id, device_type, std::move(forward_kernel));
+    registry.register_backward(id, std::move(backward_fn), std::move(save_fn));
+    return id;
+}
+
+auto register_custom_op_with_backward(
+    const std::string& name,
+    std::initializer_list<std::pair<Device::Type, CustomKernelFn>> kernels,
+    CustomBackwardFn backward_fn,
+    CustomSaveForBackwardFn save_fn) -> CustomOpId {
+    auto& registry = CustomOpRegistry::instance();
+    auto id = registry.register_op(name);
+    for (auto& [device_type, kernel] : kernels) {
+        registry.register_kernel(id, device_type, std::move(kernel));
+    }
+    registry.register_backward(id, std::move(backward_fn), std::move(save_fn));
+    return id;
 }
 
 } // namespace tenzor

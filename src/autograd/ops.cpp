@@ -8,6 +8,7 @@
 #include "tenzor/ops/linalg.hpp"
 #include "tenzor/ops/advanced.hpp"
 #include "tenzor/ops/fft.hpp"
+#include "tenzor/ops/custom_op.hpp"
 #include "tenzor/sparse/sparse_ops.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
@@ -1523,6 +1524,23 @@ auto spmv(const SparseTensor& sparse, const Variable& vec) -> Variable {
     return output;
 }
 
+auto sparse_add(const SparseTensor& sparse, const Variable& dense) -> Variable {
+    if (!dense.requires_grad() || !is_grad_enabled()) {
+        return Variable(sparse::add(sparse, dense.tensor()), false);
+    }
+
+    // Compute forward: Y = S + D
+    auto result_tensor = sparse::add(sparse, dense.tensor());
+
+    auto grad_fn = std::make_shared<SparseAddBackward>();
+    grad_fn->set_next_functions({dense.grad_fn()});
+    grad_fn->set_input_variables({dense});
+
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
 // ============================================================================
 // Cumulative, Sorting, and Triangular Operations
 // ============================================================================
@@ -1718,5 +1736,74 @@ auto irfft(const Variable& input,
 }
 
 } // namespace fft_autograd
+
+// ============================================================================
+// Custom Op Autograd Dispatch
+// ============================================================================
+
+auto dispatch_custom_op(CustomOpId id,
+                        std::vector<Variable> inputs,
+                        const OpAttributes& attrs) -> Variable {
+    // Check if any input requires grad
+    bool any_requires_grad = false;
+    for (const auto& v : inputs) {
+        if (v.requires_grad()) {
+            any_requires_grad = true;
+            break;
+        }
+    }
+
+    // Extract raw tensors for forward dispatch
+    std::vector<Tensor> raw_inputs;
+    raw_inputs.reserve(inputs.size());
+    for (const auto& v : inputs) {
+        raw_inputs.push_back(v.tensor());
+    }
+
+    // Forward compute via raw dispatch
+    auto result = tenzor::dispatch_custom_op(id, raw_inputs, attrs);
+
+    if (!any_requires_grad || !is_grad_enabled()) {
+        return Variable(result, false);
+    }
+
+    // Check if this custom op has a registered backward
+    auto& registry = CustomOpRegistry::instance();
+    auto backward_info = registry.get_backward(id);
+    if (!backward_info) {
+        // No backward registered — return result without grad tracking
+        return Variable(result, false);
+    }
+
+    auto& [backward_fn, save_fn] = *backward_info;
+
+    // Create the backward node
+    auto grad_fn = std::make_shared<CustomOpBackward>(backward_fn);
+
+    // Determine what to save for backward
+    if (save_fn) {
+        grad_fn->save_for_backward(save_fn(raw_inputs, result));
+    } else {
+        // Default: save all inputs
+        grad_fn->save_for_backward(std::vector<Tensor>(raw_inputs.begin(), raw_inputs.end()));
+    }
+
+    // Set up backward graph connections
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    std::vector<Variable> input_vars;
+    next_funcs.reserve(inputs.size());
+    for (const auto& v : inputs) {
+        next_funcs.push_back(v.grad_fn());
+        if (v.requires_grad()) {
+            input_vars.push_back(v);
+        }
+    }
+    grad_fn->set_next_functions(std::move(next_funcs));
+    grad_fn->set_input_variables(std::move(input_vars));
+
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
 
 } // namespace tenzor

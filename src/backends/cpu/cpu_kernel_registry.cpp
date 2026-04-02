@@ -461,6 +461,27 @@ namespace cpu {
     auto ifftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
                        const std::vector<int64_t>& signal_lengths,
                        std::string_view norm) -> Tensor;
+
+    // STFT/ISTFT
+    auto stft_kernel(const Tensor& input, int64_t n_fft, int64_t hop_length, int64_t win_length,
+                     const Tensor& window, bool center, bool normalized, bool onesided) -> Tensor;
+    auto istft_kernel(const Tensor& input, int64_t n_fft, int64_t hop_length, int64_t win_length,
+                      const Tensor& window, bool center, bool normalized, bool onesided,
+                      int64_t length) -> Tensor;
+
+    // CDist
+    auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p) -> Tensor;
+
+    // Multinomial / Bernoulli
+    auto multinomial_kernel(const Tensor& probs, int64_t num_samples, bool replacement) -> Tensor;
+    auto bernoulli_kernel(const Tensor& probs) -> Tensor;
+
+    // Histogram
+    auto histogram_kernel(const Tensor& input, int64_t bins, double min_val, double max_val)
+        -> std::pair<Tensor, Tensor>;
+
+    // Bucketize
+    auto bucketize_kernel(const Tensor& input, const Tensor& boundaries, bool right) -> Tensor;
 } // namespace cpu
 
 // Forward declarations for quantized kernels (in nn::quantization::kernels namespace)
@@ -2319,6 +2340,73 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         }
         auto norm = attrs.get_string(AttrKey::Norm, "backward");
         return cpu::ifftn_kernel(inputs[0], dims, signal_lengths, norm);
+    });
+
+    // =========================================================================
+    // STFT / ISTFT
+    // =========================================================================
+    table.register_single_output_kernel(OpId::STFT, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t n_fft = attrs.get_int(AttrKey::NFft);
+        int64_t hop_length = attrs.get_int(AttrKey::HopLength, -1);
+        int64_t win_length = attrs.get_int(AttrKey::WinLength, -1);
+        bool center = attrs.get_bool(AttrKey::Centered, true);
+        bool normalized = attrs.get_bool(AttrKey::Normalized, false);
+        bool onesided = attrs.get_bool(AttrKey::OnesidedAttr, true);
+        // Window is optional second input
+        Tensor window = (inputs.size() > 1) ? inputs[1] : Tensor();
+        return cpu::stft_kernel(inputs[0], n_fft, hop_length, win_length, window, center, normalized, onesided);
+    });
+
+    table.register_single_output_kernel(OpId::ISTFT, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t n_fft = attrs.get_int(AttrKey::NFft);
+        int64_t hop_length = attrs.get_int(AttrKey::HopLength, -1);
+        int64_t win_length = attrs.get_int(AttrKey::WinLength, -1);
+        bool center = attrs.get_bool(AttrKey::Centered, true);
+        bool normalized = attrs.get_bool(AttrKey::Normalized, false);
+        bool onesided = attrs.get_bool(AttrKey::OnesidedAttr, true);
+        int64_t length = attrs.get_int(AttrKey::N, -1);
+        Tensor window = (inputs.size() > 1) ? inputs[1] : Tensor();
+        return cpu::istft_kernel(inputs[0], n_fft, hop_length, win_length, window, center, normalized, onesided, length);
+    });
+
+    // =========================================================================
+    // CDist
+    // =========================================================================
+    table.register_single_output_kernel(OpId::CDist, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        double p = attrs.get_float(AttrKey::DistP, 2.0);
+        return cpu::cdist_kernel(inputs[0], inputs[1], p);
+    });
+
+    // =========================================================================
+    // Multinomial / Bernoulli
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Multinomial, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t num_samples = attrs.get_int(AttrKey::NumSamples, 1);
+        bool replacement = attrs.get_bool(AttrKey::Replacement, false);
+        return cpu::multinomial_kernel(inputs[0], num_samples, replacement);
+    });
+
+    table.register_single_output_kernel(OpId::Bernoulli, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return cpu::bernoulli_kernel(inputs[0]);
+    });
+
+    // =========================================================================
+    // Histogram
+    // =========================================================================
+    table.register_kernel(OpId::Histogram, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        int64_t bins = attrs.get_int(AttrKey::NumBins, 10);
+        double min_val = attrs.get_float(AttrKey::Min, 0.0);
+        double max_val = attrs.get_float(AttrKey::Max, 0.0);
+        auto [counts, edges] = cpu::histogram_kernel(inputs[0], bins, min_val, max_val);
+        return {counts, edges};
+    });
+
+    // =========================================================================
+    // Bucketize
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Bucketize, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        bool right = attrs.get_bool(AttrKey::Right, false);
+        return cpu::bucketize_kernel(inputs[0], inputs[1], right);
     });
 
     // =========================================================================

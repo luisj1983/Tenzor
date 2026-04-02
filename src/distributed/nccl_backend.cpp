@@ -433,6 +433,80 @@ auto NCCLBackend::reduce_scatter(const std::vector<Tensor>& tensors, Tensor& out
 #endif
 }
 
+auto NCCLBackend::send(const Tensor& tensor, int dst_rank) -> void {
+#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
+    validate_gpu_tensor(tensor);
+
+    if (dst_rank < 0 || dst_rank >= world_size_) {
+        throw std::invalid_argument(
+            "NCCLBackend::send: invalid dst_rank " + std::to_string(dst_rank)
+        );
+    }
+    if (dst_rank == rank_) {
+        throw std::invalid_argument(
+            "NCCLBackend::send: cannot send to self (rank " + std::to_string(rank_) + ")"
+        );
+    }
+
+    int device_id = get_device_id(tensor);
+    ncclComm_t comm = get_communicator(device_id);
+
+    ncclDataType_t nccl_dtype = to_nccl_datatype(tensor.dtype());
+
+    NCCL_CHECK(ncclSend(
+        tensor.data_ptr(),
+        tensor.numel(),
+        nccl_dtype,
+        dst_rank,
+        comm,
+        nullptr  // Use default stream
+    ));
+
+    GPU_CHECK(cudaDeviceSynchronize());
+#else
+    (void)tensor;
+    (void)dst_rank;
+    throw std::runtime_error("NCCLBackend: NCCL not available");
+#endif
+}
+
+auto NCCLBackend::recv(Tensor& tensor, int src_rank) -> void {
+#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
+    validate_gpu_tensor(tensor);
+
+    if (src_rank < 0 || src_rank >= world_size_) {
+        throw std::invalid_argument(
+            "NCCLBackend::recv: invalid src_rank " + std::to_string(src_rank)
+        );
+    }
+    if (src_rank == rank_) {
+        throw std::invalid_argument(
+            "NCCLBackend::recv: cannot recv from self (rank " + std::to_string(rank_) + ")"
+        );
+    }
+
+    int device_id = get_device_id(tensor);
+    ncclComm_t comm = get_communicator(device_id);
+
+    ncclDataType_t nccl_dtype = to_nccl_datatype(tensor.dtype());
+
+    NCCL_CHECK(ncclRecv(
+        tensor.data_ptr(),
+        tensor.numel(),
+        nccl_dtype,
+        src_rank,
+        comm,
+        nullptr  // Use default stream
+    ));
+
+    GPU_CHECK(cudaDeviceSynchronize());
+#else
+    (void)tensor;
+    (void)src_rank;
+    throw std::runtime_error("NCCLBackend: NCCL not available");
+#endif
+}
+
 auto NCCLBackend::barrier() -> void {
 #if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
     // NCCL doesn't have native barrier, use all-reduce on dummy tensor
@@ -574,7 +648,7 @@ auto NCCLBackend::exchange_unique_id() -> void {
                 throw std::runtime_error("Failed to accept connection from rank " + std::to_string(i));
             }
 
-            ssize_t sent = send(client_fd, &unique_id_, sizeof(unique_id_), 0);
+            ssize_t sent = ::send(client_fd, &unique_id_, sizeof(unique_id_), 0);
             if (sent != sizeof(unique_id_)) {
                 throw std::runtime_error("Failed to send unique ID to rank " + std::to_string(i));
             }
@@ -588,7 +662,7 @@ auto NCCLBackend::exchange_unique_id() -> void {
         // Worker ranks: receive unique ID from master
         int socket_fd = create_socket_connection(false);
 
-        ssize_t received = recv(socket_fd, &unique_id_, sizeof(unique_id_), MSG_WAITALL);
+        ssize_t received = ::recv(socket_fd, &unique_id_, sizeof(unique_id_), MSG_WAITALL);
         if (received != sizeof(unique_id_)) {
             throw std::runtime_error("Failed to receive unique ID from master");
         }

@@ -771,4 +771,17 @@ auto mode(const Tensor& input, int64_t dim, bool keepdim)
     return {results[0], results[1]};
 }
 
+auto bucketize(const Tensor& input, const Tensor& boundaries, bool right) -> Tensor {
+    if (boundaries.ndim() != 1) {
+        throw std::invalid_argument("bucketize: boundaries must be a 1-D tensor");
+    }
+
+    auto inp = input.contiguous();
+    auto bounds = boundaries.contiguous();
+    std::array<Tensor, 2> inputs = {inp, bounds};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Right, right);
+    return dispatch<OpId::Bucketize>(inputs, attrs)[0];
+}
+
 } // namespace tenzor

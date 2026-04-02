@@ -5808,5 +5808,159 @@ auto cross_kernel(const Tensor& a, const Tensor& b, int64_t dim) -> Tensor {
     return result;
 }
 
+// ============================================================================
+// CDist Kernel - Pairwise distance computation
+// ============================================================================
+
+auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p) -> Tensor {
+    // x1: (..., P, M), x2: (..., R, M) -> output: (..., P, R)
+    // For simplicity, handle 2D and 3D inputs
+    auto s1 = x1.shape();
+    auto s2 = x2.shape();
+
+    int64_t ndim1 = static_cast<int64_t>(s1.size());
+    int64_t ndim2 = static_cast<int64_t>(s2.size());
+
+    if (ndim1 < 2 || ndim2 < 2) {
+        throw std::runtime_error("cdist: inputs must have at least 2 dimensions");
+    }
+
+    int64_t M = s1[ndim1 - 1];
+    if (s2[ndim2 - 1] != M) {
+        throw std::runtime_error("cdist: last dimension of x1 and x2 must match");
+    }
+
+    int64_t P = s1[ndim1 - 2];
+    int64_t R = s2[ndim2 - 2];
+
+    // Compute batch size
+    int64_t batch1 = 1, batch2 = 1;
+    for (int64_t d = 0; d < ndim1 - 2; ++d) batch1 *= s1[d];
+    for (int64_t d = 0; d < ndim2 - 2; ++d) batch2 *= s2[d];
+
+    if (batch1 != batch2 && batch1 != 1 && batch2 != 1) {
+        throw std::runtime_error("cdist: batch dimensions must be broadcastable");
+    }
+    int64_t batch_size = std::max(batch1, batch2);
+
+    // Ensure Float32
+    Tensor a = (x1.dtype() != DType::Float32) ? x1.to(DType::Float32) : x1;
+    Tensor b = (x2.dtype() != DType::Float32) ? x2.to(DType::Float32) : x2;
+
+    // Output shape
+    std::vector<int64_t> out_shape;
+    // Use the larger batch dims
+    auto& ref_shape = (batch1 >= batch2) ? s1 : s2;
+    int64_t ref_ndim = static_cast<int64_t>(ref_shape.size());
+    for (int64_t d = 0; d < ref_ndim - 2; ++d) {
+        out_shape.push_back(ref_shape[d]);
+    }
+    out_shape.push_back(P);
+    out_shape.push_back(R);
+
+    Tensor result(out_shape, DType::Float32, x1.device());
+    float* out_data = result.data<float>();
+    const float* a_data = a.data<float>();
+    const float* b_data = b.data<float>();
+
+    if (p == 2.0) {
+        // Euclidean: ||a-b||^2 = ||a||^2 + ||b||^2 - 2*a*b^T
+        // Compute using expansion for efficiency
+        for (int64_t batch = 0; batch < batch_size; ++batch) {
+            int64_t b1 = (batch1 == 1) ? 0 : batch;
+            int64_t b2 = (batch2 == 1) ? 0 : batch;
+
+            const float* a_batch = a_data + b1 * P * M;
+            const float* b_batch = b_data + b2 * R * M;
+            float* o_batch = out_data + batch * P * R;
+
+            // Compute ||a||^2 for each row of a
+            std::vector<float> a_sq(static_cast<size_t>(P));
+            for (int64_t i = 0; i < P; ++i) {
+                float sum = 0.0f;
+                for (int64_t k = 0; k < M; ++k) {
+                    float v = a_batch[i * M + k];
+                    sum += v * v;
+                }
+                a_sq[static_cast<size_t>(i)] = sum;
+            }
+
+            // Compute ||b||^2 for each row of b
+            std::vector<float> b_sq(static_cast<size_t>(R));
+            for (int64_t j = 0; j < R; ++j) {
+                float sum = 0.0f;
+                for (int64_t k = 0; k < M; ++k) {
+                    float v = b_batch[j * M + k];
+                    sum += v * v;
+                }
+                b_sq[static_cast<size_t>(j)] = sum;
+            }
+
+            // Compute -2 * a * b^T + ||a||^2 + ||b||^2
+            #pragma omp parallel for collapse(2) if(P * R > 4096)
+            for (int64_t i = 0; i < P; ++i) {
+                for (int64_t j = 0; j < R; ++j) {
+                    float dot = 0.0f;
+                    for (int64_t k = 0; k < M; ++k) {
+                        dot += a_batch[i * M + k] * b_batch[j * M + k];
+                    }
+                    float dist_sq = a_sq[static_cast<size_t>(i)] + b_sq[static_cast<size_t>(j)] - 2.0f * dot;
+                    // Clamp to avoid negative values from floating point errors
+                    o_batch[i * R + j] = std::sqrt(std::max(0.0f, dist_sq));
+                }
+            }
+        }
+    } else {
+        // General p-norm
+        for (int64_t batch = 0; batch < batch_size; ++batch) {
+            int64_t b1 = (batch1 == 1) ? 0 : batch;
+            int64_t b2 = (batch2 == 1) ? 0 : batch;
+
+            const float* a_batch = a_data + b1 * P * M;
+            const float* b_batch = b_data + b2 * R * M;
+            float* o_batch = out_data + batch * P * R;
+
+            float inv_p = (p != 0.0) ? static_cast<float>(1.0 / p) : 0.0f;
+
+            #pragma omp parallel for collapse(2) if(P * R > 4096)
+            for (int64_t i = 0; i < P; ++i) {
+                for (int64_t j = 0; j < R; ++j) {
+                    if (p == std::numeric_limits<double>::infinity()) {
+                        // L-inf norm
+                        float max_val = 0.0f;
+                        for (int64_t k = 0; k < M; ++k) {
+                            max_val = std::max(max_val, std::abs(a_batch[i * M + k] - b_batch[j * M + k]));
+                        }
+                        o_batch[i * R + j] = max_val;
+                    } else if (p == 0.0) {
+                        // L0 norm: count non-zero differences
+                        float count = 0.0f;
+                        for (int64_t k = 0; k < M; ++k) {
+                            if (a_batch[i * M + k] != b_batch[j * M + k]) count += 1.0f;
+                        }
+                        o_batch[i * R + j] = count;
+                    } else if (p == 1.0) {
+                        // L1 norm (Manhattan)
+                        float sum = 0.0f;
+                        for (int64_t k = 0; k < M; ++k) {
+                            sum += std::abs(a_batch[i * M + k] - b_batch[j * M + k]);
+                        }
+                        o_batch[i * R + j] = sum;
+                    } else {
+                        float sum = 0.0f;
+                        float pf = static_cast<float>(p);
+                        for (int64_t k = 0; k < M; ++k) {
+                            sum += std::pow(std::abs(a_batch[i * M + k] - b_batch[j * M + k]), pf);
+                        }
+                        o_batch[i * R + j] = std::pow(sum, inv_p);
+                    }
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
 } // namespace cpu
 } // namespace tenzor

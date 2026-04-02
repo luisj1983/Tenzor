@@ -478,5 +478,48 @@ auto unique_kernel(const Tensor& input, bool sorted_output,
     }
 }
 
+// ============================================================================
+// Bucketize Kernel - Binary search in sorted boundaries
+// ============================================================================
+
+auto bucketize_kernel(const Tensor& input, const Tensor& boundaries, bool right) -> Tensor {
+    // input: any shape, boundaries: 1D sorted tensor
+    // Returns: same shape as input, Int64 indices
+    if (boundaries.ndim() != 1) {
+        throw std::runtime_error("bucketize: boundaries must be 1D");
+    }
+
+    Tensor input_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
+    Tensor bound_f32 = (boundaries.dtype() != DType::Float32) ? boundaries.to(DType::Float32) : boundaries;
+
+    const float* in_data = input_f32.data<float>();
+    const float* b_data = bound_f32.data<float>();
+    int64_t n = input_f32.numel();
+    int64_t nb = bound_f32.numel();
+
+    Tensor result(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                  DType::Int64, input.device());
+    int64_t* out_data = result.data<int64_t>();
+
+    #pragma omp parallel for schedule(static) if(n > 65536)
+    for (int64_t i = 0; i < n; ++i) {
+        float val = in_data[i];
+        // Binary search
+        int64_t lo = 0, hi = nb;
+        while (lo < hi) {
+            int64_t mid = lo + (hi - lo) / 2;
+            bool go_right = right ? (b_data[mid] <= val) : (b_data[mid] < val);
+            if (go_right) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        out_data[i] = lo;
+    }
+
+    return result;
+}
+
 } // namespace cpu
 } // namespace tenzor

@@ -38,9 +38,21 @@ if(TENZOR_BUILD_ROCM)
     target_link_libraries(test_rocm_kernels PRIVATE tenzor_core GTest::gtest_main hip::host)
     target_include_directories(test_rocm_kernels PRIVATE ${ROCM_PATH}/include)
 
+    # ROCm FFT tests
+    add_executable(test_rocm_fft test_rocm_fft.cpp)
+    target_link_libraries(test_rocm_fft PRIVATE tenzor_core GTest::gtest_main)
+
     # ROCm initialization can be slow, use 60 second timeout
     tenzor_discover_tests(test_rocm_backend DISCOVERY_TIMEOUT 60)
     tenzor_discover_tests(test_rocm_kernels DISCOVERY_TIMEOUT 60)
+    tenzor_discover_tests(test_rocm_fft DISCOVERY_TIMEOUT 60)
+endif()
+
+# Sparse GPU tests (works with any GPU backend: CUDA or ROCm)
+if(TENZOR_BUILD_CUDA OR TENZOR_BUILD_ROCM)
+    add_executable(test_sparse_gpu test_sparse_gpu.cpp)
+    target_link_libraries(test_sparse_gpu PRIVATE tenzor_core GTest::gtest_main)
+    tenzor_discover_tests(test_sparse_gpu DISCOVERY_TIMEOUT 60)
 endif()
 
 # Vulkan-specific tests

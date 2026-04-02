@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include "fp16_saturate.h"
 #include "reduction_utils.hip.h"
+#include "../rocm_arch_detect.hpp"
 
 namespace tenzor {
 namespace rocm {
@@ -1320,26 +1321,28 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t str
     // Divide by count using scaling kernel
     const int64_t n = sum_result.numel();
 
+    const int block_size = rocm::get_wavefront_size() * 4;  // 4 wavefronts per block
+
     if (dtype == DType::Float32) {
         auto* data = sum_result.data<float>();
         const float scale = 1.0f / static_cast<float>(count);
 
-        int num_blocks = (n + 255) / 256;
-        hipLaunchKernelGGL(scale_kernel<float>, dim3(num_blocks), dim3(256), 0, stream,
+        int num_blocks = (n + block_size - 1) / block_size;
+        hipLaunchKernelGGL(scale_kernel<float>, dim3(num_blocks), dim3(block_size), 0, stream,
             data, scale, n);
     } else if (dtype == DType::Float64) {
         auto* data = sum_result.data<double>();
         const double scale = 1.0 / static_cast<double>(count);
 
-        int num_blocks = (n + 255) / 256;
-        hipLaunchKernelGGL(scale_kernel<double>, dim3(num_blocks), dim3(256), 0, stream,
+        int num_blocks = (n + block_size - 1) / block_size;
+        hipLaunchKernelGGL(scale_kernel<double>, dim3(num_blocks), dim3(block_size), 0, stream,
             data, scale, n);
     } else {  // Float16
         auto* data = reinterpret_cast<__half*>(sum_result.data<Float16>());
         const float scale = 1.0f / static_cast<float>(count);
 
-        int num_blocks = (n + 255) / 256;
-        hipLaunchKernelGGL(scale_kernel_fp16, dim3(num_blocks), dim3(256), 0, stream,
+        int num_blocks = (n + block_size - 1) / block_size;
+        hipLaunchKernelGGL(scale_kernel_fp16, dim3(num_blocks), dim3(block_size), 0, stream,
             data, scale, n);
     }
 
@@ -2472,8 +2475,9 @@ auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, bool unbiased, h
     if (n == 0) return output;
 
     dim3 grid, block;
-    block = dim3(256, 1, 1);
-    grid = dim3((n + 255) / 256, 1, 1);
+    const int blk_size = rocm::get_wavefront_size() * 4;  // 4 wavefronts per block
+    block = dim3(blk_size, 1, 1);
+    grid = dim3((n + blk_size - 1) / blk_size, 1, 1);
 
     if (var_result.dtype() == DType::Float32) {
         hipLaunchKernelGGL(elementwise_sqrt_kernel<float>, grid, block, 0, stream,

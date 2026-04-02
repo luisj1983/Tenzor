@@ -2,8 +2,10 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/type_promotion.hpp"
 #include "tenzor/backend/dispatch_table.hpp"
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 
 #ifdef _OPENMP
@@ -903,6 +905,365 @@ auto mul(const SparseTensor& sparse, double scalar) -> SparseTensor {
         return SparseTensor::sparse_coo(sparse.indices(), new_values, shape_vec);
     } else {
         return SparseTensor::sparse_csr(sparse.crow_indices(), sparse.col_indices(), new_values, shape_vec);
+    }
+}
+
+// ============================================================================
+// spgemm: Sparse-Sparse Matrix Multiplication (C = A @ B)
+// ============================================================================
+
+namespace {
+
+/// CPU SpGEMM: two-phase symbolic + numeric algorithm.
+/// Both inputs must be in CSR format. Returns CSR result.
+template<typename T>
+SparseTensor cpu_spgemm_typed(const SparseTensor& a, const SparseTensor& b,
+                               int64_t M, int64_t K, int64_t N) {
+    auto a_crow = a.crow_indices().contiguous();
+    auto a_col = a.col_indices().contiguous();
+    auto a_vals = a.values().contiguous();
+    auto b_crow = b.crow_indices().contiguous();
+    auto b_col = b.col_indices().contiguous();
+    auto b_vals = b.values().contiguous();
+
+    const int64_t* a_row_ptr = a_crow.data<int64_t>();
+    const int64_t* a_col_idx = a_col.data<int64_t>();
+    const T* a_data = a_vals.data<T>();
+    const int64_t* b_row_ptr = b_crow.data<int64_t>();
+    const int64_t* b_col_idx = b_col.data<int64_t>();
+    const T* b_data = b_vals.data<T>();
+
+    // Phase 1: Symbolic — count non-zeros per row in C
+    std::vector<int64_t> c_row_ptr(M + 1, 0);
+    std::vector<std::vector<std::pair<int64_t, T>>> row_entries(M);
+
+    for (int64_t i = 0; i < M; ++i) {
+        // Use a map to accumulate column entries for row i
+        std::unordered_map<int64_t, T> acc;
+        for (int64_t ja = a_row_ptr[i]; ja < a_row_ptr[i + 1]; ++ja) {
+            int64_t k = a_col_idx[ja];
+            T a_val = a_data[ja];
+            for (int64_t jb = b_row_ptr[k]; jb < b_row_ptr[k + 1]; ++jb) {
+                int64_t col = b_col_idx[jb];
+                acc[col] += a_val * b_data[jb];
+            }
+        }
+        // Sort by column index for CSR ordering
+        row_entries[i].reserve(acc.size());
+        for (auto& [col, val] : acc) {
+            if (val != T(0)) {
+                row_entries[i].emplace_back(col, val);
+            }
+        }
+        std::sort(row_entries[i].begin(), row_entries[i].end(),
+                  [](const auto& x, const auto& y) { return x.first < y.first; });
+        c_row_ptr[i + 1] = static_cast<int64_t>(row_entries[i].size());
+    }
+
+    // Prefix sum to get row pointers
+    for (int64_t i = 0; i < M; ++i) {
+        c_row_ptr[i + 1] += c_row_ptr[i];
+    }
+    int64_t nnz_c = c_row_ptr[M];
+
+    // Phase 2: Build CSR arrays
+    auto crow_tensor = Tensor({M + 1}, DType::Int64, Device::cpu());
+    auto col_tensor = Tensor({nnz_c}, DType::Int64, Device::cpu());
+    auto val_tensor = Tensor({nnz_c}, a.dtype(), Device::cpu());
+
+    std::memcpy(crow_tensor.data<int64_t>(), c_row_ptr.data(), (M + 1) * sizeof(int64_t));
+
+    int64_t* c_col = col_tensor.data<int64_t>();
+    T* c_data = val_tensor.data<T>();
+
+    for (int64_t i = 0; i < M; ++i) {
+        int64_t offset = c_row_ptr[i];
+        for (size_t j = 0; j < row_entries[i].size(); ++j) {
+            c_col[offset + static_cast<int64_t>(j)] = row_entries[i][j].first;
+            c_data[offset + static_cast<int64_t>(j)] = row_entries[i][j].second;
+        }
+    }
+
+    return SparseTensor::sparse_csr(crow_tensor, col_tensor, val_tensor, {M, N});
+}
+
+} // anonymous namespace
+
+auto spgemm(const SparseTensor& a, const SparseTensor& b) -> SparseTensor {
+    auto a_shape = a.shape();
+    auto b_shape = b.shape();
+    if (a_shape.size() != 2 || b_shape.size() != 2) {
+        throw std::runtime_error("spgemm: both inputs must be 2D sparse matrices");
+    }
+    int64_t M = a_shape[0];
+    int64_t K = a_shape[1];
+    int64_t N = b_shape[1];
+    if (K != b_shape[0]) {
+        throw std::runtime_error("spgemm: inner dimensions must match (A is " +
+            std::to_string(M) + "x" + std::to_string(K) + ", B is " +
+            std::to_string(b_shape[0]) + "x" + std::to_string(N) + ")");
+    }
+    if (a.dtype() != b.dtype()) {
+        throw std::runtime_error("spgemm: dtype mismatch");
+    }
+
+    // Convert to CSR for efficient row-based iteration
+    auto a_csr = a.to_csr();
+    auto b_csr = b.to_csr();
+
+#ifdef TENZOR_HAS_CUSPARSE
+    if (a.device().type == Device::Type::CUDA && b.device().type == Device::Type::CUDA) {
+        // TODO: cusparseSpGEMM implementation
+        // For now, transfer to CPU, compute, transfer back
+        auto a_cpu = a_csr.to(Device::cpu());
+        auto b_cpu = b_csr.to(Device::cpu());
+        SparseTensor result;
+        if (a.dtype() == DType::Float32) {
+            result = cpu_spgemm_typed<float>(a_cpu, b_cpu, M, K, N);
+        } else if (a.dtype() == DType::Float64) {
+            result = cpu_spgemm_typed<double>(a_cpu, b_cpu, M, K, N);
+        } else {
+            throw std::runtime_error("spgemm: unsupported dtype " +
+                std::string(dtype_name(a.dtype())));
+        }
+        return result.to(a.device());
+    }
+#endif
+
+#ifdef TENZOR_HAS_ROCSPARSE
+    if (a.device().type == Device::Type::ROCm && b.device().type == Device::Type::ROCm) {
+        // TODO: rocsparse_spgemm implementation
+        // For now, transfer to CPU, compute, transfer back
+        auto a_cpu = a_csr.to(Device::cpu());
+        auto b_cpu = b_csr.to(Device::cpu());
+        SparseTensor result;
+        if (a.dtype() == DType::Float32) {
+            result = cpu_spgemm_typed<float>(a_cpu, b_cpu, M, K, N);
+        } else if (a.dtype() == DType::Float64) {
+            result = cpu_spgemm_typed<double>(a_cpu, b_cpu, M, K, N);
+        } else {
+            throw std::runtime_error("spgemm: unsupported dtype " +
+                std::string(dtype_name(a.dtype())));
+        }
+        return result.to(a.device());
+    }
+#endif
+
+    // CPU path
+    if (a.dtype() == DType::Float32) {
+        return cpu_spgemm_typed<float>(a_csr, b_csr, M, K, N);
+    } else if (a.dtype() == DType::Float64) {
+        return cpu_spgemm_typed<double>(a_csr, b_csr, M, K, N);
+    } else {
+        throw std::runtime_error("spgemm: unsupported dtype " +
+            std::string(dtype_name(a.dtype())));
+    }
+}
+
+// ============================================================================
+// sparse_triangular_solve: Solve L*x = b or U*x = b
+// ============================================================================
+
+namespace {
+
+/// CPU forward substitution for lower triangular: L*x = b
+template<typename T>
+void cpu_forward_substitution(const int64_t* row_ptr, const int64_t* col_idx,
+                               const T* vals, const T* b_data, T* x_data,
+                               int64_t N) {
+    for (int64_t i = 0; i < N; ++i) {
+        T sum = b_data[i];
+        T diag = T(0);
+        for (int64_t j = row_ptr[i]; j < row_ptr[i + 1]; ++j) {
+            int64_t col = col_idx[j];
+            if (col < i) {
+                sum -= vals[j] * x_data[col];
+            } else if (col == i) {
+                diag = vals[j];
+            }
+        }
+        if (diag == T(0)) {
+            throw std::runtime_error("sparse_triangular_solve: zero diagonal element at row " +
+                std::to_string(i));
+        }
+        x_data[i] = sum / diag;
+    }
+}
+
+/// CPU backward substitution for upper triangular: U*x = b
+template<typename T>
+void cpu_backward_substitution(const int64_t* row_ptr, const int64_t* col_idx,
+                                const T* vals, const T* b_data, T* x_data,
+                                int64_t N) {
+    for (int64_t i = N - 1; i >= 0; --i) {
+        T sum = b_data[i];
+        T diag = T(0);
+        for (int64_t j = row_ptr[i]; j < row_ptr[i + 1]; ++j) {
+            int64_t col = col_idx[j];
+            if (col > i) {
+                sum -= vals[j] * x_data[col];
+            } else if (col == i) {
+                diag = vals[j];
+            }
+        }
+        if (diag == T(0)) {
+            throw std::runtime_error("sparse_triangular_solve: zero diagonal element at row " +
+                std::to_string(i));
+        }
+        x_data[i] = sum / diag;
+    }
+}
+
+/// CPU triangular solve for a single RHS vector
+template<typename T>
+Tensor cpu_sparse_trsv(const SparseTensor& L, const Tensor& b, bool upper, int64_t N) {
+    auto L_crow = L.crow_indices().contiguous();
+    auto L_col = L.col_indices().contiguous();
+    auto L_vals = L.values().contiguous();
+    auto b_c = b.contiguous();
+
+    auto result = Tensor({N}, b.dtype(), Device::cpu());
+    const T* b_data = b_c.data<T>();
+    T* x_data = result.data<T>();
+
+    if (upper) {
+        cpu_backward_substitution<T>(L_crow.data<int64_t>(), L_col.data<int64_t>(),
+                                      L_vals.data<T>(), b_data, x_data, N);
+    } else {
+        cpu_forward_substitution<T>(L_crow.data<int64_t>(), L_col.data<int64_t>(),
+                                     L_vals.data<T>(), b_data, x_data, N);
+    }
+    return result;
+}
+
+/// CPU triangular solve for multiple RHS columns (N x K)
+template<typename T>
+Tensor cpu_sparse_trsm(const SparseTensor& L, const Tensor& B, bool upper, int64_t N, int64_t K) {
+    auto L_crow = L.crow_indices().contiguous();
+    auto L_col = L.col_indices().contiguous();
+    auto L_vals = L.values().contiguous();
+    auto B_c = B.contiguous();
+
+    auto result = Tensor({N, K}, B.dtype(), Device::cpu());
+    const T* B_data = B_c.data<T>();
+    T* X_data = result.data<T>();
+
+    // Solve column by column
+    for (int64_t k = 0; k < K; ++k) {
+        // Extract column k of B into a temporary buffer
+        std::vector<T> b_col(N);
+        for (int64_t i = 0; i < N; ++i) {
+            b_col[i] = B_data[i * K + k];
+        }
+        std::vector<T> x_col(N);
+        if (upper) {
+            cpu_backward_substitution<T>(L_crow.data<int64_t>(), L_col.data<int64_t>(),
+                                          L_vals.data<T>(), b_col.data(), x_col.data(), N);
+        } else {
+            cpu_forward_substitution<T>(L_crow.data<int64_t>(), L_col.data<int64_t>(),
+                                         L_vals.data<T>(), b_col.data(), x_col.data(), N);
+        }
+        for (int64_t i = 0; i < N; ++i) {
+            X_data[i * K + k] = x_col[i];
+        }
+    }
+    return result;
+}
+
+} // anonymous namespace
+
+auto sparse_triangular_solve(const SparseTensor& L, const Tensor& b, bool upper) -> Tensor {
+    auto L_shape = L.shape();
+    if (L_shape.size() != 2 || L_shape[0] != L_shape[1]) {
+        throw std::runtime_error("sparse_triangular_solve: L must be a square 2D sparse matrix");
+    }
+    int64_t N = L_shape[0];
+
+    if (b.ndim() == 1) {
+        if (b.shape()[0] != N) {
+            throw std::runtime_error("sparse_triangular_solve: dimension mismatch");
+        }
+    } else if (b.ndim() == 2) {
+        if (b.shape()[0] != N) {
+            throw std::runtime_error("sparse_triangular_solve: dimension mismatch");
+        }
+    } else {
+        throw std::runtime_error("sparse_triangular_solve: b must be 1D or 2D");
+    }
+
+    // Convert to CSR for row-based access
+    auto L_csr = L.to_csr();
+
+#ifdef TENZOR_HAS_CUSPARSE
+    if (L.device().type == Device::Type::CUDA) {
+        // TODO: cusparseSpSV_solve implementation
+        // For now, transfer to CPU, compute, transfer back
+        auto L_cpu = L_csr.to(Device::cpu());
+        auto b_cpu = b.to(Device::cpu());
+        Tensor result;
+        if (b.ndim() == 1) {
+            if (b.dtype() == DType::Float32) {
+                result = cpu_sparse_trsv<float>(L_cpu, b_cpu, upper, N);
+            } else {
+                result = cpu_sparse_trsv<double>(L_cpu, b_cpu, upper, N);
+            }
+        } else {
+            int64_t K = b.shape()[1];
+            if (b.dtype() == DType::Float32) {
+                result = cpu_sparse_trsm<float>(L_cpu, b_cpu, upper, N, K);
+            } else {
+                result = cpu_sparse_trsm<double>(L_cpu, b_cpu, upper, N, K);
+            }
+        }
+        return result.to(b.device());
+    }
+#endif
+
+#ifdef TENZOR_HAS_ROCSPARSE
+    if (L.device().type == Device::Type::ROCm) {
+        // TODO: rocsparse_csrsv_solve implementation
+        // For now, transfer to CPU, compute, transfer back
+        auto L_cpu = L_csr.to(Device::cpu());
+        auto b_cpu = b.to(Device::cpu());
+        Tensor result;
+        if (b.ndim() == 1) {
+            if (b.dtype() == DType::Float32) {
+                result = cpu_sparse_trsv<float>(L_cpu, b_cpu, upper, N);
+            } else {
+                result = cpu_sparse_trsv<double>(L_cpu, b_cpu, upper, N);
+            }
+        } else {
+            int64_t K = b.shape()[1];
+            if (b.dtype() == DType::Float32) {
+                result = cpu_sparse_trsm<float>(L_cpu, b_cpu, upper, N, K);
+            } else {
+                result = cpu_sparse_trsm<double>(L_cpu, b_cpu, upper, N, K);
+            }
+        }
+        return result.to(b.device());
+    }
+#endif
+
+    // CPU path
+    if (b.ndim() == 1) {
+        if (b.dtype() == DType::Float32) {
+            return cpu_sparse_trsv<float>(L_csr, b, upper, N);
+        } else if (b.dtype() == DType::Float64) {
+            return cpu_sparse_trsv<double>(L_csr, b, upper, N);
+        } else {
+            throw std::runtime_error("sparse_triangular_solve: unsupported dtype " +
+                std::string(dtype_name(b.dtype())));
+        }
+    } else {
+        int64_t K = b.shape()[1];
+        if (b.dtype() == DType::Float32) {
+            return cpu_sparse_trsm<float>(L_csr, b, upper, N, K);
+        } else if (b.dtype() == DType::Float64) {
+            return cpu_sparse_trsm<double>(L_csr, b, upper, N, K);
+        } else {
+            throw std::runtime_error("sparse_triangular_solve: unsupported dtype " +
+                std::string(dtype_name(b.dtype())));
+        }
     }
 }
 

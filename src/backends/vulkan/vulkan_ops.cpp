@@ -1103,7 +1103,6 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
             shader_name = "reduction";
         }
     }
-    auto* pipeline = getPipeline(shader_name, device_id);
 
     // Map operation name to opcode for push constants
     // 0=sum, 1=mean, 2=max, 3=min (see reduction.comp shader)
@@ -1115,6 +1114,116 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
     else {
         throw std::invalid_argument("Unknown reduction operation: " + op_name);
     }
+
+    // --- Tree reduction fast path ---
+    // For large full reductions on Float32 with subgroup arithmetic, use the
+    // two-pass tree reduction shader which leverages subgroupAdd/Max/Min for
+    // the first level and shared-memory tree reduction for the second level.
+    // The "mean" op is handled by doing sum + divide at the end.
+    auto& ctx_tree = devices_[device_id];
+    bool use_tree_reduction = full_reduction
+        && ctx_tree.hasSubgroupArithmetic
+        && !is_float64 && !is_float16 && !is_bfloat16 && !is_int32 && !is_int64
+        && reduction_input.numel() > 1024
+        && (op_name == "sum" || op_name == "max" || op_name == "min" || op_name == "mean");
+
+    if (use_tree_reduction) {
+        // Tree reduction maps reduce_op: 0=sum, 1=max, 2=min
+        uint32_t tree_reduce_op = 0;
+        if (op_name == "sum" || op_name == "mean") tree_reduce_op = 0;
+        else if (op_name == "max") tree_reduce_op = 1;
+        else tree_reduce_op = 2;
+
+        constexpr uint32_t WG_SIZE = 256;
+        uint32_t input_size = static_cast<uint32_t>(reduction_input.numel());
+        uint32_t num_workgroups = (input_size + WG_SIZE - 1) / WG_SIZE;
+
+        // Pass 1: reduce input -> partial results (one per workgroup)
+        Tensor partial({static_cast<int64_t>(num_workgroups)}, reduction_input.dtype(), reduction_input.device());
+
+        auto* tree_pipeline = getPipeline("reduction_tree", device_id);
+
+        const void* buf_in = reduction_input.data_ptr();
+        const void* buf_partial = partial.data_ptr();
+        size_t sz_in = input_size * reduction_input.dtype_size();
+        size_t sz_partial = num_workgroups * partial.dtype_size();
+
+        std::vector<std::pair<uint32_t, const void*>> bindings1 = {{0, buf_in}, {1, buf_partial}};
+        std::vector<size_t> sizes1 = {sz_in, sz_partial};
+        VkDescriptorSet ds1 = allocateAndWriteDescriptorSet(device_id, tree_pipeline, bindings1, sizes1);
+
+        struct TreePushConstants {
+            uint32_t input_size;
+            uint32_t output_size;
+            uint32_t reduce_op;
+        } treePC;
+        treePC.input_size = input_size;
+        treePC.output_size = num_workgroups;
+        treePC.reduce_op = tree_reduce_op;
+
+        VkCommandBuffer cmd1 = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd1, VK_PIPELINE_BIND_POINT_COMPUTE, tree_pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd1, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               tree_pipeline->layout(), 0, 1, &ds1, 0, nullptr);
+        vkCmdPushConstants(cmd1, tree_pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(treePC), &treePC);
+        vkCmdDispatch(cmd1, num_workgroups, 1, 1);
+        insertComputeOnlyBarrier(cmd1);
+
+        // Pass 2: reduce partial results -> single scalar
+        // Calculate output shape for full reduction
+        std::vector<int64_t> out_shape;
+        if (keepdim) {
+            out_shape.assign(input_shape.size(), 1);
+        } else {
+            out_shape = {};
+        }
+        Tensor output(out_shape, reduction_input.dtype(), reduction_input.device());
+
+        const void* buf_out = output.data_ptr();
+        size_t sz_out = std::max<size_t>(output.numel(), 1) * output.dtype_size();
+
+        // Reuse the same pipeline for pass 2
+        std::vector<std::pair<uint32_t, const void*>> bindings2 = {{0, buf_partial}, {1, buf_out}};
+        std::vector<size_t> sizes2 = {sz_partial, sz_out};
+        VkDescriptorSet ds2 = allocateAndWriteDescriptorSet(device_id, tree_pipeline, bindings2, sizes2);
+
+        treePC.input_size = num_workgroups;
+        treePC.output_size = 1;
+        uint32_t pass2_wg = (num_workgroups + WG_SIZE - 1) / WG_SIZE;
+
+        vkCmdBindDescriptorSets(cmd1, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               tree_pipeline->layout(), 0, 1, &ds2, 0, nullptr);
+        vkCmdPushConstants(cmd1, tree_pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(treePC), &treePC);
+        vkCmdDispatch(cmd1, pass2_wg, 1, 1);
+        insertComputeOnlyBarrier(cmd1);
+
+        endSingleTimeCommands(cmd1, device_id);
+        synchronize(device_id);
+
+        // For mean, divide by element count
+        if (op_name == "mean") {
+            float inv_n = 1.0f / static_cast<float>(input_size);
+            // Create a scalar-shaped tensor matching output's shape for broadcast-free multiply
+            auto scale_shape = out_shape.empty() ? std::vector<int64_t>{1} : out_shape;
+            Tensor scale = dispatchFull(scale_shape, inv_n, output.dtype());
+            if (out_shape.empty()) {
+                // Reshape output to {1} for binary op, then back to scalar
+                output = dispatchBinaryOp("mul", output.reshape({1}), scale).reshape({});
+            } else {
+                output = dispatchBinaryOp("mul", output, scale);
+            }
+        }
+
+        if (orig_dtype != output.dtype()) {
+            return output.to(orig_dtype);
+        }
+        return output;
+    }
+
+    // --- Standard reduction path ---
+    auto* pipeline = getPipeline(shader_name, device_id);
 
     // Calculate output shape
     std::vector<int64_t> out_shape;
@@ -1307,7 +1416,13 @@ auto VulkanBackend::dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor {
         }
         shader_name = "matmul_i32";
     } else {
-        shader_name = b_is_transposed ? "matmul_bt" : "matmul";
+        // Use tiled matmul with shared memory for large Float32 matrices
+        // (non-transposed only; the tiled shader assumes row-major B)
+        if (!b_is_transposed && a_shape[0] > 128 && b_shape[1] > 128) {
+            shader_name = "matmul_tiled";
+        } else {
+            shader_name = b_is_transposed ? "matmul_bt" : "matmul";
+        }
     }
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -10339,6 +10454,13 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
     int64_t kernel_h = weight_shape[2];
     int64_t kernel_w = weight_shape[3];
 
+    // Route to Winograd F(2,3) for 3x3 convolutions with stride=1, dilation=1, Float32
+    // Winograd is significantly faster for these common configurations.
+    if (kernel_h == 3 && kernel_w == 3 && stride == 1 && dilation == 1
+        && input.dtype() == DType::Float32) {
+        return dispatchConv2dWinograd(input, weight, bias, padding, groups);
+    }
+
     // Calculate output dimensions
     int64_t out_height = (in_height + 2 * padding - dilation * (kernel_h - 1) - 1) / stride + 1;
     int64_t out_width = (in_width + 2 * padding - dilation * (kernel_w - 1) - 1) / stride + 1;
@@ -10442,6 +10564,280 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
     insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+// ============================================================================
+// Conv2d Winograd F(2,3) Forward — 3x3 kernel, stride=1, dilation=1
+// ============================================================================
+
+auto VulkanBackend::dispatchConv2dWinograd(const Tensor& input, const Tensor& weight,
+                                            const Tensor* bias,
+                                            int64_t padding, int64_t groups) -> Tensor {
+    auto input_shape = input.shape();
+    auto weight_shape = weight.shape();
+
+    int64_t batch = input_shape[0];
+    int64_t in_channels = input_shape[1];
+    int64_t in_height = input_shape[2];
+    int64_t in_width = input_shape[3];
+    int64_t out_channels = weight_shape[0];
+
+    // Output size for stride=1, dilation=1, 3x3 kernel
+    int64_t out_height = in_height + 2 * padding - 2;  // in_h + 2p - (3-1)
+    int64_t out_width = in_width + 2 * padding - 2;
+
+    // Number of 2x2 output tiles
+    int64_t tiles_h = (out_height + 1) / 2;
+    int64_t tiles_w = (out_width + 1) / 2;
+
+    int32_t device_id = input.device().index;
+    bool has_bias = (bias != nullptr);
+
+    // For grouped convolution, fall back to standard path for now
+    // (Winograd with groups requires per-group transforms)
+    if (groups > 1) {
+        // Use the standard conv2d_forward shader directly (no Winograd for grouped conv)
+        std::string shader_name = "conv2d_forward";
+        auto* pipeline = getPipeline(shader_name, device_id);
+
+        std::vector<int64_t> output_shape = {batch, out_channels, out_height, out_width};
+        Tensor output(output_shape, input.dtype(), input.device());
+
+        const void* buffer_bias = has_bias ? bias->data_ptr() : output.data_ptr();
+        size_t buffer_size_bias = has_bias ? (bias->numel() * bias->dtype_size()) : 4;
+
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, input.data_ptr()}, {1, weight.data_ptr()},
+            {2, buffer_bias}, {3, output.data_ptr()}
+        };
+        std::vector<size_t> sizes = {
+            static_cast<size_t>(input.numel() * input.dtype_size()),
+            static_cast<size_t>(weight.numel() * weight.dtype_size()),
+            buffer_size_bias,
+            static_cast<size_t>(output.numel() * output.dtype_size())
+        };
+
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
+
+        struct {
+            uint32_t n_elements, batch, in_channels, out_channels;
+            uint32_t in_height, in_width, kernel_h, kernel_w;
+            uint32_t stride, padding, dilation, groups;
+            uint32_t out_h, out_w, has_bias;
+        } pc;
+        pc.n_elements = static_cast<uint32_t>(output.numel());
+        pc.batch = static_cast<uint32_t>(batch);
+        pc.in_channels = static_cast<uint32_t>(in_channels);
+        pc.out_channels = static_cast<uint32_t>(out_channels);
+        pc.in_height = static_cast<uint32_t>(in_height);
+        pc.in_width = static_cast<uint32_t>(in_width);
+        pc.kernel_h = 3; pc.kernel_w = 3;
+        pc.stride = 1; pc.padding = static_cast<uint32_t>(padding);
+        pc.dilation = 1; pc.groups = static_cast<uint32_t>(groups);
+        pc.out_h = static_cast<uint32_t>(out_height);
+        pc.out_w = static_cast<uint32_t>(out_width);
+        pc.has_bias = has_bias ? 1u : 0u;
+
+        vkCmdPushConstants(cmd, pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        uint32_t workgroups = static_cast<uint32_t>(div_wg(output.numel(), devices_[device_id].workgroupSize));
+        vkCmdDispatch(cmd, workgroups, 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+        return output;
+    }
+
+    // ---- Winograd F(2,3) path for groups=1 ----
+
+    // Step 1: Transform filters  G * g * G^T -> U [16][K][C]
+    uint32_t total_filters = static_cast<uint32_t>(out_channels * in_channels);
+    // U is stored as [16][K*C] (16 = 4x4 Winograd domain elements)
+    Tensor U({16 * static_cast<int64_t>(out_channels) * in_channels}, input.dtype(), input.device());
+
+    {
+        auto* filter_pipeline = getPipeline("winograd_filter_transform", device_id);
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, weight.data_ptr()}, {1, U.data_ptr()}
+        };
+        std::vector<size_t> sizes = {
+            static_cast<size_t>(weight.numel() * weight.dtype_size()),
+            static_cast<size_t>(U.numel() * U.dtype_size())
+        };
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, filter_pipeline, bindings, sizes);
+
+        struct { uint32_t out_channels; uint32_t in_channels; } fpc;
+        fpc.out_channels = static_cast<uint32_t>(out_channels);
+        fpc.in_channels = static_cast<uint32_t>(in_channels);
+
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, filter_pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               filter_pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, filter_pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(fpc), &fpc);
+        uint32_t wg = static_cast<uint32_t>(div_wg(total_filters, devices_[device_id].workgroupSize));
+        vkCmdDispatch(cmd, wg, 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+    }
+
+    // Step 2: Transform input tiles  B^T * d * B -> V [16][N*C*tiles_h*tiles_w]
+    uint32_t total_tiles = static_cast<uint32_t>(batch * in_channels * tiles_h * tiles_w);
+    Tensor V({16 * static_cast<int64_t>(total_tiles)}, input.dtype(), input.device());
+
+    {
+        auto* input_pipeline = getPipeline("winograd_input_transform", device_id);
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, input.data_ptr()}, {1, V.data_ptr()}
+        };
+        std::vector<size_t> sizes = {
+            static_cast<size_t>(input.numel() * input.dtype_size()),
+            static_cast<size_t>(V.numel() * V.dtype_size())
+        };
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, input_pipeline, bindings, sizes);
+
+        struct {
+            uint32_t batch, channels, in_height, in_width;
+            uint32_t tiles_h, tiles_w, pad;
+        } ipc;
+        ipc.batch = static_cast<uint32_t>(batch);
+        ipc.channels = static_cast<uint32_t>(in_channels);
+        ipc.in_height = static_cast<uint32_t>(in_height);
+        ipc.in_width = static_cast<uint32_t>(in_width);
+        ipc.tiles_h = static_cast<uint32_t>(tiles_h);
+        ipc.tiles_w = static_cast<uint32_t>(tiles_w);
+        ipc.pad = static_cast<uint32_t>(padding);
+
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, input_pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               input_pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, input_pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ipc), &ipc);
+        uint32_t wg = static_cast<uint32_t>(div_wg(total_tiles, devices_[device_id].workgroupSize));
+        vkCmdDispatch(cmd, wg, 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+    }
+
+    // Step 3: Element-wise matmul in Winograd domain
+    // For each of the 16 (alpha,beta) pairs:
+    //   M[alpha][beta] = U[alpha][beta] (K x C) * V[alpha][beta] (C x tiles)^T
+    // We reshape and use batched matmul: 16 batches of (K x C) @ (C x N*tiles_h*tiles_w)
+    // U layout: [16][K*C], V layout: [16][N*C*tiles_h*tiles_w]
+    // We need M: [16][N*K*tiles_h*tiles_w]
+    //
+    // For each Winograd point: M(k, n*th*tw) = sum_c U(k,c) * V(n*c*th*tw... )
+    // This is a batched matmul: for each of the 16 points,
+    //   U_slice: (K, C), V_slice: (C, N*tiles_h*tiles_w) -> M_slice: (K, N*tiles_h*tiles_w)
+    // But V is stored as [16][N][C][tiles_h][tiles_w], so we need V transposed per-point
+    // to get (C, N*tiles_h*tiles_w). Actually V is stored [16][tile_idx] where
+    // tile_idx = (n*C + c)*tiles_h*tiles_w + th*tiles_w + tw, so within each Winograd point
+    // the data is (N*C*TH*TW) interleaved.
+    //
+    // We'll use a simpler approach: for each Winograd point, dispatch a matmul
+    // U_point (K, C) x V_point_reshaped (C, N*TH*TW) = M_point (K, N*TH*TW)
+    // The tile layout from the shaders stores V as [16][tile_idx] where
+    // tile_idx indexes (n, c, th, tw) -- so we reshape V_point to (N*TH*TW, C) and
+    // compute M = U_point @ V_point^T... This is getting complex.
+    //
+    // Simpler: use element-wise multiplication. The standard Winograd approach does
+    // pointwise multiplies M[i][j][k][n_tile] = sum_c U[i][j][k][c] * V[i][j][c][n_tile]
+    // which is a batched matmul. We can use the existing matmul dispatch for each point.
+    uint32_t N_tiles = static_cast<uint32_t>(batch * tiles_h * tiles_w);
+    Tensor M({16 * static_cast<int64_t>(out_channels) * static_cast<int64_t>(N_tiles)},
+             input.dtype(), input.device());
+
+    {
+        // For each of the 16 Winograd domain points, compute:
+        //   M_p = U_p (K, C) @ V_p (C, N*TH*TW) = (K, N*TH*TW)
+        // The input transform stores V as [16][tile_stride] where
+        // tile_stride = N*C*TH*TW indexed as (n*C+c)*TH*TW + th*TW + tw.
+        // So V_p naturally has layout (N, C, TH, TW) which we permute to (C, N*TH*TW).
+
+        std::vector<Tensor> M_parts;
+        M_parts.reserve(16);
+
+        for (int p = 0; p < 16; p++) {
+            int64_t u_offset = static_cast<int64_t>(p) * out_channels * in_channels;
+            int64_t v_offset = static_cast<int64_t>(p) * batch * in_channels * tiles_h * tiles_w;
+
+            Tensor U_p = U.slice(0, u_offset, u_offset + out_channels * in_channels)
+                           .reshape({out_channels, in_channels});
+
+            // V_p: (N, C, TH*TW) -> permute -> (C, N, TH*TW) -> reshape -> (C, N_tiles)
+            Tensor V_p = V.slice(0, v_offset, v_offset + batch * in_channels * tiles_h * tiles_w)
+                           .reshape({batch, in_channels, tiles_h * tiles_w})
+                           .permute({1, 0, 2})
+                           .contiguous()
+                           .reshape({in_channels, static_cast<int64_t>(N_tiles)});
+
+            // M_p = U_p @ V_p -> (K, N_tiles)
+            M_parts.push_back(dispatchMatmul(U_p, V_p));
+        }
+
+        // Stack into M: [16, K, N_tiles]
+        std::span<const Tensor> parts_span(M_parts);
+        M = dispatchStack(parts_span, 0);
+    }
+
+    // Step 4: Output transform  A^T * M * A -> Y [N, K, out_h, out_w]
+    std::vector<int64_t> output_shape = {batch, out_channels, out_height, out_width};
+    Tensor output(output_shape, input.dtype(), input.device());
+
+    {
+        // M from stack is [16, K, N_tiles] where N_tiles = N*TH*TW.
+        // The output transform shader expects [16][N][K][tiles_h][tiles_w].
+        // Rearrange: [16, K, N*TH*TW] -> [16, K, N, TH, TW] -> [16, N, K, TH, TW]
+        Tensor M_reordered = M.reshape({16, out_channels, batch, tiles_h, tiles_w})
+                               .permute({0, 2, 1, 3, 4})
+                               .contiguous();
+
+        auto* output_pipeline = getPipeline("winograd_output_transform", device_id);
+        uint32_t total_out_tiles = static_cast<uint32_t>(batch * out_channels * tiles_h * tiles_w);
+
+        const void* buffer_bias_ptr = has_bias ? bias->data_ptr() : output.data_ptr();
+        size_t buffer_bias_size = has_bias ? (bias->numel() * bias->dtype_size()) : 4;
+
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, M_reordered.data_ptr()}, {1, buffer_bias_ptr}, {2, output.data_ptr()}
+        };
+        std::vector<size_t> sizes_out = {
+            static_cast<size_t>(M_reordered.numel() * M_reordered.dtype_size()),
+            buffer_bias_size,
+            static_cast<size_t>(output.numel() * output.dtype_size())
+        };
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, output_pipeline, bindings, sizes_out);
+
+        struct {
+            uint32_t batch, out_channels, out_height, out_width;
+            uint32_t tiles_h, tiles_w, has_bias;
+        } opc;
+        opc.batch = static_cast<uint32_t>(batch);
+        opc.out_channels = static_cast<uint32_t>(out_channels);
+        opc.out_height = static_cast<uint32_t>(out_height);
+        opc.out_width = static_cast<uint32_t>(out_width);
+        opc.tiles_h = static_cast<uint32_t>(tiles_h);
+        opc.tiles_w = static_cast<uint32_t>(tiles_w);
+        opc.has_bias = has_bias ? 1u : 0u;
+
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, output_pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               output_pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, output_pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(opc), &opc);
+        uint32_t wg = static_cast<uint32_t>(div_wg(total_out_tiles, devices_[device_id].workgroupSize));
+        vkCmdDispatch(cmd, wg, 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+    }
 
     return output;
 }

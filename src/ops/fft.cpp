@@ -180,5 +180,62 @@ auto ifftn(const Tensor& input, std::optional<std::vector<int64_t>> s,
     return result;
 }
 
+auto stft(const Tensor& input, int64_t n_fft, int64_t hop_length, int64_t win_length,
+          const Tensor& window, bool center, bool normalized, bool onesided) -> Tensor {
+    if (n_fft <= 0) {
+        throw std::runtime_error("stft: n_fft must be positive");
+    }
+    if (hop_length <= 0) hop_length = n_fft / 4;
+    if (win_length <= 0) win_length = n_fft;
+    if (win_length > n_fft) {
+        throw std::runtime_error("stft: win_length must be <= n_fft");
+    }
+
+    auto inp = input.contiguous();
+    std::vector<Tensor> inputs = {inp};
+    if (window.is_valid()) {
+        inputs.push_back(window.contiguous());
+    }
+
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::NFft, n_fft);
+    attrs.set(AttrKey::HopLength, hop_length);
+    attrs.set(AttrKey::WinLength, win_length);
+    attrs.set(AttrKey::Normalized, normalized ? int64_t{1} : int64_t{0});
+    attrs.set(AttrKey::OnesidedAttr, onesided ? int64_t{1} : int64_t{0});
+    attrs.set(AttrKey::Centered, center);
+
+    return dispatch<OpId::STFT>(inputs, attrs)[0];
+}
+
+auto istft(const Tensor& input, int64_t n_fft, int64_t hop_length, int64_t win_length,
+           const Tensor& window, bool center, bool normalized, bool onesided,
+           std::optional<int64_t> length) -> Tensor {
+    if (n_fft <= 0) {
+        throw std::runtime_error("istft: n_fft must be positive");
+    }
+    if (hop_length <= 0) hop_length = n_fft / 4;
+    if (win_length <= 0) win_length = n_fft;
+
+    auto inp = input.contiguous();
+    std::vector<Tensor> inputs = {inp};
+    if (window.is_valid()) {
+        inputs.push_back(window.contiguous());
+    }
+
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::NFft, n_fft);
+    attrs.set(AttrKey::HopLength, hop_length);
+    attrs.set(AttrKey::WinLength, win_length);
+    attrs.set(AttrKey::Normalized, normalized ? int64_t{1} : int64_t{0});
+    attrs.set(AttrKey::OnesidedAttr, onesided ? int64_t{1} : int64_t{0});
+    attrs.set(AttrKey::Centered, center);
+    if (length.has_value()) {
+        attrs.set(AttrKey::N, length.value());
+    }
+
+    return dispatch<OpId::ISTFT>(inputs, attrs)[0];
+}
+
 } // namespace fft
 } // namespace tenzor

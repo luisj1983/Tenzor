@@ -676,4 +676,23 @@ auto polar(const Tensor& abs, const Tensor& angle) -> Tensor {
     return dispatch<OpId::Polar>(inputs)[0];
 }
 
+auto cdist(const Tensor& x1, const Tensor& x2, double p) -> Tensor {
+    if (x1.ndim() < 2 || x2.ndim() < 2) {
+        throw std::invalid_argument("cdist: inputs must have at least 2 dimensions");
+    }
+    if (x1.shape()[x1.ndim() - 1] != x2.shape()[x2.ndim() - 1]) {
+        throw std::invalid_argument("cdist: last dimension of x1 and x2 must match");
+    }
+    if (p < 0) {
+        throw std::invalid_argument("cdist: p must be non-negative");
+    }
+
+    auto a = x1.contiguous();
+    auto b = x2.contiguous();
+    std::array<Tensor, 2> inputs = {a, b};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::DistP, p);
+    return dispatch<OpId::CDist>(inputs, attrs)[0];
+}
+
 } // namespace tenzor

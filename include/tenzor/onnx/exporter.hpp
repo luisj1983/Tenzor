@@ -762,6 +762,37 @@ public:
                        const Tensor& output, const std::string& output_name) -> void;
 
     /**
+     * @brief Export CumProd via Log + CumSum + Exp decomposition
+     */
+    auto export_cumprod(const Tensor& input, int64_t axis,
+                        const Tensor& output, const std::string& output_name) -> void;
+
+    /**
+     * @brief Export Unfold via Slice + Reshape decomposition
+     */
+    auto export_unfold(const Tensor& input, int64_t dimension,
+                       int64_t size, int64_t step,
+                       const Tensor& output, const std::string& output_name) -> void;
+
+    /**
+     * @brief Export Fold via ONNX Col2Im (opset 18+)
+     */
+    auto export_fold(const Tensor& input,
+                     const std::vector<int64_t>& output_size,
+                     const std::vector<int64_t>& kernel_size,
+                     const std::vector<int64_t>& dilation,
+                     const std::vector<int64_t>& padding,
+                     const std::vector<int64_t>& stride,
+                     const Tensor& output, const std::string& output_name) -> void;
+
+    /**
+     * @brief Export SearchSorted as custom op in tenzor domain
+     */
+    auto export_search_sorted(const Tensor& sorted_sequence,
+                              const Tensor& values, bool right,
+                              const Tensor& output, const std::string& output_name) -> void;
+
+    /**
      * @brief Export Roll via Slice + Concat decomposition
      */
     auto export_roll(const Tensor& input, int64_t shift, int64_t axis,
