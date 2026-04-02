@@ -6,23 +6,23 @@
 // One workgroup (256 threads), thread 0 does the serial bulge chase.
 layout(local_size_x = 256) in;
 
-layout(set = 0, binding = 0) buffer MatrixH { float H[]; };      // Upper Hessenberg n×n
-layout(set = 0, binding = 1) buffer ShiftBuf { float shifts[]; }; // Output: deflation info
+layout(set = 0, binding = 0) buffer MatrixH { float H[]; };           // Upper Hessenberg n×n
+layout(set = 0, binding = 1) buffer ShiftBuf { float shifts[]; };      // Output: deflation info
+layout(set = 0, binding = 2) buffer ActiveStartBuf { uint a_start[]; };
+layout(set = 0, binding = 3) buffer ActiveEndBuf   { uint a_end[]; };
 
 layout(push_constant) uniform PushConstants {
     uint n;
-    uint active_start;
-    uint active_end;    // inclusive index of last row/col in active block
-    uint batch_idx;
 };
 
 void main() {
     uint tid = gl_LocalInvocationID.x;
     if (tid != 0) return;
 
+    uint batch_idx = gl_WorkGroupID.x;
+    uint lo = a_start[batch_idx];
+    uint hi = a_end[batch_idx];
     uint base = batch_idx * n * n;
-    uint lo = active_start;
-    uint hi = active_end;
 
     if (hi <= lo) return;
     if (hi - lo == 1) {

@@ -581,8 +581,7 @@ namespace rocm {
     auto interpolate_kernel(const Tensor& input, const std::vector<int64_t>& size,
                             const std::string& mode, bool align_corners, hipStream_t stream) -> Tensor;
 
-    // FFT operations (rocFFT)
-#ifdef TENZOR_HAS_ROCFFT
+    // FFT operations (rocFFT or native HIP fallback)
     auto rocm_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                          const std::string& norm, hipStream_t stream) -> Tensor;
     auto rocm_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
@@ -603,10 +602,8 @@ namespace rocm {
     auto rocm_ifftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
                            const std::vector<int64_t>& n_vec,
                            const std::string& norm, hipStream_t stream) -> Tensor;
-#endif // TENZOR_HAS_ROCFFT
 
-    // Linear algebra operations (rocSOLVER)
-#ifdef TENZOR_HAS_ROCSOLVER
+    // Linear algebra operations (rocSOLVER or native HIP fallback)
     auto linalg_det_kernel(const Tensor& A, hipStream_t stream) -> Tensor;
     auto linalg_inv_kernel(const Tensor& A, hipStream_t stream) -> Tensor;
     auto linalg_solve_kernel(const Tensor& A, const Tensor& B, hipStream_t stream) -> Tensor;
@@ -615,7 +612,10 @@ namespace rocm {
     auto linalg_eigh_kernel(const Tensor& A, hipStream_t stream) -> std::tuple<Tensor, Tensor>;
     auto linalg_eig_kernel(const Tensor& A, hipStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
     auto linalg_cholesky_kernel(const Tensor& A, bool upper, hipStream_t stream) -> Tensor;
-#endif // TENZOR_HAS_ROCSOLVER
+
+    // Sparse operations (sparse.hip.cpp) — available with or without rocSPARSE
+    auto rocm_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) -> Tensor;
+    auto rocm_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) -> Tensor;
 
     // Sort/TopK/ArgSort/Unique operations (sort.hip.cpp)
     auto sort_kernel(const Tensor& input, int64_t dim, bool descending,
@@ -2289,9 +2289,8 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     // =========================================================================
-    // FFT Operations (rocFFT)
+    // FFT Operations (rocFFT or native HIP Cooley-Tukey/Bluestein fallback)
     // =========================================================================
-#ifdef TENZOR_HAS_ROCFFT
     table.register_single_output_kernel(OpId::FFT, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         int64_t n = attrs.get_int(AttrKey::N, inputs[0].shape()[dim >= 0 ? dim : inputs[0].ndim() + dim]);
@@ -2383,29 +2382,10 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
         return rocm::rocm_ifftn_kernel(inputs[0], dims, n_vec, norm, get_hip_stream(attrs));
     });
-#else // !TENZOR_HAS_ROCFFT
-#define ROCFFT_STUB(OpName) \
-    table.register_single_output_kernel(OpId::OpName, \
-        [](std::span<const Tensor>, const OpAttributes&) -> Tensor { \
-            throw std::runtime_error( \
-                "Operation '" #OpName "' requires rocFFT. " \
-                "Rebuild with ROCm Toolkit including rocFFT."); \
-        })
-    ROCFFT_STUB(FFT);
-    ROCFFT_STUB(IFFT);
-    ROCFFT_STUB(RFFT);
-    ROCFFT_STUB(IRFFT);
-    ROCFFT_STUB(FFT2);
-    ROCFFT_STUB(IFFT2);
-    ROCFFT_STUB(FFTN);
-    ROCFFT_STUB(IFFTN);
-#undef ROCFFT_STUB
-#endif // TENZOR_HAS_ROCFFT
 
     // ========================================================================
-    // Linear Algebra Operations (rocSOLVER)
+    // Linear Algebra Operations (rocSOLVER or native HIP fallback)
     // ========================================================================
-#ifdef TENZOR_HAS_ROCSOLVER
     table.register_single_output_kernel(OpId::LinalgDet, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         return rocm::linalg_det_kernel(inputs[0], get_hip_stream(attrs));
     });
@@ -2436,32 +2416,6 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         bool upper = attrs.get_bool(AttrKey::Upper, false);
         return rocm::linalg_cholesky_kernel(inputs[0], upper, get_hip_stream(attrs));
     });
-#else // !TENZOR_HAS_ROCSOLVER
-#define ROCSOLVER_STUB(OpName) \
-    table.register_single_output_kernel(OpId::OpName, \
-        [](std::span<const Tensor>, const OpAttributes&) -> Tensor { \
-            throw std::runtime_error( \
-                "Operation '" #OpName "' requires rocSOLVER. " \
-                "Rebuild with ROCm Toolkit including rocSOLVER."); \
-        })
-#define ROCSOLVER_MULTI_STUB(OpName) \
-    table.register_kernel(OpId::OpName, \
-        [](std::span<const Tensor>, const OpAttributes&) -> std::vector<Tensor> { \
-            throw std::runtime_error( \
-                "Operation '" #OpName "' requires rocSOLVER. " \
-                "Rebuild with ROCm Toolkit including rocSOLVER."); \
-        })
-    ROCSOLVER_STUB(LinalgDet);
-    ROCSOLVER_STUB(LinalgInv);
-    ROCSOLVER_STUB(LinalgSolve);
-    ROCSOLVER_MULTI_STUB(LinalgSVD);
-    ROCSOLVER_MULTI_STUB(LinalgQR);
-    ROCSOLVER_MULTI_STUB(LinalgEigh);
-    ROCSOLVER_MULTI_STUB(LinalgEig);
-    ROCSOLVER_STUB(LinalgCholesky);
-#undef ROCSOLVER_STUB
-#undef ROCSOLVER_MULTI_STUB
-#endif // TENZOR_HAS_ROCSOLVER
 
     // ========================================================================
     // Sort/TopK/ArgSort/Unique Operations
@@ -3000,17 +2954,24 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
             return sparse::spmv(sp, inputs[3]);
         });
-#else // !TENZOR_HAS_ROCSPARSE
-#define ROCSPARSE_STUB(OpName) \
-    table.register_single_output_kernel(OpId::OpName, \
-        [](std::span<const Tensor>, const OpAttributes&) -> Tensor { \
-            throw std::runtime_error( \
-                "Operation '" #OpName "' requires rocSPARSE. " \
-                "Rebuild with ROCm Toolkit including rocSPARSE."); \
-        })
-    ROCSPARSE_STUB(SparseSpMM);
-    ROCSPARSE_STUB(SparseSpMV);
-#undef ROCSPARSE_STUB
+#else // !TENZOR_HAS_ROCSPARSE — use native HIP CSR fallback kernels
+    // SparseSpMM: sparse(M,K) @ dense(K,N) -> dense(M,N)
+    table.register_single_output_kernel(OpId::SparseSpMM,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            return rocm::rocm_spmm_kernel(sp, inputs[3]);
+        });
+
+    // SparseSpMV: sparse(M,K) @ vec(K) -> vec(M)
+    table.register_single_output_kernel(OpId::SparseSpMV,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            return rocm::rocm_spmv_kernel(sp, inputs[3]);
+        });
 #endif // TENZOR_HAS_ROCSPARSE
 
     // SparseToDense: CSR components -> dense tensor

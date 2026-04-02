@@ -207,8 +207,7 @@ namespace cuda {
     auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offsets, const std::string& mode, int64_t embedding_dim, bool include_last_offset, cudaStream_t stream) -> Tensor;
     auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& embeddings, const Tensor& offsets, const OpAttributes& attrs, cudaStream_t stream) -> Tensor;
 
-    // Linear algebra operations (cuSOLVER)
-#ifdef TENZOR_HAS_CUSOLVER
+    // Linear algebra operations (cuSOLVER or native CUDA fallback)
     auto linalg_det_kernel(const Tensor& A, cudaStream_t stream) -> Tensor;
     auto linalg_inv_kernel(const Tensor& A, cudaStream_t stream) -> Tensor;
     auto linalg_solve_kernel(const Tensor& A, const Tensor& B, cudaStream_t stream) -> Tensor;
@@ -217,10 +216,8 @@ namespace cuda {
     auto linalg_eigh_kernel(const Tensor& A, cudaStream_t stream) -> std::tuple<Tensor, Tensor>;
     auto linalg_eig_kernel(const Tensor& A, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
     auto linalg_cholesky_kernel(const Tensor& A, bool upper, cudaStream_t stream) -> Tensor;
-#endif
 
-    // FFT operations (cuFFT)
-#ifdef TENZOR_HAS_CUFFT
+    // FFT operations (cuFFT or native Cooley-Tukey + Bluestein fallback)
     auto cuda_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                          const std::string& norm, cudaStream_t stream) -> Tensor;
     auto cuda_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
@@ -241,7 +238,6 @@ namespace cuda {
     auto cuda_ifftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
                            const std::vector<int64_t>& n_vec,
                            const std::string& norm, cudaStream_t stream) -> Tensor;
-#endif
 
     // Fused operations
     auto fused_conv2d_bn_relu_cuda(const Tensor& input, const Tensor& weight, const Tensor* bias, const Tensor& bn_mean, const Tensor& bn_var, const Tensor& bn_gamma, const Tensor& bn_beta, int64_t stride, int64_t padding, float eps) -> Tensor;
@@ -2640,31 +2636,37 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         bool upper = attrs.get_bool(AttrKey::Upper, false);
         return cuda::linalg_cholesky_kernel(inputs[0], upper, get_cuda_stream(attrs));
     });
-#else // !TENZOR_HAS_CUSOLVER
-#define CUSOLVER_STUB(OpName) \
-    table.register_single_output_kernel(OpId::OpName, \
-        [](std::span<const Tensor>, const OpAttributes&) -> Tensor { \
-            throw std::runtime_error( \
-                "Operation '" #OpName "' requires cuSOLVER. " \
-                "Rebuild with CUDA Toolkit including cuSOLVER."); \
-        })
-#define CUSOLVER_MULTI_STUB(OpName) \
-    table.register_kernel(OpId::OpName, \
-        [](std::span<const Tensor>, const OpAttributes&) -> std::vector<Tensor> { \
-            throw std::runtime_error( \
-                "Operation '" #OpName "' requires cuSOLVER. " \
-                "Rebuild with CUDA Toolkit including cuSOLVER."); \
-        })
-    CUSOLVER_STUB(LinalgDet);
-    CUSOLVER_STUB(LinalgInv);
-    CUSOLVER_STUB(LinalgSolve);
-    CUSOLVER_MULTI_STUB(LinalgSVD);
-    CUSOLVER_MULTI_STUB(LinalgQR);
-    CUSOLVER_MULTI_STUB(LinalgEigh);
-    CUSOLVER_MULTI_STUB(LinalgEig);
-    CUSOLVER_STUB(LinalgCholesky);
-#undef CUSOLVER_STUB
-#undef CUSOLVER_MULTI_STUB
+#else // !TENZOR_HAS_CUSOLVER — use native CUDA shared-memory linalg fallback
+    table.register_single_output_kernel(OpId::LinalgDet, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return cuda::linalg_det_kernel(inputs[0], get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::LinalgInv, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return cuda::linalg_inv_kernel(inputs[0], get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::LinalgSolve, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return cuda::linalg_solve_kernel(inputs[0], inputs[1], get_cuda_stream(attrs));
+    });
+    table.register_kernel(OpId::LinalgSVD, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        bool full_matrices = attrs.get_bool(AttrKey::FullMatrices, true);
+        auto [U, S, Vt] = cuda::linalg_svd_kernel(inputs[0], full_matrices, get_cuda_stream(attrs));
+        return {U, S, Vt};
+    });
+    table.register_kernel(OpId::LinalgQR, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto [Q, R] = cuda::linalg_qr_kernel(inputs[0], get_cuda_stream(attrs));
+        return {Q, R};
+    });
+    table.register_kernel(OpId::LinalgEigh, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto [W, V] = cuda::linalg_eigh_kernel(inputs[0], get_cuda_stream(attrs));
+        return {W, V};
+    });
+    table.register_kernel(OpId::LinalgEig, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto [WR, WI, V] = cuda::linalg_eig_kernel(inputs[0], get_cuda_stream(attrs));
+        return {WR, WI, V};
+    });
+    table.register_single_output_kernel(OpId::LinalgCholesky, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        bool upper = attrs.get_bool(AttrKey::Upper, false);
+        return cuda::linalg_cholesky_kernel(inputs[0], upper, get_cuda_stream(attrs));
+    });
 #endif // TENZOR_HAS_CUSOLVER
 
     // =========================================================================
@@ -2765,23 +2767,100 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
         return cuda::cuda_ifftn_kernel(inputs[0], dims, n_vec, norm, get_cuda_stream(attrs));
     });
-#else // !TENZOR_HAS_CUFFT
-#define CUFFT_STUB(OpName) \
-    table.register_single_output_kernel(OpId::OpName, \
-        [](std::span<const Tensor>, const OpAttributes&) -> Tensor { \
-            throw std::runtime_error( \
-                "Operation '" #OpName "' requires cuFFT. " \
-                "Rebuild with CUDA Toolkit including cuFFT."); \
-        })
-    CUFFT_STUB(FFT);
-    CUFFT_STUB(IFFT);
-    CUFFT_STUB(RFFT);
-    CUFFT_STUB(IRFFT);
-    CUFFT_STUB(FFT2);
-    CUFFT_STUB(IFFT2);
-    CUFFT_STUB(FFTN);
-    CUFFT_STUB(IFFTN);
-#undef CUFFT_STUB
+#else // !TENZOR_HAS_CUFFT — use native Cooley-Tukey + Bluestein CUDA FFT fallback
+
+    table.register_single_output_kernel(OpId::FFT, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        int64_t n = attrs.get_int(AttrKey::N, inputs[0].shape()[dim >= 0 ? dim : inputs[0].ndim() + dim]);
+        std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
+        return cuda::cuda_fft_kernel(inputs[0], dim, n, norm, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::IFFT, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        int64_t n = attrs.get_int(AttrKey::N, inputs[0].shape()[dim >= 0 ? dim : inputs[0].ndim() + dim]);
+        std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
+        return cuda::cuda_ifft_kernel(inputs[0], dim, n, norm, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::RFFT, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        int64_t n = attrs.get_int(AttrKey::N, inputs[0].shape()[dim >= 0 ? dim : inputs[0].ndim() + dim]);
+        std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
+        return cuda::cuda_rfft_kernel(inputs[0], dim, n, norm, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::IRFFT, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        int64_t n = attrs.get_int(AttrKey::N, 2 * (inputs[0].shape()[dim >= 0 ? dim : inputs[0].ndim() + dim] - 1));
+        std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
+        return cuda::cuda_irfft_kernel(inputs[0], dim, n, norm, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::FFT2, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t ndim = inputs[0].ndim();
+        std::vector<int64_t> dims = {ndim - 2, ndim - 1};
+        std::vector<int64_t> n_vec = {
+            inputs[0].shape()[dims[0]],
+            inputs[0].shape()[dims[1]]
+        };
+        auto attr_n = attrs.get_int_list(AttrKey::Shape);
+        if (!attr_n.empty() && attr_n.size() >= 2) {
+            n_vec[0] = attr_n[0];
+            n_vec[1] = attr_n[1];
+        }
+        std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
+        return cuda::cuda_fft2_kernel(inputs[0], dims, n_vec, norm, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::IFFT2, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t ndim = inputs[0].ndim();
+        std::vector<int64_t> dims = {ndim - 2, ndim - 1};
+        std::vector<int64_t> n_vec = {
+            inputs[0].shape()[dims[0]],
+            inputs[0].shape()[dims[1]]
+        };
+        auto attr_n = attrs.get_int_list(AttrKey::Shape);
+        if (!attr_n.empty() && attr_n.size() >= 2) {
+            n_vec[0] = attr_n[0];
+            n_vec[1] = attr_n[1];
+        }
+        std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
+        return cuda::cuda_ifft2_kernel(inputs[0], dims, n_vec, norm, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::FFTN, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t ndim = inputs[0].ndim();
+        std::vector<int64_t> dims(ndim);
+        for (int64_t i = 0; i < ndim; ++i) dims[i] = i;
+        std::vector<int64_t> n_vec(ndim);
+        for (int64_t i = 0; i < ndim; ++i) n_vec[i] = inputs[0].shape()[i];
+        auto attr_n = attrs.get_int_list(AttrKey::Shape);
+        if (!attr_n.empty()) {
+            for (size_t i = 0; i < attr_n.size() && i < n_vec.size(); ++i) {
+                n_vec[i] = attr_n[i];
+            }
+        }
+        std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
+        return cuda::cuda_fftn_kernel(inputs[0], dims, n_vec, norm, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::IFFTN, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t ndim = inputs[0].ndim();
+        std::vector<int64_t> dims(ndim);
+        for (int64_t i = 0; i < ndim; ++i) dims[i] = i;
+        std::vector<int64_t> n_vec(ndim);
+        for (int64_t i = 0; i < ndim; ++i) n_vec[i] = inputs[0].shape()[i];
+        auto attr_n = attrs.get_int_list(AttrKey::Shape);
+        if (!attr_n.empty()) {
+            for (size_t i = 0; i < attr_n.size() && i < n_vec.size(); ++i) {
+                n_vec[i] = attr_n[i];
+            }
+        }
+        std::string norm(attrs.get_string(AttrKey::Norm, "backward"));
+        return cuda::cuda_ifftn_kernel(inputs[0], dims, n_vec, norm, get_cuda_stream(attrs));
+    });
+
 #endif // TENZOR_HAS_CUFFT
 
     // =========================================================================

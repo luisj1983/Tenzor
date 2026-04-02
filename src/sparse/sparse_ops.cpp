@@ -27,7 +27,8 @@ Tensor cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec);
 #endif
 
 // Forward declarations for ROCm sparse kernels (defined in kernels/sparse.hip.cpp)
-#ifdef TENZOR_HAS_ROCSPARSE
+// Available with or without rocSPARSE (native HIP fallback when rocSPARSE absent)
+#ifdef TENZOR_ROCM_BACKEND
 namespace tenzor {
 namespace rocm {
 Tensor rocm_spmm_kernel(const SparseTensor& sparse, const Tensor& dense);
@@ -596,7 +597,7 @@ auto spmm(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
     }
 #endif
 
-#ifdef TENZOR_HAS_ROCSPARSE
+#ifdef TENZOR_ROCM_BACKEND
     if (should_use_rocm(sparse_compute, dense_compute)) {
         auto result = rocm::rocm_spmm_kernel(sparse_compute, dense_compute);
         return (orig_dtype != comp_dtype) ? result.to(orig_dtype) : result;
@@ -669,7 +670,7 @@ auto spmv(const SparseTensor& sparse, const Tensor& vec) -> Tensor {
     }
 #endif
 
-#ifdef TENZOR_HAS_ROCSPARSE
+#ifdef TENZOR_ROCM_BACKEND
     if (should_use_rocm_vec(sparse_compute, vec_compute)) {
         auto result = rocm::rocm_spmv_kernel(sparse_compute, vec_compute);
         return (orig_dtype != comp_dtype) ? result.to(orig_dtype) : result;

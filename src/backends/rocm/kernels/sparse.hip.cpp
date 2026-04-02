@@ -17,7 +17,8 @@
 #include "tenzor/core/device.hpp"
 #include "tenzor/sparse/sparse_tensor.hpp"
 
-#include "tenzor/backend/loader.hpp"
+// Forward-declare to avoid including loader.hpp (uses std::expected, unsupported by HIP C++20)
+namespace tenzor { auto is_backend_registry_alive() -> bool; }
 
 #include <rocsparse/rocsparse.h>
 #include <hip/hip_runtime.h>
@@ -476,6 +477,194 @@ Tensor rocm_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
         &buffer_size,
         workspace.ptr
     ));
+
+    return result;
+}
+
+} // namespace rocm
+} // namespace tenzor
+
+#else // !TENZOR_HAS_ROCSPARSE — native HIP CSR SpMM/SpMV fallbacks
+
+#include "tenzor/core/tensor.hpp"
+#include "tenzor/core/dtype.hpp"
+#include "tenzor/core/device.hpp"
+#include "tenzor/sparse/sparse_tensor.hpp"
+
+#include <hip/hip_runtime.h>
+#include <cstdint>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace tenzor {
+auto zeros(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor;
+}
+
+namespace tenzor {
+namespace rocm {
+
+namespace {
+
+#define HIP_CHECK_SPARSE(call)                                                  \
+    do {                                                                         \
+        hipError_t err = (call);                                                \
+        if (err != hipSuccess) {                                                \
+            throw std::runtime_error(                                           \
+                std::string("HIP error in sparse at ") + __FILE__ + ":" +      \
+                std::to_string(__LINE__) + " - " + hipGetErrorString(err));     \
+        }                                                                       \
+    } while (0)
+
+// CSR SpMV kernel: one thread per row, accumulates dot product
+template <typename T>
+__global__ void csr_spmv_kernel(
+    const int64_t* __restrict__ crow_ptr,
+    const int64_t* __restrict__ col_ptr,
+    const T* __restrict__ val_ptr,
+    const T* __restrict__ x_ptr,
+    T* __restrict__ y_ptr,
+    int64_t nrows)
+{
+    int64_t row = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (row >= nrows) return;
+
+    T sum = static_cast<T>(0);
+    int64_t row_start = crow_ptr[row];
+    int64_t row_end = crow_ptr[row + 1];
+    for (int64_t j = row_start; j < row_end; ++j) {
+        sum += val_ptr[j] * x_ptr[col_ptr[j]];
+    }
+    y_ptr[row] = sum;
+}
+
+// CSR SpMM kernel: one thread per output element (row, col)
+template <typename T>
+__global__ void csr_spmm_kernel(
+    const int64_t* __restrict__ crow_ptr,
+    const int64_t* __restrict__ col_ptr,
+    const T* __restrict__ val_ptr,
+    const T* __restrict__ b_ptr,
+    T* __restrict__ c_ptr,
+    int64_t nrows, int64_t ncols_b)
+{
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t row = idx / ncols_b;
+    int64_t col = idx % ncols_b;
+    if (row >= nrows) return;
+
+    T sum = static_cast<T>(0);
+    int64_t row_start = crow_ptr[row];
+    int64_t row_end = crow_ptr[row + 1];
+    for (int64_t j = row_start; j < row_end; ++j) {
+        sum += val_ptr[j] * b_ptr[col_ptr[j] * ncols_b + col];
+    }
+    c_ptr[row * ncols_b + col] = sum;
+}
+
+/// Ensure SparseTensor is in CSR format on ROCm device.
+SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse) {
+    auto sp = (sparse.device().type != Device::Type::ROCm)
+              ? sparse.to(Device::rocm())
+              : sparse;
+    if (sp.layout() != SparseLayout::CSR) {
+        throw std::runtime_error("rocm native sparse fallback requires CSR format");
+    }
+    return sp;
+}
+
+} // anonymous namespace
+
+Tensor rocm_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
+    auto sp_shape = sparse.shape();
+    if (sp_shape.size() != 2 || dense.ndim() != 2) {
+        throw std::runtime_error("rocm_spmm: both inputs must be 2D");
+    }
+
+    int64_t M = sp_shape[0];
+    int64_t K = sp_shape[1];
+    int64_t N = dense.shape()[1];
+    if (K != dense.shape()[0]) {
+        throw std::runtime_error("rocm_spmm: inner dimensions must match ("
+            + std::to_string(K) + " vs " + std::to_string(dense.shape()[0]) + ")");
+    }
+
+    DType dtype = dense.dtype();
+    auto csr = ensure_csr_on_gpu(sparse);
+
+    auto dense_gpu = (dense.device().type != Device::Type::ROCm)
+                     ? dense.to(Device::rocm()).contiguous()
+                     : dense.contiguous();
+
+    auto result = zeros({M, N}, dtype, Device::rocm());
+
+    auto crow = csr.crow_indices().contiguous();
+    auto col = csr.col_indices().contiguous();
+    auto vals = csr.values().contiguous();
+
+    int threads = 256;
+    int64_t total = M * N;
+    int blocks = static_cast<int>((total + threads - 1) / threads);
+
+    if (dtype == DType::Float32) {
+        csr_spmm_kernel<float><<<blocks, threads>>>(
+            crow.data<int64_t>(), col.data<int64_t>(), vals.data<float>(),
+            dense_gpu.data<float>(), result.data<float>(), M, N);
+    } else if (dtype == DType::Float64) {
+        csr_spmm_kernel<double><<<blocks, threads>>>(
+            crow.data<int64_t>(), col.data<int64_t>(), vals.data<double>(),
+            dense_gpu.data<double>(), result.data<double>(), M, N);
+    } else {
+        throw std::runtime_error("rocm_spmm: only Float32 and Float64 supported, got "
+            + std::string(dtype_name(dtype)));
+    }
+    HIP_CHECK_SPARSE(hipGetLastError());
+
+    return result;
+}
+
+Tensor rocm_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
+    auto sp_shape = sparse.shape();
+    if (sp_shape.size() != 2 || vec.ndim() != 1) {
+        throw std::runtime_error("rocm_spmv: sparse must be 2D, vec must be 1D");
+    }
+
+    int64_t M = sp_shape[0];
+    int64_t K = sp_shape[1];
+    if (K != vec.shape()[0]) {
+        throw std::runtime_error("rocm_spmv: dimensions must match ("
+            + std::to_string(K) + " vs " + std::to_string(vec.shape()[0]) + ")");
+    }
+
+    DType dtype = vec.dtype();
+    auto csr = ensure_csr_on_gpu(sparse);
+
+    auto vec_gpu = (vec.device().type != Device::Type::ROCm)
+                   ? vec.to(Device::rocm()).contiguous()
+                   : vec.contiguous();
+
+    auto result = zeros({M}, dtype, Device::rocm());
+
+    auto crow = csr.crow_indices().contiguous();
+    auto col = csr.col_indices().contiguous();
+    auto vals = csr.values().contiguous();
+
+    int threads = 256;
+    int blocks = static_cast<int>((M + threads - 1) / threads);
+
+    if (dtype == DType::Float32) {
+        csr_spmv_kernel<float><<<blocks, threads>>>(
+            crow.data<int64_t>(), col.data<int64_t>(), vals.data<float>(),
+            vec_gpu.data<float>(), result.data<float>(), M);
+    } else if (dtype == DType::Float64) {
+        csr_spmv_kernel<double><<<blocks, threads>>>(
+            crow.data<int64_t>(), col.data<int64_t>(), vals.data<double>(),
+            vec_gpu.data<double>(), result.data<double>(), M);
+    } else {
+        throw std::runtime_error("rocm_spmv: only Float32 and Float64 supported, got "
+            + std::string(dtype_name(dtype)));
+    }
+    HIP_CHECK_SPARSE(hipGetLastError());
 
     return result;
 }

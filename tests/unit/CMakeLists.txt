@@ -530,6 +530,10 @@ target_link_libraries(test_complex_arithmetic PRIVATE tenzor_core GTest::gtest_m
 add_executable(test_fft test_fft.cpp)
 target_link_libraries(test_fft PRIVATE tenzor_core GTest::gtest_main)
 
+# Linear Algebra Tests
+add_executable(test_linalg test_linalg.cpp)
+target_link_libraries(test_linalg PRIVATE tenzor_core GTest::gtest_main)
+
 # Empty Tensor Operations Tests (systematic coverage)
 add_executable(test_empty_tensor_ops test_empty_tensor_ops.cpp)
 target_link_libraries(test_empty_tensor_ops PRIVATE tenzor_core GTest::gtest_main)
@@ -675,6 +679,7 @@ tenzor_discover_tests(test_dtype_edge_cases_multidtype DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_sparse DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_complex_arithmetic DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_fft DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_linalg DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_empty_tensor_ops DISCOVERY_TIMEOUT 60)
 
 if(TENZOR_BUILD_CUDA)

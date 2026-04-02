@@ -64,22 +64,10 @@ set(ROCM_HIP_SOURCES
     kernels/vision.hip.cpp
     kernels/sort.hip.cpp
     kernels/quantization.hip.cpp
+    kernels/sparse.hip.cpp
+    kernels/fft.hip.cpp
+    kernels/linalg.hip.cpp
 )
-
-# Conditionally add linalg source if rocSOLVER is found
-if(rocsolver_FOUND)
-    list(APPEND ROCM_HIP_SOURCES kernels/linalg.hip.cpp)
-endif()
-
-# Conditionally add FFT source if rocFFT is found
-if(rocfft_FOUND)
-    list(APPEND ROCM_HIP_SOURCES kernels/fft.hip.cpp)
-endif()
-
-# Conditionally add sparse source if rocSPARSE is found
-if(rocsparse_FOUND)
-    list(APPEND ROCM_HIP_SOURCES kernels/sparse.hip.cpp)
-endif()
 
 # Mark .hip.cpp files to be compiled as HIP language
 set_source_files_properties(
@@ -150,6 +138,12 @@ endif()
 if(rocsolver_FOUND)
     target_compile_definitions(tenzor_rocm_kernels PRIVATE TENZOR_HAS_ROCSOLVER)
     target_link_libraries(tenzor_rocm_kernels PRIVATE roc::rocsolver roc::rocblas)
+endif()
+
+# Add rocSPARSE support to kernels library if available
+if(rocsparse_FOUND)
+    target_compile_definitions(tenzor_rocm_kernels PRIVATE TENZOR_HAS_ROCSPARSE)
+    target_link_libraries(tenzor_rocm_kernels PRIVATE roc::rocsparse)
 endif()
 
 # Add hipcub support (needed for sort, cumsum, cumprod, unique)

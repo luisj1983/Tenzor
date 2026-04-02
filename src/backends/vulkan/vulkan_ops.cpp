@@ -20603,9 +20603,7 @@ auto VulkanBackend::dispatchLinalgEig(const Tensor& input) -> std::vector<Tensor
         Tensor shifts({batch_size, 4}, input.dtype(), input.device());
         size_t shift_size = batch_size * 4 * elem_size;
 
-        // Track active block boundaries on GPU; host vectors kept in sync via readback
-        std::vector<uint32_t> active_start(batch_size, 0);
-        std::vector<uint32_t> active_end(batch_size, static_cast<uint32_t>(n - 1));
+        // Active block boundaries tracked entirely on GPU (no host-side vectors)
 
         // GPU buffers for convergence check shader
         Tensor gpu_active_end({batch_size}, DType::Int32, input.device());
@@ -20631,30 +20629,22 @@ auto VulkanBackend::dispatchLinalgEig(const Tensor& input) -> std::vector<Tensor
         size_t uint_buf_size = batch_size * sizeof(uint32_t);
 
         for (uint32_t iter = 0; iter < max_qr_iterations; ++iter) {
-            bool all_converged = true;
-
-            for (int64_t b = 0; b < batch_size; ++b) {
-                if (active_end[b] <= active_start[b]) continue;
-                all_converged = false;
-
+            // Dispatch QR step for ALL batches in one command; converged batches
+            // early-exit inside the shader (active_end <= active_start read from SSBOs).
+            {
                 std::string shader = is_f64 ? "linalg_hessenberg_qr_f64" : "linalg_hessenberg_qr";
                 auto* pipeline = getPipeline(shader, device_id);
 
                 struct PushConstants {
                     uint32_t n;
-                    uint32_t active_start;
-                    uint32_t active_end;
-                    uint32_t batch_idx;
                 } pc;
                 pc.n = static_cast<uint32_t>(n);
-                pc.active_start = active_start[b];
-                pc.active_end = active_end[b];
-                pc.batch_idx = static_cast<uint32_t>(b);
 
                 std::vector<std::pair<uint32_t, const void*>> bindings = {
-                    {0, H.data_ptr()}, {1, shifts.data_ptr()}
+                    {0, H.data_ptr()}, {1, shifts.data_ptr()},
+                    {2, gpu_active_start.data_ptr()}, {3, gpu_active_end.data_ptr()}
                 };
-                std::vector<size_t> sizes = {mat_size, shift_size};
+                std::vector<size_t> sizes = {mat_size, shift_size, uint_buf_size, uint_buf_size};
                 VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
                 VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
@@ -20663,12 +20653,10 @@ auto VulkanBackend::dispatchLinalgEig(const Tensor& input) -> std::vector<Tensor
                                        pipeline->layout(), 0, 1, &ds, 0, nullptr);
                 vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                                   0, sizeof(pc), &pc);
-                vkCmdDispatch(cmd, 1, 1, 1);
+                vkCmdDispatch(cmd, static_cast<uint32_t>(batch_size), 1, 1);
                 insertComputeOnlyBarrier(cmd);
                 endSingleTimeCommands(cmd, device_id);
             }
-
-            if (all_converged) break;
 
             // GPU-side convergence check: updates active_end and batch_converged on device,
             // produces a single all_converged flag to minimize readback.
@@ -20708,19 +20696,11 @@ auto VulkanBackend::dispatchLinalgEig(const Tensor& input) -> std::vector<Tensor
                 endSingleTimeCommands(cmd, device_id);
             }
 
-            // Single sync + small readback of uint32 metadata (not the full shifts tensor)
+            // Single sync + readback of one uint32 flag (not per-batch metadata)
             synchronize(device_id);
 
-            Tensor ae_cpu = gpu_active_end.to(Device::cpu());
-            Tensor conv_cpu = gpu_converged.to(Device::cpu());
-            auto* ae_data = ae_cpu.data<int32_t>();
-            auto* conv_data = conv_cpu.data<int32_t>();
-            for (int64_t b = 0; b < batch_size; ++b) {
-                active_end[b] = static_cast<uint32_t>(ae_data[b]);
-                if (conv_data[b] != 0) {
-                    active_start[b] = active_end[b]; // mark converged for host-side skip
-                }
-            }
+            Tensor ac_cpu = gpu_all_converged.to(Device::cpu());
+            if (ac_cpu.data<int32_t>()[0] != 0) break;
         }
 
         // Step 3: Extract eigenvalues from quasi-upper-triangular (real Schur) form
