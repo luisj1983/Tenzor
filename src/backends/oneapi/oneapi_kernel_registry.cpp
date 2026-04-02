@@ -3062,24 +3062,52 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return {oneapi::ifftn_kernel(inputs[0], dims, signal_lengths, norm, get_q(inputs))};
         });
 
-#else // !TENZOR_HAS_ONEMKL
-    // Linalg ops require oneMKL — no SYCL-native fallback
-#define ONEMKL_STUB(OpName) \
-    table.register_kernel(OpId::OpName, \
-        [](std::span<const Tensor>, const OpAttributes&) -> std::vector<Tensor> { \
-            throw std::runtime_error( \
-                "Operation '" #OpName "' requires oneMKL. " \
-                "Rebuild with oneMKL support enabled."); \
-        })
-    ONEMKL_STUB(LinalgDet);
-    ONEMKL_STUB(LinalgInv);
-    ONEMKL_STUB(LinalgSolve);
-    ONEMKL_STUB(LinalgSVD);
-    ONEMKL_STUB(LinalgQR);
-    ONEMKL_STUB(LinalgEigh);
-    ONEMKL_STUB(LinalgEig);
-    ONEMKL_STUB(LinalgCholesky);
-#undef ONEMKL_STUB
+#else // !TENZOR_HAS_ONEMKL — use native SYCL shared-memory linalg fallback
+    table.register_kernel(OpId::LinalgDet,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::linalg_det_kernel(inputs[0], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::LinalgInv,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::linalg_inv_kernel(inputs[0], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::LinalgSolve,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::linalg_solve_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::LinalgSVD,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            bool full_matrices = attrs.get_bool(AttrKey::FullMatrices, true);
+            auto [U, S, Vt] = oneapi::linalg_svd_kernel(inputs[0], full_matrices, get_q(inputs));
+            return {U, S, Vt};
+        });
+
+    table.register_kernel(OpId::LinalgQR,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            auto [Q, R] = oneapi::linalg_qr_kernel(inputs[0], get_q(inputs));
+            return {Q, R};
+        });
+
+    table.register_kernel(OpId::LinalgEigh,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            auto [W, V] = oneapi::linalg_eigh_kernel(inputs[0], get_q(inputs));
+            return {W, V};
+        });
+
+    table.register_kernel(OpId::LinalgEig,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            auto [WR, WI, V] = oneapi::linalg_eig_kernel(inputs[0], get_q(inputs));
+            return {WR, WI, V};
+        });
+
+    table.register_kernel(OpId::LinalgCholesky,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            bool upper = attrs.get_bool(AttrKey::Upper, false);
+            return {oneapi::linalg_cholesky_kernel(inputs[0], upper, get_q(inputs))};
+        });
 
     // FFT ops: use SYCL-native Cooley-Tukey + Bluestein fallback (implemented in fft.cpp)
     table.register_kernel(OpId::FFT,

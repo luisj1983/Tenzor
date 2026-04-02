@@ -237,3 +237,9 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Values("cpu"),
     [](const ::testing::TestParamInfo<std::string>& info) { return info.param; }
 );
+
+INSTANTIATE_TEST_SUITE_P(
+    OneAPI, LinalgTest,
+    ::testing::Values("oneapi"),
+    [](const ::testing::TestParamInfo<std::string>& info) { return info.param; }
+);

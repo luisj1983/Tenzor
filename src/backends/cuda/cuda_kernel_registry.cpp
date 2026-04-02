@@ -674,6 +674,12 @@ namespace cuda {
     Tensor polar_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor cross_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
 
+#ifndef TENZOR_HAS_CUSPARSE
+    // Native CUDA CSR sparse fallback kernels (sparse.cu)
+    auto cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) -> Tensor;
+    auto cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) -> Tensor;
+#endif
+
 } // namespace cuda
 
 // Forward declarations for quantized CUDA kernels (in nn::quantization::kernels namespace)
@@ -3025,17 +3031,24 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
             return sparse::spmv(sp, inputs[3]);
         });
-#else // !TENZOR_HAS_CUSPARSE
-#define CUSPARSE_STUB(OpName) \
-    table.register_single_output_kernel(OpId::OpName, \
-        [](std::span<const Tensor>, const OpAttributes&) -> Tensor { \
-            throw std::runtime_error( \
-                "Operation '" #OpName "' requires cuSPARSE. " \
-                "Rebuild with CUDA Toolkit including cuSPARSE."); \
-        })
-    CUSPARSE_STUB(SparseSpMM);
-    CUSPARSE_STUB(SparseSpMV);
-#undef CUSPARSE_STUB
+#else // !TENZOR_HAS_CUSPARSE — use native CUDA CSR fallback kernels
+    // SparseSpMM: sparse(M,K) @ dense(K,N) -> dense(M,N)
+    table.register_single_output_kernel(OpId::SparseSpMM,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            return cuda::cuda_spmm_kernel(sp, inputs[3]);
+        });
+
+    // SparseSpMV: sparse(M,K) @ vec(K) -> vec(M)
+    table.register_single_output_kernel(OpId::SparseSpMV,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            return cuda::cuda_spmv_kernel(sp, inputs[3]);
+        });
 #endif // TENZOR_HAS_CUSPARSE
 
     // SparseToDense: CSR components -> dense tensor (works on any device)
