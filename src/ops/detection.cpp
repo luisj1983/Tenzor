@@ -245,24 +245,13 @@ auto box_iou(const Tensor& boxes1, const Tensor& boxes2, IoUType iou_type) -> Te
         return result_f32.to(boxes1.dtype());
     }
 
-    // For devices with registered BoxIoU kernels (Vulkan, CUDA, ROCm), dispatch directly
-    if (boxes1.device().type == Device::Type::Vulkan ||
-        boxes1.device().type == Device::Type::CUDA ||
-        boxes1.device().type == Device::Type::ROCm) {
+    // For non-CPU devices, dispatch to registered backend kernel
+    if (boxes1.device().type != Device::Type::CPU) {
         OpAttributes attrs;
         attrs.set(AttrKey::IouType, static_cast<int>(iou_type));
         std::vector<Tensor> inputs_vec = {boxes1, boxes2};
         auto results = dispatch<OpId::BoxIoU>(inputs_vec, attrs);
         return results[0];
-    }
-
-    // For other non-CPU devices, move to CPU, compute, and move back
-    Device original_device = boxes1.device();
-    if (original_device != Device::cpu()) {
-        auto boxes1_cpu = boxes1.to(Device::cpu());
-        auto boxes2_cpu = boxes2.to(Device::cpu());
-        auto result_cpu = box_iou(boxes1_cpu, boxes2_cpu, iou_type);
-        return result_cpu.to(original_device);
     }
 
     // CPU implementation using manual loops for reliability
@@ -600,9 +589,9 @@ auto batched_nms(const Tensor& boxes, const Tensor& scores,
     const int64_t num_boxes = boxes.shape()[0];
     const int64_t num_classes = scores.shape()[1];
 
-    std::vector<float> all_boxes;
-    std::vector<float> all_scores;
-    std::vector<int64_t> all_labels;
+    std::vector<Tensor> all_boxes_tensors;
+    std::vector<Tensor> all_scores_tensors;
+    std::vector<Tensor> all_labels_tensors;
 
     // Apply NMS per class
     for (int64_t cls = 0; cls < num_classes; ++cls) {
@@ -630,45 +619,29 @@ auto batched_nms(const Tensor& boxes, const Tensor& scores,
             keep = keep.slice(0, 0, num_keep);
         }
 
-        // Collect results
+        // Collect results on-device (no CPU roundtrip)
         auto kept_boxes = tenzor::index_select(filtered_boxes, 0, keep);
         auto kept_scores = tenzor::index_select(filtered_scores, 0, keep);
+        auto kept_labels = tenzor::full({num_keep}, static_cast<double>(cls),
+                                         DType::Int64, boxes.device());
 
-        // Convert to Float32 on CPU for data extraction
-        auto kept_boxes_f32 = kept_boxes.to(Device::cpu()).to(DType::Float32);
-        auto kept_scores_f32 = kept_scores.to(Device::cpu()).to(DType::Float32);
-
-        // Append to output
-        const float* box_data = kept_boxes_f32.data<float>();
-        const float* score_data = kept_scores_f32.data<float>();
-
-        for (int64_t i = 0; i < num_keep; ++i) {
-            all_boxes.push_back(box_data[i * 4 + 0]);
-            all_boxes.push_back(box_data[i * 4 + 1]);
-            all_boxes.push_back(box_data[i * 4 + 2]);
-            all_boxes.push_back(box_data[i * 4 + 3]);
-            all_scores.push_back(score_data[i]);
-            all_labels.push_back(cls);
-        }
+        all_boxes_tensors.push_back(kept_boxes);
+        all_scores_tensors.push_back(kept_scores);
+        all_labels_tensors.push_back(kept_labels);
     }
 
-    const int64_t total_kept = static_cast<int64_t>(all_labels.size());
+    // Handle empty results (all classes filtered or suppressed)
+    if (all_boxes_tensors.empty()) {
+        return std::make_tuple(
+            tenzor::zeros({0, 4}, DType::Float32, boxes.device()),
+            tenzor::zeros({0}, DType::Float32, boxes.device()),
+            tenzor::zeros({0}, DType::Int64, boxes.device()));
+    }
 
-    // Create result tensors and copy data to avoid dangling pointers
-    auto result_boxes = zeros({total_kept, 4}, DType::Float32, Device::cpu());
-    float* boxes_ptr = result_boxes.data<float>();
-    std::copy(all_boxes.begin(), all_boxes.end(), boxes_ptr);
-    result_boxes = result_boxes.to(boxes.device());
-
-    auto result_scores = zeros({total_kept}, DType::Float32, Device::cpu());
-    float* scores_ptr = result_scores.data<float>();
-    std::copy(all_scores.begin(), all_scores.end(), scores_ptr);
-    result_scores = result_scores.to(boxes.device());
-
-    auto result_labels = zeros({total_kept}, DType::Int64, Device::cpu());
-    int64_t* labels_ptr = result_labels.data<int64_t>();
-    std::copy(all_labels.begin(), all_labels.end(), labels_ptr);
-    result_labels = result_labels.to(boxes.device());
+    // Concatenate all results on-device (no CPU roundtrip)
+    auto result_boxes = tenzor::cat(all_boxes_tensors, 0).to(DType::Float32);
+    auto result_scores = tenzor::cat(all_scores_tensors, 0).to(DType::Float32);
+    auto result_labels = tenzor::cat(all_labels_tensors, 0);
 
     return std::make_tuple(result_boxes, result_scores, result_labels);
 }
