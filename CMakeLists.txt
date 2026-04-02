@@ -250,6 +250,8 @@ if(TENZOR_BUILD_PYTHON)
             ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/__init__.py
             ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/nn.py
             ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/functional.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/autograd.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/data.py
         )
         set(_PY_STUBS
             ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/py.typed

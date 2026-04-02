@@ -571,6 +571,194 @@ def smooth_l1_loss(input, target, reduction="mean", beta=1.0):
     return _nn.smooth_l1_loss(input, target, reduction, beta)
 
 
+def soft_margin_loss(input, target, reduction="mean"):
+    """Compute the two-class soft margin loss.
+
+    Parameters
+    ----------
+    input : Variable
+        Predicted values.
+    target : Variable
+        Target values (+1 or -1).
+    reduction : str, optional
+        ``'mean'``, ``'sum'``, or ``'none'``.  Default: ``'mean'``.
+
+    Returns
+    -------
+    Variable
+        Loss value.
+    """
+    return _nn.soft_margin_loss(input, target, reduction)
+
+
+def hinge_embedding_loss(input, target, margin=1.0, reduction="mean"):
+    """Compute the hinge embedding loss.
+
+    Parameters
+    ----------
+    input : Variable
+        Input distances.
+    target : Variable
+        Labels (+1 for similar, -1 for dissimilar).
+    margin : float, optional
+        Margin threshold.  Default: ``1.0``.
+    reduction : str, optional
+        ``'mean'``, ``'sum'``, or ``'none'``.  Default: ``'mean'``.
+
+    Returns
+    -------
+    Variable
+        Loss value.
+    """
+    return _nn.hinge_embedding_loss(input, target, margin, reduction)
+
+
+def poisson_nll_loss(input, target, log_input=True, full=False, eps=1e-8,
+                     reduction="mean"):
+    """Compute the Poisson negative log-likelihood loss.
+
+    Parameters
+    ----------
+    input : Variable
+        Expected rate (or log-rate if *log_input* is ``True``).
+    target : Variable
+        Observed counts.
+    log_input : bool, optional
+        If ``True``, input is in log-space.  Default: ``True``.
+    full : bool, optional
+        Include Stirling approximation term.  Default: ``False``.
+    eps : float, optional
+        Small value for numerical stability.  Default: ``1e-8``.
+    reduction : str, optional
+        ``'mean'``, ``'sum'``, or ``'none'``.  Default: ``'mean'``.
+
+    Returns
+    -------
+    Variable
+        Loss value.
+    """
+    return _nn.poisson_nll_loss(input, target, log_input, full, eps, reduction)
+
+
+def cosine_embedding_loss(input1, input2, target, margin=0.0, reduction="mean"):
+    """Compute the cosine embedding loss.
+
+    Parameters
+    ----------
+    input1, input2 : Variable
+        Feature tensors of shape ``(N, D)``.
+    target : Variable
+        Labels (+1 for similar, -1 for dissimilar), shape ``(N,)``.
+    margin : float, optional
+        Margin for dissimilar pairs.  Default: ``0.0``.
+    reduction : str, optional
+        ``'mean'``, ``'sum'``, or ``'none'``.  Default: ``'mean'``.
+
+    Returns
+    -------
+    Variable
+        Loss value.
+    """
+    return _nn.cosine_embedding_loss(input1, input2, target, margin, reduction)
+
+
+def triplet_margin_loss(anchor, positive, negative, margin=1.0, p=2.0,
+                        swap=False, reduction="mean"):
+    """Compute the triplet margin loss.
+
+    Parameters
+    ----------
+    anchor, positive, negative : Variable
+        Embedding tensors of shape ``(N, D)``.
+    margin : float, optional
+        Margin between positive/negative distances.  Default: ``1.0``.
+    p : float, optional
+        Norm degree for distance.  Default: ``2.0``.
+    swap : bool, optional
+        Use distance swap heuristic.  Default: ``False``.
+    reduction : str, optional
+        ``'mean'``, ``'sum'``, or ``'none'``.  Default: ``'mean'``.
+
+    Returns
+    -------
+    Variable
+        Loss value.
+    """
+    return _nn.triplet_margin_loss(anchor, positive, negative, margin, p,
+                                   swap, reduction)
+
+
+def multi_label_soft_margin_loss(input, target, reduction="mean"):
+    """Compute the multi-label soft margin loss.
+
+    Parameters
+    ----------
+    input : Variable
+        Raw logits of shape ``(N, C)``.
+    target : Variable
+        Multi-hot target of shape ``(N, C)``.
+    reduction : str, optional
+        ``'mean'``, ``'sum'``, or ``'none'``.  Default: ``'mean'``.
+
+    Returns
+    -------
+    Variable
+        Loss value.
+    """
+    return _nn.multi_label_soft_margin_loss(input, target, reduction)
+
+
+def multi_margin_loss(input, target, p=1, margin=1.0, reduction="mean"):
+    """Compute the multi-class margin (hinge) loss.
+
+    Parameters
+    ----------
+    input : Variable
+        Class scores of shape ``(N, C)``.
+    target : Tensor
+        Class indices of shape ``(N,)``.
+    p : int, optional
+        Exponent (1 or 2).  Default: ``1``.
+    margin : float, optional
+        Margin threshold.  Default: ``1.0``.
+    reduction : str, optional
+        ``'mean'``, ``'sum'``, or ``'none'``.  Default: ``'mean'``.
+
+    Returns
+    -------
+    Variable
+        Loss value.
+    """
+    return _nn.multi_margin_loss(input, target, p, margin, reduction)
+
+
+def gaussian_nll_loss(input, target, var, full=False, eps=1e-6,
+                      reduction="mean"):
+    """Compute the Gaussian negative log-likelihood loss.
+
+    Parameters
+    ----------
+    input : Variable
+        Predicted means.
+    target : Variable
+        Observed values.
+    var : Variable
+        Predicted variances (must be positive).
+    full : bool, optional
+        Include constant log(2*pi) term.  Default: ``False``.
+    eps : float, optional
+        Minimum variance for stability.  Default: ``1e-6``.
+    reduction : str, optional
+        ``'mean'``, ``'sum'``, or ``'none'``.  Default: ``'mean'``.
+
+    Returns
+    -------
+    Variable
+        Loss value.
+    """
+    return _nn.gaussian_nll_loss(input, target, var, full, eps, reduction)
+
+
 # ---------------------------------------------------------------------------
 # Functional operations (stateless wrappers)
 # ---------------------------------------------------------------------------

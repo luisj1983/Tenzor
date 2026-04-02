@@ -28,6 +28,7 @@
 #include "device.hpp"
 #include "storage.hpp"
 #include "shape.hpp"
+#include "dimname.hpp"
 
 namespace tenzor {
 
@@ -299,6 +300,44 @@ public:
      * @return true if tensor has a valid implementation, false if default-constructed
      */
     auto is_valid() const noexcept -> bool { return impl_ != nullptr; }
+
+    // ========================================================================
+    // Named Dimensions (experimental)
+    // ========================================================================
+
+    /**
+     * @brief Get the dimension names, if any.
+     * @return nullopt if tensor is unnamed, otherwise the name list
+     */
+    auto names() const -> std::optional<DimnameList>;
+
+    /**
+     * @brief Check if tensor has named dimensions.
+     */
+    auto has_names() const noexcept -> bool;
+
+    /**
+     * @brief Return a view of this tensor with the given dimension names.
+     *
+     * The new tensor shares storage with this tensor.
+     *
+     * @param names List of dimension names (size must equal ndim())
+     * @return Named tensor view
+     * @throws std::invalid_argument if names.size() != ndim() or duplicates
+     */
+    auto rename(DimnameList names) const -> Tensor;
+
+    /**
+     * @brief Return a view with names set or cleared.
+     * @param names nullopt to clear names, or a new name list
+     */
+    auto rename(std::optional<DimnameList> names) const -> Tensor;
+
+    /**
+     * @brief Find the index of a dimension by name.
+     * @throws std::invalid_argument if name not found or tensor is unnamed
+     */
+    auto dim_index(std::string_view name) const -> int64_t;
 
     // ============================================================================
     // Data Access
@@ -1169,6 +1208,7 @@ public:
         , dtype(other.dtype)
         , device(other.device)
         , requires_grad(other.requires_grad)
+        , names_(other.names_)
         , is_contiguous_cache_(other.is_contiguous_cache_.load(std::memory_order_relaxed))
         , version_counter_(other.version_counter_.load(std::memory_order_relaxed)) {}
 
@@ -1198,6 +1238,7 @@ private:
     DType dtype;                         ///< Element data type
     Device device;                       ///< Device location
     bool requires_grad{false};           ///< Gradient computation flag
+    std::optional<DimnameList> names_;   ///< Optional dimension names (experimental)
     // SAFETY: Stale reads are harmless (triggers recomputation). No ordering
     // dependency on other fields — relaxed load/store is sufficient.
     mutable std::atomic<int8_t> is_contiguous_cache_{-1};  ///< Cached contiguity: -1=unset, 0=false, 1=true

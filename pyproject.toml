@@ -52,6 +52,8 @@ docs = [
     "sphinx>=4.0",
     "sphinx-rtd-theme>=0.5",
     "sphinx-autodoc-typehints>=1.12",
+    "breathe>=4.34",
+    "myst-parser>=0.18",
 ]
 viz = [
     "matplotlib>=3.3",

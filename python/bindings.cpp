@@ -531,6 +531,33 @@ PYBIND11_MODULE(tenzor_core, m) {
                 return std::vector<int64_t>(s.begin(), s.end());
             })
         .def_property_readonly("ndim", &tenzor::Tensor::ndim)
+        .def_property_readonly("names", [](const tenzor::Tensor& t) -> py::object {
+            auto names = t.names();
+            if (!names) return py::none();
+            py::tuple result(names->size());
+            for (size_t i = 0; i < names->size(); ++i) {
+                if ((*names)[i].is_wildcard()) {
+                    result[i] = py::none();
+                } else {
+                    result[i] = py::str(std::string((*names)[i].name()));
+                }
+            }
+            return result;
+        }, "Get dimension names (None if unnamed)")
+        .def("has_names", &tenzor::Tensor::has_names, "Check if tensor has named dimensions")
+        .def("rename", [](const tenzor::Tensor& t, py::args py_names) -> tenzor::Tensor {
+            tenzor::DimnameList names;
+            for (auto& n : py_names) {
+                if (n.is_none()) {
+                    names.push_back(tenzor::Dimname::wildcard());
+                } else {
+                    names.push_back(tenzor::Dimname(n.cast<std::string>()));
+                }
+            }
+            return t.rename(std::move(names));
+        }, "Return a view with named dimensions")
+        .def("dim_index", &tenzor::Tensor::dim_index,
+             py::arg("name"), "Find dimension index by name")
         .def_property_readonly("dtype", &tenzor::Tensor::dtype)
         .def_property_readonly("device", &tenzor::Tensor::device)
         .def_property_readonly("is_cuda", [](const tenzor::Tensor& self) {
@@ -4854,6 +4881,98 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("__call__", &tenzor::nn::MarginRankingLoss::operator(),
              py::arg("input1"), py::arg("input2"), py::arg("target"));
 
+    py::class_<tenzor::nn::SoftMarginLoss>(nn, "SoftMarginLoss",
+        "Two-class soft margin loss: log(1 + exp(-y * x))")
+        .def(py::init<tenzor::nn::Reduction>(),
+             py::arg("reduction") = tenzor::nn::Reduction::Mean)
+        .def("forward", &tenzor::nn::SoftMarginLoss::forward,
+             py::arg("input"), py::arg("target"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("__call__", &tenzor::nn::SoftMarginLoss::operator(),
+             py::arg("input"), py::arg("target"));
+
+    py::class_<tenzor::nn::HingeEmbeddingLoss>(nn, "HingeEmbeddingLoss",
+        "Hinge embedding loss for similarity/dissimilarity measurement")
+        .def(py::init<double, tenzor::nn::Reduction>(),
+             py::arg("margin") = 1.0,
+             py::arg("reduction") = tenzor::nn::Reduction::Mean)
+        .def("forward", &tenzor::nn::HingeEmbeddingLoss::forward,
+             py::arg("input"), py::arg("target"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("__call__", &tenzor::nn::HingeEmbeddingLoss::operator(),
+             py::arg("input"), py::arg("target"));
+
+    py::class_<tenzor::nn::PoissonNLLLoss>(nn, "PoissonNLLLoss",
+        "Poisson negative log-likelihood loss for count data")
+        .def(py::init<bool, bool, double, tenzor::nn::Reduction>(),
+             py::arg("log_input") = true,
+             py::arg("full") = false,
+             py::arg("eps") = 1e-8,
+             py::arg("reduction") = tenzor::nn::Reduction::Mean)
+        .def("forward", &tenzor::nn::PoissonNLLLoss::forward,
+             py::arg("input"), py::arg("target"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("__call__", &tenzor::nn::PoissonNLLLoss::operator(),
+             py::arg("input"), py::arg("target"));
+
+    py::class_<tenzor::nn::CosineEmbeddingLoss>(nn, "CosineEmbeddingLoss",
+        "Cosine embedding loss using cosine similarity")
+        .def(py::init<double, tenzor::nn::Reduction>(),
+             py::arg("margin") = 0.0,
+             py::arg("reduction") = tenzor::nn::Reduction::Mean)
+        .def("forward", &tenzor::nn::CosineEmbeddingLoss::forward,
+             py::arg("input1"), py::arg("input2"), py::arg("target"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("__call__", &tenzor::nn::CosineEmbeddingLoss::operator(),
+             py::arg("input1"), py::arg("input2"), py::arg("target"));
+
+    py::class_<tenzor::nn::TripletMarginLoss>(nn, "TripletMarginLoss",
+        "Triplet margin loss with configurable distance norm")
+        .def(py::init<double, double, bool, tenzor::nn::Reduction>(),
+             py::arg("margin") = 1.0,
+             py::arg("p") = 2.0,
+             py::arg("swap") = false,
+             py::arg("reduction") = tenzor::nn::Reduction::Mean)
+        .def("forward", &tenzor::nn::TripletMarginLoss::forward,
+             py::arg("anchor"), py::arg("positive"), py::arg("negative"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("__call__", &tenzor::nn::TripletMarginLoss::operator(),
+             py::arg("anchor"), py::arg("positive"), py::arg("negative"));
+
+    py::class_<tenzor::nn::MultiLabelSoftMarginLoss>(nn, "MultiLabelSoftMarginLoss",
+        "Multi-label one-versus-all loss based on max-entropy")
+        .def(py::init<tenzor::nn::Reduction>(),
+             py::arg("reduction") = tenzor::nn::Reduction::Mean)
+        .def("forward", &tenzor::nn::MultiLabelSoftMarginLoss::forward,
+             py::arg("input"), py::arg("target"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("__call__", &tenzor::nn::MultiLabelSoftMarginLoss::operator(),
+             py::arg("input"), py::arg("target"));
+
+    py::class_<tenzor::nn::MultiMarginLoss>(nn, "MultiMarginLoss",
+        "Multi-class classification hinge loss")
+        .def(py::init<int, double, tenzor::nn::Reduction>(),
+             py::arg("p") = 1,
+             py::arg("margin") = 1.0,
+             py::arg("reduction") = tenzor::nn::Reduction::Mean)
+        .def("forward", &tenzor::nn::MultiMarginLoss::forward,
+             py::arg("input"), py::arg("target"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("__call__", &tenzor::nn::MultiMarginLoss::operator(),
+             py::arg("input"), py::arg("target"));
+
+    py::class_<tenzor::nn::GaussianNLLLoss>(nn, "GaussianNLLLoss",
+        "Gaussian negative log-likelihood loss for regression with uncertainty")
+        .def(py::init<bool, double, tenzor::nn::Reduction>(),
+             py::arg("full") = false,
+             py::arg("eps") = 1e-6,
+             py::arg("reduction") = tenzor::nn::Reduction::Mean)
+        .def("forward", &tenzor::nn::GaussianNLLLoss::forward,
+             py::arg("input"), py::arg("target"), py::arg("var"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("__call__", &tenzor::nn::GaussianNLLLoss::operator(),
+             py::arg("input"), py::arg("target"), py::arg("var"));
+
     // Functional loss functions
     nn.def("mse_loss", &tenzor::nn::mse_loss, "MSE loss function",
           py::arg("input"), py::arg("target"),
@@ -4912,6 +5031,46 @@ PYBIND11_MODULE(tenzor_core, m) {
     nn.def("margin_ranking_loss", &tenzor::nn::margin_ranking_loss,
           py::arg("input1"), py::arg("input2"), py::arg("target"),
           py::arg("margin") = 0.0,
+          py::arg("reduction") = tenzor::nn::Reduction::Mean,
+          py::call_guard<py::gil_scoped_release>());
+
+    nn.def("soft_margin_loss", &tenzor::nn::soft_margin_loss,
+          py::arg("input"), py::arg("target"),
+          py::arg("reduction") = tenzor::nn::Reduction::Mean,
+          py::call_guard<py::gil_scoped_release>());
+    nn.def("hinge_embedding_loss", &tenzor::nn::hinge_embedding_loss,
+          py::arg("input"), py::arg("target"),
+          py::arg("margin") = 1.0,
+          py::arg("reduction") = tenzor::nn::Reduction::Mean,
+          py::call_guard<py::gil_scoped_release>());
+    nn.def("poisson_nll_loss", &tenzor::nn::poisson_nll_loss,
+          py::arg("input"), py::arg("target"),
+          py::arg("log_input") = true, py::arg("full") = false,
+          py::arg("eps") = 1e-8,
+          py::arg("reduction") = tenzor::nn::Reduction::Mean,
+          py::call_guard<py::gil_scoped_release>());
+    nn.def("cosine_embedding_loss", &tenzor::nn::cosine_embedding_loss,
+          py::arg("input1"), py::arg("input2"), py::arg("target"),
+          py::arg("margin") = 0.0,
+          py::arg("reduction") = tenzor::nn::Reduction::Mean,
+          py::call_guard<py::gil_scoped_release>());
+    nn.def("triplet_margin_loss", &tenzor::nn::triplet_margin_loss,
+          py::arg("anchor"), py::arg("positive"), py::arg("negative"),
+          py::arg("margin") = 1.0, py::arg("p") = 2.0, py::arg("swap") = false,
+          py::arg("reduction") = tenzor::nn::Reduction::Mean,
+          py::call_guard<py::gil_scoped_release>());
+    nn.def("multi_label_soft_margin_loss", &tenzor::nn::multi_label_soft_margin_loss,
+          py::arg("input"), py::arg("target"),
+          py::arg("reduction") = tenzor::nn::Reduction::Mean,
+          py::call_guard<py::gil_scoped_release>());
+    nn.def("multi_margin_loss", &tenzor::nn::multi_margin_loss,
+          py::arg("input"), py::arg("target"),
+          py::arg("p") = 1, py::arg("margin") = 1.0,
+          py::arg("reduction") = tenzor::nn::Reduction::Mean,
+          py::call_guard<py::gil_scoped_release>());
+    nn.def("gaussian_nll_loss", &tenzor::nn::gaussian_nll_loss,
+          py::arg("input"), py::arg("target"), py::arg("var"),
+          py::arg("full") = false, py::arg("eps") = 1e-6,
           py::arg("reduction") = tenzor::nn::Reduction::Mean,
           py::call_guard<py::gil_scoped_release>());
 
@@ -8267,7 +8426,9 @@ void bind_compression(py::module& m) {
 
     py::enum_<tenzor::SparseLayout>(sparse_mod, "SparseLayout")
         .value("COO", tenzor::SparseLayout::COO)
-        .value("CSR", tenzor::SparseLayout::CSR);
+        .value("CSR", tenzor::SparseLayout::CSR)
+        .value("CSC", tenzor::SparseLayout::CSC)
+        .value("BSR", tenzor::SparseLayout::BSR);
 
     py::class_<tenzor::SparseTensor>(sparse_mod, "SparseTensor")
         .def_property_readonly("layout", &tenzor::SparseTensor::layout)
@@ -8284,11 +8445,26 @@ void bind_compression(py::module& m) {
         .def("values", &tenzor::SparseTensor::values, "Get values tensor")
         .def("crow_indices", &tenzor::SparseTensor::crow_indices, "Get CSR compressed row indices")
         .def("col_indices", &tenzor::SparseTensor::col_indices, "Get CSR column indices")
+        .def("ccol_indices", &tenzor::SparseTensor::ccol_indices, "Get CSC compressed column indices")
+        .def("row_indices", &tenzor::SparseTensor::row_indices, "Get CSC row indices")
+        .def("bsr_row_ptr", &tenzor::SparseTensor::bsr_row_ptr, "Get BSR block row pointers")
+        .def("bsr_col_ind", &tenzor::SparseTensor::bsr_col_ind, "Get BSR block column indices")
+        .def("block_size", [](const tenzor::SparseTensor& s) {
+            auto bs = s.block_size();
+            return py::make_tuple(bs.first, bs.second);
+        }, "Get BSR block dimensions as (block_h, block_w)")
         .def("to_dense", &tenzor::SparseTensor::to_dense, "Convert to dense tensor",
              py::call_guard<py::gil_scoped_release>())
         .def("to_coo", &tenzor::SparseTensor::to_coo, "Convert to COO format",
              py::call_guard<py::gil_scoped_release>())
         .def("to_csr", &tenzor::SparseTensor::to_csr, "Convert to CSR format",
+             py::call_guard<py::gil_scoped_release>())
+        .def("to_csc", &tenzor::SparseTensor::to_csc, "Convert to CSC format",
+             py::call_guard<py::gil_scoped_release>())
+        .def("to_bsr", &tenzor::SparseTensor::to_bsr, "Convert to BSR format",
+             py::arg("block_size"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("transpose", &tenzor::SparseTensor::transpose, "Transpose 2D sparse tensor",
              py::call_guard<py::gil_scoped_release>())
         .def("coalesce", &tenzor::SparseTensor::coalesce, "Coalesce COO tensor",
              py::call_guard<py::gil_scoped_release>())
@@ -8297,9 +8473,14 @@ void bind_compression(py::module& m) {
              py::call_guard<py::gil_scoped_release>())
         .def("__repr__", [](const tenzor::SparseTensor& s) {
             std::ostringstream ss;
-            ss << "SparseTensor(layout="
-               << (s.layout() == tenzor::SparseLayout::COO ? "COO" : "CSR")
-               << ", shape=[";
+            const char* layout_name = "COO";
+            switch (s.layout()) {
+                case tenzor::SparseLayout::COO: layout_name = "COO"; break;
+                case tenzor::SparseLayout::CSR: layout_name = "CSR"; break;
+                case tenzor::SparseLayout::CSC: layout_name = "CSC"; break;
+                case tenzor::SparseLayout::BSR: layout_name = "BSR"; break;
+            }
+            ss << "SparseTensor(layout=" << layout_name << ", shape=[";
             auto& shape = s.shape();
             for (size_t i = 0; i < shape.size(); ++i) {
                 if (i > 0) ss << ", ";
@@ -8324,6 +8505,20 @@ void bind_compression(py::module& m) {
 
     sparse_mod.def("to_sparse_csr", &tenzor::to_sparse_csr,
         "Convert dense tensor to sparse CSR",
+        py::arg("dense"),
+        py::call_guard<py::gil_scoped_release>());
+
+    sparse_mod.def("sparse_csc", &tenzor::SparseTensor::sparse_csc,
+        "Create a CSC sparse tensor",
+        py::arg("ccol_indices"), py::arg("row_indices"), py::arg("values"), py::arg("shape"));
+
+    sparse_mod.def("sparse_bsr", &tenzor::SparseTensor::sparse_bsr,
+        "Create a BSR sparse tensor",
+        py::arg("bsr_row_ptr"), py::arg("bsr_col_ind"), py::arg("values"),
+        py::arg("shape"), py::arg("block_size"));
+
+    sparse_mod.def("to_sparse_csc", &tenzor::to_sparse_csc,
+        "Convert dense tensor to sparse CSC",
         py::arg("dense"),
         py::call_guard<py::gil_scoped_release>());
 

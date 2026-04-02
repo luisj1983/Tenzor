@@ -532,3 +532,281 @@ TEST(AdvancedLossTest, DiceLoss_ZeroDenominator) {
     EXPECT_FALSE(std::isnan(loss.tensor().item<float>()));
     EXPECT_FALSE(std::isinf(loss.tensor().item<float>()));
 }
+
+//==============================================================================
+// SoftMarginLoss Tests
+//==============================================================================
+
+TEST(AdvancedLossTest, SoftMarginLoss_BasicForward) {
+    auto input = Variable(randn({4, 3}, DType::Float32), false);
+    auto target = Variable(ones({4, 3}, DType::Float32), false);
+
+    auto criterion = SoftMarginLoss(Reduction::Mean);
+    auto loss = criterion(input, target);
+
+    EXPECT_GE(loss.tensor().item<float>(), 0.0f);
+    EXPECT_FALSE(std::isnan(loss.tensor().item<float>()));
+}
+
+TEST(AdvancedLossTest, SoftMarginLoss_KnownValues) {
+    // For x=0, y=1: loss = log(1 + exp(0)) = log(2) ≈ 0.6931
+    auto input = Variable(zeros({1}, DType::Float32), false);
+    auto target = Variable(ones({1}, DType::Float32), false);
+
+    auto loss = soft_margin_loss(input, target, Reduction::Mean);
+    EXPECT_NEAR(loss.tensor().item<float>(), std::log(2.0f), 1e-4);
+}
+
+TEST(AdvancedLossTest, SoftMarginLoss_ReductionModes) {
+    auto input = Variable(randn({4}, DType::Float32), false);
+    auto target = Variable(ones({4}, DType::Float32), false);
+
+    auto loss_none = soft_margin_loss(input, target, Reduction::None);
+    auto loss_sum = soft_margin_loss(input, target, Reduction::Sum);
+    auto loss_mean = soft_margin_loss(input, target, Reduction::Mean);
+
+    EXPECT_EQ(loss_none.shape().size(), 1u);
+    EXPECT_EQ(loss_none.shape()[0], 4);
+    EXPECT_GT(loss_sum.tensor().item<float>(), loss_mean.tensor().item<float>());
+}
+
+TEST(AdvancedLossTest, SoftMarginLoss_Gradient) {
+    auto input = Variable(randn({3}, DType::Float32), true);
+    auto target = Variable(ones({3}, DType::Float32), false);
+
+    auto loss = soft_margin_loss(input, target, Reduction::Mean);
+    loss.backward();
+
+    EXPECT_TRUE(input.grad().has_value());
+}
+
+//==============================================================================
+// HingeEmbeddingLoss Tests
+//==============================================================================
+
+TEST(AdvancedLossTest, HingeEmbeddingLoss_BasicForward) {
+    auto input = Variable(full({4}, 0.5f, DType::Float32), false);
+    auto target = Variable(ones({4}, DType::Float32), false);  // y = 1
+
+    auto criterion = HingeEmbeddingLoss(1.0, Reduction::Mean);
+    auto loss = criterion(input, target);
+
+    // When y=1, loss = input = 0.5
+    EXPECT_NEAR(loss.tensor().item<float>(), 0.5f, 1e-4);
+}
+
+TEST(AdvancedLossTest, HingeEmbeddingLoss_NegativeTarget) {
+    auto input = Variable(full({4}, 0.5f, DType::Float32), false);
+    auto neg_target = Variable(full({4}, -1.0f, DType::Float32), false);
+
+    auto loss = hinge_embedding_loss(input, neg_target, 1.0, Reduction::Mean);
+
+    // When y=-1, loss = max(0, 1.0 - 0.5) = 0.5
+    EXPECT_NEAR(loss.tensor().item<float>(), 0.5f, 1e-4);
+}
+
+TEST(AdvancedLossTest, HingeEmbeddingLoss_Gradient) {
+    auto input = Variable(randn({4}, DType::Float32), true);
+    auto target = Variable(ones({4}, DType::Float32), false);
+
+    auto loss = hinge_embedding_loss(input, target, 1.0, Reduction::Mean);
+    loss.backward();
+
+    EXPECT_TRUE(input.grad().has_value());
+}
+
+//==============================================================================
+// PoissonNLLLoss Tests
+//==============================================================================
+
+TEST(AdvancedLossTest, PoissonNLLLoss_BasicForward) {
+    auto input = Variable(randn({4, 3}, DType::Float32), false);
+    auto target = Variable(full({4, 3}, 2.0f, DType::Float32), false);
+
+    auto criterion = PoissonNLLLoss(true, false, 1e-8, Reduction::Mean);
+    auto loss = criterion(input, target);
+
+    EXPECT_FALSE(std::isnan(loss.tensor().item<float>()));
+    EXPECT_FALSE(std::isinf(loss.tensor().item<float>()));
+}
+
+TEST(AdvancedLossTest, PoissonNLLLoss_KnownValues) {
+    // For log_input=true: loss = exp(x) - y*x
+    // x=0, y=1: loss = exp(0) - 1*0 = 1.0
+    auto input = Variable(zeros({1}, DType::Float32), false);
+    auto target = Variable(ones({1}, DType::Float32), false);
+
+    auto loss = poisson_nll_loss(input, target, true, false, 1e-8, Reduction::Mean);
+    EXPECT_NEAR(loss.tensor().item<float>(), 1.0f, 1e-4);
+}
+
+TEST(AdvancedLossTest, PoissonNLLLoss_Gradient) {
+    auto input = Variable(randn({4}, DType::Float32), true);
+    auto target = Variable(full({4}, 2.0f, DType::Float32), false);
+
+    auto loss = poisson_nll_loss(input, target, true, false, 1e-8, Reduction::Mean);
+    loss.backward();
+
+    EXPECT_TRUE(input.grad().has_value());
+}
+
+//==============================================================================
+// CosineEmbeddingLoss Tests
+//==============================================================================
+
+TEST(AdvancedLossTest, CosineEmbeddingLoss_SimilarPair) {
+    // Identical vectors should give loss close to 0 for y=1
+    auto input1 = Variable(ones({2, 4}, DType::Float32), false);
+    auto input2 = Variable(ones({2, 4}, DType::Float32), false);
+    auto target = Variable(ones({2}, DType::Float32), false);
+
+    auto criterion = CosineEmbeddingLoss(0.0, Reduction::Mean);
+    auto loss = criterion(input1, input2, target);
+
+    EXPECT_NEAR(loss.tensor().item<float>(), 0.0f, 1e-4);
+}
+
+TEST(AdvancedLossTest, CosineEmbeddingLoss_DissimilarPair) {
+    auto input1 = Variable(ones({2, 4}, DType::Float32), false);
+    auto input2 = Variable(full({2, 4}, -1.0f, DType::Float32), false);
+    auto target = Variable(full({2}, -1.0f, DType::Float32), false);
+
+    auto loss = cosine_embedding_loss(input1, input2, target, 0.0, Reduction::Mean);
+
+    // Opposite vectors have cos_sim = -1, with y=-1: max(0, -1 - 0) = 0
+    EXPECT_GE(loss.tensor().item<float>(), 0.0f);
+}
+
+TEST(AdvancedLossTest, CosineEmbeddingLoss_Gradient) {
+    auto input1 = Variable(randn({3, 4}, DType::Float32), true);
+    auto input2 = Variable(randn({3, 4}, DType::Float32), true);
+    auto target = Variable(ones({3}, DType::Float32), false);
+
+    auto loss = cosine_embedding_loss(input1, input2, target, 0.0, Reduction::Mean);
+    loss.backward();
+
+    EXPECT_TRUE(input1.grad().has_value());
+    EXPECT_TRUE(input2.grad().has_value());
+}
+
+//==============================================================================
+// TripletMarginLoss Tests
+//==============================================================================
+
+TEST(AdvancedLossTest, TripletMarginLoss_BasicForward) {
+    auto anchor = Variable(randn({4, 8}, DType::Float32), false);
+    auto positive = Variable(randn({4, 8}, DType::Float32), false);
+    auto negative = Variable(randn({4, 8}, DType::Float32), false);
+
+    auto criterion = TripletMarginLoss(1.0, 2.0, false, Reduction::Mean);
+    auto loss = criterion(anchor, positive, negative);
+
+    EXPECT_GE(loss.tensor().item<float>(), 0.0f);
+    EXPECT_FALSE(std::isnan(loss.tensor().item<float>()));
+}
+
+TEST(AdvancedLossTest, TripletMarginLoss_Gradient) {
+    auto anchor = Variable(randn({4, 8}, DType::Float32), true);
+    auto positive = Variable(randn({4, 8}, DType::Float32), true);
+    auto negative = Variable(randn({4, 8}, DType::Float32), true);
+
+    auto loss = triplet_margin_loss(anchor, positive, negative, 1.0, 2.0, false, Reduction::Mean);
+    loss.backward();
+
+    EXPECT_TRUE(anchor.grad().has_value());
+}
+
+//==============================================================================
+// MultiLabelSoftMarginLoss Tests
+//==============================================================================
+
+TEST(AdvancedLossTest, MultiLabelSoftMarginLoss_BasicForward) {
+    auto input = Variable(randn({4, 5}, DType::Float32), false);
+    auto target = Variable(zeros({4, 5}, DType::Float32), false);
+
+    auto criterion = MultiLabelSoftMarginLoss(Reduction::Mean);
+    auto loss = criterion(input, target);
+
+    EXPECT_GE(loss.tensor().item<float>(), 0.0f);
+    EXPECT_FALSE(std::isnan(loss.tensor().item<float>()));
+}
+
+TEST(AdvancedLossTest, MultiLabelSoftMarginLoss_Gradient) {
+    auto input = Variable(randn({4, 5}, DType::Float32), true);
+    auto target = Variable(zeros({4, 5}, DType::Float32), false);
+
+    auto loss = multi_label_soft_margin_loss(input, target, Reduction::Mean);
+    loss.backward();
+
+    EXPECT_TRUE(input.grad().has_value());
+}
+
+//==============================================================================
+// MultiMarginLoss Tests
+//==============================================================================
+
+TEST(AdvancedLossTest, MultiMarginLoss_BasicForward) {
+    auto input = Variable(randn({4, 5}, DType::Float32), false);
+    // Create target with class indices using arange
+    auto target = arange(0, 4, 1, DType::Int64);
+
+    auto criterion = MultiMarginLoss(1, 1.0, Reduction::Mean);
+    auto loss = criterion(input, target);
+
+    float loss_val = loss.tensor().item<float>();
+    EXPECT_GE(loss_val, 0.0f);
+    EXPECT_FALSE(std::isnan(loss_val));
+}
+
+TEST(AdvancedLossTest, MultiMarginLoss_P2) {
+    auto input = Variable(randn({4, 3}, DType::Float32), false);
+    auto target = zeros({4}, DType::Int64);  // All class 0
+
+    auto loss_p1 = multi_margin_loss(input, target, 1, 1.0, Reduction::Mean);
+    auto loss_p2 = multi_margin_loss(input, target, 2, 1.0, Reduction::Mean);
+
+    float v1 = loss_p1.tensor().item<float>();
+    float v2 = loss_p2.tensor().item<float>();
+    // Both should be non-negative and finite
+    EXPECT_GE(v1, 0.0f);
+    EXPECT_GE(v2, 0.0f);
+    EXPECT_FALSE(std::isnan(v2));
+}
+
+//==============================================================================
+// GaussianNLLLoss Tests
+//==============================================================================
+
+TEST(AdvancedLossTest, GaussianNLLLoss_BasicForward) {
+    auto input = Variable(randn({4, 3}, DType::Float32), false);
+    auto target = Variable(randn({4, 3}, DType::Float32), false);
+    auto var = Variable(full({4, 3}, 1.0f, DType::Float32), false);
+
+    auto criterion = GaussianNLLLoss(false, 1e-6, Reduction::Mean);
+    auto loss = criterion(input, target, var);
+
+    EXPECT_FALSE(std::isnan(loss.tensor().item<float>()));
+    EXPECT_FALSE(std::isinf(loss.tensor().item<float>()));
+}
+
+TEST(AdvancedLossTest, GaussianNLLLoss_KnownValues) {
+    // input=target, var=1: loss = 0.5*(log(1) + 0) = 0
+    auto input = Variable(ones({1}, DType::Float32), false);
+    auto target = Variable(ones({1}, DType::Float32), false);
+    auto var = Variable(ones({1}, DType::Float32), false);
+
+    auto loss = gaussian_nll_loss(input, target, var, false, 1e-6, Reduction::Mean);
+    EXPECT_NEAR(loss.tensor().item<float>(), 0.0f, 1e-4);
+}
+
+TEST(AdvancedLossTest, GaussianNLLLoss_Gradient) {
+    auto input = Variable(randn({4, 3}, DType::Float32), true);
+    auto target = Variable(randn({4, 3}, DType::Float32), false);
+    auto var = Variable(full({4, 3}, 1.0f, DType::Float32), true);
+
+    auto loss = gaussian_nll_loss(input, target, var, false, 1e-6, Reduction::Mean);
+    loss.backward();
+
+    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_TRUE(var.grad().has_value());
+}

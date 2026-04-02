@@ -82,7 +82,7 @@ TYPEDEF_HIDES_STRUCT   = NO
 
 LOOKUP_CACHE_SIZE      = 0
 
-NUM_PROC_THREADS       = 1
+NUM_PROC_THREADS       = 0
 
 #---------------------------------------------------------------------------
 # Build related configuration options
@@ -350,7 +350,7 @@ GENERATE_MAN           = NO
 # Configuration options related to the XML output
 #---------------------------------------------------------------------------
 
-GENERATE_XML           = NO
+GENERATE_XML           = YES
 
 #---------------------------------------------------------------------------
 # Configuration options related to the DOCBOOK output

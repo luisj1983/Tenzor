@@ -100,6 +100,23 @@ auto ROCmBackend::get_device_info(int32_t device_id) const -> DeviceInfo {
     return info;
 }
 
+// Check at runtime whether hipMallocAsync is available (HIP 5.3+)
+static bool hip_async_alloc_available() {
+    static int result = -1;
+    if (result >= 0) return result != 0;
+
+#if HIP_VERSION >= 50300000
+    // hipMallocAsync available at compile time; verify runtime support
+    // by checking if the default memory pool exists
+    hipMemPool_t pool = nullptr;
+    hipError_t err = hipDeviceGetDefaultMemPool(&pool, 0);
+    result = (err == hipSuccess && pool != nullptr) ? 1 : 0;
+#else
+    result = 0;
+#endif
+    return result != 0;
+}
+
 auto ROCmBackend::allocate(size_t bytes, int32_t device_id) -> void* {
     // Handle empty tensors - HIP doesn't like 0-byte allocations
     if (bytes == 0) {
@@ -112,6 +129,20 @@ auto ROCmBackend::allocate(size_t bytes, int32_t device_id) -> void* {
 
     void* ptr = nullptr;
     check_hip_error(hipSetDevice(device_id), "hipSetDevice in allocate");
+
+#if HIP_VERSION >= 50300000
+    if (hip_async_alloc_available()) {
+        hipStream_t stream = nullptr;  // default stream
+        hipError_t err = hipMallocAsync(&ptr, bytes, stream);
+        if (err == hipSuccess) {
+            std::lock_guard<std::mutex> lock(alloc_map_mutex_);
+            alloc_device_map_[ptr] = device_id;
+            return ptr;
+        }
+        // Fall through to synchronous allocation on failure
+    }
+#endif
+
     hipError_t err = hipMalloc(&ptr, bytes);
     if (err != hipSuccess) {
         throw std::runtime_error(
@@ -168,6 +199,14 @@ auto ROCmBackend::deallocate(void* ptr) -> void {
         alloc_device_map_.erase(ptr);
     }
 
+#if HIP_VERSION >= 50300000
+    if (hip_async_alloc_available()) {
+        hipStream_t stream = nullptr;  // default stream
+        hipError_t err = hipFreeAsync(ptr, stream);
+        if (err == hipSuccess) return;
+        // Fall through to synchronous free on failure
+    }
+#endif
     check_hip_error(hipFree(ptr), "hipFree");
 }
 

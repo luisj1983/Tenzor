@@ -853,6 +853,294 @@ auto margin_ranking_loss(const Variable& input1, const Variable& input2,
                         double margin = 0.0,
                         Reduction reduction = Reduction::Mean) -> Variable;
 
+/**
+ * @brief Soft Margin Loss
+ *
+ * Computes the two-class soft margin loss:
+ *
+ * \f[
+ * \text{loss}(x, y) = \frac{1}{n}\sum_i \log(1 + \exp(-y_i \cdot x_i))
+ * \f]
+ *
+ * where y is +1 or -1.
+ *
+ * @param reduction How to reduce the loss (default: Mean)
+ */
+class SoftMarginLoss {
+public:
+    explicit SoftMarginLoss(Reduction reduction = Reduction::Mean);
+
+    auto forward(const Variable& input, const Variable& target) -> Variable;
+    auto operator()(const Variable& input, const Variable& target) -> Variable {
+        return forward(input, target);
+    }
+
+private:
+    Reduction reduction_;
+};
+
+auto soft_margin_loss(const Variable& input, const Variable& target,
+                     Reduction reduction = Reduction::Mean) -> Variable;
+
+/**
+ * @brief Hinge Embedding Loss
+ *
+ * Measures whether two inputs are similar or dissimilar:
+ *
+ * \f[
+ * \text{loss}(x, y) = \begin{cases}
+ *   x_i & \text{if } y_i = 1 \\
+ *   \max(0, \text{margin} - x_i) & \text{if } y_i = -1
+ * \end{cases}
+ * \f]
+ *
+ * @param margin Margin threshold (default: 1.0)
+ * @param reduction How to reduce the loss (default: Mean)
+ */
+class HingeEmbeddingLoss {
+public:
+    explicit HingeEmbeddingLoss(double margin = 1.0,
+                                 Reduction reduction = Reduction::Mean);
+
+    auto forward(const Variable& input, const Variable& target) -> Variable;
+    auto operator()(const Variable& input, const Variable& target) -> Variable {
+        return forward(input, target);
+    }
+
+private:
+    double margin_;
+    Reduction reduction_;
+};
+
+auto hinge_embedding_loss(const Variable& input, const Variable& target,
+                          double margin = 1.0,
+                          Reduction reduction = Reduction::Mean) -> Variable;
+
+/**
+ * @brief Poisson Negative Log-Likelihood Loss
+ *
+ * Computes the loss for a Poisson-distributed target:
+ *
+ * \f[
+ * \text{loss}(x, y) = \exp(x) - y \cdot x
+ * \f]
+ *
+ * when log_input=true (default), or:
+ *
+ * \f[
+ * \text{loss}(x, y) = x - y \cdot \log(x + \epsilon)
+ * \f]
+ *
+ * @param log_input If true, input is in log-space (default: true)
+ * @param full Include Stirling approximation term (default: false)
+ * @param eps Small value for numerical stability (default: 1e-8)
+ * @param reduction How to reduce the loss (default: Mean)
+ */
+class PoissonNLLLoss {
+public:
+    explicit PoissonNLLLoss(bool log_input = true, bool full = false,
+                            double eps = 1e-8,
+                            Reduction reduction = Reduction::Mean);
+
+    auto forward(const Variable& input, const Variable& target) -> Variable;
+    auto operator()(const Variable& input, const Variable& target) -> Variable {
+        return forward(input, target);
+    }
+
+private:
+    bool log_input_;
+    bool full_;
+    double eps_;
+    Reduction reduction_;
+};
+
+auto poisson_nll_loss(const Variable& input, const Variable& target,
+                      bool log_input = true, bool full = false,
+                      double eps = 1e-8,
+                      Reduction reduction = Reduction::Mean) -> Variable;
+
+/**
+ * @brief Cosine Embedding Loss
+ *
+ * Measures whether two inputs are similar (y=1) or dissimilar (y=-1)
+ * using cosine similarity:
+ *
+ * \f[
+ * \text{loss}(x_1, x_2, y) = \begin{cases}
+ *   1 - \cos(x_1, x_2) & \text{if } y = 1 \\
+ *   \max(0, \cos(x_1, x_2) - \text{margin}) & \text{if } y = -1
+ * \end{cases}
+ * \f]
+ *
+ * @param margin Margin for dissimilar pairs (default: 0.0)
+ * @param reduction How to reduce the loss (default: Mean)
+ */
+class CosineEmbeddingLoss {
+public:
+    explicit CosineEmbeddingLoss(double margin = 0.0,
+                                  Reduction reduction = Reduction::Mean);
+
+    auto forward(const Variable& input1, const Variable& input2,
+                 const Variable& target) -> Variable;
+
+    auto operator()(const Variable& input1, const Variable& input2,
+                   const Variable& target) -> Variable {
+        return forward(input1, input2, target);
+    }
+
+private:
+    double margin_;
+    Reduction reduction_;
+};
+
+auto cosine_embedding_loss(const Variable& input1, const Variable& input2,
+                           const Variable& target,
+                           double margin = 0.0,
+                           Reduction reduction = Reduction::Mean) -> Variable;
+
+/**
+ * @brief Triplet Margin Loss
+ *
+ * Alias for TripletLoss (see contrastive.hpp). Measures relative distance
+ * between anchor-positive and anchor-negative pairs.
+ *
+ * \f[
+ * L(a, p, n) = \max(0, d(a, p) - d(a, n) + \text{margin})
+ * \f]
+ *
+ * @param margin Margin between positive/negative distances (default: 1.0)
+ * @param p Norm degree for distance (default: 2.0)
+ * @param swap Use distance swap heuristic (default: false)
+ * @param reduction How to reduce the loss (default: Mean)
+ */
+class TripletMarginLoss {
+public:
+    explicit TripletMarginLoss(double margin = 1.0, double p = 2.0,
+                                bool swap = false,
+                                Reduction reduction = Reduction::Mean);
+
+    auto forward(const Variable& anchor, const Variable& positive,
+                 const Variable& negative) -> Variable;
+
+    auto operator()(const Variable& anchor, const Variable& positive,
+                   const Variable& negative) -> Variable {
+        return forward(anchor, positive, negative);
+    }
+
+private:
+    double margin_;
+    double p_;
+    bool swap_;
+    Reduction reduction_;
+};
+
+auto triplet_margin_loss(const Variable& anchor, const Variable& positive,
+                         const Variable& negative,
+                         double margin = 1.0, double p = 2.0,
+                         bool swap = false,
+                         Reduction reduction = Reduction::Mean) -> Variable;
+
+/**
+ * @brief Multi-Label Soft Margin Loss
+ *
+ * Multi-label one-versus-all loss based on max-entropy:
+ *
+ * \f[
+ * \text{loss}(x, y) = -\frac{1}{C}\sum_c \left[ y_c \log(\sigma(x_c))
+ *                      + (1-y_c) \log(1-\sigma(x_c)) \right]
+ * \f]
+ *
+ * @param reduction How to reduce the loss (default: Mean)
+ */
+class MultiLabelSoftMarginLoss {
+public:
+    explicit MultiLabelSoftMarginLoss(Reduction reduction = Reduction::Mean);
+
+    auto forward(const Variable& input, const Variable& target) -> Variable;
+    auto operator()(const Variable& input, const Variable& target) -> Variable {
+        return forward(input, target);
+    }
+
+private:
+    Reduction reduction_;
+};
+
+auto multi_label_soft_margin_loss(const Variable& input, const Variable& target,
+                                   Reduction reduction = Reduction::Mean) -> Variable;
+
+/**
+ * @brief Multi-Class Margin Loss (Hinge Loss)
+ *
+ * Creates a criterion that optimizes a multi-class classification hinge loss:
+ *
+ * \f[
+ * \text{loss}(x, y) = \frac{1}{C}\sum_{j \neq y} \max(0, \text{margin} - x_y + x_j)^p
+ * \f]
+ *
+ * @param p Exponent (1 or 2, default: 1)
+ * @param margin Margin threshold (default: 1.0)
+ * @param reduction How to reduce the loss (default: Mean)
+ */
+class MultiMarginLoss {
+public:
+    explicit MultiMarginLoss(int p = 1, double margin = 1.0,
+                              Reduction reduction = Reduction::Mean);
+
+    auto forward(const Variable& input, const Tensor& target) -> Variable;
+    auto operator()(const Variable& input, const Tensor& target) -> Variable {
+        return forward(input, target);
+    }
+
+private:
+    int p_;
+    double margin_;
+    Reduction reduction_;
+};
+
+auto multi_margin_loss(const Variable& input, const Tensor& target,
+                       int p = 1, double margin = 1.0,
+                       Reduction reduction = Reduction::Mean) -> Variable;
+
+/**
+ * @brief Gaussian Negative Log-Likelihood Loss
+ *
+ * Computes the negative log-likelihood of a Gaussian distribution:
+ *
+ * \f[
+ * \text{loss}(x, y, \sigma^2) = \frac{1}{2}\left[\log(\sigma^2) +
+ *    \frac{(x - y)^2}{\sigma^2}\right]
+ * \f]
+ *
+ * Optionally includes the constant \f$\frac{1}{2}\log(2\pi)\f$ when full=true.
+ *
+ * @param full Include constant term (default: false)
+ * @param eps Minimum variance for numerical stability (default: 1e-6)
+ * @param reduction How to reduce the loss (default: Mean)
+ */
+class GaussianNLLLoss {
+public:
+    explicit GaussianNLLLoss(bool full = false, double eps = 1e-6,
+                              Reduction reduction = Reduction::Mean);
+
+    auto forward(const Variable& input, const Variable& target,
+                 const Variable& var) -> Variable;
+
+    auto operator()(const Variable& input, const Variable& target,
+                   const Variable& var) -> Variable {
+        return forward(input, target, var);
+    }
+
+private:
+    bool full_;
+    double eps_;
+    Reduction reduction_;
+};
+
+auto gaussian_nll_loss(const Variable& input, const Variable& target,
+                       const Variable& var,
+                       bool full = false, double eps = 1e-6,
+                       Reduction reduction = Reduction::Mean) -> Variable;
+
 /** @} */ // end of functional_advanced_losses group
 
 } // namespace nn

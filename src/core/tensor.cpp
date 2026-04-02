@@ -15,6 +15,9 @@
 #include <numeric>
 #include <algorithm>
 #include <array>
+#include <mutex>
+#include <shared_mutex>
+#include <unordered_set>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -1554,6 +1557,72 @@ auto Tensor::select(int64_t dim, int64_t index) const -> Tensor {
 
 auto Tensor::chunk(int64_t chunks, int64_t dim) const -> std::vector<Tensor> {
     return tenzor::chunk(*this, chunks, dim);
+}
+
+// ============================================================================
+// Named Dimensions (experimental)
+// ============================================================================
+
+auto Dimname::intern(std::string_view name) -> const std::string* {
+    static std::unordered_set<std::string> pool;
+    static std::shared_mutex mutex;
+
+    // Fast path: read lock
+    {
+        std::shared_lock lock(mutex);
+        auto it = pool.find(std::string(name));
+        if (it != pool.end()) return &(*it);
+    }
+    // Slow path: write lock
+    {
+        std::unique_lock lock(mutex);
+        auto [it, inserted] = pool.emplace(name);
+        return &(*it);
+    }
+}
+
+auto Tensor::names() const -> std::optional<DimnameList> {
+    if (!impl_) return std::nullopt;
+    return impl_->names_;
+}
+
+auto Tensor::has_names() const noexcept -> bool {
+    return impl_ && impl_->names_.has_value();
+}
+
+auto Tensor::rename(DimnameList names) const -> Tensor {
+    if (!impl_) throw std::runtime_error("rename: tensor is not initialized");
+    if (static_cast<int64_t>(names.size()) != ndim()) {
+        throw std::invalid_argument(
+            "rename: expected " + std::to_string(ndim()) + " names, got " +
+            std::to_string(names.size()));
+    }
+    validate_dimnames(names);
+
+    // Create a new TensorImpl that shares storage but has different names
+    auto new_impl = std::make_shared<TensorImpl>(*impl_);
+    new_impl->names_ = std::move(names);
+    Tensor result;
+    result.impl_ = std::move(new_impl);
+    return result;
+}
+
+auto Tensor::rename(std::optional<DimnameList> names) const -> Tensor {
+    if (!names) {
+        auto new_impl = std::make_shared<TensorImpl>(*impl_);
+        new_impl->names_ = std::nullopt;
+        Tensor result;
+        result.impl_ = std::move(new_impl);
+        return result;
+    }
+    return rename(std::move(*names));
+}
+
+auto Tensor::dim_index(std::string_view name) const -> int64_t {
+    if (!impl_ || !impl_->names_) {
+        throw std::invalid_argument("dim_index: tensor has no named dimensions");
+    }
+    return find_dim_by_name(*impl_->names_, name);
 }
 
 } // namespace tenzor

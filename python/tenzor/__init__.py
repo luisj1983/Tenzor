@@ -96,6 +96,16 @@ if _os.path.exists(_data_path):
     _sys.modules['tenzor.data'] = _data_module
     data = _data_module
 
+# Load autograd submodule with Python Function base class
+_autograd_path = _os.path.join(_os.path.dirname(__file__), 'autograd.py')
+if _os.path.exists(_autograd_path):
+    _autograd_spec = _importlib_util.spec_from_file_location(
+        'tenzor.autograd', _autograd_path)
+    _autograd_module = _importlib_util.module_from_spec(_autograd_spec)
+    _autograd_spec.loader.exec_module(_autograd_module)
+    _sys.modules['tenzor.autograd'] = _autograd_module
+    autograd = _autograd_module
+
 __version__ = "1.0.0"
 
 __all__ = [
