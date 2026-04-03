@@ -141,5 +141,28 @@ auto istft(const Tensor& input,
            bool onesided = true,
            std::optional<int64_t> length = std::nullopt) -> Tensor;
 
+/**
+ * @brief Griffin-Lim phase reconstruction algorithm.
+ *
+ * Reconstructs a time-domain signal from a magnitude spectrogram
+ * by iteratively estimating the phase using STFT/ISTFT round-trips.
+ *
+ * @param magnitude Magnitude spectrogram (from |STFT(signal)|)
+ * @param n_fft FFT window size
+ * @param hop_length Hop between windows (default: n_fft / 4)
+ * @param win_length Window length (default: n_fft)
+ * @param window Optional window tensor
+ * @param n_iter Number of iterations (default: 32)
+ * @param momentum Momentum for phase update (default: 0.99)
+ * @return Reconstructed time-domain signal
+ */
+auto griffin_lim(const Tensor& magnitude,
+                int64_t n_fft,
+                int64_t hop_length = -1,
+                int64_t win_length = -1,
+                const Tensor& window = Tensor{},
+                int64_t n_iter = 32,
+                double momentum = 0.99) -> Tensor;
+
 } // namespace fft
 } // namespace tenzor

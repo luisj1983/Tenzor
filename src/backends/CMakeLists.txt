@@ -20,3 +20,7 @@ if(TENZOR_BUILD_VULKAN)
     add_subdirectory(vulkan)
 endif()
 
+if(TENZOR_BUILD_MPS AND APPLE)
+    add_subdirectory(mps)
+endif()
+

@@ -244,7 +244,8 @@ private:
  * }
  * @endcode
  */
-class DistributedDataParallel : public Module {
+class [[deprecated("Use tenzor::distributed::DistributedDataParallel from <tenzor/distributed/ddp.hpp> instead")]]
+DistributedDataParallel : public Module {
 public:
     /**
      * @brief Construct DistributedDataParallel wrapper.

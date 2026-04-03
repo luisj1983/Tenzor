@@ -2449,7 +2449,9 @@ PYBIND11_MODULE(tenzor_core, m) {
          return tenzor::scatter(input, dim, index, src);
          }, "Scatter elements along dimension",
          py::arg("input"), py::arg("dim"), py::arg("index"), py::arg("src"));
-    m.def("scatter_add", &tenzor::scatter_add, "Scatter-add elements along dimension",
+    m.def("scatter_add", [](const tenzor::Tensor& input, int64_t dim, const tenzor::Tensor& index, const tenzor::Tensor& src) {
+         return tenzor::scatter_add(input, dim, index, src);
+         }, "Scatter-add elements along dimension",
          py::arg("input"), py::arg("dim"), py::arg("index"), py::arg("src"));
     m.def("masked_select", &tenzor::masked_select, "Select elements where mask is true",
          py::arg("input"), py::arg("mask"));

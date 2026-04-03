@@ -44,6 +44,13 @@ auto Device::from_string(std::string_view str) -> Device {
         return Device::vulkan(parse_device_index(str, 7));
     }
 
+    if (str.starts_with("mps:")) {
+        return Device::mps(parse_device_index(str, 4));
+    }
+    if (str == "mps") {
+        return Device::mps(0);
+    }
+
     throw DeviceException("Invalid device string: " + std::string(str));
 }
 

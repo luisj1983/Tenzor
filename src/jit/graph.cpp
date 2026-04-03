@@ -1800,6 +1800,33 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             break;
 
         // ====================================================================
+        // Shape guard — runtime check, triggers retrace on mismatch
+        // ====================================================================
+        case OpType::ShapeGuard: {
+            // Input: tensor to check
+            // Attribute: expected_shape (vec<int64_t>)
+            if (!input_vars.empty()) {
+                auto actual_shape = input_vars[0].tensor().shape();
+                auto expected = node->get_vec_attr("expected_shape");
+                bool match = (static_cast<int64_t>(actual_shape.size()) == static_cast<int64_t>(expected.size()));
+                if (match) {
+                    for (size_t i = 0; i < expected.size(); ++i) {
+                        if (actual_shape[i] != expected[i]) {
+                            match = false;
+                            break;
+                        }
+                    }
+                }
+                if (!match) {
+                    needs_retrace_ = true;
+                }
+                // Pass through input unchanged
+                outputs.push_back(input_vars[0]);
+            }
+            break;
+        }
+
+        // ====================================================================
         // Control flow
         // ====================================================================
         case OpType::If: {

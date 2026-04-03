@@ -32,6 +32,7 @@ set(TENZOR_CORE_SOURCES
     ops/fused_ops.cpp
     ops/advanced.cpp
     ops/fft.cpp
+    ops/windows.cpp
     ops/vision.cpp
     ops/detection.cpp
     ops/async_ops.cpp

@@ -612,6 +612,9 @@ auto gather(const Variable& input, int64_t dim, const Tensor& index) -> Variable
 /// Scatter src into self along dim. Grad: scatter zeros / gather
 auto scatter(const Variable& input, int64_t dim, const Tensor& index, const Variable& src) -> Variable;
 
+/// Scatter-add src into input along dim. Grad: identity for input, gather for src
+auto scatter_add(const Variable& input, int64_t dim, const Tensor& index, const Variable& src) -> Variable;
+
 /// Select elements along dim by index. Grad: index_add
 auto index_select(const Variable& input, int64_t dim, const Tensor& index) -> Variable;
 

@@ -40,6 +40,7 @@ struct Device {
         ROCm,        ///< AMD ROCm backend
         OneAPI,      ///< Intel OneAPI backend
         Vulkan,      ///< Vulkan cross-platform backend
+        MPS,         ///< Apple Metal Performance Shaders backend
         COUNT        ///< Sentinel — must be last
     };
 
@@ -104,6 +105,16 @@ struct Device {
     }
 
     /**
+     * @brief Create an Apple Metal/MPS device.
+     *
+     * @param idx Device index (default: 0)
+     * @return Device configured for MPS execution
+     */
+    static auto mps(int32_t idx = 0) -> Device {
+        return Device{Type::MPS, idx};
+    }
+
+    /**
      * @brief Compare devices for equality.
      *
      * @param other Device to compare with
@@ -140,6 +151,7 @@ struct Device {
             case Type::ROCm: return "rocm:" + std::to_string(index);
             case Type::OneAPI: return "oneapi:" + std::to_string(index);
             case Type::Vulkan: return "vulkan:" + std::to_string(index);
+            case Type::MPS: return "mps:" + std::to_string(index);
             case Type::COUNT: break;
         }
         return "unknown";

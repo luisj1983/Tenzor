@@ -1193,6 +1193,22 @@ auto scatter(const Variable& input, int64_t dim, const Tensor& index, const Vari
     return output;
 }
 
+auto scatter_add(const Variable& input, int64_t dim, const Tensor& index, const Variable& src) -> Variable {
+    bool needs_grad = (input.requires_grad() || src.requires_grad()) && is_grad_enabled();
+    if (!needs_grad) {
+        return Variable(tenzor::scatter_add(input.tensor(), dim, index, src.tensor()), false);
+    }
+    auto result = tenzor::scatter_add(input.tensor(), dim, index, src.tensor());
+    auto grad_fn = std::make_shared<ScatterAddBackward>();
+    auto dim_tensor = full({1}, static_cast<float>(dim), DType::Float32, Device::cpu());
+    grad_fn->save_for_backward({dim_tensor, index});
+    grad_fn->set_next_functions({input.grad_fn(), src.grad_fn()});
+    grad_fn->set_input_variables({input, src});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
 auto index_select(const Variable& input, int64_t dim, const Tensor& index) -> Variable {
     if (!input.requires_grad() || !is_grad_enabled()) {
         return Variable(tenzor::index_select(input.tensor(), dim, index), false);

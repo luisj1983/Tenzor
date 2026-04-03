@@ -733,7 +733,15 @@ private:
     std::vector<std::shared_ptr<Value>> inputs_;            ///< Graph inputs
     std::vector<std::shared_ptr<Value>> outputs_;           ///< Graph outputs
     int64_t next_node_id_{0};                               ///< Node ID counter
+    mutable bool needs_retrace_{false};                        ///< Set when ShapeGuard detects mismatch
 
+public:
+    /// Check if a shape guard triggered a retrace request
+    auto needs_retrace() const -> bool { return needs_retrace_; }
+    /// Reset the retrace flag
+    auto reset_retrace() -> void { needs_retrace_ = false; }
+
+private:
     /**
      * @brief Execute a single node.
      *

@@ -46,6 +46,11 @@ add_executable(test_custom_op_autograd test_custom_op_autograd.cpp)
 target_link_libraries(test_custom_op_autograd PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_custom_op_autograd DISCOVERY_TIMEOUT 60)
 
+# Scatter-add autograd tests
+add_executable(test_scatter_add_autograd test_scatter_add_autograd.cpp)
+target_link_libraries(test_scatter_add_autograd PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_scatter_add_autograd DISCOVERY_TIMEOUT 60)
+
 # Forward-mode AD (JVP) tests
 add_executable(test_jvp test_jvp.cpp)
 target_link_libraries(test_jvp PRIVATE tenzor_core GTest::gtest_main)

@@ -182,6 +182,65 @@ public:
     auto is_auto_sync_enabled() const -> bool { return auto_sync_enabled_; }
 
     /**
+     * @brief Communication statistics for profiling.
+     */
+    struct CommStats {
+        size_t total_bytes_transferred{0};  ///< Total bytes sent in all-reduce ops
+        size_t num_all_reduces{0};          ///< Number of all-reduce operations
+        double total_comm_time_ms{0.0};     ///< Total communication wall time in ms
+        auto avg_comm_time_ms() const -> double {
+            return num_all_reduces > 0 ? total_comm_time_ms / num_all_reduces : 0.0;
+        }
+    };
+
+    /**
+     * @brief RAII guard that disables gradient sync for gradient accumulation.
+     *
+     * Usage:
+     * @code
+     * {
+     *     auto guard = ddp.no_sync();
+     *     for (int i = 0; i < num_micro_batches - 1; ++i) {
+     *         loss = model.forward(micro_batch[i]);
+     *         loss.backward();
+     *     }
+     * }
+     * // Guard destructor re-enables sync and synchronizes gradients
+     * @endcode
+     */
+    class GradAccumulationGuard {
+    public:
+        explicit GradAccumulationGuard(DistributedDataParallel& ddp)
+            : ddp_(ddp), was_enabled_(ddp.is_auto_sync_enabled()) {
+            ddp_.auto_sync_gradients(false);
+        }
+        ~GradAccumulationGuard() {
+            ddp_.auto_sync_gradients(was_enabled_);
+            if (was_enabled_) {
+                ddp_.synchronize_gradients();
+            }
+        }
+        GradAccumulationGuard(const GradAccumulationGuard&) = delete;
+        auto operator=(const GradAccumulationGuard&) -> GradAccumulationGuard& = delete;
+    private:
+        DistributedDataParallel& ddp_;
+        bool was_enabled_;
+    };
+
+    /**
+     * @brief Create a guard that disables gradient sync for accumulation.
+     *
+     * @return RAII guard that re-enables sync on destruction
+     */
+    auto no_sync() -> GradAccumulationGuard { return GradAccumulationGuard(*this); }
+
+    /** @brief Get communication statistics */
+    auto comm_stats() const -> const CommStats& { return comm_stats_; }
+
+    /** @brief Reset communication statistics */
+    auto reset_comm_stats() -> void { comm_stats_ = CommStats{}; }
+
+    /**
      * @brief Reset all bucket ready states for the next iteration.
      *
      * Called automatically at the start of forward() when auto-sync is
@@ -194,6 +253,7 @@ private:
     ProcessGroup& pg_;
     std::vector<GradBucket> buckets_;
     bool auto_sync_enabled_{true};
+    CommStats comm_stats_;
 
     /** @brief Maps parameter data_ptr to its bucket index for O(1) hook lookup */
     std::unordered_map<const void*, size_t> param_to_bucket_;

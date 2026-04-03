@@ -175,8 +175,20 @@ auto GatherBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
 }
 
 auto GatherBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    const auto& grad_var = grad_outputs[0];
+
+    int64_t dim = static_cast<int64_t>(saved_tensors_[0].data<float>()[0]);
+    const auto& index = saved_tensors_[1];
+    const auto& shape_tensor = saved_tensors_[2];
+    auto shape_ptr = shape_tensor.data<float>();
+    auto input_shape = std::vector<int64_t>(shape_ptr, shape_ptr + shape_tensor.numel());
+
+    // Use Variable-level scatter_add to preserve gradient graph
+    auto zeros_tensor = zeros(input_shape, grad_var.tensor().dtype(), grad_var.tensor().device());
+    Variable zeros_var(zeros_tensor, false);
+    auto grad_input = scatter_add(zeros_var, dim, index, grad_var);
+
+    return {grad_input};
 }
 
 // ScatterBackward implementation
@@ -208,6 +220,45 @@ auto ScatterBackward::backward_with_variables(std::vector<Variable> grad_outputs
     auto result = backward({grad_outputs[0].tensor()});
     return {Variable(result[0], grad_outputs[0].requires_grad()),
             Variable(result[1], grad_outputs[0].requires_grad())};
+}
+
+// ScatterAddBackward implementation
+// Saves dim, index. backward: grad_input = grad (identity), grad_src = gather(grad, dim, index)
+auto ScatterAddBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("ScatterAddBackward::forward should not be called");
+}
+
+auto ScatterAddBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    const auto& grad = grad_outputs[0];
+
+    // saved_tensors_[0] = dim (scalar Float32, cast to int64_t)
+    // saved_tensors_[1] = index
+    int64_t dim = static_cast<int64_t>(saved_tensors_[0].data<float>()[0]);
+    const auto& index = saved_tensors_[1];
+
+    // grad_input: identity (scatter_add adds to input, so gradient flows through directly)
+    auto grad_input = grad.clone();
+
+    // grad_src: gather from grad at the index positions
+    auto grad_src = gather(grad, dim, index);
+
+    return {grad_input, grad_src};
+}
+
+auto ScatterAddBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    const auto& grad_var = grad_outputs[0];
+
+    int64_t dim = static_cast<int64_t>(saved_tensors_[0].data<float>()[0]);
+    const auto& index = saved_tensors_[1];
+
+    // grad_input is identity: gradient flows through unchanged
+    // Use mul by 1.0 to create a tracked variable in the graph
+    auto grad_input = grad_var * 1.0f;
+
+    // Use Variable-level gather to preserve gradient graph for higher-order derivatives
+    auto grad_src = gather(grad_var, dim, index);
+
+    return {grad_input, grad_src};
 }
 
 // IndexSelectBackward implementation
@@ -259,8 +310,42 @@ auto IndexSelectBackward::backward(std::vector<Tensor> grad_outputs) -> std::vec
 }
 
 auto IndexSelectBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    const auto& grad_var = grad_outputs[0];
+
+    int64_t dim = static_cast<int64_t>(saved_tensors_[0].data<float>()[0]);
+    const auto& index = saved_tensors_[1];
+    const auto& shape_tensor = saved_tensors_[2];
+    auto shape_ptr = shape_tensor.data<float>();
+    auto input_shape = std::vector<int64_t>(shape_ptr, shape_ptr + shape_tensor.numel());
+
+    // Build full index tensor matching grad shape for scatter_add along dim
+    auto grad_shape = std::vector<int64_t>(grad_var.tensor().shape().begin(), grad_var.tensor().shape().end());
+    auto full_index = zeros(grad_shape, DType::Int64, Device::cpu());
+    auto* idx_ptr = full_index.data<int64_t>();
+    auto* src_idx_ptr = index.to(Device::cpu()).data<int64_t>();
+
+    int64_t total = grad_var.tensor().numel();
+    int64_t dim_size = grad_shape[dim];
+    int64_t dim_stride = 1;
+    for (int64_t d = dim + 1; d < static_cast<int64_t>(grad_shape.size()); ++d) {
+        dim_stride *= grad_shape[d];
+    }
+
+    for (int64_t i = 0; i < total; ++i) {
+        int64_t pos_in_dim = (i / dim_stride) % dim_size;
+        idx_ptr[i] = src_idx_ptr[pos_in_dim];
+    }
+
+    if (grad_var.tensor().device() != Device::cpu()) {
+        full_index = full_index.to(grad_var.tensor().device());
+    }
+
+    // Use Variable-level scatter_add to preserve gradient graph
+    auto zeros_tensor = zeros(input_shape, grad_var.tensor().dtype(), grad_var.tensor().device());
+    Variable zeros_var(zeros_tensor, false);
+    auto grad_input = scatter_add(zeros_var, dim, full_index, grad_var);
+
+    return {grad_input};
 }
 
 // IndexBackward implementation
@@ -300,6 +385,10 @@ auto IndexBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Te
 }
 
 auto IndexBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // IndexBackward uses index_put with accumulation, which doesn't need
+    // Variable-level scatter_add. Fall through to Tensor-level backward
+    // since advanced indexing backward (index_put) is not differentiable
+    // through the index positions themselves.
     auto result = backward({grad_outputs[0].tensor()});
     return {Variable(result[0], grad_outputs[0].requires_grad())};
 }

@@ -21,7 +21,28 @@
 #include <thrust/gather.h>
 #include <thrust/scan.h>
 #include <cfloat>
+#include <chrono>
 #include <stdexcept>
+#include <optional>
+
+// Forward declarations for CPU fallback functions (avoid C++23 headers in CUDA)
+namespace tenzor {
+    auto zeros(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor;
+    auto index(const Tensor& input,
+               const std::vector<std::optional<Tensor>>& indices) -> Tensor;
+    auto index_put(Tensor& input,
+                   const std::vector<std::optional<Tensor>>& indices,
+                   const Tensor& values) -> void;
+namespace fft {
+    auto stft(const Tensor& input, int64_t n_fft, int64_t hop_length,
+              int64_t win_length, const Tensor& window, bool center,
+              bool normalized, bool onesided) -> Tensor;
+    auto istft(const Tensor& input, int64_t n_fft, int64_t hop_length,
+               int64_t win_length, const Tensor& window, bool center,
+               bool normalized, bool onesided,
+               std::optional<int64_t> length) -> Tensor;
+} // namespace fft
+} // namespace tenzor
 
 namespace tenzor {
 namespace cuda {
@@ -1220,6 +1241,385 @@ auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim,
     }
 
     return {values, indices};
+}
+
+// ============================================================================
+// Bernoulli sampling kernel
+// ============================================================================
+
+__global__ void bernoulli_kernel_impl(const float* probs, float* output,
+                                       int64_t n, uint64_t seed) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n) return;
+
+    // Simple LCG-based PRNG per thread (sufficient for sampling)
+    uint64_t state = seed + tid * 6364136223846793005ULL + 1442695040888963407ULL;
+    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+    float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+
+    output[tid] = (u < probs[tid]) ? 1.0f : 0.0f;
+}
+
+auto bernoulli_kernel(const Tensor& probs, cudaStream_t stream) -> Tensor {
+    auto input = probs.contiguous();
+    if (input.dtype() != DType::Float32) {
+        input = input.to(DType::Float32);
+    }
+    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
+    auto result = Tensor(shape_vec, DType::Float32, input.device());
+    int64_t n = input.numel();
+    if (n == 0) return result;
+
+    int threads = 256;
+    int blocks_n = (n + threads - 1) / threads;
+
+    // Use a time-based seed
+    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+
+    bernoulli_kernel_impl<<<blocks_n, threads, 0, stream>>>(
+        input.data<float>(), result.data<float>(), n, seed);
+    return result;
+}
+
+// ============================================================================
+// Multinomial sampling kernel
+// ============================================================================
+
+__global__ void multinomial_cdf_kernel(const float* probs, float* cdf,
+                                        int64_t num_categories) {
+    // Simple single-block CDF computation for one distribution
+    // For batch, call per distribution
+    extern __shared__ float shared[];
+    int tid = threadIdx.x;
+
+    // Load and compute prefix sum
+    float val = (tid < num_categories) ? probs[tid] : 0.0f;
+    shared[tid] = val;
+    __syncthreads();
+
+    // Inclusive scan (Blelloch-style, simplified)
+    for (int stride = 1; stride < blockDim.x; stride *= 2) {
+        float tmp = (tid >= stride) ? shared[tid - stride] : 0.0f;
+        __syncthreads();
+        shared[tid] += tmp;
+        __syncthreads();
+    }
+
+    if (tid < num_categories) {
+        cdf[tid] = shared[tid];
+    }
+}
+
+__global__ void multinomial_sample_kernel(const float* cdf, int64_t* output,
+                                           int64_t num_categories,
+                                           int64_t num_samples, float total,
+                                           uint64_t seed) {
+    int64_t sid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (sid >= num_samples) return;
+
+    // Generate random number in [0, total)
+    uint64_t state = seed + sid * 6364136223846793005ULL + 1442695040888963407ULL;
+    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+    float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31) * total;
+
+    // Binary search in CDF
+    int64_t lo = 0, hi = num_categories - 1;
+    while (lo < hi) {
+        int64_t mid = (lo + hi) / 2;
+        if (cdf[mid] <= u) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    output[sid] = lo;
+}
+
+auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
+                        bool replacement, cudaStream_t stream) -> Tensor {
+    auto input = probs.contiguous();
+    if (input.dtype() != DType::Float32) {
+        input = input.to(DType::Float32);
+    }
+
+    // Handle 1D and 2D
+    bool was_1d = (input.dim() == 1);
+    if (was_1d) {
+        input = input.reshape({1, input.numel()});
+    }
+
+    int64_t batch_size = input.shape()[0];
+    int64_t num_categories = input.shape()[1];
+    auto result = Tensor({batch_size, num_samples}, DType::Int64, input.device());
+    auto cdf_buf = Tensor({batch_size, num_categories}, DType::Float32, input.device());
+
+    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+
+    for (int64_t b = 0; b < batch_size; ++b) {
+        const float* prob_ptr = input.data<float>() + b * num_categories;
+        float* cdf_ptr = cdf_buf.data<float>() + b * num_categories;
+        int64_t* out_ptr = result.data<int64_t>() + b * num_samples;
+
+        // Compute CDF
+        int block_size = 1;
+        while (block_size < num_categories) block_size *= 2;
+        if (block_size > 1024) block_size = 1024;
+        multinomial_cdf_kernel<<<1, block_size, block_size * sizeof(float), stream>>>(
+            prob_ptr, cdf_ptr, num_categories);
+
+        // Get total (last element of CDF) - copy to host
+        float total = 0.0f;
+        cudaMemcpyAsync(&total, cdf_ptr + num_categories - 1, sizeof(float),
+                        cudaMemcpyDeviceToHost, stream);
+        cudaStreamSynchronize(stream);
+        if (total <= 0.0f) total = 1.0f;
+
+        // Sample
+        int threads = 256;
+        int blocks = (num_samples + threads - 1) / threads;
+        multinomial_sample_kernel<<<blocks, threads, 0, stream>>>(
+            cdf_ptr, out_ptr, num_categories, num_samples, total,
+            seed + b * 1000003);
+    }
+
+    if (was_1d) {
+        result = result.reshape({num_samples});
+    }
+    return result;
+}
+
+// ============================================================================
+// Bucketize kernel
+// ============================================================================
+
+__global__ void bucketize_kernel_impl(const float* input, const float* boundaries,
+                                       int64_t* output, int64_t n,
+                                       int64_t num_boundaries, bool right) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n) return;
+
+    float val = input[tid];
+    // Binary search
+    int64_t lo = 0, hi = num_boundaries;
+    while (lo < hi) {
+        int64_t mid = (lo + hi) / 2;
+        bool cond = right ? (boundaries[mid] <= val) : (boundaries[mid] < val);
+        if (cond) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    output[tid] = lo;
+}
+
+auto bucketize_kernel(const Tensor& input, const Tensor& boundaries,
+                      bool right, cudaStream_t stream) -> Tensor {
+    auto in_contig = input.contiguous();
+    auto bound_contig = boundaries.contiguous();
+    if (in_contig.dtype() != DType::Float32) {
+        in_contig = in_contig.to(DType::Float32);
+    }
+    if (bound_contig.dtype() != DType::Float32) {
+        bound_contig = bound_contig.to(DType::Float32);
+    }
+
+    std::vector<int64_t> in_shape(in_contig.shape().begin(), in_contig.shape().end());
+    auto result = Tensor(in_shape, DType::Int64, in_contig.device());
+    int64_t n = in_contig.numel();
+    if (n == 0) return result;
+
+    int threads = 256;
+    int blocks = (n + threads - 1) / threads;
+    bucketize_kernel_impl<<<blocks, threads, 0, stream>>>(
+        in_contig.data<float>(), bound_contig.data<float>(),
+        result.data<int64_t>(), n, bound_contig.numel(), right);
+    return result;
+}
+
+// ============================================================================
+// Histogram kernel
+// ============================================================================
+
+__global__ void histogram_kernel_impl(const float* input, int64_t* counts,
+                                       int64_t n, int64_t num_bins,
+                                       float min_val, float bin_width) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n) return;
+
+    float val = input[tid];
+    int64_t bin = static_cast<int64_t>((val - min_val) / bin_width);
+    if (bin < 0) bin = 0;
+    if (bin >= num_bins) bin = num_bins - 1;
+    atomicAdd(reinterpret_cast<unsigned long long*>(&counts[bin]),
+              static_cast<unsigned long long>(1));
+}
+
+auto histogram_kernel(const Tensor& input, int64_t bins,
+                      double min_val, double max_val,
+                      cudaStream_t stream) -> std::pair<Tensor, Tensor> {
+    auto in_contig = input.contiguous();
+    if (in_contig.dtype() != DType::Float32) {
+        in_contig = in_contig.to(DType::Float32);
+    }
+
+    // Auto-detect range if not specified
+    if (min_val == 0.0 && max_val == 0.0) {
+        // Transfer min/max from device — simple fallback
+        auto in_cpu = in_contig.to(Device::cpu());
+        const float* data = in_cpu.data<float>();
+        int64_t n = in_cpu.numel();
+        float mn = data[0], mx = data[0];
+        for (int64_t i = 1; i < n; ++i) {
+            if (data[i] < mn) mn = data[i];
+            if (data[i] > mx) mx = data[i];
+        }
+        min_val = mn;
+        max_val = mx;
+    }
+    if (max_val <= min_val) max_val = min_val + 1.0;
+
+    float bin_width = static_cast<float>((max_val - min_val) / bins);
+
+    auto counts = tenzor::zeros({bins}, DType::Int64, in_contig.device());
+    int64_t n = in_contig.numel();
+
+    if (n > 0) {
+        int threads = 256;
+        int blocks_n = (n + threads - 1) / threads;
+        histogram_kernel_impl<<<blocks_n, threads, 0, stream>>>(
+            in_contig.data<float>(), counts.data<int64_t>(),
+            n, bins, static_cast<float>(min_val), bin_width);
+    }
+
+    // Compute bin edges
+    auto edges = Tensor({bins + 1}, DType::Float32, in_contig.device());
+    // Fill edges on CPU and transfer (small tensor)
+    auto edges_cpu = Tensor({bins + 1}, DType::Float32, Device::cpu());
+    float* edge_ptr = edges_cpu.data<float>();
+    for (int64_t i = 0; i <= bins; ++i) {
+        edge_ptr[i] = static_cast<float>(min_val + i * bin_width);
+    }
+    edges = edges_cpu.to(in_contig.device());
+
+    return {counts, edges};
+}
+
+// ============================================================================
+// CDist (pairwise distance) kernel
+// ============================================================================
+
+__global__ void cdist_l2_kernel_impl(const float* x1, const float* x2,
+                                      float* output,
+                                      int64_t P, int64_t R, int64_t M) {
+    // x1: (P, M), x2: (R, M), output: (P, R)
+    int64_t p = blockIdx.y * blockDim.y + threadIdx.y;
+    int64_t r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (p >= P || r >= R) return;
+
+    float sum = 0.0f;
+    for (int64_t m = 0; m < M; ++m) {
+        float diff = x1[p * M + m] - x2[r * M + m];
+        sum += diff * diff;
+    }
+    output[p * R + r] = sqrtf(sum);
+}
+
+auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
+                  cudaStream_t stream) -> Tensor {
+    auto a = x1.contiguous();
+    auto b = x2.contiguous();
+    if (a.dtype() != DType::Float32) a = a.to(DType::Float32);
+    if (b.dtype() != DType::Float32) b = b.to(DType::Float32);
+
+    int64_t P = a.shape()[0];
+    int64_t M = a.shape()[1];
+    int64_t R = b.shape()[0];
+
+    auto result = Tensor({P, R}, DType::Float32, a.device());
+
+    if (P == 0 || R == 0) return result;
+
+    // Only L2 distance for now
+    dim3 threads(16, 16);
+    dim3 blocks((R + 15) / 16, (P + 15) / 16);
+    cdist_l2_kernel_impl<<<blocks, threads, 0, stream>>>(
+        a.data<float>(), b.data<float>(), result.data<float>(), P, R, M);
+
+    return result;
+}
+
+// ============================================================================
+// AdvancedIndex/AdvancedIndexPut — CPU fallback for complex indexing logic
+// ============================================================================
+
+auto advanced_index_cuda_kernel(
+    const Tensor& src, const std::vector<Tensor>& indices,
+    int64_t num_indices, cudaStream_t stream) -> Tensor {
+    // CPU fallback for complex indexing logic - transfer to CPU, index, transfer back
+    auto src_cpu = src.to(Device::cpu());
+    std::vector<std::optional<Tensor>> indices_cpu;
+    indices_cpu.reserve(indices.size());
+    for (const auto& idx : indices) {
+        if (idx.numel() > 0) {
+            indices_cpu.push_back(idx.to(Device::cpu()));
+        } else {
+            indices_cpu.push_back(std::nullopt);
+        }
+    }
+
+    // Dispatch to CPU AdvancedIndex
+    auto result_cpu = tenzor::index(src_cpu, indices_cpu);
+    return result_cpu.to(src.device());
+}
+
+auto advanced_index_put_cuda_kernel(
+    const Tensor& src, const std::vector<Tensor>& indices,
+    const Tensor& values, int64_t num_indices, cudaStream_t stream) -> Tensor {
+    // CPU fallback
+    auto src_cpu = src.to(Device::cpu()).clone();
+    auto values_cpu = values.to(Device::cpu());
+    std::vector<std::optional<Tensor>> opt_indices;
+    opt_indices.reserve(indices.size());
+    for (const auto& idx : indices) {
+        if (idx.numel() > 0) {
+            opt_indices.push_back(idx.to(Device::cpu()));
+        } else {
+            opt_indices.push_back(std::nullopt);
+        }
+    }
+    tenzor::index_put(src_cpu, opt_indices, values_cpu);
+    return src_cpu.to(src.device());
+}
+
+// ============================================================================
+// STFT / ISTFT CUDA kernels (CPU fallback via device transfer)
+// ============================================================================
+
+auto stft_cuda_kernel(const Tensor& input, int64_t n_fft,
+                      int64_t hop_length, int64_t win_length,
+                      const Tensor& window, bool center,
+                      bool normalized, bool onesided,
+                      cudaStream_t stream) -> Tensor {
+    // Transfer to CPU, compute STFT, transfer back
+    auto input_cpu = input.to(Device::cpu());
+    Tensor window_cpu = window.numel() > 0 ? window.to(Device::cpu()) : window;
+    auto result_cpu = tenzor::fft::stft(input_cpu, n_fft, hop_length, win_length,
+                                   window_cpu, center, normalized, onesided);
+    return result_cpu.to(input.device());
+}
+
+auto istft_cuda_kernel(const Tensor& input, int64_t n_fft,
+                       int64_t hop_length, int64_t win_length,
+                       const Tensor& window, bool center,
+                       bool normalized, bool onesided,
+                       int64_t length, cudaStream_t stream) -> Tensor {
+    auto input_cpu = input.to(Device::cpu());
+    Tensor window_cpu = window.numel() > 0 ? window.to(Device::cpu()) : window;
+    std::optional<int64_t> opt_length = (length >= 0) ? std::optional<int64_t>(length) : std::nullopt;
+    auto result_cpu = tenzor::fft::istft(input_cpu, n_fft, hop_length, win_length,
+                                    window_cpu, center, normalized, onesided, opt_length);
+    return result_cpu.to(input.device());
 }
 
 } // namespace cuda

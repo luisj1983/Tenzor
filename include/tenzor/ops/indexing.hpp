@@ -11,6 +11,7 @@
 #include "../core/tensor.hpp"
 
 #include <optional>
+#include <variant>
 #include <vector>
 
 namespace tenzor {
@@ -139,6 +140,49 @@ auto index(const Tensor& input,
 void index_put(Tensor& input,
                const std::vector<std::optional<Tensor>>& indices,
                const Tensor& values);
+
+// ============================================================================
+// Extended indexing types: Ellipsis, NewAxis, boolean mask support
+// ============================================================================
+
+/** @brief Sentinel type representing `...` (ellipsis) in indexing */
+struct Ellipsis {};
+
+/** @brief Sentinel type representing `None`/newaxis in indexing */
+struct NewAxis {};
+
+/** @brief Global Ellipsis constant for use in indexing expressions */
+inline constexpr Ellipsis ellipsis{};
+
+/** @brief Global NewAxis constant for use in indexing expressions */
+inline constexpr NewAxis newaxis{};
+
+/**
+ * @brief Extended index element supporting Tensor, Ellipsis, NewAxis, and full-slice.
+ *
+ * Usage:
+ * @code
+ * auto result = index_extended(t, {ellipsis, Tensor(idx)});    // t[..., idx]
+ * auto result = index_extended(t, {newaxis, nullopt});          // t[None, :]
+ * auto result = index_extended(t, {bool_mask});                 // t[mask]
+ * @endcode
+ */
+using IndexElement = std::variant<Tensor, Ellipsis, NewAxis, std::nullopt_t>;
+
+/**
+ * @brief Advanced indexing with ellipsis, newaxis, and boolean mask support.
+ *
+ * Extends the basic index() function with:
+ * - Ellipsis (...): Expands to fill remaining dimensions with full-slices
+ * - NewAxis (None): Inserts a new dimension of size 1
+ * - Boolean Tensor: Converts to integer indices via nonzero()
+ *
+ * @param input Source tensor
+ * @param indices Vector of IndexElement (Tensor, Ellipsis, NewAxis, or nullopt)
+ * @return Indexed tensor with appropriate shape
+ */
+auto index_extended(const Tensor& input,
+                    const std::vector<IndexElement>& indices) -> Tensor;
 
 /** @} */ // end of tensor_indexing group
 

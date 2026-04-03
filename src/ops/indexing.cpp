@@ -7,6 +7,7 @@
 #include "tenzor/core/shape.hpp"
 #include <cstdint>
 #include <optional>
+#include <variant>
 
 namespace tenzor {
 
@@ -315,6 +316,85 @@ void index_put(Tensor& input,
     // Copy result back into input (in-place semantics)
     // The kernel returns the modified tensor; overwrite input's data
     input = result;
+}
+
+// ============================================================================
+// Extended indexing with Ellipsis, NewAxis, and boolean mask support
+// ============================================================================
+
+auto index_extended(const Tensor& input,
+                    const std::vector<IndexElement>& indices) -> Tensor {
+    int64_t ndim = input.dim();
+
+    // Step 1: Count explicit dimensions and validate
+    int64_t num_ellipsis = 0;
+    int64_t num_explicit_dims = 0;
+    std::vector<int64_t> newaxis_positions;
+
+    for (size_t i = 0; i < indices.size(); ++i) {
+        if (std::holds_alternative<Ellipsis>(indices[i])) {
+            ++num_ellipsis;
+        } else if (std::holds_alternative<NewAxis>(indices[i])) {
+            newaxis_positions.push_back(static_cast<int64_t>(i));
+        } else if (std::holds_alternative<std::nullopt_t>(indices[i])) {
+            ++num_explicit_dims;
+        } else if (std::holds_alternative<Tensor>(indices[i])) {
+            ++num_explicit_dims;
+        }
+    }
+
+    if (num_ellipsis > 1) {
+        throw std::runtime_error("index_extended: at most one Ellipsis allowed");
+    }
+
+    // Step 2: Expand ellipsis to fill remaining dims
+    int64_t ellipsis_ndims = ndim - num_explicit_dims;
+    if (ellipsis_ndims < 0) {
+        throw std::runtime_error("index_extended: too many index dimensions");
+    }
+
+    // Build expanded optional index list
+    std::vector<std::optional<Tensor>> expanded;
+    expanded.reserve(ndim + newaxis_positions.size());
+
+    for (const auto& elem : indices) {
+        if (std::holds_alternative<Ellipsis>(elem)) {
+            // Insert ellipsis_ndims full-slices
+            for (int64_t j = 0; j < ellipsis_ndims; ++j) {
+                expanded.push_back(std::nullopt);
+            }
+        } else if (std::holds_alternative<NewAxis>(elem)) {
+            // Skip — handled after indexing
+            continue;
+        } else if (std::holds_alternative<std::nullopt_t>(elem)) {
+            expanded.push_back(std::nullopt);
+        } else if (std::holds_alternative<Tensor>(elem)) {
+            const auto& t = std::get<Tensor>(elem);
+            // Boolean mask: convert to integer indices via nonzero
+            if (t.dtype() == DType::Bool) {
+                auto nz = nonzero(t);
+                expanded.push_back(nz);
+            } else {
+                expanded.push_back(t);
+            }
+        }
+    }
+
+    // If no ellipsis was present, pad remaining dims with nullopt
+    while (static_cast<int64_t>(expanded.size()) < ndim) {
+        expanded.push_back(std::nullopt);
+    }
+
+    // Step 3: Perform the indexing
+    auto result = index(input, expanded);
+
+    // Step 4: Insert new dimensions for NewAxis positions
+    // Process in reverse order to keep positions valid
+    for (auto it = newaxis_positions.rbegin(); it != newaxis_positions.rend(); ++it) {
+        result = result.unsqueeze(*it);
+    }
+
+    return result;
 }
 
 } // namespace tenzor

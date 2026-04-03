@@ -56,6 +56,20 @@ auto CompiledModule::forward(const Variable& input) -> Variable {
     }
 
     auto results = graph_->forward({input});
+
+    // Check if a ShapeGuard triggered a retrace request
+    if (graph_->needs_retrace() && source_module_ && retrace_count_ < MAX_RETRACES) {
+        ++retrace_count_;
+        graph_->reset_retrace();
+
+        // Re-trace with the new input shape
+        auto retraced = CompiledModule::trace(source_module_, input);
+        graph_ = retraced->graph_;
+
+        // Re-execute with new graph
+        results = graph_->forward({input});
+    }
+
     if (results.empty()) {
         throw std::runtime_error("CompiledModule produced no outputs");
     }

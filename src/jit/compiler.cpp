@@ -64,6 +64,22 @@ auto DeadCodeEliminationPass::mark_reachable_nodes(const Graph& graph) -> std::u
                     worklist.push_back(producer.get());
                 }
             }
+            // Mark all nodes in subgraphs as reachable (If/Loop branches)
+            if (node->then_branch()) {
+                for (const auto& sub_node : node->then_branch()->nodes()) {
+                    worklist.push_back(sub_node.get());
+                }
+            }
+            if (node->else_branch()) {
+                for (const auto& sub_node : node->else_branch()->nodes()) {
+                    worklist.push_back(sub_node.get());
+                }
+            }
+            if (node->body()) {
+                for (const auto& sub_node : node->body()->nodes()) {
+                    worklist.push_back(sub_node.get());
+                }
+            }
         }
     }
 
@@ -135,6 +151,16 @@ auto CommonSubexpressionEliminationPass::run(Graph& graph) -> bool {
 
     for (auto& node : to_remove) {
         graph.remove_node(node);
+    }
+
+    // Recurse into subgraphs of If/Loop nodes
+    for (const auto& node : graph.nodes()) {
+        auto& then_g = node->then_branch();
+        auto& else_g = node->else_branch();
+        auto& body_g = node->body();
+        if (then_g) modified |= run(*then_g);
+        if (else_g) modified |= run(*else_g);
+        if (body_g) modified |= run(*body_g);
     }
 
     return modified;

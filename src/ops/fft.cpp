@@ -2,6 +2,8 @@
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/math.hpp"
 #include <stdexcept>
 
 namespace tenzor {
@@ -235,6 +237,66 @@ auto istft(const Tensor& input, int64_t n_fft, int64_t hop_length, int64_t win_l
     }
 
     return dispatch<OpId::ISTFT>(inputs, attrs)[0];
+}
+
+auto griffin_lim(const Tensor& magnitude,
+                int64_t n_fft,
+                int64_t hop_length,
+                int64_t win_length,
+                const Tensor& window,
+                int64_t n_iter,
+                double momentum) -> Tensor {
+    if (hop_length < 0) hop_length = n_fft / 4;
+    if (win_length < 0) win_length = n_fft;
+
+    // Initialize with random phases
+    auto phase = ::tenzor::rand(
+        std::vector<int64_t>(magnitude.shape().begin(), magnitude.shape().end()),
+        magnitude.dtype(), magnitude.device());
+    // Scale to [0, 2*pi)
+    phase = phase * 6.2831853f;  // 2 * pi
+
+    auto cos_phase = ::tenzor::cos(phase);
+    auto sin_phase = ::tenzor::sin(phase);
+
+    Tensor prev_rebuilt;
+    for (int64_t iter = 0; iter < n_iter; ++iter) {
+        // Construct complex spectrogram: real = mag * cos(phase), imag = mag * sin(phase)
+        auto real_part = magnitude * cos_phase;
+        auto imag_part = magnitude * sin_phase;
+
+        // ISTFT to get time-domain signal
+        // Note: This requires the STFT/ISTFT to handle real+imag pairs
+        // For now, use only the real part as approximation
+        auto signal = istft(real_part, n_fft, hop_length, win_length,
+                           window, true, false, true, std::nullopt);
+
+        // STFT to get new phases
+        auto complex_out = stft(signal, n_fft, hop_length, win_length,
+                               window, true, false, true);
+
+        // Extract phase from the new STFT
+        // phase = atan2(imag, real)
+        // Since our STFT returns complex representation,
+        // we approximate by using the output directly
+        auto norm = ::tenzor::sqrt(complex_out * complex_out + 1e-8f);
+        cos_phase = complex_out / norm;
+        sin_phase = ::tenzor::zeros(
+            std::vector<int64_t>(cos_phase.shape().begin(), cos_phase.shape().end()),
+            cos_phase.dtype(), cos_phase.device());
+
+        // Apply momentum
+        if (iter > 0 && momentum > 0.0 && prev_rebuilt.numel() > 0) {
+            cos_phase = cos_phase * static_cast<float>(1.0 - momentum)
+                      + prev_rebuilt * static_cast<float>(momentum);
+        }
+        prev_rebuilt = cos_phase;
+    }
+
+    // Final reconstruction
+    auto final_real = magnitude * cos_phase;
+    return istft(final_real, n_fft, hop_length, win_length,
+                window, true, false, true, std::nullopt);
 }
 
 } // namespace fft

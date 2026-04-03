@@ -41,6 +41,7 @@ auto BackendLoader::shutdown() -> void {
 
     // Destroy backends in reverse dependency order to avoid cleanup issues
     const std::vector<std::string> destruction_order = {
+        "mps",          // Apple Metal (independent)
         "oneapi",       // Independent SYCL runtime
         "vulkan",       // Independent GPU API
         "rocm",         // AMD runtime
@@ -242,6 +243,8 @@ auto BackendLoader::register_backend(std::string_view name,
         device_type = Device::Type::OneAPI;
     } else if (backend_name == "vulkan") {
         device_type = Device::Type::Vulkan;
+    } else if (backend_name == "mps") {
+        device_type = Device::Type::MPS;
     } else {
         device_type = Device::Type::CPU; // Default fallback
     }

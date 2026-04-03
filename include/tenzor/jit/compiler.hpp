@@ -996,12 +996,20 @@ public:
      */
     explicit CompiledModule(std::shared_ptr<Graph> graph);
 
+    /// Set the source module for retrace support (called by trace())
+    auto set_source_module(std::shared_ptr<nn::Module> module) -> void {
+        source_module_ = std::move(module);
+    }
+
 private:
     std::shared_ptr<Graph> graph_;                                   ///< IR graph
     std::unordered_map<std::string, std::string> metadata_;          ///< Metadata storage
     MemoryPlan memory_plan_;                                         ///< Memory plan for buffer reuse
     std::unique_ptr<CUDAGraph> cuda_graph_;                          ///< Captured CUDA graph for replay
     std::vector<std::vector<int64_t>> captured_shapes_;              ///< Input shapes at capture time
+    std::shared_ptr<nn::Module> source_module_;                      ///< Source module for re-tracing
+    int retrace_count_{0};                                           ///< Number of retraces performed
+    static constexpr int MAX_RETRACES = 3;                           ///< Maximum retrace attempts
 };
 
 // ============================================================================

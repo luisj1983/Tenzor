@@ -17,6 +17,7 @@
 #include "tenzor/distributed/process_group.hpp"
 #include "tenzor/core/dtype.hpp"
 #include <algorithm>
+#include <chrono>
 #include <stdexcept>
 #include <numeric>
 
@@ -339,6 +340,7 @@ auto DistributedDataParallel::sync_comm() -> void {
 
 auto DistributedDataParallel::all_reduce_bucket(GradBucket& bucket) -> void {
     int ws = pg_.world_size();
+    auto start = std::chrono::high_resolution_clock::now();
 
     for (auto& param : bucket.params) {
         if (!param || !param->has_grad()) {
@@ -347,6 +349,9 @@ auto DistributedDataParallel::all_reduce_bucket(GradBucket& bucket) -> void {
 
         // Get the gradient tensor
         Tensor grad = param->grad().value();
+
+        // Track communication bytes
+        comm_stats_.total_bytes_transferred += grad.numel() * dtype_size(grad.dtype());
 
         // All-reduce: sum gradients across all processes
         pg_.all_reduce(grad, ReduceOp::SUM);
@@ -358,6 +363,11 @@ auto DistributedDataParallel::all_reduce_bucket(GradBucket& bucket) -> void {
             param->set_grad(grad / static_cast<double>(ws));
         }
     }
+
+    auto end = std::chrono::high_resolution_clock::now();
+    comm_stats_.total_comm_time_ms +=
+        std::chrono::duration<double, std::milli>(end - start).count();
+    ++comm_stats_.num_all_reduces;
 
     bucket.ready = true;
 }

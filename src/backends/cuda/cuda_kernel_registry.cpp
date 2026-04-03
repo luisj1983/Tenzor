@@ -288,6 +288,21 @@ namespace cuda {
     auto median_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> std::vector<Tensor>;
     auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> std::vector<Tensor>;
 
+    // Sampling / statistics operations
+    auto bernoulli_kernel(const Tensor& probs, cudaStream_t stream) -> Tensor;
+    auto multinomial_kernel(const Tensor& probs, int64_t num_samples, bool replacement, cudaStream_t stream) -> Tensor;
+    auto bucketize_kernel(const Tensor& input, const Tensor& boundaries, bool right, cudaStream_t stream) -> Tensor;
+    auto histogram_kernel(const Tensor& input, int64_t bins, double min_val, double max_val, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
+    auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p, cudaStream_t stream) -> Tensor;
+
+    // Advanced indexing (CPU fallback)
+    auto advanced_index_cuda_kernel(const Tensor& src, const std::vector<Tensor>& indices, int64_t num_indices, cudaStream_t stream) -> Tensor;
+    auto advanced_index_put_cuda_kernel(const Tensor& src, const std::vector<Tensor>& indices, const Tensor& values, int64_t num_indices, cudaStream_t stream) -> Tensor;
+
+    // STFT/ISTFT (CPU fallback)
+    auto stft_cuda_kernel(const Tensor& input, int64_t n_fft, int64_t hop_length, int64_t win_length, const Tensor& window, bool center, bool normalized, bool onesided, cudaStream_t stream) -> Tensor;
+    auto istft_cuda_kernel(const Tensor& input, int64_t n_fft, int64_t hop_length, int64_t win_length, const Tensor& window, bool center, bool normalized, bool onesided, int64_t length, cudaStream_t stream) -> Tensor;
+
     // ROI Align operations
     auto roi_align_forward(const Tensor& features, const Tensor& rois,
                            int64_t output_h, int64_t output_w,
@@ -3058,6 +3073,93 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             int64_t K = attrs.get_int(AttrKey::K);
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
             return sp.to_dense();
+        });
+
+    // =========================================================================
+    // Sampling / Statistics operations
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Bernoulli,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            return cuda::bernoulli_kernel(inputs[0], get_cuda_stream(attrs));
+        });
+
+    table.register_single_output_kernel(OpId::Multinomial,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t num_samples = attrs.get_int(AttrKey::NumSamples, 1);
+            bool replacement = attrs.get_bool(AttrKey::Replacement, false);
+            return cuda::multinomial_kernel(inputs[0], num_samples, replacement, get_cuda_stream(attrs));
+        });
+
+    table.register_single_output_kernel(OpId::Bucketize,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            bool right = attrs.get_bool(AttrKey::Right, false);
+            return cuda::bucketize_kernel(inputs[0], inputs[1], right, get_cuda_stream(attrs));
+        });
+
+    table.register_kernel(OpId::Histogram,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t bins = attrs.get_int(AttrKey::NumBins, 10);
+            double min_val = attrs.get_float(AttrKey::Min, 0.0);
+            double max_val = attrs.get_float(AttrKey::Max, 0.0);
+            auto [counts, edges] = cuda::histogram_kernel(inputs[0], bins, min_val, max_val, get_cuda_stream(attrs));
+            return {counts, edges};
+        });
+
+    table.register_single_output_kernel(OpId::CDist,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double p = attrs.get_float(AttrKey::DistP, 2.0);
+            return cuda::cdist_kernel(inputs[0], inputs[1], p, get_cuda_stream(attrs));
+        });
+
+    // =========================================================================
+    // Advanced indexing (CPU fallback for complex indexing logic)
+    // =========================================================================
+    table.register_single_output_kernel(OpId::AdvancedIndex,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t num_indices = attrs.get_int(AttrKey::NumIndices, 0);
+            std::vector<Tensor> indices(inputs.begin() + 1, inputs.end());
+            return cuda::advanced_index_cuda_kernel(inputs[0], indices, num_indices, get_cuda_stream(attrs));
+        });
+
+    table.register_single_output_kernel(OpId::AdvancedIndexPut,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t num_indices = attrs.get_int(AttrKey::NumIndices, 0);
+            // inputs[0] = source, inputs[1..N] = index tensors, inputs[N+1] = values
+            std::vector<Tensor> indices(inputs.begin() + 1, inputs.begin() + 1 + num_indices);
+            const auto& values = inputs[1 + num_indices];
+            return cuda::advanced_index_put_cuda_kernel(inputs[0], indices, values, num_indices, get_cuda_stream(attrs));
+        });
+
+    // =========================================================================
+    // STFT / ISTFT (CPU fallback for signal processing)
+    // =========================================================================
+    table.register_single_output_kernel(OpId::STFT,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t n_fft = attrs.get_int(AttrKey::NFft);
+            int64_t hop_length = attrs.get_int(AttrKey::HopLength, -1);
+            int64_t win_length = attrs.get_int(AttrKey::WinLength, -1);
+            bool center = attrs.get_bool(AttrKey::Centered, true);
+            bool normalized = attrs.get_bool(AttrKey::Normalized, false);
+            bool onesided = attrs.get_bool(AttrKey::OnesidedAttr, true);
+            Tensor window = (inputs.size() > 1) ? inputs[1] : Tensor();
+            return cuda::stft_cuda_kernel(inputs[0], n_fft, hop_length, win_length,
+                                          window, center, normalized, onesided,
+                                          get_cuda_stream(attrs));
+        });
+
+    table.register_single_output_kernel(OpId::ISTFT,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t n_fft = attrs.get_int(AttrKey::NFft);
+            int64_t hop_length = attrs.get_int(AttrKey::HopLength, -1);
+            int64_t win_length = attrs.get_int(AttrKey::WinLength, -1);
+            bool center = attrs.get_bool(AttrKey::Centered, true);
+            bool normalized = attrs.get_bool(AttrKey::Normalized, false);
+            bool onesided = attrs.get_bool(AttrKey::OnesidedAttr, true);
+            int64_t length = attrs.get_int(AttrKey::N, -1);
+            Tensor window = (inputs.size() > 1) ? inputs[1] : Tensor();
+            return cuda::istft_cuda_kernel(inputs[0], n_fft, hop_length, win_length,
+                                           window, center, normalized, onesided,
+                                           length, get_cuda_stream(attrs));
         });
 
     // DenseToSparse: dense tensor -> CSR components [crow_indices, col_indices, values]

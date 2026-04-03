@@ -128,10 +128,12 @@ public:
      *   - CholeskyBackward, SvdBackward, QrBackward, EighBackward, EigvalshBackward
      *   - SpMMBackward, SpMVBackward
      *
-     * Ops with passthrough stubs (second derivative is zero or requires
-     * Variable-level scatter_add which is not yet available):
+     * Ops with full backward_with_variables using Variable-level scatter_add:
+     *   - GatherBackward, IndexSelectBackward, IndexBackward, ScatterAddBackward
+     *
+     * Ops with passthrough stubs (second derivative is zero or non-differentiable):
      *   - MaxBackward, MinBackward (non-differentiable mask)
-     *   - GatherBackward, ScatterBackward, IndexSelectBackward, NarrowBackward
+     *   - ScatterBackward, NarrowBackward
      *   - TopKBackward, SortBackward, UpsampleBilinearBackward
      *
      * @param grad_outputs Gradient Variables with respect to outputs
@@ -1187,6 +1189,23 @@ public:
 };
 
 class ScatterBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+};
+
+/**
+ * @brief Backward for scatter_add: output[dim][index[i]] += src[i]
+ *
+ * Forward:  y = scatter_add(x, dim, index, src)
+ * Backward: grad_x = grad_y (identity), grad_src = gather(grad_y, dim, index)
+ *
+ * Saved tensors:
+ *   [0] = dim (scalar Float32, cast to int64_t)
+ *   [1] = index tensor
+ */
+class ScatterAddBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
