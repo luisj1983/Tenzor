@@ -5,6 +5,8 @@
 #include <iostream>
 #include <sstream>
 #include <tenzor/tenzor.hpp>
+#include <tenzor/autograd/graph_optimizer.hpp>
+#include <tenzor/onnx/graph_module.hpp>
 #include <tenzor/core/device_guard.hpp>
 #include <tenzor/ops/custom_op.hpp>
 #include <tenzor/ops/indexing.hpp>
@@ -147,7 +149,19 @@ public:
             return result.cast<tenzor::Variable>();
         }
 
-        // Fall back to forward_impl if no forward override found
+        // Fall back to forward_impl if no forward override found.
+        // Emit a one-time deprecation warning: users should override forward().
+        {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                if (PyErr_WarnEx(PyExc_DeprecationWarning,
+                        "Overriding forward_impl() is deprecated. "
+                        "Override forward() instead (same as PyTorch).", 1) < 0) {
+                    throw py::error_already_set();
+                }
+            }
+        }
         PYBIND11_OVERRIDE_PURE(
             tenzor::Variable,           // Return type
             tenzor::nn::Module,         // Parent class
@@ -623,6 +637,8 @@ PYBIND11_MODULE(tenzor_core, m) {
             "Check if tensor is contiguous. Optionally specify memory_format (channels_last, etc)")
         .def("memory_format", &tenzor::Tensor::memory_format,
              "Get the memory format of the tensor (contiguous_format or channels_last)")
+        .def("version", &tenzor::Tensor::version,
+             "Get the version counter (incremented by in-place operations)")
         .def("to", py::overload_cast<tenzor::Device>(&tenzor::Tensor::to, py::const_),
              py::arg("device"),
              "Move tensor to specified device",
@@ -2689,47 +2705,39 @@ PYBIND11_MODULE(tenzor_core, m) {
         // In-place operators
         .def("__iadd__", [](tenzor::Variable& a, const tenzor::Variable& b) -> tenzor::Variable& {
             tenzor::add_(a.tensor(), b.tensor());
-            a.tensor().bump_version();
             return a;
         }, py::is_operator())
         .def("__isub__", [](tenzor::Variable& a, const tenzor::Variable& b) -> tenzor::Variable& {
             tenzor::sub_(a.tensor(), b.tensor());
-            a.tensor().bump_version();
             return a;
         }, py::is_operator())
         .def("__imul__", [](tenzor::Variable& a, const tenzor::Variable& b) -> tenzor::Variable& {
             tenzor::mul_(a.tensor(), b.tensor());
-            a.tensor().bump_version();
             return a;
         }, py::is_operator())
         .def("__itruediv__", [](tenzor::Variable& a, const tenzor::Variable& b) -> tenzor::Variable& {
             tenzor::div_(a.tensor(), b.tensor());
-            a.tensor().bump_version();
             return a;
         }, py::is_operator())
         // Scalar in-place
         .def("__iadd__", [](tenzor::Variable& a, float b) -> tenzor::Variable& {
             auto scalar_t = tenzor::full({1}, static_cast<double>(b), a.dtype(), a.device());
             tenzor::add_(a.tensor(), scalar_t);
-            a.tensor().bump_version();
             return a;
         }, py::is_operator())
         .def("__isub__", [](tenzor::Variable& a, float b) -> tenzor::Variable& {
             auto scalar_t = tenzor::full({1}, static_cast<double>(b), a.dtype(), a.device());
             tenzor::sub_(a.tensor(), scalar_t);
-            a.tensor().bump_version();
             return a;
         }, py::is_operator())
         .def("__imul__", [](tenzor::Variable& a, float b) -> tenzor::Variable& {
             auto scalar_t = tenzor::full({1}, static_cast<double>(b), a.dtype(), a.device());
             tenzor::mul_(a.tensor(), scalar_t);
-            a.tensor().bump_version();
             return a;
         }, py::is_operator())
         .def("__itruediv__", [](tenzor::Variable& a, float b) -> tenzor::Variable& {
             auto scalar_t = tenzor::full({1}, static_cast<double>(b), a.dtype(), a.device());
             tenzor::div_(a.tensor(), scalar_t);
-            a.tensor().bump_version();
             return a;
         }, py::is_operator())
         // Numeric protocol
@@ -3093,7 +3101,7 @@ PYBIND11_MODULE(tenzor_core, m) {
         }
     };
 
-    py::class_<PyFunctionCtx>(m, "FunctionCtx",
+    py::class_<PyFunctionCtx, std::shared_ptr<PyFunctionCtx>>(m, "FunctionCtx",
         "Context object for custom autograd Functions")
         .def("save_for_backward", &PyFunctionCtx::save_for_backward,
              "Save tensors for backward pass")
@@ -3133,7 +3141,13 @@ PYBIND11_MODULE(tenzor_core, m) {
                     }
                 }
                 // Save tensors from ctx into C++ Function's saved_tensors_
+                // and record their version counters for in-place detection
                 saved_tensors_ = ctx_->saved_tensors_;
+                saved_versions_.clear();
+                saved_versions_.reserve(saved_tensors_.size());
+                for (auto& t : saved_tensors_) {
+                    saved_versions_.push_back(t.version());
+                }
                 return outputs;
             } catch (py::error_already_set&) {
                 throw;  // Preserves Python traceback
@@ -3171,6 +3185,26 @@ PYBIND11_MODULE(tenzor_core, m) {
                 throw;  // Preserves Python traceback
             }
         }
+
+        auto backward_with_variables(std::vector<tenzor::Variable> grad_outputs) -> std::vector<tenzor::Variable> override {
+            // Extract tensors, call the Python backward, wrap results with requires_grad=true
+            std::vector<tenzor::Tensor> tensor_grads;
+            tensor_grads.reserve(grad_outputs.size());
+            for (auto& var : grad_outputs) {
+                tensor_grads.push_back(var.tensor());
+            }
+
+            auto result_tensors = backward(tensor_grads);
+
+            std::vector<tenzor::Variable> result_vars;
+            result_vars.reserve(result_tensors.size());
+            for (auto& t : result_tensors) {
+                result_vars.emplace_back(t, true);
+            }
+            return result_vars;
+        }
+
+        auto name() const -> std::string override { return "PyCustomFunction"; }
     };
 
     // The Python-facing autograd.Function class
@@ -3323,6 +3357,21 @@ PYBIND11_MODULE(tenzor_core, m) {
     "Generate Graphviz DOT string for the computation graph",
     py::arg("root"),
     py::arg("params") = py::dict());
+
+    // autograd.optimize_graph() - graph optimization
+    autograd_mod.def("optimize_graph", [](tenzor::Variable& root) {
+        tenzor::GraphOptimizer optimizer;
+        auto stats = optimizer.optimize_variable(root);
+        py::dict result;
+        result["linear_relu_fused"] = stats.linear_relu_fused;
+        result["conv_batchnorm_fused"] = stats.conv_batchnorm_fused;
+        result["dead_nodes_removed"] = stats.dead_nodes_removed;
+        result["total"] = stats.total();
+        return result;
+    },
+    py::arg("root"),
+    "Optimize the computation graph of a Variable. Returns optimization stats dict.\n"
+    "This is opt-in and does NOT run automatically during backward().");
 
     // Neural network
     auto nn = m.def_submodule("nn", "Neural network components");
@@ -6894,6 +6943,19 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("set_device", &tenzor::onnx::ONNXImporter::set_device,
              py::arg("device"),
              "Set target device for imported model");
+
+    // GraphModule for DAG-structured ONNX models
+    py::class_<tenzor::onnx::GraphModule, tenzor::nn::Module,
+               std::shared_ptr<tenzor::onnx::GraphModule>>(onnx_mod, "GraphModule",
+        "DAG-aware module for executing non-sequential ONNX graphs")
+        .def(py::init<>())
+        .def("add_constant", &tenzor::onnx::GraphModule::add_constant,
+             py::arg("name"), py::arg("value"))
+        .def("set_input_names", &tenzor::onnx::GraphModule::set_input_names,
+             py::arg("names"))
+        .def("set_output_names", &tenzor::onnx::GraphModule::set_output_names,
+             py::arg("names"))
+        .def("num_ops", &tenzor::onnx::GraphModule::num_ops);
 
     // ONNXModelData struct (read-only access)
     py::class_<tenzor::onnx::ONNXModelData>(onnx_mod, "ModelData",

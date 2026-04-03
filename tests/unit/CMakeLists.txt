@@ -522,6 +522,10 @@ target_link_libraries(test_dtype_edge_cases_multidtype PRIVATE tenzor_core GTest
 add_executable(test_sparse test_sparse.cpp)
 target_link_libraries(test_sparse PRIVATE tenzor_core GTest::gtest_main)
 
+# Sparse Autograd Tests
+add_executable(test_sparse_autograd test_sparse_autograd.cpp)
+target_link_libraries(test_sparse_autograd PRIVATE tenzor_core GTest::gtest_main)
+
 # Complex Arithmetic Tests
 add_executable(test_complex_arithmetic test_complex_arithmetic.cpp)
 target_link_libraries(test_complex_arithmetic PRIVATE tenzor_core GTest::gtest_main)
@@ -677,6 +681,7 @@ tenzor_discover_tests(test_async_ops_multidtype DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_dataloader_multidtype DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_dtype_edge_cases_multidtype DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_sparse DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_sparse_autograd DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_complex_arithmetic DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_fft DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_linalg DISCOVERY_TIMEOUT 60)

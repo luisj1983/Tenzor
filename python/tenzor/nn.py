@@ -11,7 +11,7 @@ Example:
             self.fc1 = tz.nn.Linear(10, 20)  # Auto-registered
             self.fc2 = tz.nn.Linear(20, 10)  # Auto-registered
 
-        def forward_impl(self, x):
+        def forward(self, x):
             x = self.fc1(x)
             x = tz.nn.relu(x)
             return self.fc2(x)
@@ -56,7 +56,7 @@ class Module(_CppModule):
                 self.fc1 = tz.nn.Linear(800, 500)
                 self.fc2 = tz.nn.Linear(500, 10)
 
-            def forward_impl(self, x):
+            def forward(self, x):
                 x = tz.nn.relu(self.conv1(x))
                 x = tz.nn.max_pool2d(x, 2)
                 x = tz.nn.relu(self.conv2(x))
@@ -446,7 +446,7 @@ class Parameter(metaclass=_ParameterMeta):
                 self.weight = tz.nn.Parameter(tz.randn([10, 5]))
                 self.bias = tz.nn.Parameter(tz.zeros([5]))
 
-            def forward_impl(self, x):
+            def forward(self, x):
                 return x @ self.weight + self.bias
     """
 

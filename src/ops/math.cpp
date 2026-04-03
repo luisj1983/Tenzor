@@ -47,6 +47,41 @@ static void validate_broadcast_shapes(const char* op_name,
     }
 }
 
+// ---------------------------------------------------------------------------
+// Helper templates to eliminate repeated promote→validate→contiguous→dispatch
+// ---------------------------------------------------------------------------
+namespace detail {
+
+// Standard binary op: promote dtypes, validate broadcast, make contiguous, dispatch
+template<OpId Op>
+auto binary_op_promoted(const char* name, const Tensor& a, const Tensor& b) -> Tensor {
+    auto [ap, bp] = promote_inputs(a, b);
+    validate_broadcast_shapes(name, ap.shape(), bp.shape());
+    Tensor ac = ap.is_contiguous() ? ap : ap.contiguous();
+    Tensor bc = bp.is_contiguous() ? bp : bp.contiguous();
+    std::vector<Tensor> inputs = {ac, bc};
+    return dispatch<Op>(inputs)[0];
+}
+
+// Binary op without type promotion (logical ops)
+template<OpId Op>
+auto binary_op_raw(const char* name, const Tensor& a, const Tensor& b) -> Tensor {
+    validate_broadcast_shapes(name, a.shape(), b.shape());
+    auto ac = a.is_contiguous() ? a : a.contiguous();
+    auto bc = b.is_contiguous() ? b : b.contiguous();
+    std::vector<Tensor> inputs = {ac, bc};
+    return dispatch<Op>(inputs)[0];
+}
+
+// Simple unary op: just dispatch
+template<OpId Op>
+auto unary_op(const Tensor& input) -> Tensor {
+    std::vector<Tensor> inputs = {input};
+    return dispatch<Op>(inputs)[0];
+}
+
+} // namespace detail
+
 // Math operation implementations - dispatched to backend kernels
 
 auto add(const Tensor& a, const Tensor& b) -> Tensor {
@@ -65,30 +100,15 @@ auto add(const Tensor& a, const Tensor& b) -> Tensor {
 }
 
 auto sub(const Tensor& a, const Tensor& b) -> Tensor {
-    auto [ap, bp] = promote_inputs(a, b);
-    validate_broadcast_shapes("sub", ap.shape(), bp.shape());
-    Tensor a_contiguous = ap.is_contiguous() ? ap : ap.contiguous();
-    Tensor b_contiguous = bp.is_contiguous() ? bp : bp.contiguous();
-    std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
-    return dispatch<OpId::Sub>(inputs)[0];
+    return detail::binary_op_promoted<OpId::Sub>("sub", a, b);
 }
 
 auto mul(const Tensor& a, const Tensor& b) -> Tensor {
-    auto [ap, bp] = promote_inputs(a, b);
-    validate_broadcast_shapes("mul", ap.shape(), bp.shape());
-    Tensor a_contiguous = ap.is_contiguous() ? ap : ap.contiguous();
-    Tensor b_contiguous = bp.is_contiguous() ? bp : bp.contiguous();
-    std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
-    return dispatch<OpId::Mul>(inputs)[0];
+    return detail::binary_op_promoted<OpId::Mul>("mul", a, b);
 }
 
 auto div(const Tensor& a, const Tensor& b) -> Tensor {
-    auto [ap, bp] = promote_inputs(a, b);
-    validate_broadcast_shapes("div", ap.shape(), bp.shape());
-    Tensor a_contiguous = ap.is_contiguous() ? ap : ap.contiguous();
-    Tensor b_contiguous = bp.is_contiguous() ? bp : bp.contiguous();
-    std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
-    return dispatch<OpId::Div>(inputs)[0];
+    return detail::binary_op_promoted<OpId::Div>("div", a, b);
 }
 
 // Scalar arithmetic overloads — avoid creating temporary scalar tensors.
@@ -210,98 +230,30 @@ auto pow(const Tensor& input, float exponent) -> Tensor {
     return dispatch(OpId::Pow, inputs, attrs)[0];
 }
 
-auto exp(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Exp>(inputs)[0];
-}
-
-auto log(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Log>(inputs)[0];
-}
-
-auto sqrt(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Sqrt>(inputs)[0];
-}
-
-auto sin(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Sin>(inputs)[0];
-}
-
-auto cos(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Cos>(inputs)[0];
-}
-
-auto tan(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Tan>(inputs)[0];
-}
-
-auto tanh(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Tanh>(inputs)[0];
-}
-
-auto abs(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Abs>(inputs)[0];
-}
-
-auto neg(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Neg>(inputs)[0];
-}
-
-auto reciprocal(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Reciprocal>(inputs)[0];
-}
-
-auto sign(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Sign>(inputs)[0];
-}
-
-auto sigmoid(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Sigmoid>(inputs)[0];
-}
+auto exp(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Exp>(input); }
+auto log(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Log>(input); }
+auto sqrt(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Sqrt>(input); }
+auto sin(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Sin>(input); }
+auto cos(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Cos>(input); }
+auto tan(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Tan>(input); }
+auto tanh(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Tanh>(input); }
+auto abs(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Abs>(input); }
+auto neg(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Neg>(input); }
+auto reciprocal(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Reciprocal>(input); }
+auto sign(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Sign>(input); }
+auto sigmoid(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Sigmoid>(input); }
 
 auto minimum(const Tensor& a, const Tensor& b) -> Tensor {
-    auto [ap, bp] = promote_inputs(a, b);
-    validate_broadcast_shapes("minimum", ap.shape(), bp.shape());
-    Tensor a_cont = ap.is_contiguous() ? ap : ap.contiguous();
-    Tensor b_cont = bp.is_contiguous() ? bp : bp.contiguous();
-    std::vector<Tensor> inputs = {a_cont, b_cont};
-    return dispatch<OpId::Minimum>(inputs)[0];
+    return detail::binary_op_promoted<OpId::Minimum>("minimum", a, b);
 }
 
 auto maximum(const Tensor& a, const Tensor& b) -> Tensor {
-    auto [ap, bp] = promote_inputs(a, b);
-    validate_broadcast_shapes("maximum", ap.shape(), bp.shape());
-    Tensor a_cont = ap.is_contiguous() ? ap : ap.contiguous();
-    Tensor b_cont = bp.is_contiguous() ? bp : bp.contiguous();
-    std::vector<Tensor> inputs = {a_cont, b_cont};
-    return dispatch<OpId::Maximum>(inputs)[0];
+    return detail::binary_op_promoted<OpId::Maximum>("maximum", a, b);
 }
 
-auto floor(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Floor>(inputs)[0];
-}
-
-auto ceil(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Ceil>(inputs)[0];
-}
-
-auto round(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Round>(inputs)[0];
-}
+auto floor(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Floor>(input); }
+auto ceil(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Ceil>(input); }
+auto round(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Round>(input); }
 
 auto clamp(const Tensor& input, float min, float max) -> Tensor {
     NewOpAttributes attrs;
@@ -325,85 +277,19 @@ auto clamp_max(const Tensor& input, float max) -> Tensor {
     return dispatch(OpId::ClampMax, inputs, attrs)[0];
 }
 
-auto sinh(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Sinh>(inputs)[0];
-}
-
-auto cosh(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Cosh>(inputs)[0];
-}
-
-auto atan(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Atan>(inputs)[0];
-}
-
-auto asin(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Asin>(inputs)[0];
-}
-
-auto acos(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Acos>(inputs)[0];
-}
+auto sinh(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Sinh>(input); }
+auto cosh(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Cosh>(input); }
+auto atan(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Atan>(input); }
+auto asin(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Asin>(input); }
+auto acos(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Acos>(input); }
 
 // Comparison operations — auto-promote dtypes before comparing
-auto eq(const Tensor& a, const Tensor& b) -> Tensor {
-    auto [ap, bp] = promote_inputs(a, b);
-    validate_broadcast_shapes("eq", ap.shape(), bp.shape());
-    Tensor a_contiguous = ap.is_contiguous() ? ap : ap.contiguous();
-    Tensor b_contiguous = bp.is_contiguous() ? bp : bp.contiguous();
-    std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
-    return dispatch<OpId::Eq>(inputs)[0];
-}
-
-auto ne(const Tensor& a, const Tensor& b) -> Tensor {
-    auto [ap, bp] = promote_inputs(a, b);
-    validate_broadcast_shapes("ne", ap.shape(), bp.shape());
-    Tensor a_contiguous = ap.is_contiguous() ? ap : ap.contiguous();
-    Tensor b_contiguous = bp.is_contiguous() ? bp : bp.contiguous();
-    std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
-    return dispatch<OpId::Ne>(inputs)[0];
-}
-
-auto lt(const Tensor& a, const Tensor& b) -> Tensor {
-    auto [ap, bp] = promote_inputs(a, b);
-    validate_broadcast_shapes("lt", ap.shape(), bp.shape());
-    Tensor a_contiguous = ap.is_contiguous() ? ap : ap.contiguous();
-    Tensor b_contiguous = bp.is_contiguous() ? bp : bp.contiguous();
-    std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
-    return dispatch<OpId::Lt>(inputs)[0];
-}
-
-auto le(const Tensor& a, const Tensor& b) -> Tensor {
-    auto [ap, bp] = promote_inputs(a, b);
-    validate_broadcast_shapes("le", ap.shape(), bp.shape());
-    Tensor a_contiguous = ap.is_contiguous() ? ap : ap.contiguous();
-    Tensor b_contiguous = bp.is_contiguous() ? bp : bp.contiguous();
-    std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
-    return dispatch<OpId::Le>(inputs)[0];
-}
-
-auto gt(const Tensor& a, const Tensor& b) -> Tensor {
-    auto [ap, bp] = promote_inputs(a, b);
-    validate_broadcast_shapes("gt", ap.shape(), bp.shape());
-    Tensor a_contiguous = ap.is_contiguous() ? ap : ap.contiguous();
-    Tensor b_contiguous = bp.is_contiguous() ? bp : bp.contiguous();
-    std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
-    return dispatch<OpId::Gt>(inputs)[0];
-}
-
-auto ge(const Tensor& a, const Tensor& b) -> Tensor {
-    auto [ap, bp] = promote_inputs(a, b);
-    validate_broadcast_shapes("ge", ap.shape(), bp.shape());
-    Tensor a_contiguous = ap.is_contiguous() ? ap : ap.contiguous();
-    Tensor b_contiguous = bp.is_contiguous() ? bp : bp.contiguous();
-    std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
-    return dispatch<OpId::Ge>(inputs)[0];
-}
+auto eq(const Tensor& a, const Tensor& b) -> Tensor { return detail::binary_op_promoted<OpId::Eq>("eq", a, b); }
+auto ne(const Tensor& a, const Tensor& b) -> Tensor { return detail::binary_op_promoted<OpId::Ne>("ne", a, b); }
+auto lt(const Tensor& a, const Tensor& b) -> Tensor { return detail::binary_op_promoted<OpId::Lt>("lt", a, b); }
+auto le(const Tensor& a, const Tensor& b) -> Tensor { return detail::binary_op_promoted<OpId::Le>("le", a, b); }
+auto gt(const Tensor& a, const Tensor& b) -> Tensor { return detail::binary_op_promoted<OpId::Gt>("gt", a, b); }
+auto ge(const Tensor& a, const Tensor& b) -> Tensor { return detail::binary_op_promoted<OpId::Ge>("ge", a, b); }
 
 // Helper to validate in-place operations don't break autograd
 static void check_inplace_autograd(const Tensor& self) {
@@ -473,81 +359,27 @@ auto div_(Tensor& self, const Tensor& other) -> Tensor& {
 // Extended Math Operations
 // =========================================================================
 
-auto log2(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Log2>(inputs)[0];
-}
-
-auto log10(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Log10>(inputs)[0];
-}
-
-auto log1p(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Log1p>(inputs)[0];
-}
-
-auto exp2(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Exp2>(inputs)[0];
-}
-
-auto expm1(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Expm1>(inputs)[0];
-}
-
-auto erf(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Erf>(inputs)[0];
-}
-
-auto erfc(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::Erfc>(inputs)[0];
-}
-
-auto isnan(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::IsNan>(inputs)[0];
-}
-
-auto isinf(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::IsInf>(inputs)[0];
-}
-
-auto isfinite(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch<OpId::IsFinite>(inputs)[0];
-}
+auto log2(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Log2>(input); }
+auto log10(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Log10>(input); }
+auto log1p(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Log1p>(input); }
+auto exp2(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Exp2>(input); }
+auto expm1(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Expm1>(input); }
+auto erf(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Erf>(input); }
+auto erfc(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Erfc>(input); }
+auto isnan(const Tensor& input) -> Tensor { return detail::unary_op<OpId::IsNan>(input); }
+auto isinf(const Tensor& input) -> Tensor { return detail::unary_op<OpId::IsInf>(input); }
+auto isfinite(const Tensor& input) -> Tensor { return detail::unary_op<OpId::IsFinite>(input); }
 
 auto atan2(const Tensor& y, const Tensor& x) -> Tensor {
-    auto [yp, xp] = promote_inputs(y, x);
-    validate_broadcast_shapes("atan2", yp.shape(), xp.shape());
-    Tensor y_c = yp.is_contiguous() ? yp : yp.contiguous();
-    Tensor x_c = xp.is_contiguous() ? xp : xp.contiguous();
-    std::vector<Tensor> inputs = {y_c, x_c};
-    return dispatch(OpId::Atan2, inputs)[0];
+    return detail::binary_op_promoted<OpId::Atan2>("atan2", y, x);
 }
 
 auto fmod(const Tensor& a, const Tensor& b) -> Tensor {
-    auto [ap, bp] = promote_inputs(a, b);
-    validate_broadcast_shapes("fmod", ap.shape(), bp.shape());
-    Tensor a_c = ap.is_contiguous() ? ap : ap.contiguous();
-    Tensor b_c = bp.is_contiguous() ? bp : bp.contiguous();
-    std::vector<Tensor> inputs = {a_c, b_c};
-    return dispatch(OpId::Fmod, inputs)[0];
+    return detail::binary_op_promoted<OpId::Fmod>("fmod", a, b);
 }
 
 auto remainder(const Tensor& a, const Tensor& b) -> Tensor {
-    auto [ap, bp] = promote_inputs(a, b);
-    validate_broadcast_shapes("remainder", ap.shape(), bp.shape());
-    Tensor a_c = ap.is_contiguous() ? ap : ap.contiguous();
-    Tensor b_c = bp.is_contiguous() ? bp : bp.contiguous();
-    std::vector<Tensor> inputs = {a_c, b_c};
-    return dispatch(OpId::Remainder, inputs)[0];
+    return detail::binary_op_promoted<OpId::Remainder>("remainder", a, b);
 }
 
 auto lerp(const Tensor& start, const Tensor& end, const Tensor& weight) -> Tensor {
@@ -564,34 +396,10 @@ auto lerp(const Tensor& start, const Tensor& end, double weight) -> Tensor {
     return dispatch(OpId::Lerp, inputs)[0];
 }
 
-auto logical_and(const Tensor& a, const Tensor& b) -> Tensor {
-    validate_broadcast_shapes("logical_and", a.shape(), b.shape());
-    auto ac = a.is_contiguous() ? a : a.contiguous();
-    auto bc = b.is_contiguous() ? b : b.contiguous();
-    std::vector<Tensor> inputs = {ac, bc};
-    return dispatch(OpId::LogicalAnd, inputs)[0];
-}
-
-auto logical_or(const Tensor& a, const Tensor& b) -> Tensor {
-    validate_broadcast_shapes("logical_or", a.shape(), b.shape());
-    auto ac = a.is_contiguous() ? a : a.contiguous();
-    auto bc = b.is_contiguous() ? b : b.contiguous();
-    std::vector<Tensor> inputs = {ac, bc};
-    return dispatch(OpId::LogicalOr, inputs)[0];
-}
-
-auto logical_not(const Tensor& input) -> Tensor {
-    std::vector<Tensor> inputs = {input};
-    return dispatch(OpId::LogicalNot, inputs)[0];
-}
-
-auto logical_xor(const Tensor& a, const Tensor& b) -> Tensor {
-    validate_broadcast_shapes("logical_xor", a.shape(), b.shape());
-    auto ac = a.is_contiguous() ? a : a.contiguous();
-    auto bc = b.is_contiguous() ? b : b.contiguous();
-    std::vector<Tensor> inputs = {ac, bc};
-    return dispatch(OpId::LogicalXor, inputs)[0];
-}
+auto logical_and(const Tensor& a, const Tensor& b) -> Tensor { return detail::binary_op_raw<OpId::LogicalAnd>("logical_and", a, b); }
+auto logical_or(const Tensor& a, const Tensor& b) -> Tensor { return detail::binary_op_raw<OpId::LogicalOr>("logical_or", a, b); }
+auto logical_not(const Tensor& input) -> Tensor { return detail::unary_op<OpId::LogicalNot>(input); }
+auto logical_xor(const Tensor& a, const Tensor& b) -> Tensor { return detail::binary_op_raw<OpId::LogicalXor>("logical_xor", a, b); }
 
 auto cross(const Tensor& input, const Tensor& other, int64_t dim) -> Tensor {
     auto shape_a = input.shape();

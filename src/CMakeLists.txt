@@ -157,6 +157,7 @@ set(TENZOR_CORE_SOURCES
     backends/cpu/kernels/quantization/quantized_conv2d.cpp
     onnx/exporter.cpp
     onnx/importer.cpp
+    onnx/graph_module.cpp
     jit/tracer.cpp
     jit/graph.cpp
     jit/compiler.cpp

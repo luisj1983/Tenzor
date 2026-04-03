@@ -10,6 +10,36 @@ namespace tenzor {
 // Main Optimization Entry Point
 // ============================================================================
 
+auto GraphOptimizer::optimize_variable(Variable& root) -> OptimizationStats {
+    // Build a ComputationGraph from the Variable's grad_fn chain
+    ComputationGraph graph;
+    std::unordered_set<Function*> visited;
+
+    std::function<void(std::shared_ptr<Function>)> build_graph;
+    build_graph = [&](std::shared_ptr<Function> fn) {
+        if (!fn || visited.count(fn.get())) return;
+        visited.insert(fn.get());
+
+        auto node = graph.add_node(fn);
+
+        for (auto& next_fn : fn->next_functions()) {
+            if (next_fn) {
+                build_graph(next_fn);
+                auto next_node = graph.add_node(next_fn);
+                graph.connect(node, next_node);
+            }
+        }
+    };
+
+    if (root.grad_fn()) {
+        build_graph(root.grad_fn());
+    }
+
+    reset_stats();
+    optimize(graph);
+    return stats_;
+}
+
 auto GraphOptimizer::optimize(ComputationGraph& graph) -> void {
     // Apply optimization passes in order
     // Fusion passes first (may create dead code)
@@ -56,10 +86,26 @@ auto GraphOptimizer::fuse_linear_relu(ComputationGraph& graph) -> size_t {
         if (!is_operation_type(next_node, "ReLUBackward")) continue;
 
         // Found a fusion opportunity: MatMul -> ReLU
-        // Note: In a real implementation, we would create a FusedLinearReLUBackward
-        // For now, we just track the fusion for statistics
         fusions.push_back({node, next_node});
         fusion_count++;
+    }
+
+    // Apply fusions: replace each MatMul+ReLU pair with FusedLinearReLUBackward
+    for (auto& [matmul_node, relu_node] : fusions) {
+        auto fused_fn = std::make_shared<FusedLinearReLUBackward>();
+
+        // Transfer the matmul's next_functions (input gradient chains)
+        if (matmul_node->function) {
+            fused_fn->set_next_functions(matmul_node->function->next_functions());
+            fused_fn->input_variables() = matmul_node->function->input_variables();
+        }
+
+        // Create fused graph node
+        auto fused_graph_node = std::make_shared<GraphNode>();
+        fused_graph_node->function = fused_fn;
+
+        // Replace: remove relu node, replace matmul node with fused
+        replace_nodes({matmul_node, relu_node}, fused_graph_node, graph);
     }
 
     // Update statistics
@@ -138,9 +184,8 @@ auto GraphOptimizer::eliminate_dead_code(ComputationGraph& graph) -> size_t {
         if (!node) continue;
 
         if (reachable.find(node.get()) == reachable.end()) {
+            graph.remove_node(node);
             dead_count++;
-            // Note: In a full implementation, we would actually remove the node
-            // from the graph. For now, we just count it.
         }
     }
 
@@ -318,33 +363,20 @@ auto GraphOptimizer::replace_nodes(const std::vector<std::shared_ptr<GraphNode>>
                                    ComputationGraph& graph) -> void {
     if (nodes.empty() || !fused_node) return;
 
-    // Get first and last nodes in the sequence
     auto first = nodes.front();
     auto last = nodes.back();
 
-    // Update fused node's connections
-    // Input edges: connect fused node to first node's predecessors
-    // Output edges: connect fused node to last node's successors
-
-    // Connect fused node outputs to last node's consumers
+    // 1. Fused node inherits the last node's outgoing edges (consumers)
     fused_node->next_nodes = last->next_nodes;
 
-    // Update reference counts for successors
-    for (const auto& next_weak : fused_node->next_nodes) {
-        auto next = next_weak.lock();
-        if (next) {
-            next->ref_count++;
-        }
+    // 2. Replace the first node with the fused node in the graph
+    //    This updates all nodes that pointed to 'first' to now point to 'fused_node'
+    graph.replace_node(first, fused_node);
+
+    // 3. Remove intermediate and last nodes from the graph
+    for (size_t i = 1; i < nodes.size(); ++i) {
+        graph.remove_node(nodes[i]);
     }
-
-    // In a full implementation, we would:
-    // 1. Find all nodes that point to 'first' and redirect them to 'fused_node'
-    // 2. Update the graph's node map
-    // 3. Decrement reference counts for removed nodes
-    // 4. Remove the old nodes from the graph
-
-    // Note: This requires more extensive graph manipulation capabilities
-    // than the current ComputationGraph API provides
 }
 
 } // namespace tenzor

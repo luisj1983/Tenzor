@@ -60,6 +60,52 @@ auto ComputationGraph::topological_sort(std::shared_ptr<GraphNode> root)
     return sorted;
 }
 
+auto ComputationGraph::remove_node(std::shared_ptr<GraphNode> node) -> bool {
+    if (!node || !node->function) return false;
+
+    auto it = nodes_.find(node->function.get());
+    if (it == nodes_.end()) return false;
+
+    // Count edges being removed
+    edge_count_ -= node->next_nodes.size();
+
+    // Remove from map
+    nodes_.erase(it);
+    return true;
+}
+
+auto ComputationGraph::replace_node(std::shared_ptr<GraphNode> old_node,
+                                    std::shared_ptr<GraphNode> new_node) -> bool {
+    if (!old_node || !old_node->function || !new_node) return false;
+
+    auto it = nodes_.find(old_node->function.get());
+    if (it == nodes_.end()) return false;
+
+    // Transfer outgoing edges from old to new
+    new_node->next_nodes = std::move(old_node->next_nodes);
+    new_node->ref_count = old_node->ref_count;
+
+    // Remove old entry, add new
+    nodes_.erase(it);
+    if (new_node->function) {
+        nodes_[new_node->function.get()] = new_node;
+    }
+
+    // Update all nodes that reference old_node in their next_nodes
+    // Since next_nodes uses weak_ptr, stale refs will simply expire.
+    // But we need to update nodes that point to old_node to point to new_node.
+    for (auto& [_, n] : nodes_) {
+        for (auto& next_weak : n->next_nodes) {
+            auto next = next_weak.lock();
+            if (next.get() == old_node.get()) {
+                next_weak = new_node;
+            }
+        }
+    }
+
+    return true;
+}
+
 auto ComputationGraph::clear() -> void {
     nodes_.clear();
     edge_count_ = 0;

@@ -1754,6 +1754,30 @@ using CustomBackwardFn = std::function<std::vector<Tensor>(
  *
  * @see register_custom_op_with_backward()
  */
+/**
+ * @brief Fused Linear+ReLU backward pass.
+ *
+ * Combines the backward passes of MatMul and ReLU into a single operation.
+ * Given forward: z = ReLU(W @ x + b), the backward is:
+ *   grad_input = W^T @ (grad_output * (z > 0))
+ * where the ReLU mask is computed from the forward output.
+ *
+ * This saves one intermediate tensor (the pre-ReLU activation) and
+ * one kernel launch compared to separate MatMul + ReLU backward.
+ */
+class FusedLinearReLUBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto name() const -> std::string override { return "FusedLinearReLUBackward"; }
+
+    void set_relu_output(Tensor output) { relu_output_ = std::move(output); }
+
+private:
+    Tensor relu_output_;  // Output of ReLU (for computing mask in backward)
+};
+
 class CustomOpBackward : public Function {
 public:
     explicit CustomOpBackward(CustomBackwardFn backward_fn)
@@ -1761,6 +1785,7 @@ public:
 
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto name() const -> std::string override { return "CustomOpBackward"; }
 
 private:

@@ -16,6 +16,7 @@
 #include <functional>
 #include "graph.hpp"
 #include "function.hpp"
+#include "variable.hpp"
 
 namespace tenzor {
 
@@ -128,6 +129,18 @@ public:
      * @note This is the recommended way to optimize a graph
      */
     auto optimize(ComputationGraph& graph) -> void;
+
+    /**
+     * @brief Optimize the computation graph rooted at a Variable.
+     *
+     * Convenience method that builds a ComputationGraph from the Variable's
+     * grad_fn chain, optimizes it, and returns the optimization stats.
+     * This is the recommended entry point for users.
+     *
+     * @param root Variable whose computation graph to optimize
+     * @return Optimization statistics
+     */
+    auto optimize_variable(Variable& root) -> OptimizationStats;
 
     /**
      * @brief Fuse Linear+ReLU operation sequences.

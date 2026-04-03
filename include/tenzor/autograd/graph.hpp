@@ -138,6 +138,32 @@ public:
         -> std::vector<std::shared_ptr<GraphNode>>;
 
     /**
+     * @brief Remove a node from the graph.
+     *
+     * Removes the specified node and all edges connected to it.
+     * Other nodes that referenced this node via next_nodes will
+     * have stale weak_ptrs (which is safe — they expire naturally).
+     *
+     * @param node Node to remove
+     * @return true if node was found and removed
+     */
+    auto remove_node(std::shared_ptr<GraphNode> node) -> bool;
+
+    /**
+     * @brief Replace a node in the graph with a different node.
+     *
+     * The replacement node inherits the original node's outgoing edges.
+     * All nodes pointing to the original via next_nodes will now
+     * resolve to the replacement (via the nodes_ map update).
+     *
+     * @param old_node Node to replace
+     * @param new_node Replacement node
+     * @return true if old_node was found and replaced
+     */
+    auto replace_node(std::shared_ptr<GraphNode> old_node,
+                     std::shared_ptr<GraphNode> new_node) -> bool;
+
+    /**
      * @brief Clear all nodes and edges from graph.
      *
      * Removes all nodes and resets edge count. Call this to free
