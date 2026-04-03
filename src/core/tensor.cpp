@@ -63,7 +63,7 @@ TensorImpl::TensorImpl(std::vector<int64_t> shape_, DType dtype_, Device device_
     }
 
     // Use DeviceStorage for ALL devices (including CPU)
-    storage = std::make_shared<DeviceStorage>(ptr, size_bytes, device);
+    storage = make_intrusive<DeviceStorage>(ptr, size_bytes, device);
 
     // Zero-initialize if requested
     if (zero_init && size_bytes > 0) {
@@ -114,7 +114,7 @@ auto Tensor::empty_uninitialized(std::vector<int64_t> shape, DType dtype, Device
 }
 
 // TensorImpl: construct from pre-existing storage (no allocation)
-TensorImpl::TensorImpl(std::shared_ptr<Storage> storage_,
+TensorImpl::TensorImpl(intrusive_ptr<Storage> storage_,
                        std::vector<int64_t> shape_,
                        std::vector<int64_t> strides_,
                        DType dtype_, Device device_)
@@ -145,7 +145,7 @@ auto Tensor::from_blob(void* data,
     size_t size_bytes = static_cast<size_t>(n) * tenzor::dtype_size(dtype);
 
     // Create ExternalStorage (does NOT take ownership unless deleter is provided)
-    auto storage = std::make_shared<ExternalStorage>(
+    auto storage = make_intrusive<ExternalStorage>(
         data, size_bytes, device, std::move(deleter));
 
     // Build tensor from pre-existing storage
@@ -212,7 +212,7 @@ auto Tensor::offset() const -> int64_t {
     return impl_->offset;
 }
 
-auto Tensor::storage() const -> const std::shared_ptr<Storage>& {
+auto Tensor::storage() const -> const intrusive_ptr<Storage>& {
     if (!impl_) throw std::runtime_error("Operation on uninitialized tensor");
     return impl_->storage;
 }
@@ -242,6 +242,7 @@ auto Tensor::set_offset(int64_t offset) -> void {
 auto Tensor::invalidate_contiguity_cache() -> void {
     if (impl_) {
         impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
+        impl_->memory_format_cache_.store(-1, std::memory_order_relaxed);
     }
 }
 
@@ -1090,7 +1091,7 @@ auto Tensor::view(std::vector<int64_t> new_shape) const -> Tensor {
 
     // CRITICAL: Share the same storage - this is what makes it a view
     // The storage is already shared via the copy constructor of TensorImpl
-    // which copies the shared_ptr<Storage>
+    // which copies the intrusive_ptr<Storage>
 
     return result;
 }
@@ -1519,23 +1520,30 @@ auto Tensor::zeros_like(const Tensor& other) -> Tensor {
 auto Tensor::memory_format() const noexcept -> MemoryFormat {
     if (!impl_) return MemoryFormat::Contiguous;
 
+    // Return cached result if available
+    auto cached = impl_->memory_format_cache_.load(std::memory_order_relaxed);
+    if (cached >= 0) return static_cast<MemoryFormat>(cached);
+
+    // Compute and cache
+    MemoryFormat fmt = MemoryFormat::Contiguous;
+
     // Check 4D ChannelsLast (NHWC)
     if (impl_->shape.size() == 4) {
         auto nhwc_strides = compute_channels_last_strides(impl_->shape);
         if (impl_->strides == nhwc_strides) {
-            return MemoryFormat::ChannelsLast;
+            fmt = MemoryFormat::ChannelsLast;
         }
     }
-
     // Check 5D ChannelsLast3d (NDHWC)
-    if (impl_->shape.size() == 5) {
+    else if (impl_->shape.size() == 5) {
         auto ndhwc_strides = compute_channels_last_3d_strides(impl_->shape);
         if (impl_->strides == ndhwc_strides) {
-            return MemoryFormat::ChannelsLast3d;
+            fmt = MemoryFormat::ChannelsLast3d;
         }
     }
 
-    return MemoryFormat::Contiguous;
+    impl_->memory_format_cache_.store(static_cast<int8_t>(fmt), std::memory_order_relaxed);
+    return fmt;
 }
 
 auto Tensor::is_contiguous(MemoryFormat format) const noexcept -> bool {

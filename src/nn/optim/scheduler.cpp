@@ -14,6 +14,14 @@ namespace tenzor::optim {
 // StepLR Implementation
 //==============================================================================
 
+StepLR::StepLR(Optimizer& optimizer, int step_size, double gamma)
+    : step_size_(step_size), gamma_(gamma), epoch_(0) {
+    optimizer_.generic = &optimizer;
+    optimizer_type_ = OptimizerType::Generic;
+    base_lr_ = optimizer.get_lr();
+    last_lr_ = base_lr_;
+}
+
 StepLR::StepLR(SGD& optimizer, int step_size, double gamma)
     : step_size_(step_size), gamma_(gamma), epoch_(0) {
     optimizer_.sgd = &optimizer;
@@ -80,6 +88,8 @@ auto StepLR::update_lr() -> void {
 
 auto StepLR::get_current_lr() const -> double {
     switch (optimizer_type_) {
+        case OptimizerType::Generic:
+            return optimizer_.generic->get_lr();
         case OptimizerType::SGD:
             return optimizer_.sgd->get_lr();
         case OptimizerType::Adam:
@@ -98,6 +108,9 @@ auto StepLR::get_current_lr() const -> double {
 
 auto StepLR::set_optimizer_lr(double lr) -> void {
     switch (optimizer_type_) {
+        case OptimizerType::Generic:
+            optimizer_.generic->set_lr(lr);
+            break;
         case OptimizerType::SGD:
             optimizer_.sgd->set_lr(lr);
             break;
@@ -122,6 +135,14 @@ auto StepLR::set_optimizer_lr(double lr) -> void {
 //==============================================================================
 // ExponentialLR Implementation
 //==============================================================================
+
+ExponentialLR::ExponentialLR(Optimizer& optimizer, double gamma)
+    : gamma_(gamma), epoch_(0) {
+    optimizer_.generic = &optimizer;
+    optimizer_type_ = OptimizerType::Generic;
+    base_lr_ = optimizer.get_lr();
+    last_lr_ = base_lr_;
+}
 
 ExponentialLR::ExponentialLR(SGD& optimizer, double gamma)
     : gamma_(gamma), epoch_(0) {
@@ -185,6 +206,8 @@ auto ExponentialLR::update_lr() -> void {
 
 auto ExponentialLR::get_current_lr() const -> double {
     switch (optimizer_type_) {
+        case OptimizerType::Generic:
+            return optimizer_.generic->get_lr();
         case OptimizerType::SGD:
             return optimizer_.sgd->get_lr();
         case OptimizerType::Adam:
@@ -203,6 +226,9 @@ auto ExponentialLR::get_current_lr() const -> double {
 
 auto ExponentialLR::set_optimizer_lr(double lr) -> void {
     switch (optimizer_type_) {
+        case OptimizerType::Generic:
+            optimizer_.generic->set_lr(lr);
+            break;
         case OptimizerType::SGD:
             optimizer_.sgd->set_lr(lr);
             break;
@@ -227,6 +253,14 @@ auto ExponentialLR::set_optimizer_lr(double lr) -> void {
 //==============================================================================
 // CosineAnnealingLR Implementation
 //==============================================================================
+
+CosineAnnealingLR::CosineAnnealingLR(Optimizer& optimizer, int T_max, double eta_min)
+    : T_max_(T_max), eta_min_(eta_min), epoch_(0) {
+    optimizer_.generic = &optimizer;
+    optimizer_type_ = OptimizerType::Generic;
+    base_lr_ = optimizer.get_lr();
+    last_lr_ = base_lr_;
+}
 
 CosineAnnealingLR::CosineAnnealingLR(SGD& optimizer, int T_max, double eta_min)
     : T_max_(T_max), eta_min_(eta_min), epoch_(0) {
@@ -294,6 +328,8 @@ auto CosineAnnealingLR::update_lr() -> void {
 
 auto CosineAnnealingLR::get_current_lr() const -> double {
     switch (optimizer_type_) {
+        case OptimizerType::Generic:
+            return optimizer_.generic->get_lr();
         case OptimizerType::SGD:
             return optimizer_.sgd->get_lr();
         case OptimizerType::Adam:
@@ -312,6 +348,9 @@ auto CosineAnnealingLR::get_current_lr() const -> double {
 
 auto CosineAnnealingLR::set_optimizer_lr(double lr) -> void {
     switch (optimizer_type_) {
+        case OptimizerType::Generic:
+            optimizer_.generic->set_lr(lr);
+            break;
         case OptimizerType::SGD:
             optimizer_.sgd->set_lr(lr);
             break;

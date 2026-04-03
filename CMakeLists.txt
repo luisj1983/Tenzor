@@ -83,6 +83,7 @@ endif()
 option(TENZOR_BUILD_PYTHON "Build Python bindings" ON)
 option(TENZOR_BUILD_TESTS "Build tests" ON)
 option(TENZOR_BUILD_BENCHMARKS "Build benchmarks" OFF)
+option(TENZOR_FUZZ "Build libFuzzer fuzz targets (requires Clang)" OFF)
 option(TENZOR_BUILD_EXAMPLES "Build examples" ON)
 option(TENZOR_BUILD_MODEL_HUB "Build model hub (requires CURL and OpenSSL)" ON)
 option(TENZOR_REQUIRE_MKL "Require Intel MKL (FATAL_ERROR if not found)" OFF)
@@ -298,6 +299,11 @@ endif()
 # Benchmarks
 if(TENZOR_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)
+endif()
+
+# Fuzzing targets
+if(TENZOR_FUZZ)
+    add_subdirectory(fuzz)
 endif()
 
 # Examples

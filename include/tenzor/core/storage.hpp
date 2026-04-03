@@ -12,6 +12,7 @@
 #include <functional>
 #include <cstddef>
 #include "device.hpp"
+#include "intrusive_ptr.hpp"
 
 namespace tenzor {
 
@@ -23,11 +24,13 @@ namespace tenzor {
  * memory allocation, deallocation, and lifetime management.
  *
  * Storage objects use reference counting to enable safe sharing of
- * underlying memory between multiple tensor views.
+ * underlying memory between multiple tensor views. Inherits from
+ * IntrusiveRefCounted to support both std::shared_ptr (current) and
+ * intrusive_ptr (for future migration to reduce copy overhead).
  *
  * @note This class is not thread-safe for mutation operations.
  */
-class Storage {
+class Storage : public IntrusiveRefCounted {
 public:
     virtual ~Storage() = default;
 

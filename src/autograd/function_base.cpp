@@ -27,6 +27,33 @@
 
 namespace tenzor {
 
+// Global unique ID counter for Function instances. Relaxed ordering is
+// sufficient — atomicity alone guarantees uniqueness.
+std::atomic<uint64_t> Function::next_id_{1};
+
+// Higher-order gradient fallback mode. Programmatic setting takes precedence
+// over the TENZOR_HIGHER_ORDER_GRAD env var.
+static std::atomic<int> g_higher_order_mode{-1}; // -1 = not set (check env var)
+
+void set_higher_order_grad_mode(HigherOrderGradMode mode) {
+    g_higher_order_mode.store(static_cast<int>(mode), std::memory_order_relaxed);
+}
+
+auto get_higher_order_grad_mode() -> HigherOrderGradMode {
+    int mode = g_higher_order_mode.load(std::memory_order_relaxed);
+    if (mode >= 0) return static_cast<HigherOrderGradMode>(mode);
+
+    // Fall back to env var for backward compatibility
+    static int env_mode = []() {
+        if (const char* env = std::getenv("TENZOR_HIGHER_ORDER_GRAD")) {
+            if (std::string(env) == "warn") return static_cast<int>(HigherOrderGradMode::Warn);
+            if (std::string(env) == "silent") return static_cast<int>(HigherOrderGradMode::Silent);
+        }
+        return static_cast<int>(HigherOrderGradMode::Error);
+    }();
+    return static_cast<HigherOrderGradMode>(env_mode);
+}
+
 // Per-thread activation offload flag (thread-local instead of global atomic
 // so one thread enabling offload doesn't affect other threads' backward passes)
 static thread_local bool g_activation_offload_enabled = false;
@@ -159,25 +186,18 @@ auto Function::backward_with_variables(std::vector<Variable> grad_outputs) -> st
 
     if (any_requires_grad) {
         // Higher-order gradients requested but this op doesn't support them.
-        // Behavior controlled by env var:
-        //   TENZOR_HIGHER_ORDER_GRAD=error  → throw (default, safe)
-        //   TENZOR_HIGHER_ORDER_GRAD=warn   → warn and fall through (backward compat)
-        static int mode = []() {
-            if (const char* env = std::getenv("TENZOR_HIGHER_ORDER_GRAD")) {
-                if (std::string(env) == "warn") return 1;
-                if (std::string(env) == "silent") return 2;
-            }
-            return 0; // error by default (safe: users must opt-in via TENZOR_HIGHER_ORDER_GRAD=warn)
-        }();
-
+        auto mode = get_higher_order_grad_mode();
         auto op_name = name();
-        if (mode == 0) {
+
+        switch (mode) {
+        case HigherOrderGradMode::Error:
             throw std::runtime_error(
                 "create_graph=true requires higher-order gradient support, but '" +
                 op_name + "' does not implement backward_with_variables(). "
-                "Either use create_graph=false, or set TENZOR_HIGHER_ORDER_GRAD=warn "
+                "Either use create_graph=false, or call "
+                "set_higher_order_grad_mode(HigherOrderGradMode::Warn) "
                 "to fall through with disconnected gradient graph.");
-        } else if (mode == 1) {
+        case HigherOrderGradMode::Warn: {
             static thread_local std::unordered_set<std::string> warned_ops;
             if (warned_ops.find(op_name) == warned_ops.end()) {
                 warned_ops.insert(op_name);
@@ -185,8 +205,11 @@ auto Function::backward_with_variables(std::vector<Variable> grad_outputs) -> st
                           << " does not support higher-order gradients. "
                           << "Gradient graph will be disconnected at this operation.\n";
             }
+            break;
         }
-        // mode == 2: silent fallthrough
+        case HigherOrderGradMode::Silent:
+            break;
+        }
     }
 
     // Fallback: extract Tensors, call backward(), wrap results without grad tracking

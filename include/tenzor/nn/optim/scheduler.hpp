@@ -125,22 +125,21 @@ protected:
  */
 class StepLR : public LRScheduler {
 public:
-    // Constructor for SGD optimizer
+    /// Generic constructor accepting any Optimizer via base class reference
+    StepLR(Optimizer& optimizer, int step_size, double gamma = 0.1);
+
+    // Type-specific constructors (deprecated — use generic Optimizer& constructor)
+    [[deprecated("Use StepLR(Optimizer&, ...) instead")]]
     StepLR(SGD& optimizer, int step_size, double gamma = 0.1);
-
-    // Constructor for Adam optimizer
+    [[deprecated("Use StepLR(Optimizer&, ...) instead")]]
     StepLR(Adam& optimizer, int step_size, double gamma = 0.1);
-
-    // Constructor for AdamW optimizer
+    [[deprecated("Use StepLR(Optimizer&, ...) instead")]]
     StepLR(AdamW& optimizer, int step_size, double gamma = 0.1);
-
-    // Constructor for RMSprop optimizer
+    [[deprecated("Use StepLR(Optimizer&, ...) instead")]]
     StepLR(RMSprop& optimizer, int step_size, double gamma = 0.1);
-
-    // Constructor for Adagrad optimizer
+    [[deprecated("Use StepLR(Optimizer&, ...) instead")]]
     StepLR(Adagrad& optimizer, int step_size, double gamma = 0.1);
-
-    // Constructor for Adadelta optimizer
+    [[deprecated("Use StepLR(Optimizer&, ...) instead")]]
     StepLR(Adadelta& optimizer, int step_size, double gamma = 0.1);
 
     auto step() -> void override;
@@ -150,7 +149,7 @@ public:
     auto get_epoch() const -> int { return epoch_; }
 
 private:
-    enum class OptimizerType { SGD, Adam, AdamW, RMSprop, Adagrad, Adadelta };
+    enum class OptimizerType { SGD, Adam, AdamW, RMSprop, Adagrad, Adadelta, Generic };
 
     union OptimizerPtr {
         SGD* sgd;
@@ -159,6 +158,7 @@ private:
         RMSprop* rmsprop;
         Adagrad* adagrad;
         Adadelta* adadelta;
+        Optimizer* generic;
         OptimizerPtr() : sgd(nullptr) {}
     };
 
@@ -208,22 +208,21 @@ private:
  */
 class ExponentialLR : public LRScheduler {
 public:
-    // Constructor for SGD optimizer
+    /// Generic constructor accepting any Optimizer via base class reference
+    ExponentialLR(Optimizer& optimizer, double gamma);
+
+    // Type-specific constructors (deprecated — use generic Optimizer& constructor)
+    [[deprecated("Use ExponentialLR(Optimizer&, ...) instead")]]
     ExponentialLR(SGD& optimizer, double gamma);
-
-    // Constructor for Adam optimizer
+    [[deprecated("Use ExponentialLR(Optimizer&, ...) instead")]]
     ExponentialLR(Adam& optimizer, double gamma);
-
-    // Constructor for AdamW optimizer
+    [[deprecated("Use ExponentialLR(Optimizer&, ...) instead")]]
     ExponentialLR(AdamW& optimizer, double gamma);
-
-    // Constructor for RMSprop optimizer
+    [[deprecated("Use ExponentialLR(Optimizer&, ...) instead")]]
     ExponentialLR(RMSprop& optimizer, double gamma);
-
-    // Constructor for Adagrad optimizer
+    [[deprecated("Use ExponentialLR(Optimizer&, ...) instead")]]
     ExponentialLR(Adagrad& optimizer, double gamma);
-
-    // Constructor for Adadelta optimizer
+    [[deprecated("Use ExponentialLR(Optimizer&, ...) instead")]]
     ExponentialLR(Adadelta& optimizer, double gamma);
 
     auto step() -> void override;
@@ -233,7 +232,7 @@ public:
     auto get_epoch() const -> int { return epoch_; }
 
 private:
-    enum class OptimizerType { SGD, Adam, AdamW, RMSprop, Adagrad, Adadelta };
+    enum class OptimizerType { SGD, Adam, AdamW, RMSprop, Adagrad, Adadelta, Generic };
 
     union OptimizerPtr {
         SGD* sgd;
@@ -242,6 +241,7 @@ private:
         RMSprop* rmsprop;
         Adagrad* adagrad;
         Adadelta* adadelta;
+        Optimizer* generic;
         OptimizerPtr() : sgd(nullptr) {}
     };
 
@@ -299,22 +299,21 @@ private:
  */
 class CosineAnnealingLR : public LRScheduler {
 public:
-    // Constructor for SGD optimizer
+    /// Generic constructor accepting any Optimizer via base class reference
+    CosineAnnealingLR(Optimizer& optimizer, int T_max, double eta_min = 0.0);
+
+    // Type-specific constructors (deprecated — use generic Optimizer& constructor)
+    [[deprecated("Use CosineAnnealingLR(Optimizer&, ...) instead")]]
     CosineAnnealingLR(SGD& optimizer, int T_max, double eta_min = 0.0);
-
-    // Constructor for Adam optimizer
+    [[deprecated("Use CosineAnnealingLR(Optimizer&, ...) instead")]]
     CosineAnnealingLR(Adam& optimizer, int T_max, double eta_min = 0.0);
-
-    // Constructor for AdamW optimizer
+    [[deprecated("Use CosineAnnealingLR(Optimizer&, ...) instead")]]
     CosineAnnealingLR(AdamW& optimizer, int T_max, double eta_min = 0.0);
-
-    // Constructor for RMSprop optimizer
+    [[deprecated("Use CosineAnnealingLR(Optimizer&, ...) instead")]]
     CosineAnnealingLR(RMSprop& optimizer, int T_max, double eta_min = 0.0);
-
-    // Constructor for Adagrad optimizer
+    [[deprecated("Use CosineAnnealingLR(Optimizer&, ...) instead")]]
     CosineAnnealingLR(Adagrad& optimizer, int T_max, double eta_min = 0.0);
-
-    // Constructor for Adadelta optimizer
+    [[deprecated("Use CosineAnnealingLR(Optimizer&, ...) instead")]]
     CosineAnnealingLR(Adadelta& optimizer, int T_max, double eta_min = 0.0);
 
     auto step() -> void override;
@@ -324,7 +323,7 @@ public:
     auto get_epoch() const -> int { return epoch_; }
 
 private:
-    enum class OptimizerType { SGD, Adam, AdamW, RMSprop, Adagrad, Adadelta };
+    enum class OptimizerType { SGD, Adam, AdamW, RMSprop, Adagrad, Adadelta, Generic };
 
     union OptimizerPtr {
         SGD* sgd;
@@ -333,6 +332,7 @@ private:
         RMSprop* rmsprop;
         Adagrad* adagrad;
         Adadelta* adadelta;
+        Optimizer* generic;
         OptimizerPtr() : sgd(nullptr) {}
     };
 

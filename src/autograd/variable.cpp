@@ -173,6 +173,31 @@ auto Variable::set_grad_fn(std::shared_ptr<Function> fn) -> void {
     if (!impl_) {
         throw std::runtime_error("Cannot set grad_fn on uninitialized Variable");
     }
+
+    // When anomaly detection is enabled, record creation metadata for tracebacks
+    if (is_anomaly_detection_enabled() && fn) {
+        auto meta = std::make_shared<AnomalyMetadata>();
+        meta->function_name = fn->name();
+
+        // Record input shapes from the function's input variables
+        for (const auto& input_var : fn->input_variables()) {
+            auto s = input_var.shape();
+            meta->input_shapes.emplace_back(s.begin(), s.end());
+        }
+
+        // Record output shape (this variable)
+        auto out_shape = impl_->data_.shape();
+        meta->output_shapes.emplace_back(out_shape.begin(), out_shape.end());
+
+        // Link parent metadata from first input for chained tracebacks
+        const auto& inputs = fn->input_variables();
+        if (!inputs.empty()) {
+            meta->parent = inputs[0].creation_metadata();
+        }
+
+        impl_->creation_metadata_ = std::move(meta);
+    }
+
     impl_->grad_fn_ = std::move(fn);
 }
 
@@ -466,6 +491,18 @@ auto Variable::matmul(const Variable& other) const -> Variable {
 
 auto Variable::squeeze(int64_t dim) const -> Variable {
     return tenzor::squeeze(*this, dim);
+}
+
+auto Variable::creation_metadata() const -> const std::shared_ptr<AnomalyMetadata>& {
+    static const std::shared_ptr<AnomalyMetadata> empty;
+    if (!impl_) return empty;
+    return impl_->creation_metadata_;
+}
+
+auto Variable::set_creation_metadata(std::shared_ptr<AnomalyMetadata> meta) -> void {
+    if (impl_) {
+        impl_->creation_metadata_ = std::move(meta);
+    }
 }
 
 } // namespace tenzor

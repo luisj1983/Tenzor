@@ -21,6 +21,7 @@ namespace tenzor {
 
 // Forward declarations
 class Function;
+struct AnomalyMetadata;
 
 /**
  * @brief Implementation class for Variable's handle pattern.
@@ -58,7 +59,8 @@ struct VariableImpl {
           hooks_([&]() { std::shared_lock lock(other.hooks_mutex_); return other.hooks_; }()),
           next_hook_id_(other.next_hook_id_.load(std::memory_order_acquire)),
           grad_mutex_(other.grad_mutex_),  // Share mutex — copies share grad_ storage
-          thread_safe_(other.thread_safe_.load(std::memory_order_acquire)) {}
+          thread_safe_(other.thread_safe_.load(std::memory_order_acquire)),
+          creation_metadata_(other.creation_metadata_) {}
 
     VariableImpl(VariableImpl&& other) noexcept
         : data_(std::move(other.data_)),
@@ -157,6 +159,10 @@ struct VariableImpl {
     /// Opt-in flag for thread-safe gradient access. When true, grad_mutex_
     /// is locked around gradient reads/writes. Enable via Variable::make_thread_safe().
     std::atomic<bool> thread_safe_{false};
+
+    /// Forward-pass creation metadata for anomaly detection tracebacks.
+    /// Only populated when anomaly detection is enabled. Null otherwise (zero overhead).
+    std::shared_ptr<AnomalyMetadata> creation_metadata_;
 };
 
 /**
@@ -602,6 +608,12 @@ public:
     /** @brief Divide variable by scalar. */
     auto operator/(float scalar) const -> Variable;
     auto operator/(double scalar) const -> Variable;
+
+    /// Get creation metadata for anomaly detection tracebacks (may be null).
+    auto creation_metadata() const -> const std::shared_ptr<AnomalyMetadata>&;
+
+    /// Set creation metadata (called by autograd functions when anomaly mode is on).
+    auto set_creation_metadata(std::shared_ptr<AnomalyMetadata> meta) -> void;
 
 private:
     std::shared_ptr<VariableImpl> impl_;

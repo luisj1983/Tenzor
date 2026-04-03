@@ -14,10 +14,12 @@ if(NOT METAL_FRAMEWORK OR NOT MPS_FRAMEWORK)
     return()
 endif()
 
-# Collect Objective-C++ sources
+# Collect Objective-C++ sources (including kernels subdirectory)
 file(GLOB MPS_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/*.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/kernels/*.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/kernels/*.cpp
 )
 
 # Compile Metal shaders to metallib

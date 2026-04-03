@@ -138,7 +138,17 @@ target_link_libraries(test_fsdp PRIVATE tenzor_core GTest::gtest_main)
 add_executable(test_tensor_parallel test_tensor_parallel.cpp)
 target_link_libraries(test_tensor_parallel PRIVATE tenzor_core GTest::gtest_main)
 
+# Functional API tests
+add_executable(test_functional test_functional.cpp)
+target_link_libraries(test_functional PRIVATE tenzor_core GTest::gtest_main)
+
+# SafeTensors format tests
+add_executable(test_safetensors test_safetensors.cpp)
+target_link_libraries(test_safetensors PRIVATE tenzor_core GTest::gtest_main)
+
 tenzor_discover_tests(test_hrm DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_pytorch_loader DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_fsdp DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_tensor_parallel DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_functional DISCOVERY_TIMEOUT 120)
+tenzor_discover_tests(test_safetensors DISCOVERY_TIMEOUT 120)

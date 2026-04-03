@@ -149,10 +149,11 @@ private:
     /**
      * @brief Gradient accumulation buffers for multi-path graphs.
      *
-     * Maps each function to accumulated gradients from all paths.
-     * Used when a variable is used multiple times in the computation.
+     * Maps each function's unique ID to accumulated gradients from all paths.
+     * Uses uint64_t IDs instead of raw Function* pointers to avoid potential
+     * issues with address reuse after deallocation.
      */
-    std::unordered_map<Function*, std::vector<Tensor>> grad_accumulators_;
+    std::unordered_map<uint64_t, std::vector<Tensor>> grad_accumulators_;
 
     /**
      * @brief Accumulate gradient for a function.

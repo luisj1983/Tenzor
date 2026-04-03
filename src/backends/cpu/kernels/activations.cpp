@@ -1,7 +1,9 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/shape.hpp"
+#include "tenzor/backend/dtype_dispatch.hpp"
 #include "tenzor/utils/error.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "simd_elementwise.hpp"
 #include "simd_fast_math.hpp"
 #include "float16_simd.hpp"
 #include <cmath>
@@ -301,174 +303,28 @@ static bool onednn_softmax_forward(
 // ============================================================================
 
 // Forward: max(0, x)
+// Refactored to use TENZOR_DISPATCH_FLOAT_AND_HALF + elementwise_unary helper.
+// Float32 path retains oneDNN fast path via if constexpr.
 auto relu_kernel(const Tensor& input) -> Tensor {
     auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
+    size_t n = input.numel();
 
-    if (input.dtype() == DType::Float32) {
-        const float* in_data = input.data<float>();
-        float* out_data = output.data<float>();
-        size_t n = input.numel();
-
+    // Try oneDNN fast path for Float32 (5-10x faster for large inputs)
 #ifdef TENZOR_USE_ONEDNN
-        // Try oneDNN for large tensors (5-10x faster than SIMD for large inputs)
-        if (onednn_eltwise_forward(in_data, out_data, n, dnnl::algorithm::eltwise_relu)) {
+    if (input.dtype() == DType::Float32) {
+        if (onednn_eltwise_forward(input.data<float>(), output.data<float>(), n,
+                                    dnnl::algorithm::eltwise_relu)) {
             return output;
         }
-#endif
-        // Fall back to SIMD implementation
-#ifdef TENZOR_HAS_AVX512
-        size_t i = 0;
-        const size_t simd_width = 16;
-        __m512 zero = _mm512_setzero_ps();
-
-        // OpenMP parallelization for very large tensors
-        if (n >= ACTIVATION_OMP_THRESHOLD) {
-            #pragma omp parallel for schedule(static)
-            for (size_t j = 0; j < n / simd_width; ++j) {
-                size_t idx = j * simd_width;
-                __m512 x = _mm512_loadu_ps(in_data + idx);
-                __m512 result = _mm512_max_ps(x, zero);
-                _mm512_storeu_ps(out_data + idx, result);
-            }
-            i = (n / simd_width) * simd_width;
-        } else {
-            for (; i + simd_width <= n; i += simd_width) {
-                __m512 x = _mm512_loadu_ps(in_data + i);
-                __m512 result = _mm512_max_ps(x, zero);
-                _mm512_storeu_ps(out_data + i, result);
-            }
-        }
-
-        for (; i < n; ++i) {
-            out_data[i] = std::max(0.0f, in_data[i]);
-        }
-#elif defined(TENZOR_HAS_AVX2)
-        size_t i = 0;
-        const size_t simd_width = 8;
-        __m256 zero = _mm256_setzero_ps();
-
-        if (n >= ACTIVATION_OMP_THRESHOLD) {
-            #pragma omp parallel for schedule(static)
-            for (size_t j = 0; j < n / simd_width; ++j) {
-                size_t idx = j * simd_width;
-                __m256 x = _mm256_loadu_ps(in_data + idx);
-                __m256 result = _mm256_max_ps(x, zero);
-                _mm256_storeu_ps(out_data + idx, result);
-            }
-            i = (n / simd_width) * simd_width;
-        } else {
-            for (; i + simd_width <= n; i += simd_width) {
-                __m256 x = _mm256_loadu_ps(in_data + i);
-                __m256 result = _mm256_max_ps(x, zero);
-                _mm256_storeu_ps(out_data + i, result);
-            }
-        }
-
-        for (; i < n; ++i) {
-            out_data[i] = std::max(0.0f, in_data[i]);
-        }
-#else
-        if (n >= ACTIVATION_OMP_THRESHOLD) {
-            #pragma omp parallel for schedule(static)
-            for (size_t i = 0; i < n; ++i) {
-                out_data[i] = std::max(0.0f, in_data[i]);
-            }
-        } else {
-            for (size_t i = 0; i < n; ++i) {
-                out_data[i] = std::max(0.0f, in_data[i]);
-            }
-        }
-#endif
-    } else if (input.dtype() == DType::Float64) {
-        const double* in_data = input.data<double>();
-        double* out_data = output.data<double>();
-        size_t n = input.numel();
-
-#ifdef TENZOR_HAS_AVX512
-        size_t i = 0;
-        const size_t simd_width = 8;
-        __m512d zero = _mm512_setzero_pd();
-
-        if (n >= ACTIVATION_OMP_THRESHOLD) {
-            #pragma omp parallel for schedule(static)
-            for (size_t j = 0; j < n / simd_width; ++j) {
-                size_t idx = j * simd_width;
-                __m512d x = _mm512_loadu_pd(in_data + idx);
-                __m512d result = _mm512_max_pd(x, zero);
-                _mm512_storeu_pd(out_data + idx, result);
-            }
-            i = (n / simd_width) * simd_width;
-        } else {
-            for (; i + simd_width <= n; i += simd_width) {
-                __m512d x = _mm512_loadu_pd(in_data + i);
-                __m512d result = _mm512_max_pd(x, zero);
-                _mm512_storeu_pd(out_data + i, result);
-            }
-        }
-
-        for (; i < n; ++i) {
-            out_data[i] = std::max(0.0, in_data[i]);
-        }
-#elif defined(TENZOR_HAS_AVX2)
-        size_t i = 0;
-        const size_t simd_width = 4;
-        __m256d zero = _mm256_setzero_pd();
-
-        if (n >= ACTIVATION_OMP_THRESHOLD) {
-            #pragma omp parallel for schedule(static)
-            for (size_t j = 0; j < n / simd_width; ++j) {
-                size_t idx = j * simd_width;
-                __m256d x = _mm256_loadu_pd(in_data + idx);
-                __m256d result = _mm256_max_pd(x, zero);
-                _mm256_storeu_pd(out_data + idx, result);
-            }
-            i = (n / simd_width) * simd_width;
-        } else {
-            for (; i + simd_width <= n; i += simd_width) {
-                __m256d x = _mm256_loadu_pd(in_data + i);
-                __m256d result = _mm256_max_pd(x, zero);
-                _mm256_storeu_pd(out_data + i, result);
-            }
-        }
-
-        for (; i < n; ++i) {
-            out_data[i] = std::max(0.0, in_data[i]);
-        }
-#else
-        if (n >= ACTIVATION_OMP_THRESHOLD) {
-            #pragma omp parallel for schedule(static)
-            for (size_t i = 0; i < n; ++i) {
-                out_data[i] = std::max(0.0, in_data[i]);
-            }
-        } else {
-            for (size_t i = 0; i < n; ++i) {
-                out_data[i] = std::max(0.0, in_data[i]);
-            }
-        }
-#endif
-    } else if (input.dtype() == DType::Float16) {
-        const Float16* in_data = input.data<Float16>();
-        Float16* out_data = output.data<Float16>();
-        size_t n = input.numel();
-
-        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
-            float val = static_cast<float>(in_data[i]);
-            out_data[i] = Float16(std::max(0.0f, val));
-        }
-    } else if (input.dtype() == DType::BFloat16) {
-        const BFloat16* in_data = input.data<BFloat16>();
-        BFloat16* out_data = output.data<BFloat16>();
-        size_t n = input.numel();
-
-        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
-        for (size_t i = 0; i < n; ++i) {
-            float val = static_cast<float>(in_data[i]);
-            out_data[i] = BFloat16(std::max(0.0f, val));
-        }
-    } else {
-        throw std::runtime_error("ReLU only supports Float32, Float64, Float16, and BFloat16");
     }
+#endif
+    // Generic dtype-dispatched path using elementwise_unary helper
+    TENZOR_DISPATCH_FLOAT_AND_HALF(input.dtype(), "relu", [&]() {
+        const scalar_t* in_data = input.data<scalar_t>();
+        scalar_t* out_data = output.data<scalar_t>();
+        cpu::elementwise_unary<scalar_t>(in_data, out_data, n,
+            [](auto x) { return std::max(decltype(x)(0), x); });
+    });
 
     return output;
 }

@@ -21,6 +21,23 @@
 
 namespace tenzor {
 
+/**
+ * @brief Controls behavior when create_graph=true but the operation
+ * doesn't implement backward_with_variables().
+ */
+enum class HigherOrderGradMode : uint8_t {
+    Error,   ///< Throw std::runtime_error (default, safe)
+    Warn,    ///< Log warning once per op, fall through with disconnected graph
+    Silent   ///< Silently fall through with disconnected graph
+};
+
+/// Set the higher-order gradient fallback mode programmatically.
+/// This takes precedence over the TENZOR_HIGHER_ORDER_GRAD env var.
+void set_higher_order_grad_mode(HigherOrderGradMode mode);
+
+/// Get the current higher-order gradient fallback mode.
+auto get_higher_order_grad_mode() -> HigherOrderGradMode;
+
 /// Enable/disable activation offloading to CPU for GPU-resident saved tensors.
 /// When enabled, save_for_backward() moves GPU tensors to CPU RAM to reduce
 /// GPU memory pressure, and saved_tensors() loads them back on access.
@@ -70,7 +87,16 @@ class Function : public std::enable_shared_from_this<Function> {
     friend class Variable;  // Allow Variable to access saved_tensors_
 
 public:
+    Function() : id_(next_id_.fetch_add(1, std::memory_order_relaxed)) {}
     virtual ~Function() = default;
+
+    /**
+     * @brief Unique identifier for this Function instance.
+     *
+     * Used as a stable key in gradient accumulation maps instead of raw
+     * pointers, avoiding potential issues with address reuse after free.
+     */
+    auto id() const noexcept -> uint64_t { return id_; }
 
     /**
      * @brief Forward pass computation.
@@ -141,6 +167,20 @@ public:
      * @throws std::runtime_error if create_graph=true and op doesn't support it
      */
     virtual auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable>;
+
+    /**
+     * @brief Query whether this function supports higher-order gradients.
+     *
+     * Returns true if the subclass has a proper backward_with_variables()
+     * implementation that builds a gradient graph. The default returns false.
+     * Subclasses that override backward_with_variables() should also override
+     * this to return true.
+     *
+     * @note In practice, if a subclass overrides backward_with_variables(),
+     * the base class fallback (which checks this flag) is never reached.
+     * This method is primarily useful for introspection and pre-flight checks.
+     */
+    virtual auto supports_higher_order() const -> bool { return false; }
 
     /**
      * @brief Get readable name for this backward function.
@@ -286,6 +326,10 @@ protected:
     mutable std::mutex offload_mutex_;                              ///< Guards offload/reload of saved tensors
     std::vector<std::shared_ptr<Function>> next_functions_;         ///< Chained gradient functions
     std::vector<Variable> input_variables_;                          ///< Input variables for gradient accumulation (stored by value)
+
+private:
+    uint64_t id_;                                                    ///< Unique identifier (stable key for gradient accumulators)
+    static std::atomic<uint64_t> next_id_;                           ///< Global counter for unique IDs
 };
 
 // ============================================================================
@@ -314,6 +358,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 
     // Public for direct access from Variable operators
     std::vector<int64_t> input_shape_a_;
@@ -335,6 +380,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 
     // Public for direct access from Variable operators
     std::vector<int64_t> input_shape_a_;
@@ -356,6 +402,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 
     // Public for direct access from Variable operators
     std::vector<int64_t> input_shape_a_;
@@ -377,6 +424,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 
     std::vector<int64_t> input_shape_a_;
     std::vector<int64_t> input_shape_b_;
@@ -403,6 +451,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 /**
@@ -425,6 +474,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 // Note: ReLUBackward is implemented in src/nn/activations/activations.cpp
@@ -452,6 +502,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 private:
     std::optional<int64_t> dim_;
     bool keepdim_;
@@ -473,6 +524,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 private:
     std::optional<int64_t> dim_;
     bool keepdim_;
@@ -491,6 +543,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 /**
@@ -506,6 +559,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 /**
@@ -521,6 +575,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 /**
@@ -544,6 +599,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 private:
     int64_t dim_;
 };
@@ -564,6 +620,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 private:
     int64_t dim_;
 };
@@ -581,6 +638,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 /**
@@ -602,6 +660,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 private:
     float min_;
     float max_;
@@ -622,6 +681,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 private:
     std::optional<int64_t> dim_;
     bool keepdim_;
@@ -639,6 +699,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 private:
     std::optional<int64_t> dim_;
     bool keepdim_;
@@ -656,6 +717,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 private:
     std::optional<int64_t> dim_;
     bool keepdim_;
@@ -681,6 +743,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 private:
     std::vector<int64_t> input_shape_;
 };
@@ -711,6 +774,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 private:
     std::vector<int64_t> dims_;
     std::vector<int64_t> inv_dims_;
@@ -730,6 +794,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 private:
     int64_t dim0_;
     int64_t dim1_;
@@ -749,6 +814,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 private:
     int64_t shifts_;
     int64_t dim_;
@@ -768,6 +834,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 private:
     int64_t dim_;
 };
@@ -796,6 +863,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 /**
@@ -822,6 +890,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 private:
     std::vector<int64_t> split_sizes_;  ///< Size of each input along concat dimension
     int64_t dim_;                        ///< Concatenation dimension
@@ -850,6 +919,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 private:
     std::vector<int64_t> input_shape_;  ///< Original input shape
     int64_t dim_;                        ///< Slice dimension
@@ -880,6 +950,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 private:
     int64_t input_h_;   ///< Input height
     int64_t input_w_;   ///< Input width
@@ -896,6 +967,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class TanhBackward_AG : public Function {
@@ -903,6 +975,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class GeluBackward : public Function {
@@ -910,6 +983,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class EluBackward : public Function {
@@ -917,6 +991,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class SeluBackward : public Function {
@@ -924,6 +999,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class MishBackward : public Function {
@@ -931,6 +1007,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class LeakyReluBackward : public Function {
@@ -938,6 +1015,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class SoftplusBackward : public Function {
@@ -945,6 +1023,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 // =========================================================================
@@ -956,6 +1035,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class PowBackward : public Function {
@@ -963,6 +1043,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class ReciprocalBackward : public Function {
@@ -970,6 +1051,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class SinBackward : public Function {
@@ -977,6 +1059,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class CosBackward : public Function {
@@ -984,6 +1067,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class TanBackward : public Function {
@@ -991,6 +1075,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class AsinBackward : public Function {
@@ -998,6 +1083,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class AcosBackward : public Function {
@@ -1005,6 +1091,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class AtanBackward : public Function {
@@ -1012,6 +1099,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class SinhBackward : public Function {
@@ -1019,6 +1107,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class CoshBackward : public Function {
@@ -1026,6 +1115,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 // =========================================================================
@@ -1037,6 +1127,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class ErfcBackward : public Function {
@@ -1044,6 +1135,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class Log2Backward : public Function {
@@ -1051,6 +1143,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class Log10Backward : public Function {
@@ -1058,6 +1151,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class Log1pBackward : public Function {
@@ -1065,6 +1159,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class Exp2Backward : public Function {
@@ -1072,6 +1167,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class Expm1Backward : public Function {
@@ -1079,6 +1175,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class Atan2Backward : public Function {
@@ -1086,6 +1183,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 // =========================================================================
@@ -1098,6 +1196,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     std::optional<int64_t> dim_;
     bool keepdim_;
 };
@@ -1108,6 +1207,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     std::optional<int64_t> dim_;
     bool keepdim_;
 };
@@ -1118,6 +1218,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     std::optional<int64_t> dim_;
     bool keepdim_;
 };
@@ -1128,6 +1229,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     std::optional<int64_t> dim_;
     bool keepdim_;
 };
@@ -1138,6 +1240,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     int64_t dim_;
     bool keepdim_;
 };
@@ -1151,6 +1254,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class ExpandBackward : public Function {
@@ -1158,6 +1262,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class DeviceTransferBackward : public Function {
@@ -1172,6 +1277,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class WhereBackward : public Function {
@@ -1179,6 +1285,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class GatherBackward : public Function {
@@ -1186,6 +1293,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class ScatterBackward : public Function {
@@ -1193,6 +1301,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 /**
@@ -1210,6 +1319,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class IndexSelectBackward : public Function {
@@ -1217,6 +1327,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 /**
@@ -1237,6 +1348,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "IndexBackward"; }
 
 private:
@@ -1248,6 +1360,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class FlipBackward : public Function {
@@ -1255,6 +1368,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class RepeatBackward : public Function {
@@ -1262,6 +1376,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 // =========================================================================
@@ -1281,6 +1396,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "CumSumBackward"; }
 private:
     int64_t dim_;
@@ -1301,6 +1417,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "CumProdBackward"; }
 private:
     int64_t dim_;
@@ -1320,6 +1437,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "TopKBackward"; }
 private:
     int64_t k_;
@@ -1340,6 +1458,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "SortBackward"; }
 private:
     int64_t dim_;
@@ -1361,6 +1480,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "DiagBackward"; }
 private:
     int64_t input_ndim_;
@@ -1379,6 +1499,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "TraceBackward"; }
 private:
     int64_t n_;
@@ -1396,6 +1517,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "TriuBackward"; }
 private:
     int64_t diagonal_;
@@ -1413,6 +1535,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "TrilBackward"; }
 private:
     int64_t diagonal_;
@@ -1435,6 +1558,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "FFTBackward"; }
 private:
     std::optional<int64_t> n_;
@@ -1455,6 +1579,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "IFFTBackward"; }
 private:
     std::optional<int64_t> n_;
@@ -1477,6 +1602,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "RFFTBackward"; }
 private:
     int64_t signal_length_;
@@ -1497,6 +1623,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "IRFFTBackward"; }
 private:
     int64_t dim_;
@@ -1520,6 +1647,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "DetBackward"; }
 };
 
@@ -1536,6 +1664,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "InvBackward"; }
 };
 
@@ -1554,6 +1683,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "SolveBackward"; }
 };
 
@@ -1572,6 +1702,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "CholeskyBackward"; }
 private:
     bool upper_;
@@ -1591,6 +1722,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "SvdBackward"; }
 private:
     bool full_matrices_;
@@ -1610,6 +1742,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "QrBackward"; }
 };
 
@@ -1628,6 +1761,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "EighBackward"; }
 };
 
@@ -1645,6 +1779,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "EigvalshBackward"; }
 };
 
@@ -1663,6 +1798,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "NormBackward_Linalg"; }
 private:
     std::string ord_;
@@ -1682,6 +1818,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "SlogdetBackward"; }
 };
 
@@ -1709,6 +1846,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "SpMMBackward"; }
 
 private:
@@ -1735,6 +1873,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "SpMVBackward"; }
 
 private:
@@ -1753,6 +1892,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "SparseAddBackward"; }
 };
 
@@ -1789,6 +1929,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "FusedLinearReLUBackward"; }
 
     void set_relu_output(Tensor output) { relu_output_ = std::move(output); }
@@ -1805,6 +1946,7 @@ public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "CustomOpBackward"; }
 
 private:

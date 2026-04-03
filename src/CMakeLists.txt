@@ -64,7 +64,9 @@ set(TENZOR_CORE_SOURCES
     autograd/functional.cpp
     autograd/vmap.cpp
     nn/module.cpp
+    nn/functional.cpp
     nn/serialize.cpp
+    nn/safetensors.cpp
     nn/pytorch_loader.cpp
     nn/checkpoint.cpp
     nn/layers/linear.cpp

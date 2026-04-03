@@ -79,6 +79,7 @@
 #include <tenzor/sparse/sparse_ops.hpp>
 #include <tenzor/autograd/anomaly_mode.hpp>
 #include <tenzor/autograd/functional.hpp>
+#include <tenzor/nn/functional.hpp>
 #include <tenzor/autograd/vmap.hpp>
 #include <tenzor/autograd/dual.hpp>
 #include <tenzor/backend/cpu_caching_allocator.hpp>
@@ -5383,6 +5384,36 @@ PYBIND11_MODULE(tenzor_core, m) {
     }, py::arg("input"), py::arg("target"),
        py::arg("reduction") = tenzor::nn::Reduction::Mean,
        "Binary cross entropy with logits loss");
+
+    // New nn.functional wrappers using the C++ functional namespace
+    nn.def("functional_nll_loss", &tenzor::nn::functional::nll_loss,
+           py::arg("input"), py::arg("target"),
+           py::arg("reduction") = tenzor::nn::Reduction::Mean,
+           "Negative log likelihood loss",
+           py::call_guard<py::gil_scoped_release>());
+
+    nn.def("functional_smooth_l1_loss", &tenzor::nn::functional::smooth_l1_loss,
+           py::arg("input"), py::arg("target"),
+           py::arg("reduction") = tenzor::nn::Reduction::Mean,
+           py::arg("beta") = 1.0,
+           "Smooth L1 (Huber) loss",
+           py::call_guard<py::gil_scoped_release>());
+
+    nn.def("functional_cosine_similarity", &tenzor::nn::functional::cosine_similarity,
+           py::arg("x1"), py::arg("x2"),
+           py::arg("dim") = 1, py::arg("eps") = 1e-8,
+           "Cosine similarity between tensors",
+           py::call_guard<py::gil_scoped_release>());
+
+    nn.def("functional_conv2d", &tenzor::nn::functional::conv2d,
+           py::arg("input"), py::arg("weight"),
+           py::arg("bias") = std::nullopt,
+           py::arg("stride") = std::make_pair(1LL, 1LL),
+           py::arg("padding") = std::make_pair(0LL, 0LL),
+           py::arg("dilation") = std::make_pair(1LL, 1LL),
+           py::arg("groups") = 1,
+           "Functional 2D convolution",
+           py::call_guard<py::gil_scoped_release>());
 
     // Gradient clipping utilities
     nn.def("clip_grad_norm_", &tenzor::nn::utils::clip_grad_norm_,

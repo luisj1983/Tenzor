@@ -131,6 +131,16 @@ static void check_for_anomaly(const std::vector<Tensor>& grads,
                 // Ignore errors from saved tensor validation
             }
 
+            // Include forward-pass creation metadata if available
+            const auto& input_vars = func->input_variables();
+            for (size_t v = 0; v < input_vars.size(); ++v) {
+                const auto& meta = input_vars[v].creation_metadata();
+                if (meta) {
+                    detail += "\n  Forward traceback for input " + std::to_string(v) + ":";
+                    detail += "\n" + meta->to_string();
+                }
+            }
+
             throw AutogradException(
                 "Anomaly detected: gradient output " + std::to_string(i) +
                 " contains " + anomaly + " values in backward of '" +
@@ -491,12 +501,12 @@ auto BackwardEngine::clear_gradients() -> void {
 }
 
 auto BackwardEngine::accumulate_grad(Function* func, Tensor grad) -> void {
-    grad_accumulators_[func].push_back(std::move(grad));
+    grad_accumulators_[func->id()].push_back(std::move(grad));
 }
 
 auto BackwardEngine::get_accumulated_grads(Function* func) -> const std::vector<Tensor>& {
     static const std::vector<Tensor> empty;
-    auto it = grad_accumulators_.find(func);
+    auto it = grad_accumulators_.find(func->id());
     if (it == grad_accumulators_.end()) {
         return empty;
     }

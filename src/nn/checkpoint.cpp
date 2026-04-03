@@ -4,6 +4,7 @@
  */
 
 #include "../../include/tenzor/nn/checkpoint.hpp"
+#include "../../include/tenzor/nn/safetensors.hpp"
 #include <fstream>
 #include <sstream>
 #include <iomanip>
@@ -171,6 +172,12 @@ auto ModelCheckpoint::save_model(
 }
 
 auto ModelCheckpoint::load_model(const std::string& path) -> std::unordered_map<std::string, Tensor> {
+    // Auto-detect format: SafeTensors files are loaded directly,
+    // native checkpoint files go through the full checkpoint path.
+    auto format = detect_format(path);
+    if (format == SerializeFormat::SafeTensors) {
+        return SafeTensorsSerializer::load(path);
+    }
     return load(path).model_state;
 }
 

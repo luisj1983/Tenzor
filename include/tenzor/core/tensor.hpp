@@ -1156,7 +1156,7 @@ public:
     /**
      * @brief Get the underlying storage.
      */
-    auto storage() const -> const std::shared_ptr<Storage>&;
+    auto storage() const -> const intrusive_ptr<Storage>&;
 
     /**
      * @brief Set the requires_grad flag.
@@ -1223,7 +1223,7 @@ public:
  *
  * @note This class is an implementation detail and may change between versions.
  */
-class TensorImpl {
+class TensorImpl : public IntrusiveRefCounted {
 public:
     /**
      * @brief Construct tensor implementation.
@@ -1247,14 +1247,15 @@ public:
      * @param dtype Element data type
      * @param device Device location
      */
-    TensorImpl(std::shared_ptr<Storage> storage,
+    TensorImpl(intrusive_ptr<Storage> storage,
                std::vector<int64_t> shape,
                std::vector<int64_t> strides,
                DType dtype, Device device);
 
     /// Copy constructor (needed because std::atomic is not copyable)
     TensorImpl(const TensorImpl& other)
-        : storage(other.storage)
+        : IntrusiveRefCounted(other)
+        , storage(other.storage)
         , shape(other.shape)
         , strides(other.strides)
         , offset(other.offset)
@@ -1263,6 +1264,7 @@ public:
         , requires_grad(other.requires_grad)
         , names_(other.names_)
         , is_contiguous_cache_(other.is_contiguous_cache_.load(std::memory_order_relaxed))
+        , memory_format_cache_(other.memory_format_cache_.load(std::memory_order_relaxed))
         , version_counter_(other.version_counter_.load(std::memory_order_relaxed)) {}
 
     TensorImpl& operator=(const TensorImpl&) = delete;
@@ -1284,7 +1286,7 @@ public:
 private:
     friend class Tensor;
 
-    std::shared_ptr<Storage> storage;    ///< Shared storage for tensor data
+    intrusive_ptr<Storage> storage;    ///< Shared storage for tensor data
     std::vector<int64_t> shape;          ///< Tensor dimensions
     std::vector<int64_t> strides;        ///< Memory strides per dimension
     int64_t offset{0};                   ///< Offset into storage
@@ -1295,6 +1297,13 @@ private:
     // SAFETY: Stale reads are harmless (triggers recomputation). No ordering
     // dependency on other fields — relaxed load/store is sufficient.
     mutable std::atomic<int8_t> is_contiguous_cache_{-1};  ///< Cached contiguity: -1=unset, 0=false, 1=true
+    // SAFETY: Same relaxed semantics as is_contiguous_cache_. Encoding matches
+    // MemoryFormat enum: -1=unset, 0=Contiguous, 1=ChannelsLast, 2=ChannelsLast3d.
+    static_assert(static_cast<int>(MemoryFormat::Contiguous) == 0
+               && static_cast<int>(MemoryFormat::ChannelsLast) == 1
+               && static_cast<int>(MemoryFormat::ChannelsLast3d) == 2,
+                  "MemoryFormat enum values must match cache encoding");
+    mutable std::atomic<int8_t> memory_format_cache_{-1};  ///< Cached memory format: -1=unset
     // SAFETY: Relaxed only in copy construction (snapshot of current version).
     // Mutation paths (increment_version()) use release ordering; version checks
     // in autograd use acquire ordering to observe the mutated tensor state.
