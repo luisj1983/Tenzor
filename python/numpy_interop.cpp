@@ -206,10 +206,10 @@ auto create_numpy_array(const Tensor& tensor, DType original_dtype) -> py::array
     void* data_ptr = base_ptr + checked_mul(static_cast<int64_t>(tensor.offset()),
                                             static_cast<int64_t>(element_size));
 
-    // Create capsule that keeps the tensor's storage alive via shared_ptr refcount.
-    auto* storage_ptr = new std::shared_ptr<Storage>(tensor.storage());
+    // Create capsule that keeps the tensor's storage alive via intrusive_ptr refcount.
+    auto* storage_ptr = new intrusive_ptr<Storage>(tensor.storage());
     py::capsule capsule(storage_ptr, [](void* ptr) {
-        delete static_cast<std::shared_ptr<Storage>*>(ptr);
+        delete static_cast<intrusive_ptr<Storage>*>(ptr);
     });
 
     py::array result(py::dtype(format), np_shape, np_strides, data_ptr, capsule);
