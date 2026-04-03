@@ -25,6 +25,18 @@ if(TENZOR_BUILD_VULKAN)
     tenzor_discover_tests(test_vulkan_caching_allocator DISCOVERY_TIMEOUT 60)
 endif()
 
+# ROCm Caching Allocator Tests
+if(TENZOR_BUILD_ROCM AND TARGET tenzor_backend_rocm)
+    find_package(hip REQUIRED)
+
+    add_executable(test_rocm_caching_allocator test_rocm_caching_allocator.cpp)
+    target_link_libraries(test_rocm_caching_allocator PRIVATE
+        tenzor_core tenzor_backend_rocm hip::host GTest::gtest_main)
+    target_include_directories(test_rocm_caching_allocator PRIVATE ${ROCM_PATH}/include)
+    add_dependencies(test_rocm_caching_allocator tenzor_backend_rocm)
+    tenzor_discover_tests(test_rocm_caching_allocator DISCOVERY_TIMEOUT 60)
+endif()
+
 # OneAPI Caching Allocator Tests
 if(TENZOR_BUILD_ONEAPI AND TARGET tenzor_backend_oneapi)
     add_executable(test_oneapi_caching_allocator test_oneapi_caching_allocator.cpp)

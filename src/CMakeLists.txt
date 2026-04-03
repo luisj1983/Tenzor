@@ -324,6 +324,11 @@ endif()
 
 # Add ROCm/HIP definition and includes if ROCm backend is enabled
 if(TENZOR_BUILD_ROCM)
+    # Ensure HIP_PLATFORM is set before find_package(hip)
+    if(NOT DEFINED HIP_PLATFORM AND NOT DEFINED ENV{HIP_PLATFORM})
+        set(HIP_PLATFORM "amd" CACHE STRING "HIP platform (amd or nvidia)")
+        set(ENV{HIP_PLATFORM} "amd")
+    endif()
     find_package(hip QUIET CONFIG PATHS /opt/rocm)
     if(hip_FOUND)
         target_compile_definitions(tenzor_core PRIVATE

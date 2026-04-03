@@ -42,10 +42,27 @@ if(TENZOR_BUILD_ROCM)
     add_executable(test_rocm_fft test_rocm_fft.cpp)
     target_link_libraries(test_rocm_fft PRIVATE tenzor_core GTest::gtest_main)
 
+    # ROCm detection kernel tests
+    add_executable(test_rocm_detection_kernels test_rocm_detection_kernels.cpp)
+    target_link_libraries(test_rocm_detection_kernels PRIVATE tenzor_core GTest::gtest_main hip::host)
+    target_include_directories(test_rocm_detection_kernels PRIVATE ${ROCM_PATH}/include)
+
+    # ROCm reduction tests
+    add_executable(test_rocm_reduction test_rocm_reduction.cpp)
+    target_link_libraries(test_rocm_reduction PRIVATE tenzor_core GTest::gtest_main)
+
+    # ROCm RNN kernel tests
+    add_executable(test_rocm_rnn_kernels test_rocm_rnn_kernels.cpp)
+    target_link_libraries(test_rocm_rnn_kernels PRIVATE tenzor_core GTest::gtest_main hip::host)
+    target_include_directories(test_rocm_rnn_kernels PRIVATE ${ROCM_PATH}/include)
+
     # ROCm initialization can be slow, use 60 second timeout
     tenzor_discover_tests(test_rocm_backend DISCOVERY_TIMEOUT 60)
     tenzor_discover_tests(test_rocm_kernels DISCOVERY_TIMEOUT 60)
     tenzor_discover_tests(test_rocm_fft DISCOVERY_TIMEOUT 60)
+    tenzor_discover_tests(test_rocm_detection_kernels DISCOVERY_TIMEOUT 60)
+    tenzor_discover_tests(test_rocm_reduction DISCOVERY_TIMEOUT 60)
+    tenzor_discover_tests(test_rocm_rnn_kernels DISCOVERY_TIMEOUT 60)
 endif()
 
 # Sparse GPU tests (works with any GPU backend: CUDA or ROCm)
