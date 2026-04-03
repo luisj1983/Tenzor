@@ -31,18 +31,7 @@ __global__ void im2col_kernel(
     int64_t kernel_h, int64_t kernel_w, int64_t stride, int64_t padding,
     int64_t dilation, int64_t out_h, int64_t out_w);
 
-inline void compute_launch_config_1d(int64_t n, dim3& grid, dim3& block) {
-    // Use a safe conservative block size (256) that works for ALL kernels
-    // regardless of register pressure. Using occupancy-based config with a
-    // specific simple kernel (e.g. im2col) produces block sizes that are
-    // too large for complex kernels (conv_transpose2d, depthwise_conv2d, etc.)
-    // causing "too many resources requested for launch" on Float64/Float16/BFloat16.
-    constexpr int kBlockSize = 256;
-    int num_blocks = static_cast<int>((n + kBlockSize - 1) / kBlockSize);
-    if (num_blocks < 1) num_blocks = 1;
-    block = dim3(static_cast<unsigned int>(kBlockSize), 1, 1);
-    grid  = dim3(static_cast<unsigned int>(num_blocks), 1, 1);
-}
+// compute_launch_config_1d() is now in cuda_launch_utils.cuh
 
 inline void compute_launch_config_2d(int64_t rows, int64_t cols, dim3& grid, dim3& block) {
     const int block_x = 16;

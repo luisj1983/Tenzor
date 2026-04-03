@@ -22,6 +22,20 @@ inline auto reduce_grad_var_for_broadcasting(const Variable& grad, const std::ve
         return grad;
     }
 
+    // Handle empty tensors: reshape directly to target
+    if (grad.tensor().numel() == 0) {
+        return tenzor::reshape(grad, target_shape);
+    }
+
+    // Handle scalar target (empty shape): sum all dimensions
+    if (target_shape.empty()) {
+        auto result = grad;
+        for (int64_t d = static_cast<int64_t>(grad_shape_vec.size()) - 1; d >= 0; --d) {
+            result = tenzor::sum(result, 0, false);
+        }
+        return result;
+    }
+
     auto result = grad;
 
     int64_t ndim_diff = static_cast<int64_t>(grad_shape_vec.size()) - static_cast<int64_t>(target_shape.size());
@@ -49,6 +63,13 @@ inline auto reduce_grad_var_for_broadcasting(const Variable& grad, const std::ve
         result = tenzor::reshape(result, target_shape);
     }
 
+    // Final validation: shape must match target after all reductions
+    auto final_shape = std::vector<int64_t>(result.shape().begin(), result.shape().end());
+    if (final_shape != target_shape) {
+        throw std::runtime_error(
+            "Autograd bug: reduce_grad_var_for_broadcasting failed to produce target shape");
+    }
+
     return result;
 }
 
@@ -58,6 +79,20 @@ inline auto reduce_grad_for_broadcasting(const Tensor& grad, const std::vector<i
 
     if (grad_shape_vec == target_shape) {
         return grad;
+    }
+
+    // Handle empty tensors: reshape directly to target
+    if (grad.numel() == 0) {
+        return reshape(grad, target_shape);
+    }
+
+    // Handle scalar target (empty shape): sum all dimensions
+    if (target_shape.empty()) {
+        auto result = grad;
+        while (result.dim() > 0) {
+            result = tenzor::sum(result, 0, false);
+        }
+        return result;
     }
 
     auto result = grad;
@@ -85,6 +120,13 @@ inline auto reduce_grad_for_broadcasting(const Tensor& grad, const std::vector<i
 
     if (result_shape_vec != target_shape) {
         result = reshape(result, target_shape);
+    }
+
+    // Final validation: shape must match target after all reductions
+    auto final_shape = std::vector<int64_t>(result.shape().begin(), result.shape().end());
+    if (final_shape != target_shape) {
+        throw std::runtime_error(
+            "Autograd bug: reduce_grad_for_broadcasting failed to produce target shape");
     }
 
     return result;

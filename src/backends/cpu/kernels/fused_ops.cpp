@@ -28,6 +28,9 @@
 // Import shared Float16/BFloat16 operator overloads
 #include "half_operators.hpp"
 
+// SIMD fast math (vectorized tanh, GELU, etc.)
+#include "simd_fast_math.hpp"
+
 namespace tenzor {
 namespace cpu {
 
@@ -69,11 +72,13 @@ auto fused_linear_relu_kernel(
     Tensor output = matmul(input_2d, weight_t);
 
     // Add bias if provided and apply ReLU in single pass
+    const size_t total_elems = static_cast<size_t>(batch_size) * static_cast<size_t>(out_features);
+
     if (input.dtype() == DType::Float32) {
         float* out_data = output.data<float>();
         const float* bias_data = bias ? bias->data<float>() : nullptr;
-        size_t n = static_cast<size_t>(output.numel());
 
+        #pragma omp parallel for if(total_elems > 65536)
         for (size_t i = 0; i < static_cast<size_t>(batch_size); ++i) {
             for (size_t j = 0; j < static_cast<size_t>(out_features); ++j) {
                 size_t idx = i * out_features + j;
@@ -81,7 +86,6 @@ auto fused_linear_relu_kernel(
                 if (bias_data) {
                     val += bias_data[j];
                 }
-                // ReLU
                 out_data[idx] = std::max(0.0f, val);
             }
         }
@@ -89,6 +93,7 @@ auto fused_linear_relu_kernel(
         double* out_data = output.data<double>();
         const double* bias_data = bias ? bias->data<double>() : nullptr;
 
+        #pragma omp parallel for if(total_elems > 65536)
         for (size_t i = 0; i < static_cast<size_t>(batch_size); ++i) {
             for (size_t j = 0; j < static_cast<size_t>(out_features); ++j) {
                 size_t idx = i * out_features + j;
@@ -96,18 +101,17 @@ auto fused_linear_relu_kernel(
                 if (bias_data) {
                     val += bias_data[j];
                 }
-                // ReLU
                 out_data[idx] = std::max(0.0, val);
             }
         }
     } else if (input.dtype() == DType::Float16) {
-        // Float16: convert to Float32 for computation, convert back
         Tensor output_f32 = output.to(DType::Float32);
         Tensor bias_f32 = bias ? bias->to(DType::Float32) : Tensor();
 
         float* out_data = output_f32.data<float>();
         const float* bias_data = bias ? bias_f32.data<float>() : nullptr;
 
+        #pragma omp parallel for if(total_elems > 65536)
         for (size_t i = 0; i < static_cast<size_t>(batch_size); ++i) {
             for (size_t j = 0; j < static_cast<size_t>(out_features); ++j) {
                 size_t idx = i * out_features + j;
@@ -115,20 +119,19 @@ auto fused_linear_relu_kernel(
                 if (bias_data) {
                     val += bias_data[j];
                 }
-                // ReLU
                 out_data[idx] = std::max(0.0f, val);
             }
         }
 
         output = output_f32.to(DType::Float16);
     } else if (input.dtype() == DType::BFloat16) {
-        // BFloat16: convert to Float32 for computation, convert back
         Tensor output_f32 = output.to(DType::Float32);
         Tensor bias_f32 = bias ? bias->to(DType::Float32) : Tensor();
 
         float* out_data = output_f32.data<float>();
         const float* bias_data = bias ? bias_f32.data<float>() : nullptr;
 
+        #pragma omp parallel for if(total_elems > 65536)
         for (size_t i = 0; i < static_cast<size_t>(batch_size); ++i) {
             for (size_t j = 0; j < static_cast<size_t>(out_features); ++j) {
                 size_t idx = i * out_features + j;
@@ -136,7 +139,6 @@ auto fused_linear_relu_kernel(
                 if (bias_data) {
                     val += bias_data[j];
                 }
-                // ReLU
                 out_data[idx] = std::max(0.0f, val);
             }
         }
@@ -213,6 +215,7 @@ auto fused_batchnorm_relu_kernel(
         float* out_data = output.data<float>();
 
         // Fused batchnorm + ReLU
+        #pragma omp parallel for collapse(2) if(batch_size * num_features > 64)
         for (int64_t n = 0; n < batch_size; ++n) {
             for (int64_t c = 0; c < num_features; ++c) {
                 float mean = mean_data[c];
@@ -225,7 +228,6 @@ auto fused_batchnorm_relu_kernel(
                     size_t idx = n * num_features * spatial_size + c * spatial_size + s;
                     float normalized = (in_data[idx] - mean) * inv_std;
                     float scaled = normalized * gamma + beta;
-                    // ReLU
                     out_data[idx] = std::max(0.0f, scaled);
                 }
             }
@@ -239,6 +241,7 @@ auto fused_batchnorm_relu_kernel(
         double* out_data = output.data<double>();
 
         // Fused batchnorm + ReLU
+        #pragma omp parallel for collapse(2) if(batch_size * num_features > 64)
         for (int64_t n = 0; n < batch_size; ++n) {
             for (int64_t c = 0; c < num_features; ++c) {
                 double mean = mean_data[c];
@@ -251,7 +254,6 @@ auto fused_batchnorm_relu_kernel(
                     size_t idx = n * num_features * spatial_size + c * spatial_size + s;
                     double normalized = (in_data[idx] - mean) * inv_std;
                     double scaled = normalized * gamma + beta;
-                    // ReLU
                     out_data[idx] = std::max(0.0, scaled);
                 }
             }
@@ -265,6 +267,7 @@ auto fused_batchnorm_relu_kernel(
         Float16* out_data = output.data<Float16>();
 
         // Fused batchnorm + ReLU (compute in float for numerical stability)
+        #pragma omp parallel for collapse(2) if(batch_size * num_features > 64)
         for (int64_t n = 0; n < batch_size; ++n) {
             for (int64_t c = 0; c < num_features; ++c) {
                 float mean = static_cast<float>(mean_data[c]);
@@ -278,7 +281,6 @@ auto fused_batchnorm_relu_kernel(
                     float in_val = static_cast<float>(in_data[idx]);
                     float normalized = (in_val - mean) * inv_std;
                     float scaled = normalized * gamma + beta;
-                    // ReLU
                     out_data[idx] = Float16(std::max(0.0f, scaled));
                 }
             }
@@ -291,6 +293,7 @@ auto fused_batchnorm_relu_kernel(
         const BFloat16* beta_data = bias.data<BFloat16>();
         BFloat16* out_data = output.data<BFloat16>();
 
+        #pragma omp parallel for collapse(2) if(batch_size * num_features > 64)
         for (int64_t n = 0; n < batch_size; ++n) {
             for (int64_t c = 0; c < num_features; ++c) {
                 float mean = static_cast<float>(mean_data[c]);
@@ -478,20 +481,35 @@ auto fused_add_relu_kernel(const Tensor& a, const Tensor& b) -> Tensor {
     if (result.dtype() == DType::Float32) {
         float* data = result.data<float>();
         size_t n = static_cast<size_t>(result.numel());
+#if defined(TENZOR_ATTN_AVX2)
+        size_t vec_end = n - (n % 8);
+        __m256 zero_vec = _mm256_setzero_ps();
+        #pragma omp parallel for if(n > 65536)
+        for (size_t i = 0; i < vec_end; i += 8) {
+            __m256 v = _mm256_loadu_ps(data + i);
+            _mm256_storeu_ps(data + i, _mm256_max_ps(zero_vec, v));
+        }
+        for (size_t i = vec_end; i < n; ++i) {
+            data[i] = std::max(0.0f, data[i]);
+        }
+#else
+        #pragma omp parallel for if(n > 65536)
         for (size_t i = 0; i < n; ++i) {
             data[i] = std::max(0.0f, data[i]);
         }
+#endif
     } else if (result.dtype() == DType::Float64) {
         double* data = result.data<double>();
         size_t n = static_cast<size_t>(result.numel());
+        #pragma omp parallel for if(n > 65536)
         for (size_t i = 0; i < n; ++i) {
             data[i] = std::max(0.0, data[i]);
         }
     } else if (result.dtype() == DType::Float16) {
-        // Float16: convert to Float32 for computation, convert back
         Tensor result_f32 = result.to(DType::Float32);
         float* data = result_f32.data<float>();
         size_t n = static_cast<size_t>(result.numel());
+        #pragma omp parallel for if(n > 65536)
         for (size_t i = 0; i < n; ++i) {
             data[i] = std::max(0.0f, data[i]);
         }
@@ -500,6 +518,7 @@ auto fused_add_relu_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         Tensor result_f32 = result.to(DType::Float32);
         float* data = result_f32.data<float>();
         size_t n = static_cast<size_t>(result.numel());
+        #pragma omp parallel for if(n > 65536)
         for (size_t i = 0; i < n; ++i) {
             data[i] = std::max(0.0f, data[i]);
         }
@@ -528,6 +547,34 @@ auto fused_gelu_kernel(const Tensor& input) -> Tensor {
         float* out_data = result.data<float>();
         size_t n = static_cast<size_t>(input.numel());
 
+#if defined(TENZOR_ATTN_AVX512)
+        size_t vec_end = n - (n % 16);
+        #pragma omp parallel for if(n > 65536)
+        for (size_t i = 0; i < vec_end; i += 16) {
+            __m512 x = _mm512_loadu_ps(in_data + i);
+            _mm512_storeu_ps(out_data + i, fast_math::gelu_avx512(x));
+        }
+        for (size_t i = vec_end; i < n; ++i) {
+            float x = in_data[i];
+            float x_cubed = x * x * x;
+            float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
+            out_data[i] = 0.5f * x * (1.0f + std::tanh(inner));
+        }
+#elif defined(TENZOR_ATTN_AVX2)
+        size_t vec_end = n - (n % 8);
+        #pragma omp parallel for if(n > 65536)
+        for (size_t i = 0; i < vec_end; i += 8) {
+            __m256 x = _mm256_loadu_ps(in_data + i);
+            _mm256_storeu_ps(out_data + i, fast_math::gelu_avx2(x));
+        }
+        for (size_t i = vec_end; i < n; ++i) {
+            float x = in_data[i];
+            float x_cubed = x * x * x;
+            float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
+            out_data[i] = 0.5f * x * (1.0f + std::tanh(inner));
+        }
+#else
+        #pragma omp parallel for if(n > 65536)
         for (size_t i = 0; i < n; ++i) {
             float x = in_data[i];
             float x_cubed = x * x * x;
@@ -535,11 +582,13 @@ auto fused_gelu_kernel(const Tensor& input) -> Tensor {
             float tanh_val = std::tanh(inner);
             out_data[i] = 0.5f * x * (1.0f + tanh_val);
         }
+#endif
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
         double* out_data = result.data<double>();
         size_t n = static_cast<size_t>(input.numel());
 
+        #pragma omp parallel for if(n > 65536)
         for (size_t i = 0; i < n; ++i) {
             double x = in_data[i];
             double x_cubed = x * x * x;
@@ -552,6 +601,7 @@ auto fused_gelu_kernel(const Tensor& input) -> Tensor {
         Float16* out_data = result.data<Float16>();
         size_t n = static_cast<size_t>(input.numel());
 
+        #pragma omp parallel for if(n > 65536)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float x_cubed = x * x * x;
@@ -564,6 +614,7 @@ auto fused_gelu_kernel(const Tensor& input) -> Tensor {
         BFloat16* out_data = result.data<BFloat16>();
         size_t n = static_cast<size_t>(input.numel());
 
+        #pragma omp parallel for if(n > 65536)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
             float x_cubed = x * x * x;

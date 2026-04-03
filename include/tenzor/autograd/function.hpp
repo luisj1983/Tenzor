@@ -38,6 +38,19 @@ void set_higher_order_grad_mode(HigherOrderGradMode mode);
 /// Get the current higher-order gradient fallback mode.
 auto get_higher_order_grad_mode() -> HigherOrderGradMode;
 
+/// Returns the number of times higher-order gradient graph was disconnected
+/// due to an operation not supporting backward_with_variables() (Warn/Silent mode).
+/// Useful for programmatic detection in tests and debugging.
+auto higher_order_disconnection_count() -> uint64_t;
+
+/// Reset the disconnection counter to zero.
+void reset_higher_order_disconnection_count();
+
+namespace detail {
+/// Internal: increment the disconnection counter (used by engine for stub ops)
+void increment_higher_order_disconnection_count();
+} // namespace detail
+
 /// Enable/disable activation offloading to CPU for GPU-resident saved tensors.
 /// When enabled, save_for_backward() moves GPU tensors to CPU RAM to reduce
 /// GPU memory pressure, and saved_tensors() loads them back on access.
@@ -181,6 +194,21 @@ public:
      * This method is primarily useful for introspection and pre-flight checks.
      */
     virtual auto supports_higher_order() const -> bool { return false; }
+
+    /**
+     * @brief Query whether this function's backward_with_variables() is a stub.
+     *
+     * Returns true if the subclass has a passthrough stub that delegates to
+     * backward() and wraps results without building a gradient graph. This
+     * means higher-order gradients through this operation will be zero.
+     *
+     * Operations where this returns true include non-differentiable mask ops
+     * (MaxBackward, MinBackward) and ops where the second derivative is
+     * structurally zero (ScatterBackward, TopKBackward, SortBackward, etc.).
+     *
+     * @return true if backward_with_variables() is a passthrough stub
+     */
+    virtual auto is_higher_order_stub() const -> bool { return false; }
 
     /**
      * @brief Get readable name for this backward function.
@@ -682,6 +710,7 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
 private:
     std::optional<int64_t> dim_;
     bool keepdim_;
@@ -951,6 +980,7 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
 private:
     int64_t input_h_;   ///< Input height
     int64_t input_w_;   ///< Input width
@@ -1197,6 +1227,7 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
     std::optional<int64_t> dim_;
     bool keepdim_;
 };
@@ -1302,6 +1333,7 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
 };
 
 /**
@@ -1361,6 +1393,7 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
 };
 
 class FlipBackward : public Function {
@@ -1438,6 +1471,7 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
     auto name() const -> std::string override { return "TopKBackward"; }
 private:
     int64_t k_;
@@ -1459,6 +1493,7 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
     auto name() const -> std::string override { return "SortBackward"; }
 private:
     int64_t dim_;

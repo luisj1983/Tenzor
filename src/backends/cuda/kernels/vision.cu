@@ -30,16 +30,7 @@ __global__ void float_to_half_kernel(const float* __restrict__ in, HalfT* __rest
 // Kernel Launch Helpers
 // ============================================================================
 
-// Delegates to compute_grid_size() from cuda_launch_utils.cuh to avoid
-// duplicating the block-size logic. For per-kernel occupancy-optimized
-// launches use optimal_launch_config() or the LAUNCH_KERNEL macro instead.
-inline void compute_launch_config_1d(int64_t n, dim3& grid, dim3& block) {
-    constexpr int block_size = 256;
-    block = dim3(block_size, 1, 1);
-    int num_blocks = compute_grid_size(n, block_size);
-    grid = dim3(static_cast<unsigned int>(num_blocks), 1, 1);
-}
-
+// compute_launch_config_1d() is now in cuda_launch_utils.cuh
 
 // ============================================================================
 // Unfold CUDA Kernel

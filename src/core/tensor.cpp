@@ -104,12 +104,12 @@ auto TensorImpl::is_contiguous() const -> bool {
 
 // Tensor implementation
 Tensor::Tensor(std::vector<int64_t> shape, DType dtype, Device device)
-    : impl_(std::make_shared<TensorImpl>(std::move(shape), dtype, device, true)) {}
+    : impl_(make_intrusive<TensorImpl>(std::move(shape), dtype, device, true)) {}
 
 auto Tensor::empty_uninitialized(std::vector<int64_t> shape, DType dtype, Device device)
     -> Tensor {
     Tensor t;
-    t.impl_ = std::make_shared<TensorImpl>(std::move(shape), dtype, device, false);
+    t.impl_ = make_intrusive<TensorImpl>(std::move(shape), dtype, device, false);
     return t;
 }
 
@@ -150,7 +150,7 @@ auto Tensor::from_blob(void* data,
 
     // Build tensor from pre-existing storage
     Tensor t;
-    t.impl_ = std::make_shared<TensorImpl>(
+    t.impl_ = make_intrusive<TensorImpl>(
         std::move(storage), std::move(shape), std::move(strides),
         dtype, device);
     return t;
@@ -720,7 +720,7 @@ auto Tensor::detach() const -> Tensor {
     }
     // Share storage (zero-copy) like view() — no need to copy data
     Tensor result;
-    result.impl_ = std::make_shared<TensorImpl>(*impl_);
+    result.impl_ = make_intrusive<TensorImpl>(*impl_);
     result.impl_->requires_grad = false;
     return result;
 }
@@ -1083,7 +1083,7 @@ auto Tensor::view(std::vector<int64_t> new_shape) const -> Tensor {
     // View is a zero-copy operation - create a new tensor that shares the same storage
     // This is the key difference from reshape: view MUST share storage
     Tensor result;
-    result.impl_ = std::make_shared<TensorImpl>(*impl_);
+    result.impl_ = make_intrusive<TensorImpl>(*impl_);
 
     // Update shape and recompute strides for contiguous layout
     result.impl_->shape = std::move(new_shape);
@@ -1115,7 +1115,7 @@ auto Tensor::transpose(int64_t dim0, int64_t dim1) const -> Tensor {
     if (ndims == 2 && dim0 == 0 && dim1 == 1) {
         // Simple transpose - just swap shape and strides
         Tensor result;
-        result.impl_ = std::make_shared<TensorImpl>(*impl_);
+        result.impl_ = make_intrusive<TensorImpl>(*impl_);
         std::swap(result.impl_->shape[0], result.impl_->shape[1]);
         std::swap(result.impl_->strides[0], result.impl_->strides[1]);
         result.impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
@@ -1124,7 +1124,7 @@ auto Tensor::transpose(int64_t dim0, int64_t dim1) const -> Tensor {
 
     // General case - swap specified dimensions
     Tensor result;
-    result.impl_ = std::make_shared<TensorImpl>(*impl_);
+    result.impl_ = make_intrusive<TensorImpl>(*impl_);
     std::swap(result.impl_->shape[dim0], result.impl_->shape[dim1]);
     std::swap(result.impl_->strides[dim0], result.impl_->strides[dim1]);
     result.impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
@@ -1161,7 +1161,7 @@ auto Tensor::permute(std::vector<int64_t> dims) const -> Tensor {
 
     // Create permuted tensor
     Tensor result;
-    result.impl_ = std::make_shared<TensorImpl>(*impl_);
+    result.impl_ = make_intrusive<TensorImpl>(*impl_);
 
     std::vector<int64_t> new_shape(ndims);
     std::vector<int64_t> new_strides(ndims);
@@ -1201,7 +1201,7 @@ auto Tensor::squeeze(std::optional<int64_t> dim) const -> Tensor {
 
         // Remove the dimension
         Tensor result;
-        result.impl_ = std::make_shared<TensorImpl>(*impl_);
+        result.impl_ = make_intrusive<TensorImpl>(*impl_);
         result.impl_->shape.erase(result.impl_->shape.begin() + d);
         result.impl_->strides.erase(result.impl_->strides.begin() + d);
         result.impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
@@ -1223,7 +1223,7 @@ auto Tensor::squeeze(std::optional<int64_t> dim) const -> Tensor {
         // numel() == 1 for an empty shape (identity of multiplication).
 
         Tensor result;
-        result.impl_ = std::make_shared<TensorImpl>(*impl_);
+        result.impl_ = make_intrusive<TensorImpl>(*impl_);
         result.impl_->shape = std::move(new_shape);
         result.impl_->strides = std::move(new_strides);
         result.impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
@@ -1249,7 +1249,7 @@ auto Tensor::unsqueeze(int64_t dim) const -> Tensor {
 
     // Insert dimension of size 1
     Tensor result;
-    result.impl_ = std::make_shared<TensorImpl>(*impl_);
+    result.impl_ = make_intrusive<TensorImpl>(*impl_);
 
     result.impl_->shape.insert(result.impl_->shape.begin() + dim, 1);
 
@@ -1398,7 +1398,7 @@ auto Tensor::slice(int64_t dim, int64_t start, int64_t end, int64_t step) const 
 
     // Create new tensor that shares storage with original
     Tensor result;
-    result.impl_ = std::make_shared<TensorImpl>(*impl_);
+    result.impl_ = make_intrusive<TensorImpl>(*impl_);
 
     // Update shape for sliced dimension
     result.impl_->shape[dim] = new_dim_size;
@@ -1659,7 +1659,7 @@ auto Tensor::rename(DimnameList names) const -> Tensor {
     validate_dimnames(names);
 
     // Create a new TensorImpl that shares storage but has different names
-    auto new_impl = std::make_shared<TensorImpl>(*impl_);
+    auto new_impl = make_intrusive<TensorImpl>(*impl_);
     new_impl->names_ = std::move(names);
     Tensor result;
     result.impl_ = std::move(new_impl);
@@ -1668,7 +1668,7 @@ auto Tensor::rename(DimnameList names) const -> Tensor {
 
 auto Tensor::rename(std::optional<DimnameList> names) const -> Tensor {
     if (!names) {
-        auto new_impl = std::make_shared<TensorImpl>(*impl_);
+        auto new_impl = make_intrusive<TensorImpl>(*impl_);
         new_impl->names_ = std::nullopt;
         Tensor result;
         result.impl_ = std::move(new_impl);

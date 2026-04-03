@@ -75,29 +75,8 @@ __device__ __host__ inline BFloat16 from_cuda_bfloat16(const __nv_bfloat16& x) {
 template<typename T>
 __global__ void fill_kernel_device(T* output, T value, int64_t n);
 
-inline void compute_launch_config_1d(int64_t n, dim3& grid, dim3& block) {
-    // Use a safe conservative block size (256) that works for ALL kernels
-    // regardless of register pressure. Using occupancy-based config with a
-    // specific simple kernel (e.g. fill_kernel) produces block sizes that are
-    // too large for complex kernels (adaptive_avg_pool2d, etc.) causing
-    // "too many resources requested for launch" errors on Float64/Float16/BFloat16.
-    // For kernel-specific optimization, use OCCUPANCY_CONFIG(kernel_ptr, ...) instead.
-    constexpr int kBlockSize = 256;
-    int num_blocks = static_cast<int>((n + kBlockSize - 1) / kBlockSize);
-    if (num_blocks < 1) num_blocks = 1;
-    block = dim3(static_cast<unsigned int>(kBlockSize), 1, 1);
-    grid  = dim3(static_cast<unsigned int>(num_blocks), 1, 1);
-}
-
-
-// Convenience: compute occupancy-based grid/block from a kernel pointer
-// and element count, storing into the provided dim3 variables.
-#define OCCUPANCY_CONFIG(kernel_ptr, numel, grid_var, block_var) \
-    do { \
-        auto [_nb, _bs] = optimal_launch_config((kernel_ptr), (numel)); \
-        (grid_var)  = dim3(static_cast<unsigned int>(_nb)); \
-        (block_var) = dim3(static_cast<unsigned int>(_bs)); \
-    } while (0)
+// compute_launch_config_1d() and OCCUPANCY_CONFIG are now in
+// cuda_launch_utils.cuh (shared across all CUDA kernel files).
 
 // ============================================================================
 // Division by Zero Check (for integer types)

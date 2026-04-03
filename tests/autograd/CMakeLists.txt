@@ -70,3 +70,13 @@ tenzor_discover_tests(test_vmap DISCOVERY_TIMEOUT 60)
 add_executable(test_anomaly_detection test_anomaly_detection.cpp)
 target_link_libraries(test_anomaly_detection PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_anomaly_detection DISCOVERY_TIMEOUT 60)
+
+# HigherOrderGradMode::Warn disconnection counter and is_higher_order_stub() tests
+add_executable(test_warn_mode_counter test_warn_mode_counter.cpp)
+target_link_libraries(test_warn_mode_counter PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_warn_mode_counter DISCOVERY_TIMEOUT 60)
+
+# Graph cleanup tests (verify grad_fn cleared on intermediates after backward)
+add_executable(test_graph_cleanup test_graph_cleanup.cpp)
+target_link_libraries(test_graph_cleanup PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_graph_cleanup DISCOVERY_TIMEOUT 60)

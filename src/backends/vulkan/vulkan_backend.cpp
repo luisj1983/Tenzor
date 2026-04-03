@@ -4597,7 +4597,7 @@ auto VulkanBackend::dispatchReshape(const Tensor& input, const std::vector<int64
 
     // Create new tensor that shares storage (view)
     Tensor result;
-    result.impl_ = std::make_shared<TensorImpl>(*input.impl_);
+    result.impl_ = make_intrusive<TensorImpl>(*input.impl_);
     result.impl_->shape = new_shape;
     result.impl_->strides = tenzor::compute_strides(new_shape);
 
@@ -4898,7 +4898,7 @@ auto VulkanBackend::dispatchSqueeze(const Tensor& input, int64_t dim) -> Tensor 
 
     // Create result tensor sharing storage (zero-copy metadata-only operation)
     Tensor result;
-    result.impl_ = std::make_shared<TensorImpl>(*(input.impl_));
+    result.impl_ = make_intrusive<TensorImpl>(*(input.impl_));
     result.impl_->shape = std::move(new_shape);
     result.impl_->strides = std::move(new_strides);
 

@@ -105,7 +105,7 @@ auto reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape) 
 
     // Create new tensor sharing storage (view)
     Tensor result;
-    TensorAccessor::get_impl_mutable(result) = std::make_shared<TensorImpl>(*TensorAccessor::get_impl(input));
+    TensorAccessor::get_impl_mutable(result) = make_intrusive<TensorImpl>(*TensorAccessor::get_impl(input));
     result.mutable_shape() = new_shape;
     result.mutable_strides() = compute_strides(new_shape);
 
@@ -123,7 +123,7 @@ auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1) -> Tensor
     }
     // Transpose just swaps dimensions in metadata
     Tensor result;
-    TensorAccessor::get_impl_mutable(result) = std::make_shared<TensorImpl>(*TensorAccessor::get_impl(input));
+    TensorAccessor::get_impl_mutable(result) = make_intrusive<TensorImpl>(*TensorAccessor::get_impl(input));
     auto& r_shape = result.mutable_shape();
     auto& r_strides = result.mutable_strides();
     std::swap(r_shape[dim0], r_shape[dim1]);
@@ -135,7 +135,7 @@ auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims) -> Te
     const int64_t ndim = input.ndim();
 
     Tensor result;
-    TensorAccessor::get_impl_mutable(result) = std::make_shared<TensorImpl>(*TensorAccessor::get_impl(input));
+    TensorAccessor::get_impl_mutable(result) = make_intrusive<TensorImpl>(*TensorAccessor::get_impl(input));
 
     std::vector<int64_t> new_shape(ndim);
     std::vector<int64_t> new_strides(ndim);
@@ -153,7 +153,7 @@ auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims) -> Te
 
 auto squeeze_kernel(const Tensor& input, int64_t dim) -> Tensor {
     Tensor result;
-    TensorAccessor::get_impl_mutable(result) = std::make_shared<TensorImpl>(*TensorAccessor::get_impl(input));
+    TensorAccessor::get_impl_mutable(result) = make_intrusive<TensorImpl>(*TensorAccessor::get_impl(input));
 
     if (dim >= 0) {
         // Squeeze specific dimension
@@ -187,7 +187,7 @@ auto squeeze_kernel(const Tensor& input, int64_t dim) -> Tensor {
 
 auto unsqueeze_kernel(const Tensor& input, int64_t dim) -> Tensor {
     Tensor result;
-    TensorAccessor::get_impl_mutable(result) = std::make_shared<TensorImpl>(*TensorAccessor::get_impl(input));
+    TensorAccessor::get_impl_mutable(result) = make_intrusive<TensorImpl>(*TensorAccessor::get_impl(input));
 
     auto& r_shape = result.mutable_shape();
     auto& r_strides = result.mutable_strides();
@@ -457,7 +457,7 @@ auto slice_kernel(const Tensor& input, int64_t dim, int64_t start, int64_t end, 
     // If step is 1, we can create a view
     if (step == 1) {
         Tensor result;
-        TensorAccessor::get_impl_mutable(result) = std::make_shared<TensorImpl>(*TensorAccessor::get_impl(input));
+        TensorAccessor::get_impl_mutable(result) = make_intrusive<TensorImpl>(*TensorAccessor::get_impl(input));
         result.mutable_shape() = new_shape;
         result.set_offset(result.offset() + start * strides[dim]);
         return result;
@@ -528,7 +528,7 @@ auto expand_kernel(const Tensor& input, const std::vector<int64_t>& target_shape
     }
 
     Tensor result;
-    TensorAccessor::get_impl_mutable(result) = std::make_shared<TensorImpl>(*TensorAccessor::get_impl(input));
+    TensorAccessor::get_impl_mutable(result) = make_intrusive<TensorImpl>(*TensorAccessor::get_impl(input));
     result.mutable_shape() = target_shape;
     result.mutable_strides() = new_strides;
     return result;

@@ -95,8 +95,9 @@ inline void intrusive_ptr_release(const IntrusiveRefCounted* p) noexcept {
  */
 template<typename T>
 class intrusive_ptr {
-    static_assert(std::is_base_of_v<IntrusiveRefCounted, T>,
-                  "T must inherit from IntrusiveRefCounted");
+    // Note: base class check deferred to destructor to allow incomplete types
+    // at member declaration (PImpl pattern). The check fires when the destructor
+    // is instantiated, at which point T must be complete.
 
 public:
     /// Default constructor: null pointer
@@ -132,6 +133,8 @@ public:
     }
 
     ~intrusive_ptr() {
+        static_assert(std::is_base_of_v<IntrusiveRefCounted, T>,
+                      "T must inherit from IntrusiveRefCounted");
         if (ptr_) intrusive_ptr_release(ptr_);
     }
 

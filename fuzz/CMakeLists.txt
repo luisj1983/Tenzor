@@ -32,3 +32,12 @@ add_fuzz_target(fuzz_tensor_creation fuzz_tensor_creation.cpp)
 
 # Fuzz reshape with untrusted dimensions
 add_fuzz_target(fuzz_reshape fuzz_reshape.cpp)
+
+# Fuzz autograd backward pass with random computation graphs
+add_fuzz_target(fuzz_autograd_backward fuzz_autograd_backward.cpp)
+
+# Fuzz matmul with edge-case shapes
+add_fuzz_target(fuzz_matmul_shapes fuzz_matmul_shapes.cpp)
+
+# Fuzz type promotion in binary operations
+add_fuzz_target(fuzz_type_promotion fuzz_type_promotion.cpp)

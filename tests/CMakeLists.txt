@@ -166,19 +166,6 @@ add_executable(test_minimal_training test_minimal_training.cpp)
 target_link_libraries(test_minimal_training PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_minimal_training DISCOVERY_TIMEOUT 60)
 
-# Minimal Float16 tests (debugging Float16 corruption)
-add_executable(minimal_float16_test minimal_float16_test.cpp)
-target_link_libraries(minimal_float16_test PRIVATE tenzor_core)
-
-add_executable(minimal_float16_variable_test minimal_float16_variable_test.cpp)
-target_link_libraries(minimal_float16_variable_test PRIVATE tenzor_core)
-
-add_executable(minimal_float16_embedding_test minimal_float16_embedding_test.cpp)
-target_link_libraries(minimal_float16_embedding_test PRIVATE tenzor_core)
-
-add_executable(minimal_float16_attention_test minimal_float16_attention_test.cpp)
-target_link_libraries(minimal_float16_attention_test PRIVATE tenzor_core)
-
 # Split operation tests
 add_executable(test_split_operation test_split_operation.cpp)
 target_link_libraries(test_split_operation PRIVATE tenzor_core GTest::gtest_main)
@@ -318,72 +305,9 @@ target_link_libraries(vulkan_diagnostic PRIVATE tenzor_core)
 add_executable(vulkan_add_debug vulkan_add_debug.cpp)
 target_link_libraries(vulkan_add_debug PRIVATE tenzor_core)
 
-# Debug vulkan hang with command batching
-add_executable(debug_vulkan_hang debug_vulkan_hang.cpp)
-target_link_libraries(debug_vulkan_hang PRIVATE tenzor_core)
-
 # Debug DataLoader test
 add_executable(debug_dataloader debug_dataloader.cpp)
 target_link_libraries(debug_dataloader PRIVATE tenzor_core)
-
-# Minimal Float16 Linear backward test
-add_executable(minimal_float16_linear_backward_test minimal_float16_linear_backward_test.cpp)
-target_link_libraries(minimal_float16_linear_backward_test PRIVATE tenzor_core)
-
-# Minimal Float16 Embedding backward test
-add_executable(minimal_float16_embedding_backward_test minimal_float16_embedding_backward_test.cpp)
-target_link_libraries(minimal_float16_embedding_backward_test PRIVATE tenzor_core)
-
-# Minimal Float16 LayerNorm backward test
-add_executable(minimal_float16_layernorm_backward_test minimal_float16_layernorm_backward_test.cpp)
-target_link_libraries(minimal_float16_layernorm_backward_test PRIVATE tenzor_core)
-
-# Minimal Float16 Attention backward test
-add_executable(minimal_float16_attention_backward_test minimal_float16_attention_backward_test.cpp)
-target_link_libraries(minimal_float16_attention_backward_test PRIVATE tenzor_core)
-
-# Minimal Float16 BMM backward test
-add_executable(minimal_float16_bmm_backward_test minimal_float16_bmm_backward_test.cpp)
-target_link_libraries(minimal_float16_bmm_backward_test PRIVATE tenzor_core)
-
-# Minimal Float16 Softmax backward test
-add_executable(minimal_float16_softmax_backward_test minimal_float16_softmax_backward_test.cpp)
-target_link_libraries(minimal_float16_softmax_backward_test PRIVATE tenzor_core)
-
-# Minimal Float16 Reshape backward test
-add_executable(minimal_float16_reshape_backward_test minimal_float16_reshape_backward_test.cpp)
-target_link_libraries(minimal_float16_reshape_backward_test PRIVATE tenzor_core)
-
-# Minimal Float16 Permute backward test
-add_executable(minimal_float16_permute_backward_test minimal_float16_permute_backward_test.cpp)
-target_link_libraries(minimal_float16_permute_backward_test PRIVATE tenzor_core)
-
-# Minimal Float16 Scaled Dot-Product Attention test
-add_executable(minimal_float16_scaled_dot_product_attention_test minimal_float16_scaled_dot_product_attention_test.cpp)
-target_link_libraries(minimal_float16_scaled_dot_product_attention_test PRIVATE tenzor_core)
-
-# Minimal Float16 Linear + Reshape + Permute test
-add_executable(minimal_float16_linear_reshape_permute_test minimal_float16_linear_reshape_permute_test.cpp)
-target_link_libraries(minimal_float16_linear_reshape_permute_test PRIVATE tenzor_core)
-
-# Minimal Float16 Linear test (2x768)
-add_executable(minimal_float16_linear_test minimal_float16_linear_test.cpp)
-target_link_libraries(minimal_float16_linear_test PRIVATE tenzor_core GTest::gtest_main)
-
-# Minimal Float16 Matmul test (256x128x768) - Debug ALBERT issue
-add_executable(minimal_float16_matmul_256x128x768 minimal_float16_matmul_256x128x768.cpp)
-target_link_libraries(minimal_float16_matmul_256x128x768 PRIVATE tenzor_core GTest::gtest_main)
-
-add_executable(minimal_float16_mean_backward_test minimal_float16_mean_backward_test.cpp)
-target_link_libraries(minimal_float16_mean_backward_test PRIVATE tenzor_core GTest::gtest_main)
-
-# Minimal Float16 debug test - Compare Float16 vs Float32 with zero inputs
-add_executable(minimal_float16_debug minimal_float16_debug.cpp)
-target_link_libraries(minimal_float16_debug PRIVATE tenzor_core GTest::gtest_main)
-
-# Minimal Float16 Conv2d test - Test patch embedding with zero inputs
-add_executable(minimal_float16_conv2d_test minimal_float16_conv2d_test.cpp)
-target_link_libraries(minimal_float16_conv2d_test PRIVATE tenzor_core GTest::gtest_main)
 
 # Minimal Swin debug test - Compare Float32 vs Float16 backward pass
 add_executable(minimal_swin_debug minimal_swin_debug.cpp)

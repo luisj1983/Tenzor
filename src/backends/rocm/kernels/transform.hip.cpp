@@ -15,10 +15,10 @@ namespace rocm {
 // Routes through TensorAccessor which is a friend of Tensor.
 class HIPKernelAccess {
 public:
-    static auto get_impl(const Tensor& t) -> const std::shared_ptr<TensorImpl>& {
+    static auto get_impl(const Tensor& t) -> const intrusive_ptr<TensorImpl>& {
         return TensorAccessor::get_impl(t);
     }
-    static auto get_impl_mutable(Tensor& t) -> std::shared_ptr<TensorImpl>& {
+    static auto get_impl_mutable(Tensor& t) -> intrusive_ptr<TensorImpl>& {
         return TensorAccessor::get_impl_mutable(t);
     }
 };
@@ -199,7 +199,7 @@ auto reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape, 
 
     // Create new tensor sharing storage (view)
     Tensor result;
-    HIPKernelAccess::get_impl_mutable(result) = std::make_shared<TensorImpl>(*HIPKernelAccess::get_impl(input));
+    HIPKernelAccess::get_impl_mutable(result) = make_intrusive<TensorImpl>(*HIPKernelAccess::get_impl(input));
     result.mutable_shape() = new_shape;
     result.mutable_strides() = compute_strides(new_shape);
 
@@ -213,7 +213,7 @@ auto reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape, 
 auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1, hipStream_t stream) -> Tensor {
     // Transpose just swaps dimensions in metadata
     Tensor result;
-    HIPKernelAccess::get_impl_mutable(result) = std::make_shared<TensorImpl>(*HIPKernelAccess::get_impl(input));
+    HIPKernelAccess::get_impl_mutable(result) = make_intrusive<TensorImpl>(*HIPKernelAccess::get_impl(input));
     auto& r_shape = result.mutable_shape();
     auto& r_strides = result.mutable_strides();
     std::swap(r_shape[dim0], r_shape[dim1]);
@@ -229,7 +229,7 @@ auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims, hipSt
     const int64_t ndim = input.ndim();
 
     Tensor result;
-    HIPKernelAccess::get_impl_mutable(result) = std::make_shared<TensorImpl>(*HIPKernelAccess::get_impl(input));
+    HIPKernelAccess::get_impl_mutable(result) = make_intrusive<TensorImpl>(*HIPKernelAccess::get_impl(input));
 
     std::vector<int64_t> new_shape(ndim);
     std::vector<int64_t> new_strides(ndim);
@@ -251,7 +251,7 @@ auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims, hipSt
 
 auto squeeze_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Tensor {
     Tensor result;
-    HIPKernelAccess::get_impl_mutable(result) = std::make_shared<TensorImpl>(*HIPKernelAccess::get_impl(input));
+    HIPKernelAccess::get_impl_mutable(result) = make_intrusive<TensorImpl>(*HIPKernelAccess::get_impl(input));
 
     if (dim >= 0) {
         // Squeeze specific dimension
@@ -289,7 +289,7 @@ auto squeeze_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Ten
 
 auto unsqueeze_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Tensor {
     Tensor result;
-    HIPKernelAccess::get_impl_mutable(result) = std::make_shared<TensorImpl>(*HIPKernelAccess::get_impl(input));
+    HIPKernelAccess::get_impl_mutable(result) = make_intrusive<TensorImpl>(*HIPKernelAccess::get_impl(input));
 
     auto& r_shape = result.mutable_shape();
     auto& r_strides = result.mutable_strides();

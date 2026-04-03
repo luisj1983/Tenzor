@@ -1142,7 +1142,7 @@ public:
     static auto zeros_like(const Tensor& other) -> Tensor;
 
     // Implementation access
-    auto impl() const -> const std::shared_ptr<TensorImpl>& { return impl_; }
+    auto impl() const -> const intrusive_ptr<TensorImpl>& { return impl_; }
 
     // ============================================================================
     // Low-level Accessors (for backend kernel implementations)
@@ -1186,7 +1186,7 @@ public:
     /// @}
 
 private:
-    std::shared_ptr<TensorImpl> impl_;
+    intrusive_ptr<TensorImpl> impl_;
 
     friend class Variable;
     friend class TensorAccessor;  // Single accessor for all backend kernel access to impl_
@@ -1206,11 +1206,11 @@ private:
  */
 class TensorAccessor {
 public:
-    static auto get_impl(const Tensor& t) -> const std::shared_ptr<TensorImpl>& {
+    static auto get_impl(const Tensor& t) -> const intrusive_ptr<TensorImpl>& {
         return t.impl_;
     }
 
-    static auto get_impl_mutable(Tensor& t) -> std::shared_ptr<TensorImpl>& {
+    static auto get_impl_mutable(Tensor& t) -> intrusive_ptr<TensorImpl>& {
         return t.impl_;
     }
 };

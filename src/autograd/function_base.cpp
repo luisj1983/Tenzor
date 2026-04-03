@@ -35,6 +35,9 @@ std::atomic<uint64_t> Function::next_id_{1};
 // over the TENZOR_HIGHER_ORDER_GRAD env var.
 static std::atomic<int> g_higher_order_mode{-1}; // -1 = not set (check env var)
 
+// Counter for higher-order gradient disconnections (Warn/Silent mode).
+static std::atomic<uint64_t> g_higher_order_disconnection_count{0};
+
 void set_higher_order_grad_mode(HigherOrderGradMode mode) {
     g_higher_order_mode.store(static_cast<int>(mode), std::memory_order_relaxed);
 }
@@ -53,6 +56,20 @@ auto get_higher_order_grad_mode() -> HigherOrderGradMode {
     }();
     return static_cast<HigherOrderGradMode>(env_mode);
 }
+
+auto higher_order_disconnection_count() -> uint64_t {
+    return g_higher_order_disconnection_count.load(std::memory_order_relaxed);
+}
+
+void reset_higher_order_disconnection_count() {
+    g_higher_order_disconnection_count.store(0, std::memory_order_relaxed);
+}
+
+namespace detail {
+void increment_higher_order_disconnection_count() {
+    g_higher_order_disconnection_count.fetch_add(1, std::memory_order_relaxed);
+}
+} // namespace detail
 
 // Per-thread activation offload flag (thread-local instead of global atomic
 // so one thread enabling offload doesn't affect other threads' backward passes)
@@ -198,16 +215,23 @@ auto Function::backward_with_variables(std::vector<Variable> grad_outputs) -> st
                 "set_higher_order_grad_mode(HigherOrderGradMode::Warn) "
                 "to fall through with disconnected gradient graph.");
         case HigherOrderGradMode::Warn: {
+            g_higher_order_disconnection_count.fetch_add(1, std::memory_order_relaxed);
             static thread_local std::unordered_set<std::string> warned_ops;
             if (warned_ops.find(op_name) == warned_ops.end()) {
                 warned_ops.insert(op_name);
-                std::cerr << "[tenzor::autograd] Warning: " << op_name
-                          << " does not support higher-order gradients. "
-                          << "Gradient graph will be disconnected at this operation.\n";
+                std::cerr << "[tenzor::autograd] Warning: '" << op_name
+                          << "' does not support higher-order gradients"
+                          << (is_higher_order_stub() ? " (passthrough stub)" : "")
+                          << ". The gradient graph will be disconnected at this "
+                          << "operation — second-order derivatives through it will "
+                          << "be zero. Use set_higher_order_grad_mode(Error) to "
+                          << "make this a hard error, or check "
+                          << "higher_order_disconnection_count() programmatically.\n";
             }
             break;
         }
         case HigherOrderGradMode::Silent:
+            g_higher_order_disconnection_count.fetch_add(1, std::memory_order_relaxed);
             break;
         }
     }

@@ -523,3 +523,126 @@ jobs:
         with:
           name: coverage-report
           path: build/coverage.info
+
+  # =========================================================================
+  # Code Quality: clang-format check + Python linting
+  # =========================================================================
+  code-quality:
+    name: Code Quality
+    runs-on: ubuntu-24.04
+    needs: build-and-smoke
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18 clang-tidy-18 ninja-build \
+            libopenblas-dev python3-pip
+          pip install black flake8 mypy
+
+      - name: clang-format check
+        run: |
+          find src include -name '*.cpp' -o -name '*.hpp' -o -name '*.h' | \
+            xargs clang-format-18 --dry-run -Werror 2>&1 | head -100
+        continue-on-error: true
+
+      - name: clang-tidy check
+        run: |
+          cmake -B build-tidy -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++ \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DTENZOR_BUILD_CUDA=OFF \
+            -DTENZOR_BUILD_ROCM=OFF \
+            -DTENZOR_BUILD_VULKAN=OFF \
+            -DTENZOR_BUILD_ONEAPI=OFF \
+            -DTENZOR_BUILD_TESTS=OFF \
+            -DTENZOR_BUILD_PYTHON=OFF
+          # Run clang-tidy on a subset of core files
+          find src/core src/autograd src/ops -name '*.cpp' | head -20 | \
+            xargs clang-tidy-18 -p build-tidy 2>&1 | tail -50
+        continue-on-error: true
+
+      - name: Python lint - black
+        run: black --check python/ || true
+
+      - name: Python lint - flake8
+        run: flake8 python/ --max-line-length=120 --ignore=E501,W503 || true
+
+      - name: Python type check - mypy
+        run: mypy python/tenzor/ --ignore-missing-imports || true
+
+  # =========================================================================
+  # GPU Compile Check: Verify CUDA backend compiles (no GPU needed)
+  # =========================================================================
+  gpu-compile-check:
+    name: GPU Compile Check
+    runs-on: ubuntu-24.04
+    needs: build-and-smoke
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.17
+        with:
+          cuda: '12.4.0'
+          method: 'network'
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libopenblas-dev
+
+      - name: Configure with CUDA
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DTENZOR_BUILD_CUDA=ON \
+            -DTENZOR_BUILD_ROCM=OFF \
+            -DTENZOR_BUILD_VULKAN=OFF \
+            -DTENZOR_BUILD_ONEAPI=OFF \
+            -DTENZOR_BUILD_TESTS=OFF \
+            -DTENZOR_BUILD_PYTHON=OFF
+
+      - name: Compile CUDA backend
+        run: ninja -C build tenzor_backend_cuda
+        timeout-minutes: 15
+
+  # =========================================================================
+  # Nightly Fuzzing: Run fuzz targets for short duration
+  # =========================================================================
+  nightly-fuzz:
+    name: Nightly Fuzzing
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libopenblas-dev clang-18
+
+      - name: Build fuzz targets
+        run: |
+          CC=clang-18 CXX=clang++-18 cmake -B build -G Ninja \
+            -DTENZOR_FUZZ=ON \
+            -DCMAKE_CXX_COMPILER=clang++-18 \
+            -DTENZOR_BUILD_CUDA=OFF \
+            -DTENZOR_BUILD_ROCM=OFF \
+            -DTENZOR_BUILD_VULKAN=OFF \
+            -DTENZOR_BUILD_ONEAPI=OFF \
+            -DTENZOR_BUILD_TESTS=OFF \
+            -DTENZOR_BUILD_PYTHON=OFF
+          ninja -C build fuzz_deserialize fuzz_safetensors fuzz_tensor_creation \
+            fuzz_reshape fuzz_autograd_backward fuzz_matmul_shapes fuzz_type_promotion
+
+      - name: Run fuzz targets (60s each)
+        run: |
+          for target in fuzz_deserialize fuzz_safetensors fuzz_tensor_creation \
+                        fuzz_reshape fuzz_autograd_backward fuzz_matmul_shapes \
+                        fuzz_type_promotion; do
+            echo "=== Fuzzing $target ==="
+            timeout 70 ./build/fuzz/$target -max_total_time=60 fuzz/corpus/${target#fuzz_}/ 2>&1 || true
+          done

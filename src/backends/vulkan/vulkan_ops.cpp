@@ -6889,7 +6889,7 @@ auto VulkanBackend::dispatchReshape(const Tensor& input, const std::vector<int64
 
     // Create new tensor that shares storage (view)
     Tensor result;
-    result.impl_ = std::make_shared<TensorImpl>(*input.impl_);
+    result.impl_ = make_intrusive<TensorImpl>(*input.impl_);
     result.mutable_shape() = new_shape;
     result.mutable_strides() = tenzor::compute_strides(new_shape);
 
@@ -7246,7 +7246,7 @@ auto VulkanBackend::dispatchSqueeze(const Tensor& input, int64_t dim) -> Tensor 
 
     // Create result tensor sharing storage (zero-copy metadata-only operation)
     Tensor result;
-    result.impl_ = std::make_shared<TensorImpl>(*(input.impl_));
+    result.impl_ = make_intrusive<TensorImpl>(*(input.impl_));
     result.mutable_shape() = std::move(new_shape);
     result.mutable_strides() = std::move(new_strides);
 
@@ -7399,6 +7399,14 @@ auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
     insertComputeOnlyBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
+
+    // Ensure strided_copy completes before result is used.
+    // Without this, command batching defers GPU submission, causing hangs
+    // when the backward pass chain reads the result immediately.
+    if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
+        submitBatchIfNeeded(device_id, true);   // Force immediate submit
+        ensurePendingWorkComplete(device_id);   // Wait for GPU completion
+    }
 
     return result;
 }
@@ -13132,7 +13140,7 @@ auto VulkanBackend::dispatchSlice(const Tensor& input,
     if (all_step_one) {
         // Can create a view - shares storage with offset
         Tensor result;
-        result.impl_ = std::make_shared<TensorImpl>(*input.impl_);
+        result.impl_ = make_intrusive<TensorImpl>(*input.impl_);
         result.mutable_shape() = new_shape;
         result.mutable_strides() = new_strides;
         result.set_offset(offset);
@@ -13142,7 +13150,7 @@ auto VulkanBackend::dispatchSlice(const Tensor& input,
     // Non-unit steps require copying to a contiguous tensor via strided_copy
     // Create a view first, then make it contiguous
     Tensor view;
-    view.impl_ = std::make_shared<TensorImpl>(*input.impl_);
+    view.impl_ = make_intrusive<TensorImpl>(*input.impl_);
     view.mutable_shape() = new_shape;
     view.mutable_strides() = new_strides;
     view.set_offset(offset);

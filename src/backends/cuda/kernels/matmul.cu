@@ -76,10 +76,9 @@ __global__ void matmul_fp16_saturate_kernel(__half* data, int64_t n) {
 
 static void saturate_fp16(__half* data, int64_t n, cudaStream_t stream) {
     if (n <= 0) return;
-    constexpr int kBlock = 256;
-    int64_t grid64 = (n + kBlock - 1) / kBlock;
-    int grid = static_cast<int>(std::min(grid64, static_cast<int64_t>(INT_MAX)));
-    matmul_fp16_saturate_kernel<<<grid, kBlock, 0, stream>>>(data, n);
+    dim3 grid, block;
+    OCCUPANCY_CONFIG(matmul_fp16_saturate_kernel, n, grid, block);
+    matmul_fp16_saturate_kernel<<<grid, block, 0, stream>>>(data, n);
     TENZOR_CUDA_CHECK(cudaGetLastError());
 }
 
@@ -139,64 +138,55 @@ __global__ void matmul_tiled_f32_kernel(
     int64_t M, int64_t N, int64_t K,
     int64_t lda, int64_t ldb, int64_t ldc) {
 
-    // Shared memory for tiles
+    // Shared memory for tiles (padded to avoid bank conflicts)
     __shared__ float As[TILE_M][TILE_K + 1];
     __shared__ float Bs[TILE_K][TILE_N + 1];
 
-    // Thread indices
     int tx = threadIdx.x;
     int ty = threadIdx.y;
-
-    // Block indices
     int bx = blockIdx.x;
     int by = blockIdx.y;
 
-    // Global row and column indices
     int row = by * TILE_M + ty;
     int col = bx * TILE_N + tx;
 
-    // Accumulator for the result
+    // Flat thread ID for cooperative tile loading
+    int tid = ty * TILE_N + tx;
+    constexpr int TOTAL_THREADS = TILE_M * TILE_N;
+
     float sum = 0.0f;
 
-    // Loop over tiles
     int num_tiles = (K + TILE_K - 1) / TILE_K;
 
     for (int t = 0; t < num_tiles; ++t) {
-        // Load tile of A into shared memory
-        // Each thread loads one element if within bounds
-        if (tx < TILE_K) {
-            int a_col = t * TILE_K + tx;
-            if (row < M && a_col < K) {
-                As[ty][tx] = A[row * lda + a_col];
-            } else {
-                As[ty][tx] = 0.0f;
-            }
+        // Cooperative load of A tile: all threads participate
+        for (int idx = tid; idx < TILE_M * TILE_K; idx += TOTAL_THREADS) {
+            int li = idx / TILE_K;
+            int lj = idx % TILE_K;
+            int a_row = by * TILE_M + li;
+            int a_col = t * TILE_K + lj;
+            As[li][lj] = (a_row < M && a_col < K) ? A[a_row * lda + a_col] : 0.0f;
         }
 
-        // Load tile of B into shared memory
-        if (ty < TILE_K) {
-            int b_row = t * TILE_K + ty;
-            if (b_row < K && col < N) {
-                Bs[ty][tx] = B[b_row * ldb + col];
-            } else {
-                Bs[ty][tx] = 0.0f;
-            }
+        // Cooperative load of B tile: all threads participate
+        for (int idx = tid; idx < TILE_K * TILE_N; idx += TOTAL_THREADS) {
+            int li = idx / TILE_N;
+            int lj = idx % TILE_N;
+            int b_row = t * TILE_K + li;
+            int b_col = bx * TILE_N + lj;
+            Bs[li][lj] = (b_row < K && b_col < N) ? B[b_row * ldb + b_col] : 0.0f;
         }
 
-        // Synchronize to ensure tiles are loaded
         __syncthreads();
 
-        // Compute partial dot product
         #pragma unroll
         for (int k = 0; k < TILE_K; ++k) {
             sum += As[ty][k] * Bs[k][tx];
         }
 
-        // Synchronize before loading next tile
         __syncthreads();
     }
 
-    // Write result
     if (row < M && col < N) {
         C[row * ldc + col] = sum;
     }
@@ -214,63 +204,51 @@ __global__ void matmul_tiled_f64_kernel(
     int64_t M, int64_t N, int64_t K,
     int64_t lda, int64_t ldb, int64_t ldc) {
 
-    // Shared memory for tiles
     __shared__ double As[TILE_M][TILE_K + 1];
     __shared__ double Bs[TILE_K][TILE_N + 1];
 
-    // Thread indices
     int tx = threadIdx.x;
     int ty = threadIdx.y;
-
-    // Block indices
     int bx = blockIdx.x;
     int by = blockIdx.y;
 
-    // Global row and column indices
     int row = by * TILE_M + ty;
     int col = bx * TILE_N + tx;
 
-    // Accumulator for the result
+    int tid = ty * TILE_N + tx;
+    constexpr int TOTAL_THREADS = TILE_M * TILE_N;
+
     double sum = 0.0;
 
-    // Loop over tiles
     int num_tiles = (K + TILE_K - 1) / TILE_K;
 
     for (int t = 0; t < num_tiles; ++t) {
-        // Load tile of A into shared memory
-        if (tx < TILE_K) {
-            int a_col = t * TILE_K + tx;
-            if (row < M && a_col < K) {
-                As[ty][tx] = A[row * lda + a_col];
-            } else {
-                As[ty][tx] = 0.0;
-            }
+        for (int idx = tid; idx < TILE_M * TILE_K; idx += TOTAL_THREADS) {
+            int li = idx / TILE_K;
+            int lj = idx % TILE_K;
+            int a_row = by * TILE_M + li;
+            int a_col = t * TILE_K + lj;
+            As[li][lj] = (a_row < M && a_col < K) ? A[a_row * lda + a_col] : 0.0;
         }
 
-        // Load tile of B into shared memory
-        if (ty < TILE_K) {
-            int b_row = t * TILE_K + ty;
-            if (b_row < K && col < N) {
-                Bs[ty][tx] = B[b_row * ldb + col];
-            } else {
-                Bs[ty][tx] = 0.0;
-            }
+        for (int idx = tid; idx < TILE_K * TILE_N; idx += TOTAL_THREADS) {
+            int li = idx / TILE_N;
+            int lj = idx % TILE_N;
+            int b_row = t * TILE_K + li;
+            int b_col = bx * TILE_N + lj;
+            Bs[li][lj] = (b_row < K && b_col < N) ? B[b_row * ldb + b_col] : 0.0;
         }
 
-        // Synchronize to ensure tiles are loaded
         __syncthreads();
 
-        // Compute partial dot product
         #pragma unroll
         for (int k = 0; k < TILE_K; ++k) {
             sum += As[ty][k] * Bs[k][tx];
         }
 
-        // Synchronize before loading next tile
         __syncthreads();
     }
 
-    // Write result
     if (row < M && col < N) {
         C[row * ldc + col] = sum;
     }
@@ -288,63 +266,51 @@ __global__ void matmul_tiled_i32_kernel(
     int64_t M, int64_t N, int64_t K,
     int64_t lda, int64_t ldb, int64_t ldc) {
 
-    // Shared memory for tiles
     __shared__ int32_t As[TILE_M][TILE_K + 1];
     __shared__ int32_t Bs[TILE_K][TILE_N + 1];
 
-    // Thread indices
     int tx = threadIdx.x;
     int ty = threadIdx.y;
-
-    // Block indices
     int bx = blockIdx.x;
     int by = blockIdx.y;
 
-    // Global row and column indices
     int row = by * TILE_M + ty;
     int col = bx * TILE_N + tx;
 
-    // Accumulator for the result
+    int tid = ty * TILE_N + tx;
+    constexpr int TOTAL_THREADS = TILE_M * TILE_N;
+
     int32_t sum = 0;
 
-    // Loop over tiles
     int num_tiles = (K + TILE_K - 1) / TILE_K;
 
     for (int t = 0; t < num_tiles; ++t) {
-        // Load tile of A into shared memory
-        if (tx < TILE_K) {
-            int a_col = t * TILE_K + tx;
-            if (row < M && a_col < K) {
-                As[ty][tx] = A[row * lda + a_col];
-            } else {
-                As[ty][tx] = 0;
-            }
+        for (int idx = tid; idx < TILE_M * TILE_K; idx += TOTAL_THREADS) {
+            int li = idx / TILE_K;
+            int lj = idx % TILE_K;
+            int a_row = by * TILE_M + li;
+            int a_col = t * TILE_K + lj;
+            As[li][lj] = (a_row < M && a_col < K) ? A[a_row * lda + a_col] : 0;
         }
 
-        // Load tile of B into shared memory
-        if (ty < TILE_K) {
-            int b_row = t * TILE_K + ty;
-            if (b_row < K && col < N) {
-                Bs[ty][tx] = B[b_row * ldb + col];
-            } else {
-                Bs[ty][tx] = 0;
-            }
+        for (int idx = tid; idx < TILE_K * TILE_N; idx += TOTAL_THREADS) {
+            int li = idx / TILE_N;
+            int lj = idx % TILE_N;
+            int b_row = t * TILE_K + li;
+            int b_col = bx * TILE_N + lj;
+            Bs[li][lj] = (b_row < K && b_col < N) ? B[b_row * ldb + b_col] : 0;
         }
 
-        // Synchronize to ensure tiles are loaded
         __syncthreads();
 
-        // Compute partial dot product
         #pragma unroll
         for (int k = 0; k < TILE_K; ++k) {
             sum += As[ty][k] * Bs[k][tx];
         }
 
-        // Synchronize before loading next tile
         __syncthreads();
     }
 
-    // Write result
     if (row < M && col < N) {
         C[row * ldc + col] = sum;
     }
@@ -375,63 +341,51 @@ __global__ void batched_matmul_tiled_f32_kernel(
     const float* B_batch = B + batch_idx * stride_b;
     float* C_batch = C + batch_idx * stride_c;
 
-    // Shared memory for tiles
     __shared__ float As[TILE_M][TILE_K + 1];
     __shared__ float Bs[TILE_K][TILE_N + 1];
 
-    // Thread indices
     int tx = threadIdx.x;
     int ty = threadIdx.y;
-
-    // Block indices
     int bx = blockIdx.x;
     int by = blockIdx.y;
 
-    // Global row and column indices
     int row = by * TILE_M + ty;
     int col = bx * TILE_N + tx;
 
-    // Accumulator for the result
+    int tid = ty * TILE_N + tx;
+    constexpr int TOTAL_THREADS = TILE_M * TILE_N;
+
     float sum = 0.0f;
 
-    // Loop over tiles
     int num_tiles = (K + TILE_K - 1) / TILE_K;
 
     for (int t = 0; t < num_tiles; ++t) {
-        // Load tile of A into shared memory
-        if (tx < TILE_K) {
-            int a_col = t * TILE_K + tx;
-            if (row < M && a_col < K) {
-                As[ty][tx] = A_batch[row * K + a_col];
-            } else {
-                As[ty][tx] = 0.0f;
-            }
+        for (int idx = tid; idx < TILE_M * TILE_K; idx += TOTAL_THREADS) {
+            int li = idx / TILE_K;
+            int lj = idx % TILE_K;
+            int a_row = by * TILE_M + li;
+            int a_col = t * TILE_K + lj;
+            As[li][lj] = (a_row < M && a_col < K) ? A_batch[a_row * K + a_col] : 0.0f;
         }
 
-        // Load tile of B into shared memory
-        if (ty < TILE_K) {
-            int b_row = t * TILE_K + ty;
-            if (b_row < K && col < N) {
-                Bs[ty][tx] = B_batch[b_row * N + col];
-            } else {
-                Bs[ty][tx] = 0.0f;
-            }
+        for (int idx = tid; idx < TILE_K * TILE_N; idx += TOTAL_THREADS) {
+            int li = idx / TILE_N;
+            int lj = idx % TILE_N;
+            int b_row = t * TILE_K + li;
+            int b_col = bx * TILE_N + lj;
+            Bs[li][lj] = (b_row < K && b_col < N) ? B_batch[b_row * N + b_col] : 0.0f;
         }
 
-        // Synchronize to ensure tiles are loaded
         __syncthreads();
 
-        // Compute partial dot product
         #pragma unroll
         for (int k = 0; k < TILE_K; ++k) {
             sum += As[ty][k] * Bs[k][tx];
         }
 
-        // Synchronize before loading next tile
         __syncthreads();
     }
 
-    // Write result
     if (row < M && col < N) {
         C_batch[row * N + col] = sum;
     }
@@ -446,65 +400,53 @@ __global__ void batched_matmul_tiled_f64_kernel(
     int64_t M, int64_t N, int64_t K,
     int64_t stride_a, int64_t stride_b, int64_t stride_c) {
 
-    // Batch index
     int batch_idx = blockIdx.z;
 
     if (batch_idx >= batch_size) {
         return;
     }
 
-    // Offset pointers for this batch
     const double* A_batch = A + batch_idx * stride_a;
     const double* B_batch = B + batch_idx * stride_b;
     double* C_batch = C + batch_idx * stride_c;
 
-    // Shared memory for tiles
     __shared__ double As[TILE_M][TILE_K + 1];
     __shared__ double Bs[TILE_K][TILE_N + 1];
 
-    // Thread indices
     int tx = threadIdx.x;
     int ty = threadIdx.y;
-
-    // Block indices
     int bx = blockIdx.x;
     int by = blockIdx.y;
 
-    // Global row and column indices
     int row = by * TILE_M + ty;
     int col = bx * TILE_N + tx;
 
-    // Accumulator for the result
+    int tid = ty * TILE_N + tx;
+    constexpr int TOTAL_THREADS = TILE_M * TILE_N;
+
     double sum = 0.0;
 
-    // Loop over tiles
     int num_tiles = (K + TILE_K - 1) / TILE_K;
 
     for (int t = 0; t < num_tiles; ++t) {
-        // Load tile of A into shared memory
-        if (tx < TILE_K) {
-            int a_col = t * TILE_K + tx;
-            if (row < M && a_col < K) {
-                As[ty][tx] = A_batch[row * K + a_col];
-            } else {
-                As[ty][tx] = 0.0;
-            }
+        for (int idx = tid; idx < TILE_M * TILE_K; idx += TOTAL_THREADS) {
+            int li = idx / TILE_K;
+            int lj = idx % TILE_K;
+            int a_row = by * TILE_M + li;
+            int a_col = t * TILE_K + lj;
+            As[li][lj] = (a_row < M && a_col < K) ? A_batch[a_row * K + a_col] : 0.0;
         }
 
-        // Load tile of B into shared memory
-        if (ty < TILE_K) {
-            int b_row = t * TILE_K + ty;
-            if (b_row < K && col < N) {
-                Bs[ty][tx] = B_batch[b_row * N + col];
-            } else {
-                Bs[ty][tx] = 0.0;
-            }
+        for (int idx = tid; idx < TILE_K * TILE_N; idx += TOTAL_THREADS) {
+            int li = idx / TILE_N;
+            int lj = idx % TILE_N;
+            int b_row = t * TILE_K + li;
+            int b_col = bx * TILE_N + lj;
+            Bs[li][lj] = (b_row < K && b_col < N) ? B_batch[b_row * N + b_col] : 0.0;
         }
 
-        // Synchronize to ensure tiles are loaded
         __syncthreads();
 
-        // Compute partial dot product
         #pragma unroll
         for (int k = 0; k < TILE_K; ++k) {
             sum += As[ty][k] * Bs[k][tx];
@@ -659,63 +601,53 @@ __global__ void matmul_tiled_f16_kernel(
     int64_t M, int64_t N, int64_t K,
     int64_t lda, int64_t ldb, int64_t ldc) {
 
-    // Shared memory for tiles
     __shared__ __half As[TILE_M][TILE_K + 1];
     __shared__ __half Bs[TILE_K][TILE_N + 1];
 
-    // Thread indices
     int tx = threadIdx.x;
     int ty = threadIdx.y;
-
-    // Block indices
     int bx = blockIdx.x;
     int by = blockIdx.y;
 
-    // Global row and column indices
     int row = by * TILE_M + ty;
     int col = bx * TILE_N + tx;
 
-    // Accumulator for the result (use float for numerical stability)
+    int tid = ty * TILE_N + tx;
+    constexpr int TOTAL_THREADS = TILE_M * TILE_N;
+    const __half zero_h = __float2half(0.0f);
+
+    // Accumulate in float for numerical stability
     float sum = 0.0f;
 
-    // Loop over tiles
     int num_tiles = (K + TILE_K - 1) / TILE_K;
 
     for (int t = 0; t < num_tiles; ++t) {
-        // Load tile of A into shared memory
-        if (tx < TILE_K) {
-            int a_col = t * TILE_K + tx;
-            if (row < M && a_col < K) {
-                As[ty][tx] = A[row * lda + a_col];
-            } else {
-                As[ty][tx] = __float2half(0.0f);
-            }
+        for (int idx = tid; idx < TILE_M * TILE_K; idx += TOTAL_THREADS) {
+            int li = idx / TILE_K;
+            int lj = idx % TILE_K;
+            int a_row = by * TILE_M + li;
+            int a_col = t * TILE_K + lj;
+            As[li][lj] = (a_row < M && a_col < K) ? A[a_row * lda + a_col] : zero_h;
         }
 
-        // Load tile of B into shared memory
-        if (ty < TILE_K) {
-            int b_row = t * TILE_K + ty;
-            if (b_row < K && col < N) {
-                Bs[ty][tx] = B[b_row * ldb + col];
-            } else {
-                Bs[ty][tx] = __float2half(0.0f);
-            }
+        for (int idx = tid; idx < TILE_K * TILE_N; idx += TOTAL_THREADS) {
+            int li = idx / TILE_N;
+            int lj = idx % TILE_N;
+            int b_row = t * TILE_K + li;
+            int b_col = bx * TILE_N + lj;
+            Bs[li][lj] = (b_row < K && b_col < N) ? B[b_row * ldb + b_col] : zero_h;
         }
 
-        // Synchronize to ensure tiles are loaded
         __syncthreads();
 
-        // Compute partial dot product (accumulate in float)
         #pragma unroll
         for (int k = 0; k < TILE_K; ++k) {
             sum += __half2float(As[ty][k]) * __half2float(Bs[k][tx]);
         }
 
-        // Synchronize before loading next tile
         __syncthreads();
     }
 
-    // Write result (convert float back to half)
     if (row < M && col < N) {
         C[row * ldc + col] = __float2half(sum);
     }
@@ -750,26 +682,28 @@ __global__ void batched_matmul_tiled_f16_kernel(
     int row = by * TILE_M + ty;
     int col = bx * TILE_N + tx;
 
+    int tid = ty * TILE_N + tx;
+    constexpr int TOTAL_THREADS = TILE_M * TILE_N;
+    const __half zero_h = __float2half(0.0f);
+
     float sum = 0.0f;
     int num_tiles = (K + TILE_K - 1) / TILE_K;
 
     for (int t = 0; t < num_tiles; ++t) {
-        if (tx < TILE_K) {
-            int a_col = t * TILE_K + tx;
-            if (row < M && a_col < K) {
-                As[ty][tx] = A_batch[row * lda + a_col];
-            } else {
-                As[ty][tx] = __float2half(0.0f);
-            }
+        for (int idx = tid; idx < TILE_M * TILE_K; idx += TOTAL_THREADS) {
+            int li = idx / TILE_K;
+            int lj = idx % TILE_K;
+            int a_row = by * TILE_M + li;
+            int a_col = t * TILE_K + lj;
+            As[li][lj] = (a_row < M && a_col < K) ? A_batch[a_row * lda + a_col] : zero_h;
         }
 
-        if (ty < TILE_K) {
-            int b_row = t * TILE_K + ty;
-            if (b_row < K && col < N) {
-                Bs[ty][tx] = B_batch[b_row * ldb + col];
-            } else {
-                Bs[ty][tx] = __float2half(0.0f);
-            }
+        for (int idx = tid; idx < TILE_K * TILE_N; idx += TOTAL_THREADS) {
+            int li = idx / TILE_N;
+            int lj = idx % TILE_N;
+            int b_row = t * TILE_K + li;
+            int b_col = bx * TILE_N + lj;
+            Bs[li][lj] = (b_row < K && b_col < N) ? B_batch[b_row * ldb + b_col] : zero_h;
         }
 
         __syncthreads();
@@ -924,63 +858,53 @@ __global__ void matmul_tiled_bf16_kernel(
     int64_t M, int64_t N, int64_t K,
     int64_t lda, int64_t ldb, int64_t ldc) {
 
-    // Shared memory for tiles
     __shared__ __nv_bfloat16 As[TILE_M][TILE_K + 1];
     __shared__ __nv_bfloat16 Bs[TILE_K][TILE_N + 1];
 
-    // Thread indices
     int tx = threadIdx.x;
     int ty = threadIdx.y;
-
-    // Block indices
     int bx = blockIdx.x;
     int by = blockIdx.y;
 
-    // Global row and column indices
     int row = by * TILE_M + ty;
     int col = bx * TILE_N + tx;
 
-    // Accumulator for the result (use float for numerical stability)
+    int tid = ty * TILE_N + tx;
+    constexpr int TOTAL_THREADS = TILE_M * TILE_N;
+    const __nv_bfloat16 zero_bf = __float2bfloat16(0.0f);
+
+    // Accumulate in float for numerical stability
     float sum = 0.0f;
 
-    // Loop over tiles
     int num_tiles = (K + TILE_K - 1) / TILE_K;
 
     for (int t = 0; t < num_tiles; ++t) {
-        // Load tile of A into shared memory
-        if (tx < TILE_K) {
-            int a_col = t * TILE_K + tx;
-            if (row < M && a_col < K) {
-                As[ty][tx] = A[row * lda + a_col];
-            } else {
-                As[ty][tx] = __float2bfloat16(0.0f);
-            }
+        for (int idx = tid; idx < TILE_M * TILE_K; idx += TOTAL_THREADS) {
+            int li = idx / TILE_K;
+            int lj = idx % TILE_K;
+            int a_row = by * TILE_M + li;
+            int a_col = t * TILE_K + lj;
+            As[li][lj] = (a_row < M && a_col < K) ? A[a_row * lda + a_col] : zero_bf;
         }
 
-        // Load tile of B into shared memory
-        if (ty < TILE_K) {
-            int b_row = t * TILE_K + ty;
-            if (b_row < K && col < N) {
-                Bs[ty][tx] = B[b_row * ldb + col];
-            } else {
-                Bs[ty][tx] = __float2bfloat16(0.0f);
-            }
+        for (int idx = tid; idx < TILE_K * TILE_N; idx += TOTAL_THREADS) {
+            int li = idx / TILE_N;
+            int lj = idx % TILE_N;
+            int b_row = t * TILE_K + li;
+            int b_col = bx * TILE_N + lj;
+            Bs[li][lj] = (b_row < K && b_col < N) ? B[b_row * ldb + b_col] : zero_bf;
         }
 
-        // Synchronize to ensure tiles are loaded
         __syncthreads();
 
-        // Compute partial dot product (accumulate in float)
         #pragma unroll
         for (int k = 0; k < TILE_K; ++k) {
             sum += __bfloat162float(As[ty][k]) * __bfloat162float(Bs[k][tx]);
         }
 
-        // Synchronize before loading next tile
         __syncthreads();
     }
 
-    // Write result (convert float back to bfloat16)
     if (row < M && col < N) {
         C[row * ldc + col] = __float2bfloat16(sum);
     }
@@ -1015,26 +939,28 @@ __global__ void batched_matmul_tiled_bf16_kernel(
     int row = by * TILE_M + ty;
     int col = bx * TILE_N + tx;
 
+    int tid = ty * TILE_N + tx;
+    constexpr int TOTAL_THREADS = TILE_M * TILE_N;
+    const __nv_bfloat16 zero_bf = __float2bfloat16(0.0f);
+
     float sum = 0.0f;
     int num_tiles = (K + TILE_K - 1) / TILE_K;
 
     for (int t = 0; t < num_tiles; ++t) {
-        if (tx < TILE_K) {
-            int a_col = t * TILE_K + tx;
-            if (row < M && a_col < K) {
-                As[ty][tx] = A_batch[row * lda + a_col];
-            } else {
-                As[ty][tx] = __float2bfloat16(0.0f);
-            }
+        for (int idx = tid; idx < TILE_M * TILE_K; idx += TOTAL_THREADS) {
+            int li = idx / TILE_K;
+            int lj = idx % TILE_K;
+            int a_row = by * TILE_M + li;
+            int a_col = t * TILE_K + lj;
+            As[li][lj] = (a_row < M && a_col < K) ? A_batch[a_row * lda + a_col] : zero_bf;
         }
 
-        if (ty < TILE_K) {
-            int b_row = t * TILE_K + ty;
-            if (b_row < K && col < N) {
-                Bs[ty][tx] = B_batch[b_row * ldb + col];
-            } else {
-                Bs[ty][tx] = __float2bfloat16(0.0f);
-            }
+        for (int idx = tid; idx < TILE_K * TILE_N; idx += TOTAL_THREADS) {
+            int li = idx / TILE_N;
+            int lj = idx % TILE_N;
+            int b_row = t * TILE_K + li;
+            int b_col = bx * TILE_N + lj;
+            Bs[li][lj] = (b_row < K && b_col < N) ? B_batch[b_row * ldb + b_col] : zero_bf;
         }
 
         __syncthreads();

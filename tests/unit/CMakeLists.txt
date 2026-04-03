@@ -38,6 +38,10 @@ target_link_libraries(test_lstm PRIVATE tenzor_core GTest::gtest_main)
 add_executable(test_lstm_multidtype test_lstm_multidtype.cpp)
 target_link_libraries(test_lstm_multidtype PRIVATE tenzor_core GTest::gtest_main)
 
+# Float16 regression tests (consolidated from 19 minimal_float16_* debug tests)
+add_executable(test_float16_regression test_float16_regression.cpp)
+target_link_libraries(test_float16_regression PRIVATE tenzor_core GTest::gtest_main)
+
 # GRU tests
 add_executable(test_gru test_gru.cpp)
 target_link_libraries(test_gru PRIVATE tenzor_core GTest::gtest_main)
@@ -574,6 +578,7 @@ tenzor_discover_tests(test_rnn DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_rnn_multidtype DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_lstm DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_lstm_multidtype DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_float16_regression DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_gru DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_gru_multidtype DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_attention DISCOVERY_TIMEOUT 60)

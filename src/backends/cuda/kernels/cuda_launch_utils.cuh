@@ -79,6 +79,31 @@ inline int compute_grid_size(int64_t num_elements, int block_size = 256) {
 }
 
 /**
+ * @brief Conservative 1D launch config (256 threads) for general-purpose kernels.
+ *
+ * Uses a safe block size that works for ALL kernels regardless of register
+ * pressure. For kernel-specific optimization, use OCCUPANCY_CONFIG instead.
+ */
+inline void compute_launch_config_1d(int64_t n, dim3& grid, dim3& block) {
+    constexpr int kBlockSize = 256;
+    int num_blocks = static_cast<int>((n + kBlockSize - 1) / kBlockSize);
+    if (num_blocks < 1) num_blocks = 1;
+    block = dim3(static_cast<unsigned int>(kBlockSize), 1, 1);
+    grid  = dim3(static_cast<unsigned int>(num_blocks), 1, 1);
+}
+
+/**
+ * @brief Compute occupancy-based grid/block from a kernel pointer and
+ * element count, storing into the provided dim3 variables.
+ */
+#define OCCUPANCY_CONFIG(kernel_ptr, numel, grid_var, block_var) \
+    do { \
+        auto [_nb, _bs] = optimal_launch_config((kernel_ptr), (numel)); \
+        (grid_var)  = dim3(static_cast<unsigned int>(_nb)); \
+        (block_var) = dim3(static_cast<unsigned int>(_bs)); \
+    } while (0)
+
+/**
  * @brief RAII wrapper for cudaMalloc/cudaFree allocations (synchronous).
  */
 struct CudaBuffer {

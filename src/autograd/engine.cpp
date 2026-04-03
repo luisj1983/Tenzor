@@ -218,6 +218,13 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
         if (!retain_graph) {
             for (auto& func : sorted) {
                 if (func) {
+                    // Clear grad_fn on intermediate (non-leaf) input variables
+                    // to break reference cycles that would otherwise leak memory.
+                    for (auto& var : func->input_variables()) {
+                        if (var.grad_fn() && !var.is_leaf()) {
+                            var.set_grad_fn(nullptr);
+                        }
+                    }
                     func->set_input_variables({});
                     func->set_next_functions({});
                 }
@@ -295,6 +302,19 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                 }
 
                 auto var_input_grads = function->backward_with_variables(var_grad_outputs);
+
+                // Check for stub ops that override backward_with_variables()
+                // but only delegate to backward() — second derivatives are zero.
+                if (function->is_higher_order_stub()) {
+                    auto mode = get_higher_order_grad_mode();
+                    if (mode == HigherOrderGradMode::Error) {
+                        throw std::runtime_error(
+                            "create_graph=true but '" + function->name() +
+                            "' is a higher-order stub (second derivatives are zero). "
+                            "Use set_higher_order_grad_mode(Warn) to allow this.");
+                    }
+                    detail::increment_higher_order_disconnection_count();
+                }
 
                 // Extract the underlying tensors for accumulation, but the Variables
                 // in var_input_grads have grad_fn set from the Variable operations
@@ -598,6 +618,13 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
         if (!retain_graph) {
             for (auto& func : sorted) {
                 if (func) {
+                    // Clear grad_fn on intermediate (non-leaf) input variables
+                    // to break reference cycles that would otherwise leak memory.
+                    for (auto& var : func->input_variables()) {
+                        if (var.grad_fn() && !var.is_leaf()) {
+                            var.set_grad_fn(nullptr);
+                        }
+                    }
                     func->set_input_variables({});
                     func->set_next_functions({});
                 }
