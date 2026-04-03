@@ -12,6 +12,7 @@
 #include "tenzor/utils/error.hpp"
 #include "tenzor/utils/safe_math.hpp"
 #include "tenzor/utils/memory_profiler.hpp"
+#include "tenzor/core/memory_manager.hpp"
 #include "tenzor/core/checked_math.hpp"
 #include <numeric>
 #include <algorithm>
@@ -72,6 +73,7 @@ TensorImpl::TensorImpl(std::vector<int64_t> shape_, DType dtype_, Device device_
             backend->memset(ptr, 0, size_bytes, device.index);
         }
     }
+
 }
 
 auto TensorImpl::numel() const -> int64_t {

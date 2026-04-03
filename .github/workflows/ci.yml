@@ -356,7 +356,8 @@ jobs:
             -DTENZOR_BUILD_VULKAN=OFF \
             -DTENZOR_BUILD_PYTHON=ON \
             -DTENZOR_BUILD_TESTS=ON \
-            -DTENZOR_BUILD_MODEL_HUB=OFF
+            -DTENZOR_BUILD_MODEL_HUB=OFF \
+            -DTENZOR_ENABLE_COVERAGE=ON
           ninja -C build
 
       - name: Run all CPU tests
@@ -366,6 +367,19 @@ jobs:
             -E "cuda|vulkan|oneapi|rocm" \
             --timeout 300
         timeout-minutes: 45
+
+      - name: Collect coverage
+        if: success() || failure()
+        run: |
+          lcov --capture --directory build --output-file coverage.info
+          lcov --remove coverage.info '/usr/*' '*/tests/*' '*/build/*' --output-file coverage.info
+
+      - name: Upload coverage to Codecov
+        if: success() || failure()
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.info
+          fail_ci_if_error: false
 
       - name: Run Python tests
         run: |
@@ -420,10 +434,10 @@ jobs:
         if: steps.previous.outcome == 'success'
         run: |
           python3 scripts/compare_benchmarks.py \
+            --threshold 10 \
             previous_benchmark_results/all.json \
             build/benchmark_results/all.json \
             | tee benchmark_comparison.md
-        continue-on-error: true
 
       - name: Upload benchmark results
         if: always()

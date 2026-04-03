@@ -1189,6 +1189,209 @@ __global__ void compute_attention_lse_kernel(
 }
 
 // ==============================================================================
+// Flash Attention v2 Forward HIP Kernel (Tiled, Memory-Efficient)
+// ==============================================================================
+
+/**
+ * @brief Tiled Flash Attention v2 forward kernel for AMD GPUs
+ *
+ * Processes one query row per block, iterating over KV tiles.
+ * Uses online softmax to avoid materializing the full NxN attention matrix.
+ *
+ * Grid: (batch_heads, seq_len_q)
+ * Block: (BLOCK_SIZE) threads
+ *
+ * Shared memory layout:
+ *   K_tile[Bc][K_STRIDE], V_tile[Bc][K_STRIDE],
+ *   Q_shared[HEAD_DIM], scores_shared[Bc], reduce_buf[num_warps]
+ *
+ * Adapted from CUDA for AMD wavefront-64 architecture.
+ * Uses shared-memory reductions (no warp shuffles) for portability across
+ * GCN/CDNA/RDNA which have different wavefront sizes.
+ */
+template<int HEAD_DIM, int BLOCK_SIZE = 256>
+__global__ void flash_attention_v2_kernel_hip(
+    const float* __restrict__ Q,
+    const float* __restrict__ K,
+    const float* __restrict__ V,
+    float* __restrict__ O,
+    float* __restrict__ L,
+    const int seq_len_q,
+    const int seq_len_k,
+    const float scale
+) {
+    const int batch_head = blockIdx.x;
+    const int q_row = blockIdx.y;
+    const int tid = threadIdx.x;
+
+    if (q_row >= seq_len_q) return;
+
+    constexpr int Bc = 32;  // KV tile size
+    constexpr int K_STRIDE = HEAD_DIM + 4;  // Padding for bank conflict avoidance
+    const int num_kv_blocks = (seq_len_k + Bc - 1) / Bc;
+    const int num_warps = BLOCK_SIZE / 64;  // AMD wavefront = 64
+
+    // Shared memory layout
+    extern __shared__ float smem[];
+    float* K_tile = smem;                              // [Bc][K_STRIDE]
+    float* V_tile = smem + Bc * K_STRIDE;              // [Bc][K_STRIDE]
+    float* Q_shared = smem + 2 * Bc * K_STRIDE;        // [HEAD_DIM]
+    float* scores_shared = Q_shared + HEAD_DIM;        // [Bc]
+    float* reduce_buf = scores_shared + Bc;            // [num_warps + 1]
+
+    // Pointers for this batch/head
+    const float* Q_row = Q + (batch_head * seq_len_q + q_row) * HEAD_DIM;
+    const float* K_base = K + batch_head * seq_len_k * HEAD_DIM;
+    const float* V_base = V + batch_head * seq_len_k * HEAD_DIM;
+    float* O_row = O + (batch_head * seq_len_q + q_row) * HEAD_DIM;
+
+    // Load query row into shared memory cooperatively
+    for (int d = tid; d < HEAD_DIM; d += BLOCK_SIZE) {
+        Q_shared[d] = Q_row[d];
+    }
+    __syncthreads();
+
+    // Online softmax accumulators (per-thread output elements)
+    constexpr int ELEMS_PER_THREAD = (HEAD_DIM + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    float o_acc[ELEMS_PER_THREAD];
+    for (int e = 0; e < ELEMS_PER_THREAD; ++e) o_acc[e] = 0.0f;
+    float m_prev = -1e30f;  // Running max
+    float l_prev = 0.0f;    // Running sum of exp
+
+    // Iterate over KV tiles
+    for (int kv_block = 0; kv_block < num_kv_blocks; ++kv_block) {
+        const int kv_start = kv_block * Bc;
+        const int kv_end_actual = (kv_start + Bc < seq_len_k) ? Bc : (seq_len_k - kv_start);
+
+        // Cooperatively load K tile: K[kv_start:kv_start+Bc, :]
+        for (int idx = tid; idx < Bc * HEAD_DIM; idx += BLOCK_SIZE) {
+            int row = idx / HEAD_DIM;
+            int col = idx % HEAD_DIM;
+            if (row < kv_end_actual) {
+                K_tile[row * K_STRIDE + col] = K_base[(kv_start + row) * HEAD_DIM + col];
+            } else {
+                K_tile[row * K_STRIDE + col] = 0.0f;
+            }
+        }
+        // Cooperatively load V tile
+        for (int idx = tid; idx < Bc * HEAD_DIM; idx += BLOCK_SIZE) {
+            int row = idx / HEAD_DIM;
+            int col = idx % HEAD_DIM;
+            if (row < kv_end_actual) {
+                V_tile[row * K_STRIDE + col] = V_base[(kv_start + row) * HEAD_DIM + col];
+            } else {
+                V_tile[row * K_STRIDE + col] = 0.0f;
+            }
+        }
+        __syncthreads();
+
+        // Compute attention scores: S[j] = Q @ K[j]^T * scale for j in [0, Bc)
+        // Each thread computes one or more scores
+        for (int j = tid; j < Bc; j += BLOCK_SIZE) {
+            float score = 0.0f;
+            if (j < kv_end_actual) {
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    score += Q_shared[d] * K_tile[j * K_STRIDE + d];
+                }
+                score *= scale;
+            } else {
+                score = -1e30f;  // Masked out (beyond seq_len_k)
+            }
+            scores_shared[j] = score;
+        }
+        __syncthreads();
+
+        // Find max score (shared-memory reduction, wavefront-agnostic)
+        float local_max = -1e30f;
+        for (int j = tid; j < Bc; j += BLOCK_SIZE) {
+            local_max = fmaxf(local_max, scores_shared[j]);
+        }
+        // Tree reduction in shared memory
+        reduce_buf[tid % (num_warps + 1)] = -1e30f;  // init
+        __syncthreads();
+        // Each thread writes its local max
+        if (tid < BLOCK_SIZE) {
+            atomicMax(reinterpret_cast<int*>(&reduce_buf[0]),
+                      __float_as_int(local_max));  // float atomicMax via int cast
+        }
+        __syncthreads();
+
+        // Simpler approach: just use shared memory parallel reduction
+        // Store per-thread max in scores_shared (repurposed)
+        if (tid < Bc) {
+            // scores_shared already has the values
+        }
+        // Serial max over Bc elements (Bc=32, fast enough)
+        if (tid == 0) {
+            float block_max = -1e30f;
+            for (int j = 0; j < Bc; ++j) {
+                block_max = fmaxf(block_max, scores_shared[j]);
+            }
+            reduce_buf[0] = block_max;
+        }
+        __syncthreads();
+        float tile_max = reduce_buf[0];
+
+        // Compute exp(score - max) and sum
+        float local_sum = 0.0f;
+        for (int j = tid; j < Bc; j += BLOCK_SIZE) {
+            float exp_val = expf(scores_shared[j] - tile_max);
+            scores_shared[j] = exp_val;  // Store P values
+            local_sum += exp_val;
+        }
+        // Sum reduction (serial in thread 0 since Bc=32)
+        if (tid == 0) {
+            float total_sum = 0.0f;
+            for (int j = 0; j < Bc; ++j) {
+                total_sum += scores_shared[j];
+            }
+            reduce_buf[0] = total_sum;
+        }
+        __syncthreads();
+        float tile_sum = reduce_buf[0];
+
+        // Online softmax rescaling
+        float m_new = fmaxf(m_prev, tile_max);
+        float rescale_prev = expf(m_prev - m_new);
+        float rescale_tile = expf(tile_max - m_new);
+        float l_new = l_prev * rescale_prev + tile_sum * rescale_tile;
+
+        // Rescale previous output accumulator and add P @ V contribution
+        for (int e = 0; e < ELEMS_PER_THREAD; ++e) {
+            int d = tid + e * BLOCK_SIZE;
+            if (d < HEAD_DIM) {
+                // Rescale previous accumulation
+                o_acc[e] *= rescale_prev;
+                // Accumulate P @ V for this dimension
+                float pv = 0.0f;
+                for (int j = 0; j < Bc; ++j) {
+                    pv += scores_shared[j] * V_tile[j * K_STRIDE + d];
+                }
+                o_acc[e] += pv * rescale_tile;
+            }
+        }
+
+        m_prev = m_new;
+        l_prev = l_new;
+        __syncthreads();
+    }
+
+    // Final normalization: O = o_acc / l_prev
+    float l_inv = (l_prev > 0.0f) ? (1.0f / l_prev) : 0.0f;
+    for (int e = 0; e < ELEMS_PER_THREAD; ++e) {
+        int d = tid + e * BLOCK_SIZE;
+        if (d < HEAD_DIM) {
+            O_row[d] = o_acc[e] * l_inv;
+        }
+    }
+
+    // Write logsumexp if requested
+    if (L != nullptr && tid == 0) {
+        L[batch_head * seq_len_q + q_row] = m_prev + logf(l_prev + 1e-30f);
+    }
+}
+
+// ==============================================================================
 // Flash Attention Backward HIP Kernel (Tiled, Memory-Efficient)
 // ==============================================================================
 
@@ -1578,42 +1781,69 @@ auto fused_attention_hip(
     Tensor lse = create_hip_zeros({batch_size, seq_len}, Q.dtype(), Q.device());
 
     constexpr int BLOCK_SIZE = 256;
-    dim3 threads(BLOCK_SIZE);
-    dim3 blocks(1, seq_len, batch_size);
 
-    if (Q.dtype() == DType::Float32) {
+    if (Q.dtype() != DType::Float32) {
+        throw std::runtime_error("fused_attention_hip: Only Float32 supported");
+    }
+
+    // Use tiled Flash Attention v2 for supported head dimensions
+    bool use_tiled = (d_k == 32 || d_k == 64 || d_k == 128) && d_k == d_v;
+
+    if (use_tiled) {
+        // Flash Attention v2: tiled, O(1) memory per query row
+        constexpr int Bc = 32;
+        int seq_len_int = static_cast<int>(seq_len);
+
+        dim3 grid(static_cast<int>(batch_size), seq_len_int);
+        dim3 threads(BLOCK_SIZE);
+
+        // Shared memory: K_tile[Bc*K_STRIDE] + V_tile[Bc*K_STRIDE] + Q_shared[HD] + scores[Bc] + reduce[num_warps+1]
+        auto compute_fwd_smem = [&](int hd) -> size_t {
+            int k_stride = hd + 4;
+            int num_warps = BLOCK_SIZE / 64 + 1;
+            return (2 * Bc * k_stride + hd + Bc + num_warps + 1) * sizeof(float);
+        };
+
+        const float* q_ptr = Q.data<float>();
+        const float* k_ptr = K.data<float>();
+        const float* v_ptr = V.data<float>();
+        float* o_ptr = output.data<float>();
+        float* l_ptr = lse.data<float>();
+
+        if (d_k == 32) {
+            hipLaunchKernelGGL(
+                HIP_KERNEL_NAME(flash_attention_v2_kernel_hip<32, BLOCK_SIZE>),
+                grid, threads, compute_fwd_smem(32), 0,
+                q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, seq_len_int, scale);
+        } else if (d_k == 64) {
+            hipLaunchKernelGGL(
+                HIP_KERNEL_NAME(flash_attention_v2_kernel_hip<64, BLOCK_SIZE>),
+                grid, threads, compute_fwd_smem(64), 0,
+                q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, seq_len_int, scale);
+        } else if (d_k == 128) {
+            hipLaunchKernelGGL(
+                HIP_KERNEL_NAME(flash_attention_v2_kernel_hip<128, BLOCK_SIZE>),
+                grid, threads, compute_fwd_smem(128), 0,
+                q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, seq_len_int, seq_len_int, scale);
+        }
+        HIP_CHECK(hipGetLastError());
+    } else {
+        // Fallback: naive O(N^2) attention + separate LSE computation
+        dim3 threads_naive(BLOCK_SIZE);
+        dim3 blocks_naive(1, static_cast<int>(seq_len), static_cast<int>(batch_size));
+
         hipLaunchKernelGGL(
             HIP_KERNEL_NAME(fused_attention_kernel<float, BLOCK_SIZE>),
-            blocks, threads, 0, 0,
-            Q.data<float>(),
-            K.data<float>(),
-            V.data<float>(),
-            output.data<float>(),
-            batch_size,
-            seq_len,
-            d_k,
-            d_v,
-            scale
-        );
+            blocks_naive, threads_naive, 0, 0,
+            Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(),
+            batch_size, seq_len, d_k, d_v, scale);
 
-        // Compute logsumexp separately for backward pass compatibility
-        // The naive attention kernel doesn't produce it inline, so we compute
-        // LSE = log(sum(exp(scores - max))) + max per query row
-        // For now, use a simple kernel to compute it from Q and K
-        // (this is acceptable overhead since the naive kernel is already O(N^2))
         hipLaunchKernelGGL(
             HIP_KERNEL_NAME(compute_attention_lse_kernel<float, BLOCK_SIZE>),
-            dim3(batch_size, seq_len), dim3(BLOCK_SIZE), BLOCK_SIZE * sizeof(float), 0,
-            Q.data<float>(),
-            K.data<float>(),
-            lse.data<float>(),
-            batch_size,
-            seq_len,
-            d_k,
-            scale
-        );
-    } else {
-        throw std::runtime_error("fused_attention_hip: Only Float32 supported");
+            dim3(static_cast<int>(batch_size), static_cast<int>(seq_len)),
+            dim3(BLOCK_SIZE), BLOCK_SIZE * sizeof(float), 0,
+            Q.data<float>(), K.data<float>(), lse.data<float>(),
+            batch_size, seq_len, d_k, scale);
     }
 
     HIP_CHECK(hipGetLastError());

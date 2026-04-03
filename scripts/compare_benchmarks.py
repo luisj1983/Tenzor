@@ -194,18 +194,21 @@ def format_markdown(results: list[dict], has_failure: bool) -> str:
 
 
 def main():
-    if len(sys.argv) != 3:
-        print(
-            f"Usage: {sys.argv[0]} <baseline.json> <current.json>",
-            file=sys.stderr,
-        )
-        sys.exit(2)
+    import argparse
 
-    baseline_path = sys.argv[1]
-    current_path = sys.argv[2]
+    parser = argparse.ArgumentParser(description="Compare benchmark results")
+    parser.add_argument("baseline", help="Baseline benchmark JSON file")
+    parser.add_argument("current", help="Current benchmark JSON file")
+    parser.add_argument("--threshold", type=float, default=None,
+                        help="Override failure threshold (percent regression)")
+    args = parser.parse_args()
 
-    baseline = load_benchmarks(baseline_path)
-    current = load_benchmarks(current_path)
+    if args.threshold is not None:
+        global FAILURE_THRESHOLD
+        FAILURE_THRESHOLD = args.threshold
+
+    baseline = load_benchmarks(args.baseline)
+    current = load_benchmarks(args.current)
 
     if not baseline:
         print("Warning: Baseline has no benchmarks.", file=sys.stderr)

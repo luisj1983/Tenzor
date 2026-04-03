@@ -384,4 +384,18 @@ private:
 };
 
 } // namespace core
+
+// ============================================================================
+// Auto-registration API (opt-in, disabled by default)
+// ============================================================================
+
+/// Enable automatic tensor registration with MemoryManager on construction.
+auto enable_auto_tensor_registration() -> void;
+
+/// Disable automatic tensor registration.
+auto disable_auto_tensor_registration() -> void;
+
+/// Check if auto-registration is enabled.
+auto is_auto_tensor_registration_enabled() -> bool;
+
 } // namespace tenzor

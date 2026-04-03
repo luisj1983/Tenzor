@@ -39,7 +39,19 @@ set(TENZOR_CORE_SOURCES
     ops/custom_op.cpp
     autograd/variable.cpp
     autograd/graph.cpp
-    autograd/function.cpp
+    autograd/function_base.cpp
+    autograd/function_arithmetic.cpp
+    autograd/function_elementwise.cpp
+    autograd/function_reduction.cpp
+    autograd/function_shape.cpp
+    autograd/function_activations.cpp
+    autograd/function_math.cpp
+    autograd/function_reduction_ext.cpp
+    autograd/function_shape_ext.cpp
+    autograd/function_linalg.cpp
+    autograd/function_fft.cpp
+    autograd/function_sparse.cpp
+    autograd/function_special.cpp
     autograd/engine.cpp
     autograd/ops.cpp
     autograd/checkpoint.cpp

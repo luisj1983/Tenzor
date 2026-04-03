@@ -594,4 +594,23 @@ auto MemoryManager::remove_from_lru(Tensor* tensor, DeviceMemory& device_mem) ->
 }
 
 } // namespace core
+
+// ============================================================================
+// Auto-registration API
+// ============================================================================
+
+static std::atomic<bool> g_auto_tensor_registration{false};
+
+auto enable_auto_tensor_registration() -> void {
+    g_auto_tensor_registration.store(true, std::memory_order_release);
+}
+
+auto disable_auto_tensor_registration() -> void {
+    g_auto_tensor_registration.store(false, std::memory_order_release);
+}
+
+auto is_auto_tensor_registration_enabled() -> bool {
+    return g_auto_tensor_registration.load(std::memory_order_acquire);
+}
+
 } // namespace tenzor

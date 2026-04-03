@@ -4,11 +4,13 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/type_promotion.hpp"
 #include "tenzor/utils/error.hpp"
 #include <unordered_set>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <typeinfo>
 
@@ -70,10 +72,69 @@ static void check_for_anomaly(const std::vector<Tensor>& grads,
             else if (has_nan) anomaly = "NaN";
             else anomaly = "Inf";
 
+            // Build detailed diagnostic (only computed on error path)
+            std::string detail;
+
+            // Gradient shape
+            detail += "\n  Gradient shape: [";
+            for (size_t d = 0; d < grad.shape().size(); ++d) {
+                if (d > 0) detail += ", ";
+                detail += std::to_string(grad.shape()[d]);
+            }
+            detail += "]";
+
+            // Anomaly counts
+            detail += "\n  NaN count: " + std::to_string(static_cast<int64_t>(nan_count.item<float>()));
+            detail += "\n  Inf count: " + std::to_string(static_cast<int64_t>(inf_count.item<float>()));
+
+            // Finite value statistics
+            auto finite_mask = logical_not(logical_or(nan_mask, inf_mask));
+            Tensor finite_count_t = sum(finite_mask.to(DType::Float32));
+            float finite_count_val = finite_count_t.item<float>();
+            if (finite_count_val > 0) {
+                auto grad_shape_vec = std::vector<int64_t>(grad.shape().begin(), grad.shape().end());
+                Tensor grad_f32 = (grad.dtype() != DType::Float32) ? grad.to(DType::Float32) : grad;
+                Tensor zero_t = zeros(grad_shape_vec, DType::Float32, grad.device());
+                Tensor finite_vals = where(finite_mask, grad_f32, zero_t);
+                Tensor sum_t = sum(finite_vals);
+                float finite_sum = sum_t.item<float>();
+                // For min: replace non-finite with +max so they don't affect min
+                Tensor max_fill = full(grad_shape_vec, std::numeric_limits<float>::max(), DType::Float32, grad.device());
+                Tensor for_min = where(finite_mask, grad_f32, max_fill);
+                Tensor min_t = min(for_min);
+                float min_val = min_t.item<float>();
+                // For max: replace non-finite with -max so they don't affect max
+                Tensor min_fill = full(grad_shape_vec, std::numeric_limits<float>::lowest(), DType::Float32, grad.device());
+                Tensor for_max = where(finite_mask, grad_f32, min_fill);
+                Tensor max_t = max(for_max);
+                float max_val = max_t.item<float>();
+                detail += "\n  Finite values: min=" + std::to_string(min_val)
+                        + " max=" + std::to_string(max_val)
+                        + " mean=" + std::to_string(finite_sum / finite_count_val);
+            }
+
+            // Saved tensor shapes (catch exceptions since tensors may have been modified)
+            try {
+                const auto& saved = func->saved_tensors();
+                if (!saved.empty()) {
+                    detail += "\n  Saved tensor shapes:";
+                    for (size_t j = 0; j < saved.size(); ++j) {
+                        detail += " [" + std::to_string(j) + "]=(";
+                        for (size_t d = 0; d < saved[j].shape().size(); ++d) {
+                            if (d > 0) detail += ", ";
+                            detail += std::to_string(saved[j].shape()[d]);
+                        }
+                        detail += ")";
+                    }
+                }
+            } catch (...) {
+                // Ignore errors from saved tensor validation
+            }
+
             throw AutogradException(
                 "Anomaly detected: gradient output " + std::to_string(i) +
                 " contains " + anomaly + " values in backward of '" +
-                func_name + "'");
+                func_name + "'" + detail);
         }
     }
 }
