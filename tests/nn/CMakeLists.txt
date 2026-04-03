@@ -152,3 +152,8 @@ tenzor_discover_tests(test_fsdp DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_tensor_parallel DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_functional DISCOVERY_TIMEOUT 120)
 tenzor_discover_tests(test_safetensors DISCOVERY_TIMEOUT 120)
+
+# Parametrize module tests
+add_executable(test_parametrize test_parametrize.cpp)
+target_link_libraries(test_parametrize PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_parametrize DISCOVERY_TIMEOUT 60)

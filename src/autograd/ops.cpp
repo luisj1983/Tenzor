@@ -957,6 +957,57 @@ auto erfc(const Variable& input) -> Variable {
         [](const Tensor& t) { return tenzor::erfc(t); });
 }
 
+auto erfinv(const Variable& input) -> Variable {
+    // ErfInvBackward saves the output (not input) for efficient backward
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::erfinv(input.tensor()), false);
+    }
+    auto grad_fn = std::make_shared<ErfInvBackward>();
+    auto result = tenzor::erfinv(input.tensor());
+    grad_fn->save_for_backward({result});  // Save output
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+auto gamma(const Variable& input) -> Variable {
+    return unary_autograd<GammaBackward>(input,
+        [](const Tensor& t) { return tenzor::gamma(t); });
+}
+
+auto lgamma(const Variable& input) -> Variable {
+    return unary_autograd<LgammaBackward>(input,
+        [](const Tensor& t) { return tenzor::lgamma(t); });
+}
+
+auto digamma(const Variable& input) -> Variable {
+    return unary_autograd<DigammaBackward>(input,
+        [](const Tensor& t) { return tenzor::digamma(t); });
+}
+
+auto polygamma(int64_t n, const Variable& input) -> Variable {
+    // Polygamma backward: d/dx ψ^(n)(x) = ψ^(n+1)(x)
+    // For now, no autograd support (would need recursive backward)
+    return Variable(tenzor::polygamma(n, input.tensor()), false);
+}
+
+auto bessel_i0(const Variable& input) -> Variable {
+    return unary_autograd<BesselI0Backward>(input,
+        [](const Tensor& t) { return tenzor::bessel_i0(t); });
+}
+
+auto bessel_i1(const Variable& input) -> Variable {
+    return unary_autograd<BesselI1Backward>(input,
+        [](const Tensor& t) { return tenzor::bessel_i1(t); });
+}
+
+auto sinc(const Variable& input) -> Variable {
+    return unary_autograd<SincBackward>(input,
+        [](const Tensor& t) { return tenzor::sinc(t); });
+}
+
 auto log2(const Variable& input) -> Variable {
     return unary_autograd<Log2Backward>(input,
         [](const Tensor& t) { return tenzor::log2(t); });

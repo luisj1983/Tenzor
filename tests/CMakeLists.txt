@@ -85,6 +85,9 @@ add_executable(tenzor_unit_tests
     unit/test_device.cpp
     unit/test_ops.cpp
     unit/test_ops_additional.cpp
+    unit/test_special_math.cpp
+    unit/test_matrix_construction.cpp
+    unit/test_ddp_unused_params.cpp
     unit/test_autograd.cpp
     test_autograd_transform.cpp
     unit/test_cpu_kernels.cpp

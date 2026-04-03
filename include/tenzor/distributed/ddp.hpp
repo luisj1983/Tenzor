@@ -92,8 +92,14 @@ public:
      * @param pg The process group for communication
      * @param bucket_size_bytes Maximum size of each gradient bucket in bytes
      */
+    /**
+     * @param find_unused_parameters If true, detect parameters that did not
+     *        receive gradients and skip their all-reduce. Logs warnings on
+     *        first detection. Re-detects each iteration for dynamic graphs.
+     */
     DistributedDataParallel(nn::Module& module, ProcessGroup& pg,
-                            size_t bucket_size_bytes = DEFAULT_BUCKET_SIZE);
+                            size_t bucket_size_bytes = DEFAULT_BUCKET_SIZE,
+                            bool find_unused_parameters = false);
 
     /**
      * @brief Destructor - cleans up CUDA stream and event resources.
@@ -253,6 +259,8 @@ private:
     ProcessGroup& pg_;
     std::vector<GradBucket> buckets_;
     bool auto_sync_enabled_{true};
+    bool find_unused_parameters_{false};
+    bool logged_unused_warning_{false};
     CommStats comm_stats_;
 
     /** @brief Maps parameter data_ptr to its bucket index for O(1) hook lookup */

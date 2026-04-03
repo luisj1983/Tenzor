@@ -278,6 +278,40 @@ public:
     auto is_tracing() const -> bool { return tracing_; }
 
     /**
+     * @brief Trace a conditional branch (if/else).
+     *
+     * Records both branches as subgraphs in the IR. At execution time,
+     * the condition tensor determines which branch to evaluate.
+     *
+     * @param condition Boolean scalar tensor (evaluated at runtime)
+     * @param then_fn Function executed when condition is true
+     * @param else_fn Function executed when condition is false
+     * @param inputs Input variables available to both branches
+     * @return Output variables from the selected branch
+     */
+    auto trace_if(const Tensor& condition,
+                  std::function<std::vector<Variable>(const std::vector<Variable>&)> then_fn,
+                  std::function<std::vector<Variable>(const std::vector<Variable>&)> else_fn,
+                  const std::vector<Variable>& inputs) -> std::vector<Variable>;
+
+    /**
+     * @brief Trace a loop with carried state.
+     *
+     * Records the loop body as a subgraph. The loop executes up to max_iter
+     * times, with carried variables passed between iterations.
+     *
+     * @param max_iter Maximum number of iterations
+     * @param cond_fn Function returning bool tensor (continue condition)
+     * @param body_fn Function computing one iteration (takes carried, returns updated carried)
+     * @param carried Initial carried state variables
+     * @return Final carried state after loop completes
+     */
+    auto trace_loop(int64_t max_iter,
+                    std::function<Tensor(const std::vector<Variable>&)> cond_fn,
+                    std::function<std::vector<Variable>(const std::vector<Variable>&)> body_fn,
+                    const std::vector<Variable>& carried) -> std::vector<Variable>;
+
+    /**
      * @brief Clear all recorded operations and reset state.
      */
     auto clear() -> void;

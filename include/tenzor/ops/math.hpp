@@ -302,6 +302,25 @@ auto expm1(const Tensor& input) -> Tensor;
 /// @{
 auto erf(const Tensor& input) -> Tensor;
 auto erfc(const Tensor& input) -> Tensor;
+auto erfinv(const Tensor& input) -> Tensor;
+
+auto gamma(const Tensor& input) -> Tensor;
+auto lgamma(const Tensor& input) -> Tensor;
+auto digamma(const Tensor& input) -> Tensor;
+auto polygamma(int64_t n, const Tensor& input) -> Tensor;
+
+auto beta(const Tensor& a, const Tensor& b) -> Tensor;
+auto betainc(const Tensor& a, const Tensor& b, const Tensor& x) -> Tensor;
+
+auto bessel_j0(const Tensor& input) -> Tensor;
+auto bessel_j1(const Tensor& input) -> Tensor;
+auto bessel_y0(const Tensor& input) -> Tensor;
+auto bessel_y1(const Tensor& input) -> Tensor;
+auto bessel_i0(const Tensor& input) -> Tensor;
+auto bessel_i1(const Tensor& input) -> Tensor;
+
+auto sinc(const Tensor& input) -> Tensor;
+auto zeta(const Tensor& x, const Tensor& q) -> Tensor;
 /// @}
 
 /// @name Classification Functions (return Bool tensors)

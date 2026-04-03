@@ -169,6 +169,7 @@ enum class AttrKey : uint16_t {
     Max,
     Exponent,
     ScalarB,
+    Order,           // Polygamma order n
 
     // Stream handle
     Stream,

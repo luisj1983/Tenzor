@@ -3,6 +3,8 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/indexing.hpp"
+#include <cmath>
 
 namespace tenzor {
 
@@ -195,6 +197,340 @@ auto jvp_cos(const DualTensor& x) -> DualTensor {
 auto jvp_abs(const DualTensor& x) -> DualTensor {
     auto primal = tenzor::abs(x.primal());
     auto tangent = tenzor::mul(x.tangent(), tenzor::sign(x.primal()));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_tan(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::tan(x.primal());
+    // d(tan(x)) = dx / cos^2(x) = dx * (1 + tan^2(x))
+    auto one = tenzor::ones_like(primal);
+    auto tangent = tenzor::mul(x.tangent(), tenzor::add(one, tenzor::mul(primal, primal)));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_asin(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::asin(x.primal());
+    // d(asin(x)) = dx / sqrt(1 - x^2)
+    auto one = tenzor::ones_like(x.primal());
+    auto denom = tenzor::sqrt(tenzor::sub(one, tenzor::mul(x.primal(), x.primal())));
+    auto tangent = tenzor::div(x.tangent(), denom);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_acos(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::acos(x.primal());
+    // d(acos(x)) = -dx / sqrt(1 - x^2)
+    auto one = tenzor::ones_like(x.primal());
+    auto denom = tenzor::sqrt(tenzor::sub(one, tenzor::mul(x.primal(), x.primal())));
+    auto tangent = tenzor::neg(tenzor::div(x.tangent(), denom));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_atan(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::atan(x.primal());
+    // d(atan(x)) = dx / (1 + x^2)
+    auto one = tenzor::ones_like(x.primal());
+    auto tangent = tenzor::div(x.tangent(), tenzor::add(one, tenzor::mul(x.primal(), x.primal())));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_sinh(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::sinh(x.primal());
+    auto tangent = tenzor::mul(x.tangent(), tenzor::cosh(x.primal()));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_cosh(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::cosh(x.primal());
+    auto tangent = tenzor::mul(x.tangent(), tenzor::sinh(x.primal()));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_log2(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::log2(x.primal());
+    // d(log2(x)) = dx / (x * ln(2))
+    auto tangent = tenzor::div(x.tangent(), tenzor::mul(x.primal(), M_LN2));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_log10(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::log10(x.primal());
+    // d(log10(x)) = dx / (x * ln(10))
+    auto tangent = tenzor::div(x.tangent(), tenzor::mul(x.primal(), M_LN10));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_log1p(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::log1p(x.primal());
+    // d(log(1+x)) = dx / (1 + x)
+    auto one = tenzor::ones_like(x.primal());
+    auto tangent = tenzor::div(x.tangent(), tenzor::add(one, x.primal()));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_exp2(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::exp2(x.primal());
+    // d(2^x) = dx * 2^x * ln(2)
+    auto tangent = tenzor::mul(x.tangent(), tenzor::mul(primal, M_LN2));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_expm1(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::expm1(x.primal());
+    // d(exp(x)-1) = dx * exp(x)
+    auto tangent = tenzor::mul(x.tangent(), tenzor::exp(x.primal()));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_reciprocal(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::reciprocal(x.primal());
+    // d(1/x) = -dx / x^2
+    auto tangent = tenzor::neg(tenzor::div(x.tangent(), tenzor::mul(x.primal(), x.primal())));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_sign(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::sign(x.primal());
+    // sign is piecewise constant, derivative is 0
+    auto tangent = tenzor::zeros_like(x.tangent());
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_erf(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::erf(x.primal());
+    // d(erf(x)) = dx * (2/sqrt(pi)) * exp(-x^2)
+    constexpr double two_over_sqrt_pi = 1.1283791670955126;
+    auto neg_x_sq = tenzor::neg(tenzor::mul(x.primal(), x.primal()));
+    auto tangent = tenzor::mul(x.tangent(), tenzor::mul(tenzor::exp(neg_x_sq), two_over_sqrt_pi));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_erfc(const DualTensor& x) -> DualTensor {
+    auto primal = tenzor::erfc(x.primal());
+    constexpr double neg_two_over_sqrt_pi = -1.1283791670955126;
+    auto neg_x_sq = tenzor::neg(tenzor::mul(x.primal(), x.primal()));
+    auto tangent = tenzor::mul(x.tangent(), tenzor::mul(tenzor::exp(neg_x_sq), neg_two_over_sqrt_pi));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_clamp(const DualTensor& x, double min_val, double max_val) -> DualTensor {
+    auto primal = tenzor::clamp(x.primal(), static_cast<float>(min_val), static_cast<float>(max_val));
+    // Gradient passes through where min < x < max, zero at boundaries
+    auto above_min = tenzor::gt(x.primal(), tenzor::mul(tenzor::ones_like(x.primal()), min_val));
+    auto below_max = tenzor::lt(x.primal(), tenzor::mul(tenzor::ones_like(x.primal()), max_val));
+    auto mask = tenzor::mul(above_min, below_max);
+    auto tangent = tenzor::mul(x.tangent(), mask);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+// ============================================================================
+// Activation extensions
+// ============================================================================
+
+auto jvp_leaky_relu(const DualTensor& x, float negative_slope) -> DualTensor {
+    // leaky_relu(x) = x if x > 0, else negative_slope * x
+    auto p = x.primal();
+    auto zero = tenzor::zeros_like(p);
+    auto pos_mask = tenzor::gt(p, zero);  // 1 where x > 0
+    // derivative: 1 where x > 0, negative_slope elsewhere
+    auto one = tenzor::ones_like(p);
+    auto slope = tenzor::mul(tenzor::ones_like(p), static_cast<double>(negative_slope));
+    // deriv = pos_mask * 1 + (1 - pos_mask) * negative_slope
+    auto deriv = tenzor::add(tenzor::mul(pos_mask, one),
+                             tenzor::mul(tenzor::sub(one, pos_mask), slope));
+    auto primal = tenzor::mul(p, deriv);  // equivalent to leaky_relu
+    auto tangent = tenzor::mul(x.tangent(), deriv);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_elu(const DualTensor& x, float alpha) -> DualTensor {
+    // elu(x) = x if x > 0, else alpha * (exp(x) - 1)
+    // d(elu)/dx = 1 if x > 0, else alpha * exp(x)
+    auto p = x.primal();
+    auto zero = tenzor::zeros_like(p);
+    auto pos_mask = tenzor::gt(p, zero);
+    auto one = tenzor::ones_like(p);
+    auto exp_x = tenzor::exp(p);
+    auto neg_deriv = tenzor::mul(exp_x, static_cast<double>(alpha));
+    auto deriv = tenzor::add(tenzor::mul(pos_mask, one),
+                             tenzor::mul(tenzor::sub(one, pos_mask), neg_deriv));
+    // primal
+    auto neg_val = tenzor::mul(tenzor::sub(exp_x, one), static_cast<double>(alpha));
+    auto primal = tenzor::add(tenzor::mul(pos_mask, p),
+                              tenzor::mul(tenzor::sub(one, pos_mask), neg_val));
+    auto tangent = tenzor::mul(x.tangent(), deriv);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_selu(const DualTensor& x) -> DualTensor {
+    // SELU(x) = lambda * (x if x > 0, else alpha * (exp(x) - 1))
+    constexpr double lambda = 1.0507009873554805;
+    constexpr double alpha = 1.6732632423543772;
+    auto p = x.primal();
+    auto zero = tenzor::zeros_like(p);
+    auto pos_mask = tenzor::gt(p, zero);
+    auto one = tenzor::ones_like(p);
+    auto exp_x = tenzor::exp(p);
+    // deriv: lambda if x>0, else lambda * alpha * exp(x)
+    auto deriv = tenzor::add(
+        tenzor::mul(pos_mask, lambda),
+        tenzor::mul(tenzor::sub(one, pos_mask), tenzor::mul(exp_x, lambda * alpha))
+    );
+    // primal
+    auto neg_val = tenzor::mul(tenzor::sub(exp_x, one), lambda * alpha);
+    auto primal = tenzor::add(tenzor::mul(pos_mask, tenzor::mul(p, lambda)),
+                              tenzor::mul(tenzor::sub(one, pos_mask), neg_val));
+    auto tangent = tenzor::mul(x.tangent(), deriv);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_softplus(const DualTensor& x, float beta) -> DualTensor {
+    // softplus(x) = (1/beta) * log(1 + exp(beta*x))
+    // d(softplus)/dx = sigmoid(beta*x)
+    auto bx = tenzor::mul(x.primal(), static_cast<double>(beta));
+    auto exp_bx = tenzor::exp(bx);
+    auto one = tenzor::ones_like(x.primal());
+    auto primal = tenzor::mul(tenzor::log(tenzor::add(one, exp_bx)), 1.0 / beta);
+    auto deriv = tenzor::sigmoid(bx);
+    auto tangent = tenzor::mul(x.tangent(), deriv);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_mish(const DualTensor& x) -> DualTensor {
+    // mish(x) = x * tanh(softplus(x)) = x * tanh(ln(1 + exp(x)))
+    // d(mish)/dx = tanh(sp) + x * sech^2(sp) * sigmoid(x)
+    //   where sp = softplus(x) = ln(1 + exp(x))
+    auto p = x.primal();
+    auto one = tenzor::ones_like(p);
+    auto exp_x = tenzor::exp(p);
+    auto sp = tenzor::log(tenzor::add(one, exp_x));  // softplus(x)
+    auto tanh_sp = tenzor::tanh(sp);
+    auto primal = tenzor::mul(p, tanh_sp);
+
+    auto sech2 = tenzor::sub(one, tenzor::mul(tanh_sp, tanh_sp));
+    auto sig_x = tenzor::sigmoid(p);
+    auto deriv = tenzor::add(tanh_sp, tenzor::mul(tenzor::mul(p, sech2), sig_x));
+    auto tangent = tenzor::mul(x.tangent(), deriv);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+// ============================================================================
+// Softmax
+// ============================================================================
+
+auto jvp_softmax(const DualTensor& x, int64_t dim) -> DualTensor {
+    // s = softmax(p, dim)
+    // ds = s * (dt - sum(s * dt, dim, keepdim=true))
+    auto p = x.primal();
+    // Compute softmax manually: exp(x - max) / sum(exp(x - max))
+    auto max_val = tenzor::max(p, dim, /*keepdim=*/true);
+    auto shifted = tenzor::sub(p, max_val);
+    auto exp_shifted = tenzor::exp(shifted);
+    auto sum_exp = tenzor::sum(exp_shifted, dim, /*keepdim=*/true);
+    auto s = tenzor::div(exp_shifted, sum_exp);
+
+    auto s_dt = tenzor::mul(s, x.tangent());
+    auto sum_s_dt = tenzor::sum(s_dt, dim, /*keepdim=*/true);
+    auto tangent = tenzor::mul(s, tenzor::sub(x.tangent(), sum_s_dt));
+    return DualTensor(std::move(s), std::move(tangent));
+}
+
+auto jvp_log_softmax(const DualTensor& x, int64_t dim) -> DualTensor {
+    // log_softmax(x) = x - log(sum(exp(x), dim))
+    // d(log_softmax) = dt - softmax(x) * sum(dt, dim)
+    auto p = x.primal();
+    auto max_val = tenzor::max(p, dim, /*keepdim=*/true);
+    auto shifted = tenzor::sub(p, max_val);
+    auto exp_shifted = tenzor::exp(shifted);
+    auto sum_exp = tenzor::sum(exp_shifted, dim, /*keepdim=*/true);
+    auto log_sum_exp = tenzor::add(tenzor::log(sum_exp), max_val);
+    auto primal = tenzor::sub(p, log_sum_exp);
+    auto s = tenzor::div(exp_shifted, sum_exp);  // softmax
+
+    auto sum_dt = tenzor::sum(x.tangent(), dim, /*keepdim=*/true);
+    auto tangent = tenzor::sub(x.tangent(), tenzor::mul(s, sum_dt));
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+// ============================================================================
+// Linear algebra
+// ============================================================================
+
+auto jvp_linear(const DualTensor& input, const DualTensor& weight, const DualTensor& bias) -> DualTensor {
+    // y = x @ W^T + b
+    // dy = dx @ W^T + x @ dW^T + db
+    auto wt = tenzor::transpose(weight.primal(), 0, 1);
+    auto dwt = tenzor::transpose(weight.tangent(), 0, 1);
+    auto primal = tenzor::add(tenzor::matmul(input.primal(), wt), bias.primal());
+    auto tangent = tenzor::add(
+        tenzor::add(tenzor::matmul(input.tangent(), wt),
+                    tenzor::matmul(input.primal(), dwt)),
+        bias.tangent()
+    );
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+// ============================================================================
+// Shape ops (extensions)
+// ============================================================================
+
+auto jvp_permute(const DualTensor& x, std::vector<int64_t> dims) -> DualTensor {
+    auto primal = tenzor::permute(x.primal(), dims);
+    auto tangent = tenzor::permute(x.tangent(), dims);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_squeeze(const DualTensor& x, std::optional<int64_t> dim) -> DualTensor {
+    auto primal = tenzor::squeeze(x.primal(), dim);
+    auto tangent = tenzor::squeeze(x.tangent(), dim);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_unsqueeze(const DualTensor& x, int64_t dim) -> DualTensor {
+    auto primal = tenzor::unsqueeze(x.primal(), dim);
+    auto tangent = tenzor::unsqueeze(x.tangent(), dim);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_expand(const DualTensor& x, std::vector<int64_t> shape) -> DualTensor {
+    auto primal = tenzor::expand(x.primal(), shape);
+    auto tangent = tenzor::expand(x.tangent(), shape);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_flatten(const DualTensor& x, int64_t start_dim, int64_t end_dim) -> DualTensor {
+    auto primal = tenzor::flatten(x.primal(), start_dim, end_dim);
+    auto tangent = tenzor::flatten(x.tangent(), start_dim, end_dim);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+// ============================================================================
+// Tensor combination
+// ============================================================================
+
+auto jvp_cat(std::span<const DualTensor> tensors, int64_t dim) -> DualTensor {
+    std::vector<Tensor> primals, tangents;
+    primals.reserve(tensors.size());
+    tangents.reserve(tensors.size());
+    for (const auto& t : tensors) {
+        primals.push_back(t.primal());
+        tangents.push_back(t.tangent());
+    }
+    auto primal = tenzor::cat(primals, dim);
+    auto tangent = tenzor::cat(tangents, dim);
+    return DualTensor(std::move(primal), std::move(tangent));
+}
+
+auto jvp_stack(std::span<const DualTensor> tensors, int64_t dim) -> DualTensor {
+    std::vector<Tensor> primals, tangents;
+    primals.reserve(tensors.size());
+    tangents.reserve(tensors.size());
+    for (const auto& t : tensors) {
+        primals.push_back(t.primal());
+        tangents.push_back(t.tangent());
+    }
+    auto primal = tenzor::stack(primals, dim);
+    auto tangent = tenzor::stack(tangents, dim);
     return DualTensor(std::move(primal), std::move(tangent));
 }
 

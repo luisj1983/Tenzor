@@ -174,6 +174,63 @@ auto mode(const Tensor& input,
  */
 auto bucketize(const Tensor& input, const Tensor& boundaries, bool right = false) -> Tensor;
 
+/// @name Matrix Construction Operations
+/// @{
+
+/**
+ * @brief Kronecker product of two tensors.
+ *
+ * For 2-D tensors A (m×n) and B (p×q), returns (m*p × n*q) tensor where
+ * each element a_ij is replaced by a_ij * B.
+ *
+ * @param a First tensor (must be 2-D)
+ * @param b Second tensor (must be 2-D)
+ * @return Kronecker product tensor
+ */
+auto kron(const Tensor& a, const Tensor& b) -> Tensor;
+
+/**
+ * @brief Create a block diagonal matrix from a sequence of tensors.
+ *
+ * Each tensor is placed along the diagonal of the result, with zeros elsewhere.
+ *
+ * @param tensors Sequence of 2-D tensors
+ * @return Block diagonal matrix
+ */
+auto block_diag(std::span<const Tensor> tensors) -> Tensor;
+
+/**
+ * @brief Generate a Vandermonde matrix.
+ *
+ * Column k of the output is x^k (or x^(N-1-k) if increasing=false).
+ *
+ * @param x 1-D tensor of values
+ * @param N Number of columns (default: x.size(0))
+ * @param increasing If true, columns are [1, x, x², ...]; if false [x^(N-1), ..., x, 1]
+ * @return Vandermonde matrix of shape (len(x), N)
+ */
+auto vander(const Tensor& x, int64_t N = -1, bool increasing = false) -> Tensor;
+
+/**
+ * @brief Cartesian product of 1-D tensors.
+ *
+ * @param tensors Sequence of 1-D tensors
+ * @return 2-D tensor where each row is one element of the Cartesian product
+ */
+auto cartesian_prod(std::span<const Tensor> tensors) -> Tensor;
+
+/**
+ * @brief All r-length combinations of elements from the input tensor.
+ *
+ * @param input 1-D tensor
+ * @param r Combination length
+ * @param with_replacement If true, allow repeated elements
+ * @return 2-D tensor of shape (num_combinations, r)
+ */
+auto combinations(const Tensor& input, int64_t r, bool with_replacement = false) -> Tensor;
+
+/// @}
+
 /** @} */ // end of tensor_advanced group
 
 } // namespace tenzor

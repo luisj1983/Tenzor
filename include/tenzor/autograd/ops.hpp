@@ -550,6 +550,30 @@ auto erf(const Variable& input) -> Variable;
 /// Complementary error function. Grad: -(2/√π)*exp(-x²)
 auto erfc(const Variable& input) -> Variable;
 
+/// Inverse error function. Grad: √π/2 * exp(erfinv(x)²)
+auto erfinv(const Variable& input) -> Variable;
+
+/// Gamma function Γ(x). Grad: Γ(x)*ψ(x)
+auto gamma(const Variable& input) -> Variable;
+
+/// Log-gamma ln|Γ(x)|. Grad: ψ(x) (digamma)
+auto lgamma(const Variable& input) -> Variable;
+
+/// Digamma ψ(x) = d/dx ln Γ(x). Grad: ψ¹(x) (trigamma)
+auto digamma(const Variable& input) -> Variable;
+
+/// Polygamma ψⁿ(x), n-th derivative of digamma
+auto polygamma(int64_t n, const Variable& input) -> Variable;
+
+/// Modified Bessel I₀(x). Grad: I₁(x)
+auto bessel_i0(const Variable& input) -> Variable;
+
+/// Modified Bessel I₁(x). Grad: I₀(x) - I₁(x)/x
+auto bessel_i1(const Variable& input) -> Variable;
+
+/// Normalized sinc: sin(πx)/(πx). Grad handled via chain rule
+auto sinc(const Variable& input) -> Variable;
+
 /// Log base 2. Grad: 1/(x*ln(2))
 auto log2(const Variable& input) -> Variable;
 

@@ -72,6 +72,21 @@ namespace cpu {
     auto expm1_kernel(const Tensor& input) -> Tensor;
     auto erf_kernel(const Tensor& input) -> Tensor;
     auto erfc_kernel(const Tensor& input) -> Tensor;
+    auto erfinv_kernel(const Tensor& input) -> Tensor;
+    auto gamma_kernel(const Tensor& input) -> Tensor;
+    auto lgamma_kernel(const Tensor& input) -> Tensor;
+    auto digamma_kernel(const Tensor& input) -> Tensor;
+    auto polygamma_kernel(const Tensor& input, int64_t n) -> Tensor;
+    auto beta_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto betainc_kernel(std::span<const Tensor> inputs) -> Tensor;
+    auto bessel_j0_kernel(const Tensor& input) -> Tensor;
+    auto bessel_j1_kernel(const Tensor& input) -> Tensor;
+    auto bessel_y0_kernel(const Tensor& input) -> Tensor;
+    auto bessel_y1_kernel(const Tensor& input) -> Tensor;
+    auto bessel_i0_kernel(const Tensor& input) -> Tensor;
+    auto bessel_i1_kernel(const Tensor& input) -> Tensor;
+    auto sinc_kernel(const Tensor& input) -> Tensor;
+    auto zeta_kernel(const Tensor& x, const Tensor& q) -> Tensor;
     auto isnan_kernel(const Tensor& input) -> Tensor;
     auto isinf_kernel(const Tensor& input) -> Tensor;
     auto isfinite_kernel(const Tensor& input) -> Tensor;
@@ -681,6 +696,26 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Expm1, cpu::expm1_kernel);
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Erf, cpu::erf_kernel);
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Erfc, cpu::erfc_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, ErfInv, cpu::erfinv_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Gamma, cpu::gamma_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Lgamma, cpu::lgamma_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Digamma, cpu::digamma_kernel);
+    table.register_single_output_kernel(OpId::Polygamma, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t n = static_cast<int64_t>(attrs.get_float(AttrKey::Order, 0.0));
+        return cpu::polygamma_kernel(inputs[0], n);
+    });
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Beta, cpu::beta_kernel);
+    table.register_kernel(OpId::BetaInc, [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+        return {cpu::betainc_kernel(inputs)};
+    });
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, BesselJ0, cpu::bessel_j0_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, BesselJ1, cpu::bessel_j1_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, BesselY0, cpu::bessel_y0_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, BesselY1, cpu::bessel_y1_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, BesselI0, cpu::bessel_i0_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, BesselI1, cpu::bessel_i1_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Sinc, cpu::sinc_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Zeta, cpu::zeta_kernel);
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, IsNan, cpu::isnan_kernel);
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, IsInf, cpu::isinf_kernel);
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, IsFinite, cpu::isfinite_kernel);

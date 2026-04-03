@@ -378,5 +378,100 @@ auto trace(std::shared_ptr<nn::Module> module,
     return std::make_shared<CompiledModule>(graph);
 }
 
+// ============================================================================
+// Control Flow: trace_if
+// ============================================================================
+
+auto Tracer::trace_if(const Tensor& condition,
+                      std::function<std::vector<Variable>(const std::vector<Variable>&)> then_fn,
+                      std::function<std::vector<Variable>(const std::vector<Variable>&)> else_fn,
+                      const std::vector<Variable>& inputs) -> std::vector<Variable> {
+
+    // Register condition tensor
+    auto cond_id = register_tensor(condition);
+
+    // Register input tensors
+    std::vector<std::string> input_ids;
+    for (const auto& v : inputs) {
+        input_ids.push_back(register_tensor(v));
+    }
+
+    // Save current ops state to isolate subgraphs
+    auto ops_before_then = ops_.size();
+
+    // Trace the then-branch by executing it
+    auto then_outputs = then_fn(inputs);
+
+    // Record then-branch ops range
+    auto then_ops_end = ops_.size();
+
+    // Trace the else-branch
+    auto else_outputs = else_fn(inputs);
+    auto else_ops_end = ops_.size();
+
+    // Register output tensors
+    std::vector<std::string> output_ids;
+    for (const auto& v : then_outputs) {
+        output_ids.push_back(register_tensor(v));
+    }
+
+    // Create the If operation with subgraph info as attributes
+    TracedOp if_op(OpType::If, input_ids, output_ids);
+    if_op.inputs.insert(if_op.inputs.begin(), cond_id);  // condition is first input
+    if_op.int_attrs["then_ops_start"] = static_cast<int64_t>(ops_before_then);
+    if_op.int_attrs["then_ops_end"] = static_cast<int64_t>(then_ops_end);
+    if_op.int_attrs["else_ops_start"] = static_cast<int64_t>(then_ops_end);
+    if_op.int_attrs["else_ops_end"] = static_cast<int64_t>(else_ops_end);
+    if_op.int_attrs["num_outputs"] = static_cast<int64_t>(then_outputs.size());
+
+    record_op(std::move(if_op));
+
+    // At trace time, we return then-branch outputs (arbitrary choice)
+    // The compiled module will evaluate the condition at runtime
+    return then_outputs;
+}
+
+// ============================================================================
+// Control Flow: trace_loop
+// ============================================================================
+
+auto Tracer::trace_loop(int64_t max_iter,
+                        std::function<Tensor(const std::vector<Variable>&)> cond_fn,
+                        std::function<std::vector<Variable>(const std::vector<Variable>&)> body_fn,
+                        const std::vector<Variable>& carried) -> std::vector<Variable> {
+
+    // Register carried state
+    std::vector<std::string> carried_ids;
+    for (const auto& v : carried) {
+        carried_ids.push_back(register_tensor(v));
+    }
+
+    // Save ops state before body
+    auto body_ops_start = ops_.size();
+
+    // Trace one iteration of the body
+    auto body_outputs = body_fn(carried);
+
+    auto body_ops_end = ops_.size();
+
+    // Register output IDs
+    std::vector<std::string> output_ids;
+    for (const auto& v : body_outputs) {
+        output_ids.push_back(register_tensor(v));
+    }
+
+    // Create Loop operation
+    TracedOp loop_op(OpType::Loop, carried_ids, output_ids);
+    loop_op.int_attrs["max_iter"] = max_iter;
+    loop_op.int_attrs["body_ops_start"] = static_cast<int64_t>(body_ops_start);
+    loop_op.int_attrs["body_ops_end"] = static_cast<int64_t>(body_ops_end);
+    loop_op.int_attrs["num_carried"] = static_cast<int64_t>(carried.size());
+
+    record_op(std::move(loop_op));
+
+    // Return body outputs as the result (representing final carried state)
+    return body_outputs;
+}
+
 } // namespace jit
 } // namespace tenzor

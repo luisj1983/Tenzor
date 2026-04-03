@@ -366,6 +366,46 @@ auto exp2(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Exp2>(i
 auto expm1(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Expm1>(input); }
 auto erf(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Erf>(input); }
 auto erfc(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Erfc>(input); }
+auto erfinv(const Tensor& input) -> Tensor { return detail::unary_op<OpId::ErfInv>(input); }
+
+auto gamma(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Gamma>(input); }
+auto lgamma(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Lgamma>(input); }
+auto digamma(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Digamma>(input); }
+
+auto polygamma(int64_t n, const Tensor& input) -> Tensor {
+    OpAttributes attrs;
+    attrs.set(AttrKey::Order, static_cast<double>(n));
+    std::vector<Tensor> inputs = {input};
+    return dispatch(OpId::Polygamma, inputs, attrs)[0];
+}
+
+auto beta(const Tensor& a, const Tensor& b) -> Tensor {
+    return detail::binary_op_promoted<OpId::Beta>("beta", a, b);
+}
+
+auto betainc(const Tensor& a, const Tensor& b, const Tensor& x) -> Tensor {
+    auto [ap, bp] = promote_inputs(a, b);
+    auto [ap2, xp] = promote_inputs(ap, x);
+    Tensor ac = ap2.is_contiguous() ? ap2 : ap2.contiguous();
+    Tensor bc = bp.is_contiguous() ? bp : bp.contiguous();
+    Tensor xc = xp.is_contiguous() ? xp : xp.contiguous();
+    std::vector<Tensor> inputs = {ac, bc, xc};
+    return dispatch<OpId::BetaInc>(inputs)[0];
+}
+
+auto bessel_j0(const Tensor& input) -> Tensor { return detail::unary_op<OpId::BesselJ0>(input); }
+auto bessel_j1(const Tensor& input) -> Tensor { return detail::unary_op<OpId::BesselJ1>(input); }
+auto bessel_y0(const Tensor& input) -> Tensor { return detail::unary_op<OpId::BesselY0>(input); }
+auto bessel_y1(const Tensor& input) -> Tensor { return detail::unary_op<OpId::BesselY1>(input); }
+auto bessel_i0(const Tensor& input) -> Tensor { return detail::unary_op<OpId::BesselI0>(input); }
+auto bessel_i1(const Tensor& input) -> Tensor { return detail::unary_op<OpId::BesselI1>(input); }
+
+auto sinc(const Tensor& input) -> Tensor { return detail::unary_op<OpId::Sinc>(input); }
+
+auto zeta(const Tensor& x, const Tensor& q) -> Tensor {
+    return detail::binary_op_promoted<OpId::Zeta>("zeta", x, q);
+}
+
 auto isnan(const Tensor& input) -> Tensor { return detail::unary_op<OpId::IsNan>(input); }
 auto isinf(const Tensor& input) -> Tensor { return detail::unary_op<OpId::IsInf>(input); }
 auto isfinite(const Tensor& input) -> Tensor { return detail::unary_op<OpId::IsFinite>(input); }

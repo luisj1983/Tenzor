@@ -394,6 +394,23 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::Histogram)] = "histogram";
     names[static_cast<size_t>(OpId::Bucketize)] = "bucketize";
 
+    // Special Math Functions
+    names[static_cast<size_t>(OpId::Gamma)] = "gamma";
+    names[static_cast<size_t>(OpId::Lgamma)] = "lgamma";
+    names[static_cast<size_t>(OpId::Digamma)] = "digamma";
+    names[static_cast<size_t>(OpId::Polygamma)] = "polygamma";
+    names[static_cast<size_t>(OpId::Beta)] = "beta";
+    names[static_cast<size_t>(OpId::BetaInc)] = "betainc";
+    names[static_cast<size_t>(OpId::BesselJ0)] = "bessel_j0";
+    names[static_cast<size_t>(OpId::BesselJ1)] = "bessel_j1";
+    names[static_cast<size_t>(OpId::BesselY0)] = "bessel_y0";
+    names[static_cast<size_t>(OpId::BesselY1)] = "bessel_y1";
+    names[static_cast<size_t>(OpId::BesselI0)] = "bessel_i0";
+    names[static_cast<size_t>(OpId::BesselI1)] = "bessel_i1";
+    names[static_cast<size_t>(OpId::ErfInv)] = "erfinv";
+    names[static_cast<size_t>(OpId::Sinc)] = "sinc";
+    names[static_cast<size_t>(OpId::Zeta)] = "zeta";
+
     // Sparse Tensor Operations
     names[static_cast<size_t>(OpId::SparseSpMM)] = "sparse_spmm";
     names[static_cast<size_t>(OpId::SparseSpMV)] = "sparse_spmv";
@@ -415,7 +432,7 @@ constexpr size_t count_named_ops() {
 
 // Count of actual OpId enum values (excluding gap slots).
 // Update this when adding new OpIds to catch missing name entries at compile time.
-inline constexpr size_t EXPECTED_NAMED_OPS = 305;
+inline constexpr size_t EXPECTED_NAMED_OPS = 320;
 
 // If this fires, a new OpId was added without a corresponding name in op_names above
 static_assert(count_named_ops() == EXPECTED_NAMED_OPS,

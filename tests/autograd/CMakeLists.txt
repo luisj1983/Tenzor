@@ -56,6 +56,10 @@ add_executable(test_jvp test_jvp.cpp)
 target_link_libraries(test_jvp PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_jvp DISCOVERY_TIMEOUT 60)
 
+add_executable(test_jvp_expanded test_jvp_expanded.cpp)
+target_link_libraries(test_jvp_expanded PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_jvp_expanded DISCOVERY_TIMEOUT 60)
+
 # Jacobian and Hessian tests
 add_executable(test_jacobian_hessian test_jacobian_hessian.cpp)
 target_link_libraries(test_jacobian_hessian PRIVATE tenzor_core GTest::gtest_main)
@@ -65,6 +69,10 @@ tenzor_discover_tests(test_jacobian_hessian DISCOVERY_TIMEOUT 60)
 add_executable(test_vmap test_vmap.cpp)
 target_link_libraries(test_vmap PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_vmap DISCOVERY_TIMEOUT 60)
+
+add_executable(test_vmap_expanded test_vmap_expanded.cpp)
+target_link_libraries(test_vmap_expanded PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_vmap_expanded DISCOVERY_TIMEOUT 60)
 
 # Anomaly detection tests
 add_executable(test_anomaly_detection test_anomaly_detection.cpp)

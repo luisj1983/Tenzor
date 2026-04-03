@@ -2197,6 +2197,59 @@ PYBIND11_MODULE(tenzor_core, m) {
          "Element-wise error function", py::call_guard<py::gil_scoped_release>());
     m.def("erfc", [](const tenzor::Tensor& t) { return tenzor::erfc(t); },
          "Element-wise complementary error function", py::call_guard<py::gil_scoped_release>());
+    m.def("erfinv", [](const tenzor::Tensor& t) { return tenzor::erfinv(t); },
+         "Element-wise inverse error function", py::call_guard<py::gil_scoped_release>());
+
+    // Special math functions
+    m.def("gamma", [](const tenzor::Tensor& t) { return tenzor::gamma(t); },
+         "Element-wise gamma function", py::call_guard<py::gil_scoped_release>());
+    m.def("lgamma", [](const tenzor::Tensor& t) { return tenzor::lgamma(t); },
+         "Element-wise log-gamma function", py::call_guard<py::gil_scoped_release>());
+    m.def("digamma", [](const tenzor::Tensor& t) { return tenzor::digamma(t); },
+         "Element-wise digamma (psi) function", py::call_guard<py::gil_scoped_release>());
+    m.def("polygamma", [](int64_t n, const tenzor::Tensor& t) { return tenzor::polygamma(n, t); },
+         "Element-wise polygamma function", py::arg("n"), py::arg("input"),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("beta", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::beta(a, b); },
+         "Element-wise beta function B(a,b)", py::call_guard<py::gil_scoped_release>());
+    m.def("betainc", [](const tenzor::Tensor& a, const tenzor::Tensor& b, const tenzor::Tensor& x) {
+         return tenzor::betainc(a, b, x); },
+         "Regularized incomplete beta function I_x(a,b)", py::call_guard<py::gil_scoped_release>());
+    m.def("bessel_j0", [](const tenzor::Tensor& t) { return tenzor::bessel_j0(t); },
+         "Bessel function of first kind, order 0", py::call_guard<py::gil_scoped_release>());
+    m.def("bessel_j1", [](const tenzor::Tensor& t) { return tenzor::bessel_j1(t); },
+         "Bessel function of first kind, order 1", py::call_guard<py::gil_scoped_release>());
+    m.def("bessel_y0", [](const tenzor::Tensor& t) { return tenzor::bessel_y0(t); },
+         "Bessel function of second kind, order 0", py::call_guard<py::gil_scoped_release>());
+    m.def("bessel_y1", [](const tenzor::Tensor& t) { return tenzor::bessel_y1(t); },
+         "Bessel function of second kind, order 1", py::call_guard<py::gil_scoped_release>());
+    m.def("bessel_i0", [](const tenzor::Tensor& t) { return tenzor::bessel_i0(t); },
+         "Modified Bessel function of first kind, order 0", py::call_guard<py::gil_scoped_release>());
+    m.def("bessel_i1", [](const tenzor::Tensor& t) { return tenzor::bessel_i1(t); },
+         "Modified Bessel function of first kind, order 1", py::call_guard<py::gil_scoped_release>());
+    m.def("sinc", [](const tenzor::Tensor& t) { return tenzor::sinc(t); },
+         "Normalized sinc function: sin(pi*x)/(pi*x)", py::call_guard<py::gil_scoped_release>());
+    m.def("zeta", [](const tenzor::Tensor& x, const tenzor::Tensor& q) { return tenzor::zeta(x, q); },
+         "Hurwitz zeta function", py::call_guard<py::gil_scoped_release>());
+
+    // Matrix construction operations
+    m.def("kron", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::kron(a, b); },
+         "Kronecker product of two 2-D tensors", py::call_guard<py::gil_scoped_release>());
+    m.def("block_diag", [](std::vector<tenzor::Tensor> tensors) {
+         return tenzor::block_diag(tensors); },
+         "Create block diagonal matrix from tensors", py::call_guard<py::gil_scoped_release>());
+    m.def("vander", [](const tenzor::Tensor& x, int64_t N, bool increasing) {
+         return tenzor::vander(x, N, increasing); },
+         "Generate Vandermonde matrix", py::arg("x"), py::arg("N") = -1, py::arg("increasing") = false,
+         py::call_guard<py::gil_scoped_release>());
+    m.def("cartesian_prod", [](std::vector<tenzor::Tensor> tensors) {
+         return tenzor::cartesian_prod(tensors); },
+         "Cartesian product of 1-D tensors", py::call_guard<py::gil_scoped_release>());
+    m.def("combinations", [](const tenzor::Tensor& input, int64_t r, bool with_replacement) {
+         return tenzor::combinations(input, r, with_replacement); },
+         "All r-length combinations from input", py::arg("input"), py::arg("r"),
+         py::arg("with_replacement") = false, py::call_guard<py::gil_scoped_release>());
+
     m.def("isnan", [](const tenzor::Tensor& t) { return tenzor::isnan(t); },
          "Element-wise NaN test", py::call_guard<py::gil_scoped_release>());
     m.def("isinf", [](const tenzor::Tensor& t) { return tenzor::isinf(t); },

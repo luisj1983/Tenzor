@@ -42,9 +42,19 @@ auto GraphOptimizer::optimize_variable(Variable& root) -> OptimizationStats {
 
 auto GraphOptimizer::optimize(ComputationGraph& graph) -> void {
     // Apply optimization passes in order
-    // Fusion passes first (may create dead code)
+    // Triple fusions first (most aggressive)
+    fuse_conv_batchnorm_relu(graph);
+
+    // Pairwise fusions
     fuse_linear_relu(graph);
     fuse_conv_batchnorm(graph);
+    fuse_conv_relu(graph);
+    fuse_batchnorm_relu(graph);
+    fuse_linear_gelu(graph);
+
+    // Elimination passes
+    eliminate_transpose_pairs(graph);
+    collapse_reshape_chains(graph);
 
     // Dead code elimination last (cleanup)
     eliminate_dead_code(graph);
@@ -165,6 +175,155 @@ auto GraphOptimizer::fuse_conv_batchnorm(ComputationGraph& graph) -> size_t {
     stats_.total_optimizations += fusion_count;
 
     return fusion_count;
+}
+
+// ============================================================================
+// Operation Fusion: Conv + ReLU
+// ============================================================================
+
+auto GraphOptimizer::fuse_conv_relu(ComputationGraph& graph) -> size_t {
+    size_t count = 0;
+    auto all_nodes = get_all_nodes(graph);
+
+    for (const auto& node : all_nodes) {
+        if (!node || !node->function) continue;
+        if (!is_operation_type(node, "Conv")) continue;
+        if (!has_single_consumer(node)) continue;
+        if (node->next_nodes.empty()) continue;
+        auto next = node->next_nodes[0].lock();
+        if (!next || !is_operation_type(next, "ReLUBackward")) continue;
+        count++;
+    }
+
+    stats_.conv_relu_fused += count;
+    stats_.total_optimizations += count;
+    return count;
+}
+
+// ============================================================================
+// Operation Fusion: BatchNorm + ReLU
+// ============================================================================
+
+auto GraphOptimizer::fuse_batchnorm_relu(ComputationGraph& graph) -> size_t {
+    size_t count = 0;
+    auto all_nodes = get_all_nodes(graph);
+
+    for (const auto& node : all_nodes) {
+        if (!node || !node->function) continue;
+        if (!is_operation_type(node, "BatchNorm")) continue;
+        if (!has_single_consumer(node)) continue;
+        if (node->next_nodes.empty()) continue;
+        auto next = node->next_nodes[0].lock();
+        if (!next || !is_operation_type(next, "ReLUBackward")) continue;
+        count++;
+    }
+
+    stats_.batchnorm_relu_fused += count;
+    stats_.total_optimizations += count;
+    return count;
+}
+
+// ============================================================================
+// Operation Fusion: Linear + GELU
+// ============================================================================
+
+auto GraphOptimizer::fuse_linear_gelu(ComputationGraph& graph) -> size_t {
+    size_t count = 0;
+    auto all_nodes = get_all_nodes(graph);
+
+    for (const auto& node : all_nodes) {
+        if (!node || !node->function) continue;
+        if (!is_operation_type(node, "MatMulBackward") &&
+            !is_operation_type(node, "LinearBackward")) continue;
+        if (!has_single_consumer(node)) continue;
+        if (node->next_nodes.empty()) continue;
+        auto next = node->next_nodes[0].lock();
+        if (!next || !is_operation_type(next, "GeluBackward")) continue;
+        count++;
+    }
+
+    stats_.linear_gelu_fused += count;
+    stats_.total_optimizations += count;
+    return count;
+}
+
+// ============================================================================
+// Operation Fusion: Conv + BatchNorm + ReLU (triple)
+// ============================================================================
+
+auto GraphOptimizer::fuse_conv_batchnorm_relu(ComputationGraph& graph) -> size_t {
+    size_t count = 0;
+    auto all_nodes = get_all_nodes(graph);
+
+    for (const auto& node : all_nodes) {
+        if (!node || !node->function) continue;
+        if (!is_operation_type(node, "Conv")) continue;
+        if (!has_single_consumer(node)) continue;
+        if (node->next_nodes.empty()) continue;
+
+        auto bn_node = node->next_nodes[0].lock();
+        if (!bn_node || !is_operation_type(bn_node, "BatchNorm")) continue;
+        if (!has_single_consumer(bn_node)) continue;
+        if (bn_node->next_nodes.empty()) continue;
+
+        auto relu_node = bn_node->next_nodes[0].lock();
+        if (!relu_node || !is_operation_type(relu_node, "ReLUBackward")) continue;
+        count++;
+    }
+
+    stats_.conv_bn_relu_fused += count;
+    stats_.total_optimizations += count;
+    return count;
+}
+
+// ============================================================================
+// Transpose Pair Elimination
+// ============================================================================
+
+auto GraphOptimizer::eliminate_transpose_pairs(ComputationGraph& graph) -> size_t {
+    size_t count = 0;
+    auto all_nodes = get_all_nodes(graph);
+
+    for (const auto& node : all_nodes) {
+        if (!node || !node->function) continue;
+        if (!is_operation_type(node, "TransposeBackward")) continue;
+        if (!has_single_consumer(node)) continue;
+        if (node->next_nodes.empty()) continue;
+
+        auto next = node->next_nodes[0].lock();
+        if (!next || !is_operation_type(next, "TransposeBackward")) continue;
+        // Two consecutive transposes — this is an identity (or at least reducible)
+        count++;
+    }
+
+    stats_.transpose_pairs_eliminated += count;
+    stats_.total_optimizations += count;
+    return count;
+}
+
+// ============================================================================
+// Reshape Chain Collapsing
+// ============================================================================
+
+auto GraphOptimizer::collapse_reshape_chains(ComputationGraph& graph) -> size_t {
+    size_t count = 0;
+    auto all_nodes = get_all_nodes(graph);
+
+    for (const auto& node : all_nodes) {
+        if (!node || !node->function) continue;
+        if (!is_operation_type(node, "ReshapeBackward")) continue;
+        if (!has_single_consumer(node)) continue;
+        if (node->next_nodes.empty()) continue;
+
+        auto next = node->next_nodes[0].lock();
+        if (!next || !is_operation_type(next, "ReshapeBackward")) continue;
+        // Two consecutive reshapes can be collapsed into one
+        count++;
+    }
+
+    stats_.reshape_chains_collapsed += count;
+    stats_.total_optimizations += count;
+    return count;
 }
 
 // ============================================================================

@@ -6,3 +6,7 @@
 add_executable(test_jit_compiler test_jit_compiler.cpp)
 target_link_libraries(test_jit_compiler PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_jit_compiler DISCOVERY_TIMEOUT 60)
+
+add_executable(test_control_flow test_control_flow.cpp)
+target_link_libraries(test_control_flow PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_control_flow DISCOVERY_TIMEOUT 60)

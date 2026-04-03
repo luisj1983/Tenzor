@@ -15,6 +15,7 @@
 #include <type_traits>
 #include <limits>
 #include <complex>
+#include <functional>
 
 // SIMD intrinsics
 #if defined(__AVX512F__)
@@ -5960,6 +5961,417 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p) -> Tensor {
     }
 
     return result;
+}
+
+// =========================================================================
+// Special Math Functions
+// =========================================================================
+
+auto gamma_kernel(const Tensor& input) -> Tensor {
+    return unary_math_kernel(input,
+        [](float x) { return std::tgamma(x); },
+        [](double x) { return std::tgamma(x); }, "gamma");
+}
+
+auto lgamma_kernel(const Tensor& input) -> Tensor {
+    return unary_math_kernel(input,
+        [](float x) { return std::lgamma(x); },
+        [](double x) { return std::lgamma(x); }, "lgamma");
+}
+
+auto digamma_kernel(const Tensor& input) -> Tensor {
+    // Digamma via recurrence + asymptotic expansion
+    auto digamma_fn = [](double x) -> double {
+        double result = 0.0;
+        if (x < 0.5) {
+            // Reflection: ψ(x) = ψ(1-x) - π*cot(πx)
+            double y = 1.0 - x;
+            double r = 0.0;
+            while (y < 7.0) {
+                r -= 1.0 / y;
+                y += 1.0;
+            }
+            double y2 = 1.0 / (y * y);
+            r += std::log(y) - 0.5 / y
+                - y2 * (1.0/12.0 - y2 * (1.0/120.0 - y2 * (1.0/252.0
+                - y2 * (1.0/240.0 - y2 * (1.0/132.0)))));
+            return r - M_PI / std::tan(M_PI * x);
+        }
+        while (x < 7.0) {
+            result -= 1.0 / x;
+            x += 1.0;
+        }
+        double x2 = 1.0 / (x * x);
+        result += std::log(x) - 0.5 / x
+                - x2 * (1.0/12.0 - x2 * (1.0/120.0 - x2 * (1.0/252.0
+                - x2 * (1.0/240.0 - x2 * (1.0/132.0)))));
+        return result;
+    };
+
+    return unary_math_kernel(input,
+        [&digamma_fn](float x) { return static_cast<float>(digamma_fn(static_cast<double>(x))); },
+        digamma_fn, "digamma");
+}
+
+auto polygamma_kernel(const Tensor& input, int64_t n) -> Tensor {
+    // Polygamma ψ^(n)(x) via asymptotic expansion
+    // For n=0, this is digamma (handled separately for efficiency).
+    // For n≥1: ψ^(n)(x) = (-1)^(n+1) * n! * Σ_{k=0}^∞ 1/(x+k)^(n+1)
+    // We use recurrence to shift to large x, then asymptotic series.
+    if (n < 0) {
+        throw std::runtime_error("polygamma: order n must be non-negative");
+    }
+
+    auto polygamma_fn = [n](double x) -> double {
+        if (n == 0) {
+            // Digamma
+            double result = 0.0;
+            if (x < 0.5) {
+                double y = 1.0 - x;
+                double r = 0.0;
+                while (y < 7.0) { r -= 1.0 / y; y += 1.0; }
+                double y2 = 1.0 / (y * y);
+                r += std::log(y) - 0.5 / y
+                    - y2 * (1.0/12.0 - y2 * (1.0/120.0 - y2 * (1.0/252.0
+                    - y2 * (1.0/240.0 - y2 * (1.0/132.0)))));
+                return r - M_PI / std::tan(M_PI * x);
+            }
+            while (x < 7.0) { result -= 1.0 / x; x += 1.0; }
+            double x2 = 1.0 / (x * x);
+            result += std::log(x) - 0.5 / x
+                    - x2 * (1.0/12.0 - x2 * (1.0/120.0 - x2 * (1.0/252.0
+                    - x2 * (1.0/240.0 - x2 * (1.0/132.0)))));
+            return result;
+        }
+        // For n >= 1: direct summation ψ^(n)(x) = (-1)^(n+1) * n! * Σ 1/(x+k)^(n+1)
+        double fact_n = 1.0;
+        for (int64_t k = 1; k <= n; ++k) fact_n *= k;
+        double sign = ((n + 1) % 2 == 0) ? 1.0 : -1.0;
+        double sum = 0.0;
+        // Sum enough terms for convergence
+        int max_terms = 100;
+        for (int k = 0; k < max_terms; ++k) {
+            double term = 1.0 / std::pow(x + k, n + 1);
+            sum += term;
+            if (term < 1e-15 * std::abs(sum)) break;
+        }
+        return sign * fact_n * sum;
+    };
+
+    return unary_math_kernel(input,
+        [&polygamma_fn](float x) { return static_cast<float>(polygamma_fn(static_cast<double>(x))); },
+        polygamma_fn, "polygamma");
+}
+
+auto beta_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    // B(a,b) = Γ(a)*Γ(b) / Γ(a+b) = exp(lgamma(a) + lgamma(b) - lgamma(a+b))
+    return binary_math_kernel(a, b,
+        [](float x, float y) { return std::exp(std::lgamma(x) + std::lgamma(y) - std::lgamma(x + y)); },
+        [](double x, double y) { return std::exp(std::lgamma(x) + std::lgamma(y) - std::lgamma(x + y)); },
+        "beta");
+}
+
+auto betainc_kernel(std::span<const Tensor> inputs) -> Tensor {
+    // Regularized incomplete beta function I_x(a,b) using continued fraction (Lentz's method)
+    if (inputs.size() != 3) {
+        throw std::runtime_error("betainc requires 3 inputs (a, b, x)");
+    }
+    const auto& a_t = inputs[0];
+    const auto& b_t = inputs[1];
+    const auto& x_t = inputs[2];
+
+    std::function<double(double, double, double)> betainc_impl;
+    betainc_impl = [&betainc_impl](double a, double b, double x) -> double {
+        if (x < 0.0 || x > 1.0) return std::numeric_limits<double>::quiet_NaN();
+        if (x == 0.0) return 0.0;
+        if (x == 1.0) return 1.0;
+
+        // Use symmetry: I_x(a,b) = 1 - I_{1-x}(b,a) when x > (a+1)/(a+b+2)
+        if (x > (a + 1.0) / (a + b + 2.0)) {
+            return 1.0 - betainc_impl(b, a, 1.0 - x);
+        }
+
+        // Continued fraction (Lentz's algorithm)
+        double lbeta = std::lgamma(a) + std::lgamma(b) - std::lgamma(a + b);
+        double front = std::exp(std::log(x) * a + std::log(1.0 - x) * b - lbeta) / a;
+
+        double f = 1.0, c = 1.0, d = 1.0 - (a + b) * x / (a + 1.0);
+        if (std::abs(d) < 1e-30) d = 1e-30;
+        d = 1.0 / d;
+        f = d;
+
+        for (int m = 1; m <= 200; ++m) {
+            // Even step
+            double num = m * (b - m) * x / ((a + 2.0*m - 1.0) * (a + 2.0*m));
+            d = 1.0 + num * d; if (std::abs(d) < 1e-30) d = 1e-30; d = 1.0 / d;
+            c = 1.0 + num / c; if (std::abs(c) < 1e-30) c = 1e-30;
+            f *= d * c;
+
+            // Odd step
+            num = -((a + m) * (a + b + m) * x) / ((a + 2.0*m) * (a + 2.0*m + 1.0));
+            d = 1.0 + num * d; if (std::abs(d) < 1e-30) d = 1e-30; d = 1.0 / d;
+            c = 1.0 + num / c; if (std::abs(c) < 1e-30) c = 1e-30;
+            double delta = d * c;
+            f *= delta;
+            if (std::abs(delta - 1.0) < 1e-12) break;
+        }
+        return front * f;
+    };
+
+    // Element-wise ternary operation
+    auto out_shape = a_t.shape();
+    Tensor result(std::vector<int64_t>(out_shape.begin(), out_shape.end()), a_t.dtype(), a_t.device());
+    size_t n = static_cast<size_t>(a_t.numel());
+
+    if (a_t.dtype() == DType::Float32) {
+        const float* ad = a_t.data<float>();
+        const float* bd = b_t.data<float>();
+        const float* xd = x_t.data<float>();
+        float* od = result.data<float>();
+        for (size_t i = 0; i < n; ++i) {
+            od[i] = static_cast<float>(betainc_impl(ad[i], bd[i], xd[i]));
+        }
+    } else if (a_t.dtype() == DType::Float64) {
+        const double* ad = a_t.data<double>();
+        const double* bd = b_t.data<double>();
+        const double* xd = x_t.data<double>();
+        double* od = result.data<double>();
+        for (size_t i = 0; i < n; ++i) {
+            od[i] = betainc_impl(ad[i], bd[i], xd[i]);
+        }
+    } else {
+        throw std::runtime_error("betainc: only Float32 and Float64 supported");
+    }
+    return result;
+}
+
+auto bessel_j0_kernel(const Tensor& input) -> Tensor {
+#if __cplusplus >= 201703L && defined(__cpp_lib_math_special_functions)
+    return unary_math_kernel(input,
+        [](float x) { return static_cast<float>(std::cyl_bessel_j(0, static_cast<double>(x))); },
+        [](double x) { return std::cyl_bessel_j(0, x); }, "bessel_j0");
+#else
+    // Fallback: polynomial approximation (Abramowitz & Stegun)
+    auto j0_approx = [](double x) -> double {
+        x = std::abs(x);
+        if (x <= 3.0) {
+            double y = x * x / 9.0;
+            return 1.0 - y * (2.2499997 - y * (1.2656208 - y * (0.3163866
+                   - y * (0.0444479 - y * (0.0039444 - y * 0.0002100)))));
+        }
+        double ax = 3.0 / x;
+        double p = 0.79788456 - ax * (0.00000077 + ax * (0.00552740 + ax * (0.00009512
+                 - ax * (0.00137237 - ax * (0.00072805 - ax * 0.00014476)))));
+        double q = -0.04166397 - ax * (0.00003954 - ax * (0.00262573 - ax * (0.00054125
+                 + ax * (0.00029333 - ax * (0.00013558 + ax * 0.00000000)))));
+        double z = x - 0.785398164;
+        return std::sqrt(2.0 / (M_PI * x)) * (p * std::cos(z) - q * std::sin(z));
+    };
+    return unary_math_kernel(input,
+        [&j0_approx](float x) { return static_cast<float>(j0_approx(x)); },
+        j0_approx, "bessel_j0");
+#endif
+}
+
+auto bessel_j1_kernel(const Tensor& input) -> Tensor {
+#if __cplusplus >= 201703L && defined(__cpp_lib_math_special_functions)
+    return unary_math_kernel(input,
+        [](float x) { return static_cast<float>(std::cyl_bessel_j(1, static_cast<double>(x))); },
+        [](double x) { return std::cyl_bessel_j(1, x); }, "bessel_j1");
+#else
+    auto j1_approx = [](double x) -> double {
+        double sign = (x < 0) ? -1.0 : 1.0;
+        x = std::abs(x);
+        if (x <= 3.0) {
+            double y = x * x / 9.0;
+            return sign * x * (0.5 - y * (0.56249985 - y * (0.21093573 - y * (0.03954289
+                   - y * (0.00443319 - y * (0.00031761 - y * 0.00001109))))));
+        }
+        double ax = 3.0 / x;
+        double p = 0.79788456 + ax * (0.00000156 + ax * (0.01659667 + ax * (0.00017105
+                 - ax * (0.00249511 + ax * (0.00113653 - ax * 0.00020033)))));
+        double q = 0.12499612 + ax * (0.00005650 - ax * (0.00637879 + ax * (0.00074348
+                 + ax * (0.00079824 - ax * (0.00029166 + ax * 0.00000000)))));
+        double z = x - 2.356194491;
+        return sign * std::sqrt(2.0 / (M_PI * x)) * (p * std::cos(z) - q * std::sin(z));
+    };
+    return unary_math_kernel(input,
+        [&j1_approx](float x) { return static_cast<float>(j1_approx(x)); },
+        j1_approx, "bessel_j1");
+#endif
+}
+
+auto bessel_y0_kernel(const Tensor& input) -> Tensor {
+#if __cplusplus >= 201703L && defined(__cpp_lib_math_special_functions)
+    return unary_math_kernel(input,
+        [](float x) { return static_cast<float>(std::cyl_neumann(0, static_cast<double>(x))); },
+        [](double x) { return std::cyl_neumann(0, x); }, "bessel_y0");
+#else
+    auto y0_approx = [](double x) -> double {
+        if (x <= 0.0) return -std::numeric_limits<double>::infinity();
+        if (x <= 3.0) {
+            double y = x * x / 9.0;
+            return (2.0 / M_PI) * std::log(x / 2.0) * std::cyl_bessel_j(0, x)
+                   + 0.36746691 + y * (0.60559366 - y * (0.74350384 - y * (0.25300117
+                   - y * (0.04261214 - y * (0.00427916 - y * 0.00024846)))));
+        }
+        double ax = 3.0 / x;
+        double p = 0.79788456 - ax * (0.00000077 + ax * (0.00552740 + ax * (0.00009512
+                 - ax * (0.00137237 - ax * (0.00072805 - ax * 0.00014476)))));
+        double q = -0.04166397 - ax * (0.00003954 - ax * (0.00262573 - ax * (0.00054125
+                 + ax * (0.00029333 - ax * (0.00013558)))));
+        double z = x - 0.785398164;
+        return std::sqrt(2.0 / (M_PI * x)) * (p * std::sin(z) + q * std::cos(z));
+    };
+    return unary_math_kernel(input,
+        [&y0_approx](float x) { return static_cast<float>(y0_approx(x)); },
+        y0_approx, "bessel_y0");
+#endif
+}
+
+auto bessel_y1_kernel(const Tensor& input) -> Tensor {
+#if __cplusplus >= 201703L && defined(__cpp_lib_math_special_functions)
+    return unary_math_kernel(input,
+        [](float x) { return static_cast<float>(std::cyl_neumann(1, static_cast<double>(x))); },
+        [](double x) { return std::cyl_neumann(1, x); }, "bessel_y1");
+#else
+    auto y1_approx = [](double x) -> double {
+        if (x <= 0.0) return -std::numeric_limits<double>::infinity();
+        if (x <= 3.0) {
+            double y = x * x / 9.0;
+            return (2.0 / M_PI) * (std::log(x / 2.0) * std::cyl_bessel_j(1, x) - 1.0 / x)
+                   + x * (0.02635537 + y * (-0.04985710 + y * (-0.00121547 + y * (0.00127120
+                   - y * (0.00023895 + y * (0.00002535))))));
+        }
+        double ax = 3.0 / x;
+        double p = 0.79788456 + ax * (0.00000156 + ax * (0.01659667 + ax * (0.00017105
+                 - ax * (0.00249511 + ax * (0.00113653 - ax * 0.00020033)))));
+        double q = 0.12499612 + ax * (0.00005650 - ax * (0.00637879 + ax * (0.00074348
+                 + ax * (0.00079824 - ax * (0.00029166)))));
+        double z = x - 2.356194491;
+        return std::sqrt(2.0 / (M_PI * x)) * (p * std::sin(z) + q * std::cos(z));
+    };
+    return unary_math_kernel(input,
+        [&y1_approx](float x) { return static_cast<float>(y1_approx(x)); },
+        y1_approx, "bessel_y1");
+#endif
+}
+
+auto bessel_i0_kernel(const Tensor& input) -> Tensor {
+    // Modified Bessel function I_0(x), polynomial approximation (Abramowitz & Stegun 9.8.1/9.8.2)
+    auto i0_approx = [](double x) -> double {
+        double ax = std::abs(x);
+        if (ax < 3.75) {
+            double t = x / 3.75;
+            t = t * t;
+            return 1.0 + t * (3.5156229 + t * (3.0899424 + t * (1.2067492
+                   + t * (0.2659732 + t * (0.0360768 + t * 0.0045813)))));
+        }
+        double t = 3.75 / ax;
+        return (std::exp(ax) / std::sqrt(ax)) * (0.39894228 + t * (0.01328592
+               + t * (0.00225319 - t * (0.00157565 - t * (0.00916281
+               - t * (0.02057706 - t * (0.02635537 - t * (0.01647633
+               - t * 0.00392377))))))));
+    };
+    return unary_math_kernel(input,
+        [&i0_approx](float x) { return static_cast<float>(i0_approx(x)); },
+        i0_approx, "bessel_i0");
+}
+
+auto bessel_i1_kernel(const Tensor& input) -> Tensor {
+    // Modified Bessel function I_1(x), polynomial approximation (Abramowitz & Stegun 9.8.3/9.8.4)
+    auto i1_approx = [](double x) -> double {
+        double ax = std::abs(x);
+        double result;
+        if (ax < 3.75) {
+            double t = x / 3.75;
+            t = t * t;
+            result = ax * (0.5 + t * (0.87890594 + t * (0.51498869 + t * (0.15084934
+                     + t * (0.02658733 + t * (0.00301532 + t * 0.00032411))))));
+        } else {
+            double t = 3.75 / ax;
+            result = (std::exp(ax) / std::sqrt(ax)) * (0.39894228 - t * (0.03988024
+                     - t * (0.00362018 + t * (0.00163801 - t * (0.01031555
+                     - t * (0.02282967 - t * (0.02895312 - t * (0.01787654
+                     - t * 0.00420059))))))));
+        }
+        return (x < 0.0) ? -result : result;
+    };
+    return unary_math_kernel(input,
+        [&i1_approx](float x) { return static_cast<float>(i1_approx(x)); },
+        i1_approx, "bessel_i1");
+}
+
+auto erfinv_kernel(const Tensor& input) -> Tensor {
+    // Inverse error function using rational approximation (Winitzki 2008)
+    auto erfinv_impl = [](double x) -> double {
+        if (x <= -1.0) return -std::numeric_limits<double>::infinity();
+        if (x >= 1.0) return std::numeric_limits<double>::infinity();
+        if (x == 0.0) return 0.0;
+
+        double a = 0.147;  // Winitzki constant
+        double ln1mx2 = std::log(1.0 - x * x);
+        double t1 = 2.0 / (M_PI * a) + 0.5 * ln1mx2;
+        double t2 = ln1mx2 / a;
+        double sign = (x > 0.0) ? 1.0 : -1.0;
+        double result = sign * std::sqrt(std::sqrt(t1 * t1 - t2) - t1);
+
+        // Newton refinement (2 iterations for double precision)
+        for (int i = 0; i < 2; ++i) {
+            double err = std::erf(result) - x;
+            double deriv = 2.0 / std::sqrt(M_PI) * std::exp(-result * result);
+            result -= err / deriv;
+        }
+        return result;
+    };
+    return unary_math_kernel(input,
+        [&erfinv_impl](float x) { return static_cast<float>(erfinv_impl(x)); },
+        erfinv_impl, "erfinv");
+}
+
+auto sinc_kernel(const Tensor& input) -> Tensor {
+    // Normalized sinc: sin(πx)/(πx), with sinc(0) = 1
+    return unary_math_kernel(input,
+        [](float x) {
+            if (x == 0.0f) return 1.0f;
+            float px = static_cast<float>(M_PI) * x;
+            return std::sin(px) / px;
+        },
+        [](double x) {
+            if (x == 0.0) return 1.0;
+            double px = M_PI * x;
+            return std::sin(px) / px;
+        }, "sinc");
+}
+
+auto zeta_kernel(const Tensor& x, const Tensor& q) -> Tensor {
+    // Hurwitz zeta: ζ(s,q) = Σ_{n=0}^∞ 1/(q+n)^s
+    // Uses Euler-Maclaurin summation for convergence
+    return binary_math_kernel(x, q,
+        [](float s, float a) -> float {
+            double sd = s, ad = a;
+            double result = 0.0;
+            // Direct summation for first N terms
+            for (int n = 0; n < 12; ++n) {
+                result += std::pow(ad + n, -sd);
+            }
+            // Integral remainder: (a+N)^(1-s)/(s-1)
+            double aN = ad + 12.0;
+            if (sd != 1.0) result += std::pow(aN, 1.0 - sd) / (sd - 1.0);
+            // Euler-Maclaurin correction
+            result += 0.5 * std::pow(aN, -sd);
+            return static_cast<float>(result);
+        },
+        [](double s, double a) -> double {
+            double result = 0.0;
+            for (int n = 0; n < 12; ++n) {
+                result += std::pow(a + n, -s);
+            }
+            double aN = a + 12.0;
+            if (s != 1.0) result += std::pow(aN, 1.0 - s) / (s - 1.0);
+            result += 0.5 * std::pow(aN, -s);
+            return result;
+        }, "zeta");
 }
 
 } // namespace cpu

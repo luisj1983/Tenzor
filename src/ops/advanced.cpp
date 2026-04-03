@@ -19,6 +19,7 @@
 #include <unordered_map>
 #include <cstring>
 #include <functional>
+#include <functional>
 #include <type_traits>
 
 // Hash specializations for Float16/BFloat16 so they work with std::unordered_map
@@ -782,6 +783,220 @@ auto bucketize(const Tensor& input, const Tensor& boundaries, bool right) -> Ten
     NewOpAttributes attrs;
     attrs.set(AttrKey::Right, right);
     return dispatch<OpId::Bucketize>(inputs, attrs)[0];
+}
+
+// =========================================================================
+// Matrix Construction Operations
+// =========================================================================
+
+auto kron(const Tensor& a, const Tensor& b) -> Tensor {
+    if (a.ndim() != 2 || b.ndim() != 2) {
+        throw std::runtime_error("kron: both tensors must be 2-D");
+    }
+    int64_t m = a.shape()[0], n = a.shape()[1];
+    int64_t p = b.shape()[0], q = b.shape()[1];
+
+    // kron(A, B) = A ⊗ B
+    // Reshape A to (m, 1, n, 1), B to (1, p, 1, q), multiply, reshape to (m*p, n*q)
+    auto a4 = a.reshape({m, 1, n, 1});
+    auto b4 = b.reshape({1, p, 1, q});
+    auto product = mul(a4, b4);  // Broadcasting: (m, p, n, q)
+    // Need (m, p, n, q) -> (m, n, p, q) -> transpose to interleave correctly
+    // Actually kron layout: row (i*p+r), col (j*q+s) = a[i,j]*b[r,s]
+    // product[i,r,j,s] = a[i,j]*b[r,s] — already correct for (m,p,n,q)
+    // Reshape directly: group (m,p) -> m*p rows, (n,q) -> n*q cols
+    // But (m,p,n,q) reshaped to (m*p, n*q) interleaves wrong.
+    // Correct: permute to (m,p,n,q) -> already is. reshape to (m*p, n*q) IS correct
+    // because C-order layout groups last dims first:
+    // [i][r][j][s] -> linear index i*p*n*q + r*n*q + j*q + s
+    // Result row = i*p + r, col = j*q + s -> row*n*q + col = (i*p+r)*n*q + j*q + s
+    // = i*p*n*q + r*n*q + j*q + s  ✓  Same!
+    return product.contiguous().reshape({m * p, n * q});
+}
+
+auto block_diag(std::span<const Tensor> tensors) -> Tensor {
+    if (tensors.empty()) {
+        return zeros({0, 0}, DType::Float32, Device::cpu());
+    }
+
+    // Compute total dimensions
+    int64_t total_cols = 0;
+    std::vector<int64_t> col_sizes;
+    for (const auto& t : tensors) {
+        if (t.ndim() != 2) {
+            throw std::runtime_error("block_diag: all tensors must be 2-D");
+        }
+        col_sizes.push_back(t.shape()[1]);
+        total_cols += t.shape()[1];
+    }
+
+    // Build row-by-row: for each tensor, create [zeros_left | tensor_rows | zeros_right]
+    std::vector<Tensor> row_blocks;
+    int64_t col_offset = 0;
+    for (size_t i = 0; i < tensors.size(); ++i) {
+        const auto& t = tensors[i];
+        int64_t r = t.shape()[0], c = t.shape()[1];
+        int64_t left = col_offset;
+        int64_t right = total_cols - col_offset - c;
+
+        std::vector<Tensor> parts;
+        if (left > 0) parts.push_back(zeros({r, left}, t.dtype(), t.device()));
+        parts.push_back(t);
+        if (right > 0) parts.push_back(zeros({r, right}, t.dtype(), t.device()));
+
+        row_blocks.push_back(cat(parts, 1));
+        col_offset += c;
+    }
+    return cat(row_blocks, 0);
+}
+
+auto vander(const Tensor& x, int64_t N, bool increasing) -> Tensor {
+    if (x.ndim() != 1) {
+        throw std::runtime_error("vander: input must be 1-D");
+    }
+    int64_t n = x.shape()[0];
+    if (N < 0) N = n;
+    if (N == 0) return zeros({n, 0}, x.dtype(), x.device());
+
+    // Build columns: col k = x^k (increasing) or x^(N-1-k) (decreasing)
+    std::vector<Tensor> cols;
+    cols.reserve(N);
+    for (int64_t k = 0; k < N; ++k) {
+        int64_t exp = increasing ? k : (N - 1 - k);
+        if (exp == 0) {
+            cols.push_back(ones({n}, x.dtype(), x.device()));
+        } else if (exp == 1) {
+            cols.push_back(x.clone());
+        } else {
+            cols.push_back(pow(x, static_cast<double>(exp)));
+        }
+    }
+
+    // Stack columns into (n, N)
+    return stack(cols, 1);
+}
+
+auto cartesian_prod(std::span<const Tensor> tensors) -> Tensor {
+    if (tensors.empty()) {
+        return zeros({0, 0}, DType::Float32, Device::cpu());
+    }
+    if (tensors.size() == 1) {
+        return tensors[0].reshape({tensors[0].shape()[0], 1});
+    }
+
+    // Compute total number of rows
+    int64_t total = 1;
+    for (const auto& t : tensors) {
+        if (t.ndim() != 1) {
+            throw std::runtime_error("cartesian_prod: all tensors must be 1-D");
+        }
+        total *= t.shape()[0];
+    }
+
+    // Build each column using repeat+tile pattern, then stack
+    std::vector<Tensor> columns;
+    int64_t repeat_inner = 1;
+    int64_t num_tensors = static_cast<int64_t>(tensors.size());
+
+    // Process from last to first
+    for (int64_t i = num_tensors - 1; i >= 0; --i) {
+        int64_t n = tensors[i].shape()[0];
+        int64_t repeat_outer = total / (n * repeat_inner);
+
+        // Each element repeated repeat_inner times, then the block repeated repeat_outer times
+        auto expanded = tensors[i].unsqueeze(1).expand({n, repeat_inner}).contiguous().reshape({n * repeat_inner});
+        auto col = repeat(expanded, {repeat_outer});
+        columns.push_back(col);
+        repeat_inner *= n;
+    }
+
+    // Reverse to get correct order (we built from last to first)
+    std::reverse(columns.begin(), columns.end());
+
+    // Stack as columns -> (total, num_tensors)
+    return stack(columns, 1);
+}
+
+auto combinations(const Tensor& input, int64_t r, bool with_replacement) -> Tensor {
+    if (input.ndim() != 1) {
+        throw std::runtime_error("combinations: input must be 1-D");
+    }
+    int64_t n = input.shape()[0];
+    if (r <= 0 || n == 0) {
+        return zeros({0, r}, input.dtype(), input.device());
+    }
+
+    // Generate combinations on CPU
+    auto input_cpu = input.to(Device::cpu()).contiguous();
+
+    // Collect all combinations
+    std::vector<std::vector<int64_t>> combos;
+    std::vector<int64_t> current;
+
+    std::function<void(int64_t)> generate;
+    generate = [&](int64_t start) {
+        if (static_cast<int64_t>(current.size()) == r) {
+            combos.push_back(current);
+            return;
+        }
+        int64_t end = with_replacement ? n : n;
+        for (int64_t i = start; i < end; ++i) {
+            current.push_back(i);
+            generate(with_replacement ? i : i + 1);
+            current.pop_back();
+        }
+    };
+    generate(0);
+
+    if (combos.empty()) {
+        return zeros({0, r}, input.dtype(), input.device());
+    }
+
+    int64_t num_combos = static_cast<int64_t>(combos.size());
+    auto result = zeros({num_combos, r}, input.dtype(), input.device());
+    auto result_cpu = result.to(Device::cpu());
+
+    // Fill using index_select for each combination
+    if (input.dtype() == DType::Float32) {
+        const float* inp = input_cpu.data<float>();
+        float* out = result_cpu.data<float>();
+        for (int64_t i = 0; i < num_combos; ++i) {
+            for (int64_t j = 0; j < r; ++j) {
+                out[i * r + j] = inp[combos[i][j]];
+            }
+        }
+    } else if (input.dtype() == DType::Float64) {
+        const double* inp = input_cpu.data<double>();
+        double* out = result_cpu.data<double>();
+        for (int64_t i = 0; i < num_combos; ++i) {
+            for (int64_t j = 0; j < r; ++j) {
+                out[i * r + j] = inp[combos[i][j]];
+            }
+        }
+    } else if (input.dtype() == DType::Int64) {
+        const int64_t* inp = input_cpu.data<int64_t>();
+        int64_t* out = result_cpu.data<int64_t>();
+        for (int64_t i = 0; i < num_combos; ++i) {
+            for (int64_t j = 0; j < r; ++j) {
+                out[i * r + j] = inp[combos[i][j]];
+            }
+        }
+    } else if (input.dtype() == DType::Int32) {
+        const int32_t* inp = input_cpu.data<int32_t>();
+        int32_t* out = result_cpu.data<int32_t>();
+        for (int64_t i = 0; i < num_combos; ++i) {
+            for (int64_t j = 0; j < r; ++j) {
+                out[i * r + j] = inp[combos[i][j]];
+            }
+        }
+    } else {
+        throw std::runtime_error("combinations: unsupported dtype");
+    }
+
+    if (input.device().type != Device::Type::CPU) {
+        return result_cpu.to(input.device());
+    }
+    return result_cpu;
 }
 
 } // namespace tenzor

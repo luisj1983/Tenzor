@@ -49,15 +49,20 @@ struct OpPattern {
 struct OptimizationStats {
     size_t linear_relu_fused{0};      ///< Number of linear+relu fusions
     size_t conv_batchnorm_fused{0};   ///< Number of conv+batchnorm fusions
+    size_t conv_relu_fused{0};        ///< Number of conv+relu fusions
+    size_t batchnorm_relu_fused{0};   ///< Number of batchnorm+relu fusions
+    size_t linear_gelu_fused{0};      ///< Number of linear+gelu fusions
+    size_t conv_bn_relu_fused{0};     ///< Number of conv+bn+relu fusions
+    size_t transpose_pairs_eliminated{0}; ///< Number of transpose pairs eliminated
+    size_t reshape_chains_collapsed{0};   ///< Number of reshape chains collapsed
     size_t dead_nodes_removed{0};     ///< Number of dead code nodes removed
     size_t total_optimizations{0};    ///< Total optimizations applied
 
-    /**
-     * @brief Get total number of optimizations.
-     * @return Sum of all optimization counts
-     */
     auto total() const -> size_t {
-        return linear_relu_fused + conv_batchnorm_fused + dead_nodes_removed;
+        return linear_relu_fused + conv_batchnorm_fused + conv_relu_fused +
+               batchnorm_relu_fused + linear_gelu_fused + conv_bn_relu_fused +
+               transpose_pairs_eliminated + reshape_chains_collapsed +
+               dead_nodes_removed;
     }
 };
 
@@ -209,6 +214,24 @@ public:
      * @note Can enable further optimizations during inference
      */
     auto fuse_conv_batchnorm(ComputationGraph& graph) -> size_t;
+
+    /** @brief Fuse Conv + ReLU into FusedConv2dReLU. */
+    auto fuse_conv_relu(ComputationGraph& graph) -> size_t;
+
+    /** @brief Fuse BatchNorm + ReLU into FusedBatchNormReLU. */
+    auto fuse_batchnorm_relu(ComputationGraph& graph) -> size_t;
+
+    /** @brief Fuse Linear + GELU into a single fused op. */
+    auto fuse_linear_gelu(ComputationGraph& graph) -> size_t;
+
+    /** @brief Fuse Conv + BatchNorm + ReLU into a single fused op. */
+    auto fuse_conv_batchnorm_relu(ComputationGraph& graph) -> size_t;
+
+    /** @brief Eliminate redundant transpose pairs (A,B followed by B,A). */
+    auto eliminate_transpose_pairs(ComputationGraph& graph) -> size_t;
+
+    /** @brief Collapse consecutive reshape operations into one. */
+    auto collapse_reshape_chains(ComputationGraph& graph) -> size_t;
 
     /**
      * @brief Eliminate dead code (unreachable nodes) from the graph.

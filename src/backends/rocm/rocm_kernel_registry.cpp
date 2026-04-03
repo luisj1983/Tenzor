@@ -2754,6 +2754,42 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     // ========================================================================
+    // Special Math Functions (CPU-roundtrip fallback)
+    // ========================================================================
+#define ROCM_UNARY_FALLBACK(OP_ID, FN) \
+    table.register_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes&) { \
+        return std::vector<Tensor>{tenzor::FN(inputs[0].to(Device::cpu())).to(inputs[0].device())}; \
+    })
+#define ROCM_BINARY_FALLBACK(OP_ID, FN) \
+    table.register_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes&) { \
+        return std::vector<Tensor>{tenzor::FN(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu())).to(inputs[0].device())}; \
+    })
+
+    ROCM_UNARY_FALLBACK(Gamma, gamma);
+    ROCM_UNARY_FALLBACK(Lgamma, lgamma);
+    ROCM_UNARY_FALLBACK(Digamma, digamma);
+    table.register_kernel(OpId::Polygamma, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t n = static_cast<int64_t>(attrs.get_float(AttrKey::Order, 0.0));
+        return std::vector<Tensor>{tenzor::polygamma(n, inputs[0].to(Device::cpu())).to(inputs[0].device())};
+    });
+    ROCM_BINARY_FALLBACK(Beta, beta);
+    table.register_kernel(OpId::BetaInc, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{tenzor::betainc(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu()), inputs[2].to(Device::cpu())).to(inputs[0].device())};
+    });
+    ROCM_UNARY_FALLBACK(BesselJ0, bessel_j0);
+    ROCM_UNARY_FALLBACK(BesselJ1, bessel_j1);
+    ROCM_UNARY_FALLBACK(BesselY0, bessel_y0);
+    ROCM_UNARY_FALLBACK(BesselY1, bessel_y1);
+    ROCM_UNARY_FALLBACK(BesselI0, bessel_i0);
+    ROCM_UNARY_FALLBACK(BesselI1, bessel_i1);
+    ROCM_UNARY_FALLBACK(ErfInv, erfinv);
+    ROCM_UNARY_FALLBACK(Sinc, sinc);
+    ROCM_BINARY_FALLBACK(Zeta, zeta);
+
+#undef ROCM_UNARY_FALLBACK
+#undef ROCM_BINARY_FALLBACK
+
+    // ========================================================================
     // Bool Predicate Operations
     // ========================================================================
     table.register_kernel(OpId::IsNan, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -3087,6 +3123,27 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::Erfc, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         return rocm::erfc_kernel(inputs[0], get_hip_stream(attrs));
     });
+
+    // Special Math Functions (CPU-roundtrip fallback for single_output path)
+#define ROCM_SINGLE_UNARY_FALLBACK(OP_ID, FN) \
+    table.register_single_output_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor { \
+        return tenzor::FN(inputs[0].to(Device::cpu())).to(inputs[0].device()); \
+    })
+
+    ROCM_SINGLE_UNARY_FALLBACK(Gamma, gamma);
+    ROCM_SINGLE_UNARY_FALLBACK(Lgamma, lgamma);
+    ROCM_SINGLE_UNARY_FALLBACK(Digamma, digamma);
+    ROCM_SINGLE_UNARY_FALLBACK(BesselJ0, bessel_j0);
+    ROCM_SINGLE_UNARY_FALLBACK(BesselJ1, bessel_j1);
+    ROCM_SINGLE_UNARY_FALLBACK(BesselY0, bessel_y0);
+    ROCM_SINGLE_UNARY_FALLBACK(BesselY1, bessel_y1);
+    ROCM_SINGLE_UNARY_FALLBACK(BesselI0, bessel_i0);
+    ROCM_SINGLE_UNARY_FALLBACK(BesselI1, bessel_i1);
+    ROCM_SINGLE_UNARY_FALLBACK(ErfInv, erfinv);
+    ROCM_SINGLE_UNARY_FALLBACK(Sinc, sinc);
+
+#undef ROCM_SINGLE_UNARY_FALLBACK
+
     table.register_single_output_kernel(OpId::Floor, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         return rocm::floor_kernel(inputs[0], get_hip_stream(attrs));
     });

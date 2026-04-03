@@ -1388,6 +1388,42 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     // ========================================================================
+    // Special Math Functions (CPU-roundtrip fallback)
+    // ========================================================================
+#define VK_UNARY_FALLBACK(OP_ID, FN) \
+    table.register_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes&) { \
+        return std::vector<Tensor>{tenzor::FN(inputs[0].to(Device::cpu())).to(inputs[0].device())}; \
+    })
+#define VK_BINARY_FALLBACK(OP_ID, FN) \
+    table.register_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes&) { \
+        return std::vector<Tensor>{tenzor::FN(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu())).to(inputs[0].device())}; \
+    })
+
+    VK_UNARY_FALLBACK(Gamma, gamma);
+    VK_UNARY_FALLBACK(Lgamma, lgamma);
+    VK_UNARY_FALLBACK(Digamma, digamma);
+    table.register_kernel(OpId::Polygamma, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t n = static_cast<int64_t>(attrs.get_float(AttrKey::Order, 0.0));
+        return std::vector<Tensor>{tenzor::polygamma(n, inputs[0].to(Device::cpu())).to(inputs[0].device())};
+    });
+    VK_BINARY_FALLBACK(Beta, beta);
+    table.register_kernel(OpId::BetaInc, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{tenzor::betainc(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu()), inputs[2].to(Device::cpu())).to(inputs[0].device())};
+    });
+    VK_UNARY_FALLBACK(BesselJ0, bessel_j0);
+    VK_UNARY_FALLBACK(BesselJ1, bessel_j1);
+    VK_UNARY_FALLBACK(BesselY0, bessel_y0);
+    VK_UNARY_FALLBACK(BesselY1, bessel_y1);
+    VK_UNARY_FALLBACK(BesselI0, bessel_i0);
+    VK_UNARY_FALLBACK(BesselI1, bessel_i1);
+    VK_UNARY_FALLBACK(ErfInv, erfinv);
+    VK_UNARY_FALLBACK(Sinc, sinc);
+    VK_BINARY_FALLBACK(Zeta, zeta);
+
+#undef VK_UNARY_FALLBACK
+#undef VK_BINARY_FALLBACK
+
+    // ========================================================================
     // Binary Math Operations
     // ========================================================================
     table.register_kernel(OpId::Atan2, [](std::span<const Tensor> inputs, const OpAttributes&) {

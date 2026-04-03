@@ -20,6 +20,7 @@
 #include <chrono>
 #include <stdexcept>
 #include <numeric>
+#include <iostream>
 
 #if defined(TENZOR_USE_CUDA)
     #include <cuda_runtime.h>
@@ -73,8 +74,9 @@ namespace tenzor::distributed {
 DistributedDataParallel::DistributedDataParallel(
     nn::Module& module,
     ProcessGroup& pg,
-    size_t bucket_size_bytes
-) : module_(module), pg_(pg) {
+    size_t bucket_size_bytes,
+    bool find_unused_parameters
+) : module_(module), pg_(pg), find_unused_parameters_(find_unused_parameters) {
 
     // Build gradient buckets from module parameters
     build_buckets(bucket_size_bytes);
@@ -233,9 +235,41 @@ auto DistributedDataParallel::mark_param_ready(const void* param_ptr) -> void {
 }
 
 auto DistributedDataParallel::synchronize_gradients() -> void {
+    // When find_unused_parameters is enabled, detect and log unused params
+    if (find_unused_parameters_) {
+        std::vector<std::string> unused_names;
+        auto params = module_.parameters();
+        auto named = module_.named_parameters();
+
+        for (size_t i = 0; i < params.size(); ++i) {
+            if (!params[i]->has_grad()) {
+                if (i < named.size()) {
+                    unused_names.push_back(named[i].first);
+                }
+            }
+        }
+
+        if (!unused_names.empty() && !logged_unused_warning_) {
+            logged_unused_warning_ = true;
+            std::string msg = "DDP: find_unused_parameters detected " +
+                              std::to_string(unused_names.size()) +
+                              " parameter(s) without gradients: ";
+            for (size_t i = 0; i < std::min(unused_names.size(), size_t(5)); ++i) {
+                if (i > 0) msg += ", ";
+                msg += unused_names[i];
+            }
+            if (unused_names.size() > 5) {
+                msg += " ... and " + std::to_string(unused_names.size() - 5) + " more";
+            }
+            std::cerr << "[WARNING] " << msg << std::endl;
+        }
+    }
+
     // All-reduce each bucket's gradients.
     // On GPU backends, this launches async all-reduce for each bucket
     // on the communication stream.
+    // Note: all_reduce_bucket already skips params without gradients,
+    // so unused parameters are automatically excluded from communication.
     for (size_t i = 0; i < buckets_.size(); ++i) {
         all_reduce_bucket_async(buckets_[i], i);
     }

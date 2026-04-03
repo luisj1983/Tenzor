@@ -388,6 +388,165 @@ auto ErfcBackward::backward_with_variables(std::vector<Variable> grad_outputs) -
     return {grad_outputs[0] * exp_term * neg_two_over_sqrt_pi};
 }
 
+// ErfInvBackward implementation
+// Saves output. backward: grad * sqrt(pi)/2 * exp(erfinv(x)^2)
+auto ErfInvBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("ErfInvBackward::forward should not be called");
+}
+
+auto ErfInvBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    const auto& grad = grad_outputs[0];
+    const auto& output = saved_tensors_[0];  // erfinv(x) saved as output
+    constexpr double half_sqrt_pi = 0.8862269254527580;  // sqrt(pi)/2
+    auto out_sq = mul(output, output);
+    auto exp_term = exp(out_sq);
+    return {mul(grad, mul(exp_term, half_sqrt_pi))};
+}
+
+auto ErfInvBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    Variable output_var(saved_tensors_[0], false);
+    constexpr double half_sqrt_pi = 0.8862269254527580;
+    auto out_sq = output_var * output_var;
+    auto exp_term = tenzor::exp(out_sq);
+    return {grad_outputs[0] * exp_term * half_sqrt_pi};
+}
+
+// GammaBackward implementation
+// Saves input. backward: grad * gamma(x) * digamma(x)
+auto GammaBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("GammaBackward::forward should not be called");
+}
+
+auto GammaBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    const auto& grad = grad_outputs[0];
+    const auto& input = saved_tensors_[0];
+    auto gamma_val = tenzor::gamma(input);
+    auto digamma_val = tenzor::digamma(input);
+    return {mul(grad, mul(gamma_val, digamma_val))};
+}
+
+auto GammaBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    Variable input_var(saved_tensors_[0], false);
+    auto gamma_val = tenzor::gamma(input_var);
+    auto digamma_val = tenzor::digamma(input_var);
+    return {grad_outputs[0] * gamma_val * digamma_val};
+}
+
+// LgammaBackward implementation
+// Saves input. backward: grad * digamma(x)
+auto LgammaBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("LgammaBackward::forward should not be called");
+}
+
+auto LgammaBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    const auto& grad = grad_outputs[0];
+    const auto& input = saved_tensors_[0];
+    return {mul(grad, tenzor::digamma(input))};
+}
+
+auto LgammaBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    Variable input_var(saved_tensors_[0], false);
+    return {grad_outputs[0] * tenzor::digamma(input_var)};
+}
+
+// DigammaBackward implementation
+// Saves input. backward: grad * polygamma(1, x)
+auto DigammaBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("DigammaBackward::forward should not be called");
+}
+
+auto DigammaBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    const auto& grad = grad_outputs[0];
+    const auto& input = saved_tensors_[0];
+    return {mul(grad, tenzor::polygamma(1, input))};
+}
+
+auto DigammaBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    Variable input_var(saved_tensors_[0], false);
+    return {grad_outputs[0] * tenzor::polygamma(1, input_var)};
+}
+
+// BesselI0Backward implementation
+// Saves input. backward: grad * bessel_i1(x)
+auto BesselI0Backward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("BesselI0Backward::forward should not be called");
+}
+
+auto BesselI0Backward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    const auto& grad = grad_outputs[0];
+    const auto& input = saved_tensors_[0];
+    return {mul(grad, tenzor::bessel_i1(input))};
+}
+
+auto BesselI0Backward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    Variable input_var(saved_tensors_[0], false);
+    return {grad_outputs[0] * tenzor::bessel_i1(input_var)};
+}
+
+// BesselI1Backward implementation
+// Saves input. backward: grad * (bessel_i0(x) + bessel_i1(x) * (-1/x))
+// I1'(x) = I0(x) - I1(x)/x
+auto BesselI1Backward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("BesselI1Backward::forward should not be called");
+}
+
+auto BesselI1Backward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    const auto& grad = grad_outputs[0];
+    const auto& input = saved_tensors_[0];
+    auto i0 = tenzor::bessel_i0(input);
+    auto i1 = tenzor::bessel_i1(input);
+    auto i1_over_x = div(i1, input);
+    return {mul(grad, sub(i0, i1_over_x))};
+}
+
+auto BesselI1Backward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    Variable input_var(saved_tensors_[0], false);
+    auto i0 = tenzor::bessel_i0(input_var);
+    auto i1 = tenzor::bessel_i1(input_var);
+    return {grad_outputs[0] * (i0 - i1 / input_var)};
+}
+
+// SincBackward implementation
+// Saves input. backward: grad * (cos(πx)/(x) - sin(πx)/(πx²)) for x≠0, else 0
+auto SincBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("SincBackward::forward should not be called");
+}
+
+auto SincBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    const auto& grad = grad_outputs[0];
+    const auto& input = saved_tensors_[0];
+    // d/dx[sin(πx)/(πx)] = cos(πx)/x - sin(πx)/(πx²)
+    // = (π*x*cos(πx) - sin(πx)) / (π*x²)
+    auto pi_x = mul(input, M_PI);
+    auto cos_px = tenzor::cos(pi_x);
+    auto sin_px = tenzor::sin(pi_x);
+    auto x_sq = mul(input, input);
+    // (cos(πx)/x - sin(πx)/(πx²))
+    auto numer = sub(mul(pi_x, cos_px), sin_px);
+    auto denom = mul(mul(input, x_sq), M_PI);
+    // Handle x=0 case: derivative is 0 at x=0
+    auto deriv = div(numer, denom);
+    // Where input is 0, set gradient to 0
+    auto zero = tenzor::zeros_like(input);
+    auto mask = tenzor::ne(input, zero);
+    return {mul(grad, mul(deriv, mask))};
+}
+
+auto SincBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    Variable input_var(saved_tensors_[0], false);
+    auto pi_x = input_var * M_PI;
+    auto cos_px = tenzor::cos(pi_x);
+    auto sin_px = tenzor::sin(pi_x);
+    auto numer = pi_x * cos_px - sin_px;
+    auto denom = input_var * input_var * input_var * M_PI;
+    // Simplified: handle div-by-zero via masking
+    auto zero_t = tenzor::zeros_like(input_var.tensor());
+    auto mask_tensor = tenzor::ne(input_var.tensor(), zero_t);
+    Variable mask_var(mask_tensor, false);
+    auto deriv = numer / denom;
+    return {grad_outputs[0] * deriv * mask_var};
+}
+
 // Log2Backward implementation
 // Saves input. backward: grad / (input * log(2))
 auto Log2Backward::forward(std::vector<Variable>) -> std::vector<Variable> {

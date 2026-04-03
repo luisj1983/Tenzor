@@ -501,6 +501,25 @@ enum class OpId : uint16_t {
     Bucketize,                 // Bucket assignment via binary search
 
     // =========================================================================
+    // Special Math Functions (490-509)
+    // =========================================================================
+    Gamma = 490,               // Gamma function: Γ(x)
+    Lgamma,                    // Log-gamma: ln|Γ(x)|
+    Digamma,                   // Digamma (psi): ψ(x) = d/dx ln Γ(x)
+    Polygamma,                 // Polygamma: ψ^(n)(x), n-th derivative of digamma
+    Beta,                      // Beta function: B(a,b) = Γ(a)Γ(b)/Γ(a+b)
+    BetaInc,                   // Regularized incomplete beta function: I_x(a,b)
+    BesselJ0,                  // Bessel function of first kind, order 0
+    BesselJ1,                  // Bessel function of first kind, order 1
+    BesselY0,                  // Bessel function of second kind, order 0
+    BesselY1,                  // Bessel function of second kind, order 1
+    BesselI0,                  // Modified Bessel function of first kind, order 0
+    BesselI1,                  // Modified Bessel function of first kind, order 1
+    ErfInv,                    // Inverse error function: erfinv(x)
+    Sinc,                      // Normalized sinc: sin(πx)/(πx)
+    Zeta,                      // Hurwitz zeta function: ζ(x, q)
+
+    // =========================================================================
     // Sentinel (MUST BE LAST)
     // =========================================================================
     OP_COUNT
