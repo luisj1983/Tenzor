@@ -18,6 +18,8 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/fft.hpp"
+#include "tenzor/ops/advanced.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/sparse/sparse_tensor.hpp"
 #include "tenzor/sparse/sparse_ops.hpp"
@@ -3421,6 +3423,107 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             int64_t K = attrs.get_int(AttrKey::K);
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
             return sparse::add(sp, inputs[3]);
+        });
+
+    // ========================================================================
+    // CPU-roundtrip fallbacks for CUDA-exclusive operations
+    // ========================================================================
+
+    // Bernoulli sampling
+    table.register_single_output_kernel(OpId::Bernoulli,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto dev = inputs[0].device();
+            return tenzor::bernoulli(inputs[0].to(Device::cpu())).to(dev);
+        });
+
+    // Multinomial sampling
+    table.register_single_output_kernel(OpId::Multinomial,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto dev = inputs[0].device();
+            int64_t num_samples = attrs.get_int(AttrKey::NumSamples, 1);
+            bool replacement = attrs.get_bool(AttrKey::Replacement, false);
+            return tenzor::multinomial(inputs[0].to(Device::cpu()), num_samples, replacement).to(dev);
+        });
+
+    // Bucketize
+    table.register_single_output_kernel(OpId::Bucketize,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto dev = inputs[0].device();
+            bool right = attrs.get_bool(AttrKey::Right, false);
+            return tenzor::bucketize(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu()), right).to(dev);
+        });
+
+    // Histogram (multi-output: returns {counts, edges})
+    table.register_kernel(OpId::Histogram,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto dev = inputs[0].device();
+            int64_t bins = attrs.get_int(AttrKey::NumBins, 10);
+            double min_val = attrs.get_float(AttrKey::Min, 0.0);
+            double max_val = attrs.get_float(AttrKey::Max, 0.0);
+            auto [counts, edges] = tenzor::histogram(inputs[0].to(Device::cpu()), bins, min_val, max_val);
+            return {counts.to(dev), edges.to(dev)};
+        });
+
+    // CDist (pairwise distance)
+    table.register_single_output_kernel(OpId::CDist,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto dev = inputs[0].device();
+            double p = attrs.get_float(AttrKey::DistP, 2.0);
+            return tenzor::cdist(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu()), p).to(dev);
+        });
+
+    // STFT (Short-Time Fourier Transform)
+    table.register_single_output_kernel(OpId::STFT,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto dev = inputs[0].device();
+            int64_t n_fft = attrs.get_int(AttrKey::NFft);
+            int64_t hop_length = attrs.get_int(AttrKey::HopLength, -1);
+            int64_t win_length = attrs.get_int(AttrKey::WinLength, -1);
+            bool center = attrs.get_bool(AttrKey::Centered, true);
+            bool normalized = attrs.get_bool(AttrKey::Normalized, false);
+            bool onesided = attrs.get_bool(AttrKey::OnesidedAttr, true);
+            Tensor window = (inputs.size() > 1) ? inputs[1].to(Device::cpu()) : Tensor();
+            return tenzor::fft::stft(inputs[0].to(Device::cpu()), n_fft, hop_length, win_length,
+                                     window, center, normalized, onesided).to(dev);
+        });
+
+    // ISTFT (Inverse STFT)
+    table.register_single_output_kernel(OpId::ISTFT,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto dev = inputs[0].device();
+            int64_t n_fft = attrs.get_int(AttrKey::NFft);
+            int64_t hop_length = attrs.get_int(AttrKey::HopLength, -1);
+            int64_t win_length = attrs.get_int(AttrKey::WinLength, -1);
+            bool center = attrs.get_bool(AttrKey::Centered, true);
+            bool normalized = attrs.get_bool(AttrKey::Normalized, false);
+            bool onesided = attrs.get_bool(AttrKey::OnesidedAttr, true);
+            int64_t length_val = attrs.get_int(AttrKey::N, -1);
+            std::optional<int64_t> length = length_val >= 0 ? std::optional<int64_t>(length_val) : std::nullopt;
+            Tensor window = (inputs.size() > 1) ? inputs[1].to(Device::cpu()) : Tensor();
+            return tenzor::fft::istft(inputs[0].to(Device::cpu()), n_fft, hop_length, win_length,
+                                      window, center, normalized, onesided, length).to(dev);
+        });
+
+    // AdvancedIndex (fancy indexing)
+    table.register_single_output_kernel(OpId::AdvancedIndex,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto dev = inputs[0].device();
+            std::vector<Tensor> cpu_inputs;
+            cpu_inputs.reserve(inputs.size());
+            for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
+            auto result = dispatch(OpId::AdvancedIndex, cpu_inputs, attrs);
+            return result[0].to(dev);
+        });
+
+    // AdvancedIndexPut (fancy indexing assignment)
+    table.register_single_output_kernel(OpId::AdvancedIndexPut,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto dev = inputs[0].device();
+            std::vector<Tensor> cpu_inputs;
+            cpu_inputs.reserve(inputs.size());
+            for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
+            auto result = dispatch(OpId::AdvancedIndexPut, cpu_inputs, attrs);
+            return result[0].to(dev);
         });
 
 } // register_oneapi_kernels

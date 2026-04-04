@@ -67,6 +67,9 @@ add_parity_test(test_performance_regression test_performance_regression.cpp)
 # Vulkan backend parity tests (Float64 shaders, Float16 buffer rounding, slice views)
 add_parity_test(test_vulkan_parity test_vulkan_parity.cpp)
 
+# Missing ops parity tests (9 CUDA-exclusive ops now available on all backends)
+add_parity_test(test_missing_ops_parity test_missing_ops_parity.cpp)
+
 # ==============================================================================
 # Test Groups
 # ==============================================================================

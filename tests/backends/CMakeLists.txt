@@ -86,3 +86,13 @@ if(TENZOR_BUILD_VULKAN)
     target_include_directories(test_vulkan_allocator_merge PRIVATE ${Vulkan_INCLUDE_DIRS})
     tenzor_discover_tests(test_vulkan_allocator_merge DISCOVERY_TIMEOUT 60)
 endif()
+
+# Event API tests (backend-agnostic, skips unavailable backends)
+add_executable(test_event_api test_event_api.cpp)
+target_link_libraries(test_event_api PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_event_api DISCOVERY_TIMEOUT 60)
+
+# MPS training tests (skips if MPS not available)
+add_executable(test_mps_training test_mps_training.cpp)
+target_link_libraries(test_mps_training PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_mps_training DISCOVERY_TIMEOUT 60)

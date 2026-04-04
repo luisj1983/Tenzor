@@ -42,6 +42,14 @@ enum class CopyKind {
 using StreamHandle = void*;
 
 /**
+ * @brief Opaque handle for synchronization events.
+ *
+ * Backend-specific event handle for inter-stream synchronization and timing.
+ * Type varies by backend (cudaEvent_t for CUDA, hipEvent_t for ROCm, etc.).
+ */
+using EventHandle = void*;
+
+/**
  * @brief Operation attributes for kernel parameters.
  *
  * Compact, cache-friendly container with SBO for up to 8 key-value pairs.
@@ -227,6 +235,77 @@ public:
      * @param stream Stream to synchronize
      */
     virtual auto synchronize_stream(StreamHandle stream) -> void = 0;
+
+    // ---- Event API for inter-stream synchronization and timing ----
+
+    /**
+     * @brief Create a synchronization event.
+     *
+     * @param device_id Device for event creation
+     * @param enable_timing Whether the event should record timing info
+     * @return Event handle for synchronization/timing
+     *
+     * @note Caller must eventually call destroy_event().
+     *       Default implementation returns nullptr (no-op for CPU).
+     */
+    virtual auto create_event(int32_t device_id, bool enable_timing = true) -> EventHandle {
+        (void)device_id; (void)enable_timing;
+        return nullptr;
+    }
+
+    /**
+     * @brief Destroy a synchronization event.
+     *
+     * @param event Event handle to destroy
+     */
+    virtual auto destroy_event(EventHandle event) -> void {
+        (void)event;
+    }
+
+    /**
+     * @brief Record an event on a stream.
+     *
+     * Marks the current point of execution in the stream. The event
+     * transitions to "recorded" state when all preceding operations
+     * in the stream have completed.
+     *
+     * @param event Event handle to record
+     * @param stream Stream to record on (nullptr for default stream)
+     */
+    virtual auto record_event(EventHandle event, StreamHandle stream = nullptr) -> void {
+        (void)event; (void)stream;
+    }
+
+    /**
+     * @brief Block a stream until an event completes.
+     *
+     * Makes all future operations on the given stream wait until the
+     * event has been recorded and all prior work in the event's stream
+     * has completed.
+     *
+     * @param event Event to wait on
+     * @param stream Stream that should wait (nullptr for default stream)
+     */
+    virtual auto wait_event(EventHandle event, StreamHandle stream = nullptr) -> void {
+        (void)event; (void)stream;
+    }
+
+    /**
+     * @brief Measure elapsed time between two events in milliseconds.
+     *
+     * Both events must have been recorded (via record_event) and
+     * created with enable_timing=true.
+     *
+     * @param start_event Event recorded at the start
+     * @param end_event Event recorded at the end
+     * @return Elapsed time in milliseconds
+     *
+     * @note Default returns 0.0 for backends without timing support.
+     */
+    virtual auto event_elapsed_ms(EventHandle start_event, EventHandle end_event) -> float {
+        (void)start_event; (void)end_event;
+        return 0.0f;
+    }
 
     /**
      * @brief Set the active device for this backend.

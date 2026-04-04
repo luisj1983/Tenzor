@@ -91,6 +91,14 @@ target_link_libraries(test_normalization_multidtype PRIVATE tenzor_core GTest::g
 add_executable(test_flatten_multidtype layers/test_flatten_multidtype.cpp)
 target_link_libraries(test_flatten_multidtype PRIVATE tenzor_core GTest::gtest_main)
 
+# ChannelShuffle tests
+add_executable(test_channel_shuffle layers/test_channel_shuffle.cpp)
+target_link_libraries(test_channel_shuffle PRIVATE tenzor_core GTest::gtest_main)
+
+# Quantized inference tests
+add_executable(test_quantized_inference test_quantized_inference.cpp)
+target_link_libraries(test_quantized_inference PRIVATE tenzor_core GTest::gtest_main)
+
 # Segmentation operations multi-dtype tests
 add_executable(test_segmentation_multidtype layers/test_segmentation_multidtype.cpp)
 target_link_libraries(test_segmentation_multidtype PRIVATE tenzor_core GTest::gtest_main)
@@ -125,6 +133,8 @@ tenzor_discover_tests(test_dropout_multidtype DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_batchnorm2d_multidtype DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_normalization_multidtype DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_flatten_multidtype DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_channel_shuffle DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_quantized_inference DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_segmentation_multidtype DISCOVERY_TIMEOUT 60)
 # PyTorch loader tests
 add_executable(test_pytorch_loader test_pytorch_loader.cpp)

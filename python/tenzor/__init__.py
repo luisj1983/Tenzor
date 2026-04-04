@@ -284,4 +284,15 @@ __all__ = [
     "memory_format",
     "list_backends",
     "is_backend_available",
+
+    # Quantization
+    "quantize_per_tensor",
+    "qint8",
+    "quint8",
+    "qint4x2",
 ]
+
+# Quantized dtype aliases (PyTorch-compatible names)
+qint8 = dtype.qint8
+quint8 = dtype.quint8
+qint4x2 = dtype.qint4x2

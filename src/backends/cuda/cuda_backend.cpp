@@ -474,6 +474,56 @@ public:
         cudaStreamSynchronize(static_cast<cudaStream_t>(stream));
     }
 
+    auto create_event(int32_t device_id, bool enable_timing = true) -> EventHandle override {
+        cudaSetDevice(device_id);
+        cudaEvent_t event;
+        unsigned flags = enable_timing ? cudaEventDefault : cudaEventDisableTiming;
+        cudaError_t err = cudaEventCreateWithFlags(&event, flags);
+        if (err != cudaSuccess) {
+            throw std::runtime_error(std::string("cudaEventCreate failed: ") + cudaGetErrorString(err));
+        }
+        return static_cast<EventHandle>(event);
+    }
+
+    auto destroy_event(EventHandle event) -> void override {
+        if (event) {
+            cudaEventDestroy(static_cast<cudaEvent_t>(event));
+        }
+    }
+
+    auto record_event(EventHandle event, StreamHandle stream = nullptr) -> void override {
+        cudaError_t err = cudaEventRecord(
+            static_cast<cudaEvent_t>(event),
+            static_cast<cudaStream_t>(stream));
+        if (err != cudaSuccess) {
+            throw std::runtime_error(std::string("cudaEventRecord failed: ") + cudaGetErrorString(err));
+        }
+    }
+
+    auto wait_event(EventHandle event, StreamHandle stream = nullptr) -> void override {
+        cudaError_t err = cudaStreamWaitEvent(
+            static_cast<cudaStream_t>(stream),
+            static_cast<cudaEvent_t>(event),
+            0);
+        if (err != cudaSuccess) {
+            throw std::runtime_error(std::string("cudaStreamWaitEvent failed: ") + cudaGetErrorString(err));
+        }
+    }
+
+    auto event_elapsed_ms(EventHandle start_event, EventHandle end_event) -> float override {
+        // Ensure both events have completed
+        cudaEventSynchronize(static_cast<cudaEvent_t>(end_event));
+        float ms = 0.0f;
+        cudaError_t err = cudaEventElapsedTime(
+            &ms,
+            static_cast<cudaEvent_t>(start_event),
+            static_cast<cudaEvent_t>(end_event));
+        if (err != cudaSuccess) {
+            throw std::runtime_error(std::string("cudaEventElapsedTime failed: ") + cudaGetErrorString(err));
+        }
+        return ms;
+    }
+
     auto memset(void* ptr, int value, size_t bytes, int32_t device_id) -> void override {
         cudaSetDevice(device_id);
         cudaError_t err = cudaMemset(ptr, value, bytes);

@@ -161,6 +161,13 @@ public:
     auto destroy_stream(StreamHandle stream) -> void override;
     auto synchronize_stream(StreamHandle stream) -> void override;
 
+    // Event management
+    auto create_event(int32_t device_id, bool enable_timing = true) -> EventHandle override;
+    auto destroy_event(EventHandle event) -> void override;
+    auto record_event(EventHandle event, StreamHandle stream = nullptr) -> void override;
+    auto wait_event(EventHandle event, StreamHandle stream = nullptr) -> void override;
+    auto event_elapsed_ms(EventHandle start_event, EventHandle end_event) -> float override;
+
     // Memory fill
     auto memset(void* ptr, int value, size_t bytes, int32_t device_id) -> void override;
 

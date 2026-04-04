@@ -313,6 +313,26 @@ public:
     /// Increment the mutation version counter
     auto bump_version() -> void;
 
+    // ---- Quantization API ----
+
+    /// Check if this tensor has a quantized dtype
+    auto is_quantized() const noexcept -> bool;
+
+    /// Get quantization scale (only valid for quantized tensors)
+    auto q_scale() const -> double;
+
+    /// Get quantization zero point (only valid for quantized tensors)
+    auto q_zero_point() const -> int64_t;
+
+    /// Get the underlying integer representation of a quantized tensor
+    auto int_repr() const -> Tensor;
+
+    /// Dequantize: convert quantized tensor back to Float32
+    auto dequantize() const -> Tensor;
+
+    /// Set quantization parameters (only for quantized tensors)
+    auto set_quantization_params(double scale, int64_t zero_point) -> void;
+
     /**
      * @brief Check if tensor is contiguous in memory.
      *
@@ -1294,6 +1314,10 @@ private:
     Device device;                       ///< Device location
     bool requires_grad{false};           ///< Gradient computation flag
     std::optional<DimnameList> names_;   ///< Optional dimension names (experimental)
+
+    // Quantization metadata (only valid when dtype is QInt8/QUInt8/QInt4x2)
+    double q_scale_{0.0};               ///< Quantization scale factor
+    int64_t q_zero_point_{0};           ///< Quantization zero point
     // SAFETY: Stale reads are harmless (triggers recomputation). No ordering
     // dependency on other fields — relaxed load/store is sufficient.
     mutable std::atomic<int8_t> is_contiguous_cache_{-1};  ///< Cached contiguity: -1=unset, 0=false, 1=true
@@ -1309,5 +1333,20 @@ private:
     // in autograd use acquire ordering to observe the mutated tensor state.
     std::atomic<uint64_t> version_counter_{0};  ///< Mutation version for autograd in-place detection
 };
+
+/**
+ * @brief Quantize a float tensor to a quantized dtype.
+ *
+ * Converts float values to quantized integers using:
+ *   q_val = clamp(round(float_val / scale) + zero_point, qmin, qmax)
+ *
+ * @param input Float tensor to quantize
+ * @param scale Quantization scale factor
+ * @param zero_point Quantization zero point
+ * @param dtype Target quantized dtype (QInt8, QUInt8)
+ * @return Quantized tensor with scale and zero_point metadata
+ */
+auto quantize_per_tensor(const Tensor& input, double scale, int64_t zero_point,
+                         DType dtype = DType::QInt8) -> Tensor;
 
 } // namespace tenzor

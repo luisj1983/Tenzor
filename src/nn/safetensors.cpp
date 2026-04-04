@@ -37,6 +37,9 @@ auto SafeTensorsSerializer::dtype_to_st_string(DType dtype) -> std::string {
         case DType::Complex128: return "F64";  // Not standard in SafeTensors
         case DType::FP8_E4M3:   return "F8_E4M3";
         case DType::FP8_E5M2:   return "F8_E5M2";
+        case DType::QInt8:      return "I8";   // Stored as raw int8
+        case DType::QUInt8:     return "U8";   // Stored as raw uint8
+        case DType::QInt4x2:    return "I8";   // Packed, stored as bytes
     }
     return "F32";
 }

@@ -502,4 +502,145 @@ auto PixelUnshuffle::forward_impl(const Variable& input) -> Variable {
     return output;
 }
 
+// ============================================================================
+// ChannelShuffle implementation
+// ============================================================================
+
+class ChannelShuffleBackward : public Function {
+public:
+    ChannelShuffleBackward(int64_t groups, std::vector<int64_t> input_shape)
+        : groups_(groups), input_shape_(std::move(input_shape)) {}
+
+    auto forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> override {
+        throw std::runtime_error("ChannelShuffleBackward::forward should not be called");
+    }
+
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        // Inverse of channel_shuffle(groups) is channel_shuffle(C/groups)
+        // but it's simpler to just do the inverse permutation:
+        // (B, C/G, G, H, W) -> permute(0,2,1,3,4) -> (B, G, C/G, H, W) -> reshape
+        auto grad = grad_outputs[0];
+        auto shape = grad.shape();
+        auto ndim = static_cast<int64_t>(shape.size());
+        if (ndim < 3) throw std::runtime_error("ChannelShuffleBackward: need at least 3D");
+
+        int64_t channels = shape[ndim - 3];
+        int64_t cpg = channels / groups_;
+
+        // Reshape: (*, C, H, W) -> (*, C/G, G, H, W)
+        std::vector<int64_t> reshaped;
+        for (int64_t i = 0; i < ndim - 3; ++i) reshaped.push_back(shape[i]);
+        reshaped.push_back(cpg);
+        reshaped.push_back(groups_);
+        for (int64_t i = ndim - 2; i < ndim; ++i) reshaped.push_back(shape[i]);
+
+        auto r = grad.reshape(reshaped);
+        auto rndim = static_cast<int64_t>(r.shape().size());
+
+        // Permute: swap the group dims back
+        std::vector<int64_t> perm;
+        for (int64_t i = 0; i < rndim - 4; ++i) perm.push_back(i);
+        perm.push_back(rndim - 3);  // G
+        perm.push_back(rndim - 4);  // C/G
+        perm.push_back(rndim - 2);  // H
+        perm.push_back(rndim - 1);  // W
+
+        auto permuted = r.permute(perm).contiguous();
+        return {permuted.reshape(input_shape_)};
+    }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        auto grad = grad_outputs[0];
+        auto shape = grad.tensor().shape();
+        auto ndim = static_cast<int64_t>(shape.size());
+
+        int64_t channels = shape[ndim - 3];
+        int64_t cpg = channels / groups_;
+
+        std::vector<int64_t> reshaped;
+        for (int64_t i = 0; i < ndim - 3; ++i) reshaped.push_back(shape[i]);
+        reshaped.push_back(cpg);
+        reshaped.push_back(groups_);
+        for (int64_t i = ndim - 2; i < ndim; ++i) reshaped.push_back(shape[i]);
+
+        auto r = reshape(grad, reshaped);
+        auto rndim = static_cast<int64_t>(r.tensor().shape().size());
+
+        std::vector<int64_t> perm;
+        for (int64_t i = 0; i < rndim - 4; ++i) perm.push_back(i);
+        perm.push_back(rndim - 3);
+        perm.push_back(rndim - 4);
+        perm.push_back(rndim - 2);
+        perm.push_back(rndim - 1);
+
+        auto permuted = permute(r, perm);
+        return {reshape(permuted, input_shape_)};
+    }
+
+private:
+    int64_t groups_;
+    std::vector<int64_t> input_shape_;
+};
+
+ChannelShuffle::ChannelShuffle(int64_t groups)
+    : groups_(groups) {
+    if (groups < 1) {
+        throw std::invalid_argument("ChannelShuffle: groups must be >= 1");
+    }
+}
+
+auto ChannelShuffle::forward_impl(const Variable& input) -> Variable {
+    auto shape = input.tensor().shape();
+    auto ndim = static_cast<int64_t>(shape.size());
+    if (ndim < 3) {
+        throw std::invalid_argument("ChannelShuffle: input must have at least 3 dimensions (*, C, H, W)");
+    }
+
+    int64_t channels = shape[ndim - 3];
+    if (channels % groups_ != 0) {
+        throw std::invalid_argument("ChannelShuffle: channels (" + std::to_string(channels) +
+            ") must be divisible by groups (" + std::to_string(groups_) + ")");
+    }
+
+    int64_t cpg = channels / groups_;
+
+    // Reshape: (*, C, H, W) -> (*, G, C/G, H, W)
+    std::vector<int64_t> reshaped_shape;
+    for (int64_t i = 0; i < ndim - 3; ++i) reshaped_shape.push_back(shape[i]);
+    reshaped_shape.push_back(groups_);
+    reshaped_shape.push_back(cpg);
+    for (int64_t i = ndim - 2; i < ndim; ++i) reshaped_shape.push_back(shape[i]);
+
+    auto reshaped = input.tensor().reshape(reshaped_shape);
+    auto rndim = static_cast<int64_t>(reshaped.shape().size());
+
+    // Permute: (*, G, C/G, H, W) -> (*, C/G, G, H, W)
+    std::vector<int64_t> perm;
+    for (int64_t i = 0; i < rndim - 4; ++i) perm.push_back(i);
+    perm.push_back(rndim - 3);  // C/G
+    perm.push_back(rndim - 4);  // G
+    perm.push_back(rndim - 2);  // H
+    perm.push_back(rndim - 1);  // W
+
+    auto permuted = reshaped.permute(perm).contiguous();
+
+    // Reshape back: (*, C/G, G, H, W) -> (*, C, H, W)
+    std::vector<int64_t> original_shape(shape.begin(), shape.end());
+    auto output_tensor = permuted.reshape(original_shape);
+    Variable output(output_tensor, input.requires_grad());
+
+    if (input.requires_grad()) {
+        std::vector<int64_t> input_shape_vec(shape.begin(), shape.end());
+        auto cs_fn = std::make_shared<ChannelShuffleBackward>(groups_, input_shape_vec);
+        std::vector<Variable> input_vars{input};
+        cs_fn->set_input_variables(input_vars);
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        if (input.grad_fn()) next_funcs.push_back(input.grad_fn());
+        cs_fn->set_next_functions(next_funcs);
+        output.set_grad_fn(cs_fn);
+    }
+
+    return output;
+}
+
 } // namespace tenzor::nn

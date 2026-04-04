@@ -320,6 +320,42 @@ PYBIND11_MODULE(tenzor_core, m) {
             self.end_capture();
         });
 
+    // Event wrapper for Python bindings
+    struct PyEvent {
+        tenzor::EventHandle handle{nullptr};
+        tenzor::Backend* backend{nullptr};
+    };
+
+    py::class_<PyEvent>(m, "Event",
+        "Synchronization event for inter-stream coordination and timing.\n"
+        "Works with CUDA, ROCm, and OneAPI backends.")
+        .def(py::init([](const std::string& device, int32_t device_id, bool enable_timing) {
+            auto& loader = tenzor::backend_registry();
+            auto* backend = loader.get_backend(device);
+            if (!backend || !backend->is_available()) {
+                throw std::runtime_error("Backend '" + device + "' is not available");
+            }
+            PyEvent ev;
+            ev.handle = backend->create_event(device_id, enable_timing);
+            ev.backend = backend;
+            return ev;
+        }), py::arg("device") = "cuda", py::arg("device_id") = 0, py::arg("enable_timing") = true)
+        .def("record", [](PyEvent& self, tenzor::StreamHandle stream) {
+            self.backend->record_event(self.handle, stream);
+        }, py::arg("stream") = nullptr, "Record event on a stream")
+        .def("wait", [](PyEvent& self, tenzor::StreamHandle stream) {
+            self.backend->wait_event(self.handle, stream);
+        }, py::arg("stream") = nullptr, "Make a stream wait for this event")
+        .def("elapsed_time", [](PyEvent& self, PyEvent& end_event) {
+            return self.backend->event_elapsed_ms(self.handle, end_event.handle);
+        }, py::arg("end_event"), "Elapsed time in ms between this (start) and end_event")
+        .def("__del__", [](PyEvent& self) {
+            if (self.handle && self.backend) {
+                self.backend->destroy_event(self.handle);
+                self.handle = nullptr;
+            }
+        });
+
     // Vulkan device availability
     m.def("vulkan_is_available", []() {
         auto& loader = tenzor::backend_registry();
@@ -539,7 +575,16 @@ PYBIND11_MODULE(tenzor_core, m) {
         .value("uint64", tenzor::DType::UInt64)
         .value("bool", tenzor::DType::Bool)
         .value("complex64", tenzor::DType::Complex64)
-        .value("complex128", tenzor::DType::Complex128);
+        .value("complex128", tenzor::DType::Complex128)
+        .value("qint8", tenzor::DType::QInt8)
+        .value("quint8", tenzor::DType::QUInt8)
+        .value("qint4x2", tenzor::DType::QInt4x2);
+
+    // Quantization functions
+    m.def("quantize_per_tensor", &tenzor::quantize_per_tensor,
+          py::arg("input"), py::arg("scale"), py::arg("zero_point"),
+          py::arg("dtype") = tenzor::DType::QInt8,
+          "Quantize a float tensor to int8/uint8 with scale and zero_point");
 
     // Memory format enum (PyTorch-compatible channels_last support)
     py::enum_<tenzor::MemoryFormat>(m, "memory_format")
@@ -627,6 +672,11 @@ PYBIND11_MODULE(tenzor_core, m) {
             return self.device().type == tenzor::Device::Type::CPU;
         })
         .def_property_readonly("numel", &tenzor::Tensor::numel)
+        .def("is_quantized", &tenzor::Tensor::is_quantized, "Check if tensor is quantized")
+        .def("q_scale", &tenzor::Tensor::q_scale, "Get quantization scale")
+        .def("q_zero_point", &tenzor::Tensor::q_zero_point, "Get quantization zero point")
+        .def("int_repr", &tenzor::Tensor::int_repr, "Get integer representation of quantized tensor")
+        .def("dequantize", &tenzor::Tensor::dequantize, "Dequantize to float32")
         .def("is_contiguous",
             [](const tenzor::Tensor& t, std::optional<tenzor::MemoryFormat> fmt) {
                 if (fmt.has_value()) {
@@ -3441,7 +3491,11 @@ PYBIND11_MODULE(tenzor_core, m) {
             py::object result = f(x_copy);
             tenzor::Variable output = result.cast<tenzor::Variable>();
             output.backward();
-            return tenzor::Variable(x_copy.grad(), false);
+            auto g = x_copy.grad();
+            if (!g.has_value()) {
+                throw std::runtime_error("grad: no gradient computed");
+            }
+            return tenzor::Variable(g.value(), false);
         });
     }, py::arg("f"),
     "Return a function that computes the gradient of f.\n"
@@ -4409,6 +4463,15 @@ PYBIND11_MODULE(tenzor_core, m) {
                std::shared_ptr<tenzor::nn::PixelUnshuffle>>(nn, "PixelUnshuffle")
         .def(py::init<int64_t>(), py::arg("downscale_factor"))
         .def("__repr__", [](const tenzor::nn::PixelUnshuffle&) { return "PixelUnshuffle()"; });
+
+    py::class_<tenzor::nn::ChannelShuffle, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::ChannelShuffle>>(nn, "ChannelShuffle",
+        "Rearranges channels by splitting into groups, transposing, and\n"
+        "flattening back. Used in ShuffleNet architectures.")
+        .def(py::init<int64_t>(), py::arg("groups"))
+        .def("__repr__", [](const tenzor::nn::ChannelShuffle& self) {
+            return "ChannelShuffle()";
+        });
 
     // Padding layers
     py::class_<tenzor::nn::ConstantPad1d, tenzor::nn::Module,

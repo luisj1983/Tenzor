@@ -746,6 +746,67 @@ public:
         }
     }
 
+    auto create_event(int32_t device_id, bool enable_timing = true) -> EventHandle override {
+        validate_device_id(device_id);
+        // SYCL events are created when operations are submitted.
+        // We use a sycl::event pointer as the opaque handle.
+        // A "blank" event is created via default construction.
+        (void)enable_timing;  // SYCL events always support profiling if queue has it
+        auto* event = new sycl::event();
+        return static_cast<EventHandle>(event);
+    }
+
+    auto destroy_event(EventHandle event) -> void override {
+        if (event) {
+            delete static_cast<sycl::event*>(event);
+        }
+    }
+
+    auto record_event(EventHandle event, StreamHandle stream = nullptr) -> void override {
+        if (!event) return;
+        if (!stream) {
+            throw std::invalid_argument("OneAPI record_event requires a non-null stream (SYCL queue)");
+        }
+        auto* queue = static_cast<sycl::queue*>(stream);
+        // Submit a marker event on the queue
+        auto* ev = static_cast<sycl::event*>(event);
+        try {
+            *ev = queue->submit([](sycl::handler& h) {
+                // Empty kernel acts as a synchronization marker
+                h.host_task([]() {});
+            });
+        } catch (const sycl::exception& e) {
+            throw std::runtime_error(std::string("SYCL record_event failed: ") + e.what());
+        }
+    }
+
+    auto wait_event(EventHandle event, StreamHandle stream = nullptr) -> void override {
+        if (!event) return;
+        auto* ev = static_cast<sycl::event*>(event);
+        // Block until the event completes
+        try {
+            ev->wait_and_throw();
+        } catch (const sycl::exception& e) {
+            throw std::runtime_error(std::string("SYCL wait_event failed: ") + e.what());
+        }
+    }
+
+    auto event_elapsed_ms(EventHandle start_event, EventHandle end_event) -> float override {
+        if (!start_event || !end_event) return 0.0f;
+        auto* start_ev = static_cast<sycl::event*>(start_event);
+        auto* end_ev = static_cast<sycl::event*>(end_event);
+        try {
+            end_ev->wait();
+            start_ev->wait();
+            auto start_time = start_ev->get_profiling_info<sycl::info::event_profiling::command_end>();
+            auto end_time = end_ev->get_profiling_info<sycl::info::event_profiling::command_end>();
+            // Profiling returns nanoseconds
+            return static_cast<float>(end_time - start_time) / 1e6f;
+        } catch (const sycl::exception& e) {
+            throw std::runtime_error(std::string("SYCL event_elapsed_ms failed: ") + e.what());
+        }
+    }
+
     auto memset(void* ptr, int value, size_t bytes, int32_t device_id) -> void override {
         validate_device_id(device_id);
         try {

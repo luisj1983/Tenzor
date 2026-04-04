@@ -202,6 +202,76 @@ auto Tensor::bump_version() -> void {
     }
 }
 
+auto Tensor::is_quantized() const noexcept -> bool {
+    if (!impl_) return false;
+    return tenzor::is_quantized(impl_->dtype);
+}
+
+auto Tensor::q_scale() const -> double {
+    if (!is_quantized()) {
+        throw std::runtime_error("q_scale() called on non-quantized tensor");
+    }
+    return impl_->q_scale_;
+}
+
+auto Tensor::q_zero_point() const -> int64_t {
+    if (!is_quantized()) {
+        throw std::runtime_error("q_zero_point() called on non-quantized tensor");
+    }
+    return impl_->q_zero_point_;
+}
+
+auto Tensor::int_repr() const -> Tensor {
+    if (!is_quantized()) {
+        throw std::runtime_error("int_repr() called on non-quantized tensor");
+    }
+    // Return a view of the same storage interpreted as Int8 or UInt8
+    DType int_dtype = (impl_->dtype == DType::QUInt8) ? DType::UInt8 : DType::Int8;
+    Tensor result(std::vector<int64_t>(impl_->shape), int_dtype, impl_->device);
+    // Copy data bytes (same underlying representation)
+    auto* backend = backend_registry().get_backend(impl_->device.type);
+    if (backend) {
+        backend->copy(result.data_ptr(), data_ptr(),
+                      numel() * tenzor::dtype_size(int_dtype), CopyKind::DeviceToDevice);
+    }
+    return result;
+}
+
+auto Tensor::dequantize() const -> Tensor {
+    if (!is_quantized()) {
+        throw std::runtime_error("dequantize() called on non-quantized tensor");
+    }
+    // Dequantize: float_val = (int_val - zero_point) * scale
+    auto int_tensor = int_repr().to(Device::cpu());
+    auto float_tensor = zeros(std::vector<int64_t>(impl_->shape), DType::Float32, Device::cpu());
+    size_t n = numel();
+    float* out = float_tensor.data<float>();
+    double scale = impl_->q_scale_;
+    int64_t zp = impl_->q_zero_point_;
+
+    if (impl_->dtype == DType::QUInt8) {
+        const uint8_t* in = int_tensor.data<uint8_t>();
+        for (size_t i = 0; i < n; ++i) {
+            out[i] = static_cast<float>((static_cast<int64_t>(in[i]) - zp) * scale);
+        }
+    } else {
+        const int8_t* in = int_tensor.data<int8_t>();
+        for (size_t i = 0; i < n; ++i) {
+            out[i] = static_cast<float>((static_cast<int64_t>(in[i]) - zp) * scale);
+        }
+    }
+
+    return float_tensor.to(impl_->device);
+}
+
+auto Tensor::set_quantization_params(double scale, int64_t zero_point) -> void {
+    if (!impl_ || !tenzor::is_quantized(impl_->dtype)) {
+        throw std::runtime_error("set_quantization_params: tensor is not quantized");
+    }
+    impl_->q_scale_ = scale;
+    impl_->q_zero_point_ = zero_point;
+}
+
 auto Tensor::is_contiguous() const noexcept -> bool {
     if (!impl_) return true;
     return impl_->is_contiguous();
@@ -657,6 +727,11 @@ auto Tensor::to(DType dtype) const -> Tensor {
         // FP8 types require specialized conversion through float; not handled by generic cast
         case DType::FP8_E4M3:
         case DType::FP8_E5M2:
+            break;
+        // Quantized types: use dequantize() first, then cast
+        case DType::QInt8:
+        case DType::QUInt8:
+        case DType::QInt4x2:
             break;
     }
 
@@ -1682,6 +1757,47 @@ auto Tensor::dim_index(std::string_view name) const -> int64_t {
         throw std::invalid_argument("dim_index: tensor has no named dimensions");
     }
     return find_dim_by_name(*impl_->names_, name);
+}
+
+auto quantize_per_tensor(const Tensor& input, double scale, int64_t zero_point,
+                         DType dtype) -> Tensor {
+    if (!tenzor::is_quantized(dtype)) {
+        throw std::invalid_argument("quantize_per_tensor: target dtype must be quantized (QInt8, QUInt8, QInt4x2)");
+    }
+    if (scale <= 0.0) {
+        throw std::invalid_argument("quantize_per_tensor: scale must be positive");
+    }
+
+    // Work on CPU
+    auto cpu_input = input.to(Device::cpu());
+    auto shape = std::vector<int64_t>(cpu_input.shape().begin(), cpu_input.shape().end());
+    size_t n = cpu_input.numel();
+
+    // Create output quantized tensor
+    Tensor result(shape, dtype, Device::cpu());
+
+    if (dtype == DType::QUInt8) {
+        const float* in = cpu_input.data<float>();
+        uint8_t* out = result.data<uint8_t>();
+        for (size_t i = 0; i < n; ++i) {
+            int64_t q = static_cast<int64_t>(std::round(in[i] / scale)) + zero_point;
+            out[i] = static_cast<uint8_t>(std::clamp(q, int64_t(0), int64_t(255)));
+        }
+    } else if (dtype == DType::QInt8) {
+        const float* in = cpu_input.data<float>();
+        int8_t* out = result.data<int8_t>();
+        for (size_t i = 0; i < n; ++i) {
+            int64_t q = static_cast<int64_t>(std::round(in[i] / scale)) + zero_point;
+            out[i] = static_cast<int8_t>(std::clamp(q, int64_t(-128), int64_t(127)));
+        }
+    } else {
+        throw std::runtime_error("quantize_per_tensor: QInt4x2 not yet implemented");
+    }
+
+    // Store quantization parameters
+    result.set_quantization_params(scale, zero_point);
+
+    return result.to(input.device());
 }
 
 } // namespace tenzor

@@ -44,7 +44,10 @@ enum class DType : uint8_t {
     Complex64,  ///< 64-bit complex (two float32)
     Complex128, ///< 128-bit complex (two float64)
     FP8_E4M3,   ///< 8-bit float (4 exponent, 3 mantissa) - Hopper Tensor Cores
-    FP8_E5M2    ///< 8-bit float (5 exponent, 2 mantissa) - Hopper Tensor Cores
+    FP8_E5M2,   ///< 8-bit float (5 exponent, 2 mantissa) - Hopper Tensor Cores
+    QInt8,      ///< Quantized 8-bit signed integer (with scale/zero_point)
+    QUInt8,     ///< Quantized 8-bit unsigned integer (with scale/zero_point)
+    QInt4x2     ///< Quantized 4-bit packed (2 values per byte, with scale/zero_point)
 };
 
 /**
@@ -303,6 +306,9 @@ constexpr auto dtype_size(DType dtype) -> size_t {
         case DType::Complex128: return 16;
         case DType::FP8_E4M3: return 1;
         case DType::FP8_E5M2: return 1;
+        case DType::QInt8: return 1;
+        case DType::QUInt8: return 1;
+        case DType::QInt4x2: return 1;  // 2 values per byte, but storage is per-byte
     }
     return 0;
 }
@@ -336,8 +342,21 @@ constexpr auto dtype_name(DType dtype) -> std::string_view {
         case DType::Complex128: return "complex128";
         case DType::FP8_E4M3: return "fp8_e4m3";
         case DType::FP8_E5M2: return "fp8_e5m2";
+        case DType::QInt8: return "qint8";
+        case DType::QUInt8: return "quint8";
+        case DType::QInt4x2: return "qint4x2";
     }
     return "unknown";
+}
+
+/**
+ * @brief Check if a dtype is a quantized type (QInt8, QUInt8, QInt4x2).
+ *
+ * @param dtype Data type to check
+ * @return true if dtype is a quantized type
+ */
+constexpr auto is_quantized(DType dtype) -> bool {
+    return dtype == DType::QInt8 || dtype == DType::QUInt8 || dtype == DType::QInt4x2;
 }
 
 /**

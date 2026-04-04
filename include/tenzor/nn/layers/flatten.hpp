@@ -143,5 +143,30 @@ private:
     int64_t downscale_factor_;
 };
 
+/**
+ * @brief ChannelShuffle layer for cross-group information exchange.
+ *
+ * Rearranges channels by splitting into groups, transposing, and flattening
+ * back. Used in ShuffleNet architectures to enable information flow between
+ * grouped convolution channels.
+ *
+ * Shape transformation (4D input):
+ * - (B, C, H, W) -> (B, G, C/G, H, W) -> permute(0,2,1,3,4) -> (B, C, H, W)
+ *
+ * @code
+ * ChannelShuffle cs(2);  // 2 groups
+ * // Input shape: {1, 4, 8, 8}
+ * // Channels [0,1] and [2,3] get interleaved: [0,2,1,3]
+ * @endcode
+ */
+class ChannelShuffle : public Module {
+public:
+    explicit ChannelShuffle(int64_t groups);
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    int64_t groups_;
+};
+
 } // namespace nn
 } // namespace tenzor

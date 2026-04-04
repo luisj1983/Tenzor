@@ -11,8 +11,12 @@
 
 #include "mps_backend.hpp"
 #include "tenzor/backend/dispatch_table.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/kernel_registry.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "tenzor/ops/math.hpp"
+#include "tenzor/ops/reduction.hpp"
+#include "tenzor/ops/creation.hpp"
 #include "tenzor/core/tensor.hpp"
 
 namespace tenzor::mps {
@@ -125,7 +129,139 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
             return {mps_conv2d_kernel(inputs[0], inputs[1], sh, sw, ph, pw, groups)};
         });
 
-    // TODO: Tier 2 (training) - backward ops, optimizer steps
+    // ================================================================
+    // Tier 2: CPU-roundtrip fallbacks for training support
+    // ================================================================
+    // These enable backward pass and optimizer steps on MPS tensors
+    // by routing through CPU. Native Metal shaders can replace these
+    // incrementally for better performance.
+
+#define MPS_UNARY_FALLBACK(OP_ID, FN) \
+    table.register_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes&) { \
+        return std::vector<Tensor>{tenzor::FN(inputs[0].to(Device::cpu())).to(inputs[0].device())}; \
+    })
+
+#define MPS_BINARY_FALLBACK(OP_ID, FN) \
+    table.register_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes&) { \
+        return std::vector<Tensor>{tenzor::FN(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu())).to(inputs[0].device())}; \
+    })
+
+    // Reductions (needed by backward pass: sum for gradient accumulation, mean for losses)
+    table.register_kernel(OpId::Sum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        auto dev = inputs[0].device();
+        auto cpu_in = inputs[0].to(Device::cpu());
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        bool keepdim = attrs.get_bool(AttrKey::KeepDim, false);
+        if (dim >= 0) {
+            return std::vector<Tensor>{tenzor::sum(cpu_in, dim, keepdim).to(dev)};
+        }
+        return std::vector<Tensor>{tenzor::sum(cpu_in).to(dev)};
+    });
+
+    table.register_kernel(OpId::Mean, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        auto dev = inputs[0].device();
+        auto cpu_in = inputs[0].to(Device::cpu());
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        bool keepdim = attrs.get_bool(AttrKey::KeepDim, false);
+        if (dim >= 0) {
+            return std::vector<Tensor>{tenzor::mean(cpu_in, dim, keepdim).to(dev)};
+        }
+        return std::vector<Tensor>{tenzor::mean(cpu_in).to(dev)};
+    });
+
+    table.register_kernel(OpId::Max, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        auto dev = inputs[0].device();
+        auto cpu_in = inputs[0].to(Device::cpu());
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        bool keepdim = attrs.get_bool(AttrKey::KeepDim, false);
+        auto [values, indices] = tenzor::max(cpu_in, dim, keepdim);
+        return std::vector<Tensor>{values.to(dev), indices.to(dev)};
+    });
+
+    // Shape operations (needed by backward: reshape for gradient matching)
+    table.register_single_output_kernel(OpId::Reshape,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            // Reshape is a metadata-only op — just do it
+            return inputs[0].to(Device::cpu()).reshape(
+                std::vector<int64_t>(inputs[0].shape().begin(), inputs[0].shape().end())).to(inputs[0].device());
+        });
+
+    table.register_single_output_kernel(OpId::Transpose,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto dev = inputs[0].device();
+            return inputs[0].to(Device::cpu()).transpose().to(dev);
+        });
+
+    // Activation backward helpers
+    MPS_UNARY_FALLBACK(Tanh, tanh);
+    MPS_UNARY_FALLBACK(Sqrt, sqrt);
+    MPS_UNARY_FALLBACK(Abs, abs);
+
+    // Element-wise operations used in backward
+    MPS_BINARY_FALLBACK(Pow, pow);
+
+    // Comparison operations (used in masks for backward)
+    table.register_kernel(OpId::GreaterThan, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        auto dev = inputs[0].device();
+        return std::vector<Tensor>{tenzor::gt(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu())).to(dev)};
+    });
+
+    // Clamp (used by many activations backward)
+    table.register_kernel(OpId::Clamp, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        auto dev = inputs[0].device();
+        double min_val = attrs.get_float(AttrKey::Min, std::numeric_limits<double>::lowest());
+        double max_val = attrs.get_float(AttrKey::Max, std::numeric_limits<double>::max());
+        return std::vector<Tensor>{tenzor::clamp(inputs[0].to(Device::cpu()), min_val, max_val).to(dev)};
+    });
+
+    // Creation ops (needed for backward: zeros_like, ones_like for gradient init)
+    table.register_single_output_kernel(OpId::ZerosLike,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            auto dev = inputs[0].device();
+            auto shape = std::vector<int64_t>(inputs[0].shape().begin(), inputs[0].shape().end());
+            return zeros(shape, inputs[0].dtype(), dev);
+        });
+
+    table.register_single_output_kernel(OpId::OnesLike,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            auto dev = inputs[0].device();
+            auto shape = std::vector<int64_t>(inputs[0].shape().begin(), inputs[0].shape().end());
+            return ones(shape, inputs[0].dtype(), dev);
+        });
+
+    // Fused optimizer steps (SGD, Adam) via CPU roundtrip
+    table.register_kernel(OpId::FusedSGDStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        auto dev = inputs[0].device();
+        std::vector<Tensor> cpu_inputs;
+        for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
+        auto result = dispatch(OpId::FusedSGDStep, cpu_inputs, attrs);
+        std::vector<Tensor> gpu_result;
+        for (const auto& t : result) gpu_result.push_back(t.to(dev));
+        return gpu_result;
+    });
+
+    table.register_kernel(OpId::FusedAdamStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        auto dev = inputs[0].device();
+        std::vector<Tensor> cpu_inputs;
+        for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
+        auto result = dispatch(OpId::FusedAdamStep, cpu_inputs, attrs);
+        std::vector<Tensor> gpu_result;
+        for (const auto& t : result) gpu_result.push_back(t.to(dev));
+        return gpu_result;
+    });
+
+    // Cast (dtype conversion needed during training)
+    table.register_single_output_kernel(OpId::Cast,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto dev = inputs[0].device();
+            auto cpu_in = inputs[0].to(Device::cpu());
+            auto result = dispatch(OpId::Cast, std::vector<Tensor>{cpu_in}, attrs);
+            return result[0].to(dev);
+        });
+
+#undef MPS_UNARY_FALLBACK
+#undef MPS_BINARY_FALLBACK
+
     // TODO: Tier 3 (completeness) - RNN, 3D ops, FFT, sparse, linalg
 }
 

@@ -287,6 +287,41 @@ auto ROCmBackend::synchronize_stream(StreamHandle stream) -> void {
     check_hip_error(hipStreamSynchronize(static_cast<hipStream_t>(stream)), "hipStreamSynchronize");
 }
 
+auto ROCmBackend::create_event(int32_t device_id, bool enable_timing) -> EventHandle {
+    check_hip_error(hipSetDevice(device_id), "hipSetDevice in create_event");
+    hipEvent_t event;
+    unsigned flags = enable_timing ? hipEventDefault : hipEventDisableTiming;
+    check_hip_error(hipEventCreateWithFlags(&event, flags), "hipEventCreateWithFlags");
+    return static_cast<EventHandle>(event);
+}
+
+auto ROCmBackend::destroy_event(EventHandle event) -> void {
+    if (event) {
+        check_hip_error(hipEventDestroy(static_cast<hipEvent_t>(event)), "hipEventDestroy");
+    }
+}
+
+auto ROCmBackend::record_event(EventHandle event, StreamHandle stream) -> void {
+    check_hip_error(
+        hipEventRecord(static_cast<hipEvent_t>(event), static_cast<hipStream_t>(stream)),
+        "hipEventRecord");
+}
+
+auto ROCmBackend::wait_event(EventHandle event, StreamHandle stream) -> void {
+    check_hip_error(
+        hipStreamWaitEvent(static_cast<hipStream_t>(stream), static_cast<hipEvent_t>(event), 0),
+        "hipStreamWaitEvent");
+}
+
+auto ROCmBackend::event_elapsed_ms(EventHandle start_event, EventHandle end_event) -> float {
+    check_hip_error(hipEventSynchronize(static_cast<hipEvent_t>(end_event)), "hipEventSynchronize");
+    float ms = 0.0f;
+    check_hip_error(
+        hipEventElapsedTime(&ms, static_cast<hipEvent_t>(start_event), static_cast<hipEvent_t>(end_event)),
+        "hipEventElapsedTime");
+    return ms;
+}
+
 auto ROCmBackend::memset(void* ptr, int value, size_t bytes, int32_t device_id) -> void {
     check_hip_error(hipSetDevice(device_id), "hipSetDevice in memset");
     check_hip_error(hipMemset(ptr, value, bytes), "hipMemset");
