@@ -76,6 +76,7 @@ private:
     bool prev_enabled_;
     std::optional<DType> prev_dtype_;
     std::optional<Device::Type> prev_device_type_;
+    bool pushed_interceptor_ = false;  ///< Whether we pushed an autocast interceptor
 
     // Thread-local state
     static thread_local bool enabled_;

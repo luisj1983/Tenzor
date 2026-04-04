@@ -321,7 +321,12 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                                 "' is a higher-order stub (second derivatives are zero). "
                                 "Use set_higher_order_grad_mode(Warn) to allow this.");
                         }
+                        // Warn and Silent (deprecated) both log and count
                         detail::increment_higher_order_disconnection_count();
+                        std::cerr << "[tenzor::autograd] Warning: '" << function->name()
+                                  << "' is a higher-order stub — second derivatives "
+                                  << "through it will be zero. (disconnection #"
+                                  << higher_order_disconnection_count() << ")\n";
                     }
 
                     // Extract the underlying tensors for accumulation, but the Variables

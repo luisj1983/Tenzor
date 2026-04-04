@@ -704,3 +704,8 @@ if(TENZOR_BUILD_CUDA)
     tenzor_discover_tests(test_data_parallel DISCOVERY_TIMEOUT 60)
     tenzor_discover_tests(test_data_parallel_single_gpu DISCOVERY_TIMEOUT 60)
 endif()
+
+# Dispatch interceptor tests
+add_executable(test_dispatch_interceptor test_dispatch_interceptor.cpp)
+target_link_libraries(test_dispatch_interceptor PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_dispatch_interceptor DISCOVERY_TIMEOUT 60)

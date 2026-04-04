@@ -68,11 +68,17 @@ auto promote_types(DType a, DType b) -> DType {
         return b;
     }
 
-    // FP8 types always promote to Float32 (too narrow for general compute).
-    // FP8 + anything -> Float32 (or wider if the other type is wider).
+    // FP8 type promotion:
+    // - FP8 + same FP8 -> same FP8 (preserve precision intent)
+    // - FP8_E4M3 + FP8_E5M2 -> FP8_E5M2 (wider dynamic range)
+    // - FP8 + non-FP8 -> Float32 (or wider if the other type is wider)
     if (a == DType::FP8_E4M3 || a == DType::FP8_E5M2) {
         if (b == DType::Float64) return DType::Float64;
-        if (b == DType::FP8_E4M3 || b == DType::FP8_E5M2) return DType::Float32;
+        if (b == DType::FP8_E4M3 || b == DType::FP8_E5M2) {
+            // Same type stays same type (already handled by a==b check above
+            // for identical types). Mixed FP8 -> E5M2 (wider range).
+            return DType::FP8_E5M2;
+        }
         if (dtype_priority(b) >= dtype_priority(DType::Float32)) return b;
         return DType::Float32;
     }

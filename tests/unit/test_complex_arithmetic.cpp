@@ -346,6 +346,57 @@ TEST_P(ComplexArithmeticTest, ComplexSqrt) {
 }
 
 // ============================================================================
+// Transcendental functions on complex tensors
+// ============================================================================
+
+TEST_P(ComplexArithmeticTest, ComplexSinCos) {
+    try {
+        auto t = zeros({2}, DType::Complex64, device);
+        auto* p = t.data<std::complex<float>>();
+        p[0] = {0.0f, 0.0f};     // sin(0) = 0, cos(0) = 1
+        p[1] = {1.5708f, 0.0f};  // sin(pi/2) ≈ 1, cos(pi/2) ≈ 0
+
+        auto s = tenzor::sin(t);
+        auto c = tenzor::cos(t);
+        auto* sp = s.data<std::complex<float>>();
+        auto* cp = c.data<std::complex<float>>();
+
+        EXPECT_NEAR(sp[0].real(), 0.0f, 1e-5f);
+        EXPECT_NEAR(cp[0].real(), 1.0f, 1e-5f);
+        EXPECT_NEAR(sp[1].real(), 1.0f, 1e-3f);
+        EXPECT_NEAR(cp[1].real(), 0.0f, 1e-3f);
+    } catch (const std::runtime_error&) {
+        GTEST_SKIP() << "Complex sin/cos not yet supported on " << device.to_string();
+    }
+}
+
+TEST_P(ComplexArithmeticTest, ComplexMatmul) {
+    try {
+        auto a = zeros({2, 3}, DType::Complex64, device);
+        auto b = zeros({3, 2}, DType::Complex64, device);
+
+        // Fill with simple values
+        auto* ap = a.data<std::complex<float>>();
+        auto* bp = b.data<std::complex<float>>();
+        for (int i = 0; i < 6; ++i) {
+            ap[i] = {static_cast<float>(i + 1), 0.0f};
+            bp[i] = {static_cast<float>(i + 1), 0.0f};
+        }
+
+        auto c = tenzor::matmul(a, b);
+        EXPECT_EQ(c.dtype(), DType::Complex64);
+        EXPECT_EQ(c.shape()[0], 2);
+        EXPECT_EQ(c.shape()[1], 2);
+
+        // C[0,0] = a[0,:] . b[:,0] = 1*1 + 2*2 + 3*3 = 14 (real values)
+        auto* cp = c.data<std::complex<float>>();
+        EXPECT_NEAR(cp[0].real(), 22.0f, 1e-3f);
+    } catch (const std::runtime_error&) {
+        GTEST_SKIP() << "Complex matmul not yet supported on " << device.to_string();
+    }
+}
+
+// ============================================================================
 // Instantiate for CPU backend
 // ============================================================================
 

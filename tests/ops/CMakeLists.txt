@@ -13,5 +13,10 @@ target_link_libraries(test_shape_ops_multidtype PRIVATE tenzor_core GTest::gtest
 # ============================================================================
 # Test Registration
 # ============================================================================
-tenzor_discover_tests(test_advanced_ops_multidtype DISCOVERY_TIMEOUT 60)
-tenzor_discover_tests(test_shape_ops_multidtype DISCOVERY_TIMEOUT 60)
+# FP8 operations tests
+add_executable(test_fp8_ops test_fp8_ops.cpp)
+target_link_libraries(test_fp8_ops PRIVATE tenzor_core GTest::gtest_main)
+
+tenzor_discover_tests(test_advanced_ops_multidtype LABELS "ops" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_shape_ops_multidtype LABELS "ops" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_fp8_ops LABELS "ops" DISCOVERY_TIMEOUT 60)

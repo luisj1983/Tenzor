@@ -8,6 +8,8 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include <tenzor/nn/functional.hpp>
+#include <tenzor/nn/loss/losses.hpp>
 #include "parity_test_utils.hpp"
 #include <cmath>
 #include <limits>
@@ -277,8 +279,137 @@ TEST(NumericalStability, LogSoftmax_StableComputation) {
 }
 
 TEST(NumericalStability, BatchNorm_SmallVariance) {
-    // TODO: Requires nn::functional::batch_norm implementation
-    GTEST_SKIP() << "nn::functional API not yet implemented";
+    // BatchNorm with very small variance — epsilon must prevent division by ~zero
+    auto input = full({4, 8, 2, 2}, 42.0f, DType::Float32, Device::cpu());
+    auto noise = randn({4, 8, 2, 2}, DType::Float32, Device::cpu()) * 1e-10f;
+    input = add(input, noise);
+
+    auto running_mean = full({8}, 42.0f, DType::Float32, Device::cpu());
+    auto running_var = full({8}, 1e-12f, DType::Float32, Device::cpu());
+    auto weight_var = Variable(ones({8}, DType::Float32, Device::cpu()), false);
+    auto bias_var = Variable(zeros({8}, DType::Float32, Device::cpu()), false);
+
+    auto input_var = Variable(input, false);
+    auto result = nn::functional::batch_norm(
+        input_var, running_mean, running_var,
+        weight_var, bias_var,
+        /*training=*/false, /*momentum=*/0.1, /*eps=*/1e-5);
+    auto result_t = result.tensor();
+
+    EXPECT_FALSE(has_inf_nan(result_t).data<bool>()[0])
+        << "BatchNorm with small variance should not produce NaN/Inf";
+}
+
+TEST(NumericalStability, LayerNorm_ConstantInput) {
+    // LayerNorm with all-identical elements — variance is zero
+    auto input = full({4, 16}, 5.0f, DType::Float32, Device::cpu());
+    auto weight_var = Variable(ones({16}, DType::Float32, Device::cpu()), false);
+    auto bias_var = Variable(zeros({16}, DType::Float32, Device::cpu()), false);
+
+    auto input_var = Variable(input, false);
+    auto result = nn::functional::layer_norm(input_var, {16}, weight_var, bias_var, 1e-5);
+    auto result_t = result.tensor();
+
+    EXPECT_FALSE(has_inf_nan(result_t).data<bool>()[0])
+        << "LayerNorm with constant input should not produce NaN/Inf";
+}
+
+TEST(NumericalStability, CrossEntropy_NearZeroProbabilities) {
+    // Cross-entropy with extreme logits (near-0 and near-1 after softmax)
+    auto logits = zeros({8, 10}, DType::Float32, Device::cpu());
+    for (int i = 0; i < 8; ++i) {
+        logits.data<float>()[i * 10 + i % 10] = 100.0f;
+    }
+    auto targets = zeros({8}, DType::Int64, Device::cpu());
+    for (int i = 0; i < 8; ++i) {
+        targets.data<int64_t>()[i] = i % 10;
+    }
+
+    auto logits_var = Variable(logits, false);
+    auto loss = nn::functional::cross_entropy(logits_var, targets);
+    auto loss_t = loss.tensor();
+
+    EXPECT_FALSE(has_inf_nan(loss_t).data<bool>()[0])
+        << "CrossEntropy with extreme logits should not produce NaN/Inf";
+    EXPECT_LT(loss_t.data<float>()[0], 1.0f);
+}
+
+TEST(NumericalStability, Softmax_VeryLargeInput) {
+    // Softmax with inputs in [1000, 1001] range — tests max-subtraction trick
+    auto input = full({4, 32}, 1000.0f, DType::Float32, Device::cpu());
+    auto noise = randn({4, 32}, DType::Float32, Device::cpu());
+    input = add(input, noise);
+
+    auto input_var = Variable(input, false);
+    auto result = softmax(input_var, 1).tensor();
+
+    EXPECT_FALSE(has_inf_nan(result).data<bool>()[0])
+        << "Softmax with very large inputs should not produce NaN/Inf";
+
+    auto row_sums = tenzor::sum(result, 1);
+    for (int64_t i = 0; i < 4; ++i) {
+        float row_sum = row_sums.data<float>()[i];
+        EXPECT_NEAR(row_sum, 1.0f, 1e-5f)
+            << "Softmax row " << i << " should sum to 1.0";
+    }
+}
+
+TEST(NumericalStability, KLDiv_NearZero) {
+    // KL divergence with near-zero distributions should not produce NaN/Inf
+    // KL(P || Q) = sum(P * log(P / Q))
+    // When Q -> 0, log(P/Q) -> inf, so stability depends on clamping
+    auto p = full({4, 16}, 1.0f / 16.0f, DType::Float32, Device::cpu()); // uniform
+    auto q = full({4, 16}, 1e-7f, DType::Float32, Device::cpu()); // near-zero
+
+    auto p_var = Variable(p, false);
+    auto q_var = Variable(q, false);
+
+    // log(p) should be stable, log(q) is very negative but finite
+    auto log_p = tenzor::log(p);
+    auto log_q = tenzor::log(q);
+
+    EXPECT_FALSE(has_inf_nan(log_p).data<bool>()[0])
+        << "log of uniform distribution should be finite";
+    EXPECT_FALSE(has_inf_nan(log_q).data<bool>()[0])
+        << "log of near-zero values should be finite (very negative but not NaN/Inf)";
+
+    // KL divergence: sum(p * (log_p - log_q))
+    auto kl = tenzor::sum(tenzor::mul(p, tenzor::sub(log_p, log_q)));
+    EXPECT_FALSE(has_inf_nan(kl).data<bool>()[0])
+        << "KL divergence with near-zero Q should be finite";
+    EXPECT_GT(kl.data<float>()[0], 0.0f)
+        << "KL divergence should be positive";
+}
+
+TEST(NumericalStability, Attention_LongSequence) {
+    // Scaled dot-product attention with long sequence
+    // Q @ K^T / sqrt(d_k) can produce very large values before softmax
+    int64_t seq_len = 4096;
+    int64_t d_k = 64;
+    float scale = 1.0f / std::sqrt(static_cast<float>(d_k));
+
+    auto Q = randn({1, seq_len, d_k}, DType::Float32, Device::cpu());
+    auto K = randn({1, d_k, seq_len}, DType::Float32, Device::cpu());
+
+    // Compute attention scores: Q @ K^T * scale
+    auto scores = tenzor::matmul(Q, K) * scale;
+
+    EXPECT_FALSE(has_inf_nan(scores).data<bool>()[0])
+        << "Attention scores should be finite";
+
+    // Apply softmax — this is the critical stability test
+    auto scores_2d = scores.reshape({seq_len, seq_len});
+    auto scores_var = Variable(scores_2d, false);
+    auto attn_weights = softmax(scores_var, 1).tensor();
+
+    EXPECT_FALSE(has_inf_nan(attn_weights).data<bool>()[0])
+        << "Attention weights after softmax should be finite";
+
+    // Each row should sum to ~1.0
+    auto row_sum = tenzor::sum(attn_weights, 1);
+    float first_sum = row_sum.data<float>()[0];
+    EXPECT_NEAR(first_sum, 1.0f, 1e-4f)
+        << "Attention weights row should sum to 1.0";
 }
 
 // ============================================================================

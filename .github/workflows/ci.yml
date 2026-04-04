@@ -376,12 +376,16 @@ jobs:
       - name: Test (CPU)
         run: cd build && ctest --output-on-failure -R "cpu" --timeout 120
 
-  # Tier 2: Full CPU tests (every PR, ~30 min)
+  # Tier 2: Full CPU tests (every PR, sharded by label for parallelism)
   full-cpu-tests:
-    name: Full CPU Test Suite
+    name: CPU Tests (${{ matrix.shard }})
     runs-on: ubuntu-24.04
     needs: build-and-smoke
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [unit, nn, autograd, ops, jit, core, backend_parity, integration]
     steps:
       - uses: actions/checkout@v4
 
@@ -412,26 +416,63 @@ jobs:
             -DTENZOR_ENABLE_COVERAGE=ON
           ninja -C build
 
-      - name: Run all CPU tests
+      - name: Run ${{ matrix.shard }} tests
         run: |
           cd build
           ctest --output-on-failure -j$(nproc) \
+            -L "${{ matrix.shard }}" \
             -E "cuda|vulkan|oneapi|rocm" \
             --timeout 300
-        timeout-minutes: 45
+        timeout-minutes: 30
 
       - name: Collect coverage
         if: success() || failure()
         run: |
-          lcov --capture --directory build --output-file coverage.info
-          lcov --remove coverage.info '/usr/*' '*/tests/*' '*/build/*' --output-file coverage.info
+          lcov --capture --directory build --output-file coverage-${{ matrix.shard }}.info
+          lcov --remove coverage-${{ matrix.shard }}.info '/usr/*' '*/tests/*' '*/build/*' --output-file coverage-${{ matrix.shard }}.info
 
       - name: Upload coverage to Codecov
         if: success() || failure()
         uses: codecov/codecov-action@v4
         with:
-          files: coverage.info
+          files: coverage-${{ matrix.shard }}.info
+          flags: ${{ matrix.shard }}
           fail_ci_if_error: false
+
+  # Python tests (separate job, not label-sharded)
+  python-tests:
+    name: Python Tests
+    runs-on: ubuntu-24.04
+    needs: build-and-smoke
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build \
+            libgtest-dev \
+            libomp-dev \
+            python3-dev \
+            python3-pybind11 \
+            pybind11-dev \
+            libmkl-dev \
+            libtbb-dev
+
+      - name: Configure and build
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} \
+            -DTENZOR_BUILD_CUDA=OFF \
+            -DTENZOR_BUILD_ROCM=OFF \
+            -DTENZOR_BUILD_ONEAPI=OFF \
+            -DTENZOR_BUILD_VULKAN=OFF \
+            -DTENZOR_BUILD_PYTHON=ON \
+            -DTENZOR_BUILD_TESTS=ON \
+            -DTENZOR_BUILD_MODEL_HUB=OFF
+          ninja -C build
 
       - name: Run Python tests
         run: |

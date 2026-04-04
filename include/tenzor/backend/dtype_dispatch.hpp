@@ -208,4 +208,64 @@ namespace tenzor {
         }                                                                       \
     }()
 
+// ============================================================================
+// TENZOR_DISPATCH_ALL_TYPES_AND_COMPLEX — All types + Bool + Complex64/128
+// ============================================================================
+#define TENZOR_DISPATCH_ALL_TYPES_AND_COMPLEX(DTYPE, NAME, ...)                \
+    [&] {                                                                       \
+        switch (DTYPE) {                                                        \
+            case DType::Float32: {                                              \
+                using scalar_t = float;                                         \
+                return __VA_ARGS__();                                           \
+            }                                                                   \
+            case DType::Float64: {                                              \
+                using scalar_t = double;                                        \
+                return __VA_ARGS__();                                           \
+            }                                                                   \
+            case DType::Float16: {                                              \
+                using scalar_t = Float16;                                       \
+                return __VA_ARGS__();                                           \
+            }                                                                   \
+            case DType::BFloat16: {                                             \
+                using scalar_t = BFloat16;                                      \
+                return __VA_ARGS__();                                           \
+            }                                                                   \
+            case DType::Int32: {                                                \
+                using scalar_t = int32_t;                                       \
+                return __VA_ARGS__();                                           \
+            }                                                                   \
+            case DType::Int64: {                                                \
+                using scalar_t = int64_t;                                       \
+                return __VA_ARGS__();                                           \
+            }                                                                   \
+            case DType::Int16: {                                                \
+                using scalar_t = int16_t;                                       \
+                return __VA_ARGS__();                                           \
+            }                                                                   \
+            case DType::Int8: {                                                 \
+                using scalar_t = int8_t;                                        \
+                return __VA_ARGS__();                                           \
+            }                                                                   \
+            case DType::UInt8: {                                                \
+                using scalar_t = uint8_t;                                       \
+                return __VA_ARGS__();                                           \
+            }                                                                   \
+            case DType::Bool: {                                                 \
+                using scalar_t = bool;                                          \
+                return __VA_ARGS__();                                           \
+            }                                                                   \
+            case DType::Complex64: {                                            \
+                using scalar_t = std::complex<float>;                           \
+                return __VA_ARGS__();                                           \
+            }                                                                   \
+            case DType::Complex128: {                                           \
+                using scalar_t = std::complex<double>;                          \
+                return __VA_ARGS__();                                           \
+            }                                                                   \
+            default:                                                            \
+                throw std::runtime_error(                                       \
+                    std::string(NAME) + ": unsupported dtype");                 \
+        }                                                                       \
+    }()
+
 } // namespace tenzor

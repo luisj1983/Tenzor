@@ -28,8 +28,9 @@ if(TENZOR_TEST_ALL_DEVICES)
 endif()
 
 # Custom function that wraps gtest_discover_tests
+# Supports optional LABELS parameter for CTest label-based filtering
 function(tenzor_discover_tests target)
-    cmake_parse_arguments(PARSE_ARGV 1 ARG "" "DISCOVERY_TIMEOUT;DISCOVERY_MODE" "PROPERTIES")
+    cmake_parse_arguments(PARSE_ARGV 1 ARG "" "DISCOVERY_TIMEOUT;DISCOVERY_MODE" "PROPERTIES;LABELS")
     set(TIMEOUT ${ARG_DISCOVERY_TIMEOUT})
     if(NOT TIMEOUT)
         set(TIMEOUT 60)
@@ -46,6 +47,11 @@ function(tenzor_discover_tests target)
         list(APPEND PROPS TIMEOUT ${TENZOR_TEST_TIMEOUT})
     endif()
 
+    # Inject LABELS if provided
+    if(ARG_LABELS)
+        list(APPEND PROPS LABELS "${ARG_LABELS}")
+    endif()
+
     # Now call gtest_discover_tests
     gtest_discover_tests(${target}
         DISCOVERY_TIMEOUT ${TIMEOUT}
@@ -54,12 +60,16 @@ function(tenzor_discover_tests target)
 endfunction()
 
 # Helper macro: create a test executable, link GTest, and register with CTest.
-# Usage: tenzor_add_test(NAME test_foo SOURCE unit/test_foo.cpp [LIBS extra_lib])
+# Usage: tenzor_add_test(NAME test_foo SOURCE unit/test_foo.cpp [LIBS extra_lib] [LABELS unit])
 macro(tenzor_add_test)
-    cmake_parse_arguments(ARG "" "NAME;SOURCE" "LIBS" ${ARGN})
+    cmake_parse_arguments(ARG "" "NAME;SOURCE" "LIBS;LABELS" ${ARGN})
     add_executable(${ARG_NAME} ${ARG_SOURCE})
     target_link_libraries(${ARG_NAME} PRIVATE tenzor_core GTest::gtest_main ${ARG_LIBS})
-    tenzor_discover_tests(${ARG_NAME} DISCOVERY_TIMEOUT 60)
+    if(ARG_LABELS)
+        tenzor_discover_tests(${ARG_NAME} DISCOVERY_TIMEOUT 60 LABELS "${ARG_LABELS}")
+    else()
+        tenzor_discover_tests(${ARG_NAME} DISCOVERY_TIMEOUT 60)
+    endif()
 endmacro()
 
 # ============================================================================
@@ -115,10 +125,9 @@ foreach(backend cuda rocm oneapi vulkan)
     endif()
 endforeach()
 
-# tenzor_unit_tests crashes during --gtest_list_tests (static destruction in linked
-# backends), so use add_test instead of gtest_discover_tests
-add_test(NAME tenzor_unit_tests COMMAND tenzor_unit_tests)
-set_tests_properties(tenzor_unit_tests PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT})
+# gtest_discover_tests enables individual test case discovery for better sharding
+# (Previously used add_test due to static destruction crash — now resolved)
+tenzor_discover_tests(tenzor_unit_tests DISCOVERY_TIMEOUT 120 LABELS "unit")
 
 # SIMD Benchmark tests (separate executable for benchmarking)
 add_executable(tenzor_simd_benchmark

@@ -1787,6 +1787,17 @@ void batched_matmul_bf16(
 // ============================================================================
 
 auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
+    // FP8 emulation: widen to Float32, GEMM, narrow back to FP8
+    // TODO: On Hopper (SM 9.0+), use cublas_fp8_gemm() for native FP8 Tensor Core support
+    if ((a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2) &&
+        (b.dtype() == DType::FP8_E4M3 || b.dtype() == DType::FP8_E5M2)) {
+        DType orig_dtype = a.dtype();
+        Tensor a_f32 = a.to(DType::Float32);
+        Tensor b_f32 = b.to(DType::Float32);
+        Tensor result_f32 = matmul_kernel(a_f32, b_f32, stream);
+        return result_f32.to(orig_dtype);
+    }
+
     // Make tensors contiguous if needed (does not break autograd chain)
     Tensor a_contig = a.is_contiguous() ? a : a.contiguous();
     Tensor b_contig = b.is_contiguous() ? b : b.contiguous();

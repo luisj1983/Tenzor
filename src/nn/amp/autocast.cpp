@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/nn/amp/autocast.hpp"
+#include "tenzor/nn/amp/autocast_interceptor.hpp"
 #include <unordered_set>
 #include <algorithm>
 
@@ -77,6 +78,9 @@ Autocast::Autocast(bool enabled, DType dtype, Device::Type device_type)
     if (enabled) {
         dtype_ = dtype;
         device_type_ = device_type;
+        // Push autocast interceptor onto the dispatch stack
+        DispatchInterceptorStack::push(nn::amp::make_autocast_interceptor());
+        pushed_interceptor_ = true;
     } else {
         dtype_ = std::nullopt;
         device_type_ = std::nullopt;
@@ -84,6 +88,11 @@ Autocast::Autocast(bool enabled, DType dtype, Device::Type device_type)
 }
 
 Autocast::~Autocast() {
+    // Pop autocast interceptor if we pushed one
+    if (pushed_interceptor_) {
+        DispatchInterceptorStack::pop();
+    }
+
     // Restore previous state
     enabled_ = prev_enabled_;
     dtype_ = prev_dtype_;

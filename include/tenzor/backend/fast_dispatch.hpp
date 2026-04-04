@@ -26,6 +26,7 @@
 #include "../ops/op_id.hpp"
 #include "../nn/amp/autocast.hpp"
 #include "dispatch_table.hpp"
+#include "dispatch_interceptor.hpp"
 #include "op_attributes.hpp"
 
 namespace tenzor {
@@ -205,13 +206,17 @@ inline std::vector<Tensor> dispatch(
     std::span<const Tensor> inputs,
     const OpAttributes& attrs = {})
 {
-    // Apply autocast if enabled (no-op when disabled — just a thread-local bool check)
-    auto casted = detail::autocast_inputs(op, inputs);
-    std::span<const Tensor> effective_inputs = casted.empty() ? inputs : std::span<const Tensor>(casted);
+    // Terminal: pure backend dispatch (autocast is handled by its own interceptor)
+    DispatchNext terminal = [](OpId o, std::span<const Tensor> ins,
+                               const OpAttributes& a) -> std::vector<Tensor> {
+        Device::Type device_type = get_dispatch_device(ins);
+        const auto& table = DispatchTableRegistry::get_table_const(device_type);
+        return table.dispatch(o, ins, a);
+    };
 
-    Device::Type device_type = get_dispatch_device(effective_inputs);
-    const auto& table = DispatchTableRegistry::get_table_const(device_type);
-    return table.dispatch(op, effective_inputs, attrs);
+    // Run through interceptor stack (zero overhead when stack is empty)
+    // When autocast is enabled, its interceptor is in the stack and handles casting.
+    return DispatchInterceptorStack::run(op, inputs, attrs, std::move(terminal));
 }
 
 /**
@@ -262,13 +267,16 @@ inline Tensor dispatch_single(
     std::span<const Tensor> inputs,
     const OpAttributes& attrs = {})
 {
-    // Apply autocast if enabled
-    auto casted = detail::autocast_inputs(op, inputs);
-    std::span<const Tensor> effective_inputs = casted.empty() ? inputs : std::span<const Tensor>(casted);
+    // Terminal: pure backend dispatch (autocast handled by interceptor stack)
+    DispatchNextSingle terminal = [](OpId o, std::span<const Tensor> ins,
+                                     const OpAttributes& a) -> Tensor {
+        Device::Type device_type = get_dispatch_device(ins);
+        const auto& table = DispatchTableRegistry::get_table_const(device_type);
+        return table.dispatch_single(o, ins, a);
+    };
 
-    Device::Type device_type = get_dispatch_device(effective_inputs);
-    const auto& table = DispatchTableRegistry::get_table_const(device_type);
-    return table.dispatch_single(op, effective_inputs, attrs);
+    // Run through interceptor stack (zero overhead when stack is empty)
+    return DispatchInterceptorStack::run_single(op, inputs, attrs, std::move(terminal));
 }
 
 /**
