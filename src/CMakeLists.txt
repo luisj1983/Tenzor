@@ -181,6 +181,7 @@ set(TENZOR_CORE_SOURCES
     jit/memory_planner.cpp
     jit/autotune.cpp
     jit/serialization.cpp
+    jit/codegen.cpp
     nn/compression/pruning.cpp
     nn/compression/distillation.cpp
     distributed/distributed.cpp
@@ -328,6 +329,14 @@ if(TENZOR_BUILD_CUDA)
     target_link_libraries(tenzor_core PRIVATE
         CUDA::cudart
     )
+
+    # Link NVRTC and CUDA Driver API for runtime kernel codegen
+    if(TARGET CUDA::nvrtc)
+        target_link_libraries(tenzor_core PRIVATE CUDA::nvrtc CUDA::cuda_driver)
+        message(STATUS "NVRTC found: runtime kernel codegen enabled")
+    else()
+        message(WARNING "NVRTC not found: runtime kernel codegen will use CPU fallback")
+    endif()
 
     # Link NCCL if available (uses cmake/FindNCCL.cmake)
     find_package(NCCL QUIET)
