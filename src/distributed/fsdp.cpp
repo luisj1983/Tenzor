@@ -335,14 +335,29 @@ auto FSDPUnit::all_gather_params() -> void {
     auto dtype = local_shard_.dtype();
     auto device = local_shard_.device();
 
+    // Mixed precision: cast shard to Float16 before communication for 2x bandwidth savings
+    Tensor comm_shard = local_shard_;
+    DType comm_dtype = dtype;
+    if (config_.mixed_precision && dtype == DType::Float32) {
+        comm_shard = local_shard_.to(DType::Float16);
+        comm_dtype = DType::Float16;
+    }
+
     // Allocate output tensors for all-gather (one per rank)
     std::vector<Tensor> gathered(ws);
     for (int i = 0; i < ws; ++i) {
-        gathered[i] = empty({static_cast<int64_t>(shard_numel_)}, dtype, device);
+        gathered[i] = empty({static_cast<int64_t>(shard_numel_)}, comm_dtype, device);
     }
 
     // All-gather: each rank sends its shard, receives all shards
-    pg_.all_gather(local_shard_, gathered);
+    pg_.all_gather(comm_shard, gathered);
+
+    // Cast back to original dtype after communication
+    if (config_.mixed_precision && dtype == DType::Float32) {
+        for (auto& g : gathered) {
+            g = g.to(DType::Float32);
+        }
+    }
 
     // Concatenate all shards into the flat parameter buffer
     // Total size is shard_numel_ * ws (may be padded beyond total_numel_)

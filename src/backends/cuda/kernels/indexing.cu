@@ -26,11 +26,9 @@
 #include <thrust/iterator/counting_iterator.h>
 #include "cuda_common.cuh"
 
+#include "tenzor/ops/creation.hpp"
+
 namespace tenzor {
-
-// Forward-declare: nvcc can't include creation.hpp (uses std::expected)
-auto zeros(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor;
-
 namespace cuda {
 
 // Centralized error checking

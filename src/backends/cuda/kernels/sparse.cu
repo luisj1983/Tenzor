@@ -25,11 +25,7 @@
 #include <string>
 #include <vector>
 
-// Forward-declare zeros to avoid including creation.hpp (which pulls in
-// loader.hpp using std::expected, unsupported by nvcc)
-namespace tenzor {
-auto zeros(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor;
-}
+#include "tenzor/ops/creation.hpp"
 
 namespace tenzor {
 namespace cuda {

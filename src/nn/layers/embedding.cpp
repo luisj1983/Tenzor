@@ -157,11 +157,12 @@ public:
             }
         }
 
-        // Sparse gradient path: build COO sparse tensor and convert to dense
-        // (full sparse autograd support is in Phase 12; for now, to_dense() ensures
-        //  compatibility with the dense autograd engine)
+        // Sparse gradient path: build COO sparse tensor.
+        // The sparse gradient is stored directly on the weight Variable via
+        // set_sparse_grad() for sparse-aware optimizers (e.g., SparseAdam).
+        // A dense version is also returned for compatibility with the dense engine.
         if (sparse_) {
-            // indices shape: [2, num_indices] (row=embedding_idx, col not used for 2D)
+            // indices shape: [1, num_indices] (row=embedding_idx)
             // values shape: [num_indices, embedding_dim]
             auto idx_tensor = zeros({1, num_indices}, DType::Int64);
             auto* idx_ptr = idx_tensor.data<int64_t>();
@@ -172,6 +173,12 @@ public:
             auto grad_values = grad_output.reshape({num_indices, embedding_dim_});
             auto sparse_grad = SparseTensor::sparse_coo(
                 idx_tensor, grad_values, {num_embeddings_, embedding_dim_});
+
+            // Store sparse gradient on the weight variable for sparse-aware optimizers
+            auto& weight_var = input_variables_[1];
+            weight_var.set_sparse_grad(sparse_grad);
+
+            // Convert to dense for the standard backward engine
             auto grad_weight = sparse_grad.to_dense();
 
             // Apply scale_grad_by_freq if needed
@@ -338,12 +345,21 @@ public:
     }
 
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
-        // Embedding backward uses scatter/index operations -- delegate to tensor backward and wrap results
+        // Embedding backward is index-based scatter (non-differentiable indices),
+        // so higher-order derivative through the scatter is zero.
+        // Delegate to tensor-level backward and wrap with requires_grad=true
+        // so the gradient of the gradient output is tracked.
         std::vector<Tensor> tensor_grads;
+        tensor_grads.reserve(grad_outputs.size());
         for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
         auto results = backward(std::move(tensor_grads));
         std::vector<Variable> var_results;
-        for (auto& t : results) var_results.emplace_back(t, false);
+        var_results.reserve(results.size());
+        // Input gradient (no grad needed - indices are non-differentiable)
+        // Weight gradient (tracked for higher-order)
+        for (size_t i = 0; i < results.size(); ++i) {
+            var_results.emplace_back(results[i], i > 0 && grad_outputs[0].requires_grad());
+        }
         return var_results;
     }
 

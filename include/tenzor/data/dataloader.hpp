@@ -9,6 +9,7 @@
 #include <atomic>
 #include <random>
 #include <algorithm>
+#include <functional>
 #include "dataset.hpp"
 
 namespace tenzor {
@@ -31,6 +32,15 @@ struct Batch {
 /**
  * @brief Configuration for DataLoader
  */
+/**
+ * @brief Custom collation function type.
+ *
+ * Takes a vector of (input, target) sample pairs and returns a single
+ * batched Batch. If not set, the default collation (tensor stacking)
+ * is used.
+ */
+using CollateFn = std::function<Batch(const std::vector<std::pair<Tensor, Tensor>>&)>;
+
 struct DataLoaderConfig {
     size_t batch_size = 1;        ///< Number of samples per batch
     bool shuffle = false;          ///< Whether to shuffle data each epoch
@@ -38,6 +48,7 @@ struct DataLoaderConfig {
     bool pin_memory = false;       ///< Pin memory for faster CUDA transfer
     bool drop_last = false;        ///< Drop last incomplete batch
     size_t prefetch_factor = 2;    ///< Number of batches to prefetch per worker
+    CollateFn collate_fn;          ///< Optional custom collation function
 
     DataLoaderConfig() = default;
 };

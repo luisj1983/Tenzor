@@ -260,6 +260,42 @@ private:
 };
 
 /**
+ * @brief KL-divergence observer for quantization calibration.
+ *
+ * Uses KL divergence between the reference floating-point distribution and
+ * the simulated quantized distribution to find the optimal clipping threshold.
+ * Generally produces better accuracy than min-max or percentile approaches,
+ * at the cost of higher calibration time.
+ *
+ * Algorithm:
+ * 1. Collect histogram of observed values
+ * 2. For each candidate threshold (from num_quantized_bins to num_bins):
+ *    a. Simulate quantization at that threshold
+ *    b. Compute KL(reference || quantized)
+ * 3. Select threshold that minimizes KL divergence
+ */
+class KLDivergenceObserver : public Observer {
+public:
+    explicit KLDivergenceObserver(int64_t num_bins = 2048, int64_t num_quantized_bins = 128);
+
+    auto observe(const Tensor& tensor) -> void override;
+    auto calculate_qparams(QuantDType dtype, QuantizationScheme scheme)
+        -> QuantizationParams override;
+    auto reset() -> void override;
+    auto has_data() const -> bool override { return total_count_ > 0; }
+
+private:
+    int64_t num_bins_;
+    int64_t num_quantized_bins_;
+    std::vector<float> histogram_;
+    float min_val_{0.0f};
+    float max_val_{0.0f};
+    int64_t total_count_{0};
+
+    auto find_optimal_threshold() const -> float;
+};
+
+/**
  * @brief Create appropriate observer for quantization scheme.
  *
  * Factory function that creates the right observer type based on the

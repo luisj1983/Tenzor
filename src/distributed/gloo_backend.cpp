@@ -8,6 +8,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/backend/dtype_dispatch.hpp"
 #include <stdexcept>
 #include <cstring>
 #include <algorithm>
@@ -884,6 +885,7 @@ auto GlooBackend::apply_reduce_op(Tensor& result, const Tensor& operand, ReduceO
 auto GlooBackend::ring_all_reduce(Tensor& tensor, ReduceOp op) -> void {
     // Ring all-reduce algorithm using direct memory operations
     // Works with any tensor shape by operating on contiguous memory
+    // Dtype-generic: supports Float32, Float64, and half types
 
     validate_cpu_accessible(tensor);
     Tensor cpu_tensor = get_cpu_buffer(tensor);
@@ -891,98 +893,97 @@ auto GlooBackend::ring_all_reduce(Tensor& tensor, ReduceOp op) -> void {
     int64_t total_elements = cpu_tensor.numel();
     int num_chunks = world_size_;
     size_t chunk_size = (total_elements + num_chunks - 1) / num_chunks;
+    size_t elem_size = dtype_size(cpu_tensor.dtype());
 
-    // Get direct pointer to contiguous data
-    auto* data_ptr = static_cast<float*>(cpu_tensor.data_ptr());
+    TENZOR_DISPATCH_FLOATING_TYPES(cpu_tensor.dtype(), "ring_all_reduce", [&] {
+        auto* data_ptr = static_cast<scalar_t*>(cpu_tensor.data_ptr());
 
-    // Temporary buffer for receiving chunks
-    std::vector<float> recv_buffer(chunk_size);
+        // Reduce-scatter phase: reduce chunks in a ring pattern
+        for (int i = 0; i < world_size_ - 1; ++i) {
+            int send_chunk_idx = (rank_ - i + world_size_) % world_size_;
+            int recv_chunk_idx = (rank_ - i - 1 + world_size_) % world_size_;
 
-    // Reduce-scatter phase: reduce chunks in a ring pattern
-    for (int i = 0; i < world_size_ - 1; ++i) {
-        int send_chunk_idx = (rank_ - i + world_size_) % world_size_;
-        int recv_chunk_idx = (rank_ - i - 1 + world_size_) % world_size_;
+            int send_rank = (rank_ + 1) % world_size_;
+            int recv_rank = (rank_ - 1 + world_size_) % world_size_;
 
-        int send_rank = (rank_ + 1) % world_size_;
-        int recv_rank = (rank_ - 1 + world_size_) % world_size_;
+            // Calculate chunk boundaries
+            size_t send_start = send_chunk_idx * chunk_size;
+            size_t send_count = std::min(chunk_size, static_cast<size_t>(total_elements - send_start));
 
-        // Calculate chunk boundaries
-        size_t send_start = send_chunk_idx * chunk_size;
-        size_t send_count = std::min(chunk_size, static_cast<size_t>(total_elements - send_start));
+            size_t recv_start = recv_chunk_idx * chunk_size;
+            size_t recv_count = std::min(chunk_size, static_cast<size_t>(total_elements - recv_start));
 
-        size_t recv_start = recv_chunk_idx * chunk_size;
-        size_t recv_count = std::min(chunk_size, static_cast<size_t>(total_elements - recv_start));
+            if (send_start < static_cast<size_t>(total_elements) && recv_start < static_cast<size_t>(total_elements)) {
+                // Use tensor-based send/recv buffers (dtype-safe)
+                Tensor send_chunk = zeros({static_cast<int64_t>(send_count)}, cpu_tensor.dtype(), cpu_tensor.device());
+                std::memcpy(send_chunk.data_ptr(), data_ptr + send_start, send_count * elem_size);
 
-        if (send_start < static_cast<size_t>(total_elements) && recv_start < static_cast<size_t>(total_elements)) {
-            // Create tensor views for send/recv
-            Tensor send_chunk = zeros({static_cast<int64_t>(send_count)}, cpu_tensor.dtype(), cpu_tensor.device());
-            std::memcpy(send_chunk.data_ptr(), data_ptr + send_start, send_count * sizeof(float));
+                Tensor recv_chunk = zeros({static_cast<int64_t>(recv_count)}, cpu_tensor.dtype(), cpu_tensor.device());
 
-            Tensor recv_chunk = zeros({static_cast<int64_t>(recv_count)}, cpu_tensor.dtype(), cpu_tensor.device());
+                // Send/receive
+                send_tensor(send_chunk, send_rank);
+                recv_tensor(recv_chunk, recv_rank);
 
-            // Send/receive
-            send_tensor(send_chunk, send_rank);
-            recv_tensor(recv_chunk, recv_rank);
-
-            // Reduce received data into our chunk
-            auto* recv_data = static_cast<float*>(recv_chunk.data_ptr());
-            for (size_t j = 0; j < recv_count; ++j) {
-                switch (op) {
-                    case ReduceOp::SUM:
-                    case ReduceOp::AVG:
-                        data_ptr[recv_start + j] += recv_data[j];
-                        break;
-                    case ReduceOp::PRODUCT:
-                        data_ptr[recv_start + j] *= recv_data[j];
-                        break;
-                    case ReduceOp::MIN:
-                        data_ptr[recv_start + j] = std::min(data_ptr[recv_start + j], recv_data[j]);
-                        break;
-                    case ReduceOp::MAX:
-                        data_ptr[recv_start + j] = std::max(data_ptr[recv_start + j], recv_data[j]);
-                        break;
+                // Reduce received data into our chunk
+                auto* recv_data = static_cast<scalar_t*>(recv_chunk.data_ptr());
+                for (size_t j = 0; j < recv_count; ++j) {
+                    switch (op) {
+                        case ReduceOp::SUM:
+                        case ReduceOp::AVG:
+                            data_ptr[recv_start + j] += recv_data[j];
+                            break;
+                        case ReduceOp::PRODUCT:
+                            data_ptr[recv_start + j] *= recv_data[j];
+                            break;
+                        case ReduceOp::MIN:
+                            data_ptr[recv_start + j] = std::min(data_ptr[recv_start + j], recv_data[j]);
+                            break;
+                        case ReduceOp::MAX:
+                            data_ptr[recv_start + j] = std::max(data_ptr[recv_start + j], recv_data[j]);
+                            break;
+                    }
                 }
             }
         }
-    }
 
-    // All-gather phase: distribute reduced chunks to all nodes
-    for (int i = 0; i < world_size_ - 1; ++i) {
-        int send_chunk_idx = (rank_ - i + 1 + world_size_) % world_size_;
-        int recv_chunk_idx = (rank_ - i + world_size_) % world_size_;
+        // All-gather phase: distribute reduced chunks to all nodes
+        for (int i = 0; i < world_size_ - 1; ++i) {
+            int send_chunk_idx = (rank_ - i + 1 + world_size_) % world_size_;
+            int recv_chunk_idx = (rank_ - i + world_size_) % world_size_;
 
-        int send_rank = (rank_ + 1) % world_size_;
-        int recv_rank = (rank_ - 1 + world_size_) % world_size_;
+            int send_rank = (rank_ + 1) % world_size_;
+            int recv_rank = (rank_ - 1 + world_size_) % world_size_;
 
-        // Calculate chunk boundaries
-        size_t send_start = send_chunk_idx * chunk_size;
-        size_t send_count = std::min(chunk_size, static_cast<size_t>(total_elements - send_start));
+            // Calculate chunk boundaries
+            size_t send_start = send_chunk_idx * chunk_size;
+            size_t send_count = std::min(chunk_size, static_cast<size_t>(total_elements - send_start));
 
-        size_t recv_start = recv_chunk_idx * chunk_size;
-        size_t recv_count = std::min(chunk_size, static_cast<size_t>(total_elements - recv_start));
+            size_t recv_start = recv_chunk_idx * chunk_size;
+            size_t recv_count = std::min(chunk_size, static_cast<size_t>(total_elements - recv_start));
 
-        if (send_start < static_cast<size_t>(total_elements) && recv_start < static_cast<size_t>(total_elements)) {
-            // Create tensor views for send/recv
-            Tensor send_chunk = zeros({static_cast<int64_t>(send_count)}, cpu_tensor.dtype(), cpu_tensor.device());
-            std::memcpy(send_chunk.data_ptr(), data_ptr + send_start, send_count * sizeof(float));
+            if (send_start < static_cast<size_t>(total_elements) && recv_start < static_cast<size_t>(total_elements)) {
+                Tensor send_chunk = zeros({static_cast<int64_t>(send_count)}, cpu_tensor.dtype(), cpu_tensor.device());
+                std::memcpy(send_chunk.data_ptr(), data_ptr + send_start, send_count * elem_size);
 
-            Tensor recv_chunk = zeros({static_cast<int64_t>(recv_count)}, cpu_tensor.dtype(), cpu_tensor.device());
+                Tensor recv_chunk = zeros({static_cast<int64_t>(recv_count)}, cpu_tensor.dtype(), cpu_tensor.device());
 
-            // Send/receive
-            send_tensor(send_chunk, send_rank);
-            recv_tensor(recv_chunk, recv_rank);
+                // Send/receive
+                send_tensor(send_chunk, send_rank);
+                recv_tensor(recv_chunk, recv_rank);
 
-            // Copy received data to our buffer
-            std::memcpy(data_ptr + recv_start, recv_chunk.data_ptr(), recv_count * sizeof(float));
+                // Copy received data to our buffer
+                std::memcpy(data_ptr + recv_start, recv_chunk.data_ptr(), recv_count * elem_size);
+            }
         }
-    }
 
-    // Handle AVG operation
-    if (op == ReduceOp::AVG) {
-        for (int64_t i = 0; i < total_elements; ++i) {
-            data_ptr[i] /= static_cast<float>(world_size_);
+        // Handle AVG operation
+        if (op == ReduceOp::AVG) {
+            scalar_t divisor = static_cast<scalar_t>(world_size_);
+            for (int64_t i = 0; i < total_elements; ++i) {
+                data_ptr[i] /= divisor;
+            }
         }
-    }
+    });
 
     // Copy back to original device if needed
     if (tensor.device().type != Device::Type::CPU) {

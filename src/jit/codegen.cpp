@@ -230,7 +230,15 @@ auto CompiledKernel::launch(const std::vector<const void*>& input_ptrs,
         throw std::runtime_error("CompiledKernel::launch: kernel not compiled");
     }
 
-    int block_size = 256;
+    // Adaptive block size selection based on problem size.
+    // Small tensors benefit from fewer threads (less launch overhead),
+    // while large tensors need more threads for full GPU occupancy.
+    int block_size;
+    if (numel <= 256) block_size = 64;
+    else if (numel <= 4096) block_size = 128;
+    else if (numel <= 65536) block_size = 256;
+    else block_size = 512;
+
     int grid_size = static_cast<int>((numel + block_size - 1) / block_size);
     if (grid_size > 65535) grid_size = 65535;
 

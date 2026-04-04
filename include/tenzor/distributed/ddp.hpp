@@ -10,6 +10,7 @@
 #pragma once
 
 #include "distributed.hpp"
+#include "gradient_compression.hpp"
 #include "../nn/module.hpp"
 #include "../autograd/variable.hpp"
 #include <vector>
@@ -247,6 +248,18 @@ public:
     auto reset_comm_stats() -> void { comm_stats_ = CommStats{}; }
 
     /**
+     * @brief Set gradient compressor for bandwidth-efficient all-reduce.
+     *
+     * When set, gradients are compressed before all-reduce and decompressed
+     * afterwards. Pass nullptr to disable compression.
+     *
+     * @param compressor Compressor instance (DDP takes ownership)
+     */
+    auto set_gradient_compressor(std::unique_ptr<GradientCompressor> compressor) -> void {
+        compressor_ = std::move(compressor);
+    }
+
+    /**
      * @brief Reset all bucket ready states for the next iteration.
      *
      * Called automatically at the start of forward() when auto-sync is
@@ -262,6 +275,9 @@ private:
     bool find_unused_parameters_{false};
     bool logged_unused_warning_{false};
     CommStats comm_stats_;
+
+    /** @brief Optional gradient compressor for bandwidth reduction */
+    std::unique_ptr<GradientCompressor> compressor_;
 
     /** @brief Maps parameter data_ptr to its bucket index for O(1) hook lookup */
     std::unordered_map<const void*, size_t> param_to_bucket_;

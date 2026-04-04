@@ -1,6 +1,7 @@
 #include "tenzor/autograd/graph_viz.hpp"
 #include "tenzor/autograd/function.hpp"
 #include <sstream>
+#include <fstream>
 #include <typeinfo>
 #include <unordered_set>
 #include <queue>
@@ -8,7 +9,8 @@
 namespace tenzor {
 
 auto make_dot(const Variable& root,
-              const std::unordered_map<std::string, Variable>& params) -> std::string {
+              const std::unordered_map<std::string, Variable>& params,
+              const GraphVizOptions& options) -> std::string {
     std::ostringstream out;
     out << "digraph computation_graph {\n";
     out << "  rankdir=BT;\n";  // Bottom to top (loss at top)
@@ -89,9 +91,27 @@ auto make_dot(const Variable& root,
                     var_shape_str += std::to_string(var_shape[i]);
                 }
 
+                std::string extra_info;
+                if (options.show_dtypes) {
+                    extra_info += "\\n" + std::string(dtype_name(input_var.dtype()));
+                }
+                if (options.show_memory_usage) {
+                    size_t bytes = input_var.tensor().numel() * dtype_size(input_var.dtype());
+                    if (bytes >= 1024 * 1024) {
+                        extra_info += "\\n" + std::to_string(bytes / (1024 * 1024)) + " MB";
+                    } else if (bytes >= 1024) {
+                        extra_info += "\\n" + std::to_string(bytes / 1024) + " KB";
+                    } else {
+                        extra_info += "\\n" + std::to_string(bytes) + " B";
+                    }
+                }
+                if (options.show_sparse_annotations && input_var.has_sparse_grad()) {
+                    extra_info += "\\n[sparse grad]";
+                }
+
                 out << "  var_" << var_id
                     << " [label=\"" << label << "\\n[" << var_shape_str
-                    << "]\", fillcolor=\"#ffcccc\", shape=ellipse];\n";
+                    << "]" << extra_info << "\", fillcolor=\"#ffcccc\", shape=ellipse];\n";
                 out << "  var_" << var_id << " -> node_"
                     << reinterpret_cast<uintptr_t>(fn.get()) << ";\n";
             }
@@ -100,6 +120,14 @@ auto make_dot(const Variable& root,
 
     out << "}\n";
     return out.str();
+}
+
+auto save_dot(const std::string& dot, const std::string& path) -> void {
+    std::ofstream file(path);
+    if (!file.is_open()) {
+        throw std::runtime_error("Failed to open file for writing: " + path);
+    }
+    file << dot;
 }
 
 } // namespace tenzor

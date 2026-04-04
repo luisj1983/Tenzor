@@ -1848,8 +1848,18 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return get_vulkan_backend()->dispatchLinalgEig(inputs[0]);
     });
 
-    // Flash Attention — composed from existing matmul + softmax shaders (not fused).
+    // Flash Attention — composed from existing matmul + softmax shaders.
     // Both forward and backward are fully GPU-based using composed Vulkan dispatches.
+    //
+    // FUTURE OPTIMIZATION: Replace with a single fused SPIR-V compute shader that
+    // performs Q*K^T → scale → causal mask → online softmax → probs*V entirely in
+    // workgroup shared memory, eliminating intermediate global memory traffic.
+    // This would require:
+    //   1. A tiled algorithm processing blocks of Q rows against K/V columns
+    //   2. Shared memory for the attention row (seq_len x tile_size)
+    //   3. Online softmax (numerically stable, single-pass) within each tile
+    //   4. Barrier synchronization between softmax and V multiplication
+    // Expected speedup: 2-4x for long sequences (memory-bandwidth-bound).
     table.register_kernel(OpId::FlashAttention,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));

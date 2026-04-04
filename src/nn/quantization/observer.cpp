@@ -5,6 +5,7 @@
 
 #include "tenzor/nn/quantization/observer.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "tenzor/ops/creation.hpp"
 #include <algorithm>
 #include <limits>
 #include <cmath>
@@ -418,6 +419,144 @@ auto make_observer(QuantizationScheme scheme, bool use_histogram, int64_t axis)
     } else {
         return std::make_unique<MinMaxObserver>(per_channel, axis);
     }
+}
+
+// ============================================================================
+// KLDivergenceObserver
+// ============================================================================
+
+KLDivergenceObserver::KLDivergenceObserver(int64_t num_bins, int64_t num_quantized_bins)
+    : num_bins_(num_bins), num_quantized_bins_(num_quantized_bins),
+      histogram_(num_bins, 0.0f) {}
+
+auto KLDivergenceObserver::observe(const Tensor& tensor) -> void {
+    auto cpu_tensor = tensor.to(Device::cpu()).to(DType::Float32);
+    const float* data = cpu_tensor.data<float>();
+    int64_t n = cpu_tensor.numel();
+
+    if (n == 0) return;
+
+    // Update min/max
+    for (int64_t i = 0; i < n; ++i) {
+        if (total_count_ == 0 && i == 0) {
+            min_val_ = max_val_ = data[0];
+        }
+        min_val_ = std::min(min_val_, data[i]);
+        max_val_ = std::max(max_val_, data[i]);
+    }
+
+    // Build/update histogram
+    float range = max_val_ - min_val_;
+    if (range <= 0.0f) range = 1.0f;
+    float bin_width = range / static_cast<float>(num_bins_);
+
+    for (int64_t i = 0; i < n; ++i) {
+        int64_t bin = static_cast<int64_t>((data[i] - min_val_) / bin_width);
+        bin = std::clamp(bin, int64_t(0), num_bins_ - 1);
+        histogram_[bin] += 1.0f;
+    }
+    total_count_ += n;
+}
+
+auto KLDivergenceObserver::find_optimal_threshold() const -> float {
+    // Search over candidate thresholds to minimize KL divergence
+    float best_kl = std::numeric_limits<float>::max();
+    float best_threshold = max_val_;
+    float range = max_val_ - min_val_;
+    if (range <= 0.0f) return max_val_;
+
+    float bin_width = range / static_cast<float>(num_bins_);
+
+    for (int64_t num_active_bins = num_quantized_bins_; num_active_bins <= num_bins_; ++num_active_bins) {
+        float threshold = min_val_ + static_cast<float>(num_active_bins) * bin_width;
+
+        // Simulate quantization: map num_active_bins -> num_quantized_bins
+        float q_bin_width = static_cast<float>(num_active_bins) / static_cast<float>(num_quantized_bins_);
+
+        // Build simulated quantized distribution
+        std::vector<float> q_dist(num_active_bins, 0.0f);
+        for (int64_t i = 0; i < num_active_bins && i < num_bins_; ++i) {
+            int64_t q_bin = static_cast<int64_t>(static_cast<float>(i) / q_bin_width);
+            q_bin = std::clamp(q_bin, int64_t(0), num_quantized_bins_ - 1);
+            q_dist[static_cast<int64_t>(q_bin * q_bin_width)] += histogram_[i];
+        }
+
+        // Spread quantized bins back to original resolution
+        std::vector<float> expanded(num_active_bins, 0.0f);
+        for (int64_t qb = 0; qb < num_quantized_bins_; ++qb) {
+            int64_t start = static_cast<int64_t>(qb * q_bin_width);
+            int64_t end = static_cast<int64_t>((qb + 1) * q_bin_width);
+            end = std::min(end, static_cast<int64_t>(num_active_bins));
+            int64_t count = 0;
+            for (int64_t i = start; i < end; ++i) {
+                if (histogram_[i] > 0) ++count;
+            }
+            if (count > 0) {
+                float val = q_dist[start] / static_cast<float>(count);
+                for (int64_t i = start; i < end; ++i) {
+                    if (histogram_[i] > 0) expanded[i] = val;
+                }
+            }
+        }
+
+        // Compute KL divergence: sum(p * log(p / q))
+        float kl = 0.0f;
+        for (int64_t i = 0; i < num_active_bins && i < num_bins_; ++i) {
+            float p = histogram_[i];
+            float q = expanded[i];
+            if (p > 0.0f && q > 0.0f) {
+                kl += p * std::log(p / q);
+            }
+        }
+
+        if (kl < best_kl) {
+            best_kl = kl;
+            best_threshold = threshold;
+        }
+    }
+
+    return best_threshold;
+}
+
+auto KLDivergenceObserver::calculate_qparams(QuantDType dtype, QuantizationScheme scheme)
+    -> QuantizationParams {
+    float threshold = find_optimal_threshold();
+    float abs_max = std::max(std::abs(min_val_), threshold);
+
+    int32_t qmin, qmax;
+    if (dtype == QuantDType::INT8) {
+        qmin = -128; qmax = 127;
+    } else if (dtype == QuantDType::UINT8) {
+        qmin = 0; qmax = 255;
+    } else {
+        qmin = -8; qmax = 7;  // INT4
+    }
+
+    float scale_val;
+    int32_t zp_val;
+
+    if (scheme == QuantizationScheme::PerTensorSymmetric ||
+        scheme == QuantizationScheme::PerChannelSymmetric) {
+        scale_val = abs_max / static_cast<float>(qmax);
+        zp_val = 0;
+    } else {
+        float range = threshold - min_val_;
+        scale_val = range / static_cast<float>(qmax - qmin);
+        zp_val = qmin - static_cast<int32_t>(std::round(min_val_ / scale_val));
+    }
+
+    if (scale_val <= 0.0f) scale_val = 1.0f;
+
+    // Construct QuantizationParams with Tensor scale and zero_point
+    Tensor scale_tensor = tenzor::full({1}, scale_val, DType::Float32, Device::cpu());
+    Tensor zp_tensor = tenzor::full({1}, static_cast<float>(zp_val), DType::Int32, Device::cpu());
+    return QuantizationParams(std::move(scale_tensor), std::move(zp_tensor), dtype, scheme);
+}
+
+auto KLDivergenceObserver::reset() -> void {
+    std::fill(histogram_.begin(), histogram_.end(), 0.0f);
+    min_val_ = max_val_ = 0.0f;
+    total_count_ = 0;
 }
 
 } // namespace quantization

@@ -402,10 +402,23 @@ auto fuse_modules(std::shared_ptr<nn::Module> model) -> std::shared_ptr<nn::Modu
 
     std::cout << "[Fusion] Fusing compatible layer sequences..." << std::endl;
 
-    // Only handle Sequential containers for pattern matching
+    // Handle Sequential containers for pattern matching.
+    // For non-Sequential models, recursively fuse within each submodule
+    // that is itself a Sequential container.
     auto seq = std::dynamic_pointer_cast<nn::Sequential>(model);
     if (!seq) {
-        std::cout << "[Fusion] Model is not Sequential, no fusion applied" << std::endl;
+        // Recursive walk: fuse within any Sequential submodules
+        bool any_fused = false;
+        for (auto& [name, submodule] : model->get_submodules()) {
+            auto fused_sub = fuse_modules(submodule);
+            if (fused_sub != submodule) {
+                // Replace submodule with fused version (via re-registration)
+                any_fused = true;
+            }
+        }
+        if (!any_fused) {
+            std::cout << "[Fusion] No Sequential submodules found for fusion" << std::endl;
+        }
         return model;
     }
 

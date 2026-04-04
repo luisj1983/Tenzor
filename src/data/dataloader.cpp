@@ -313,7 +313,7 @@ void DataLoader::worker_thread(size_t worker_id) {
             }
 
             // Collate into batch
-            Batch batch = collate_samples(samples);
+            Batch batch = config_.collate_fn ? config_.collate_fn(samples) : collate_samples(samples);
 
             // Add to queue (with backpressure)
             {
@@ -410,7 +410,7 @@ auto DataLoader::get_next_batch_single_threaded() -> Batch {
 
     current_index_++;
 
-    return collate_samples(samples);
+    return config_.collate_fn ? config_.collate_fn(samples) : collate_samples(samples);
 }
 
 // Get next batch (multi-threaded)

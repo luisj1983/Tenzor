@@ -165,7 +165,8 @@ public:
      *   - LogSoftmaxBackward, SoftmaxBackward
      *   - DetBackward, InvBackward, SolveBackward, NormBackward_Linalg, SlogdetBackward
      *   - CholeskyBackward, SvdBackward, QrBackward, EighBackward, EigvalshBackward
-     *   - SpMMBackward, SpMVBackward
+     *   - SpMMBackward, SpMVBackward, SparseAddBackward
+     *   - MedianBackward, ModeBackward
      *
      * Ops with full backward_with_variables using Variable-level scatter_add:
      *   - GatherBackward, IndexSelectBackward, IndexBackward, ScatterAddBackward
@@ -1985,6 +1986,54 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "SparseAddBackward"; }
+};
+
+/**
+ * @brief Backward function for sparse-sparse matrix multiplication (SpGEMM).
+ *
+ * For C = A @ B where A and B are sparse:
+ * - grad_A = grad_C @ B^T (sparse)
+ * - grad_B = A^T @ grad_C (sparse)
+ * Both A and B are treated as constants (sparse matrices are not differentiable
+ * through the sparsity pattern), so gradients flow through dense conversions.
+ */
+class SpGEMMBackward : public Function {
+public:
+    void set_sparse_a_transposed(SparseTensor at) { sparse_a_t_.emplace(std::move(at)); }
+    void set_sparse_b_transposed(SparseTensor bt) { sparse_b_t_.emplace(std::move(bt)); }
+
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "SpGEMMBackward"; }
+
+private:
+    std::optional<SparseTensor> sparse_a_t_;  ///< A^T in sparse format
+    std::optional<SparseTensor> sparse_b_t_;  ///< B^T in sparse format
+};
+
+/**
+ * @brief Backward function for sparse triangular solve.
+ *
+ * For x = L^{-1} @ b (lower triangular solve):
+ * - grad_b = L^{-T} @ grad_x
+ * - L is not differentiated (treated as constant sparse matrix).
+ */
+class SparseTriSolveBackward : public Function {
+public:
+    void set_sparse_l_transposed(SparseTensor lt) { sparse_l_t_.emplace(std::move(lt)); }
+    void set_upper(bool u) { upper_ = u; }
+
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "SparseTriSolveBackward"; }
+
+private:
+    std::optional<SparseTensor> sparse_l_t_;  ///< L^T (or U^T) in sparse format
+    bool upper_{false};
 };
 
 // ============================================================================

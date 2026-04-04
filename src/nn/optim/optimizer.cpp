@@ -24,6 +24,19 @@ Optimizer::Optimizer(std::vector<ParamGroup> groups)
 
 auto Optimizer::step() -> void {
     clip_gradients_();
+
+    // Coalesce sparse gradients before the optimizer step.
+    // This ensures sparse-aware optimizers receive coalesced indices
+    // (no duplicate indices), which is required for correct updates.
+    for (auto& param : parameters_) {
+        if (param && param->has_sparse_grad()) {
+            auto& sg = param->mutable_sparse_grad().value();
+            if (!sg.is_coalesced()) {
+                sg = sg.coalesce();
+            }
+        }
+    }
+
     step_impl();
 }
 
@@ -65,7 +78,14 @@ auto Optimizer::param_groups() const -> const std::vector<ParamGroup>& {
 
 auto Optimizer::zero_grad() -> void {
     for (auto& param : parameters_) {
-        if (param && param->has_grad()) {
+        if (!param) continue;
+
+        // Clear sparse gradient if present
+        if (param->has_sparse_grad()) {
+            param->clear_sparse_grad();
+        }
+
+        if (param->has_grad()) {
             auto& grad = param->mutable_grad().value();
 
             // CPU path: use direct memset for maximum performance

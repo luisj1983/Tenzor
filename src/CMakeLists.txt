@@ -143,6 +143,8 @@ set(TENZOR_CORE_SOURCES
     quantization/module_conversion.cpp
     parallel/threadpool.cpp
     data/dataloader.cpp
+    data/sampler.cpp
+    data/transforms.cpp
     models/resnet.cpp
     models/bert.cpp
     models/roberta.cpp
@@ -182,6 +184,7 @@ set(TENZOR_CORE_SOURCES
     jit/autotune.cpp
     jit/serialization.cpp
     jit/codegen.cpp
+    jit/fusion_cost_model.cpp
     nn/compression/pruning.cpp
     nn/compression/distillation.cpp
     distributed/distributed.cpp

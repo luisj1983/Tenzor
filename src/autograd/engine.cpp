@@ -1,5 +1,6 @@
 #include "tenzor/autograd/engine.hpp"
 #include "tenzor/autograd/anomaly_mode.hpp"
+#include "tenzor/autograd/profiler.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
@@ -289,44 +290,52 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
             // Compute gradients for inputs
             std::vector<Tensor> input_grads;
 
-            if (create_graph) {
-                // Higher-order gradient path: use backward_with_variables
-                // which operates on Variables so the backward computation itself
-                // is tracked by autograd (enabling gradients of gradients).
-                std::vector<Variable> var_grad_outputs;
-                var_grad_outputs.reserve(grad_outputs.size());
-                for (auto& g : grad_outputs) {
-                    // Wrap the gradient tensor as a Variable with requires_grad=true
-                    // so that operations on it during backward are tracked
-                    var_grad_outputs.emplace_back(g, true);
+            {
+                // Optional profiling: time the backward function call
+                std::optional<BackwardTimer> _profiler_timer;
+                if (AutogradProfiler::instance().is_enabled()) {
+                    _profiler_timer.emplace(function->name());
                 }
 
-                auto var_input_grads = function->backward_with_variables(var_grad_outputs);
-
-                // Check for stub ops that override backward_with_variables()
-                // but only delegate to backward() — second derivatives are zero.
-                if (function->is_higher_order_stub()) {
-                    auto mode = get_higher_order_grad_mode();
-                    if (mode == HigherOrderGradMode::Error) {
-                        throw std::runtime_error(
-                            "create_graph=true but '" + function->name() +
-                            "' is a higher-order stub (second derivatives are zero). "
-                            "Use set_higher_order_grad_mode(Warn) to allow this.");
+                if (create_graph) {
+                    // Higher-order gradient path: use backward_with_variables
+                    // which operates on Variables so the backward computation itself
+                    // is tracked by autograd (enabling gradients of gradients).
+                    std::vector<Variable> var_grad_outputs;
+                    var_grad_outputs.reserve(grad_outputs.size());
+                    for (auto& g : grad_outputs) {
+                        // Wrap the gradient tensor as a Variable with requires_grad=true
+                        // so that operations on it during backward are tracked
+                        var_grad_outputs.emplace_back(g, true);
                     }
-                    detail::increment_higher_order_disconnection_count();
-                }
 
-                // Extract the underlying tensors for accumulation, but the Variables
-                // in var_input_grads have grad_fn set from the Variable operations
-                // used in backward_with_variables, enabling higher-order differentiation
-                input_grads.reserve(var_input_grads.size());
-                for (auto& vg : var_input_grads) {
-                    input_grads.push_back(vg.tensor());
+                    auto var_input_grads = function->backward_with_variables(var_grad_outputs);
+
+                    // Check for stub ops that override backward_with_variables()
+                    // but only delegate to backward() — second derivatives are zero.
+                    if (function->is_higher_order_stub()) {
+                        auto mode = get_higher_order_grad_mode();
+                        if (mode == HigherOrderGradMode::Error) {
+                            throw std::runtime_error(
+                                "create_graph=true but '" + function->name() +
+                                "' is a higher-order stub (second derivatives are zero). "
+                                "Use set_higher_order_grad_mode(Warn) to allow this.");
+                        }
+                        detail::increment_higher_order_disconnection_count();
+                    }
+
+                    // Extract the underlying tensors for accumulation, but the Variables
+                    // in var_input_grads have grad_fn set from the Variable operations
+                    // used in backward_with_variables, enabling higher-order differentiation
+                    input_grads.reserve(var_input_grads.size());
+                    for (auto& vg : var_input_grads) {
+                        input_grads.push_back(vg.tensor());
+                    }
+                } else {
+                    // Standard backward path: raw Tensor operations
+                    input_grads = function->backward(grad_outputs);
                 }
-            } else {
-                // Standard backward path: raw Tensor operations
-                input_grads = function->backward(grad_outputs);
-            }
+            } // _profiler_timer destroyed here, records elapsed time
 
             // Check for NaN/Inf in computed gradients when anomaly detection is on
             check_for_anomaly(input_grads, function.get());

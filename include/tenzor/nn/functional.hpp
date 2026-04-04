@@ -131,6 +131,136 @@ auto conv2d(const Variable& input, const Variable& weight,
             std::pair<int64_t, int64_t> dilation = {1, 1},
             int64_t groups = 1) -> Variable;
 
+/**
+ * @brief Functional 1D convolution
+ *
+ * Applies a 1D convolution over an input signal [N, C_in, L].
+ *
+ * @param input Input tensor [N, C_in, L]
+ * @param weight Convolution filters [C_out, C_in/groups, kL]
+ * @param bias Optional bias [C_out]
+ * @param stride Stride of the convolution
+ * @param padding Zero-padding added to both sides
+ * @param dilation Spacing between kernel elements
+ * @param groups Number of blocked connections
+ */
+auto conv1d(const Variable& input, const Variable& weight,
+            const std::optional<Variable>& bias = std::nullopt,
+            int64_t stride = 1,
+            int64_t padding = 0,
+            int64_t dilation = 1,
+            int64_t groups = 1) -> Variable;
+
+/**
+ * @brief Functional 3D convolution
+ *
+ * Applies a 3D convolution over an input signal [N, C_in, D, H, W].
+ *
+ * @param input Input tensor [N, C_in, D, H, W]
+ * @param weight Convolution filters [C_out, C_in/groups, kD, kH, kW]
+ * @param bias Optional bias [C_out]
+ * @param stride Stride of the convolution (D, H, W)
+ * @param padding Zero-padding added to both sides (D, H, W)
+ * @param dilation Spacing between kernel elements (D, H, W)
+ * @param groups Number of blocked connections
+ */
+auto conv3d(const Variable& input, const Variable& weight,
+            const std::optional<Variable>& bias = std::nullopt,
+            std::tuple<int64_t, int64_t, int64_t> stride = {1, 1, 1},
+            std::tuple<int64_t, int64_t, int64_t> padding = {0, 0, 0},
+            std::tuple<int64_t, int64_t, int64_t> dilation = {1, 1, 1},
+            int64_t groups = 1) -> Variable;
+
+/**
+ * @brief Functional transposed 1D convolution
+ *
+ * @param input Input tensor [N, C_in, L]
+ * @param weight Convolution filters [C_in, C_out/groups, kL]
+ * @param bias Optional bias [C_out]
+ * @param stride Stride of the convolution
+ * @param padding Zero-padding added to both sides
+ * @param output_padding Additional size added to output
+ * @param groups Number of blocked connections
+ * @param dilation Spacing between kernel elements
+ */
+auto conv_transpose1d(const Variable& input, const Variable& weight,
+                      const std::optional<Variable>& bias = std::nullopt,
+                      int64_t stride = 1,
+                      int64_t padding = 0,
+                      int64_t output_padding = 0,
+                      int64_t groups = 1,
+                      int64_t dilation = 1) -> Variable;
+
+/**
+ * @brief Functional transposed 2D convolution
+ *
+ * @param input Input tensor [N, C_in, H, W]
+ * @param weight Convolution filters [C_in, C_out/groups, kH, kW]
+ * @param bias Optional bias [C_out]
+ * @param stride Stride of the convolution (H, W)
+ * @param padding Zero-padding added to both sides (H, W)
+ * @param output_padding Additional size added to output (H, W)
+ * @param groups Number of blocked connections
+ * @param dilation Spacing between kernel elements (H, W)
+ */
+auto conv_transpose2d(const Variable& input, const Variable& weight,
+                      const std::optional<Variable>& bias = std::nullopt,
+                      std::pair<int64_t, int64_t> stride = {1, 1},
+                      std::pair<int64_t, int64_t> padding = {0, 0},
+                      std::pair<int64_t, int64_t> output_padding = {0, 0},
+                      int64_t groups = 1,
+                      std::pair<int64_t, int64_t> dilation = {1, 1}) -> Variable;
+
+/**
+ * @brief Functional transposed 3D convolution
+ *
+ * @param input Input tensor [N, C_in, D, H, W]
+ * @param weight Convolution filters [C_in, C_out/groups, kD, kH, kW]
+ * @param bias Optional bias [C_out]
+ * @param stride Stride of the convolution (D, H, W)
+ * @param padding Zero-padding added to both sides (D, H, W)
+ * @param output_padding Additional size added to output (D, H, W)
+ * @param groups Number of blocked connections
+ * @param dilation Spacing between kernel elements (D, H, W)
+ */
+auto conv_transpose3d(const Variable& input, const Variable& weight,
+                      const std::optional<Variable>& bias = std::nullopt,
+                      std::tuple<int64_t, int64_t, int64_t> stride = {1, 1, 1},
+                      std::tuple<int64_t, int64_t, int64_t> padding = {0, 0, 0},
+                      std::tuple<int64_t, int64_t, int64_t> output_padding = {0, 0, 0},
+                      int64_t groups = 1,
+                      std::tuple<int64_t, int64_t, int64_t> dilation = {1, 1, 1}) -> Variable;
+
+// ============================================================================
+// Attention (implemented in functional.cpp)
+// ============================================================================
+
+/**
+ * @brief Options for scaled dot-product attention.
+ */
+struct SDPAOptions {
+    std::optional<Variable> attn_mask;  ///< Optional attention mask
+    double dropout_p{0.0};              ///< Dropout probability
+    bool is_causal{false};              ///< Apply causal (lower-triangular) mask
+};
+
+/**
+ * @brief Scaled dot-product attention.
+ *
+ * Computes: softmax(Q @ K^T / sqrt(d_k) + mask) @ V
+ *
+ * @param query  Query tensor [B, H, L, E]
+ * @param key    Key tensor [B, H, S, E]
+ * @param value  Value tensor [B, H, S, Ev]
+ * @param opts   Attention options (mask, dropout, causal)
+ * @return Output tensor [B, H, L, Ev]
+ */
+auto scaled_dot_product_attention(
+    const Variable& query,
+    const Variable& key,
+    const Variable& value,
+    const SDPAOptions& opts = {}) -> Variable;
+
 // ============================================================================
 // Pooling (implemented in functional.cpp)
 // ============================================================================

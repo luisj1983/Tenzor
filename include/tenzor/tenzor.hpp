@@ -81,6 +81,7 @@
 
 // Tensor operations
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/backend/loader.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"

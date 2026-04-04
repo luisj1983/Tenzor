@@ -17,8 +17,7 @@
 #include "tenzor/core/device.hpp"
 #include "tenzor/sparse/sparse_tensor.hpp"
 
-// Forward-declare to avoid including loader.hpp (uses std::expected, unsupported by HIP C++20)
-namespace tenzor { auto is_backend_registry_alive() -> bool; }
+#include "tenzor/backend/loader_fwd.hpp"
 
 #include <rocsparse/rocsparse.h>
 #include <hip/hip_runtime.h>

@@ -1223,6 +1223,13 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
     }
 
     // --- Standard reduction path ---
+    // NOTE: The tree reduction fast path above (WG_SIZE=256 with subgroup arithmetic)
+    // already handles large full reductions efficiently. The standard path below
+    // dispatches one workgroup per output element. For per-dim reductions on large
+    // reduce dimensions (>65536), a two-pass strategy similar to the tree reduction
+    // could be beneficial: pass 1 reduces chunks to partial results, pass 2 reduces
+    // partials to final output. This would improve bandwidth utilization by using
+    // 256-thread workgroups with shared memory tree-reduction within each group.
     auto* pipeline = getPipeline(shader_name, device_id);
 
     // Calculate output shape

@@ -725,6 +725,33 @@ public:
     // Global mutex for cross-device operations (instance creation, shutdown, pipeline cache, dispatch).
     // Memory operations (allocate/deallocate/copy) use per-device mutexes + allocations_mutex_ instead.
     mutable std::recursive_mutex dispatch_mutex_;
+
+    // Matmul autotuning infrastructure
+    struct MatmulConfig {
+        uint32_t tile_m{16}, tile_n{16};
+        uint32_t local_size_x{16}, local_size_y{16};
+    };
+
+    /// Select matmul config based on problem dimensions (heuristic)
+    static auto selectMatmulConfig(int64_t M, int64_t N, int64_t K) -> MatmulConfig {
+        if (M < 64 && N < 64 && K < 64) return {8, 8, 8, 8};      // Tiny
+        if (M >= 512 && N >= 512) return {32, 32, 32, 32};          // Large
+        return {16, 16, 16, 16};                                     // Default
+    }
+
+    /// Cache for matmul configurations by "MxNxK" key
+    std::unordered_map<std::string, MatmulConfig> matmul_autotune_cache_;
+    mutable std::mutex autotune_mutex_;
+
+    auto getMatmulConfig(int64_t M, int64_t N, int64_t K) -> const MatmulConfig& {
+        std::string key = std::to_string(M) + "x" + std::to_string(N) + "x" + std::to_string(K);
+        std::lock_guard lock(autotune_mutex_);
+        auto it = matmul_autotune_cache_.find(key);
+        if (it != matmul_autotune_cache_.end()) return it->second;
+        auto config = selectMatmulConfig(M, N, K);
+        auto [inserted_it, _] = matmul_autotune_cache_.emplace(key, config);
+        return inserted_it->second;
+    }
 };
 
 } // namespace tenzor

@@ -22,6 +22,7 @@ namespace nn {
 class Linear;
 class Conv1d;
 class Conv2d;
+class Conv3d;
 class ConvTranspose2d;
 class BatchNorm2d;
 

@@ -16,6 +16,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include "../core/tensor.hpp"
+#include "../sparse/sparse_tensor.hpp"
 
 namespace tenzor {
 
@@ -53,6 +54,7 @@ struct VariableImpl {
     VariableImpl(const VariableImpl& other)
         : data_(other.data_),
           grad_(other.grad_),
+          sparse_grad_(other.sparse_grad_),
           grad_fn_(other.grad_fn_),
           requires_grad_(other.requires_grad_.load(std::memory_order_acquire)),
           retain_grad_(other.retain_grad_.load(std::memory_order_acquire)),
@@ -65,6 +67,7 @@ struct VariableImpl {
     VariableImpl(VariableImpl&& other) noexcept
         : data_(std::move(other.data_)),
           grad_(std::move(other.grad_)),
+          sparse_grad_(std::move(other.sparse_grad_)),
           grad_fn_(std::move(other.grad_fn_)),
           requires_grad_(other.requires_grad_.load(std::memory_order_acquire)),
           retain_grad_(other.retain_grad_.load(std::memory_order_acquire)),
@@ -84,6 +87,7 @@ struct VariableImpl {
 
             data_ = other.data_;
             grad_ = other.grad_;
+            sparse_grad_ = other.sparse_grad_;
             grad_fn_ = other.grad_fn_;
             requires_grad_.store(other.requires_grad_.load(std::memory_order_relaxed), std::memory_order_relaxed);
             retain_grad_.store(other.retain_grad_.load(std::memory_order_relaxed), std::memory_order_relaxed);
@@ -107,6 +111,7 @@ struct VariableImpl {
 
             data_ = std::move(other.data_);
             grad_ = std::move(other.grad_);
+            sparse_grad_ = std::move(other.sparse_grad_);
             grad_fn_ = std::move(other.grad_fn_);
             requires_grad_.store(other.requires_grad_.load(std::memory_order_relaxed), std::memory_order_relaxed);
             retain_grad_.store(other.retain_grad_.load(std::memory_order_relaxed), std::memory_order_relaxed);
@@ -130,6 +135,10 @@ struct VariableImpl {
 
     /// Accumulated gradient tensor (requires synchronization for writes)
     std::optional<Tensor> grad_;
+
+    /// Accumulated sparse gradient (for embeddings and sparse parameters).
+    /// When set, this takes precedence over grad_ for sparse-aware optimizers.
+    std::optional<SparseTensor> sparse_grad_;
 
     /// Gradient function that created this variable (thread-safe for reads)
     std::shared_ptr<Function> grad_fn_;
@@ -283,6 +292,47 @@ public:
      * @param gradient Tensor to set as gradient
      */
     auto set_grad(Tensor gradient) -> void;
+
+    /**
+     * @brief Check if variable has a sparse gradient.
+     * @return true if a sparse gradient has been set
+     */
+    auto has_sparse_grad() const -> bool {
+        return impl_ && impl_->sparse_grad_.has_value();
+    }
+
+    /**
+     * @brief Get sparse gradient (for sparse-aware optimizers).
+     * @return Reference to the optional sparse gradient
+     */
+    auto sparse_grad() const -> const std::optional<SparseTensor>& {
+        static const std::optional<SparseTensor> empty;
+        return impl_ ? impl_->sparse_grad_ : empty;
+    }
+
+    /**
+     * @brief Set sparse gradient directly.
+     * @param sg Sparse tensor gradient
+     */
+    auto set_sparse_grad(SparseTensor sg) -> void {
+        if (impl_) impl_->sparse_grad_ = std::move(sg);
+    }
+
+    /**
+     * @brief Clear sparse gradient.
+     */
+    auto clear_sparse_grad() -> void {
+        if (impl_) impl_->sparse_grad_.reset();
+    }
+
+    /**
+     * @brief Get mutable reference to sparse gradient (for coalescing).
+     * @return Mutable reference to the optional sparse gradient
+     */
+    auto mutable_sparse_grad() -> std::optional<SparseTensor>& {
+        static std::optional<SparseTensor> empty;
+        return impl_ ? impl_->sparse_grad_ : empty;
+    }
 
     // ============================================================================
     // Gradient Computation

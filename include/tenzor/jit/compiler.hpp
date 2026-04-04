@@ -567,6 +567,28 @@ private:
 };
 
 /**
+ * @brief Strength reduction pass.
+ *
+ * Replaces expensive operations with cheaper equivalents:
+ * - Div(x, const) -> Mul(x, 1/const)
+ * - Pow(x, 2) -> Mul(x, x)
+ * - Pow(x, 0.5) -> Sqrt(x)
+ * - Mul(x, 2) -> Add(x, x)
+ *
+ * These transformations reduce the number of expensive arithmetic
+ * operations (division, exponentiation) in favor of cheaper ones
+ * (multiplication, addition, square root).
+ */
+class StrengthReductionPass : public Pass {
+public:
+    auto run(Graph& graph) -> bool override;
+    auto name() const -> std::string override { return "StrengthReduction"; }
+
+private:
+    auto reduce_node(std::shared_ptr<Node> node, Graph& graph) -> bool;
+};
+
+/**
  * @brief Reshape elimination pass.
  *
  * Removes redundant reshape operations:
@@ -585,6 +607,33 @@ class ReshapeEliminationPass : public Pass {
 public:
     auto run(Graph& graph) -> bool override;
     auto name() const -> std::string override { return "ReshapeElimination"; }
+};
+
+/**
+ * @brief Loop unrolling pass.
+ *
+ * For Loop nodes with a small constant bound (<= 8), unrolls the loop
+ * by inlining the body subgraph N times with remapped value IDs.
+ */
+class LoopUnrollingPass : public Pass {
+public:
+    auto run(Graph& graph) -> bool override;
+    auto name() const -> std::string override { return "LoopUnrolling"; }
+    auto set_max_unroll(int64_t max) -> void { max_unroll_ = max; }
+private:
+    int64_t max_unroll_{8};
+};
+
+/**
+ * @brief Loop-invariant code motion (LICM) pass.
+ *
+ * Hoists loop-invariant computations outside of Loop nodes.
+ * A node is invariant if all its inputs come from outside the loop.
+ */
+class LICMPass : public Pass {
+public:
+    auto run(Graph& graph) -> bool override;
+    auto name() const -> std::string override { return "LICM"; }
 };
 
 /**

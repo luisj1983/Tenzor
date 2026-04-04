@@ -7,6 +7,7 @@
 #include "../../include/tenzor/jit/tracer.hpp"
 #include "../../include/tenzor/ops/math.hpp"
 #include "../../include/tenzor/ops/reduction.hpp"
+#include "../../include/tenzor/ops/creation.hpp"
 #include <iostream>
 #include <algorithm>
 #include <unordered_set>
@@ -1447,6 +1448,325 @@ auto AlgebraicSimplificationPass::simplify_unary_op(std::shared_ptr<Node> node, 
 }
 
 // ============================================================================
+// Strength Reduction Pass
+// ============================================================================
+
+/// Try to extract a scalar float value from a Constant node.
+/// Returns std::nullopt if the node is not a scalar constant.
+static auto get_scalar_float(const Node& node) -> std::optional<float> {
+    if (node.op_type() != OpType::Constant) return std::nullopt;
+    try {
+        const Tensor& t = node.get_tensor_attr("value");
+        if (t.numel() != 1) return std::nullopt;
+        if (t.dtype() == DType::Float32) return t.item<float>();
+        if (t.dtype() == DType::Float64) return static_cast<float>(t.item<double>());
+        return std::nullopt;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+auto StrengthReductionPass::run(Graph& graph) -> bool {
+    bool modified = false;
+    std::vector<std::shared_ptr<Node>> nodes(graph.nodes().begin(), graph.nodes().end());
+
+    for (const auto& node : nodes) {
+        auto& current_nodes = graph.nodes();
+        if (std::find(current_nodes.begin(), current_nodes.end(), node) == current_nodes.end()) {
+            continue;
+        }
+        if (reduce_node(node, graph)) {
+            modified = true;
+        }
+    }
+    return modified;
+}
+
+auto StrengthReductionPass::reduce_node(std::shared_ptr<Node> node, Graph& graph) -> bool {
+    if (node->inputs().size() < 2) {
+        // Unary ops don't have strength reduction opportunities here
+        return false;
+    }
+
+    auto input0 = node->inputs()[0];
+    auto input1 = node->inputs()[1];
+    auto producer1 = input1->node();
+
+    // ---- Div(x, const) -> Mul(x, 1/const) ----
+    if (node->op_type() == OpType::Div && producer1 &&
+        producer1->op_type() == OpType::Constant) {
+        auto val = get_scalar_float(*producer1);
+        if (val && *val != 0.0f) {
+            // Create reciprocal constant
+            float reciprocal = 1.0f / *val;
+            Tensor recip_tensor = tenzor::full({1}, reciprocal,
+                input1->dtype(), input1->device());
+
+            auto recip_node = graph.create_node(OpType::Constant);
+            recip_node->set_tensor_attr("value", recip_tensor);
+
+            std::string recip_val_id = recip_node->name() + "_out";
+            auto recip_val = graph.create_value(recip_val_id, input1->shape(),
+                input1->dtype(), input1->device());
+            recip_val->set_node(recip_node);
+            recip_node->add_output(recip_val);
+            graph.add_node(recip_node);
+
+            // Create Mul(x, 1/const) node replacing Div
+            auto mul_node = graph.create_node(OpType::Mul);
+            mul_node->add_input(input0);
+            mul_node->add_input(recip_val);
+
+            if (!node->outputs().empty()) {
+                auto old_output = node->outputs()[0];
+                std::string mul_val_id = mul_node->name() + "_out";
+                auto mul_val = graph.create_value(mul_val_id, old_output->shape(),
+                    old_output->dtype(), old_output->device());
+                mul_val->set_node(mul_node);
+                mul_node->add_output(mul_val);
+                graph.add_node(mul_node);
+                graph.replace_value(old_output->id(), mul_val_id);
+                graph.remove_node(node);
+                return true;
+            }
+        }
+    }
+
+    // ---- Pow(x, 2) -> Mul(x, x) ----
+    if (node->op_type() == OpType::Pow && producer1 &&
+        producer1->op_type() == OpType::Constant) {
+        auto val = get_scalar_float(*producer1);
+        if (val) {
+            if (*val == 2.0f) {
+                // Replace with Mul(x, x)
+                auto mul_node = graph.create_node(OpType::Mul);
+                mul_node->add_input(input0);
+                mul_node->add_input(input0);  // x * x
+
+                if (!node->outputs().empty()) {
+                    auto old_output = node->outputs()[0];
+                    std::string mul_val_id = mul_node->name() + "_out";
+                    auto mul_val = graph.create_value(mul_val_id, old_output->shape(),
+                        old_output->dtype(), old_output->device());
+                    mul_val->set_node(mul_node);
+                    mul_node->add_output(mul_val);
+                    graph.add_node(mul_node);
+                    graph.replace_value(old_output->id(), mul_val_id);
+                    graph.remove_node(node);
+                    return true;
+                }
+            }
+
+            // ---- Pow(x, 0.5) -> Sqrt(x) ----
+            if (*val == 0.5f) {
+                auto sqrt_node = graph.create_node(OpType::Sqrt);
+                sqrt_node->add_input(input0);
+
+                if (!node->outputs().empty()) {
+                    auto old_output = node->outputs()[0];
+                    std::string sqrt_val_id = sqrt_node->name() + "_out";
+                    auto sqrt_val = graph.create_value(sqrt_val_id, old_output->shape(),
+                        old_output->dtype(), old_output->device());
+                    sqrt_val->set_node(sqrt_node);
+                    sqrt_node->add_output(sqrt_val);
+                    graph.add_node(sqrt_node);
+                    graph.replace_value(old_output->id(), sqrt_val_id);
+                    graph.remove_node(node);
+                    return true;
+                }
+            }
+        }
+    }
+
+    // ---- Mul(x, 2) -> Add(x, x) ----
+    if (node->op_type() == OpType::Mul) {
+        auto producer0 = input0->node();
+        bool is_const0 = producer0 && producer0->op_type() == OpType::Constant;
+        bool is_const1 = producer1 && producer1->op_type() == OpType::Constant;
+
+        std::optional<float> val;
+        std::shared_ptr<Value> non_const_input;
+
+        if (is_const1 && !is_const0) {
+            val = get_scalar_float(*producer1);
+            non_const_input = input0;
+        } else if (is_const0 && !is_const1) {
+            val = get_scalar_float(*producer0);
+            non_const_input = input1;
+        }
+
+        if (val && *val == 2.0f && non_const_input) {
+            // Replace Mul(x, 2) with Add(x, x)
+            auto add_node = graph.create_node(OpType::Add);
+            add_node->add_input(non_const_input);
+            add_node->add_input(non_const_input);
+
+            if (!node->outputs().empty()) {
+                auto old_output = node->outputs()[0];
+                std::string add_val_id = add_node->name() + "_out";
+                auto add_val = graph.create_value(add_val_id, old_output->shape(),
+                    old_output->dtype(), old_output->device());
+                add_val->set_node(add_node);
+                add_node->add_output(add_val);
+                graph.add_node(add_node);
+                graph.replace_value(old_output->id(), add_val_id);
+                graph.remove_node(node);
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+// ============================================================================
+// Loop Unrolling Pass
+// ============================================================================
+
+auto LoopUnrollingPass::run(Graph& graph) -> bool {
+    bool modified = false;
+
+    std::vector<std::shared_ptr<Node>> loop_nodes;
+    for (const auto& node : graph.nodes()) {
+        if (node->op_type() == OpType::Loop) {
+            loop_nodes.push_back(node);
+        }
+    }
+
+    for (auto& loop_node : loop_nodes) {
+        auto& current_nodes = graph.nodes();
+        if (std::find(current_nodes.begin(), current_nodes.end(), loop_node) == current_nodes.end()) {
+            continue;
+        }
+
+        if (loop_node->inputs().empty()) continue;
+        auto bound_value = loop_node->inputs()[0];
+        auto bound_producer = bound_value->node();
+        if (!bound_producer || bound_producer->op_type() != OpType::Constant) continue;
+
+        int64_t trip_count = bound_producer->get_int_attr("value");
+        if (trip_count <= 0 || trip_count > max_unroll_) continue;
+
+        auto body = loop_node->body();
+        if (!body || body->nodes().empty()) continue;
+
+        auto loop_inputs = loop_node->inputs();
+        auto loop_outputs = loop_node->outputs();
+
+        // Carried values start as the loop's non-bound inputs
+        std::vector<std::string> carried_ids;
+        for (size_t i = 1; i < loop_inputs.size(); ++i) {
+            carried_ids.push_back(loop_inputs[i]->id());
+        }
+
+        // For each iteration, clone body nodes with remapped IDs
+        for (int64_t iter = 0; iter < trip_count; ++iter) {
+            std::unordered_map<std::string, std::string> id_remap;
+
+            auto& body_inputs = body->inputs();
+            for (size_t i = 0; i < std::min(body_inputs.size(), carried_ids.size()); ++i) {
+                id_remap[body_inputs[i]->id()] = carried_ids[i];
+            }
+
+            for (const auto& body_node : body->nodes()) {
+                auto cloned = graph.create_node(body_node->op_type());
+
+                for (const auto& input : body_node->inputs()) {
+                    auto remap_it = id_remap.find(input->id());
+                    std::string actual_id = (remap_it != id_remap.end()) ? remap_it->second : input->id();
+                    auto val = graph.get_value(actual_id);
+                    if (val) cloned->add_input(val);
+                }
+
+                for (const auto& output : body_node->outputs()) {
+                    std::string new_id = output->id() + "_unroll_" + std::to_string(iter);
+                    auto new_val = graph.create_value(new_id, output->shape(), output->dtype(), output->device());
+                    new_val->set_node(cloned);
+                    cloned->add_output(new_val);
+                    id_remap[output->id()] = new_id;
+                }
+                graph.add_node(cloned);
+            }
+
+            auto& body_outputs = body->outputs();
+            for (size_t i = 0; i < std::min(body_outputs.size(), carried_ids.size()); ++i) {
+                auto remap_it = id_remap.find(body_outputs[i]->id());
+                if (remap_it != id_remap.end()) {
+                    carried_ids[i] = remap_it->second;
+                }
+            }
+        }
+
+        for (size_t i = 0; i < std::min(loop_outputs.size(), carried_ids.size()); ++i) {
+            graph.replace_value(loop_outputs[i]->id(), carried_ids[i]);
+        }
+        graph.remove_node(loop_node);
+        modified = true;
+    }
+    return modified;
+}
+
+// ============================================================================
+// LICM Pass (Loop-Invariant Code Motion)
+// ============================================================================
+
+auto LICMPass::run(Graph& graph) -> bool {
+    bool modified = false;
+
+    for (const auto& node : graph.nodes()) {
+        if (node->op_type() != OpType::Loop) continue;
+
+        auto body = node->body();
+        if (!body || body->nodes().empty()) continue;
+
+        // Collect value IDs defined inside the loop body
+        std::unordered_set<std::string> body_defined_ids;
+        for (const auto& body_node : body->nodes()) {
+            for (const auto& output : body_node->outputs()) {
+                body_defined_ids.insert(output->id());
+            }
+        }
+        for (const auto& input : body->inputs()) {
+            body_defined_ids.insert(input->id());
+        }
+
+        // Find loop-invariant nodes
+        std::vector<std::shared_ptr<Node>> invariant_nodes;
+        for (const auto& body_node : body->nodes()) {
+            bool all_external = true;
+            for (const auto& input : body_node->inputs()) {
+                if (body_defined_ids.count(input->id()) > 0) {
+                    all_external = false;
+                    break;
+                }
+            }
+            if (all_external && !body_node->inputs().empty()) {
+                invariant_nodes.push_back(body_node);
+            }
+        }
+
+        // Hoist invariant nodes before the loop
+        for (auto& inv_node : invariant_nodes) {
+            auto hoisted = graph.create_node(inv_node->op_type());
+            for (const auto& input : inv_node->inputs()) {
+                auto outer_val = graph.get_value(input->id());
+                if (outer_val) hoisted->add_input(outer_val);
+            }
+            for (const auto& output : inv_node->outputs()) {
+                auto outer_val = graph.create_value(
+                    output->id(), output->shape(), output->dtype(), output->device());
+                outer_val->set_node(hoisted);
+                hoisted->add_output(outer_val);
+            }
+            graph.add_node(hoisted);
+            body->remove_node(inv_node);
+            modified = true;
+        }
+    }
+    return modified;
+}
+
+// ============================================================================
 // Reshape Elimination Pass
 // ============================================================================
 
@@ -1516,6 +1836,7 @@ Compiler::Compiler(bool enable_default_passes) {
     if (enable_default_passes) {
         add_pass(std::make_unique<DeadCodeEliminationPass>());
         add_pass(std::make_unique<ConstantFoldingPass>());
+        add_pass(std::make_unique<StrengthReductionPass>());      // Div→Mul, Pow→Mul/Sqrt
         add_pass(std::make_unique<FuseConvBatchNormReluPass>());  // Triple fusion before individual passes
         add_pass(std::make_unique<FuseConvBatchNormPass>());
         add_pass(std::make_unique<FuseConvReluPass>());
@@ -1528,6 +1849,8 @@ Compiler::Compiler(bool enable_default_passes) {
         add_pass(std::make_unique<AlgebraicSimplificationPass>());
         add_pass(std::make_unique<ReshapeEliminationPass>());
         add_pass(std::make_unique<CommonSubexpressionEliminationPass>());
+        add_pass(std::make_unique<LoopUnrollingPass>());
+        add_pass(std::make_unique<LICMPass>());
         add_pass(std::make_unique<ShapeGuardInsertionPass>());  // Dynamic shape guards (runs once)
     }
 }

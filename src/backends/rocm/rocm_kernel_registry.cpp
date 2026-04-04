@@ -12,9 +12,7 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/math.hpp"
-// Note: creation.hpp not included directly — it pulls in loader.hpp which uses
-// std::expected (C++23), incompatible with ROCm's C++20 compilation mode.
-// The tenzor:: creation functions used here (full, arange, etc.) are declared below.
+#include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/core/tensor.hpp"
@@ -30,14 +28,6 @@
 #include <tuple>
 
 namespace tenzor {
-
-// Forward declarations for creation functions (from creation.hpp, which can't be
-// included here due to its loader.hpp dependency using std::expected / C++23)
-auto zeros(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor;
-auto full(std::vector<int64_t> shape, float value, DType dtype, Device device) -> Tensor;
-auto full(std::vector<int64_t> shape, double value, DType dtype, Device device) -> Tensor;
-auto rand(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor;
-auto arange(double start, double end, double step, DType dtype, Device device) -> Tensor;
 
 // Helper to extract HIP stream from attributes
 inline hipStream_t get_hip_stream(const OpAttributes& attrs) {

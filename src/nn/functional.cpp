@@ -63,6 +63,206 @@ auto conv2d(const Variable& input, const Variable& weight,
     return Variable(result[0], requires_grad);
 }
 
+auto conv1d(const Variable& input, const Variable& weight,
+            const std::optional<Variable>& bias,
+            int64_t stride, int64_t padding, int64_t dilation,
+            int64_t groups) -> Variable {
+    if (input.shape().size() != 3) {
+        throw std::invalid_argument(
+            "F::conv1d expects 3D input [N, C_in, L], got " +
+            std::to_string(input.shape().size()) + "D");
+    }
+
+    // Reshape 3D -> 4D: [N, C, L] -> [N, C, 1, L]
+    auto input_4d = input.tensor().unsqueeze(2);
+    auto weight_4d = weight.tensor().unsqueeze(2);
+
+    std::vector<Tensor> inputs_vec = {input_4d, weight_4d};
+    if (bias.has_value()) {
+        inputs_vec.push_back(bias->tensor());
+    }
+
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Stride, stride);
+    attrs.set(AttrKey::Padding, padding);
+    attrs.set(AttrKey::Dilation, dilation);
+    attrs.set(AttrKey::StrideH, static_cast<int64_t>(1));
+    attrs.set(AttrKey::StrideW, stride);
+    attrs.set(AttrKey::PaddingH, static_cast<int64_t>(0));
+    attrs.set(AttrKey::PaddingW, padding);
+    attrs.set(AttrKey::DilationH, static_cast<int64_t>(1));
+    attrs.set(AttrKey::DilationW, dilation);
+    attrs.set(AttrKey::Groups, groups);
+
+    auto result = dispatch_to_device(OpId::Conv2dForward,
+        input.tensor().device().type, inputs_vec, attrs);
+
+    // Squeeze back: [N, C_out, 1, L_out] -> [N, C_out, L_out]
+    Tensor output = result[0].squeeze(2);
+
+    bool requires_grad = input.requires_grad() || weight.requires_grad() ||
+                         (bias.has_value() && bias->requires_grad());
+    return Variable(output, requires_grad);
+}
+
+auto conv3d(const Variable& input, const Variable& weight,
+            const std::optional<Variable>& bias,
+            std::tuple<int64_t, int64_t, int64_t> stride,
+            std::tuple<int64_t, int64_t, int64_t> padding,
+            std::tuple<int64_t, int64_t, int64_t> dilation,
+            int64_t groups) -> Variable {
+    if (input.shape().size() != 5) {
+        throw std::invalid_argument(
+            "F::conv3d expects 5D input [N, C_in, D, H, W], got " +
+            std::to_string(input.shape().size()) + "D");
+    }
+
+    std::vector<Tensor> inputs_vec = {input.tensor(), weight.tensor()};
+    if (bias.has_value()) {
+        inputs_vec.push_back(bias->tensor());
+    }
+
+    auto [sd, sh, sw] = stride;
+    auto [pd, ph, pw] = padding;
+    auto [dd, dh, dw] = dilation;
+
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Stride, sd);
+    attrs.set(AttrKey::Padding, pd);
+    attrs.set(AttrKey::Dilation, dd);
+    attrs.set(AttrKey::StrideH, sh);
+    attrs.set(AttrKey::StrideW, sw);
+    attrs.set(AttrKey::PaddingH, ph);
+    attrs.set(AttrKey::PaddingW, pw);
+    attrs.set(AttrKey::DilationH, dh);
+    attrs.set(AttrKey::DilationW, dw);
+    attrs.set(AttrKey::Groups, groups);
+
+    auto result = dispatch_to_device(OpId::Conv3dForward,
+        input.tensor().device().type, inputs_vec, attrs);
+
+    bool requires_grad = input.requires_grad() || weight.requires_grad() ||
+                         (bias.has_value() && bias->requires_grad());
+    return Variable(result[0], requires_grad);
+}
+
+auto conv_transpose1d(const Variable& input, const Variable& weight,
+                      const std::optional<Variable>& bias,
+                      int64_t stride, int64_t padding, int64_t output_padding,
+                      int64_t groups, int64_t dilation) -> Variable {
+    if (input.shape().size() != 3) {
+        throw std::invalid_argument(
+            "F::conv_transpose1d expects 3D input [N, C_in, L], got " +
+            std::to_string(input.shape().size()) + "D");
+    }
+
+    // Reshape 3D -> 4D
+    auto input_4d = input.tensor().unsqueeze(2);
+    auto weight_4d = weight.tensor().unsqueeze(2);
+
+    std::vector<Tensor> inputs_vec = {input_4d, weight_4d};
+    if (bias.has_value()) {
+        inputs_vec.push_back(bias->tensor());
+    }
+
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Stride, stride);
+    attrs.set(AttrKey::Padding, padding);
+    attrs.set(AttrKey::Dilation, dilation);
+    attrs.set(AttrKey::Groups, groups);
+    attrs.set(AttrKey::StrideH, static_cast<int64_t>(1));
+    attrs.set(AttrKey::StrideW, stride);
+    attrs.set(AttrKey::PaddingH, static_cast<int64_t>(0));
+    attrs.set(AttrKey::PaddingW, padding);
+
+    auto result = dispatch_to_device(OpId::ConvTranspose2dForward,
+        input.tensor().device().type, inputs_vec, attrs);
+
+    Tensor output = result[0].squeeze(2);
+
+    bool requires_grad = input.requires_grad() || weight.requires_grad() ||
+                         (bias.has_value() && bias->requires_grad());
+    return Variable(output, requires_grad);
+}
+
+auto conv_transpose2d(const Variable& input, const Variable& weight,
+                      const std::optional<Variable>& bias,
+                      std::pair<int64_t, int64_t> stride,
+                      std::pair<int64_t, int64_t> padding,
+                      std::pair<int64_t, int64_t> output_padding,
+                      int64_t groups,
+                      std::pair<int64_t, int64_t> dilation) -> Variable {
+    if (input.shape().size() != 4) {
+        throw std::invalid_argument(
+            "F::conv_transpose2d expects 4D input [N, C_in, H, W], got " +
+            std::to_string(input.shape().size()) + "D");
+    }
+
+    std::vector<Tensor> inputs_vec = {input.tensor(), weight.tensor()};
+    if (bias.has_value()) {
+        inputs_vec.push_back(bias->tensor());
+    }
+
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Stride, stride.first);
+    attrs.set(AttrKey::Padding, padding.first);
+    attrs.set(AttrKey::Dilation, dilation.first);
+    attrs.set(AttrKey::StrideH, stride.first);
+    attrs.set(AttrKey::StrideW, stride.second);
+    attrs.set(AttrKey::PaddingH, padding.first);
+    attrs.set(AttrKey::PaddingW, padding.second);
+    attrs.set(AttrKey::Groups, groups);
+
+    auto result = dispatch_to_device(OpId::ConvTranspose2dForward,
+        input.tensor().device().type, inputs_vec, attrs);
+
+    bool requires_grad = input.requires_grad() || weight.requires_grad() ||
+                         (bias.has_value() && bias->requires_grad());
+    return Variable(result[0], requires_grad);
+}
+
+auto conv_transpose3d(const Variable& input, const Variable& weight,
+                      const std::optional<Variable>& bias,
+                      std::tuple<int64_t, int64_t, int64_t> stride,
+                      std::tuple<int64_t, int64_t, int64_t> padding,
+                      std::tuple<int64_t, int64_t, int64_t> output_padding,
+                      int64_t groups,
+                      std::tuple<int64_t, int64_t, int64_t> dilation) -> Variable {
+    if (input.shape().size() != 5) {
+        throw std::invalid_argument(
+            "F::conv_transpose3d expects 5D input [N, C_in, D, H, W], got " +
+            std::to_string(input.shape().size()) + "D");
+    }
+
+    std::vector<Tensor> inputs_vec = {input.tensor(), weight.tensor()};
+    if (bias.has_value()) {
+        inputs_vec.push_back(bias->tensor());
+    }
+
+    auto [sd, sh, sw] = stride;
+    auto [pd, ph, pw] = padding;
+    auto [dd, dh, dw] = dilation;
+
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Stride, sd);
+    attrs.set(AttrKey::Padding, pd);
+    attrs.set(AttrKey::Dilation, dd);
+    attrs.set(AttrKey::StrideH, sh);
+    attrs.set(AttrKey::StrideW, sw);
+    attrs.set(AttrKey::PaddingH, ph);
+    attrs.set(AttrKey::PaddingW, pw);
+    attrs.set(AttrKey::DilationH, dh);
+    attrs.set(AttrKey::DilationW, dw);
+    attrs.set(AttrKey::Groups, groups);
+
+    auto result = dispatch_to_device(OpId::ConvTranspose3dForward,
+        input.tensor().device().type, inputs_vec, attrs);
+
+    bool requires_grad = input.requires_grad() || weight.requires_grad() ||
+                         (bias.has_value() && bias->requires_grad());
+    return Variable(result[0], requires_grad);
+}
+
 // ============================================================================
 // Pooling
 // ============================================================================
@@ -395,6 +595,49 @@ auto cosine_similarity(const Variable& x1, const Variable& x2,
     auto norm2 = tenzor::sqrt(tenzor::sum(x2 * x2, dim));
     auto denom = norm1 * norm2 + static_cast<float>(eps);
     return dot / denom;
+}
+
+// ============================================================================
+// Attention
+// ============================================================================
+
+auto scaled_dot_product_attention(
+    const Variable& query, const Variable& key,
+    const Variable& value, const SDPAOptions& opts) -> Variable {
+
+    auto d_k = static_cast<float>(query.shape().back());
+    float scale = 1.0f / std::sqrt(d_k);
+
+    // Q @ K^T / sqrt(d_k)
+    auto kt = Variable(tenzor::transpose(key.tensor(), -2, -1), key.requires_grad());
+    auto scores = tenzor::matmul(query, kt);
+    auto scaled = Variable(scores.tensor() * scale, scores.requires_grad());
+
+    // Causal mask: set upper triangle to -inf
+    if (opts.is_causal) {
+        auto L = query.shape()[query.shape().size() - 2];
+        auto S = key.shape()[key.shape().size() - 2];
+        auto mask_cpu = tenzor::zeros({L, S}, DType::Float32, Device::cpu());
+        float* mask_data = mask_cpu.data<float>();
+        for (int64_t i = 0; i < L; ++i) {
+            for (int64_t j = i + 1; j < S; ++j) {
+                mask_data[i * S + j] = -1e9f;
+            }
+        }
+        auto mask_dev = mask_cpu.to(query.tensor().device());
+        scaled = Variable(scaled.tensor() + mask_dev, scaled.requires_grad());
+    }
+
+    // Optional attention mask
+    if (opts.attn_mask.has_value()) {
+        scaled = Variable(scaled.tensor() + opts.attn_mask->tensor(), scaled.requires_grad());
+    }
+
+    // Softmax along last dimension
+    auto attn = tenzor::softmax(scaled, -1);
+
+    // attn @ V
+    return tenzor::matmul(attn, value);
 }
 
 } // namespace tenzor::nn::functional

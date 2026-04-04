@@ -140,11 +140,157 @@ void init_builtin_batching_rules() {
     register_batching_rule("WhereBackward", passthrough_rule);
 
     // ====================================================================
-    // Normalization ops: batch dim is naturally dim 0
-    // BatchNorm, LayerNorm, GroupNorm all expect batch as dim 0
+    // Fused ops
     // ====================================================================
     register_batching_rule("FusedLinearReLUBackward", passthrough_rule);
     register_batching_rule("BmmBackward", passthrough_rule);
+
+    // ====================================================================
+    // Convolution ops: batch dim is naturally dim 0 (N in NCHW/NCDHW)
+    // For batch_dim != 0, move batch to front then back
+    // ====================================================================
+    register_batching_rule("Conv1dBackward", shape_passthrough);
+    register_batching_rule("Conv2dBackward", shape_passthrough);
+    register_batching_rule("Conv3dBackward", shape_passthrough);
+    register_batching_rule("ConvTranspose1dBackward", shape_passthrough);
+    register_batching_rule("ConvTranspose2dBackward", shape_passthrough);
+    register_batching_rule("ConvTranspose3dBackward", shape_passthrough);
+    register_batching_rule("DepthwiseConv2dBackward", shape_passthrough);
+
+    // ====================================================================
+    // Normalization ops: batch dim is naturally dim 0
+    // BatchNorm, LayerNorm, GroupNorm, InstanceNorm, RMSNorm all expect
+    // batch as dim 0
+    // ====================================================================
+    register_batching_rule("BatchNorm1dBackward", shape_passthrough);
+    register_batching_rule("BatchNorm2dBackward", shape_passthrough);
+    register_batching_rule("BatchNorm3dBackward", shape_passthrough);
+    register_batching_rule("LayerNormBackward", shape_passthrough);
+    register_batching_rule("GroupNormBackward", shape_passthrough);
+    register_batching_rule("InstanceNorm1dBackward", shape_passthrough);
+    register_batching_rule("InstanceNorm2dBackward", shape_passthrough);
+    register_batching_rule("InstanceNorm3dBackward", shape_passthrough);
+    register_batching_rule("RMSNormBackward", shape_passthrough);
+
+    // ====================================================================
+    // Regularization: element-wise masking, trivially batchable
+    // ====================================================================
+    register_batching_rule("DropoutBackward", passthrough_rule);
+    register_batching_rule("Dropout2dBackward", passthrough_rule);
+    register_batching_rule("AlphaDropoutBackward", passthrough_rule);
+    register_batching_rule("DropPathBackward", passthrough_rule);
+
+    // ====================================================================
+    // Embedding: lookup is per-element on the index tensor
+    // ====================================================================
+    register_batching_rule("EmbeddingBackward", passthrough_rule);
+
+    // ====================================================================
+    // Attention: batch dim is naturally dim 0 (batch x heads x seq x dim)
+    // ====================================================================
+    register_batching_rule("MultiheadAttentionBackward", shape_passthrough);
+    register_batching_rule("FusedAttentionBackward", shape_passthrough);
+
+    // ====================================================================
+    // TopK/Sort: operate on a specific dim, batch-independent
+    // ====================================================================
+    register_batching_rule("TopKBackward", passthrough_rule);
+    register_batching_rule("SortBackward", passthrough_rule);
+    register_batching_rule("ArgsortBackward", passthrough_rule);
+
+    // ====================================================================
+    // Scatter operations
+    // ====================================================================
+    register_batching_rule("ScatterBackward", passthrough_rule);
+    register_batching_rule("ScatterAddBackward", passthrough_rule);
+
+    // ====================================================================
+    // Pooling ops: batch dim is naturally dim 0 (NCHW)
+    // ====================================================================
+    register_batching_rule("MaxPool2dBackward", shape_passthrough);
+    register_batching_rule("AvgPool2dBackward", shape_passthrough);
+    register_batching_rule("AdaptiveAvgPool2dBackward", shape_passthrough);
+    register_batching_rule("AdaptiveMaxPool2dBackward", shape_passthrough);
+
+    // ====================================================================
+    // RNN ops: batch dim is dim 0 (batch_first) or dim 1
+    // Use shape_passthrough to handle both conventions
+    // ====================================================================
+    register_batching_rule("RNNCellBackward", shape_passthrough);
+    register_batching_rule("LSTMCellBackward", shape_passthrough);
+    register_batching_rule("GRUCellBackward", shape_passthrough);
+    register_batching_rule("LSTMBackward", shape_passthrough);
+    register_batching_rule("GRUBackward", shape_passthrough);
+
+    // ====================================================================
+    // Cumulative ops: operate along a dim, batch-independent
+    // ====================================================================
+    register_batching_rule("CumSumBackward", passthrough_rule);
+    register_batching_rule("CumProdBackward", passthrough_rule);
+
+    // ====================================================================
+    // Padding ops: batch dim is naturally dim 0
+    // ====================================================================
+    register_batching_rule("ConstantPad2dBackward", shape_passthrough);
+    register_batching_rule("ReflectionPad2dBackward", shape_passthrough);
+    register_batching_rule("ReplicationPad2dBackward", shape_passthrough);
+
+    // ====================================================================
+    // Loss functions: operate element-wise or along a dim
+    // ====================================================================
+    register_batching_rule("MSELossBackward", passthrough_rule);
+    register_batching_rule("L1LossBackward", passthrough_rule);
+    register_batching_rule("CrossEntropyLossBackward", passthrough_rule);
+    register_batching_rule("BCELossBackward", passthrough_rule);
+    register_batching_rule("NLLLossBackward", passthrough_rule);
+
+    // ====================================================================
+    // Linalg ops: batch dim is naturally the leading dimension
+    // ====================================================================
+    register_batching_rule("DetBackward", passthrough_rule);
+    register_batching_rule("InvBackward", passthrough_rule);
+    register_batching_rule("SolveBackward", passthrough_rule);
+    register_batching_rule("CholeskyBackward", passthrough_rule);
+    register_batching_rule("SvdBackward", passthrough_rule);
+    register_batching_rule("QrBackward", passthrough_rule);
+
+    // ====================================================================
+    // FFT ops: operate on specific dim, batch-independent
+    // ====================================================================
+    register_batching_rule("FFTBackward", passthrough_rule);
+    register_batching_rule("IFFTBackward", passthrough_rule);
+    register_batching_rule("RFFTBackward", passthrough_rule);
+    register_batching_rule("IRFFTBackward", passthrough_rule);
+
+    // ====================================================================
+    // Additional indexing ops
+    // ====================================================================
+    register_batching_rule("NarrowBackward", passthrough_rule);
+    register_batching_rule("IndexBackward", passthrough_rule);
+    register_batching_rule("MaskedFillBackward", passthrough_rule);
+    register_batching_rule("MaskedSelectBackward", passthrough_rule);
+    register_batching_rule("RollBackward", passthrough_rule);
+
+    // ====================================================================
+    // Diag/Trace/Triangular ops
+    // ====================================================================
+    register_batching_rule("DiagBackward", passthrough_rule);
+    register_batching_rule("TraceBackward", passthrough_rule);
+    register_batching_rule("TriuBackward", passthrough_rule);
+    register_batching_rule("TrilBackward", passthrough_rule);
+
+    // ====================================================================
+    // Sparse ops
+    // ====================================================================
+    register_batching_rule("SpMMBackward", shape_passthrough);
+    register_batching_rule("SpMVBackward", shape_passthrough);
+    register_batching_rule("SparseAddBackward", passthrough_rule);
+
+    // ====================================================================
+    // Upsample/Interpolation
+    // ====================================================================
+    register_batching_rule("UpsampleBilinearBackward", shape_passthrough);
+    register_batching_rule("UpsampleNearestBackward", shape_passthrough);
 }
 
 // Try to detect the operation name from a probe run's grad_fn

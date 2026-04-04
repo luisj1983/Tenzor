@@ -387,8 +387,15 @@ auto DistributedDataParallel::all_reduce_bucket(GradBucket& bucket) -> void {
         // Track communication bytes
         comm_stats_.total_bytes_transferred += grad.numel() * dtype_size(grad.dtype());
 
-        // All-reduce: sum gradients across all processes
-        pg_.all_reduce(grad, ReduceOp::SUM);
+        // Optional gradient compression before all-reduce
+        if (compressor_) {
+            auto compressed = compressor_->compress(grad);
+            pg_.all_reduce(compressed.data, ReduceOp::SUM);
+            grad = compressor_->decompress(compressed);
+        } else {
+            // All-reduce: sum gradients across all processes
+            pg_.all_reduce(grad, ReduceOp::SUM);
+        }
 
         // Divide by world_size to compute average gradient.
         // This is equivalent to using ReduceOp::AVG but more explicit

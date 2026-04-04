@@ -159,7 +159,7 @@ public:
         for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
         auto results = backward(std::move(tensor_grads));
         std::vector<Variable> var_results;
-        for (auto& t : results) var_results.emplace_back(t, false);
+        for (auto& t : results) var_results.emplace_back(t, grad_outputs[0].requires_grad());
         return var_results;
     }
 
@@ -769,7 +769,7 @@ public:
         for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
         auto results = backward(std::move(tensor_grads));
         std::vector<Variable> var_results;
-        for (auto& t : results) var_results.emplace_back(t, false);
+        for (auto& t : results) var_results.emplace_back(t, grad_outputs[0].requires_grad());
         return var_results;
     }
 
