@@ -379,13 +379,16 @@ void VulkanBackend::createLogicalDevices() {
         floatControlsProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES;
         floatControlsProps.pNext = nullptr;
 
-        VkPhysicalDeviceProperties2 deviceProps2{};
-        deviceProps2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-        deviceProps2.pNext = &floatControlsProps;
-        vkGetPhysicalDeviceProperties2(ctx.physicalDevice, &deviceProps2);
+        bool canPreserveDenormsF32 = false;
+        if (hasFloatControls) {
+            VkPhysicalDeviceProperties2 deviceProps2{};
+            deviceProps2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+            deviceProps2.pNext = &floatControlsProps;
+            vkGetPhysicalDeviceProperties2(ctx.physicalDevice, &deviceProps2);
 
-        // Check if denorm preserve is supported for float32
-        bool canPreserveDenormsF32 = (floatControlsProps.shaderDenormPreserveFloat32 == VK_TRUE);
+            // Check if denorm preserve is supported for float32
+            canPreserveDenormsF32 = (floatControlsProps.shaderDenormPreserveFloat32 == VK_TRUE);
+        }
 
         // Set up atomic float features if extension is available
         VkPhysicalDeviceShaderAtomicFloatFeaturesEXT atomicFloatFeatures{};

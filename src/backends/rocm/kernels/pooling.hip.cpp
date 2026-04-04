@@ -612,7 +612,9 @@ __global__ void maxpool2d_backward_kernel_fp16(
 // Convert float to half kernel
 __global__ void convert_f32_to_f16_pool(const float* src, __half* dst, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        dst[idx] = __float2half(src[idx]);
+        // Saturate to FP16 representable range to prevent Inf from overflow
+        float val = fminf(fmaxf(src[idx], -65504.0f), 65504.0f);
+        dst[idx] = __float2half(val);
     }
 }
 

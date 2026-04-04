@@ -14,6 +14,13 @@ Usage:
     loss = F.cross_entropy(x, target)
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Iterable, Optional, Sequence, Union
+
+if TYPE_CHECKING:
+    from ..tenzor_core import Variable
+
 from .. import tenzor_core as _core
 
 _nn = _core.nn
@@ -23,7 +30,7 @@ _nn = _core.nn
 # Activation functions
 # ---------------------------------------------------------------------------
 
-def relu(input):
+def relu(input: Variable) -> Variable:
     """Apply the Rectified Linear Unit function element-wise.
 
     Parameters
@@ -44,7 +51,7 @@ def relu(input):
     return _nn.relu(input)
 
 
-def leaky_relu(input, negative_slope=0.01):
+def leaky_relu(input: Variable, negative_slope: float = 0.01) -> Variable:
     """Apply the Leaky ReLU function element-wise.
 
     Parameters
@@ -66,7 +73,7 @@ def leaky_relu(input, negative_slope=0.01):
     return _nn.leaky_relu(input, negative_slope)
 
 
-def elu(input, alpha=1.0):
+def elu(input: Variable, alpha: float = 1.0) -> Variable:
     """Apply the Exponential Linear Unit function element-wise.
 
     Parameters
@@ -88,7 +95,7 @@ def elu(input, alpha=1.0):
     return _nn.elu(input, alpha)
 
 
-def gelu(input):
+def gelu(input: Variable) -> Variable:
     """Apply the Gaussian Error Linear Unit function element-wise.
 
     Parameters
@@ -108,7 +115,7 @@ def gelu(input):
     return _nn.gelu(input)
 
 
-def sigmoid(input):
+def sigmoid(input: Variable) -> Variable:
     """Apply the sigmoid function element-wise.
 
     Parameters
@@ -128,7 +135,7 @@ def sigmoid(input):
     return _nn.sigmoid(input)
 
 
-def tanh(input):
+def tanh(input: Variable) -> Variable:
     """Apply the hyperbolic tangent function element-wise.
 
     Parameters
@@ -148,7 +155,7 @@ def tanh(input):
     return _nn.tanh(input)
 
 
-def softmax(input, dim=-1):
+def softmax(input: Variable, dim: int = -1) -> Variable:
     """Apply the softmax function along a dimension.
 
     Parameters
@@ -170,7 +177,7 @@ def softmax(input, dim=-1):
     return _nn.softmax(input, dim)
 
 
-def log_softmax(input, dim=-1):
+def log_softmax(input: Variable, dim: int = -1) -> Variable:
     """Apply log-softmax along a dimension.
 
     Numerically more stable than ``log(softmax(x))``.
@@ -194,7 +201,7 @@ def log_softmax(input, dim=-1):
     return _nn.log_softmax(input, dim)
 
 
-def selu(input):
+def selu(input: Variable) -> Variable:
     """Apply the Scaled Exponential Linear Unit function element-wise.
 
     Parameters
@@ -214,7 +221,7 @@ def selu(input):
     return _nn.selu(input)
 
 
-def swish(input):
+def swish(input: Variable) -> Variable:
     """Apply the Swish (SiLU) activation function element-wise.
 
     Computes ``x * sigmoid(x)``.
@@ -236,7 +243,7 @@ def swish(input):
     return _nn.swish(input)
 
 
-def mish(input):
+def mish(input: Variable) -> Variable:
     """Apply the Mish activation function element-wise.
 
     Computes ``x * tanh(softplus(x))``.
@@ -258,7 +265,7 @@ def mish(input):
     return _nn.mish(input)
 
 
-def hardswish(input):
+def hardswish(input: Variable) -> Variable:
     """Apply the Hard Swish activation function element-wise.
 
     A piecewise-linear approximation to Swish.
@@ -280,7 +287,7 @@ def hardswish(input):
     return _nn.hardswish(input)
 
 
-def hardsigmoid(input):
+def hardsigmoid(input: Variable) -> Variable:
     """Apply the Hard Sigmoid activation function element-wise.
 
     A piecewise-linear approximation to the sigmoid function.
@@ -302,7 +309,7 @@ def hardsigmoid(input):
     return _nn.hardsigmoid(input)
 
 
-def glu(input, dim=-1):
+def glu(input: Variable, dim: int = -1) -> Variable:
     """Apply the Gated Linear Unit function.
 
     Splits the input in half along *dim*, applies sigmoid to the second half,
@@ -327,7 +334,7 @@ def glu(input, dim=-1):
     return _nn.glu(input, dim)
 
 
-def softplus(input, beta=1.0):
+def softplus(input: Variable, beta: float = 1.0) -> Variable:
     """Apply the Softplus function element-wise.
 
     Computes ``(1/beta) * log(1 + exp(beta * x))``.
@@ -355,7 +362,7 @@ def softplus(input, beta=1.0):
 # Loss functions
 # ---------------------------------------------------------------------------
 
-def mse_loss(input, target, reduction="mean"):
+def mse_loss(input: Variable, target: Variable, reduction: str = "mean") -> Variable:
     """Compute the mean squared error loss.
 
     Parameters
@@ -380,7 +387,7 @@ def mse_loss(input, target, reduction="mean"):
     return _nn.mse_loss(input, target, reduction)
 
 
-def l1_loss(input, target, reduction="mean"):
+def l1_loss(input: Variable, target: Variable, reduction: str = "mean") -> Variable:
     """Compute the mean absolute error loss.
 
     Parameters
@@ -405,7 +412,7 @@ def l1_loss(input, target, reduction="mean"):
     return _nn.l1_loss(input, target, reduction)
 
 
-def cross_entropy(input, target, reduction="mean"):
+def cross_entropy(input: Variable, target: Variable, reduction: str = "mean") -> Variable:
     """Compute the cross-entropy loss between logits and class indices.
 
     Combines ``log_softmax`` and ``nll_loss`` in a single function for
@@ -434,7 +441,7 @@ def cross_entropy(input, target, reduction="mean"):
     return _nn.cross_entropy(input, target, reduction)
 
 
-def nll_loss(input, target, reduction="mean"):
+def nll_loss(input: Variable, target: Variable, reduction: str = "mean") -> Variable:
     """Compute the negative log-likelihood loss.
 
     Parameters
@@ -460,7 +467,7 @@ def nll_loss(input, target, reduction="mean"):
     return _nn.nll_loss(input, target, reduction)
 
 
-def bce_loss(input, target, reduction="mean"):
+def bce_loss(input: Variable, target: Variable, reduction: str = "mean") -> Variable:
     """Compute the binary cross-entropy loss.
 
     Parameters
@@ -485,7 +492,7 @@ def bce_loss(input, target, reduction="mean"):
     return _nn.bce_loss(input, target, reduction)
 
 
-def kl_div(input, target, reduction="mean", log_target=False):
+def kl_div(input: Variable, target: Variable, reduction: str = "mean", log_target: bool = False) -> Variable:
     """Compute the Kullback-Leibler divergence loss.
 
     Parameters
@@ -512,7 +519,7 @@ def kl_div(input, target, reduction="mean", log_target=False):
     return _nn.kl_div_loss(input, target, reduction, log_target)
 
 
-def huber_loss(input, target, delta=1.0, reduction="mean"):
+def huber_loss(input: Variable, target: Variable, delta: float = 1.0, reduction: str = "mean") -> Variable:
     """Compute the Huber loss (smooth L1 with configurable threshold).
 
     Uses quadratic loss for small errors and linear loss for large errors.
@@ -542,7 +549,7 @@ def huber_loss(input, target, delta=1.0, reduction="mean"):
     return _nn.huber_loss(input, target, delta, reduction)
 
 
-def smooth_l1_loss(input, target, reduction="mean", beta=1.0):
+def smooth_l1_loss(input: Variable, target: Variable, reduction: str = "mean", beta: float = 1.0) -> Variable:
     """Compute the smooth L1 loss.
 
     Similar to Huber loss but parameterized by *beta*.
@@ -571,7 +578,7 @@ def smooth_l1_loss(input, target, reduction="mean", beta=1.0):
     return _nn.smooth_l1_loss(input, target, reduction, beta)
 
 
-def soft_margin_loss(input, target, reduction="mean"):
+def soft_margin_loss(input: Variable, target: Variable, reduction: str = "mean") -> Variable:
     """Compute the two-class soft margin loss.
 
     Parameters
@@ -591,7 +598,7 @@ def soft_margin_loss(input, target, reduction="mean"):
     return _nn.soft_margin_loss(input, target, reduction)
 
 
-def hinge_embedding_loss(input, target, margin=1.0, reduction="mean"):
+def hinge_embedding_loss(input: Variable, target: Variable, margin: float = 1.0, reduction: str = "mean") -> Variable:
     """Compute the hinge embedding loss.
 
     Parameters
@@ -613,8 +620,8 @@ def hinge_embedding_loss(input, target, margin=1.0, reduction="mean"):
     return _nn.hinge_embedding_loss(input, target, margin, reduction)
 
 
-def poisson_nll_loss(input, target, log_input=True, full=False, eps=1e-8,
-                     reduction="mean"):
+def poisson_nll_loss(input: Variable, target: Variable, log_input: bool = True, full: bool = False, eps: float = 1e-8,
+                     reduction: str = "mean") -> Variable:
     """Compute the Poisson negative log-likelihood loss.
 
     Parameters
@@ -640,7 +647,7 @@ def poisson_nll_loss(input, target, log_input=True, full=False, eps=1e-8,
     return _nn.poisson_nll_loss(input, target, log_input, full, eps, reduction)
 
 
-def cosine_embedding_loss(input1, input2, target, margin=0.0, reduction="mean"):
+def cosine_embedding_loss(input1: Variable, input2: Variable, target: Variable, margin: float = 0.0, reduction: str = "mean") -> Variable:
     """Compute the cosine embedding loss.
 
     Parameters
@@ -662,8 +669,8 @@ def cosine_embedding_loss(input1, input2, target, margin=0.0, reduction="mean"):
     return _nn.cosine_embedding_loss(input1, input2, target, margin, reduction)
 
 
-def triplet_margin_loss(anchor, positive, negative, margin=1.0, p=2.0,
-                        swap=False, reduction="mean"):
+def triplet_margin_loss(anchor: Variable, positive: Variable, negative: Variable, margin: float = 1.0, p: float = 2.0,
+                        swap: bool = False, reduction: str = "mean") -> Variable:
     """Compute the triplet margin loss.
 
     Parameters
@@ -688,7 +695,7 @@ def triplet_margin_loss(anchor, positive, negative, margin=1.0, p=2.0,
                                    swap, reduction)
 
 
-def multi_label_soft_margin_loss(input, target, reduction="mean"):
+def multi_label_soft_margin_loss(input: Variable, target: Variable, reduction: str = "mean") -> Variable:
     """Compute the multi-label soft margin loss.
 
     Parameters
@@ -708,7 +715,7 @@ def multi_label_soft_margin_loss(input, target, reduction="mean"):
     return _nn.multi_label_soft_margin_loss(input, target, reduction)
 
 
-def multi_margin_loss(input, target, p=1, margin=1.0, reduction="mean"):
+def multi_margin_loss(input: Variable, target: Variable, p: int = 1, margin: float = 1.0, reduction: str = "mean") -> Variable:
     """Compute the multi-class margin (hinge) loss.
 
     Parameters
@@ -732,8 +739,8 @@ def multi_margin_loss(input, target, p=1, margin=1.0, reduction="mean"):
     return _nn.multi_margin_loss(input, target, p, margin, reduction)
 
 
-def gaussian_nll_loss(input, target, var, full=False, eps=1e-6,
-                      reduction="mean"):
+def gaussian_nll_loss(input: Variable, target: Variable, var: Variable, full: bool = False, eps: float = 1e-6,
+                      reduction: str = "mean") -> Variable:
     """Compute the Gaussian negative log-likelihood loss.
 
     Parameters
@@ -763,7 +770,7 @@ def gaussian_nll_loss(input, target, var, full=False, eps=1e-6,
 # Functional operations (stateless wrappers)
 # ---------------------------------------------------------------------------
 
-def dropout(input, p=0.5, training=True):
+def dropout(input: Variable, p: float = 0.5, training: bool = True) -> Variable:
     """Apply dropout to the input during training.
 
     Randomly zeroes elements with probability *p* and scales remaining
@@ -791,7 +798,7 @@ def dropout(input, p=0.5, training=True):
     return _nn.functional_dropout(input, p, training)
 
 
-def linear(input, weight, bias=None):
+def linear(input: Variable, weight: Variable, bias: Optional[Variable] = None) -> Variable:
     """Apply a linear transformation: ``y = x @ W^T + b``.
 
     Parameters
@@ -815,7 +822,7 @@ def linear(input, weight, bias=None):
     return _nn.functional_linear(input, weight, bias)
 
 
-def max_pool2d(input, kernel_size, stride=None, padding=0):
+def max_pool2d(input: Variable, kernel_size: int, stride: Optional[int] = None, padding: int = 0) -> Variable:
     """Apply 2D max pooling over an input signal.
 
     Parameters
@@ -843,7 +850,7 @@ def max_pool2d(input, kernel_size, stride=None, padding=0):
     return _nn.functional_max_pool2d(input, kernel_size, stride, padding)
 
 
-def avg_pool2d(input, kernel_size, stride=None, padding=0):
+def avg_pool2d(input: Variable, kernel_size: int, stride: Optional[int] = None, padding: int = 0) -> Variable:
     """Apply 2D average pooling over an input signal.
 
     Parameters
@@ -871,7 +878,7 @@ def avg_pool2d(input, kernel_size, stride=None, padding=0):
     return _nn.functional_avg_pool2d(input, kernel_size, stride, padding)
 
 
-def adaptive_avg_pool2d(input, output_size):
+def adaptive_avg_pool2d(input: Variable, output_size: Union[int, tuple[int, int]]) -> Variable:
     """Apply 2D adaptive average pooling.
 
     The output spatial dimensions match *output_size* regardless of input size.
@@ -895,7 +902,7 @@ def adaptive_avg_pool2d(input, output_size):
     return _nn.functional_adaptive_avg_pool2d(input, output_size)
 
 
-def adaptive_max_pool2d(input, output_size):
+def adaptive_max_pool2d(input: Variable, output_size: Union[int, tuple[int, int]]) -> Variable:
     """Apply 2D adaptive max pooling.
 
     The output spatial dimensions match *output_size* regardless of input size.
@@ -919,7 +926,7 @@ def adaptive_max_pool2d(input, output_size):
     return _nn.functional_adaptive_max_pool2d(input, output_size)
 
 
-def batch_norm(input, num_features, training=True, momentum=0.1, eps=1e-5):
+def batch_norm(input: Variable, num_features: int, training: bool = True, momentum: float = 0.1, eps: float = 1e-5) -> Variable:
     """Apply batch normalization over a mini-batch of inputs.
 
     Creates a transient BatchNorm layer with fresh running statistics.
@@ -952,7 +959,7 @@ def batch_norm(input, num_features, training=True, momentum=0.1, eps=1e-5):
     return _nn.functional_batch_norm(input, num_features, training, momentum, eps)
 
 
-def layer_norm(input, normalized_shape, eps=1e-5):
+def layer_norm(input: Variable, normalized_shape: Sequence[int], eps: float = 1e-5) -> Variable:
     """Apply layer normalization over the last *D* dimensions.
 
     Creates a transient LayerNorm layer with learnable affine parameters.
@@ -979,7 +986,7 @@ def layer_norm(input, normalized_shape, eps=1e-5):
     return _nn.functional_layer_norm(input, normalized_shape, eps)
 
 
-def group_norm(input, num_groups, num_channels, eps=1e-5):
+def group_norm(input: Variable, num_groups: int, num_channels: int, eps: float = 1e-5) -> Variable:
     """Apply group normalization.
 
     Parameters
@@ -1006,7 +1013,7 @@ def group_norm(input, num_groups, num_channels, eps=1e-5):
     return _nn.functional_group_norm(input, num_groups, num_channels, eps)
 
 
-def instance_norm(input, num_features, eps=1e-5, affine=False):
+def instance_norm(input: Variable, num_features: int, eps: float = 1e-5, affine: bool = False) -> Variable:
     """Apply instance normalization.
 
     Normalizes each sample independently across spatial dimensions.
@@ -1034,7 +1041,7 @@ def instance_norm(input, num_features, eps=1e-5, affine=False):
     return _nn.functional_instance_norm(input, num_features, eps, affine)
 
 
-def rms_norm(input, normalized_shape, eps=1e-6):
+def rms_norm(input: Variable, normalized_shape: int, eps: float = 1e-6) -> Variable:
     """Apply Root Mean Square layer normalization.
 
     Parameters
@@ -1058,7 +1065,7 @@ def rms_norm(input, normalized_shape, eps=1e-6):
     return _nn.functional_rms_norm(input, normalized_shape, eps)
 
 
-def interpolate(input, size, mode='bilinear', align_corners=False):
+def interpolate(input: Variable, size: Sequence[int], mode: str = 'bilinear', align_corners: bool = False) -> Variable:
     """Resize the input using interpolation.
 
     Parameters
@@ -1086,7 +1093,7 @@ def interpolate(input, size, mode='bilinear', align_corners=False):
     return _nn.functional_interpolate(input, size, mode, align_corners)
 
 
-def embedding(input, weight, padding_idx=-1):
+def embedding(input: Variable, weight: Variable, padding_idx: int = -1) -> Variable:
     """Look up embeddings in a fixed dictionary and size.
 
     Parameters
@@ -1111,7 +1118,7 @@ def embedding(input, weight, padding_idx=-1):
     return _nn.functional_embedding(input, weight, padding_idx)
 
 
-def binary_cross_entropy_with_logits(input, target, reduction="mean"):
+def binary_cross_entropy_with_logits(input: Variable, target: Variable, reduction: str = "mean") -> Variable:
     """Compute binary cross-entropy loss from logits.
 
     Combines a sigmoid layer and binary cross-entropy in a single function
@@ -1143,7 +1150,7 @@ def binary_cross_entropy_with_logits(input, target, reduction="mean"):
 # Gradient clipping utilities
 # ---------------------------------------------------------------------------
 
-def clip_grad_norm_(parameters, max_norm, norm_type=2.0):
+def clip_grad_norm_(parameters: Iterable[Variable], max_norm: float, norm_type: float = 2.0) -> float:
     """Clip the gradient norm of a set of parameters.
 
     Gradients are modified in-place.  The total norm is computed over all
@@ -1170,7 +1177,7 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2.0):
     return _nn.clip_grad_norm_(parameters, max_norm, norm_type)
 
 
-def clip_grad_value_(parameters, clip_value):
+def clip_grad_value_(parameters: Iterable[Variable], clip_value: float) -> None:
     """Clip the gradient values of a set of parameters to a specified range.
 
     Gradients are modified in-place.
@@ -1191,6 +1198,146 @@ def clip_grad_value_(parameters, clip_value):
     >>> F.clip_grad_value_(model.parameters(), clip_value=0.5)
     """
     return _nn.clip_grad_value_(parameters, clip_value)
+
+
+def cosine_similarity(x1: Variable, x2: Variable, dim: int = 1, eps: float = 1e-8) -> Variable:
+    """Compute cosine similarity between two tensors along a dimension.
+
+    Parameters
+    ----------
+    x1, x2 : Variable
+        Input tensors.
+    dim : int, optional
+        Dimension along which to compute similarity. Default: ``1``.
+    eps : float, optional
+        Small value to avoid division by zero. Default: ``1e-8``.
+
+    Returns
+    -------
+    Variable
+        Cosine similarity values.
+    """
+    return _nn.functional_cosine_similarity(x1, x2, dim, eps)
+
+
+def conv2d(input: Variable, weight: Variable, bias: Optional[Variable] = None,
+           stride: Union[int, tuple[int, int]] = 1,
+           padding: Union[int, tuple[int, int]] = 0,
+           dilation: Union[int, tuple[int, int]] = 1,
+           groups: int = 1) -> Variable:
+    """Apply a 2D convolution over an input signal.
+
+    Parameters
+    ----------
+    input : Variable
+        Input tensor of shape ``(N, C_in, H, W)``.
+    weight : Variable
+        Filters of shape ``(C_out, C_in/groups, kH, kW)``.
+    bias : Variable or None, optional
+        Bias of shape ``(C_out,)``. Default: ``None``.
+    stride : int or tuple, optional
+        Stride of the convolution. Default: ``1``.
+    padding : int or tuple, optional
+        Zero-padding added to both sides. Default: ``0``.
+    dilation : int or tuple, optional
+        Spacing between kernel elements. Default: ``1``.
+    groups : int, optional
+        Number of blocked connections. Default: ``1``.
+
+    Returns
+    -------
+    Variable
+        Output tensor.
+    """
+    if isinstance(stride, int):
+        stride = (stride, stride)
+    if isinstance(padding, int):
+        padding = (padding, padding)
+    if isinstance(dilation, int):
+        dilation = (dilation, dilation)
+    return _nn.functional_conv2d(input, weight, bias, stride, padding, dilation, groups)
+
+
+def scaled_dot_product_attention(
+    query: Variable, key: Variable, value: Variable,
+    attn_mask: Optional[Variable] = None,
+    dropout_p: float = 0.0, is_causal: bool = False
+) -> Variable:
+    """Compute scaled dot-product attention.
+
+    Computes ``softmax(Q @ K^T / sqrt(d_k) + mask) @ V``.
+
+    Parameters
+    ----------
+    query : Variable
+        Query tensor ``[B, H, L, E]``.
+    key : Variable
+        Key tensor ``[B, H, S, E]``.
+    value : Variable
+        Value tensor ``[B, H, S, Ev]``.
+    attn_mask : Variable or None, optional
+        Additive attention mask. Default: ``None``.
+    dropout_p : float, optional
+        Dropout probability on attention weights. Default: ``0.0``.
+    is_causal : bool, optional
+        Apply causal (lower-triangular) mask. Default: ``False``.
+
+    Returns
+    -------
+    Variable
+        Output tensor ``[B, H, L, Ev]``.
+    """
+    return _nn.functional_scaled_dot_product_attention(
+        query, key, value, attn_mask, dropout_p, is_causal)
+
+
+def normalize(input: Variable, p: float = 2.0, dim: int = 1,
+              eps: float = 1e-12) -> Variable:
+    """Apply L_p normalization along a dimension.
+
+    Divides the input by its L_p norm along the given dimension.
+
+    Parameters
+    ----------
+    input : Variable
+        Input tensor.
+    p : float, optional
+        Exponent for the norm. Default: ``2.0`` (L2).
+    dim : int, optional
+        Dimension to reduce. Default: ``1``.
+    eps : float, optional
+        Small value to avoid division by zero. Default: ``1e-12``.
+
+    Returns
+    -------
+    Variable
+        Normalized tensor of same shape as *input*.
+    """
+    return _nn.functional_normalize(input, p, dim, eps)
+
+
+def pad(input: Variable, pad: Sequence[int], mode: str = "constant",
+        value: float = 0.0) -> Variable:
+    """Pad a tensor.
+
+    Parameters
+    ----------
+    input : Variable
+        Input tensor.
+    pad : sequence of int
+        Padding sizes in reverse-dimension order: ``(left, right)`` for 1D,
+        ``(left, right, top, bottom)`` for 2D, etc.
+    mode : str, optional
+        Padding mode: ``'constant'``. Default: ``'constant'``.
+    value : float, optional
+        Fill value for constant padding. Default: ``0.0``.
+
+    Returns
+    -------
+    Variable
+        Padded tensor.
+    """
+    return _nn.functional_pad(input, list(pad), mode, value)
 
 
 __all__ = [
@@ -1234,6 +1381,12 @@ __all__ = [
     "interpolate",
     "embedding",
     "binary_cross_entropy_with_logits",
+    # Additional functional operations
+    "cosine_similarity",
+    "conv2d",
+    "scaled_dot_product_attention",
+    "normalize",
+    "pad",
     # Gradient clipping
     "clip_grad_norm_",
     "clip_grad_value_",

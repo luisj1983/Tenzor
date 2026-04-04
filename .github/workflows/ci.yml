@@ -571,7 +571,7 @@ jobs:
         run: flake8 python/ --max-line-length=120 --ignore=E501,W503 || true
 
       - name: Python type check - mypy
-        run: mypy python/tenzor/ --ignore-missing-imports || true
+        run: mypy python/tenzor/ --ignore-missing-imports
 
   # =========================================================================
   # GPU Compile Check: Verify CUDA backend compiles (no GPU needed)

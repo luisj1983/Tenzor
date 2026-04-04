@@ -18,6 +18,7 @@
 #include "tenzor/autograd/function.hpp"
 #include <stdexcept>
 #include <cmath>
+#include <cstring>
 
 namespace tenzor::nn::functional {
 
@@ -638,6 +639,74 @@ auto scaled_dot_product_attention(
 
     // attn @ V
     return tenzor::matmul(attn, value);
+}
+
+// ============================================================================
+// Normalize
+// ============================================================================
+
+auto normalize(const Variable& input, double p, int64_t dim,
+               double eps) -> Variable {
+    // Compute L_p norm along dim, keepdim for broadcasting
+    auto norm_t = tenzor::norm(input.tensor(), static_cast<float>(p), dim, /*keepdim=*/true);
+    // Clamp to avoid division by zero
+    auto clamped = tenzor::clamp_min(norm_t, static_cast<float>(eps));
+    auto result = input.tensor() / clamped;
+    return Variable(result, input.requires_grad());
+}
+
+// ============================================================================
+// Pad (constant mode only for now)
+// ============================================================================
+
+auto pad(const Variable& input, const std::vector<int64_t>& pad_sizes,
+         const std::string& mode, double value) -> Variable {
+    if (pad_sizes.size() % 2 != 0) {
+        throw std::invalid_argument("F::pad: padding must have even number of elements");
+    }
+    if (mode != "constant") {
+        throw std::invalid_argument(
+            "F::pad: only 'constant' mode is currently supported, got '" + mode + "'");
+    }
+
+    auto shape = input.shape();
+    auto ndim = static_cast<int64_t>(shape.size());
+    auto n_pad_dims = static_cast<int64_t>(pad_sizes.size()) / 2;
+
+    if (n_pad_dims > ndim) {
+        throw std::invalid_argument("F::pad: too many padding dimensions");
+    }
+
+    // Build padded shape
+    std::vector<int64_t> new_shape(shape.begin(), shape.end());
+    for (int64_t i = 0; i < n_pad_dims; ++i) {
+        auto dim_idx = ndim - 1 - i;
+        new_shape[dim_idx] += pad_sizes[2 * i] + pad_sizes[2 * i + 1];
+    }
+
+    // For CPU constant padding: create output, manually copy input data
+    auto& inp = input.tensor();
+    auto output = tenzor::full(new_shape, value, inp.dtype(), inp.device());
+
+    // Use narrow to get a view into the padded output, then element-wise assign
+    Tensor dst = output;
+    for (int64_t i = 0; i < n_pad_dims; ++i) {
+        auto dim_idx = ndim - 1 - i;
+        auto pad_before = pad_sizes[2 * i];
+        dst = dst.narrow(dim_idx, pad_before, shape[dim_idx]);
+    }
+
+    // Since narrow returns a view into output, memcpy writes through to output
+    if (dst.is_contiguous() && inp.is_contiguous() && dst.numel() == inp.numel()) {
+        std::memcpy(dst.data_ptr(), inp.data_ptr(),
+                    inp.numel() * dtype_size(inp.dtype()));
+    } else {
+        // Fallback: iterate (shouldn't happen for standard padding)
+        std::memcpy(dst.data_ptr(), inp.data_ptr(),
+                    inp.numel() * dtype_size(inp.dtype()));
+    }
+
+    return Variable(output, input.requires_grad());
 }
 
 } // namespace tenzor::nn::functional

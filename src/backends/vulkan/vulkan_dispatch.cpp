@@ -21,6 +21,16 @@ namespace tenzor {
 auto VulkanBackend::dispatch(const std::string& op_name,
                             std::span<const Tensor> inputs,
                             const OpAttributes& attrs) -> std::vector<Tensor> {
+    // Check for device lost state before submitting work
+    auto device_id = inputs.empty() ? 0 : inputs[0].device().index;
+    if (is_device_lost(device_id)) {
+        if (!try_reset_device(device_id)) {
+            throw std::runtime_error(
+                "VulkanBackend::dispatch: device " + std::to_string(device_id) +
+                " is lost and recovery failed for operation '" + op_name + "'");
+        }
+    }
+
     auto op = string_to_op_id(op_name);
     if (op == OpId::OP_COUNT) {
         throw std::runtime_error("VulkanBackend::dispatch: unknown operation '" + op_name + "'");

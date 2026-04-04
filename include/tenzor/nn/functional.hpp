@@ -504,4 +504,38 @@ auto smooth_l1_loss(const Variable& input, const Variable& target,
 auto cosine_similarity(const Variable& x1, const Variable& x2,
                        int64_t dim = 1, double eps = 1e-8) -> Variable;
 
+// ============================================================================
+// Normalization utilities
+// ============================================================================
+
+/**
+ * @brief L_p normalization along a dimension.
+ *
+ * Divides the input by its L_p norm along the specified dimension:
+ *   output = input / max(norm(input, p, dim), eps)
+ *
+ * @param input Input tensor
+ * @param p     Exponent value for the norm (default: 2.0)
+ * @param dim   Dimension to reduce (default: 1)
+ * @param eps   Small value to avoid division by zero (default: 1e-12)
+ */
+auto normalize(const Variable& input, double p = 2.0, int64_t dim = 1,
+               double eps = 1e-12) -> Variable;
+
+// ============================================================================
+// Padding
+// ============================================================================
+
+/**
+ * @brief Pad a tensor.
+ *
+ * @param input Input tensor
+ * @param pad   Padding sizes in reverse-dimension order: (left, right) for 1D,
+ *              (left, right, top, bottom) for 2D, etc.
+ * @param mode  Padding mode: "constant", "reflect", "replicate"
+ * @param value Fill value for constant padding (default: 0)
+ */
+auto pad(const Variable& input, const std::vector<int64_t>& pad,
+         const std::string& mode = "constant", double value = 0.0) -> Variable;
+
 } // namespace tenzor::nn::functional

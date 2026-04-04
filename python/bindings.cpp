@@ -5468,6 +5468,36 @@ PYBIND11_MODULE(tenzor_core, m) {
            "Functional 2D convolution",
            py::call_guard<py::gil_scoped_release>());
 
+    nn.def("functional_normalize", &tenzor::nn::functional::normalize,
+           py::arg("input"), py::arg("p") = 2.0, py::arg("dim") = 1,
+           py::arg("eps") = 1e-12,
+           "L_p normalize input along a dimension",
+           py::call_guard<py::gil_scoped_release>());
+
+    nn.def("functional_pad", &tenzor::nn::functional::pad,
+           py::arg("input"), py::arg("pad"), py::arg("mode") = "constant",
+           py::arg("value") = 0.0,
+           "Pad a tensor (constant mode)",
+           py::call_guard<py::gil_scoped_release>());
+
+    nn.def("functional_scaled_dot_product_attention",
+           [](const tenzor::Variable& query, const tenzor::Variable& key,
+              const tenzor::Variable& value,
+              std::optional<tenzor::Variable> attn_mask,
+              double dropout_p, bool is_causal) -> tenzor::Variable {
+               tenzor::nn::functional::SDPAOptions opts;
+               opts.attn_mask = attn_mask;
+               opts.dropout_p = dropout_p;
+               opts.is_causal = is_causal;
+               return tenzor::nn::functional::scaled_dot_product_attention(
+                   query, key, value, opts);
+           },
+           py::arg("query"), py::arg("key"), py::arg("value"),
+           py::arg("attn_mask") = std::nullopt,
+           py::arg("dropout_p") = 0.0, py::arg("is_causal") = false,
+           "Scaled dot-product attention",
+           py::call_guard<py::gil_scoped_release>());
+
     // Gradient clipping utilities
     nn.def("clip_grad_norm_", &tenzor::nn::utils::clip_grad_norm_,
            py::arg("parameters"), py::arg("max_norm"), py::arg("norm_type") = 2.0,
@@ -7776,6 +7806,60 @@ PYBIND11_MODULE(tenzor_core, m) {
         "Random horizontal flip")
         .def(py::init<float>(),
              py::arg("p") = 0.5f);
+
+    py::class_<tenzor::data::transforms::RandomVerticalFlip,
+               tenzor::data::transforms::Transform,
+               std::shared_ptr<tenzor::data::transforms::RandomVerticalFlip>>(transforms, "RandomVerticalFlip",
+        "Random vertical flip")
+        .def(py::init<float>(),
+             py::arg("p") = 0.5f);
+
+    py::class_<tenzor::data::transforms::CenterCrop,
+               tenzor::data::transforms::Transform,
+               std::shared_ptr<tenzor::data::transforms::CenterCrop>>(transforms, "CenterCrop",
+        "Center crop to target size")
+        .def(py::init<int64_t, int64_t>(),
+             py::arg("height"), py::arg("width"));
+
+    py::class_<tenzor::data::transforms::RandomCrop,
+               tenzor::data::transforms::Transform,
+               std::shared_ptr<tenzor::data::transforms::RandomCrop>>(transforms, "RandomCrop",
+        "Random crop with optional padding")
+        .def(py::init<int64_t, int64_t, int64_t>(),
+             py::arg("height"), py::arg("width"), py::arg("padding") = 0);
+
+    py::class_<tenzor::data::transforms::Resize,
+               tenzor::data::transforms::Transform,
+               std::shared_ptr<tenzor::data::transforms::Resize>>(transforms, "Resize",
+        "Resize using nearest-neighbor interpolation")
+        .def(py::init<int64_t, int64_t>(),
+             py::arg("height"), py::arg("width"));
+
+    py::class_<tenzor::data::transforms::RandomResizedCrop,
+               tenzor::data::transforms::Transform,
+               std::shared_ptr<tenzor::data::transforms::RandomResizedCrop>>(transforms, "RandomResizedCrop",
+        "Random crop then resize")
+        .def(py::init<int64_t, int64_t, float, float, float, float>(),
+             py::arg("height"), py::arg("width"),
+             py::arg("scale_min") = 0.08f, py::arg("scale_max") = 1.0f,
+             py::arg("ratio_min") = 0.75f, py::arg("ratio_max") = 1.333f);
+
+    py::class_<tenzor::data::transforms::GaussianBlur,
+               tenzor::data::transforms::Transform,
+               std::shared_ptr<tenzor::data::transforms::GaussianBlur>>(transforms, "GaussianBlur",
+        "Gaussian blur with random sigma")
+        .def(py::init<int, float, float>(),
+             py::arg("kernel_size"), py::arg("sigma_min") = 0.1f, py::arg("sigma_max") = 2.0f);
+
+    py::class_<tenzor::data::transforms::RandomAffine,
+               tenzor::data::transforms::Transform,
+               std::shared_ptr<tenzor::data::transforms::RandomAffine>>(transforms, "RandomAffine",
+        "Random affine transformation")
+        .def(py::init<float, float, float, float, float, float>(),
+             py::arg("degrees"),
+             py::arg("translate_x") = 0.0f, py::arg("translate_y") = 0.0f,
+             py::arg("scale_min") = 1.0f, py::arg("scale_max") = 1.0f,
+             py::arg("shear") = 0.0f);
 
     // =========================================================================
     // TensorBoard Integration

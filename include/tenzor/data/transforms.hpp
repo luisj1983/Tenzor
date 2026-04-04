@@ -246,6 +246,152 @@ private:
     int num_holes_, hole_size_;
 };
 
+/**
+ * @brief Random vertical flip transform
+ */
+class RandomVerticalFlip : public Transform {
+public:
+    explicit RandomVerticalFlip(float p = 0.5f) : p_(p) {
+        if (p < 0.0f || p > 1.0f) {
+            throw std::invalid_argument("Probability must be in [0, 1]");
+        }
+    }
+
+    auto operator()(const Tensor& input, const Tensor& target)
+        -> std::pair<Tensor, Tensor> override;
+
+private:
+    float p_;
+};
+
+/**
+ * @brief Center crop transform
+ *
+ * Crops the input tensor at the center to the specified size.
+ * Assumes input has spatial dimensions (at least 2D).
+ */
+class CenterCrop : public Transform {
+public:
+    CenterCrop(int64_t height, int64_t width)
+        : height_(height), width_(width) {}
+
+    auto operator()(const Tensor& input, const Tensor& target)
+        -> std::pair<Tensor, Tensor> override;
+
+private:
+    int64_t height_, width_;
+};
+
+/**
+ * @brief Random crop transform
+ *
+ * Randomly crops a region of the specified size from the input.
+ * Optionally applies padding before cropping.
+ */
+class RandomCrop : public Transform {
+public:
+    RandomCrop(int64_t height, int64_t width, int64_t padding = 0)
+        : height_(height), width_(width), padding_(padding) {}
+
+    auto operator()(const Tensor& input, const Tensor& target)
+        -> std::pair<Tensor, Tensor> override;
+
+private:
+    int64_t height_, width_, padding_;
+};
+
+/**
+ * @brief Resize transform
+ *
+ * Resizes input spatial dimensions to target size using interpolation.
+ * Uses nearest-neighbor interpolation.
+ */
+class Resize : public Transform {
+public:
+    Resize(int64_t height, int64_t width)
+        : height_(height), width_(width) {}
+
+    auto operator()(const Tensor& input, const Tensor& target)
+        -> std::pair<Tensor, Tensor> override;
+
+private:
+    int64_t height_, width_;
+};
+
+/**
+ * @brief Random resized crop transform
+ *
+ * Crops a random region and resizes to target size.
+ * Scale and ratio parameters control the random crop area and aspect ratio.
+ */
+class RandomResizedCrop : public Transform {
+public:
+    RandomResizedCrop(int64_t height, int64_t width,
+                      float scale_min = 0.08f, float scale_max = 1.0f,
+                      float ratio_min = 0.75f, float ratio_max = 1.333f)
+        : height_(height), width_(width),
+          scale_min_(scale_min), scale_max_(scale_max),
+          ratio_min_(ratio_min), ratio_max_(ratio_max) {}
+
+    auto operator()(const Tensor& input, const Tensor& target)
+        -> std::pair<Tensor, Tensor> override;
+
+private:
+    int64_t height_, width_;
+    float scale_min_, scale_max_, ratio_min_, ratio_max_;
+};
+
+/**
+ * @brief Gaussian blur transform
+ *
+ * Applies Gaussian blur with the specified kernel size and sigma.
+ */
+class GaussianBlur : public Transform {
+public:
+    GaussianBlur(int kernel_size, float sigma_min = 0.1f, float sigma_max = 2.0f)
+        : kernel_size_(kernel_size), sigma_min_(sigma_min), sigma_max_(sigma_max) {
+        if (kernel_size % 2 == 0) {
+            throw std::invalid_argument("Kernel size must be odd");
+        }
+    }
+
+    auto operator()(const Tensor& input, const Tensor& target)
+        -> std::pair<Tensor, Tensor> override;
+
+private:
+    int kernel_size_;
+    float sigma_min_, sigma_max_;
+};
+
+/**
+ * @brief Random affine transformation
+ *
+ * Applies a random affine transformation (rotation + translation + scale + shear)
+ * to the input tensor using nearest-neighbor interpolation.
+ */
+class RandomAffine : public Transform {
+public:
+    /**
+     * @param degrees       Max rotation angle in degrees (symmetric: [-degrees, degrees])
+     * @param translate_x   Max horizontal translation as fraction of width [0, 1)
+     * @param translate_y   Max vertical translation as fraction of height [0, 1)
+     * @param scale_min     Minimum scaling factor (default: 1.0)
+     * @param scale_max     Maximum scaling factor (default: 1.0)
+     * @param shear         Max shear angle in degrees (default: 0)
+     */
+    RandomAffine(float degrees, float translate_x = 0.0f, float translate_y = 0.0f,
+                 float scale_min = 1.0f, float scale_max = 1.0f, float shear = 0.0f)
+        : degrees_(degrees), translate_x_(translate_x), translate_y_(translate_y),
+          scale_min_(scale_min), scale_max_(scale_max), shear_(shear) {}
+
+    auto operator()(const Tensor& input, const Tensor& target)
+        -> std::pair<Tensor, Tensor> override;
+
+private:
+    float degrees_, translate_x_, translate_y_;
+    float scale_min_, scale_max_, shear_;
+};
+
 } // namespace transforms
 } // namespace data
 } // namespace tenzor

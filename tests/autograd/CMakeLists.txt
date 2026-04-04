@@ -14,6 +14,10 @@ target_link_libraries(test_higher_order_gradients PRIVATE tenzor_core GTest::gte
 add_executable(test_gradcheck test_gradcheck.cpp)
 target_link_libraries(test_gradcheck PRIVATE tenzor_core GTest::gtest_main)
 
+# Direct gradcheck tests (non-parameterized, CPU-only, for coverage)
+add_executable(test_gradcheck_direct test_gradcheck_direct.cpp)
+target_link_libraries(test_gradcheck_direct PRIVATE tenzor_core GTest::gtest_main)
+
 # Extended gradcheck tests (multi-backend)
 add_executable(test_gradcheck_extended test_gradcheck_extended.cpp)
 target_link_libraries(test_gradcheck_extended PRIVATE tenzor_core GTest::gtest_main)
@@ -35,8 +39,13 @@ target_link_libraries(test_inplace_autograd PRIVATE tenzor_core GTest::gtest_mai
 # ============================================================================
 tenzor_discover_tests(test_autograd_edge_cases DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_higher_order_gradients DISCOVERY_TIMEOUT 60)
-tenzor_discover_tests(test_gradcheck DISCOVERY_TIMEOUT 60)
-tenzor_discover_tests(test_gradcheck_extended DISCOVERY_TIMEOUT 60)
+# Parameterized backend tests use PRE_TEST discovery so that test listing
+# runs at ctest time rather than build time.  POST_BUILD discovery fails
+# when tenzor::initialize() cannot enumerate GPUs in the build sandbox,
+# causing ctest to silently register 0 tests (root cause of 0% coverage).
+tenzor_discover_tests(test_gradcheck DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_gradcheck_direct DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_gradcheck_extended DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_autograd_additional DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_hooks DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_inplace_autograd DISCOVERY_TIMEOUT 60)

@@ -1029,7 +1029,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         auto vk = get_vulkan_backend();
         auto result = vk->dispatchActivation("relu", target, 0, 0.0f);
         auto bytes = target.numel() * dtype_size(target.dtype());
-        vk->copy(target.data_ptr(), result.data_ptr(), bytes, CopyKind::DeviceToDevice);
+        if (bytes > 0) vk->copy(target.data_ptr(), result.data_ptr(), bytes, CopyKind::DeviceToDevice);
         return target;
     });
 
@@ -1037,7 +1037,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         auto vk = get_vulkan_backend();
         auto result = vk->dispatchActivation("sigmoid", target, 1, 0.0f);
         auto bytes = target.numel() * dtype_size(target.dtype());
-        vk->copy(target.data_ptr(), result.data_ptr(), bytes, CopyKind::DeviceToDevice);
+        if (bytes > 0) vk->copy(target.data_ptr(), result.data_ptr(), bytes, CopyKind::DeviceToDevice);
         return target;
     });
 
@@ -1045,7 +1045,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         auto vk = get_vulkan_backend();
         auto result = vk->dispatchActivation("tanh", target, 2, 0.0f);
         auto bytes = target.numel() * dtype_size(target.dtype());
-        vk->copy(target.data_ptr(), result.data_ptr(), bytes, CopyKind::DeviceToDevice);
+        if (bytes > 0) vk->copy(target.data_ptr(), result.data_ptr(), bytes, CopyKind::DeviceToDevice);
         return target;
     });
 
@@ -1053,7 +1053,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         auto vk = get_vulkan_backend();
         auto result = vk->dispatchActivation("leaky_relu", target, 4, static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01)));
         auto bytes = target.numel() * dtype_size(target.dtype());
-        vk->copy(target.data_ptr(), result.data_ptr(), bytes, CopyKind::DeviceToDevice);
+        if (bytes > 0) vk->copy(target.data_ptr(), result.data_ptr(), bytes, CopyKind::DeviceToDevice);
         return target;
     });
 
@@ -1061,7 +1061,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         auto vk = get_vulkan_backend();
         auto result = vk->dispatchActivation("gelu", target, 3, 0.0f);
         auto bytes = target.numel() * dtype_size(target.dtype());
-        vk->copy(target.data_ptr(), result.data_ptr(), bytes, CopyKind::DeviceToDevice);
+        if (bytes > 0) vk->copy(target.data_ptr(), result.data_ptr(), bytes, CopyKind::DeviceToDevice);
         return target;
     });
 

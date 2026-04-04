@@ -137,6 +137,12 @@ auto ROCmBackend::allocate(size_t bytes, int32_t device_id) -> void* {
         return backend::rocm::RocmCachingAllocator::get().allocate(bytes, device_id);
     }
 
+    if (device_id < 0 || device_id >= device_count()) {
+        throw std::runtime_error(
+            "ROCmBackend::allocate: invalid device_id " + std::to_string(device_id) +
+            " (have " + std::to_string(device_count()) + " devices)");
+    }
+
     void* ptr = nullptr;
     check_hip_error(hipSetDevice(device_id), "hipSetDevice in allocate");
 

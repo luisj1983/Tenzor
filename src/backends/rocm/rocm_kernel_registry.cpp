@@ -1045,39 +1045,51 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     // In-place activation operations
+    // NOTE: Each lambda creates a temporary result tensor, copies it back into target,
+    // then synchronizes the stream to ensure the copy completes before result is destroyed.
     table.register_inplace_kernel(OpId::ReLUInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
-        auto result = rocm::relu_kernel(target, get_hip_stream(attrs));
+        auto stream = get_hip_stream(attrs);
+        auto result = rocm::relu_kernel(target, stream);
         HIP_CHECK(hipMemcpyAsync(target.data_ptr(), result.data_ptr(), target.numel() * dtype_size(target.dtype()),
-                       hipMemcpyDeviceToDevice, get_hip_stream(attrs)));
+                       hipMemcpyDeviceToDevice, stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
         return target;
     });
 
     table.register_inplace_kernel(OpId::SigmoidInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
-        auto result = rocm::sigmoid_kernel(target, get_hip_stream(attrs));
+        auto stream = get_hip_stream(attrs);
+        auto result = rocm::sigmoid_kernel(target, stream);
         HIP_CHECK(hipMemcpyAsync(target.data_ptr(), result.data_ptr(), target.numel() * dtype_size(target.dtype()),
-                       hipMemcpyDeviceToDevice, get_hip_stream(attrs)));
+                       hipMemcpyDeviceToDevice, stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
         return target;
     });
 
     table.register_inplace_kernel(OpId::TanhInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
-        auto result = rocm::tanh_kernel(target, get_hip_stream(attrs));
+        auto stream = get_hip_stream(attrs);
+        auto result = rocm::tanh_kernel(target, stream);
         HIP_CHECK(hipMemcpyAsync(target.data_ptr(), result.data_ptr(), target.numel() * dtype_size(target.dtype()),
-                       hipMemcpyDeviceToDevice, get_hip_stream(attrs)));
+                       hipMemcpyDeviceToDevice, stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
         return target;
     });
 
     table.register_inplace_kernel(OpId::LeakyReLUInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
+        auto stream = get_hip_stream(attrs);
         float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
-        auto result = rocm::leaky_relu_kernel(target, alpha, get_hip_stream(attrs));
+        auto result = rocm::leaky_relu_kernel(target, alpha, stream);
         HIP_CHECK(hipMemcpyAsync(target.data_ptr(), result.data_ptr(), target.numel() * dtype_size(target.dtype()),
-                       hipMemcpyDeviceToDevice, get_hip_stream(attrs)));
+                       hipMemcpyDeviceToDevice, stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
         return target;
     });
 
     table.register_inplace_kernel(OpId::GeluInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
-        auto result = rocm::gelu_kernel(target, get_hip_stream(attrs));
+        auto stream = get_hip_stream(attrs);
+        auto result = rocm::gelu_kernel(target, stream);
         HIP_CHECK(hipMemcpyAsync(target.data_ptr(), result.data_ptr(), target.numel() * dtype_size(target.dtype()),
-                       hipMemcpyDeviceToDevice, get_hip_stream(attrs)));
+                       hipMemcpyDeviceToDevice, stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
         return target;
     });
 
@@ -1250,7 +1262,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         return std::vector<Tensor>{rocm::conv2d_forward_kernel(inputs[0], inputs[1], bias,
             stride, padding, dilation, groups, get_hip_stream(attrs))};
     });
@@ -1542,7 +1554,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
         int64_t output_padding_h = attrs.get_int(AttrKey::OutputPaddingH, output_padding);
         int64_t output_padding_w = attrs.get_int(AttrKey::OutputPaddingW, output_padding);
-        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         return std::vector<Tensor>{rocm::conv_transpose2d_forward_kernel(
             inputs[0], inputs[1], bias, stride_h, stride_w, padding_h, padding_w,
             output_padding_h, output_padding_w, get_hip_stream(attrs))};
@@ -1555,7 +1567,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t padding_w = attrs.get_int(AttrKey::PaddingW, 0);
         int64_t dilation_h = attrs.get_int(AttrKey::DilationH, 1);
         int64_t dilation_w = attrs.get_int(AttrKey::DilationW, 1);
-        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         return std::vector<Tensor>{rocm::depthwise_conv2d_kernel(
             inputs[0], inputs[1], bias, stride_h, stride_w, padding_h, padding_w,
             dilation_h, dilation_w, get_hip_stream(attrs))};
@@ -1786,7 +1798,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         const Tensor* weight = inputs.size() > 1 ? &inputs[1] : nullptr;
-        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         return std::vector<Tensor>{rocm::layer_norm_kernel(inputs[0], normalized_shape, weight, bias, eps, get_hip_stream(attrs))};
     });
 
@@ -1802,7 +1814,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t num_groups = attrs.get_int(AttrKey::NumGroups, attrs.get_int(AttrKey::Groups, 1));
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         const Tensor* weight = inputs.size() > 1 ? &inputs[1] : nullptr;
-        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         return rocm::group_norm_forward_with_stats(inputs[0], num_groups, weight, bias, eps, get_hip_stream(attrs));
     });
 
@@ -1817,7 +1829,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::InstanceNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         const Tensor* weight = inputs.size() > 1 ? &inputs[1] : nullptr;
-        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         return std::vector<Tensor>{rocm::instance_norm_kernel(inputs[0], weight, bias, eps, get_hip_stream(attrs))};
     });
 
@@ -1833,7 +1845,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // ========================================================================
     table.register_kernel(OpId::FusedLinearReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: input, weight, [bias]
-        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         return std::vector<Tensor>{rocm::fused_linear_relu_hip(inputs[0], inputs[1], bias, get_hip_stream(attrs))};
     });
 
@@ -2222,7 +2234,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // ========================================================================
     table.register_kernel(OpId::Linear, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: input, weight, [bias]
-        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         return std::vector<Tensor>{rocm::linear_kernel(inputs[0], inputs[1], bias, get_hip_stream(attrs))};
     });
 
@@ -2684,7 +2696,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         Tensor result = rocm::conv2d_forward_kernel(inputs[0], inputs[1], bias,
             stride, padding, dilation, groups, get_hip_stream(attrs));
         return std::vector<Tensor>{rocm::sigmoid_kernel(result, get_hip_stream(attrs))};
@@ -2695,7 +2707,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         Tensor result = rocm::conv2d_forward_kernel(inputs[0], inputs[1], bias,
             stride, padding, dilation, groups, get_hip_stream(attrs));
         return std::vector<Tensor>{rocm::tanh_kernel(result, get_hip_stream(attrs))};
@@ -2706,7 +2718,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         Tensor result = rocm::conv2d_forward_kernel(inputs[0], inputs[1], bias,
             stride, padding, dilation, groups, get_hip_stream(attrs));
         return std::vector<Tensor>{rocm::swish_kernel(result, get_hip_stream(attrs))};
@@ -3478,7 +3490,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
     // --- Linear Operations -----------------------------------------------------
     table.register_single_output_kernel(OpId::Linear, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         return rocm::linear_kernel(inputs[0], inputs[1], bias, get_hip_stream(attrs));
     });
 
@@ -3494,7 +3506,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         return rocm::conv2d_forward_kernel(inputs[0], inputs[1], bias,
             stride, padding, dilation, groups, get_hip_stream(attrs));
     });
@@ -3517,7 +3529,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
         int64_t output_padding_h = attrs.get_int(AttrKey::OutputPaddingH, output_padding);
         int64_t output_padding_w = attrs.get_int(AttrKey::OutputPaddingW, output_padding);
-        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         return rocm::conv_transpose2d_forward_kernel(inputs[0], inputs[1], bias,
             stride_h, stride_w, padding_h, padding_w, output_padding_h, output_padding_w,
             get_hip_stream(attrs));
@@ -3539,7 +3551,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t padding_w = attrs.get_int(AttrKey::PaddingW, 0);
         int64_t dilation_h = attrs.get_int(AttrKey::DilationH, 1);
         int64_t dilation_w = attrs.get_int(AttrKey::DilationW, 1);
-        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         return rocm::depthwise_conv2d_kernel(
             inputs[0], inputs[1], bias, stride_h, stride_w, padding_h, padding_w,
             dilation_h, dilation_w, get_hip_stream(attrs));
@@ -3656,7 +3668,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
     // --- Fused Operations (single output) --------------------------------------
     table.register_single_output_kernel(OpId::FusedLinearReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         return rocm::fused_linear_relu_hip(inputs[0], inputs[1], bias, get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::FusedBatchNormReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -3680,7 +3692,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         Tensor result = rocm::conv2d_forward_kernel(inputs[0], inputs[1], bias,
             stride, padding, dilation, groups, get_hip_stream(attrs));
         return rocm::sigmoid_kernel(result, get_hip_stream(attrs));
@@ -3690,7 +3702,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         Tensor result = rocm::conv2d_forward_kernel(inputs[0], inputs[1], bias,
             stride, padding, dilation, groups, get_hip_stream(attrs));
         return rocm::tanh_kernel(result, get_hip_stream(attrs));
@@ -3700,7 +3712,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         Tensor result = rocm::conv2d_forward_kernel(inputs[0], inputs[1], bias,
             stride, padding, dilation, groups, get_hip_stream(attrs));
         return rocm::swish_kernel(result, get_hip_stream(attrs));

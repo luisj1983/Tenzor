@@ -20,7 +20,7 @@ Example:
 from __future__ import annotations
 
 import threading
-from typing import Any, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional
 
 from . import tenzor_core as _core
 
@@ -232,7 +232,7 @@ class Module(_CppModule):
         result.update(self._get_own_named_buffers().keys())
         return sorted(result)
 
-    def add_module(self, name: str, module) -> None:
+    def add_module(self, name: str, module: Optional[Module]) -> None:
         """
         Add a child module to the current module.
 
@@ -283,7 +283,7 @@ class Module(_CppModule):
                 else:
                     yield submodule_prefix, module
 
-    def apply(self, fn) -> Module:
+    def apply(self, fn: Callable[[Module], None]) -> Module:
         """
         Apply a function recursively to every submodule and self.
 
@@ -337,6 +337,96 @@ class Module(_CppModule):
         for p in self.parameters():
             p.requires_grad_(requires_grad)
         return self
+
+    # ----------------------------------------------------------------
+    # Hook API (methods are inherited from C++ via pybind11 bindings)
+    # ----------------------------------------------------------------
+
+    def register_forward_hook(self, hook: Callable) -> int:
+        """Register a forward hook on the module.
+
+        The hook is called every time after :meth:`forward` computes an output.
+
+        Args:
+            hook: Callable with signature ``hook(module, input, output) -> None or modified output``.
+
+        Returns:
+            Hook ID that can be passed to :meth:`remove_hook`.
+
+        Example::
+
+            def print_output(module, input, output):
+                print(f"{module.__class__.__name__} output shape: {output.shape()}")
+
+            hook_id = model.fc1.register_forward_hook(print_output)
+        """
+        return _CppModule.register_forward_hook(self, hook)
+
+    def register_forward_pre_hook(self, hook: Callable) -> int:
+        """Register a hook called before each forward call.
+
+        Args:
+            hook: Callable with signature ``hook(module, input) -> None or modified input``.
+
+        Returns:
+            Hook ID that can be passed to :meth:`remove_hook`.
+        """
+        return _CppModule.register_forward_pre_hook(self, hook)
+
+    def register_backward_hook(self, hook: Callable) -> int:
+        """Register a backward hook on the module.
+
+        .. deprecated::
+            Use :meth:`register_full_backward_hook` instead. This method is
+            kept for backward compatibility but may be removed in a future release.
+
+        Args:
+            hook: Callable with signature ``hook(module, grad_input, grad_output)``.
+
+        Returns:
+            Hook ID that can be passed to :meth:`remove_hook`.
+        """
+        return _CppModule.register_backward_hook(self, hook)
+
+    def register_full_backward_hook(self, hook: Callable) -> int:
+        """Register a backward hook on the module.
+
+        The hook is called every time the gradients w.r.t. the module
+        inputs and outputs are computed.
+
+        Args:
+            hook: Callable with signature ``hook(module, grad_input, grad_output) -> None or modified grad_input``.
+
+        Returns:
+            Hook ID that can be passed to :meth:`remove_hook`.
+
+        Example::
+
+            def clip_grad(module, grad_input, grad_output):
+                return tuple(g.clamp(-1, 1) if g is not None else g for g in grad_input)
+
+            hook_id = model.fc1.register_full_backward_hook(clip_grad)
+        """
+        return _CppModule.register_full_backward_hook(self, hook)
+
+    def register_full_backward_pre_hook(self, hook: Callable) -> int:
+        """Register a hook called before the backward pass.
+
+        Args:
+            hook: Callable with signature ``hook(module, grad_output) -> None or modified grad_output``.
+
+        Returns:
+            Hook ID that can be passed to :meth:`remove_hook`.
+        """
+        return _CppModule.register_full_backward_pre_hook(self, hook)
+
+    def remove_hook(self, hook_id: int) -> None:
+        """Remove a previously registered hook.
+
+        Args:
+            hook_id: ID returned by one of the ``register_*_hook`` methods.
+        """
+        _CppModule.remove_hook(self, hook_id)
 
     def extra_repr(self) -> str:
         """Override in subclasses to show constructor args."""
