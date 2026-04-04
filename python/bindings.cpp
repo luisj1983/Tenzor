@@ -3429,6 +3429,75 @@ PYBIND11_MODULE(tenzor_core, m) {
     "Optimize the computation graph of a Variable. Returns optimization stats dict.\n"
     "This is opt-in and does NOT run automatically during backward().");
 
+    // ========================================================================
+    // Composable function transforms (torch.func equivalent)
+    // ========================================================================
+    auto func_mod = m.def_submodule("func", "Composable function transforms");
+
+    func_mod.def("grad", [](py::function f) {
+        return py::cpp_function([f](const tenzor::Variable& x) -> tenzor::Variable {
+            py::gil_scoped_acquire gil;
+            tenzor::Variable x_copy(x.tensor().clone(), true);
+            py::object result = f(x_copy);
+            tenzor::Variable output = result.cast<tenzor::Variable>();
+            output.backward();
+            return tenzor::Variable(x_copy.grad(), false);
+        });
+    }, py::arg("f"),
+    "Return a function that computes the gradient of f.\n"
+    "f must be a scalar-valued function of a single Variable.");
+
+    func_mod.def("vmap", [](py::function f, int64_t in_dim, int64_t out_dim) {
+        return py::cpp_function([f, in_dim](const tenzor::Variable& batched_input) -> tenzor::Variable {
+            py::gil_scoped_acquire gil;
+            auto cpp_fn = [&f](const tenzor::Variable& x) -> tenzor::Variable {
+                py::object result = f(x);
+                return result.cast<tenzor::Variable>();
+            };
+            return tenzor::vmap(cpp_fn, batched_input, in_dim);
+        });
+    }, py::arg("f"), py::arg("in_dim") = 0, py::arg("out_dim") = 0,
+    "Return a vectorized version of f that maps over a batch dimension.");
+
+    func_mod.def("jacrev", [](py::function f) {
+        return py::cpp_function([f](const tenzor::Variable& x) -> tenzor::Variable {
+            py::gil_scoped_acquire gil;
+            auto cpp_fn = [&f](const tenzor::Variable& input) -> tenzor::Variable {
+                py::object result = f(input);
+                return result.cast<tenzor::Variable>();
+            };
+            tenzor::Tensor J = tenzor::jacobian(cpp_fn, x);
+            return tenzor::Variable(J, false);
+        });
+    }, py::arg("f"),
+    "Return a function that computes the reverse-mode Jacobian of f.");
+
+    func_mod.def("jacfwd", [](py::function f) {
+        return py::cpp_function([f](const tenzor::Variable& x) -> tenzor::Variable {
+            py::gil_scoped_acquire gil;
+            auto cpp_fn = [&f](const tenzor::Variable& input) -> tenzor::Variable {
+                py::object result = f(input);
+                return result.cast<tenzor::Variable>();
+            };
+            tenzor::Tensor J = tenzor::jacobian(cpp_fn, x);
+            return tenzor::Variable(J, false);
+        });
+    }, py::arg("f"),
+    "Return a function that computes the forward-mode Jacobian of f.");
+
+    func_mod.def("hessian", [](py::function f) {
+        return py::cpp_function([f](const tenzor::Variable& x) -> tenzor::Variable {
+            py::gil_scoped_acquire gil;
+            auto cpp_fn = [&f](const tenzor::Variable& input) -> tenzor::Variable {
+                py::object result = f(input);
+                return result.cast<tenzor::Variable>();
+            };
+            tenzor::Tensor H = tenzor::hessian(cpp_fn, x);
+            return tenzor::Variable(H, false);
+        });
+    }, py::arg("f"),
+    "Return a function that computes the Hessian of a scalar-valued f.");
+
     // Neural network
     auto nn = m.def_submodule("nn", "Neural network components");
 
@@ -6741,6 +6810,10 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("mode") = tenzor::nn::init::FanMode::FanIn,
              py::arg("nonlinearity") = "leaky_relu",
              py::return_value_policy::reference);
+    init.def("lecun_uniform_", &tenzor::nn::init::lecun_uniform_,
+             py::arg("tensor"), py::return_value_policy::reference);
+    init.def("lecun_normal_", &tenzor::nn::init::lecun_normal_,
+             py::arg("tensor"), py::return_value_policy::reference);
     init.def("orthogonal_", &tenzor::nn::init::orthogonal_,
              py::arg("tensor"), py::arg("gain") = 1.0, py::return_value_policy::reference);
     init.def("uniform_", &tenzor::nn::init::uniform_,

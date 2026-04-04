@@ -136,6 +136,35 @@ auto kaiming_normal_(Tensor& tensor,
                      const std::string& nonlinearity = "leaky_relu") -> Tensor&;
 
 // ============================================================================
+// LeCun Initialization
+// ============================================================================
+
+/**
+ * @brief LeCun uniform initialization.
+ *
+ * Fills tensor with values from U(-limit, limit) where:
+ * limit = sqrt(3 / fan_in)
+ *
+ * Recommended for use with SELU activations.
+ *
+ * @param tensor Tensor to initialize (modified in-place)
+ * @return Reference to the modified tensor
+ */
+auto lecun_uniform_(Tensor& tensor) -> Tensor&;
+
+/**
+ * @brief LeCun normal initialization.
+ *
+ * Fills tensor with values from N(0, 1/fan_in).
+ *
+ * Recommended for use with SELU activations.
+ *
+ * @param tensor Tensor to initialize (modified in-place)
+ * @return Reference to the modified tensor
+ */
+auto lecun_normal_(Tensor& tensor) -> Tensor&;
+
+// ============================================================================
 // Orthogonal Initialization
 // ============================================================================
 

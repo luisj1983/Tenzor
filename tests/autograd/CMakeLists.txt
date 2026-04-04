@@ -97,3 +97,8 @@ tenzor_discover_tests(test_warn_mode_counter DISCOVERY_TIMEOUT 60)
 add_executable(test_graph_cleanup test_graph_cleanup.cpp)
 target_link_libraries(test_graph_cleanup PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_graph_cleanup DISCOVERY_TIMEOUT 60)
+
+# Composable function transforms (func::grad, func::vmap, etc.)
+add_executable(test_func test_func.cpp)
+target_link_libraries(test_func PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_func DISCOVERY_TIMEOUT 60)

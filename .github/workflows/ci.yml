@@ -250,6 +250,58 @@ jobs:
           ctest -R "cuda|vulkan" -j4 \
             --output-on-failure --timeout 300
 
+  # Tier 1.76: Vulkan tests using software renderer (lavapipe)
+  vulkan-software:
+    name: Vulkan (Software Renderer)
+    runs-on: ubuntu-24.04
+    needs: build-and-smoke
+    if: github.event_name == 'pull_request'
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build \
+            libgtest-dev \
+            libomp-dev \
+            python3-dev \
+            python3-pybind11 \
+            pybind11-dev \
+            libmkl-dev \
+            libtbb-dev \
+            mesa-vulkan-drivers \
+            vulkan-tools \
+            libvulkan-dev
+
+      - name: Verify Vulkan (lavapipe)
+        run: vulkaninfo --summary || true
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} \
+            -DTENZOR_BUILD_CUDA=OFF \
+            -DTENZOR_BUILD_ROCM=OFF \
+            -DTENZOR_BUILD_ONEAPI=OFF \
+            -DTENZOR_BUILD_VULKAN=ON \
+            -DTENZOR_BUILD_PYTHON=ON \
+            -DTENZOR_BUILD_TESTS=ON \
+            -DTENZOR_BUILD_BENCHMARKS=OFF \
+            -DTENZOR_BUILD_EXAMPLES=OFF \
+            -DTENZOR_BUILD_MODEL_HUB=OFF
+
+      - name: Build
+        run: ninja -C build
+
+      - name: Run Vulkan tests
+        run: |
+          cd build
+          ctest -R "vulkan" -j1 \
+            --output-on-failure --timeout 300
+
   # Tier 1.8: Clang build (catches different warnings/errors than GCC)
   clang-build:
     name: Clang-18 Build

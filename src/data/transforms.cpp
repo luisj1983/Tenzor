@@ -277,6 +277,45 @@ auto RandomVerticalFlip::operator()(const Tensor& input, const Tensor& target)
 }
 
 // ============================================================================
+// RandomHorizontalFlip
+// ============================================================================
+
+auto RandomHorizontalFlip::operator()(const Tensor& input, const Tensor& target)
+    -> std::pair<Tensor, Tensor> {
+    const auto& shape = input.shape();
+    if (shape.size() < 2) {
+        return {input, target};
+    }
+
+    static thread_local std::mt19937 rng{std::random_device{}()};
+    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+
+    if (dist(rng) >= p_) {
+        return {input, target};
+    }
+
+    int64_t H = shape[shape.size() - 2];
+    int64_t W = shape[shape.size() - 1];
+
+    Tensor output = zeros(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype());
+    int64_t num_planes = output.numel() / (H * W);
+
+    const float* src = static_cast<const float*>(input.data_ptr());
+    float* dst = static_cast<float*>(output.data_ptr());
+
+    for (int64_t plane = 0; plane < num_planes; ++plane) {
+        for (int64_t y = 0; y < H; ++y) {
+            for (int64_t x = 0; x < W; ++x) {
+                dst[plane * H * W + y * W + x] =
+                    src[plane * H * W + y * W + (W - 1 - x)];
+            }
+        }
+    }
+
+    return {output, target};
+}
+
+// ============================================================================
 // CenterCrop
 // ============================================================================
 

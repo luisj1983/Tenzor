@@ -46,8 +46,6 @@ public:
 
     auto operator()(const Tensor& input, const Tensor& target)
         -> std::pair<Tensor, Tensor> override {
-        Tensor normalized = input;
-
         // Apply normalization: (x - mean) / std
         const auto& shape = input.shape();
         if (shape.empty()) {
@@ -60,18 +58,24 @@ public:
             throw std::invalid_argument("Input channels must match normalization parameters");
         }
 
-        // Simple channel-wise normalization
+        // Validate no zero std
         for (size_t i = 0; i < num_channels; ++i) {
-            // Note: This is simplified. In practice, you'd want more efficient tensor operations
-            float mean = mean_[i];
-            float std = std_[i];
-
-            if (std == 0.0f) {
+            if (std_[i] == 0.0f) {
                 throw std::invalid_argument("Standard deviation cannot be zero");
             }
+        }
 
-            // Normalize channel i
-            // normalized[..., i] = (input[..., i] - mean) / std
+        // Create output tensor and apply channel-wise normalization
+        Tensor normalized = zeros(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype());
+        const float* src = static_cast<const float*>(input.data_ptr());
+        float* dst = static_cast<float*>(normalized.data_ptr());
+        int64_t total = 1;
+        for (auto s : shape) total *= s;
+        int64_t C = static_cast<int64_t>(num_channels);
+
+        for (int64_t i = 0; i < total; ++i) {
+            int64_t c = i % C;
+            dst[i] = (src[i] - mean_[c]) / std_[c];
         }
 
         return {normalized, target};
@@ -138,18 +142,7 @@ public:
     }
 
     auto operator()(const Tensor& input, const Tensor& target)
-        -> std::pair<Tensor, Tensor> override {
-        // Random flip based on probability
-        float random_val = static_cast<float>(std::rand()) / RAND_MAX;
-
-        if (random_val < p_) {
-            // Flip input horizontally (assuming HWC or NHWC format)
-            // Note: Actual implementation would need tensor flip operation
-            return {input, target};  // Placeholder
-        }
-
-        return {input, target};
-    }
+        -> std::pair<Tensor, Tensor> override;
 
 private:
     float p_;

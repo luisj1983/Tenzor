@@ -3085,64 +3085,43 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
 
 // Randn kernel launcher - normal distribution N(0,1)
 auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor {
-    //printf("[DEBUG randn_kernel] Entry - dtype=%d, device type=%d\n", static_cast<int>(dtype), static_cast<int>(device.type));
-
     if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
         throw std::runtime_error("randn operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
-    //printf("[DEBUG randn_kernel] Creating tensor...\n");
     Tensor result(shape, dtype, device);
     int64_t n = result.numel();
-    //printf("[DEBUG randn_kernel] Tensor created, n=%lld\n", (long long)n);
 
     if (n == 0) {
         return result;
     }
 
-    //printf("[DEBUG randn_kernel] Computing launch config...\n");
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
-    //printf("[DEBUG randn_kernel] Launch config done: grid=(%u,%u,%u), block=(%u,%u,%u)\n", grid.x, grid.y, grid.z, block.x, block.y, block.z);
 
     // Allocate cuRAND states
-    //printf("[DEBUG randn_kernel] Allocating cuRAND states...\n");
     backend::CachedMemoryGuard d_states_guard(n * sizeof(curandState));
     auto* d_states = static_cast<curandState*>(d_states_guard.get());
-    //printf("[DEBUG randn_kernel] cuRAND states allocated\n");
 
     // Thread-safe seed generation with better entropy
     // Mix: high-res time + thread ID + random_device + atomic counter
-    //printf("[DEBUG randn_kernel] Generating seed...\n");
     static std::atomic<uint64_t> seed_counter{0};
     static std::random_device rd;
-    //printf("[DEBUG randn_kernel] Getting time seed...\n");
     auto time_seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
-    //printf("[DEBUG randn_kernel] Getting thread ID...\n");
     auto thread_id = std::hash<std::thread::id>{}(std::this_thread::get_id());
-    //printf("[DEBUG randn_kernel] Calling random_device...\n");
     auto random_bits = rd();
-    //printf("[DEBUG randn_kernel] Getting counter...\n");
     auto counter = seed_counter.fetch_add(1, std::memory_order_relaxed);
-    //printf("[DEBUG randn_kernel] Seed generation complete\n");
 
     // Mix all entropy sources with XOR and rotation
     uint64_t seed = time_seed ^ (thread_id << 32) ^ (random_bits << 16) ^ counter;
-    //printf("[DEBUG randn_kernel] Final seed=%llu\n", (unsigned long long)seed);
 
-    //printf("[DEBUG randn_kernel] Initializing cuRAND states...\n");
     init_curand_states<<<grid, block, 0, stream>>>(d_states, seed, n);
     CUDA_CHECK(cudaGetLastError());
-    //printf("[DEBUG randn_kernel] cuRAND states initialized\n");
 
     if (dtype == DType::Float32) {
-        //printf("[DEBUG randn_kernel] Generating Float32 random numbers...\n");
-        // Generate normal random numbers
         randn_kernel_device<<<grid, block, 0, stream>>>(result.data<float>(), d_states, n);
         CUDA_CHECK(cudaGetLastError());
-        //printf("[DEBUG randn_kernel] Float32 generation complete\n");
     } else if (dtype == DType::Float64) {
-        //printf("[DEBUG randn_kernel] Generating Float64 random numbers...\n");
         // For Float64, generate as float then convert properly
         backend::CachedMemoryGuard temp_float_guard(n * sizeof(float));
         auto* temp_float = static_cast<float*>(temp_float_guard.get());
@@ -3153,22 +3132,15 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
         double* output_double = result.data<double>();
         convert_float_to_double_kernel<<<grid, block, 0, stream>>>(temp_float, output_double, n);
         CUDA_CHECK(cudaGetLastError());
-        //printf("[DEBUG randn_kernel] Float64 generation complete\n");
     } else if (dtype == DType::Float16) {
-        //printf("[DEBUG randn_kernel] Generating Float16 random numbers...\n");
         randn_kernel_f16<<<grid, block, 0, stream>>>(
             reinterpret_cast<__half*>(result.data<Float16>()), d_states, n);
         CUDA_CHECK(cudaGetLastError());
-        //printf("[DEBUG randn_kernel] Float16 generation complete\n");
     } else if (dtype == DType::BFloat16) {
-        //printf("[DEBUG randn_kernel] Generating BFloat16 random numbers...\n");
         randn_kernel_bf16<<<grid, block, 0, stream>>>(
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), d_states, n);
         CUDA_CHECK(cudaGetLastError());
-        //printf("[DEBUG randn_kernel] BFloat16 generation complete\n");
     }
-
-    //printf("[DEBUG randn_kernel] Cleanup complete, returning result\n");
 
     return result;
 }

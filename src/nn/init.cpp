@@ -197,6 +197,28 @@ auto kaiming_normal_(Tensor& tensor, double a, FanMode mode,
 }
 
 // ============================================================================
+// LeCun Initialization
+// ============================================================================
+
+auto lecun_uniform_(Tensor& tensor) -> Tensor& {
+    auto [fan_in, fan_out] = calculate_fan_in_and_fan_out(tensor);
+    double bound = std::sqrt(3.0 / static_cast<double>(fan_in));
+
+    std::uniform_real_distribution<double> dist(-bound, bound);
+    fill_tensor(tensor, [&]() { return dist(get_rng()); });
+    return tensor;
+}
+
+auto lecun_normal_(Tensor& tensor) -> Tensor& {
+    auto [fan_in, fan_out] = calculate_fan_in_and_fan_out(tensor);
+    double std_val = std::sqrt(1.0 / static_cast<double>(fan_in));
+
+    std::normal_distribution<double> dist(0.0, std_val);
+    fill_tensor(tensor, [&]() { return dist(get_rng()); });
+    return tensor;
+}
+
+// ============================================================================
 // Orthogonal Initialization
 // ============================================================================
 
