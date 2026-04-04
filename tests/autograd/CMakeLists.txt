@@ -10,6 +10,10 @@ target_link_libraries(test_autograd_edge_cases PRIVATE tenzor_core GTest::gtest_
 add_executable(test_higher_order_gradients test_higher_order_gradients.cpp)
 target_link_libraries(test_higher_order_gradients PRIVATE tenzor_core GTest::gtest_main)
 
+# Higher order gradients for NN layers (Conv2d, LSTM, GRU)
+add_executable(test_higher_order_nn test_higher_order_nn.cpp)
+target_link_libraries(test_higher_order_nn PRIVATE tenzor_core GTest::gtest_main)
+
 # Gradient checking tests
 add_executable(test_gradcheck test_gradcheck.cpp)
 target_link_libraries(test_gradcheck PRIVATE tenzor_core GTest::gtest_main)
@@ -39,6 +43,7 @@ target_link_libraries(test_inplace_autograd PRIVATE tenzor_core GTest::gtest_mai
 # ============================================================================
 tenzor_discover_tests(test_autograd_edge_cases DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_higher_order_gradients DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_higher_order_nn DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 # Parameterized backend tests use PRE_TEST discovery so that test listing
 # runs at ctest time rather than build time.  POST_BUILD discovery fails
 # when tenzor::initialize() cannot enumerate GPUs in the build sandbox,

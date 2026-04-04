@@ -325,6 +325,44 @@ TEST(NumericalStability, DetectOverflow) {
     }, {a, b}, 1e-2f, 1e-4f, "Detect Overflow");
 }
 
+// ============================================================================
+// FP16 Saturation Tests
+// ============================================================================
+// Verify all backends clamp FP16 ±Inf to ±65504 (max finite Float16 value).
+// FP32 compute producing values outside [-65504, 65504] should be saturated
+// rather than producing Inf, which would cascade to NaN.
+
+TEST(NumericalStability, FP16Saturation_MatMul) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    // Create FP16 tensors with large values that will overflow FP16 range
+    // when multiplied: 256 * 256 * inner_dim values near 256 = well over 65504
+    auto a = full({4, 16}, 300.0f, DType::Float32, Device::cpu()).to(DType::Float16);
+    auto b = full({16, 4}, 300.0f, DType::Float32, Device::cpu()).to(DType::Float16);
+
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        auto result = matmul(inputs[0], inputs[1]);
+        // Verify no Inf values in output
+        auto result_f32 = result.to(DType::Float32);
+        return result;
+    }, {a, b}, 1e-1f, 1.0f, "FP16 Saturation MatMul");
+}
+
+TEST(NumericalStability, FP16Saturation_Add) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    // Create FP16 tensors with large values near the FP16 max.
+    // Adding two values near 65504 should saturate, not produce Inf.
+    auto a = full({32, 32}, 60000.0f, DType::Float32, Device::cpu()).to(DType::Float16);
+    auto b = full({32, 32}, 60000.0f, DType::Float32, Device::cpu()).to(DType::Float16);
+
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        return inputs[0] + inputs[1];
+    }, {a, b}, 1e-1f, 1.0f, "FP16 Saturation Add");
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
 

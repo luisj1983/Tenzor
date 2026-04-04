@@ -17,6 +17,8 @@ constexpr int dtype_priority(DType dt) {
         case DType::Int32:      return 6;
         case DType::UInt64:     return 7;
         case DType::Int64:      return 8;
+        case DType::FP8_E4M3:   return 8;   // FP8 types promote to Float32
+        case DType::FP8_E5M2:   return 8;   // (same priority as narrow floats)
         case DType::Float16:    return 9;
         case DType::BFloat16:   return 10;
         case DType::Float32:    return 11;
@@ -28,7 +30,8 @@ constexpr int dtype_priority(DType dt) {
 }
 
 constexpr bool is_floating(DType dt) {
-    return dt == DType::Float16 || dt == DType::BFloat16 ||
+    return dt == DType::FP8_E4M3 || dt == DType::FP8_E5M2 ||
+           dt == DType::Float16 || dt == DType::BFloat16 ||
            dt == DType::Float32 || dt == DType::Float64;
 }
 
@@ -63,6 +66,20 @@ auto promote_types(DType a, DType b) -> DType {
     if (is_complex(b)) {
         if (a == DType::Float64) return DType::Complex128;
         return b;
+    }
+
+    // FP8 types always promote to Float32 (too narrow for general compute).
+    // FP8 + anything -> Float32 (or wider if the other type is wider).
+    if (a == DType::FP8_E4M3 || a == DType::FP8_E5M2) {
+        if (b == DType::Float64) return DType::Float64;
+        if (b == DType::FP8_E4M3 || b == DType::FP8_E5M2) return DType::Float32;
+        if (dtype_priority(b) >= dtype_priority(DType::Float32)) return b;
+        return DType::Float32;
+    }
+    if (b == DType::FP8_E4M3 || b == DType::FP8_E5M2) {
+        if (a == DType::Float64) return DType::Float64;
+        if (dtype_priority(a) >= dtype_priority(DType::Float32)) return a;
+        return DType::Float32;
     }
 
     // Float wins over integer.

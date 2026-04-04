@@ -23,6 +23,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/sparse/sparse_tensor.hpp"
 #include "tenzor/sparse/sparse_ops.hpp"
+#include "kernels/fp16_saturate.hpp"
 #include <climits>
 #include <cmath>
 #include <cstdint>
@@ -692,12 +693,16 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::MatMul,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
-            return {oneapi::matmul_kernel(inputs[0], inputs[1], get_q(inputs))};
+            auto result = oneapi::matmul_kernel(inputs[0], inputs[1], get_q(inputs));
+            oneapi::fp16_saturate_if_needed(result, get_q(inputs));
+            return {result};
         });
 
     table.register_kernel(OpId::Bmm,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
-            return {oneapi::bmm_kernel(inputs[0], inputs[1], get_q(inputs))};
+            auto result = oneapi::bmm_kernel(inputs[0], inputs[1], get_q(inputs));
+            oneapi::fp16_saturate_if_needed(result, get_q(inputs));
+            return {result};
         });
 
     table.register_kernel(OpId::Dot,
@@ -1277,7 +1282,9 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::Softmax,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             int64_t dim = attrs.get_int(AttrKey::Dim, -1);
-            return {oneapi::softmax_kernel(inputs[0], dim, get_q(inputs))};
+            auto result = oneapi::softmax_kernel(inputs[0], dim, get_q(inputs));
+            oneapi::fp16_saturate_if_needed(result, get_q(inputs));
+            return {result};
         });
 
     table.register_kernel(OpId::SoftmaxBackward,
@@ -1492,8 +1499,10 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             int64_t padding = attrs.get_int(AttrKey::Padding, 0);
             int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
             int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-            return {oneapi::conv2d_forward(inputs[0], inputs[1], bias,
-                                           stride, padding, dilation, groups, get_q(inputs))};
+            auto result = oneapi::conv2d_forward(inputs[0], inputs[1], bias,
+                                           stride, padding, dilation, groups, get_q(inputs));
+            oneapi::fp16_saturate_if_needed(result, get_q(inputs));
+            return {result};
         });
 
     // Conv2dBackwardInput: inputs = {grad_output, input, weight}
@@ -1817,7 +1826,9 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::BatchNorm2dForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
-            return {oneapi::batchnorm2d_forward(inputs[0], inputs[1], inputs[2], epsilon, get_q(inputs))};
+            auto result = oneapi::batchnorm2d_forward(inputs[0], inputs[1], inputs[2], epsilon, get_q(inputs));
+            oneapi::fp16_saturate_if_needed(result, get_q(inputs));
+            return {result};
         });
 
     table.register_kernel(OpId::BatchNorm2dForwardAffine,
@@ -2356,6 +2367,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
             Tensor output = oneapi::flash_attention_kernel(
                 inputs[0], inputs[1], inputs[2], mask, scale, is_causal, queue);
+            oneapi::fp16_saturate_if_needed(output, queue);
             return {output};
         });
 
@@ -2585,7 +2597,9 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::Linear,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
             const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
-            return oneapi::linear_kernel(inputs[0], inputs[1], bias, get_q(inputs));
+            auto result = oneapi::linear_kernel(inputs[0], inputs[1], bias, get_q(inputs));
+            oneapi::fp16_saturate_if_needed(result, get_q(inputs));
+            return result;
         });
 
     table.register_kernel(OpId::LinearBackward,
@@ -2613,6 +2627,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
             auto [output, mean, rstd] = oneapi::layer_norm_kernel(
                 inputs[0], normalized_shape, inputs[1], inputs[2], eps, get_q(inputs));
+            oneapi::fp16_saturate_if_needed(output, get_q(inputs));
             return {output, mean, rstd};
         });
 

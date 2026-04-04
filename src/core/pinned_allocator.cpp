@@ -34,6 +34,12 @@ inline auto check_cuda_error(cudaError_t error, const char* msg) -> void {
  * @brief Align size to alignment boundary
  */
 inline auto align_size(size_t size, size_t alignment = 256) -> size_t {
+    if (size > SIZE_MAX - (alignment - 1)) {
+        throw std::overflow_error(
+            "Allocation size overflow in align_size: requested " +
+            std::to_string(size) + " bytes with alignment " +
+            std::to_string(alignment));
+    }
     return (size + alignment - 1) & ~(alignment - 1);
 }
 
@@ -65,15 +71,16 @@ PinnedMemoryAllocator::PinnedMemoryAllocator(const Config& config)
         void* base_ptr = allocate_cuda_pinned(config_.pool_size);
 
         // Create initial free block spanning entire pool
-        auto* initial_block = new MemoryBlock(base_ptr, config_.pool_size, true);
-        free_list_head_ = initial_block;
-        block_map_[base_ptr] = initial_block;
+        auto initial_block = std::make_unique<MemoryBlock>(base_ptr, config_.pool_size, true);
+        auto* initial_block_raw = initial_block.get();
+        free_list_head_ = initial_block_raw;
+        block_map_[base_ptr] = std::move(initial_block);
 
         // Store pool region
         PoolRegion region;
         region.base_ptr = base_ptr;
         region.size = config_.pool_size;
-        region.head = initial_block;
+        region.head = initial_block_raw;
         pools_.push_back(region);
 
         is_initialized_ = true;
@@ -92,10 +99,7 @@ PinnedMemoryAllocator::~PinnedMemoryAllocator() {
 
     std::lock_guard<std::mutex> lock(mutex_);
 
-    // Free all blocks
-    for (auto& [ptr, block] : block_map_) {
-        delete block;
-    }
+    // unique_ptr handles block deallocation when map is cleared
     block_map_.clear();
 
     // Free all pools
@@ -131,9 +135,7 @@ PinnedMemoryAllocator& PinnedMemoryAllocator::operator=(PinnedMemoryAllocator&& 
     if (this != &other) {
         // Clean up current resources
         if (is_initialized_) {
-            for (auto& [ptr, block] : block_map_) {
-                delete block;
-            }
+            block_map_.clear();
             for (auto& pool : pools_) {
                 try {
                     free_cuda_pinned(pool.base_ptr);
@@ -264,7 +266,7 @@ auto PinnedMemoryAllocator::defragment() -> size_t {
             // Check if block belongs to this pool
             if (block->ptr >= pool.base_ptr &&
                 block->ptr < static_cast<char*>(pool.base_ptr) + pool.size) {
-                sorted_blocks.push_back(block);
+                sorted_blocks.push_back(block.get());
             }
         }
 
@@ -281,16 +283,16 @@ auto PinnedMemoryAllocator::defragment() -> size_t {
             if (current->is_free && next->is_free) {
                 void* current_end = static_cast<char*>(current->ptr) + current->size;
                 if (current_end == next->ptr) {
-                    // Coalesce
+                    // Coalesce: merge next into current
                     current->size += next->size;
                     current->next = next->next;
                     if (next->next) {
                         next->next->prev = current;
                     }
 
-                    // Remove next from block map
-                    block_map_.erase(next->ptr);
-                    delete next;
+                    // Remove next from block map (unique_ptr handles deallocation)
+                    void* next_ptr = next->ptr;
+                    block_map_.erase(next_ptr);
 
                     coalesce_count++;
                 }
@@ -318,10 +320,7 @@ auto PinnedMemoryAllocator::reset() -> void {
         pool_bases.push_back(pool.base_ptr);
     }
 
-    // Clear block map
-    for (auto& [ptr, block] : block_map_) {
-        delete block;
-    }
+    // Clear block map (unique_ptr handles deallocation)
     block_map_.clear();
 
     // Recreate initial blocks for each pool
@@ -329,18 +328,19 @@ auto PinnedMemoryAllocator::reset() -> void {
     MemoryBlock* prev_block = nullptr;
 
     for (auto& pool : pools_) {
-        auto* block = new MemoryBlock(pool.base_ptr, pool.size, true);
-        block_map_[pool.base_ptr] = block;
-        pool.head = block;
+        auto block = std::make_unique<MemoryBlock>(pool.base_ptr, pool.size, true);
+        auto* block_raw = block.get();
+        block_map_[pool.base_ptr] = std::move(block);
+        pool.head = block_raw;
 
         if (prev_block) {
-            prev_block->next = block;
-            block->prev = prev_block;
+            prev_block->next = block_raw;
+            block_raw->prev = prev_block;
         } else {
-            free_list_head_ = block;
+            free_list_head_ = block_raw;
         }
 
-        prev_block = block;
+        prev_block = block_raw;
     }
 
     // Reset statistics
@@ -368,21 +368,22 @@ auto PinnedMemoryAllocator::grow_pool(size_t additional_bytes) -> bool {
         void* new_ptr = allocate_cuda_pinned(additional_bytes);
 
         // Create new block
-        auto* new_block = new MemoryBlock(new_ptr, additional_bytes, true);
-        block_map_[new_ptr] = new_block;
+        auto new_block = std::make_unique<MemoryBlock>(new_ptr, additional_bytes, true);
+        auto* new_block_raw = new_block.get();
+        block_map_[new_ptr] = std::move(new_block);
 
         // Add to free list
         if (free_list_head_) {
-            new_block->next = free_list_head_;
-            free_list_head_->prev = new_block;
+            new_block_raw->next = free_list_head_;
+            free_list_head_->prev = new_block_raw;
         }
-        free_list_head_ = new_block;
+        free_list_head_ = new_block_raw;
 
         // Add pool region
         PoolRegion region;
         region.base_ptr = new_ptr;
         region.size = additional_bytes;
-        region.head = new_block;
+        region.head = new_block_raw;
         pools_.push_back(region);
 
         return true;
@@ -464,7 +465,7 @@ auto PinnedMemoryAllocator::find_best_fit(size_t size) -> MemoryBlock* {
             size_t size_diff = block->size - size;
             if (size_diff < min_size_diff) {
                 min_size_diff = size_diff;
-                best_fit = block;
+                best_fit = block.get();
 
                 // Perfect fit, stop searching
                 if (size_diff == 0) {
@@ -489,23 +490,24 @@ auto PinnedMemoryAllocator::split_block(MemoryBlock* block, size_t size) -> Memo
 
     // Create new block for remainder
     void* remainder_ptr = static_cast<char*>(block->ptr) + size;
-    auto* remainder = new MemoryBlock(remainder_ptr, remainder_size, true);
+    auto remainder = std::make_unique<MemoryBlock>(remainder_ptr, remainder_size, true);
+    auto* remainder_raw = remainder.get();
 
     // Update linked list
-    remainder->next = block->next;
-    remainder->prev = block;
+    remainder_raw->next = block->next;
+    remainder_raw->prev = block;
     if (block->next) {
-        block->next->prev = remainder;
+        block->next->prev = remainder_raw;
     }
-    block->next = remainder;
+    block->next = remainder_raw;
 
     // Update original block size
     block->size = size;
 
-    // Add to block map
-    block_map_[remainder_ptr] = remainder;
+    // Add to block map (unique_ptr handles lifetime)
+    block_map_[remainder_ptr] = std::move(remainder);
 
-    return remainder;
+    return remainder_raw;
 }
 
 auto PinnedMemoryAllocator::coalesce_block(MemoryBlock* block) -> void {
@@ -519,16 +521,16 @@ auto PinnedMemoryAllocator::coalesce_block(MemoryBlock* block) -> void {
         if (expected_next == block->next->ptr) {
             MemoryBlock* next = block->next;
 
-            // Merge
+            // Merge next into block
             block->size += next->size;
             block->next = next->next;
             if (next->next) {
                 next->next->prev = block;
             }
 
-            // Remove next from map
-            block_map_.erase(next->ptr);
-            delete next;
+            // Remove next from map (unique_ptr handles deallocation)
+            void* next_ptr_key = next->ptr;
+            block_map_.erase(next_ptr_key);
         } else {
             break;  // Not adjacent
         }
@@ -540,16 +542,16 @@ auto PinnedMemoryAllocator::coalesce_block(MemoryBlock* block) -> void {
         if (expected_next == block->ptr) {
             MemoryBlock* prev = block->prev;
 
-            // Merge into prev
+            // Merge block into prev
             prev->size += block->size;
             prev->next = block->next;
             if (block->next) {
                 block->next->prev = prev;
             }
 
-            // Remove current from map
-            block_map_.erase(block->ptr);
-            delete block;
+            // Remove current from map (unique_ptr handles deallocation)
+            void* block_ptr_key = block->ptr;
+            block_map_.erase(block_ptr_key);
 
             block = prev;  // Continue with merged block
         } else {
@@ -561,7 +563,7 @@ auto PinnedMemoryAllocator::coalesce_block(MemoryBlock* block) -> void {
 auto PinnedMemoryAllocator::find_block(void* ptr) -> MemoryBlock* {
     auto it = block_map_.find(ptr);
     if (it != block_map_.end()) {
-        return it->second;
+        return it->second.get();
     }
     return nullptr;
 }

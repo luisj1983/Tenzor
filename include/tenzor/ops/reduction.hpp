@@ -168,6 +168,5 @@ using tenzor::argmax;
 using tenzor::argmin;
 using tenzor::argsort;
 using tenzor::prod;
-// Note: cumsum and cumprod not yet implemented
 } // namespace ops
 } // namespace tenzor

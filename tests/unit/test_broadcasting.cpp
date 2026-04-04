@@ -263,3 +263,65 @@ TEST_P(BroadcastingTest, AddNoBroadcast_SameShape) {
 }
 
 INSTANTIATE_BACKEND_TESTS(BroadcastingTest);
+
+// ============================================================================
+// broadcast_strides() unit tests (CPU-only, tests shape utility)
+// ============================================================================
+
+#include "tenzor/core/shape.hpp"
+
+TEST(BroadcastStrides, ScalarBroadcast) {
+    // Scalar (shape {1}) broadcast to {4}: stride should be 0
+    std::vector<int64_t> shape = {1};
+    std::vector<int64_t> strides = {1};
+    std::vector<int64_t> target = {4};
+    auto result = tenzor::broadcast_strides(shape, strides, target);
+    ASSERT_EQ(result.size(), 1u);
+    EXPECT_EQ(result[0], 0);  // broadcast dim gets stride 0
+}
+
+TEST(BroadcastStrides, DimensionExpansion) {
+    // Shape {3} broadcast to {4, 3}: prepended dim gets stride 0
+    std::vector<int64_t> shape = {3};
+    std::vector<int64_t> strides = {1};
+    std::vector<int64_t> target = {4, 3};
+    auto result = tenzor::broadcast_strides(shape, strides, target);
+    ASSERT_EQ(result.size(), 2u);
+    EXPECT_EQ(result[0], 0);  // prepended dim
+    EXPECT_EQ(result[1], 1);  // original dim kept
+}
+
+TEST(BroadcastStrides, MultipleBroadcastDims) {
+    // Shape {1, 3, 1} broadcast to {4, 3, 5}
+    std::vector<int64_t> shape = {1, 3, 1};
+    std::vector<int64_t> strides = {3, 1, 1};
+    std::vector<int64_t> target = {4, 3, 5};
+    auto result = tenzor::broadcast_strides(shape, strides, target);
+    ASSERT_EQ(result.size(), 3u);
+    EXPECT_EQ(result[0], 0);  // dim 0: was 1, broadcast to 4
+    EXPECT_EQ(result[1], 1);  // dim 1: was 3, stays 3
+    EXPECT_EQ(result[2], 0);  // dim 2: was 1, broadcast to 5
+}
+
+TEST(BroadcastStrides, NoBroadcast) {
+    // Shape {2, 3} broadcast to {2, 3}: all strides preserved
+    std::vector<int64_t> shape = {2, 3};
+    std::vector<int64_t> strides = {3, 1};
+    std::vector<int64_t> target = {2, 3};
+    auto result = tenzor::broadcast_strides(shape, strides, target);
+    ASSERT_EQ(result.size(), 2u);
+    EXPECT_EQ(result[0], 3);
+    EXPECT_EQ(result[1], 1);
+}
+
+TEST(BroadcastStrides, PrependMultipleDims) {
+    // Shape {3} broadcast to {2, 4, 3}: two prepended dims
+    std::vector<int64_t> shape = {3};
+    std::vector<int64_t> strides = {1};
+    std::vector<int64_t> target = {2, 4, 3};
+    auto result = tenzor::broadcast_strides(shape, strides, target);
+    ASSERT_EQ(result.size(), 3u);
+    EXPECT_EQ(result[0], 0);
+    EXPECT_EQ(result[1], 0);
+    EXPECT_EQ(result[2], 1);
+}

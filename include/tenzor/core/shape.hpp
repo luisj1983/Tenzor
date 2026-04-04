@@ -309,4 +309,46 @@ inline auto broadcast_shapes(std::span<const int64_t> shape1,
     return result;
 }
 
+/**
+ * @brief Compute strides for a tensor after broadcasting to a target shape.
+ *
+ * Given a tensor's original shape and strides, returns the strides that
+ * correspond to the broadcast shape. Dimensions where the original size
+ * was 1 (broadcast dimensions) get stride 0.
+ *
+ * @param shape Original tensor shape
+ * @param strides Original tensor strides
+ * @param broadcast_shape Target broadcast shape (must be compatible)
+ * @return Strides for the broadcast shape (stride 0 for broadcast dims)
+ *
+ * @code
+ * auto strides = broadcast_strides({1, 3}, {3, 1}, {4, 3});
+ * // Returns {0, 1} — first dim is broadcast (stride 0), second is kept
+ * @endcode
+ */
+inline auto broadcast_strides(std::span<const int64_t> shape,
+                              std::span<const int64_t> strides,
+                              std::span<const int64_t> broadcast_shape)
+    -> std::vector<int64_t> {
+    size_t ndim = broadcast_shape.size();
+    std::vector<int64_t> result(ndim, 0);
+
+    for (size_t i = 0; i < ndim; ++i) {
+        size_t orig_idx = i + shape.size() - ndim;
+        if (i >= ndim - shape.size()) {
+            // This dimension exists in the original tensor
+            int64_t orig_dim = shape[orig_idx];
+            if (orig_dim == broadcast_shape[i]) {
+                result[i] = strides[orig_idx];
+            } else {
+                // orig_dim must be 1 (broadcast) — stride is 0
+                result[i] = 0;
+            }
+        }
+        // Dimensions that don't exist in original (prepended) get stride 0
+    }
+
+    return result;
+}
+
 } // namespace tenzor

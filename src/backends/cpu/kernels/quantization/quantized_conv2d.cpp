@@ -3,6 +3,7 @@
  * @brief CPU kernels for quantized convolution operations
  */
 
+#include <cassert>
 #include <cstdint>
 #include <algorithm>
 #include <vector>

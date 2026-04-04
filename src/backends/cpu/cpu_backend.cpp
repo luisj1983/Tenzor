@@ -1148,6 +1148,17 @@ extern "C" {
             int num_threads = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
             omp_set_num_threads(num_threads);
         }
+
+        // Warn if OpenMP is limited to 1 thread on a multi-core system.
+        // This can happen when another library (e.g., PyTorch, MKL) initializes
+        // the OpenMP runtime first with a different thread count.
+        if (omp_get_max_threads() == 1 && std::thread::hardware_concurrency() > 1) {
+            std::fprintf(stderr,
+                "[tenzor] Warning: OpenMP is limited to 1 thread on a %u-core system. "
+                "Set OMP_NUM_THREADS=%u before importing other libraries for full parallelism.\n",
+                std::thread::hardware_concurrency(),
+                std::thread::hardware_concurrency());
+        }
 #endif
         return std::make_unique<CPUBackend>();
     }

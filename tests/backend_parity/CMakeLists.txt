@@ -70,6 +70,18 @@ add_parity_test(test_vulkan_parity test_vulkan_parity.cpp)
 # Missing ops parity tests (9 CUDA-exclusive ops now available on all backends)
 add_parity_test(test_missing_ops_parity test_missing_ops_parity.cpp)
 
+# RNN parity tests (LSTM, GRU, Sparse, Quantization)
+add_parity_test(test_rnn_parity test_rnn_parity.cpp)
+
+# FFT parity tests
+add_parity_test(test_fft_parity test_fft_parity.cpp)
+
+# Sparse parity tests
+add_parity_test(test_sparse_parity test_sparse_parity.cpp)
+
+# Quantization parity tests
+add_parity_test(test_quantization_parity test_quantization_parity.cpp)
+
 # ==============================================================================
 # Test Groups
 # ==============================================================================

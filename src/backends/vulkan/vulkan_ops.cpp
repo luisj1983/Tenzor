@@ -30,6 +30,22 @@
 
 namespace tenzor {
 
+// ============================================================================
+// FP16 Saturating Clamp Utility
+// ============================================================================
+
+// Clamps FP16 values to max finite range, replacing ±Inf with ±65504.
+// This matches the CUDA/ROCm fp16_saturate behavior to prevent NaN
+// propagation when FP32 compute produces values outside Float16 range.
+// Returns the saturated tensor (new allocation via dispatchClamp).
+static inline auto fp16_saturate_if_needed(
+        VulkanBackend& backend, const Tensor& output) -> Tensor {
+    if (output.dtype() == DType::Float16 && output.numel() > 0) {
+        return backend.dispatchClamp(output, -65504.0f, 65504.0f);
+    }
+    return output;
+}
+
 inline void vulkan_assert_dtype_supported(
     const char* op_name, DType dtype, std::initializer_list<DType> supported) {
     for (auto d : supported) if (dtype == d) return;
@@ -1504,7 +1520,8 @@ auto VulkanBackend::dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor {
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    return output;
+    // Saturate FP16 output: clamp ±Inf to ±65504 to prevent NaN propagation
+    return fp16_saturate_if_needed(*this, output);
 }
 
 auto VulkanBackend::dispatchBmm(const Tensor& a, const Tensor& b) -> Tensor {
@@ -1700,7 +1717,8 @@ auto VulkanBackend::dispatchBmm(const Tensor& a, const Tensor& b) -> Tensor {
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    return output;
+    // Saturate FP16 output: clamp ±Inf to ±65504 to prevent NaN propagation
+    return fp16_saturate_if_needed(*this, output);
 }
 
 auto VulkanBackend::dispatchDot(const Tensor& a, const Tensor& b) -> Tensor {
@@ -1863,7 +1881,7 @@ auto VulkanBackend::dispatchConv2dBackwardInput(
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    return grad_input;
+    return fp16_saturate_if_needed(*this, grad_input);
 }
 
 /**
@@ -1994,7 +2012,7 @@ auto VulkanBackend::dispatchConv2dBackwardWeight(
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    return grad_weight;
+    return fp16_saturate_if_needed(*this, grad_weight);
 }
 
 /**
@@ -2923,7 +2941,7 @@ auto VulkanBackend::dispatchBatchNorm2d(const Tensor& input, const Tensor& mean,
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    return output;
+    return fp16_saturate_if_needed(*this, output);
 }
 
 auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Tensor& input,
@@ -3293,7 +3311,7 @@ auto VulkanBackend::dispatchBatchNorm2dForward(const Tensor& input, const Tensor
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    return output;
+    return fp16_saturate_if_needed(*this, output);
 }
 
 // BatchNorm2d Mean and Variance computation
@@ -3566,7 +3584,7 @@ auto VulkanBackend::dispatchLayerNorm(const Tensor& input, int64_t normalized_sh
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    return output;
+    return fp16_saturate_if_needed(*this, output);
 }
 
 auto VulkanBackend::dispatchGroupNorm(const Tensor& input, int64_t num_groups,
@@ -3701,7 +3719,7 @@ auto VulkanBackend::dispatchGroupNorm(const Tensor& input, int64_t num_groups,
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    return {output, mean_out, inv_std_out};
+    return {fp16_saturate_if_needed(*this, output), mean_out, inv_std_out};
 }
 
 // LayerNorm Backward - GPU implementation
@@ -4303,7 +4321,7 @@ auto VulkanBackend::dispatchRMSNorm(const Tensor& input, const Tensor& weight,
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    return {output, rrms};
+    return {fp16_saturate_if_needed(*this, output), rrms};
 }
 
 // RMSNorm Backward - GPU implementation
@@ -4950,7 +4968,7 @@ auto VulkanBackend::dispatchSoftmax(const Tensor& input, int64_t dim) -> Tensor 
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    return output;
+    return fp16_saturate_if_needed(*this, output);
 }
 
 auto VulkanBackend::dispatchLogSoftmax(const Tensor& input, int64_t dim) -> Tensor {
@@ -5026,7 +5044,7 @@ auto VulkanBackend::dispatchLogSoftmax(const Tensor& input, int64_t dim) -> Tens
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    return output;
+    return fp16_saturate_if_needed(*this, output);
 }
 
 auto VulkanBackend::dispatchCrossEntropy(const Tensor& log_probs, const Tensor& targets,
@@ -10580,7 +10598,8 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    return output;
+    // Saturate FP16 output: clamp ±Inf to ±65504 to prevent NaN propagation
+    return fp16_saturate_if_needed(*this, output);
 }
 
 // ============================================================================
@@ -10999,7 +11018,7 @@ auto VulkanBackend::dispatchConvTranspose2dForward(const Tensor& input, const Te
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    return output;
+    return fp16_saturate_if_needed(*this, output);
 }
 
 // ============================================================================
@@ -12786,7 +12805,7 @@ auto VulkanBackend::dispatchLinear(const Tensor& input, const Tensor& weight, co
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    return output;
+    return fp16_saturate_if_needed(*this, output);
 }
 
 auto VulkanBackend::dispatchLinearBackward(const Tensor& grad_output, const Tensor& input, const Tensor& weight) -> std::vector<Tensor> {
@@ -15616,7 +15635,7 @@ auto VulkanBackend::dispatchConv3dForward(const Tensor& input, const Tensor& wei
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    return output;
+    return fp16_saturate_if_needed(*this, output);
 }
 
 // ============================================================================
@@ -16326,7 +16345,7 @@ auto VulkanBackend::dispatchInstanceNorm(const Tensor& input, const Tensor& weig
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    return {output, mean_out, rstd_out};
+    return {fp16_saturate_if_needed(*this, output), mean_out, rstd_out};
 }
 
 // ============================================================================
@@ -21649,7 +21668,7 @@ auto VulkanBackend::dispatchFlashAttention(
         output = output.reshape({q_shape[0], q_shape[1], seq_len_q, V.shape()[3]});
     }
 
-    return output;
+    return fp16_saturate_if_needed(*this, output);
 }
 
 // ---------------------------------------------------------------------------

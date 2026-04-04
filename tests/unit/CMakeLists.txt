@@ -135,6 +135,9 @@ add_executable(test_autograd_multidtype test_autograd_multidtype.cpp)
 target_link_libraries(test_autograd_multidtype PRIVATE tenzor_core GTest::gtest_main)
 
 # Broadcasting operations multi-dtype tests
+add_executable(test_broadcasting test_broadcasting.cpp)
+target_link_libraries(test_broadcasting PRIVATE tenzor_core GTest::gtest_main)
+
 add_executable(test_broadcasting_multidtype test_broadcasting_multidtype.cpp)
 target_link_libraries(test_broadcasting_multidtype PRIVATE tenzor_core GTest::gtest_main)
 
@@ -173,6 +176,9 @@ target_link_libraries(test_dtype_edge_cases PRIVATE tenzor_core GTest::gtest_mai
 # CachingAllocator tests (universal - uses mock backend)
 add_executable(test_caching_allocator test_caching_allocator.cpp)
 target_link_libraries(test_caching_allocator PRIVATE tenzor_core GTest::gtest_main)
+
+add_executable(test_allocator_overflow test_allocator_overflow.cpp)
+target_link_libraries(test_allocator_overflow PRIVATE tenzor_core GTest::gtest_main)
 
 # ============================================================================
 # Phase 6 Tests - Improved Test Coverage
@@ -601,6 +607,7 @@ tenzor_discover_tests(test_fused_ops DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_fused_ops_multidtype DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_tensor_multidtype DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_autograd_multidtype DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_broadcasting DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_broadcasting_multidtype DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_ops_multidtype DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_comparison_ops_multidtype DISCOVERY_TIMEOUT 60)
@@ -611,6 +618,7 @@ tenzor_discover_tests(test_backend_ops_parameterized DISCOVERY_TIMEOUT 120)
 tenzor_discover_tests(test_edge_cases DISCOVERY_TIMEOUT 120)
 tenzor_discover_tests(test_dtype_edge_cases DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_caching_allocator DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_allocator_overflow DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_empty_tensors DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_view_slice_semantics DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_broadcasting_edge_cases DISCOVERY_TIMEOUT 60)

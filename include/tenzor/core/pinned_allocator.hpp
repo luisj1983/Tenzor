@@ -257,7 +257,7 @@ private:
 
     // Free list management
     MemoryBlock* free_list_head_;            // Head of global free list
-    std::map<void*, MemoryBlock*> block_map_; // Map pointer -> block for fast lookup
+    std::map<void*, std::unique_ptr<MemoryBlock>> block_map_; // Map pointer -> block (owns lifetime)
 
     // Statistics tracking
     std::atomic<size_t> total_allocated_;    // Total bytes allocated

@@ -3,6 +3,7 @@
  * @brief CPU kernels for quantized linear operations
  */
 
+#include <cassert>
 #include <cstdint>
 #include <algorithm>
 #include <immintrin.h>  // For SIMD operations
@@ -60,6 +61,16 @@ auto quantized_linear_kernel(
     int32_t weight_zp
 ) -> void {
     float combined_scale = input_scale * weight_scale / output_scale;
+
+    // Verify alignment expectations for SIMD loads. On Haswell+ CPUs, unaligned
+    // loads (_mm256_loadu_si256 / _mm512_loadu_si512) have the same throughput as
+    // aligned loads when data IS aligned. The allocator provides 256-byte aligned
+    // buffers, so this assert should always pass. If it fails, the kernel still
+    // works correctly via unaligned loads, just potentially slower on pre-Haswell.
+    assert(reinterpret_cast<uintptr_t>(input) % 32 == 0 ||
+           "quantized_linear_kernel: input pointer not 32-byte aligned");
+    assert(reinterpret_cast<uintptr_t>(weight) % 32 == 0 ||
+           "quantized_linear_kernel: weight pointer not 32-byte aligned");
 
     // Parallel over batch and output features
     #pragma omp parallel for collapse(2)

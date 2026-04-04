@@ -234,3 +234,10 @@ auto combinations(const Tensor& input, int64_t r, bool with_replacement = false)
 /** @} */ // end of tensor_advanced group
 
 } // namespace tenzor
+
+namespace tenzor {
+namespace ops {
+using tenzor::cumsum;
+using tenzor::cumprod;
+} // namespace ops
+} // namespace tenzor
