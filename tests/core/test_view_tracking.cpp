@@ -87,3 +87,63 @@ TEST_F(ViewTrackingTest, DetachCreatesView) {
     auto d = t.detach();
     EXPECT_TRUE(d.is_view());
 }
+
+TEST_F(ViewTrackingTest, ViewSurvivesBaseDestruction) {
+    // Regression test: view_base_ must keep the base TensorImpl alive.
+    // Before the intrusive_ptr fix, this was a use-after-free.
+    Tensor view;
+    {
+        auto base = tenzor::ones({3, 4}, DType::Float32);
+        view = base.view({12});
+        EXPECT_TRUE(view.is_view());
+        EXPECT_NE(view._view_base(), nullptr);
+    }
+    // base is now out of scope, but the view should still be valid
+    EXPECT_TRUE(view.is_view());
+    EXPECT_NE(view._view_base(), nullptr);
+    EXPECT_EQ(view.numel(), 12);
+    // Access data to ensure it's still alive (ASan would catch UAF)
+    const float* vdata = view.data<float>();
+    EXPECT_FLOAT_EQ(vdata[0], 1.0f);
+    EXPECT_FLOAT_EQ(vdata[11], 1.0f);
+}
+
+TEST_F(ViewTrackingTest, ChainedViewSurvivesIntermediateDestruction) {
+    // Ensure chained views survive when intermediate views are destroyed
+    Tensor v2;
+    {
+        auto base = tenzor::ones({2, 3, 4}, DType::Float32);
+        auto v1 = base.view({6, 4});
+        v2 = v1.view({24});
+        // v1 and base go out of scope
+    }
+    EXPECT_TRUE(v2.is_view());
+    EXPECT_EQ(v2.numel(), 24);
+    const float* v2data = v2.data<float>();
+    EXPECT_FLOAT_EQ(v2data[0], 1.0f);
+}
+
+TEST_F(ViewTrackingTest, TransposeViewSurvivesBaseDestruction) {
+    Tensor view;
+    {
+        auto base = tenzor::ones({3, 4}, DType::Float32);
+        view = base.transpose(0, 1);
+    }
+    EXPECT_TRUE(view.is_view());
+    EXPECT_EQ(view.shape()[0], 4);
+    EXPECT_EQ(view.shape()[1], 3);
+    const float* tdata = view.data<float>();
+    EXPECT_FLOAT_EQ(tdata[0], 1.0f);
+}
+
+TEST_F(ViewTrackingTest, SliceViewSurvivesBaseDestruction) {
+    Tensor view;
+    {
+        auto base = tenzor::ones({10}, DType::Float32);
+        view = base.slice(0, 2, 5);
+    }
+    EXPECT_TRUE(view.is_view());
+    EXPECT_EQ(view.numel(), 3);
+    const float* sdata = view.data<float>();
+    EXPECT_FLOAT_EQ(sdata[0], 1.0f);
+}

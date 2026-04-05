@@ -192,6 +192,7 @@ set(TENZOR_CORE_SOURCES
     jit/tracing_interceptor.cpp
     jit/compile.cpp
     jit/control_flow.cpp
+    jit/symbolic_shape_inference.cpp
     nn/compression/pruning.cpp
     nn/compression/distillation.cpp
     distributed/distributed.cpp

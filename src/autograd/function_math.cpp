@@ -13,6 +13,7 @@
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "function_helpers.hpp"
 #include "tenzor/utils/error.hpp"
 #include "tenzor/utils/safe_math.hpp"
 #include <cmath>
@@ -664,11 +665,11 @@ auto Atan2Backward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Te
     // denom = x^2 + y^2
     auto denom = add(mul(x, x), mul(y, y));
 
-    // grad_y = grad * x / denom
-    auto grad_y = div(mul(grad, x), denom);
+    // grad_y = grad * x / denom, reduced to match input y shape
+    auto grad_y = reduce_grad_for_broadcasting(div(mul(grad, x), denom), input_shape_y_);
 
-    // grad_x = grad * (-y) / denom
-    auto grad_x = div(mul(grad, neg(y)), denom);
+    // grad_x = grad * (-y) / denom, reduced to match input x shape
+    auto grad_x = reduce_grad_for_broadcasting(div(mul(grad, neg(y)), denom), input_shape_x_);
 
     return {grad_y, grad_x};
 }
@@ -678,8 +679,8 @@ auto Atan2Backward::backward_with_variables(std::vector<Variable> grad_outputs) 
     Variable y_var(saved_tensors_[0], false);
     Variable x_var(saved_tensors_[1], false);
     auto denom = x_var * x_var + y_var * y_var;
-    auto grad_y = grad_outputs[0] * x_var / denom;
-    auto grad_x = grad_outputs[0] * tenzor::neg(y_var) / denom;
+    auto grad_y = reduce_grad_var_for_broadcasting(grad_outputs[0] * x_var / denom, input_shape_y_);
+    auto grad_x = reduce_grad_var_for_broadcasting(grad_outputs[0] * tenzor::neg(y_var) / denom, input_shape_x_);
     return {grad_y, grad_x};
 }
 

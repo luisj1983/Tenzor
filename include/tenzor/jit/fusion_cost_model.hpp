@@ -12,6 +12,9 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "codegen.hpp"
+#include "../core/device.hpp"
+
 namespace tenzor {
 namespace jit {
 
@@ -25,6 +28,7 @@ struct FusionCandidate {
     size_t num_ops{0};               ///< Number of operations in the candidate
     int64_t total_elements{0};       ///< Total number of elements processed
     size_t num_memory_accesses{0};   ///< Number of separate memory read/write ops
+    FusionKind kind{FusionKind::ElementWise};  ///< Kind of fusion pattern
 };
 
 /**
@@ -64,6 +68,33 @@ public:
     auto should_fuse(const FusionCandidate& candidate) const -> bool;
 
     /**
+     * @brief Configure cost model for a specific device type.
+     *
+     * Adjusts internal heuristics based on device characteristics
+     * (kernel launch overhead, memory hierarchy, bandwidth).
+     *
+     * @param type Target device type
+     */
+    auto set_device_type(Device::Type type) -> void;
+
+    /**
+     * @brief Estimate speedup ratio for a fusion candidate.
+     *
+     * Returns a value indicating how much faster the fused kernel is
+     * expected to be compared to unfused execution. A value > 1.0
+     * means fusion is beneficial; < 1.0 means fusion would hurt.
+     *
+     * The estimate accounts for device-specific characteristics:
+     * - GPU: kernel launch overhead vs compute savings
+     * - CPU: memory bandwidth savings and cache effects
+     * - Known-beneficial patterns receive higher speedup estimates
+     *
+     * @param candidate Fusion candidate to evaluate
+     * @return Estimated speedup ratio (>1.0 means beneficial)
+     */
+    auto estimate_speedup(const FusionCandidate& candidate) const -> double;
+
+    /**
      * @brief Set device memory bandwidth in GB/s.
      *
      * @param bw Bandwidth in GB/s (default: 900.0 for H100-class GPU)
@@ -94,6 +125,7 @@ public:
 private:
     double bandwidth_gbps_{900.0};      ///< Device memory bandwidth (GB/s)
     double launch_overhead_us_{5.0};    ///< Kernel launch overhead (microseconds)
+    Device::Type device_type_{Device::Type::CPU};  ///< Target device type
 };
 
 } // namespace jit

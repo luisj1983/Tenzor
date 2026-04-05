@@ -1,5 +1,6 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/backend/cuda_config.hpp"
 #include "cuda_common.cuh"
 #include "cuda_launch_utils.cuh"
 #include <cuda_runtime.h>
@@ -19,6 +20,19 @@
 
 #include <random>
 #include "tenzor/ops/fp8_scaling.hpp"
+
+namespace tenzor::cuda::matmul {
+
+// Thread-local configuration flags
+static thread_local bool g_allow_tf32 = true;
+static thread_local bool g_warn_fp16_saturation = false;
+
+auto allow_tf32() -> bool { return g_allow_tf32; }
+auto set_allow_tf32(bool value) -> void { g_allow_tf32 = value; }
+auto warn_fp16_saturation() -> bool { return g_warn_fp16_saturation; }
+auto set_warn_fp16_saturation(bool value) -> void { g_warn_fp16_saturation = value; }
+
+} // namespace tenzor::cuda::matmul
 
 namespace tenzor {
 namespace cuda {
@@ -71,22 +85,48 @@ __device__ __host__ inline BFloat16 from_cuda_bfloat16(const __nv_bfloat16& x) {
 // Clamp ±Inf to ±65504 in-place for Float16 arrays.
 // cuBLAS FP16 output uses standard rounding which can produce Inf for values > 65504.
 // This prevents NaN propagation when Inf interacts with 0 or other Inf values.
-__global__ void matmul_fp16_saturate_kernel(__half* data, int64_t n) {
+// When saturation_count is non-null, atomically increments it for each saturated element.
+__global__ void matmul_fp16_saturate_kernel(__half* data, int64_t n,
+                                            unsigned long long* saturation_count) {
     constexpr float kHalfMax = 65504.0f;
     for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += blockDim.x * gridDim.x) {
         float val = __half2float(data[idx]);
         if (val > kHalfMax || val < -kHalfMax) {
             data[idx] = __float2half(fminf(fmaxf(val, -kHalfMax), kHalfMax));
+            if (saturation_count) {
+                atomicAdd(saturation_count, 1ULL);
+            }
         }
     }
 }
 
 static void saturate_fp16(__half* data, int64_t n, cudaStream_t stream) {
     if (n <= 0) return;
+
+    unsigned long long* d_count = nullptr;
+    bool do_warn = matmul::g_warn_fp16_saturation;
+
+    if (do_warn) {
+        cudaMallocAsync(&d_count, sizeof(unsigned long long), stream);
+        cudaMemsetAsync(d_count, 0, sizeof(unsigned long long), stream);
+    }
+
     dim3 grid, block;
     OCCUPANCY_CONFIG(matmul_fp16_saturate_kernel, n, grid, block);
-    matmul_fp16_saturate_kernel<<<grid, block, 0, stream>>>(data, n);
+    matmul_fp16_saturate_kernel<<<grid, block, 0, stream>>>(data, n, d_count);
     TENZOR_CUDA_CHECK(cudaGetLastError());
+
+    if (do_warn && d_count) {
+        unsigned long long h_count = 0;
+        cudaMemcpyAsync(&h_count, d_count, sizeof(unsigned long long),
+                        cudaMemcpyDeviceToHost, stream);
+        cudaStreamSynchronize(stream);
+        cudaFreeAsync(d_count, stream);
+        if (h_count > 0) {
+            fprintf(stderr, "[tenzor::cuda] Warning: FP16 matmul saturated %llu values to +/-65504\n",
+                    h_count);
+        }
+    }
 }
 
 // ============================================================================
@@ -1020,7 +1060,7 @@ void matmul_cublas_f32(
         A, CUDA_R_32F, K,   // A matrix with leading dimension K
         &beta,
         C, CUDA_R_32F, N,   // C matrix with leading dimension N
-        CUBLAS_COMPUTE_32F_FAST_TF32,  // Use TF32 Tensor Cores
+        matmul::g_allow_tf32 ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F,
         CUBLAS_GEMM_DEFAULT
     );
 
@@ -1081,7 +1121,7 @@ void batched_matmul_cublas_f32(
         &beta,
         C, CUDA_R_32F, N, stride_c,   // C matrix
         batch_size,
-        CUBLAS_COMPUTE_32F_FAST_TF32, // Use TF32 Tensor Cores
+        matmul::g_allow_tf32 ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F,
         CUBLAS_GEMM_DEFAULT           // Let cuBLAS pick best algorithm
     );
 

@@ -62,5 +62,71 @@ auto FusionCostModel::should_fuse(const FusionCandidate& candidate) const -> boo
     return total_time_saved_us > launch_overhead_us_;
 }
 
+auto FusionCostModel::set_device_type(Device::Type type) -> void {
+    device_type_ = type;
+}
+
+auto FusionCostModel::estimate_speedup(const FusionCandidate& candidate) const -> double {
+    // Trivial case: nothing to fuse
+    if (candidate.num_ops <= 1) {
+        return 0.0;
+    }
+
+    // Check for known-beneficial fusion patterns first.
+    // These patterns have well-understood performance characteristics
+    // and get fixed speedup estimates regardless of element count.
+    switch (candidate.kind) {
+        case FusionKind::Softmax:
+            return 2.0;
+        case FusionKind::LayerNorm:
+            return 1.8;
+        case FusionKind::SwiGLU:
+            return 1.5;
+        case FusionKind::GemmEpilogue:
+            return 1.3;
+        default:
+            break;
+    }
+
+    bool is_gpu = (device_type_ == Device::Type::CUDA ||
+                   device_type_ == Device::Type::ROCm);
+
+    if (is_gpu) {
+        // GPU heuristic: kernel launch overhead (~5us) vs compute savings.
+        // Small workloads don't amortize launch overhead of a fused kernel.
+        if (candidate.total_elements < 1024) {
+            return 0.8;
+        }
+
+        // Scale speedup based on element count: more elements -> more
+        // memory traffic saved -> higher speedup. Range [1.2, 2.0].
+        constexpr int64_t low_threshold = 1024;
+        constexpr int64_t high_threshold = 1024 * 1024;
+        double t = static_cast<double>(candidate.total_elements - low_threshold)
+                 / static_cast<double>(high_threshold - low_threshold);
+        if (t > 1.0) t = 1.0;
+        return 1.2 + t * 0.8;  // [1.2, 2.0]
+
+    } else {
+        // CPU heuristic: memory bandwidth savings from keeping data in cache.
+        // Working set = total_elements * 4 bytes (float32).
+        constexpr int64_t l2_elements = 1024 * 1024 / 4;  // ~1MB L2 / 4 bytes
+
+        if (candidate.total_elements <= l2_elements) {
+            // Fits in L2: fusion keeps intermediates in cache -> good savings.
+            // Scale in [1.1, 1.5] based on number of eliminated intermediates.
+            double mem_factor = static_cast<double>(candidate.num_memory_accesses) / 10.0;
+            if (mem_factor > 1.0) mem_factor = 1.0;
+            return 1.1 + mem_factor * 0.4;  // [1.1, 1.5]
+        } else {
+            // Exceeds L2: still some benefit from reduced memory traffic,
+            // but intermediates spill to main memory anyway.
+            double mem_factor = static_cast<double>(candidate.num_memory_accesses) / 10.0;
+            if (mem_factor > 1.0) mem_factor = 1.0;
+            return 1.0 + mem_factor * 0.2;  // [1.0, 1.2]
+        }
+    }
+}
+
 } // namespace jit
 } // namespace tenzor

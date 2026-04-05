@@ -209,12 +209,12 @@ auto Tensor::is_view() const noexcept -> bool {
 
 auto Tensor::_view_base() const noexcept -> TensorImpl* {
     if (!impl_) return nullptr;
-    return impl_->view_base_;
+    return impl_->view_base_.get();
 }
 
-auto Tensor::_set_view_base(TensorImpl* base) noexcept -> void {
+auto Tensor::_set_view_base(intrusive_ptr<TensorImpl> base) noexcept -> void {
     if (impl_) {
-        impl_->view_base_ = base;
+        impl_->view_base_ = std::move(base);
     }
 }
 
@@ -813,7 +813,7 @@ auto Tensor::detach() const -> Tensor {
     Tensor result;
     result.impl_ = make_intrusive<TensorImpl>(*impl_);
     result.impl_->requires_grad = false;
-    result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_.get();
+    result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;
     return result;
 }
 
@@ -1180,7 +1180,7 @@ auto Tensor::view(std::vector<int64_t> new_shape) const -> Tensor {
     // Update shape and recompute strides for contiguous layout
     result.impl_->shape = std::move(new_shape);
     result.impl_->strides = compute_strides(result.impl_->shape);
-    result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_.get();
+    result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;
 
     return result;
 }
@@ -1208,7 +1208,7 @@ auto Tensor::transpose(int64_t dim0, int64_t dim1) const -> Tensor {
         std::swap(result.impl_->shape[0], result.impl_->shape[1]);
         std::swap(result.impl_->strides[0], result.impl_->strides[1]);
         result.impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
-        result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_.get();
+        result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;
         return result;
     }
 
@@ -1218,7 +1218,7 @@ auto Tensor::transpose(int64_t dim0, int64_t dim1) const -> Tensor {
     std::swap(result.impl_->shape[dim0], result.impl_->shape[dim1]);
     std::swap(result.impl_->strides[dim0], result.impl_->strides[dim1]);
     result.impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
-    result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_.get();
+    result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;
 
     return result;
 }
@@ -1265,7 +1265,7 @@ auto Tensor::permute(std::vector<int64_t> dims) const -> Tensor {
     result.impl_->shape = std::move(new_shape);
     result.impl_->strides = std::move(new_strides);
     result.impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
-    result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_.get();
+    result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;
 
     return result;
 }
@@ -1297,7 +1297,7 @@ auto Tensor::squeeze(std::optional<int64_t> dim) const -> Tensor {
         result.impl_->shape.erase(result.impl_->shape.begin() + d);
         result.impl_->strides.erase(result.impl_->strides.begin() + d);
         result.impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
-        result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_.get();
+        result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;
 
         return result;
     } else {
@@ -1320,7 +1320,7 @@ auto Tensor::squeeze(std::optional<int64_t> dim) const -> Tensor {
         result.impl_->shape = std::move(new_shape);
         result.impl_->strides = std::move(new_strides);
         result.impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
-        result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_.get();
+        result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;
 
         return result;
     }
@@ -1351,7 +1351,7 @@ auto Tensor::unsqueeze(int64_t dim) const -> Tensor {
     int64_t new_stride = (dim < ndims) ? impl_->strides[dim] : 1;
     result.impl_->strides.insert(result.impl_->strides.begin() + dim, new_stride);
     result.impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
-    result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_.get();
+    result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;
 
     return result;
 }
@@ -1540,7 +1540,7 @@ auto Tensor::slice(int64_t dim, int64_t start, int64_t end, int64_t step) const 
     }
 
     result.impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
-    result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_.get();
+    result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;
 
     return result;
 }

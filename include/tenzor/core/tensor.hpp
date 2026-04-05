@@ -322,7 +322,7 @@ public:
     auto _view_base() const noexcept -> TensorImpl*;
 
     /// Mark this tensor as a view of another tensor (called internally by view-creating ops)
-    auto _set_view_base(TensorImpl* base) noexcept -> void;
+    auto _set_view_base(intrusive_ptr<TensorImpl> base) noexcept -> void;
 
     // ---- Quantization API ----
 
@@ -1330,7 +1330,7 @@ private:
     Device device;                       ///< Device location
     bool requires_grad{false};           ///< Gradient computation flag
     std::optional<DimnameList> names_;   ///< Optional dimension names (experimental)
-    TensorImpl* view_base_{nullptr};    ///< Non-owning pointer to base tensor for views
+    intrusive_ptr<TensorImpl> view_base_;    ///< Owning pointer to base tensor for views (prevents UAF)
 
     // Quantization metadata (only valid when dtype is QInt8/QUInt8/QInt4x2)
     double q_scale_{0.0};               ///< Quantization scale factor

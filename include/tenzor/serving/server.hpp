@@ -26,9 +26,11 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <array>
 #include "../core/tensor.hpp"
 #include "../core/device.hpp"
 #include "../jit/compiler.hpp"
+#include "traffic_router.hpp"
 
 namespace tenzor {
 namespace serving {
@@ -47,6 +49,17 @@ struct ServerConfig {
     std::string model_repository_path;    ///< Path to model directory
     bool enable_metrics{true};            ///< Enable /metrics endpoint
     bool enable_health_check{true};       ///< Enable /health endpoint
+    Device default_device{Device::cpu()}; ///< Default device for model loading
+
+    // Authentication
+    bool enable_auth{false};              ///< Enable API key authentication
+    std::vector<std::string> api_keys;    ///< Valid API keys (Bearer tokens)
+    std::string auth_header{"Authorization"}; ///< Header name for auth token
+
+    // Rate limiting
+    bool enable_rate_limit{false};        ///< Enable per-client rate limiting
+    double rate_limit_rps{100.0};         ///< Max requests per second per client
+    int32_t rate_limit_burst{200};        ///< Burst capacity
 };
 
 // ============================================================================
@@ -201,6 +214,16 @@ struct ModelMetrics {
     std::atomic<uint64_t> total_batch_count{0};
     std::atomic<uint64_t> total_batch_size{0};
     std::atomic<uint64_t> error_count{0};
+
+    // Latency percentile tracking (ring buffer of recent latencies)
+    static constexpr size_t kLatencyWindowSize = 1000;
+    std::array<uint64_t, kLatencyWindowSize> latency_window{};
+    std::atomic<size_t> latency_idx{0};
+
+    auto record_latency(uint64_t latency_us) -> void {
+        auto idx = latency_idx.fetch_add(1, std::memory_order_relaxed) % kLatencyWindowSize;
+        latency_window[idx] = latency_us;
+    }
 };
 
 /**
@@ -254,9 +277,13 @@ public:
      */
     auto repository() -> ModelRepository& { return repository_; }
 
+    /// Get the traffic router for A/B experiments
+    auto traffic_router() -> TrafficRouter& { return traffic_router_; }
+
 private:
     ServerConfig config_;
     ModelRepository repository_;
+    TrafficRouter traffic_router_;
     std::atomic<bool> running_{false};
     std::thread server_thread_;
 

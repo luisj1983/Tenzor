@@ -1348,6 +1348,9 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
+
+    std::vector<int64_t> input_shape_y_;
+    std::vector<int64_t> input_shape_x_;
 };
 
 // =========================================================================

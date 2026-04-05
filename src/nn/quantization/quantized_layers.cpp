@@ -14,6 +14,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include "../../backends/cpu/kernels/fused_quantized_ops.hpp"
 #include <stdexcept>
 
 namespace tenzor {
@@ -127,7 +128,6 @@ auto QuantizedLinear::forward_quantized(const QuantizedTensor& input) -> Tensor 
 
     // Perform quantized matrix multiplication
     const int8_t* input_data = input_data_cpu.data<int8_t>();
-    const int8_t* weight_data = weight_data_cpu.data<int8_t>();
     // Convert bias to Float32 and CPU if needed
     std::optional<Tensor> bias_f32;
     const float* bias_data = nullptr;
@@ -143,6 +143,19 @@ auto QuantizedLinear::forward_quantized(const QuantizedTensor& input) -> Tensor 
         bias_data = bias_f32->data<const float>();
     }
     float* output_data = output.data<float>();
+
+    // INT4 (QInt4x2) weight path: use fused dequantizing matmul
+    if (weight_data_cpu.dtype() == DType::QInt4x2) {
+        const uint8_t* weight_packed = weight_data_cpu.data<uint8_t>();
+        float weight_scale = weight_scale_cpu.data<const float>()[0];
+        cpu::fused_qlinear_dequant(
+            input_data, weight_packed, bias_data, output_data,
+            batch_size, out_features_, in_features_,
+            input_scale, weight_scale);
+        return output.to(original_device);
+    }
+
+    const int8_t* weight_data = weight_data_cpu.data<int8_t>();
 
     if (is_per_channel) {
         // Per-channel: weight_scale_cpu has [out_features] scales

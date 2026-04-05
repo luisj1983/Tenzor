@@ -78,6 +78,21 @@ auto CompiledModule::forward(const Variable& input) -> Variable {
         throw std::runtime_error("CompiledModule has no graph");
     }
 
+    // If dynamic shapes are configured, bind symbolic dims to actual values
+    if (!dynamic_dims_.empty()) {
+        SymbolicShapeEnvironment env;
+        for (const auto& dd : dynamic_dims_) {
+            if (dd.input_idx == 0) {
+                auto shape = input.tensor().shape();
+                if (dd.dim >= 0 &&
+                    static_cast<size_t>(dd.dim) < shape.size()) {
+                    env.bind(dd.name, shape[static_cast<size_t>(dd.dim)]);
+                }
+            }
+        }
+        graph_->bind_symbolic_shapes(env);
+    }
+
     auto results = graph_->forward({input});
 
     // Check if a ShapeGuard triggered a retrace request
@@ -118,6 +133,22 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
         throw std::runtime_error("CompiledModule has no graph");
     }
 
+    // If dynamic shapes are configured, bind symbolic dims to actual values
+    if (!dynamic_dims_.empty()) {
+        SymbolicShapeEnvironment env;
+        for (const auto& dd : dynamic_dims_) {
+            if (dd.input_idx >= 0 &&
+                static_cast<size_t>(dd.input_idx) < inputs.size()) {
+                auto shape = inputs[static_cast<size_t>(dd.input_idx)].tensor().shape();
+                if (dd.dim >= 0 &&
+                    static_cast<size_t>(dd.dim) < shape.size()) {
+                    env.bind(dd.name, shape[static_cast<size_t>(dd.dim)]);
+                }
+            }
+        }
+        graph_->bind_symbolic_shapes(env);
+    }
+
     auto results = graph_->forward(inputs);
 
     // Check if a ShapeGuard triggered a retrace request
@@ -152,6 +183,21 @@ auto CompiledModule::optimize_for_inference() -> int {
     int result = compiler.optimize(*graph_);
     memory_plan_ = compiler.memory_plan();
     return result;
+}
+
+auto CompiledModule::mark_dynamic_dims(const std::vector<DynamicDimSpec>& dynamic_dims) -> void {
+    if (!graph_) {
+        throw std::runtime_error("CompiledModule has no graph");
+    }
+
+    dynamic_dims_ = dynamic_dims;
+
+    // Create and run a SymbolicTracePass to propagate symbolic shapes
+    SymbolicTracePass trace_pass;
+    for (const auto& dd : dynamic_dims_) {
+        trace_pass.mark_dynamic(dd.input_idx, dd.dim, dd.name);
+    }
+    trace_pass.run(*graph_);
 }
 
 auto CompiledModule::save(const std::string& path) const -> void {

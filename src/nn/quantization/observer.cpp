@@ -559,6 +559,168 @@ auto KLDivergenceObserver::reset() -> void {
     total_count_ = 0;
 }
 
+// ============================================================================
+// PercentileObserver
+// ============================================================================
+
+PercentileObserver::PercentileObserver(double lower_percentile, double upper_percentile)
+    : lower_percentile_(lower_percentile), upper_percentile_(upper_percentile) {}
+
+auto PercentileObserver::observe(const Tensor& tensor) -> void {
+    auto cpu_tensor = tensor.device() != Device::cpu() ? tensor.to(Device::cpu()) : tensor;
+    auto contiguous = cpu_tensor.contiguous();
+    const float* data = contiguous.data<float>();
+    int64_t n = contiguous.numel();
+
+    // Reservoir sampling to cap memory usage
+    for (int64_t i = 0; i < n; ++i) {
+        if (collected_values_.size() < kMaxSamples) {
+            collected_values_.push_back(data[i]);
+        } else {
+            // Reservoir sampling: replace with decreasing probability
+            size_t total = collected_values_.size() + i;
+            size_t j = static_cast<size_t>(std::rand()) % total;
+            if (j < kMaxSamples) {
+                collected_values_[j] = data[i];
+            }
+        }
+    }
+}
+
+auto PercentileObserver::calculate_qparams(QuantDType dtype, QuantizationScheme scheme)
+    -> QuantizationParams {
+    if (collected_values_.empty()) {
+        throw std::runtime_error("PercentileObserver: no data observed");
+    }
+
+    // Sort to find percentiles
+    std::vector<float> sorted = collected_values_;
+    std::sort(sorted.begin(), sorted.end());
+
+    size_t lo_idx = static_cast<size_t>(lower_percentile_ * (sorted.size() - 1));
+    size_t hi_idx = static_cast<size_t>(upper_percentile_ * (sorted.size() - 1));
+    float min_val = sorted[lo_idx];
+    float max_val = sorted[hi_idx];
+
+    // Compute scale and zero_point using standard formulas
+    int64_t qmin = (dtype == QuantDType::INT8) ? -128 : 0;
+    int64_t qmax = (dtype == QuantDType::INT8) ? 127 : 255;
+    if (dtype == QuantDType::INT4) { qmin = -8; qmax = 7; }
+    if (dtype == QuantDType::UINT4) { qmin = 0; qmax = 15; }
+
+    float scale_val = (max_val - min_val) / static_cast<float>(qmax - qmin);
+    if (scale_val == 0.0f) scale_val = 1.0f;
+    int32_t zp_val = static_cast<int32_t>(std::round(static_cast<float>(qmin) - min_val / scale_val));
+    zp_val = std::clamp(zp_val, static_cast<int32_t>(qmin), static_cast<int32_t>(qmax));
+
+    if (scheme == QuantizationScheme::PerTensorSymmetric ||
+        scheme == QuantizationScheme::PerChannelSymmetric) {
+        float abs_max = std::max(std::abs(min_val), std::abs(max_val));
+        scale_val = abs_max / static_cast<float>(qmax);
+        if (scale_val == 0.0f) scale_val = 1.0f;
+        zp_val = 0;
+    }
+
+    Tensor scale_tensor = tenzor::full({1}, scale_val, DType::Float32, Device::cpu());
+    Tensor zp_tensor = tenzor::full({1}, static_cast<float>(zp_val), DType::Int32, Device::cpu());
+    return QuantizationParams(std::move(scale_tensor), std::move(zp_tensor), dtype, scheme);
+}
+
+auto PercentileObserver::reset() -> void {
+    collected_values_.clear();
+}
+
+// ============================================================================
+// MSEObserver
+// ============================================================================
+
+MSEObserver::MSEObserver(int64_t num_candidates) : num_candidates_(num_candidates) {}
+
+auto MSEObserver::observe(const Tensor& tensor) -> void {
+    auto cpu_tensor = tensor.device() != Device::cpu() ? tensor.to(Device::cpu()) : tensor;
+    auto contiguous = cpu_tensor.contiguous();
+    const float* data = contiguous.data<float>();
+    int64_t n = contiguous.numel();
+
+    for (int64_t i = 0; i < n; ++i) {
+        if (collected_values_.size() < kMaxSamples) {
+            collected_values_.push_back(data[i]);
+        } else {
+            size_t total = collected_values_.size() + i;
+            size_t j = static_cast<size_t>(std::rand()) % total;
+            if (j < kMaxSamples) {
+                collected_values_[j] = data[i];
+            }
+        }
+    }
+}
+
+auto MSEObserver::calculate_qparams(QuantDType dtype, QuantizationScheme scheme)
+    -> QuantizationParams {
+    if (collected_values_.empty()) {
+        throw std::runtime_error("MSEObserver: no data observed");
+    }
+
+    int64_t qmin = (dtype == QuantDType::INT8) ? -128 : 0;
+    int64_t qmax = (dtype == QuantDType::INT8) ? 127 : 255;
+    if (dtype == QuantDType::INT4) { qmin = -8; qmax = 7; }
+    if (dtype == QuantDType::UINT4) { qmin = 0; qmax = 15; }
+
+    float abs_min = *std::min_element(collected_values_.begin(), collected_values_.end());
+    float abs_max = *std::max_element(collected_values_.begin(), collected_values_.end());
+
+    float best_scale = 1.0f;
+    int32_t best_zp = 0;
+    double best_mse = std::numeric_limits<double>::max();
+
+    // Grid search over candidate scale values
+    for (int64_t c = 1; c <= num_candidates_; ++c) {
+        float fraction = static_cast<float>(c) / static_cast<float>(num_candidates_);
+        float candidate_max = abs_max * fraction;
+        float candidate_min = abs_min * fraction;
+
+        float scale_val;
+        int32_t zp_val;
+        if (scheme == QuantizationScheme::PerTensorSymmetric ||
+            scheme == QuantizationScheme::PerChannelSymmetric) {
+            float sym_max = std::max(std::abs(candidate_min), std::abs(candidate_max));
+            scale_val = sym_max / static_cast<float>(qmax);
+            zp_val = 0;
+        } else {
+            scale_val = (candidate_max - candidate_min) / static_cast<float>(qmax - qmin);
+            zp_val = static_cast<int32_t>(std::round(static_cast<float>(qmin) - candidate_min / scale_val));
+            zp_val = std::clamp(zp_val, static_cast<int32_t>(qmin), static_cast<int32_t>(qmax));
+        }
+
+        if (scale_val <= 0.0f) continue;
+
+        // Compute MSE for this candidate
+        double mse = 0.0;
+        for (float v : collected_values_) {
+            int32_t q = static_cast<int32_t>(std::round(v / scale_val)) + zp_val;
+            q = std::clamp(q, static_cast<int32_t>(qmin), static_cast<int32_t>(qmax));
+            float dequant = static_cast<float>(q - zp_val) * scale_val;
+            double diff = static_cast<double>(v - dequant);
+            mse += diff * diff;
+        }
+        mse /= static_cast<double>(collected_values_.size());
+
+        if (mse < best_mse) {
+            best_mse = mse;
+            best_scale = scale_val;
+            best_zp = zp_val;
+        }
+    }
+
+    Tensor scale_tensor = tenzor::full({1}, best_scale, DType::Float32, Device::cpu());
+    Tensor zp_tensor = tenzor::full({1}, static_cast<float>(best_zp), DType::Int32, Device::cpu());
+    return QuantizationParams(std::move(scale_tensor), std::move(zp_tensor), dtype, scheme);
+}
+
+auto MSEObserver::reset() -> void {
+    collected_values_.clear();
+}
+
 } // namespace quantization
 } // namespace nn
 } // namespace tenzor

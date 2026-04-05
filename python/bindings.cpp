@@ -18,6 +18,7 @@
 #include <tenzor/ops/fp8_scaling.hpp>
 #include <tenzor/backend/loader.hpp>
 #include <tenzor/backend/backend.hpp>
+#include <tenzor/backend/cuda_config.hpp>
 #include <tenzor/jit/compile.hpp>
 #include <tenzor/distributed/rpc/rpc.hpp>
 #include <tenzor/backend/dispatch_table.hpp>
@@ -524,6 +525,20 @@ PYBIND11_MODULE(tenzor_core, m) {
         }
         return devices;
     }, "Get list of all available devices across all backends with their properties");
+
+    // CUDA backend configuration
+    auto cuda_mod = m.def_submodule("cuda", "CUDA backend configuration");
+    auto matmul_mod = cuda_mod.def_submodule("matmul", "CUDA matmul configuration");
+    matmul_mod.def("allow_tf32", &tenzor::cuda::matmul::allow_tf32,
+        "Check if TF32 Tensor Cores are allowed for Float32 matmul");
+    matmul_mod.def("set_allow_tf32", &tenzor::cuda::matmul::set_allow_tf32,
+        py::arg("value"),
+        "Set whether TF32 Tensor Cores are allowed for Float32 matmul");
+    matmul_mod.def("warn_fp16_saturation", &tenzor::cuda::matmul::warn_fp16_saturation,
+        "Check if FP16 saturation warnings are enabled");
+    matmul_mod.def("set_warn_fp16_saturation", &tenzor::cuda::matmul::set_warn_fp16_saturation,
+        py::arg("value"),
+        "Set whether FP16 saturation warnings are enabled");
 
     // Device::Type enum (must be defined before Device class for default args)
     py::enum_<tenzor::Device::Type>(m, "DeviceType")

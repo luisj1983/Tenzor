@@ -87,6 +87,12 @@ if(TENZOR_BUILD_VULKAN)
     tenzor_discover_tests(test_vulkan_allocator_merge DISCOVERY_TIMEOUT 60)
 endif()
 
+# ARM NEON kernel tests (compiles on all platforms; tests skip on non-ARM)
+add_executable(test_neon_kernels test_neon_kernels.cpp)
+target_link_libraries(test_neon_kernels PRIVATE tenzor_core GTest::gtest_main)
+target_include_directories(test_neon_kernels PRIVATE ${PROJECT_SOURCE_DIR})
+tenzor_discover_tests(test_neon_kernels LABELS "backends" DISCOVERY_TIMEOUT 60)
+
 # Event API tests (backend-agnostic, skips unavailable backends)
 add_executable(test_event_api test_event_api.cpp)
 target_link_libraries(test_event_api PRIVATE tenzor_core GTest::gtest_main)

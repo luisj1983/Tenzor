@@ -296,6 +296,54 @@ private:
 };
 
 /**
+ * @brief Percentile-based observer for better outlier handling.
+ *
+ * Instead of using absolute min/max, uses configurable percentiles
+ * (e.g., 0.1% and 99.9%) to determine the quantization range.
+ * This reduces the impact of outlier values on quantization quality.
+ */
+class PercentileObserver : public Observer {
+public:
+    explicit PercentileObserver(double lower_percentile = 0.001,
+                                 double upper_percentile = 0.999);
+
+    auto observe(const Tensor& tensor) -> void override;
+    auto calculate_qparams(QuantDType dtype, QuantizationScheme scheme)
+        -> QuantizationParams override;
+    auto reset() -> void override;
+    auto has_data() const -> bool override { return !collected_values_.empty(); }
+
+private:
+    double lower_percentile_;
+    double upper_percentile_;
+    std::vector<float> collected_values_;  ///< Reservoir sample of observed values
+    static constexpr size_t kMaxSamples = 100000;
+};
+
+/**
+ * @brief MSE-minimizing observer.
+ *
+ * Finds scale and zero_point that minimize the mean squared error between
+ * original and quantized-then-dequantized values via grid search over
+ * candidate ranges.
+ */
+class MSEObserver : public Observer {
+public:
+    explicit MSEObserver(int64_t num_candidates = 100);
+
+    auto observe(const Tensor& tensor) -> void override;
+    auto calculate_qparams(QuantDType dtype, QuantizationScheme scheme)
+        -> QuantizationParams override;
+    auto reset() -> void override;
+    auto has_data() const -> bool override { return !collected_values_.empty(); }
+
+private:
+    int64_t num_candidates_;
+    std::vector<float> collected_values_;
+    static constexpr size_t kMaxSamples = 100000;
+};
+
+/**
  * @brief Create appropriate observer for quantization scheme.
  *
  * Factory function that creates the right observer type based on the

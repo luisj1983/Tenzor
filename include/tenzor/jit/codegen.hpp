@@ -48,6 +48,9 @@ enum class FusionKind : uint8_t {
     LayerNorm,        ///< mean -> sub -> var -> rsqrt -> mul -> add
     RMSNorm,          ///< square -> mean -> rsqrt -> mul
     SmallMLP,         ///< Linear -> activation -> Linear (hidden <= 4096)
+    SwiGLU,           ///< Linear -> Slice (split) -> Sigmoid -> Mul (gate) -> Linear
+    GeluVariant,      ///< GELU approximation: tanh-based (Pow->Mul->Add->Tanh) or erf-based
+    RotaryEmbedding,  ///< cos/sin rotation: Slice -> Mul(cos) -> Slice -> Mul(sin) -> Sub/Add
 };
 
 // ============================================================================

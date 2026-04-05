@@ -22,8 +22,10 @@
 #include <unordered_set>
 #include <functional>
 #include "graph.hpp"
+#include "fusion_cost_model.hpp"
 #include "memory_planner.hpp"
 #include "pattern_matcher.hpp"
+#include "symbolic_shape_inference.hpp"
 #include "../nn/module.hpp"
 #include "../backend/cuda_graph.hpp"
 
@@ -526,6 +528,49 @@ private:
 };
 
 /**
+ * @brief Symbolic shape tracing pass.
+ *
+ * Converts specified input dimensions from concrete to symbolic,
+ * then propagates symbolic shapes through the graph using
+ * SymbolicShapeInference.
+ *
+ * This pass enables dynamic shape support by marking certain
+ * dimensions (e.g., batch size, sequence length) as symbolic
+ * variables that can take different values at runtime.
+ *
+ * Example:
+ * @code
+ * SymbolicTracePass pass;
+ * pass.mark_dynamic(0, 0, "batch");   // input 0, dim 0 is dynamic
+ * pass.mark_dynamic(0, 1, "seq_len"); // input 0, dim 1 is dynamic
+ * pass.run(graph);
+ * // Now graph values have symbolic shapes with "batch" and "seq_len"
+ * @endcode
+ */
+class SymbolicTracePass : public Pass {
+public:
+    /**
+     * @brief Mark a dimension of an input as dynamic with a symbolic name.
+     *
+     * @param input_idx Index of the graph input (0-based)
+     * @param dim Dimension index within the input's shape
+     * @param name Symbolic name for this dimension (e.g., "batch")
+     */
+    auto mark_dynamic(int input_idx, int dim, const std::string& name) -> void;
+
+    auto run(Graph& graph) -> bool override;
+    auto name() const -> std::string override { return "SymbolicTrace"; }
+
+private:
+    struct DynamicDim {
+        int input_idx;
+        int dim;
+        std::string name;
+    };
+    std::vector<DynamicDim> dynamic_dims_;
+};
+
+/**
  * @brief Algebraic simplification pass.
  *
  * Applies algebraic identities to simplify expressions:
@@ -707,8 +752,19 @@ public:
      */
     auto set_max_mlp_hidden_dim(int64_t max_dim) -> void { max_mlp_hidden_ = max_dim; }
 
+    /**
+     * @brief Set the target device type for fusion cost estimation.
+     *
+     * Configures the internal cost model to use device-specific heuristics
+     * when evaluating fusion profitability.
+     *
+     * @param type Target device type
+     */
+    auto set_device_type(Device::Type type) -> void { cost_model_.set_device_type(type); }
+
 private:
     int64_t max_mlp_hidden_{4096};
+    FusionCostModel cost_model_;
 };
 
 /**
@@ -944,6 +1000,42 @@ public:
     auto optimize_for_inference() -> int;
 
     /**
+     * @brief Mark input dimensions as dynamic and propagate symbolic shapes.
+     *
+     * Creates a SymbolicTracePass with the specified dynamic dimension
+     * configuration, runs it on the graph, and stores the configuration
+     * for use during forward(). When forward() is called with inputs
+     * that have symbolic dimensions in the graph, a SymbolicShapeEnvironment
+     * is created to bind symbolic names to actual input dimension values.
+     *
+     * @param dynamic_dims Vector of {input_idx, dim, name} tuples specifying
+     *        which dimensions are dynamic and their symbolic names
+     *
+     * @code
+     * auto compiled = CompiledModule::trace(model, example_input);
+     * compiled->mark_dynamic_dims({
+     *     {0, 0, "batch"},      // input 0, dim 0 = dynamic "batch"
+     *     {0, 1, "seq_len"},    // input 0, dim 1 = dynamic "seq_len"
+     * });
+     * compiled->optimize_for_inference();
+     * // Now forward() supports variable batch/seq_len
+     * @endcode
+     */
+    struct DynamicDimSpec {
+        int input_idx;
+        int dim;
+        std::string name;
+    };
+    auto mark_dynamic_dims(const std::vector<DynamicDimSpec>& dynamic_dims) -> void;
+
+    /**
+     * @brief Check if this module has dynamic shape support enabled.
+     *
+     * @return true if mark_dynamic_dims() has been called with at least one dim
+     */
+    auto has_dynamic_shapes() const -> bool { return !dynamic_dims_.empty(); }
+
+    /**
      * @brief Get the underlying IR graph.
      *
      * @return Shared pointer to the graph
@@ -1100,6 +1192,7 @@ private:
     std::unordered_map<std::string, std::shared_ptr<Graph>> shape_cache_;  ///< Cached graphs by shape key
     int retrace_count_{0};                                           ///< Number of retraces performed
     static constexpr int MAX_RETRACES = 8;                           ///< Maximum distinct shapes to cache
+    std::vector<DynamicDimSpec> dynamic_dims_;                       ///< Dynamic dimension configuration
 
     /// Compute cache key from input shapes
     static auto compute_shape_key(const Variable& input) -> std::string;

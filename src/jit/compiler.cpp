@@ -1841,7 +1841,6 @@ auto ExtendedFusionPass::run(Graph& graph) -> bool {
     auto matches = matcher.find_all(graph);
     if (matches.empty()) return false;
 
-    FusionCostModel cost_model;
     bool modified = false;
 
     for (auto& match : matches) {
@@ -1850,8 +1849,12 @@ auto ExtendedFusionPass::run(Graph& graph) -> bool {
         candidate.num_ops = match.nodes.size();
         candidate.total_elements = match.estimated_elements;
         candidate.num_memory_accesses = match.nodes.size() * 2;  // Rough estimate: 1 read + 1 write per op
+        candidate.kind = match.kind;
 
-        if (!cost_model.should_fuse(candidate)) continue;
+        if (!cost_model_.should_fuse(candidate)) continue;
+
+        // Skip fusion if device-aware cost model predicts no speedup
+        if (cost_model_.estimate_speedup(candidate) < 1.0) continue;
 
         // Map the match kind to the appropriate fused OpType
         OpType fused_type;
@@ -1905,6 +1908,73 @@ auto ExtendedFusionPass::run(Graph& graph) -> bool {
     }
 
     return modified;
+}
+
+// ============================================================================
+// Symbolic Trace Pass
+// ============================================================================
+
+auto SymbolicTracePass::mark_dynamic(int input_idx, int dim, const std::string& name) -> void {
+    dynamic_dims_.push_back({input_idx, dim, name});
+}
+
+auto SymbolicTracePass::run(Graph& graph) -> bool {
+    if (dynamic_dims_.empty()) {
+        return false;
+    }
+
+    auto& inputs = graph.inputs();
+    bool changed = false;
+
+    // Step 1: For each graph input matching a dynamic_dims_ entry, replace
+    // the concrete dim with a symbolic dim in the input's symbolic shape.
+    for (const auto& dd : dynamic_dims_) {
+        if (dd.input_idx < 0 || static_cast<size_t>(dd.input_idx) >= inputs.size()) {
+            continue;
+        }
+
+        auto& input = inputs[static_cast<size_t>(dd.input_idx)];
+
+        // Start from existing symbolic shape, or create one from concrete shape
+        SymbolicShape sym_shape = input->has_symbolic_shape()
+            ? input->symbolic_shape()
+            : SymbolicShape::from_concrete(input->shape());
+
+        if (dd.dim < 0 || static_cast<size_t>(dd.dim) >= sym_shape.rank()) {
+            continue;
+        }
+
+        auto& target_dim = sym_shape[static_cast<size_t>(dd.dim)];
+        auto new_dim = SymbolicDim::symbolic(dd.name);
+
+        if (target_dim != new_dim) {
+            target_dim = new_dim;
+            changed = true;
+        }
+
+        input->set_symbolic_shape(std::move(sym_shape));
+    }
+
+    if (!changed) {
+        return false;
+    }
+
+    // Step 2: Propagate symbolic shapes through all nodes in topological order
+    // using SymbolicShapeInference.
+    SymbolicShapeInference inference;
+
+    for (const auto& node : graph.nodes()) {
+        auto output_shapes = inference.infer(node.get());
+
+        auto& outputs = node->outputs();
+        for (size_t i = 0; i < output_shapes.size() && i < outputs.size(); ++i) {
+            if (outputs[i]->symbolic_shape() != output_shapes[i]) {
+                outputs[i]->set_symbolic_shape(std::move(output_shapes[i]));
+            }
+        }
+    }
+
+    return true;
 }
 
 // ============================================================================

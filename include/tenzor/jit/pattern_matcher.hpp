@@ -95,6 +95,12 @@ private:
                          const std::unordered_set<Node*>& used) -> std::optional<FusionMatch>;
     auto match_reduction_chain(const Graph& graph, size_t start_idx,
                                const std::unordered_set<Node*>& used) -> std::optional<FusionMatch>;
+    auto match_swiglu(const Graph& graph, size_t start_idx,
+                      const std::unordered_set<Node*>& used) -> std::optional<FusionMatch>;
+    auto match_gelu_variant(const Graph& graph, size_t start_idx,
+                            const std::unordered_set<Node*>& used) -> std::optional<FusionMatch>;
+    auto match_rotary_embedding(const Graph& graph, size_t start_idx,
+                                const std::unordered_set<Node*>& used) -> std::optional<FusionMatch>;
 
     /// Check if a node's single output is consumed only by nodes in the candidate set.
     static auto has_single_use(const std::shared_ptr<Node>& node) -> bool;

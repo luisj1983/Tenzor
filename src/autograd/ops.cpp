@@ -1039,6 +1039,8 @@ auto atan2(const Variable& y, const Variable& x) -> Variable {
         return Variable(tenzor::atan2(y.tensor(), x.tensor()), false);
     }
     auto grad_fn = std::make_shared<Atan2Backward>();
+    grad_fn->input_shape_y_ = std::vector<int64_t>(y.shape().begin(), y.shape().end());
+    grad_fn->input_shape_x_ = std::vector<int64_t>(x.shape().begin(), x.shape().end());
     grad_fn->save_for_backward({y.tensor(), x.tensor()});
     grad_fn->set_next_functions({y.grad_fn(), x.grad_fn()});
     grad_fn->set_input_variables({y, x});
