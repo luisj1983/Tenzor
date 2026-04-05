@@ -522,6 +522,12 @@ enum class OpId : uint16_t {
     Zeta,                      // Hurwitz zeta function: ζ(x, q)
 
     // =========================================================================
+    // Additional Linear Algebra Operations (510-519)
+    // =========================================================================
+    LinalgLU = 510,            // LU factorization with partial pivoting
+    LinalgLUSolve,             // Solve via pre-computed LU factors
+
+    // =========================================================================
     // Sentinel (MUST BE LAST)
     // =========================================================================
     OP_COUNT

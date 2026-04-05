@@ -10,6 +10,9 @@
 
 #include "vulkan_helpers.hpp"
 #include "tenzor/backend/vulkan_caching_allocator.hpp"
+#ifdef TENZOR_HAS_VMA
+#include "tenzor/backend/vulkan_vma_allocator.hpp"
+#endif
 
 #include <cstring>
 #include <stdexcept>
@@ -123,7 +126,18 @@ auto VulkanBackend::allocate(size_t bytes, int32_t device_id) -> void* {
 }
 
 void* VulkanBackend::allocateDeviceMemory(size_t bytes, int32_t device_id) {
-    // Use caching allocator for efficient memory reuse
+#ifdef TENZOR_HAS_VMA
+    // When VMA is available, use it for allocation (better suballocation + defrag)
+    auto& vma_alloc = backend::VulkanVMAAllocator::get();
+    void* ptr = vma_alloc.allocate(
+        bytes, device_id,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+    );
+    return ptr;
+#else
+    // Use custom caching allocator for efficient memory reuse
     auto& allocator = backend::VulkanCachingAllocator::get();
 
     // Allocate device-local memory for compute buffers.
@@ -138,6 +152,7 @@ void* VulkanBackend::allocateDeviceMemory(size_t bytes, int32_t device_id) {
     );
 
     return ptr;
+#endif
 }
 
 auto VulkanBackend::deallocate(void* ptr) -> void {
@@ -175,8 +190,12 @@ auto VulkanBackend::deallocate(void* ptr) -> void {
 }
 
 void VulkanBackend::freeDeviceMemory(void* ptr, int32_t device_id) {
+#ifdef TENZOR_HAS_VMA
+    backend::VulkanVMAAllocator::get().free(ptr, device_id);
+#else
     // Return memory to caching allocator for reuse
     backend::VulkanCachingAllocator::get().free(ptr, device_id);
+#endif
 }
 
 void VulkanBackend::flush_deferred_frees(int32_t device_id) {

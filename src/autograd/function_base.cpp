@@ -88,6 +88,28 @@ bool activation_offload_enabled() {
     return g_activation_offload_enabled;
 }
 
+auto Function::should_offload(const Tensor& t) const -> bool {
+    // Check device - only offload GPU tensors
+    if (t.device().type == Device::Type::CPU) return false;
+
+    // Check per-function policy
+    switch (offload_policy_) {
+        case OffloadPolicy::Always: break;  // Always offload (if GPU)
+        case OffloadPolicy::Never: return false;
+        case OffloadPolicy::Inherit:
+            if (!activation_offload_enabled()) return false;
+            break;
+    }
+
+    // Check size threshold
+    if (offload_min_bytes_ > 0) {
+        size_t tensor_bytes = static_cast<size_t>(t.numel()) * dtype_size(t.dtype());
+        if (tensor_bytes < offload_min_bytes_) return false;
+    }
+
+    return true;
+}
+
 auto Function::set_next_functions(std::vector<std::shared_ptr<Function>> funcs) -> void {
     next_functions_ = std::move(funcs);
 }
@@ -112,19 +134,32 @@ auto Function::save_for_backward(std::vector<Tensor> tensors) -> void {
     // Record version counters for in-place modification detection
     saved_versions_.clear();
     saved_versions_.reserve(tensors.size());
+    saved_view_base_versions_.clear();
+    saved_view_base_versions_.reserve(tensors.size());
     for (const auto& t : tensors) {
         saved_versions_.push_back(t.version());
+        // Also track view base version for view safety detection
+        if (t.is_view() && t._view_base()) {
+            saved_view_base_versions_.push_back(t._view_base()->version());
+        } else {
+            saved_view_base_versions_.push_back(0);
+        }
     }
 
-    if (activation_offload_enabled() && !tensors.empty()) {
-        // Check if any tensor is on a GPU device
-        auto dev = tensors[0].device();
-        if (dev.type != Device::Type::CPU) {
-            offloaded_device_ = dev;
-            tensors_offloaded_.store(true, std::memory_order_release);
-            for (auto& t : tensors) {
+    // Per-tensor offload check (respects per-function policy + size threshold)
+    if (!tensors.empty()) {
+        bool any_offloaded = false;
+        for (auto& t : tensors) {
+            if (should_offload(t)) {
+                if (!any_offloaded) {
+                    offloaded_device_ = t.device();
+                    any_offloaded = true;
+                }
                 t = t.to(Device::cpu());
             }
+        }
+        if (any_offloaded) {
+            tensors_offloaded_.store(true, std::memory_order_release);
         }
     }
     saved_tensors_ = std::move(tensors);
@@ -159,6 +194,19 @@ void Function::validate_saved_tensors() const {
                 "one of the variables needed for gradient computation has been modified by an "
                 "in-place operation after the forward pass. Use .clone() before in-place ops "
                 "on tensors used in autograd computation.");
+        }
+        // Check if view base was modified (in-place op on the base invalidates the view)
+        if (i < saved_view_base_versions_.size() && saved_view_base_versions_[i] != 0) {
+            auto* base = saved_tensors_[i]._view_base();
+            if (base) {
+                auto current_base_ver = base->version();
+                if (current_base_ver != saved_view_base_versions_[i]) {
+                    throw std::runtime_error(
+                        "a view's base tensor has been modified by an in-place operation after "
+                        "the forward pass. This invalidates the saved view. Use .clone() on "
+                        "the view before the in-place modification.");
+                }
+            }
         }
     }
 }

@@ -26,3 +26,7 @@ tenzor_discover_tests(test_compile LABELS "jit" DISCOVERY_TIMEOUT 60)
 add_executable(test_control_flow_compile test_control_flow_compile.cpp)
 target_link_libraries(test_control_flow_compile PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_control_flow_compile LABELS "jit" DISCOVERY_TIMEOUT 60)
+
+add_executable(test_dynamic_shapes test_dynamic_shapes.cpp)
+target_link_libraries(test_dynamic_shapes PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_dynamic_shapes LABELS "jit" DISCOVERY_TIMEOUT 60)

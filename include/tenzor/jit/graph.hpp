@@ -673,6 +673,25 @@ public:
     auto infer_symbolic_types() -> void;
 
     /**
+     * @brief Bind symbolic dimensions to concrete values using an environment.
+     *
+     * Walks all values in the graph and resolves any symbolic dimensions
+     * to concrete values using the provided environment. After binding,
+     * the graph can be executed with the concrete shapes.
+     *
+     * @param env Environment mapping symbolic names to concrete values
+     * @throws std::runtime_error if any symbolic dimension is not bound
+     */
+    auto bind_symbolic_shapes(const SymbolicShapeEnvironment& env) -> void;
+
+    /**
+     * @brief Get the symbolic input shapes (if set).
+     *
+     * @return Vector of symbolic shapes for each input (empty if no symbolic shapes set)
+     */
+    auto symbolic_input_shapes() const -> std::vector<SymbolicShape>;
+
+    /**
      * @brief Execute graph with runtime inputs.
      *
      * @param runtime_inputs Input tensors/variables

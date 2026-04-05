@@ -2712,6 +2712,15 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return {Re, Im, V};
     });
 
+    table.register_kernel(OpId::LinalgLU, [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+        auto [L, U, pivots] = linalg::lu(inputs[0]);
+        return {L, U, pivots};
+    });
+
+    table.register_single_output_kernel(OpId::LinalgLUSolve, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        return linalg::lu_solve(inputs[0], inputs[1], inputs[2]);
+    });
+
     // =========================================================================
     // Sparse Tensor Operations (OpIds 460-464)
     //

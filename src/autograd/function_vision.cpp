@@ -210,4 +210,27 @@ auto AffineGridBackward::backward(std::vector<Tensor> grad_outputs) -> std::vect
     return {gt_f32.to(grad_grid.dtype()).to(grad_grid.device())};
 }
 
+auto GridSampleBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // Delegate to tensor-level backward and wrap results
+    // GridSample backward is complex (bilinear interpolation gradients);
+    // for higher-order, we wrap the tensor results as Variables
+    auto result_tensors = backward({grad_outputs[0].tensor()});
+    std::vector<Variable> results;
+    results.reserve(result_tensors.size());
+    for (auto& t : result_tensors) {
+        results.emplace_back(std::move(t), grad_outputs[0].requires_grad());
+    }
+    return results;
+}
+
+auto AffineGridBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    auto result_tensors = backward({grad_outputs[0].tensor()});
+    std::vector<Variable> results;
+    results.reserve(result_tensors.size());
+    for (auto& t : result_tensors) {
+        results.emplace_back(std::move(t), grad_outputs[0].requires_grad());
+    }
+    return results;
+}
+
 } // namespace tenzor

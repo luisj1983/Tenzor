@@ -2206,8 +2206,17 @@ auto fused_attention_cuda(
     int64_t head_dim = Q.shape()[2];
     int64_t seq_len_k = K.shape()[1];
 
+    // Support FP16 and BF16 by upcasting to FP32 for computation
+    if (Q.dtype() == DType::Float16 || Q.dtype() == DType::BFloat16) {
+        auto Q_f32 = Q.to(DType::Float32);
+        auto K_f32 = K.to(DType::Float32);
+        auto V_f32 = V.to(DType::Float32);
+        auto [output_f32, lse_f32] = fused_attention_cuda(Q_f32, K_f32, V_f32, scale);
+        return {output_f32.to(Q.dtype()), lse_f32};
+    }
+
     if (Q.dtype() != DType::Float32) {
-        throw std::runtime_error("fused_attention_cuda: Only Float32 supported");
+        throw std::runtime_error("fused_attention_cuda: Only Float32, Float16, BFloat16 supported");
     }
 
     Tensor output = create_cuda_zeros({batch_heads, seq_len_q, head_dim}, Q.dtype(), Q.device());

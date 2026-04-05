@@ -346,9 +346,9 @@ auto cudnn_sdpa_forward(
     const Tensor& V,
     float scale
 ) -> Tensor {
-    // FP32 bypass: route to custom flash attention kernel instead of
-    // expensive FP32→FP16→cuDNN→FP16→FP32 conversion chain
-    if (Q.dtype() == DType::Float32) {
+    // FP32/BF16 bypass: route to custom flash attention kernel
+    // BF16 is handled by fused_attention_cuda via upcast to FP32
+    if (Q.dtype() == DType::Float32 || Q.dtype() == DType::BFloat16) {
         auto [output, lse] = fused_attention_cuda(Q, K, V, scale);
         return output;
     }

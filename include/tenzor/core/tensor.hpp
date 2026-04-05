@@ -313,6 +313,17 @@ public:
     /// Increment the mutation version counter
     auto bump_version() -> void;
 
+    // ---- View Tracking API ----
+
+    /// Check if this tensor is a view of another tensor (shares storage via reshape/transpose/slice/etc.)
+    auto is_view() const noexcept -> bool;
+
+    /// Get the base tensor that this view was derived from (nullptr if not a view)
+    auto _view_base() const noexcept -> TensorImpl*;
+
+    /// Mark this tensor as a view of another tensor (called internally by view-creating ops)
+    auto _set_view_base(TensorImpl* base) noexcept -> void;
+
     // ---- Quantization API ----
 
     /// Check if this tensor has a quantized dtype
@@ -1289,6 +1300,11 @@ public:
 
     TensorImpl& operator=(const TensorImpl&) = delete;
 
+    /// Get the mutation version counter
+    auto version() const noexcept -> uint64_t {
+        return version_counter_.load(std::memory_order_acquire);
+    }
+
     /**
      * @brief Get total number of elements.
      *
@@ -1314,6 +1330,7 @@ private:
     Device device;                       ///< Device location
     bool requires_grad{false};           ///< Gradient computation flag
     std::optional<DimnameList> names_;   ///< Optional dimension names (experimental)
+    TensorImpl* view_base_{nullptr};    ///< Non-owning pointer to base tensor for views
 
     // Quantization metadata (only valid when dtype is QInt8/QUInt8/QInt4x2)
     double q_scale_{0.0};               ///< Quantization scale factor

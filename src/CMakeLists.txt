@@ -294,6 +294,62 @@ else()
     message(STATUS "Model Hub: Disabled")
 endif()
 
+# Optional serving dependencies (cpp-httplib + gRPC)
+if(TENZOR_BUILD_SERVING)
+    # cpp-httplib (header-only HTTP server)
+    include(FetchContent)
+    FetchContent_Declare(
+        httplib
+        GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
+        GIT_TAG v0.18.7
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(httplib)
+    target_link_libraries(tenzor_core PRIVATE httplib::httplib)
+    target_compile_definitions(tenzor_core PRIVATE TENZOR_HAS_HTTPLIB)
+
+    # gRPC (system package)
+    find_package(gRPC CONFIG QUIET)
+    if(gRPC_FOUND)
+        # Generate protobuf/gRPC stubs from proto file
+        find_program(PROTOC protoc REQUIRED)
+        find_program(GRPC_CPP_PLUGIN grpc_cpp_plugin REQUIRED)
+
+        set(PROTO_SRC_DIR ${CMAKE_SOURCE_DIR}/proto)
+        set(PROTO_GEN_DIR ${CMAKE_BINARY_DIR}/generated/proto)
+        file(MAKE_DIRECTORY ${PROTO_GEN_DIR})
+
+        set(PROTO_FILE ${PROTO_SRC_DIR}/tenzor_serving.proto)
+        set(PROTO_GEN_SRCS ${PROTO_GEN_DIR}/tenzor_serving.pb.cc ${PROTO_GEN_DIR}/tenzor_serving.grpc.pb.cc)
+        set(PROTO_GEN_HDRS ${PROTO_GEN_DIR}/tenzor_serving.pb.h ${PROTO_GEN_DIR}/tenzor_serving.grpc.pb.h)
+
+        add_custom_command(
+            OUTPUT ${PROTO_GEN_SRCS} ${PROTO_GEN_HDRS}
+            COMMAND ${PROTOC}
+                --proto_path=${PROTO_SRC_DIR}
+                --cpp_out=${PROTO_GEN_DIR}
+                --grpc_out=${PROTO_GEN_DIR}
+                --plugin=protoc-gen-grpc=${GRPC_CPP_PLUGIN}
+                ${PROTO_FILE}
+            DEPENDS ${PROTO_FILE}
+            COMMENT "Generating gRPC stubs for tenzor_serving.proto"
+        )
+
+        target_sources(tenzor_core PRIVATE
+            serving/grpc_server.cpp
+            ${PROTO_GEN_SRCS}
+        )
+        target_include_directories(tenzor_core PRIVATE ${PROTO_GEN_DIR})
+        target_link_libraries(tenzor_core PRIVATE gRPC::grpc++ protobuf::libprotobuf)
+        target_compile_definitions(tenzor_core PRIVATE TENZOR_HAS_GRPC)
+        message(STATUS "Serving: HTTP + gRPC enabled")
+    else()
+        message(STATUS "Serving: HTTP only (gRPC not found)")
+    endif()
+else()
+    message(STATUS "Serving: Disabled (set -DTENZOR_BUILD_SERVING=ON to enable)")
+endif()
+
 if(OpenMP_CXX_FOUND)
     target_link_libraries(tenzor_core PUBLIC OpenMP::OpenMP_CXX)
 endif()

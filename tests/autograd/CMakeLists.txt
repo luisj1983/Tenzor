@@ -107,3 +107,8 @@ tenzor_discover_tests(test_graph_cleanup LABELS "autograd" DISCOVERY_TIMEOUT 60)
 add_executable(test_func test_func.cpp)
 target_link_libraries(test_func PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_func LABELS "autograd" DISCOVERY_TIMEOUT 60)
+
+# Activation offload per-function policy tests
+add_executable(test_activation_offload test_activation_offload.cpp)
+target_link_libraries(test_activation_offload PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_activation_offload LABELS "autograd" DISCOVERY_TIMEOUT 60)

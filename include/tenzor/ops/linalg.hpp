@@ -145,5 +145,30 @@ auto eig(const Tensor& A) -> std::tuple<Tensor, Tensor, Tensor>;
  */
 auto matrix_power(const Tensor& A, int64_t n) -> Tensor;
 
+/**
+ * @brief Compute LU decomposition with partial pivoting.
+ *
+ * Factorizes A = P @ L @ U where P is a permutation matrix,
+ * L is lower-triangular with unit diagonal, and U is upper-triangular.
+ *
+ * @param A Input square matrix (..., N, N)
+ * @return Tuple of (L, U, pivots) where L is (..., N, N), U is (..., N, N),
+ *         and pivots is (..., N) containing pivot indices (1-based LAPACK convention)
+ */
+auto lu(const Tensor& A) -> std::tuple<Tensor, Tensor, Tensor>;
+
+/**
+ * @brief Solve linear system using pre-computed LU factors.
+ *
+ * Given LU factors from lu(), solves AX = B efficiently.
+ *
+ * @param LU_data Packed LU factors (output of LAPACKE_?getrf, (..., N, N))
+ * @param pivots Pivot indices from LU factorization (..., N)
+ * @param B Right-hand side matrix (..., N, K)
+ * @return Solution matrix X (..., N, K)
+ */
+auto lu_solve(const Tensor& LU_data, const Tensor& pivots,
+              const Tensor& B) -> Tensor;
+
 } // namespace linalg
 } // namespace tenzor

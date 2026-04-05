@@ -45,6 +45,9 @@
 #include <tenzor/nn/amp/autocast.hpp>
 #include <tenzor/distributed/distributed.hpp>
 #include <tenzor/distributed/ddp.hpp>
+#include <tenzor/distributed/fsdp.hpp>
+#include <tenzor/distributed/gradient_compression.hpp>
+#include <tenzor/serving/server.hpp>
 #include <tenzor/models/hub.hpp>
 #include <tenzor/onnx/exporter.hpp>
 #include <tenzor/data/dataset.hpp>
@@ -6757,6 +6760,58 @@ Example::
             "Reset bucket ready states for next iteration");
 
     // =========================================================================
+    // FSDP (Fully Sharded Data Parallel)
+    // =========================================================================
+    py::enum_<tenzor::distributed::ShardingStrategy>(distributed, "ShardingStrategy")
+        .value("FULL_SHARD", tenzor::distributed::ShardingStrategy::FULL_SHARD)
+        .value("SHARD_GRAD_OP", tenzor::distributed::ShardingStrategy::SHARD_GRAD_OP)
+        .value("NO_SHARD", tenzor::distributed::ShardingStrategy::NO_SHARD);
+
+    py::class_<tenzor::distributed::FSDPConfig>(distributed, "FSDPConfig")
+        .def(py::init<>())
+        .def_readwrite("strategy", &tenzor::distributed::FSDPConfig::strategy)
+        .def_readwrite("cpu_offload", &tenzor::distributed::FSDPConfig::cpu_offload)
+        .def_readwrite("auto_wrap_min_params", &tenzor::distributed::FSDPConfig::auto_wrap_min_params)
+        .def_readwrite("mixed_precision", &tenzor::distributed::FSDPConfig::mixed_precision)
+        .def_readwrite("forward_prefetch", &tenzor::distributed::FSDPConfig::forward_prefetch)
+        .def_readwrite("backward_prefetch", &tenzor::distributed::FSDPConfig::backward_prefetch);
+
+    py::class_<tenzor::distributed::FullyShardedDataParallel>(distributed, "FullyShardedDataParallel")
+        .def(py::init<tenzor::nn::Module&, tenzor::distributed::ProcessGroup&,
+                       const tenzor::distributed::FSDPConfig&>(),
+             py::arg("module"), py::arg("process_group"),
+             py::arg("config") = tenzor::distributed::FSDPConfig{})
+        .def("forward", &tenzor::distributed::FullyShardedDataParallel::forward,
+             py::arg("input"))
+        .def("finalize_backward", &tenzor::distributed::FullyShardedDataParallel::finalize_backward)
+        .def("summon_full_params", &tenzor::distributed::FullyShardedDataParallel::summon_full_params)
+        .def("release_full_params", &tenzor::distributed::FullyShardedDataParallel::release_full_params)
+        .def("total_params", &tenzor::distributed::FullyShardedDataParallel::total_params)
+        .def("sharded_param_bytes", &tenzor::distributed::FullyShardedDataParallel::sharded_param_bytes);
+
+    // =========================================================================
+    // Gradient Compression
+    // =========================================================================
+    py::class_<tenzor::distributed::CompressedGradient>(distributed, "CompressedGradient")
+        .def_readonly("data", &tenzor::distributed::CompressedGradient::data)
+        .def_readonly("original_shape", &tenzor::distributed::CompressedGradient::original_shape)
+        .def_readonly("compression_ratio", &tenzor::distributed::CompressedGradient::compression_ratio);
+
+    py::class_<tenzor::distributed::FP16Compressor>(distributed, "FP16Compressor")
+        .def(py::init<>())
+        .def("compress", &tenzor::distributed::FP16Compressor::compress, py::arg("gradient"))
+        .def("decompress", &tenzor::distributed::FP16Compressor::decompress, py::arg("compressed"))
+        .def("name", &tenzor::distributed::FP16Compressor::name)
+        .def("reset", &tenzor::distributed::FP16Compressor::reset);
+
+    py::class_<tenzor::distributed::TopKCompressor>(distributed, "TopKCompressor")
+        .def(py::init<double>(), py::arg("ratio") = 0.01)
+        .def("compress", &tenzor::distributed::TopKCompressor::compress, py::arg("gradient"))
+        .def("decompress", &tenzor::distributed::TopKCompressor::decompress, py::arg("compressed"))
+        .def("name", &tenzor::distributed::TopKCompressor::name)
+        .def("reset", &tenzor::distributed::TopKCompressor::reset);
+
+    // =========================================================================
     // RPC submodule
     // =========================================================================
     auto rpc = distributed.def_submodule("rpc", "Remote Procedure Call framework");
@@ -9359,4 +9414,37 @@ void bind_compression(py::module& m) {
     }, py::arg("func"), py::arg("batched_input"), py::arg("batch_dim") = 0,
     "Vectorized map: apply func independently to each element along batch dim.\n"
     "Equivalent to torch.vmap.");
+
+    // =========================================================================
+    // Serving submodule
+    // =========================================================================
+    auto serving = m.def_submodule("serving", "Inference serving infrastructure");
+
+    py::class_<tenzor::serving::ServerConfig>(serving, "ServerConfig")
+        .def(py::init<>())
+        .def_readwrite("http_port", &tenzor::serving::ServerConfig::http_port)
+        .def_readwrite("grpc_port", &tenzor::serving::ServerConfig::grpc_port)
+        .def_readwrite("num_workers", &tenzor::serving::ServerConfig::num_workers)
+        .def_readwrite("model_repository_path", &tenzor::serving::ServerConfig::model_repository_path);
+
+    py::class_<tenzor::serving::BatchConfig>(serving, "BatchConfig")
+        .def(py::init<>())
+        .def_readwrite("max_batch_size", &tenzor::serving::BatchConfig::max_batch_size)
+        .def_readwrite("max_latency_us", &tenzor::serving::BatchConfig::max_latency_us);
+
+    py::class_<tenzor::serving::InferenceServer>(serving, "InferenceServer")
+        .def(py::init<tenzor::serving::ServerConfig>(), py::arg("config"))
+        .def("start", &tenzor::serving::InferenceServer::start)
+        .def("stop", &tenzor::serving::InferenceServer::stop)
+        .def("wait", &tenzor::serving::InferenceServer::wait)
+        .def("repository", &tenzor::serving::InferenceServer::repository,
+             py::return_value_policy::reference_internal);
+
+    py::class_<tenzor::serving::ModelRepository>(serving, "ModelRepository")
+        .def("load_model", &tenzor::serving::ModelRepository::load_model,
+             py::arg("name"), py::arg("path"), py::arg("device"),
+             py::arg("batch_config") = tenzor::serving::BatchConfig{})
+        .def("unload_model", &tenzor::serving::ModelRepository::unload_model,
+             py::arg("name"))
+        .def("list_models", &tenzor::serving::ModelRepository::list_models);
 }

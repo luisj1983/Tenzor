@@ -87,6 +87,11 @@ auto DeviceTransferBackward::backward(std::vector<Tensor> grad_outputs) -> std::
     return {grad.to(source_device)};
 }
 
+auto DeviceTransferBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    auto result_tensors = backward({grad_outputs[0].tensor()});
+    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+}
+
 // FlattenBackward implementation
 // Saves original shape. backward: reshape(grad, original_shape)
 auto FlattenBackward::forward(std::vector<Variable>) -> std::vector<Variable> {

@@ -2744,6 +2744,12 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     });
 #endif // TENZOR_HAS_CUSOLVER
 
+    // LU decomposition - falls through to CPU LAPACKE implementation
+    // The CUDA lu_kernel in linalg.cu is used internally by inverse/solve but
+    // not yet exposed as a standalone dispatch target. GPU tensors will be
+    // transferred to CPU for LU factorization until a cuSOLVER getrf wrapper
+    // is registered here.
+
     // =========================================================================
     // FFT Operations (cuFFT)
     // =========================================================================

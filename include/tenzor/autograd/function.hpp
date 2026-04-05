@@ -58,6 +58,18 @@ void increment_higher_order_disconnection_count();
 void set_activation_offload(bool enabled);
 bool activation_offload_enabled();
 
+/**
+ * @brief Per-function offload policy for activation offloading.
+ *
+ * Controls whether a specific Function offloads saved tensors to CPU,
+ * overriding the global thread-local setting.
+ */
+enum class OffloadPolicy : uint8_t {
+    Inherit,  ///< Use the global thread-local setting (default)
+    Always,   ///< Always offload saved tensors to CPU (regardless of global setting)
+    Never     ///< Never offload (regardless of global setting)
+};
+
 // Forward declaration
 class Variable;
 
@@ -347,15 +359,35 @@ public:
      */
     auto has_saved_variables() const -> bool { return !saved_variables_.empty(); }
 
+    /**
+     * @brief Set per-function offload policy.
+     *
+     * @param policy Offload policy (Inherit/Always/Never)
+     * @param min_bytes Minimum tensor size in bytes to offload (0 = offload all)
+     */
+    void set_offload_policy(OffloadPolicy policy, size_t min_bytes = 0) {
+        offload_policy_ = policy;
+        offload_min_bytes_ = min_bytes;
+    }
+
+    /// Get the current offload policy
+    auto offload_policy() const -> OffloadPolicy { return offload_policy_; }
+
+    /// Check if a specific tensor should be offloaded based on policy and size
+    auto should_offload(const Tensor& t) const -> bool;
+
 protected:
     mutable std::vector<Tensor> saved_tensors_;                     ///< Tensors saved for backward
     mutable std::vector<uint64_t> saved_versions_;                  ///< Tensor versions at save time (for in-place detection)
+    mutable std::vector<uint64_t> saved_view_base_versions_;       ///< View base versions at save time (0 if not a view)
     mutable std::vector<Variable> saved_variables_;                 ///< Variables saved for backward (preserves graph for create_graph)
     mutable Device offloaded_device_{Device::cpu()};                ///< Original device when offloaded
     mutable std::atomic<bool> tensors_offloaded_{false};            ///< Whether saved tensors are on CPU due to offloading
     mutable std::mutex offload_mutex_;                              ///< Guards offload/reload of saved tensors
     std::vector<std::shared_ptr<Function>> next_functions_;         ///< Chained gradient functions
     std::vector<Variable> input_variables_;                          ///< Input variables for gradient accumulation (stored by value)
+    OffloadPolicy offload_policy_{OffloadPolicy::Inherit};           ///< Per-function offload policy
+    size_t offload_min_bytes_{0};                                    ///< Minimum tensor size to offload (0=all)
 
 private:
     uint64_t id_;                                                    ///< Unique identifier (stable key for gradient accumulators)
@@ -602,6 +634,8 @@ class ConjBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 /**
@@ -614,6 +648,8 @@ class RealBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     DType input_dtype_;
 };
 
@@ -627,6 +663,8 @@ class ImagBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     DType input_dtype_;
 };
 
@@ -1397,6 +1435,8 @@ public:
     Device source_device;  // Device to transfer gradients back to
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
 };
 
 class FlattenBackward : public Function {
@@ -1840,6 +1880,23 @@ private:
 };
 
 /**
+ * @brief LU decomposition gradient function.
+ *
+ * Forward: (L, U, pivots) = lu(A)  where P @ L @ U = A
+ * Backward: dA = P^T @ (dL @ U + L @ dU)
+ *
+ * @note Saves L, U for backward computation. Pivots are non-differentiable.
+ */
+class LUBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "LUBackward"; }
+};
+
+/**
  * @brief SVD gradient function.
  *
  * Forward: (U, S, Vh) = svd(A)
@@ -2142,6 +2199,8 @@ class GridSampleBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "GridSampleBackward"; }
 
     std::string mode_;
@@ -2158,6 +2217,8 @@ class AffineGridBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "AffineGridBackward"; }
 
     std::vector<int64_t> size_;

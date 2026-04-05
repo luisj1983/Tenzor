@@ -7,6 +7,9 @@
 #include "tenzor/core/shape.hpp"
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/backend/vulkan_caching_allocator.hpp"
+#ifdef TENZOR_HAS_VMA
+#include "tenzor/backend/vulkan_vma_allocator.hpp"
+#endif
 
 // Undefine Vulkan Bool macro that conflicts with DType::Bool
 #ifdef Bool
@@ -958,6 +961,16 @@ std::pair<VkBuffer, VkDeviceSize> VulkanBackend::getVulkanBufferAndOffset(const 
         throw std::runtime_error("Invalid buffer pointer: null pointer (empty tensor?)");
     }
 
+#ifdef TENZOR_HAS_VMA
+    // VMA path: look up buffer via VMA allocator
+    auto& vma_alloc = backend::VulkanVMAAllocator::get();
+    for (int32_t device_id = 0; device_id < device_count(); ++device_id) {
+        VkBuffer buffer = vma_alloc.get_buffer(const_cast<void*>(ptr), device_id);
+        if (buffer != VK_NULL_HANDLE) {
+            return {buffer, 0};
+        }
+    }
+#else
     auto& allocator = backend::VulkanCachingAllocator::get();
 
     // First try direct lookup in caching allocator
@@ -975,15 +988,13 @@ std::pair<VkBuffer, VkDeviceSize> VulkanBackend::getVulkanBufferAndOffset(const 
     // view or an offset write into a larger tensor).  Ask the caching allocator to
     // search its block list — it knows the ACTUAL block sizes (including slab
     // sub-allocations) and can find the correct VkBuffer + byte offset.
-    // The allocations_ map cannot be used here because it stores the REQUESTED
-    // size which may be smaller than the actual block, causing mismatches when
-    // slab sub-allocation places adjacent blocks in overlapping address ranges.
     for (int32_t device_id = 0; device_id < device_count(); ++device_id) {
         auto [buffer, offset] = allocator.find_buffer_and_offset(ptr, device_id);
         if (buffer != VK_NULL_HANDLE) {
             return {buffer, static_cast<VkDeviceSize>(offset)};
         }
     }
+#endif
 
     // Not found even with offset search
     throw std::runtime_error("Invalid buffer pointer: buffer not tracked");

@@ -6,9 +6,16 @@
 #include "tenzor/serving/server.hpp"
 #include "tenzor/jit/serialization.hpp"
 #include "tenzor/autograd/variable.hpp"
+#include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/creation.hpp"
+#include "tenzor/core/dtype.hpp"
 #include <algorithm>
 #include <iostream>
 #include <sstream>
+#include <chrono>
+#ifdef TENZOR_HAS_HTTPLIB
+#include <httplib.h>
+#endif
 
 namespace tenzor {
 namespace serving {
@@ -86,16 +93,37 @@ auto DynamicBatcher::batch_loop() -> void {
 auto DynamicBatcher::execute_batch(
     std::vector<std::shared_ptr<InferRequest>>& batch) -> void {
     try {
-        // Concatenate inputs along batch dimension (dim=0)
-        // For simplicity, execute individually if batch size is 1
-        // In production: cat(inputs, 0) -> forward -> split
-        for (auto& req : batch) {
-            try {
-                tenzor::Variable input_var(req->input, false);
-                auto output = model_->forward(input_var);
-                req->result.set_value(output.tensor());
-            } catch (const std::exception& e) {
-                req->result.set_exception(std::current_exception());
+        if (batch.size() == 1) {
+            // Single request: no batching overhead
+            tenzor::Variable input_var(batch[0]->input, false);
+            auto output = model_->forward(input_var);
+            batch[0]->result.set_value(output.tensor());
+        } else {
+            // Batch multiple requests: concatenate along dim 0, single forward, split
+            std::vector<Tensor> inputs;
+            inputs.reserve(batch.size());
+            for (auto& req : batch) {
+                inputs.push_back(req->input);
+            }
+
+            // Concatenate all inputs along batch dimension
+            auto batched_input = tenzor::cat(inputs, 0);
+
+            // Single forward pass on the full batch
+            tenzor::Variable batched_var(batched_input, false);
+            auto batched_output = model_->forward(batched_var);
+
+            // Split output back into individual results
+            auto split_outputs = tenzor::split(batched_output.tensor(),
+                                               /*split_size=*/1, /*dim=*/0);
+            for (size_t i = 0; i < batch.size(); ++i) {
+                if (i < split_outputs.size()) {
+                    batch[i]->result.set_value(split_outputs[i]);
+                } else {
+                    batch[i]->result.set_exception(
+                        std::make_exception_ptr(std::runtime_error(
+                            "Batch output split mismatch")));
+                }
             }
         }
     } catch (const std::exception& e) {
@@ -244,20 +272,188 @@ auto InferenceServer::wait() -> void {
 }
 
 auto InferenceServer::serve_loop() -> void {
-    // In a full implementation, this would:
-    // 1. Start cpp-httplib server on config_.http_port
-    // 2. Register routes:
-    //    - POST /v1/models/{name}/predict -> parse input -> batcher.submit() -> return result
-    //    - GET  /v1/models/{name}/status -> model state
-    //    - POST /v1/models/{name}/load -> repository.load_model()
-    //    - DELETE /v1/models/{name} -> repository.unload_model()
-    //    - GET  /health -> {"status": "ok"}
-    //    - GET  /metrics -> MetricsRegistry::format_prometheus()
-    // 3. Optionally start gRPC server on config_.grpc_port
+#ifdef TENZOR_HAS_HTTPLIB
+    httplib::Server svr;
 
+    // Health check
+    svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
+        res.set_content(R"({"status":"ok","version":"1.0.0"})", "application/json");
+    });
+
+    // Prometheus metrics
+    svr.Get("/metrics", [](const httplib::Request&, httplib::Response& res) {
+        res.set_content(MetricsRegistry::instance().format_prometheus(), "text/plain");
+    });
+
+    // List models
+    svr.Get("/v1/models", [this](const httplib::Request&, httplib::Response& res) {
+        auto models = repository_.list_models();
+        std::ostringstream oss;
+        oss << R"({"models":[)";
+        for (size_t i = 0; i < models.size(); ++i) {
+            if (i > 0) oss << ",";
+            oss << "\"" << models[i] << "\"";
+        }
+        oss << "]}";
+        res.set_content(oss.str(), "application/json");
+    });
+
+    // Model status
+    svr.Get(R"(/v1/models/([^/]+)/status)", [this](const httplib::Request& req, httplib::Response& res) {
+        auto name = req.matches[1].str();
+        auto model = repository_.get_model(name);
+        if (!model) {
+            res.status = 404;
+            res.set_content(R"({"error":"model not found"})", "application/json");
+            return;
+        }
+        auto state = model->state.load();
+        const char* state_str = "UNKNOWN";
+        switch (state) {
+            case ModelState::LOADING: state_str = "LOADING"; break;
+            case ModelState::READY: state_str = "READY"; break;
+            case ModelState::UNLOADING: state_str = "UNLOADING"; break;
+            case ModelState::FAILED: state_str = "FAILED"; break;
+        }
+        std::ostringstream oss;
+        oss << R"({"model_name":")" << name
+            << R"(","version":)" << model->version
+            << R"(,"status":")" << state_str << "\"}";
+        res.set_content(oss.str(), "application/json");
+    });
+
+    // Load model
+    svr.Post(R"(/v1/models/([^/]+)/load)", [this](const httplib::Request& req, httplib::Response& res) {
+        auto name = req.matches[1].str();
+        // Expect JSON body: {"model_path": "/path/to/model"}
+        auto path_pos = req.body.find("\"model_path\"");
+        if (path_pos == std::string::npos) {
+            res.status = 400;
+            res.set_content(R"({"error":"missing model_path"})", "application/json");
+            return;
+        }
+        // Simple JSON value extraction
+        auto colon_pos = req.body.find(':', path_pos);
+        auto quote1 = req.body.find('"', colon_pos);
+        auto quote2 = req.body.find('"', quote1 + 1);
+        if (quote1 == std::string::npos || quote2 == std::string::npos) {
+            res.status = 400;
+            res.set_content(R"({"error":"invalid model_path"})", "application/json");
+            return;
+        }
+        auto model_path = req.body.substr(quote1 + 1, quote2 - quote1 - 1);
+
+        try {
+            repository_.load_model(name, model_path, Device::cpu());
+            res.set_content(R"({"success":true})", "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            std::ostringstream oss;
+            oss << R"({"success":false,"message":")" << e.what() << "\"}";
+            res.set_content(oss.str(), "application/json");
+        }
+    });
+
+    // Unload model
+    svr.Delete(R"(/v1/models/([^/]+))", [this](const httplib::Request& req, httplib::Response& res) {
+        auto name = req.matches[1].str();
+        try {
+            repository_.unload_model(name);
+            res.set_content(R"({"success":true})", "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            std::ostringstream oss;
+            oss << R"({"success":false,"message":")" << e.what() << "\"}";
+            res.set_content(oss.str(), "application/json");
+        }
+    });
+
+    // Predict (simplified: accepts raw float data, returns raw float data)
+    svr.Post(R"(/v1/models/([^/]+)/predict)", [this](const httplib::Request& req, httplib::Response& res) {
+        auto name = req.matches[1].str();
+        auto model = repository_.get_model(name);
+        if (!model || model->state.load() != ModelState::READY) {
+            res.status = 404;
+            res.set_content(R"({"error":"model not ready"})", "application/json");
+            return;
+        }
+
+        auto start = std::chrono::high_resolution_clock::now();
+
+        try {
+            // Parse binary tensor data from body
+            // Format: [4 bytes: ndim][ndim * 8 bytes: shape][rest: float32 data]
+            if (req.body.size() < 4) {
+                res.status = 400;
+                res.set_content(R"({"error":"body too short"})", "application/json");
+                return;
+            }
+
+            const char* body = req.body.data();
+            int32_t ndim;
+            std::memcpy(&ndim, body, 4);
+            body += 4;
+
+            if (req.body.size() < static_cast<size_t>(4 + ndim * 8)) {
+                res.status = 400;
+                res.set_content(R"({"error":"body too short for shape"})", "application/json");
+                return;
+            }
+
+            std::vector<int64_t> shape(ndim);
+            std::memcpy(shape.data(), body, ndim * 8);
+            body += ndim * 8;
+
+            size_t data_bytes = req.body.size() - 4 - ndim * 8;
+            auto input = tenzor::from_data(
+                reinterpret_cast<const float*>(body),
+                shape, model->device
+            );
+
+            // Submit to batcher and wait for result
+            auto future = model->batcher->submit(input);
+            auto output = future.get();
+
+            auto end = std::chrono::high_resolution_clock::now();
+            auto latency_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+
+            // Update metrics
+            auto& metrics = MetricsRegistry::instance().get_metrics(name);
+            metrics.total_requests.fetch_add(1);
+            metrics.total_latency_us.fetch_add(latency_us);
+
+            // Return binary tensor data
+            auto output_cont = output.contiguous();
+            size_t out_data_bytes = output_cont.numel() * dtype_size(output_cont.dtype());
+            auto out_shape = output_cont.shape();
+            int32_t out_ndim = static_cast<int32_t>(out_shape.size());
+
+            std::string response;
+            response.resize(4 + out_ndim * 8 + out_data_bytes);
+            char* rp = response.data();
+            std::memcpy(rp, &out_ndim, 4); rp += 4;
+            std::memcpy(rp, out_shape.data(), out_ndim * 8); rp += out_ndim * 8;
+            std::memcpy(rp, output_cont.data<float>(), out_data_bytes);
+
+            res.set_content(response, "application/octet-stream");
+        } catch (const std::exception& e) {
+            auto& metrics = MetricsRegistry::instance().get_metrics(name);
+            metrics.error_count.fetch_add(1);
+            res.status = 500;
+            std::ostringstream oss;
+            oss << R"({"error":")" << e.what() << "\"}";
+            res.set_content(oss.str(), "application/json");
+        }
+    });
+
+    std::cout << "[TenzorServing] HTTP server listening on port " << config_.http_port << std::endl;
+    svr.listen("0.0.0.0", config_.http_port);
+#else
+    // Fallback: no HTTP library, just spin
     while (running_.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
+#endif
 }
 
 } // namespace serving

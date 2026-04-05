@@ -161,6 +161,24 @@ target_link_libraries(tenzor_backend_vulkan PRIVATE
     tenzor_core
 )
 
+# Optional: Vulkan Memory Allocator (VMA) for better memory management
+option(TENZOR_USE_VMA "Use Vulkan Memory Allocator (VMA) for Vulkan backend" OFF)
+if(TENZOR_USE_VMA)
+    include(FetchContent)
+    FetchContent_Declare(
+        VulkanMemoryAllocator
+        GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
+        GIT_TAG v3.1.0
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(VulkanMemoryAllocator)
+    target_link_libraries(tenzor_backend_vulkan PRIVATE GPUOpen::VulkanMemoryAllocator)
+    target_compile_definitions(tenzor_backend_vulkan PRIVATE TENZOR_HAS_VMA)
+    message(STATUS "  VMA integration: ON")
+else()
+    message(STATUS "  VMA integration: OFF (using custom caching allocator)")
+endif()
+
 # C++20 standard
 target_compile_features(tenzor_backend_vulkan PRIVATE cxx_std_20)
 

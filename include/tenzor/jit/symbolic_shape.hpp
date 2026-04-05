@@ -26,6 +26,7 @@
 #include <vector>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace tenzor {
 namespace jit {
@@ -480,6 +481,137 @@ inline auto broadcast_symbolic_shapes(const SymbolicShape& shape1,
 
     return SymbolicShape(std::move(result));
 }
+
+/**
+ * @brief Environment for binding symbolic dimension names to concrete values at runtime.
+ *
+ * Used to resolve symbolic shapes before graph execution. Allows specifying
+ * concrete values for named dimensions like "batch" or "seq_len".
+ *
+ * @code
+ * SymbolicShapeEnvironment env;
+ * env.bind("batch", 32);
+ * env.bind("seq_len", 128);
+ *
+ * SymbolicDim batch = SymbolicDim::symbolic("batch");
+ * int64_t concrete_batch = env.resolve(batch);  // Returns 32
+ *
+ * SymbolicShape shape = {batch, SymbolicDim::concrete(64)};
+ * auto concrete_shape = env.resolve(shape);  // Returns {32, 64}
+ * @endcode
+ */
+class SymbolicShapeEnvironment {
+public:
+    /**
+     * @brief Bind a symbolic name to a concrete value.
+     *
+     * @param name Symbolic dimension name
+     * @param value Concrete integer value
+     */
+    void bind(const std::string& name, int64_t value) {
+        bindings_[name] = value;
+    }
+
+    /**
+     * @brief Unbind a symbolic name.
+     *
+     * @param name Symbolic dimension name to remove
+     */
+    void unbind(const std::string& name) {
+        bindings_.erase(name);
+    }
+
+    /**
+     * @brief Clear all bindings.
+     */
+    void clear() {
+        bindings_.clear();
+    }
+
+    /**
+     * @brief Check if a symbolic name is bound.
+     *
+     * @param name Symbolic dimension name
+     * @return true if bound to a concrete value
+     */
+    auto is_bound(const std::string& name) const -> bool {
+        return bindings_.find(name) != bindings_.end();
+    }
+
+    /**
+     * @brief Get the concrete value for a symbolic name.
+     *
+     * @param name Symbolic dimension name
+     * @return Concrete value
+     * @throws std::runtime_error if not bound
+     */
+    auto get(const std::string& name) const -> int64_t {
+        auto it = bindings_.find(name);
+        if (it == bindings_.end()) {
+            throw std::runtime_error("SymbolicShapeEnvironment: unbound symbol '" + name + "'");
+        }
+        return it->second;
+    }
+
+    /**
+     * @brief Resolve a symbolic dimension to a concrete value.
+     *
+     * If the dimension is already concrete, returns its value unchanged.
+     * If symbolic, looks up the name in the environment.
+     *
+     * @param dim Symbolic or concrete dimension
+     * @return Concrete integer value
+     * @throws std::runtime_error if symbolic and not bound
+     */
+    auto resolve(const SymbolicDim& dim) const -> int64_t {
+        if (dim.is_concrete()) {
+            return dim.value();
+        }
+        return get(dim.name());
+    }
+
+    /**
+     * @brief Resolve a symbolic shape to a concrete shape.
+     *
+     * @param shape Symbolic shape
+     * @return Vector of concrete integer dimensions
+     * @throws std::runtime_error if any symbolic dimension is not bound
+     */
+    auto resolve(const SymbolicShape& shape) const -> std::vector<int64_t> {
+        std::vector<int64_t> result;
+        result.reserve(shape.rank());
+        for (size_t i = 0; i < shape.rank(); ++i) {
+            result.push_back(resolve(shape[i]));
+        }
+        return result;
+    }
+
+    /**
+     * @brief Check if all symbolic dimensions in a shape are bound.
+     *
+     * @param shape Symbolic shape to check
+     * @return true if all dimensions can be resolved
+     */
+    auto can_resolve(const SymbolicShape& shape) const -> bool {
+        for (size_t i = 0; i < shape.rank(); ++i) {
+            if (!shape[i].is_concrete() && !is_bound(shape[i].name())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// Get the number of bindings
+    auto size() const -> size_t { return bindings_.size(); }
+
+    /// Get all bindings (for iteration)
+    auto bindings() const -> const std::unordered_map<std::string, int64_t>& {
+        return bindings_;
+    }
+
+private:
+    std::unordered_map<std::string, int64_t> bindings_;
+};
 
 } // namespace jit
 } // namespace tenzor

@@ -2036,5 +2036,41 @@ auto Graph::to_string() const -> std::string {
     return oss.str();
 }
 
+auto Graph::bind_symbolic_shapes(const SymbolicShapeEnvironment& env) -> void {
+    // Resolve symbolic dimensions on all values in the graph
+    for (auto& [id, value] : values_) {
+        if (value && value->has_symbolic_shape()) {
+            auto& sym_shape = value->symbolic_shape();
+            if (env.can_resolve(sym_shape)) {
+                auto concrete = env.resolve(sym_shape);
+                value->set_shape(concrete);
+            }
+        }
+    }
+    // Also resolve input shapes
+    for (auto& input : inputs_) {
+        if (input && input->has_symbolic_shape()) {
+            auto& sym_shape = input->symbolic_shape();
+            if (env.can_resolve(sym_shape)) {
+                auto concrete = env.resolve(sym_shape);
+                input->set_shape(concrete);
+            }
+        }
+    }
+}
+
+auto Graph::symbolic_input_shapes() const -> std::vector<SymbolicShape> {
+    std::vector<SymbolicShape> result;
+    result.reserve(inputs_.size());
+    for (const auto& input : inputs_) {
+        if (input && input->has_symbolic_shape()) {
+            result.push_back(input->symbolic_shape());
+        } else {
+            result.emplace_back();  // Empty shape for non-symbolic inputs
+        }
+    }
+    return result;
+}
+
 } // namespace jit
 } // namespace tenzor

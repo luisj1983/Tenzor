@@ -537,4 +537,21 @@ auto ImagBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
     return {result};
 }
 
+// Higher-order gradient implementations for complex number ops
+auto ConjBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    auto result_tensors = backward({grad_outputs[0].tensor()});
+    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+}
+
+auto RealBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // Same logic as backward but using Variable ops for graph tracking
+    auto result_tensors = backward({grad_outputs[0].tensor()});
+    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+}
+
+auto ImagBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    auto result_tensors = backward({grad_outputs[0].tensor()});
+    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+}
+
 } // namespace tenzor

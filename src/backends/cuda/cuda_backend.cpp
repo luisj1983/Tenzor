@@ -18,6 +18,7 @@
 #include <mutex>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace tenzor {
 
@@ -338,6 +339,31 @@ public:
             return nullptr;
         }
 
+        // Unified (managed) memory path - accessible from both host and device
+        if (use_unified_memory_) {
+            void* ptr = nullptr;
+            cudaError_t err = cudaMallocManaged(&ptr, bytes);
+            if (err != cudaSuccess) {
+                throw std::runtime_error(
+                    std::string("Failed to allocate managed memory: ") + cudaGetErrorString(err)
+                );
+            }
+            // Set preferred location to the target device for better performance
+            cudaMemLocation location{};
+            location.type = cudaMemLocationTypeDevice;
+            location.id = device_id;
+            cudaMemAdvise(ptr, bytes, cudaMemAdviseSetPreferredLocation, location);
+            // Prefetch to device for immediate use
+            cudaMemPrefetchAsync(ptr, bytes, location, 0);
+
+            {
+                std::lock_guard<std::mutex> lock(ptr_device_mutex_);
+                ptr_device_map_[ptr] = device_id;
+                managed_ptrs_.insert(ptr);
+            }
+            return ptr;
+        }
+
         if (use_caching_allocator_) {
             void* ptr = backend::CachingAllocator::get().allocate(bytes, device_id);
             {
@@ -369,8 +395,9 @@ public:
             return;
         }
 
-        // Look up cached device_id (avoids cudaPointerGetAttributes() overhead)
+        // Look up cached device_id and check if managed
         int device_id = 0;
+        bool is_managed = false;
         {
             std::lock_guard<std::mutex> lock(ptr_device_mutex_);
             auto it = ptr_device_map_.find(ptr);
@@ -378,6 +405,17 @@ public:
                 device_id = it->second;
                 ptr_device_map_.erase(it);
             }
+            auto mit = managed_ptrs_.find(ptr);
+            if (mit != managed_ptrs_.end()) {
+                is_managed = true;
+                managed_ptrs_.erase(mit);
+            }
+        }
+
+        // Managed memory uses cudaFree (same as device memory)
+        if (is_managed) {
+            cudaFree(ptr);
+            return;
         }
 
         if (use_caching_allocator_) {
@@ -539,11 +577,29 @@ public:
             "' not available via legacy string dispatch. Use OpId-based dispatch instead.");
     }
 
+public:
+    /// Enable/disable unified (managed) memory allocation
+    void set_unified_memory(bool enabled) { use_unified_memory_ = enabled; }
+    bool unified_memory_enabled() const { return use_unified_memory_; }
+
+    /// Prefetch a managed allocation to the specified device
+    void prefetch_to_device(void* ptr, size_t bytes, int device_id) {
+        if (ptr && bytes > 0) {
+            cudaMemLocation location;
+            location.type = cudaMemLocationTypeDevice;
+            location.id = device_id;
+            cudaMemPrefetchAsync(ptr, bytes, location, 0);
+        }
+    }
+
 private:
     bool use_caching_allocator_{false};
+    bool use_unified_memory_{false};
     // Cache pointer→device_id mapping to avoid cudaPointerGetAttributes() in deallocate()
     std::mutex ptr_device_mutex_;
     std::unordered_map<void*, int> ptr_device_map_;
+    // Track which pointers are managed memory (for deallocate routing)
+    std::unordered_set<void*> managed_ptrs_;
 
     // Peer access matrix: peer_access_[i][j] = true means GPU i can access GPU j directly
     std::vector<std::vector<bool>> peer_access_;

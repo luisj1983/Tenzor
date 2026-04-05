@@ -84,3 +84,4 @@ tenzor_add_test(NAME test_memory_profiler SOURCE test_memory_profiler.cpp LABELS
 tenzor_add_test(NAME test_dimname SOURCE test_dimname.cpp LABELS core)
 tenzor_add_test(NAME test_sparse_bsr SOURCE test_sparse_bsr.cpp LABELS core)
 tenzor_add_test(NAME test_quantized_dtype SOURCE test_quantized_dtype.cpp LABELS core)
+tenzor_add_test(NAME test_view_tracking SOURCE test_view_tracking.cpp LABELS core)

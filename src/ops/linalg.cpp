@@ -921,4 +921,180 @@ auto matrix_power(const Tensor& A, int64_t n) -> Tensor {
     return result;
 }
 
+auto lu(const Tensor& A) -> std::tuple<Tensor, Tensor, Tensor> {
+    // Try GPU dispatch first
+    {
+        std::vector<Tensor> results;
+        std::array<Tensor, 1> inputs = {A};
+        if (try_gpu_dispatch_multi(OpId::LinalgLU, inputs, {}, results)) {
+            return {results[0], results[1], results[2]};
+        }
+    }
+
+#if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
+    throw_no_lapack("lu");
+#else
+    auto original_dtype = A.dtype();
+    auto work = prepare_matrix(A);
+    auto [n, ndim] = check_square(work);
+    int64_t nbatch = batch_size(work);
+
+    auto shape = A.shape();
+    std::vector<int64_t> batch_dims;
+    for (size_t i = 0; i + 2 < shape.size(); ++i) batch_dims.push_back(shape[i]);
+
+    std::vector<int64_t> mat_shape = batch_dims;
+    mat_shape.push_back(n); mat_shape.push_back(n);
+
+    std::vector<int64_t> piv_shape = batch_dims;
+    piv_shape.push_back(n);
+
+    auto L = zeros(mat_shape, work.dtype(), Device::cpu());
+    auto U = zeros(mat_shape, work.dtype(), Device::cpu());
+    auto pivots_out = zeros(piv_shape, DType::Int32, Device::cpu());
+
+    if (work.dtype() == DType::Float32) {
+        float* a_data = work.data<float>();
+        float* l_data = L.data<float>();
+        float* u_data = U.data<float>();
+        int32_t* piv_data = pivots_out.data<int32_t>();
+        std::vector<lapack_int> ipiv(n);
+
+        for (int64_t b = 0; b < nbatch; ++b) {
+            float* a_mat = a_data + b * n * n;
+            float* l_mat = l_data + b * n * n;
+            float* u_mat = u_data + b * n * n;
+            int32_t* piv_mat = piv_data + b * n;
+            auto ln = static_cast<lapack_int>(n);
+
+            lapack_int info = LAPACKE_sgetrf(LAPACK_ROW_MAJOR, ln, ln, a_mat, ln, ipiv.data());
+            if (info < 0) throw std::runtime_error("linalg::lu: invalid argument " + std::to_string(-info));
+
+            // Extract L (unit lower triangular) and U (upper triangular) from packed result
+            for (int64_t i = 0; i < n; ++i) {
+                for (int64_t j = 0; j < n; ++j) {
+                    if (i > j) {
+                        l_mat[i * n + j] = a_mat[i * n + j];
+                        u_mat[i * n + j] = 0.0f;
+                    } else if (i == j) {
+                        l_mat[i * n + j] = 1.0f;
+                        u_mat[i * n + j] = a_mat[i * n + j];
+                    } else {
+                        l_mat[i * n + j] = 0.0f;
+                        u_mat[i * n + j] = a_mat[i * n + j];
+                    }
+                }
+                piv_mat[i] = static_cast<int32_t>(ipiv[i]);
+            }
+        }
+    } else {
+        double* a_data = work.data<double>();
+        double* l_data = L.data<double>();
+        double* u_data = U.data<double>();
+        int32_t* piv_data = pivots_out.data<int32_t>();
+        std::vector<lapack_int> ipiv(n);
+
+        for (int64_t b = 0; b < nbatch; ++b) {
+            double* a_mat = a_data + b * n * n;
+            double* l_mat = l_data + b * n * n;
+            double* u_mat = u_data + b * n * n;
+            int32_t* piv_mat = piv_data + b * n;
+            auto ln = static_cast<lapack_int>(n);
+
+            lapack_int info = LAPACKE_dgetrf(LAPACK_ROW_MAJOR, ln, ln, a_mat, ln, ipiv.data());
+            if (info < 0) throw std::runtime_error("linalg::lu: invalid argument " + std::to_string(-info));
+
+            for (int64_t i = 0; i < n; ++i) {
+                for (int64_t j = 0; j < n; ++j) {
+                    if (i > j) {
+                        l_mat[i * n + j] = a_mat[i * n + j];
+                        u_mat[i * n + j] = 0.0;
+                    } else if (i == j) {
+                        l_mat[i * n + j] = 1.0;
+                        u_mat[i * n + j] = a_mat[i * n + j];
+                    } else {
+                        l_mat[i * n + j] = 0.0;
+                        u_mat[i * n + j] = a_mat[i * n + j];
+                    }
+                }
+                piv_mat[i] = static_cast<int32_t>(ipiv[i]);
+            }
+        }
+    }
+
+    return {maybe_downcast(L, original_dtype), maybe_downcast(U, original_dtype), pivots_out};
+#endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
+}
+
+auto lu_solve(const Tensor& LU_data, const Tensor& pivots,
+              const Tensor& B) -> Tensor {
+    // Try GPU dispatch first
+    {
+        Tensor result;
+        std::array<Tensor, 3> inputs = {LU_data, pivots, B};
+        if (try_gpu_dispatch(OpId::LinalgLUSolve, inputs, {}, result)) return result;
+    }
+
+#if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
+    throw_no_lapack("lu_solve");
+#else
+    auto original_dtype = B.dtype();
+    auto work_lu = prepare_matrix(LU_data);
+    auto work_b = prepare_matrix(B);
+
+    auto lu_shape = LU_data.shape();
+    auto b_shape = B.shape();
+    auto lu_ndim = static_cast<int64_t>(lu_shape.size());
+    auto b_ndim = static_cast<int64_t>(b_shape.size());
+    if (lu_ndim < 2 || b_ndim < 2)
+        throw std::invalid_argument("linalg::lu_solve: inputs must be at least 2D");
+
+    int64_t n = lu_shape[lu_ndim - 1];
+    int64_t nrhs = b_shape[b_ndim - 1];
+    int64_t nbatch = batch_size(work_lu);
+
+    auto piv_cpu = pivots.to(Device::cpu()).contiguous();
+
+    if (work_lu.dtype() == DType::Float32) {
+        float* lu_ptr = work_lu.data<float>();
+        float* b_ptr = work_b.data<float>();
+        auto* piv_ptr = piv_cpu.data<int32_t>();
+        std::vector<lapack_int> ipiv(n);
+
+        for (int64_t b = 0; b < nbatch; ++b) {
+            float* lu_mat = lu_ptr + b * n * n;
+            float* b_mat = b_ptr + b * n * nrhs;
+            int32_t* piv_mat = piv_ptr + b * n;
+            for (int64_t i = 0; i < n; ++i) ipiv[i] = static_cast<lapack_int>(piv_mat[i]);
+
+            auto ln = static_cast<lapack_int>(n);
+            auto lnrhs = static_cast<lapack_int>(nrhs);
+            lapack_int info = LAPACKE_sgetrs(LAPACK_ROW_MAJOR, 'N', ln, lnrhs,
+                lu_mat, ln, ipiv.data(), b_mat, lnrhs);
+            if (info != 0) throw std::runtime_error("linalg::lu_solve: solve failed");
+        }
+    } else {
+        double* lu_ptr = work_lu.data<double>();
+        double* b_ptr = work_b.data<double>();
+        auto* piv_ptr = piv_cpu.data<int32_t>();
+        std::vector<lapack_int> ipiv(n);
+
+        for (int64_t b = 0; b < nbatch; ++b) {
+            double* lu_mat = lu_ptr + b * n * n;
+            double* b_mat = b_ptr + b * n * nrhs;
+            int32_t* piv_mat = piv_ptr + b * n;
+            for (int64_t i = 0; i < n; ++i) ipiv[i] = static_cast<lapack_int>(piv_mat[i]);
+
+            auto ln = static_cast<lapack_int>(n);
+            auto lnrhs = static_cast<lapack_int>(nrhs);
+            lapack_int info = LAPACKE_dgetrs(LAPACK_ROW_MAJOR, 'N', ln, lnrhs,
+                lu_mat, ln, ipiv.data(), b_mat, lnrhs);
+            if (info != 0) throw std::runtime_error("linalg::lu_solve: solve failed");
+        }
+    }
+
+    return maybe_downcast(work_b, original_dtype);
+#endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
+}
+
 } // namespace tenzor::linalg
