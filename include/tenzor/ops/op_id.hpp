@@ -234,6 +234,8 @@ enum class OpId : uint16_t {
     BoxIoU,
     GatherRelativePositionBias,
     NMS,                       // Non-Maximum Suppression
+    GridSample,                // F.grid_sample spatial transformer
+    AffineGrid,                // F.affine_grid for grid generation
 
     // =========================================================================
     // Fused Operations (210-229)

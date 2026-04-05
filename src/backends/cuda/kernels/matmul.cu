@@ -18,9 +18,16 @@
 #endif
 
 #include <random>
+#include "tenzor/ops/fp8_scaling.hpp"
 
 namespace tenzor {
 namespace cuda {
+
+// Forward declarations from cublas_ops.cu for FP8 Hopper support
+int get_compute_capability();
+auto cublas_fp8_matmul(
+    const Tensor& a, const Tensor& b,
+    DType out_dtype, float scale_a, float scale_b) -> Tensor;
 
 // Overflow-checked multiplication for stride/size calculations
 inline int64_t checked_stride_mul(int64_t a, int64_t b) {
@@ -1787,11 +1794,24 @@ void batched_matmul_bf16(
 // ============================================================================
 
 auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
-    // FP8 emulation: widen to Float32, GEMM, narrow back to FP8
-    // TODO: On Hopper (SM 9.0+), use cublas_fp8_gemm() for native FP8 Tensor Core support
+    // FP8 dispatch: use native Hopper Tensor Cores when available, else emulate via FP32
     if ((a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2) &&
         (b.dtype() == DType::FP8_E4M3 || b.dtype() == DType::FP8_E5M2)) {
         DType orig_dtype = a.dtype();
+
+#if defined(TENZOR_HAS_CUBLAS) && CUDA_VERSION >= 11080
+        // Hopper (SM 9.0+): native FP8 GEMM via cuBLAS for 20-50x speedup
+        if (a.ndim() == 2 && b.ndim() == 2 && get_compute_capability() >= 90) {
+            Tensor a_contig = a.is_contiguous() ? a : a.contiguous();
+            Tensor b_contig = b.is_contiguous() ? b : b.contiguous();
+            float scale_a = compute_fp8_scale(compute_amax(a_contig), a_contig.dtype());
+            float scale_b = compute_fp8_scale(compute_amax(b_contig), b_contig.dtype());
+            Tensor result = cublas_fp8_matmul(a_contig, b_contig, DType::Float16, scale_a, scale_b);
+            return result.to(orig_dtype);
+        }
+#endif
+
+        // Pre-Hopper or non-2D: widen to Float32, GEMM, narrow back
         Tensor a_f32 = a.to(DType::Float32);
         Tensor b_f32 = b.to(DType::Float32);
         Tensor result_f32 = matmul_kernel(a_f32, b_f32, stream);

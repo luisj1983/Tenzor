@@ -42,6 +42,7 @@ set(CPU_BACKEND_SOURCES
     kernels/nn_kernels.cpp
     kernels/rnn_kernels.cpp
     kernels/vision.cpp
+    kernels/grid_sample.cpp
     kernels/advanced.cpp
     kernels/flash_attention.cpp
     kernels/fft.cpp

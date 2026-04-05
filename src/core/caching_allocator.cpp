@@ -25,7 +25,14 @@ constexpr size_t kDebugLogInterval = 1000;
 } // anonymous namespace
 
 CachingAllocator::CachingAllocator(Backend* backend, Device device)
-    : backend_(backend), device_(device) {
+    : backend_(backend), device_(device), config_() {
+    if (!backend) {
+        throw std::invalid_argument("CachingAllocator: backend cannot be null");
+    }
+}
+
+CachingAllocator::CachingAllocator(Backend* backend, Device device, const Config& config)
+    : backend_(backend), device_(device), config_(config) {
     if (!backend) {
         throw std::invalid_argument("CachingAllocator: backend cannot be null");
     }
@@ -49,6 +56,7 @@ CachingAllocator::~CachingAllocator() {
 CachingAllocator::CachingAllocator(CachingAllocator&& other) noexcept
     : backend_(other.backend_),
       device_(other.device_),
+      config_(other.config_),
       free_blocks_(std::move(other.free_blocks_)),
       allocated_blocks_(std::move(other.allocated_blocks_)),
       total_allocations_(other.total_allocations_),
@@ -80,6 +88,7 @@ CachingAllocator& CachingAllocator::operator=(CachingAllocator&& other) noexcept
         // Move from other
         backend_ = other.backend_;
         device_ = other.device_;
+        config_ = other.config_;
         free_blocks_ = std::move(other.free_blocks_);
         allocated_blocks_ = std::move(other.allocated_blocks_);
         total_allocations_ = other.total_allocations_;
@@ -180,6 +189,12 @@ auto CachingAllocator::deallocate(void* ptr) -> void {
     allocated_blocks_.erase(it);
     free_blocks_.insert({size, ptr});
     total_cached_bytes_ += size;
+
+    // Auto-defragment if cached memory exceeds configured limit
+    if (config_.auto_defragment && config_.max_cached_bytes > 0 &&
+        total_cached_bytes_ > config_.max_cached_bytes) {
+        free_cached_blocks();
+    }
 
     // Record in global memory profiler
     MemoryProfiler::instance().on_deallocate(size);

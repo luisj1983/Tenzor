@@ -172,4 +172,78 @@ auto interpolate(const Tensor& input,
     return dispatch(OpId::Interpolate, inputs, attrs)[0];
 }
 
+auto grid_sample(const Tensor& input,
+                 const Tensor& grid,
+                 const std::string& mode,
+                 const std::string& padding_mode,
+                 bool align_corners) -> Tensor {
+    auto in_shape = input.shape();
+    auto grid_shape = grid.shape();
+
+    if (in_shape.size() != 4) {
+        throw std::invalid_argument(
+            "grid_sample expects 4D input (N, C, H, W), got " +
+            std::to_string(in_shape.size()) + "D");
+    }
+    if (grid_shape.size() != 4 || grid_shape[3] != 2) {
+        throw std::invalid_argument(
+            "grid_sample expects grid of shape (N, H_out, W_out, 2)");
+    }
+    if (in_shape[0] != grid_shape[0]) {
+        throw std::invalid_argument(
+            "grid_sample: batch size mismatch between input and grid");
+    }
+
+    if (mode != "bilinear" && mode != "nearest" && mode != "bicubic") {
+        throw std::invalid_argument(
+            "grid_sample: mode must be 'bilinear', 'nearest', or 'bicubic', got '" + mode + "'");
+    }
+    if (padding_mode != "zeros" && padding_mode != "border" && padding_mode != "reflection") {
+        throw std::invalid_argument(
+            "grid_sample: padding_mode must be 'zeros', 'border', or 'reflection', got '" +
+            padding_mode + "'");
+    }
+
+    OpAttributes attrs;
+    attrs.set(AttrKey::Mode, mode);
+    attrs.set(AttrKey::PaddingMode, padding_mode);
+    attrs.set(AttrKey::AlignCorners, align_corners);
+
+    std::vector<Tensor> inputs = {input, grid};
+    return dispatch(OpId::GridSample, inputs, attrs)[0];
+}
+
+auto affine_grid(const Tensor& theta,
+                 const std::vector<int64_t>& size,
+                 bool align_corners) -> Tensor {
+    auto theta_shape = theta.shape();
+
+    if (theta_shape.size() != 3 || theta_shape[1] != 2 || theta_shape[2] != 3) {
+        throw std::invalid_argument(
+            "affine_grid expects theta of shape (N, 2, 3)");
+    }
+    if (size.size() != 4) {
+        throw std::invalid_argument(
+            "affine_grid expects size as {N, C, H, W}");
+    }
+    if (theta_shape[0] != size[0]) {
+        throw std::invalid_argument(
+            "affine_grid: batch size of theta must match size[0]");
+    }
+
+    // Serialize size as comma-separated string
+    std::string size_str;
+    for (size_t i = 0; i < size.size(); ++i) {
+        if (i > 0) size_str += ",";
+        size_str += std::to_string(size[i]);
+    }
+
+    OpAttributes attrs;
+    attrs.set(AttrKey::OutputSize, size_str);
+    attrs.set(AttrKey::AlignCorners, align_corners);
+
+    std::vector<Tensor> inputs = {theta};
+    return dispatch(OpId::AffineGrid, inputs, attrs)[0];
+}
+
 } // namespace tenzor::ops

@@ -271,6 +271,11 @@ namespace cuda {
                              const Tensor& h0, const Tensor& c0) -> std::vector<Tensor>;
 
     // Vision/Interpolation operations
+    auto grid_sample_cuda(const Tensor& input, const Tensor& grid,
+                          const std::string& mode, const std::string& padding_mode,
+                          bool align_corners) -> Tensor;
+    auto affine_grid_cuda(const Tensor& theta, const std::vector<int64_t>& size,
+                          bool align_corners) -> Tensor;
     auto interpolate_cuda(const Tensor& input, const std::vector<int64_t>& size, const std::string& mode, bool align_corners) -> Tensor;
     auto unfold_cuda(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation, cudaStream_t stream) -> Tensor;
     auto fold_cuda(const Tensor& input, const std::vector<int64_t>& output_size, int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation, cudaStream_t stream) -> Tensor;
@@ -1735,6 +1740,19 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         std::string mode = std::string(attrs.get_string(AttrKey::Mode, "bilinear"));
         bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
         return cuda::interpolate_cuda(inputs[0], size, mode, align_corners);
+    });
+
+    table.register_single_output_kernel(OpId::GridSample, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        std::string mode = std::string(attrs.get_string(AttrKey::Mode, "bilinear"));
+        std::string padding_mode = std::string(attrs.get_string(AttrKey::PaddingMode, "zeros"));
+        bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
+        return cuda::grid_sample_cuda(inputs[0], inputs[1], mode, padding_mode, align_corners);
+    });
+
+    table.register_single_output_kernel(OpId::AffineGrid, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto size = attrs.get_int_list(AttrKey::OutputSize);
+        bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
+        return cuda::affine_grid_cuda(inputs[0], size, align_corners);
     });
 
     // =========================================================================

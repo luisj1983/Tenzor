@@ -1057,8 +1057,13 @@ private:
     std::unique_ptr<CUDAGraph> cuda_graph_;                          ///< Captured CUDA graph for replay
     std::vector<std::vector<int64_t>> captured_shapes_;              ///< Input shapes at capture time
     std::shared_ptr<nn::Module> source_module_;                      ///< Source module for re-tracing
+    std::unordered_map<std::string, std::shared_ptr<Graph>> shape_cache_;  ///< Cached graphs by shape key
     int retrace_count_{0};                                           ///< Number of retraces performed
-    static constexpr int MAX_RETRACES = 3;                           ///< Maximum retrace attempts
+    static constexpr int MAX_RETRACES = 8;                           ///< Maximum distinct shapes to cache
+
+    /// Compute cache key from input shapes
+    static auto compute_shape_key(const Variable& input) -> std::string;
+    static auto compute_shape_key(const std::vector<Variable>& inputs) -> std::string;
 };
 
 // ============================================================================

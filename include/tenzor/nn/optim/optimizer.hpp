@@ -12,6 +12,8 @@
 #include <memory>
 #include <unordered_map>
 #include <string>
+#include <functional>
+#include <optional>
 #include "../../autograd/variable.hpp"
 
 namespace tenzor {
@@ -129,6 +131,29 @@ public:
     auto step() -> void;
 
     /**
+     * @brief Perform optimization step with a closure that recomputes the loss.
+     *
+     * Calls the closure to (re-)evaluate the model and compute gradients,
+     * then applies the optimizer step. Useful for optimizers like LBFGS
+     * that require multiple function evaluations.
+     *
+     * @param closure Callable that clears gradients, computes forward+backward,
+     *                and returns the loss as a Variable
+     * @return The loss value returned by the closure
+     *
+     * @code
+     * auto loss = optimizer.step([&]() {
+     *     optimizer.zero_grad();
+     *     auto output = model.forward(input);
+     *     auto loss = criterion(output, target);
+     *     loss.backward();
+     *     return loss;
+     * });
+     * @endcode
+     */
+    auto step(std::function<Variable()> closure) -> Variable;
+
+    /**
      * @brief Implementation of the parameter update step.
      *
      * Must be implemented by derived classes to perform the actual optimization
@@ -158,6 +183,16 @@ public:
      * @return Const reference to parameter vector
      */
     auto parameters() const -> const std::vector<std::shared_ptr<Variable>>&;
+
+    /**
+     * @brief Replace the parameters being optimized.
+     *
+     * Used by MasterWeightManager to swap model parameters with FP32 master
+     * copies so the optimizer operates in full precision.
+     *
+     * @param new_params New parameter vector (must be same size as current)
+     */
+    auto replace_parameters(std::vector<std::shared_ptr<Variable>> new_params) -> void;
 
     /**
      * @brief Get optimizer state as dictionary

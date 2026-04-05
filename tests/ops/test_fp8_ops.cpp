@@ -16,6 +16,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/type_promotion.hpp"
+#include "tenzor/ops/fp8_scaling.hpp"
 
 using namespace tenzor;
 
@@ -150,4 +151,79 @@ TEST_F(FP8OpsTest, AddNumericalCorrectness) {
     // and addition accumulates errors from both operands
     EXPECT_LT(max_diff, 2.0f)
         << "FP8 add should be within FP8 quantization tolerance of Float32";
+}
+
+// ============================================================================
+// Quantized Type Promotion Tests
+// ============================================================================
+
+TEST_F(FP8OpsTest, QuantizedFloat32Promotion) {
+    EXPECT_EQ(promote_types(DType::QInt8, DType::Float32), DType::Float32);
+    EXPECT_EQ(promote_types(DType::QUInt8, DType::Float32), DType::Float32);
+}
+
+TEST_F(FP8OpsTest, QuantizedFloat64Promotion) {
+    EXPECT_EQ(promote_types(DType::QInt8, DType::Float64), DType::Float64);
+}
+
+TEST_F(FP8OpsTest, QuantizedQuantizedPromotion) {
+    EXPECT_EQ(promote_types(DType::QInt8, DType::QUInt8), DType::QInt8);
+    EXPECT_EQ(promote_types(DType::QUInt8, DType::QInt8), DType::QInt8);
+    EXPECT_EQ(promote_types(DType::QInt4x2, DType::QInt8), DType::QInt8);
+}
+
+TEST_F(FP8OpsTest, QuantizedIntegerPromotion) {
+    EXPECT_EQ(promote_types(DType::QInt8, DType::Int32), DType::Float32);
+    EXPECT_EQ(promote_types(DType::QUInt8, DType::Int64), DType::Float32);
+}
+
+TEST_F(FP8OpsTest, QuantizedSameTypePromotion) {
+    EXPECT_EQ(promote_types(DType::QInt8, DType::QInt8), DType::QInt8);
+    EXPECT_EQ(promote_types(DType::QUInt8, DType::QUInt8), DType::QUInt8);
+}
+
+// ============================================================================
+// FP8 Scaling Tests
+// ============================================================================
+
+TEST_F(FP8OpsTest, FP8MaxValue) {
+    EXPECT_FLOAT_EQ(tenzor::fp8_max_value(DType::FP8_E4M3), 448.0f);
+    EXPECT_FLOAT_EQ(tenzor::fp8_max_value(DType::FP8_E5M2), 57344.0f);
+}
+
+TEST_F(FP8OpsTest, ComputeAmax) {
+    auto t = tenzor::full({4}, -5.0f, DType::Float32, Device::cpu());
+    EXPECT_FLOAT_EQ(tenzor::compute_amax(t), 5.0f);
+}
+
+TEST_F(FP8OpsTest, FP8ScaleComputation) {
+    float scale = tenzor::compute_fp8_scale(100.0f, DType::FP8_E4M3);
+    // scale = 100.0 / 448.0
+    EXPECT_NEAR(scale, 100.0f / 448.0f, 1e-6f);
+}
+
+TEST_F(FP8OpsTest, FP8ScalingMathCorrectness) {
+    // Verify the scaling math is correct (independent of FP8 dtype conversion)
+    auto input = tenzor::full({1}, 100.0f, DType::Float32, Device::cpu());
+    float amax = tenzor::compute_amax(input);
+    EXPECT_FLOAT_EQ(amax, 100.0f);
+
+    float scale = tenzor::compute_fp8_scale(amax, DType::FP8_E4M3);
+    EXPECT_NEAR(scale, 100.0f / 448.0f, 1e-5f);
+
+    // Verify scaling: input / scale should be in FP8 range
+    float scaled_val = 100.0f / scale;
+    EXPECT_NEAR(scaled_val, 448.0f, 1.0f);
+    EXPECT_LE(scaled_val, 448.0f);  // Should not exceed FP8 max
+}
+
+TEST_F(FP8OpsTest, FP8QuantizeOutputDtype) {
+    // Verify quantize_to_fp8 returns correct dtype and params
+    auto input = tenzor::rand({4, 4}, DType::Float32, Device::cpu());
+    auto [fp8_tensor, params] = tenzor::quantize_to_fp8(input, DType::FP8_E4M3);
+
+    EXPECT_EQ(fp8_tensor.dtype(), DType::FP8_E4M3);
+    EXPECT_EQ(params.fp8_dtype, DType::FP8_E4M3);
+    EXPECT_GT(params.scale, 0.0f);
+    EXPECT_GT(params.amax, 0.0f);
 }

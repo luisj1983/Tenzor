@@ -26,6 +26,7 @@ set(TENZOR_CORE_SOURCES
     ops/creation.cpp
     ops/math.cpp
     ops/type_promotion.cpp
+    ops/fp8_scaling.cpp
     ops/indexing.cpp
     ops/reduction.cpp
     ops/transform.cpp
@@ -53,6 +54,7 @@ set(TENZOR_CORE_SOURCES
     autograd/function_fft.cpp
     autograd/function_sparse.cpp
     autograd/function_special.cpp
+    autograd/function_vision.cpp
     autograd/engine.cpp
     autograd/ops.cpp
     autograd/checkpoint.cpp

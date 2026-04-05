@@ -40,6 +40,12 @@ auto Optimizer::step() -> void {
     step_impl();
 }
 
+auto Optimizer::step(std::function<Variable()> closure) -> Variable {
+    auto loss = closure();
+    step();
+    return loss;
+}
+
 auto Optimizer::clip_gradients_() -> void {
     switch (clip_config_.mode) {
         case ClipMode::None:
@@ -104,6 +110,15 @@ auto Optimizer::zero_grad() -> void {
 
 auto Optimizer::parameters() const -> const std::vector<std::shared_ptr<Variable>>& {
     return parameters_;
+}
+
+auto Optimizer::replace_parameters(std::vector<std::shared_ptr<Variable>> new_params) -> void {
+    if (new_params.size() != parameters_.size()) {
+        throw std::invalid_argument(
+            "replace_parameters: size mismatch (" + std::to_string(new_params.size()) +
+            " vs " + std::to_string(parameters_.size()) + ")");
+    }
+    parameters_ = std::move(new_params);
 }
 
 auto Optimizer::save_state(const std::string& path) const -> void {

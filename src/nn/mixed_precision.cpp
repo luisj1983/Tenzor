@@ -9,7 +9,56 @@
 namespace tenzor {
 namespace nn {
 
-// Constructor is now template in header
+// ============================================================================
+// MasterWeightManager
+// ============================================================================
+
+MasterWeightManager::MasterWeightManager(std::shared_ptr<Module> model)
+    : model_(std::move(model)) {
+    auto params = model_->parameters();
+    master_variables_.reserve(params.size());
+    working_refs_.reserve(params.size());
+
+    for (auto& param : params) {
+        working_refs_.push_back(param);
+        // Create FP32 master copy
+        Tensor master_data = param->tensor().to(DType::Float32).clone();
+        auto master_var = std::make_shared<Variable>(master_data, true);
+        master_variables_.push_back(master_var);
+    }
+}
+
+auto MasterWeightManager::sync_to_working() -> void {
+    for (size_t i = 0; i < master_variables_.size(); ++i) {
+        auto& working = working_refs_[i];
+        auto& master = master_variables_[i];
+        // Copy FP32 master -> working precision (FP16/BF16) in-place
+        Tensor converted = master->tensor().to(working->dtype());
+        working->tensor().zero_();
+        working->tensor() += converted;
+    }
+}
+
+auto MasterWeightManager::sync_from_working() -> void {
+    // When using replace_parameters(), the optimizer updates master params directly
+    // in FP32. This method copies gradients from the working (FP16) params to the
+    // master (FP32) params so the optimizer can use them.
+    for (size_t i = 0; i < master_variables_.size(); ++i) {
+        auto& working = working_refs_[i];
+        auto& master = master_variables_[i];
+        if (working->has_grad()) {
+            master->set_grad(working->grad()->to(DType::Float32));
+        }
+    }
+}
+
+auto MasterWeightManager::master_params() -> std::vector<std::shared_ptr<Variable>>& {
+    return master_variables_;
+}
+
+// ============================================================================
+// MixedPrecisionTrainer
+// ============================================================================
 
 auto MixedPrecisionTrainer::train_step(const Variable& input, const Variable& target) -> float {
     // Ensure model is in training mode
@@ -24,6 +73,7 @@ auto MixedPrecisionTrainer::train_step(const Variable& input, const Variable& ta
 
     if (config_.enabled) {
         // Mixed precision training path
+
         Variable output;
 
         // Forward pass in mixed precision (FP16/BF16)
@@ -47,8 +97,18 @@ auto MixedPrecisionTrainer::train_step(const Variable& input, const Variable& ta
         // Backward pass with scaled gradients
         scaled_loss.backward();
 
-        // Unscale gradients, check for overflow, and update parameters
+        // Copy gradients to master weights if using master weights
+        if (master_weights_) {
+            master_weights_->sync_from_working();
+        }
+
+        // Unscale gradients, check for overflow, and update FP32 master parameters
         bool step_successful = scaler_.step(*optimizer_);
+
+        // Sync FP32 master weights -> model's working FP16 params after update
+        if (master_weights_ && step_successful) {
+            master_weights_->sync_to_working();
+        }
 
         // Update loss scale for next iteration
         scaler_.update();

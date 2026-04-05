@@ -50,6 +50,29 @@ auto CompiledModule::trace(std::shared_ptr<nn::Module> module,
     return trace(module, Variable(example_input, false));
 }
 
+auto CompiledModule::compute_shape_key(const Variable& input) -> std::string {
+    std::string key;
+    auto shape = input.tensor().shape();
+    for (size_t i = 0; i < shape.size(); ++i) {
+        if (i > 0) key += ',';
+        key += std::to_string(shape[i]);
+    }
+    return key;
+}
+
+auto CompiledModule::compute_shape_key(const std::vector<Variable>& inputs) -> std::string {
+    std::string key;
+    for (size_t j = 0; j < inputs.size(); ++j) {
+        if (j > 0) key += '|';
+        auto shape = inputs[j].tensor().shape();
+        for (size_t i = 0; i < shape.size(); ++i) {
+            if (i > 0) key += ',';
+            key += std::to_string(shape[i]);
+        }
+    }
+    return key;
+}
+
 auto CompiledModule::forward(const Variable& input) -> Variable {
     if (!graph_) {
         throw std::runtime_error("CompiledModule has no graph");
@@ -58,15 +81,25 @@ auto CompiledModule::forward(const Variable& input) -> Variable {
     auto results = graph_->forward({input});
 
     // Check if a ShapeGuard triggered a retrace request
-    if (graph_->needs_retrace() && source_module_ && retrace_count_ < MAX_RETRACES) {
-        ++retrace_count_;
+    if (graph_->needs_retrace() && source_module_) {
         graph_->reset_retrace();
 
-        // Re-trace with the new input shape
-        auto retraced = CompiledModule::trace(source_module_, input);
-        graph_ = retraced->graph_;
+        auto key = compute_shape_key(input);
 
-        // Re-execute with new graph
+        // Check shape cache first
+        auto it = shape_cache_.find(key);
+        if (it != shape_cache_.end()) {
+            graph_ = it->second;
+        } else if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
+            // Re-trace with the new input shape and cache
+            auto retraced = CompiledModule::trace(source_module_, input);
+            retraced->optimize_for_inference();
+            shape_cache_[key] = retraced->graph_;
+            graph_ = retraced->graph_;
+        }
+        // else: too many distinct shapes, stay on current graph
+
+        // Re-execute with new/cached graph
         results = graph_->forward({input});
     }
 
@@ -84,7 +117,29 @@ auto CompiledModule::forward(const std::vector<Variable>& inputs) -> std::vector
     if (!graph_) {
         throw std::runtime_error("CompiledModule has no graph");
     }
-    return graph_->forward(inputs);
+
+    auto results = graph_->forward(inputs);
+
+    // Check if a ShapeGuard triggered a retrace request
+    if (graph_->needs_retrace() && source_module_ && !inputs.empty()) {
+        graph_->reset_retrace();
+
+        auto key = compute_shape_key(inputs);
+
+        auto it = shape_cache_.find(key);
+        if (it != shape_cache_.end()) {
+            graph_ = it->second;
+        } else if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
+            auto retraced = CompiledModule::trace(source_module_, inputs[0]);
+            retraced->optimize_for_inference();
+            shape_cache_[key] = retraced->graph_;
+            graph_ = retraced->graph_;
+        }
+
+        results = graph_->forward(inputs);
+    }
+
+    return results;
 }
 
 auto CompiledModule::optimize_for_inference() -> int {

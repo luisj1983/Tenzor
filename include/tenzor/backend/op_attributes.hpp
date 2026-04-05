@@ -241,6 +241,9 @@ enum class AttrKey : uint16_t {
     // Distance parameters
     DistP,             // CDist p-norm value
 
+    // Grid sample parameters
+    PaddingMode,       // Grid sample padding mode string
+
     // Sentinel
     _Count
 };

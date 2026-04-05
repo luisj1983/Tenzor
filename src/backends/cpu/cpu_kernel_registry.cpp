@@ -357,6 +357,11 @@ namespace cpu {
     auto box_iou_kernel(const Tensor& boxes1, const Tensor& boxes2, int iou_type) -> Tensor;
     auto gather_relative_position_bias_kernel(const Tensor& bias_table, const Tensor& rel_pos_index,
                                                int64_t num_positions, int64_t num_heads) -> Tensor;
+    auto grid_sample_kernel(const Tensor& input, const Tensor& grid,
+                            const std::string& mode, const std::string& padding_mode,
+                            bool align_corners) -> Tensor;
+    auto affine_grid_kernel(const Tensor& theta, const std::vector<int64_t>& size,
+                            bool align_corners) -> Tensor;
     auto unfold_kernel(const Tensor& input, int64_t kernel_size,
                        int64_t stride, int64_t padding, int64_t dilation) -> Tensor;
     auto fold_kernel(const Tensor& input, const std::vector<int64_t>& output_size,
@@ -1571,6 +1576,22 @@ void register_cpu_kernels(BackendDispatchTable& table) {
             int64_t num_heads = attrs.get_int(AttrKey::NumHeads, 0);
             return {cpu::gather_relative_position_bias_kernel(inputs[0], inputs[1], num_positions, num_heads)};
         });
+
+    // =========================================================================
+    // Grid Sample / Affine Grid Operations
+    // =========================================================================
+    table.register_single_output_kernel(OpId::GridSample, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        std::string mode = std::string(attrs.get_string(AttrKey::Mode, "bilinear"));
+        std::string padding_mode = std::string(attrs.get_string(AttrKey::PaddingMode, "zeros"));
+        bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
+        return cpu::grid_sample_kernel(inputs[0], inputs[1], mode, padding_mode, align_corners);
+    });
+
+    table.register_single_output_kernel(OpId::AffineGrid, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto size = attrs.get_int_list(AttrKey::OutputSize);
+        bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
+        return cpu::affine_grid_kernel(inputs[0], size, align_corners);
+    });
 
     // =========================================================================
     // Unfold / Fold Operations

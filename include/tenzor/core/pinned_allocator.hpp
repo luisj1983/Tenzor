@@ -85,6 +85,7 @@ public:
         size_t growth_increment = 256 * 1024 * 1024;  // 256 MB growth chunks
         size_t max_pool_size = 4ULL * 1024 * 1024 * 1024;  // 4 GB max
         bool enable_defragmentation = true;     // Enable automatic defragmentation
+        bool throw_on_oom = false;              // Throw instead of returning nullptr on exhaustion
     };
 
     /**

@@ -13,6 +13,7 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/math.hpp"
+#include "tenzor/ops/vision.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/fft.hpp"
@@ -862,6 +863,24 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::ROIAlignBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchROIAlignBackward(inputs[0], inputs[1], attrs)};
+    });
+
+    // GridSample / AffineGrid — CPU-roundtrip fallback
+    table.register_single_output_kernel(OpId::GridSample, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        std::string mode = std::string(attrs.get_string(AttrKey::Mode, "bilinear"));
+        std::string padding_mode = std::string(attrs.get_string(AttrKey::PaddingMode, "zeros"));
+        bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
+        auto cpu_in = inputs[0].cpu();
+        auto cpu_grid = inputs[1].cpu();
+        auto result = tenzor::ops::grid_sample(cpu_in, cpu_grid, mode, padding_mode, align_corners);
+        return result.to(inputs[0].device());
+    });
+    table.register_single_output_kernel(OpId::AffineGrid, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto size = attrs.get_int_list(AttrKey::OutputSize);
+        bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
+        auto cpu_theta = inputs[0].cpu();
+        auto result = tenzor::ops::affine_grid(cpu_theta, size, align_corners);
+        return result.to(inputs[0].device());
     });
 
     table.register_kernel(OpId::GatherRelativePositionBias, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {

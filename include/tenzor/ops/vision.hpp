@@ -123,5 +123,39 @@ auto interpolate(const Tensor& input,
                 const std::string& mode = "bilinear",
                 bool align_corners = false) -> Tensor;
 
+/**
+ * @brief Spatial transformer network grid sampling.
+ *
+ * Samples from input using grid coordinates, supporting bilinear, nearest,
+ * and bicubic interpolation with configurable padding modes.
+ *
+ * @param input Input tensor of shape (N, C, H_in, W_in)
+ * @param grid Grid tensor of shape (N, H_out, W_out, 2) with values in [-1, 1]
+ * @param mode Interpolation mode: "bilinear", "nearest", or "bicubic" (default: "bilinear")
+ * @param padding_mode How to handle out-of-bound grid values: "zeros", "border", or "reflection"
+ * @param align_corners If true, grid extremes (-1, 1) map to pixel centers at corners
+ * @return Output tensor of shape (N, C, H_out, W_out)
+ */
+auto grid_sample(const Tensor& input,
+                 const Tensor& grid,
+                 const std::string& mode = "bilinear",
+                 const std::string& padding_mode = "zeros",
+                 bool align_corners = false) -> Tensor;
+
+/**
+ * @brief Generate a 2D affine grid for grid_sample.
+ *
+ * Given a batch of 2x3 affine matrices, generates a grid of (x, y) coordinates
+ * that can be used with grid_sample() to perform spatial transformations.
+ *
+ * @param theta Affine transformation matrices of shape (N, 2, 3)
+ * @param size Output spatial size as {N, C, H, W}
+ * @param align_corners If true, grid extremes correspond to pixel corners
+ * @return Grid tensor of shape (N, H, W, 2) with values in [-1, 1]
+ */
+auto affine_grid(const Tensor& theta,
+                 const std::vector<int64_t>& size,
+                 bool align_corners = false) -> Tensor;
+
 } // namespace ops
 } // namespace tenzor

@@ -45,6 +45,11 @@ struct MixedPrecisionConfig {
     /// Iterations before attempting scale growth
     int growth_interval = 2000;
 
+    /// Maintain FP32 master copies of parameters for numerical stability.
+    /// When enabled, the optimizer updates FP32 master weights, which are
+    /// then copied to the model's lower-precision working parameters.
+    bool use_master_weights = false;
+
     /**
      * @brief Create default FP16 configuration for CUDA
      */
@@ -89,6 +94,37 @@ struct MixedPrecisionConfig {
             5000
         };
     }
+};
+
+/**
+ * @brief Manages FP32 master copies of model parameters for mixed-precision training.
+ *
+ * When training in FP16/BF16, parameter updates accumulate rounding errors.
+ * Master weights maintain FP32 copies: the optimizer updates the FP32 masters,
+ * which are then copied to the model's lower-precision working parameters
+ * before each forward pass.
+ */
+class MasterWeightManager {
+public:
+    /**
+     * @brief Initialize master weights from model parameters.
+     * @param model Model whose parameters will be managed
+     */
+    explicit MasterWeightManager(std::shared_ptr<Module> model);
+
+    /// Copy FP32 master weights -> model's working parameters (before forward)
+    auto sync_to_working() -> void;
+
+    /// Copy model's working parameters -> FP32 masters (after optimizer step)
+    auto sync_from_working() -> void;
+
+    /// Get the FP32 master parameters (for optimizer construction)
+    auto master_params() -> std::vector<std::shared_ptr<Variable>>&;
+
+private:
+    std::shared_ptr<Module> model_;
+    std::vector<std::shared_ptr<Variable>> master_variables_;
+    std::vector<std::shared_ptr<Variable>> working_refs_;  ///< References to model params
 };
 
 /**
@@ -190,6 +226,11 @@ public:
         training_(true),
         skipped_steps_(0),
         total_steps_(0) {
+        if (config_.use_master_weights && config_.enabled) {
+            master_weights_ = std::make_unique<MasterWeightManager>(model_);
+            // Swap optimizer to use FP32 master params instead of model's FP16 params
+            optimizer_->replace_parameters(master_weights_->master_params());
+        }
     }
 
     /**
@@ -378,6 +419,7 @@ private:
     bool training_{true};                                                  ///< Training mode flag
     int skipped_steps_{0};                                                 ///< Number of skipped steps
     int total_steps_{0};                                                   ///< Total training steps
+    std::unique_ptr<MasterWeightManager> master_weights_;                  ///< FP32 master copies (optional)
 };
 
 /**

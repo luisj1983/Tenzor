@@ -2094,4 +2094,36 @@ private:
     CustomBackwardFn backward_fn_;
 };
 
+/**
+ * @brief Grid sample gradient function.
+ *
+ * Computes gradients for grid_sample w.r.t. both input and grid.
+ * Uses bilinear interpolation gradient formulas.
+ */
+class GridSampleBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "GridSampleBackward"; }
+
+    std::string mode_;
+    std::string padding_mode_;
+    bool align_corners_{false};
+};
+
+/**
+ * @brief Affine grid gradient function.
+ *
+ * Computes gradient for affine_grid w.r.t. theta.
+ */
+class AffineGridBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto name() const -> std::string override { return "AffineGridBackward"; }
+
+    std::vector<int64_t> size_;
+    bool align_corners_{false};
+};
+
 } // namespace tenzor

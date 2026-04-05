@@ -59,6 +59,14 @@ class Backend;
 class CachingAllocator {
 public:
     /**
+     * @brief Configuration for caching allocator behavior.
+     */
+    struct Config {
+        size_t max_cached_bytes = 0;    ///< Max cached memory before auto-defragment (0 = unlimited)
+        bool auto_defragment = true;    ///< Enable auto-defragment when cache limit exceeded
+    };
+
+    /**
      * @brief Construct caching allocator for specific backend and device.
      *
      * @param backend Backend managing memory allocation (must not be null)
@@ -72,6 +80,22 @@ public:
      * @endcode
      */
     explicit CachingAllocator(Backend* backend, Device device);
+
+    /**
+     * @brief Construct caching allocator with custom configuration.
+     *
+     * @param backend Backend managing memory allocation (must not be null)
+     * @param device Device where memory will be allocated
+     * @param config Configuration controlling cache limits and auto-cleanup
+     * @throws std::invalid_argument if backend is null
+     *
+     * @code
+     * CachingAllocator::Config cfg;
+     * cfg.max_cached_bytes = 512 * 1024 * 1024;  // 512 MB limit
+     * CachingAllocator allocator(cuda_backend, device, cfg);
+     * @endcode
+     */
+    CachingAllocator(Backend* backend, Device device, const Config& config);
 
     /**
      * @brief Destructor frees all cached and allocated blocks.
@@ -247,6 +271,7 @@ private:
 
     Backend* backend_;                                      ///< Backend for memory allocation
     Device device_;                                         ///< Target device for allocations
+    Config config_;                                         ///< Configuration for cache limits
     mutable std::mutex mutex_;                              ///< Mutex for thread safety
 
     // Memory tracking

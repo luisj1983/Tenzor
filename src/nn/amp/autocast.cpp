@@ -5,61 +5,71 @@
 
 #include "tenzor/nn/amp/autocast.hpp"
 #include "tenzor/nn/amp/autocast_interceptor.hpp"
-#include <unordered_set>
 #include <algorithm>
 
 namespace tenzor {
 namespace nn {
 namespace amp {
 
+// ============================================================================
+// AutocastPolicyRegistry
+// ============================================================================
+
+AutocastPolicyRegistry::AutocastPolicyRegistry()
+    : compute_heavy_ops_{
+        "matmul", "mm", "bmm", "addmm", "baddbmm",
+        "conv1d", "conv2d", "conv3d",
+        "conv_transpose1d", "conv_transpose2d", "conv_transpose3d",
+        "linear", "gru", "lstm", "rnn", "transformer"
+    }
+    , stability_critical_ops_{
+        "softmax", "log_softmax", "cross_entropy", "nll_loss",
+        "batch_norm", "layer_norm", "group_norm", "instance_norm",
+        "normalize", "sum", "mean", "var", "std", "prod",
+        "cumsum", "cumprod", "amax", "amin", "argmax", "argmin"
+    } {}
+
+auto AutocastPolicyRegistry::instance() -> AutocastPolicyRegistry& {
+    static AutocastPolicyRegistry registry;
+    return registry;
+}
+
+auto AutocastPolicyRegistry::register_compute_heavy(const std::string& op_name) -> void {
+    std::unique_lock lock(mutex_);
+    stability_critical_ops_.erase(op_name);
+    compute_heavy_ops_.insert(op_name);
+}
+
+auto AutocastPolicyRegistry::register_stability_critical(const std::string& op_name) -> void {
+    std::unique_lock lock(mutex_);
+    compute_heavy_ops_.erase(op_name);
+    stability_critical_ops_.insert(op_name);
+}
+
+auto AutocastPolicyRegistry::unregister(const std::string& op_name) -> void {
+    std::unique_lock lock(mutex_);
+    compute_heavy_ops_.erase(op_name);
+    stability_critical_ops_.erase(op_name);
+}
+
+auto AutocastPolicyRegistry::is_compute_heavy(const std::string& op_name) const -> bool {
+    std::shared_lock lock(mutex_);
+    return compute_heavy_ops_.count(op_name) > 0;
+}
+
+auto AutocastPolicyRegistry::is_stability_critical(const std::string& op_name) const -> bool {
+    std::shared_lock lock(mutex_);
+    return stability_critical_ops_.count(op_name) > 0;
+}
+
+// ============================================================================
+// Autocast
+// ============================================================================
+
 // Thread-local state initialization
 thread_local bool Autocast::enabled_ = false;
 thread_local std::optional<DType> Autocast::dtype_ = std::nullopt;
 thread_local std::optional<Device::Type> Autocast::device_type_ = std::nullopt;
-
-// Operations that benefit from lower precision (compute-heavy)
-static const std::unordered_set<std::string> COMPUTE_HEAVY_OPS = {
-    "matmul",
-    "mm",
-    "bmm",
-    "addmm",
-    "baddbmm",
-    "conv1d",
-    "conv2d",
-    "conv3d",
-    "conv_transpose1d",
-    "conv_transpose2d",
-    "conv_transpose3d",
-    "linear",
-    "gru",
-    "lstm",
-    "rnn",
-    "transformer"
-};
-
-// Operations that need higher precision for numerical stability
-static const std::unordered_set<std::string> STABILITY_CRITICAL_OPS = {
-    "softmax",
-    "log_softmax",
-    "cross_entropy",
-    "nll_loss",
-    "batch_norm",
-    "layer_norm",
-    "group_norm",
-    "instance_norm",
-    "normalize",
-    "sum",
-    "mean",
-    "var",
-    "std",
-    "prod",
-    "cumsum",
-    "cumprod",
-    "amax",
-    "amin",
-    "argmax",
-    "argmin"
-};
 
 Autocast::Autocast(bool enabled, DType dtype, Device::Type device_type)
     : prev_enabled_(enabled_)
@@ -166,11 +176,11 @@ auto Autocast::get_autocast_dtype(const std::string& op_name, DType input_dtype)
 }
 
 auto Autocast::is_compute_heavy_op(const std::string& op_name) -> bool {
-    return COMPUTE_HEAVY_OPS.find(op_name) != COMPUTE_HEAVY_OPS.end();
+    return AutocastPolicyRegistry::instance().is_compute_heavy(op_name);
 }
 
 auto Autocast::is_stability_critical_op(const std::string& op_name) -> bool {
-    return STABILITY_CRITICAL_OPS.find(op_name) != STABILITY_CRITICAL_OPS.end();
+    return AutocastPolicyRegistry::instance().is_stability_critical(op_name);
 }
 
 } // namespace amp

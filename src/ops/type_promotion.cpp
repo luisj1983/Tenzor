@@ -68,6 +68,22 @@ auto promote_types(DType a, DType b) -> DType {
         return b;
     }
 
+    // Quantized type promotion:
+    // - Quantized + Float -> Float32 (or wider if the float type is wider)
+    // - Quantized + Quantized -> QInt8 (signed wins over unsigned)
+    // - Quantized + Integer -> Float32 (dequantization needed)
+    if (is_quantized(a) || is_quantized(b)) {
+        if (is_floating(a)) return (dtype_priority(a) >= dtype_priority(DType::Float32)) ? a : DType::Float32;
+        if (is_floating(b)) return (dtype_priority(b) >= dtype_priority(DType::Float32)) ? b : DType::Float32;
+        if (is_complex(a)) return a;
+        if (is_complex(b)) return b;
+        if (is_quantized(a) && is_quantized(b)) {
+            if (a == b) return a;
+            return DType::QInt8;  // signed type wins
+        }
+        return DType::Float32;  // quantized + integer -> dequant needed
+    }
+
     // FP8 type promotion:
     // - FP8 + same FP8 -> same FP8 (preserve precision intent)
     // - FP8_E4M3 + FP8_E5M2 -> FP8_E5M2 (wider dynamic range)

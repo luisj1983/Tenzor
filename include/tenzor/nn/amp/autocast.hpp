@@ -12,10 +12,54 @@
 #include "tenzor/core/device.hpp"
 #include <atomic>
 #include <optional>
+#include <shared_mutex>
+#include <string>
+#include <unordered_set>
 
 namespace tenzor {
 namespace nn {
 namespace amp {
+
+/**
+ * @brief Registry for autocast op categorization policies.
+ *
+ * Thread-safe singleton that classifies operations as compute-heavy
+ * (cast to lower precision) or stability-critical (keep in FP32).
+ * Initialized with default lists matching PyTorch's autocast behavior.
+ * Users can register/unregister ops to customize autocast policies.
+ *
+ * @code
+ * auto& registry = AutocastPolicyRegistry::instance();
+ * registry.register_compute_heavy("my_custom_matmul");
+ * registry.unregister("sum");  // Remove from stability-critical
+ * @endcode
+ */
+class AutocastPolicyRegistry {
+public:
+    static auto instance() -> AutocastPolicyRegistry&;
+
+    /// Register an op as compute-heavy (will be cast to lower precision)
+    auto register_compute_heavy(const std::string& op_name) -> void;
+
+    /// Register an op as stability-critical (will be kept in FP32)
+    auto register_stability_critical(const std::string& op_name) -> void;
+
+    /// Remove an op from both compute-heavy and stability-critical sets
+    auto unregister(const std::string& op_name) -> void;
+
+    /// Check if op is compute-heavy
+    auto is_compute_heavy(const std::string& op_name) const -> bool;
+
+    /// Check if op is stability-critical
+    auto is_stability_critical(const std::string& op_name) const -> bool;
+
+private:
+    AutocastPolicyRegistry();
+
+    std::unordered_set<std::string> compute_heavy_ops_;
+    std::unordered_set<std::string> stability_critical_ops_;
+    mutable std::shared_mutex mutex_;
+};
 
 /**
  * @brief Autocast mode for automatic mixed precision

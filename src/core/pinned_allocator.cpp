@@ -191,6 +191,12 @@ auto PinnedMemoryAllocator::allocate(size_t bytes) -> void* {
         }
 
         if (block == nullptr) {
+            if (config_.throw_on_oom) {
+                throw std::runtime_error(
+                    "PinnedMemoryAllocator: pool exhausted, requested " +
+                    std::to_string(bytes) + " bytes (" +
+                    std::to_string(aligned_size) + " aligned)");
+            }
             return nullptr;  // Out of memory
         }
     }

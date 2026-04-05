@@ -15,6 +15,7 @@
 #include <tenzor/ops/math.hpp>
 #include <tenzor/ops/linalg.hpp>
 #include <tenzor/ops/transform.hpp>
+#include <tenzor/ops/fp8_scaling.hpp>
 #include <tenzor/backend/loader.hpp>
 #include <tenzor/backend/backend.hpp>
 #include <tenzor/backend/dispatch_table.hpp>
@@ -585,6 +586,77 @@ PYBIND11_MODULE(tenzor_core, m) {
           py::arg("input"), py::arg("scale"), py::arg("zero_point"),
           py::arg("dtype") = tenzor::DType::QInt8,
           "Quantize a float tensor to int8/uint8 with scale and zero_point");
+
+    // FP8 scaling utilities
+    m.def("fp8_max_value", &tenzor::fp8_max_value,
+          py::arg("fp8_dtype"),
+          R"doc(Get maximum representable value for an FP8 data type.
+
+Args:
+    fp8_dtype: FP8_E4M3 (max=448) or FP8_E5M2 (max=57344)
+
+Returns:
+    Maximum finite value as float.
+)doc");
+
+    m.def("compute_amax", &tenzor::compute_amax,
+          py::arg("tensor"),
+          R"doc(Compute the absolute maximum value of a tensor.
+
+Args:
+    tensor: Input tensor (any floating-point dtype)
+
+Returns:
+    Absolute maximum value as float.
+)doc");
+
+    m.def("compute_fp8_scale", &tenzor::compute_fp8_scale,
+          py::arg("amax"), py::arg("fp8_dtype"),
+          R"doc(Compute the FP8 quantization scale from an amax value.
+
+The scale maps the tensor's dynamic range to the FP8 representable range:
+scale = amax / fp8_max.
+
+Args:
+    amax: Absolute maximum value of the tensor
+    fp8_dtype: Target FP8 dtype
+
+Returns:
+    Scale factor as float.
+)doc");
+
+    m.def("quantize_to_fp8", &tenzor::quantize_to_fp8,
+          py::arg("input"), py::arg("fp8_dtype"),
+          py::arg("scale") = std::nullopt,
+          py::arg("stochastic_rounding") = false,
+          R"doc(Quantize a floating-point tensor to FP8 with per-tensor scaling.
+
+Args:
+    input: Input tensor (Float32, Float16, or BFloat16)
+    fp8_dtype: Target FP8 dtype (FP8_E4M3 or FP8_E5M2)
+    scale: Optional pre-computed scale (auto-computed if None)
+    stochastic_rounding: Use stochastic rounding for better training accuracy
+
+Returns:
+    Tuple of (FP8 tensor, FP8ScalingParams).
+
+Example::
+
+    fp8_tensor, params = tz.quantize_to_fp8(x, tz.fp8_e4m3)
+    x_restored = tz.dequantize_from_fp8(fp8_tensor, params.scale)
+)doc");
+
+    m.def("dequantize_from_fp8", &tenzor::dequantize_from_fp8,
+          py::arg("fp8_tensor"), py::arg("scale"),
+          R"doc(Dequantize an FP8 tensor back to Float32 using a scale factor.
+
+Args:
+    fp8_tensor: FP8 tensor to dequantize
+    scale: Scale factor from quantization
+
+Returns:
+    Float32 tensor.
+)doc");
 
     // Memory format enum (PyTorch-compatible channels_last support)
     py::enum_<tenzor::MemoryFormat>(m, "memory_format")
@@ -2202,7 +2274,23 @@ PYBIND11_MODULE(tenzor_core, m) {
 
     m.def("matmul", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
          return tenzor::matmul(a, b);
-         }, "Matrix multiplication",
+         },
+         R"doc(Matrix product of two tensors.
+
+Supports 1D-1D (dot product), 2D-2D (matrix multiply), and batched
+matrix multiplication with broadcasting. Uses MKL/cuBLAS when available.
+
+Args:
+    a: First tensor
+    b: Second tensor
+
+Returns:
+    Result tensor. Shape depends on input dimensions.
+
+Example::
+
+    C = tz.matmul(A, B)  # (M, K) @ (K, N) -> (M, N)
+)doc",
          py::arg("a"), py::arg("b"),
          py::call_guard<py::gil_scoped_release>());
 
@@ -5735,7 +5823,14 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("params"), py::arg("lr"),
              py::arg("momentum") = 0.0, py::arg("dampening") = 0.0,
              py::arg("weight_decay") = 0.0, py::arg("nesterov") = false)
-        .def("step", &tenzor::optim::SGD::step)
+        .def("step", [](tenzor::optim::SGD& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
+            if (closure) {
+                return py::cast(self.step(*closure));
+            }
+            self.step();
+            return py::none();
+        }, py::arg("closure") = py::none(),
+           "Perform optimization step. Optionally takes a closure that recomputes the loss.")
         .def("zero_grad", &tenzor::optim::SGD::zero_grad)
         .def("set_lr", &tenzor::optim::SGD::set_lr,
              py::arg("lr"), "Set learning rate")
@@ -5752,7 +5847,10 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("beta1") = 0.9, py::arg("beta2") = 0.999,
              py::arg("eps") = 1e-8, py::arg("weight_decay") = 0.0,
              py::arg("amsgrad") = false)
-        .def("step", &tenzor::optim::Adam::step)
+        .def("step", [](tenzor::optim::Adam& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
+            if (closure) return py::cast(self.step(*closure));
+            self.step(); return py::none();
+        }, py::arg("closure") = py::none())
         .def("zero_grad", &tenzor::optim::Adam::zero_grad)
         .def("set_lr", &tenzor::optim::Adam::set_lr,
              py::arg("lr"), "Set learning rate")
@@ -5769,7 +5867,10 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("beta1") = 0.9, py::arg("beta2") = 0.999,
              py::arg("eps") = 1e-8, py::arg("weight_decay") = 0.01,
              py::arg("amsgrad") = false)
-        .def("step", &tenzor::optim::AdamW::step)
+        .def("step", [](tenzor::optim::AdamW& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
+            if (closure) return py::cast(self.step(*closure));
+            self.step(); return py::none();
+        }, py::arg("closure") = py::none())
         .def("zero_grad", &tenzor::optim::AdamW::zero_grad)
         .def("set_lr", &tenzor::optim::AdamW::set_lr,
              py::arg("lr"), "Set learning rate")
@@ -5786,7 +5887,10 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("params"), py::arg("lr") = 0.01, py::arg("alpha") = 0.99,
              py::arg("eps") = 1e-8, py::arg("weight_decay") = 0.0,
              py::arg("momentum") = 0.0, py::arg("centered") = false)
-        .def("step", &tenzor::optim::RMSprop::step)
+        .def("step", [](tenzor::optim::RMSprop& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
+            if (closure) return py::cast(self.step(*closure));
+            self.step(); return py::none();
+        }, py::arg("closure") = py::none())
         .def("zero_grad", &tenzor::optim::RMSprop::zero_grad)
         .def("state_dict", &tenzor::optim::RMSprop::state_dict)
         .def("load_state_dict", &tenzor::optim::RMSprop::load_state_dict);
@@ -5796,14 +5900,20 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("params"), py::arg("lr") = 0.01, py::arg("lr_decay") = 0.0,
              py::arg("weight_decay") = 0.0, py::arg("initial_accumulator_value") = 0.0,
              py::arg("eps") = 1e-10)
-        .def("step", &tenzor::optim::Adagrad::step)
+        .def("step", [](tenzor::optim::Adagrad& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
+            if (closure) return py::cast(self.step(*closure));
+            self.step(); return py::none();
+        }, py::arg("closure") = py::none())
         .def("zero_grad", &tenzor::optim::Adagrad::zero_grad);
 
     py::class_<tenzor::optim::Adadelta>(optim, "Adadelta")
         .def(py::init<std::vector<std::shared_ptr<tenzor::Variable>>, double, double, double, double>(),
              py::arg("params"), py::arg("lr") = 1.0, py::arg("rho") = 0.9,
              py::arg("eps") = 1e-6, py::arg("weight_decay") = 0.0)
-        .def("step", &tenzor::optim::Adadelta::step)
+        .def("step", [](tenzor::optim::Adadelta& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
+            if (closure) return py::cast(self.step(*closure));
+            self.step(); return py::none();
+        }, py::arg("closure") = py::none())
         .def("zero_grad", &tenzor::optim::Adadelta::zero_grad);
 
     py::class_<tenzor::optim::RAdam, tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::RAdam>>(optim, "RAdam",
@@ -5812,7 +5922,10 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("params"), py::arg("lr") = 1e-3,
              py::arg("beta1") = 0.9, py::arg("beta2") = 0.999,
              py::arg("eps") = 1e-8, py::arg("weight_decay") = 0.0)
-        .def("step", &tenzor::optim::RAdam::step)
+        .def("step", [](tenzor::optim::RAdam& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
+            if (closure) return py::cast(self.step(*closure));
+            self.step(); return py::none();
+        }, py::arg("closure") = py::none())
         .def("zero_grad", &tenzor::optim::RAdam::zero_grad)
         .def("set_lr", &tenzor::optim::RAdam::set_lr, py::arg("lr"))
         .def("get_lr", &tenzor::optim::RAdam::get_lr)
@@ -5825,7 +5938,10 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("params"), py::arg("lr") = 1e-3,
              py::arg("beta1") = 0.9, py::arg("beta2") = 0.999,
              py::arg("eps") = 1e-6, py::arg("weight_decay") = 0.01)
-        .def("step", &tenzor::optim::LAMB::step)
+        .def("step", [](tenzor::optim::LAMB& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
+            if (closure) return py::cast(self.step(*closure));
+            self.step(); return py::none();
+        }, py::arg("closure") = py::none())
         .def("zero_grad", &tenzor::optim::LAMB::zero_grad)
         .def("set_lr", &tenzor::optim::LAMB::set_lr, py::arg("lr"))
         .def("get_lr", &tenzor::optim::LAMB::get_lr)
@@ -5838,7 +5954,10 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("params"), py::arg("lr") = 1e-3,
              py::arg("beta1") = 0.9, py::arg("beta2") = 0.999,
              py::arg("eps") = 1e-8)
-        .def("step", &tenzor::optim::SparseAdam::step)
+        .def("step", [](tenzor::optim::SparseAdam& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
+            if (closure) return py::cast(self.step(*closure));
+            self.step(); return py::none();
+        }, py::arg("closure") = py::none())
         .def("zero_grad", &tenzor::optim::SparseAdam::zero_grad)
         .def("set_lr", &tenzor::optim::SparseAdam::set_lr, py::arg("lr"))
         .def("get_lr", &tenzor::optim::SparseAdam::get_lr)
@@ -7783,6 +7902,20 @@ PYBIND11_MODULE(tenzor_core, m) {
                py::arg("align_corners") = false,
                "Resize tensor using interpolation");
 
+    vision.def("grid_sample", &tenzor::ops::grid_sample,
+               py::arg("input"),
+               py::arg("grid"),
+               py::arg("mode") = "bilinear",
+               py::arg("padding_mode") = "zeros",
+               py::arg("align_corners") = false,
+               "Sample from input using grid coordinates (spatial transformer)");
+
+    vision.def("affine_grid", &tenzor::ops::affine_grid,
+               py::arg("theta"),
+               py::arg("size"),
+               py::arg("align_corners") = false,
+               "Generate 2D affine grid for grid_sample");
+
     // =========================================================================
     // Detection Operations
     // =========================================================================
@@ -8126,7 +8259,10 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("eps") = 1e-8,
              py::arg("weight_decay") = 0.01,
              py::arg("amsgrad") = false)
-        .def("step", &tenzor::optim::AdamAtan2::step)
+        .def("step", [](tenzor::optim::AdamAtan2& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
+            if (closure) return py::cast(self.step(*closure));
+            self.step(); return py::none();
+        }, py::arg("closure") = py::none())
         .def("zero_grad", &tenzor::optim::AdamAtan2::zero_grad)
         .def("set_lr", &tenzor::optim::AdamAtan2::set_lr)
         .def("get_lr", &tenzor::optim::AdamAtan2::get_lr)

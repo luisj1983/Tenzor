@@ -290,6 +290,13 @@ __all__ = [
     "qint8",
     "quint8",
     "qint4x2",
+
+    # FP8 scaling
+    "fp8_max_value",
+    "compute_amax",
+    "compute_fp8_scale",
+    "quantize_to_fp8",
+    "dequantize_from_fp8",
 ]
 
 # Quantized dtype aliases (PyTorch-compatible names)
