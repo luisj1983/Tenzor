@@ -1,0 +1,93 @@
+// Copyright 2026 Tenzor Authors. All rights reserved.
+//
+// Protobuf service definition for the Tenzor inference serving API.
+// Build with protoc and grpc_cpp_plugin to generate stubs.
+
+syntax = "proto3";
+
+package tenzor.serving;
+
+// ---------------------------------------------------------------------------
+// Service
+// ---------------------------------------------------------------------------
+
+service TenzorServing {
+  rpc Predict(PredictRequest) returns (PredictResponse);
+  rpc GetModelStatus(ModelStatusRequest) returns (ModelStatusResponse);
+  rpc LoadModel(LoadModelRequest) returns (LoadModelResponse);
+  rpc UnloadModel(UnloadModelRequest) returns (UnloadModelResponse);
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// ---------------------------------------------------------------------------
+// Common types
+// ---------------------------------------------------------------------------
+
+message TensorData {
+  repeated int64 shape = 1;
+  bytes data = 2;
+  string dtype = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Predict
+// ---------------------------------------------------------------------------
+
+message PredictRequest {
+  string model_name = 1;
+  int32 model_version = 2;
+  TensorData input = 3;
+}
+
+message PredictResponse {
+  TensorData output = 1;
+  float latency_ms = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Model status
+// ---------------------------------------------------------------------------
+
+message ModelStatusRequest {
+  string model_name = 1;
+}
+
+message ModelStatusResponse {
+  string model_name = 1;
+  int32 model_version = 2;
+  string status = 3;  // e.g. "READY", "LOADING", "UNLOADED"
+}
+
+// ---------------------------------------------------------------------------
+// Load / Unload
+// ---------------------------------------------------------------------------
+
+message LoadModelRequest {
+  string model_name = 1;
+  string model_path = 2;
+}
+
+message LoadModelResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message UnloadModelRequest {
+  string model_name = 1;
+}
+
+message UnloadModelResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Health check
+// ---------------------------------------------------------------------------
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+  string version = 2;
+}

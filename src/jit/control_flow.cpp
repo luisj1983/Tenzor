@@ -1,0 +1,100 @@
+/**
+ * @file control_flow.cpp
+ * @brief Implementation of JIT-compatible control flow primitives
+ */
+
+#include "tenzor/jit/control_flow.hpp"
+
+namespace tenzor {
+namespace jit {
+
+// ============================================================================
+// cond (multi-output)
+// ============================================================================
+
+auto cond(const Tensor& condition,
+          std::function<std::vector<Variable>(const std::vector<Variable>&)> then_fn,
+          std::function<std::vector<Variable>(const std::vector<Variable>&)> else_fn,
+          const std::vector<Variable>& args) -> std::vector<Variable> {
+
+    auto& tracer = Tracer::get_instance();
+
+    if (tracer.is_tracing()) {
+        // Tracing mode: record both branches as subgraphs
+        return tracer.trace_if(condition,
+                               std::move(then_fn),
+                               std::move(else_fn),
+                               args);
+    }
+
+    // Eager mode: evaluate condition and call appropriate branch
+    bool cond_val = condition.item<float>() != 0.0f;
+
+    if (cond_val) {
+        return then_fn(args);
+    } else {
+        return else_fn(args);
+    }
+}
+
+// ============================================================================
+// cond (single-output convenience)
+// ============================================================================
+
+auto cond(const Tensor& condition,
+          std::function<Variable(const Variable&)> then_fn,
+          std::function<Variable(const Variable&)> else_fn,
+          const Variable& input) -> Variable {
+
+    auto results = cond(
+        condition,
+        [&then_fn](const std::vector<Variable>& args) -> std::vector<Variable> {
+            return {then_fn(args[0])};
+        },
+        [&else_fn](const std::vector<Variable>& args) -> std::vector<Variable> {
+            return {else_fn(args[0])};
+        },
+        {input});
+
+    return results.empty() ? Variable(Tensor({}, DType::Float32, Device::cpu()))
+                           : results[0];
+}
+
+// ============================================================================
+// while_loop
+// ============================================================================
+
+auto while_loop(int64_t max_iter,
+                std::function<Tensor(const std::vector<Variable>&)> cond_fn,
+                std::function<std::vector<Variable>(const std::vector<Variable>&)> body_fn,
+                const std::vector<Variable>& carried) -> std::vector<Variable> {
+
+    auto& tracer = Tracer::get_instance();
+
+    if (tracer.is_tracing()) {
+        // Tracing mode: record loop body as subgraph
+        return tracer.trace_loop(max_iter,
+                                 std::move(cond_fn),
+                                 std::move(body_fn),
+                                 carried);
+    }
+
+    // Eager mode: execute loop directly
+    std::vector<Variable> state = carried;
+
+    for (int64_t i = 0; i < max_iter; ++i) {
+        // Check condition
+        Tensor cond_result = cond_fn(state);
+        if (cond_result.item<float>() == 0.0f) {
+            break;
+        }
+
+        // Execute body
+        state = body_fn(state);
+    }
+
+    return state;
+}
+
+} // namespace jit
+} // namespace tenzor

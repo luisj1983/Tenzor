@@ -1,0 +1,267 @@
+/**
+ * @file server.hpp
+ * @brief Inference serving infrastructure
+ *
+ * Provides a high-performance inference server with:
+ * - REST API for predictions (POST /v1/models/{name}/predict)
+ * - Dynamic batching to maximize GPU throughput
+ * - Multi-model serving with independent worker pools
+ * - Health checks, metrics, model lifecycle management
+ *
+ * Build with -DTENZOR_BUILD_SERVING=ON. Optionally with gRPC
+ * for high-performance binary protocol.
+ */
+
+#pragma once
+
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <functional>
+#include <future>
+#include <memory>
+#include <mutex>
+#include <queue>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+#include "../core/tensor.hpp"
+#include "../core/device.hpp"
+#include "../jit/compiler.hpp"
+
+namespace tenzor {
+namespace serving {
+
+// ============================================================================
+// Configuration
+// ============================================================================
+
+/**
+ * @brief Server configuration.
+ */
+struct ServerConfig {
+    int32_t http_port{8080};              ///< REST API port
+    int32_t grpc_port{8081};              ///< gRPC port (if built with gRPC)
+    int32_t num_workers{4};               ///< Worker threads per model
+    std::string model_repository_path;    ///< Path to model directory
+    bool enable_metrics{true};            ///< Enable /metrics endpoint
+    bool enable_health_check{true};       ///< Enable /health endpoint
+};
+
+// ============================================================================
+// Inference request/response
+// ============================================================================
+
+/**
+ * @brief A single inference request.
+ */
+struct InferRequest {
+    Tensor input;
+    std::promise<Tensor> result;
+    std::chrono::steady_clock::time_point arrival;
+
+    InferRequest(Tensor in)
+        : input(std::move(in)), arrival(std::chrono::steady_clock::now()) {}
+};
+
+// ============================================================================
+// Dynamic batcher
+// ============================================================================
+
+/**
+ * @brief Configuration for dynamic batching.
+ */
+struct BatchConfig {
+    int32_t max_batch_size{32};           ///< Maximum batch size
+    int32_t max_latency_us{10000};        ///< Maximum waiting time (microseconds)
+};
+
+/**
+ * @brief Collects individual requests into batches for efficient execution.
+ *
+ * Waits until batch is full or deadline expires, then concatenates inputs
+ * along dim=0 and executes a single forward pass.
+ */
+class DynamicBatcher {
+public:
+    DynamicBatcher(std::shared_ptr<jit::CompiledModule> model,
+                   BatchConfig config = {});
+    ~DynamicBatcher();
+
+    /**
+     * @brief Submit a request for batched inference.
+     *
+     * @param input Input tensor
+     * @return Future that will hold the result
+     */
+    auto submit(Tensor input) -> std::future<Tensor>;
+
+    /**
+     * @brief Start the batching loop.
+     */
+    auto start() -> void;
+
+    /**
+     * @brief Stop the batching loop.
+     */
+    auto stop() -> void;
+
+private:
+    std::shared_ptr<jit::CompiledModule> model_;
+    BatchConfig config_;
+    std::atomic<bool> running_{false};
+    std::thread batch_thread_;
+
+    std::mutex queue_mutex_;
+    std::condition_variable queue_cv_;
+    std::queue<std::shared_ptr<InferRequest>> queue_;
+
+    auto batch_loop() -> void;
+    auto execute_batch(std::vector<std::shared_ptr<InferRequest>>& batch) -> void;
+};
+
+// ============================================================================
+// Model repository
+// ============================================================================
+
+/**
+ * @brief State of a loaded model.
+ */
+enum class ModelState : uint8_t {
+    LOADING,
+    READY,
+    UNLOADING,
+    FAILED,
+};
+
+/**
+ * @brief Entry for a loaded model.
+ */
+struct ModelEntry {
+    std::string name;
+    int32_t version{1};
+    std::shared_ptr<jit::CompiledModule> module;
+    Device device;
+    std::unique_ptr<DynamicBatcher> batcher;
+    std::atomic<ModelState> state{ModelState::LOADING};
+};
+
+/**
+ * @brief Thread-safe model registry with load/unload/versioning.
+ */
+class ModelRepository {
+public:
+    /**
+     * @brief Load a model from file.
+     *
+     * Supports TZJT (native JIT), ONNX, and TNZR formats.
+     * Runs optimize_for_inference() after loading.
+     *
+     * @param name Model name
+     * @param path Path to model file
+     * @param device Target device
+     * @param batch_config Batching configuration
+     */
+    auto load_model(const std::string& name, const std::string& path,
+                    Device device, BatchConfig batch_config = {}) -> void;
+
+    /**
+     * @brief Unload a model.
+     */
+    auto unload_model(const std::string& name) -> void;
+
+    /**
+     * @brief Get a loaded model by name.
+     *
+     * @return Model entry, or nullptr if not found
+     */
+    auto get_model(const std::string& name) -> std::shared_ptr<ModelEntry>;
+
+    /**
+     * @brief List all loaded models.
+     */
+    auto list_models() const -> std::vector<std::string>;
+
+private:
+    mutable std::mutex mutex_;
+    std::unordered_map<std::string, std::shared_ptr<ModelEntry>> models_;
+};
+
+// ============================================================================
+// Metrics
+// ============================================================================
+
+/**
+ * @brief Lock-free metrics per model.
+ */
+struct ModelMetrics {
+    std::atomic<uint64_t> total_requests{0};
+    std::atomic<uint64_t> total_latency_us{0};
+    std::atomic<uint64_t> total_batch_count{0};
+    std::atomic<uint64_t> total_batch_size{0};
+    std::atomic<uint64_t> error_count{0};
+};
+
+/**
+ * @brief Global metrics registry.
+ */
+class MetricsRegistry {
+public:
+    static auto instance() -> MetricsRegistry&;
+
+    auto get_metrics(const std::string& model_name) -> ModelMetrics&;
+    auto format_prometheus() const -> std::string;
+
+private:
+    MetricsRegistry() = default;
+    mutable std::mutex mutex_;
+    std::unordered_map<std::string, std::unique_ptr<ModelMetrics>> metrics_;
+};
+
+// ============================================================================
+// Inference server
+// ============================================================================
+
+/**
+ * @brief Main inference server.
+ *
+ * Owns the HTTP server, model repository, and metrics.
+ * Start/stop lifecycle with blocking wait().
+ */
+class InferenceServer {
+public:
+    explicit InferenceServer(ServerConfig config);
+    ~InferenceServer();
+
+    /**
+     * @brief Start the server.
+     */
+    auto start() -> void;
+
+    /**
+     * @brief Stop the server.
+     */
+    auto stop() -> void;
+
+    /**
+     * @brief Block until the server is stopped.
+     */
+    auto wait() -> void;
+
+    /**
+     * @brief Get the model repository.
+     */
+    auto repository() -> ModelRepository& { return repository_; }
+
+private:
+    ServerConfig config_;
+    ModelRepository repository_;
+    std::atomic<bool> running_{false};
+    std::thread server_thread_;
+
+    auto serve_loop() -> void;
+};
+
+} // namespace serving
+} // namespace tenzor

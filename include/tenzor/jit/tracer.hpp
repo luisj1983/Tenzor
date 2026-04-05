@@ -117,6 +117,7 @@ enum class OpType {
 
     // Shape guard (for dynamic shape support)
     ShapeGuard,       ///< Runtime shape check that triggers re-trace on mismatch
+    GuardNode,        ///< Data-dependent branch guard; failure triggers retrace
 
     // Memory management pseudo-ops
     SwapOut,          ///< GPU -> CPU async transfer for memory pressure relief

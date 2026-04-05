@@ -8,6 +8,7 @@
  * wired up by the backend constructor.
  */
 
+#include <limits>
 #include "oneapi_internal.hpp"
 #include "tenzor/backend/dispatch_table.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
@@ -1059,8 +1060,8 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Clamp,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            float min_val = static_cast<float>(attrs.get_float(AttrKey::Min, 0.0));
-            float max_val = static_cast<float>(attrs.get_float(AttrKey::Max, 1.0));
+            float min_val = static_cast<float>(attrs.get_float(AttrKey::Min, -std::numeric_limits<float>::infinity()));
+            float max_val = static_cast<float>(attrs.get_float(AttrKey::Max, std::numeric_limits<float>::infinity()));
             return {oneapi::clamp_kernel(inputs[0], min_val, max_val, get_q(inputs))};
         });
 
@@ -1072,7 +1073,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::ClampMax,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            float max_val = static_cast<float>(attrs.get_float(AttrKey::Max, 1.0));
+            float max_val = static_cast<float>(attrs.get_float(AttrKey::Max, std::numeric_limits<float>::infinity()));
             return {oneapi::clamp_max_kernel(inputs[0], max_val, get_q(inputs))};
         });
 

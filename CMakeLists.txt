@@ -86,6 +86,8 @@ option(TENZOR_BUILD_BENCHMARKS "Build benchmarks" OFF)
 option(TENZOR_FUZZ "Build libFuzzer fuzz targets (requires Clang)" OFF)
 option(TENZOR_BUILD_EXAMPLES "Build examples" ON)
 option(TENZOR_BUILD_MODEL_HUB "Build model hub (requires CURL and OpenSSL)" ON)
+option(TENZOR_BUILD_SERVING "Build inference serving (requires gRPC for full support)" OFF)
+option(TENZOR_BUILD_LITE "Build lightweight mobile/embedded inference runtime" OFF)
 option(TENZOR_REQUIRE_MKL "Require Intel MKL (FATAL_ERROR if not found)" OFF)
 option(TENZOR_ENABLE_PROFILING "Enable NVTX/ROCTX profiling annotations" OFF)
 

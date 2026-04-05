@@ -59,6 +59,24 @@ public:
      */
     auto wait(const std::string& key) -> void;
 
+    /**
+     * @brief Delete a key from the store.
+     *
+     * Used by elastic rendezvous to clean up stale worker entries.
+     *
+     * @param key Key to delete
+     * @return true if key existed and was deleted
+     */
+    auto delete_key(const std::string& key) -> bool;
+
+    /**
+     * @brief Check if a key exists without blocking.
+     *
+     * @param key Key to check
+     * @return true if key exists
+     */
+    auto check_key(const std::string& key) -> bool;
+
 private:
     std::string master_addr_;
     int master_port_;

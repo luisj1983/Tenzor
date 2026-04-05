@@ -224,12 +224,14 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::ClampMin, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchClamp(inputs[0],
-            static_cast<float>(attrs.get_float(AttrKey::Min, 0.0)), std::numeric_limits<float>::infinity())};
+            static_cast<float>(attrs.get_float(AttrKey::Min, 0.0)),
+            std::numeric_limits<float>::infinity())};
     });
 
     table.register_kernel(OpId::ClampMax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchClamp(inputs[0],
-            -std::numeric_limits<float>::infinity(), static_cast<float>(attrs.get_float(AttrKey::Max, 0.0)))};
+            -std::numeric_limits<float>::infinity(),
+            static_cast<float>(attrs.get_float(AttrKey::Max, std::numeric_limits<float>::infinity())))};
     });
 
     // ========================================================================

@@ -5,6 +5,8 @@
 
 #include "../../include/tenzor/jit/compiler.hpp"
 #include "../../include/tenzor/jit/tracer.hpp"
+#include "../../include/tenzor/jit/extended_codegen.hpp"
+#include "../../include/tenzor/jit/fusion_cost_model.hpp"
 #include "../../include/tenzor/ops/math.hpp"
 #include "../../include/tenzor/ops/reduction.hpp"
 #include "../../include/tenzor/ops/creation.hpp"
@@ -1829,6 +1831,83 @@ auto MemoryPlanningPass::run(Graph& graph) -> bool {
 }
 
 // ============================================================================
+// Extended Fusion Pass
+// ============================================================================
+
+auto ExtendedFusionPass::run(Graph& graph) -> bool {
+    PatternMatcher matcher;
+    matcher.set_max_mlp_hidden_dim(max_mlp_hidden_);
+
+    auto matches = matcher.find_all(graph);
+    if (matches.empty()) return false;
+
+    FusionCostModel cost_model;
+    bool modified = false;
+
+    for (auto& match : matches) {
+        // Check profitability
+        FusionCandidate candidate;
+        candidate.num_ops = match.nodes.size();
+        candidate.total_elements = match.estimated_elements;
+        candidate.num_memory_accesses = match.nodes.size() * 2;  // Rough estimate: 1 read + 1 write per op
+
+        if (!cost_model.should_fuse(candidate)) continue;
+
+        // Map the match kind to the appropriate fused OpType
+        OpType fused_type;
+        switch (match.kind) {
+            case FusionKind::Softmax:      fused_type = OpType::Softmax; break;
+            case FusionKind::GemmEpilogue: fused_type = OpType::Linear; break;
+            case FusionKind::SmallMLP:     fused_type = OpType::FusedFFN; break;
+            default:
+                // For LayerNorm, RMSNorm, Reduction: use the existing op type
+                // of the dominant operation as the fused node type
+                fused_type = match.nodes[0]->op_type();
+                break;
+        }
+
+        // Create a fused node that replaces the matched subgraph
+        auto fused_node = std::make_shared<Node>(fused_type);
+
+        // Copy inputs from the first matched node
+        for (auto& input : match.inputs) {
+            fused_node->add_input(input);
+        }
+
+        // Copy outputs from the last matched node
+        if (!match.nodes.empty()) {
+            auto& last = match.nodes.back();
+            for (auto& output : last->outputs()) {
+                fused_node->add_output(output);
+                output->set_node(fused_node);
+            }
+        }
+
+        // Store the fusion signature as an attribute for the execution engine
+        fused_node->set_name("fused_" + match.signature);
+        fused_node->set_attr("fusion_kind", static_cast<float>(static_cast<int>(match.kind)));
+        fused_node->set_int_attr("fusion_num_ops", static_cast<int64_t>(match.nodes.size()));
+
+        // Copy key attributes from matched nodes (eps, momentum for normalization)
+        for (auto& node : match.nodes) {
+            float eps_val = node->get_attr("eps");
+            if (eps_val != 0.0f) fused_node->set_attr("eps", eps_val);
+            float momentum_val = node->get_attr("momentum");
+            if (momentum_val != 0.0f) fused_node->set_attr("momentum", momentum_val);
+        }
+
+        // Replace first matched node with fused node, remove the rest
+        graph.replace_node(match.nodes[0], fused_node);
+        for (size_t i = 1; i < match.nodes.size(); ++i) {
+            graph.remove_node(match.nodes[i]);
+        }
+        modified = true;
+    }
+
+    return modified;
+}
+
+// ============================================================================
 // Compiler Implementation
 // ============================================================================
 
@@ -1846,6 +1925,7 @@ Compiler::Compiler(bool enable_default_passes) {
         add_pass(std::make_unique<FuseAttentionPass>());        // Transformer attention fusion
         add_pass(std::make_unique<FuseFFNPass>());              // FFN fusion (Linear->Act->Linear)
         add_pass(std::make_unique<FuseResidualAddPass>());      // Residual connection marking
+        add_pass(std::make_unique<ExtendedFusionPass>());       // Multi-node extended fusion (reduction, softmax, norm, MLP)
         add_pass(std::make_unique<AlgebraicSimplificationPass>());
         add_pass(std::make_unique<ReshapeEliminationPass>());
         add_pass(std::make_unique<CommonSubexpressionEliminationPass>());

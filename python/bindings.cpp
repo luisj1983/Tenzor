@@ -18,6 +18,8 @@
 #include <tenzor/ops/fp8_scaling.hpp>
 #include <tenzor/backend/loader.hpp>
 #include <tenzor/backend/backend.hpp>
+#include <tenzor/jit/compile.hpp>
+#include <tenzor/distributed/rpc/rpc.hpp>
 #include <tenzor/backend/dispatch_table.hpp>
 #include <tenzor/nn/optim/scheduler.hpp>
 #include <tenzor/nn/layers/rnn.hpp>
@@ -6754,6 +6756,31 @@ Example::
         .def("reset_buckets", &tenzor::distributed::DistributedDataParallel::reset_buckets,
             "Reset bucket ready states for next iteration");
 
+    // =========================================================================
+    // RPC submodule
+    // =========================================================================
+    auto rpc = distributed.def_submodule("rpc", "Remote Procedure Call framework");
+
+    rpc.def("init_rpc", &tenzor::distributed::rpc::init_rpc,
+        py::arg("name"), py::arg("rank"), py::arg("world_size"),
+        py::arg("config") = tenzor::distributed::rpc::RpcAgentConfig{},
+        "Initialize the RPC framework");
+
+    rpc.def("shutdown_rpc", &tenzor::distributed::rpc::shutdown_rpc,
+        "Shut down the RPC framework");
+
+    rpc.def("rpc_sync", &tenzor::distributed::rpc::rpc_sync,
+        py::arg("dst"), py::arg("func_name"), py::arg("args"),
+        "Synchronous RPC call to a remote worker");
+
+    rpc.def("rpc_async", [](int32_t dst, const std::string& func_name,
+                             const std::vector<tenzor::Tensor>& args) {
+        auto future = tenzor::distributed::rpc::rpc_async(dst, func_name, args);
+        return future.get();  // Block in Python for simplicity
+    },
+    py::arg("dst"), py::arg("func_name"), py::arg("args"),
+    "Asynchronous RPC call (blocks until result available in Python)");
+
     // ModelHub for pretrained weight management
     auto models = m.def_submodule("models", "Pretrained model hub");
 
@@ -7872,6 +7899,46 @@ Example::
     jit.def("verify_graph", &tenzor::jit::verify_graph,
             py::arg("graph"),
             "Verify graph integrity, returns list of errors");
+
+    // =========================================================================
+    // Compile API (torch.compile equivalent)
+    // =========================================================================
+    jit.def("compile", [](py::function fn, bool fullgraph, std::string mode) {
+        // Wrap Python function in a C++ callable
+        auto cpp_fn = [fn](const tenzor::Variable& input) -> tenzor::Variable {
+            py::gil_scoped_acquire acquire;
+            auto result = fn(input);
+            return result.cast<tenzor::Variable>();
+        };
+
+        tenzor::jit::CompileConfig config;
+        config.fullgraph = fullgraph;
+        config.mode = std::move(mode);
+
+        auto compiled = std::make_shared<tenzor::jit::CompiledFunction>(
+            std::move(cpp_fn), std::move(config));
+
+        // Return a callable Python object
+        return py::cpp_function([compiled](const tenzor::Variable& input) {
+            py::gil_scoped_release release;
+            return (*compiled)(input);
+        });
+    },
+    py::arg("fn"),
+    py::arg("fullgraph") = false,
+    py::arg("mode") = "default",
+    "Compile a function for automatic graph capture and optimization.\n"
+    "First call traces and compiles; subsequent calls use cached compiled graph.\n"
+    "Shape mismatches trigger recompilation (up to 8 shapes cached).");
+
+    // Also expose compile at module level
+    m.def("compile", [&jit](py::function fn, bool fullgraph, std::string mode) {
+        return jit.attr("compile")(fn, fullgraph, mode);
+    },
+    py::arg("fn"),
+    py::arg("fullgraph") = false,
+    py::arg("mode") = "default",
+    "Compile a function for automatic graph capture (alias for jit.compile).");
 
     // =========================================================================
     // Vision Operations

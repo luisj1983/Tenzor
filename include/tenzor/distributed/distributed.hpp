@@ -462,6 +462,20 @@ public:
      */
     static auto finalize() -> void;
 
+    /**
+     * @brief Replace the global process group for elastic training recovery.
+     *
+     * Called when the training group is rebuilt after a worker failure.
+     * Existing DDP/FSDP wrappers should call reset_process_group()
+     * after this to pick up the new group.
+     *
+     * @param new_pg New process group
+     */
+    static auto replace_process_group(std::shared_ptr<ProcessGroup> new_pg) -> void {
+        std::lock_guard<std::mutex> lock(mutex_);
+        global_process_group_ = std::move(new_pg);
+    }
+
 private:
     static std::shared_ptr<ProcessGroup> global_process_group_;
     static std::mutex mutex_;

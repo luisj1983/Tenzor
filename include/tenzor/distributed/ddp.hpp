@@ -267,9 +267,27 @@ public:
      */
     auto reset_buckets() -> void;
 
+    /**
+     * @brief Replace the process group for elastic training recovery.
+     *
+     * Called after a worker failure when the training group is rebuilt
+     * with a different world_size. Re-initializes buckets for the new group.
+     *
+     * @param new_pg New process group
+     */
+    auto reset_process_group(ProcessGroup& new_pg) -> void {
+        pg_ = &new_pg;
+        reset_buckets();
+    }
+
+    /**
+     * @brief Get the current process group.
+     */
+    auto process_group() const -> ProcessGroup& { return *pg_; }
+
 private:
     nn::Module& module_;
-    ProcessGroup& pg_;
+    ProcessGroup* pg_;
     std::vector<GradBucket> buckets_;
     bool auto_sync_enabled_{true};
     bool find_unused_parameters_{false};

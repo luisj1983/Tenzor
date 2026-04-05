@@ -1,0 +1,513 @@
+/**
+ * @file pattern_matcher.cpp
+ * @brief Implementation of graph pattern matching for extended fusion
+ */
+
+#include "tenzor/jit/pattern_matcher.hpp"
+#include <algorithm>
+#include <sstream>
+#include <unordered_set>
+
+namespace tenzor {
+namespace jit {
+
+// ============================================================================
+// Utility helpers
+// ============================================================================
+
+auto PatternMatcher::has_single_use(const std::shared_ptr<Node>& node) -> bool {
+    if (node->outputs().empty()) return false;
+    return node->outputs()[0]->uses().size() == 1;
+}
+
+auto PatternMatcher::is_elementwise(OpType op) -> bool {
+    switch (op) {
+        case OpType::Add: case OpType::Sub: case OpType::Mul: case OpType::Div:
+        case OpType::Exp: case OpType::Log: case OpType::Sqrt: case OpType::Pow:
+        case OpType::Abs: case OpType::Neg: case OpType::Clamp:
+        case OpType::ReLU: case OpType::Sigmoid: case OpType::Tanh: case OpType::GELU:
+            return true;
+        default:
+            return false;
+    }
+}
+
+auto PatternMatcher::is_reduction(OpType op) -> bool {
+    switch (op) {
+        case OpType::Sum: case OpType::Mean: case OpType::Max: case OpType::Min:
+            return true;
+        default:
+            return false;
+    }
+}
+
+auto PatternMatcher::is_activation(OpType op) -> bool {
+    switch (op) {
+        case OpType::ReLU: case OpType::Sigmoid: case OpType::Tanh: case OpType::GELU:
+            return true;
+        default:
+            return false;
+    }
+}
+
+auto PatternMatcher::collect_external_inputs(
+    const std::vector<std::shared_ptr<Node>>& nodes)
+    -> std::vector<std::shared_ptr<Value>> {
+    std::unordered_set<Value*> internal_values;
+    for (auto& n : nodes) {
+        for (auto& out : n->outputs()) {
+            internal_values.insert(out.get());
+        }
+    }
+
+    std::vector<std::shared_ptr<Value>> external;
+    std::unordered_set<Value*> seen;
+    for (auto& n : nodes) {
+        for (auto& inp : n->inputs()) {
+            if (inp && internal_values.count(inp.get()) == 0 && seen.insert(inp.get()).second) {
+                external.push_back(inp);
+            }
+        }
+    }
+    return external;
+}
+
+auto PatternMatcher::collect_external_outputs(
+    const std::vector<std::shared_ptr<Node>>& nodes)
+    -> std::vector<std::shared_ptr<Value>> {
+    std::unordered_set<Node*> node_set;
+    for (auto& n : nodes) node_set.insert(n.get());
+
+    std::vector<std::shared_ptr<Value>> external;
+    for (auto& n : nodes) {
+        for (auto& out : n->outputs()) {
+            for (auto& use : out->uses()) {
+                if (auto user = use.lock()) {
+                    if (node_set.count(user.get()) == 0) {
+                        external.push_back(out);
+                        break;  // Only add once per output
+                    }
+                }
+            }
+        }
+    }
+    return external;
+}
+
+// ============================================================================
+// FusionMatch signature
+// ============================================================================
+
+auto FusionMatch::compute_signature() -> std::string {
+    std::ostringstream ss;
+    ss << "ext_" << static_cast<int>(kind);
+    for (auto& n : nodes) {
+        ss << "_" << static_cast<int>(n->op_type());
+    }
+    if (!inputs.empty()) {
+        ss << "_d" << static_cast<int>(inputs[0]->dtype());
+    }
+    signature = ss.str();
+    return signature;
+}
+
+// ============================================================================
+// Main pattern finder
+// ============================================================================
+
+auto PatternMatcher::find_all(const Graph& graph) -> std::vector<FusionMatch> {
+    std::vector<FusionMatch> matches;
+    std::unordered_set<Node*> used;
+    auto& nodes = graph.nodes();
+
+    // Scan in topological order, try most specific patterns first
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        if (used.count(nodes[i].get())) continue;
+
+        // Try patterns from most specific to least specific
+        if (auto m = match_softmax(graph, i, used)) {
+            for (auto& n : m->nodes) used.insert(n.get());
+            matches.push_back(std::move(*m));
+        } else if (auto m = match_layer_norm(graph, i, used)) {
+            for (auto& n : m->nodes) used.insert(n.get());
+            matches.push_back(std::move(*m));
+        } else if (auto m = match_rms_norm(graph, i, used)) {
+            for (auto& n : m->nodes) used.insert(n.get());
+            matches.push_back(std::move(*m));
+        } else if (auto m = match_small_mlp(graph, i, used)) {
+            for (auto& n : m->nodes) used.insert(n.get());
+            matches.push_back(std::move(*m));
+        } else if (auto m = match_gemm_epilogue(graph, i, used)) {
+            for (auto& n : m->nodes) used.insert(n.get());
+            matches.push_back(std::move(*m));
+        } else if (auto m = match_reduction_chain(graph, i, used)) {
+            for (auto& n : m->nodes) used.insert(n.get());
+            matches.push_back(std::move(*m));
+        }
+    }
+
+    return matches;
+}
+
+// ============================================================================
+// Softmax pattern: Max -> Sub -> Exp -> Sum -> Div
+// Matches the numerically stable softmax decomposition.
+// ============================================================================
+
+auto PatternMatcher::match_softmax(const Graph& graph, size_t start_idx,
+                                    const std::unordered_set<Node*>& used)
+    -> std::optional<FusionMatch> {
+    auto& nodes = graph.nodes();
+    if (start_idx + 4 >= nodes.size()) return std::nullopt;
+
+    auto& n0 = nodes[start_idx];
+    if (n0->op_type() != OpType::Max || used.count(n0.get())) return std::nullopt;
+
+    // Look for Sub(input, max_result) immediately after
+    auto& n1 = nodes[start_idx + 1];
+    if (n1->op_type() != OpType::Sub || used.count(n1.get())) return std::nullopt;
+    if (!has_single_use(n0)) return std::nullopt;
+
+    // Exp after Sub
+    auto& n2 = nodes[start_idx + 2];
+    if (n2->op_type() != OpType::Exp || used.count(n2.get())) return std::nullopt;
+    if (!has_single_use(n1)) return std::nullopt;
+
+    // Sum after Exp
+    auto& n3 = nodes[start_idx + 3];
+    if (n3->op_type() != OpType::Sum || used.count(n3.get())) return std::nullopt;
+    if (!has_single_use(n2)) return std::nullopt;
+
+    // Div after Sum
+    if (start_idx + 4 >= nodes.size()) return std::nullopt;
+    auto& n4 = nodes[start_idx + 4];
+    if (n4->op_type() != OpType::Div || used.count(n4.get())) return std::nullopt;
+    if (!has_single_use(n3)) return std::nullopt;
+
+    FusionMatch match;
+    match.kind = FusionKind::Softmax;
+    match.nodes = {n0, n1, n2, n3, n4};
+    match.inputs = collect_external_inputs(match.nodes);
+    match.outputs = collect_external_outputs(match.nodes);
+    if (!match.inputs.empty()) {
+        auto& shape = match.inputs[0]->shape();
+        match.estimated_elements = 1;
+        for (auto d : shape) match.estimated_elements *= d;
+    }
+    match.compute_signature();
+    return match;
+}
+
+// ============================================================================
+// LayerNorm pattern: Mean -> Sub -> Pow/Mul -> Mean -> Add(eps) -> Sqrt/Rsqrt -> Div/Mul -> Mul(gamma) -> Add(beta)
+// We match a simplified version: Mean -> Sub -> (variance ops) -> mul(gamma) -> add(beta)
+// ============================================================================
+
+auto PatternMatcher::match_layer_norm(const Graph& graph, size_t start_idx,
+                                       const std::unordered_set<Node*>& used)
+    -> std::optional<FusionMatch> {
+    auto& nodes = graph.nodes();
+    if (start_idx + 5 >= nodes.size()) return std::nullopt;
+
+    auto& n0 = nodes[start_idx];
+    if (n0->op_type() != OpType::Mean || used.count(n0.get())) return std::nullopt;
+
+    auto& n1 = nodes[start_idx + 1];
+    if (n1->op_type() != OpType::Sub || used.count(n1.get())) return std::nullopt;
+    if (!has_single_use(n0)) return std::nullopt;
+
+    // After sub(input, mean), look for variance computation:
+    // Pow(2) or Mul(self, self) -> Mean -> Add(eps) -> Sqrt -> Div
+    // Match loosely: next should be Pow or Mul
+    auto& n2 = nodes[start_idx + 2];
+    if ((n2->op_type() != OpType::Pow && n2->op_type() != OpType::Mul) ||
+        used.count(n2.get())) return std::nullopt;
+
+    // Mean of squared differences
+    if (start_idx + 3 >= nodes.size()) return std::nullopt;
+    auto& n3 = nodes[start_idx + 3];
+    if (n3->op_type() != OpType::Mean || used.count(n3.get())) return std::nullopt;
+
+    // Look for the remaining chain: could be Add(eps) -> Sqrt -> Div -> Mul(gamma) -> Add(beta)
+    // or variations. Collect contiguous matching nodes.
+    std::vector<std::shared_ptr<Node>> matched = {n0, n1, n2, n3};
+    size_t idx = start_idx + 4;
+
+    // Consume remaining ops that form the normalization pattern
+    while (idx < nodes.size() && matched.size() < 10) {
+        auto& nk = nodes[idx];
+        if (used.count(nk.get())) break;
+
+        auto op = nk->op_type();
+        if (op == OpType::Add || op == OpType::Sqrt || op == OpType::Div ||
+            op == OpType::Mul || op == OpType::Neg) {
+            matched.push_back(nk);
+            ++idx;
+
+            // If we've reached a Mul followed by Add that look like gamma/beta affine,
+            // and we have at least 6 nodes, consider the pattern complete
+            if (matched.size() >= 6 && op == OpType::Add) {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    // Need at least 6 nodes for a meaningful LayerNorm fusion
+    if (matched.size() < 6) return std::nullopt;
+
+    // Verify single-use constraint for intermediate nodes
+    for (size_t i = 0; i + 1 < matched.size(); ++i) {
+        if (!has_single_use(matched[i])) return std::nullopt;
+    }
+
+    FusionMatch match;
+    match.kind = FusionKind::LayerNorm;
+    match.nodes = std::move(matched);
+    match.inputs = collect_external_inputs(match.nodes);
+    match.outputs = collect_external_outputs(match.nodes);
+    if (!match.inputs.empty()) {
+        auto& shape = match.inputs[0]->shape();
+        match.estimated_elements = 1;
+        for (auto d : shape) match.estimated_elements *= d;
+    }
+    match.compute_signature();
+    return match;
+}
+
+// ============================================================================
+// RMSNorm pattern: Pow/Mul(self) -> Mean -> Add(eps) -> Rsqrt/Sqrt -> Mul
+// ============================================================================
+
+auto PatternMatcher::match_rms_norm(const Graph& graph, size_t start_idx,
+                                     const std::unordered_set<Node*>& used)
+    -> std::optional<FusionMatch> {
+    auto& nodes = graph.nodes();
+    if (start_idx + 4 >= nodes.size()) return std::nullopt;
+
+    auto& n0 = nodes[start_idx];
+    if ((n0->op_type() != OpType::Pow && n0->op_type() != OpType::Mul) ||
+        used.count(n0.get())) return std::nullopt;
+
+    auto& n1 = nodes[start_idx + 1];
+    if (n1->op_type() != OpType::Mean || used.count(n1.get())) return std::nullopt;
+    if (!has_single_use(n0)) return std::nullopt;
+
+    // Add(eps) or directly Sqrt/Rsqrt
+    size_t next = start_idx + 2;
+    std::vector<std::shared_ptr<Node>> matched = {n0, n1};
+
+    if (next < nodes.size() && nodes[next]->op_type() == OpType::Add &&
+        !used.count(nodes[next].get())) {
+        matched.push_back(nodes[next]);
+        ++next;
+    }
+
+    // Sqrt or Rsqrt (which is Div(1, Sqrt) or Pow(-0.5))
+    if (next < nodes.size() && nodes[next]->op_type() == OpType::Sqrt &&
+        !used.count(nodes[next].get())) {
+        matched.push_back(nodes[next]);
+        ++next;
+    }
+
+    // Div (input / sqrt_result) or Mul (input * rsqrt_result)
+    if (next < nodes.size() &&
+        (nodes[next]->op_type() == OpType::Div || nodes[next]->op_type() == OpType::Mul) &&
+        !used.count(nodes[next].get())) {
+        matched.push_back(nodes[next]);
+        ++next;
+    }
+
+    // Optional: Mul(gamma)
+    if (next < nodes.size() && nodes[next]->op_type() == OpType::Mul &&
+        !used.count(nodes[next].get())) {
+        matched.push_back(nodes[next]);
+    }
+
+    if (matched.size() < 4) return std::nullopt;
+
+    for (size_t i = 0; i + 1 < matched.size(); ++i) {
+        if (!has_single_use(matched[i])) return std::nullopt;
+    }
+
+    FusionMatch match;
+    match.kind = FusionKind::RMSNorm;
+    match.nodes = std::move(matched);
+    match.inputs = collect_external_inputs(match.nodes);
+    match.outputs = collect_external_outputs(match.nodes);
+    if (!match.inputs.empty()) {
+        auto& shape = match.inputs[0]->shape();
+        match.estimated_elements = 1;
+        for (auto d : shape) match.estimated_elements *= d;
+    }
+    match.compute_signature();
+    return match;
+}
+
+// ============================================================================
+// GEMM Epilogue: MatMul/Linear + Add(bias) + activation
+// ============================================================================
+
+auto PatternMatcher::match_gemm_epilogue(const Graph& graph, size_t start_idx,
+                                          const std::unordered_set<Node*>& used)
+    -> std::optional<FusionMatch> {
+    auto& nodes = graph.nodes();
+    auto& n0 = nodes[start_idx];
+
+    if ((n0->op_type() != OpType::MatMul && n0->op_type() != OpType::Linear) ||
+        used.count(n0.get())) return std::nullopt;
+    if (!has_single_use(n0)) return std::nullopt;
+
+    std::vector<std::shared_ptr<Node>> matched = {n0};
+    size_t next = start_idx + 1;
+
+    // Optional: Add(bias)
+    if (next < nodes.size() && nodes[next]->op_type() == OpType::Add &&
+        !used.count(nodes[next].get())) {
+        matched.push_back(nodes[next]);
+        ++next;
+        if (matched.size() > 1 && !has_single_use(matched.back())) {
+            // Add has multiple uses — can still fuse MatMul+Add but not activation
+        }
+    }
+
+    // Optional: activation
+    if (next < nodes.size() && is_activation(nodes[next]->op_type()) &&
+        !used.count(nodes[next].get())) {
+        // Only fuse if the previous node has single use
+        if (matched.size() >= 1 && has_single_use(matched.back())) {
+            matched.push_back(nodes[next]);
+        }
+    }
+
+    // Need at least MatMul + one more op to justify fusion
+    if (matched.size() < 2) return std::nullopt;
+
+    FusionMatch match;
+    match.kind = FusionKind::GemmEpilogue;
+    match.nodes = std::move(matched);
+    match.inputs = collect_external_inputs(match.nodes);
+    match.outputs = collect_external_outputs(match.nodes);
+    if (!match.inputs.empty()) {
+        auto& shape = match.inputs[0]->shape();
+        match.estimated_elements = 1;
+        for (auto d : shape) match.estimated_elements *= d;
+    }
+    match.compute_signature();
+    return match;
+}
+
+// ============================================================================
+// Small MLP: Linear -> activation -> Linear
+// ============================================================================
+
+auto PatternMatcher::match_small_mlp(const Graph& graph, size_t start_idx,
+                                      const std::unordered_set<Node*>& used)
+    -> std::optional<FusionMatch> {
+    auto& nodes = graph.nodes();
+    if (start_idx + 2 >= nodes.size()) return std::nullopt;
+
+    auto& n0 = nodes[start_idx];
+    if (n0->op_type() != OpType::Linear || used.count(n0.get())) return std::nullopt;
+    if (!has_single_use(n0)) return std::nullopt;
+
+    auto& n1 = nodes[start_idx + 1];
+    if (!is_activation(n1->op_type()) || used.count(n1.get())) return std::nullopt;
+    if (!has_single_use(n1)) return std::nullopt;
+
+    auto& n2 = nodes[start_idx + 2];
+    if (n2->op_type() != OpType::Linear || used.count(n2.get())) return std::nullopt;
+
+    // Check hidden dimension constraint
+    if (!n0->outputs().empty()) {
+        auto& shape = n0->outputs()[0]->shape();
+        if (!shape.empty()) {
+            int64_t hidden = shape.back();
+            if (hidden > max_mlp_hidden_) return std::nullopt;
+        }
+    }
+
+    FusionMatch match;
+    match.kind = FusionKind::SmallMLP;
+    match.nodes = {n0, n1, n2};
+    match.inputs = collect_external_inputs(match.nodes);
+    match.outputs = collect_external_outputs(match.nodes);
+    if (!match.inputs.empty()) {
+        auto& shape = match.inputs[0]->shape();
+        match.estimated_elements = 1;
+        for (auto d : shape) match.estimated_elements *= d;
+    }
+    match.compute_signature();
+    return match;
+}
+
+// ============================================================================
+// Reduction chain: element-wise* -> reduction -> element-wise*
+// ============================================================================
+
+auto PatternMatcher::match_reduction_chain(const Graph& graph, size_t start_idx,
+                                            const std::unordered_set<Node*>& used)
+    -> std::optional<FusionMatch> {
+    auto& nodes = graph.nodes();
+
+    // Start must be an element-wise op followed eventually by a reduction
+    auto& n0 = nodes[start_idx];
+    if (!is_elementwise(n0->op_type()) || used.count(n0.get())) return std::nullopt;
+
+    std::vector<std::shared_ptr<Node>> matched = {n0};
+    size_t idx = start_idx + 1;
+    bool found_reduction = false;
+
+    // Collect pre-reduction element-wise ops
+    while (idx < nodes.size() && !found_reduction) {
+        auto& nk = nodes[idx];
+        if (used.count(nk.get())) break;
+
+        if (is_reduction(nk->op_type())) {
+            matched.push_back(nk);
+            found_reduction = true;
+            ++idx;
+        } else if (is_elementwise(nk->op_type()) && has_single_use(matched.back())) {
+            matched.push_back(nk);
+            ++idx;
+        } else {
+            break;
+        }
+    }
+
+    if (!found_reduction) return std::nullopt;
+
+    // Collect post-reduction element-wise ops
+    while (idx < nodes.size() && matched.size() < 8) {
+        auto& nk = nodes[idx];
+        if (used.count(nk.get()) || !is_elementwise(nk->op_type())) break;
+        if (!has_single_use(matched.back())) break;
+        matched.push_back(nk);
+        ++idx;
+    }
+
+    // Need at least 3 nodes (pre + reduce + post) to justify fusion
+    if (matched.size() < 3) return std::nullopt;
+
+    // Verify single-use for all intermediate nodes
+    for (size_t i = 0; i + 1 < matched.size(); ++i) {
+        if (!has_single_use(matched[i])) return std::nullopt;
+    }
+
+    FusionMatch match;
+    match.kind = FusionKind::Reduction;
+    match.nodes = std::move(matched);
+    match.inputs = collect_external_inputs(match.nodes);
+    match.outputs = collect_external_outputs(match.nodes);
+    if (!match.inputs.empty()) {
+        auto& shape = match.inputs[0]->shape();
+        match.estimated_elements = 1;
+        for (auto d : shape) match.estimated_elements *= d;
+    }
+    match.compute_signature();
+    return match;
+}
+
+} // namespace jit
+} // namespace tenzor

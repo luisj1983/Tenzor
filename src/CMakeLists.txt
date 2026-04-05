@@ -187,11 +187,26 @@ set(TENZOR_CORE_SOURCES
     jit/serialization.cpp
     jit/codegen.cpp
     jit/fusion_cost_model.cpp
+    jit/pattern_matcher.cpp
+    jit/extended_codegen.cpp
+    jit/tracing_interceptor.cpp
+    jit/compile.cpp
+    jit/control_flow.cpp
     nn/compression/pruning.cpp
     nn/compression/distillation.cpp
     distributed/distributed.cpp
     distributed/nccl_backend.cpp
     distributed/gloo_backend.cpp
+    distributed/rpc/function_registry.cpp
+    distributed/rpc/rpc_agent.cpp
+    distributed/rpc/rref.cpp
+    distributed/rpc/rpc.cpp
+    serving/server.cpp
+    lite/runtime.cpp
+    distributed/elastic/rendezvous.cpp
+    distributed/elastic/health_monitor.cpp
+    distributed/elastic/elastic_trainer.cpp
+    distributed/elastic/state_sync.cpp
     distributed/process_group.cpp
     distributed/ddp.cpp
     distributed/fsdp.cpp

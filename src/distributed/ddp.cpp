@@ -76,14 +76,14 @@ DistributedDataParallel::DistributedDataParallel(
     ProcessGroup& pg,
     size_t bucket_size_bytes,
     bool find_unused_parameters
-) : module_(module), pg_(pg), find_unused_parameters_(find_unused_parameters) {
+) : module_(module), pg_(&pg), find_unused_parameters_(find_unused_parameters) {
 
     // Build gradient buckets from module parameters
     build_buckets(bucket_size_bytes);
 
     // Detect whether the process group supports async stream operations
     // (i.e., it's an NCCL backend on GPU)
-    use_gpu_comm_ = pg_.supports_async_stream();
+    use_gpu_comm_ = pg_->supports_async_stream();
 
     // Initialize the dedicated communication stream and per-bucket events
     init_comm_resources();
@@ -316,7 +316,7 @@ auto DistributedDataParallel::all_reduce_bucket_async(
         // all-reduce kernel, eliminating a separate element-wise division.
         // NCCL natively supports AVG reduction (ncclAvg), so this is a
         // single fused communication + scaling operation.
-        pg_.all_reduce_async(grad, ReduceOp::AVG, comm_stream_);
+        pg_->all_reduce_async(grad, ReduceOp::AVG, comm_stream_);
     }
 
     // Record a CUDA event on the communication stream after this bucket's
@@ -373,7 +373,7 @@ auto DistributedDataParallel::sync_comm() -> void {
 // ============================================================================
 
 auto DistributedDataParallel::all_reduce_bucket(GradBucket& bucket) -> void {
-    int ws = pg_.world_size();
+    int ws = pg_->world_size();
     auto start = std::chrono::high_resolution_clock::now();
 
     for (auto& param : bucket.params) {
@@ -390,11 +390,11 @@ auto DistributedDataParallel::all_reduce_bucket(GradBucket& bucket) -> void {
         // Optional gradient compression before all-reduce
         if (compressor_) {
             auto compressed = compressor_->compress(grad);
-            pg_.all_reduce(compressed.data, ReduceOp::SUM);
+            pg_->all_reduce(compressed.data, ReduceOp::SUM);
             grad = compressor_->decompress(compressed);
         } else {
             // All-reduce: sum gradients across all processes
-            pg_.all_reduce(grad, ReduceOp::SUM);
+            pg_->all_reduce(grad, ReduceOp::SUM);
         }
 
         // Divide by world_size to compute average gradient.
@@ -470,7 +470,7 @@ auto DistributedDataParallel::broadcast_parameters() -> void {
         }
 
         Tensor& data = param->tensor();
-        pg_.broadcast(data, /*src_rank=*/0);
+        pg_->broadcast(data, /*src_rank=*/0);
     }
 
     // Also broadcast buffers (e.g., batch norm running statistics)
@@ -482,7 +482,7 @@ auto DistributedDataParallel::broadcast_parameters() -> void {
         }
 
         Tensor& data = buf->tensor();
-        pg_.broadcast(data, /*src_rank=*/0);
+        pg_->broadcast(data, /*src_rank=*/0);
     }
 }
 

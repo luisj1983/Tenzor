@@ -72,9 +72,9 @@ namespace tenzor::distributed {
 // ============================================================================
 
 FSDPUnit::FSDPUnit(nn::Module& module, ProcessGroup& pg, const FSDPConfig& config)
-    : module_(module), pg_(pg), config_(config) {
+    : module_(module), pg_(&pg), config_(config) {
 
-    use_gpu_comm_ = pg_.supports_async_stream();
+    use_gpu_comm_ = pg_->supports_async_stream();
 
     // Flatten all parameters into a single contiguous buffer
     flatten_params();
@@ -150,8 +150,8 @@ auto FSDPUnit::shard_params() -> void {
         return;
     }
 
-    int ws = pg_.world_size();
-    int rank = pg_.rank();
+    int ws = pg_->world_size();
+    int rank = pg_->rank();
 
     // Compute shard size: pad total_numel to be divisible by world_size
     shard_numel_ = (total_numel_ + ws - 1) / ws;
@@ -238,7 +238,7 @@ auto FSDPUnit::collect_grads() -> void {
     auto device = original_params_[0]->tensor().device();
 
     // Allocate flat gradient buffer with padded size
-    int ws = pg_.world_size();
+    int ws = pg_->world_size();
     size_t padded_numel = shard_numel_ * ws;
     flat_grad_ = zeros({static_cast<int64_t>(padded_numel)}, dtype, device);
 
@@ -331,7 +331,7 @@ auto FSDPUnit::all_gather_params() -> void {
         reload_from_cpu();
     }
 
-    int ws = pg_.world_size();
+    int ws = pg_->world_size();
     auto dtype = local_shard_.dtype();
     auto device = local_shard_.device();
 
@@ -350,7 +350,7 @@ auto FSDPUnit::all_gather_params() -> void {
     }
 
     // All-gather: each rank sends its shard, receives all shards
-    pg_.all_gather(comm_shard, gathered);
+    pg_->all_gather(comm_shard, gathered);
 
     // Cast back to original dtype after communication
     if (config_.mixed_precision && dtype == DType::Float32) {
@@ -400,7 +400,7 @@ auto FSDPUnit::reduce_scatter_grads() -> void {
         return;
     }
 
-    int ws = pg_.world_size();
+    int ws = pg_->world_size();
 
     // Collect gradients from parameters into flat buffer
     collect_grads();
@@ -425,7 +425,7 @@ auto FSDPUnit::reduce_scatter_grads() -> void {
     Tensor grad_shard = empty({static_cast<int64_t>(shard_numel_)}, dtype, device);
 
     // Reduce-scatter: sum across ranks, each rank gets its shard
-    pg_.reduce_scatter(grad_chunks, grad_shard, ReduceOp::SUM);
+    pg_->reduce_scatter(grad_chunks, grad_shard, ReduceOp::SUM);
 
     // Divide by world_size to compute average
     if (ws > 1) {
@@ -534,7 +534,7 @@ FullyShardedDataParallel::FullyShardedDataParallel(
     nn::Module& module,
     ProcessGroup& pg,
     const FSDPConfig& config
-) : module_(module), pg_(pg), config_(config) {
+) : module_(module), pg_(&pg), config_(config) {
 
     // Apply auto-wrap policy to identify FSDP units
     apply_auto_wrap();
@@ -568,7 +568,7 @@ auto FullyShardedDataParallel::apply_auto_wrap() -> void {
 }
 
 auto FullyShardedDataParallel::wrap_module(nn::Module& module) -> void {
-    units_.push_back(std::make_unique<FSDPUnit>(module, pg_, config_));
+    units_.push_back(std::make_unique<FSDPUnit>(module, *pg_, config_));
 }
 
 auto FullyShardedDataParallel::count_params(nn::Module& module) const -> size_t {

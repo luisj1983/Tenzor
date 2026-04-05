@@ -1854,6 +1854,83 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             break;
         }
 
+        // ====================================================================
+        // Guard node — data-dependent branch guard, triggers retrace
+        // ====================================================================
+        case OpType::GuardNode: {
+            if (!input_vars.empty()) {
+                // GuardNode checks a boolean condition; if false, triggers retrace
+                bool guard_val = input_vars[0].tensor().template item<float>() != 0.0f;
+                bool expected = node->get_bool_attr("expected_value");
+                if (guard_val != expected) {
+                    needs_retrace_ = true;
+                }
+                // Pass through remaining inputs unchanged
+                for (size_t i = 1; i < input_vars.size(); ++i) {
+                    outputs.push_back(input_vars[i]);
+                }
+                if (input_vars.size() == 1) {
+                    outputs.push_back(input_vars[0]);
+                }
+            }
+            break;
+        }
+
+        // ====================================================================
+        // Fused operations — dispatch to fused kernel implementations
+        // ====================================================================
+        case OpType::FlashAttention: {
+            // Fused multi-head attention: softmax(Q*K^T / sqrt(d_k)) * V
+            // Inputs: [Q, K, V] or [Q, K, V, mask]
+            if (input_vars.size() >= 3) {
+                auto& Q = input_vars[0];
+                auto& K = input_vars[1];
+                auto& V = input_vars[2];
+                // Fallback: compute as standard attention
+                auto d_k = static_cast<float>(K.tensor().shape().back());
+                auto scores = tenzor::matmul(Q, K.transpose(-2, -1));
+                auto scaled = scores * Variable(tenzor::full({1}, 1.0f / std::sqrt(d_k), DType::Float32), false);
+                auto attn = nn::softmax(scaled, -1);
+                outputs.push_back(tenzor::matmul(attn, V));
+            }
+            break;
+        }
+
+        case OpType::FusedFFN: {
+            // Fused feed-forward: Linear -> Activation -> Linear
+            // Inputs: [x, w1, b1, w2, b2]
+            if (input_vars.size() >= 5) {
+                auto h = tenzor::matmul(input_vars[0], input_vars[1].transpose(-2, -1));
+                h = h + input_vars[2];
+                h = nn::gelu(h);  // Default activation
+                auto out = tenzor::matmul(h, input_vars[3].transpose(-2, -1));
+                out = out + input_vars[4];
+                outputs.push_back(out);
+            }
+            break;
+        }
+
+        case OpType::ResidualAdd: {
+            // Residual connection: x + sublayer(x)
+            // Inputs: [original, sublayer_output]
+            if (input_vars.size() >= 2) {
+                outputs.push_back(input_vars[0] + input_vars[1]);
+            }
+            break;
+        }
+
+        // ====================================================================
+        // Memory management pseudo-ops (no-ops during normal execution)
+        // ====================================================================
+        case OpType::SwapOut:
+        case OpType::SwapIn: {
+            // These are hints for memory management; pass through during execution
+            if (!input_vars.empty()) {
+                outputs.push_back(input_vars[0]);
+            }
+            break;
+        }
+
         case OpType::Loop: {
             // ONNX-style loop semantics:
             // Inputs: [max_iterations, condition, carried_0, carried_1, ...]

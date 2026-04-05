@@ -136,4 +136,19 @@ auto init_from_env(const std::string& backend = "nccl") -> void;
  */
 auto get_local_rank() -> int;
 
+// Forward declaration for elastic config
+namespace elastic { struct ElasticConfig; }
+
+/**
+ * @brief Launch elastic training with fault tolerance.
+ *
+ * Combines spawn() with the elastic training infrastructure for
+ * automatic worker failure recovery and dynamic membership.
+ *
+ * @param config Elastic configuration (includes rendezvous and health settings)
+ * @param train_fn Training function taking (rank, world_size)
+ */
+auto elastic_launch(const elastic::ElasticConfig& config,
+                    std::function<void(int32_t rank, int32_t world_size)> train_fn) -> void;
+
 } // namespace tenzor::distributed

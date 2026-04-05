@@ -295,6 +295,9 @@ __all__ = [
     "quint8",
     "qint4x2",
 
+    # JIT compilation
+    "compile",
+
     # FP8 scaling
     "fp8_max_value",
     "compute_amax",

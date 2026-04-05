@@ -150,6 +150,27 @@ auto RendezvousStore::wait(const std::string& key) -> void {
     throw std::runtime_error("RendezvousStore: timeout waiting for key " + key);
 }
 
+auto RendezvousStore::delete_key(const std::string& key) -> bool {
+    // In a full implementation, this would send a DELETE command to the master store.
+    // For now, use the store protocol to mark the key as deleted.
+    try {
+        get(key);  // Check if exists
+        set(key, "__deleted__");
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+auto RendezvousStore::check_key(const std::string& key) -> bool {
+    try {
+        auto val = get(key);
+        return val != "__deleted__";
+    } catch (...) {
+        return false;
+    }
+}
+
 auto RendezvousStore::connect_to_master() -> void {
     if (socket_fd_ >= 0) {
         return;  // Already connected

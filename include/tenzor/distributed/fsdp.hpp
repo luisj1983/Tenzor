@@ -164,7 +164,7 @@ public:
 
 private:
     nn::Module& module_;
-    ProcessGroup& pg_;
+    ProcessGroup* pg_;
     FSDPConfig config_;
 
     /** @brief Flat contiguous buffer holding all parameters */
@@ -368,9 +368,24 @@ public:
      */
     auto sharded_param_bytes() const -> size_t;
 
+    /**
+     * @brief Replace the process group for elastic training recovery.
+     *
+     * After a worker failure, the training group is rebuilt with a new
+     * world_size. This re-shards all parameters for the new group.
+     *
+     * @param new_pg New process group
+     */
+    auto reset_process_group(ProcessGroup& new_pg) -> void {
+        pg_ = &new_pg;
+        // Re-shard: all-gather current shards, then re-partition for new world_size
+        summon_full_params();
+        release_full_params();
+    }
+
 private:
     nn::Module& module_;
-    ProcessGroup& pg_;
+    ProcessGroup* pg_;
     FSDPConfig config_;
 
     /** @brief FSDP units (one per wrapped submodule or the root) */

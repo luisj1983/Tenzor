@@ -31,6 +31,26 @@
 namespace tenzor::jit {
 
 // ============================================================================
+// Fusion kind categories (shared with pattern_matcher and extended_codegen)
+// ============================================================================
+
+/**
+ * @brief Categories of kernel fusion patterns.
+ *
+ * Used by PatternMatcher to classify matched patterns and by
+ * ExtendedKernelCodegen to dispatch to the appropriate generator.
+ */
+enum class FusionKind : uint8_t {
+    ElementWise,      ///< Existing element-wise chain fusion
+    Reduction,        ///< Reduction with pre/post element-wise ops
+    GemmEpilogue,     ///< MatMul/Linear + Add(bias) + activation
+    Softmax,          ///< sub(max) -> exp -> sum -> div pattern
+    LayerNorm,        ///< mean -> sub -> var -> rsqrt -> mul -> add
+    RMSNorm,          ///< square -> mean -> rsqrt -> mul
+    SmallMLP,         ///< Linear -> activation -> Linear (hidden <= 4096)
+};
+
+// ============================================================================
 // Element-wise operation representation for codegen
 // ============================================================================
 
