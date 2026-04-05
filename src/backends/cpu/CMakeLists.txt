@@ -346,6 +346,37 @@ endif()
 # Optional: Intel oneDNN for optimized DNN primitives (Conv, BatchNorm, etc.)
 include(${CMAKE_SOURCE_DIR}/cmake/FindOneDNN.cmake OPTIONAL RESULT_VARIABLE ONEDNN_MODULE_FOUND)
 if(ONEDNN_MODULE_FOUND AND ONEDNN_FOUND)
+    # oneDNN's pre-built libdnnl.so links libtbb.so.12 (release). During library
+    # init, libtbb.so does dlsym("scalable_free") to find tbbmalloc. If tbbmalloc
+    # isn't loaded yet, the function pointer stays NULL, causing a segfault in
+    # __TBB_InitOnce's destructor during process exit.
+    #
+    # In Debug builds this is worse: dnnl's FindTBB selects libtbb_debug.so which
+    # loads libtbbmalloc_debug.so, but libtbb.so (release, from libdnnl.so) inits
+    # before either release tbbmalloc variant is available.
+    #
+    # Fix: link libtbbmalloc.so BEFORE libdnnl.so so the dynamic linker loads it
+    # first, making scalable_free available when libtbb.so initializes.
+    # oneDNN links libtbb.so.12 which does dlsym("scalable_free") during its
+    # static init to find tbbmalloc. We must ensure libtbbmalloc.so.2 (which
+    # provides scalable_free) is loaded and initialized BEFORE libtbb.so.12.
+    # Directly linking both libraries before dnnl puts them in the NEEDED list
+    # ahead of dnnl's transitive dependencies.
+    find_library(_tbb_release NAMES tbb
+        HINTS "${TBBROOT}/lib" "$ENV{TBBROOT}/lib"
+              "${ONEAPI_ROOT}/lib" "$ENV{ONEAPI_ROOT}/lib"
+              "/opt/intel/oneapi/2025.3/lib")
+    find_library(_tbbmalloc_release NAMES tbbmalloc
+        HINTS "${TBBROOT}/lib" "$ENV{TBBROOT}/lib"
+              "${ONEAPI_ROOT}/lib" "$ENV{ONEAPI_ROOT}/lib"
+              "/opt/intel/oneapi/2025.3/lib")
+    if(_tbbmalloc_release AND _tbb_release)
+        # Link tbbmalloc FIRST, then tbb — ensures tbbmalloc inits before tbb
+        target_link_libraries(tenzor_backend_cpu PRIVATE
+            ${_tbbmalloc_release} ${_tbb_release})
+        message(STATUS "CPU Backend: Linked release TBB libs for init order fix")
+    endif()
+
     target_link_libraries(tenzor_backend_cpu PRIVATE ${ONEDNN_LIBRARIES})
     target_include_directories(tenzor_backend_cpu PRIVATE ${ONEDNN_INCLUDE_DIRS})
     target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_USE_ONEDNN)

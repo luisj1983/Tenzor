@@ -13,6 +13,38 @@
 #include <omp.h>
 #endif
 
+#ifndef _WIN32
+#include <dlfcn.h>
+#endif
+
+// ============================================================================
+// Pin TBB malloc to prevent static destruction crash (Static Constructor)
+// ============================================================================
+// The CPU backend transitively links libtbb.so via oneDNN. During process
+// exit, libtbb's __TBB_InitOnce destructor calls cache_aligned_deallocate
+// which forwards to libtbbmalloc's scalable_free. If libtbbmalloc's static
+// destructors run first, the function pointer is NULL → segfault.
+//
+// Fix: re-open tbbmalloc with RTLD_NODELETE at load time. This prevents
+// its static destructors from ever running, so scalable_free remains valid
+// when libtbb's destructor calls it. The OS reclaims all memory at exit.
+#ifndef _WIN32
+__attribute__((constructor(101)))
+static void pin_tbb_libs() {
+    // Pin all TBB libraries to prevent their static destructors from running
+    // during __cxa_finalize. Without this, libtbb's __TBB_InitOnce destructor
+    // calls cache_aligned_deallocate through a scalable_free weak symbol that
+    // becomes NULL after tbbmalloc cleanup.
+    const char* libs[] = {
+        "libtbbmalloc.so.2", "libtbbmalloc_debug.so.2",
+        "libtbb.so.12", "libtbb_debug.so.12",
+    };
+    for (const char* lib : libs) {
+        dlopen(lib, RTLD_NOW | RTLD_GLOBAL | RTLD_NODELETE);
+    }
+}
+#endif
+
 // ============================================================================
 // Early OpenMP Configuration (Static Constructor)
 // ============================================================================
@@ -20,7 +52,7 @@
 // OMP_NUM_THREADS before any OpenMP runtime initialization.
 // Note: This may not help if PyTorch/MKL is loaded first, but it ensures
 // our library uses all threads when loaded independently.
-__attribute__((constructor(101)))
+__attribute__((constructor(102)))
 static void configure_openmp_early() {
     if (std::getenv("OMP_NUM_THREADS") == nullptr) {
         unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());

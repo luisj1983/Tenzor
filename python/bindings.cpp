@@ -6925,6 +6925,27 @@ Example::
     // =========================================================================
     auto rpc = distributed.def_submodule("rpc", "Remote Procedure Call framework");
 
+    // Register RpcAgentConfig BEFORE init_rpc (pybind11 requires types to be
+    // registered before they are used as default arguments)
+    py::class_<tenzor::distributed::rpc::RpcAgentConfig>(rpc, "RpcAgentConfig",
+        "Configuration for the RPC agent")
+        .def(py::init<>())
+        .def_readwrite("num_io_threads",
+            &tenzor::distributed::rpc::RpcAgentConfig::num_io_threads,
+            "I/O threads for socket operations (default: 2)")
+        .def_readwrite("num_worker_threads",
+            &tenzor::distributed::rpc::RpcAgentConfig::num_worker_threads,
+            "Worker threads for RPC execution (default: 4)")
+        .def_readwrite("timeout_ms",
+            &tenzor::distributed::rpc::RpcAgentConfig::timeout_ms,
+            "RPC timeout in milliseconds (default: 60000)")
+        .def_readwrite("heartbeat_interval_ms",
+            &tenzor::distributed::rpc::RpcAgentConfig::heartbeat_interval_ms,
+            "Heartbeat interval in milliseconds (default: 5000)")
+        .def_readwrite("enable_heartbeat",
+            &tenzor::distributed::rpc::RpcAgentConfig::enable_heartbeat,
+            "Enable health monitoring (default: true)");
+
     rpc.def("init_rpc", &tenzor::distributed::rpc::init_rpc,
         py::arg("name"), py::arg("rank"), py::arg("world_size"),
         py::arg("config") = tenzor::distributed::rpc::RpcAgentConfig{},
