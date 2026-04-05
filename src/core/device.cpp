@@ -1,4 +1,5 @@
 #include "tenzor/core/device.hpp"
+#include "tenzor/backend/backend.hpp"
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/utils/error.hpp"
 #include <stdexcept>
@@ -63,6 +64,25 @@ auto Device::synchronize() const -> void {
 
     // Call the backend's synchronize method
     backend->synchronize(index);
+}
+
+auto get_device_properties(const Device& device) -> DeviceInfo {
+    if (device.type == Device::Type::CPU) {
+        // CPU doesn't have a traditional "device info" query
+        DeviceInfo info;
+        info.name = "CPU";
+        info.vendor = "Host";
+        info.compute_units = 0;
+        info.is_integrated = true;
+        return info;
+    }
+
+    auto* backend = backend_registry().get_backend(device.type);
+    if (!backend) {
+        throw std::runtime_error(
+            "Backend not available for device: " + device.to_string());
+    }
+    return backend->get_device_info(device.index);
 }
 
 } // namespace tenzor

@@ -668,6 +668,31 @@ auto Tensor::to(DType dtype) const -> Tensor {
                 } else {
                     dst_ptr[i] = static_cast<DstT>(intermediate);
                 }
+            } else if constexpr (std::is_same_v<SrcT, FP8_E4M3> || std::is_same_v<SrcT, FP8_E5M2>) {
+                // Convert FP8 to float, then to target type
+                float intermediate = static_cast<float>(src_ptr[i]);
+                if constexpr (std::is_same_v<DstT, FP8_E4M3> || std::is_same_v<DstT, FP8_E5M2>) {
+                    dst_ptr[i] = DstT(intermediate);
+                } else if constexpr (std::is_same_v<DstT, Float16> || std::is_same_v<DstT, BFloat16>) {
+                    dst_ptr[i] = DstT(intermediate);
+                } else if constexpr (std::is_same_v<DstT, std::complex<float>>) {
+                    dst_ptr[i] = std::complex<float>(intermediate, 0.0f);
+                } else if constexpr (std::is_same_v<DstT, std::complex<double>>) {
+                    dst_ptr[i] = std::complex<double>(static_cast<double>(intermediate), 0.0);
+                } else {
+                    dst_ptr[i] = static_cast<DstT>(intermediate);
+                }
+            } else if constexpr (std::is_same_v<DstT, FP8_E4M3> || std::is_same_v<DstT, FP8_E5M2>) {
+                // Convert source to float, then to FP8
+                float intermediate;
+                if constexpr (std::is_same_v<SrcT, std::complex<float>>) {
+                    intermediate = src_ptr[i].real();
+                } else if constexpr (std::is_same_v<SrcT, std::complex<double>>) {
+                    intermediate = static_cast<float>(src_ptr[i].real());
+                } else {
+                    intermediate = static_cast<float>(src_ptr[i]);
+                }
+                dst_ptr[i] = DstT(intermediate);
             } else if constexpr (std::is_same_v<DstT, Float16> || std::is_same_v<DstT, BFloat16>) {
                 // Convert source to float, then to half-precision
                 float intermediate;
@@ -718,7 +743,9 @@ auto Tensor::to(DType dtype) const -> Tensor {
                 case DType::Bool: convert_elements.template operator()<SrcT, bool>(); break; \
                 case DType::Complex64: convert_elements.template operator()<SrcT, std::complex<float>>(); break; \
                 case DType::Complex128: convert_elements.template operator()<SrcT, std::complex<double>>(); break; \
-                default: break; /* FP8 types require specialized conversion */ \
+                case DType::FP8_E4M3: convert_elements.template operator()<SrcT, FP8_E4M3>(); break; \
+                case DType::FP8_E5M2: convert_elements.template operator()<SrcT, FP8_E5M2>(); break; \
+                default: break; \
             } \
             break; \
         }
@@ -740,10 +767,8 @@ auto Tensor::to(DType dtype) const -> Tensor {
         DISPATCH_SRC_DTYPE(DType::Bool, bool)
         DISPATCH_SRC_DTYPE(DType::Complex64, std::complex<float>)
         DISPATCH_SRC_DTYPE(DType::Complex128, std::complex<double>)
-        // FP8 types require specialized conversion through float; not handled by generic cast
-        case DType::FP8_E4M3:
-        case DType::FP8_E5M2:
-            break;
+        DISPATCH_SRC_DTYPE(DType::FP8_E4M3, FP8_E4M3)
+        DISPATCH_SRC_DTYPE(DType::FP8_E5M2, FP8_E5M2)
         // Quantized types: use dequantize() first, then cast
         case DType::QInt8:
         case DType::QUInt8:

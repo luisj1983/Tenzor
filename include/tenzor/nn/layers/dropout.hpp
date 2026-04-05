@@ -167,5 +167,70 @@ private:
     double p_;  ///< Dropout probability
 };
 
+/**
+ * @brief Variational dropout for RNNs (Gal & Ghahramani 2016).
+ *
+ * Maintains the same dropout mask across time steps within a sequence.
+ * Call reset_mask() at the start of each new sequence/batch to generate
+ * a new mask. The mask shape is determined by the first forward call
+ * after reset.
+ *
+ * For 3D input (T, B, F), the mask has shape (1, B, F) and broadcasts
+ * across the time dimension so that the same neurons are dropped at
+ * every time step.
+ *
+ * Shape:
+ * - Input: (seq_len, batch, features) or (batch, features)
+ * - Output: Same as input
+ *
+ * @code
+ * VariationalDropout vdrop(0.3);
+ * vdrop.reset_mask();  // New sequence
+ * for (int t = 0; t < seq_len; ++t) {
+ *     auto h = vdrop.forward(hidden[t]);  // Same mask at each step
+ * }
+ * @endcode
+ *
+ * @see Dropout for standard element-wise dropout
+ */
+class VariationalDropout : public Module {
+public:
+    /**
+     * @brief Construct variational dropout layer.
+     *
+     * @param p Probability of an element being zeroed (default: 0.5)
+     *
+     * @throws std::invalid_argument if p not in [0, 1]
+     */
+    explicit VariationalDropout(double p = 0.5);
+
+    /**
+     * @brief Forward pass through variational dropout.
+     *
+     * In training mode: applies cached mask (generates on first call after reset).
+     * In evaluation mode: returns input unchanged.
+     *
+     * @param input Input variable of shape (T, B, F) or (B, F)
+     * @return Output variable with same dropout pattern across time steps
+     */
+    auto forward_impl(const Variable& input) -> Variable override;
+
+    /**
+     * @brief Reset the dropout mask for a new sequence/batch.
+     *
+     * Must be called before processing a new sequence to generate a fresh mask.
+     */
+    auto reset_mask() -> void;
+
+    auto extra_repr() const -> std::string override {
+        return "p=" + std::to_string(p_);
+    }
+
+private:
+    double p_;              ///< Dropout probability
+    Tensor mask_;           ///< Cached mask (reused across time steps)
+    bool mask_valid_{false}; ///< Whether mask_ has been generated for current sequence
+};
+
 } // namespace nn
 } // namespace tenzor

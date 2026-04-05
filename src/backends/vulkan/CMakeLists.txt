@@ -118,7 +118,25 @@ if(GLSLC)
         vulkan_memory.cpp
         vulkan_commands.cpp
         vulkan_dispatch.cpp
-        vulkan_ops.cpp
+        vulkan_ops_math.cpp
+        vulkan_ops_pooling.cpp
+        vulkan_ops_norm.cpp
+        vulkan_ops_vision.cpp
+        vulkan_ops_activation.cpp
+        vulkan_ops_reduction.cpp
+        vulkan_ops_indexing.cpp
+        vulkan_ops_shape.cpp
+        vulkan_ops_memory.cpp
+        vulkan_ops_conv.cpp
+        vulkan_ops_linear.cpp
+        vulkan_ops_rnn.cpp
+        vulkan_ops_sort.cpp
+        vulkan_ops_misc.cpp
+        vulkan_ops_complex.cpp
+        vulkan_ops_fft.cpp
+        vulkan_ops_linalg.cpp
+        vulkan_ops_embed.cpp
+        vulkan_ops_fused.cpp
         vulkan_kernel_registry.cpp
         vulkan_backend.hpp
         vulkan_helpers.hpp
@@ -132,7 +150,25 @@ else()
         vulkan_memory.cpp
         vulkan_commands.cpp
         vulkan_dispatch.cpp
-        vulkan_ops.cpp
+        vulkan_ops_math.cpp
+        vulkan_ops_pooling.cpp
+        vulkan_ops_norm.cpp
+        vulkan_ops_vision.cpp
+        vulkan_ops_activation.cpp
+        vulkan_ops_reduction.cpp
+        vulkan_ops_indexing.cpp
+        vulkan_ops_shape.cpp
+        vulkan_ops_memory.cpp
+        vulkan_ops_conv.cpp
+        vulkan_ops_linear.cpp
+        vulkan_ops_rnn.cpp
+        vulkan_ops_sort.cpp
+        vulkan_ops_misc.cpp
+        vulkan_ops_complex.cpp
+        vulkan_ops_fft.cpp
+        vulkan_ops_linalg.cpp
+        vulkan_ops_embed.cpp
+        vulkan_ops_fused.cpp
         vulkan_kernel_registry.cpp
         vulkan_backend.hpp
         vulkan_helpers.hpp

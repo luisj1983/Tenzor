@@ -85,6 +85,7 @@
 #include <tenzor/sparse/sparse_tensor.hpp>
 #include <tenzor/sparse/sparse_ops.hpp>
 #include <tenzor/autograd/anomaly_mode.hpp>
+#include <tenzor/autograd/checkpoint.hpp>
 #include <tenzor/autograd/functional.hpp>
 #include <tenzor/nn/functional.hpp>
 #include <tenzor/autograd/vmap.hpp>
@@ -486,6 +487,38 @@ PYBIND11_MODULE(tenzor_core, m) {
         return result;
     }, py::arg("backend_name"), py::arg("device_id") = 0,
     "Get detailed information about a specific device");
+
+    // DeviceInfo as a typed Python class
+    py::class_<tenzor::DeviceInfo>(m, "DeviceInfo",
+        "Hardware properties for a compute device")
+        .def_readonly("name", &tenzor::DeviceInfo::name, "Device name")
+        .def_readonly("vendor", &tenzor::DeviceInfo::vendor, "Vendor name")
+        .def_readonly("driver_version", &tenzor::DeviceInfo::driver_version, "Driver version")
+        .def_readonly("total_memory", &tenzor::DeviceInfo::total_memory, "Total memory (bytes)")
+        .def_readonly("available_memory", &tenzor::DeviceInfo::available_memory, "Available memory (bytes)")
+        .def_readonly("compute_units", &tenzor::DeviceInfo::compute_units, "Number of compute units/SMs")
+        .def_readonly("max_threads_per_block", &tenzor::DeviceInfo::max_threads_per_block, "Max threads per block")
+        .def_readonly("max_shared_memory", &tenzor::DeviceInfo::max_shared_memory, "Max shared memory (bytes)")
+        .def_readonly("warp_size", &tenzor::DeviceInfo::warp_size, "Warp/wavefront size")
+        .def_readonly("major_version", &tenzor::DeviceInfo::major_version, "Compute capability major")
+        .def_readonly("minor_version", &tenzor::DeviceInfo::minor_version, "Compute capability minor")
+        .def_readonly("supports_fp16", &tenzor::DeviceInfo::supports_fp16, "FP16 support")
+        .def_readonly("supports_fp64", &tenzor::DeviceInfo::supports_fp64, "FP64 support")
+        .def_readonly("supports_int8", &tenzor::DeviceInfo::supports_int8, "INT8 support")
+        .def_readonly("is_integrated", &tenzor::DeviceInfo::is_integrated, "Integrated GPU")
+        .def_readonly("is_discrete", &tenzor::DeviceInfo::is_discrete, "Discrete GPU")
+        .def_readonly("pci_bus_id", &tenzor::DeviceInfo::pci_bus_id, "PCI bus ID")
+        .def_readonly("pci_device_id", &tenzor::DeviceInfo::pci_device_id, "PCI device ID")
+        .def("__repr__", [](const tenzor::DeviceInfo& info) {
+            return "DeviceInfo(name='" + info.name + "', vendor='" + info.vendor +
+                   "', memory=" + std::to_string(info.total_memory / (1024*1024)) + "MB)";
+        });
+
+    // Get device properties using a Device object (returns typed DeviceInfo)
+    m.def("get_device_properties", [](const tenzor::Device& device) {
+        return tenzor::get_device_properties(device);
+    }, py::arg("device"),
+    "Get detailed hardware properties for a Device object");
 
     // Get all devices across all backends
     m.def("get_all_devices", []() {
@@ -3279,6 +3312,67 @@ Example::
         .def("__exit__", [](PyAnomalyModeContext& self, py::object, py::object, py::object) {
             self.exit();
         });
+
+    // ========================================================================
+    // Automatic Gradient Checkpointing
+    // ========================================================================
+
+    py::enum_<tenzor::autograd::CheckpointStrategy>(m, "CheckpointStrategy",
+        "Strategy for automatic gradient checkpoint placement")
+        .value("none", tenzor::autograd::CheckpointStrategy::None,
+               "No automatic checkpointing")
+        .value("every_n", tenzor::autograd::CheckpointStrategy::EveryN,
+               "Checkpoint every N layers")
+        .value("sqrt_n", tenzor::autograd::CheckpointStrategy::SqrtN,
+               "Checkpoint every sqrt(N) layers (optimal for sequential models)")
+        .value("memory_budget", tenzor::autograd::CheckpointStrategy::MemoryBudget,
+               "Checkpoint to stay within a parameter memory budget per segment");
+
+    py::class_<tenzor::autograd::AutoCheckpointPolicy,
+               std::shared_ptr<tenzor::autograd::AutoCheckpointPolicy>>(
+        m, "AutoCheckpointPolicy",
+        "Automatic gradient checkpointing policy for memory-efficient training")
+        .def(py::init<tenzor::autograd::CheckpointStrategy, int, size_t>(),
+             py::arg("strategy") = tenzor::autograd::CheckpointStrategy::SqrtN,
+             py::arg("every_n") = 0,
+             py::arg("memory_budget_bytes") = 0)
+        .def("apply", &tenzor::autograd::AutoCheckpointPolicy::apply,
+             py::arg("module"), "Apply checkpointing policy to a module")
+        .def("remove", &tenzor::autograd::AutoCheckpointPolicy::remove,
+             py::arg("module"), "Remove checkpointing policy from a module")
+        .def_property_readonly("strategy",
+             &tenzor::autograd::AutoCheckpointPolicy::strategy);
+
+    m.def("enable_auto_checkpoint",
+        [](tenzor::nn::Module& module, const std::string& strategy,
+           int every_n, size_t memory_budget_bytes) {
+            tenzor::autograd::CheckpointStrategy strat;
+            if (strategy == "sqrt_n" || strategy == "sqrtn")
+                strat = tenzor::autograd::CheckpointStrategy::SqrtN;
+            else if (strategy == "every_n" || strategy == "everyn")
+                strat = tenzor::autograd::CheckpointStrategy::EveryN;
+            else if (strategy == "memory_budget")
+                strat = tenzor::autograd::CheckpointStrategy::MemoryBudget;
+            else if (strategy == "none")
+                strat = tenzor::autograd::CheckpointStrategy::None;
+            else
+                throw std::invalid_argument("Unknown strategy: " + strategy +
+                    ". Use 'sqrt_n', 'every_n', 'memory_budget', or 'none'");
+            return tenzor::autograd::enable_auto_checkpoint(
+                module, strat, every_n, memory_budget_bytes);
+        },
+        py::arg("module"),
+        py::arg("strategy") = "sqrt_n",
+        py::arg("every_n") = 0,
+        py::arg("memory_budget_bytes") = 0,
+        "Enable automatic gradient checkpointing on a model.\n\n"
+        "Args:\n"
+        "    module: Model to checkpoint\n"
+        "    strategy: 'sqrt_n', 'every_n', 'memory_budget', or 'none'\n"
+        "    every_n: Interval for every_n strategy\n"
+        "    memory_budget_bytes: Budget for memory_budget strategy\n"
+        "Returns:\n"
+        "    AutoCheckpointPolicy handle (keep reference alive to maintain hooks)");
 
     // ========================================================================
     // Custom autograd Function base class

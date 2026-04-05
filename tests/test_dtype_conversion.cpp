@@ -175,6 +175,117 @@ TEST_F(DTypeConversionTest, MultipleConversions) {
     EXPECT_FLOAT_EQ(t4.data<float>()[0], 3.0f); // Lost fractional part in conversion to int
 }
 
+// ============================================================================
+// FP8 Conversion Tests
+// ============================================================================
+
+TEST_F(DTypeConversionTest, Float32ToFP8E4M3Roundtrip) {
+    auto t = tenzor::ones({4}, DType::Float32, Device::cpu());
+    t.data<float>()[0] = 0.0f;
+    t.data<float>()[1] = 1.0f;
+    t.data<float>()[2] = -1.0f;
+    t.data<float>()[3] = 42.0f;
+
+    auto t_fp8 = t.to(DType::FP8_E4M3);
+    ASSERT_EQ(t_fp8.dtype(), DType::FP8_E4M3);
+    ASSERT_EQ(t_fp8.numel(), 4);
+
+    auto t_back = t_fp8.to(DType::Float32);
+    ASSERT_EQ(t_back.dtype(), DType::Float32);
+    EXPECT_FLOAT_EQ(t_back.data<float>()[0], 0.0f);
+    EXPECT_FLOAT_EQ(t_back.data<float>()[1], 1.0f);
+    EXPECT_FLOAT_EQ(t_back.data<float>()[2], -1.0f);
+    // 42.0 should roundtrip within E4M3 precision (3-bit mantissa)
+    EXPECT_NEAR(t_back.data<float>()[3], 42.0f, 2.0f);
+}
+
+TEST_F(DTypeConversionTest, Float32ToFP8E5M2Roundtrip) {
+    auto t = tenzor::ones({4}, DType::Float32, Device::cpu());
+    t.data<float>()[0] = 0.0f;
+    t.data<float>()[1] = 1.0f;
+    t.data<float>()[2] = -1.0f;
+    t.data<float>()[3] = 256.0f;
+
+    auto t_fp8 = t.to(DType::FP8_E5M2);
+    ASSERT_EQ(t_fp8.dtype(), DType::FP8_E5M2);
+
+    auto t_back = t_fp8.to(DType::Float32);
+    ASSERT_EQ(t_back.dtype(), DType::Float32);
+    EXPECT_FLOAT_EQ(t_back.data<float>()[0], 0.0f);
+    EXPECT_FLOAT_EQ(t_back.data<float>()[1], 1.0f);
+    EXPECT_FLOAT_EQ(t_back.data<float>()[2], -1.0f);
+    // 256.0 should roundtrip within E5M2 precision (2-bit mantissa)
+    EXPECT_NEAR(t_back.data<float>()[3], 256.0f, 64.0f);
+}
+
+TEST_F(DTypeConversionTest, FP8E4M3ToFloat16) {
+    auto t = tenzor::ones({2}, DType::Float32, Device::cpu());
+    t.data<float>()[0] = 2.0f;
+    t.data<float>()[1] = -3.0f;
+
+    auto t_fp8 = t.to(DType::FP8_E4M3);
+    auto t_f16 = t_fp8.to(DType::Float16);
+    ASSERT_EQ(t_f16.dtype(), DType::Float16);
+
+    auto t_f32 = t_f16.to(DType::Float32);
+    EXPECT_NEAR(t_f32.data<float>()[0], 2.0f, 0.1f);
+    EXPECT_NEAR(t_f32.data<float>()[1], -3.0f, 0.5f);
+}
+
+TEST_F(DTypeConversionTest, Int32ToFP8E4M3) {
+    auto t = tenzor::ones({3}, DType::Int32, Device::cpu());
+    t.data<int32_t>()[0] = 0;
+    t.data<int32_t>()[1] = 5;
+    t.data<int32_t>()[2] = -10;
+
+    auto t_fp8 = t.to(DType::FP8_E4M3);
+    ASSERT_EQ(t_fp8.dtype(), DType::FP8_E4M3);
+
+    auto t_back = t_fp8.to(DType::Float32);
+    EXPECT_FLOAT_EQ(t_back.data<float>()[0], 0.0f);
+    EXPECT_NEAR(t_back.data<float>()[1], 5.0f, 1.0f);
+    EXPECT_NEAR(t_back.data<float>()[2], -10.0f, 2.0f);
+}
+
+TEST_F(DTypeConversionTest, FP8E4M3ToInt32) {
+    auto t = tenzor::ones({2}, DType::Float32, Device::cpu());
+    t.data<float>()[0] = 7.0f;
+    t.data<float>()[1] = -3.0f;
+
+    auto t_fp8 = t.to(DType::FP8_E4M3);
+    auto t_int = t_fp8.to(DType::Int32);
+    ASSERT_EQ(t_int.dtype(), DType::Int32);
+    EXPECT_NEAR(t_int.data<int32_t>()[0], 7, 1);
+    EXPECT_NEAR(t_int.data<int32_t>()[1], -3, 1);
+}
+
+TEST_F(DTypeConversionTest, FP8E4M3ZeroValues) {
+    // Ensure zero converts correctly (not garbage)
+    auto t = tenzor::zeros({8}, DType::Float32, Device::cpu());
+    auto t_fp8 = t.to(DType::FP8_E4M3);
+    auto t_back = t_fp8.to(DType::Float32);
+
+    for (int64_t i = 0; i < 8; ++i) {
+        EXPECT_FLOAT_EQ(t_back.data<float>()[i], 0.0f)
+            << "Element " << i << " should be zero after FP8 roundtrip";
+    }
+}
+
+TEST_F(DTypeConversionTest, FP8CrossConversion) {
+    // E4M3 -> E5M2 conversion
+    auto t = tenzor::ones({2}, DType::Float32, Device::cpu());
+    t.data<float>()[0] = 1.5f;
+    t.data<float>()[1] = -4.0f;
+
+    auto t_e4m3 = t.to(DType::FP8_E4M3);
+    auto t_e5m2 = t_e4m3.to(DType::FP8_E5M2);
+    ASSERT_EQ(t_e5m2.dtype(), DType::FP8_E5M2);
+
+    auto t_back = t_e5m2.to(DType::Float32);
+    EXPECT_NEAR(t_back.data<float>()[0], 1.5f, 0.5f);
+    EXPECT_NEAR(t_back.data<float>()[1], -4.0f, 1.0f);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

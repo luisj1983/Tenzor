@@ -1,0 +1,657 @@
+#include "vulkan_ops_common.hpp"
+
+namespace tenzor {
+
+// ============================================================================
+// Vision Operations Implementation
+// ============================================================================
+
+/**
+ * @brief Gather relative position bias for Swin Transformer attention
+ *
+ * Gathers position bias values from a table using precomputed indices.
+ * table: [table_size*table_size, num_heads] - position bias table
+ * indices: [num_positions, num_positions] - lookup indices (Int64)
+ * output: [num_positions, num_positions, num_heads] - gathered biases
+ */
+auto VulkanBackend::dispatchGatherRelativePositionBias(const Tensor& table, const Tensor& indices,
+                                                        int64_t num_positions, int64_t num_heads) -> Tensor {
+    int32_t device_id = table.device().index;
+
+    // Select shader based on dtype
+    std::string shader_name;
+    switch (table.dtype()) {
+        case DType::Float64:
+            shader_name = "gather_relative_position_bias_f64";
+            break;
+        case DType::Float16:
+            shader_name = "gather_relative_position_bias_f16";
+            break;
+        default:
+            shader_name = "gather_relative_position_bias";
+            break;
+    }
+
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    // Output shape: [num_positions, num_positions, num_heads]
+    std::vector<int64_t> out_shape = {num_positions, num_positions, num_heads};
+    Tensor output(out_shape, table.dtype(), table.device());
+
+    uint32_t total_elements = static_cast<uint32_t>(num_positions * num_positions * num_heads);
+
+    // Push constants
+    struct PushConstants {
+        uint32_t num_positions;
+        uint32_t num_heads;
+        uint32_t total_elements;
+    } push_constants;
+
+    push_constants.num_positions = static_cast<uint32_t>(num_positions);
+    push_constants.num_heads = static_cast<uint32_t>(num_heads);
+    push_constants.total_elements = total_elements;
+
+    // Get VkBuffer handles
+    const void* buffer_table = table.data_ptr();
+    const void* buffer_indices = indices.data_ptr();
+    const void* buffer_output = output.data_ptr();
+
+    // Calculate buffer sizes
+    size_t table_size = table.numel() * table.dtype_size();
+    size_t indices_size = indices.numel() * indices.dtype_size();
+    size_t output_size = output.numel() * output.dtype_size();
+
+    // Allocate and write descriptor set
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, buffer_table},
+        {1, buffer_indices},
+        {2, buffer_output}
+    };
+    std::vector<size_t> sizes = {table_size, indices_size, output_size};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    // Execute compute shader
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    // Bind descriptor sets
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+
+    // Set push constants
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &push_constants);
+
+    // Dispatch compute workgroups
+    uint32_t workgroups = div_wg(total_elements, devices_[device_id].workgroupSize);
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    // Add memory barrier
+    insertComputeOnlyBarrier(cmdBuffer);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+// ============================================================================
+// Shape Operations Implementation
+// ============================================================================
+
+/**
+ * @brief Reshape tensor - metadata-only operation (no data movement)
+ *
+ * Reshapes the tensor to the new shape. This is a metadata-only operation
+ * that doesn't move data, just creates a new view with different dimensions.
+ */
+auto VulkanBackend::dispatchReshape(const Tensor& input, const std::vector<int64_t>& new_shape) -> Tensor {
+    // Verify total elements match
+    int64_t old_numel = input.numel();
+    int64_t new_numel = 1;
+    for (int64_t dim : new_shape) {
+        new_numel *= dim;
+    }
+
+    if (old_numel != new_numel) {
+        throw std::invalid_argument(
+            "Reshape: total elements must match (old=" + std::to_string(old_numel) +
+            ", new=" + std::to_string(new_numel) + ")"
+        );
+    }
+
+    // For contiguous tensors, reshape is just metadata manipulation
+    // Create a view that shares storage with the input tensor
+    if (!input.is_contiguous()) {
+        // Need to make contiguous first, then reshape
+        Tensor contiguous = dispatchContiguous(input);
+        return dispatchReshape(contiguous, new_shape);
+    }
+
+    // Create new tensor that shares storage (view)
+    Tensor result;
+    result.impl_ = make_intrusive<TensorImpl>(*input.impl_);
+    result.mutable_shape() = new_shape;
+    result.mutable_strides() = tenzor::compute_strides(new_shape);
+
+    return result;
+}
+
+/**
+ * @brief Transpose two dimensions using compute shader
+ *
+ * Swaps two dimensions of the tensor, reordering data in memory according
+ * to the transposed layout.
+ */
+auto VulkanBackend::dispatchTranspose(const Tensor& input, int64_t dim0, int64_t dim1) -> Tensor {
+    auto input_shape = input.shape();
+    int32_t ndim = input.ndim();
+
+    // Normalize negative dimensions
+    if (dim0 < 0) dim0 += ndim;
+    if (dim1 < 0) dim1 += ndim;
+
+    if (dim0 < 0 || dim0 >= ndim || dim1 < 0 || dim1 >= ndim) {
+        throw std::invalid_argument("Transpose: dimension out of range");
+    }
+
+    // Create output shape
+    std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
+    std::swap(out_shape[dim0], out_shape[dim1]);
+
+    // Calculate output strides
+    std::vector<int64_t> out_strides(ndim);
+    out_strides[ndim - 1] = 1;
+    for (int i = ndim - 2; i >= 0; i--) {
+        out_strides[i] = out_strides[i + 1] * out_shape[i + 1];
+    }
+
+    int32_t device_id = input.device().index;
+
+    // For simple 2D transpose or contiguous case, use optimized path
+    if (ndim == 2 && input.is_contiguous()) {
+        // Use simplified transform shader for 2D case
+        // For Float16/BFloat16, convert to Float32, transpose, convert back
+        DType orig_dtype = input.dtype();
+        Tensor transpose_input = input;
+        if (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16) {
+            transpose_input = input.to(DType::Float32);
+        }
+        std::string shader_name;
+        if (transpose_input.dtype() == DType::Float64) {
+            shader_name = "transform_f64";
+        } else {
+            shader_name = "transform";
+        }
+        auto* pipeline = getPipeline(shader_name, device_id);
+        Tensor output(out_shape, transpose_input.dtype(), transpose_input.device());
+
+        const void* buffer_in = transpose_input.data_ptr();
+        const void* buffer_out = output.data_ptr();
+
+        size_t buffer_size_in = transpose_input.numel() * transpose_input.dtype_size();
+        size_t buffer_size_out = output.numel() * output.dtype_size();
+
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, buffer_in},
+            {1, buffer_out}
+        };
+        std::vector<size_t> sizes = {buffer_size_in, buffer_size_out};
+
+        VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+            device_id, pipeline, bindings, sizes);
+
+        struct PushConstants {
+            uint32_t n;
+            uint32_t ndim;
+            uint32_t transform;
+            uint32_t rows;
+            uint32_t cols;
+        } push_constants;
+
+        push_constants.n = static_cast<uint32_t>(transpose_input.numel());
+        push_constants.ndim = static_cast<uint32_t>(ndim);
+        push_constants.transform = 1; // transpose
+        push_constants.rows = static_cast<uint32_t>(input_shape[0]);
+        push_constants.cols = static_cast<uint32_t>(input_shape[1]);
+
+        VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+
+        // Insert pre-read barrier to ensure input data from previous ops is ready
+        insertPreReadBarrier(cmdBuffer);
+
+        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(PushConstants), &push_constants);
+
+        uint32_t workgroups = div_wg(transpose_input.numel(), devices_[device_id].workgroupSize);
+        vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+        // Add memory barrier
+        insertComputeOnlyBarrier(cmdBuffer);
+
+        endSingleTimeCommands(cmdBuffer, device_id);
+
+        // Convert back to original dtype if we converted F16/BF16 to F32
+        if (orig_dtype != output.dtype()) {
+            return output.to(orig_dtype);
+        }
+        return output;
+    }
+
+    // For general N-D transpose, delegate to dispatchPermute with appropriate
+    // permutation vector. Transpose(dim0, dim1) is equivalent to permute where
+    // the permutation swaps dim0 and dim1 and leaves all other dims in place.
+    std::vector<int64_t> perm(ndim);
+    for (int32_t i = 0; i < ndim; ++i) perm[i] = i;
+    std::swap(perm[dim0], perm[dim1]);
+    return dispatchPermute(input, perm);
+}
+
+/**
+ * @brief Permute dimensions using compute shader
+ *
+ * Reorders dimensions according to the specified permutation.
+ */
+auto VulkanBackend::dispatchPermute(const Tensor& input, const std::vector<int64_t>& dims) -> Tensor {
+    auto input_shape = input.shape();
+    auto input_strides = input.strides();
+    int32_t ndim = input.ndim();
+    int32_t device_id = input.device().index;
+
+    // Validate permutation
+    if (static_cast<int64_t>(dims.size()) != ndim) {
+        throw std::invalid_argument("Permute: number of dimensions doesn't match");
+    }
+
+    std::vector<bool> seen(ndim, false);
+    for (int64_t dim : dims) {
+        if (dim < 0 || dim >= ndim || seen[dim]) {
+            throw std::invalid_argument("Permute: invalid permutation");
+        }
+        seen[dim] = true;
+    }
+
+    // Create output shape by permuting input shape
+    std::vector<int64_t> out_shape;
+    for (int64_t dim : dims) {
+        out_shape.push_back(input_shape[dim]);
+    }
+
+    // Create output tensor
+    Tensor output(out_shape, input.dtype(), input.device());
+
+    // Get pipeline - select dtype-specific shader variant
+    std::string permute_shader;
+    if (input.dtype() == DType::Float64) permute_shader = "permute_f64";
+    else if (input.dtype() == DType::Float16) permute_shader = "permute_f16";
+    else if (input.dtype() == DType::BFloat16) permute_shader = "permute_bf16";
+    else permute_shader = "permute";
+    auto* pipeline = getPipeline(permute_shader, device_id);
+    auto& ctx = devices_[device_id];
+
+    // Get Vulkan buffers for input and output
+    const void* buffer_input = input.data_ptr();
+    const void* buffer_output = output.data_ptr();
+
+    size_t buffer_size_input = input.numel() * input.dtype_size();
+    size_t buffer_size_output = output.numel() * output.dtype_size();
+
+    // Create temporary buffers for shape, strides, and permutation on device
+    // Convert int64_t to int32_t for shader compatibility
+    std::vector<int32_t> shape_i32(ndim);
+    std::vector<int32_t> strides_i32(ndim);
+    std::vector<int32_t> dims_i32(ndim);
+
+    for (int32_t i = 0; i < ndim; ++i) {
+        shape_i32[i] = static_cast<int32_t>(input_shape[i]);
+        strides_i32[i] = static_cast<int32_t>(input_strides[i]);
+        dims_i32[i] = static_cast<int32_t>(dims[i]);
+    }
+
+    // Allocate temporary device buffers for metadata
+    size_t metadata_size = ndim * sizeof(int32_t);
+
+    // Acquire staging buffer from pool to upload metadata
+    size_t staging_idx = acquireStagingBuffer(device_id, metadata_size * 3);
+    auto& staging = stagingPools_[device_id].buffers[staging_idx];
+
+    // Map and copy all metadata
+    void* mapped = staging.buffer->map();
+    std::memcpy(static_cast<char*>(mapped), shape_i32.data(), metadata_size);
+    std::memcpy(static_cast<char*>(mapped) + metadata_size, strides_i32.data(), metadata_size);
+    std::memcpy(static_cast<char*>(mapped) + metadata_size * 2, dims_i32.data(), metadata_size);
+    staging.buffer->unmap();
+
+    // Create device-local buffers for metadata
+    auto buffer_shape = std::make_unique<vulkan::VulkanBuffer>(
+        ctx.device, ctx.physicalDevice, metadata_size,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+    );
+
+    auto buffer_strides = std::make_unique<vulkan::VulkanBuffer>(
+        ctx.device, ctx.physicalDevice, metadata_size,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+    );
+
+    auto buffer_perm = std::make_unique<vulkan::VulkanBuffer>(
+        ctx.device, ctx.physicalDevice, metadata_size,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+    );
+
+    // Copy metadata from staging to device buffers
+    VkCommandBuffer copyCmd = beginSingleTimeCommands(device_id);
+
+    VkBufferCopy copyRegion{};
+    copyRegion.size = metadata_size;
+
+    copyRegion.srcOffset = 0;
+    vkCmdCopyBuffer(copyCmd, staging.buffer->buffer(), buffer_shape->buffer(), 1, &copyRegion);
+
+    copyRegion.srcOffset = metadata_size;
+    vkCmdCopyBuffer(copyCmd, staging.buffer->buffer(), buffer_strides->buffer(), 1, &copyRegion);
+
+    copyRegion.srcOffset = metadata_size * 2;
+    vkCmdCopyBuffer(copyCmd, staging.buffer->buffer(), buffer_perm->buffer(), 1, &copyRegion);
+
+    // Insert transfer-to-compute barrier before the compute dispatch reads this data
+    insertTransferToComputeBarrier(copyCmd);
+
+    endSingleTimeCommands(copyCmd, device_id);
+
+    // With batching enabled, force submit now to ensure staging buffer
+    // content is copied to device buffers before staging buffer can be reused.
+    if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
+        submitBatchIfNeeded(device_id, true);  // Force submit the copy commands
+        ensurePendingWorkComplete(device_id);   // Wait for copies to complete
+    }
+
+    // Release staging buffer back to pool for reuse
+    releaseStagingBuffer(device_id, staging_idx);
+
+    // Set up descriptor set with all buffers
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, buffer_input},
+        {1, buffer_output},
+        {2, buffer_shape->buffer()},
+        {3, buffer_strides->buffer()},
+        {4, buffer_perm->buffer()}
+    };
+    std::vector<size_t> sizes = {
+        buffer_size_input,
+        buffer_size_output,
+        metadata_size,
+        metadata_size,
+        metadata_size
+    };
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    // Push constants
+    struct PushConstants {
+        uint32_t n;
+        uint32_t ndim;
+    } push_constants;
+
+    push_constants.n = static_cast<uint32_t>(output.numel());
+    push_constants.ndim = static_cast<uint32_t>(ndim);
+
+    // Execute compute shader
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+
+    // Insert pre-read barrier to ensure input data from previous ops is ready
+    insertPreReadBarrier(cmdBuffer);
+
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &push_constants);
+
+    uint32_t workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    // Add memory barrier
+    insertComputeOnlyBarrier(cmdBuffer);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    // CRITICAL: Force batch submission before temp buffers go out of scope!
+    // buffer_shape, buffer_strides, and buffer_perm are unique_ptrs that will
+    // be destroyed when this function returns. With batching enabled, the
+    // command buffer still references these buffers. We must submit and wait
+    // for completion before destroying them.
+    if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
+        submitBatchIfNeeded(device_id, true);  // Force submit
+        ensurePendingWorkComplete(device_id);   // Wait for GPU
+    }
+
+    return output;
+}
+
+/**
+ * @brief Squeeze - remove dimensions of size 1 (metadata-only)
+ */
+auto VulkanBackend::dispatchSqueeze(const Tensor& input, int64_t dim) -> Tensor {
+    // Make this a pure metadata-only operation like the core Tensor::squeeze()
+    // This prevents potential recursion through reshape → contiguous
+
+    auto input_shape = input.shape();
+    auto input_strides = input.strides();
+    int32_t ndim = input.ndim();
+
+    std::vector<int64_t> new_shape;
+    std::vector<int64_t> new_strides;
+
+    if (dim < 0) {
+        // Squeeze all dimensions of size 1
+        for (int64_t i = 0; i < ndim; i++) {
+            if (input_shape[i] != 1) {
+                new_shape.push_back(input_shape[i]);
+                new_strides.push_back(input_strides[i]);
+            }
+        }
+    } else {
+        // Normalize negative dimension
+        if (dim < 0) dim += ndim;
+        if (dim < 0 || dim >= ndim) {
+            throw std::invalid_argument("Squeeze: dimension out of range");
+        }
+
+        // Squeeze specific dimension
+        if (input_shape[dim] != 1) {
+            throw std::invalid_argument("Squeeze: dimension size must be 1");
+        }
+
+        for (int64_t i = 0; i < ndim; i++) {
+            if (i != dim) {
+                new_shape.push_back(input_shape[i]);
+                new_strides.push_back(input_strides[i]);
+            }
+        }
+    }
+
+    // If all dimensions were size 1, keep at least one
+    if (new_shape.empty()) {
+        new_shape.push_back(1);
+        new_strides.push_back(1);
+    }
+
+    // Create result tensor sharing storage (zero-copy metadata-only operation)
+    Tensor result;
+    result.impl_ = make_intrusive<TensorImpl>(*(input.impl_));
+    result.mutable_shape() = std::move(new_shape);
+    result.mutable_strides() = std::move(new_strides);
+
+    return result;
+}
+
+/**
+ * @brief Unsqueeze - add dimension of size 1 (metadata-only)
+ */
+auto VulkanBackend::dispatchUnsqueeze(const Tensor& input, int64_t dim) -> Tensor {
+    auto input_shape = input.shape();
+    int32_t ndim = input.ndim();
+
+    // Normalize negative dimension (allow ndim as well for appending)
+    if (dim < 0) dim += ndim + 1;
+    if (dim < 0 || dim > ndim) {
+        throw std::invalid_argument("Unsqueeze: dimension out of range");
+    }
+
+    // Create output shape with new dimension of size 1
+    std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
+    out_shape.insert(out_shape.begin() + dim, 1);
+
+    // Metadata-only operation - just reshape
+    return dispatchReshape(input, out_shape);
+}
+
+/**
+ * @brief Contiguous - ensure tensor is contiguous in memory
+ *
+ * If already contiguous with zero offset, returns the input tensor.
+ * Otherwise, creates a new contiguous copy using GPU strided_copy kernel.
+ */
+auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
+    // If already contiguous AND starts at offset 0, return as-is.
+    // Views (slices) may be stride-contiguous but sit at an offset within
+    // a shared parent buffer; they need to be copied to own storage.
+    if (input.is_contiguous() && input.offset() == 0) {
+        return input;
+    }
+
+    // For non-contiguous tensors, use GPU kernel to reorder the data
+    const int64_t total_elements = input.numel();
+    const int64_t ndims = input.ndim();
+    const int64_t base_offset = input.is_valid() ? input.offset() : 0;
+
+    // Create new contiguous tensor with same shape, dtype, device
+    Tensor result(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                  input.dtype(), input.device());
+
+    if (total_elements == 0) {
+        return result;
+    }
+
+    int32_t device_id = input.device().index;
+
+    // Select shader based on dtype (element size must match shader buffer layout)
+    std::string shader_name = "strided_copy";
+    if (input.dtype() == DType::Float64 || input.dtype() == DType::Int64) {
+        shader_name = "strided_copy_f64";  // uvec2 layout works for any 8-byte type
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        shader_name = "strided_copy_f16";
+    } else if (input.dtype() == DType::UInt8 || input.dtype() == DType::Bool ||
+               input.dtype() == DType::Int8) {
+        shader_name = "strided_copy_u8";
+    }
+
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    // Get Vulkan buffers - use base storage pointer for input
+    const void* base_storage_ptr = input.is_valid() ? input.storage()->data() : input.data_ptr();
+    const void* buffer_in = const_cast<void*>(base_storage_ptr);
+    const void* buffer_out = result.data_ptr();
+
+    // Calculate buffer sizes
+    int64_t max_offset = base_offset;
+    auto strides = input.strides();
+    auto shape = input.shape();
+    if (ndims > 0) {
+        for (int64_t dim = 0; dim < ndims; ++dim) {
+            max_offset += (shape[dim] - 1) * std::abs(strides[dim]);
+        }
+    }
+    size_t input_buffer_size = (max_offset + 1) * input.dtype_size();
+    size_t output_buffer_size = total_elements * input.dtype_size();
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, buffer_in},
+        {1, buffer_out}
+    };
+    std::vector<size_t> sizes = {input_buffer_size, output_buffer_size};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    // Push constants structure matching the shader
+    // IMPORTANT: The shader uses uvec4/ivec4 which require 16-byte alignment
+    // We need padding after base_offset to align the first uvec4
+    struct PushConstants {
+        uint32_t n_elements;
+        uint32_t ndims;
+        uint32_t base_offset;
+        uint32_t _padding;  // Padding to align shape_0_3 to 16 bytes
+        uint32_t shape_0_3[4];   // shape[0..3] as uvec4
+        uint32_t shape_4_7[4];   // shape[4..7] as uvec4
+        int32_t strides_0_3[4];  // strides[0..3] as ivec4
+        int32_t strides_4_7[4];  // strides[4..7] as ivec4
+    } push_constants;
+
+    push_constants.n_elements = static_cast<uint32_t>(total_elements);
+    push_constants.ndims = static_cast<uint32_t>(ndims);
+    push_constants.base_offset = static_cast<uint32_t>(base_offset);
+    push_constants._padding = 0;
+
+    // Initialize all shape/stride values to defaults
+    for (int i = 0; i < 4; ++i) {
+        push_constants.shape_0_3[i] = 1;
+        push_constants.shape_4_7[i] = 1;
+        push_constants.strides_0_3[i] = 0;
+        push_constants.strides_4_7[i] = 0;
+    }
+
+    // Fill in actual shape and strides
+    for (int64_t i = 0; i < ndims && i < 4; ++i) {
+        push_constants.shape_0_3[i] = static_cast<uint32_t>(shape[i]);
+        push_constants.strides_0_3[i] = static_cast<int32_t>(strides[i]);
+    }
+    for (int64_t i = 4; i < ndims && i < 8; ++i) {
+        push_constants.shape_4_7[i - 4] = static_cast<uint32_t>(shape[i]);
+        push_constants.strides_4_7[i - 4] = static_cast<int32_t>(strides[i]);
+    }
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+
+    // Insert pre-read barrier to ensure input data from previous ops is ready
+    // This is critical for strided_copy which reads non-contiguous data
+    insertPreReadBarrier(cmdBuffer);
+
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &push_constants);
+
+    uint32_t workgroups = div_wg(total_elements, devices_[device_id].workgroupSize);
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    // Add memory barrier
+    insertComputeOnlyBarrier(cmdBuffer);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    // Ensure strided_copy completes before result is used.
+    // Without this, command batching defers GPU submission, causing hangs
+    // when the backward pass chain reads the result immediately.
+    if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
+        submitBatchIfNeeded(device_id, true);   // Force immediate submit
+        ensurePendingWorkComplete(device_id);   // Wait for GPU completion
+    }
+
+    return result;
+}
+
+} // namespace tenzor

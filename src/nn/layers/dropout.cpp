@@ -391,4 +391,96 @@ auto AlphaDropout::forward_impl(const Variable& input) -> Variable {
     return output;
 }
 
+// Variational Dropout (Gal & Ghahramani 2016)
+VariationalDropout::VariationalDropout(double p) : p_(p) {
+    if (p < 0.0 || p > 1.0) {
+        throw std::invalid_argument("VariationalDropout probability must be in [0, 1]");
+    }
+}
+
+auto VariationalDropout::reset_mask() -> void {
+    mask_valid_ = false;
+}
+
+auto VariationalDropout::forward_impl(const Variable& input) -> Variable {
+    if (!is_training()) {
+        return input;
+    }
+
+    auto shape_span = input.tensor().shape();
+    std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
+
+    if (p_ == 1.0) {
+        auto output_tensor = zeros(shape_vec, input.tensor().dtype(), input.tensor().device());
+        return Variable(output_tensor, input.requires_grad());
+    }
+
+    if (p_ == 0.0) {
+        return input;
+    }
+
+    double scale = 1.0 / (1.0 - p_);
+
+    // Generate mask on first call after reset (or first call ever)
+    if (!mask_valid_) {
+        // For 3D input (T, B, F): mask shape is (1, B, F) to broadcast over time
+        // For 2D input (B, F): mask shape is (B, F)
+        std::vector<int64_t> mask_shape;
+        if (shape_vec.size() >= 3) {
+            mask_shape.push_back(1);
+            for (size_t i = 1; i < shape_vec.size(); ++i) {
+                mask_shape.push_back(shape_vec[i]);
+            }
+        } else {
+            mask_shape = shape_vec;
+        }
+
+        // Generate Bernoulli mask: 1 with probability (1-p), 0 with probability p
+        auto rand_vals = rand(mask_shape, input.tensor().dtype(), input.tensor().device());
+        auto threshold = full(mask_shape, static_cast<float>(1.0 - p_),
+                            input.tensor().dtype(), input.tensor().device());
+        // mask = (rand >= p) ? 1 : 0 — implemented as rand < (1-p)
+        // Use comparison: values < threshold get 1.0, else 0.0
+        mask_ = zeros(mask_shape, input.tensor().dtype(), input.tensor().device());
+        auto rand_data = rand_vals.data<float>();
+        auto mask_data = mask_.data<float>();
+        int64_t mask_numel = 1;
+        for (auto d : mask_shape) mask_numel *= d;
+        float thresh = static_cast<float>(1.0 - p_);
+        for (int64_t i = 0; i < mask_numel; ++i) {
+            mask_data[i] = (rand_data[i] < thresh) ? 1.0f : 0.0f;
+        }
+
+        mask_valid_ = true;
+    }
+
+    // Apply mask with scaling: output = input * mask * scale
+    auto masked = mul(input.tensor(), mask_);
+    auto scale_shape = shape_vec;
+    auto output_tensor = mul(masked,
+        full(scale_shape, static_cast<float>(scale),
+             input.tensor().dtype(), input.tensor().device()));
+
+    auto output = Variable(output_tensor, input.requires_grad());
+
+    // Set up autograd if needed
+    if (input.requires_grad()) {
+        auto dropout_fn = std::make_shared<DropoutBackward>(mask_, scale);
+
+        std::vector<Variable> input_vars;
+        input_vars.push_back(input);
+        dropout_fn->set_input_variables(input_vars);
+
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        if (input.grad_fn()) {
+            next_funcs.push_back(input.grad_fn());
+        }
+        dropout_fn->set_next_functions(next_funcs);
+
+        output.set_grad_fn(dropout_fn);
+    }
+
+    return output;
+}
+
 } // namespace tenzor::nn

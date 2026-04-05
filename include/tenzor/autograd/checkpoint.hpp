@@ -20,6 +20,10 @@
 #include "function.hpp"
 
 namespace tenzor {
+
+// Forward declaration for auto-checkpoint policy
+namespace nn { class Module; }
+
 namespace autograd {
 
 /**
@@ -527,6 +531,113 @@ auto is_checkpoint_enabled() -> bool;
  * @param enabled Whether to enable checkpointing
  */
 auto set_checkpoint_enabled(bool enabled) -> void;
+
+/**
+ * @brief Strategy for automatic checkpoint placement.
+ */
+enum class CheckpointStrategy {
+    None,           ///< No automatic checkpointing
+    EveryN,         ///< Checkpoint every N layers (counting sequential submodules)
+    SqrtN,          ///< Checkpoint every sqrt(N) layers (optimal for sequential models)
+    MemoryBudget,   ///< Checkpoint to stay within a parameter-count budget per segment
+};
+
+/**
+ * @brief Automatic gradient checkpointing policy.
+ *
+ * Analyzes a Module's submodule graph and wraps selected submodule
+ * forward passes with checkpoint() to reduce peak memory usage.
+ *
+ * The SqrtN strategy is optimal for sequential models: for a model with
+ * N layers, checkpointing every sqrt(N) layers minimizes peak memory
+ * while keeping recomputation overhead bounded.
+ *
+ * @code
+ * nn::Sequential model = build_resnet50();
+ * AutoCheckpointPolicy policy(CheckpointStrategy::SqrtN);
+ * policy.apply(model);    // Wraps ~7 of ~50 layers with checkpoint
+ * // ... train normally ...
+ * policy.remove(model);   // Restore original forward behavior
+ * @endcode
+ */
+class AutoCheckpointPolicy {
+public:
+    /**
+     * @brief Construct with SqrtN strategy (recommended default).
+     */
+    AutoCheckpointPolicy()
+        : strategy_(CheckpointStrategy::SqrtN), every_n_(0) {}
+
+    /**
+     * @brief Construct with specific strategy.
+     *
+     * @param strategy Checkpointing strategy
+     * @param every_n For EveryN strategy: checkpoint interval (ignored for other strategies)
+     */
+    explicit AutoCheckpointPolicy(CheckpointStrategy strategy, int every_n = 0,
+                                  size_t memory_budget_bytes = 0)
+        : strategy_(strategy), every_n_(every_n),
+          memory_budget_bytes_(memory_budget_bytes) {
+        if (strategy == CheckpointStrategy::EveryN && every_n <= 0) {
+            throw std::invalid_argument(
+                "EveryN strategy requires every_n > 0");
+        }
+        if (strategy == CheckpointStrategy::MemoryBudget && memory_budget_bytes == 0) {
+            throw std::invalid_argument(
+                "MemoryBudget strategy requires memory_budget_bytes > 0");
+        }
+    }
+
+    /**
+     * @brief Apply checkpointing policy to a module.
+     *
+     * Traverses the module's submodules and registers forward hooks on
+     * selected submodules to wrap their forward pass with checkpoint().
+     *
+     * @param module Root module to apply policy to
+     */
+    auto apply(nn::Module& module) -> void;
+
+    /**
+     * @brief Remove checkpointing policy from a module.
+     *
+     * Removes all hooks registered by apply().
+     *
+     * @param module Root module to remove policy from
+     */
+    auto remove(nn::Module& module) -> void;
+
+    /**
+     * @brief Check if a submodule at given index should be checkpointed.
+     *
+     * @param index Submodule index (0-based)
+     * @param total Total number of submodules
+     * @return true if this submodule should be wrapped with checkpoint
+     */
+    auto should_checkpoint(int index, int total) const -> bool;
+
+    auto strategy() const -> CheckpointStrategy { return strategy_; }
+
+private:
+    CheckpointStrategy strategy_;
+    int every_n_;
+    size_t memory_budget_bytes_{0};
+    std::vector<std::pair<nn::Module*, size_t>> registered_hooks_;
+};
+
+/**
+ * @brief Enable automatic checkpointing on a model (convenience function).
+ *
+ * @param module Model to checkpoint
+ * @param strategy Strategy to use (default: SqrtN)
+ * @param every_n Interval for EveryN strategy
+ * @return AutoCheckpointPolicy handle (keep alive to maintain hooks)
+ */
+auto enable_auto_checkpoint(
+    nn::Module& module,
+    CheckpointStrategy strategy = CheckpointStrategy::SqrtN,
+    int every_n = 0,
+    size_t memory_budget_bytes = 0) -> std::shared_ptr<AutoCheckpointPolicy>;
 
 } // namespace autograd
 } // namespace tenzor

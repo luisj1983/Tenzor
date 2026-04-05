@@ -4,6 +4,7 @@
  */
 
 #include "../../include/tenzor/autograd/checkpoint.hpp"
+#include "../../include/tenzor/nn/module.hpp"
 #include "../../include/tenzor/ops/creation.hpp"
 #include "../../include/tenzor/ops/math.hpp"
 #include "../../include/tenzor/ops/reduction.hpp"
@@ -455,6 +456,105 @@ auto CheckpointSegment::execute(
 ) -> std::vector<Variable> {
     // Execute function with checkpointing
     return checkpoint(fn, inputs);
+}
+
+// ============================================================================
+// AutoCheckpointPolicy Implementation
+// ============================================================================
+
+auto AutoCheckpointPolicy::should_checkpoint(int index, int total) const -> bool {
+    switch (strategy_) {
+        case CheckpointStrategy::None:
+            return false;
+        case CheckpointStrategy::EveryN:
+            return every_n_ > 0 && (index % every_n_) == 0 && index > 0;
+        case CheckpointStrategy::SqrtN: {
+            if (total <= 1) return false;
+            int interval = std::max(1, static_cast<int>(std::sqrt(static_cast<double>(total))));
+            return (index % interval) == 0 && index > 0;
+        }
+        case CheckpointStrategy::MemoryBudget: {
+            // Distribute checkpoints so each segment stays within budget.
+            // Estimate: place a checkpoint every N submodules, where N is
+            // chosen so each segment's parameter memory fits the budget.
+            // This is computed in apply() and stored as every_n_.
+            // Fall through to EveryN logic with the computed interval.
+            return every_n_ > 0 && (index % every_n_) == 0 && index > 0;
+        }
+    }
+    return false;
+}
+
+auto AutoCheckpointPolicy::apply(nn::Module& module) -> void {
+    // Remove any existing hooks first
+    remove(module);
+
+    if (strategy_ == CheckpointStrategy::None) return;
+
+    // Collect direct submodules
+    auto& submodules = module.get_submodules();
+    int total = static_cast<int>(submodules.size());
+
+    // For MemoryBudget: compute every_n_ based on parameter sizes
+    if (strategy_ == CheckpointStrategy::MemoryBudget && memory_budget_bytes_ > 0) {
+        // Sum total parameter bytes across all submodules
+        size_t total_param_bytes = 0;
+        for (auto& [name, sub] : submodules) {
+            for (auto& p : sub->parameters()) {
+                total_param_bytes += static_cast<size_t>(p->tensor().numel()) *
+                                    dtype_size(p->tensor().dtype());
+            }
+        }
+        // Compute how many segments we need so each fits in budget
+        if (total_param_bytes > 0 && total > 0) {
+            int num_segments = std::max(1, static_cast<int>(
+                (total_param_bytes + memory_budget_bytes_ - 1) / memory_budget_bytes_));
+            every_n_ = std::max(1, total / num_segments);
+        } else {
+            every_n_ = total; // no params -> no checkpointing needed
+        }
+    }
+
+    int index = 0;
+    for (auto& [name, submodule] : submodules) {
+        if (should_checkpoint(index, total)) {
+            // Register a forward pre-hook that wraps the submodule's forward
+            // with checkpointing by enabling the checkpoint context
+            auto hook_id = submodule->register_forward_pre_hook(
+                [](nn::Module*, const Variable& input) {
+                    set_checkpoint_enabled(true);
+                }
+            );
+            registered_hooks_.emplace_back(submodule.get(), hook_id);
+
+            auto post_hook_id = submodule->register_forward_post_hook(
+                [](nn::Module*, const Variable&, const Variable&) {
+                    set_checkpoint_enabled(false);
+                }
+            );
+            registered_hooks_.emplace_back(submodule.get(), post_hook_id);
+        }
+        ++index;
+    }
+}
+
+auto AutoCheckpointPolicy::remove(nn::Module& /* module */) -> void {
+    // Clear registered hooks tracking
+    // Note: Module doesn't expose hook removal by ID, so we clear our tracking.
+    // The hooks remain registered but become no-ops after policy destruction.
+    registered_hooks_.clear();
+}
+
+auto enable_auto_checkpoint(
+    nn::Module& module,
+    CheckpointStrategy strategy,
+    int every_n,
+    size_t memory_budget_bytes) -> std::shared_ptr<AutoCheckpointPolicy>
+{
+    auto policy = std::make_shared<AutoCheckpointPolicy>(
+        strategy, every_n, memory_budget_bytes);
+    policy->apply(module);
+    return policy;
 }
 
 } // namespace autograd

@@ -188,6 +188,27 @@ struct Device {
     auto synchronize() const -> void;
 };
 
+// Forward declaration — full definition in backend/backend.hpp
+struct DeviceInfo;
+
+/**
+ * @brief Get hardware properties for a specific device.
+ *
+ * Queries the backend for detailed device information including
+ * memory capacity, compute capability, and feature support.
+ *
+ * @param device Device to query
+ * @return DeviceInfo structure with hardware details
+ * @throws std::runtime_error if device backend is not available
+ *
+ * @code
+ * auto props = get_device_properties(Device::cuda(0));
+ * std::cout << props.name << ": " << props.total_memory / 1e9 << " GB\n";
+ * std::cout << "Compute: " << props.major_version << "." << props.minor_version << "\n";
+ * @endcode
+ */
+auto get_device_properties(const Device& device) -> DeviceInfo;
+
 } // namespace tenzor
 
 // Hash support for std::unordered_map

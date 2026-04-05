@@ -64,7 +64,7 @@ namespace tenzor::nn {
 #if defined(__x86_64__) || defined(_M_X64)
 // Fused LayerNorm that computes output AND saves mean/rstd for backward pass
 // Uses 2-pass algorithm: (1) sum + sum_sq, (2) normalize
-// var = sum_sq/n - mean^2 (more cache-efficient than 3-pass approach)
+// var = sum((x - mean)^2) / N (numerically stable two-pass algorithm)
 static void fused_layer_norm_f32(
     const float* __restrict__ input,
     const float* __restrict__ weight,
