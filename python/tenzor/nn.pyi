@@ -610,6 +610,29 @@ class GRU(Module):
         h_0: Optional[Tensor] = None
     ) -> Tuple[Tensor, Tensor]: ...
 
+# RNN Cell layers
+class RNNCell(Module):
+    """An Elman RNN cell."""
+
+    def __init__(self, input_size: int, hidden_size: int, bias: bool = True,
+                 nonlinearity: str = "tanh") -> None: ...
+
+    def forward(self, input: Tensor, hx: Optional[Tensor] = None) -> Tensor: ...
+
+class LSTMCell(Module):
+    """A long short-term memory (LSTM) cell."""
+
+    def __init__(self, input_size: int, hidden_size: int, bias: bool = True) -> None: ...
+
+    def forward(self, input: Tensor, hx: Optional[Tuple[Tensor, Tensor]] = None) -> Tuple[Tensor, Tensor]: ...
+
+class GRUCell(Module):
+    """A gated recurrent unit (GRU) cell."""
+
+    def __init__(self, input_size: int, hidden_size: int, bias: bool = True) -> None: ...
+
+    def forward(self, input: Tensor, hx: Optional[Tensor] = None) -> Tensor: ...
+
 # Transformer layers
 class MultiheadAttention(Module):
     """Multi-head attention mechanism."""

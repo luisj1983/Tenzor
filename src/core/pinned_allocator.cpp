@@ -282,7 +282,7 @@ auto PinnedMemoryAllocator::defragment() -> size_t {
                   });
 
         // Coalesce adjacent free blocks
-        for (size_t i = 0; i < sorted_blocks.size() - 1; ++i) {
+        for (size_t i = 0; i + 1 < sorted_blocks.size(); ++i) {
             auto* current = sorted_blocks[i];
             auto* next = sorted_blocks[i + 1];
 

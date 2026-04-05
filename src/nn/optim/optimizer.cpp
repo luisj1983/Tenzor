@@ -100,6 +100,11 @@ auto Optimizer::zero_grad() -> void {
             } else {
                 // GPU path: in-place zero via backend memset (avoids allocation)
                 auto* backend = backend_registry().get_backend(grad.device().type);
+                if (!backend) {
+                    throw std::runtime_error(
+                        "Optimizer::zero_grad: no backend registered for device "
+                        + grad.device().to_string());
+                }
                 backend->memset(grad.data_ptr(), 0,
                                 grad.numel() * dtype_size(grad.dtype()),
                                 grad.device().index);

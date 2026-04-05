@@ -116,10 +116,19 @@ auto MulBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable>
 
 auto MulBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     require_saved_tensors(2);
-    // d(a*b)/da = b, d(a*b)/db = a
-    // Handle broadcasting
-    auto grad_a_unreduced = mul(grad_outputs[0], saved_tensors_[1]);
-    auto grad_b_unreduced = mul(grad_outputs[0], saved_tensors_[0]);
+    const auto& a = saved_tensors_[0];
+    const auto& b = saved_tensors_[1];
+    const auto& grad = grad_outputs[0];
+
+    Tensor grad_a_unreduced, grad_b_unreduced;
+    if (a.is_complex() || b.is_complex()) {
+        // Wirtinger derivative: d/d(conj(a)) (a*b) = conj(b) * grad
+        grad_a_unreduced = mul(grad, conj(b));
+        grad_b_unreduced = mul(grad, conj(a));
+    } else {
+        grad_a_unreduced = mul(grad, b);
+        grad_b_unreduced = mul(grad, a);
+    }
 
     auto grad_a = reduce_grad_for_broadcasting(grad_a_unreduced, input_shape_a_);
     auto grad_b = reduce_grad_for_broadcasting(grad_b_unreduced, input_shape_b_);
@@ -128,8 +137,6 @@ auto MulBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
 }
 
 auto MulBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    // d(a*b)/da = b, d(a*b)/db = a
-    // Use saved Variables if available, otherwise wrap saved Tensors
     Variable saved_a, saved_b;
     if (has_saved_variables()) {
         require_saved_variables(2);
@@ -141,9 +148,17 @@ auto MulBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
         saved_b = Variable(saved_tensors_[1], false);
     }
 
-    // Use Variable operations so multiplication is tracked for higher-order gradients
-    auto grad_a_unreduced = grad_outputs[0] * saved_b;
-    auto grad_b_unreduced = grad_outputs[0] * saved_a;
+    Variable grad_a_unreduced, grad_b_unreduced;
+    if (saved_a.tensor().is_complex() || saved_b.tensor().is_complex()) {
+        // Wirtinger: use conj at tensor level (non-differentiable operation)
+        auto conj_b = Variable(conj(saved_b.tensor()), false);
+        auto conj_a = Variable(conj(saved_a.tensor()), false);
+        grad_a_unreduced = grad_outputs[0] * conj_b;
+        grad_b_unreduced = grad_outputs[0] * conj_a;
+    } else {
+        grad_a_unreduced = grad_outputs[0] * saved_b;
+        grad_b_unreduced = grad_outputs[0] * saved_a;
+    }
 
     auto grad_a = reduce_grad_var_for_broadcasting(grad_a_unreduced, input_shape_a_);
     auto grad_b = reduce_grad_var_for_broadcasting(grad_b_unreduced, input_shape_b_);
@@ -164,9 +179,9 @@ auto DivBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable>
 
 auto DivBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     require_saved_tensors(2);
-    // d(a/b)/da = 1/b, d(a/b)/db = -a/(b^2)
     const auto& a = saved_tensors_[0];
     const auto& b = saved_tensors_[1];
+    const auto& grad = grad_outputs[0];
 
     // Zero-safe: replace zero denominator with epsilon to avoid NaN/Inf
     auto zero_b = zeros(std::vector<int64_t>(b.shape().begin(), b.shape().end()),
@@ -175,9 +190,17 @@ auto DivBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
                       detail::dtype_epsilon(b.dtype()), b.dtype(), b.device());
     auto safe_b = where(eq(b, zero_b), eps_b, b);
 
-    auto grad_a_unreduced = div(grad_outputs[0], safe_b);
-    // grad_b = -a / (b^2) * grad_output = -(a * grad_output) / (b * b)
-    auto grad_b_unreduced = neg(div(mul(a, grad_outputs[0]), mul(safe_b, safe_b)));
+    Tensor grad_a_unreduced, grad_b_unreduced;
+    if (a.is_complex() || b.is_complex()) {
+        // Wirtinger: d/d(conj(a)) (a/b) = 1/conj(b)
+        //            d/d(conj(b)) (a/b) = -conj(a)/conj(b)^2
+        auto conj_b = conj(safe_b);
+        grad_a_unreduced = div(grad, conj_b);
+        grad_b_unreduced = neg(div(mul(conj(a), grad), mul(conj_b, conj_b)));
+    } else {
+        grad_a_unreduced = div(grad, safe_b);
+        grad_b_unreduced = neg(div(mul(a, grad), mul(safe_b, safe_b)));
+    }
 
     auto grad_a = reduce_grad_for_broadcasting(grad_a_unreduced, input_shape_a_);
     auto grad_b = reduce_grad_for_broadcasting(grad_b_unreduced, input_shape_b_);
@@ -206,10 +229,17 @@ auto DivBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     auto safe_b_tensor = where(eq(b_tensor, zero_b), eps_b, b_tensor);
     Variable safe_b(safe_b_tensor, false);
 
-    // Use Variable operations for higher-order gradient tracking
-    auto grad_a_unreduced = grad_outputs[0] / safe_b;
-    // grad_b = -(a * grad_output) / (b * b)
-    auto grad_b_unreduced = tenzor::neg((saved_a * grad_outputs[0]) / (safe_b * safe_b));
+    Variable grad_a_unreduced, grad_b_unreduced;
+    if (saved_a.tensor().is_complex() || saved_b.tensor().is_complex()) {
+        // Wirtinger: use conj at tensor level
+        auto conj_b = Variable(conj(safe_b_tensor), false);
+        auto conj_a = Variable(conj(saved_a.tensor()), false);
+        grad_a_unreduced = grad_outputs[0] / conj_b;
+        grad_b_unreduced = tenzor::neg((conj_a * grad_outputs[0]) / (conj_b * conj_b));
+    } else {
+        grad_a_unreduced = grad_outputs[0] / safe_b;
+        grad_b_unreduced = tenzor::neg((saved_a * grad_outputs[0]) / (safe_b * safe_b));
+    }
 
     auto grad_a = reduce_grad_var_for_broadcasting(grad_a_unreduced, input_shape_a_);
     auto grad_b = reduce_grad_var_for_broadcasting(grad_b_unreduced, input_shape_b_);
@@ -225,23 +255,26 @@ auto MatMulBackward::forward(std::vector<Variable> inputs) -> std::vector<Variab
 
 auto MatMulBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     require_saved_tensors(2);
-    // For C = A @ B:
-    // dL/dA = dL/dC @ B.T
-    // dL/dB = A.T @ dL/dC
     const auto& a = saved_tensors_[0];
     const auto& b = saved_tensors_[1];
     const auto& grad_out = grad_outputs[0];
 
-    // Get the number of dimensions
     auto a_ndim = a.shape().size();
     auto b_ndim = b.shape().size();
 
-    // For 2D matrices: grad_a = grad_out @ b.T, grad_b = a.T @ grad_out
-    auto b_t = transpose(b, b_ndim - 2, b_ndim - 1);
-    auto a_t = transpose(a, a_ndim - 2, a_ndim - 1);
-
-    auto grad_a = matmul(grad_out, b_t);
-    auto grad_b = matmul(a_t, grad_out);
+    Tensor grad_a, grad_b;
+    if (a.is_complex() || b.is_complex()) {
+        // Wirtinger: d/d(conj(A)) (A@B) uses conj(B^T) and conj(A^T)
+        auto b_ct = conj(transpose(b, b_ndim - 2, b_ndim - 1));
+        auto a_ct = conj(transpose(a, a_ndim - 2, a_ndim - 1));
+        grad_a = matmul(grad_out, b_ct);
+        grad_b = matmul(a_ct, grad_out);
+    } else {
+        auto b_t = transpose(b, b_ndim - 2, b_ndim - 1);
+        auto a_t = transpose(a, a_ndim - 2, a_ndim - 1);
+        grad_a = matmul(grad_out, b_t);
+        grad_b = matmul(a_t, grad_out);
+    }
 
     return {grad_a, grad_b};
 }
@@ -267,11 +300,19 @@ auto MatMulBackward::backward_with_variables(std::vector<Variable> grad_outputs)
     auto a_ndim = saved_a.shape().size();
     auto b_ndim = saved_b.shape().size();
 
-    auto b_t = tenzor::transpose(saved_b, b_ndim - 2, b_ndim - 1);
-    auto a_t = tenzor::transpose(saved_a, a_ndim - 2, a_ndim - 1);
-
-    auto grad_a = tenzor::matmul(grad_out, b_t);
-    auto grad_b = tenzor::matmul(a_t, grad_out);
+    Variable grad_a, grad_b;
+    if (saved_a.tensor().is_complex() || saved_b.tensor().is_complex()) {
+        // Wirtinger: conj(transpose(B)) and conj(transpose(A))
+        auto b_ct = Variable(conj(transpose(saved_b.tensor(), b_ndim - 2, b_ndim - 1)), false);
+        auto a_ct = Variable(conj(transpose(saved_a.tensor(), a_ndim - 2, a_ndim - 1)), false);
+        grad_a = tenzor::matmul(grad_out, b_ct);
+        grad_b = tenzor::matmul(a_ct, grad_out);
+    } else {
+        auto b_t = tenzor::transpose(saved_b, b_ndim - 2, b_ndim - 1);
+        auto a_t = tenzor::transpose(saved_a, a_ndim - 2, a_ndim - 1);
+        grad_a = tenzor::matmul(grad_out, b_t);
+        grad_b = tenzor::matmul(a_t, grad_out);
+    }
 
     return {grad_a, grad_b};
 }

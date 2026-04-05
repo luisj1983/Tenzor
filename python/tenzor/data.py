@@ -30,11 +30,14 @@ Usage:
 from __future__ import annotations
 
 import math
+import multiprocessing as mp
+import os
 import random
+import signal
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Sized
-from queue import Queue
+from queue import Empty, Queue
 from typing import Any, Callable, Generic, Optional, Sequence, TypeVar
 
 T = TypeVar("T")
@@ -93,6 +96,53 @@ class Dataset(ABC, Generic[T_co]):
             f"{type(self).__name__} does not implement __len__. "
             "Override __len__ to use default samplers."
         )
+
+
+class IterableDataset(ABC, Generic[T_co]):
+    """Abstract base class for iterable-style datasets.
+
+    Unlike map-style ``Dataset``, an ``IterableDataset`` does not need
+    ``__getitem__`` or ``__len__``.  Instead, subclasses implement
+    ``__iter__`` to yield samples one at a time.  When used with
+    multi-worker ``DataLoader``, each worker receives a copy and should
+    use ``get_worker_info()`` to shard the data.
+
+    Example
+    -------
+    >>> class MyStream(IterableDataset):
+    ...     def __iter__(self):
+    ...         info = get_worker_info()
+    ...         # shard based on info.id / info.num_workers
+    ...         for item in stream:
+    ...             yield item
+    """
+
+    @abstractmethod
+    def __iter__(self) -> Iterator[T_co]:
+        ...
+
+
+class WorkerInfo:
+    """Metadata passed to each DataLoader worker."""
+
+    __slots__ = ("id", "num_workers", "seed", "dataset")
+
+    def __init__(self, id: int, num_workers: int, seed: int, dataset: Any):
+        self.id = id
+        self.num_workers = num_workers
+        self.seed = seed
+        self.dataset = dataset
+
+
+_worker_info: Optional[WorkerInfo] = None
+
+
+def get_worker_info() -> Optional[WorkerInfo]:
+    """Return the ``WorkerInfo`` for the current DataLoader worker.
+
+    Returns ``None`` if called outside a DataLoader worker process.
+    """
+    return _worker_info
 
 
 class TensorDataset(Dataset):
@@ -450,7 +500,7 @@ def default_collate(batch: list) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Prefetch worker
+# Prefetch workers
 # ---------------------------------------------------------------------------
 
 class _PrefetchWorker:
@@ -484,16 +534,246 @@ class _PrefetchWorker:
         return item
 
 
+_WORKER_SENTINEL = "__DONE__"
+
+
+def _worker_loop(
+    dataset,
+    index_queue: mp.Queue,
+    output_queue: mp.Queue,
+    collate_fn: Callable,
+    worker_id: int,
+    num_workers: int,
+    seed: int,
+    worker_init_fn: Optional[Callable],
+):
+    """Target function for each DataLoader worker process."""
+    global _worker_info
+    _worker_info = WorkerInfo(
+        id=worker_id, num_workers=num_workers, seed=seed, dataset=dataset
+    )
+
+    # Ignore SIGINT in workers — let the main process handle it
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+    if worker_init_fn is not None:
+        worker_init_fn(worker_id)
+
+    # Seed the worker's RNG for reproducibility
+    random.seed(seed + worker_id)
+
+    is_iterable = isinstance(dataset, IterableDataset)
+
+    try:
+        if is_iterable:
+            # For IterableDataset, iterate and send batches directly
+            batch = []
+            for item in dataset:
+                batch.append(item)
+                # Check for poison pill
+                try:
+                    msg = index_queue.get_nowait()
+                    if msg is None:
+                        return
+                except Exception:
+                    pass
+                if len(batch) >= 1:
+                    output_queue.put((worker_id, collate_fn(batch)))
+                    batch = []
+            if batch:
+                output_queue.put((worker_id, collate_fn(batch)))
+        else:
+            # For map-style datasets, receive index batches and produce results
+            while True:
+                msg = index_queue.get()
+                if msg is None:  # Poison pill
+                    break
+                batch_indices = msg
+                batch = [dataset[i] for i in batch_indices]
+                output_queue.put((worker_id, collate_fn(batch)))
+    except Exception as e:
+        output_queue.put((worker_id, e))
+    finally:
+        output_queue.put((worker_id, _WORKER_SENTINEL))
+
+
+class _MultiProcessLoader:
+    """Manages a pool of worker processes for parallel data loading."""
+
+    def __init__(
+        self,
+        dataset,
+        batch_sampler,
+        collate_fn: Callable,
+        num_workers: int,
+        prefetch_factor: int,
+        worker_init_fn: Optional[Callable],
+        persistent_workers: bool,
+        timeout: float,
+        seed: int,
+    ):
+        self._dataset = dataset
+        self._batch_sampler = batch_sampler
+        self._collate_fn = collate_fn
+        self._num_workers = num_workers
+        self._prefetch_factor = prefetch_factor
+        self._worker_init_fn = worker_init_fn
+        self._persistent = persistent_workers
+        self._timeout = timeout
+        self._seed = seed
+        self._workers: list[mp.Process] = []
+        self._index_queues: list[mp.Queue] = []
+        self._output_queue: Optional[mp.Queue] = None
+
+    def _start_workers(self):
+        ctx = mp.get_context("fork" if hasattr(os, "fork") else "spawn")
+        self._output_queue = ctx.Queue(maxsize=self._prefetch_factor * self._num_workers)
+        self._index_queues = [ctx.Queue(maxsize=self._prefetch_factor) for _ in range(self._num_workers)]
+        self._workers = []
+
+        for wid in range(self._num_workers):
+            w = ctx.Process(
+                target=_worker_loop,
+                args=(
+                    self._dataset,
+                    self._index_queues[wid],
+                    self._output_queue,
+                    self._collate_fn,
+                    wid,
+                    self._num_workers,
+                    self._seed,
+                    self._worker_init_fn,
+                ),
+                daemon=True,
+            )
+            w.start()
+            self._workers.append(w)
+
+    def _stop_workers(self):
+        for q in self._index_queues:
+            try:
+                q.put_nowait(None)
+            except Exception:
+                pass
+        for w in self._workers:
+            w.join(timeout=5)
+            if w.is_alive():
+                w.terminate()
+        self._workers.clear()
+
+    def __iter__(self):
+        if not self._workers:
+            self._start_workers()
+
+        is_iterable = isinstance(self._dataset, IterableDataset)
+
+        if is_iterable:
+            # IterableDataset: workers push results, we collect
+            done_count = 0
+            while done_count < self._num_workers:
+                try:
+                    wid, result = self._output_queue.get(timeout=self._timeout)
+                except Empty:
+                    raise RuntimeError("DataLoader worker timed out")
+                if result is _WORKER_SENTINEL:
+                    done_count += 1
+                    continue
+                if isinstance(result, Exception):
+                    self._stop_workers()
+                    raise result
+                yield result
+        else:
+            # Map-style: distribute index batches round-robin
+            batches_iter = iter(self._batch_sampler)
+            total_batches = len(self._batch_sampler)
+            sent = 0
+            received = 0
+
+            # Pre-fill queues
+            for wid in range(self._num_workers):
+                for _ in range(self._prefetch_factor):
+                    try:
+                        indices = next(batches_iter)
+                        self._index_queues[wid].put(indices)
+                        sent += 1
+                    except StopIteration:
+                        break
+
+            done_workers = 0
+            while received < total_batches:
+                try:
+                    wid, result = self._output_queue.get(timeout=self._timeout)
+                except Empty:
+                    raise RuntimeError("DataLoader worker timed out")
+
+                if result is _WORKER_SENTINEL:
+                    done_workers += 1
+                    continue
+                if isinstance(result, Exception):
+                    self._stop_workers()
+                    raise result
+
+                received += 1
+                yield result
+
+                # Send more work to keep workers busy
+                if sent < total_batches:
+                    try:
+                        indices = next(batches_iter)
+                        self._index_queues[wid].put(indices)
+                        sent += 1
+                    except StopIteration:
+                        pass
+
+            # Signal workers to stop after this epoch
+            if not self._persistent:
+                self._stop_workers()
+
+    def __del__(self):
+        self._stop_workers()
+
+
 # ---------------------------------------------------------------------------
 # DataLoader
 # ---------------------------------------------------------------------------
+
+def _pin_memory_batch(batch):
+    """Recursively copy tensors in a batch to pinned (page-locked) memory."""
+    # Lazy import to avoid circular dependency at module level
+    try:
+        from . import tenzor_core as _core
+        _has_core = True
+    except ImportError:
+        _has_core = False
+
+    if not _has_core:
+        return batch
+
+    if isinstance(batch, _core.Tensor):
+        return _core.pin_memory(batch) if hasattr(_core, 'pin_memory') else batch
+    elif isinstance(batch, (tuple, list)):
+        pinned = [_pin_memory_batch(item) for item in batch]
+        return type(batch)(pinned)
+    elif isinstance(batch, dict):
+        return {k: _pin_memory_batch(v) for k, v in batch.items()}
+    return batch
+
+
+def _wrap_pin_memory(iterator, pin: bool):
+    """Wrap an iterator to pin each yielded batch."""
+    if not pin:
+        yield from iterator
+    else:
+        for batch in iterator:
+            yield _pin_memory_batch(batch)
+
 
 class DataLoader(Generic[T_co]):
     """Combines a dataset and a sampler to provide an iterable over batches.
 
     Parameters
     ----------
-    dataset : Dataset
+    dataset : Dataset or IterableDataset
         Dataset from which to load data.
     batch_size : int, optional
         Number of samples per batch.  Default: ``1``.
@@ -505,28 +785,37 @@ class DataLoader(Generic[T_co]):
         Custom batch sampler.  Mutually exclusive with *batch_size*,
         *shuffle*, *sampler*, and *drop_last*.
     num_workers : int, optional
-        Number of prefetch threads.  ``0`` means data is loaded in the
-        main thread.  Currently only ``0`` (synchronous) and ``1``
-        (single prefetch thread) are supported.  Default: ``0``.
+        Number of subprocesses for data loading.  ``0`` means data is
+        loaded in the main process.  Default: ``0``.
     collate_fn : callable or None, optional
         Function to merge a list of samples into a batch.  Defaults to
         :func:`default_collate`.
     drop_last : bool, optional
         If ``True``, drop the last incomplete batch.  Default: ``False``.
     prefetch_factor : int, optional
-        Number of batches to prefetch per worker.  Only used when
-        *num_workers* > 0.  Default: ``2``.
+        Number of batches to prefetch per worker.  Default: ``2``.
+    worker_init_fn : callable or None, optional
+        Called with ``worker_id`` at the start of each worker process.
+    persistent_workers : bool, optional
+        If ``True``, worker processes are not shut down between epochs.
+        Default: ``False``.
+    timeout : float, optional
+        Timeout in seconds for collecting a batch from workers.
+        Default: ``60``.
+    pin_memory : bool, optional
+        If ``True``, copy tensors to pinned (page-locked) memory after
+        collation for faster CPU-to-GPU transfer.  Default: ``False``.
 
     Example
     -------
-    >>> loader = DataLoader(dataset, batch_size=64, shuffle=True)
+    >>> loader = DataLoader(dataset, batch_size=64, shuffle=True, num_workers=4)
     >>> for batch in loader:
     ...     output = model(batch)
     """
 
     def __init__(
         self,
-        dataset: Dataset[T_co],
+        dataset,
         batch_size: int = 1,
         shuffle: bool = False,
         sampler: Optional[Sampler] = None,
@@ -535,14 +824,24 @@ class DataLoader(Generic[T_co]):
         collate_fn: Optional[Callable] = None,
         drop_last: bool = False,
         prefetch_factor: int = 2,
+        worker_init_fn: Optional[Callable] = None,
+        persistent_workers: bool = False,
+        timeout: float = 60.0,
+        pin_memory: bool = False,
     ):
         self.dataset = dataset
         self.collate_fn = collate_fn or default_collate
         self.num_workers = num_workers
         self.prefetch_factor = prefetch_factor
+        self.worker_init_fn = worker_init_fn
+        self.persistent_workers = persistent_workers
+        self.timeout = timeout
+        self.pin_memory = pin_memory
+        self._multiprocess_loader: Optional[_MultiProcessLoader] = None
+
+        is_iterable = isinstance(dataset, IterableDataset)
 
         if batch_sampler is not None:
-            # batch_sampler is mutually exclusive with these options
             if batch_size != 1 or shuffle or sampler is not None or drop_last:
                 raise ValueError(
                     "batch_sampler is mutually exclusive with batch_size, "
@@ -550,6 +849,9 @@ class DataLoader(Generic[T_co]):
                 )
             self.batch_sampler = batch_sampler
             self.batch_size = None
+        elif is_iterable:
+            self.batch_sampler = None
+            self.batch_size = batch_size
         else:
             if sampler is not None and shuffle:
                 raise ValueError("sampler and shuffle are mutually exclusive")
@@ -566,18 +868,55 @@ class DataLoader(Generic[T_co]):
 
     def _generate_batches(self) -> Iterator:
         """Yield collated batches from the dataset."""
-        for batch_indices in self.batch_sampler:
-            batch = [self.dataset[i] for i in batch_indices]
-            yield self.collate_fn(batch)
+        if isinstance(self.dataset, IterableDataset):
+            batch = []
+            for item in self.dataset:
+                batch.append(item)
+                if len(batch) == self.batch_size:
+                    yield self.collate_fn(batch)
+                    batch = []
+            if batch:
+                yield self.collate_fn(batch)
+        else:
+            for batch_indices in self.batch_sampler:
+                batch = [self.dataset[i] for i in batch_indices]
+                yield self.collate_fn(batch)
 
     def __iter__(self) -> Iterator[T_co]:
-        gen = self._generate_batches()
-        if self.num_workers > 0:
-            return _PrefetchWorker(gen, queue_size=self.prefetch_factor)
-        return gen
+        if self.num_workers <= 0:
+            it = self._generate_batches()
+            return _wrap_pin_memory(it, self.pin_memory)
+
+        if self.num_workers == 1 and not isinstance(self.dataset, IterableDataset):
+            # Single prefetch thread (fast path, avoids process overhead)
+            it = _PrefetchWorker(
+                self._generate_batches(), queue_size=self.prefetch_factor
+            )
+            return _wrap_pin_memory(it, self.pin_memory)
+
+        # Multi-process loading
+        if self._multiprocess_loader is None or not self.persistent_workers:
+            self._multiprocess_loader = _MultiProcessLoader(
+                dataset=self.dataset,
+                batch_sampler=self.batch_sampler,
+                collate_fn=self.collate_fn,
+                num_workers=self.num_workers,
+                prefetch_factor=self.prefetch_factor,
+                worker_init_fn=self.worker_init_fn,
+                persistent_workers=self.persistent_workers,
+                timeout=self.timeout,
+                seed=random.randint(0, 2**31),
+            )
+        return _wrap_pin_memory(iter(self._multiprocess_loader), self.pin_memory)
 
     def __len__(self) -> int:
-        return len(self.batch_sampler)
+        if self.batch_sampler is not None:
+            return len(self.batch_sampler)
+        raise TypeError("DataLoader with IterableDataset has no len()")
+
+    def __del__(self):
+        if self._multiprocess_loader is not None:
+            self._multiprocess_loader._stop_workers()
 
 
 # ---------------------------------------------------------------------------

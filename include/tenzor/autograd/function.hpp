@@ -593,6 +593,44 @@ public:
 };
 
 /**
+ * @brief Complex conjugate gradient function.
+ *
+ * Forward: y = conj(z)
+ * Backward (Wirtinger): dL/d(conj(z)) = conj(dL/dy)
+ */
+class ConjBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+};
+
+/**
+ * @brief Real part gradient function.
+ *
+ * Forward: y = real(z)
+ * Backward (Wirtinger): dL/d(conj(z)) = 0.5 * dL/dy (broadcast to complex)
+ */
+class RealBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    DType input_dtype_;
+};
+
+/**
+ * @brief Imaginary part gradient function.
+ *
+ * Forward: y = imag(z)
+ * Backward (Wirtinger): dL/d(conj(z)) = -0.5j * dL/dy (broadcast to complex)
+ */
+class ImagBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    DType input_dtype_;
+};
+
+/**
  * @brief Negation gradient function.
  *
  * Forward: y = -x

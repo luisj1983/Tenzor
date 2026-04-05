@@ -521,6 +521,23 @@ namespace nn::quantization::kernels {
         float input_scale, float weight_scale, int32_t input_zp, int32_t weight_zp,
         int64_t dilation, int64_t groups
     ) -> void;
+
+    // Per-channel quantized variants
+    auto quantized_linear_per_channel_kernel(
+        const int8_t* input, const int8_t* weight, const float* bias,
+        float* output, int64_t batch_size, int64_t in_features, int64_t out_features,
+        float input_scale, const float* weight_scales, float output_scale,
+        int32_t input_zp, const int32_t* weight_zps
+    ) -> void;
+
+    auto quantized_conv2d_per_channel_kernel(
+        const int8_t* input, const int8_t* weight, const float* bias,
+        float* output, int64_t batch, int64_t in_channels, int64_t out_channels,
+        int64_t h_in, int64_t w_in, int64_t h_out, int64_t w_out,
+        int64_t kernel_size, int64_t stride, int64_t padding,
+        float input_scale, const float* weight_scales, int32_t input_zp, const int32_t* weight_zps,
+        int64_t dilation, int64_t groups
+    ) -> void;
 } // namespace nn::quantization::kernels
 
 /**
@@ -2495,12 +2512,29 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         }
         float* output_data = output.data<float>();
 
-        nn::quantization::kernels::quantized_linear_kernel(
-            input_data, weight_data, bias_data, output_data,
-            batch_size, in_features, out_features,
-            input_scale, weight_scale, output_scale,
-            input_zp, weight_zp
-        );
+        // Per-channel path: inputs[3] = weight_scales (Float32, [out_features])
+        //                   inputs[4] = weight_zero_points (Int32, [out_features]) (optional)
+        bool per_channel = inputs.size() > 3 && inputs[3].numel() > 1;
+
+        if (per_channel) {
+            const float* weight_scales_data = inputs[3].data<const float>();
+            const int32_t* weight_zps_data = (inputs.size() > 4 && inputs[4].numel() > 0)
+                ? inputs[4].data<int32_t>() : nullptr;
+
+            nn::quantization::kernels::quantized_linear_per_channel_kernel(
+                input_data, weight_data, bias_data, output_data,
+                batch_size, in_features, out_features,
+                input_scale, weight_scales_data, output_scale,
+                input_zp, weight_zps_data
+            );
+        } else {
+            nn::quantization::kernels::quantized_linear_kernel(
+                input_data, weight_data, bias_data, output_data,
+                batch_size, in_features, out_features,
+                input_scale, weight_scale, output_scale,
+                input_zp, weight_zp
+            );
+        }
 
         return output;
     });
@@ -2543,14 +2577,33 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         }
         float* output_data = output.data<float>();
 
-        nn::quantization::kernels::quantized_conv2d_kernel(
-            input_data, weight_data, bias_data, output_data,
-            batch, in_channels, out_channels,
-            h_in, w_in, h_out, w_out,
-            kernel_size, stride, padding,
-            input_scale, weight_scale, input_zp, weight_zp,
-            dilation, groups
-        );
+        // Per-channel path: inputs[3] = weight_scales (Float32, [out_channels])
+        //                   inputs[4] = weight_zero_points (Int32, [out_channels]) (optional)
+        bool per_channel = inputs.size() > 3 && inputs[3].numel() > 1;
+
+        if (per_channel) {
+            const float* weight_scales_data = inputs[3].data<const float>();
+            const int32_t* weight_zps_data = (inputs.size() > 4 && inputs[4].numel() > 0)
+                ? inputs[4].data<int32_t>() : nullptr;
+
+            nn::quantization::kernels::quantized_conv2d_per_channel_kernel(
+                input_data, weight_data, bias_data, output_data,
+                batch, in_channels, out_channels,
+                h_in, w_in, h_out, w_out,
+                kernel_size, stride, padding,
+                input_scale, weight_scales_data, input_zp, weight_zps_data,
+                dilation, groups
+            );
+        } else {
+            nn::quantization::kernels::quantized_conv2d_kernel(
+                input_data, weight_data, bias_data, output_data,
+                batch, in_channels, out_channels,
+                h_in, w_in, h_out, w_out,
+                kernel_size, stride, padding,
+                input_scale, weight_scale, input_zp, weight_zp,
+                dilation, groups
+            );
+        }
 
         return output;
     });

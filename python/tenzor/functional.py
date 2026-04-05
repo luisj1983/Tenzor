@@ -1093,6 +1093,95 @@ def interpolate(input: Variable, size: Sequence[int], mode: str = 'bilinear', al
     return _nn.functional_interpolate(input, size, mode, align_corners)
 
 
+def grid_sample(
+    input: Variable,
+    grid: Variable,
+    mode: str = "bilinear",
+    padding_mode: str = "zeros",
+    align_corners: bool = False,
+) -> Variable:
+    """Sample from *input* using a spatial grid of coordinates.
+
+    Implements the spatial transformer sampling operation.
+
+    Parameters
+    ----------
+    input : Variable
+        Input tensor of shape ``(N, C, H_in, W_in)``.
+    grid : Variable
+        Sampling grid of shape ``(N, H_out, W_out, 2)`` with values
+        in ``[-1, 1]`` (normalised coordinates).
+    mode : str, optional
+        Interpolation mode: ``'bilinear'`` or ``'nearest'``.
+        Default: ``'bilinear'``.
+    padding_mode : str, optional
+        Padding mode for out-of-bound coordinates: ``'zeros'``,
+        ``'border'``, or ``'reflection'``.  Default: ``'zeros'``.
+    align_corners : bool, optional
+        If ``True``, corner pixels are aligned.  Default: ``False``.
+
+    Returns
+    -------
+    Variable
+        Sampled output of shape ``(N, C, H_out, W_out)``.
+
+    Example
+    -------
+    >>> theta = tz.eye(2, 3).unsqueeze(0)
+    >>> grid = F.affine_grid(theta, x.shape)
+    >>> y = F.grid_sample(x, grid)
+    """
+    return _nn.functional_grid_sample(input, grid, mode, padding_mode, align_corners)
+
+
+def affine_grid(theta: Variable, size: Sequence[int], align_corners: bool = False) -> Variable:
+    """Generate a 2-D affine sampling grid from a batch of 2x3 matrices.
+
+    Parameters
+    ----------
+    theta : Variable
+        Affine matrices of shape ``(N, 2, 3)``.
+    size : Sequence[int]
+        Output spatial size ``(N, C, H, W)``.
+    align_corners : bool, optional
+        Default: ``False``.
+
+    Returns
+    -------
+    Variable
+        Grid tensor of shape ``(N, H, W, 2)``.
+    """
+    return _nn.functional_affine_grid(theta, size, align_corners)
+
+
+def checkpoint(fn, *args, **kwargs):
+    """Gradient checkpointing: trade compute for memory.
+
+    Runs *fn* without saving intermediate activations.  During the
+    backward pass the forward is re-executed to recompute them.
+
+    Parameters
+    ----------
+    fn : callable
+        Function to checkpoint (typically a module's ``forward``).
+    *args
+        Positional arguments forwarded to *fn*.
+    **kwargs
+        Keyword arguments forwarded to *fn*.
+
+    Returns
+    -------
+    Variable
+        Output of ``fn(*args, **kwargs)``.
+
+    Example
+    -------
+    >>> y = F.checkpoint(block, x)
+    """
+    return _nn.functional_checkpoint(fn, *args, **kwargs)
+
+
+
 def embedding(input: Variable, weight: Variable, padding_idx: int = -1) -> Variable:
     """Look up embeddings in a fixed dictionary and size.
 
@@ -1379,6 +1468,9 @@ __all__ = [
     "instance_norm",
     "rms_norm",
     "interpolate",
+    "grid_sample",
+    "affine_grid",
+    "checkpoint",
     "embedding",
     "binary_cross_entropy_with_logits",
     # Additional functional operations

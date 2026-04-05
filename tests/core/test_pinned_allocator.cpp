@@ -607,6 +607,126 @@ TEST_F(PinnedAllocatorTest, ResetClearsAllocations) {
 }
 
 // =============================================================================
+// Defragment Edge Case Tests
+// =============================================================================
+
+TEST_F(PinnedAllocatorTest, DefragmentEmptyPool) {
+    PinnedMemoryAllocator allocator(default_config);
+
+    // No allocations made — defragment on empty pool must not crash
+    // (Regression test for unsigned underflow in sorted_blocks.size() - 1)
+    size_t coalesced = allocator.defragment();
+    EXPECT_EQ(coalesced, 0u);
+}
+
+TEST_F(PinnedAllocatorTest, DefragmentSingleBlock) {
+    PinnedMemoryAllocator allocator(default_config);
+
+    void* ptr = allocator.allocate(1024);
+    ASSERT_NE(ptr, nullptr);
+    allocator.deallocate(ptr);
+
+    // Single free block — nothing to coalesce
+    size_t coalesced = allocator.defragment();
+    EXPECT_EQ(coalesced, 0u);
+}
+
+TEST_F(PinnedAllocatorTest, DefragmentCoalescesAdjacentFreeBlocks) {
+    PinnedMemoryAllocator allocator(default_config);
+
+    // Create fragmentation pattern: allocate many blocks, free alternating
+    // to create non-adjacent free blocks that deallocate() can't coalesce
+    constexpr int N = 20;
+    std::vector<void*> ptrs;
+    for (int i = 0; i < N; ++i) {
+        void* p = allocator.allocate(4096);
+        ASSERT_NE(p, nullptr);
+        ptrs.push_back(p);
+    }
+
+    // Free every other block — creates isolated free blocks separated by
+    // allocated blocks, so deallocate() can't coalesce them
+    for (int i = 0; i < N; i += 2) {
+        allocator.deallocate(ptrs[i]);
+        ptrs[i] = nullptr;
+    }
+
+    // Now free the remaining blocks — adjacent free blocks may coalesce
+    // on deallocate(), but defragment() should handle any remaining pairs
+    for (int i = 1; i < N; i += 2) {
+        allocator.deallocate(ptrs[i]);
+        ptrs[i] = nullptr;
+    }
+
+    allocator.defragment();
+
+    // After full deallocation + defragmentation, should be able to
+    // allocate a large contiguous block
+    void* big = allocator.allocate(4096 * (N - 2));
+    EXPECT_NE(big, nullptr);
+    if (big) allocator.deallocate(big);
+}
+
+TEST_F(PinnedAllocatorTest, DefragmentStressFragmented) {
+    PinnedMemoryAllocator allocator(default_config);
+
+    constexpr int N = 100;
+    std::vector<void*> ptrs;
+    for (int i = 0; i < N; ++i) {
+        void* p = allocator.allocate(1024);
+        if (p) ptrs.push_back(p);
+    }
+
+    // Free every other block to create fragmentation
+    for (size_t i = 0; i < ptrs.size(); i += 2) {
+        allocator.deallocate(ptrs[i]);
+        ptrs[i] = nullptr;
+    }
+
+    float frag_before = allocator.get_fragmentation_ratio();
+    allocator.defragment();
+    float frag_after = allocator.get_fragmentation_ratio();
+
+    // Fragmentation should not increase after defragmentation
+    EXPECT_LE(frag_after, frag_before);
+
+    // Cleanup remaining allocations
+    for (void* p : ptrs) {
+        if (p) allocator.deallocate(p);
+    }
+}
+
+// =============================================================================
+// Move Semantics Tests
+// =============================================================================
+
+TEST_F(PinnedAllocatorTest, MoveConstructor) {
+    PinnedMemoryAllocator allocator(default_config);
+
+    void* ptr = allocator.allocate(1024);
+    ASSERT_NE(ptr, nullptr);
+
+    PinnedMemoryAllocator moved(std::move(allocator));
+    EXPECT_TRUE(moved.is_valid());
+
+    // Should be able to deallocate through moved allocator
+    ASSERT_NO_THROW(moved.deallocate(ptr));
+}
+
+TEST_F(PinnedAllocatorTest, MoveAssignment) {
+    PinnedMemoryAllocator alloc1(default_config);
+    PinnedMemoryAllocator alloc2(default_config);
+
+    void* ptr = alloc1.allocate(2048);
+    ASSERT_NE(ptr, nullptr);
+
+    alloc2 = std::move(alloc1);
+    EXPECT_TRUE(alloc2.is_valid());
+
+    ASSERT_NO_THROW(alloc2.deallocate(ptr));
+}
+
+// =============================================================================
 // Main
 // =============================================================================
 

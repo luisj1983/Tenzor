@@ -1283,6 +1283,11 @@ void matmul_f32(
     int64_t M, int64_t N, int64_t K,
     cudaStream_t stream = 0) {
 
+    // Validate element counts don't overflow int64_t
+    checked_stride_mul(M, K);
+    checked_stride_mul(K, N);
+    checked_stride_mul(M, N);
+
 #ifdef TENZOR_HAS_CUBLAS
     // Use cuBLAS for large matrices
     if (M >= CUBLAS_THRESHOLD || N >= CUBLAS_THRESHOLD || K >= CUBLAS_THRESHOLD) {
@@ -1321,6 +1326,11 @@ void matmul_f64(
     int64_t M, int64_t N, int64_t K,
     cudaStream_t stream = 0) {
 
+    // Validate element counts don't overflow int64_t
+    checked_stride_mul(M, K);
+    checked_stride_mul(K, N);
+    checked_stride_mul(M, N);
+
 #ifdef TENZOR_HAS_CUBLAS
     // Use cuBLAS for large matrices
     if (M >= CUBLAS_THRESHOLD || N >= CUBLAS_THRESHOLD || K >= CUBLAS_THRESHOLD) {
@@ -1358,6 +1368,11 @@ void matmul_i32(
     const int32_t* A, const int32_t* B, int32_t* C,
     int64_t M, int64_t N, int64_t K,
     cudaStream_t stream = 0) {
+
+    // Validate element counts don't overflow int64_t
+    checked_stride_mul(M, K);
+    checked_stride_mul(K, N);
+    checked_stride_mul(M, N);
 
     // Custom kernel (no cuBLAS for int32)
     // Select architecture-appropriate tile sizes
@@ -1412,6 +1427,11 @@ void matmul_f16(
     int64_t M, int64_t N, int64_t K,
     cudaStream_t stream = 0) {
 
+    // Validate element counts don't overflow int64_t
+    checked_stride_mul(M, K);
+    checked_stride_mul(K, N);
+    checked_stride_mul(M, N);
+
 #ifdef TENZOR_HAS_CUBLAS
     // Use cuBLAS for large matrices (FP16 benefits from Tensor Core acceleration)
     if (M >= CUBLAS_THRESHOLD || N >= CUBLAS_THRESHOLD || K >= CUBLAS_THRESHOLD) {
@@ -1443,15 +1463,20 @@ void matmul_f16(
         int64_t Np = round_up_16(N);
         int64_t Kp = round_up_16(K);
 
+        // Validate padded dimensions don't overflow
+        auto a_elems = checked_stride_mul(Mp, Kp);
+        auto b_elems = checked_stride_mul(Kp, Np);
+        auto c_elems = checked_stride_mul(Mp, Np);
+
         // Allocate zero-initialized padded buffers (RAII ensures cleanup on exception)
-        CudaAsyncBuffer A_buf(Mp * Kp * sizeof(__half), stream);
-        CudaAsyncBuffer B_buf(Kp * Np * sizeof(__half), stream);
-        CudaAsyncBuffer C_buf(Mp * Np * sizeof(__half), stream);
+        CudaAsyncBuffer A_buf(a_elems * static_cast<int64_t>(sizeof(__half)), stream);
+        CudaAsyncBuffer B_buf(b_elems * static_cast<int64_t>(sizeof(__half)), stream);
+        CudaAsyncBuffer C_buf(c_elems * static_cast<int64_t>(sizeof(__half)), stream);
         auto* A_pad = A_buf.as<__half>();
         auto* B_pad = B_buf.as<__half>();
         auto* C_pad = C_buf.as<__half>();
-        TENZOR_CUDA_CHECK(cudaMemsetAsync(A_pad, 0, Mp * Kp * sizeof(__half), stream));
-        TENZOR_CUDA_CHECK(cudaMemsetAsync(B_pad, 0, Kp * Np * sizeof(__half), stream));
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(A_pad, 0, a_elems * static_cast<int64_t>(sizeof(__half)), stream));
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(B_pad, 0, b_elems * static_cast<int64_t>(sizeof(__half)), stream));
 
         // Copy A (M x K) into A_pad (Mp x Kp) with proper stride
         TENZOR_CUDA_CHECK(cudaMemcpy2DAsync(
@@ -1512,6 +1537,11 @@ void matmul_bf16(
     const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
     int64_t M, int64_t N, int64_t K,
     cudaStream_t stream = 0) {
+
+    // Validate element counts don't overflow int64_t
+    checked_stride_mul(M, K);
+    checked_stride_mul(K, N);
+    checked_stride_mul(M, N);
 
 #ifdef TENZOR_HAS_CUBLAS
     // Use cuBLAS for large matrices (BF16 benefits from Tensor Core acceleration)

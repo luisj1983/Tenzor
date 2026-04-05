@@ -37,6 +37,23 @@ namespace kernels {
         float input_scale, float weight_scale, int32_t input_zp, int32_t weight_zp,
         int64_t dilation = 1, int64_t groups = 1
     ) -> void;
+
+    // Per-channel quantized variants
+    auto quantized_linear_per_channel_kernel(
+        const int8_t* input, const int8_t* weight, const float* bias,
+        float* output, int64_t batch_size, int64_t in_features, int64_t out_features,
+        float input_scale, const float* weight_scales, float output_scale,
+        int32_t input_zp, const int32_t* weight_zps
+    ) -> void;
+
+    auto quantized_conv2d_per_channel_kernel(
+        const int8_t* input, const int8_t* weight, const float* bias,
+        float* output, int64_t batch, int64_t in_channels, int64_t out_channels,
+        int64_t h_in, int64_t w_in, int64_t h_out, int64_t w_out,
+        int64_t kernel_size, int64_t stride, int64_t padding,
+        float input_scale, const float* weight_scales, int32_t input_zp, const int32_t* weight_zps,
+        int64_t dilation = 1, int64_t groups = 1
+    ) -> void;
 }
 
 // ============================================================================
@@ -93,9 +110,10 @@ auto QuantizedLinear::forward_quantized(const QuantizedTensor& input) -> Tensor 
     }
 
     float input_scale = input_scale_cpu.data<const float>()[0];
-    float weight_scale = weight_scale_cpu.data<const float>()[0];
     int32_t input_zp = input_zp_cpu.data<int32_t>()[0];
-    int32_t weight_zp = weight_zp_cpu.data<int32_t>()[0];
+
+    bool is_per_channel = (weight_params.scheme == QuantizationScheme::PerChannelSymmetric ||
+                           weight_params.scheme == QuantizationScheme::PerChannelAsymmetric);
 
     // Move data to CPU for computation
     Tensor input_data_cpu = input.data();
@@ -126,15 +144,27 @@ auto QuantizedLinear::forward_quantized(const QuantizedTensor& input) -> Tensor 
     }
     float* output_data = output.data<float>();
 
-    // Use kernel for computation
-    // Use bias_scale_ for output scaling instead of hardcoded 1.0f
-    // bias_scale_ controls the dequantization scaling: combined_scale = input_scale * weight_scale / output_scale
-    kernels::quantized_linear_kernel(
-        input_data, weight_data, bias_data, output_data,
-        batch_size, in_features_, out_features_,
-        input_scale, weight_scale, bias_scale_,
-        input_zp, weight_zp
-    );
+    if (is_per_channel) {
+        // Per-channel: weight_scale_cpu has [out_features] scales
+        const float* weight_scales = weight_scale_cpu.data<const float>();
+        const int32_t* weight_zps = weight_zp_cpu.data<int32_t>();
+        kernels::quantized_linear_per_channel_kernel(
+            input_data, weight_data, bias_data, output_data,
+            batch_size, in_features_, out_features_,
+            input_scale, weight_scales, bias_scale_,
+            input_zp, weight_zps
+        );
+    } else {
+        // Per-tensor: scalar scale and zero point
+        float weight_scale = weight_scale_cpu.data<const float>()[0];
+        int32_t weight_zp = weight_zp_cpu.data<int32_t>()[0];
+        kernels::quantized_linear_kernel(
+            input_data, weight_data, bias_data, output_data,
+            batch_size, in_features_, out_features_,
+            input_scale, weight_scale, bias_scale_,
+            input_zp, weight_zp
+        );
+    }
 
     // Move output back to original device
     return output.to(original_device);
@@ -256,9 +286,10 @@ auto QuantizedConv2d::forward_quantized(const QuantizedTensor& input) -> Tensor 
     }
 
     float input_scale = input_scale_cpu.data<const float>()[0];
-    float weight_scale = weight_scale_cpu.data<const float>()[0];
     int32_t input_zp = input_zp_cpu.data<int32_t>()[0];
-    int32_t weight_zp = weight_zp_cpu.data<int32_t>()[0];
+
+    bool is_per_channel = (weight_params.scheme == QuantizationScheme::PerChannelSymmetric ||
+                           weight_params.scheme == QuantizationScheme::PerChannelAsymmetric);
 
     // Move data to CPU for computation
     Tensor input_data_cpu = input.data();
@@ -288,14 +319,29 @@ auto QuantizedConv2d::forward_quantized(const QuantizedTensor& input) -> Tensor 
     }
     float* output_data = output.data<float>();
 
-    kernels::quantized_conv2d_kernel(
-        input_data, weight_data, bias_data, output_data,
-        batch, in_channels_, out_channels_,
-        h_in, w_in, h_out, w_out,
-        kernel_size_, stride_, padding_,
-        input_scale, weight_scale, input_zp, weight_zp,
-        dilation_, groups_
-    );
+    if (is_per_channel) {
+        const float* weight_scales = weight_scale_cpu.data<const float>();
+        const int32_t* weight_zps = weight_zp_cpu.data<int32_t>();
+        kernels::quantized_conv2d_per_channel_kernel(
+            input_data, weight_data, bias_data, output_data,
+            batch, in_channels_, out_channels_,
+            h_in, w_in, h_out, w_out,
+            kernel_size_, stride_, padding_,
+            input_scale, weight_scales, input_zp, weight_zps,
+            dilation_, groups_
+        );
+    } else {
+        float weight_scale = weight_scale_cpu.data<const float>()[0];
+        int32_t weight_zp = weight_zp_cpu.data<int32_t>()[0];
+        kernels::quantized_conv2d_kernel(
+            input_data, weight_data, bias_data, output_data,
+            batch, in_channels_, out_channels_,
+            h_in, w_in, h_out, w_out,
+            kernel_size_, stride_, padding_,
+            input_scale, weight_scale, input_zp, weight_zp,
+            dilation_, groups_
+        );
+    }
 
     // Move output back to original device
     return output.to(original_device);

@@ -74,36 +74,21 @@ CachingAllocator::CachingAllocator(CachingAllocator&& other) noexcept
 
 CachingAllocator& CachingAllocator::operator=(CachingAllocator&& other) noexcept {
     if (this != &other) {
-        // Lock both mutexes
+        // Use swap idiom for exception safety: old resources transfer to
+        // 'other' and get cleaned up when 'other' is destroyed (in a
+        // non-noexcept destructor context, avoiding std::terminate).
         std::scoped_lock lock(mutex_, other.mutex_);
 
-        // Free current resources
-        free_cached_blocks();
-        for (const auto& [ptr, size] : allocated_blocks_) {
-            if (ptr && backend_) {
-                backend_->deallocate(ptr);
-            }
-        }
-
-        // Move from other
-        backend_ = other.backend_;
-        device_ = other.device_;
-        config_ = other.config_;
-        free_blocks_ = std::move(other.free_blocks_);
-        allocated_blocks_ = std::move(other.allocated_blocks_);
-        total_allocations_ = other.total_allocations_;
-        cache_hits_ = other.cache_hits_;
-        backend_allocations_ = other.backend_allocations_;
-        total_allocated_bytes_ = other.total_allocated_bytes_;
-        total_cached_bytes_ = other.total_cached_bytes_;
-
-        // Reset other
-        other.backend_ = nullptr;
-        other.total_allocations_ = 0;
-        other.cache_hits_ = 0;
-        other.backend_allocations_ = 0;
-        other.total_allocated_bytes_ = 0;
-        other.total_cached_bytes_ = 0;
+        std::swap(backend_, other.backend_);
+        std::swap(device_, other.device_);
+        std::swap(config_, other.config_);
+        std::swap(free_blocks_, other.free_blocks_);
+        std::swap(allocated_blocks_, other.allocated_blocks_);
+        std::swap(total_allocations_, other.total_allocations_);
+        std::swap(cache_hits_, other.cache_hits_);
+        std::swap(backend_allocations_, other.backend_allocations_);
+        std::swap(total_allocated_bytes_, other.total_allocated_bytes_);
+        std::swap(total_cached_bytes_, other.total_cached_bytes_);
     }
     return *this;
 }

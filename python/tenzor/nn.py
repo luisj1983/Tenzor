@@ -734,3 +734,6 @@ def pack_sequence(sequences, enforce_sorted=True):
 
 # Make init submodule accessible
 from .tenzor_core.nn import init
+
+# Re-export RNN cell classes from C++ module for direct access via tz.nn.RNNCell etc.
+from .tenzor_core.nn import RNNCell, LSTMCell, GRUCell

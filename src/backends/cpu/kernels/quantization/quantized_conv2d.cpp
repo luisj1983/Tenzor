@@ -189,6 +189,87 @@ auto quantized_conv2d_kernel(
     }
 }
 
+/**
+ * @brief Per-channel quantized 2D convolution (CPU) using im2col + GEMM.
+ *
+ * Each output channel has its own weight_scale and weight_zp, enabling
+ * higher accuracy for weights with varying magnitude per output filter.
+ */
+auto quantized_conv2d_per_channel_kernel(
+    const int8_t* input,
+    const int8_t* weight,
+    const float* bias,
+    float* output,
+    int64_t batch,
+    int64_t in_channels,
+    int64_t out_channels,
+    int64_t h_in,
+    int64_t w_in,
+    int64_t h_out,
+    int64_t w_out,
+    int64_t kernel_size,
+    int64_t stride,
+    int64_t padding,
+    float input_scale,
+    const float* weight_scales,     // [out_channels] per-channel scales
+    int32_t input_zp,
+    const int32_t* weight_zps,      // [out_channels] per-channel zero points (nullable for symmetric)
+    int64_t dilation,
+    int64_t groups
+) -> void {
+    if (in_channels % groups != 0)
+        throw std::invalid_argument("quantized_conv2d_per_channel: in_channels must be divisible by groups");
+    if (out_channels % groups != 0)
+        throw std::invalid_argument("quantized_conv2d_per_channel: out_channels must be divisible by groups");
+
+    const int64_t in_channels_per_group = in_channels / groups;
+    const int64_t out_channels_per_group = out_channels / groups;
+    const int64_t col_width = in_channels_per_group * kernel_size * kernel_size;
+    const int64_t spatial_out = h_out * w_out;
+
+    #pragma omp parallel
+    {
+        std::vector<int8_t> col_buffer(spatial_out * col_width);
+
+        #pragma omp for
+        for (int64_t b = 0; b < batch; ++b) {
+            for (int64_t g = 0; g < groups; ++g) {
+                const int8_t* group_input = input + b * in_channels * h_in * w_in
+                                           + g * in_channels_per_group * h_in * w_in;
+
+                im2col_int8(group_input, col_buffer.data(),
+                            in_channels_per_group, h_in, w_in, h_out, w_out,
+                            kernel_size, stride, padding, dilation);
+
+                for (int64_t oc_local = 0; oc_local < out_channels_per_group; ++oc_local) {
+                    int64_t oc = g * out_channels_per_group + oc_local;
+                    const int8_t* weight_row = weight + oc * col_width;
+
+                    // Per-channel scale and zero point
+                    float w_scale = weight_scales[oc];
+                    int32_t w_zp = weight_zps ? weight_zps[oc] : 0;
+                    float combined_scale = input_scale * w_scale;
+
+                    for (int64_t s = 0; s < spatial_out; ++s) {
+                        const int8_t* col_row = col_buffer.data() + s * col_width;
+
+                        int32_t acc = dot_int8(weight_row, col_row, col_width);
+                        acc -= input_zp * w_zp * col_width;
+
+                        float result = static_cast<float>(acc) * combined_scale;
+                        if (bias != nullptr) {
+                            result += bias[oc];
+                        }
+
+                        int64_t output_idx = ((b * out_channels + oc) * h_out + s / w_out) * w_out + s % w_out;
+                        output[output_idx] = result;
+                    }
+                }
+            }
+        }
+    }
+}
+
 } // namespace kernels
 } // namespace quantization
 } // namespace nn

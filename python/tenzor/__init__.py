@@ -106,6 +106,10 @@ if _os.path.exists(_autograd_path):
     _sys.modules['tenzor.autograd'] = _autograd_module
     autograd = _autograd_module
 
+# Expose linalg submodule from C++ bindings (det, inv, solve, svd, qr, etc.)
+from .tenzor_core import linalg
+_sys.modules['tenzor.linalg'] = linalg
+
 __version__ = "1.0.0"
 
 __all__ = [

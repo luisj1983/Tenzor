@@ -148,3 +148,67 @@ int main(int argc, char** argv) {
 
     return result;
 }
+
+// ============================================================================
+// Per-Channel Quantization Tests
+// ============================================================================
+
+TEST(QuantizationParity, PerChannelSymmetricQuantize) {
+    // Quantize a weight tensor per-channel and verify roundtrip accuracy
+    auto weights = randn({64, 32}, DType::Float32, Device::cpu());
+
+    auto q_weights = quantize_per_channel_symmetric(weights, /*axis=*/0);
+
+    // Per-channel scale should have one entry per output channel
+    EXPECT_EQ(q_weights.params().scale.numel(), 64);
+    EXPECT_EQ(q_weights.params().axis, 0);
+    EXPECT_EQ(q_weights.params().scheme, QuantizationScheme::PerChannelSymmetric);
+
+    // Dequantize and check accuracy
+    auto dequantized = dequantize_tensor(q_weights);
+    EXPECT_EQ(dequantized.shape()[0], 64);
+    EXPECT_EQ(dequantized.shape()[1], 32);
+
+    // Per-channel quantization should be more accurate than per-tensor
+    auto q_pertensor = quantize_per_tensor_symmetric(weights);
+    auto deq_pertensor = dequantize_tensor(q_pertensor);
+
+    // Compute per-channel and per-tensor error
+    auto pc_error = sum(abs(sub(dequantized, weights))).item<float>();
+    auto pt_error = sum(abs(sub(deq_pertensor, weights))).item<float>();
+
+    // Per-channel error should be <= per-tensor error
+    EXPECT_LE(pc_error, pt_error * 1.01f);  // 1% tolerance for numerical noise
+}
+
+TEST(QuantizationParity, PerChannelAsymmetricQuantize) {
+    auto weights = randn({32, 16}, DType::Float32, Device::cpu());
+
+    auto q_weights = quantize_per_channel_asymmetric(weights, /*axis=*/0);
+
+    EXPECT_EQ(q_weights.params().scale.numel(), 32);
+    EXPECT_EQ(q_weights.params().zero_point.numel(), 32);
+    EXPECT_EQ(q_weights.params().scheme, QuantizationScheme::PerChannelAsymmetric);
+
+    // Roundtrip should preserve shape
+    auto dequantized = dequantize_tensor(q_weights);
+    EXPECT_EQ(dequantized.shape()[0], 32);
+    EXPECT_EQ(dequantized.shape()[1], 16);
+}
+
+TEST(QuantizationParity, PerChannelConv2dWeights) {
+    // Conv2d weights are [out_channels, in_channels, kH, kW]
+    auto weights = randn({16, 3, 3, 3}, DType::Float32, Device::cpu());
+
+    // Quantize per output channel (axis=0)
+    auto q_weights = quantize_per_channel_symmetric(weights, /*axis=*/0);
+
+    EXPECT_EQ(q_weights.params().scale.numel(), 16);
+    EXPECT_EQ(q_weights.params().axis, 0);
+
+    auto dequantized = dequantize_tensor(q_weights);
+    EXPECT_EQ(dequantized.shape()[0], 16);
+    EXPECT_EQ(dequantized.shape()[1], 3);
+    EXPECT_EQ(dequantized.shape()[2], 3);
+    EXPECT_EQ(dequantized.shape()[3], 3);
+}

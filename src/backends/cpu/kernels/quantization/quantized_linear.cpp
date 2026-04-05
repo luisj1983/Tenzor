@@ -137,6 +137,83 @@ auto quantized_linear_kernel(
     }
 }
 
+/**
+ * @brief Per-channel quantized matrix multiplication for linear layer (CPU).
+ *
+ * Each output channel has its own weight_scale and weight_zp, enabling
+ * higher accuracy quantization for weights with varying magnitude ranges.
+ *
+ * output[b][o] = (dot(input[b], weight[o]) - zp_correction[o]) * (input_scale * weight_scales[o] / output_scale) + bias[o]
+ */
+auto quantized_linear_per_channel_kernel(
+    const int8_t* input,
+    const int8_t* weight,
+    const float* bias,
+    float* output,
+    int64_t batch_size,
+    int64_t in_features,
+    int64_t out_features,
+    float input_scale,
+    const float* weight_scales,     // [out_features] per-channel scales
+    float output_scale,
+    int32_t input_zp,
+    const int32_t* weight_zps       // [out_features] per-channel zero points
+) -> void {
+
+    #pragma omp parallel for collapse(2)
+    for (int64_t b = 0; b < batch_size; ++b) {
+        for (int64_t o = 0; o < out_features; ++o) {
+            int32_t acc = 0;
+
+            const int8_t* input_row = input + b * in_features;
+            const int8_t* weight_row = weight + o * in_features;
+
+#if defined(__AVX512VNNI__)
+            acc = dot_int8_vnni(input_row, weight_row, in_features);
+#elif defined(__AVX2__)
+            __m256i acc_vec = _mm256_setzero_si256();
+            int64_t i = 0;
+
+            for (; i + 32 <= in_features; i += 32) {
+                __m256i input_vec = _mm256_loadu_si256((__m256i*)(input_row + i));
+                __m256i weight_vec = _mm256_loadu_si256((__m256i*)(weight_row + i));
+                __m256i prod_lo = _mm256_maddubs_epi16(input_vec, weight_vec);
+                __m256i prod_hi = _mm256_madd_epi16(prod_lo, _mm256_set1_epi16(1));
+                acc_vec = _mm256_add_epi32(acc_vec, prod_hi);
+            }
+
+            __m128i sum128 = _mm_add_epi32(
+                _mm256_castsi256_si128(acc_vec),
+                _mm256_extracti128_si256(acc_vec, 1)
+            );
+            sum128 = _mm_hadd_epi32(sum128, sum128);
+            sum128 = _mm_hadd_epi32(sum128, sum128);
+            acc = _mm_cvtsi128_si32(sum128);
+
+            for (; i < in_features; ++i) {
+                acc += static_cast<int32_t>(input_row[i]) * static_cast<int32_t>(weight_row[i]);
+            }
+#else
+            for (int64_t i = 0; i < in_features; ++i) {
+                acc += static_cast<int32_t>(input_row[i]) * static_cast<int32_t>(weight_row[i]);
+            }
+#endif
+
+            // Per-channel zero point correction and dequantization
+            int32_t w_zp = weight_zps ? weight_zps[o] : 0;
+            acc -= input_zp * w_zp * in_features;
+
+            float combined_scale = input_scale * weight_scales[o] / output_scale;
+            float result = static_cast<float>(acc) * combined_scale;
+            if (bias != nullptr) {
+                result += bias[o];
+            }
+
+            output[b * out_features + o] = result;
+        }
+    }
+}
+
 } // namespace kernels
 } // namespace quantization
 } // namespace nn
