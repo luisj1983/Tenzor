@@ -1,7 +1,7 @@
 #version 450
 
 // EmbeddingBag for BFloat16
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Embeddings { float emb_data[]; };
 layout(binding = 1) buffer Offsets { int offset_data[]; };

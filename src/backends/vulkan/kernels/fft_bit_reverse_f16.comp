@@ -4,7 +4,7 @@
 // Bit-reversal permutation for FFT input/output reordering — Float16
 // Each complex element is one uint32 word (real in low 16, imag in high 16)
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer InputBuf  { uint data_in[];  };
 layout(set = 0, binding = 1) buffer OutputBuf { uint data_out[]; };

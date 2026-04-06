@@ -333,13 +333,16 @@ inline auto broadcast_strides(std::span<const int64_t> shape,
     size_t ndim = broadcast_shape.size();
     std::vector<int64_t> result(ndim, 0);
 
+    // Use signed arithmetic to avoid size_t underflow when ndim > shape.size()
+    ptrdiff_t offset = static_cast<ptrdiff_t>(shape.size()) - static_cast<ptrdiff_t>(ndim);
+
     for (size_t i = 0; i < ndim; ++i) {
-        size_t orig_idx = i + shape.size() - ndim;
-        if (i >= ndim - shape.size()) {
+        ptrdiff_t orig_idx = static_cast<ptrdiff_t>(i) + offset;
+        if (orig_idx >= 0 && orig_idx < static_cast<ptrdiff_t>(shape.size())) {
             // This dimension exists in the original tensor
-            int64_t orig_dim = shape[orig_idx];
+            int64_t orig_dim = shape[static_cast<size_t>(orig_idx)];
             if (orig_dim == broadcast_shape[i]) {
-                result[i] = strides[orig_idx];
+                result[i] = strides[static_cast<size_t>(orig_idx)];
             } else {
                 // orig_dim must be 1 (broadcast) — stride is 0
                 result[i] = 0;

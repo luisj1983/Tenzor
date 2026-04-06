@@ -5,7 +5,7 @@
 // tridiagonal form. Stores Householder vectors below sub-diagonal, tridiagonal
 // entries on diagonal and sub-diagonal.
 // One workgroup with 256 threads per batch element.
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer MatrixA { float A[]; };   // Symmetric n×n (in-place)
 layout(set = 0, binding = 1) buffer TauBuf  { float tau[]; }; // Householder scalars

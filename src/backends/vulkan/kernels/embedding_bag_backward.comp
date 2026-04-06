@@ -9,7 +9,7 @@
 // Input: grad_output (num_bags, embedding_dim), indices (total_indices), offsets (num_offsets)
 // Output: grad_weight (num_embeddings, embedding_dim) — zero-initialized by host
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { float grad_output_data[]; };   // (num_bags, embedding_dim)
 layout(binding = 1) buffer Indices { int indices_data[]; };             // (total_indices)

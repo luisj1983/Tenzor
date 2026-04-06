@@ -4,6 +4,7 @@
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/sparse/sparse_ops.hpp"
 #include <iostream>
 #include <vector>
 
@@ -224,6 +225,17 @@ auto Variable::device() const -> const Device& {
         throw std::runtime_error("Cannot access device of uninitialized Variable");
     }
     return impl_->data_.device();
+}
+
+auto Variable::accumulate_sparse_grad(SparseTensor sg) -> void {
+    if (!impl_) return;
+    std::lock_guard lock(*impl_->grad_mutex_);
+    if (impl_->sparse_grad_.has_value()) {
+        impl_->sparse_grad_ =
+            sparse::add(impl_->sparse_grad_.value(), sg).coalesce();
+    } else {
+        impl_->sparse_grad_ = std::move(sg);
+    }
 }
 
 // NoGradGuard implementation

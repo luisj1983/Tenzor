@@ -5,7 +5,7 @@
 // Input: LU matrix (from blocked LU), pivot indices.
 // Output: scalar determinant per batch element.
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer LUBuf    { float lu_data[]; };
 layout(set = 0, binding = 1) buffer PivotBuf { int pivots[];    };

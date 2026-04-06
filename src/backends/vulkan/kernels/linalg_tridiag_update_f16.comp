@@ -1,7 +1,7 @@
 #version 450
 
 // Blocked tridiagonalization — trailing matrix update — Float16 variant
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer MatrixA { uint A[]; };
 layout(set = 0, binding = 1) readonly buffer TauBuf { uint tau_buf[]; };

@@ -49,11 +49,14 @@ void batchnorm_mean_var_f32(
     int final_threads = 1;
 #endif
 
+    // Single pass: compute sum and sum-of-squares simultaneously,
+    // then derive variance as E[X^2] - E[X]^2. Halves memory bandwidth.
     #pragma omp parallel for num_threads(final_threads) if(C > 1)
     for (int64_t c = 0; c < C; c++) {
-        // First pass: compute sum using AVX-512 (16 floats at a time)
         __m512 vsum = _mm512_setzero_ps();
+        __m512 vsum_sq = _mm512_setzero_ps();
         float scalar_tail = 0.0f;
+        float scalar_sq_tail = 0.0f;
 
         for (int64_t n = 0; n < N; n++) {
             const float* ch_ptr = input + (n * C + c) * spatial_size;
@@ -62,36 +65,21 @@ void batchnorm_mean_var_f32(
             for (; i + 16 <= spatial_size; i += 16) {
                 __m512 v = _mm512_loadu_ps(ch_ptr + i);
                 vsum = _mm512_add_ps(vsum, v);
+                vsum_sq = _mm512_fmadd_ps(v, v, vsum_sq);
             }
             for (; i < spatial_size; i++) {
-                scalar_tail += ch_ptr[i];
+                float val = ch_ptr[i];
+                scalar_tail += val;
+                scalar_sq_tail += val * val;
             }
         }
 
-        float channel_mean = (_mm512_reduce_add_ps(vsum) + scalar_tail) * inv_total;
+        float channel_sum = _mm512_reduce_add_ps(vsum) + scalar_tail;
+        float channel_mean = channel_sum * inv_total;
         mean[c] = channel_mean;
 
-        // Second pass: compute variance
-        __m512 vmean = _mm512_set1_ps(channel_mean);
-        __m512 vvar = _mm512_setzero_ps();
-        float scalar_var_tail = 0.0f;
-
-        for (int64_t n = 0; n < N; n++) {
-            const float* ch_ptr = input + (n * C + c) * spatial_size;
-            int64_t i = 0;
-
-            for (; i + 16 <= spatial_size; i += 16) {
-                __m512 v = _mm512_loadu_ps(ch_ptr + i);
-                __m512 diff = _mm512_sub_ps(v, vmean);
-                vvar = _mm512_fmadd_ps(diff, diff, vvar);
-            }
-            for (; i < spatial_size; i++) {
-                float diff = ch_ptr[i] - channel_mean;
-                scalar_var_tail += diff * diff;
-            }
-        }
-
-        variance[c] = (_mm512_reduce_add_ps(vvar) + scalar_var_tail) * inv_total;
+        float channel_sum_sq = _mm512_reduce_add_ps(vsum_sq) + scalar_sq_tail;
+        variance[c] = channel_sum_sq * inv_total - channel_mean * channel_mean;
     }
 }
 

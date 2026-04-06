@@ -49,41 +49,15 @@
 #include <unordered_map>
 #endif
 
-// Adaptive OpenMP thresholds based on operation complexity
-// NOTE: Thresholds tuned to avoid OpenMP overhead for medium-sized tensors.
-// For simple ops, the per-element work is tiny, so we need large tensors
-// to amortize thread creation/join overhead (~50-100μs per parallel region).
-// With AVX-512 processing 16 floats/cycle, we need ~100K+ elements to benefit.
-struct OmpThresholds {
-    size_t simple;
-    size_t medium;
-    size_t complex;
-    size_t matmul;
-};
+// OpenMP thresholds — uses shared definition with env var override support.
+// See omp_thresholds.hpp for TENZOR_OMP_THRESHOLD_* environment variables.
+#include "omp_thresholds.hpp"
 
-// Function-local static guarantees thread-safe lazy initialization (C++11+),
-// avoiding potential issues with file-scope static init ordering.
-static auto get_omp_thresholds() -> const OmpThresholds& {
-    static const OmpThresholds t = [] {
-        int n = 1;
-#ifdef _OPENMP
-        n = omp_get_max_threads();
-#endif
-        return OmpThresholds{
-            std::max(size_t(65536), size_t(16384) * n),
-            std::max(size_t(32768), size_t(8192) * n),
-            std::max(size_t(8192), size_t(2048) * n),
-            1024
-        };
-    }();
-    return t;
-}
-
-// Convenience macros — delegate to lazy-init function
-#define OMP_THRESHOLD_SIMPLE  (get_omp_thresholds().simple)
-#define OMP_THRESHOLD_MEDIUM  (get_omp_thresholds().medium)
-#define OMP_THRESHOLD_COMPLEX (get_omp_thresholds().complex)
-#define OMP_THRESHOLD_MATMUL  (get_omp_thresholds().matmul)
+// Convenience macros — delegate to shared lazy-init function
+#define OMP_THRESHOLD_SIMPLE  (::tenzor::cpu::get_omp_thresholds().simple)
+#define OMP_THRESHOLD_MEDIUM  (::tenzor::cpu::get_omp_thresholds().medium)
+#define OMP_THRESHOLD_COMPLEX (::tenzor::cpu::get_omp_thresholds().complex)
+#define OMP_THRESHOLD_MATMUL  (::tenzor::cpu::get_omp_thresholds().matmul)
 
 namespace tenzor {
 
@@ -1242,7 +1216,7 @@ inline void div_scalar(const T* a, const T* b, T* c, size_t n) {
 #ifdef TENZOR_HAS_AVX512
 
 __attribute__((target("avx512f")))
-inline void add_avx512_f32(const float* a, const float* b, float* c, size_t n) {
+inline void add_avx512_f32(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, size_t n) {
     const size_t simd_width = 16;
     const size_t simd_end = (n / simd_width) * simd_width;
 
@@ -1262,7 +1236,7 @@ inline void add_avx512_f32(const float* a, const float* b, float* c, size_t n) {
 }
 
 __attribute__((target("avx512f")))
-inline void sub_avx512_f32(const float* a, const float* b, float* c, size_t n) {
+inline void sub_avx512_f32(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, size_t n) {
     const size_t simd_width = 16;
     const size_t simd_end = (n / simd_width) * simd_width;
 
@@ -1280,7 +1254,7 @@ inline void sub_avx512_f32(const float* a, const float* b, float* c, size_t n) {
 }
 
 __attribute__((target("avx512f")))
-inline void mul_avx512_f32(const float* a, const float* b, float* c, size_t n) {
+inline void mul_avx512_f32(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, size_t n) {
     const size_t simd_width = 16;
     const size_t simd_end = (n / simd_width) * simd_width;
 
@@ -1298,7 +1272,7 @@ inline void mul_avx512_f32(const float* a, const float* b, float* c, size_t n) {
 }
 
 __attribute__((target("avx512f")))
-inline void div_avx512_f32(const float* a, const float* b, float* c, size_t n) {
+inline void div_avx512_f32(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, size_t n) {
     const size_t simd_width = 16;
     const size_t simd_end = (n / simd_width) * simd_width;
 
@@ -1318,7 +1292,7 @@ inline void div_avx512_f32(const float* a, const float* b, float* c, size_t n) {
 
 // SIMD implementations for Float64
 __attribute__((target("avx512f")))
-inline void add_avx512_f64(const double* a, const double* b, double* c, size_t n) {
+inline void add_avx512_f64(const double* __restrict__ a, const double* __restrict__ b, double* __restrict__ c, size_t n) {
     size_t i = 0;
     const size_t simd_width = 8;
 
@@ -1335,7 +1309,7 @@ inline void add_avx512_f64(const double* a, const double* b, double* c, size_t n
 }
 
 __attribute__((target("avx512f")))
-inline void sub_avx512_f64(const double* a, const double* b, double* c, size_t n) {
+inline void sub_avx512_f64(const double* __restrict__ a, const double* __restrict__ b, double* __restrict__ c, size_t n) {
     size_t i = 0;
     const size_t simd_width = 8;
 
@@ -1352,7 +1326,7 @@ inline void sub_avx512_f64(const double* a, const double* b, double* c, size_t n
 }
 
 __attribute__((target("avx512f")))
-inline void mul_avx512_f64(const double* a, const double* b, double* c, size_t n) {
+inline void mul_avx512_f64(const double* __restrict__ a, const double* __restrict__ b, double* __restrict__ c, size_t n) {
     size_t i = 0;
     const size_t simd_width = 8;
 
@@ -1369,7 +1343,7 @@ inline void mul_avx512_f64(const double* a, const double* b, double* c, size_t n
 }
 
 __attribute__((target("avx512f")))
-inline void div_avx512_f64(const double* a, const double* b, double* c, size_t n) {
+inline void div_avx512_f64(const double* __restrict__ a, const double* __restrict__ b, double* __restrict__ c, size_t n) {
     size_t i = 0;
     const size_t simd_width = 8;
 
@@ -1477,7 +1451,7 @@ inline void sub_avx512_i64(const int64_t* a, const int64_t* b, int64_t* c, size_
 
 // AVX2 fallback implementations
 __attribute__((target("avx2,fma")))
-inline void add_avx2_f32(const float* a, const float* b, float* c, size_t n) {
+inline void add_avx2_f32(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, size_t n) {
     const size_t simd_width = 8;
     const size_t simd_end = (n / simd_width) * simd_width;
 
@@ -1497,7 +1471,7 @@ inline void add_avx2_f32(const float* a, const float* b, float* c, size_t n) {
 }
 
 __attribute__((target("avx2,fma")))
-inline void sub_avx2_f32(const float* a, const float* b, float* c, size_t n) {
+inline void sub_avx2_f32(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, size_t n) {
     const size_t simd_width = 8;
     const size_t simd_end = (n / simd_width) * simd_width;
 
@@ -1515,7 +1489,7 @@ inline void sub_avx2_f32(const float* a, const float* b, float* c, size_t n) {
 }
 
 __attribute__((target("avx2,fma")))
-inline void mul_avx2_f32(const float* a, const float* b, float* c, size_t n) {
+inline void mul_avx2_f32(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, size_t n) {
     const size_t simd_width = 8;
     const size_t simd_end = (n / simd_width) * simd_width;
 
@@ -1533,7 +1507,7 @@ inline void mul_avx2_f32(const float* a, const float* b, float* c, size_t n) {
 }
 
 __attribute__((target("avx2,fma")))
-inline void div_avx2_f32(const float* a, const float* b, float* c, size_t n) {
+inline void div_avx2_f32(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, size_t n) {
     const size_t simd_width = 8;
     const size_t simd_end = (n / simd_width) * simd_width;
 
@@ -1552,7 +1526,7 @@ inline void div_avx2_f32(const float* a, const float* b, float* c, size_t n) {
 }
 
 __attribute__((target("avx2,fma")))
-inline void add_avx2_f64(const double* a, const double* b, double* c, size_t n) {
+inline void add_avx2_f64(const double* __restrict__ a, const double* __restrict__ b, double* __restrict__ c, size_t n) {
     size_t i = 0;
     const size_t simd_width = 4;
 
@@ -1569,7 +1543,7 @@ inline void add_avx2_f64(const double* a, const double* b, double* c, size_t n) 
 }
 
 __attribute__((target("avx2,fma")))
-inline void sub_avx2_f64(const double* a, const double* b, double* c, size_t n) {
+inline void sub_avx2_f64(const double* __restrict__ a, const double* __restrict__ b, double* __restrict__ c, size_t n) {
     size_t i = 0;
     const size_t simd_width = 4;
 
@@ -1586,7 +1560,7 @@ inline void sub_avx2_f64(const double* a, const double* b, double* c, size_t n) 
 }
 
 __attribute__((target("avx2,fma")))
-inline void mul_avx2_f64(const double* a, const double* b, double* c, size_t n) {
+inline void mul_avx2_f64(const double* __restrict__ a, const double* __restrict__ b, double* __restrict__ c, size_t n) {
     size_t i = 0;
     const size_t simd_width = 4;
 
@@ -1603,7 +1577,7 @@ inline void mul_avx2_f64(const double* a, const double* b, double* c, size_t n) 
 }
 
 __attribute__((target("avx2,fma")))
-inline void div_avx2_f64(const double* a, const double* b, double* c, size_t n) {
+inline void div_avx2_f64(const double* __restrict__ a, const double* __restrict__ b, double* __restrict__ c, size_t n) {
     size_t i = 0;
     const size_t simd_width = 4;
 

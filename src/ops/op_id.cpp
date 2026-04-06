@@ -166,6 +166,7 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::GroupNormBackward)] = "group_norm_backward";
     names[static_cast<size_t>(OpId::InstanceNorm)] = "instance_norm";
     names[static_cast<size_t>(OpId::InstanceNormBackward)] = "instance_norm_backward";
+    names[static_cast<size_t>(OpId::RMSNorm)] = "rms_norm";
     names[static_cast<size_t>(OpId::RMSNormBackward)] = "rms_norm_backward";
     names[static_cast<size_t>(OpId::BatchNorm2dFusedTraining)] = "batchnorm2d_fused_training";
 
@@ -434,7 +435,7 @@ constexpr size_t count_named_ops() {
 
 // Count of actual OpId enum values (excluding gap slots).
 // Update this when adding new OpIds to catch missing name entries at compile time.
-inline constexpr size_t EXPECTED_NAMED_OPS = 322;
+inline constexpr size_t EXPECTED_NAMED_OPS = 323;
 
 // If this fires, a new OpId was added without a corresponding name in op_names above
 static_assert(count_named_ops() == EXPECTED_NAMED_OPS,

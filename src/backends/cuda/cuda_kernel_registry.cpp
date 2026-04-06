@@ -1359,6 +1359,12 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // =========================================================================
     // Fused RMSNorm (single kernel launch for maximum performance)
     // =========================================================================
+    table.register_kernel(OpId::RMSNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+        auto [output, rrms] = cuda::fused_rms_norm_cuda(inputs[0], inputs[1], eps);
+        return std::vector<Tensor>{output, rrms};
+    });
+
     table.register_kernel(OpId::FusedRMSNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [input, weight]
         // attrs: eps

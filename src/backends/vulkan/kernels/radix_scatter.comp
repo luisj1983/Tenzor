@@ -1,7 +1,7 @@
 #version 450
 
 // Radix sort: scatter pass — write keys and indices to sorted positions
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) readonly buffer KeysIn   { float keys_in[];   };
 layout(set = 0, binding = 1) readonly buffer IdxIn    { int idx_in[];      };

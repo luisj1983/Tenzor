@@ -6,7 +6,7 @@
 // For k < half_plus_one: direct copy
 // For k >= half_plus_one: X[k] = conj(X[N-k])
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer InputBuf  { float data_in[];  };
 layout(set = 0, binding = 1) buffer OutputBuf { float data_out[]; };

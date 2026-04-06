@@ -3,7 +3,7 @@
 // Stockham mixed-radix FFT: radix-2 butterfly stage
 // Data layout: interleaved real/imag pairs
 // Unlike the Cooley-Tukey fft.comp, this uses Stockham auto-sort (ping-pong buffers)
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer InputBuf  { float data_in[];  };
 layout(set = 0, binding = 1) buffer OutputBuf { float data_out[]; };

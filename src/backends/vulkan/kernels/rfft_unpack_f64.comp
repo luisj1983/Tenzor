@@ -3,7 +3,7 @@
 
 // Real-to-Complex FFT: Unpack N/2-point complex FFT to N/2+1 complex output — Float64
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer InputBuf  { double data_in[];  };
 layout(set = 0, binding = 1) buffer OutputBuf { double data_out[]; };

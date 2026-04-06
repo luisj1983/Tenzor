@@ -6,7 +6,7 @@
 // tau_l, tau_r, reconstruct U = product of left Householder reflections,
 // V = product of right Householder reflections.
 // Each workgroup handles one column of the output matrix.
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) readonly buffer BidiagA { float A[]; };
 layout(set = 0, binding = 1) readonly buffer TauL { float tau_l[]; };

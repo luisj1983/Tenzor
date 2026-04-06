@@ -2,7 +2,7 @@
 
 // Radix sort: per-workgroup histogram of 8-bit digit
 // Each workgroup counts occurrences of each digit value (0-255) in its tile
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) readonly buffer Keys     { float keys[];    };
 layout(set = 0, binding = 1) buffer Histograms         { uint histos[];   };  // [n_workgroups * 256]

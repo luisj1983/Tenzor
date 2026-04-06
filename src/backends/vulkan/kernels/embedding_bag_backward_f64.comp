@@ -10,7 +10,7 @@
 // limitation because GL_EXT_shader_atomic_float does not cover float64 atomics.
 // See embedding_backward_f64.comp for detailed rationale.
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { float64_t grad_output_data[]; };
 layout(binding = 1) buffer Indices { int indices_data[]; };

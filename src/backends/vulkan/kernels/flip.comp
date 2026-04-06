@@ -2,7 +2,7 @@
 
 // Flip (reverse) elements along a dimension
 // Grid-stride kernel: one thread per element
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer InputA { float a[]; };
 layout(binding = 1) buffer Output { float result[]; };

@@ -5,7 +5,7 @@
 // Stores Householder vectors below diagonal, R on/above diagonal
 // Also builds compact WY representation: Q = I - V*T*V^T
 // One workgroup with 256 threads.
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer Matrix { float A[]; };
 layout(set = 0, binding = 1) buffer TauBuf { float tau[]; };  // Householder scalars

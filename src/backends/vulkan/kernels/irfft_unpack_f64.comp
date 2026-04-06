@@ -3,7 +3,7 @@
 
 // Complex-to-Real IFFT: Unpack N/2 complex values back to N real values — Float64
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer InputBuf  { double data_in[];  };
 layout(set = 0, binding = 1) buffer OutputBuf { double data_out[]; };

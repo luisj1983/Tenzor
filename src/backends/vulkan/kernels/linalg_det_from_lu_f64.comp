@@ -4,7 +4,7 @@
 // Compute determinant from LU factorization diagonal + pivot sign — Float64.
 // Each workgroup handles one batch element.
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer LUBuf    { double lu_data[]; };
 layout(set = 0, binding = 1) buffer PivotBuf { int pivots[];     };

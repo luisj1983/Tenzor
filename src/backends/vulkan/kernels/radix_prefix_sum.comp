@@ -3,7 +3,7 @@
 // Exclusive prefix sum over the column-major histogram matrix
 // Input/output: histogram array of size [256 * n_workgroups]
 // After prefix sum, histos[digit * n_wgs + wg] = starting offset for (digit, wg)
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer Histograms { uint histos[]; };
 

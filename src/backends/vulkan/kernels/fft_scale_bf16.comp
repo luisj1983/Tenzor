@@ -19,7 +19,7 @@ uint packBF16x2(vec2 v) {
 // Scale complex array by 1/N for inverse FFT normalization — BFloat16
 // Each complex element is one uint32 word (real in low 16, imag in high 16)
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer DataBuf { uint data[]; };
 

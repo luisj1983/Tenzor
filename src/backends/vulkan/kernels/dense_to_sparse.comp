@@ -3,7 +3,7 @@
 // Dense to CSR: Pass 1 — count nonzeros per row
 // Output: row_counts[row] = number of nonzero elements in that row
 // A prefix sum (on the host or a separate pass) converts row_counts to row_offsets
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) readonly buffer Dense     { float dense[];     };
 layout(set = 0, binding = 1) buffer RowCounts          { uint row_counts[]; };

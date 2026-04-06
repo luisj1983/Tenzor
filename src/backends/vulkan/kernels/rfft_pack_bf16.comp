@@ -21,7 +21,7 @@ uint packBF16x2(vec2 v) {
 // Output: N/2 complex bfloat16 values (1 complex per uint32 word: real low, imag high)
 // Pairs adjacent reals as (re, im) for a half-length complex FFT
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer InputBuf  { uint data_in[];  };
 layout(set = 0, binding = 1) buffer OutputBuf { uint data_out[]; };

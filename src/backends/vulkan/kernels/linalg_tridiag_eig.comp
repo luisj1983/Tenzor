@@ -5,7 +5,7 @@
 // Outputs eigenvalues and accumulated Givens rotation parameters for eigenvector
 // reconstruction.
 // One workgroup per batch element (256 threads, thread 0 does serial QR).
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer DiagBuf    { float diag[]; };     // n diagonal elements
 layout(set = 0, binding = 1) buffer SubDiagBuf { float sdiag[]; };    // n-1 subdiagonal elements

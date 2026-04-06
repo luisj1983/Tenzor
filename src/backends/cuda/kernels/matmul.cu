@@ -91,10 +91,16 @@ __global__ void matmul_fp16_saturate_kernel(__half* data, int64_t n,
     constexpr float kHalfMax = 65504.0f;
     for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += blockDim.x * gridDim.x) {
         float val = __half2float(data[idx]);
-        if (val > kHalfMax || val < -kHalfMax) {
+        bool saturated = (val > kHalfMax || val < -kHalfMax);
+        if (saturated) {
             data[idx] = __float2half(fminf(fmaxf(val, -kHalfMax), kHalfMax));
-            if (saturation_count) {
-                atomicAdd(saturation_count, 1ULL);
+        }
+        // Use warp-level ballot to reduce atomic contention: one atomic per warp
+        // instead of one per saturated thread
+        if (saturation_count) {
+            unsigned mask = __ballot_sync(0xFFFFFFFF, saturated);
+            if ((threadIdx.x & 31) == 0 && mask) {
+                atomicAdd(saturation_count, static_cast<unsigned long long>(__popc(mask)));
             }
         }
     }

@@ -1,7 +1,7 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 // F16 sort: keys stored as individual uint16 values packed in uint32 pairs
 // But for sorting we need individual access, so we use a flat uint16 view via uint buffer

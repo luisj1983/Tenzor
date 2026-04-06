@@ -2,7 +2,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
 // Flip (reverse) elements along a dimension for Float64
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer InputA { float64_t a[]; };
 layout(binding = 1) buffer Output { float64_t result[]; };

@@ -4,7 +4,7 @@
 // After panel reduction of columns [col_start, col_start+panel_cols), apply the
 // reflections to the trailing block of columns [col_start+panel_cols, n).
 // Each workgroup handles one trailing column.
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer MatrixA { float A[]; };
 layout(set = 0, binding = 1) readonly buffer TauBuf { float tau[]; };

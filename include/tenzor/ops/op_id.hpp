@@ -195,6 +195,7 @@ enum class OpId : uint16_t {
     GroupNormBackward,
     InstanceNorm,
     InstanceNormBackward,
+    RMSNorm,
     RMSNormBackward,
 
     // =========================================================================

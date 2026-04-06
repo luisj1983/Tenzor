@@ -2,7 +2,7 @@
 
 // Flip (reverse) elements along a dimension for BFloat16
 // BFloat16 stored as packed uint32 words (2 elements per word)
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer InputA { uint a[]; };
 layout(binding = 1) buffer Output { uint result[]; };

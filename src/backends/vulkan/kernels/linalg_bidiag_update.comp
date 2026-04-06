@@ -6,7 +6,7 @@
 // apply the accumulated reflections to trailing rows and columns.
 // Each workgroup handles one trailing column for left reflections,
 // then one trailing row for right reflections.
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer MatrixA { float A[]; };
 layout(set = 0, binding = 1) readonly buffer TauL { float tau_l[]; };

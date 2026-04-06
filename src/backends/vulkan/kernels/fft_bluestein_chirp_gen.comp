@@ -5,7 +5,7 @@
 //          = cos(angle) + j*sin(angle), where angle = sign * pi * k^2 / N
 // Output: interleaved real/imag pairs — [re0, im0, re1, im1, ...]
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer OutputBuf { float output_data[]; };
 

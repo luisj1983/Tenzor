@@ -3,7 +3,7 @@
 // Extract eigenvalues from quasi-upper-triangular (real Schur) form.
 // Walks diagonal blocks: 1x1 block = real eigenvalue, 2x2 block = complex pair.
 // One workgroup per batch element, thread 0 does the serial walk.
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) readonly buffer MatrixT { float T[]; };  // Quasi-upper-triangular n×n
 layout(set = 0, binding = 1) buffer EigReal { float eig_r[]; };       // Real parts of eigenvalues

@@ -5,7 +5,7 @@
 //   op=0: extract diagonal from 2D matrix -> 1D vector
 //   op=1: construct diagonal matrix from 1D vector -> 2D matrix
 // F16 packed buffers (2 Float16 per uint32), arithmetic in float32
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer InputA { uint a[]; };
 layout(binding = 1) buffer Output { uint result[]; };

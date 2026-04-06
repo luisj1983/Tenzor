@@ -3,7 +3,7 @@
 
 // Convert real-valued Float64 buffer to interleaved complex (imag = 0)
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer InputBuf  { float64_t data_in[];  };
 layout(set = 0, binding = 1) buffer OutputBuf { float64_t data_out[]; };

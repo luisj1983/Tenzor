@@ -7,7 +7,7 @@
 // computation and accumulation in float32 for precision.
 // grad_weight is stored as float32; the dispatch method handles conversion back to float16.
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { float16_t grad_output_data[]; };
 layout(binding = 1) buffer Indices { int indices_data[]; };

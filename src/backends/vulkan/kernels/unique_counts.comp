@@ -5,7 +5,7 @@
 // For each boundary element at position gid, writes the position into
 // boundary_positions[group_id]. Counts are then computed as differences
 // between consecutive boundary positions by the caller.
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) readonly buffer Boundaries { int boundaries[]; };
 layout(set = 0, binding = 1) readonly buffer PrefixSum { int prefix_sum[]; };

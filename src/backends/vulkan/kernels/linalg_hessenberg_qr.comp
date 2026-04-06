@@ -4,7 +4,7 @@
 // Operates on the active unreduced block [active_start, active_end] of H.
 // Computes shifts from the bottom-right 2x2 block, then chases the bulge.
 // One workgroup (256 threads), thread 0 does the serial bulge chase.
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer MatrixH { float H[]; };           // Upper Hessenberg n×n
 layout(set = 0, binding = 1) buffer ShiftBuf { float shifts[]; };      // Output: deflation info

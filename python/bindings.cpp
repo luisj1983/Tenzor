@@ -28,6 +28,7 @@
 #include <tenzor/nn/layers/transformer.hpp>
 #include <tenzor/nn/layers/embedding.hpp>
 #include <tenzor/nn/layers/lazy_linear.hpp>
+#include <tenzor/nn/layers/sync_batchnorm.hpp>
 #include <tenzor/nn/optim/rmsprop.hpp>
 #include <tenzor/nn/optim/adagrad.hpp>
 #include <tenzor/nn/optim/adadelta.hpp>
@@ -4264,6 +4265,22 @@ Example::
             return "BatchNorm3d(" + std::to_string(num_f) + ")";
         });
 
+    py::class_<tenzor::nn::SyncBatchNorm, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::SyncBatchNorm>>(nn, "SyncBatchNorm",
+               "Synchronized Batch Normalization across distributed processes.\n"
+               "Synchronizes mean/variance via an all-reduce callback.")
+        .def(py::init<int64_t, tenzor::nn::AllReduceFn, int, double, double, bool, bool>(),
+             py::arg("num_features"),
+             py::arg("all_reduce_fn"),
+             py::arg("world_size") = 1,
+             py::arg("eps") = 1e-5,
+             py::arg("momentum") = 0.1,
+             py::arg("affine") = true,
+             py::arg("track_running_stats") = true)
+        .def("__repr__", [](const tenzor::nn::SyncBatchNorm& self) {
+            return "SyncBatchNorm(" + self.extra_repr() + ")";
+        });
+
     py::class_<tenzor::nn::BatchNorm1d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::BatchNorm1d>>(nn, "BatchNorm1d")
         .def(py::init<int64_t, double, double, bool, bool>(),
@@ -7173,6 +7190,31 @@ Example::
     torch_mod.def("tensor_from_torch", &tenzor::torch_interop::tensor_from_torch,
                   py::arg("torch_tensor"), py::arg("device") = py::none(),
                   "Convert PyTorch tensor to Tenzor tensor");
+    torch_mod.def("can_zero_copy_from_torch", &tenzor::torch_interop::can_zero_copy_from_torch,
+                  py::arg("torch_tensor"),
+                  "Check if zero-copy conversion from PyTorch is possible");
+    torch_mod.def("variable_to_torch", &tenzor::torch_interop::variable_to_torch,
+                  py::arg("variable"),
+                  "Convert Tenzor Variable to PyTorch Variable with autograd");
+    torch_mod.def("variable_from_torch", &tenzor::torch_interop::variable_from_torch,
+                  py::arg("torch_variable"),
+                  "Convert PyTorch Variable to Tenzor Variable");
+    torch_mod.def("dtype_to_torch", &tenzor::torch_interop::dtype_to_torch,
+                  py::arg("dtype"),
+                  "Map Tenzor DType to PyTorch ScalarType (as int)");
+    torch_mod.def("dtype_from_torch", &tenzor::torch_interop::dtype_from_torch,
+                  py::arg("torch_dtype"),
+                  "Map PyTorch ScalarType (as int) to Tenzor DType");
+    torch_mod.def("device_to_torch_string", &tenzor::torch_interop::device_to_torch_string,
+                  py::arg("device"),
+                  "Map Tenzor Device to PyTorch device string");
+    torch_mod.def("device_from_torch_string", &tenzor::torch_interop::device_from_torch_string,
+                  py::arg("device_str"),
+                  "Map PyTorch device string to Tenzor Device");
+    torch_mod.def("sync_gradients", &tenzor::torch_interop::sync_gradients,
+                  py::arg("tenzor_var"), py::arg("torch_var"),
+                  py::arg("tenzor_to_torch") = true,
+                  "Synchronize gradient storage between Tenzor and PyTorch");
     #endif
 
     // =============================================================================

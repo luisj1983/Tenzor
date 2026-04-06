@@ -5,7 +5,7 @@
 // For each nonzero element, atomically claim a write slot within the
 // row's range [crow_indices[row], crow_indices[row+1]) and write
 // the column index and value.
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) readonly  buffer Dense       { float dense[];       };
 layout(set = 0, binding = 1) readonly  buffer CrowIndices  { int   crow_indices[]; };

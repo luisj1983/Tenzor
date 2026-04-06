@@ -6,7 +6,7 @@
 // For each column j: zeros A[j+2:n, j] using H_j = I - tau * v * v^T
 // applied from both left and right: A = H * A * H^T (preserves Hessenberg structure).
 // One workgroup (256 threads) per batch element.
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer MatrixA { float A[]; };
 layout(set = 0, binding = 1) buffer TauBuf  { float tau[]; };

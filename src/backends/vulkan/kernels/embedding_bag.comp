@@ -4,7 +4,7 @@
 // Input embeddings are pre-indexed (already selected rows stacked contiguously).
 // Offsets define bag boundaries: bag[i] spans [offsets[i], offsets[i+1]).
 // One workgroup per (bag, embedding_dim_chunk) — each thread handles one output element.
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Embeddings { float emb_data[]; };   // (total_rows, embedding_dim)
 layout(binding = 1) buffer Offsets { int offset_data[]; };       // (num_bags) or (num_bags+1) if include_last

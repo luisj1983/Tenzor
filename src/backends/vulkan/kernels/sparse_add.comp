@@ -4,7 +4,7 @@
 // The output buffer must be pre-filled with dense matrix values before dispatch.
 // This kernel adds CSR sparse values at the appropriate positions.
 // One workgroup per row, threads handle a subset of nonzeros in that row.
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) readonly buffer RowOffsets { int row_offsets[]; };
 layout(set = 0, binding = 1) readonly buffer ColIndices { int col_indices[]; };

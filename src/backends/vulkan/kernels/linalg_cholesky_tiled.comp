@@ -4,7 +4,7 @@
 // Factorizes a single 32-column panel of the lower-triangular factor L
 // Input: A[n x n] symmetric positive definite, stored row-major
 // One workgroup with 256 threads.
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer Matrix { float A[]; };
 

@@ -2,7 +2,7 @@
 
 // Extract diagonal and superdiagonal from bidiagonalized matrix — Float16 variant
 // Reads packed F16 matrix, writes packed F16 diag/superdiag
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) readonly buffer MatrixA { uint A[]; };
 layout(set = 0, binding = 1) buffer Diag { uint diag_buf[]; };

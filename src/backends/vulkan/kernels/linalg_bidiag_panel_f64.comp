@@ -2,7 +2,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
 // Blocked bidiagonal reduction — panel factorization (Float64)
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer MatrixA { float64_t A[]; };
 layout(set = 0, binding = 1) buffer TauL { float64_t tau_l[]; };

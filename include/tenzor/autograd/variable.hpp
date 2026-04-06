@@ -319,6 +319,17 @@ public:
     }
 
     /**
+     * @brief Accumulate sparse gradient (thread-safe).
+     *
+     * If a sparse gradient already exists, adds the new one and coalesces.
+     * Otherwise sets it directly. Acquires grad_mutex_ for thread safety,
+     * matching the dense gradient accumulation pattern in BackwardEngine.
+     *
+     * @param sg New sparse gradient to accumulate
+     */
+    auto accumulate_sparse_grad(SparseTensor sg) -> void;
+
+    /**
      * @brief Clear sparse gradient.
      */
     auto clear_sparse_grad() -> void {

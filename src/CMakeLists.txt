@@ -75,6 +75,7 @@ set(TENZOR_CORE_SOURCES
     nn/layers/lazy_linear.cpp
     nn/layers/conv.cpp
     nn/layers/batchnorm.cpp
+    nn/layers/sync_batchnorm.cpp
     nn/layers/dropout.cpp
     nn/layers/drop_path.cpp
     nn/layers/rope.cpp

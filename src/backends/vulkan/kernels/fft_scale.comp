@@ -3,7 +3,7 @@
 // Scale complex array by 1/N for inverse FFT normalization
 // Data layout: interleaved real/imag pairs
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer DataBuf { float data[]; };
 

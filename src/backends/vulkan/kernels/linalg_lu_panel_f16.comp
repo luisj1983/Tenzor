@@ -6,7 +6,7 @@
 // columns [col_start, col_start+32) using partial pivoting within the panel,
 // then applies row swaps to the full matrix.
 // One workgroup with 256 threads.
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer Matrix { uint A[]; };
 layout(set = 0, binding = 1) buffer PivotBuf { int pivots[]; };

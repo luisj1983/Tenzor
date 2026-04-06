@@ -11,6 +11,7 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/sparse/sparse_tensor.hpp"
+#include "tenzor/sparse/sparse_ops.hpp"
 #include <array>
 #include <stdexcept>
 #include <cmath>
@@ -174,9 +175,13 @@ public:
             auto sparse_grad = SparseTensor::sparse_coo(
                 idx_tensor, grad_values, {num_embeddings_, embedding_dim_});
 
-            // Store sparse gradient on the weight variable for sparse-aware optimizers
+            // Accumulate sparse gradient on the weight variable for sparse-aware optimizers.
+            // When the same embedding is used in multiple forward paths, backward is
+            // called once per path — we must accumulate, not overwrite, to get the
+            // correct total gradient.
+            // accumulate_sparse_grad() acquires grad_mutex_ internally for thread safety.
             auto& weight_var = input_variables_[1];
-            weight_var.set_sparse_grad(sparse_grad);
+            weight_var.accumulate_sparse_grad(sparse_grad);
 
             // Convert to dense for the standard backward engine
             auto grad_weight = sparse_grad.to_dense();

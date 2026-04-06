@@ -3,7 +3,7 @@
 // Complex-to-Real IFFT: Unpack N/2 complex values back to N real values
 // After N/2-point inverse FFT, extract interleaved real parts
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer InputBuf  { float data_in[];  };  // N/2 complex (interleaved)
 layout(set = 0, binding = 1) buffer OutputBuf { float data_out[]; };  // N real values

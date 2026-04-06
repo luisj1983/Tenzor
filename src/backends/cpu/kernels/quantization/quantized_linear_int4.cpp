@@ -69,56 +69,112 @@ auto quantized_linear_int4_kernel(
     float combined_scale = input_scale * weight_scale / output_scale;
     int64_t packed_features = in_features / 2;
 
-    #pragma omp parallel for collapse(2)
-    for (int64_t b = 0; b < batch_size; ++b) {
+    // When batch_size > 1, pre-unpack each weight row to avoid redundant
+    // unpacking across batch elements. The unpacked buffer (~in_features bytes
+    // per output row) fits in L1 cache for typical hidden sizes (4096 = 4KB).
+    if (batch_size > 1) {
+        #pragma omp parallel for
+        for (int64_t o = 0; o < out_features; ++o) {
+            const uint8_t* weight_row = weight_packed + o * packed_features;
+
+            // Pre-unpack INT4 weights to INT8 (thread-local stack buffer)
+            // Use alloca-like approach: VLA or fixed-size buffer
+            alignas(32) int8_t unpacked_weights[in_features]; // fits in stack for typical sizes
+
+            for (int64_t p = 0; p < packed_features; ++p) {
+                unpack_int4(weight_row[p], unpacked_weights[p * 2], unpacked_weights[p * 2 + 1]);
+            }
+
+            // Now iterate over batch with pre-unpacked weights
+            for (int64_t b = 0; b < batch_size; ++b) {
+                int32_t acc = 0;
+                const int8_t* input_row = input + b * in_features;
+
+#if defined(__AVX2__)
+                __m256i acc_vec = _mm256_setzero_si256();
+                int64_t k = 0;
+
+                // Process 32 INT8 values at a time using _mm256_maddubs_epi16
+                for (; k + 32 <= in_features; k += 32) {
+                    __m256i vi = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(input_row + k));
+                    __m256i vw = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(unpacked_weights + k));
+                    // maddubs: treats first as unsigned, second as signed
+                    // Since our input is signed INT8, use madd_epi16 on 16-bit widened values
+                    __m128i vi_lo = _mm256_castsi256_si128(vi);
+                    __m128i vi_hi = _mm256_extracti128_si256(vi, 1);
+                    __m128i vw_lo = _mm256_castsi256_si128(vw);
+                    __m128i vw_hi = _mm256_extracti128_si256(vw, 1);
+
+                    __m256i vi16_lo = _mm256_cvtepi8_epi16(vi_lo);
+                    __m256i vw16_lo = _mm256_cvtepi8_epi16(vw_lo);
+                    __m256i vi16_hi = _mm256_cvtepi8_epi16(vi_hi);
+                    __m256i vw16_hi = _mm256_cvtepi8_epi16(vw_hi);
+
+                    acc_vec = _mm256_add_epi32(acc_vec, _mm256_madd_epi16(vi16_lo, vw16_lo));
+                    acc_vec = _mm256_add_epi32(acc_vec, _mm256_madd_epi16(vi16_hi, vw16_hi));
+                }
+
+                // Horizontal sum
+                __m128i sum128 = _mm_add_epi32(_mm256_castsi256_si128(acc_vec),
+                                               _mm256_extracti128_si256(acc_vec, 1));
+                sum128 = _mm_add_epi32(sum128, _mm_shuffle_epi32(sum128, _MM_SHUFFLE(1, 0, 3, 2)));
+                sum128 = _mm_add_epi32(sum128, _mm_shuffle_epi32(sum128, _MM_SHUFFLE(0, 1, 0, 1)));
+                acc = _mm_cvtsi128_si32(sum128);
+
+                // Scalar tail
+                for (; k < in_features; ++k) {
+                    acc += static_cast<int32_t>(input_row[k]) * static_cast<int32_t>(unpacked_weights[k]);
+                }
+#else
+                for (int64_t k = 0; k < in_features; ++k) {
+                    acc += static_cast<int32_t>(input_row[k]) * static_cast<int32_t>(unpacked_weights[k]);
+                }
+#endif
+                float result = static_cast<float>(acc) * combined_scale;
+                if (bias) {
+                    result += bias[o];
+                }
+                output[b * out_features + o] = result;
+            }
+        }
+    } else {
+        // batch_size == 1: original approach (no benefit from pre-unpacking)
+        #pragma omp parallel for
         for (int64_t o = 0; o < out_features; ++o) {
             int32_t acc = 0;
-            const int8_t* input_row = input + b * in_features;
+            const int8_t* input_row = input;
             const uint8_t* weight_row = weight_packed + o * packed_features;
 
 #if defined(__AVX2__)
-            // AVX2 path: unpack INT4 to INT16 and use _mm256_madd_epi16
             __m256i acc_vec = _mm256_setzero_si256();
             int64_t p = 0;
 
-            // Process 16 packed bytes (32 INT4 values) at a time
-            const __m256i mask_low = _mm256_set1_epi8(0x0F);
-            const __m256i offset = _mm256_set1_epi8(8);
-
             for (; p + 16 <= packed_features; p += 16) {
-                // Load 16 packed bytes = 32 INT4 weights
                 __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(weight_row + p));
                 __m256i packed256 = _mm256_cvtepu8_epi16(packed);
 
-                // Extract low and high nibbles
                 __m256i w_low = _mm256_and_si256(packed256, _mm256_set1_epi16(0x0F));
                 __m256i w_high = _mm256_srli_epi16(packed256, 4);
                 w_high = _mm256_and_si256(w_high, _mm256_set1_epi16(0x0F));
 
-                // Subtract offset (signed: -8 to 7)
                 w_low = _mm256_sub_epi16(w_low, _mm256_set1_epi16(8));
                 w_high = _mm256_sub_epi16(w_high, _mm256_set1_epi16(8));
 
-                // Load corresponding input INT8 values (32 values: interleaved low, high)
-                // Input indices: for packed byte p, input[2p] pairs with low, input[2p+1] with high
                 __m256i in_low = _mm256_cvtepi8_epi16(
                     _mm_loadu_si128(reinterpret_cast<const __m128i*>(input_row + p * 2)));
                 __m256i in_high = _mm256_cvtepi8_epi16(
                     _mm_loadu_si128(reinterpret_cast<const __m128i*>(input_row + p * 2 + 16)));
 
-                // Multiply and accumulate (INT16 * INT16 -> INT32)
                 acc_vec = _mm256_add_epi32(acc_vec, _mm256_madd_epi16(in_low, w_low));
                 acc_vec = _mm256_add_epi32(acc_vec, _mm256_madd_epi16(in_high, w_high));
             }
 
-            // Horizontal sum of acc_vec
             __m128i sum128 = _mm_add_epi32(_mm256_castsi256_si128(acc_vec),
                                            _mm256_extracti128_si256(acc_vec, 1));
             sum128 = _mm_add_epi32(sum128, _mm_shuffle_epi32(sum128, _MM_SHUFFLE(1, 0, 3, 2)));
             sum128 = _mm_add_epi32(sum128, _mm_shuffle_epi32(sum128, _MM_SHUFFLE(0, 1, 0, 1)));
             acc = _mm_cvtsi128_si32(sum128);
 
-            // Scalar tail
             for (; p < packed_features; ++p) {
                 int8_t w_lo, w_hi;
                 unpack_int4(weight_row[p], w_lo, w_hi);
@@ -126,7 +182,6 @@ auto quantized_linear_int4_kernel(
                 acc += static_cast<int32_t>(input_row[p * 2 + 1]) * static_cast<int32_t>(w_hi);
             }
 #else
-            // Scalar fallback
             for (int64_t p = 0; p < packed_features; ++p) {
                 int8_t w_lo, w_hi;
                 unpack_int4(weight_row[p], w_lo, w_hi);
@@ -134,12 +189,11 @@ auto quantized_linear_int4_kernel(
                 acc += static_cast<int32_t>(input_row[p * 2 + 1]) * static_cast<int32_t>(w_hi);
             }
 #endif
-
             float result = static_cast<float>(acc) * combined_scale;
             if (bias) {
                 result += bias[o];
             }
-            output[b * out_features + o] = result;
+            output[o] = result;
         }
     }
 }

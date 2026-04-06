@@ -4,7 +4,7 @@
 // to trailing submatrix. Performs: A_trail -= V * W^T + W * V^T (symmetric rank-2k)
 // where V contains the panel Householder vectors and W = tau * A * V - beta * V.
 // Each workgroup handles one row of the trailing submatrix.
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer MatrixA { float A[]; };
 layout(set = 0, binding = 1) readonly buffer TauBuf { float tau[]; };

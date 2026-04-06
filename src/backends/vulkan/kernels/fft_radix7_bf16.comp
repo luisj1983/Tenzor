@@ -2,7 +2,7 @@
 
 // Stockham mixed-radix FFT: radix-7 butterfly stage (BFloat16)
 // Data layout: interleaved real/imag pairs, packed as uint32 (2 bf16 per word)
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer InputBuf  { uint data_in[];  };  // packed bf16 pairs
 layout(set = 0, binding = 1) buffer OutputBuf { uint data_out[]; };

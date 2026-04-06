@@ -925,6 +925,14 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{grad_input, grad_weight, grad_bias};
     });
 
+    table.register_kernel(OpId::RMSNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+        int64_t normalized_shape = inputs[0].shape().back();
+        auto [output, rrms] = get_vulkan_backend()->dispatchRMSNorm(
+            inputs[0], inputs[1], normalized_shape, eps);
+        return std::vector<Tensor>{output, rrms};
+    });
+
     table.register_kernel(OpId::FusedRMSNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         int64_t normalized_shape = inputs[0].shape().back();

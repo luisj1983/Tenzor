@@ -2102,6 +2102,13 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return {oneapi::fused_softmax_cross_entropy_kernel(inputs[0], inputs[1], reduction, get_q(inputs))};
         });
 
+    table.register_kernel(OpId::RMSNorm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+            auto [output, rrms] = oneapi::fused_rms_norm_kernel(inputs[0], inputs[1], epsilon, get_q(inputs));
+            return {output, rrms};
+        });
+
     table.register_kernel(OpId::FusedRMSNorm,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));

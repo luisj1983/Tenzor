@@ -21,7 +21,7 @@ uint packBF16x2(vec2 v) {
 // Input:  N/2 complex bfloat16 (1 uint32 per complex element)
 // Output: N real bfloat16 values in packed uint32 buffer (2 reals per word)
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer InputBuf  { uint data_in[];  };  // N/2 complex
 layout(set = 0, binding = 1) buffer OutputBuf { uint data_out[]; };  // N real (packed)
