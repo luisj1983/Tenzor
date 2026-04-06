@@ -17,6 +17,7 @@
 #include <memory>
 #include <mutex>
 #include <atomic>
+#include <unordered_set>
 
 namespace tenzor::distributed {
 
@@ -96,7 +97,8 @@ public:
     /**
      * @param find_unused_parameters If true, detect parameters that did not
      *        receive gradients and skip their all-reduce. Logs warnings on
-     *        first detection. Re-detects each iteration for dynamic graphs.
+     *        first detection. Detection is cached after first iteration;
+     *        call invalidate_unused_cache() for dynamic graphs.
      */
     DistributedDataParallel(nn::Module& module, ProcessGroup& pg,
                             size_t bucket_size_bytes = DEFAULT_BUCKET_SIZE,
@@ -281,6 +283,18 @@ public:
     }
 
     /**
+     * @brief Invalidate the cached unused parameter detection.
+     *
+     * Call this when using dynamic graphs where unused parameters may change
+     * between iterations. By default, unused parameter detection is cached
+     * after the first iteration for performance.
+     */
+    auto invalidate_unused_cache() -> void {
+        unused_detection_cached_ = false;
+        cached_unused_indices_.clear();
+    }
+
+    /**
      * @brief Get the current process group.
      */
     auto process_group() const -> ProcessGroup& { return *pg_; }
@@ -292,6 +306,8 @@ private:
     bool auto_sync_enabled_{true};
     bool find_unused_parameters_{false};
     bool logged_unused_warning_{false};
+    bool unused_detection_cached_{false};
+    std::unordered_set<size_t> cached_unused_indices_;
     CommStats comm_stats_;
 
     /** @brief Optional gradient compressor for bandwidth reduction */

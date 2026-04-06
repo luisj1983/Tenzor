@@ -11,12 +11,16 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
 #include <stdexcept>
+#include <cerrno>
 #include <cstring>
+#include <cstdlib>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <netdb.h>
+#include <ifaddrs.h>
+#include <iostream>
 
 #if defined(TENZOR_USE_CUDA)
     #include <cuda_runtime.h>
@@ -643,14 +647,23 @@ auto NCCLBackend::exchange_unique_id() -> void {
 
         // Send unique ID to all other ranks
         for (int i = 1; i < world_size_; ++i) {
-            int client_fd = accept(server_fd, nullptr, nullptr);
+            int client_fd;
+            do {
+                client_fd = accept(server_fd, nullptr, nullptr);
+            } while (client_fd < 0 && errno == EINTR);
             if (client_fd < 0) {
-                throw std::runtime_error("Failed to accept connection from rank " + std::to_string(i));
+                throw std::runtime_error("Failed to accept connection from rank " +
+                    std::to_string(i) + ": " + strerror(errno));
             }
 
-            ssize_t sent = ::send(client_fd, &unique_id_, sizeof(unique_id_), 0);
-            if (sent != sizeof(unique_id_)) {
-                throw std::runtime_error("Failed to send unique ID to rank " + std::to_string(i));
+            ssize_t sent;
+            do {
+                sent = ::send(client_fd, &unique_id_, sizeof(unique_id_), 0);
+            } while (sent < 0 && errno == EINTR);
+            if (sent != static_cast<ssize_t>(sizeof(unique_id_))) {
+                close_socket(client_fd);
+                throw std::runtime_error("Failed to send unique ID to rank " +
+                    std::to_string(i) + ": " + strerror(errno));
             }
 
             close_socket(client_fd);
@@ -662,9 +675,14 @@ auto NCCLBackend::exchange_unique_id() -> void {
         // Worker ranks: receive unique ID from master
         int socket_fd = create_socket_connection(false);
 
-        ssize_t received = ::recv(socket_fd, &unique_id_, sizeof(unique_id_), MSG_WAITALL);
-        if (received != sizeof(unique_id_)) {
-            throw std::runtime_error("Failed to receive unique ID from master");
+        ssize_t received;
+        do {
+            received = ::recv(socket_fd, &unique_id_, sizeof(unique_id_), MSG_WAITALL);
+        } while (received < 0 && errno == EINTR);
+        if (received != static_cast<ssize_t>(sizeof(unique_id_))) {
+            close_socket(socket_fd);
+            throw std::runtime_error("Failed to receive unique ID from master: " +
+                std::string(strerror(errno)));
         }
 
         close_socket(socket_fd);
@@ -678,14 +696,47 @@ auto NCCLBackend::create_socket_connection(bool is_master) -> int {
         throw std::runtime_error("Failed to create socket");
     }
 
+    // Apply socket timeouts (default 300s, configurable via TENZOR_COMM_TIMEOUT)
+    const char* timeout_env = std::getenv("TENZOR_COMM_TIMEOUT");
+    int timeout_sec = timeout_env ? std::atoi(timeout_env) : 300;
+    if (timeout_sec > 0) {
+        struct timeval tv{};
+        tv.tv_sec = timeout_sec;
+        tv.tv_usec = 0;
+        setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    }
+
     struct sockaddr_in addr;
     std::memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(master_port_);
 
     if (is_master) {
-        // Server mode
+        // Server mode — default to INADDR_ANY
         addr.sin_addr.s_addr = INADDR_ANY;
+
+        // Respect NCCL_SOCKET_IFNAME to bind to a specific network interface
+        const char* ifname = std::getenv("NCCL_SOCKET_IFNAME");
+        if (ifname) {
+            struct ifaddrs* ifaddr = nullptr;
+            if (getifaddrs(&ifaddr) == 0) {
+                bool found = false;
+                for (auto* ifa = ifaddr; ifa; ifa = ifa->ifa_next) {
+                    if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_INET &&
+                        std::strcmp(ifa->ifa_name, ifname) == 0) {
+                        addr.sin_addr = reinterpret_cast<struct sockaddr_in*>(ifa->ifa_addr)->sin_addr;
+                        found = true;
+                        break;
+                    }
+                }
+                freeifaddrs(ifaddr);
+                if (!found) {
+                    std::cerr << "[WARNING] NCCL_SOCKET_IFNAME=" << ifname
+                              << " not found, falling back to INADDR_ANY" << std::endl;
+                }
+            }
+        }
 
         int opt = 1;
         setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));

@@ -21,16 +21,23 @@ namespace distributed {
  */
 class TCPConnection {
 public:
-    TCPConnection(int socket_fd);
+    explicit TCPConnection(int socket_fd, int timeout_seconds = 0);
     ~TCPConnection();
 
     auto send(const void* data, size_t size) -> void;
     auto recv(void* data, size_t size) -> void;
     auto close() -> void;
 
+    /**
+     * @brief Apply send/recv timeouts to the underlying socket.
+     * @param seconds Timeout in seconds (0 = no timeout)
+     */
+    auto set_timeout(int seconds) -> void;
+
 private:
     int socket_fd_{-1};
     bool closed_{false};
+    int timeout_seconds_{0};
 };
 
 /**

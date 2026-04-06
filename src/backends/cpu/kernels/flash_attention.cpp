@@ -243,16 +243,25 @@ auto flash_attention_forward(const Tensor& Q, const Tensor& K, const Tensor& V,
     int64_t seq_len = shape[2];
     int64_t head_dim = shape[3];
 
+    // Multi-dtype support: Float32 computed directly, Float64/Float16/BFloat16
+    // upcast to Float32, compute, then downcast output.
+    if (Q.dtype() == DType::Float64 || Q.dtype() == DType::Float16 || Q.dtype() == DType::BFloat16) {
+        auto orig_dtype = Q.dtype();
+        auto O_f32 = flash_attention_forward(
+            Q.to(DType::Float32), K.to(DType::Float32), V.to(DType::Float32),
+            scale, causal, dropout_p, is_training);
+        return O_f32.to(orig_dtype);
+    } else if (Q.dtype() != DType::Float32) {
+        throw std::runtime_error("Flash attention: unsupported dtype " +
+                                 std::string(dtype_name(Q.dtype())));
+    }
+
     // Block sizes tuned for L2 cache (~256KB)
     constexpr int64_t BLOCK_Q = 64;
     constexpr int64_t BLOCK_KV = 64;
 
-    // Output tensor
-    auto O = zeros({batch, num_heads, seq_len, head_dim}, Q.dtype(), Q.device());
-
-    if (Q.dtype() != DType::Float32) {
-        throw std::runtime_error("Flash attention currently only supports Float32");
-    }
+    // Output tensor (Float32 path only reaches here)
+    auto O = zeros({batch, num_heads, seq_len, head_dim}, DType::Float32, Q.device());
 
     const float* q_data = Q.data<float>();
     const float* k_data = K.data<float>();
@@ -413,8 +422,16 @@ auto flash_attention_backward(const Tensor& dO, const Tensor& Q, const Tensor& K
     auto k_shape = K.shape();
     int64_t M = k_shape[2];      // key/value sequence length
 
-    if (Q.dtype() != DType::Float32) {
-        throw std::runtime_error("Flash attention backward currently only supports Float32");
+    // Multi-dtype: upcast non-Float32 inputs, compute in Float32, downcast outputs
+    if (Q.dtype() == DType::Float64 || Q.dtype() == DType::Float16 || Q.dtype() == DType::BFloat16) {
+        auto orig_dtype = Q.dtype();
+        auto result = flash_attention_backward(
+            dO.to(DType::Float32), Q.to(DType::Float32), K.to(DType::Float32),
+            V.to(DType::Float32), O.to(DType::Float32), scale, causal);
+        return {result[0].to(orig_dtype), result[1].to(orig_dtype), result[2].to(orig_dtype)};
+    } else if (Q.dtype() != DType::Float32) {
+        throw std::runtime_error("Flash attention backward: unsupported dtype " +
+                                 std::string(dtype_name(Q.dtype())));
     }
 
     std::vector<int64_t> q_shape_vec(q_shape.begin(), q_shape.end());

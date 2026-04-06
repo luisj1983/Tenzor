@@ -2860,6 +2860,51 @@ Example::
         .def("numel", [](const tenzor::Variable& self) {
             return self.tensor().numel();
         }, "Get the number of elements")
+        .def("item", [](const tenzor::Variable& self) -> py::object {
+            const auto& t = self.tensor();
+            if (t.numel() != 1) {
+                throw std::runtime_error("item() only works for scalar tensors");
+            }
+            auto dtype = t.dtype();
+            double dval = 0;
+            int64_t ival = 0;
+            uint64_t uval = 0;
+            bool bval = false;
+            std::complex<double> cval{};
+            bool is_float = false, is_int = false, is_uint = false, is_bool = false, is_complex = false;
+            {
+                py::gil_scoped_release release;
+                switch (dtype) {
+                    case tenzor::DType::Float32:  dval = t.item<float>(); is_float = true; break;
+                    case tenzor::DType::Float64:  dval = t.item<double>(); is_float = true; break;
+                    case tenzor::DType::Float16:  dval = static_cast<float>(t.data<tenzor::Float16>()[0]); is_float = true; break;
+                    case tenzor::DType::BFloat16: dval = static_cast<float>(t.data<tenzor::BFloat16>()[0]); is_float = true; break;
+                    case tenzor::DType::Int8:     ival = t.item<int8_t>(); is_int = true; break;
+                    case tenzor::DType::Int16:    ival = t.item<int16_t>(); is_int = true; break;
+                    case tenzor::DType::Int32:    ival = t.item<int32_t>(); is_int = true; break;
+                    case tenzor::DType::Int64:    ival = t.item<int64_t>(); is_int = true; break;
+                    case tenzor::DType::UInt8:    uval = t.item<uint8_t>(); is_uint = true; break;
+                    case tenzor::DType::UInt16:   uval = t.item<uint16_t>(); is_uint = true; break;
+                    case tenzor::DType::UInt32:   uval = t.item<uint32_t>(); is_uint = true; break;
+                    case tenzor::DType::UInt64:   uval = t.item<uint64_t>(); is_uint = true; break;
+                    case tenzor::DType::Bool:     bval = t.item<bool>(); is_bool = true; break;
+                    case tenzor::DType::Complex64: {
+                        auto c = t.item<std::complex<float>>();
+                        cval = {c.real(), c.imag()};
+                        is_complex = true; break;
+                    }
+                    case tenzor::DType::Complex128: cval = t.item<std::complex<double>>(); is_complex = true; break;
+                    default:
+                        throw std::runtime_error("Unsupported dtype for item()");
+                }
+            }
+            if (is_float)   return py::cast(dval);
+            if (is_int)     return py::cast(ival);
+            if (is_uint)    return py::cast(uval);
+            if (is_bool)    return py::cast(bval);
+            if (is_complex) return py::cast(cval);
+            throw std::runtime_error("Unsupported dtype for item()");
+        }, "Extract scalar value from single-element variable")
         // Arithmetic operators - Variable-Variable (GIL released for compute)
         .def("__add__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
             return a + b;

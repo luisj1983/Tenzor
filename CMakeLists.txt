@@ -7,9 +7,20 @@ endif()
 
 # Pre-project configuration for ROCm/HIP
 # Must happen before project() because HIP language must be enabled at project() time
-# Check if ROCm is available on the system first
+# Locate ROCm root: prefer ROCM_PATH env, then find hipcc, then fallback to /opt/rocm
 set(_ROCM_AVAILABLE FALSE)
-if(EXISTS "/opt/rocm/bin/hipcc")
+if(DEFINED ENV{ROCM_PATH})
+    set(_ROCM_ROOT "$ENV{ROCM_PATH}")
+else()
+    find_program(_HIPCC_EXE hipcc PATHS /opt/rocm/bin NO_DEFAULT_PATH)
+    if(_HIPCC_EXE)
+        get_filename_component(_ROCM_ROOT "${_HIPCC_EXE}" DIRECTORY)
+        get_filename_component(_ROCM_ROOT "${_ROCM_ROOT}" DIRECTORY)
+    else()
+        set(_ROCM_ROOT "/opt/rocm")
+    endif()
+endif()
+if(EXISTS "${_ROCM_ROOT}/bin/hipcc")
     set(_ROCM_AVAILABLE TRUE)
 endif()
 
@@ -25,7 +36,7 @@ if(TENZOR_BUILD_ROCM AND _ROCM_AVAILABLE)
     if(NOT CMAKE_HIP_ARCHITECTURES)
         # Try to auto-detect GPU architecture
         execute_process(
-            COMMAND /opt/rocm/bin/rocm_agent_enumerator
+            COMMAND ${_ROCM_ROOT}/bin/rocm_agent_enumerator
             OUTPUT_VARIABLE ROCM_AGENTS
             OUTPUT_STRIP_TRAILING_WHITESPACE
             RESULT_VARIABLE ROCM_ENUM_RESULT

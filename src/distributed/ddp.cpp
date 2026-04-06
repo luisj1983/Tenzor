@@ -235,19 +235,25 @@ auto DistributedDataParallel::mark_param_ready(const void* param_ptr) -> void {
 }
 
 auto DistributedDataParallel::synchronize_gradients() -> void {
-    // When find_unused_parameters is enabled, detect and log unused params
-    if (find_unused_parameters_) {
+    // When find_unused_parameters is enabled, detect and log unused params.
+    // Detection is cached after first iteration for performance. Call
+    // invalidate_unused_cache() for dynamic graphs where unused params change.
+    if (find_unused_parameters_ && !unused_detection_cached_) {
+        cached_unused_indices_.clear();
         std::vector<std::string> unused_names;
         auto params = module_.parameters();
         auto named = module_.named_parameters();
 
         for (size_t i = 0; i < params.size(); ++i) {
             if (!params[i]->has_grad()) {
+                cached_unused_indices_.insert(i);
                 if (i < named.size()) {
                     unused_names.push_back(named[i].first);
                 }
             }
         }
+
+        unused_detection_cached_ = true;
 
         if (!unused_names.empty() && !logged_unused_warning_) {
             logged_unused_warning_ = true;

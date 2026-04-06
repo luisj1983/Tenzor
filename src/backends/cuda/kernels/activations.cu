@@ -29,6 +29,26 @@ namespace cuda {
 // Default block size for element-wise operations (used as fallback)
 constexpr int BLOCK_SIZE = 256;
 
+// ============================================================================
+// FP16 Saturation Tracking (opt-in via TENZOR_TRACK_SATURATION)
+// ============================================================================
+// When enabled, counts how many float→half conversions saturate to ±65504.
+// This helps diagnose silent gradient clipping in mixed-precision training.
+#ifdef TENZOR_TRACK_SATURATION
+__device__ uint32_t g_fp16_saturation_count = 0;
+
+__device__ __forceinline__ __half float2half_tracked(float val) {
+    __half result = __float2half_rn(val);
+    if (fabsf(val) > 65504.0f && !isinf(val) && !isnan(val)) {
+        atomicAdd(&g_fp16_saturation_count, 1);
+    }
+    return result;
+}
+
+// Replace float2half_sat with tracked version when enabled
+#define float2half_sat(x) float2half_tracked(x)
+#endif // TENZOR_TRACK_SATURATION
+
 // Calculate grid size for element-wise operations
 inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
     return compute_grid_size(n, block_size);
@@ -3595,5 +3615,18 @@ auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, floa
     CUDA_CHECK(cudaGetLastError());
     return grad_input;
 }
+// ============================================================================
+// FP16 Saturation Tracking - Host Query Functions
+// ============================================================================
+#ifdef TENZOR_TRACK_SATURATION
+uint32_t get_and_reset_fp16_saturation_count() {
+    uint32_t count = 0;
+    cudaMemcpyFromSymbol(&count, g_fp16_saturation_count, sizeof(count));
+    uint32_t zero = 0;
+    cudaMemcpyToSymbol(g_fp16_saturation_count, &zero, sizeof(zero));
+    return count;
+}
+#endif
+
 } // namespace cuda
 } // namespace tenzor

@@ -10,7 +10,9 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/backend/dtype_dispatch.hpp"
 #include <stdexcept>
+#include <cerrno>
 #include <cstring>
+#include <cstdlib>
 #include <algorithm>
 #include <iostream>
 #include <sys/socket.h>
@@ -31,8 +33,25 @@ namespace distributed {
 // TCPConnection Implementation
 // ============================================================================
 
-TCPConnection::TCPConnection(int socket_fd)
-    : socket_fd_(socket_fd) {
+TCPConnection::TCPConnection(int socket_fd, int timeout_seconds)
+    : socket_fd_(socket_fd), timeout_seconds_(timeout_seconds) {
+    if (timeout_seconds_ <= 0) {
+        // Read default from environment variable (default: 300s)
+        const char* env = std::getenv("TENZOR_COMM_TIMEOUT");
+        timeout_seconds_ = env ? std::atoi(env) : 300;
+    }
+    set_timeout(timeout_seconds_);
+}
+
+auto TCPConnection::set_timeout(int seconds) -> void {
+    timeout_seconds_ = seconds;
+    if (socket_fd_ >= 0 && seconds > 0) {
+        struct timeval tv{};
+        tv.tv_sec = seconds;
+        tv.tv_usec = 0;
+        setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(socket_fd_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    }
 }
 
 TCPConnection::~TCPConnection() {
@@ -50,7 +69,14 @@ auto TCPConnection::send(const void* data, size_t size) -> void {
     while (total_sent < size) {
         ssize_t sent = ::send(socket_fd_, ptr + total_sent, size - total_sent, 0);
         if (sent < 0) {
-            throw std::runtime_error("TCPConnection: send failed");
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                throw std::runtime_error(
+                    "TCPConnection: send timed out after " +
+                    std::to_string(timeout_seconds_) + "s");
+            }
+            throw std::runtime_error(
+                std::string("TCPConnection: send failed: ") + strerror(errno));
         }
         total_sent += sent;
     }
@@ -66,8 +92,18 @@ auto TCPConnection::recv(void* data, size_t size) -> void {
 
     while (total_received < size) {
         ssize_t received = ::recv(socket_fd_, ptr + total_received, size - total_received, MSG_WAITALL);
-        if (received <= 0) {
-            throw std::runtime_error("TCPConnection: recv failed");
+        if (received < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                throw std::runtime_error(
+                    "TCPConnection: recv timed out after " +
+                    std::to_string(timeout_seconds_) + "s");
+            }
+            throw std::runtime_error(
+                std::string("TCPConnection: recv failed: ") + strerror(errno));
+        }
+        if (received == 0) {
+            throw std::runtime_error("TCPConnection: peer disconnected");
         }
         total_received += received;
     }

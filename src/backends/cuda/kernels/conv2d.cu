@@ -259,8 +259,9 @@ __global__ void im2col_kernel_f16(
 // contributing col positions. This completely eliminates atomics but requires
 // different parallelization strategy.
 
-// Version 1: Shared memory optimized col2im (reduces atomics via thread-local accumulation)
-// This version uses shared memory to accumulate values within a block before writing to global memory
+// DEPRECATED: Retained for reference only. The primary col2im_kernel (below) uses the
+// output-centric approach which eliminates atomics entirely and is faster for all kernel sizes.
+// Version 1: Atomic-based col2im (misnamed "shared memory" — does not actually use shared memory)
 template<typename T>
 __global__ void col2im_kernel_shared_memory(
     const T* col,

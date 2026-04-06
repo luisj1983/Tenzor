@@ -124,9 +124,10 @@ struct alignas(64) BackendDispatchTable {
      * @param op Operation identifier
      * @param fn Kernel function pointer
      */
-    void register_kernel(OpId op, KernelFn fn) noexcept {
-        assert(!ready.load(std::memory_order_relaxed) &&
-               "register_kernel called after table marked ready");
+    void register_kernel(OpId op, KernelFn fn) {
+        if (ready.load(std::memory_order_relaxed)) {
+            throw std::runtime_error("register_kernel called after dispatch table marked ready");
+        }
         auto idx = static_cast<size_t>(op);
         if (kernels[idx] != nullptr) {
             fprintf(stderr, "[dispatch_table] WARNING: overwriting kernel for OpId %zu\n", idx);
@@ -146,9 +147,10 @@ struct alignas(64) BackendDispatchTable {
      * @param op Operation identifier
      * @param fn Single-output kernel function pointer
      */
-    void register_single_output_kernel(OpId op, SingleOutputKernelFn fn) noexcept {
-        assert(!ready.load(std::memory_order_relaxed) &&
-               "register_single_output_kernel called after table marked ready");
+    void register_single_output_kernel(OpId op, SingleOutputKernelFn fn) {
+        if (ready.load(std::memory_order_relaxed)) {
+            throw std::runtime_error("register_single_output_kernel called after dispatch table marked ready");
+        }
         auto idx = static_cast<size_t>(op);
         if (single_output_kernels[idx] != nullptr) {
             fprintf(stderr, "[dispatch_table] WARNING: overwriting single_output kernel for OpId %zu\n", idx);
@@ -168,9 +170,10 @@ struct alignas(64) BackendDispatchTable {
      * @param op Operation identifier (should be an inplace op like OpId::AddInplace)
      * @param fn Inplace kernel function pointer
      */
-    void register_inplace_kernel(OpId op, InplaceKernelFn fn) noexcept {
-        assert(!ready.load(std::memory_order_relaxed) &&
-               "register_inplace_kernel called after table marked ready");
+    void register_inplace_kernel(OpId op, InplaceKernelFn fn) {
+        if (ready.load(std::memory_order_relaxed)) {
+            throw std::runtime_error("register_inplace_kernel called after dispatch table marked ready");
+        }
         auto idx = static_cast<size_t>(op);
         if (inplace_kernels[idx] != nullptr) {
             fprintf(stderr, "[dispatch_table] WARNING: overwriting inplace kernel for OpId %zu\n", idx);

@@ -14,6 +14,7 @@
 
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace tenzor {
@@ -31,9 +32,19 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         }
     }
 
-    auto op = string_to_op_id(op_name);
-    if (op == OpId::OP_COUNT) {
-        throw std::runtime_error("VulkanBackend::dispatch: unknown operation '" + op_name + "'");
+    // Cache string→OpId lookups to avoid repeated linear scans.
+    // Thread-local, bounded by OP_COUNT (~530 entries), no locking needed.
+    thread_local std::unordered_map<std::string, OpId> op_cache;
+    OpId op;
+    auto it = op_cache.find(op_name);
+    if (it != op_cache.end()) {
+        op = it->second;
+    } else {
+        op = string_to_op_id(op_name);
+        if (op == OpId::OP_COUNT) {
+            throw std::runtime_error("VulkanBackend::dispatch: unknown operation '" + op_name + "'");
+        }
+        op_cache[op_name] = op;
     }
     auto& table = DispatchTableRegistry::get_table(Device::Type::Vulkan);
     return table.dispatch(op, inputs, attrs);

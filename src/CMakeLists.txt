@@ -420,12 +420,19 @@ if(TENZOR_BUILD_CUDA)
     endif()
 
     # Link NCCL if available (uses cmake/FindNCCL.cmake)
-    find_package(NCCL QUIET)
+    option(TENZOR_REQUIRE_NCCL "Require NCCL library (fail if not found)" OFF)
+    find_package(NCCL)
     if(NCCL_FOUND)
         target_link_libraries(tenzor_core PRIVATE NCCL::NCCL)
         target_compile_definitions(tenzor_core PRIVATE TENZOR_HAS_NCCL)
     else()
-        message(WARNING "NCCL library not found, distributed GPU training will not be available")
+        if(TENZOR_REQUIRE_NCCL)
+            message(FATAL_ERROR "NCCL library required but not found. "
+                    "Set NCCL_ROOT or install NCCL.")
+        else()
+            message(WARNING "NCCL not found — distributed GPU training disabled. "
+                    "Set -DTENZOR_REQUIRE_NCCL=ON to make this an error.")
+        endif()
     endif()
 endif()
 
@@ -436,13 +443,13 @@ if(TENZOR_BUILD_ROCM)
         set(HIP_PLATFORM "amd" CACHE STRING "HIP platform (amd or nvidia)")
         set(ENV{HIP_PLATFORM} "amd")
     endif()
-    find_package(hip QUIET CONFIG PATHS /opt/rocm)
+    find_package(hip QUIET CONFIG PATHS ${_ROCM_ROOT})
     if(hip_FOUND)
         target_compile_definitions(tenzor_core PRIVATE
             TENZOR_HAS_ROCM
         )
         target_include_directories(tenzor_core PRIVATE
-            /opt/rocm/include
+            ${_ROCM_ROOT}/include
         )
         target_link_libraries(tenzor_core PRIVATE
             hip::host
