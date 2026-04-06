@@ -148,6 +148,9 @@ set(TENZOR_CORE_SOURCES
     data/dataloader.cpp
     data/sampler.cpp
     data/transforms.cpp
+    data/datasets/mnist.cpp
+    data/datasets/cifar10.cpp
+    data/datasets/imagenet.cpp
     models/resnet.cpp
     models/bert.cpp
     models/roberta.cpp

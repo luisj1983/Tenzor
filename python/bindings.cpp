@@ -53,6 +53,9 @@
 #include <tenzor/models/hub.hpp>
 #include <tenzor/onnx/exporter.hpp>
 #include <tenzor/data/dataset.hpp>
+#include <tenzor/data/datasets/mnist.hpp>
+#include <tenzor/data/datasets/cifar10.hpp>
+#include <tenzor/data/datasets/imagenet.hpp>
 #include <tenzor/data/dataloader.hpp>
 #include <tenzor/nn/compression/pruning.hpp>
 #include <tenzor/nn/quantization.hpp>
@@ -80,6 +83,25 @@
 #include <tenzor/nn/layers/sparse_embedding.hpp>
 #include <tenzor/nn/serialize.hpp>
 #include <tenzor/models/resnet.hpp>
+#include <tenzor/models/vgg.hpp>
+#include <tenzor/models/alexnet.hpp>
+#include <tenzor/models/mobilenet.hpp>
+#include <tenzor/models/efficientnet.hpp>
+#include <tenzor/models/googlenet.hpp>
+#include <tenzor/models/convnext.hpp>
+#include <tenzor/models/vit.hpp>
+#include <tenzor/models/swin_transformer.hpp>
+#include <tenzor/models/bert.hpp>
+#include <tenzor/models/roberta.hpp>
+#include <tenzor/models/albert.hpp>
+#include <tenzor/models/gpt.hpp>
+#include <tenzor/models/t5.hpp>
+#include <tenzor/models/electra.hpp>
+#include <tenzor/models/unet.hpp>
+#include <tenzor/models/deeplabv3plus.hpp>
+#include <tenzor/models/yolo.hpp>
+#include <tenzor/models/faster_rcnn.hpp>
+#include <tenzor/models/mask_rcnn.hpp>
 #include <tenzor/onnx/importer.hpp>
 #include <tenzor/autograd/ops.hpp>
 #include <tenzor/ops/fft.hpp>
@@ -97,6 +119,8 @@
 #include <tenzor/utils/error.hpp>
 #include <tenzor/utils/config.hpp>
 #include <tenzor/utils/memory_profiler.hpp>
+#include <tenzor/autograd/profiler.hpp>
+#include <tenzor/backend/profiling_interceptor.hpp>
 #include "numpy_interop.hpp"
 #include <thread>
 #include <cstdlib>
@@ -803,6 +827,18 @@ Returns:
         .def("q_zero_point", &tenzor::Tensor::q_zero_point, "Get quantization zero point")
         .def("int_repr", &tenzor::Tensor::int_repr, "Get integer representation of quantized tensor")
         .def("dequantize", &tenzor::Tensor::dequantize, "Dequantize to float32")
+        .def("is_per_channel_quantized", &tenzor::Tensor::is_per_channel_quantized,
+            "Check if tensor uses per-channel quantization")
+        .def("q_per_channel_scales", &tenzor::Tensor::q_per_channel_scales,
+            "Get per-channel quantization scales")
+        .def("q_per_channel_zero_points", &tenzor::Tensor::q_per_channel_zero_points,
+            "Get per-channel quantization zero points")
+        .def("q_per_channel_axis", &tenzor::Tensor::q_per_channel_axis,
+            "Get per-channel quantization axis")
+        .def("set_per_channel_quantization_params",
+            &tenzor::Tensor::set_per_channel_quantization_params,
+            py::arg("scales"), py::arg("zero_points"), py::arg("axis"),
+            "Set per-channel quantization parameters")
         .def("is_contiguous",
             [](const tenzor::Tensor& t, std::optional<tenzor::MemoryFormat> fmt) {
                 if (fmt.has_value()) {
@@ -8424,6 +8460,80 @@ Example::
              py::arg("scale_min") = 1.0f, py::arg("scale_max") = 1.0f,
              py::arg("shear") = 0.0f);
 
+    py::class_<tenzor::data::transforms::RandomRotation,
+               tenzor::data::transforms::Transform,
+               std::shared_ptr<tenzor::data::transforms::RandomRotation>>(transforms, "RandomRotation",
+        "Random rotation by angle in [min_degrees, max_degrees]")
+        .def(py::init<float, float>(),
+             py::arg("min_degrees"), py::arg("max_degrees"));
+
+    py::class_<tenzor::data::transforms::ColorJitter,
+               tenzor::data::transforms::Transform,
+               std::shared_ptr<tenzor::data::transforms::ColorJitter>>(transforms, "ColorJitter",
+        "Random brightness, contrast, saturation, and hue adjustments")
+        .def(py::init<float, float, float, float>(),
+             py::arg("brightness") = 0.0f, py::arg("contrast") = 0.0f,
+             py::arg("saturation") = 0.0f, py::arg("hue") = 0.0f);
+
+    py::class_<tenzor::data::transforms::Cutout,
+               tenzor::data::transforms::Transform,
+               std::shared_ptr<tenzor::data::transforms::Cutout>>(transforms, "Cutout",
+        "Randomly mask rectangular regions with zeros")
+        .def(py::init<int, int>(),
+             py::arg("num_holes"), py::arg("hole_size"));
+
+    py::class_<tenzor::data::transforms::Lambda,
+               tenzor::data::transforms::Transform,
+               std::shared_ptr<tenzor::data::transforms::Lambda>>(transforms, "Lambda",
+        "Custom transform from a callable")
+        .def(py::init([](py::function func) {
+            return std::make_unique<tenzor::data::transforms::Lambda>(
+                [func](const tenzor::Tensor& input, const tenzor::Tensor& target)
+                    -> std::pair<tenzor::Tensor, tenzor::Tensor> {
+                    py::gil_scoped_acquire acquire;
+                    auto result = func(input, target);
+                    return result.cast<std::pair<tenzor::Tensor, tenzor::Tensor>>();
+                });
+        }), py::arg("func"));
+
+    // =========================================================================
+    // Standard Datasets
+    // =========================================================================
+    auto datasets = data_mod.def_submodule("datasets", "Standard dataset loaders");
+
+    py::class_<tenzor::data::datasets::MNIST, tenzor::data::MapDataset,
+               std::shared_ptr<tenzor::data::datasets::MNIST>>(datasets, "MNIST",
+        "MNIST handwritten digit dataset (28x28 grayscale, 10 classes)")
+        .def(py::init<std::string, bool, bool>(),
+             py::arg("root"), py::arg("train") = true, py::arg("normalize") = true);
+
+    py::class_<tenzor::data::datasets::FashionMNIST, tenzor::data::datasets::MNIST,
+               std::shared_ptr<tenzor::data::datasets::FashionMNIST>>(datasets, "FashionMNIST",
+        "Fashion-MNIST dataset (same format as MNIST)")
+        .def(py::init<std::string, bool, bool>(),
+             py::arg("root"), py::arg("train") = true, py::arg("normalize") = true);
+
+    py::class_<tenzor::data::datasets::CIFAR10, tenzor::data::MapDataset,
+               std::shared_ptr<tenzor::data::datasets::CIFAR10>>(datasets, "CIFAR10",
+        "CIFAR-10 image classification (32x32 RGB, 10 classes)")
+        .def(py::init<std::string, bool, bool>(),
+             py::arg("root"), py::arg("train") = true, py::arg("normalize") = true);
+
+    py::class_<tenzor::data::datasets::CIFAR100, tenzor::data::MapDataset,
+               std::shared_ptr<tenzor::data::datasets::CIFAR100>>(datasets, "CIFAR100",
+        "CIFAR-100 image classification (32x32 RGB, 100 classes)")
+        .def(py::init<std::string, bool, bool>(),
+             py::arg("root"), py::arg("train") = true, py::arg("normalize") = true);
+
+    py::class_<tenzor::data::datasets::ImageFolder, tenzor::data::MapDataset,
+               std::shared_ptr<tenzor::data::datasets::ImageFolder>>(datasets, "ImageFolder",
+        "ImageNet-style folder dataset (root/class_name/image.jpg)")
+        .def(py::init<std::string, int64_t, std::vector<std::string>>(),
+             py::arg("root"), py::arg("image_size") = 224,
+             py::arg("extensions") = std::vector<std::string>{".jpg", ".jpeg", ".png", ".bmp"})
+        .def("class_names", &tenzor::data::datasets::ImageFolder::class_names)
+        .def("num_classes", &tenzor::data::datasets::ImageFolder::num_classes);
+
     // =========================================================================
     // TensorBoard Integration
     // =========================================================================
@@ -8734,6 +8844,372 @@ Example::
         return std::make_shared<tenzor::models::ResNet>(
             std::vector<int64_t>{3, 8, 36, 3}, num_classes, false);
     }, py::arg("num_classes") = 1000, "Create ResNet-152");
+
+    // VGG
+    py::class_<tenzor::models::VGG, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::VGG>>(models, "VGG",
+        "VGG architecture")
+        .def(py::init<tenzor::models::VGGConfig, int64_t, bool, double, bool>(),
+             py::arg("config"), py::arg("num_classes") = 1000,
+             py::arg("batch_norm") = true, py::arg("dropout") = 0.5,
+             py::arg("init_weights") = true);
+
+    py::class_<tenzor::models::VGGConfig>(models, "VGGConfig", "VGG configuration")
+        .def(py::init<>())
+        .def_readwrite("layers", &tenzor::models::VGGConfig::layers);
+
+    models.def("vgg11", [](int64_t num_classes, bool bn) {
+        return tenzor::models::vgg11(num_classes, bn);
+    }, py::arg("num_classes") = 1000, py::arg("batch_norm") = true, "Create VGG-11");
+    models.def("vgg13", [](int64_t num_classes, bool bn) {
+        return tenzor::models::vgg13(num_classes, bn);
+    }, py::arg("num_classes") = 1000, py::arg("batch_norm") = true, "Create VGG-13");
+    models.def("vgg16", [](int64_t num_classes, bool bn) {
+        return tenzor::models::vgg16(num_classes, bn);
+    }, py::arg("num_classes") = 1000, py::arg("batch_norm") = true, "Create VGG-16");
+    models.def("vgg19", [](int64_t num_classes, bool bn) {
+        return tenzor::models::vgg19(num_classes, bn);
+    }, py::arg("num_classes") = 1000, py::arg("batch_norm") = true, "Create VGG-19");
+
+    // AlexNet
+    py::class_<tenzor::models::AlexNet, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::AlexNet>>(models, "AlexNet",
+        "AlexNet architecture")
+        .def(py::init<int64_t, double>(),
+             py::arg("num_classes") = 1000, py::arg("dropout") = 0.5);
+    models.def("alexnet", [](int64_t num_classes) {
+        return tenzor::models::alexnet(num_classes);
+    }, py::arg("num_classes") = 1000, "Create AlexNet");
+
+    // MobileNet
+    py::class_<tenzor::models::MobileNetV2, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::MobileNetV2>>(models, "MobileNetV2",
+        "MobileNetV2 architecture")
+        .def(py::init<int64_t, double, double>(),
+             py::arg("num_classes") = 1000, py::arg("width_mult") = 1.0,
+             py::arg("dropout") = 0.2);
+    models.def("mobilenet_v2", [](int64_t num_classes) {
+        return tenzor::models::mobilenet_v2(num_classes);
+    }, py::arg("num_classes") = 1000, "Create MobileNetV2");
+
+    py::class_<tenzor::models::MobileNetV3, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::MobileNetV3>>(models, "MobileNetV3",
+        "MobileNetV3 architecture")
+        .def(py::init<int64_t, std::string, double, double>(),
+             py::arg("num_classes") = 1000, py::arg("mode") = "large",
+             py::arg("width_mult") = 1.0, py::arg("dropout") = 0.2);
+    models.def("mobilenet_v3_large", [](int64_t num_classes) {
+        return tenzor::models::mobilenet_v3_large(num_classes);
+    }, py::arg("num_classes") = 1000, "Create MobileNetV3-Large");
+    models.def("mobilenet_v3_small", [](int64_t num_classes) {
+        return tenzor::models::mobilenet_v3_small(num_classes);
+    }, py::arg("num_classes") = 1000, "Create MobileNetV3-Small");
+
+    // EfficientNet
+    py::class_<tenzor::models::EfficientNet, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::EfficientNet>>(models, "EfficientNet",
+        "EfficientNet architecture")
+        .def(py::init<tenzor::models::EfficientNetConfig>(),
+             py::arg("config"));
+
+    py::class_<tenzor::models::EfficientNetConfig>(models, "EfficientNetConfig",
+        "EfficientNet configuration")
+        .def(py::init<>())
+        .def_readwrite("width_mult", &tenzor::models::EfficientNetConfig::width_mult)
+        .def_readwrite("depth_mult", &tenzor::models::EfficientNetConfig::depth_mult)
+        .def_readwrite("num_classes", &tenzor::models::EfficientNetConfig::num_classes)
+        .def_readwrite("dropout_rate", &tenzor::models::EfficientNetConfig::dropout_rate);
+
+    models.def("efficientnet_b0", [](int64_t num_classes) {
+        return tenzor::models::efficientnet_b0(num_classes);
+    }, py::arg("num_classes") = 1000, "Create EfficientNet-B0");
+    models.def("efficientnet_b1", [](int64_t num_classes) {
+        return tenzor::models::efficientnet_b1(num_classes);
+    }, py::arg("num_classes") = 1000, "Create EfficientNet-B1");
+    models.def("efficientnet_b2", [](int64_t num_classes) {
+        return tenzor::models::efficientnet_b2(num_classes);
+    }, py::arg("num_classes") = 1000, "Create EfficientNet-B2");
+    models.def("efficientnet_b3", [](int64_t num_classes) {
+        return tenzor::models::efficientnet_b3(num_classes);
+    }, py::arg("num_classes") = 1000, "Create EfficientNet-B3");
+    models.def("efficientnet_b4", [](int64_t num_classes) {
+        return tenzor::models::efficientnet_b4(num_classes);
+    }, py::arg("num_classes") = 1000, "Create EfficientNet-B4");
+    models.def("efficientnet_b5", [](int64_t num_classes) {
+        return tenzor::models::efficientnet_b5(num_classes);
+    }, py::arg("num_classes") = 1000, "Create EfficientNet-B5");
+    models.def("efficientnet_b6", [](int64_t num_classes) {
+        return tenzor::models::efficientnet_b6(num_classes);
+    }, py::arg("num_classes") = 1000, "Create EfficientNet-B6");
+    models.def("efficientnet_b7", [](int64_t num_classes) {
+        return tenzor::models::efficientnet_b7(num_classes);
+    }, py::arg("num_classes") = 1000, "Create EfficientNet-B7");
+
+    // GoogLeNet
+    py::class_<tenzor::models::GoogLeNet, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::GoogLeNet>>(models, "GoogLeNet",
+        "GoogLeNet/Inception architecture")
+        .def(py::init<int64_t, bool, double, bool>(),
+             py::arg("num_classes") = 1000, py::arg("aux_logits") = true,
+             py::arg("dropout") = 0.4, py::arg("init_weights") = true);
+    models.def("googlenet", [](int64_t num_classes) {
+        return tenzor::models::googlenet(num_classes);
+    }, py::arg("num_classes") = 1000, "Create GoogLeNet");
+
+    // ConvNeXt
+    py::class_<tenzor::models::ConvNeXt, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::ConvNeXt>>(models, "ConvNeXt",
+        "ConvNeXt architecture")
+        .def(py::init<int64_t, int64_t, std::vector<int64_t>, std::vector<int64_t>, double, double>(),
+             py::arg("in_channels") = 3, py::arg("num_classes") = 1000,
+             py::arg("depths") = std::vector<int64_t>{3,3,9,3},
+             py::arg("dims") = std::vector<int64_t>{96,192,384,768},
+             py::arg("drop_path_rate") = 0.0, py::arg("layer_scale_init_value") = 1e-6);
+    models.def("convnext_tiny", [](int64_t num_classes) {
+        return tenzor::models::convnext_tiny(num_classes);
+    }, py::arg("num_classes") = 1000, "Create ConvNeXt-Tiny");
+    models.def("convnext_small", [](int64_t num_classes) {
+        return tenzor::models::convnext_small(num_classes);
+    }, py::arg("num_classes") = 1000, "Create ConvNeXt-Small");
+    models.def("convnext_base", [](int64_t num_classes) {
+        return tenzor::models::convnext_base(num_classes);
+    }, py::arg("num_classes") = 1000, "Create ConvNeXt-Base");
+    models.def("convnext_large", [](int64_t num_classes) {
+        return tenzor::models::convnext_large(num_classes);
+    }, py::arg("num_classes") = 1000, "Create ConvNeXt-Large");
+
+    // Vision Transformer (ViT)
+    py::class_<tenzor::models::ViTConfig>(models, "ViTConfig", "ViT configuration")
+        .def(py::init<>())
+        .def_readwrite("hidden_size", &tenzor::models::ViTConfig::hidden_size)
+        .def_readwrite("num_hidden_layers", &tenzor::models::ViTConfig::num_hidden_layers)
+        .def_readwrite("num_attention_heads", &tenzor::models::ViTConfig::num_attention_heads)
+        .def_readwrite("image_size", &tenzor::models::ViTConfig::image_size)
+        .def_readwrite("patch_size", &tenzor::models::ViTConfig::patch_size)
+        .def_readwrite("num_channels", &tenzor::models::ViTConfig::num_channels);
+
+    py::class_<tenzor::models::ViT, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::ViT>>(models, "ViT",
+        "Vision Transformer")
+        .def(py::init<tenzor::models::ViTConfig, bool>(),
+             py::arg("config"), py::arg("add_pooling_layer") = true);
+
+    py::class_<tenzor::models::ViTForImageClassification, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::ViTForImageClassification>>(models, "ViTForImageClassification",
+        "ViT for image classification")
+        .def(py::init<tenzor::models::ViTConfig, int64_t>(),
+             py::arg("config"), py::arg("num_labels"));
+
+    models.def("vit_base_patch16", []() {
+        return tenzor::models::ViT_Base_Patch16();
+    }, "Create ViT-Base/16");
+    models.def("vit_large_patch16", []() {
+        return tenzor::models::ViT_Large_Patch16();
+    }, "Create ViT-Large/16");
+
+    // Swin Transformer
+    py::class_<tenzor::models::SwinTransformer, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::SwinTransformer>>(models, "SwinTransformer",
+        "Swin Transformer architecture")
+        .def(py::init([](int64_t img_size, int64_t patch_size, int64_t in_chans,
+                         int64_t num_classes, int64_t embed_dim,
+                         std::vector<int64_t> depths, std::vector<int64_t> num_heads,
+                         int64_t window_size, double mlp_ratio, bool qkv_bias,
+                         double qk_scale, double drop_rate, double attn_drop_rate,
+                         double drop_path_rate, bool norm_layer, bool use_checkpoint) {
+            return std::make_unique<tenzor::models::SwinTransformer>(
+                img_size, patch_size, in_chans, num_classes, embed_dim,
+                depths, num_heads, window_size, mlp_ratio, qkv_bias,
+                qk_scale, drop_rate, attn_drop_rate, drop_path_rate,
+                norm_layer, use_checkpoint);
+        }),
+             py::arg("img_size") = 224, py::arg("patch_size") = 4,
+             py::arg("in_chans") = 3, py::arg("num_classes") = 1000,
+             py::arg("embed_dim") = 96,
+             py::arg("depths") = std::vector<int64_t>{2,2,6,2},
+             py::arg("num_heads") = std::vector<int64_t>{3,6,12,24},
+             py::arg("window_size") = 7, py::arg("mlp_ratio") = 4.0,
+             py::arg("qkv_bias") = true, py::arg("qk_scale") = 0.0,
+             py::arg("drop_rate") = 0.0, py::arg("attn_drop_rate") = 0.0,
+             py::arg("drop_path_rate") = 0.1, py::arg("norm_layer") = true,
+             py::arg("use_checkpoint") = false);
+    models.def("swin_tiny", [](int64_t num_classes) {
+        return tenzor::models::swin_tiny(num_classes);
+    }, py::arg("num_classes") = 1000, "Create Swin-Tiny");
+    models.def("swin_small", [](int64_t num_classes) {
+        return tenzor::models::swin_small(num_classes);
+    }, py::arg("num_classes") = 1000, "Create Swin-Small");
+    models.def("swin_base", [](int64_t num_classes) {
+        return tenzor::models::swin_base(num_classes);
+    }, py::arg("num_classes") = 1000, "Create Swin-Base");
+
+    // BERT
+    py::class_<tenzor::models::BertConfig>(models, "BertConfig", "BERT configuration")
+        .def(py::init<>())
+        .def_readwrite("hidden_size", &tenzor::models::BertConfig::hidden_size)
+        .def_readwrite("num_hidden_layers", &tenzor::models::BertConfig::num_hidden_layers)
+        .def_readwrite("num_attention_heads", &tenzor::models::BertConfig::num_attention_heads)
+        .def_readwrite("vocab_size", &tenzor::models::BertConfig::vocab_size)
+        .def_readwrite("max_position_embeddings", &tenzor::models::BertConfig::max_position_embeddings)
+        .def_static("base", &tenzor::models::BertConfig::base, "BERT-Base config")
+        .def_static("large", &tenzor::models::BertConfig::large, "BERT-Large config");
+
+    py::class_<tenzor::models::BertModel, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::BertModel>>(models, "BertModel",
+        "BERT base model")
+        .def(py::init<tenzor::models::BertConfig, bool>(),
+             py::arg("config"), py::arg("add_pooling_layer") = true);
+
+    py::class_<tenzor::models::BertForSequenceClassification, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::BertForSequenceClassification>>(models, "BertForSequenceClassification",
+        "BERT for sequence classification")
+        .def(py::init<tenzor::models::BertConfig, int64_t>(),
+             py::arg("config"), py::arg("num_labels"));
+
+    // GPT
+    py::class_<tenzor::models::GPT2Config>(models, "GPT2Config", "GPT-2 configuration")
+        .def(py::init<>())
+        .def_readwrite("vocab_size", &tenzor::models::GPT2Config::vocab_size)
+        .def_readwrite("n_positions", &tenzor::models::GPT2Config::n_positions)
+        .def_readwrite("n_embd", &tenzor::models::GPT2Config::n_embd)
+        .def_readwrite("n_layer", &tenzor::models::GPT2Config::n_layer)
+        .def_readwrite("n_head", &tenzor::models::GPT2Config::n_head)
+        .def_static("gpt2_small", &tenzor::models::GPT2Config::gpt2_small, "GPT-2 Small config")
+        .def_static("gpt2_medium", &tenzor::models::GPT2Config::gpt2_medium, "GPT-2 Medium config")
+        .def_static("gpt2_large", &tenzor::models::GPT2Config::gpt2_large, "GPT-2 Large config")
+        .def_static("gpt2_xl", &tenzor::models::GPT2Config::gpt2_xl, "GPT-2 XL config");
+
+    py::class_<tenzor::models::GPT2Model, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::GPT2Model>>(models, "GPT2Model",
+        "GPT-2 base model")
+        .def(py::init<tenzor::models::GPT2Config>(),
+             py::arg("config"));
+
+    py::class_<tenzor::models::GPT2LMHeadModel, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::GPT2LMHeadModel>>(models, "GPT2LMHeadModel",
+        "GPT-2 language model with LM head")
+        .def(py::init<tenzor::models::GPT2Config>(),
+             py::arg("config"));
+
+    // T5
+    py::class_<tenzor::models::T5Config>(models, "T5Config", "T5 configuration")
+        .def(py::init<>())
+        .def_readwrite("d_model", &tenzor::models::T5Config::d_model)
+        .def_readwrite("d_ff", &tenzor::models::T5Config::d_ff)
+        .def_readwrite("num_layers", &tenzor::models::T5Config::num_layers)
+        .def_readwrite("num_heads", &tenzor::models::T5Config::num_heads)
+        .def_readwrite("vocab_size", &tenzor::models::T5Config::vocab_size)
+        .def_static("small", &tenzor::models::T5Config::small, "T5-Small config")
+        .def_static("base", &tenzor::models::T5Config::base, "T5-Base config")
+        .def_static("large", &tenzor::models::T5Config::large, "T5-Large config");
+
+    py::class_<tenzor::models::T5Model, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::T5Model>>(models, "T5Model",
+        "T5 base model")
+        .def(py::init<tenzor::models::T5Config>(),
+             py::arg("config"));
+
+    py::class_<tenzor::models::T5ForConditionalGeneration, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::T5ForConditionalGeneration>>(models, "T5ForConditionalGeneration",
+        "T5 for conditional generation")
+        .def(py::init<tenzor::models::T5Config>(),
+             py::arg("config"));
+
+    // ALBERT
+    py::class_<tenzor::models::AlbertConfig>(models, "AlbertConfig", "ALBERT configuration")
+        .def(py::init<>())
+        .def_readwrite("hidden_size", &tenzor::models::AlbertConfig::hidden_size)
+        .def_readwrite("embedding_size", &tenzor::models::AlbertConfig::embedding_size)
+        .def_readwrite("num_hidden_layers", &tenzor::models::AlbertConfig::num_hidden_layers)
+        .def_readwrite("num_attention_heads", &tenzor::models::AlbertConfig::num_attention_heads)
+        .def_readwrite("vocab_size", &tenzor::models::AlbertConfig::vocab_size)
+        .def_static("base", &tenzor::models::AlbertConfig::base, "ALBERT-Base config")
+        .def_static("large", &tenzor::models::AlbertConfig::large, "ALBERT-Large config");
+
+    py::class_<tenzor::models::AlbertModel, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::AlbertModel>>(models, "AlbertModel",
+        "ALBERT base model")
+        .def(py::init<tenzor::models::AlbertConfig>(),
+             py::arg("config"));
+
+    py::class_<tenzor::models::AlbertForSequenceClassification, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::AlbertForSequenceClassification>>(models, "AlbertForSequenceClassification",
+        "ALBERT for sequence classification")
+        .def(py::init<tenzor::models::AlbertConfig, int64_t>(),
+             py::arg("config"), py::arg("num_labels"));
+
+    // RoBERTa
+    py::class_<tenzor::models::RobertaConfig>(models, "RobertaConfig", "RoBERTa configuration")
+        .def(py::init<>())
+        .def_readwrite("hidden_size", &tenzor::models::RobertaConfig::hidden_size)
+        .def_readwrite("num_hidden_layers", &tenzor::models::RobertaConfig::num_hidden_layers)
+        .def_readwrite("num_attention_heads", &tenzor::models::RobertaConfig::num_attention_heads)
+        .def_readwrite("vocab_size", &tenzor::models::RobertaConfig::vocab_size)
+        .def_static("base", &tenzor::models::RobertaConfig::base, "RoBERTa-Base config")
+        .def_static("large", &tenzor::models::RobertaConfig::large, "RoBERTa-Large config");
+
+    // ELECTRA
+    py::class_<tenzor::models::ElectraConfig>(models, "ElectraConfig", "ELECTRA configuration")
+        .def(py::init<>())
+        .def_readwrite("hidden_size", &tenzor::models::ElectraConfig::hidden_size)
+        .def_readwrite("num_hidden_layers", &tenzor::models::ElectraConfig::num_hidden_layers)
+        .def_readwrite("num_attention_heads", &tenzor::models::ElectraConfig::num_attention_heads)
+        .def_readwrite("vocab_size", &tenzor::models::ElectraConfig::vocab_size)
+        .def_static("small", &tenzor::models::ElectraConfig::small, "ELECTRA-Small config")
+        .def_static("base", &tenzor::models::ElectraConfig::base, "ELECTRA-Base config")
+        .def_static("large", &tenzor::models::ElectraConfig::large, "ELECTRA-Large config");
+
+    // U-Net
+    py::class_<tenzor::models::UNet, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::UNet>>(models, "UNet",
+        "U-Net segmentation architecture")
+        .def(py::init<int64_t, int64_t, bool>(),
+             py::arg("in_channels"), py::arg("num_classes"),
+             py::arg("bilinear") = false);
+
+    // DeepLab v3+
+    py::class_<tenzor::models::DeepLabV3PlusEncoder, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::DeepLabV3PlusEncoder>>(models, "DeepLabV3PlusEncoder",
+        "DeepLab v3+ encoder")
+        .def(py::init<std::string, int64_t, bool>(),
+             py::arg("backbone_name") = "resnet50",
+             py::arg("output_stride") = 16,
+             py::arg("pretrained") = false);
+
+    // YOLO
+    py::class_<tenzor::models::Darknet53, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::Darknet53>>(models, "Darknet53",
+        "Darknet53 backbone for YOLO")
+        .def(py::init<int64_t>(),
+             py::arg("in_channels") = 3);
+
+    py::class_<tenzor::models::YOLOv3Head, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::YOLOv3Head>>(models, "YOLOv3Head",
+        "YOLOv3 detection head")
+        .def(py::init<int64_t, int64_t, int64_t>(),
+             py::arg("in_channels"), py::arg("num_classes"),
+             py::arg("num_anchors") = 3);
+
+    // Faster R-CNN
+    py::class_<tenzor::models::FasterRCNN, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::FasterRCNN>>(models, "FasterRCNN",
+        "Faster R-CNN object detection")
+        .def(py::init<std::shared_ptr<tenzor::nn::Module>, int64_t>(),
+             py::arg("backbone"), py::arg("num_classes"));
+
+    // Mask R-CNN
+    py::class_<tenzor::models::RPN, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::RPN>>(models, "RPN",
+        "Region Proposal Network")
+        .def(py::init<int64_t, int64_t>(),
+             py::arg("in_channels"), py::arg("num_anchors"));
+
+    py::class_<tenzor::models::ROIHead, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::ROIHead>>(models, "ROIHead",
+        "ROI Head for instance segmentation")
+        .def(py::init<int64_t, int64_t, int64_t>(),
+             py::arg("in_channels"), py::arg("num_classes"),
+             py::arg("roi_size") = 7);
 
     // ========== Model Compression (Pruning + Quantization) ==========
     bind_compression(m);
@@ -9362,6 +9838,93 @@ void bind_compression(py::module& m) {
     m.def("memory_profiler_summary", []() -> std::string {
         return tenzor::MemoryProfiler::instance().memory_summary();
     }, "Get human-readable global memory profiler summary");
+
+    // =========================================================================
+    // Operation Profiler
+    // =========================================================================
+    auto profiler = m.def_submodule("profiler", "Operation profiling for forward and backward passes");
+
+    py::enum_<tenzor::ProfilePhase>(profiler, "Phase")
+        .value("Forward", tenzor::ProfilePhase::Forward)
+        .value("Backward", tenzor::ProfilePhase::Backward);
+
+    // Thread-local guard storage for the forward profiling interceptor
+    static thread_local std::unique_ptr<tenzor::ProfilingInterceptorGuard> s_fwd_guard;
+
+    profiler.def("enable", []() {
+        // Enable backward profiling (autograd)
+        tenzor::AutogradProfiler::instance().enable();
+        // Enable forward profiling (dispatch interceptor)
+        tenzor::OpProfiler::instance().enable();
+        if (!s_fwd_guard) {
+            s_fwd_guard = std::make_unique<tenzor::ProfilingInterceptorGuard>();
+        }
+    }, "Enable profiling for both forward and backward passes");
+
+    profiler.def("disable", []() {
+        tenzor::AutogradProfiler::instance().disable();
+        tenzor::OpProfiler::instance().disable();
+        s_fwd_guard.reset();  // pop the interceptor
+    }, "Disable profiling");
+
+    profiler.def("is_enabled", []() {
+        return tenzor::AutogradProfiler::instance().is_enabled()
+            || tenzor::OpProfiler::instance().is_enabled();
+    }, "Check if profiling is enabled");
+
+    profiler.def("reset", []() {
+        tenzor::AutogradProfiler::instance().reset();
+        tenzor::OpProfiler::instance().reset();
+    }, "Clear all recorded profiles");
+
+    profiler.def("summary", []() {
+        std::string out;
+        // Forward pass summary from OpProfiler
+        out += tenzor::OpProfiler::instance().summary();
+        out += "\n";
+        // Backward pass summary from AutogradProfiler
+        out += tenzor::AutogradProfiler::instance().summary();
+        return out;
+    }, "Get human-readable profiling summary (forward + backward)");
+
+    profiler.def("profiles", [](std::optional<tenzor::ProfilePhase> phase) -> py::list {
+        py::list result;
+
+        // Forward profiles from OpProfiler (dispatch-level)
+        if (!phase.has_value() || phase.value() == tenzor::ProfilePhase::Forward) {
+            auto fwd_profs = tenzor::OpProfiler::instance().profiles();
+            for (const auto& p : fwd_profs) {
+                py::dict d;
+                d["name"] = "OpId:" + std::to_string(static_cast<int>(p.op));
+                d["phase"] = "forward";
+                d["total_ms"] = std::chrono::duration<double, std::milli>(p.total_time).count();
+                d["call_count"] = p.call_count;
+                d["avg_us"] = p.call_count > 0
+                    ? std::chrono::duration<double, std::micro>(p.total_time).count() / p.call_count
+                    : 0.0;
+                result.append(d);
+            }
+        }
+
+        // Backward profiles from AutogradProfiler
+        if (!phase.has_value() || phase.value() == tenzor::ProfilePhase::Backward) {
+            auto bwd_profs = tenzor::AutogradProfiler::instance().profiles();
+            for (const auto& p : bwd_profs) {
+                py::dict d;
+                d["name"] = p.name;
+                d["phase"] = p.phase == tenzor::ProfilePhase::Forward ? "forward" : "backward";
+                d["total_ms"] = std::chrono::duration<double, std::milli>(p.total_time).count();
+                d["call_count"] = p.call_count;
+                d["avg_us"] = p.call_count > 0
+                    ? std::chrono::duration<double, std::micro>(p.total_time).count() / p.call_count
+                    : 0.0;
+                result.append(d);
+            }
+        }
+
+        return result;
+    }, py::arg("phase") = py::none(),
+    "Get profiling data as list of dicts. Optional phase filter.");
 
     // =========================================================================
     // Custom Op Registration API

@@ -344,6 +344,26 @@ public:
     /// Set quantization parameters (only for quantized tensors)
     auto set_quantization_params(double scale, int64_t zero_point) -> void;
 
+    // ---- Per-channel quantization API ----
+
+    /// Check if this tensor uses per-channel quantization
+    auto is_per_channel_quantized() const noexcept -> bool;
+
+    /// Get per-channel quantization scales (only valid for per-channel quantized tensors)
+    auto q_per_channel_scales() const -> const std::vector<double>&;
+
+    /// Get per-channel quantization zero points
+    auto q_per_channel_zero_points() const -> const std::vector<int64_t>&;
+
+    /// Get per-channel quantization axis
+    auto q_per_channel_axis() const -> int64_t;
+
+    /// Set per-channel quantization parameters
+    auto set_per_channel_quantization_params(
+        std::vector<double> scales,
+        std::vector<int64_t> zero_points,
+        int64_t axis) -> void;
+
     /**
      * @brief Check if tensor is contiguous in memory.
      *
@@ -1335,10 +1355,13 @@ private:
     // Quantization metadata (only valid when dtype is QInt8/QUInt8/QInt4x2)
     double q_scale_{0.0};               ///< Quantization scale factor
     int64_t q_zero_point_{0};           ///< Quantization zero point
-    // SAFETY: Stale reads are harmless (triggers recomputation). No ordering
-    // dependency on other fields — relaxed load/store is sufficient.
+    std::optional<std::vector<double>> q_scales_;       ///< Per-channel quantization scales
+    std::optional<std::vector<int64_t>> q_zero_points_; ///< Per-channel quantization zero points
+    int64_t q_axis_{-1};                                 ///< Quantization axis (-1 = per-tensor)
+    // SAFETY: Uses acquire/release ordering to synchronize with version_counter_
+    // updates, ensuring autograd sees consistent contiguity state after mutations.
     mutable std::atomic<int8_t> is_contiguous_cache_{-1};  ///< Cached contiguity: -1=unset, 0=false, 1=true
-    // SAFETY: Same relaxed semantics as is_contiguous_cache_. Encoding matches
+    // SAFETY: Same acquire/release semantics as is_contiguous_cache_. Encoding matches
     // MemoryFormat enum: -1=unset, 0=Contiguous, 1=ChannelsLast, 2=ChannelsLast3d.
     static_assert(static_cast<int>(MemoryFormat::Contiguous) == 0
                && static_cast<int>(MemoryFormat::ChannelsLast) == 1

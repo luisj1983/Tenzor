@@ -182,10 +182,10 @@ auto GatherBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
 auto GatherBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     const auto& grad_var = grad_outputs[0];
 
-    int64_t dim = static_cast<int64_t>(saved_tensors_[0].data<float>()[0]);
+    int64_t dim = saved_tensors_[0].data<int64_t>()[0];
     const auto& index = saved_tensors_[1];
     const auto& shape_tensor = saved_tensors_[2];
-    auto shape_ptr = shape_tensor.data<float>();
+    auto shape_ptr = shape_tensor.data<int64_t>();
     auto input_shape = std::vector<int64_t>(shape_ptr, shape_ptr + shape_tensor.numel());
 
     // Use Variable-level scatter_add to preserve gradient graph
@@ -236,9 +236,9 @@ auto ScatterAddBackward::forward(std::vector<Variable>) -> std::vector<Variable>
 auto ScatterAddBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     const auto& grad = grad_outputs[0];
 
-    // saved_tensors_[0] = dim (scalar Float32, cast to int64_t)
+    // saved_tensors_[0] = dim (scalar Int64)
     // saved_tensors_[1] = index
-    int64_t dim = static_cast<int64_t>(saved_tensors_[0].data<float>()[0]);
+    int64_t dim = saved_tensors_[0].data<int64_t>()[0];
     const auto& index = saved_tensors_[1];
 
     // grad_input: identity (scatter_add adds to input, so gradient flows through directly)
@@ -253,7 +253,7 @@ auto ScatterAddBackward::backward(std::vector<Tensor> grad_outputs) -> std::vect
 auto ScatterAddBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     const auto& grad_var = grad_outputs[0];
 
-    int64_t dim = static_cast<int64_t>(saved_tensors_[0].data<float>()[0]);
+    int64_t dim = saved_tensors_[0].data<int64_t>()[0];
     const auto& index = saved_tensors_[1];
 
     // grad_input is identity: gradient flows through unchanged
@@ -317,10 +317,10 @@ auto IndexSelectBackward::backward(std::vector<Tensor> grad_outputs) -> std::vec
 auto IndexSelectBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     const auto& grad_var = grad_outputs[0];
 
-    int64_t dim = static_cast<int64_t>(saved_tensors_[0].data<float>()[0]);
+    int64_t dim = saved_tensors_[0].data<int64_t>()[0];
     const auto& index = saved_tensors_[1];
     const auto& shape_tensor = saved_tensors_[2];
-    auto shape_ptr = shape_tensor.data<float>();
+    auto shape_ptr = shape_tensor.data<int64_t>();
     auto input_shape = std::vector<int64_t>(shape_ptr, shape_ptr + shape_tensor.numel());
 
     // Build full index tensor matching grad shape for scatter_add along dim

@@ -229,12 +229,19 @@ auto Variable::device() const -> const Device& {
 
 auto Variable::accumulate_sparse_grad(SparseTensor sg) -> void {
     if (!impl_) return;
-    std::lock_guard lock(*impl_->grad_mutex_);
-    if (impl_->sparse_grad_.has_value()) {
-        impl_->sparse_grad_ =
-            sparse::add(impl_->sparse_grad_.value(), sg).coalesce();
+    auto do_accumulate = [&] {
+        if (impl_->sparse_grad_.has_value()) {
+            impl_->sparse_grad_ =
+                sparse::add(impl_->sparse_grad_.value(), sg).coalesce();
+        } else {
+            impl_->sparse_grad_ = std::move(sg);
+        }
+    };
+    if (impl_->thread_safe_.load(std::memory_order_acquire)) {
+        std::lock_guard lock(*impl_->grad_mutex_);
+        do_accumulate();
     } else {
-        impl_->sparse_grad_ = std::move(sg);
+        do_accumulate();
     }
 }
 

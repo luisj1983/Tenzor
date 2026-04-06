@@ -32,7 +32,7 @@ namespace tenzor {
 TensorImpl::TensorImpl(std::vector<int64_t> shape_, DType dtype_, Device device_,
                        bool zero_init)
     : shape(std::move(shape_)), dtype(dtype_), device(device_) {
-    is_contiguous_cache_.store(1, std::memory_order_relaxed);  // freshly constructed = contiguous
+    is_contiguous_cache_.store(1, std::memory_order_release);  // freshly constructed = contiguous
 
     // Compute strides
     strides = compute_strides(this->shape);
@@ -90,7 +90,7 @@ auto TensorImpl::numel() const -> int64_t {
 
 auto TensorImpl::is_contiguous() const -> bool {
     // Return cached result if available (atomic load for thread safety)
-    auto cached = is_contiguous_cache_.load(std::memory_order_relaxed);
+    auto cached = is_contiguous_cache_.load(std::memory_order_acquire);
     if (cached >= 0) {
         return cached == 1;
     }
@@ -98,7 +98,7 @@ auto TensorImpl::is_contiguous() const -> bool {
     // Offset does not affect contiguity — a slice can be contiguous at a non-zero offset.
     auto expected_strides = compute_strides(shape);
     bool result = (strides == expected_strides);
-    is_contiguous_cache_.store(result ? 1 : 0, std::memory_order_relaxed);
+    is_contiguous_cache_.store(result ? 1 : 0, std::memory_order_release);
     return result;
 }
 
@@ -123,7 +123,7 @@ TensorImpl::TensorImpl(intrusive_ptr<Storage> storage_,
     , strides(std::move(strides_))
     , dtype(dtype_)
     , device(device_) {
-    is_contiguous_cache_.store(-1, std::memory_order_relaxed);  // lazily computed
+    is_contiguous_cache_.store(-1, std::memory_order_release);  // lazily computed
 }
 
 auto Tensor::from_blob(void* data,
@@ -288,6 +288,52 @@ auto Tensor::set_quantization_params(double scale, int64_t zero_point) -> void {
     impl_->q_zero_point_ = zero_point;
 }
 
+auto Tensor::is_per_channel_quantized() const noexcept -> bool {
+    return impl_ && tenzor::is_quantized(impl_->dtype) && impl_->q_scales_.has_value();
+}
+
+auto Tensor::q_per_channel_scales() const -> const std::vector<double>& {
+    if (!impl_ || !impl_->q_scales_.has_value()) {
+        throw std::runtime_error("q_per_channel_scales: tensor is not per-channel quantized");
+    }
+    return impl_->q_scales_.value();
+}
+
+auto Tensor::q_per_channel_zero_points() const -> const std::vector<int64_t>& {
+    if (!impl_ || !impl_->q_zero_points_.has_value()) {
+        throw std::runtime_error("q_per_channel_zero_points: tensor is not per-channel quantized");
+    }
+    return impl_->q_zero_points_.value();
+}
+
+auto Tensor::q_per_channel_axis() const -> int64_t {
+    if (!impl_ || !impl_->q_scales_.has_value()) {
+        throw std::runtime_error("q_per_channel_axis: tensor is not per-channel quantized");
+    }
+    return impl_->q_axis_;
+}
+
+auto Tensor::set_per_channel_quantization_params(
+    std::vector<double> scales,
+    std::vector<int64_t> zero_points,
+    int64_t axis) -> void {
+    if (!impl_ || !tenzor::is_quantized(impl_->dtype)) {
+        throw std::runtime_error("set_per_channel_quantization_params: tensor is not quantized");
+    }
+    if (scales.size() != zero_points.size()) {
+        throw std::runtime_error("set_per_channel_quantization_params: scales and zero_points must have same size");
+    }
+    if (axis < 0 || axis >= static_cast<int64_t>(impl_->shape.size())) {
+        throw std::runtime_error("set_per_channel_quantization_params: axis out of range");
+    }
+    if (static_cast<int64_t>(scales.size()) != impl_->shape[axis]) {
+        throw std::runtime_error("set_per_channel_quantization_params: scales size must match shape[axis]");
+    }
+    impl_->q_scales_ = std::move(scales);
+    impl_->q_zero_points_ = std::move(zero_points);
+    impl_->q_axis_ = axis;
+}
+
 auto Tensor::is_contiguous() const noexcept -> bool {
     if (!impl_) return true;
     return impl_->is_contiguous();
@@ -310,13 +356,13 @@ auto Tensor::set_requires_grad(bool requires_grad) -> void {
 
 auto Tensor::mutable_shape() -> std::vector<int64_t>& {
     if (!impl_) throw std::runtime_error("Operation on uninitialized tensor");
-    impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
+    impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
     return impl_->shape;
 }
 
 auto Tensor::mutable_strides() -> std::vector<int64_t>& {
     if (!impl_) throw std::runtime_error("Operation on uninitialized tensor");
-    impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
+    impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
     return impl_->strides;
 }
 
@@ -327,8 +373,8 @@ auto Tensor::set_offset(int64_t offset) -> void {
 
 auto Tensor::invalidate_contiguity_cache() -> void {
     if (impl_) {
-        impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
-        impl_->memory_format_cache_.store(-1, std::memory_order_relaxed);
+        impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
+        impl_->memory_format_cache_.store(-1, std::memory_order_release);
     }
 }
 
@@ -1232,7 +1278,7 @@ auto Tensor::transpose(int64_t dim0, int64_t dim1) const -> Tensor {
         result.impl_ = make_intrusive<TensorImpl>(*impl_);
         std::swap(result.impl_->shape[0], result.impl_->shape[1]);
         std::swap(result.impl_->strides[0], result.impl_->strides[1]);
-        result.impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
+        result.impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
         result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;
         return result;
     }
@@ -1242,7 +1288,7 @@ auto Tensor::transpose(int64_t dim0, int64_t dim1) const -> Tensor {
     result.impl_ = make_intrusive<TensorImpl>(*impl_);
     std::swap(result.impl_->shape[dim0], result.impl_->shape[dim1]);
     std::swap(result.impl_->strides[dim0], result.impl_->strides[dim1]);
-    result.impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
+    result.impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
     result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;
 
     return result;
@@ -1289,7 +1335,7 @@ auto Tensor::permute(std::vector<int64_t> dims) const -> Tensor {
 
     result.impl_->shape = std::move(new_shape);
     result.impl_->strides = std::move(new_strides);
-    result.impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
+    result.impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
     result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;
 
     return result;
@@ -1321,7 +1367,7 @@ auto Tensor::squeeze(std::optional<int64_t> dim) const -> Tensor {
         result.impl_ = make_intrusive<TensorImpl>(*impl_);
         result.impl_->shape.erase(result.impl_->shape.begin() + d);
         result.impl_->strides.erase(result.impl_->strides.begin() + d);
-        result.impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
+        result.impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
         result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;
 
         return result;
@@ -1344,7 +1390,7 @@ auto Tensor::squeeze(std::optional<int64_t> dim) const -> Tensor {
         result.impl_ = make_intrusive<TensorImpl>(*impl_);
         result.impl_->shape = std::move(new_shape);
         result.impl_->strides = std::move(new_strides);
-        result.impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
+        result.impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
         result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;
 
         return result;
@@ -1375,7 +1421,7 @@ auto Tensor::unsqueeze(int64_t dim) const -> Tensor {
     // Compute stride for new dimension (should be product of all following dims)
     int64_t new_stride = (dim < ndims) ? impl_->strides[dim] : 1;
     result.impl_->strides.insert(result.impl_->strides.begin() + dim, new_stride);
-    result.impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
+    result.impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
     result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;
 
     return result;
@@ -1564,7 +1610,7 @@ auto Tensor::slice(int64_t dim, int64_t start, int64_t end, int64_t step) const 
         throw std::out_of_range("Slice offset exceeds storage bounds");
     }
 
-    result.impl_->is_contiguous_cache_.store(-1, std::memory_order_relaxed);
+    result.impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
     result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;
 
     return result;
@@ -1642,7 +1688,7 @@ auto Tensor::memory_format() const noexcept -> MemoryFormat {
     if (!impl_) return MemoryFormat::Contiguous;
 
     // Return cached result if available
-    auto cached = impl_->memory_format_cache_.load(std::memory_order_relaxed);
+    auto cached = impl_->memory_format_cache_.load(std::memory_order_acquire);
     if (cached >= 0) return static_cast<MemoryFormat>(cached);
 
     // Compute and cache
@@ -1663,7 +1709,7 @@ auto Tensor::memory_format() const noexcept -> MemoryFormat {
         }
     }
 
-    impl_->memory_format_cache_.store(static_cast<int8_t>(fmt), std::memory_order_relaxed);
+    impl_->memory_format_cache_.store(static_cast<int8_t>(fmt), std::memory_order_release);
     return fmt;
 }
 

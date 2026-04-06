@@ -1134,7 +1134,8 @@ auto unsqueeze(const Variable& input, int64_t dim) -> Variable {
     }
     auto result = tenzor::unsqueeze(input.tensor(), dim);
     auto grad_fn = std::make_shared<UnsqueezeBackward>();
-    auto dim_tensor = full({1}, static_cast<float>(dim), DType::Float32, Device::cpu());
+    auto dim_tensor = zeros({1}, DType::Int64, Device::cpu());
+    dim_tensor.data<int64_t>()[0] = dim;
     grad_fn->save_for_backward({dim_tensor});
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
@@ -1150,9 +1151,9 @@ auto expand(const Variable& input, const std::vector<int64_t>& shape) -> Variabl
     auto result = tenzor::expand(input.tensor(), shape);
     auto grad_fn = std::make_shared<ExpandBackward>();
     // Save original shape as tensor for backward
-    std::vector<float> shape_data(input.tensor().shape().begin(), input.tensor().shape().end());
-    auto shape_tensor = zeros({static_cast<int64_t>(shape_data.size())}, DType::Float32, Device::cpu());
-    std::memcpy(shape_tensor.data_ptr(), shape_data.data(), shape_data.size() * sizeof(float));
+    const auto& sh = input.tensor().shape();
+    auto shape_tensor = zeros({static_cast<int64_t>(sh.size())}, DType::Int64, Device::cpu());
+    std::memcpy(shape_tensor.data_ptr(), sh.data(), sh.size() * sizeof(int64_t));
     grad_fn->save_for_backward({shape_tensor});
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
@@ -1185,9 +1186,9 @@ auto flatten(const Variable& input, int64_t start_dim, int64_t end_dim) -> Varia
     auto result = tenzor::flatten(input.tensor(), start_dim, end_dim);
     auto grad_fn = std::make_shared<FlattenBackward>();
     // Save original shape as tensor for backward
-    std::vector<float> shape_data(input.tensor().shape().begin(), input.tensor().shape().end());
-    auto shape_tensor = zeros({static_cast<int64_t>(shape_data.size())}, DType::Float32, Device::cpu());
-    std::memcpy(shape_tensor.data_ptr(), shape_data.data(), shape_data.size() * sizeof(float));
+    const auto& sh = input.tensor().shape();
+    auto shape_tensor = zeros({static_cast<int64_t>(sh.size())}, DType::Int64, Device::cpu());
+    std::memcpy(shape_tensor.data_ptr(), sh.data(), sh.size() * sizeof(int64_t));
     grad_fn->save_for_backward({shape_tensor});
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
@@ -1217,11 +1218,12 @@ auto gather(const Variable& input, int64_t dim, const Tensor& index) -> Variable
     }
     auto result = tenzor::gather(input.tensor(), dim, index);
     auto grad_fn = std::make_shared<GatherBackward>();
-    auto dim_tensor = full({1}, static_cast<float>(dim), DType::Float32, Device::cpu());
+    auto dim_tensor = zeros({1}, DType::Int64, Device::cpu());
+    dim_tensor.data<int64_t>()[0] = dim;
     // Save input shape for backward scatter_add
-    std::vector<float> shape_data(input.tensor().shape().begin(), input.tensor().shape().end());
-    auto shape_tensor = zeros({static_cast<int64_t>(shape_data.size())}, DType::Float32, Device::cpu());
-    std::memcpy(shape_tensor.data_ptr(), shape_data.data(), shape_data.size() * sizeof(float));
+    const auto& sh = input.tensor().shape();
+    auto shape_tensor = zeros({static_cast<int64_t>(sh.size())}, DType::Int64, Device::cpu());
+    std::memcpy(shape_tensor.data_ptr(), sh.data(), sh.size() * sizeof(int64_t));
     grad_fn->save_for_backward({dim_tensor, index, shape_tensor});
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
@@ -1237,7 +1239,8 @@ auto scatter(const Variable& input, int64_t dim, const Tensor& index, const Vari
     }
     auto result = tenzor::scatter(input.tensor(), dim, index, src.tensor());
     auto grad_fn = std::make_shared<ScatterBackward>();
-    auto dim_tensor = full({1}, static_cast<float>(dim), DType::Float32, Device::cpu());
+    auto dim_tensor = zeros({1}, DType::Int64, Device::cpu());
+    dim_tensor.data<int64_t>()[0] = dim;
     grad_fn->save_for_backward({dim_tensor, index});
     grad_fn->set_next_functions({input.grad_fn(), src.grad_fn()});
     grad_fn->set_input_variables({input, src});
@@ -1253,7 +1256,8 @@ auto scatter_add(const Variable& input, int64_t dim, const Tensor& index, const 
     }
     auto result = tenzor::scatter_add(input.tensor(), dim, index, src.tensor());
     auto grad_fn = std::make_shared<ScatterAddBackward>();
-    auto dim_tensor = full({1}, static_cast<float>(dim), DType::Float32, Device::cpu());
+    auto dim_tensor = zeros({1}, DType::Int64, Device::cpu());
+    dim_tensor.data<int64_t>()[0] = dim;
     grad_fn->save_for_backward({dim_tensor, index});
     grad_fn->set_next_functions({input.grad_fn(), src.grad_fn()});
     grad_fn->set_input_variables({input, src});
@@ -1268,10 +1272,11 @@ auto index_select(const Variable& input, int64_t dim, const Tensor& index) -> Va
     }
     auto result = tenzor::index_select(input.tensor(), dim, index);
     auto grad_fn = std::make_shared<IndexSelectBackward>();
-    auto dim_tensor = full({1}, static_cast<float>(dim), DType::Float32, Device::cpu());
-    std::vector<float> shape_data(input.tensor().shape().begin(), input.tensor().shape().end());
-    auto shape_tensor = zeros({static_cast<int64_t>(shape_data.size())}, DType::Float32, Device::cpu());
-    std::memcpy(shape_tensor.data_ptr(), shape_data.data(), shape_data.size() * sizeof(float));
+    auto dim_tensor = zeros({1}, DType::Int64, Device::cpu());
+    dim_tensor.data<int64_t>()[0] = dim;
+    const auto& sh = input.tensor().shape();
+    auto shape_tensor = zeros({static_cast<int64_t>(sh.size())}, DType::Int64, Device::cpu());
+    std::memcpy(shape_tensor.data_ptr(), sh.data(), sh.size() * sizeof(int64_t));
     grad_fn->save_for_backward({dim_tensor, index, shape_tensor});
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
@@ -1286,11 +1291,13 @@ auto narrow(const Variable& input, int64_t dim, int64_t start, int64_t length) -
     }
     auto result = input.tensor().slice(dim, start, start + length);
     auto grad_fn = std::make_shared<NarrowBackward>();
-    auto dim_tensor = full({1}, static_cast<float>(dim), DType::Float32, Device::cpu());
-    auto start_tensor = full({1}, static_cast<float>(start), DType::Float32, Device::cpu());
-    std::vector<float> shape_data(input.tensor().shape().begin(), input.tensor().shape().end());
-    auto shape_tensor = zeros({static_cast<int64_t>(shape_data.size())}, DType::Float32, Device::cpu());
-    std::memcpy(shape_tensor.data_ptr(), shape_data.data(), shape_data.size() * sizeof(float));
+    auto dim_tensor = zeros({1}, DType::Int64, Device::cpu());
+    dim_tensor.data<int64_t>()[0] = dim;
+    auto start_tensor = zeros({1}, DType::Int64, Device::cpu());
+    start_tensor.data<int64_t>()[0] = start;
+    const auto& sh = input.tensor().shape();
+    auto shape_tensor = zeros({static_cast<int64_t>(sh.size())}, DType::Int64, Device::cpu());
+    std::memcpy(shape_tensor.data_ptr(), sh.data(), sh.size() * sizeof(int64_t));
     grad_fn->save_for_backward({dim_tensor, start_tensor, shape_tensor});
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
@@ -1306,9 +1313,9 @@ auto flip(const Variable& input, const std::vector<int64_t>& dims) -> Variable {
     auto result = tenzor::flip(input.tensor(), dims);
     auto grad_fn = std::make_shared<FlipBackward>();
     // Save dims as tensor
-    auto dims_tensor = zeros({static_cast<int64_t>(dims.size())}, DType::Float32, Device::cpu());
-    auto* ptr = dims_tensor.data<float>();
-    for (size_t i = 0; i < dims.size(); ++i) ptr[i] = static_cast<float>(dims[i]);
+    auto dims_tensor = zeros({static_cast<int64_t>(dims.size())}, DType::Int64, Device::cpu());
+    auto* ptr = dims_tensor.data<int64_t>();
+    for (size_t i = 0; i < dims.size(); ++i) ptr[i] = dims[i];
     grad_fn->save_for_backward({dims_tensor});
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
@@ -1324,12 +1331,12 @@ auto repeat(const Variable& input, const std::vector<int64_t>& repeats) -> Varia
     auto result = tenzor::repeat(input.tensor(), repeats);
     auto grad_fn = std::make_shared<RepeatBackward>();
     // Save original shape and repeats
-    std::vector<float> shape_data(input.tensor().shape().begin(), input.tensor().shape().end());
-    auto shape_tensor = zeros({static_cast<int64_t>(shape_data.size())}, DType::Float32, Device::cpu());
-    std::memcpy(shape_tensor.data_ptr(), shape_data.data(), shape_data.size() * sizeof(float));
-    auto repeats_tensor = zeros({static_cast<int64_t>(repeats.size())}, DType::Float32, Device::cpu());
-    auto* rptr = repeats_tensor.data<float>();
-    for (size_t i = 0; i < repeats.size(); ++i) rptr[i] = static_cast<float>(repeats[i]);
+    const auto& sh = input.tensor().shape();
+    auto shape_tensor = zeros({static_cast<int64_t>(sh.size())}, DType::Int64, Device::cpu());
+    std::memcpy(shape_tensor.data_ptr(), sh.data(), sh.size() * sizeof(int64_t));
+    auto repeats_tensor = zeros({static_cast<int64_t>(repeats.size())}, DType::Int64, Device::cpu());
+    auto* rptr = repeats_tensor.data<int64_t>();
+    for (size_t i = 0; i < repeats.size(); ++i) rptr[i] = repeats[i];
     grad_fn->save_for_backward({shape_tensor, repeats_tensor});
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
