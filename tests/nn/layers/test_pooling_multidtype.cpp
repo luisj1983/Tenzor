@@ -212,6 +212,54 @@ TEST_P(PoolingMultiDTypeTest, SequentialPoolingPreservesType) {
 }
 
 // ============================================================================
+// AdaptiveMaxPool2d Tests
+// ============================================================================
+
+TEST_P(PoolingMultiDTypeTest, AdaptiveMaxPool2dOutputShape) {
+    auto pool = nn::AdaptiveMaxPool2d(4, 4);
+
+    Variable input = createInput({2, 3, 16, 16}, true);
+    auto output = pool.forward(input);
+
+    expectShape(output.tensor(), {2, 3, 4, 4});
+    expectDType(output.tensor());
+}
+
+TEST_P(PoolingMultiDTypeTest, AdaptiveMaxPool2dSquareOutput) {
+    auto pool = nn::AdaptiveMaxPool2d(1);  // global max pool
+
+    Variable input = createInput({2, 3, 8, 8}, true);
+    auto output = pool.forward(input);
+
+    expectShape(output.tensor(), {2, 3, 1, 1});
+    expectDType(output.tensor());
+}
+
+TEST_P(PoolingMultiDTypeTest, AdaptiveMaxPool2dNonSquareInput) {
+    auto pool = nn::AdaptiveMaxPool2d(3, 5);
+
+    Variable input = createInput({1, 4, 12, 20}, true);
+    auto output = pool.forward(input);
+
+    expectShape(output.tensor(), {1, 4, 3, 5});
+    expectDType(output.tensor());
+}
+
+TEST_P(PoolingMultiDTypeTest, AdaptiveMaxPool2dGradientFlow) {
+    auto pool = nn::AdaptiveMaxPool2d(2, 2);
+
+    Variable input = createInput({1, 2, 8, 8}, true);
+    auto output = pool.forward(input);
+
+    auto loss = tenzor::sum(output.tensor());
+    auto loss_var = Variable(loss, true);
+    loss_var.backward();
+
+    ASSERT_TRUE(input.grad().has_value());
+    expectShape(input.grad().value(), {1, 2, 8, 8});
+}
+
+// ============================================================================
 // Test Instantiation
 // ============================================================================
 

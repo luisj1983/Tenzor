@@ -209,7 +209,7 @@ tenzor_discover_tests(test_creation_ops DISCOVERY_TIMEOUT 60)
 # Creation operations multi-dtype tests
 add_executable(test_creation_ops_multidtype test_creation_ops_multidtype.cpp)
 target_link_libraries(test_creation_ops_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_creation_ops_multidtype DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_creation_ops_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
 # Comparison operators tests
 add_executable(test_comparison_operators test_comparison_operators.cpp)
@@ -356,6 +356,40 @@ tenzor_discover_tests(test_convtranspose2d_multidtype DISCOVERY_TIMEOUT 60 DISCO
 add_executable(test_kldiv_manual_multidtype test_kldiv_manual_multidtype.cpp)
 target_link_libraries(test_kldiv_manual_multidtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_kldiv_manual_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# ============================================================================
+# Phase 4: New tests for previously untested components
+# ============================================================================
+
+# Missing loss functions (MarginRanking, Poisson, Cosine, Triplet, etc.)
+add_executable(test_losses_missing_multidtype test_losses_missing_multidtype.cpp)
+target_link_libraries(test_losses_missing_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_losses_missing_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# RNN cells (RNNCell, GRUCell)
+add_executable(test_rnn_cells_multidtype test_rnn_cells_multidtype.cpp)
+target_link_libraries(test_rnn_cells_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_rnn_cells_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# RNN utilities (pack_padded_sequence, pad_packed_sequence)
+add_executable(test_rnn_utils_multidtype test_rnn_utils_multidtype.cpp)
+target_link_libraries(test_rnn_utils_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_rnn_utils_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# KV Cache
+add_executable(test_kv_cache_multidtype test_kv_cache_multidtype.cpp)
+target_link_libraries(test_kv_cache_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_kv_cache_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Gradient accumulation
+add_executable(test_grad_accumulation test_grad_accumulation.cpp)
+target_link_libraries(test_grad_accumulation PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_grad_accumulation DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# ROI operations (ROIAlign)
+add_executable(test_roi_ops_multidtype test_roi_ops_multidtype.cpp)
+target_link_libraries(test_roi_ops_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_roi_ops_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
 # Vulkan tensor creation test (standalone, non-GTest)
 add_executable(vulkan_tensor_test vulkan_tensor_test.cpp)

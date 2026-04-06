@@ -113,7 +113,7 @@ target_link_libraries(test_hrm PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_dropout LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_batchnorm2d LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_conv2d LABELS "nn" DISCOVERY_TIMEOUT 60)
-tenzor_discover_tests(test_conv2d_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_conv2d_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_pooling LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_schedulers LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_zero_stage1 LABELS "nn" DISCOVERY_TIMEOUT 60)
@@ -128,14 +128,14 @@ tenzor_discover_tests(test_zero_profiling LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_normalization LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_serialization LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_offload LABELS "nn" DISCOVERY_TIMEOUT 60)
-tenzor_discover_tests(test_pooling_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60)
-tenzor_discover_tests(test_dropout_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60)
-tenzor_discover_tests(test_batchnorm2d_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60)
-tenzor_discover_tests(test_normalization_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60)
-tenzor_discover_tests(test_flatten_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_pooling_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_dropout_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_batchnorm2d_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_normalization_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_flatten_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_channel_shuffle LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_quantized_inference LABELS "nn" DISCOVERY_TIMEOUT 60)
-tenzor_discover_tests(test_segmentation_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_segmentation_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 # PyTorch loader tests
 add_executable(test_pytorch_loader test_pytorch_loader.cpp)
 target_link_libraries(test_pytorch_loader PRIVATE tenzor_core GTest::gtest_main)
@@ -175,24 +175,48 @@ tenzor_discover_tests(test_parametrize LABELS "nn" DISCOVERY_TIMEOUT 60)
 # Distributions multi-backend tests
 add_executable(test_distributions_multidtype test_distributions_multidtype.cpp)
 target_link_libraries(test_distributions_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_distributions_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_distributions_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
 # Weight initialization multi-backend tests
 add_executable(test_init_multidtype test_init_multidtype.cpp)
 target_link_libraries(test_init_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_init_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_init_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
 # Gradient clipping multi-backend tests
 add_executable(test_clip_grad_multidtype test_clip_grad_multidtype.cpp)
 target_link_libraries(test_clip_grad_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_clip_grad_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_clip_grad_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
 # Spectral normalization multi-backend tests
 add_executable(test_spectral_norm_multidtype test_spectral_norm_multidtype.cpp)
 target_link_libraries(test_spectral_norm_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_spectral_norm_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_spectral_norm_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
 # Weight normalization multi-backend tests
 add_executable(test_weight_norm_multidtype test_weight_norm_multidtype.cpp)
 target_link_libraries(test_weight_norm_multidtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_weight_norm_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_weight_norm_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# ============================================================================
+# Phase 4: New tests for previously untested NN components
+# ============================================================================
+
+# Padding layers (ConstantPad1d/2d/3d, ReflectionPad1d/2d, ReplicationPad1d/2d/3d, ZeroPad2d)
+add_executable(test_padding_multidtype layers/test_padding_multidtype.cpp)
+target_link_libraries(test_padding_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_padding_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Missing optimizers (RAdam, LAMB, AdamAtan2, SparseAdam, Adadelta)
+add_executable(test_optimizers_missing_multidtype optim/test_optimizers_missing_multidtype.cpp)
+target_link_libraries(test_optimizers_missing_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_optimizers_missing_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Dropout variants (AlphaDropout, VariationalDropout)
+add_executable(test_dropout_variants_multidtype layers/test_dropout_variants_multidtype.cpp)
+target_link_libraries(test_dropout_variants_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_dropout_variants_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# SyncBatchNorm
+add_executable(test_sync_batchnorm layers/test_sync_batchnorm.cpp)
+target_link_libraries(test_sync_batchnorm PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_sync_batchnorm LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)

@@ -1,9 +1,9 @@
 /**
  * @file test_advanced_ops_multidtype.cpp
- * @brief DType-parameterized tests for advanced tensor operations
+ * @brief Multi-backend, DType-parameterized tests for advanced tensor operations
  *
  * Tests advanced operations (topk, sort, unique, cumsum, cumprod, expand)
- * across multiple dtypes to ensure correct behavior.
+ * across multiple backends and dtypes to ensure correct behavior.
  *
  * OPERATION-SPECIFIC DTYPE SUPPORT:
  * - Expand: Float32, Float64, Float16, Int32, Int64 (broadcasting)
@@ -24,22 +24,7 @@
 #include <type_traits>
 
 using namespace tenzor;
-
-// ============================================================================
-// DType Parameter Structure
-// ============================================================================
-
-struct DTypeParam {
-    DType dtype;
-    std::string name;
-
-    std::string ToString() const { return name; }
-};
-
-// Required for gtest_discover_tests to show human-readable test names
-void PrintTo(const DTypeParam& param, std::ostream* os) {
-    *os << param.ToString();
-}
+using namespace tenzor::testing;
 
 // ============================================================================
 // Helper Templates for Type-Specific Operations
@@ -66,29 +51,35 @@ struct TypedVerifier {
 };
 
 // ============================================================================
+// Helper to create a tensor with specific values on the test device
+// ============================================================================
+
+template<typename T>
+Tensor make_tensor(std::initializer_list<int64_t> shape, DType dtype, Device target_device, std::vector<T> values) {
+    auto t = Tensor(shape, dtype, Device::cpu());
+    auto data = t.data<T>();
+    for (size_t i = 0; i < values.size(); ++i) {
+        data[i] = values[i];
+    }
+    return (target_device.type == Device::Type::CPU) ? t : t.to(target_device);
+}
+
+// ============================================================================
 // Expand Tests (Broadcasting Operations)
 // ============================================================================
 
-class ExpandMultiDTypeTest : public ::testing::TestWithParam<DTypeParam> {
+class ExpandMultiDTypeTest : public BackendTest {
 protected:
-    Device cpu = Device::cpu();
-    DType dtype;
-
-    void SetUp() override {
-        tenzor::initialize();
-        dtype = GetParam().dtype;
-    }
-
     template<typename T>
-    void testExpandBroadcast() {
-        auto t = ones({1, 3}, dtype, cpu);
+    void testExpandBroadcast(DType dtype) {
+        auto t = ones({1, 3}, dtype, device);
         auto expanded = expand(t, {4, 3});
 
         EXPECT_EQ(expanded.shape()[0], 4);
         EXPECT_EQ(expanded.shape()[1], 3);
 
-        // Verify all values are 1
-        auto data = expanded.contiguous().data<T>();
+        auto cpu_expanded = expanded.contiguous().to(Device::cpu());
+        auto data = cpu_expanded.template data<T>();
         for (int64_t i = 0; i < 12; ++i) {
             TypedVerifier<T>::expectEq(data[i], static_cast<T>(1),
                 "Expand broadcast value mismatch at index " + std::to_string(i));
@@ -96,76 +87,47 @@ protected:
     }
 };
 
-TEST_P(ExpandMultiDTypeTest, ExpandBroadcast) {
-    auto param = GetParam();
+TEST_P(ExpandMultiDTypeTest, ExpandBroadcastFloat32) {
+    testExpandBroadcast<float>(DType::Float32);
+}
 
-    if (dtype == DType::Float32) {
-        testExpandBroadcast<float>();
-    } else if (dtype == DType::Float64) {
-        testExpandBroadcast<double>();
-    } else if (dtype == DType::Int32) {
-        testExpandBroadcast<int32_t>();
-    } else if (dtype == DType::Int64) {
-        testExpandBroadcast<int64_t>();
-    }
+TEST_P(ExpandMultiDTypeTest, ExpandBroadcastFloat64) {
+    testExpandBroadcast<double>(DType::Float64);
+}
+
+TEST_P(ExpandMultiDTypeTest, ExpandBroadcastInt32) {
+    testExpandBroadcast<int32_t>(DType::Int32);
+}
+
+TEST_P(ExpandMultiDTypeTest, ExpandBroadcastInt64) {
+    testExpandBroadcast<int64_t>(DType::Int64);
 }
 
 TEST_P(ExpandMultiDTypeTest, ExpandInvalidShape) {
-    auto t = ones({2, 3}, dtype, cpu);
-
-    // Cannot expand dimension 2 to 4 (not singleton)
+    auto t = ones({2, 3}, DType::Float32, device);
     EXPECT_THROW(expand(t, {4, 3}), std::runtime_error);
 }
 
-std::vector<DTypeParam> GetExpandDTypes() {
-    return {
-        {DType::Float32, "float32"},
-        {DType::Float64, "float64"},
-        {DType::Int32, "int32"},
-        {DType::Int64, "int64"},
-    };
-}
-
-INSTANTIATE_TEST_SUITE_P(
-    AllDTypes,
-    ExpandMultiDTypeTest,
-    ::testing::ValuesIn(GetExpandDTypes()),
-    [](const ::testing::TestParamInfo<DTypeParam>& info) {
-        return info.param.ToString();
-    }
-);
+INSTANTIATE_BACKEND_TESTS(ExpandMultiDTypeTest);
 
 // ============================================================================
 // TopK Tests (Comparison Operations)
 // ============================================================================
 
-class TopKMultiDTypeTest : public ::testing::TestWithParam<DTypeParam> {
+class TopKMultiDTypeTest : public BackendTest {
 protected:
-    Device cpu = Device::cpu();
-    DType dtype;
-
-    void SetUp() override {
-        tenzor::initialize();
-        dtype = GetParam().dtype;
-    }
-
     template<typename T>
-    void testTopKLargest() {
-        auto t = Tensor({5}, dtype, cpu);
-        auto data = t.data<T>();
-        data[0] = static_cast<T>(3);
-        data[1] = static_cast<T>(1);
-        data[2] = static_cast<T>(4);
-        data[3] = static_cast<T>(2);
-        data[4] = static_cast<T>(5);
+    void testTopKLargest(DType dtype) {
+        auto t = make_tensor<T>({5}, dtype, device,
+            {static_cast<T>(3), static_cast<T>(1), static_cast<T>(4), static_cast<T>(2), static_cast<T>(5)});
 
         auto [values, indices] = topk(t, 3, 0, true, true);
 
         EXPECT_EQ(values.shape()[0], 3);
         EXPECT_EQ(indices.shape()[0], 3);
 
-        auto vals = values.data<T>();
-        auto idxs = indices.data<int64_t>();
+        auto vals = values.to(Device::cpu()).template data<T>();
+        auto idxs = indices.to(Device::cpu()).template data<int64_t>();
 
         TypedVerifier<T>::expectEq(vals[0], static_cast<T>(5), "TopK value 0");
         TypedVerifier<T>::expectEq(vals[1], static_cast<T>(4), "TopK value 1");
@@ -177,101 +139,49 @@ protected:
     }
 
     template<typename T>
-    void testTopKSmallest() {
-        auto t = Tensor({5}, dtype, cpu);
-        auto data = t.data<T>();
-        data[0] = static_cast<T>(3);
-        data[1] = static_cast<T>(1);
-        data[2] = static_cast<T>(4);
-        data[3] = static_cast<T>(2);
-        data[4] = static_cast<T>(5);
+    void testTopKSmallest(DType dtype) {
+        auto t = make_tensor<T>({5}, dtype, device,
+            {static_cast<T>(3), static_cast<T>(1), static_cast<T>(4), static_cast<T>(2), static_cast<T>(5)});
 
         auto [values, indices] = topk(t, 2, 0, false, true);
 
-        auto vals = values.data<T>();
+        auto vals = values.to(Device::cpu()).template data<T>();
         TypedVerifier<T>::expectEq(vals[0], static_cast<T>(1), "TopK smallest value 0");
         TypedVerifier<T>::expectEq(vals[1], static_cast<T>(2), "TopK smallest value 1");
     }
 };
 
-TEST_P(TopKMultiDTypeTest, TopKLargest) {
-    auto param = GetParam();
+TEST_P(TopKMultiDTypeTest, TopKLargestFloat32) { testTopKLargest<float>(DType::Float32); }
+TEST_P(TopKMultiDTypeTest, TopKLargestFloat64) { testTopKLargest<double>(DType::Float64); }
+TEST_P(TopKMultiDTypeTest, TopKLargestInt32) { testTopKLargest<int32_t>(DType::Int32); }
+TEST_P(TopKMultiDTypeTest, TopKLargestInt64) { testTopKLargest<int64_t>(DType::Int64); }
+TEST_P(TopKMultiDTypeTest, TopKSmallestFloat32) { testTopKSmallest<float>(DType::Float32); }
+TEST_P(TopKMultiDTypeTest, TopKSmallestFloat64) { testTopKSmallest<double>(DType::Float64); }
+TEST_P(TopKMultiDTypeTest, TopKSmallestInt32) { testTopKSmallest<int32_t>(DType::Int32); }
+TEST_P(TopKMultiDTypeTest, TopKSmallestInt64) { testTopKSmallest<int64_t>(DType::Int64); }
 
-    if (dtype == DType::Float32) {
-        testTopKLargest<float>();
-    } else if (dtype == DType::Float64) {
-        testTopKLargest<double>();
-    } else if (dtype == DType::Int32) {
-        testTopKLargest<int32_t>();
-    } else if (dtype == DType::Int64) {
-        testTopKLargest<int64_t>();
-    }
-}
-
-TEST_P(TopKMultiDTypeTest, TopKSmallest) {
-    auto param = GetParam();
-
-    if (dtype == DType::Float32) {
-        testTopKSmallest<float>();
-    } else if (dtype == DType::Float64) {
-        testTopKSmallest<double>();
-    } else if (dtype == DType::Int32) {
-        testTopKSmallest<int32_t>();
-    } else if (dtype == DType::Int64) {
-        testTopKSmallest<int64_t>();
-    }
-}
-
-std::vector<DTypeParam> GetTopKDTypes() {
-    return {
-        {DType::Float32, "float32"},
-        {DType::Float64, "float64"},
-        {DType::Int32, "int32"},
-        {DType::Int64, "int64"},
-    };
-}
-
-INSTANTIATE_TEST_SUITE_P(
-    AllDTypes,
-    TopKMultiDTypeTest,
-    ::testing::ValuesIn(GetTopKDTypes()),
-    [](const ::testing::TestParamInfo<DTypeParam>& info) {
-        return info.param.ToString();
-    }
-);
+INSTANTIATE_BACKEND_TESTS(TopKMultiDTypeTest);
 
 // ============================================================================
 // Sort Tests (Comparison Operations)
 // ============================================================================
 
-class SortMultiDTypeTest : public ::testing::TestWithParam<DTypeParam> {
+class SortMultiDTypeTest : public BackendTest {
 protected:
-    Device cpu = Device::cpu();
-    DType dtype;
-
-    void SetUp() override {
-        tenzor::initialize();
-        dtype = GetParam().dtype;
-    }
-
     template<typename T>
-    void testSortAscending() {
-        auto t = Tensor({4}, dtype, cpu);
-        auto data = t.data<T>();
-        data[0] = static_cast<T>(3);
-        data[1] = static_cast<T>(1);
-        data[2] = static_cast<T>(4);
-        data[3] = static_cast<T>(2);
+    void testSortAscending(DType dtype) {
+        auto t = make_tensor<T>({4}, dtype, device,
+            {static_cast<T>(3), static_cast<T>(1), static_cast<T>(4), static_cast<T>(2)});
 
         auto [sorted, indices] = sort(t, 0, false);
 
-        auto vals = sorted.data<T>();
+        auto vals = sorted.to(Device::cpu()).template data<T>();
         TypedVerifier<T>::expectEq(vals[0], static_cast<T>(1), "Sort ascending value 0");
         TypedVerifier<T>::expectEq(vals[1], static_cast<T>(2), "Sort ascending value 1");
         TypedVerifier<T>::expectEq(vals[2], static_cast<T>(3), "Sort ascending value 2");
         TypedVerifier<T>::expectEq(vals[3], static_cast<T>(4), "Sort ascending value 3");
 
-        auto idxs = indices.data<int64_t>();
+        auto idxs = indices.to(Device::cpu()).template data<int64_t>();
         EXPECT_EQ(idxs[0], 1);
         EXPECT_EQ(idxs[1], 3);
         EXPECT_EQ(idxs[2], 0);
@@ -279,17 +189,13 @@ protected:
     }
 
     template<typename T>
-    void testSortDescending() {
-        auto t = Tensor({4}, dtype, cpu);
-        auto data = t.data<T>();
-        data[0] = static_cast<T>(1);
-        data[1] = static_cast<T>(4);
-        data[2] = static_cast<T>(2);
-        data[3] = static_cast<T>(3);
+    void testSortDescending(DType dtype) {
+        auto t = make_tensor<T>({4}, dtype, device,
+            {static_cast<T>(1), static_cast<T>(4), static_cast<T>(2), static_cast<T>(3)});
 
         auto [sorted, indices] = sort(t, 0, true);
 
-        auto vals = sorted.data<T>();
+        auto vals = sorted.to(Device::cpu()).template data<T>();
         TypedVerifier<T>::expectEq(vals[0], static_cast<T>(4), "Sort descending value 0");
         TypedVerifier<T>::expectEq(vals[1], static_cast<T>(3), "Sort descending value 1");
         TypedVerifier<T>::expectEq(vals[2], static_cast<T>(2), "Sort descending value 2");
@@ -297,223 +203,115 @@ protected:
     }
 };
 
-TEST_P(SortMultiDTypeTest, SortAscending) {
-    auto param = GetParam();
+TEST_P(SortMultiDTypeTest, SortAscendingFloat32) { testSortAscending<float>(DType::Float32); }
+TEST_P(SortMultiDTypeTest, SortAscendingFloat64) { testSortAscending<double>(DType::Float64); }
+TEST_P(SortMultiDTypeTest, SortAscendingInt32) { testSortAscending<int32_t>(DType::Int32); }
+TEST_P(SortMultiDTypeTest, SortAscendingInt64) { testSortAscending<int64_t>(DType::Int64); }
+TEST_P(SortMultiDTypeTest, SortDescendingFloat32) { testSortDescending<float>(DType::Float32); }
+TEST_P(SortMultiDTypeTest, SortDescendingFloat64) { testSortDescending<double>(DType::Float64); }
+TEST_P(SortMultiDTypeTest, SortDescendingInt32) { testSortDescending<int32_t>(DType::Int32); }
+TEST_P(SortMultiDTypeTest, SortDescendingInt64) { testSortDescending<int64_t>(DType::Int64); }
 
-    if (dtype == DType::Float32) {
-        testSortAscending<float>();
-    } else if (dtype == DType::Float64) {
-        testSortAscending<double>();
-    } else if (dtype == DType::Int32) {
-        testSortAscending<int32_t>();
-    } else if (dtype == DType::Int64) {
-        testSortAscending<int64_t>();
-    }
-}
-
-TEST_P(SortMultiDTypeTest, SortDescending) {
-    auto param = GetParam();
-
-    if (dtype == DType::Float32) {
-        testSortDescending<float>();
-    } else if (dtype == DType::Float64) {
-        testSortDescending<double>();
-    } else if (dtype == DType::Int32) {
-        testSortDescending<int32_t>();
-    } else if (dtype == DType::Int64) {
-        testSortDescending<int64_t>();
-    }
-}
-
-std::vector<DTypeParam> GetSortDTypes() {
-    return {
-        {DType::Float32, "float32"},
-        {DType::Float64, "float64"},
-        {DType::Int32, "int32"},
-        {DType::Int64, "int64"},
-    };
-}
-
-INSTANTIATE_TEST_SUITE_P(
-    AllDTypes,
-    SortMultiDTypeTest,
-    ::testing::ValuesIn(GetSortDTypes()),
-    [](const ::testing::TestParamInfo<DTypeParam>& info) {
-        return info.param.ToString();
-    }
-);
+INSTANTIATE_BACKEND_TESTS(SortMultiDTypeTest);
 
 // ============================================================================
 // Unique Tests (Equality Operations)
 // ============================================================================
 
-class UniqueMultiDTypeTest : public ::testing::TestWithParam<DTypeParam> {
+class UniqueMultiDTypeTest : public BackendTest {
 protected:
-    Device cpu = Device::cpu();
-    DType dtype;
-
-    void SetUp() override {
-        tenzor::initialize();
-        dtype = GetParam().dtype;
-    }
-
     template<typename T>
-    void testUniqueBasic() {
-        auto t = Tensor({6}, dtype, cpu);
-        auto data = t.data<T>();
-        data[0] = static_cast<T>(1);
-        data[1] = static_cast<T>(2);
-        data[2] = static_cast<T>(1);
-        data[3] = static_cast<T>(3);
-        data[4] = static_cast<T>(2);
-        data[5] = static_cast<T>(3);
+    void testUniqueBasic(DType dtype) {
+        auto t = make_tensor<T>({6}, dtype, device,
+            {static_cast<T>(1), static_cast<T>(2), static_cast<T>(1),
+             static_cast<T>(3), static_cast<T>(2), static_cast<T>(3)});
 
         auto [unique_vals, inverse, counts] = unique(t, true, false, false);
 
         EXPECT_EQ(unique_vals.numel(), 3);
 
-        auto vals = unique_vals.data<T>();
+        auto vals = unique_vals.to(Device::cpu()).template data<T>();
         TypedVerifier<T>::expectEq(vals[0], static_cast<T>(1), "Unique value 0");
         TypedVerifier<T>::expectEq(vals[1], static_cast<T>(2), "Unique value 1");
         TypedVerifier<T>::expectEq(vals[2], static_cast<T>(3), "Unique value 2");
     }
 
-    // Specialized test for bool (only 2 unique values possible)
     void testUniqueBasicBool() {
-        auto t = Tensor({6}, DType::Bool, cpu);
-        auto data = t.data<bool>();
-        data[0] = false;
-        data[1] = true;
-        data[2] = false;
-        data[3] = true;
-        data[4] = true;
-        data[5] = false;
+        // Bool tensors: create on CPU, move to device
+        auto t_cpu = Tensor({6}, DType::Bool, Device::cpu());
+        auto data = t_cpu.data<bool>();
+        data[0] = false; data[1] = true; data[2] = false;
+        data[3] = true; data[4] = true; data[5] = false;
+        auto t = (device.type == Device::Type::CPU) ? t_cpu : t_cpu.to(device);
 
         auto [unique_vals, inverse, counts] = unique(t, true, false, false);
 
         EXPECT_EQ(unique_vals.numel(), 2);
 
-        auto vals = unique_vals.data<bool>();
-        EXPECT_EQ(vals[0], false);  // false < true in sorted order
+        auto vals = unique_vals.to(Device::cpu()).template data<bool>();
+        EXPECT_EQ(vals[0], false);
         EXPECT_EQ(vals[1], true);
     }
 
     template<typename T>
-    void testUniqueWithCounts() {
-        auto t = Tensor({5}, dtype, cpu);
-        auto data = t.data<T>();
-        data[0] = static_cast<T>(1);
-        data[1] = static_cast<T>(2);
-        data[2] = static_cast<T>(1);
-        data[3] = static_cast<T>(1);
-        data[4] = static_cast<T>(2);
+    void testUniqueWithCounts(DType dtype) {
+        auto t = make_tensor<T>({5}, dtype, device,
+            {static_cast<T>(1), static_cast<T>(2), static_cast<T>(1),
+             static_cast<T>(1), static_cast<T>(2)});
 
         auto [unique_vals, inverse, counts_tensor] = unique(t, true, false, true);
 
         EXPECT_EQ(unique_vals.numel(), 2);
 
-        auto counts_data = counts_tensor.data<int64_t>();
-        EXPECT_EQ(counts_data[0], 3);  // 1 appears 3 times
-        EXPECT_EQ(counts_data[1], 2);  // 2 appears 2 times
+        auto counts_data = counts_tensor.to(Device::cpu()).template data<int64_t>();
+        EXPECT_EQ(counts_data[0], 3);
+        EXPECT_EQ(counts_data[1], 2);
     }
 
-    // Specialized test for bool with counts
     void testUniqueWithCountsBool() {
-        auto t = Tensor({5}, DType::Bool, cpu);
-        auto data = t.data<bool>();
-        data[0] = false;
-        data[1] = true;
-        data[2] = false;
-        data[3] = false;
-        data[4] = true;
+        auto t_cpu = Tensor({5}, DType::Bool, Device::cpu());
+        auto data = t_cpu.data<bool>();
+        data[0] = false; data[1] = true; data[2] = false;
+        data[3] = false; data[4] = true;
+        auto t = (device.type == Device::Type::CPU) ? t_cpu : t_cpu.to(device);
 
         auto [unique_vals, inverse, counts_tensor] = unique(t, true, false, true);
 
         EXPECT_EQ(unique_vals.numel(), 2);
 
-        auto counts_data = counts_tensor.data<int64_t>();
-        EXPECT_EQ(counts_data[0], 3);  // false appears 3 times
-        EXPECT_EQ(counts_data[1], 2);  // true appears 2 times
+        auto counts_data = counts_tensor.to(Device::cpu()).template data<int64_t>();
+        EXPECT_EQ(counts_data[0], 3);
+        EXPECT_EQ(counts_data[1], 2);
     }
 };
 
-TEST_P(UniqueMultiDTypeTest, UniqueBasic) {
-    auto param = GetParam();
+TEST_P(UniqueMultiDTypeTest, UniqueBasicFloat32) { testUniqueBasic<float>(DType::Float32); }
+TEST_P(UniqueMultiDTypeTest, UniqueBasicFloat64) { testUniqueBasic<double>(DType::Float64); }
+TEST_P(UniqueMultiDTypeTest, UniqueBasicInt32) { testUniqueBasic<int32_t>(DType::Int32); }
+TEST_P(UniqueMultiDTypeTest, UniqueBasicInt64) { testUniqueBasic<int64_t>(DType::Int64); }
+TEST_P(UniqueMultiDTypeTest, UniqueBasicBool) { testUniqueBasicBool(); }
+TEST_P(UniqueMultiDTypeTest, UniqueWithCountsFloat32) { testUniqueWithCounts<float>(DType::Float32); }
+TEST_P(UniqueMultiDTypeTest, UniqueWithCountsFloat64) { testUniqueWithCounts<double>(DType::Float64); }
+TEST_P(UniqueMultiDTypeTest, UniqueWithCountsInt32) { testUniqueWithCounts<int32_t>(DType::Int32); }
+TEST_P(UniqueMultiDTypeTest, UniqueWithCountsInt64) { testUniqueWithCounts<int64_t>(DType::Int64); }
+TEST_P(UniqueMultiDTypeTest, UniqueWithCountsBool) { testUniqueWithCountsBool(); }
 
-    if (dtype == DType::Float32) {
-        testUniqueBasic<float>();
-    } else if (dtype == DType::Float64) {
-        testUniqueBasic<double>();
-    } else if (dtype == DType::Int32) {
-        testUniqueBasic<int32_t>();
-    } else if (dtype == DType::Int64) {
-        testUniqueBasic<int64_t>();
-    } else if (dtype == DType::Bool) {
-        testUniqueBasicBool();
-    }
-}
-
-TEST_P(UniqueMultiDTypeTest, UniqueWithCounts) {
-    auto param = GetParam();
-
-    if (dtype == DType::Float32) {
-        testUniqueWithCounts<float>();
-    } else if (dtype == DType::Float64) {
-        testUniqueWithCounts<double>();
-    } else if (dtype == DType::Int32) {
-        testUniqueWithCounts<int32_t>();
-    } else if (dtype == DType::Int64) {
-        testUniqueWithCounts<int64_t>();
-    } else if (dtype == DType::Bool) {
-        testUniqueWithCountsBool();
-    }
-}
-
-std::vector<DTypeParam> GetUniqueDTypes() {
-    return {
-        {DType::Float32, "float32"},
-        {DType::Float64, "float64"},
-        {DType::Int32, "int32"},
-        {DType::Int64, "int64"},
-        {DType::Bool, "bool"},
-    };
-}
-
-INSTANTIATE_TEST_SUITE_P(
-    AllDTypes,
-    UniqueMultiDTypeTest,
-    ::testing::ValuesIn(GetUniqueDTypes()),
-    [](const ::testing::TestParamInfo<DTypeParam>& info) {
-        return info.param.ToString();
-    }
-);
+INSTANTIATE_BACKEND_TESTS(UniqueMultiDTypeTest);
 
 // ============================================================================
 // Cumsum Tests (Accumulation Operations)
 // ============================================================================
 
-class CumsumMultiDTypeTest : public ::testing::TestWithParam<DTypeParam> {
+class CumsumMultiDTypeTest : public BackendTest {
 protected:
-    Device cpu = Device::cpu();
-    DType dtype;
-
-    void SetUp() override {
-        tenzor::initialize();
-        dtype = GetParam().dtype;
-    }
-
     template<typename T>
-    void testCumsumBasic() {
-        auto t = Tensor({4}, dtype, cpu);
-        auto data = t.data<T>();
-        data[0] = static_cast<T>(1);
-        data[1] = static_cast<T>(2);
-        data[2] = static_cast<T>(3);
-        data[3] = static_cast<T>(4);
+    void testCumsumBasic(DType dtype) {
+        auto t = make_tensor<T>({4}, dtype, device,
+            {static_cast<T>(1), static_cast<T>(2), static_cast<T>(3), static_cast<T>(4)});
 
         auto result = cumsum(t, 0);
 
-        auto res_data = result.data<T>();
+        auto res_data = result.to(Device::cpu()).template data<T>();
         TypedVerifier<T>::expectEq(res_data[0], static_cast<T>(1), "Cumsum value 0");
         TypedVerifier<T>::expectEq(res_data[1], static_cast<T>(3), "Cumsum value 1");
         TypedVerifier<T>::expectEq(res_data[2], static_cast<T>(6), "Cumsum value 2");
@@ -521,16 +319,14 @@ protected:
     }
 
     template<typename T>
-    void testCumsum2D() {
-        auto t = Tensor({2, 3}, dtype, cpu);
-        auto data = t.data<T>();
-        for (int i = 0; i < 6; ++i) {
-            data[i] = static_cast<T>(i + 1);
-        }
+    void testCumsum2D(DType dtype) {
+        std::vector<T> vals;
+        for (int i = 0; i < 6; ++i) vals.push_back(static_cast<T>(i + 1));
+        auto t = make_tensor<T>({2, 3}, dtype, device, vals);
 
         auto result = cumsum(t, 1);
 
-        auto res_data = result.data<T>();
+        auto res_data = result.to(Device::cpu()).template data<T>();
         TypedVerifier<T>::expectEq(res_data[0], static_cast<T>(1), "Cumsum 2D [0,0]");
         TypedVerifier<T>::expectEq(res_data[1], static_cast<T>(3), "Cumsum 2D [0,1]");
         TypedVerifier<T>::expectEq(res_data[2], static_cast<T>(6), "Cumsum 2D [0,2]");
@@ -540,80 +336,31 @@ protected:
     }
 };
 
-TEST_P(CumsumMultiDTypeTest, CumsumBasic) {
-    auto param = GetParam();
+TEST_P(CumsumMultiDTypeTest, CumsumBasicFloat32) { testCumsumBasic<float>(DType::Float32); }
+TEST_P(CumsumMultiDTypeTest, CumsumBasicFloat64) { testCumsumBasic<double>(DType::Float64); }
+TEST_P(CumsumMultiDTypeTest, CumsumBasicInt32) { testCumsumBasic<int32_t>(DType::Int32); }
+TEST_P(CumsumMultiDTypeTest, CumsumBasicInt64) { testCumsumBasic<int64_t>(DType::Int64); }
+TEST_P(CumsumMultiDTypeTest, Cumsum2DFloat32) { testCumsum2D<float>(DType::Float32); }
+TEST_P(CumsumMultiDTypeTest, Cumsum2DFloat64) { testCumsum2D<double>(DType::Float64); }
+TEST_P(CumsumMultiDTypeTest, Cumsum2DInt32) { testCumsum2D<int32_t>(DType::Int32); }
+TEST_P(CumsumMultiDTypeTest, Cumsum2DInt64) { testCumsum2D<int64_t>(DType::Int64); }
 
-    if (dtype == DType::Float32) {
-        testCumsumBasic<float>();
-    } else if (dtype == DType::Float64) {
-        testCumsumBasic<double>();
-    } else if (dtype == DType::Int32) {
-        testCumsumBasic<int32_t>();
-    } else if (dtype == DType::Int64) {
-        testCumsumBasic<int64_t>();
-    }
-}
-
-TEST_P(CumsumMultiDTypeTest, Cumsum2D) {
-    auto param = GetParam();
-
-    if (dtype == DType::Float32) {
-        testCumsum2D<float>();
-    } else if (dtype == DType::Float64) {
-        testCumsum2D<double>();
-    } else if (dtype == DType::Int32) {
-        testCumsum2D<int32_t>();
-    } else if (dtype == DType::Int64) {
-        testCumsum2D<int64_t>();
-    }
-}
-
-std::vector<DTypeParam> GetCumsumDTypes() {
-    return {
-        {DType::Float32, "float32"},
-        {DType::Float64, "float64"},
-        {DType::Int32, "int32"},
-        {DType::Int64, "int64"},
-    };
-}
-
-INSTANTIATE_TEST_SUITE_P(
-    AllDTypes,
-    CumsumMultiDTypeTest,
-    ::testing::ValuesIn(GetCumsumDTypes()),
-    [](const ::testing::TestParamInfo<DTypeParam>& info) {
-        return info.param.ToString();
-    }
-);
+INSTANTIATE_BACKEND_TESTS(CumsumMultiDTypeTest);
 
 // ============================================================================
 // Cumprod Tests (Product Accumulation - Float Only)
 // ============================================================================
 
-class CumprodMultiDTypeTest : public ::testing::TestWithParam<DTypeParam> {
+class CumprodMultiDTypeTest : public BackendTest {
 protected:
-    Device cpu = Device::cpu();
-    DType dtype;
-
-    void SetUp() override {
-        tenzor::initialize();
-        dtype = GetParam().dtype;
-    }
-
     template<typename T>
-    void testCumprodBasic() {
-        auto t = Tensor({4}, dtype, cpu);
-        auto data = t.data<T>();
-        data[0] = static_cast<T>(2);
-        data[1] = static_cast<T>(3);
-        data[2] = static_cast<T>(4);
-        data[3] = static_cast<T>(5);
+    void testCumprodBasic(DType dtype) {
+        auto t = make_tensor<T>({4}, dtype, device,
+            {static_cast<T>(2), static_cast<T>(3), static_cast<T>(4), static_cast<T>(5)});
 
         auto result = cumprod(t, 0);
 
-        auto res_data = result.data<T>();
-
-        // Use appropriate tolerance for floating point
+        auto res_data = result.to(Device::cpu()).template data<T>();
         T tol = std::is_floating_point_v<T> ? static_cast<T>(1e-4) : static_cast<T>(0);
 
         TypedVerifier<T>::expectNear(res_data[0], static_cast<T>(2), tol, "Cumprod value 0");
@@ -623,54 +370,7 @@ protected:
     }
 };
 
-TEST_P(CumprodMultiDTypeTest, CumprodBasic) {
-    auto param = GetParam();
+TEST_P(CumprodMultiDTypeTest, CumprodBasicFloat32) { testCumprodBasic<float>(DType::Float32); }
+TEST_P(CumprodMultiDTypeTest, CumprodBasicFloat64) { testCumprodBasic<double>(DType::Float64); }
 
-    if (dtype == DType::Float32) {
-        testCumprodBasic<float>();
-    } else if (dtype == DType::Float64) {
-        testCumprodBasic<double>();
-    }
-}
-
-std::vector<DTypeParam> GetCumprodDTypes() {
-    // Only float types - integer cumprod can easily overflow
-    return {
-        {DType::Float32, "float32"},
-        {DType::Float64, "float64"},
-    };
-}
-
-INSTANTIATE_TEST_SUITE_P(
-    AllDTypes,
-    CumprodMultiDTypeTest,
-    ::testing::ValuesIn(GetCumprodDTypes()),
-    [](const ::testing::TestParamInfo<DTypeParam>& info) {
-        return info.param.ToString();
-    }
-);
-
-/*
- * COVERAGE SUMMARY:
- *
- * Expand:    4 dtypes × 2 tests = 8 test scenarios
- * TopK:      4 dtypes × 2 tests = 8 test scenarios
- * Sort:      4 dtypes × 2 tests = 8 test scenarios
- * Unique:    5 dtypes × 2 tests = 10 test scenarios (includes Bool)
- * Cumsum:    4 dtypes × 2 tests = 8 test scenarios
- * Cumprod:   2 dtypes × 1 test = 2 test scenarios (float only)
- *
- * Total: 44 test scenarios from 11 test cases
- *
- * DTYPE SELECTION RATIONALE:
- * - Expand: All numeric types (broadcasting is type-agnostic)
- * - TopK/Sort: All numeric types (need comparison operators)
- * - Unique: All types including Bool (only needs equality)
- * - Cumsum: All numeric types (accumulation is well-defined)
- * - Cumprod: Float only (integer overflow risk: 5! = 120, 10! = 3628800)
- *
- * EXCLUDED DTYPES:
- * - Float16: Not tested (requires special handling, limited precision)
- * - Int8/Int16: Not tested (would overflow very quickly in cumulative ops)
- * - Integers in Cumprod: Overflow risk (120 fits in int32, but grows fast)
- */
+INSTANTIATE_BACKEND_TESTS(CumprodMultiDTypeTest);

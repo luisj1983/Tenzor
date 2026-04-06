@@ -279,6 +279,90 @@ TEST_P(FlattenMultiDTypeTest, VariousFlattenDims) {
 }
 
 // ============================================================================
+// PixelShuffle Tests
+// ============================================================================
+
+TEST_P(FlattenMultiDTypeTest, PixelShuffleOutputShape) {
+    auto ps = PixelShuffle(2);
+
+    // Input: (1, C*r^2, H, W) = (1, 8, 4, 4) -> Output: (1, 2, 8, 8)
+    Variable input = createInput({1, 8, 4, 4}, true);
+    auto output = ps.forward(input);
+
+    expectShape(output.tensor(), {1, 2, 8, 8});
+    expectDType(output.tensor());
+}
+
+TEST_P(FlattenMultiDTypeTest, PixelShuffleGradientFlow) {
+    auto ps = PixelShuffle(2);
+
+    Variable input = createInput({1, 8, 4, 4}, true);
+    auto output = ps.forward(input);
+
+    auto loss = tenzor::sum(output.tensor());
+    auto loss_var = Variable(loss, true);
+    loss_var.backward();
+
+    ASSERT_TRUE(input.grad().has_value());
+    expectShape(input.grad().value(), {1, 8, 4, 4});
+}
+
+// ============================================================================
+// PixelUnshuffle Tests
+// ============================================================================
+
+TEST_P(FlattenMultiDTypeTest, PixelUnshuffleOutputShape) {
+    auto pus = PixelUnshuffle(2);
+
+    // Input: (1, C, H*r, W*r) = (1, 2, 8, 8) -> Output: (1, 8, 4, 4)
+    Variable input = createInput({1, 2, 8, 8}, true);
+    auto output = pus.forward(input);
+
+    expectShape(output.tensor(), {1, 8, 4, 4});
+    expectDType(output.tensor());
+}
+
+TEST_P(FlattenMultiDTypeTest, PixelUnshuffleGradientFlow) {
+    auto pus = PixelUnshuffle(2);
+
+    Variable input = createInput({1, 2, 8, 8}, true);
+    auto output = pus.forward(input);
+
+    auto loss = tenzor::sum(output.tensor());
+    auto loss_var = Variable(loss, true);
+    loss_var.backward();
+
+    ASSERT_TRUE(input.grad().has_value());
+    expectShape(input.grad().value(), {1, 2, 8, 8});
+}
+
+TEST_P(FlattenMultiDTypeTest, PixelShuffleUnshuffleRoundtrip) {
+    auto ps = PixelShuffle(2);
+    auto pus = PixelUnshuffle(2);
+
+    // Start with (1, 8, 4, 4), shuffle to (1, 2, 8, 8), unshuffle back to (1, 8, 4, 4)
+    Variable input = createInput({1, 8, 4, 4});
+    auto shuffled = ps.forward(input);
+    auto roundtrip = pus.forward(shuffled);
+
+    expectShape(roundtrip.tensor(), {1, 8, 4, 4});
+
+    // Verify values are preserved
+    expectTensorNear(roundtrip.tensor(), input.tensor());
+}
+
+TEST_P(FlattenMultiDTypeTest, PixelUnshuffleFactor3) {
+    auto pus = PixelUnshuffle(3);
+
+    // Input: (1, 1, 9, 9) -> Output: (1, 9, 3, 3)
+    Variable input = createInput({1, 1, 9, 9});
+    auto output = pus.forward(input);
+
+    expectShape(output.tensor(), {1, 9, 3, 3});
+    expectDType(output.tensor());
+}
+
+// ============================================================================
 // Test Instantiation
 // ============================================================================
 

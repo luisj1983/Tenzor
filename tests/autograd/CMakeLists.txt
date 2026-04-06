@@ -175,3 +175,13 @@ tenzor_discover_tests(test_jvp_multidtype LABELS "autograd" DISCOVERY_TIMEOUT 60
 add_executable(test_jacobian_hessian_multidtype test_jacobian_hessian_multidtype.cpp)
 target_link_libraries(test_jacobian_hessian_multidtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_jacobian_hessian_multidtype LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Warn mode counter multi-backend
+add_executable(test_warn_mode_counter_multidtype test_warn_mode_counter_multidtype.cpp)
+target_link_libraries(test_warn_mode_counter_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_warn_mode_counter_multidtype LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Activation offload multi-backend
+add_executable(test_activation_offload_multidtype test_activation_offload_multidtype.cpp)
+target_link_libraries(test_activation_offload_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_activation_offload_multidtype LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
