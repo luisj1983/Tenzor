@@ -73,7 +73,7 @@ public:
         auto var = scale_ * scale_;
         auto log_scale = tenzor::log(scale_);
         auto diff = value - loc_;
-        return -(diff * diff) / (var * 2.0f) - log_scale - 0.9189385332f; // -log(sqrt(2*pi))
+        return tenzor::neg(diff * diff) / (var * 2.0f) - log_scale - 0.9189385332f; // -log(sqrt(2*pi))
     }
 
     auto entropy() -> Tensor override {
@@ -162,7 +162,7 @@ public:
 
     auto entropy() -> Tensor override {
         auto log_probs = tenzor::log(probs_);
-        return -(probs_ * log_probs).sum();
+        return tenzor::neg(tenzor::sum(probs_ * log_probs));
     }
 
 private:
@@ -231,7 +231,7 @@ public:
     auto entropy() -> Tensor override {
         auto eps = 1e-7f;
         auto clamped = tenzor::clamp(probs_, eps, 1.0f - eps);
-        return -(clamped * tenzor::log(clamped) + (1.0f - clamped) * tenzor::log(1.0f - clamped));
+        return tenzor::neg(clamped * tenzor::log(clamped) + (1.0f - clamped) * tenzor::log(1.0f - clamped));
     }
 
     auto mean() -> Tensor override { return probs_; }

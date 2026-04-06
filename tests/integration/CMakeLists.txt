@@ -125,6 +125,26 @@ if(TENZOR_BUILD_CUDA)
     gtest_discover_tests(test_multi_gpu DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
 endif()
 
+# ============================================================================
+# Multi-backend integration tests (Phase 4)
+# ============================================================================
+
+add_executable(test_data_pipeline_multidtype test_data_pipeline_multidtype.cpp)
+target_link_libraries(test_data_pipeline_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_data_pipeline_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
+
+add_executable(test_model_persistence_multidtype test_model_persistence_multidtype.cpp)
+target_link_libraries(test_model_persistence_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_model_persistence_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
+
+add_executable(test_model_zoo_multidtype test_model_zoo_multidtype.cpp)
+target_link_libraries(test_model_zoo_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_model_zoo_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
+
+add_executable(test_optimization_multidtype test_optimization_multidtype.cpp)
+target_link_libraries(test_optimization_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_optimization_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")
+
 # Note: Existing integration tests
 # - test_nn.cpp
 # - test_training.cpp

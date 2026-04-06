@@ -43,13 +43,19 @@ def device(request):
 
     Usage::
 
-        @pytest.mark.parametrize("device", ["cpu", "cuda"], indirect=True)
+        @pytest.mark.parametrize("device", ["cpu", "cuda", "vulkan", "oneapi", "rocm"], indirect=True)
         def test_foo(device):
             x = tz.randn([3], device=device)
     """
     dev = request.param
     if dev == "cuda" and not tz.cuda_is_available():
         pytest.skip("CUDA not available")
+    elif dev == "vulkan" and not tz.vulkan_is_available():
+        pytest.skip("Vulkan not available")
+    elif dev == "oneapi" and not tz.oneapi_is_available():
+        pytest.skip("OneAPI not available")
+    elif dev == "rocm" and not tz.rocm_is_available():
+        pytest.skip("ROCm not available")
     return dev
 
 

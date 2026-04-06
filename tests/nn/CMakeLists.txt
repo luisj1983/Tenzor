@@ -167,3 +167,32 @@ tenzor_discover_tests(test_safetensors LABELS "nn" DISCOVERY_TIMEOUT 120)
 add_executable(test_parametrize test_parametrize.cpp)
 target_link_libraries(test_parametrize PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_parametrize LABELS "nn" DISCOVERY_TIMEOUT 60)
+
+# ============================================================================
+# New module tests (Phase 2)
+# ============================================================================
+
+# Distributions multi-backend tests
+add_executable(test_distributions_multidtype test_distributions_multidtype.cpp)
+target_link_libraries(test_distributions_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_distributions_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60)
+
+# Weight initialization multi-backend tests
+add_executable(test_init_multidtype test_init_multidtype.cpp)
+target_link_libraries(test_init_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_init_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60)
+
+# Gradient clipping multi-backend tests
+add_executable(test_clip_grad_multidtype test_clip_grad_multidtype.cpp)
+target_link_libraries(test_clip_grad_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_clip_grad_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60)
+
+# Spectral normalization multi-backend tests
+add_executable(test_spectral_norm_multidtype test_spectral_norm_multidtype.cpp)
+target_link_libraries(test_spectral_norm_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_spectral_norm_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60)
+
+# Weight normalization multi-backend tests
+add_executable(test_weight_norm_multidtype test_weight_norm_multidtype.cpp)
+target_link_libraries(test_weight_norm_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_weight_norm_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60)

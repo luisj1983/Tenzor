@@ -308,6 +308,55 @@ add_executable(test_repeat_tile test_repeat_tile.cpp)
 target_link_libraries(test_repeat_tile PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_repeat_tile DISCOVERY_TIMEOUT 60)
 
+# ============================================================================
+# Multi-backend root-level tests (Phase 4)
+# ============================================================================
+
+# Repeat/tile multi-backend
+add_executable(test_repeat_tile_multidtype test_repeat_tile_multidtype.cpp)
+target_link_libraries(test_repeat_tile_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_repeat_tile_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Comparison operators multi-backend
+add_executable(test_comparison_operators_multidtype test_comparison_operators_multidtype.cpp)
+target_link_libraries(test_comparison_operators_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_comparison_operators_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Indexing operator multi-backend
+add_executable(test_indexing_operator_multidtype test_indexing_operator_multidtype.cpp)
+target_link_libraries(test_indexing_operator_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_indexing_operator_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# BMM autograd multi-backend
+add_executable(test_bmm_autograd_multidtype test_bmm_autograd_multidtype.cpp)
+target_link_libraries(test_bmm_autograd_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_bmm_autograd_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# DType conversion multi-backend
+add_executable(test_dtype_conversion_multidtype test_dtype_conversion_multidtype.cpp)
+target_link_libraries(test_dtype_conversion_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_dtype_conversion_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Split operation multi-backend
+add_executable(test_split_operation_multidtype test_split_operation_multidtype.cpp)
+target_link_libraries(test_split_operation_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_split_operation_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Conv1d multi-backend
+add_executable(test_conv1d_multidtype test_conv1d_multidtype.cpp)
+target_link_libraries(test_conv1d_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_conv1d_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# ConvTranspose2d multi-backend
+add_executable(test_convtranspose2d_multidtype test_convtranspose2d_multidtype.cpp)
+target_link_libraries(test_convtranspose2d_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_convtranspose2d_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# KL divergence multi-backend
+add_executable(test_kldiv_manual_multidtype test_kldiv_manual_multidtype.cpp)
+target_link_libraries(test_kldiv_manual_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_kldiv_manual_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
 # Vulkan tensor creation test (standalone, non-GTest)
 add_executable(vulkan_tensor_test vulkan_tensor_test.cpp)
 target_link_libraries(vulkan_tensor_test PRIVATE tenzor_core)
