@@ -47,9 +47,8 @@ TEST_P(Pooling3dMultiDTypeTest, MaxPool3dGradientFlow) {
 
     EXPECT_NO_THROW({ output.backward(grad_output); });
 
-    if (!input.grad().has_value()) {
-        GTEST_SKIP() << "3D pooling backward not yet implemented for this backend";
-    }
+    ASSERT_TRUE(input.grad().has_value())
+        << "MaxPool3d backward did not produce gradient on " << device().to_string();
     expectShape(*input.grad(), {1, 1, 4, 4, 4});
 }
 
@@ -79,9 +78,8 @@ TEST_P(Pooling3dMultiDTypeTest, AvgPool3dGradientFlow) {
 
     EXPECT_NO_THROW({ output.backward(grad_output); });
 
-    if (!input.grad().has_value()) {
-        GTEST_SKIP() << "3D pooling backward not yet implemented for this backend";
-    }
+    ASSERT_TRUE(input.grad().has_value())
+        << "AvgPool3d backward did not produce gradient on " << device().to_string();
     expectShape(*input.grad(), {1, 1, 4, 4, 4});
 }
 
@@ -110,9 +108,8 @@ TEST_P(Pooling3dMultiDTypeTest, AdaptiveMaxPool3dGradientFlow) {
 
     EXPECT_NO_THROW({ output.backward(grad_output); });
 
-    if (!input.grad().has_value()) {
-        GTEST_SKIP() << "3D pooling backward not yet implemented for this backend";
-    }
+    ASSERT_TRUE(input.grad().has_value())
+        << "AdaptiveMaxPool3d backward did not produce gradient on " << device().to_string();
     expectShape(*input.grad(), {1, 1, 6, 6, 6});
 }
 
@@ -141,9 +138,8 @@ TEST_P(Pooling3dMultiDTypeTest, AdaptiveAvgPool3dGradientFlow) {
 
     EXPECT_NO_THROW({ output.backward(grad_output); });
 
-    if (!input.grad().has_value()) {
-        GTEST_SKIP() << "3D pooling backward not yet implemented for this backend";
-    }
+    ASSERT_TRUE(input.grad().has_value())
+        << "AdaptiveAvgPool3d backward did not produce gradient on " << device().to_string();
     expectShape(*input.grad(), {1, 1, 6, 6, 6});
 }
 

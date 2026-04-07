@@ -61,6 +61,11 @@ auto binary_pointwise_kernel(
     std::vector<int64_t> output_shape = detail::compute_broadcast_shape(shape_a_vec, shape_b_vec);
     Tensor result(output_shape, a.dtype(), a.device());
 
+    // Early return for zero-element outputs (e.g. broadcasting with empty tensors)
+    if (result.numel() == 0) {
+        return result;
+    }
+
     bool same_shape = (shape_a_vec == shape_b_vec);
     if (same_shape) {
         // Contiguous fast path with SIMD

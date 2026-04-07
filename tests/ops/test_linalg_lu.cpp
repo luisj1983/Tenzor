@@ -123,3 +123,56 @@ TEST_F(LinalgLUTest, TwoByTwo) {
     auto* u_data = U.data<float>();
     EXPECT_FLOAT_EQ(u_data[2], 0.0f);  // U[1,0]
 }
+
+// ============================================================================
+// LU Solve Tests
+// ============================================================================
+
+TEST_F(LinalgLUTest, LUSolveBasic) {
+    // Solve A * X = B where A is known
+    float a_vals[] = {2.0f, 1.0f, 1.0f,
+                      4.0f, 3.0f, 3.0f,
+                      8.0f, 7.0f, 9.0f};
+    auto A = from_data(a_vals, {3, 3}, cpu);
+
+    float b_vals[] = {1.0f, 2.0f, 3.0f};
+    auto B = from_data(b_vals, {3, 1}, cpu);
+
+    auto [L, U, pivots] = linalg::lu(A);
+
+    // Pack LU factors back into combined form for lu_solve
+    // lu_solve expects the packed LU_data from lu() — reconstruct from L and U
+    auto LU_data = tenzor::add(tenzor::sub(L, tenzor::eye(3)), U);
+    auto X = linalg::lu_solve(LU_data, pivots, B);
+
+    EXPECT_EQ(X.shape()[0], 3);
+    EXPECT_EQ(X.shape()[1], 1);
+
+    // Verify: A * X ≈ B
+    auto AX = tenzor::matmul(A, X);
+    float diff = max_abs_diff(AX, B);
+    EXPECT_LT(diff, 1e-4f) << "LU solve residual too large: " << diff;
+}
+
+TEST_F(LinalgLUTest, LUSolveMultipleRHS) {
+    // Solve A * X = B where B has multiple columns
+    float a_vals[] = {4.0f, 3.0f, 6.0f, 3.0f};
+    auto A = from_data(a_vals, {2, 2}, cpu);
+
+    float b_vals[] = {1.0f, 0.0f,
+                      0.0f, 1.0f};
+    auto B = from_data(b_vals, {2, 2}, cpu);
+
+    auto [L, U, pivots] = linalg::lu(A);
+    auto LU_data = tenzor::add(tenzor::sub(L, tenzor::eye(2)), U);
+    auto X = linalg::lu_solve(LU_data, pivots, B);
+
+    EXPECT_EQ(X.shape()[0], 2);
+    EXPECT_EQ(X.shape()[1], 2);
+
+    // X should be A^{-1}, so A * X ≈ I
+    auto AX = tenzor::matmul(A, X);
+    auto I = tenzor::eye(2);
+    float diff = max_abs_diff(AX, I);
+    EXPECT_LT(diff, 1e-4f) << "LU solve inverse residual too large: " << diff;
+}

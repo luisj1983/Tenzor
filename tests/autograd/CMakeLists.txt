@@ -52,7 +52,7 @@ tenzor_discover_tests(test_gradcheck LABELS "autograd" DISCOVERY_TIMEOUT 60 DISC
 tenzor_discover_tests(test_gradcheck_direct LABELS "autograd" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_gradcheck_extended LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_autograd_additional LABELS "autograd" DISCOVERY_TIMEOUT 60)
-tenzor_discover_tests(test_hooks LABELS "autograd" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_hooks LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_inplace_autograd LABELS "autograd" DISCOVERY_TIMEOUT 60)
 
 # Custom Op Autograd Integration Tests
@@ -73,6 +73,10 @@ tenzor_discover_tests(test_jvp LABELS "autograd" DISCOVERY_TIMEOUT 60)
 add_executable(test_jvp_expanded test_jvp_expanded.cpp)
 target_link_libraries(test_jvp_expanded PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_jvp_expanded LABELS "autograd" DISCOVERY_TIMEOUT 60)
+
+add_executable(test_jvp_expanded_multidtype test_jvp_expanded_multidtype.cpp)
+target_link_libraries(test_jvp_expanded_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_jvp_expanded_multidtype LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
 # Jacobian and Hessian tests
 add_executable(test_jacobian_hessian test_jacobian_hessian.cpp)
@@ -185,3 +189,8 @@ tenzor_discover_tests(test_warn_mode_counter_multidtype LABELS "autograd" DISCOV
 add_executable(test_activation_offload_multidtype test_activation_offload_multidtype.cpp)
 target_link_libraries(test_activation_offload_multidtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_activation_offload_multidtype LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Additional autograd features (13 tests using BackendTest fixture)
+add_executable(test_autograd_features test_autograd_features.cpp)
+target_link_libraries(test_autograd_features PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_autograd_features LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)

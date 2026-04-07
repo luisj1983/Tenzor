@@ -71,7 +71,7 @@ TEST_P(BackendTest, AutogradFeatures_RegisterHookModifyGradient) {
     });
 
     Variable y = x * 3.0f;
-    auto loss = y.sum();
+    auto loss = sum(y);
     loss.backward();
 
     // Gradient should be 3.0 (from y = x * 3), then doubled by hook = 6.0
@@ -96,7 +96,7 @@ TEST_P(BackendTest, AutogradFeatures_RegisterMultipleHooks) {
     });
 
     Variable y = x * 5.0f;
-    auto loss = y.sum();
+    auto loss = sum(y);
     loss.backward();
 
     // Gradient: 5.0 -> *2 = 10.0 -> +1 = 11.0
@@ -122,7 +122,7 @@ TEST_P(BackendTest, AutogradFeatures_RetainGradNonLeaf) {
     EXPECT_TRUE(y.retains_grad());
 
     Variable z = y * 3.0f;
-    auto loss = z.sum();
+    auto loss = sum(z);
     loss.backward();
 
     // Both x and y should have gradients
@@ -153,7 +153,7 @@ TEST_P(BackendTest, AutogradFeatures_RetainGradNotSet) {
     EXPECT_FALSE(y.retains_grad());
 
     Variable z = y * 3.0f;
-    auto loss = z.sum();
+    auto loss = sum(z);
     loss.backward();
 
     // Only leaf variable x should have gradient
@@ -171,7 +171,7 @@ TEST_P(BackendTest, AutogradFeatures_BackwardRetainGraph) {
     auto t = ones({2}, DType::Float32, device);
     Variable x(t, true);
     Variable y = x * 3.0f;
-    auto loss = y.sum();
+    auto loss = sum(y);
 
     // First backward with retain_graph=true
     loss.backward(std::nullopt, true);
@@ -199,7 +199,7 @@ TEST_P(BackendTest, AutogradFeatures_BackwardWithoutRetainGraph) {
     auto t = ones({2}, DType::Float32, device);
     Variable x(t, true);
     Variable y = x * 3.0f;
-    auto loss = y.sum();
+    auto loss = sum(y);
 
     // Backward without retain_graph (default)
     loss.backward();
@@ -217,14 +217,14 @@ TEST_P(BackendTest, AutogradFeatures_MultipleBackwardPasses) {
 
     // First computation
     Variable y1 = x * 2.0f;
-    auto loss1 = y1.sum();
+    auto loss1 = sum(y1);
     loss1.backward(std::nullopt, true);
 
     auto grad1 = x.grad()->clone();
 
     // Second computation (accumulates gradients)
     Variable y2 = x * 3.0f;
-    auto loss2 = y2.sum();
+    auto loss2 = sum(y2);
     loss2.backward(std::nullopt, false);
 
     // Gradients should accumulate: 2.0 + 3.0 = 5.0
@@ -252,7 +252,7 @@ TEST_P(BackendTest, AutogradFeatures_HookWithRetainGrad) {
     });
 
     Variable z = y * 3.0f;
-    auto loss = z.sum();
+    auto loss = sum(z);
     loss.backward();
 
     // y.grad should be 3.0 * 10.0 = 30.0 (hook applied)
@@ -281,7 +281,7 @@ TEST_P(BackendTest, AutogradFeatures_ComplexComputationGraph) {
     y.retain_grad();
 
     Variable z = y * 2.0f;
-    auto loss = z.sum();
+    auto loss = sum(z);
 
     loss.backward(std::nullopt, true);
 

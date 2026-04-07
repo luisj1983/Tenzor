@@ -158,6 +158,11 @@ void broadcast_op(const T* a_data, const T* b_data, T* c_data,
         total_elements *= dim;
     }
 
+    // Early return for zero-element outputs (e.g. broadcasting with empty tensors)
+    if (total_elements == 0) {
+        return;
+    }
+
     // Fast path: scalar broadcast with contiguous memory (avoids index computation)
     if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double> ||
                   std::is_same_v<T, int32_t> || std::is_same_v<T, int64_t>) {

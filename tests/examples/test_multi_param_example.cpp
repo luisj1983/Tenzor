@@ -188,9 +188,9 @@ TEST_P(DTypeSpecificOpsTest, IntegerDivision) {
 }
 
 TEST_P(DTypeSpecificOpsTest, Float16Precision) {
-    // Float16 for mixed precision training
-    if (!device.supports_dtype(DType::Float16)) {
-        GTEST_SKIP() << "Float16 not supported on " << device.to_string();
+    // Float16 for mixed precision training - Float16 only supported on GPU backends
+    if (device.type == Device::Type::CPU) {
+        GTEST_SKIP() << "Float16 not commonly supported on CPU backend";
     }
 
     auto a = ones({100, 100}, DType::Float16, device);

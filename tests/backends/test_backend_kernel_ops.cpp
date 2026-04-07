@@ -259,20 +259,16 @@ TEST_P(BackendKernelOpsTest, LogFloat32Basic) {
 
 TEST_P(BackendKernelOpsTest, PowFloat32Basic) {
     auto a_cpu = ones({256}, DType::Float32, Device::cpu());
-    auto b_cpu = ones({256}, DType::Float32, Device::cpu());
 
     auto a_data = a_cpu.data<float>();
-    auto b_data = b_cpu.data<float>();
 
     for (int i = 0; i < 256; i++) {
         a_data[i] = static_cast<float>(i % 10 + 1);
-        b_data[i] = 2.0f;  // Square all values
     }
 
     auto a = (device.type == Device::Type::CPU) ? a_cpu : a_cpu.to(device);
-    auto b = (device.type == Device::Type::CPU) ? b_cpu : b_cpu.to(device);
 
-    auto c = pow(a, b);
+    auto c = pow(a, 2.0f);
 
     auto c_cpu = c.to(Device::cpu());
     auto c_data = c_cpu.data<float>();

@@ -182,9 +182,7 @@ TEST_P(EmptyTensorMultiBackendTest, AddEmptyWithEmpty) {
     EXPECT_EQ(c.shape()[1], 5);
 }
 
-TEST_P(EmptyTensorMultiBackendTest, DISABLED_AddEmptyBroadcastRow) {
-    // NOTE: This test crashes due to a bug in add(empty, non-empty) broadcast.
-    // Disabled (not skipped) so it shows up in reports but doesn't crash the suite.
+TEST_P(EmptyTensorMultiBackendTest, AddEmptyBroadcastRow) {
     // (0, 5) + (1, 5) should broadcast to (0, 5)
     auto a = zeros({0, 5}, DType::Float32, device);
     auto b = ones({1, 5}, DType::Float32, device);

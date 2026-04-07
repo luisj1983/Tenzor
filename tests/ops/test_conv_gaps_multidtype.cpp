@@ -175,7 +175,7 @@ TEST_P(ConvGapsMultiDTypeTest, ConvTranspose3dForwardShape) {
     expectDevice(output.tensor());
 }
 
-TEST_P(ConvGapsMultiDTypeTest, DISABLED_ConvTranspose3dBackward) {
+TEST_P(ConvGapsMultiDTypeTest, ConvTranspose3dBackward) {
     nn::ConvTranspose3d conv(2, 4, 3, 1, 1);
     convert_model(conv);
 
@@ -188,13 +188,13 @@ TEST_P(ConvGapsMultiDTypeTest, DISABLED_ConvTranspose3dBackward) {
 
     try {
         output.backward(grad_output);
-    } catch (...) {
-        GTEST_SKIP() << "Backward threw for this op/backend";
+    } catch (const std::exception& e) {
+        FAIL() << "ConvTranspose3d backward threw: " << e.what()
+               << " on " << device().to_string();
     }
 
-    if (!input.grad().has_value()) {
-        GTEST_SKIP() << "Backward not yet implemented for this op/backend";
-    }
+    ASSERT_TRUE(input.grad().has_value())
+        << "ConvTranspose3d backward did not produce gradient on " << device().to_string();
     expectShape(*input.grad(), {1, 2, 4, 4, 4});
 }
 

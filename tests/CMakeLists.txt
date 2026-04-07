@@ -89,6 +89,7 @@ add_subdirectory(lite)
 add_subdirectory(integration)
 add_subdirectory(backend_parity)
 add_subdirectory(utils)
+add_subdirectory(examples)
 
 # ============================================================================
 # Combined unit test executable
@@ -429,6 +430,8 @@ if(TENZOR_BUILD_CUDA)
     add_test(NAME CUDAConcatenation COMMAND test_cuda_cat)
     set_tests_properties(CUDAConcatenation PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT})
 endif()
+
+# test_jit.cpp orphan removed: rotted APIs (Tensor::full/zeros/ones static methods, DeviceType enum no longer exist)
 
 # ============================================================================
 # Benchmark executables

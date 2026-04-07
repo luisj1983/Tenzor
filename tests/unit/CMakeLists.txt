@@ -749,3 +749,19 @@ tenzor_discover_tests(test_numerical_precision_multidtype DISCOVERY_TIMEOUT 60 D
 add_executable(test_graph_optimizer_multidtype test_graph_optimizer_multidtype.cpp)
 target_link_libraries(test_graph_optimizer_multidtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_graph_optimizer_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# ============================================================================
+# Previously orphaned test files (registered in audit cleanup)
+# Note: 4 orphan files (test_fusion_optimizer, test_nn_additional, test_detection_components,
+# test_caching_allocator_performance) had rotted APIs (never built since written) and were
+# removed. Their _multidtype variants provide canonical coverage.
+# ============================================================================
+
+# test_cublas_cudnn.cpp orphan removed: rotted APIs (Tensor::ones/randn/matmul methods no longer exist)
+
+# Quantization observers and FakeQuantize specifics (16 tests, complements canonical test_quantization)
+add_executable(test_quantization_observers test_quantization.cpp)
+target_link_libraries(test_quantization_observers PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_quantization_observers LABELS "unit" DISCOVERY_TIMEOUT 60)
+
+# test_oneapi_backend.cpp orphan removed: rotted APIs (relu/gelu now require Variable not Tensor)

@@ -102,3 +102,38 @@ tenzor_discover_tests(test_linalg_lu_multidtype LABELS "ops" DISCOVERY_TIMEOUT 6
 add_executable(test_fp8_ops_multidtype test_fp8_ops_multidtype.cpp)
 target_link_libraries(test_fp8_ops_multidtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_fp8_ops_multidtype LABELS "ops" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Conv3d multi-backend
+add_executable(test_conv3d_multidtype test_conv3d_multidtype.cpp)
+target_link_libraries(test_conv3d_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_conv3d_multidtype LABELS "ops" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Activation backward multi-backend
+add_executable(test_activation_backward_multidtype test_activation_backward_multidtype.cpp)
+target_link_libraries(test_activation_backward_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_activation_backward_multidtype LABELS "ops" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Fused ops dispatch multi-backend
+add_executable(test_fused_ops_dispatch_multidtype test_fused_ops_dispatch_multidtype.cpp)
+target_link_libraries(test_fused_ops_dispatch_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_fused_ops_dispatch_multidtype LABELS "ops" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# EmbeddingBag multi-backend
+add_executable(test_embedding_bag_multidtype test_embedding_bag_multidtype.cpp)
+target_link_libraries(test_embedding_bag_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_embedding_bag_multidtype LABELS "ops" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# BatchNorm dispatch multi-backend
+add_executable(test_batchnorm_dispatch_multidtype test_batchnorm_dispatch_multidtype.cpp)
+target_link_libraries(test_batchnorm_dispatch_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_batchnorm_dispatch_multidtype LABELS "ops" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# RNN cells dispatch multi-backend
+add_executable(test_rnn_cells_dispatch_multidtype test_rnn_cells_dispatch_multidtype.cpp)
+target_link_libraries(test_rnn_cells_dispatch_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_rnn_cells_dispatch_multidtype LABELS "ops" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Previously untested ops: inplace activations, LogSumExp, GridSample, AffineGrid
+add_executable(test_untested_ops_multidtype test_untested_ops_multidtype.cpp)
+target_link_libraries(test_untested_ops_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_untested_ops_multidtype LABELS "ops" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)

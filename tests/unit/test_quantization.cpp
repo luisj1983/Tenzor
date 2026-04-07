@@ -63,10 +63,10 @@ TEST_F(QuantizationTest, ComputeQuantizationParams_PerTensorSymmetric) {
 
     // Scale should be max(abs(-2), abs(3)) / 127 ≈ 3.0 / 127
     float expected_scale = 3.0f / 127.0f;
-    EXPECT_TRUE(isClose(params.scale.data<const float>()[0], expected_scale, 1e-4f));
+    EXPECT_TRUE(isClose(params.scale.data<float>()[0], expected_scale, 1e-4f));
 
     // Zero point should be 0 for symmetric
-    EXPECT_EQ(params.zero_point.data<const int32_t>()[0], 0);
+    EXPECT_EQ(params.zero_point.data<int32_t>()[0], 0);
 }
 
 TEST_F(QuantizationTest, ComputeQuantizationParams_PerTensorAsymmetric) {
@@ -84,10 +84,10 @@ TEST_F(QuantizationTest, ComputeQuantizationParams_PerTensorAsymmetric) {
 
     // Range is 3.0, quantized range is 255
     float expected_scale = 3.0f / 255.0f;
-    EXPECT_TRUE(isClose(params.scale.data<const float>()[0], expected_scale, 1e-4f));
+    EXPECT_TRUE(isClose(params.scale.data<float>()[0], expected_scale, 1e-4f));
 
     // Zero point should map 0.0 to appropriate quantized value
-    int32_t zp = params.zero_point.data<const int32_t>()[0];
+    int32_t zp = params.zero_point.data<int32_t>()[0];
     EXPECT_GE(zp, -128);
     EXPECT_LE(zp, 127);
 }
@@ -108,14 +108,14 @@ TEST_F(QuantizationTest, QuantizeAndDequantize_PerTensorSymmetric) {
     auto q_tensor = quantize_per_tensor_symmetric(input, QuantDType::INT8);
 
     // Check quantized values
-    const int8_t* q_data = q_tensor.data().data<const int8_t>();
+    const int8_t* q_data = q_tensor.data().data<int8_t>();
     EXPECT_EQ(q_tensor.data().dtype(), DType::Int8);
 
     // Dequantize
     Tensor deq = q_tensor.dequantize();
 
     // Check dequantized values are close to original
-    const float* deq_data = deq.data<const float>();
+    const float* deq_data = deq.data<float>();
     for (int i = 0; i < 4; ++i) {
         EXPECT_TRUE(isClose(data[i], deq_data[i], 0.1f))
             << "Mismatch at index " << i
@@ -141,7 +141,7 @@ TEST_F(QuantizationTest, QuantizeAndDequantize_PerChannelSymmetric) {
 
     // Dequantize
     Tensor deq = q_tensor.dequantize();
-    const float* deq_data = deq.data<const float>();
+    const float* deq_data = deq.data<float>();
 
     for (int i = 0; i < 8; ++i) {
         EXPECT_TRUE(isClose(data[i], deq_data[i], 0.1f));
@@ -172,8 +172,8 @@ TEST_F(QuantizationTest, MinMaxObserver_SingleTensor) {
     );
 
     // Min should be -2.0, max should be 3.0
-    EXPECT_TRUE(isClose(observer.get_min().data<const float>()[0], -2.0f));
-    EXPECT_TRUE(isClose(observer.get_max().data<const float>()[0], 3.0f));
+    EXPECT_TRUE(isClose(observer.get_min().data<float>()[0], -2.0f));
+    EXPECT_TRUE(isClose(observer.get_max().data<float>()[0], 3.0f));
 }
 
 TEST_F(QuantizationTest, MinMaxObserver_MultipleTensors) {
@@ -192,8 +192,8 @@ TEST_F(QuantizationTest, MinMaxObserver_MultipleTensors) {
     observer.observe(input2);
 
     // Min should be -3.0, max should be 4.0
-    EXPECT_TRUE(isClose(observer.get_min().data<const float>()[0], -3.0f));
-    EXPECT_TRUE(isClose(observer.get_max().data<const float>()[0], 4.0f));
+    EXPECT_TRUE(isClose(observer.get_min().data<float>()[0], -3.0f));
+    EXPECT_TRUE(isClose(observer.get_max().data<float>()[0], 4.0f));
 }
 
 TEST_F(QuantizationTest, MovingAverageMinMaxObserver) {
@@ -237,7 +237,7 @@ TEST_F(QuantizationTest, HistogramObserver) {
     );
 
     // Should compute reasonable quantization parameters
-    EXPECT_GT(params.scale.data<const float>()[0], 0.0f);
+    EXPECT_GT(params.scale.data<float>()[0], 0.0f);
 }
 
 // ============================================================================
@@ -268,7 +268,7 @@ TEST_F(QuantizationTest, FakeQuantize_Forward) {
     EXPECT_EQ(output.tensor().shape()[0], 4);
 
     // Values should be slightly different due to quantization
-    const float* out_data = output.tensor().data<const float>();
+    const float* out_data = output.tensor().data<float>();
     for (int i = 0; i < 4; ++i) {
         EXPECT_NEAR(data[i], out_data[i], 0.2f);
     }
@@ -290,7 +290,7 @@ TEST_F(QuantizationTest, FakeQuantize_EnableDisable) {
     Variable output = fake_quant->forward(input);
 
     // Output should be identical to input
-    const float* out_data = output.tensor().data<const float>();
+    const float* out_data = output.tensor().data<float>();
     for (int i = 0; i < 4; ++i) {
         EXPECT_FLOAT_EQ(data[i], out_data[i]);
     }
@@ -389,8 +389,8 @@ TEST_F(QuantizationTest, CalibrateQuantizationParams) {
     );
 
     // Should compute reasonable parameters
-    EXPECT_GT(params.scale.data<const float>()[0], 0.0f);
-    EXPECT_EQ(params.zero_point.data<const int32_t>()[0], 0);  // Symmetric
+    EXPECT_GT(params.scale.data<float>()[0], 0.0f);
+    EXPECT_EQ(params.zero_point.data<int32_t>()[0], 0);  // Symmetric
 }
 
 // ============================================================================
@@ -428,7 +428,7 @@ TEST_F(QuantizationTest, EndToEnd_PTQ_Workflow) {
 
     // 5. Dequantize and verify
     Tensor deq = q_tensor.dequantize();
-    const float* deq_data = deq.data<const float>();
+    const float* deq_data = deq.data<float>();
 
     for (int i = 0; i < 10; ++i) {
         EXPECT_NEAR(test_data[i], deq_data[i], 0.2f);

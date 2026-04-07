@@ -102,3 +102,8 @@ tenzor_discover_tests(test_event_api DISCOVERY_TIMEOUT 60)
 add_executable(test_mps_training test_mps_training.cpp)
 target_link_libraries(test_mps_training PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_mps_training DISCOVERY_TIMEOUT 60)
+
+# Backend kernel operations (14 tests using BackendTest fixture)
+add_executable(test_backend_kernel_ops test_backend_kernel_ops.cpp)
+target_link_libraries(test_backend_kernel_ops PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_backend_kernel_ops LABELS "backends" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)

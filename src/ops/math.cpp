@@ -93,6 +93,18 @@ auto add(const Tensor& a, const Tensor& b) -> Tensor {
     // Auto-promote dtypes if mismatched
     auto [ap, bp] = promote_inputs(a, b);
     validate_broadcast_shapes("add", ap.shape(), bp.shape());
+    // Early return for empty tensor broadcasts (e.g. {0,5} + {1,5} -> {0,5})
+    if (ap.numel() == 0 || bp.numel() == 0) {
+        auto sa = ap.shape(); auto sb = bp.shape();
+        size_t nd = std::max(sa.size(), sb.size());
+        std::vector<int64_t> out(nd);
+        for (size_t i = 0; i < nd; ++i) {
+            int64_t da = i < sa.size() ? sa[sa.size()-1-i] : 1;
+            int64_t db = i < sb.size() ? sb[sb.size()-1-i] : 1;
+            out[nd-1-i] = (da == 1) ? db : da;
+        }
+        return Tensor(out, ap.dtype(), ap.device());
+    }
     Tensor a_contiguous = ap.is_contiguous() ? ap : ap.contiguous();
     Tensor b_contiguous = bp.is_contiguous() ? bp : bp.contiguous();
     std::vector<Tensor> inputs = {a_contiguous, b_contiguous};

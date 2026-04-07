@@ -175,11 +175,7 @@ TEST_P(HooksTest, RemoveModuleHook) {
 }
 
 // ============================================================================
-// Instantiate for CPU backend
+// Instantiate for all available backends
 // ============================================================================
 
-INSTANTIATE_TEST_SUITE_P(
-    CPU, HooksTest,
-    ::testing::Values("cpu"),
-    [](const ::testing::TestParamInfo<std::string>& info) { return info.param; }
-);
+INSTANTIATE_BACKEND_TESTS(HooksTest);

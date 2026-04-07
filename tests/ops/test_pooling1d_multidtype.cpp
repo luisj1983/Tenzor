@@ -47,9 +47,8 @@ TEST_P(Pooling1dMultiDTypeTest, MaxPool1dGradientFlow) {
 
     EXPECT_NO_THROW({ output.backward(grad_output); });
 
-    if (!input.grad().has_value()) {
-        GTEST_SKIP() << "1D pooling backward not yet implemented for this backend";
-    }
+    ASSERT_TRUE(input.grad().has_value())
+        << "MaxPool1d backward did not produce gradient on " << device().to_string();
     expectShape(*input.grad(), {1, 2, 6});
 }
 
@@ -87,9 +86,8 @@ TEST_P(Pooling1dMultiDTypeTest, AvgPool1dGradientFlow) {
 
     EXPECT_NO_THROW({ output.backward(grad_output); });
 
-    if (!input.grad().has_value()) {
-        GTEST_SKIP() << "1D pooling backward not yet implemented for this backend";
-    }
+    ASSERT_TRUE(input.grad().has_value())
+        << "AvgPool1d backward did not produce gradient on " << device().to_string();
     expectShape(*input.grad(), {1, 2, 6});
 }
 
@@ -118,9 +116,8 @@ TEST_P(Pooling1dMultiDTypeTest, AdaptiveMaxPool1dGradientFlow) {
 
     EXPECT_NO_THROW({ output.backward(grad_output); });
 
-    if (!input.grad().has_value()) {
-        GTEST_SKIP() << "1D pooling backward not yet implemented for this backend";
-    }
+    ASSERT_TRUE(input.grad().has_value())
+        << "AdaptiveMaxPool1d backward did not produce gradient on " << device().to_string();
     expectShape(*input.grad(), {1, 2, 12});
 }
 
@@ -149,9 +146,8 @@ TEST_P(Pooling1dMultiDTypeTest, AdaptiveAvgPool1dGradientFlow) {
 
     EXPECT_NO_THROW({ output.backward(grad_output); });
 
-    if (!input.grad().has_value()) {
-        GTEST_SKIP() << "1D pooling backward not yet implemented for this backend";
-    }
+    ASSERT_TRUE(input.grad().has_value())
+        << "AdaptiveAvgPool1d backward did not produce gradient on " << device().to_string();
     expectShape(*input.grad(), {1, 2, 12});
 }
 
