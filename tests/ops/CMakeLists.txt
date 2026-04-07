@@ -137,3 +137,8 @@ tenzor_discover_tests(test_rnn_cells_dispatch_multidtype LABELS "ops" DISCOVERY_
 add_executable(test_untested_ops_multidtype test_untested_ops_multidtype.cpp)
 target_link_libraries(test_untested_ops_multidtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_untested_ops_multidtype LABELS "ops" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Previously untested OpIds: StridedFill, EmbeddingWithBoundsCheck, HasInfNan, Cast
+add_executable(test_dispatch_ops_multidtype test_dispatch_ops_multidtype.cpp)
+target_link_libraries(test_dispatch_ops_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_dispatch_ops_multidtype LABELS "ops" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)

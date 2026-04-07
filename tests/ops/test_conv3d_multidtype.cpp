@@ -97,6 +97,62 @@ TEST_P(Conv3dMultiDTypeTest, WeightGradientExists) {
 }
 
 // ============================================================================
+// Numerical Correctness Tests
+// ============================================================================
+
+TEST_P(Conv3dMultiDTypeTest, IdentityConvWithUnitWeight) {
+    // A 1x1x1 Conv3d with weight=1 and no bias should preserve the input value.
+    // We fill the weight tensor in-place via fill_().
+    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
+        GTEST_SKIP() << "Numerical correctness check requires Float32/Float64";
+    }
+    nn::Conv3d conv(1, 1, /*kernel_size=*/1, /*stride=*/1, /*padding=*/0,
+                    /*dilation=*/1, /*groups=*/1, /*bias=*/false);
+    convert_model(conv);
+
+    auto params = conv.parameters();
+    ASSERT_FALSE(params.empty());
+    // Fill weight in-place: weight = 2.0
+    params[0]->tensor().fill_(2.0);
+
+    auto input = tenzor::ones({1, 1, 4, 4, 4}, dtype(), device());
+    Variable input_var(input, false);
+    auto output = conv.forward(input_var);
+
+    // Output should be all 2.0 (input=1, weight=2, 1x1x1 kernel = elementwise mul)
+    auto cpu_out = output.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* data = cpu_out.data<float>();
+    for (int64_t i = 0; i < cpu_out.numel(); ++i) {
+        EXPECT_NEAR(data[i], 2.0f, std::max(atol() * 10.0f, 1e-4f));
+    }
+}
+
+TEST_P(Conv3dMultiDTypeTest, ZeroInputProducesBiasOnly) {
+    // With zero input, the output should equal the bias broadcast across spatial dims.
+    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
+        GTEST_SKIP() << "Numerical correctness check requires Float32/Float64";
+    }
+    nn::Conv3d conv(2, 4, 3, 1, 1);
+    convert_model(conv);
+
+    auto params = conv.parameters();
+    ASSERT_GE(params.size(), 2u) << "Conv3d should have weight + bias parameters";
+    // Set bias to 3.0 in-place
+    params[1]->tensor().fill_(3.0);
+
+    auto input = tenzor::zeros({1, 2, 4, 4, 4}, dtype(), device());
+    Variable input_var(input, false);
+    auto output = conv.forward(input_var);
+
+    // All output values should equal the bias (3.0)
+    auto cpu_out = output.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* data = cpu_out.data<float>();
+    for (int64_t i = 0; i < cpu_out.numel(); ++i) {
+        EXPECT_NEAR(data[i], 3.0f, std::max(atol() * 10.0f, 1e-4f));
+    }
+}
+
+// ============================================================================
 // Instantiation
 // ============================================================================
 

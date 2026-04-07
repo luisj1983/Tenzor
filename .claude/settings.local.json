@@ -4,7 +4,9 @@
       "Bash(ninja:*)",
       "Bash(cmake:*)",
       "Bash(python3:*)",
-      "Bash(ctest:*)"
+      "Bash(ctest:*)",
+      "Bash(timeout 60 ./bin/test_pooling1d_multidtype --gtest_filter='*GradientFlow*Cpu*')",
+      "Bash(timeout 60 ./bin/test_pooling3d_multidtype --gtest_filter='*GradientFlow*Cpu*')"
     ]
   }
 }

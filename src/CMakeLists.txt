@@ -31,6 +31,7 @@ set(TENZOR_CORE_SOURCES
     ops/reduction.cpp
     ops/transform.cpp
     ops/fused_ops.cpp
+    ops/fusion_optimizer.cpp
     ops/advanced.cpp
     ops/fft.cpp
     ops/windows.cpp
@@ -200,6 +201,7 @@ set(TENZOR_CORE_SOURCES
     nn/compression/pruning.cpp
     nn/compression/distillation.cpp
     distributed/distributed.cpp
+    distributed/pipeline_parallel.cpp
     distributed/nccl_backend.cpp
     distributed/gloo_backend.cpp
     distributed/rpc/function_registry.cpp
@@ -208,6 +210,8 @@ set(TENZOR_CORE_SOURCES
     distributed/rpc/rpc.cpp
     serving/server.cpp
     lite/runtime.cpp
+    lite/lite_graph.cpp
+    lite/model_format.cpp
     distributed/elastic/rendezvous.cpp
     distributed/elastic/health_monitor.cpp
     distributed/elastic/elastic_trainer.cpp

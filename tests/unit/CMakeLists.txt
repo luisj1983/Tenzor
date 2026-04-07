@@ -752,10 +752,14 @@ tenzor_discover_tests(test_graph_optimizer_multidtype DISCOVERY_TIMEOUT 60 DISCO
 
 # ============================================================================
 # Previously orphaned test files (registered in audit cleanup)
-# Note: 4 orphan files (test_fusion_optimizer, test_nn_additional, test_detection_components,
-# test_caching_allocator_performance) had rotted APIs (never built since written) and were
-# removed. Their _multidtype variants provide canonical coverage.
+# Note: 3 orphan files (test_nn_additional, test_detection_components,
+# test_caching_allocator_performance) had rotted APIs and were removed.
 # ============================================================================
+
+# Graph-level kernel fusion optimizer (recreated as fresh test in follow-up cleanup)
+add_executable(test_fusion_optimizer test_fusion_optimizer.cpp)
+target_link_libraries(test_fusion_optimizer PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_fusion_optimizer LABELS "unit" DISCOVERY_TIMEOUT 60)
 
 # test_cublas_cudnn.cpp orphan removed: rotted APIs (Tensor::ones/randn/matmul methods no longer exist)
 

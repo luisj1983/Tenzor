@@ -11,6 +11,8 @@
 #include <tenzor/ops/fused_ops.hpp>
 #include <tenzor/ops/math.hpp>
 #include <tenzor/ops/creation.hpp>
+#include <tenzor/ops/op_id.hpp>
+#include <tenzor/backend/fast_dispatch.hpp>
 #include <tenzor/nn/layers/conv.hpp>
 #include <tenzor/autograd/variable.hpp>
 #include "../multi_backend_dtype_fixture.hpp"
@@ -118,6 +120,72 @@ TEST_P(FusedOpsDispatchMultiDTypeTest, FusedConv2dSwishWithStride) {
     // stride=2, padding=1: output spatial = (16+2-3)/2+1 = 8
     auto out = fused_conv2d_swish(input, weight, &bias, 2, 1);
     expectShape(out, {2, 8, 8, 8});
+}
+
+// ============================================================================
+// Numerical Correctness — Fused vs Unfused
+// ============================================================================
+
+TEST_P(FusedOpsDispatchMultiDTypeTest, FusedConv2dSigmoidValueRange) {
+    skipIfHalf();
+    auto input = tenzor::randn({1, 3, 8, 8}, dtype(), device());
+    auto weight = tenzor::randn({4, 3, 3, 3}, dtype(), device());
+    auto bias = tenzor::randn({4}, dtype(), device());
+
+    auto fused_out = fused_conv2d_sigmoid(input, weight, &bias, 1, 1);
+    // Sigmoid output should be in (0, 1)
+    float max_val = compute_max(fused_out);
+    float min_val = compute_min(fused_out);
+    EXPECT_LE(max_val, 1.0f);
+    EXPECT_GE(min_val, 0.0f);
+}
+
+TEST_P(FusedOpsDispatchMultiDTypeTest, FusedConv2dSigmoidMatchesUnfused) {
+    skipIfHalf();
+    if (dtype() != DType::Float32 && dtype() != DType::Float64) {
+        GTEST_SKIP() << "Numerical comparison only for Float32/Float64";
+    }
+    // Compute fused result
+    auto input = tenzor::randn({1, 2, 4, 4}, dtype(), device());
+    auto weight = tenzor::randn({3, 2, 3, 3}, dtype(), device());
+    auto bias = tenzor::randn({3}, dtype(), device());
+
+    auto fused_out = fused_conv2d_sigmoid(input, weight, &bias, 1, 1);
+
+    // Compute unfused: conv2d via dispatch + sigmoid
+    OpAttributes attrs;
+    attrs.set(AttrKey::Stride, int64_t{1});
+    attrs.set(AttrKey::Padding, int64_t{1});
+    attrs.set(AttrKey::Dilation, int64_t{1});
+    attrs.set(AttrKey::Groups, int64_t{1});
+    std::vector<Tensor> conv_inputs = {input, weight, bias};
+    auto conv_result = dispatch_to_device(OpId::Conv2dForward, device().type, conv_inputs, attrs);
+    auto unfused_out = tenzor::sigmoid(conv_result[0]);
+
+    expectTensorNear(fused_out, unfused_out, std::max(atol() * 100.0f, 1e-3f));
+}
+
+TEST_P(FusedOpsDispatchMultiDTypeTest, FusedConv2dTanhMatchesUnfused) {
+    skipIfHalf();
+    if (dtype() != DType::Float32 && dtype() != DType::Float64) {
+        GTEST_SKIP() << "Numerical comparison only for Float32/Float64";
+    }
+    auto input = tenzor::randn({1, 2, 4, 4}, dtype(), device());
+    auto weight = tenzor::randn({3, 2, 3, 3}, dtype(), device());
+    auto bias = tenzor::randn({3}, dtype(), device());
+
+    auto fused_out = fused_conv2d_tanh(input, weight, &bias, 1, 1);
+
+    OpAttributes attrs;
+    attrs.set(AttrKey::Stride, int64_t{1});
+    attrs.set(AttrKey::Padding, int64_t{1});
+    attrs.set(AttrKey::Dilation, int64_t{1});
+    attrs.set(AttrKey::Groups, int64_t{1});
+    std::vector<Tensor> conv_inputs = {input, weight, bias};
+    auto conv_result = dispatch_to_device(OpId::Conv2dForward, device().type, conv_inputs, attrs);
+    auto unfused_out = tenzor::tanh(conv_result[0]);
+
+    expectTensorNear(fused_out, unfused_out, std::max(atol() * 100.0f, 1e-3f));
 }
 
 // ============================================================================

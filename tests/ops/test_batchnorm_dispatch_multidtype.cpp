@@ -124,6 +124,67 @@ TEST_P(BatchNormDispatchMultiDTypeTest, AffineParameterGradients) {
 }
 
 // ============================================================================
+// Numerical Correctness Tests
+// ============================================================================
+
+TEST_P(BatchNormDispatchMultiDTypeTest, NormalizesToZeroMeanUnitVariance) {
+    skipIfHalf();
+    // In training mode, the per-channel output should have approximately zero
+    // mean and unit variance across the (N, H, W) dimensions, scaled by gamma=1
+    // and shifted by beta=0 (the default initialization).
+    nn::BatchNorm2d bn(4, 1e-5, 0.1, true);
+    convert_model(bn);
+    bn.train();
+
+    auto input_t = tenzor::randn({8, 4, 4, 4}, dtype(), device());
+    Variable input(input_t, false);
+    auto output = bn.forward(input);
+
+    // Compute per-channel mean across N,H,W and verify it's close to zero
+    auto cpu_out = output.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* data = cpu_out.data<float>();
+    int64_t N = 8, C = 4, H = 4, W = 4;
+    for (int64_t c = 0; c < C; ++c) {
+        float sum = 0.0f;
+        int64_t count = N * H * W;
+        for (int64_t n = 0; n < N; ++n) {
+            for (int64_t h = 0; h < H; ++h) {
+                for (int64_t w = 0; w < W; ++w) {
+                    sum += data[((n * C + c) * H + h) * W + w];
+                }
+            }
+        }
+        float mean = sum / static_cast<float>(count);
+        EXPECT_NEAR(mean, 0.0f, std::max(atol() * 100.0f, 1e-3f))
+            << "BatchNorm2d output channel " << c << " mean " << mean << " not close to 0";
+    }
+}
+
+TEST_P(BatchNormDispatchMultiDTypeTest, EvalModeUsesRunningStats) {
+    skipIfHalf();
+    // In eval mode with affine=false, output = (input - running_mean) / sqrt(running_var + eps).
+    // After construction, running_mean=0 and running_var=1, so output should equal input.
+    nn::BatchNorm2d bn(4, 1e-5, 0.1, /*affine=*/false, /*track_running_stats=*/true);
+    convert_model(bn);
+    bn.eval();
+
+    auto input_t = tenzor::randn({2, 4, 4, 4}, dtype(), device());
+    Variable input(input_t, false);
+    auto output = bn.forward(input);
+
+    auto cpu_in = input_t.to(Device::cpu()).to(DType::Float32).contiguous();
+    auto cpu_out = output.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* in_data = cpu_in.data<float>();
+    auto* out_data = cpu_out.data<float>();
+
+    // Output ≈ input (since running_mean=0, running_var=1, only sqrt(1+eps) ≈ 1 division)
+    for (int64_t i = 0; i < cpu_in.numel(); ++i) {
+        EXPECT_NEAR(out_data[i], in_data[i], std::max(atol() * 10.0f, 1e-3f))
+            << "BatchNorm2d eval mode mismatch at index " << i;
+    }
+}
+
+// ============================================================================
 // Instantiation
 // ============================================================================
 

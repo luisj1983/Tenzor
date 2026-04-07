@@ -649,8 +649,17 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::MaxPool1dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // Read input length from InputShape attribute (set by autograd Function wrapper).
+        // Falls back to legacy InputL int attribute for backward compatibility.
+        int64_t L_in = 0;
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        if (input_shape.size() == 3) {
+            L_in = input_shape[2];
+        } else {
+            L_in = attrs.get_int(AttrKey::InputL, 0);
+        }
         return std::vector<Tensor>{get_vulkan_backend()->dispatchMaxPool1dBackward(
-            inputs[0], inputs[1], attrs.get_int(AttrKey::InputL, 0))};
+            inputs[0], inputs[1], L_in)};
     });
 
     table.register_kernel(OpId::AvgPool1dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -658,7 +667,15 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::AvgPool1dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchAvgPool1dBackward(inputs[0], inputs[1], attrs)};
+        // The Vulkan kernel needs an input tensor for shape/dtype/device. Construct
+        // a placeholder from the InputShape attribute set by the autograd Function wrapper.
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        if (input_shape.empty()) {
+            // Legacy path: caller already supplied input as inputs[1]
+            return std::vector<Tensor>{get_vulkan_backend()->dispatchAvgPool1dBackward(inputs[0], inputs[1], attrs)};
+        }
+        Tensor placeholder(input_shape, inputs[0].dtype(), inputs[0].device());
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchAvgPool1dBackward(inputs[0], placeholder, attrs)};
     });
 
     table.register_kernel(OpId::AdaptiveMaxPool1d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -673,8 +690,15 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::AdaptiveAvgPool1dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t L_in = 0;
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        if (input_shape.size() == 3) {
+            L_in = input_shape[2];
+        } else {
+            L_in = attrs.get_int(AttrKey::InputL, 0);
+        }
         return std::vector<Tensor>{get_vulkan_backend()->dispatchAdaptiveAvgPool1dBackward(
-            inputs[0], attrs.get_int(AttrKey::InputL, 0))};
+            inputs[0], L_in)};
     });
 
     table.register_single_output_kernel(OpId::AdaptiveMaxPool1dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -690,9 +714,20 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::MaxPool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // Read DHW from InputShape attribute (set by autograd Function wrapper).
+        int64_t D_in = 0, H_in = 0, W_in = 0;
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        if (input_shape.size() == 5) {
+            D_in = input_shape[2];
+            H_in = input_shape[3];
+            W_in = input_shape[4];
+        } else {
+            D_in = attrs.get_int(AttrKey::InputD, 0);
+            H_in = attrs.get_int(AttrKey::InputH, 0);
+            W_in = attrs.get_int(AttrKey::InputW, 0);
+        }
         return std::vector<Tensor>{get_vulkan_backend()->dispatchMaxPool3dBackward(
-            inputs[0], inputs[1],
-            attrs.get_int(AttrKey::InputD, 0), attrs.get_int(AttrKey::InputH, 0), attrs.get_int(AttrKey::InputW, 0))};
+            inputs[0], inputs[1], D_in, H_in, W_in)};
     });
 
     table.register_kernel(OpId::AvgPool3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -700,7 +735,13 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::AvgPool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchAvgPool3dBackward(inputs[0], inputs[1], attrs)};
+        // Construct placeholder input tensor from InputShape if caller only passed grad_output.
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        if (input_shape.empty() || inputs.size() >= 2) {
+            return std::vector<Tensor>{get_vulkan_backend()->dispatchAvgPool3dBackward(inputs[0], inputs[1], attrs)};
+        }
+        Tensor placeholder(input_shape, inputs[0].dtype(), inputs[0].device());
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchAvgPool3dBackward(inputs[0], placeholder, attrs)};
     });
 
     table.register_kernel(OpId::AdaptiveMaxPool3d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -719,8 +760,19 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::AdaptiveAvgPool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t D_in = 0, H_in = 0, W_in = 0;
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        if (input_shape.size() == 5) {
+            D_in = input_shape[2];
+            H_in = input_shape[3];
+            W_in = input_shape[4];
+        } else {
+            D_in = attrs.get_int(AttrKey::InputD, 0);
+            H_in = attrs.get_int(AttrKey::InputH, 0);
+            W_in = attrs.get_int(AttrKey::InputW, 0);
+        }
         return std::vector<Tensor>{get_vulkan_backend()->dispatchAdaptiveAvgPool3dBackward(
-            inputs[0], attrs.get_int(AttrKey::InputD, 0), attrs.get_int(AttrKey::InputH, 0), attrs.get_int(AttrKey::InputW, 0))};
+            inputs[0], D_in, H_in, W_in)};
     });
 
     table.register_single_output_kernel(OpId::AdaptiveMaxPool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {

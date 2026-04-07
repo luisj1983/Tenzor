@@ -99,7 +99,7 @@ auto concat_microbatches(const std::vector<Variable>& microbatches) -> Variable 
     if (microbatches.size() == 1) {
         return microbatches[0];
     }
-    return autograd::cat(microbatches, /*dim=*/0);
+    return tenzor::cat(microbatches, /*dim=*/0);
 }
 
 /**

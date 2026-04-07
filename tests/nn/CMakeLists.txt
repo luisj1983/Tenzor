@@ -221,7 +221,12 @@ add_executable(test_sync_batchnorm layers/test_sync_batchnorm.cpp)
 target_link_libraries(test_sync_batchnorm PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_sync_batchnorm LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
-# Pipeline parallelism orphan removed: tenzor::distributed::PipelineStage symbol not built into libtenzor_core.so
+# Pipeline parallelism (recreated as fresh test in follow-up cleanup)
+# The original orphan was removed because PipelineStage symbols weren't built;
+# pipeline_parallel.cpp has now been added to src/CMakeLists.txt and the symbols are exported.
+add_executable(test_pipeline_parallel test_pipeline_parallel.cpp)
+target_link_libraries(test_pipeline_parallel PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_pipeline_parallel LABELS "nn" DISCOVERY_TIMEOUT 60)
 
 # tests/nn/test_data_parallel.cpp orphan removed: rotted include paths (tenzor/nn/modules/ no longer exists)
 # tests/nn/test_distributed.cpp orphan removed: requires rccl/rccl.h via TENZOR_USE_ROCM that isn't installed

@@ -1102,6 +1102,118 @@ auto AdaptiveAvgPool2d::forward_impl(const Variable& input) -> Variable {
 }
 
 // ============================================================================
+// Backward Function classes for 1D and 3D pooling
+// ============================================================================
+// These wrap the registered OpId backward kernels to wire pool ops into the
+// autograd graph. Each Function class:
+//   - Saves the input shape (and indices for max-pool variants)
+//   - On backward(), dispatches to the registered backend kernel via OpId
+//   - Returns the resulting input gradient
+//
+// The backward kernels are registered in src/backends/*/cpu_kernel_registry.cpp
+// (and equivalent for other backends), so this dispatcher pattern works on all
+// backends without needing CPU-specific code paths in this file.
+
+namespace {
+
+inline std::string pool_shape_to_string(const std::vector<int64_t>& shape) {
+    std::string s;
+    for (size_t i = 0; i < shape.size(); ++i) {
+        if (i) s += ',';
+        s += std::to_string(shape[i]);
+    }
+    return s;
+}
+
+// Generic backward Function for pool ops that need an input shape attribute.
+// Used for AvgPool variants (no indices needed).
+template <OpId BackwardOp>
+class AvgPoolNdBackward : public Function {
+public:
+    AvgPoolNdBackward(std::vector<int64_t> input_shape,
+                      int64_t kernel_size, int64_t stride, int64_t padding)
+        : input_shape_(std::move(input_shape)),
+          kernel_size_(kernel_size), stride_(stride), padding_(padding) {}
+
+    auto forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> override {
+        throw std::runtime_error("AvgPoolNdBackward::forward should not be called");
+    }
+
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::InputShape, pool_shape_to_string(input_shape_));
+        attrs.set(AttrKey::KernelSize, kernel_size_);
+        attrs.set(AttrKey::Stride, stride_);
+        attrs.set(AttrKey::Padding, padding_);
+        std::vector<Tensor> inputs = {grad_outputs[0]};
+        auto result = dispatch_to_device(BackwardOp, grad_outputs[0].device().type, inputs, attrs);
+        return {result[0]};
+    }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        std::vector<Tensor> tensor_grads;
+        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
+        auto results = backward(std::move(tensor_grads));
+        std::vector<Variable> var_results;
+        for (auto& t : results) var_results.emplace_back(t, false);
+        return var_results;
+    }
+
+private:
+    std::vector<int64_t> input_shape_;
+    int64_t kernel_size_;
+    int64_t stride_;
+    int64_t padding_;
+};
+
+// Generic backward Function for max-pool variants (needs saved indices).
+template <OpId BackwardOp>
+class MaxPoolNdBackward : public Function {
+public:
+    MaxPoolNdBackward(std::vector<int64_t> input_shape, Tensor indices)
+        : input_shape_(std::move(input_shape)) {
+        save_for_backward({std::move(indices)});
+    }
+
+    auto forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> override {
+        throw std::runtime_error("MaxPoolNdBackward::forward should not be called");
+    }
+
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::InputShape, pool_shape_to_string(input_shape_));
+        std::vector<Tensor> inputs = {grad_outputs[0], saved_tensors_[0]};
+        auto result = dispatch_to_device(BackwardOp, grad_outputs[0].device().type, inputs, attrs);
+        return {result[0]};
+    }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        std::vector<Tensor> tensor_grads;
+        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
+        auto results = backward(std::move(tensor_grads));
+        std::vector<Variable> var_results;
+        for (auto& t : results) var_results.emplace_back(t, false);
+        return var_results;
+    }
+
+private:
+    std::vector<int64_t> input_shape_;
+};
+
+// Helper to wire a backward Function as the grad_fn of a result Variable.
+inline void wire_grad_fn(Variable& result, const Variable& input,
+                         std::shared_ptr<Function> backward_fn) {
+    result.set_grad_fn(backward_fn);
+    std::vector<Variable> input_vars{input};
+    backward_fn->set_input_variables(input_vars);
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    if (input.grad_fn()) next_funcs.push_back(input.grad_fn());
+    backward_fn->set_next_functions(next_funcs);
+}
+
+} // anonymous namespace
+
+// ============================================================================
 // MaxPool3d Implementation
 // ============================================================================
 
@@ -1123,110 +1235,28 @@ auto MaxPool3d::forward_impl(const Variable& input) -> Variable {
         throw std::invalid_argument("MaxPool3d expects 5D input [batch, channels, depth, height, width]");
     }
 
-    Device original_device = input.tensor().device();
-    int64_t N = input_shape[0];
-    int64_t C = input_shape[1];
-    int64_t D_in = input_shape[2];
-    int64_t H_in = input_shape[3];
-    int64_t W_in = input_shape[4];
+    Device device = input.tensor().device();
+    std::vector<int64_t> in_shape_vec(input_shape.begin(), input_shape.end());
 
-    int64_t D_out = calculate_pool_output_size(D_in, kernel_size_, stride_, padding_, ceil_mode_);
-    int64_t H_out = calculate_pool_output_size(H_in, kernel_size_, stride_, padding_, ceil_mode_);
-    int64_t W_out = calculate_pool_output_size(W_in, kernel_size_, stride_, padding_, ceil_mode_);
+    OpAttributes fwd_attrs;
+    fwd_attrs.set(AttrKey::KernelSize, kernel_size_);
+    fwd_attrs.set(AttrKey::Stride, stride_);
+    fwd_attrs.set(AttrKey::Padding, padding_);
 
-    // GPU path: OpId dispatch
-    if (original_device.type != Device::Type::CPU) {
-        std::vector<Tensor> inputs = {input.tensor()};
-        OpAttributes fwd_attrs;
-        fwd_attrs.set(AttrKey::KernelSize, kernel_size_);
-        fwd_attrs.set(AttrKey::Stride, stride_);
-        fwd_attrs.set(AttrKey::Padding, padding_);
-        auto result = dispatch_to_device(OpId::MaxPool3dForward, original_device.type,
-            inputs, fwd_attrs);
-        return Variable(result[0], input.requires_grad());
+    std::vector<Tensor> inputs = {input.tensor()};
+    auto fwd_result = dispatch_to_device(OpId::MaxPool3dForward, device.type, inputs, fwd_attrs);
+    Tensor output = fwd_result[0];
+    Tensor indices = fwd_result[1];
+
+    auto result = Variable(output, input.requires_grad());
+
+    if (input.requires_grad()) {
+        auto backward_fn = std::make_shared<MaxPoolNdBackward<OpId::MaxPool3dBackward>>(
+            in_shape_vec, indices);
+        wire_grad_fn(result, input, backward_fn);
     }
 
-    // CPU path
-    auto dtype = input.tensor().dtype();
-    auto output = zeros({N, C, D_out, H_out, W_out}, dtype, Device::cpu());
-
-    if (dtype == DType::Float32) {
-        const float* input_data = input.tensor().data<float>();
-        float* output_data = output.data<float>();
-
-        #pragma omp parallel for collapse(2) if(N * C > 4)
-        for (int64_t n = 0; n < N; ++n) {
-            for (int64_t c = 0; c < C; ++c) {
-                for (int64_t d_out = 0; d_out < D_out; ++d_out) {
-                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                            int64_t d_start = d_out * stride_ - padding_;
-                            int64_t h_start = h_out * stride_ - padding_;
-                            int64_t w_start = w_out * stride_ - padding_;
-
-                            float max_val = -std::numeric_limits<float>::infinity();
-
-                            for (int64_t kd = 0; kd < kernel_size_; ++kd) {
-                                for (int64_t kh = 0; kh < kernel_size_; ++kh) {
-                                    for (int64_t kw = 0; kw < kernel_size_; ++kw) {
-                                        int64_t d = d_start + kd;
-                                        int64_t h = h_start + kh;
-                                        int64_t w = w_start + kw;
-                                        if (d >= 0 && d < D_in && h >= 0 && h < H_in && w >= 0 && w < W_in) {
-                                            int64_t idx = ((n * C + c) * D_in + d) * H_in * W_in + h * W_in + w;
-                                            max_val = std::max(max_val, input_data[idx]);
-                                        }
-                                    }
-                                }
-                            }
-
-                            int64_t out_idx = ((n * C + c) * D_out + d_out) * H_out * W_out + h_out * W_out + w_out;
-                            output_data[out_idx] = max_val;
-                        }
-                    }
-                }
-            }
-        }
-    } else if (dtype == DType::Float64) {
-        const double* input_data = input.tensor().data<double>();
-        double* output_data = output.data<double>();
-
-        #pragma omp parallel for collapse(2) if(N * C > 4)
-        for (int64_t n = 0; n < N; ++n) {
-            for (int64_t c = 0; c < C; ++c) {
-                for (int64_t d_out = 0; d_out < D_out; ++d_out) {
-                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                            int64_t d_start = d_out * stride_ - padding_;
-                            int64_t h_start = h_out * stride_ - padding_;
-                            int64_t w_start = w_out * stride_ - padding_;
-
-                            double max_val = -std::numeric_limits<double>::infinity();
-
-                            for (int64_t kd = 0; kd < kernel_size_; ++kd) {
-                                for (int64_t kh = 0; kh < kernel_size_; ++kh) {
-                                    for (int64_t kw = 0; kw < kernel_size_; ++kw) {
-                                        int64_t d = d_start + kd;
-                                        int64_t h = h_start + kh;
-                                        int64_t w = w_start + kw;
-                                        if (d >= 0 && d < D_in && h >= 0 && h < H_in && w >= 0 && w < W_in) {
-                                            int64_t idx = ((n * C + c) * D_in + d) * H_in * W_in + h * W_in + w;
-                                            max_val = std::max(max_val, input_data[idx]);
-                                        }
-                                    }
-                                }
-                            }
-
-                            int64_t out_idx = ((n * C + c) * D_out + d_out) * H_out * W_out + h_out * W_out + w_out;
-                            output_data[out_idx] = max_val;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    return Variable(output, input.requires_grad());
+    return result;
 }
 
 // ============================================================================
@@ -1250,114 +1280,27 @@ auto AvgPool3d::forward_impl(const Variable& input) -> Variable {
         throw std::invalid_argument("AvgPool3d expects 5D input [batch, channels, depth, height, width]");
     }
 
-    Device original_device = input.tensor().device();
-    int64_t N = input_shape[0];
-    int64_t C = input_shape[1];
-    int64_t D_in = input_shape[2];
-    int64_t H_in = input_shape[3];
-    int64_t W_in = input_shape[4];
+    Device device = input.tensor().device();
+    std::vector<int64_t> in_shape_vec(input_shape.begin(), input_shape.end());
 
-    int64_t D_out = calculate_pool_output_size(D_in, kernel_size_, stride_, padding_);
-    int64_t H_out = calculate_pool_output_size(H_in, kernel_size_, stride_, padding_);
-    int64_t W_out = calculate_pool_output_size(W_in, kernel_size_, stride_, padding_);
+    OpAttributes fwd_attrs;
+    fwd_attrs.set(AttrKey::KernelSize, kernel_size_);
+    fwd_attrs.set(AttrKey::Stride, stride_);
+    fwd_attrs.set(AttrKey::Padding, padding_);
 
-    // GPU path: OpId dispatch
-    if (original_device.type != Device::Type::CPU) {
-        std::vector<Tensor> inputs = {input.tensor()};
-        OpAttributes fwd_attrs;
-        fwd_attrs.set(AttrKey::KernelSize, kernel_size_);
-        fwd_attrs.set(AttrKey::Stride, stride_);
-        fwd_attrs.set(AttrKey::Padding, padding_);
-        auto result = dispatch_to_device(OpId::AvgPool3dForward, original_device.type,
-            inputs, fwd_attrs);
-        return Variable(result[0], input.requires_grad());
+    std::vector<Tensor> inputs = {input.tensor()};
+    auto fwd_result = dispatch_to_device(OpId::AvgPool3dForward, device.type, inputs, fwd_attrs);
+    Tensor output = fwd_result[0];
+
+    auto result = Variable(output, input.requires_grad());
+
+    if (input.requires_grad()) {
+        auto backward_fn = std::make_shared<AvgPoolNdBackward<OpId::AvgPool3dBackward>>(
+            in_shape_vec, kernel_size_, stride_, padding_);
+        wire_grad_fn(result, input, backward_fn);
     }
 
-    // CPU path
-    auto dtype = input.tensor().dtype();
-    auto output = zeros({N, C, D_out, H_out, W_out}, dtype, Device::cpu());
-
-    if (dtype == DType::Float32) {
-        const float* input_data = input.tensor().data<float>();
-        float* output_data = output.data<float>();
-
-        #pragma omp parallel for collapse(2) if(N * C > 4)
-        for (int64_t n = 0; n < N; ++n) {
-            for (int64_t c = 0; c < C; ++c) {
-                for (int64_t d_out = 0; d_out < D_out; ++d_out) {
-                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                            int64_t d_start = d_out * stride_ - padding_;
-                            int64_t h_start = h_out * stride_ - padding_;
-                            int64_t w_start = w_out * stride_ - padding_;
-
-                            float sum = 0.0f;
-                            int64_t count = 0;
-
-                            for (int64_t kd = 0; kd < kernel_size_; ++kd) {
-                                for (int64_t kh = 0; kh < kernel_size_; ++kh) {
-                                    for (int64_t kw = 0; kw < kernel_size_; ++kw) {
-                                        int64_t d = d_start + kd;
-                                        int64_t h = h_start + kh;
-                                        int64_t w = w_start + kw;
-                                        if (d >= 0 && d < D_in && h >= 0 && h < H_in && w >= 0 && w < W_in) {
-                                            int64_t idx = ((n * C + c) * D_in + d) * H_in * W_in + h * W_in + w;
-                                            sum += input_data[idx];
-                                            ++count;
-                                        }
-                                    }
-                                }
-                            }
-
-                            int64_t out_idx = ((n * C + c) * D_out + d_out) * H_out * W_out + h_out * W_out + w_out;
-                            output_data[out_idx] = count > 0 ? sum / static_cast<float>(count) : 0.0f;
-                        }
-                    }
-                }
-            }
-        }
-    } else if (dtype == DType::Float64) {
-        const double* input_data = input.tensor().data<double>();
-        double* output_data = output.data<double>();
-
-        #pragma omp parallel for collapse(2) if(N * C > 4)
-        for (int64_t n = 0; n < N; ++n) {
-            for (int64_t c = 0; c < C; ++c) {
-                for (int64_t d_out = 0; d_out < D_out; ++d_out) {
-                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                            int64_t d_start = d_out * stride_ - padding_;
-                            int64_t h_start = h_out * stride_ - padding_;
-                            int64_t w_start = w_out * stride_ - padding_;
-
-                            double sum = 0.0;
-                            int64_t count = 0;
-
-                            for (int64_t kd = 0; kd < kernel_size_; ++kd) {
-                                for (int64_t kh = 0; kh < kernel_size_; ++kh) {
-                                    for (int64_t kw = 0; kw < kernel_size_; ++kw) {
-                                        int64_t d = d_start + kd;
-                                        int64_t h = h_start + kh;
-                                        int64_t w = w_start + kw;
-                                        if (d >= 0 && d < D_in && h >= 0 && h < H_in && w >= 0 && w < W_in) {
-                                            int64_t idx = ((n * C + c) * D_in + d) * H_in * W_in + h * W_in + w;
-                                            sum += input_data[idx];
-                                            ++count;
-                                        }
-                                    }
-                                }
-                            }
-
-                            int64_t out_idx = ((n * C + c) * D_out + d_out) * H_out * W_out + h_out * W_out + w_out;
-                            output_data[out_idx] = count > 0 ? sum / static_cast<double>(count) : 0.0;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    return Variable(output, input.requires_grad());
+    return result;
 }
 
 // ============================================================================
@@ -1378,61 +1321,28 @@ auto MaxPool1d::forward_impl(const Variable& input) -> Variable {
         throw std::invalid_argument("MaxPool1d expects 3D input [batch, channels, length]");
     }
 
-    int64_t N = input_shape[0];
-    int64_t C = input_shape[1];
-    int64_t L_in = input_shape[2];
-    int64_t L_out = calculate_pool_output_size(L_in, kernel_size_, stride_, padding_, ceil_mode_);
+    Device device = input.tensor().device();
+    std::vector<int64_t> in_shape_vec(input_shape.begin(), input_shape.end());
 
-    auto dtype = input.tensor().dtype();
-    auto output = zeros({N, C, L_out}, dtype, input.tensor().device());
+    OpAttributes fwd_attrs;
+    fwd_attrs.set(AttrKey::KernelSize, kernel_size_);
+    fwd_attrs.set(AttrKey::Stride, stride_);
+    fwd_attrs.set(AttrKey::Padding, padding_);
 
-    if (input.tensor().device().type == Device::Type::CPU) {
-        if (dtype == DType::Float32) {
-            const float* in_data = input.tensor().data<float>();
-            float* out_data = output.data<float>();
+    std::vector<Tensor> inputs = {input.tensor()};
+    auto fwd_result = dispatch_to_device(OpId::MaxPool1dForward, device.type, inputs, fwd_attrs);
+    Tensor output = fwd_result[0];
+    Tensor indices = fwd_result[1];
 
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t l = 0; l < L_out; ++l) {
-                        int64_t l_start = l * stride_ - padding_;
-                        float max_val = -std::numeric_limits<float>::infinity();
-                        for (int64_t k = 0; k < kernel_size_; ++k) {
-                            int64_t li = l_start + k;
-                            if (li >= 0 && li < L_in) {
-                                float val = in_data[(n * C + c) * L_in + li];
-                                if (val > max_val) max_val = val;
-                            }
-                        }
-                        out_data[(n * C + c) * L_out + l] = max_val;
-                    }
-                }
-            }
-        } else if (dtype == DType::Float64) {
-            const double* in_data = input.tensor().data<double>();
-            double* out_data = output.data<double>();
+    auto result = Variable(output, input.requires_grad());
 
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t l = 0; l < L_out; ++l) {
-                        int64_t l_start = l * stride_ - padding_;
-                        double max_val = -std::numeric_limits<double>::infinity();
-                        for (int64_t k = 0; k < kernel_size_; ++k) {
-                            int64_t li = l_start + k;
-                            if (li >= 0 && li < L_in) {
-                                double val = in_data[(n * C + c) * L_in + li];
-                                if (val > max_val) max_val = val;
-                            }
-                        }
-                        out_data[(n * C + c) * L_out + l] = max_val;
-                    }
-                }
-            }
-        } else {
-            throw std::runtime_error("MaxPool1d: unsupported dtype");
-        }
+    if (input.requires_grad()) {
+        auto backward_fn = std::make_shared<MaxPoolNdBackward<OpId::MaxPool1dBackward>>(
+            in_shape_vec, indices);
+        wire_grad_fn(result, input, backward_fn);
     }
 
-    return Variable(output, input.requires_grad());
+    return result;
 }
 
 // ============================================================================
@@ -1452,63 +1362,27 @@ auto AvgPool1d::forward_impl(const Variable& input) -> Variable {
         throw std::invalid_argument("AvgPool1d expects 3D input [batch, channels, length]");
     }
 
-    int64_t N = input_shape[0];
-    int64_t C = input_shape[1];
-    int64_t L_in = input_shape[2];
-    int64_t L_out = calculate_pool_output_size(L_in, kernel_size_, stride_, padding_);
+    Device device = input.tensor().device();
+    std::vector<int64_t> in_shape_vec(input_shape.begin(), input_shape.end());
 
-    auto dtype = input.tensor().dtype();
-    auto output = zeros({N, C, L_out}, dtype, input.tensor().device());
+    OpAttributes fwd_attrs;
+    fwd_attrs.set(AttrKey::KernelSize, kernel_size_);
+    fwd_attrs.set(AttrKey::Stride, stride_);
+    fwd_attrs.set(AttrKey::Padding, padding_);
 
-    if (input.tensor().device().type == Device::Type::CPU) {
-        if (dtype == DType::Float32) {
-            const float* in_data = input.tensor().data<float>();
-            float* out_data = output.data<float>();
+    std::vector<Tensor> inputs = {input.tensor()};
+    auto fwd_result = dispatch_to_device(OpId::AvgPool1dForward, device.type, inputs, fwd_attrs);
+    Tensor output = fwd_result[0];
 
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t l = 0; l < L_out; ++l) {
-                        int64_t l_start = l * stride_ - padding_;
-                        float sum = 0.0f;
-                        int64_t count = 0;
-                        for (int64_t k = 0; k < kernel_size_; ++k) {
-                            int64_t li = l_start + k;
-                            if (li >= 0 && li < L_in) {
-                                sum += in_data[(n * C + c) * L_in + li];
-                                ++count;
-                            }
-                        }
-                        out_data[(n * C + c) * L_out + l] = count > 0 ? sum / static_cast<float>(count) : 0.0f;
-                    }
-                }
-            }
-        } else if (dtype == DType::Float64) {
-            const double* in_data = input.tensor().data<double>();
-            double* out_data = output.data<double>();
+    auto result = Variable(output, input.requires_grad());
 
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t l = 0; l < L_out; ++l) {
-                        int64_t l_start = l * stride_ - padding_;
-                        double sum = 0.0;
-                        int64_t count = 0;
-                        for (int64_t k = 0; k < kernel_size_; ++k) {
-                            int64_t li = l_start + k;
-                            if (li >= 0 && li < L_in) {
-                                sum += in_data[(n * C + c) * L_in + li];
-                                ++count;
-                            }
-                        }
-                        out_data[(n * C + c) * L_out + l] = count > 0 ? sum / static_cast<double>(count) : 0.0;
-                    }
-                }
-            }
-        } else {
-            throw std::runtime_error("AvgPool1d: unsupported dtype");
-        }
+    if (input.requires_grad()) {
+        auto backward_fn = std::make_shared<AvgPoolNdBackward<OpId::AvgPool1dBackward>>(
+            in_shape_vec, kernel_size_, stride_, padding_);
+        wire_grad_fn(result, input, backward_fn);
     }
 
-    return Variable(output, input.requires_grad());
+    return result;
 }
 
 // ============================================================================
@@ -1526,55 +1400,26 @@ auto AdaptiveAvgPool1d::forward_impl(const Variable& input) -> Variable {
         throw std::invalid_argument("AdaptiveAvgPool1d expects 3D input [batch, channels, length]");
     }
 
-    int64_t N = input_shape[0];
-    int64_t C = input_shape[1];
-    int64_t L_in = input_shape[2];
-    int64_t L_out = output_size_;
+    Device device = input.tensor().device();
+    std::vector<int64_t> in_shape_vec(input_shape.begin(), input_shape.end());
 
-    auto dtype = input.tensor().dtype();
-    auto output = zeros({N, C, L_out}, dtype, input.tensor().device());
+    OpAttributes fwd_attrs;
+    fwd_attrs.set(AttrKey::OutputSize, output_size_);
 
-    if (input.tensor().device().type == Device::Type::CPU) {
-        if (dtype == DType::Float32) {
-            const float* in_data = input.tensor().data<float>();
-            float* out_data = output.data<float>();
+    std::vector<Tensor> inputs = {input.tensor()};
+    auto fwd_result = dispatch_to_device(OpId::AdaptiveAvgPool1d, device.type, inputs, fwd_attrs);
+    Tensor output = fwd_result[0];
 
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t l = 0; l < L_out; ++l) {
-                        int64_t l_start = l * L_in / L_out;
-                        int64_t l_end = (l + 1) * L_in / L_out;
-                        float sum = 0.0f;
-                        for (int64_t li = l_start; li < l_end; ++li) {
-                            sum += in_data[(n * C + c) * L_in + li];
-                        }
-                        out_data[(n * C + c) * L_out + l] = sum / static_cast<float>(l_end - l_start);
-                    }
-                }
-            }
-        } else if (dtype == DType::Float64) {
-            const double* in_data = input.tensor().data<double>();
-            double* out_data = output.data<double>();
+    auto result = Variable(output, input.requires_grad());
 
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t l = 0; l < L_out; ++l) {
-                        int64_t l_start = l * L_in / L_out;
-                        int64_t l_end = (l + 1) * L_in / L_out;
-                        double sum = 0.0;
-                        for (int64_t li = l_start; li < l_end; ++li) {
-                            sum += in_data[(n * C + c) * L_in + li];
-                        }
-                        out_data[(n * C + c) * L_out + l] = sum / static_cast<double>(l_end - l_start);
-                    }
-                }
-            }
-        } else {
-            throw std::runtime_error("AdaptiveAvgPool1d: unsupported dtype");
-        }
+    if (input.requires_grad()) {
+        // AdaptiveAvgPool backward only needs the input shape (no kernel/stride/padding).
+        auto backward_fn = std::make_shared<AvgPoolNdBackward<OpId::AdaptiveAvgPool1dBackward>>(
+            in_shape_vec, /*kernel_size=*/0, /*stride=*/0, /*padding=*/0);
+        wire_grad_fn(result, input, backward_fn);
     }
 
-    return Variable(output, input.requires_grad());
+    return result;
 }
 
 // ============================================================================
@@ -1676,57 +1521,26 @@ auto AdaptiveMaxPool1d::forward_impl(const Variable& input) -> Variable {
         throw std::invalid_argument("AdaptiveMaxPool1d expects 3D input [batch, channels, length]");
     }
 
-    int64_t N = input_shape[0];
-    int64_t C = input_shape[1];
-    int64_t L_in = input_shape[2];
-    int64_t L_out = output_size_;
+    Device device = input.tensor().device();
+    std::vector<int64_t> in_shape_vec(input_shape.begin(), input_shape.end());
 
-    auto dtype = input.tensor().dtype();
-    auto output = zeros({N, C, L_out}, dtype, input.tensor().device());
+    OpAttributes fwd_attrs;
+    fwd_attrs.set(AttrKey::OutputSize, output_size_);
 
-    if (input.tensor().device().type == Device::Type::CPU) {
-        if (dtype == DType::Float32) {
-            const float* in_data = input.tensor().data<float>();
-            float* out_data = output.data<float>();
+    std::vector<Tensor> inputs = {input.tensor()};
+    auto fwd_result = dispatch_to_device(OpId::AdaptiveMaxPool1d, device.type, inputs, fwd_attrs);
+    Tensor output = fwd_result[0];
+    Tensor indices = fwd_result[1];
 
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t l = 0; l < L_out; ++l) {
-                        int64_t l_start = l * L_in / L_out;
-                        int64_t l_end = (l + 1) * L_in / L_out;
-                        float max_val = -std::numeric_limits<float>::infinity();
-                        for (int64_t li = l_start; li < l_end; ++li) {
-                            float val = in_data[(n * C + c) * L_in + li];
-                            if (val > max_val) max_val = val;
-                        }
-                        out_data[(n * C + c) * L_out + l] = max_val;
-                    }
-                }
-            }
-        } else if (dtype == DType::Float64) {
-            const double* in_data = input.tensor().data<double>();
-            double* out_data = output.data<double>();
+    auto result = Variable(output, input.requires_grad());
 
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t l = 0; l < L_out; ++l) {
-                        int64_t l_start = l * L_in / L_out;
-                        int64_t l_end = (l + 1) * L_in / L_out;
-                        double max_val = -std::numeric_limits<double>::infinity();
-                        for (int64_t li = l_start; li < l_end; ++li) {
-                            double val = in_data[(n * C + c) * L_in + li];
-                            if (val > max_val) max_val = val;
-                        }
-                        out_data[(n * C + c) * L_out + l] = max_val;
-                    }
-                }
-            }
-        } else {
-            throw std::runtime_error("AdaptiveMaxPool1d: unsupported dtype");
-        }
+    if (input.requires_grad()) {
+        auto backward_fn = std::make_shared<MaxPoolNdBackward<OpId::AdaptiveMaxPool1dBackward>>(
+            in_shape_vec, indices);
+        wire_grad_fn(result, input, backward_fn);
     }
 
-    return Variable(output, input.requires_grad());
+    return result;
 }
 
 // ============================================================================
@@ -1746,87 +1560,28 @@ auto AdaptiveMaxPool3d::forward_impl(const Variable& input) -> Variable {
         throw std::invalid_argument("AdaptiveMaxPool3d expects 5D input [batch, channels, depth, height, width]");
     }
 
-    int64_t N = input_shape[0];
-    int64_t C = input_shape[1];
-    int64_t D_in = input_shape[2];
-    int64_t H_in = input_shape[3];
-    int64_t W_in = input_shape[4];
-    int64_t D_out = output_d_;
-    int64_t H_out = output_h_;
-    int64_t W_out = output_w_;
+    Device device = input.tensor().device();
+    std::vector<int64_t> in_shape_vec(input_shape.begin(), input_shape.end());
 
-    auto dtype = input.tensor().dtype();
-    auto output = zeros({N, C, D_out, H_out, W_out}, dtype, input.tensor().device());
+    OpAttributes fwd_attrs;
+    fwd_attrs.set(AttrKey::OutputSizeD, output_d_);
+    fwd_attrs.set(AttrKey::OutputSizeH, output_h_);
+    fwd_attrs.set(AttrKey::OutputSizeW, output_w_);
 
-    if (input.tensor().device().type == Device::Type::CPU) {
-        if (dtype == DType::Float32) {
-            const float* in_data = input.tensor().data<float>();
-            float* out_data = output.data<float>();
+    std::vector<Tensor> inputs = {input.tensor()};
+    auto fwd_result = dispatch_to_device(OpId::AdaptiveMaxPool3d, device.type, inputs, fwd_attrs);
+    Tensor output = fwd_result[0];
+    Tensor indices = fwd_result[1];
 
-            #pragma omp parallel for collapse(2) if(N * C > 4)
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t d = 0; d < D_out; ++d) {
-                        int64_t d_start = d * D_in / D_out;
-                        int64_t d_end = (d + 1) * D_in / D_out;
-                        for (int64_t h = 0; h < H_out; ++h) {
-                            int64_t h_start = h * H_in / H_out;
-                            int64_t h_end = (h + 1) * H_in / H_out;
-                            for (int64_t w = 0; w < W_out; ++w) {
-                                int64_t w_start = w * W_in / W_out;
-                                int64_t w_end = (w + 1) * W_in / W_out;
-                                float max_val = -std::numeric_limits<float>::infinity();
-                                for (int64_t di = d_start; di < d_end; ++di) {
-                                    for (int64_t hi = h_start; hi < h_end; ++hi) {
-                                        for (int64_t wi = w_start; wi < w_end; ++wi) {
-                                            float val = in_data[((n * C + c) * D_in + di) * H_in * W_in + hi * W_in + wi];
-                                            if (val > max_val) max_val = val;
-                                        }
-                                    }
-                                }
-                                out_data[((n * C + c) * D_out + d) * H_out * W_out + h * W_out + w] = max_val;
-                            }
-                        }
-                    }
-                }
-            }
-        } else if (dtype == DType::Float64) {
-            const double* in_data = input.tensor().data<double>();
-            double* out_data = output.data<double>();
+    auto result = Variable(output, input.requires_grad());
 
-            #pragma omp parallel for collapse(2) if(N * C > 4)
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t d = 0; d < D_out; ++d) {
-                        int64_t d_start = d * D_in / D_out;
-                        int64_t d_end = (d + 1) * D_in / D_out;
-                        for (int64_t h = 0; h < H_out; ++h) {
-                            int64_t h_start = h * H_in / H_out;
-                            int64_t h_end = (h + 1) * H_in / H_out;
-                            for (int64_t w = 0; w < W_out; ++w) {
-                                int64_t w_start = w * W_in / W_out;
-                                int64_t w_end = (w + 1) * W_in / W_out;
-                                double max_val = -std::numeric_limits<double>::infinity();
-                                for (int64_t di = d_start; di < d_end; ++di) {
-                                    for (int64_t hi = h_start; hi < h_end; ++hi) {
-                                        for (int64_t wi = w_start; wi < w_end; ++wi) {
-                                            double val = in_data[((n * C + c) * D_in + di) * H_in * W_in + hi * W_in + wi];
-                                            if (val > max_val) max_val = val;
-                                        }
-                                    }
-                                }
-                                out_data[((n * C + c) * D_out + d) * H_out * W_out + h * W_out + w] = max_val;
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            throw std::runtime_error("AdaptiveMaxPool3d: unsupported dtype");
-        }
+    if (input.requires_grad()) {
+        auto backward_fn = std::make_shared<MaxPoolNdBackward<OpId::AdaptiveMaxPool3dBackward>>(
+            in_shape_vec, indices);
+        wire_grad_fn(result, input, backward_fn);
     }
 
-    return Variable(output, input.requires_grad());
+    return result;
 }
 
 // ============================================================================
@@ -1846,89 +1601,28 @@ auto AdaptiveAvgPool3d::forward_impl(const Variable& input) -> Variable {
         throw std::invalid_argument("AdaptiveAvgPool3d expects 5D input [batch, channels, depth, height, width]");
     }
 
-    int64_t N = input_shape[0];
-    int64_t C = input_shape[1];
-    int64_t D_in = input_shape[2];
-    int64_t H_in = input_shape[3];
-    int64_t W_in = input_shape[4];
-    int64_t D_out = output_d_;
-    int64_t H_out = output_h_;
-    int64_t W_out = output_w_;
+    Device device = input.tensor().device();
+    std::vector<int64_t> in_shape_vec(input_shape.begin(), input_shape.end());
 
-    auto dtype = input.tensor().dtype();
-    auto output = zeros({N, C, D_out, H_out, W_out}, dtype, input.tensor().device());
+    OpAttributes fwd_attrs;
+    fwd_attrs.set(AttrKey::OutputSizeD, output_d_);
+    fwd_attrs.set(AttrKey::OutputSizeH, output_h_);
+    fwd_attrs.set(AttrKey::OutputSizeW, output_w_);
 
-    if (input.tensor().device().type == Device::Type::CPU) {
-        if (dtype == DType::Float32) {
-            const float* in_data = input.tensor().data<float>();
-            float* out_data = output.data<float>();
+    std::vector<Tensor> inputs = {input.tensor()};
+    auto fwd_result = dispatch_to_device(OpId::AdaptiveAvgPool3d, device.type, inputs, fwd_attrs);
+    Tensor output = fwd_result[0];
 
-            #pragma omp parallel for collapse(2) if(N * C > 4)
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t d = 0; d < D_out; ++d) {
-                        int64_t d_start = d * D_in / D_out;
-                        int64_t d_end = (d + 1) * D_in / D_out;
-                        for (int64_t h = 0; h < H_out; ++h) {
-                            int64_t h_start = h * H_in / H_out;
-                            int64_t h_end = (h + 1) * H_in / H_out;
-                            for (int64_t w = 0; w < W_out; ++w) {
-                                int64_t w_start = w * W_in / W_out;
-                                int64_t w_end = (w + 1) * W_in / W_out;
-                                float sum = 0.0f;
-                                int64_t count = (d_end - d_start) * (h_end - h_start) * (w_end - w_start);
-                                for (int64_t di = d_start; di < d_end; ++di) {
-                                    for (int64_t hi = h_start; hi < h_end; ++hi) {
-                                        for (int64_t wi = w_start; wi < w_end; ++wi) {
-                                            sum += in_data[((n * C + c) * D_in + di) * H_in * W_in + hi * W_in + wi];
-                                        }
-                                    }
-                                }
-                                out_data[((n * C + c) * D_out + d) * H_out * W_out + h * W_out + w] =
-                                    count > 0 ? sum / static_cast<float>(count) : 0.0f;
-                            }
-                        }
-                    }
-                }
-            }
-        } else if (dtype == DType::Float64) {
-            const double* in_data = input.tensor().data<double>();
-            double* out_data = output.data<double>();
+    auto result = Variable(output, input.requires_grad());
 
-            #pragma omp parallel for collapse(2) if(N * C > 4)
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t d = 0; d < D_out; ++d) {
-                        int64_t d_start = d * D_in / D_out;
-                        int64_t d_end = (d + 1) * D_in / D_out;
-                        for (int64_t h = 0; h < H_out; ++h) {
-                            int64_t h_start = h * H_in / H_out;
-                            int64_t h_end = (h + 1) * H_in / H_out;
-                            for (int64_t w = 0; w < W_out; ++w) {
-                                int64_t w_start = w * W_in / W_out;
-                                int64_t w_end = (w + 1) * W_in / W_out;
-                                double sum = 0.0;
-                                int64_t count = (d_end - d_start) * (h_end - h_start) * (w_end - w_start);
-                                for (int64_t di = d_start; di < d_end; ++di) {
-                                    for (int64_t hi = h_start; hi < h_end; ++hi) {
-                                        for (int64_t wi = w_start; wi < w_end; ++wi) {
-                                            sum += in_data[((n * C + c) * D_in + di) * H_in * W_in + hi * W_in + wi];
-                                        }
-                                    }
-                                }
-                                out_data[((n * C + c) * D_out + d) * H_out * W_out + h * W_out + w] =
-                                    count > 0 ? sum / static_cast<double>(count) : 0.0;
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            throw std::runtime_error("AdaptiveAvgPool3d: unsupported dtype");
-        }
+    if (input.requires_grad()) {
+        // Adaptive pool backward only needs the input shape.
+        auto backward_fn = std::make_shared<AvgPoolNdBackward<OpId::AdaptiveAvgPool3dBackward>>(
+            in_shape_vec, /*kernel_size=*/0, /*stride=*/0, /*padding=*/0);
+        wire_grad_fn(result, input, backward_fn);
     }
 
-    return Variable(output, input.requires_grad());
+    return result;
 }
 
 } // namespace tenzor::nn

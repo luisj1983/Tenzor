@@ -30,3 +30,8 @@ tenzor_discover_tests(test_control_flow_compile LABELS "jit" DISCOVERY_TIMEOUT 6
 add_executable(test_dynamic_shapes test_dynamic_shapes.cpp)
 target_link_libraries(test_dynamic_shapes PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_dynamic_shapes LABELS "jit" DISCOVERY_TIMEOUT 60)
+
+# Low-level Graph/Tracer API tests (recreated as fresh test in follow-up cleanup)
+add_executable(test_jit_lowlevel test_jit_lowlevel.cpp)
+target_link_libraries(test_jit_lowlevel PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_jit_lowlevel LABELS "jit" DISCOVERY_TIMEOUT 60)

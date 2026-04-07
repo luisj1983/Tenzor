@@ -131,6 +131,50 @@ TEST_P(EmbeddingBagMultiDTypeTest, ForwardSingleBag) {
 }
 
 // ============================================================================
+// Numerical Correctness Tests
+// ============================================================================
+
+TEST_P(EmbeddingBagMultiDTypeTest, SumModeMatchesManualSum) {
+    skipIfIntegerDtype();
+    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
+        GTEST_SKIP() << "Numerical correctness check requires Float32/Float64";
+    }
+    nn::EmbeddingBag emb(5, 3, 0.0, 2.0, false, "sum");
+    convert_model(emb);
+
+    // Set the embedding table to a known pattern: row i = [i, i+1, i+2]
+    auto params = emb.parameters();
+    ASSERT_FALSE(params.empty());
+    auto cpu_table = tenzor::zeros({5, 3}, DType::Float32, Device::cpu());
+    auto* tbl = cpu_table.data<float>();
+    for (int64_t i = 0; i < 5; ++i) {
+        tbl[i * 3 + 0] = static_cast<float>(i);
+        tbl[i * 3 + 1] = static_cast<float>(i + 1);
+        tbl[i * 3 + 2] = static_cast<float>(i + 2);
+    }
+    auto target_table = cpu_table.to(dtype()).to(device());
+    // Replace parameter tensor in-place: zero then add target.
+    params[0]->tensor().zero_();
+    params[0]->tensor() += target_table;
+
+    // Bag 0: indices [0, 1] → row0+row1 = [0+1, 1+2, 2+3] = [1, 3, 5]
+    // Bag 1: indices [2, 3, 4] → row2+row3+row4 = [2+3+4, 3+4+5, 4+5+6] = [9, 12, 15]
+    auto indices = makeInt64Tensor({0, 1, 2, 3, 4});
+    auto offsets = makeInt64Tensor({0, 2});
+    auto output = emb.forward(Variable(indices, false), Variable(offsets, false));
+
+    auto cpu_out = output.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* out_data = cpu_out.data<float>();
+    float tol = std::max(atol() * 100.0f, 1e-3f);
+    EXPECT_NEAR(out_data[0], 1.0f, tol);
+    EXPECT_NEAR(out_data[1], 3.0f, tol);
+    EXPECT_NEAR(out_data[2], 5.0f, tol);
+    EXPECT_NEAR(out_data[3], 9.0f, tol);
+    EXPECT_NEAR(out_data[4], 12.0f, tol);
+    EXPECT_NEAR(out_data[5], 15.0f, tol);
+}
+
+// ============================================================================
 // Instantiation
 // ============================================================================
 
