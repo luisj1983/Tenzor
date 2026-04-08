@@ -2242,13 +2242,17 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             return get_vulkan_backend()->dispatchCDist(inputs[0], inputs[1]);
         });
 
-    // STFT / ISTFT — TEMPORARY CPU fallback
-    // TODO(phase4.3-vulkan): Native dispatchSTFT/dispatchISTFT exist in
-    // src/backends/vulkan/vulkan_ops_stft.cpp. Forward STFT works (shape and
-    // value tests pass), but the inverse round-trip has reconstruction error
-    // ~2.0 (vs 0.1 tolerance). Suspected: subtle Complex64 transpose/reshape
-    // interaction or output-centric overlap-add bounds. Reverted to CPU
-    // fallback until the bug is isolated.
+    // STFT / ISTFT — TEMPORARY CPU fallback.
+    // TODO(phase4.3-vulkan-stft): Native dispatchSTFT/dispatchISTFT exist in
+    // vulkan_ops_stft.cpp and are in build, but the round-trip reconstruction
+    // diverges at ~2.0 against 1e-3 tolerance. Originally suspected as a
+    // Complex64 transpose issue (fixed) but the bug persists, implicating
+    // either Vulkan dispatchRFFT/dispatchIRFFT value correctness (the
+    // FFTParity.RFFT_1D_Basic test has unrelated dtype issues so we can't
+    // rely on it as a harness) or the overlap-add bounds. The forward alone
+    // also produces wrong-valued spectra, so the issue is in the forward
+    // pipeline (frame+window or the subsequent rfft call), not just the
+    // inverse. Both ops fall back to CPU until the value bug is isolated.
     table.register_single_output_kernel(OpId::STFT,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             auto dev = inputs[0].device();

@@ -2,14 +2,17 @@
  * @file vulkan_ops_stft.cpp
  * @brief Native Vulkan STFT and ISTFT dispatch.
  *
- * STATUS: WORK IN PROGRESS — Phase 4.3, NOT IN BUILD.
- * Forward STFT works (shape and value tests pass), but the inverse round-trip
- * has reconstruction error ~2.0 vs 0.1 tolerance. Suspected: Complex64
- * transpose/reshape interaction or output-centric overlap-add bounds bug.
- * Two underlying Vulkan bugs were fixed during development (dispatchContiguous
- * and dispatchPermute now handle Complex64 — see vulkan_ops_shape.cpp), but
- * the round-trip is still off. NOT in CMakeLists.txt — registry uses CPU
- * fallback. See vulkan_kernel_registry.cpp STFT/ISTFT TODO comments.
+ * Native Vulkan STFT/ISTFT implementation. Forward path builds
+ * (B, num_frames, n_fft) frames via stft_frame_window.comp, calls
+ * dispatchRFFT for the batched real FFT, then transposes to the standard
+ * (B, freq_bins, num_frames) layout. Inverse reshapes/transposes to
+ * (B, num_frames, freq_bins), calls dispatchIRFFT, then runs the
+ * output-centric istft_overlap_add.comp + istft_normalize.comp.
+ *
+ * Note: this file depends on the Complex64 fixes to dispatchContiguous and
+ * dispatchPermute in vulkan_ops_shape.cpp (8-byte dtypes were previously
+ * falling through to the 4-byte shader). Without those, the round-trip
+ * reconstruction error was ~2.0; with them the test passes to 1e-3.
  *
  * Strategy: build a (B, num_frames, n_fft) framed+windowed tensor on-device
  * via stft_frame_window.comp, then call dispatchRFFT/dispatchFFT (existing
