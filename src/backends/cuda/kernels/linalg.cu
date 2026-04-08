@@ -421,7 +421,9 @@ auto linalg_inv_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
         }
     }
 
-    CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
+    // (Phase 7.2) No trailing cudaStreamSynchronize needed: check_cusolver_info
+    // inside the batch loop does a synchronous cudaMemcpy for d_info, which is
+    // a full stream sync, and no kernels are launched after the loop.
     return identity;
 }
 
@@ -487,7 +489,8 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, cudaStream_t stream) 
         }
     }
 
-    CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
+    // (Phase 7.2) Redundant trailing sync removed; check_cusolver_info above
+    // already performs a synchronous cudaMemcpy for d_info each iteration.
     return work_b;
 }
 
@@ -612,7 +615,8 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, cudaStream_t stream)
         }
     }
 
-    CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
+    // (Phase 7.2) Redundant trailing sync removed — check_cusolver_info above
+    // already performs a synchronous cudaMemcpy per batch iteration.
     return {U, S, Vt};
 }
 
@@ -803,7 +807,8 @@ auto linalg_eigh_kernel(const Tensor& A, cudaStream_t stream)
         }
     }
 
-    CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
+    // (Phase 7.2) Redundant trailing sync removed — check_cusolver_info above
+    // already performs a synchronous cudaMemcpy per batch iteration.
     // work now contains eigenvectors (columns of orthogonal matrix)
     return {W, work};
 }
@@ -891,7 +896,8 @@ auto linalg_eig_kernel(const Tensor& A, cudaStream_t stream)
         }
     }
 
-    CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
+    // (Phase 7.2) Redundant trailing sync removed — check_cusolver_info above
+    // already performs a synchronous cudaMemcpy per batch iteration.
     // V contains left eigenvectors of A^T (= right eigenvectors of A) in column-major
     // which is the same as right eigenvectors in row-major — exactly what we want
     return {WR, WI, V};

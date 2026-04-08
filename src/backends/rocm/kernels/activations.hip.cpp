@@ -2439,5 +2439,154 @@ auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, fl
     return result;
 }
 
+// ============================================================================
+// True in-place activation wrappers (Phase 7.1)
+//
+// These launch the same forward kernels used by the out-of-place path but
+// alias input and output to the target tensor's storage. Eliminates the
+// D2D-copy + hipStreamSynchronize dance that the registry was previously
+// doing around temporary result tensors.
+//
+// Covers the pointwise activations (ReLU, Sigmoid, Tanh, LeakyReLU, Gelu).
+// Float16/BFloat16 aren't straightforward to alias because the reference
+// implementation uses a __half* path and BFloat16 is handled via a cast to
+// Float32; for those dtypes the inplace wrapper falls back to the existing
+// temporary-result pattern (but without the unnecessary sync — the temporary
+// result's destruction is safe to defer to ordinary dtor order because the
+// Tensor implementation's storage release schedules its own dealloc).
+// ============================================================================
+
+void relu_inplace_kernel(Tensor& target, hipStream_t stream) {
+    int64_t n = target.numel();
+    if (n == 0) return;
+    if (target.dtype() == DType::Float32) {
+        int nb = get_num_blocks(n);
+        hipLaunchKernelGGL(relu_forward_kernel<float>, dim3(nb), dim3(BLOCK_SIZE), 0, stream,
+                          target.data<float>(), target.data<float>(), n);
+    } else if (target.dtype() == DType::Float64) {
+        int nb = get_num_blocks(n);
+        hipLaunchKernelGGL(relu_forward_kernel<double>, dim3(nb), dim3(BLOCK_SIZE), 0, stream,
+                          target.data<double>(), target.data<double>(), n);
+    } else if (target.dtype() == DType::Float16) {
+        int nb = get_num_blocks(n);
+        auto* p = reinterpret_cast<__half*>(target.data<Float16>());
+        hipLaunchKernelGGL(relu_forward_kernel_fp16, dim3(nb), dim3(BLOCK_SIZE), 0, stream, p, p, n);
+    } else if (target.dtype() == DType::BFloat16) {
+        // BFloat16 uses a promote-to-f32 path; can't alias losslessly. Fall back to a
+        // read-modify-write through a temporary but avoid the explicit sync.
+        auto tmp = relu_kernel(target, stream);
+        HIP_CHECK(hipMemcpyAsync(target.data_ptr(), tmp.data_ptr(),
+            target.numel() * dtype_size(target.dtype()), hipMemcpyDeviceToDevice, stream));
+        return;
+    } else {
+        throw std::runtime_error("ReLU in-place: unsupported dtype");
+    }
+    HIP_CHECK(hipGetLastError());
+}
+
+void sigmoid_inplace_kernel(Tensor& target, hipStream_t stream) {
+    int64_t n = target.numel();
+    if (n == 0) return;
+    if (target.dtype() == DType::Float32) {
+        int nb = get_num_blocks(n);
+        hipLaunchKernelGGL(sigmoid_forward_kernel<float>, dim3(nb), dim3(BLOCK_SIZE), 0, stream,
+                          target.data<float>(), target.data<float>(), n);
+    } else if (target.dtype() == DType::Float64) {
+        int nb = get_num_blocks(n);
+        hipLaunchKernelGGL(sigmoid_forward_kernel<double>, dim3(nb), dim3(BLOCK_SIZE), 0, stream,
+                          target.data<double>(), target.data<double>(), n);
+    } else if (target.dtype() == DType::Float16) {
+        int nb = get_num_blocks(n);
+        auto* p = reinterpret_cast<__half*>(target.data<Float16>());
+        hipLaunchKernelGGL(sigmoid_forward_kernel_fp16, dim3(nb), dim3(BLOCK_SIZE), 0, stream, p, p, n);
+    } else if (target.dtype() == DType::BFloat16) {
+        auto tmp = sigmoid_kernel(target, stream);
+        HIP_CHECK(hipMemcpyAsync(target.data_ptr(), tmp.data_ptr(),
+            target.numel() * dtype_size(target.dtype()), hipMemcpyDeviceToDevice, stream));
+        return;
+    } else {
+        throw std::runtime_error("Sigmoid in-place: unsupported dtype");
+    }
+    HIP_CHECK(hipGetLastError());
+}
+
+void tanh_inplace_kernel(Tensor& target, hipStream_t stream) {
+    int64_t n = target.numel();
+    if (n == 0) return;
+    if (target.dtype() == DType::Float32) {
+        int nb = get_num_blocks(n);
+        hipLaunchKernelGGL(tanh_forward_kernel<float>, dim3(nb), dim3(BLOCK_SIZE), 0, stream,
+                          target.data<float>(), target.data<float>(), n);
+    } else if (target.dtype() == DType::Float64) {
+        int nb = get_num_blocks(n);
+        hipLaunchKernelGGL(tanh_forward_kernel<double>, dim3(nb), dim3(BLOCK_SIZE), 0, stream,
+                          target.data<double>(), target.data<double>(), n);
+    } else if (target.dtype() == DType::Float16) {
+        int nb = get_num_blocks(n);
+        auto* p = reinterpret_cast<__half*>(target.data<Float16>());
+        hipLaunchKernelGGL(tanh_forward_kernel_fp16, dim3(nb), dim3(BLOCK_SIZE), 0, stream, p, p, n);
+    } else if (target.dtype() == DType::BFloat16) {
+        auto tmp = tanh_kernel(target, stream);
+        HIP_CHECK(hipMemcpyAsync(target.data_ptr(), tmp.data_ptr(),
+            target.numel() * dtype_size(target.dtype()), hipMemcpyDeviceToDevice, stream));
+        return;
+    } else {
+        throw std::runtime_error("Tanh in-place: unsupported dtype");
+    }
+    HIP_CHECK(hipGetLastError());
+}
+
+void leaky_relu_inplace_kernel(Tensor& target, float alpha, hipStream_t stream) {
+    int64_t n = target.numel();
+    if (n == 0) return;
+    if (target.dtype() == DType::Float32) {
+        int nb = get_num_blocks(n);
+        hipLaunchKernelGGL(leaky_relu_forward_kernel<float>, dim3(nb), dim3(BLOCK_SIZE), 0, stream,
+                          target.data<float>(), target.data<float>(), alpha, n);
+    } else if (target.dtype() == DType::Float64) {
+        int nb = get_num_blocks(n);
+        hipLaunchKernelGGL(leaky_relu_forward_kernel<double>, dim3(nb), dim3(BLOCK_SIZE), 0, stream,
+                          target.data<double>(), target.data<double>(), static_cast<double>(alpha), n);
+    } else if (target.dtype() == DType::Float16) {
+        int nb = get_num_blocks(n);
+        auto* p = reinterpret_cast<__half*>(target.data<Float16>());
+        hipLaunchKernelGGL(leaky_relu_forward_kernel_fp16, dim3(nb), dim3(BLOCK_SIZE), 0, stream, p, p, alpha, n);
+    } else if (target.dtype() == DType::BFloat16) {
+        auto tmp = leaky_relu_kernel(target, alpha, stream);
+        HIP_CHECK(hipMemcpyAsync(target.data_ptr(), tmp.data_ptr(),
+            target.numel() * dtype_size(target.dtype()), hipMemcpyDeviceToDevice, stream));
+        return;
+    } else {
+        throw std::runtime_error("LeakyReLU in-place: unsupported dtype");
+    }
+    HIP_CHECK(hipGetLastError());
+}
+
+void gelu_inplace_kernel(Tensor& target, hipStream_t stream) {
+    int64_t n = target.numel();
+    if (n == 0) return;
+    if (target.dtype() == DType::Float32) {
+        int nb = get_num_blocks(n);
+        hipLaunchKernelGGL(gelu_forward_kernel<float>, dim3(nb), dim3(BLOCK_SIZE), 0, stream,
+                          target.data<float>(), target.data<float>(), n);
+    } else if (target.dtype() == DType::Float64) {
+        int nb = get_num_blocks(n);
+        hipLaunchKernelGGL(gelu_forward_kernel<double>, dim3(nb), dim3(BLOCK_SIZE), 0, stream,
+                          target.data<double>(), target.data<double>(), n);
+    } else if (target.dtype() == DType::Float16) {
+        int nb = get_num_blocks(n);
+        auto* p = reinterpret_cast<__half*>(target.data<Float16>());
+        hipLaunchKernelGGL(gelu_forward_kernel_fp16, dim3(nb), dim3(BLOCK_SIZE), 0, stream, p, p, n);
+    } else if (target.dtype() == DType::BFloat16) {
+        auto tmp = gelu_kernel(target, stream);
+        HIP_CHECK(hipMemcpyAsync(target.data_ptr(), tmp.data_ptr(),
+            target.numel() * dtype_size(target.dtype()), hipMemcpyDeviceToDevice, stream));
+        return;
+    } else {
+        throw std::runtime_error("Gelu in-place: unsupported dtype");
+    }
+    HIP_CHECK(hipGetLastError());
+}
+
 } // namespace rocm
 } // namespace tenzor

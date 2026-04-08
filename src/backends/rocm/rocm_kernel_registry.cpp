@@ -250,6 +250,13 @@ namespace rocm {
     auto softplus_kernel(const Tensor& input, float beta, float threshold, hipStream_t stream) -> Tensor;
     auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, float beta, float threshold, hipStream_t stream) -> Tensor;
 
+    // In-place activation kernels (Phase 7.1) — direct aliased-in/out launches.
+    void relu_inplace_kernel(Tensor& target, hipStream_t stream);
+    void sigmoid_inplace_kernel(Tensor& target, hipStream_t stream);
+    void tanh_inplace_kernel(Tensor& target, hipStream_t stream);
+    void leaky_relu_inplace_kernel(Tensor& target, float alpha, hipStream_t stream);
+    void gelu_inplace_kernel(Tensor& target, hipStream_t stream);
+
     // Softmax operations
     auto softmax_kernel(const Tensor& input, int64_t dim, hipStream_t stream, float temperature = 1.0f) -> Tensor;
     auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, int64_t dim, hipStream_t stream) -> Tensor;
@@ -1107,51 +1114,32 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     // In-place activation operations
-    // NOTE: Each lambda creates a temporary result tensor, copies it back into target,
-    // then synchronizes the stream to ensure the copy completes before result is destroyed.
+    // Native in-place activations: Phase 7.1 cleanup. These call the forward
+    // kernel with aliased input/output pointers directly into target's storage,
+    // avoiding the temporary result + D2D copy + hipStreamSynchronize dance.
     table.register_inplace_kernel(OpId::ReLUInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
-        auto stream = get_hip_stream(attrs);
-        auto result = rocm::relu_kernel(target, stream);
-        HIP_CHECK(hipMemcpyAsync(target.data_ptr(), result.data_ptr(), target.numel() * dtype_size(target.dtype()),
-                       hipMemcpyDeviceToDevice, stream));
-        HIP_CHECK(hipStreamSynchronize(stream));
+        rocm::relu_inplace_kernel(target, get_hip_stream(attrs));
         return target;
     });
 
     table.register_inplace_kernel(OpId::SigmoidInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
-        auto stream = get_hip_stream(attrs);
-        auto result = rocm::sigmoid_kernel(target, stream);
-        HIP_CHECK(hipMemcpyAsync(target.data_ptr(), result.data_ptr(), target.numel() * dtype_size(target.dtype()),
-                       hipMemcpyDeviceToDevice, stream));
-        HIP_CHECK(hipStreamSynchronize(stream));
+        rocm::sigmoid_inplace_kernel(target, get_hip_stream(attrs));
         return target;
     });
 
     table.register_inplace_kernel(OpId::TanhInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
-        auto stream = get_hip_stream(attrs);
-        auto result = rocm::tanh_kernel(target, stream);
-        HIP_CHECK(hipMemcpyAsync(target.data_ptr(), result.data_ptr(), target.numel() * dtype_size(target.dtype()),
-                       hipMemcpyDeviceToDevice, stream));
-        HIP_CHECK(hipStreamSynchronize(stream));
+        rocm::tanh_inplace_kernel(target, get_hip_stream(attrs));
         return target;
     });
 
     table.register_inplace_kernel(OpId::LeakyReLUInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
-        auto stream = get_hip_stream(attrs);
         float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
-        auto result = rocm::leaky_relu_kernel(target, alpha, stream);
-        HIP_CHECK(hipMemcpyAsync(target.data_ptr(), result.data_ptr(), target.numel() * dtype_size(target.dtype()),
-                       hipMemcpyDeviceToDevice, stream));
-        HIP_CHECK(hipStreamSynchronize(stream));
+        rocm::leaky_relu_inplace_kernel(target, alpha, get_hip_stream(attrs));
         return target;
     });
 
     table.register_inplace_kernel(OpId::GeluInplace, [](Tensor& target, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
-        auto stream = get_hip_stream(attrs);
-        auto result = rocm::gelu_kernel(target, stream);
-        HIP_CHECK(hipMemcpyAsync(target.data_ptr(), result.data_ptr(), target.numel() * dtype_size(target.dtype()),
-                       hipMemcpyDeviceToDevice, stream));
-        HIP_CHECK(hipStreamSynchronize(stream));
+        rocm::gelu_inplace_kernel(target, get_hip_stream(attrs));
         return target;
     });
 
