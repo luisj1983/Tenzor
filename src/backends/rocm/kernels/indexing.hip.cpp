@@ -2764,5 +2764,316 @@ auto searchsorted_hip(const Tensor& sorted_sequence, const Tensor& values,
     return result;
 }
 
+// ============================================================================
+// AdvancedIndex / AdvancedIndexPut — native ROCm/HIP implementations
+// ============================================================================
+//
+// NumPy-style fancy indexing: gather elements from `src` using up to N index
+// tensors that broadcast to a common shape, with optional passthrough dims.
+// One thread per output element; each thread reads index values from the
+// indexed dims, computes a source offset, and copies its element.
+//
+// All indices arrive as Int64 (cast at the dispatch layer); empty (numel=0)
+// indices mark "full slice on this dim".
+//
+// MAX_ADV_INDEX_DIMS bounds the indexed-dim count and stride/shape buffers
+// stored in kernel argument arrays.
+
+namespace {
+constexpr int MAX_ADV_INDEX_DIMS = 16;
+}
+
+struct AdvancedIndexMeta {
+    int num_indices;
+    int src_ndim;
+    int num_pass_dims;
+    int64_t bc_numel;
+    int64_t pass_numel;
+    int64_t src_shape[MAX_ADV_INDEX_DIMS];
+    int64_t src_strides[MAX_ADV_INDEX_DIMS];
+    int pass_dims[MAX_ADV_INDEX_DIMS];
+    int is_indexed[MAX_ADV_INDEX_DIMS];
+};
+
+template<typename T>
+__global__ void advanced_index_gather_kernel_hip(
+    const T* __restrict__ src,
+    T* __restrict__ dst,
+    const int64_t* __restrict__ const* __restrict__ idx_ptrs,
+    AdvancedIndexMeta meta,
+    int64_t total_out
+) {
+    int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (out_idx >= total_out) return;
+
+    int64_t p = (meta.pass_numel > 0) ? (out_idx % meta.pass_numel) : 0;
+    int64_t bc = (meta.pass_numel > 0) ? (out_idx / meta.pass_numel) : out_idx;
+
+    int64_t src_offset = 0;
+    for (int i = 0; i < meta.num_indices; ++i) {
+        if (meta.is_indexed[i]) {
+            int64_t idx_val = idx_ptrs[i][bc];
+            if (idx_val < 0) idx_val += meta.src_shape[i];
+            src_offset += idx_val * meta.src_strides[i];
+        }
+    }
+
+    if (meta.num_pass_dims > 0) {
+        int64_t remaining = p;
+        for (int k = meta.num_pass_dims - 1; k >= 0; --k) {
+            int d = meta.pass_dims[k];
+            int64_t coord = remaining % meta.src_shape[d];
+            remaining /= meta.src_shape[d];
+            src_offset += coord * meta.src_strides[d];
+        }
+    }
+
+    dst[out_idx] = src[src_offset];
+}
+
+template<typename T>
+__global__ void advanced_index_put_kernel_hip(
+    T* __restrict__ dst,
+    const T* __restrict__ values,
+    const int64_t* __restrict__ const* __restrict__ idx_ptrs,
+    AdvancedIndexMeta meta,
+    int64_t total_out
+) {
+    int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (out_idx >= total_out) return;
+
+    int64_t p = (meta.pass_numel > 0) ? (out_idx % meta.pass_numel) : 0;
+    int64_t bc = (meta.pass_numel > 0) ? (out_idx / meta.pass_numel) : out_idx;
+
+    int64_t dst_offset = 0;
+    for (int i = 0; i < meta.num_indices; ++i) {
+        if (meta.is_indexed[i]) {
+            int64_t idx_val = idx_ptrs[i][bc];
+            if (idx_val < 0) idx_val += meta.src_shape[i];
+            dst_offset += idx_val * meta.src_strides[i];
+        }
+    }
+
+    if (meta.num_pass_dims > 0) {
+        int64_t remaining = p;
+        for (int k = meta.num_pass_dims - 1; k >= 0; --k) {
+            int d = meta.pass_dims[k];
+            int64_t coord = remaining % meta.src_shape[d];
+            remaining /= meta.src_shape[d];
+            dst_offset += coord * meta.src_strides[d];
+        }
+    }
+
+    dst[dst_offset] = values[out_idx];
+}
+
+namespace {
+
+struct PreparedAdvancedIndex {
+    AdvancedIndexMeta meta;
+    std::vector<int64_t> output_shape;
+    int64_t total;
+};
+
+inline PreparedAdvancedIndex prepare_advanced_index_hip(
+    const Tensor& src,
+    const Tensor* const* index_tensors,
+    int64_t num_indices
+) {
+    PreparedAdvancedIndex out{};
+    auto src_shape_span = src.shape();
+    int64_t src_ndim = static_cast<int64_t>(src_shape_span.size());
+    if (src_ndim > MAX_ADV_INDEX_DIMS) {
+        throw std::runtime_error("AdvancedIndex: source ndim exceeds MAX_ADV_INDEX_DIMS");
+    }
+    if (num_indices > MAX_ADV_INDEX_DIMS) {
+        throw std::runtime_error("AdvancedIndex: num_indices exceeds MAX_ADV_INDEX_DIMS");
+    }
+
+    out.meta.num_indices = static_cast<int>(num_indices);
+    out.meta.src_ndim = static_cast<int>(src_ndim);
+
+    for (int64_t i = 0; i < src_ndim; ++i) {
+        out.meta.src_shape[i] = src_shape_span[i];
+    }
+    out.meta.src_strides[src_ndim - 1] = 1;
+    for (int64_t d = src_ndim - 2; d >= 0; --d) {
+        out.meta.src_strides[d] = out.meta.src_strides[d + 1] * src_shape_span[d + 1];
+    }
+
+    std::vector<int64_t> broadcast_shape;
+    for (int i = 0; i < num_indices; ++i) {
+        if (index_tensors[i] != nullptr && index_tensors[i]->numel() > 0) {
+            out.meta.is_indexed[i] = 1;
+            if (broadcast_shape.empty()) {
+                auto s = index_tensors[i]->shape();
+                broadcast_shape.assign(s.begin(), s.end());
+            }
+        } else {
+            out.meta.is_indexed[i] = 0;
+        }
+    }
+    if (broadcast_shape.empty()) {
+        throw std::runtime_error("AdvancedIndex: at least one index tensor required");
+    }
+
+    out.output_shape = broadcast_shape;
+    int pass_count = 0;
+    for (int i = 0; i < num_indices; ++i) {
+        if (!out.meta.is_indexed[i]) {
+            out.output_shape.push_back(src_shape_span[i]);
+            out.meta.pass_dims[pass_count++] = i;
+        }
+    }
+    for (int64_t i = num_indices; i < src_ndim; ++i) {
+        out.output_shape.push_back(src_shape_span[i]);
+        out.meta.pass_dims[pass_count++] = static_cast<int>(i);
+    }
+    out.meta.num_pass_dims = pass_count;
+
+    out.meta.bc_numel = 1;
+    for (auto d : broadcast_shape) out.meta.bc_numel *= d;
+    out.meta.pass_numel = 1;
+    for (int k = 0; k < pass_count; ++k) {
+        out.meta.pass_numel *= src_shape_span[out.meta.pass_dims[k]];
+    }
+    out.total = out.meta.bc_numel * out.meta.pass_numel;
+    return out;
+}
+
+template<typename T>
+auto launch_advanced_index_gather_hip(
+    const Tensor& src,
+    const Tensor* const* index_tensors,
+    int64_t num_indices,
+    hipStream_t stream
+) -> Tensor {
+    auto prep = prepare_advanced_index_hip(src, index_tensors, num_indices);
+    Tensor src_contig = src.contiguous();
+    Tensor result(prep.output_shape, src.dtype(), src.device());
+    if (prep.total == 0) return result;
+
+    std::vector<const int64_t*> host_ptrs(num_indices, nullptr);
+    std::vector<Tensor> idx_contig(num_indices);
+    for (int i = 0; i < num_indices; ++i) {
+        if (prep.meta.is_indexed[i]) {
+            idx_contig[i] = index_tensors[i]->contiguous();
+            host_ptrs[i] = idx_contig[i].data<int64_t>();
+        }
+    }
+
+    const int64_t** d_idx_ptrs = nullptr;
+    HIP_CHECK(hipMalloc(&d_idx_ptrs, num_indices * sizeof(const int64_t*)));
+    HIP_CHECK(hipMemcpyAsync(d_idx_ptrs, host_ptrs.data(),
+                             num_indices * sizeof(const int64_t*),
+                             hipMemcpyHostToDevice, stream));
+
+    int threads = 256;
+    int blocks = static_cast<int>((prep.total + threads - 1) / threads);
+    hipLaunchKernelGGL(advanced_index_gather_kernel_hip<T>,
+        dim3(blocks), dim3(threads), 0, stream,
+        src_contig.data<T>(),
+        result.data<T>(),
+        d_idx_ptrs,
+        prep.meta,
+        prep.total);
+    HIP_POST_LAUNCH_CHECK();
+
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipFree(d_idx_ptrs));
+    return result;
+}
+
+template<typename T>
+auto launch_advanced_index_put_hip(
+    const Tensor& src,
+    const Tensor& values,
+    const Tensor* const* index_tensors,
+    int64_t num_indices,
+    hipStream_t stream
+) -> Tensor {
+    auto prep = prepare_advanced_index_hip(src, index_tensors, num_indices);
+    Tensor result = src.clone();
+    Tensor result_contig = result.contiguous();
+    Tensor values_contig = values.contiguous();
+    if (prep.total == 0) return result_contig;
+
+    std::vector<const int64_t*> host_ptrs(num_indices, nullptr);
+    std::vector<Tensor> idx_contig(num_indices);
+    for (int i = 0; i < num_indices; ++i) {
+        if (prep.meta.is_indexed[i]) {
+            idx_contig[i] = index_tensors[i]->contiguous();
+            host_ptrs[i] = idx_contig[i].data<int64_t>();
+        }
+    }
+
+    const int64_t** d_idx_ptrs = nullptr;
+    HIP_CHECK(hipMalloc(&d_idx_ptrs, num_indices * sizeof(const int64_t*)));
+    HIP_CHECK(hipMemcpyAsync(d_idx_ptrs, host_ptrs.data(),
+                             num_indices * sizeof(const int64_t*),
+                             hipMemcpyHostToDevice, stream));
+
+    int threads = 256;
+    int blocks = static_cast<int>((prep.total + threads - 1) / threads);
+    hipLaunchKernelGGL(advanced_index_put_kernel_hip<T>,
+        dim3(blocks), dim3(threads), 0, stream,
+        result_contig.data<T>(),
+        values_contig.data<T>(),
+        d_idx_ptrs,
+        prep.meta,
+        prep.total);
+    HIP_POST_LAUNCH_CHECK();
+
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipFree(d_idx_ptrs));
+    return result_contig;
+}
+
+}  // namespace
+
+auto advanced_index_rocm_kernel(
+    const Tensor& src, const std::vector<Tensor>& indices,
+    int64_t num_indices, hipStream_t stream) -> Tensor {
+    std::vector<const Tensor*> idx_ptrs(num_indices);
+    for (int64_t i = 0; i < num_indices; ++i) idx_ptrs[i] = &indices[i];
+
+    if (src.dtype() == DType::Float32) {
+        return launch_advanced_index_gather_hip<float>(src, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Float64) {
+        return launch_advanced_index_gather_hip<double>(src, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Int32) {
+        return launch_advanced_index_gather_hip<int32_t>(src, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Int64) {
+        return launch_advanced_index_gather_hip<int64_t>(src, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Float16) {
+        return launch_advanced_index_gather_hip<__half>(src, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::BFloat16) {
+        return launch_advanced_index_gather_hip<hip_bfloat16>(src, idx_ptrs.data(), num_indices, stream);
+    }
+    throw std::runtime_error("AdvancedIndex ROCm: unsupported dtype");
+}
+
+auto advanced_index_put_rocm_kernel(
+    const Tensor& src, const std::vector<Tensor>& indices,
+    const Tensor& values, int64_t num_indices, hipStream_t stream) -> Tensor {
+    std::vector<const Tensor*> idx_ptrs(num_indices);
+    for (int64_t i = 0; i < num_indices; ++i) idx_ptrs[i] = &indices[i];
+
+    if (src.dtype() == DType::Float32) {
+        return launch_advanced_index_put_hip<float>(src, values, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Float64) {
+        return launch_advanced_index_put_hip<double>(src, values, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Int32) {
+        return launch_advanced_index_put_hip<int32_t>(src, values, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Int64) {
+        return launch_advanced_index_put_hip<int64_t>(src, values, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Float16) {
+        return launch_advanced_index_put_hip<__half>(src, values, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::BFloat16) {
+        return launch_advanced_index_put_hip<hip_bfloat16>(src, values, idx_ptrs.data(), num_indices, stream);
+    }
+    throw std::runtime_error("AdvancedIndexPut ROCm: unsupported dtype");
+}
+
 } // namespace rocm
 } // namespace tenzor

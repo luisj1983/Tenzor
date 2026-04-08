@@ -1599,46 +1599,328 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double /*p*/,
 }
 
 // ============================================================================
-// AdvancedIndex/AdvancedIndexPut — CPU fallback for complex indexing logic
+// AdvancedIndex / AdvancedIndexPut — native CUDA implementations
 // ============================================================================
+//
+// NumPy-style fancy indexing: gather elements from `src` using up to N index
+// tensors that broadcast to a common shape, with optional passthrough dims.
+// One thread per output element; each thread reads index values from the
+// indexed dims, computes a source offset, and copies its element.
+//
+// All indices arrive as Int64 (cast at the dispatch layer); empty (numel=0)
+// indices mark "full slice on this dim".
+//
+// MAX_INDEX_DIMS bounds the indexed-dim count and stride/shape buffers stored
+// in __constant__-style kernel argument arrays.
+
+namespace {
+constexpr int MAX_INDEX_DIMS = 16;
+}
+
+struct AdvancedIndexMeta {
+    int num_indices;        // Number of dims that have an index tensor (indexed or null)
+    int src_ndim;
+    int num_pass_dims;
+    int64_t bc_numel;
+    int64_t pass_numel;
+    int64_t src_shape[MAX_INDEX_DIMS];
+    int64_t src_strides[MAX_INDEX_DIMS];
+    int pass_dims[MAX_INDEX_DIMS];     // Source dim indices that are passthrough
+    int is_indexed[MAX_INDEX_DIMS];    // 1 if dim is indexed, 0 if full-slice
+};
+
+template<typename T>
+__global__ void advanced_index_gather_kernel(
+    const T* __restrict__ src,
+    T* __restrict__ dst,
+    const int64_t* __restrict__ const* __restrict__ idx_ptrs,  // [num_indices] pointers
+    AdvancedIndexMeta meta,
+    int64_t total_out
+) {
+    int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (out_idx >= total_out) return;
+
+    // Decode output position into (bc, p) where bc is broadcast index, p is pass index
+    int64_t p = (meta.pass_numel > 0) ? (out_idx % meta.pass_numel) : 0;
+    int64_t bc = (meta.pass_numel > 0) ? (out_idx / meta.pass_numel) : out_idx;
+
+    // Compute src offset from indexed dims
+    int64_t src_offset = 0;
+    for (int i = 0; i < meta.num_indices; ++i) {
+        if (meta.is_indexed[i]) {
+            int64_t idx_val = idx_ptrs[i][bc];
+            if (idx_val < 0) idx_val += meta.src_shape[i];
+            // Bounds check elided for hot path
+            src_offset += idx_val * meta.src_strides[i];
+        }
+    }
+
+    // Compute pass offset from passthrough dims
+    if (meta.num_pass_dims > 0) {
+        int64_t remaining = p;
+        for (int k = meta.num_pass_dims - 1; k >= 0; --k) {
+            int d = meta.pass_dims[k];
+            int64_t coord = remaining % meta.src_shape[d];
+            remaining /= meta.src_shape[d];
+            src_offset += coord * meta.src_strides[d];
+        }
+    }
+
+    dst[out_idx] = src[src_offset];
+}
+
+template<typename T>
+__global__ void advanced_index_put_kernel(
+    T* __restrict__ dst,
+    const T* __restrict__ values,
+    const int64_t* __restrict__ const* __restrict__ idx_ptrs,
+    AdvancedIndexMeta meta,
+    int64_t total_out
+) {
+    int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (out_idx >= total_out) return;
+
+    int64_t p = (meta.pass_numel > 0) ? (out_idx % meta.pass_numel) : 0;
+    int64_t bc = (meta.pass_numel > 0) ? (out_idx / meta.pass_numel) : out_idx;
+
+    int64_t dst_offset = 0;
+    for (int i = 0; i < meta.num_indices; ++i) {
+        if (meta.is_indexed[i]) {
+            int64_t idx_val = idx_ptrs[i][bc];
+            if (idx_val < 0) idx_val += meta.src_shape[i];
+            dst_offset += idx_val * meta.src_strides[i];
+        }
+    }
+
+    if (meta.num_pass_dims > 0) {
+        int64_t remaining = p;
+        for (int k = meta.num_pass_dims - 1; k >= 0; --k) {
+            int d = meta.pass_dims[k];
+            int64_t coord = remaining % meta.src_shape[d];
+            remaining /= meta.src_shape[d];
+            dst_offset += coord * meta.src_strides[d];
+        }
+    }
+
+    dst[dst_offset] = values[out_idx];
+}
+
+namespace {
+
+// Build meta from src + indices and compute output shape.
+// Returns {meta, output_shape, total_output_numel}.
+struct PreparedAdvancedIndex {
+    AdvancedIndexMeta meta;
+    std::vector<int64_t> output_shape;
+    int64_t total;
+};
+
+inline PreparedAdvancedIndex prepare_advanced_index(
+    const Tensor& src,
+    const Tensor* const* index_tensors,
+    int64_t num_indices
+) {
+    PreparedAdvancedIndex out{};
+    auto src_shape_span = src.shape();
+    int64_t src_ndim = static_cast<int64_t>(src_shape_span.size());
+    if (src_ndim > MAX_INDEX_DIMS) {
+        throw std::runtime_error("AdvancedIndex: source ndim exceeds MAX_INDEX_DIMS");
+    }
+    if (num_indices > MAX_INDEX_DIMS) {
+        throw std::runtime_error("AdvancedIndex: num_indices exceeds MAX_INDEX_DIMS");
+    }
+
+    out.meta.num_indices = static_cast<int>(num_indices);
+    out.meta.src_ndim = static_cast<int>(src_ndim);
+
+    for (int64_t i = 0; i < src_ndim; ++i) {
+        out.meta.src_shape[i] = src_shape_span[i];
+    }
+    // Row-major strides
+    out.meta.src_strides[src_ndim - 1] = 1;
+    for (int64_t d = src_ndim - 2; d >= 0; --d) {
+        out.meta.src_strides[d] = out.meta.src_strides[d + 1] * src_shape_span[d + 1];
+    }
+
+    // Identify is_indexed and broadcast shape
+    std::vector<int64_t> broadcast_shape;
+    for (int i = 0; i < num_indices; ++i) {
+        if (index_tensors[i] != nullptr && index_tensors[i]->numel() > 0) {
+            out.meta.is_indexed[i] = 1;
+            if (broadcast_shape.empty()) {
+                auto s = index_tensors[i]->shape();
+                broadcast_shape.assign(s.begin(), s.end());
+            }
+        } else {
+            out.meta.is_indexed[i] = 0;
+        }
+    }
+    if (broadcast_shape.empty()) {
+        throw std::runtime_error("AdvancedIndex: at least one index tensor required");
+    }
+
+    // Output shape = broadcast_shape + passthrough dims
+    out.output_shape = broadcast_shape;
+    int pass_count = 0;
+    for (int i = 0; i < num_indices; ++i) {
+        if (!out.meta.is_indexed[i]) {
+            out.output_shape.push_back(src_shape_span[i]);
+            out.meta.pass_dims[pass_count++] = i;
+        }
+    }
+    for (int64_t i = num_indices; i < src_ndim; ++i) {
+        out.output_shape.push_back(src_shape_span[i]);
+        out.meta.pass_dims[pass_count++] = static_cast<int>(i);
+    }
+    out.meta.num_pass_dims = pass_count;
+
+    out.meta.bc_numel = 1;
+    for (auto d : broadcast_shape) out.meta.bc_numel *= d;
+    out.meta.pass_numel = 1;
+    for (int k = 0; k < pass_count; ++k) {
+        out.meta.pass_numel *= src_shape_span[out.meta.pass_dims[k]];
+    }
+    out.total = out.meta.bc_numel * out.meta.pass_numel;
+    return out;
+}
+
+template<typename T>
+auto launch_advanced_index_gather(
+    const Tensor& src,
+    const Tensor* const* index_tensors,
+    int64_t num_indices,
+    cudaStream_t stream
+) -> Tensor {
+    auto prep = prepare_advanced_index(src, index_tensors, num_indices);
+    Tensor src_contig = src.contiguous();
+    Tensor result(prep.output_shape, src.dtype(), src.device());
+    if (prep.total == 0) return result;
+
+    // Pack idx pointers into a small device array
+    std::vector<const int64_t*> host_ptrs(num_indices, nullptr);
+    std::vector<Tensor> idx_contig(num_indices);
+    for (int i = 0; i < num_indices; ++i) {
+        if (prep.meta.is_indexed[i]) {
+            idx_contig[i] = index_tensors[i]->contiguous();
+            host_ptrs[i] = idx_contig[i].data<int64_t>();
+        }
+    }
+    backend::CachedMemoryGuard ptr_buf_guard(num_indices * sizeof(const int64_t*));
+    auto* d_idx_ptrs = static_cast<const int64_t**>(ptr_buf_guard.get());
+    cudaMemcpyAsync(d_idx_ptrs, host_ptrs.data(),
+                    num_indices * sizeof(const int64_t*),
+                    cudaMemcpyHostToDevice, stream);
+
+    int threads = 256;
+    int blocks = static_cast<int>((prep.total + threads - 1) / threads);
+    advanced_index_gather_kernel<T><<<blocks, threads, 0, stream>>>(
+        src_contig.data<T>(),
+        result.data<T>(),
+        d_idx_ptrs,
+        prep.meta,
+        prep.total);
+    TENZOR_CUDA_CHECK(cudaGetLastError());
+    return result;
+}
+
+template<typename T>
+auto launch_advanced_index_put(
+    const Tensor& src,
+    const Tensor& values,
+    const Tensor* const* index_tensors,
+    int64_t num_indices,
+    cudaStream_t stream
+) -> Tensor {
+    auto prep = prepare_advanced_index(src, index_tensors, num_indices);
+    Tensor result = src.clone();
+    Tensor result_contig = result.contiguous();
+    Tensor values_contig = values.contiguous();
+    if (prep.total == 0) return result_contig;
+
+    std::vector<const int64_t*> host_ptrs(num_indices, nullptr);
+    std::vector<Tensor> idx_contig(num_indices);
+    for (int i = 0; i < num_indices; ++i) {
+        if (prep.meta.is_indexed[i]) {
+            idx_contig[i] = index_tensors[i]->contiguous();
+            host_ptrs[i] = idx_contig[i].data<int64_t>();
+        }
+    }
+    backend::CachedMemoryGuard ptr_buf_guard(num_indices * sizeof(const int64_t*));
+    auto* d_idx_ptrs = static_cast<const int64_t**>(ptr_buf_guard.get());
+    cudaMemcpyAsync(d_idx_ptrs, host_ptrs.data(),
+                    num_indices * sizeof(const int64_t*),
+                    cudaMemcpyHostToDevice, stream);
+
+    int threads = 256;
+    int blocks = static_cast<int>((prep.total + threads - 1) / threads);
+    advanced_index_put_kernel<T><<<blocks, threads, 0, stream>>>(
+        result_contig.data<T>(),
+        values_contig.data<T>(),
+        d_idx_ptrs,
+        prep.meta,
+        prep.total);
+    TENZOR_CUDA_CHECK(cudaGetLastError());
+    return result_contig;
+}
+
+template<typename FnFloat, typename FnDouble, typename FnInt32, typename FnInt64>
+auto dispatch_advanced_index_dtype(DType dt,
+                                   FnFloat ff, FnDouble fd, FnInt32 fi32, FnInt64 fi64,
+                                   const std::string& op) {
+    switch (dt) {
+        case DType::Float32: return ff();
+        case DType::Float64: return fd();
+        case DType::Int32:   return fi32();
+        case DType::Int64:   return fi64();
+        default:
+            throw std::runtime_error(op + ": unsupported dtype (only Float32, Float64, Int32, Int64)");
+    }
+}
+
+}  // namespace
 
 auto advanced_index_cuda_kernel(
     const Tensor& src, const std::vector<Tensor>& indices,
     int64_t num_indices, cudaStream_t stream) -> Tensor {
-    // CPU fallback for complex indexing logic - transfer to CPU, index, transfer back
-    auto src_cpu = src.to(Device::cpu());
-    std::vector<std::optional<Tensor>> indices_cpu;
-    indices_cpu.reserve(indices.size());
-    for (const auto& idx : indices) {
-        if (idx.numel() > 0) {
-            indices_cpu.push_back(idx.to(Device::cpu()));
-        } else {
-            indices_cpu.push_back(std::nullopt);
-        }
-    }
+    std::vector<const Tensor*> idx_ptrs(num_indices);
+    for (int64_t i = 0; i < num_indices; ++i) idx_ptrs[i] = &indices[i];
 
-    // Dispatch to CPU AdvancedIndex
-    auto result_cpu = tenzor::index(src_cpu, indices_cpu);
-    return result_cpu.to(src.device());
+    if (src.dtype() == DType::Float32) {
+        return launch_advanced_index_gather<float>(src, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Float64) {
+        return launch_advanced_index_gather<double>(src, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Int32) {
+        return launch_advanced_index_gather<int32_t>(src, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Int64) {
+        return launch_advanced_index_gather<int64_t>(src, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Float16) {
+        return launch_advanced_index_gather<__half>(src, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::BFloat16) {
+        return launch_advanced_index_gather<__nv_bfloat16>(src, idx_ptrs.data(), num_indices, stream);
+    }
+    throw std::runtime_error("AdvancedIndex CUDA: unsupported dtype");
 }
 
 auto advanced_index_put_cuda_kernel(
     const Tensor& src, const std::vector<Tensor>& indices,
     const Tensor& values, int64_t num_indices, cudaStream_t stream) -> Tensor {
-    // CPU fallback
-    auto src_cpu = src.to(Device::cpu()).clone();
-    auto values_cpu = values.to(Device::cpu());
-    std::vector<std::optional<Tensor>> opt_indices;
-    opt_indices.reserve(indices.size());
-    for (const auto& idx : indices) {
-        if (idx.numel() > 0) {
-            opt_indices.push_back(idx.to(Device::cpu()));
-        } else {
-            opt_indices.push_back(std::nullopt);
-        }
+    std::vector<const Tensor*> idx_ptrs(num_indices);
+    for (int64_t i = 0; i < num_indices; ++i) idx_ptrs[i] = &indices[i];
+
+    if (src.dtype() == DType::Float32) {
+        return launch_advanced_index_put<float>(src, values, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Float64) {
+        return launch_advanced_index_put<double>(src, values, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Int32) {
+        return launch_advanced_index_put<int32_t>(src, values, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Int64) {
+        return launch_advanced_index_put<int64_t>(src, values, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::Float16) {
+        return launch_advanced_index_put<__half>(src, values, idx_ptrs.data(), num_indices, stream);
+    } else if (src.dtype() == DType::BFloat16) {
+        return launch_advanced_index_put<__nv_bfloat16>(src, values, idx_ptrs.data(), num_indices, stream);
     }
-    tenzor::index_put(src_cpu, opt_indices, values_cpu);
-    return src_cpu.to(src.device());
+    throw std::runtime_error("AdvancedIndexPut CUDA: unsupported dtype");
 }
 
 // ============================================================================

@@ -130,6 +130,17 @@ namespace oneapi {
                       bool normalized, bool onesided,
                       int64_t length, sycl::queue& queue) -> Tensor;
 
+    // ---- Advanced indexing (kernels/advanced_index.cpp) ----
+    auto advanced_index_oneapi_kernel(const Tensor& src,
+                                      const std::vector<Tensor>& indices,
+                                      int64_t num_indices,
+                                      sycl::queue& queue) -> Tensor;
+    auto advanced_index_put_oneapi_kernel(const Tensor& src,
+                                          const std::vector<Tensor>& indices,
+                                          const Tensor& values,
+                                          int64_t num_indices,
+                                          sycl::queue& queue) -> Tensor;
+
     // Bool predicates
     auto isnan_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
     auto isinf_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
@@ -3578,26 +3589,31 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
                                         length_val, get_q(inputs));
         });
 
-    // AdvancedIndex (fancy indexing)
+    // AdvancedIndex (fancy indexing) — native OneAPI kernel
     table.register_single_output_kernel(OpId::AdvancedIndex,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            auto dev = inputs[0].device();
-            std::vector<Tensor> cpu_inputs;
-            cpu_inputs.reserve(inputs.size());
-            for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
-            auto result = dispatch(OpId::AdvancedIndex, cpu_inputs, attrs);
-            return result[0].to(dev);
+            int64_t num_indices = attrs.get_int(AttrKey::NumIndices, 0);
+            std::vector<Tensor> indices;
+            indices.reserve(static_cast<size_t>(num_indices));
+            for (int64_t i = 0; i < num_indices; ++i) {
+                indices.push_back(inputs[1 + i]);
+            }
+            return oneapi::advanced_index_oneapi_kernel(
+                inputs[0], indices, num_indices, get_q(inputs));
         });
 
-    // AdvancedIndexPut (fancy indexing assignment)
+    // AdvancedIndexPut (fancy indexing assignment) — native OneAPI kernel
     table.register_single_output_kernel(OpId::AdvancedIndexPut,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            auto dev = inputs[0].device();
-            std::vector<Tensor> cpu_inputs;
-            cpu_inputs.reserve(inputs.size());
-            for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
-            auto result = dispatch(OpId::AdvancedIndexPut, cpu_inputs, attrs);
-            return result[0].to(dev);
+            int64_t num_indices = attrs.get_int(AttrKey::NumIndices, 0);
+            const auto& values = inputs[1];
+            std::vector<Tensor> indices;
+            indices.reserve(static_cast<size_t>(num_indices));
+            for (int64_t i = 0; i < num_indices; ++i) {
+                indices.push_back(inputs[2 + i]);
+            }
+            return oneapi::advanced_index_put_oneapi_kernel(
+                inputs[0], indices, values, num_indices, get_q(inputs));
         });
 
 } // register_oneapi_kernels

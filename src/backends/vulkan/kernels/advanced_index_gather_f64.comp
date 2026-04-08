@@ -1,0 +1,61 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+// Advanced index gather — 8-byte elements (Float64 / Int64).
+// Uses int64_t as the bitwise-copy carrier.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Src  { int64_t src_data[]; };
+layout(binding = 1)          buffer Dst  { int64_t dst_data[]; };
+layout(binding = 2) readonly buffer Meta { int64_t meta[]; };
+layout(binding = 3) readonly buffer Idx  { int64_t idx_data[]; };
+
+const int META_SRC_SHAPE   = 5;
+const int META_SRC_STRIDES = 21;
+const int META_PASS_DIMS   = 37;
+const int META_IS_INDEXED  = 53;
+const int META_IDX_OFFSET  = 69;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    int64_t total_out = meta[3];
+    if (int64_t(gid) >= total_out) return;
+
+    int64_t pass_numel = meta[4];
+    int64_t out_idx = int64_t(gid);
+    int64_t bc;
+    int64_t p;
+    if (pass_numel > 0) {
+        bc = out_idx / pass_numel;
+        p  = out_idx - bc * pass_numel;
+    } else {
+        bc = out_idx;
+        p  = 0;
+    }
+
+    int num_indices = int(meta[0]);
+    int num_pass    = int(meta[2]);
+
+    int64_t src_offset = 0;
+    for (int i = 0; i < num_indices; ++i) {
+        if (meta[META_IS_INDEXED + i] != 0) {
+            int64_t base = meta[META_IDX_OFFSET + i];
+            int64_t idx_val = idx_data[uint(base + bc)];
+            if (idx_val < 0) idx_val += meta[META_SRC_SHAPE + i];
+            src_offset += idx_val * meta[META_SRC_STRIDES + i];
+        }
+    }
+
+    if (num_pass > 0) {
+        int64_t remaining = p;
+        for (int k = num_pass - 1; k >= 0; --k) {
+            int d = int(meta[META_PASS_DIMS + k]);
+            int64_t dim_sz = meta[META_SRC_SHAPE + d];
+            int64_t coord = remaining - (remaining / dim_sz) * dim_sz;
+            remaining = remaining / dim_sz;
+            src_offset += coord * meta[META_SRC_STRIDES + d];
+        }
+    }
+
+    dst_data[gid] = src_data[uint(src_offset)];
+}

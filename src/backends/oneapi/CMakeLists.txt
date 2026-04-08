@@ -170,6 +170,7 @@ set(ONEAPI_SYCL_SOURCES
     kernels/conv3d.cpp
     kernels/pooling.cpp
     kernels/indexing.cpp
+    kernels/advanced_index.cpp
     kernels/embedding.cpp
     kernels/comparison.cpp
     kernels/im2col.cpp

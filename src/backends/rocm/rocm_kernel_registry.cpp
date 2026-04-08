@@ -750,6 +750,13 @@ namespace rocm {
     auto fused_rms_norm_backward_hip(const Tensor& grad_output, const Tensor& input,
                                       const Tensor& weight, const Tensor& rrms)
         -> std::tuple<Tensor, Tensor>;
+
+    // Advanced indexing (indexing.hip.cpp)
+    auto advanced_index_rocm_kernel(const Tensor& src, const std::vector<Tensor>& indices,
+                                    int64_t num_indices, hipStream_t stream) -> Tensor;
+    auto advanced_index_put_rocm_kernel(const Tensor& src, const std::vector<Tensor>& indices,
+                                        const Tensor& values, int64_t num_indices,
+                                        hipStream_t stream) -> Tensor;
 }
 
 /**
@@ -3184,25 +3191,25 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         return rocm::erfc_kernel(inputs[0], get_hip_stream(attrs));
     });
 
-    // Special Math Functions (CPU-roundtrip fallback for single_output path)
-#define ROCM_SINGLE_UNARY_FALLBACK(OP_ID, FN) \
-    table.register_single_output_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor { \
-        return tenzor::FN(inputs[0].to(Device::cpu())).to(inputs[0].device()); \
+    // Special Math Functions — native ROCm device kernels (single_output path)
+#define ROCM_SINGLE_UNARY_NATIVE(OP_ID, FN) \
+    table.register_single_output_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor { \
+        return rocm::FN(inputs[0], get_hip_stream(attrs)); \
     })
 
-    ROCM_SINGLE_UNARY_FALLBACK(Gamma, gamma);
-    ROCM_SINGLE_UNARY_FALLBACK(Lgamma, lgamma);
-    ROCM_SINGLE_UNARY_FALLBACK(Digamma, digamma);
-    ROCM_SINGLE_UNARY_FALLBACK(BesselJ0, bessel_j0);
-    ROCM_SINGLE_UNARY_FALLBACK(BesselJ1, bessel_j1);
-    ROCM_SINGLE_UNARY_FALLBACK(BesselY0, bessel_y0);
-    ROCM_SINGLE_UNARY_FALLBACK(BesselY1, bessel_y1);
-    ROCM_SINGLE_UNARY_FALLBACK(BesselI0, bessel_i0);
-    ROCM_SINGLE_UNARY_FALLBACK(BesselI1, bessel_i1);
-    ROCM_SINGLE_UNARY_FALLBACK(ErfInv, erfinv);
-    ROCM_SINGLE_UNARY_FALLBACK(Sinc, sinc);
+    ROCM_SINGLE_UNARY_NATIVE(Gamma,    gamma_kernel);
+    ROCM_SINGLE_UNARY_NATIVE(Lgamma,   lgamma_kernel);
+    ROCM_SINGLE_UNARY_NATIVE(Digamma,  digamma_kernel);
+    ROCM_SINGLE_UNARY_NATIVE(BesselJ0, bessel_j0_kernel);
+    ROCM_SINGLE_UNARY_NATIVE(BesselJ1, bessel_j1_kernel);
+    ROCM_SINGLE_UNARY_NATIVE(BesselY0, bessel_y0_kernel);
+    ROCM_SINGLE_UNARY_NATIVE(BesselY1, bessel_y1_kernel);
+    ROCM_SINGLE_UNARY_NATIVE(BesselI0, bessel_i0_kernel);
+    ROCM_SINGLE_UNARY_NATIVE(BesselI1, bessel_i1_kernel);
+    ROCM_SINGLE_UNARY_NATIVE(ErfInv,   erfinv_kernel);
+    ROCM_SINGLE_UNARY_NATIVE(Sinc,     sinc_kernel);
 
-#undef ROCM_SINGLE_UNARY_FALLBACK
+#undef ROCM_SINGLE_UNARY_NATIVE
 
     table.register_single_output_kernel(OpId::Floor, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         return rocm::floor_kernel(inputs[0], get_hip_stream(attrs));
@@ -3896,26 +3903,22 @@ void register_rocm_kernels(BackendDispatchTable& table) {
                                       window, center, normalized, onesided, length).to(dev);
         });
 
-    // AdvancedIndex (fancy indexing)
+    // AdvancedIndex (native ROCm fancy indexing)
     table.register_single_output_kernel(OpId::AdvancedIndex,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            auto dev = inputs[0].device();
-            std::vector<Tensor> cpu_inputs;
-            cpu_inputs.reserve(inputs.size());
-            for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
-            auto result = dispatch(OpId::AdvancedIndex, cpu_inputs, attrs);
-            return result[0].to(dev);
+            int64_t num_indices = attrs.get_int(AttrKey::NumIndices, 0);
+            std::vector<Tensor> indices(inputs.begin() + 1, inputs.end());
+            return rocm::advanced_index_rocm_kernel(inputs[0], indices, num_indices, get_hip_stream(attrs));
         });
 
-    // AdvancedIndexPut (fancy indexing assignment)
+    // AdvancedIndexPut (native ROCm fancy indexing assignment)
     table.register_single_output_kernel(OpId::AdvancedIndexPut,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            auto dev = inputs[0].device();
-            std::vector<Tensor> cpu_inputs;
-            cpu_inputs.reserve(inputs.size());
-            for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
-            auto result = dispatch(OpId::AdvancedIndexPut, cpu_inputs, attrs);
-            return result[0].to(dev);
+            int64_t num_indices = attrs.get_int(AttrKey::NumIndices, 0);
+            // inputs[0] = destination, inputs[1] = values, inputs[2..2+N] = index tensors
+            const auto& values = inputs[1];
+            std::vector<Tensor> indices(inputs.begin() + 2, inputs.begin() + 2 + num_indices);
+            return rocm::advanced_index_put_rocm_kernel(inputs[0], indices, values, num_indices, get_hip_stream(attrs));
         });
 
     std::cout << "ROCm dispatch table initialized with O(1) lookup" << std::endl;

@@ -26,7 +26,7 @@ Snapshot captured at the start of the v1 pre-release hardening effort
 
   Target after Phase 4: **0**.
 
-## Progress (post-Phase 4.3 partial)
+## Progress (post-Phase 4.4)
 
 | Phase | Status | Burndown after |
 |---|---|---|
@@ -37,17 +37,28 @@ Snapshot captured at the start of the v1 pre-release hardening effort
 | 4.1 GridSample/AffineGrid (× 3 backends) | ✅ done | 51 |
 | 4.2 Bernoulli/Multinomial/Bucketize/Histogram/CDist (× 3 backends) | ✅ done | 39 |
 | 4.3 STFT/ISTFT — CUDA + OneAPI native; ROCm/Vulkan WIP | partial | 31 |
-| 4.4 AdvancedIndex/AdvancedIndexPut (× 4 backends) | pending | ~11 expected |
+| 4.4 AdvancedIndex/AdvancedIndexPut (× 4 backends) | ✅ done | 17 |
 | 5  GPU LinalgLU/LinalgLUSolve | pending | — |
 | 6  MPS full implementation | pending | — |
 | 7  Sync/perf cleanup + Flash Attention bw fused | pending | — |
 | 8  Unimplemented enum entries | pending | — |
 
-**Burndown: 78 → 31 (-47 sites, 60%)** from CPU fallbacks in `src/backends/{cuda,rocm,vulkan,oneapi}/`. Per-backend remaining:
-- CUDA: 5 (AdvancedIndex × 5)
-- OneAPI: 2 (AdvancedIndex × 2)
-- ROCm: 7 (5 AdvancedIndex + 2 STFT/ISTFT WIP fallback)
-- Vulkan: 17 (includes 5 special-math/sampling metadata syncs that aren't true compute fallbacks + 2 STFT/ISTFT WIP fallbacks + 5 AdvancedIndex + scattered)
+**Burndown: 78 → 17 (-61 sites, 78%)** from CPU fallbacks in `src/backends/{cuda,rocm,vulkan,oneapi}/`. Per-backend remaining:
+- CUDA: 0 ✅
+- OneAPI: 0 ✅
+- ROCm: 4 (4 STFT/ISTFT WIP fallback)
+- Vulkan: 13 (includes 5 special-math/sampling/sort metadata-scalar syncs that aren't true compute fallbacks + 4 STFT/ISTFT WIP fallbacks + 4 misc/vision metadata reads)
+
+## Phase 4.4 status (AdvancedIndex/AdvancedIndexPut)
+All four GPU backends now use native fancy-indexing kernels (no CPU roundtrip):
+- **CUDA**: `advanced_index_cuda_kernel` / `advanced_index_put_cuda_kernel` in `src/backends/cuda/kernels/advanced.cu`. Templated `__global__` gather/put kernels keyed on output element index, with broadcast/passthrough decoding and per-dim Int64 index pointer arrays staged via `CachedMemoryGuard`. Float32/Float64/Int32/Int64/Float16/BFloat16.
+- **ROCm**: `advanced_index_rocm_kernel` / `advanced_index_put_rocm_kernel` appended to `src/backends/rocm/kernels/indexing.hip.cpp`. Mechanical HIP port (`hipLaunchKernelGGL`, `hipMalloc`/`hipFree` for the per-dim pointer array, `hip_bfloat16` for BF16).
+- **OneAPI**: new `src/backends/oneapi/kernels/advanced_index.cpp`. SYCL `parallel_for` over `sycl::range<1>(total_out)`; per-dim pointer array via `sycl::malloc_device<const int64_t*>`. Float16/BFloat16 use `uint16_t` bit-copy (gather/scatter is value-preserving, no arithmetic needed).
+- **Vulkan**: new `vulkan_ops_advanced_index.cpp` + 8 compute shaders (`advanced_index_{gather,put}{,_f64,_f16,_bf16}.comp`). Single packed Int64 SSBO for all per-dim index arrays + per-dim offsets. Meta encoded as 85 int64 words in a separate Int64 SSBO. Float16/BF16 use packed-2-per-uint with CAS-loop writes.
+- **Tests**: 5 new parity tests in `tests/backend_parity/test_missing_ops_parity.cpp` (Simple1D, NegativeIndices, 2D_RowSelect, 2D_TwoIndices, AdvancedIndexPut_Simple). All 5 pass on CUDA, ROCm, OneAPI, Vulkan.
+
+## Phase 4.4 bonus
+Replaced 11 leftover ROCm `ROCM_SINGLE_UNARY_FALLBACK` registrations (Gamma/Lgamma/Digamma/Bessel*/ErfInv/Sinc) with `ROCM_SINGLE_UNARY_NATIVE` calls into the Phase 3 native kernels — these were dead-ish single_output-path fallbacks left over after Phase 3 added native kernels via `register_kernel`.
 
 ## Phase 4.3 partial status (STFT/ISTFT)
 - **CUDA**: native (`stft_cuda_kernel`/`istft_cuda_kernel` in `src/backends/cuda/kernels/advanced.cu`). Frame+window kernel + cuFFT batched RFFT/IRFFT + output-centric overlap-add. **6/6 tests pass.** Bonus: added Complex64/Complex128 support to CUDA `contiguous_kernel` (was missing). 

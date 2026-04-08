@@ -255,6 +255,11 @@ public:
                             const std::string& mode_str, const std::string& padding_mode_str,
                             bool align_corners) -> Tensor;
     auto dispatchAffineGrid(const Tensor& theta, const std::vector<int64_t>& size, bool align_corners) -> Tensor;
+    // Advanced (fancy) indexing (vulkan_ops_advanced_index.cpp)
+    auto dispatchAdvancedIndex(const Tensor& src, const std::vector<Tensor>& indices,
+                               int64_t num_indices) -> Tensor;
+    auto dispatchAdvancedIndexPut(const Tensor& src, const std::vector<Tensor>& indices,
+                                  const Tensor& values, int64_t num_indices) -> Tensor;
     // Sampling / statistics (vulkan_ops_sampling.cpp)
     auto dispatchBernoulli(const Tensor& probs) -> Tensor;
     auto dispatchBucketize(const Tensor& input, const Tensor& boundaries, bool right) -> Tensor;

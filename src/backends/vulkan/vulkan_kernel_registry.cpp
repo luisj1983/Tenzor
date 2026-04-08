@@ -2279,26 +2279,21 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
                                       window, center, normalized, onesided, length).to(dev);
         });
 
-    // AdvancedIndex (fancy indexing)
+    // AdvancedIndex / AdvancedIndexPut — native Vulkan compute shaders
     table.register_single_output_kernel(OpId::AdvancedIndex,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            auto dev = inputs[0].device();
-            std::vector<Tensor> cpu_inputs;
-            cpu_inputs.reserve(inputs.size());
-            for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
-            auto result = dispatch(OpId::AdvancedIndex, cpu_inputs, attrs);
-            return result[0].to(dev);
+            int64_t num_indices = attrs.get_int(AttrKey::NumIndices, 0);
+            std::vector<Tensor> indices(inputs.begin() + 1, inputs.end());
+            return get_vulkan_backend()->dispatchAdvancedIndex(inputs[0], indices, num_indices);
         });
 
-    // AdvancedIndexPut (fancy indexing assignment)
     table.register_single_output_kernel(OpId::AdvancedIndexPut,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            auto dev = inputs[0].device();
-            std::vector<Tensor> cpu_inputs;
-            cpu_inputs.reserve(inputs.size());
-            for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
-            auto result = dispatch(OpId::AdvancedIndexPut, cpu_inputs, attrs);
-            return result[0].to(dev);
+            int64_t num_indices = attrs.get_int(AttrKey::NumIndices, 0);
+            // inputs[0] = destination, inputs[1] = values, inputs[2..2+N) = indices
+            const auto& values = inputs[1];
+            std::vector<Tensor> indices(inputs.begin() + 2, inputs.begin() + 2 + num_indices);
+            return get_vulkan_backend()->dispatchAdvancedIndexPut(inputs[0], indices, values, num_indices);
         });
 
     std::cout << "Vulkan dispatch table initialized with O(1) lookup" << std::endl;

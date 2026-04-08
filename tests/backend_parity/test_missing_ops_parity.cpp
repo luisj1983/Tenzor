@@ -5,7 +5,9 @@
 #include <tenzor/ops/math.hpp>
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/reduction.hpp>
+#include <tenzor/ops/indexing.hpp>
 #include <cmath>
+#include <optional>
 
 using namespace tenzor;
 
@@ -148,5 +150,99 @@ TEST_F(MissingOpsParity, Histogram) {
         EXPECT_EQ(cpu_counts.numel(), gpu_counts.numel());
         EXPECT_EQ(cpu_edges.numel(), gpu_edges.numel());
         EXPECT_TRUE(close(cpu_edges, gpu_edges.to(Device::cpu()), 1e-5));
+    });
+}
+
+// ============================================================================
+// AdvancedIndex / AdvancedIndexPut parity (Phase 4.4)
+// ============================================================================
+
+namespace {
+inline Tensor int64_tensor_1d(const std::vector<int64_t>& data) {
+    auto t = Tensor::from_blob(const_cast<int64_t*>(data.data()),
+                               {static_cast<int64_t>(data.size())},
+                               DType::Int64).clone();
+    return t;
+}
+inline Tensor float_tensor_1d(const std::vector<float>& data) {
+    auto t = Tensor::from_blob(const_cast<float*>(data.data()),
+                               {static_cast<int64_t>(data.size())},
+                               DType::Float32).clone();
+    return t;
+}
+inline std::vector<std::optional<Tensor>> make_idx_vec(std::initializer_list<Tensor> idxs) {
+    std::vector<std::optional<Tensor>> v;
+    v.reserve(idxs.size());
+    for (const auto& t : idxs) v.emplace_back(t);
+    return v;
+}
+}  // namespace
+
+TEST_F(MissingOpsParity, AdvancedIndex_Simple1D) {
+    testOnGPUBackends([&](Device dev) {
+        auto src_cpu = arange(10.0f, 20.0f, 1.0f);
+        auto idx_cpu = int64_tensor_1d({0, 3, 5, 9});
+
+        auto cpu_ref = tenzor::index(src_cpu, make_idx_vec({idx_cpu}));
+        auto gpu_result = tenzor::index(src_cpu.to(dev), make_idx_vec({idx_cpu.to(dev)}));
+
+        EXPECT_TRUE(close(cpu_ref, gpu_result.to(Device::cpu()), 1e-6));
+    });
+}
+
+TEST_F(MissingOpsParity, AdvancedIndex_NegativeIndices) {
+    testOnGPUBackends([&](Device dev) {
+        auto src_cpu = arange(0.0f, 10.0f, 1.0f);
+        auto idx_cpu = int64_tensor_1d({-1, -2, -3});
+
+        auto cpu_ref = tenzor::index(src_cpu, make_idx_vec({idx_cpu}));
+        auto gpu_result = tenzor::index(src_cpu.to(dev), make_idx_vec({idx_cpu.to(dev)}));
+
+        EXPECT_TRUE(close(cpu_ref, gpu_result.to(Device::cpu()), 1e-6));
+    });
+}
+
+TEST_F(MissingOpsParity, AdvancedIndex_2D_RowSelect) {
+    testOnGPUBackends([&](Device dev) {
+        auto src_cpu = arange(0.0f, 12.0f, 1.0f).reshape({4, 3});
+        auto idx_cpu = int64_tensor_1d({2, 0});
+
+        auto cpu_ref = tenzor::index(src_cpu, make_idx_vec({idx_cpu}));
+        auto gpu_result = tenzor::index(src_cpu.to(dev), make_idx_vec({idx_cpu.to(dev)}));
+
+        ASSERT_EQ(cpu_ref.shape().size(), gpu_result.shape().size());
+        EXPECT_EQ(cpu_ref.shape()[0], gpu_result.shape()[0]);
+        EXPECT_EQ(cpu_ref.shape()[1], gpu_result.shape()[1]);
+        EXPECT_TRUE(close(cpu_ref, gpu_result.to(Device::cpu()), 1e-6));
+    });
+}
+
+TEST_F(MissingOpsParity, AdvancedIndex_2D_TwoIndices) {
+    testOnGPUBackends([&](Device dev) {
+        auto src_cpu = arange(0.0f, 12.0f, 1.0f).reshape({4, 3});
+        auto idx0 = int64_tensor_1d({0, 1, 2});
+        auto idx1 = int64_tensor_1d({2, 1, 0});
+
+        auto cpu_ref = tenzor::index(src_cpu, make_idx_vec({idx0, idx1}));
+        auto gpu_result = tenzor::index(src_cpu.to(dev),
+                                        make_idx_vec({idx0.to(dev), idx1.to(dev)}));
+
+        EXPECT_TRUE(close(cpu_ref, gpu_result.to(Device::cpu()), 1e-6));
+    });
+}
+
+TEST_F(MissingOpsParity, AdvancedIndexPut_Simple) {
+    testOnGPUBackends([&](Device dev) {
+        auto dst_cpu = zeros({10}, DType::Float32, Device::cpu());
+        auto idx_cpu = int64_tensor_1d({1, 4, 7});
+        auto vals_cpu = float_tensor_1d({1.5f, 2.5f, 3.5f});
+
+        auto cpu_dst = dst_cpu.clone();
+        tenzor::index_put(cpu_dst, make_idx_vec({idx_cpu}), vals_cpu);
+
+        auto gpu_dst = dst_cpu.to(dev);
+        tenzor::index_put(gpu_dst, make_idx_vec({idx_cpu.to(dev)}), vals_cpu.to(dev));
+
+        EXPECT_TRUE(close(cpu_dst, gpu_dst.to(Device::cpu()), 1e-6));
     });
 }

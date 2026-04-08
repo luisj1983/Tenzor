@@ -3193,9 +3193,9 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::AdvancedIndexPut,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t num_indices = attrs.get_int(AttrKey::NumIndices, 0);
-            // inputs[0] = source, inputs[1..N] = index tensors, inputs[N+1] = values
-            std::vector<Tensor> indices(inputs.begin() + 1, inputs.begin() + 1 + num_indices);
-            const auto& values = inputs[1 + num_indices];
+            // inputs[0] = destination, inputs[1] = values, inputs[2..2+N] = index tensors
+            const auto& values = inputs[1];
+            std::vector<Tensor> indices(inputs.begin() + 2, inputs.begin() + 2 + num_indices);
             return cuda::advanced_index_put_cuda_kernel(inputs[0], indices, values, num_indices, get_cuda_stream(attrs));
         });
 
