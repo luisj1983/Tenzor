@@ -219,8 +219,6 @@ void init_builtin_batching_rules() {
     register_batching_rule("RNNCellBackward", shape_passthrough);
     register_batching_rule("LSTMCellBackward", shape_passthrough);
     register_batching_rule("GRUCellBackward", shape_passthrough);
-    register_batching_rule("LSTMBackward", shape_passthrough);
-    register_batching_rule("GRUBackward", shape_passthrough);
 
     // ====================================================================
     // Cumulative ops: operate along a dim, batch-independent

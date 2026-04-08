@@ -307,13 +307,6 @@ enum class OpId : uint16_t {
     DropoutBackward,
 
     // =========================================================================
-    // JIT-specific markers (285-289)
-    // =========================================================================
-    Constant = 285,
-    Input,
-    Output,
-
-    // =========================================================================
     // Advanced Operations (290-299)
     // =========================================================================
     TopK = 290,
@@ -441,8 +434,7 @@ enum class OpId : uint16_t {
     QuantizedLinear,           // 429
     QuantizedConv2d,           // 430
     EmbeddingWithBoundsCheck,  // 431
-    WinogradConv2d,            // 432 — CPU-only internal optimization, not dispatched separately
-    LogSumExp,                 // 433
+    LogSumExp = 433,           // 433 — (432 retired: WinogradConv2d was an unused enum slot; CPU conv uses winograd_conv2d_f4x3 as an internal helper, not via dispatch)
     HasInfNan,                 // 434
     EmbeddingBagForward,       // 435
     EmbeddingBagBackward,      // 436
@@ -457,19 +449,10 @@ enum class OpId : uint16_t {
     Polar,                     // Construct complex from magnitude and phase
 
     // =========================================================================
-    // RNN Backward / Extended RNN Operations (450-459)
-    //
-    // NOTE: These OpIds are RESERVED but NOT registered in any backend.
-    // Autograd handles RNN backward by unrolling the sequence and calling
-    // cell-level backward ops (LSTMCellBackward, GRUCellBackward), which
-    // ARE registered on all backends. The sequence-level backward OpIds
-    // exist for potential future fused backward implementations but are
-    // currently unused. RNNForward is reserved for vanilla/Elman RNN.
+    // (450-459 previously reserved LSTMBackward/GRUBackward/BiLSTMBackward/
+    // RNNForward — removed as unused. Autograd uses cell-level backward ops
+    // LSTMCellBackward / GRUCellBackward / RNNCellBackward instead.)
     // =========================================================================
-    LSTMBackward = 450,        // LSTM backward (single layer) — RESERVED, unused
-    GRUBackward,               // GRU backward (single layer) — RESERVED, unused
-    BiLSTMBackward,            // Bidirectional LSTM backward — RESERVED, unused
-    RNNForward,                // Generic RNN forward (vanilla/Elman) — RESERVED, unused
 
     // =========================================================================
     // Sparse Tensor Operations (460-469)
