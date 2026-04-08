@@ -768,6 +768,15 @@ namespace rocm {
     auto advanced_index_put_rocm_kernel(const Tensor& src, const std::vector<Tensor>& indices,
                                         const Tensor& values, int64_t num_indices,
                                         hipStream_t stream) -> Tensor;
+
+    // STFT / ISTFT (stft.hip.cpp)
+    auto stft_kernel(const Tensor& input, int64_t n_fft, int64_t hop_length,
+                     int64_t win_length, const Tensor& window, bool center,
+                     bool normalized, bool onesided, hipStream_t stream) -> Tensor;
+    auto istft_kernel(const Tensor& input, int64_t n_fft, int64_t hop_length,
+                      int64_t win_length, const Tensor& window, bool center,
+                      bool normalized, bool onesided, int64_t length,
+                      hipStream_t stream) -> Tensor;
 }
 
 /**
@@ -3869,40 +3878,32 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             return rocm::cdist_kernel(inputs[0], inputs[1], p, get_hip_stream(attrs));
         });
 
-    // STFT / ISTFT — TEMPORARY CPU fallback
-    // TODO(phase4.3-rocm): Native rocm::stft_kernel/istft_kernel exist in
-    // src/backends/rocm/kernels/stft.hip.cpp but produce wrong shape on
-    // batched (B, num_frames, n_fft) input. Suspected interaction between
-    // rocm_rfft_kernel batching and the transpose/reshape chain. Reverted to
-    // CPU fallback until the layout issue is resolved.
+    // STFT / ISTFT — native ROCm (rocFFT-backed)
     table.register_single_output_kernel(OpId::STFT,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            auto dev = inputs[0].device();
             int64_t n_fft = attrs.get_int(AttrKey::NFft);
             int64_t hop_length = attrs.get_int(AttrKey::HopLength, -1);
             int64_t win_length = attrs.get_int(AttrKey::WinLength, -1);
             bool center = attrs.get_bool(AttrKey::Centered, true);
             bool normalized = attrs.get_bool(AttrKey::Normalized, false);
             bool onesided = attrs.get_bool(AttrKey::OnesidedAttr, true);
-            Tensor window = (inputs.size() > 1) ? inputs[1].to(Device::cpu()) : Tensor();
-            return tenzor::fft::stft(inputs[0].to(Device::cpu()), n_fft, hop_length, win_length,
-                                     window, center, normalized, onesided).to(dev);
+            Tensor window = (inputs.size() > 1) ? inputs[1] : Tensor();
+            return rocm::stft_kernel(inputs[0], n_fft, hop_length, win_length,
+                                     window, center, normalized, onesided, get_hip_stream(attrs));
         });
 
     table.register_single_output_kernel(OpId::ISTFT,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            auto dev = inputs[0].device();
             int64_t n_fft = attrs.get_int(AttrKey::NFft);
             int64_t hop_length = attrs.get_int(AttrKey::HopLength, -1);
             int64_t win_length = attrs.get_int(AttrKey::WinLength, -1);
             bool center = attrs.get_bool(AttrKey::Centered, true);
             bool normalized = attrs.get_bool(AttrKey::Normalized, false);
             bool onesided = attrs.get_bool(AttrKey::OnesidedAttr, true);
-            int64_t length_val = attrs.get_int(AttrKey::N, -1);
-            std::optional<int64_t> length = length_val >= 0 ? std::optional<int64_t>(length_val) : std::nullopt;
-            Tensor window = (inputs.size() > 1) ? inputs[1].to(Device::cpu()) : Tensor();
-            return tenzor::fft::istft(inputs[0].to(Device::cpu()), n_fft, hop_length, win_length,
-                                      window, center, normalized, onesided, length).to(dev);
+            int64_t length = attrs.get_int(AttrKey::N, -1);
+            Tensor window = (inputs.size() > 1) ? inputs[1] : Tensor();
+            return rocm::istft_kernel(inputs[0], n_fft, hop_length, win_length,
+                                      window, center, normalized, onesided, length, get_hip_stream(attrs));
         });
 
     // AdvancedIndex (native ROCm fancy indexing)

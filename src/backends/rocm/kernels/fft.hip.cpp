@@ -609,10 +609,12 @@ auto rocm_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
     auto cached_plan = get_plan_cache().get_or_create(r2c_key, [&]() -> rocfft_plan {
         RocFFTDescription desc;
+        // R2C forward: output must be hermitian_interleaved, not complex_interleaved.
+        // rocFFT rejects complex_interleaved with rocfft_status_invalid_array_type (4).
         ROCFFT_CHECK(rocfft_plan_description_set_data_layout(
             desc.handle,
             rocfft_array_type_real,
-            rocfft_array_type_complex_interleaved,
+            rocfft_array_type_hermitian_interleaved,
             nullptr, nullptr,
             1, in_strides, in_dist,
             1, out_strides, out_dist));
@@ -722,9 +724,10 @@ auto rocm_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
     auto cached_plan = get_plan_cache().get_or_create(c2r_key, [&]() -> rocfft_plan {
         RocFFTDescription desc;
+        // C2R inverse: input must be hermitian_interleaved, not complex_interleaved.
         ROCFFT_CHECK(rocfft_plan_description_set_data_layout(
             desc.handle,
-            rocfft_array_type_complex_interleaved,
+            rocfft_array_type_hermitian_interleaved,
             rocfft_array_type_real,
             nullptr, nullptr,
             1, in_strides, in_dist,

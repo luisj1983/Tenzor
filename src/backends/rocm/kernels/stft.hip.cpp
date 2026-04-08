@@ -2,13 +2,12 @@
  * @file stft.hip.cpp
  * @brief HIP/ROCm port of STFT and ISTFT.
  *
- * STATUS: WORK IN PROGRESS — Phase 4.3, NOT IN BUILD.
- * The forward STFT produces a wrong-shape result on (B, num_frames, n_fft)
- * input — output reshape fails because rocm_rfft_kernel returns a tensor with
- * 1088 (=B*n_fft*num_frames) elements where 561 (=B*freq_bins*num_frames)
- * was expected. Suspected interaction between rocm_rfft_kernel batching and
- * the transpose/reshape chain. NOT included in CMakeLists.txt — the registry
- * uses a CPU fallback. See rocm_kernel_registry.cpp STFT/ISTFT TODO comments.
+ * Native ROCm STFT/ISTFT implementation. Forward: frame+window kernel +
+ * batched rFFT (rocFFT) + transpose + reshape. Inverse: transpose/reshape +
+ * batched irFFT + output-centric overlap-add + normalize. Added to build in
+ * Phase 7 (post-Phase 4.3 fix for the earlier shape bug: the previous version
+ * called rocm_fft_kernel for both onesided and non-onesided branches, but
+ * onesided must use rocm_rfft_kernel which returns n/2+1 freq bins).
  *
  * Mirrors src/backends/cuda/kernels/advanced.cu (stft_cuda_kernel and
  * istft_cuda_kernel) — uses the existing rocm fft kernels for the actual
@@ -139,8 +138,10 @@ auto stft_kernel(const Tensor& input, int64_t n_fft,
 
     Tensor fft_out;
     if (onesided) {
-        fft_out = rocm_fft_kernel(framed, /*dim=*/2, n_fft, normalized ? "ortho" : "backward", stream);
+        // Real-to-complex batched FFT along the last dim → (B, num_frames, n_fft/2+1)
+        fft_out = rocm_rfft_kernel(framed, /*dim=*/2, n_fft, normalized ? "ortho" : "backward", stream);
     } else {
+        // Full complex FFT → (B, num_frames, n_fft). Input is real, promoted by rocm_fft_kernel.
         fft_out = rocm_fft_kernel(framed, /*dim=*/2, n_fft, normalized ? "ortho" : "backward", stream);
     }
 

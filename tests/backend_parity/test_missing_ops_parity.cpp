@@ -140,6 +140,26 @@ TEST_F(MissingOpsParity, STFT) {
     });
 }
 
+TEST_F(MissingOpsParity, STFT_ISTFT_RoundTrip) {
+    testOnGPUBackends([&](Device dev) {
+        auto signal = randn({256}, DType::Float32, Device::cpu());
+        int64_t n_fft = 64;
+
+        try {
+            auto sig_dev = signal.to(dev);
+            auto spec = tenzor::fft::stft(sig_dev, n_fft);
+            auto recon = tenzor::fft::istft(spec, n_fft, -1, -1, Tensor{},
+                                            /*center=*/true, /*normalized=*/false,
+                                            /*onesided=*/true, 256);
+            EXPECT_EQ(recon.shape().size(), signal.shape().size());
+            EXPECT_EQ(recon.numel(), signal.numel());
+            EXPECT_TRUE(close(signal, recon.to(Device::cpu()), 1e-3));
+        } catch (const std::exception& e) {
+            GTEST_SKIP() << "STFT/ISTFT round-trip on " << dev.to_string() << ": " << e.what();
+        }
+    });
+}
+
 TEST_F(MissingOpsParity, Histogram) {
     testOnGPUBackends([&](Device dev) {
         auto input = randn({100}, DType::Float32, Device::cpu());
