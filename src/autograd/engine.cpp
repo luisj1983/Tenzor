@@ -321,7 +321,7 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                                 "' is a higher-order stub (second derivatives are zero). "
                                 "Use set_higher_order_grad_mode(Warn) to allow this.");
                         }
-                        // Warn and Silent (deprecated) both log and count
+                        // Warn mode logs and counts
                         detail::increment_higher_order_disconnection_count();
                         std::cerr << "[tenzor::autograd] Warning: '" << function->name()
                                   << "' is a higher-order stub — second derivatives "

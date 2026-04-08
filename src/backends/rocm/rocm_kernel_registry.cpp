@@ -125,6 +125,42 @@ namespace rocm {
     auto erf_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
     auto erfc_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
 
+    // Special math (native ROCm — replaces previous CPU-roundtrip fallbacks)
+    auto gamma_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto lgamma_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto digamma_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto polygamma_kernel(int64_t n, const Tensor& input, hipStream_t stream) -> Tensor;
+    auto beta_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor;
+    auto betainc_kernel(const Tensor& a, const Tensor& b, const Tensor& x, hipStream_t stream) -> Tensor;
+    auto bessel_j0_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto bessel_j1_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto bessel_y0_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto bessel_y1_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto bessel_i0_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto bessel_i1_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto erfinv_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto sinc_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto zeta_kernel(const Tensor& s, const Tensor& q, hipStream_t stream) -> Tensor;
+
+    // Grid sample / affine grid (native ROCm kernels — replaces previous CPU fallbacks)
+    auto grid_sample_kernel(const Tensor& input, const Tensor& grid,
+                            const std::string& mode, const std::string& padding_mode,
+                            bool align_corners, hipStream_t stream) -> Tensor;
+    auto affine_grid_kernel_host(const Tensor& theta, const std::vector<int64_t>& size,
+                                  bool align_corners, hipStream_t stream) -> Tensor;
+
+    // Sampling / statistics (native ROCm — replaces previous CPU fallbacks)
+    auto bernoulli_kernel(const Tensor& probs, hipStream_t stream) -> Tensor;
+    auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
+                            bool replacement, hipStream_t stream) -> Tensor;
+    auto bucketize_kernel(const Tensor& input, const Tensor& boundaries,
+                          bool right, hipStream_t stream) -> Tensor;
+    auto histogram_kernel(const Tensor& input, int64_t bins,
+                          double min_val, double max_val,
+                          hipStream_t stream) -> std::pair<Tensor, Tensor>;
+    auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
+                      hipStream_t stream) -> Tensor;
+
     // Bool predicate operations
     auto isnan_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
     auto isinf_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
@@ -2765,40 +2801,41 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     // ========================================================================
-    // Special Math Functions (CPU-roundtrip fallback)
+    // Special Math Functions — native ROCm device kernels
     // ========================================================================
-#define ROCM_UNARY_FALLBACK(OP_ID, FN) \
-    table.register_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes&) { \
-        return std::vector<Tensor>{tenzor::FN(inputs[0].to(Device::cpu())).to(inputs[0].device())}; \
+#define ROCM_REGISTER_UNARY_SPECIAL(OP_ID, FN) \
+    table.register_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes& attrs) { \
+        return std::vector<Tensor>{rocm::FN(inputs[0], get_hip_stream(attrs))}; \
     })
-#define ROCM_BINARY_FALLBACK(OP_ID, FN) \
-    table.register_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes&) { \
-        return std::vector<Tensor>{tenzor::FN(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu())).to(inputs[0].device())}; \
+#define ROCM_REGISTER_BINARY_SPECIAL(OP_ID, FN) \
+    table.register_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes& attrs) { \
+        return std::vector<Tensor>{rocm::FN(inputs[0], inputs[1], get_hip_stream(attrs))}; \
     })
 
-    ROCM_UNARY_FALLBACK(Gamma, gamma);
-    ROCM_UNARY_FALLBACK(Lgamma, lgamma);
-    ROCM_UNARY_FALLBACK(Digamma, digamma);
+    ROCM_REGISTER_UNARY_SPECIAL(Gamma,     gamma_kernel);
+    ROCM_REGISTER_UNARY_SPECIAL(Lgamma,    lgamma_kernel);
+    ROCM_REGISTER_UNARY_SPECIAL(Digamma,   digamma_kernel);
+    ROCM_REGISTER_BINARY_SPECIAL(Beta,     beta_kernel);
+    ROCM_REGISTER_UNARY_SPECIAL(BesselJ0,  bessel_j0_kernel);
+    ROCM_REGISTER_UNARY_SPECIAL(BesselJ1,  bessel_j1_kernel);
+    ROCM_REGISTER_UNARY_SPECIAL(BesselY0,  bessel_y0_kernel);
+    ROCM_REGISTER_UNARY_SPECIAL(BesselY1,  bessel_y1_kernel);
+    ROCM_REGISTER_UNARY_SPECIAL(BesselI0,  bessel_i0_kernel);
+    ROCM_REGISTER_UNARY_SPECIAL(BesselI1,  bessel_i1_kernel);
+    ROCM_REGISTER_UNARY_SPECIAL(ErfInv,    erfinv_kernel);
+    ROCM_REGISTER_UNARY_SPECIAL(Sinc,      sinc_kernel);
+    ROCM_REGISTER_BINARY_SPECIAL(Zeta,     zeta_kernel);
+
     table.register_kernel(OpId::Polygamma, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t n = static_cast<int64_t>(attrs.get_float(AttrKey::Order, 0.0));
-        return std::vector<Tensor>{tenzor::polygamma(n, inputs[0].to(Device::cpu())).to(inputs[0].device())};
+        return std::vector<Tensor>{rocm::polygamma_kernel(n, inputs[0], get_hip_stream(attrs))};
     });
-    ROCM_BINARY_FALLBACK(Beta, beta);
-    table.register_kernel(OpId::BetaInc, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        return std::vector<Tensor>{tenzor::betainc(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu()), inputs[2].to(Device::cpu())).to(inputs[0].device())};
+    table.register_kernel(OpId::BetaInc, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{rocm::betainc_kernel(inputs[0], inputs[1], inputs[2], get_hip_stream(attrs))};
     });
-    ROCM_UNARY_FALLBACK(BesselJ0, bessel_j0);
-    ROCM_UNARY_FALLBACK(BesselJ1, bessel_j1);
-    ROCM_UNARY_FALLBACK(BesselY0, bessel_y0);
-    ROCM_UNARY_FALLBACK(BesselY1, bessel_y1);
-    ROCM_UNARY_FALLBACK(BesselI0, bessel_i0);
-    ROCM_UNARY_FALLBACK(BesselI1, bessel_i1);
-    ROCM_UNARY_FALLBACK(ErfInv, erfinv);
-    ROCM_UNARY_FALLBACK(Sinc, sinc);
-    ROCM_BINARY_FALLBACK(Zeta, zeta);
 
-#undef ROCM_UNARY_FALLBACK
-#undef ROCM_BINARY_FALLBACK
+#undef ROCM_REGISTER_UNARY_SPECIAL
+#undef ROCM_REGISTER_BINARY_SPECIAL
 
     // ========================================================================
     // Bool Predicate Operations
@@ -3632,22 +3669,18 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         return rocm::box_iou_hip(inputs[0], inputs[1], iou_type);
     });
 
-    // GridSample / AffineGrid — CPU-roundtrip fallback
+    // GridSample / AffineGrid — native ROCm kernels
     table.register_single_output_kernel(OpId::GridSample, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         std::string mode = std::string(attrs.get_string(AttrKey::Mode, "bilinear"));
         std::string padding_mode = std::string(attrs.get_string(AttrKey::PaddingMode, "zeros"));
         bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
-        auto cpu_in = inputs[0].cpu();
-        auto cpu_grid = inputs[1].cpu();
-        auto result = tenzor::ops::grid_sample(cpu_in, cpu_grid, mode, padding_mode, align_corners);
-        return result.to(inputs[0].device());
+        return rocm::grid_sample_kernel(inputs[0], inputs[1], mode, padding_mode, align_corners, get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::AffineGrid, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        auto size = attrs.get_int_list(AttrKey::OutputSize);
+        auto size_span = attrs.get_int_list(AttrKey::OutputSize);
+        std::vector<int64_t> size(size_span.begin(), size_span.end());
         bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
-        auto cpu_theta = inputs[0].cpu();
-        auto result = tenzor::ops::affine_grid(cpu_theta, size, align_corners);
-        return result.to(inputs[0].device());
+        return rocm::affine_grid_kernel_host(inputs[0], size, align_corners, get_hip_stream(attrs));
     });
 
     // --- Cast/Dtype Operations -------------------------------------------------
@@ -3779,50 +3812,40 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     // ========================================================================
-    // CPU-roundtrip fallbacks for CUDA-exclusive operations
+    // Sampling / Statistics — native ROCm kernels
     // ========================================================================
 
-    // Bernoulli sampling
     table.register_single_output_kernel(OpId::Bernoulli,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            auto dev = inputs[0].device();
-            return tenzor::bernoulli(inputs[0].to(Device::cpu())).to(dev);
+            return rocm::bernoulli_kernel(inputs[0], get_hip_stream(attrs));
         });
 
-    // Multinomial sampling
     table.register_single_output_kernel(OpId::Multinomial,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            auto dev = inputs[0].device();
             int64_t num_samples = attrs.get_int(AttrKey::NumSamples, 1);
             bool replacement = attrs.get_bool(AttrKey::Replacement, false);
-            return tenzor::multinomial(inputs[0].to(Device::cpu()), num_samples, replacement).to(dev);
+            return rocm::multinomial_kernel(inputs[0], num_samples, replacement, get_hip_stream(attrs));
         });
 
-    // Bucketize
     table.register_single_output_kernel(OpId::Bucketize,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            auto dev = inputs[0].device();
             bool right = attrs.get_bool(AttrKey::Right, false);
-            return tenzor::bucketize(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu()), right).to(dev);
+            return rocm::bucketize_kernel(inputs[0], inputs[1], right, get_hip_stream(attrs));
         });
 
-    // Histogram (multi-output: returns {counts, edges})
     table.register_kernel(OpId::Histogram,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto dev = inputs[0].device();
             int64_t bins = attrs.get_int(AttrKey::NumBins, 10);
             double min_val = attrs.get_float(AttrKey::Min, 0.0);
             double max_val = attrs.get_float(AttrKey::Max, 0.0);
-            auto [counts, edges] = tenzor::histogram(inputs[0].to(Device::cpu()), bins, min_val, max_val);
-            return {counts.to(dev), edges.to(dev)};
+            auto [counts, edges] = rocm::histogram_kernel(inputs[0], bins, min_val, max_val, get_hip_stream(attrs));
+            return {counts, edges};
         });
 
-    // CDist (pairwise distance)
     table.register_single_output_kernel(OpId::CDist,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            auto dev = inputs[0].device();
             double p = attrs.get_float(AttrKey::DistP, 2.0);
-            return tenzor::cdist(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu()), p).to(dev);
+            return rocm::cdist_kernel(inputs[0], inputs[1], p, get_hip_stream(attrs));
         });
 
     // STFT (Short-Time Fourier Transform)

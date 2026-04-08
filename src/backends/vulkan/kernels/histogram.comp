@@ -1,0 +1,27 @@
+#version 450
+
+// Histogram: per-element atomic add into bin counts.
+// Uses int32 counts (sufficient for any practical histogram size).
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer InputBuf  { float input_data[]; };
+layout(binding = 1) buffer OutputBuf { int  counts[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint num_bins;
+    float min_val;
+    float bin_width;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n) return;
+
+    float val = input_data[idx];
+    int bin = int((val - params.min_val) / params.bin_width);
+    if (bin < 0) bin = 0;
+    if (bin >= int(params.num_bins)) bin = int(params.num_bins) - 1;
+    atomicAdd(counts[bin], 1);
+}

@@ -6527,5 +6527,471 @@ Tensor cross_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs)
     return cross_kernel(inputs[0], inputs[1], dim, stream);
 }
 
+// =========================================================================
+// Special Math Functions — native CUDA device implementations
+// (replaces the previous CPU-roundtrip fallbacks in cuda_kernel_registry.cpp)
+// =========================================================================
+//
+// CUDA's libdevice provides native implementations of most special functions:
+//   tgammaf, lgammaf       — gamma, lgamma
+//   j0f, j1f, y0f, y1f     — cylindrical Bessel J/Y
+//   cyl_bessel_i0f, cyl_bessel_i1f — modified Bessel I (CUDA Math API extensions)
+//   erfinvf                — inverse error function
+//
+// For functions without native libdevice equivalents (digamma, polygamma,
+// betainc, sinc, zeta) we implement them inline using polynomial expansions
+// matching the CPU backend's algorithms.
+
+// --- Digamma (psi function) — Cephes-style asymptotic expansion ---
+__device__ inline float digamma_dev_f32(float x) {
+    float result = 0.0f;
+    if (x < 0.5f) {
+        // Reflection: ψ(x) = ψ(1-x) - π·cot(πx)
+        float y = 1.0f - x;
+        float r = 0.0f;
+        while (y < 7.0f) { r -= 1.0f / y; y += 1.0f; }
+        float y2 = 1.0f / (y * y);
+        r += logf(y) - 0.5f / y
+            - y2 * (0.0833333333f - y2 * (0.00833333333f - y2 * (0.00396825397f
+            - y2 * (0.00416666667f - y2 * 0.00757575758f))));
+        return r - 3.14159265358979f / tanf(3.14159265358979f * x);
+    }
+    while (x < 7.0f) { result -= 1.0f / x; x += 1.0f; }
+    float x2 = 1.0f / (x * x);
+    result += logf(x) - 0.5f / x
+            - x2 * (0.0833333333f - x2 * (0.00833333333f - x2 * (0.00396825397f
+            - x2 * (0.00416666667f - x2 * 0.00757575758f))));
+    return result;
+}
+__device__ inline double digamma_dev_f64(double x) {
+    double result = 0.0;
+    if (x < 0.5) {
+        double y = 1.0 - x;
+        double r = 0.0;
+        while (y < 7.0) { r -= 1.0 / y; y += 1.0; }
+        double y2 = 1.0 / (y * y);
+        r += log(y) - 0.5 / y
+            - y2 * (1.0/12.0 - y2 * (1.0/120.0 - y2 * (1.0/252.0
+            - y2 * (1.0/240.0 - y2 * (1.0/132.0)))));
+        return r - 3.14159265358979323846 / tan(3.14159265358979323846 * x);
+    }
+    while (x < 7.0) { result -= 1.0 / x; x += 1.0; }
+    double x2 = 1.0 / (x * x);
+    result += log(x) - 0.5 / x
+            - x2 * (1.0/12.0 - x2 * (1.0/120.0 - x2 * (1.0/252.0
+            - x2 * (1.0/240.0 - x2 * (1.0/132.0)))));
+    return result;
+}
+
+// --- Sinc (normalized: sin(πx)/(πx), sinc(0)=1) ---
+__device__ inline float sinc_dev_f32(float x) {
+    if (x == 0.0f) return 1.0f;
+    float px = 3.14159265358979f * x;
+    return __sinf(px) / px;
+}
+__device__ inline double sinc_dev_f64(double x) {
+    if (x == 0.0) return 1.0;
+    double px = 3.14159265358979323846 * x;
+    return sin(px) / px;
+}
+
+// --- Hurwitz zeta ζ(s,q) — Euler-Maclaurin partial sum ---
+__device__ inline float zeta_dev_f32(float s, float a) {
+    float result = 0.0f;
+    #pragma unroll
+    for (int n = 0; n < 12; ++n) {
+        result += powf(a + static_cast<float>(n), -s);
+    }
+    float aN = a + 12.0f;
+    if (s != 1.0f) result += powf(aN, 1.0f - s) / (s - 1.0f);
+    result += 0.5f * powf(aN, -s);
+    return result;
+}
+__device__ inline double zeta_dev_f64(double s, double a) {
+    double result = 0.0;
+    #pragma unroll
+    for (int n = 0; n < 12; ++n) {
+        result += pow(a + static_cast<double>(n), -s);
+    }
+    double aN = a + 12.0;
+    if (s != 1.0) result += pow(aN, 1.0 - s) / (s - 1.0);
+    result += 0.5 * pow(aN, -s);
+    return result;
+}
+
+// --- Polygamma ψ^(n)(x) — direct asymptotic series for n ≥ 1 ---
+__device__ inline double polygamma_dev_f64(int n, double x) {
+    if (n == 0) return digamma_dev_f64(x);
+    double fact_n = 1.0;
+    for (int k = 1; k <= n; ++k) fact_n *= static_cast<double>(k);
+    double sign = ((n + 1) % 2 == 0) ? 1.0 : -1.0;
+    double sum = 0.0;
+    for (int k = 0; k < 100; ++k) {
+        double term = pow(x + k, -static_cast<double>(n + 1));
+        sum += term;
+        if (term < 1e-15 * fabs(sum)) break;
+    }
+    return sign * fact_n * sum;
+}
+__device__ inline float polygamma_dev_f32(int n, float x) {
+    return static_cast<float>(polygamma_dev_f64(n, static_cast<double>(x)));
+}
+
+// --- Regularized incomplete beta function I_x(a,b) — Lentz continued fraction ---
+__device__ inline double betainc_dev_f64(double a, double b, double x) {
+    if (x < 0.0 || x > 1.0) return nan("");
+    if (x == 0.0) return 0.0;
+    if (x == 1.0) return 1.0;
+
+    // Symmetry: I_x(a,b) = 1 - I_{1-x}(b,a) when x past inflection
+    bool flipped = false;
+    if (x > (a + 1.0) / (a + b + 2.0)) {
+        double tmp_a = a; a = b; b = tmp_a;
+        x = 1.0 - x;
+        flipped = true;
+    }
+
+    double lbeta = lgamma(a) + lgamma(b) - lgamma(a + b);
+    double front = exp(log(x) * a + log(1.0 - x) * b - lbeta) / a;
+
+    double f = 1.0, c = 1.0, d = 1.0 - (a + b) * x / (a + 1.0);
+    if (fabs(d) < 1e-30) d = 1e-30;
+    d = 1.0 / d;
+    f = d;
+
+    for (int m = 1; m <= 200; ++m) {
+        double num = static_cast<double>(m) * (b - m) * x
+                   / ((a + 2.0 * m - 1.0) * (a + 2.0 * m));
+        d = 1.0 + num * d; if (fabs(d) < 1e-30) d = 1e-30; d = 1.0 / d;
+        c = 1.0 + num / c; if (fabs(c) < 1e-30) c = 1e-30;
+        f *= d * c;
+
+        num = -((a + m) * (a + b + m) * x) / ((a + 2.0 * m) * (a + 2.0 * m + 1.0));
+        d = 1.0 + num * d; if (fabs(d) < 1e-30) d = 1e-30; d = 1.0 / d;
+        c = 1.0 + num / c; if (fabs(c) < 1e-30) c = 1e-30;
+        double delta = d * c;
+        f *= delta;
+        if (fabs(delta - 1.0) < 1e-12) break;
+    }
+    double val = front * f;
+    return flipped ? (1.0 - val) : val;
+}
+
+// =========================================================================
+// Generic unary special-math kernel template
+// =========================================================================
+template<typename FnFloat, typename FnDouble>
+__global__ void special_unary_kernel_f32(const float* in, float* out, int64_t n, FnFloat fn) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = fn(in[idx]); }
+}
+template<typename FnDouble>
+__global__ void special_unary_kernel_f64(const double* in, double* out, int64_t n, FnDouble fn) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = fn(in[idx]); }
+}
+
+// Macro to declare kernel + dispatch for a unary special function.
+// All dtypes accumulate in float (or double for f64); FP16/BF16 storage variants
+// load, cast to float, compute via the f32 expression, then cast back.
+#define DEFINE_CUDA_SPECIAL_UNARY(NAME, FN_F32_EXPR, FN_F64_EXPR)                            \
+    __global__ void NAME##_kernel_f32(const float* in, float* out, int64_t n) {              \
+        TENZOR_CUDA_KERNEL_LOOP(idx, n) { float x = in[idx]; out[idx] = (FN_F32_EXPR); }    \
+    }                                                                                         \
+    __global__ void NAME##_kernel_f64(const double* in, double* out, int64_t n) {            \
+        TENZOR_CUDA_KERNEL_LOOP(idx, n) { double x = in[idx]; out[idx] = (FN_F64_EXPR); }   \
+    }                                                                                         \
+    __global__ void NAME##_kernel_f16(const __half* in, __half* out, int64_t n) {            \
+        TENZOR_CUDA_KERNEL_LOOP(idx, n) {                                                     \
+            float x = __half2float(in[idx]);                                                  \
+            out[idx] = __float2half(FN_F32_EXPR);                                             \
+        }                                                                                     \
+    }                                                                                         \
+    __global__ void NAME##_kernel_bf16(const __nv_bfloat16* in, __nv_bfloat16* out, int64_t n) { \
+        TENZOR_CUDA_KERNEL_LOOP(idx, n) {                                                     \
+            float x = __bfloat162float(in[idx]);                                              \
+            out[idx] = __float2bfloat16(FN_F32_EXPR);                                         \
+        }                                                                                     \
+    }                                                                                         \
+    auto NAME##_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {                 \
+        int64_t n = input.numel();                                                            \
+        std::vector<int64_t> shape(input.shape().begin(), input.shape().end());              \
+        Tensor result(shape, input.dtype(), input.device());                                 \
+        if (n == 0) return result;                                                            \
+        dim3 grid, block; compute_launch_config_1d(n, grid, block);                          \
+        if (input.dtype() == DType::Float32) {                                                \
+            NAME##_kernel_f32<<<grid, block, 0, stream>>>(                                    \
+                input.data<float>(), result.data<float>(), n);                               \
+            CUDA_CHECK(cudaGetLastError());                                                   \
+        } else if (input.dtype() == DType::Float64) {                                         \
+            NAME##_kernel_f64<<<grid, block, 0, stream>>>(                                    \
+                input.data<double>(), result.data<double>(), n);                             \
+            CUDA_CHECK(cudaGetLastError());                                                   \
+        } else if (input.dtype() == DType::Float16) {                                         \
+            NAME##_kernel_f16<<<grid, block, 0, stream>>>(                                    \
+                reinterpret_cast<const __half*>(input.data<Float16>()),                       \
+                reinterpret_cast<__half*>(result.data<Float16>()), n);                        \
+            CUDA_CHECK(cudaGetLastError());                                                   \
+        } else if (input.dtype() == DType::BFloat16) {                                        \
+            NAME##_kernel_bf16<<<grid, block, 0, stream>>>(                                   \
+                reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),               \
+                reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);                \
+            CUDA_CHECK(cudaGetLastError());                                                   \
+        } else {                                                                              \
+            throw std::runtime_error(#NAME " only supports Float32, Float64, Float16, BFloat16"); \
+        }                                                                                     \
+        return result;                                                                        \
+    }                                                                                         \
+    Tensor NAME##_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {      \
+        auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);                        \
+        return NAME##_kernel(inputs[0], stream);                                              \
+    }
+
+DEFINE_CUDA_SPECIAL_UNARY(gamma,     tgammaf(x),               tgamma(x))
+DEFINE_CUDA_SPECIAL_UNARY(lgamma,    lgammaf(x),               lgamma(x))
+DEFINE_CUDA_SPECIAL_UNARY(digamma,   digamma_dev_f32(x),       digamma_dev_f64(x))
+DEFINE_CUDA_SPECIAL_UNARY(bessel_j0, j0f(x),                   j0(x))
+DEFINE_CUDA_SPECIAL_UNARY(bessel_j1, j1f(x),                   j1(x))
+DEFINE_CUDA_SPECIAL_UNARY(bessel_y0, y0f(x),                   y0(x))
+DEFINE_CUDA_SPECIAL_UNARY(bessel_y1, y1f(x),                   y1(x))
+DEFINE_CUDA_SPECIAL_UNARY(bessel_i0, cyl_bessel_i0f(x),        cyl_bessel_i0(x))
+DEFINE_CUDA_SPECIAL_UNARY(bessel_i1, cyl_bessel_i1f(x),        cyl_bessel_i1(x))
+DEFINE_CUDA_SPECIAL_UNARY(erfinv,    erfinvf(x),               erfinv(x))
+DEFINE_CUDA_SPECIAL_UNARY(sinc,      sinc_dev_f32(x),          sinc_dev_f64(x))
+
+#undef DEFINE_CUDA_SPECIAL_UNARY
+
+// --- Beta(a, b) = exp(lgamma(a) + lgamma(b) - lgamma(a + b)) ---
+__device__ inline float beta_dev_f32(float a, float b) {
+    return expf(lgammaf(a) + lgammaf(b) - lgammaf(a + b));
+}
+__device__ inline double beta_dev_f64(double a, double b) {
+    return exp(lgamma(a) + lgamma(b) - lgamma(a + b));
+}
+__global__ void beta_kernel_f32(const float* a, const float* b, float* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = beta_dev_f32(a[idx], b[idx]); }
+}
+__global__ void beta_kernel_f64(const double* a, const double* b, double* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = beta_dev_f64(a[idx], b[idx]); }
+}
+__global__ void beta_kernel_f16(const __half* a, const __half* b, __half* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        out[idx] = __float2half(beta_dev_f32(__half2float(a[idx]), __half2float(b[idx])));
+    }
+}
+__global__ void beta_kernel_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b, __nv_bfloat16* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        out[idx] = __float2bfloat16(beta_dev_f32(__bfloat162float(a[idx]), __bfloat162float(b[idx])));
+    }
+}
+auto beta_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
+    int64_t n = a.numel();
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, a.dtype(), a.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (a.dtype() == DType::Float32) {
+        beta_kernel_f32<<<grid, block, 0, stream>>>(
+            a.data<float>(), b.data<float>(), result.data<float>(), n);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::Float64) {
+        beta_kernel_f64<<<grid, block, 0, stream>>>(
+            a.data<double>(), b.data<double>(), result.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::Float16) {
+        beta_kernel_f16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(b.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::BFloat16) {
+        beta_kernel_bf16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(a.data<BFloat16>()),
+            reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
+        CUDA_CHECK(cudaGetLastError());
+    } else {
+        throw std::runtime_error("beta only supports Float32, Float64, Float16, BFloat16");
+    }
+    return result;
+}
+Tensor beta_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
+    return beta_kernel(inputs[0], inputs[1], stream);
+}
+
+// --- Hurwitz zeta ζ(s, q) ---
+__global__ void zeta_kernel_f32(const float* s, const float* q, float* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = zeta_dev_f32(s[idx], q[idx]); }
+}
+__global__ void zeta_kernel_f64(const double* s, const double* q, double* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = zeta_dev_f64(s[idx], q[idx]); }
+}
+__global__ void zeta_kernel_f16(const __half* s, const __half* q, __half* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        out[idx] = __float2half(zeta_dev_f32(__half2float(s[idx]), __half2float(q[idx])));
+    }
+}
+__global__ void zeta_kernel_bf16(const __nv_bfloat16* s, const __nv_bfloat16* q, __nv_bfloat16* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        out[idx] = __float2bfloat16(zeta_dev_f32(__bfloat162float(s[idx]), __bfloat162float(q[idx])));
+    }
+}
+auto zeta_kernel(const Tensor& s, const Tensor& q, cudaStream_t stream) -> Tensor {
+    int64_t n = s.numel();
+    std::vector<int64_t> shape(s.shape().begin(), s.shape().end());
+    Tensor result(shape, s.dtype(), s.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (s.dtype() == DType::Float32) {
+        zeta_kernel_f32<<<grid, block, 0, stream>>>(
+            s.data<float>(), q.data<float>(), result.data<float>(), n);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (s.dtype() == DType::Float64) {
+        zeta_kernel_f64<<<grid, block, 0, stream>>>(
+            s.data<double>(), q.data<double>(), result.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (s.dtype() == DType::Float16) {
+        zeta_kernel_f16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(s.data<Float16>()),
+            reinterpret_cast<const __half*>(q.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (s.dtype() == DType::BFloat16) {
+        zeta_kernel_bf16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(s.data<BFloat16>()),
+            reinterpret_cast<const __nv_bfloat16*>(q.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
+        CUDA_CHECK(cudaGetLastError());
+    } else {
+        throw std::runtime_error("zeta only supports Float32, Float64, Float16, BFloat16");
+    }
+    return result;
+}
+Tensor zeta_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
+    return zeta_kernel(inputs[0], inputs[1], stream);
+}
+
+// --- Polygamma ψ^(n)(x) — n is a scalar order from attrs ---
+__global__ void polygamma_kernel_f32(int n, const float* in, float* out, int64_t numel) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, numel) { out[idx] = polygamma_dev_f32(n, in[idx]); }
+}
+__global__ void polygamma_kernel_f64(int n, const double* in, double* out, int64_t numel) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, numel) { out[idx] = polygamma_dev_f64(n, in[idx]); }
+}
+__global__ void polygamma_kernel_f16(int n, const __half* in, __half* out, int64_t numel) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, numel) {
+        out[idx] = __float2half(polygamma_dev_f32(n, __half2float(in[idx])));
+    }
+}
+__global__ void polygamma_kernel_bf16(int n, const __nv_bfloat16* in, __nv_bfloat16* out, int64_t numel) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, numel) {
+        out[idx] = __float2bfloat16(polygamma_dev_f32(n, __bfloat162float(in[idx])));
+    }
+}
+auto polygamma_kernel(int64_t n, const Tensor& input, cudaStream_t stream) -> Tensor {
+    int64_t numel = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    if (numel == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(numel, grid, block);
+    if (input.dtype() == DType::Float32) {
+        polygamma_kernel_f32<<<grid, block, 0, stream>>>(
+            static_cast<int>(n), input.data<float>(), result.data<float>(), numel);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Float64) {
+        polygamma_kernel_f64<<<grid, block, 0, stream>>>(
+            static_cast<int>(n), input.data<double>(), result.data<double>(), numel);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Float16) {
+        polygamma_kernel_f16<<<grid, block, 0, stream>>>(
+            static_cast<int>(n),
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), numel);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::BFloat16) {
+        polygamma_kernel_bf16<<<grid, block, 0, stream>>>(
+            static_cast<int>(n),
+            reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), numel);
+        CUDA_CHECK(cudaGetLastError());
+    } else {
+        throw std::runtime_error("polygamma only supports Float32, Float64, Float16, BFloat16");
+    }
+    return result;
+}
+Tensor polygamma_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
+    int64_t order = static_cast<int64_t>(attrs.get_float(AttrKey::Order, 0.0));
+    return polygamma_kernel(order, inputs[0], stream);
+}
+
+// --- Regularized incomplete beta I_x(a, b) ---
+__global__ void betainc_kernel_f32(const float* a, const float* b, const float* x, float* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        out[idx] = static_cast<float>(betainc_dev_f64(
+            static_cast<double>(a[idx]), static_cast<double>(b[idx]), static_cast<double>(x[idx])));
+    }
+}
+__global__ void betainc_kernel_f64(const double* a, const double* b, const double* x, double* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        out[idx] = betainc_dev_f64(a[idx], b[idx], x[idx]);
+    }
+}
+__global__ void betainc_kernel_f16(const __half* a, const __half* b, const __half* x, __half* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        double r = betainc_dev_f64(
+            static_cast<double>(__half2float(a[idx])),
+            static_cast<double>(__half2float(b[idx])),
+            static_cast<double>(__half2float(x[idx])));
+        out[idx] = __float2half(static_cast<float>(r));
+    }
+}
+__global__ void betainc_kernel_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b, const __nv_bfloat16* x, __nv_bfloat16* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        double r = betainc_dev_f64(
+            static_cast<double>(__bfloat162float(a[idx])),
+            static_cast<double>(__bfloat162float(b[idx])),
+            static_cast<double>(__bfloat162float(x[idx])));
+        out[idx] = __float2bfloat16(static_cast<float>(r));
+    }
+}
+auto betainc_kernel(const Tensor& a, const Tensor& b, const Tensor& x, cudaStream_t stream) -> Tensor {
+    int64_t n = a.numel();
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, a.dtype(), a.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (a.dtype() == DType::Float32) {
+        betainc_kernel_f32<<<grid, block, 0, stream>>>(
+            a.data<float>(), b.data<float>(), x.data<float>(), result.data<float>(), n);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::Float64) {
+        betainc_kernel_f64<<<grid, block, 0, stream>>>(
+            a.data<double>(), b.data<double>(), x.data<double>(), result.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::Float16) {
+        betainc_kernel_f16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(b.data<Float16>()),
+            reinterpret_cast<const __half*>(x.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::BFloat16) {
+        betainc_kernel_bf16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(a.data<BFloat16>()),
+            reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
+            reinterpret_cast<const __nv_bfloat16*>(x.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
+        CUDA_CHECK(cudaGetLastError());
+    } else {
+        throw std::runtime_error("betainc only supports Float32, Float64, Float16, BFloat16");
+    }
+    return result;
+}
+Tensor betainc_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
+    return betainc_kernel(inputs[0], inputs[1], inputs[2], stream);
+}
+
 } // namespace cuda
 } // namespace tenzor

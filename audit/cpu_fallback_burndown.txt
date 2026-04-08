@@ -1,0 +1,78 @@
+/home/lee/Projects/Tenzor/src/backends/cuda/kernels/advanced.cu:1469:        auto in_cpu = in_contig.to(Device::cpu());
+/home/lee/Projects/Tenzor/src/backends/cuda/kernels/advanced.cu:1560:    auto src_cpu = src.to(Device::cpu());
+/home/lee/Projects/Tenzor/src/backends/cuda/kernels/advanced.cu:1565:            indices_cpu.push_back(idx.to(Device::cpu()));
+/home/lee/Projects/Tenzor/src/backends/cuda/kernels/advanced.cu:1580:    auto src_cpu = src.to(Device::cpu()).clone();
+/home/lee/Projects/Tenzor/src/backends/cuda/kernels/advanced.cu:1581:    auto values_cpu = values.to(Device::cpu());
+/home/lee/Projects/Tenzor/src/backends/cuda/kernels/advanced.cu:1586:            opt_indices.push_back(idx.to(Device::cpu()));
+/home/lee/Projects/Tenzor/src/backends/cuda/kernels/advanced.cu:1605:    auto input_cpu = input.to(Device::cpu());
+/home/lee/Projects/Tenzor/src/backends/cuda/kernels/advanced.cu:1606:    Tensor window_cpu = window.numel() > 0 ? window.to(Device::cpu()) : window;
+/home/lee/Projects/Tenzor/src/backends/cuda/kernels/advanced.cu:1617:    auto input_cpu = input.to(Device::cpu());
+/home/lee/Projects/Tenzor/src/backends/cuda/kernels/advanced.cu:1618:    Tensor window_cpu = window.numel() > 0 ? window.to(Device::cpu()) : window;
+/home/lee/Projects/Tenzor/src/backends/cuda/cuda_kernel_registry.cpp:901:        return tenzor::FN(inputs[0].to(Device::cpu())).to(inputs[0].device()); \
+/home/lee/Projects/Tenzor/src/backends/cuda/cuda_kernel_registry.cpp:905:        return tenzor::FN(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu())).to(inputs[0].device()); \
+/home/lee/Projects/Tenzor/src/backends/cuda/cuda_kernel_registry.cpp:913:        return tenzor::polygamma(n, inputs[0].to(Device::cpu())).to(inputs[0].device());
+/home/lee/Projects/Tenzor/src/backends/cuda/cuda_kernel_registry.cpp:917:        return std::vector<Tensor>{tenzor::betainc(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu()), inputs[2].to(Device::cpu())).to(inputs[0].device())};
+/home/lee/Projects/Tenzor/src/backends/rocm/rocm_kernel_registry.cpp:2772:        return std::vector<Tensor>{tenzor::FN(inputs[0].to(Device::cpu())).to(inputs[0].device())}; \
+/home/lee/Projects/Tenzor/src/backends/rocm/rocm_kernel_registry.cpp:2776:        return std::vector<Tensor>{tenzor::FN(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu())).to(inputs[0].device())}; \
+/home/lee/Projects/Tenzor/src/backends/rocm/rocm_kernel_registry.cpp:2784:        return std::vector<Tensor>{tenzor::polygamma(n, inputs[0].to(Device::cpu())).to(inputs[0].device())};
+/home/lee/Projects/Tenzor/src/backends/rocm/rocm_kernel_registry.cpp:2788:        return std::vector<Tensor>{tenzor::betainc(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu()), inputs[2].to(Device::cpu())).to(inputs[0].device())};
+/home/lee/Projects/Tenzor/src/backends/rocm/rocm_kernel_registry.cpp:3141:        return tenzor::FN(inputs[0].to(Device::cpu())).to(inputs[0].device()); \
+/home/lee/Projects/Tenzor/src/backends/rocm/rocm_kernel_registry.cpp:3640:        auto cpu_in = inputs[0].cpu();
+/home/lee/Projects/Tenzor/src/backends/rocm/rocm_kernel_registry.cpp:3641:        auto cpu_grid = inputs[1].cpu();
+/home/lee/Projects/Tenzor/src/backends/rocm/rocm_kernel_registry.cpp:3648:        auto cpu_theta = inputs[0].cpu();
+/home/lee/Projects/Tenzor/src/backends/rocm/rocm_kernel_registry.cpp:3789:            return tenzor::bernoulli(inputs[0].to(Device::cpu())).to(dev);
+/home/lee/Projects/Tenzor/src/backends/rocm/rocm_kernel_registry.cpp:3798:            return tenzor::multinomial(inputs[0].to(Device::cpu()), num_samples, replacement).to(dev);
+/home/lee/Projects/Tenzor/src/backends/rocm/rocm_kernel_registry.cpp:3806:            return tenzor::bucketize(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu()), right).to(dev);
+/home/lee/Projects/Tenzor/src/backends/rocm/rocm_kernel_registry.cpp:3816:            auto [counts, edges] = tenzor::histogram(inputs[0].to(Device::cpu()), bins, min_val, max_val);
+/home/lee/Projects/Tenzor/src/backends/rocm/rocm_kernel_registry.cpp:3825:            return tenzor::cdist(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu()), p).to(dev);
+/home/lee/Projects/Tenzor/src/backends/rocm/rocm_kernel_registry.cpp:3838:            Tensor window = (inputs.size() > 1) ? inputs[1].to(Device::cpu()) : Tensor();
+/home/lee/Projects/Tenzor/src/backends/rocm/rocm_kernel_registry.cpp:3839:            return tenzor::fft::stft(inputs[0].to(Device::cpu()), n_fft, hop_length, win_length,
+/home/lee/Projects/Tenzor/src/backends/rocm/rocm_kernel_registry.cpp:3855:            Tensor window = (inputs.size() > 1) ? inputs[1].to(Device::cpu()) : Tensor();
+/home/lee/Projects/Tenzor/src/backends/rocm/rocm_kernel_registry.cpp:3856:            return tenzor::fft::istft(inputs[0].to(Device::cpu()), n_fft, hop_length, win_length,
+/home/lee/Projects/Tenzor/src/backends/rocm/rocm_kernel_registry.cpp:3866:            for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
+/home/lee/Projects/Tenzor/src/backends/rocm/rocm_kernel_registry.cpp:3877:            for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
+/home/lee/Projects/Tenzor/src/backends/vulkan/QUICK_START.md:102:    auto result = e.cpu();
+/home/lee/Projects/Tenzor/src/backends/vulkan/QUICK_START.md:137:result = c.cpu()
+/home/lee/Projects/Tenzor/src/backends/vulkan/vulkan_ops_vision.cpp:152:    Tensor last_scalar = prefix.slice(0, N - 1, N).to(Device::cpu());
+/home/lee/Projects/Tenzor/src/backends/vulkan/vulkan_ops_vision.cpp:332:    Tensor count_cpu = count_buf.to(Device::cpu());
+/home/lee/Projects/Tenzor/src/backends/vulkan/vulkan_ops_sort.cpp:811:    Tensor last_elem = prefix_sum.slice(0, numel - 1, numel).to(Device::cpu());
+/home/lee/Projects/Tenzor/src/backends/vulkan/vulkan_ops_linalg.cpp:1818:            Tensor ac_cpu = gpu_all_converged.to(Device::cpu());
+/home/lee/Projects/Tenzor/src/backends/vulkan/vulkan_ops_linalg.cpp:2643:    Tensor nnz_scalar = crow_indices.slice(0, M, M + 1).to(Device::cpu());
+/home/lee/Projects/Tenzor/src/backends/vulkan/vulkan_kernel_registry.cpp:927:        auto cpu_in = inputs[0].cpu();
+/home/lee/Projects/Tenzor/src/backends/vulkan/vulkan_kernel_registry.cpp:928:        auto cpu_grid = inputs[1].cpu();
+/home/lee/Projects/Tenzor/src/backends/vulkan/vulkan_kernel_registry.cpp:935:        auto cpu_theta = inputs[0].cpu();
+/home/lee/Projects/Tenzor/src/backends/vulkan/vulkan_kernel_registry.cpp:1478:        return std::vector<Tensor>{tenzor::FN(inputs[0].to(Device::cpu())).to(inputs[0].device())}; \
+/home/lee/Projects/Tenzor/src/backends/vulkan/vulkan_kernel_registry.cpp:1482:        return std::vector<Tensor>{tenzor::FN(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu())).to(inputs[0].device())}; \
+/home/lee/Projects/Tenzor/src/backends/vulkan/vulkan_kernel_registry.cpp:1490:        return std::vector<Tensor>{tenzor::polygamma(n, inputs[0].to(Device::cpu())).to(inputs[0].device())};
+/home/lee/Projects/Tenzor/src/backends/vulkan/vulkan_kernel_registry.cpp:1494:        return std::vector<Tensor>{tenzor::betainc(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu()), inputs[2].to(Device::cpu())).to(inputs[0].device())};
+/home/lee/Projects/Tenzor/src/backends/vulkan/vulkan_kernel_registry.cpp:2207:            return tenzor::bernoulli(inputs[0].to(Device::cpu())).to(dev);
+/home/lee/Projects/Tenzor/src/backends/vulkan/vulkan_kernel_registry.cpp:2216:            return tenzor::multinomial(inputs[0].to(Device::cpu()), num_samples, replacement).to(dev);
+/home/lee/Projects/Tenzor/src/backends/vulkan/vulkan_kernel_registry.cpp:2224:            return tenzor::bucketize(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu()), right).to(dev);
+/home/lee/Projects/Tenzor/src/backends/vulkan/vulkan_kernel_registry.cpp:2234:            auto [counts, edges] = tenzor::histogram(inputs[0].to(Device::cpu()), bins, min_val, max_val);
+/home/lee/Projects/Tenzor/src/backends/vulkan/vulkan_kernel_registry.cpp:2243:            return tenzor::cdist(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu()), p).to(dev);
+/home/lee/Projects/Tenzor/src/backends/vulkan/vulkan_kernel_registry.cpp:2256:            Tensor window = (inputs.size() > 1) ? inputs[1].to(Device::cpu()) : Tensor();
+/home/lee/Projects/Tenzor/src/backends/vulkan/vulkan_kernel_registry.cpp:2257:            return tenzor::fft::stft(inputs[0].to(Device::cpu()), n_fft, hop_length, win_length,
+/home/lee/Projects/Tenzor/src/backends/vulkan/vulkan_kernel_registry.cpp:2273:            Tensor window = (inputs.size() > 1) ? inputs[1].to(Device::cpu()) : Tensor();
+/home/lee/Projects/Tenzor/src/backends/vulkan/vulkan_kernel_registry.cpp:2274:            return tenzor::fft::istft(inputs[0].to(Device::cpu()), n_fft, hop_length, win_length,
+/home/lee/Projects/Tenzor/src/backends/vulkan/vulkan_kernel_registry.cpp:2284:            for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
+/home/lee/Projects/Tenzor/src/backends/vulkan/vulkan_kernel_registry.cpp:2295:            for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
+/home/lee/Projects/Tenzor/src/backends/vulkan/vulkan_backend.cpp:4486:        Tensor indices_cpu = indices.to(Device::cpu());
+/home/lee/Projects/Tenzor/src/backends/vulkan/vulkan_ops_misc.cpp:803:    Tensor count_cpu = count_buf.slice(0, 0, 1).to(Device::cpu());
+/home/lee/Projects/Tenzor/src/backends/oneapi/oneapi_kernel_registry.cpp:911:        return std::vector<Tensor>{tenzor::FN(inputs[0].to(Device::cpu())).to(inputs[0].device())}; \
+/home/lee/Projects/Tenzor/src/backends/oneapi/oneapi_kernel_registry.cpp:915:        return std::vector<Tensor>{tenzor::FN(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu())).to(inputs[0].device())}; \
+/home/lee/Projects/Tenzor/src/backends/oneapi/oneapi_kernel_registry.cpp:923:        return std::vector<Tensor>{tenzor::polygamma(n, inputs[0].to(Device::cpu())).to(inputs[0].device())};
+/home/lee/Projects/Tenzor/src/backends/oneapi/oneapi_kernel_registry.cpp:927:        return std::vector<Tensor>{tenzor::betainc(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu()), inputs[2].to(Device::cpu())).to(inputs[0].device())};
+/home/lee/Projects/Tenzor/src/backends/oneapi/oneapi_kernel_registry.cpp:2599:        auto cpu_in = inputs[0].cpu();
+/home/lee/Projects/Tenzor/src/backends/oneapi/oneapi_kernel_registry.cpp:2600:        auto cpu_grid = inputs[1].cpu();
+/home/lee/Projects/Tenzor/src/backends/oneapi/oneapi_kernel_registry.cpp:2607:        auto cpu_theta = inputs[0].cpu();
+/home/lee/Projects/Tenzor/src/backends/oneapi/oneapi_kernel_registry.cpp:3478:            return tenzor::bernoulli(inputs[0].to(Device::cpu())).to(dev);
+/home/lee/Projects/Tenzor/src/backends/oneapi/oneapi_kernel_registry.cpp:3487:            return tenzor::multinomial(inputs[0].to(Device::cpu()), num_samples, replacement).to(dev);
+/home/lee/Projects/Tenzor/src/backends/oneapi/oneapi_kernel_registry.cpp:3495:            return tenzor::bucketize(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu()), right).to(dev);
+/home/lee/Projects/Tenzor/src/backends/oneapi/oneapi_kernel_registry.cpp:3505:            auto [counts, edges] = tenzor::histogram(inputs[0].to(Device::cpu()), bins, min_val, max_val);
+/home/lee/Projects/Tenzor/src/backends/oneapi/oneapi_kernel_registry.cpp:3514:            return tenzor::cdist(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu()), p).to(dev);
+/home/lee/Projects/Tenzor/src/backends/oneapi/oneapi_kernel_registry.cpp:3527:            Tensor window = (inputs.size() > 1) ? inputs[1].to(Device::cpu()) : Tensor();
+/home/lee/Projects/Tenzor/src/backends/oneapi/oneapi_kernel_registry.cpp:3528:            return tenzor::fft::stft(inputs[0].to(Device::cpu()), n_fft, hop_length, win_length,
+/home/lee/Projects/Tenzor/src/backends/oneapi/oneapi_kernel_registry.cpp:3544:            Tensor window = (inputs.size() > 1) ? inputs[1].to(Device::cpu()) : Tensor();
+/home/lee/Projects/Tenzor/src/backends/oneapi/oneapi_kernel_registry.cpp:3545:            return tenzor::fft::istft(inputs[0].to(Device::cpu()), n_fft, hop_length, win_length,
+/home/lee/Projects/Tenzor/src/backends/oneapi/oneapi_kernel_registry.cpp:3555:            for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
+/home/lee/Projects/Tenzor/src/backends/oneapi/oneapi_kernel_registry.cpp:3566:            for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));

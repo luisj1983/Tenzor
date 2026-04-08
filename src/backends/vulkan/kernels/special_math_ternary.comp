@@ -1,0 +1,95 @@
+#version 450
+
+// Special math ternary operation:
+//   0=betainc(a, b, x) — regularized incomplete beta function I_x(a,b)
+//
+// Uses Lentz's continued-fraction algorithm matching the CPU implementation.
+
+layout(local_size_x_id = 0) in;
+layout(binding = 0) buffer InputA { float a_data[]; };
+layout(binding = 1) buffer InputB { float b_data[]; };
+layout(binding = 2) buffer InputX { float x_data[]; };
+layout(binding = 3) buffer Output { float out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint op;
+} params;
+
+const float PI = 3.14159265358979f;
+
+float lgamma_lanczos(float x) {
+    float coef[9];
+    coef[0] = 0.99999999999980993f;
+    coef[1] = 676.5203681218851f;
+    coef[2] = -1259.1392167224028f;
+    coef[3] = 771.32342877765313f;
+    coef[4] = -176.61502916214059f;
+    coef[5] = 12.507343278686905f;
+    coef[6] = -0.13857109526572012f;
+    coef[7] = 9.9843695780195716e-6f;
+    coef[8] = 1.5056327351493116e-7f;
+
+    float g = 7.0f;
+    float xm1 = x - 1.0f;
+    float a = coef[0];
+    float t = xm1 + g + 0.5f;
+    for (int i = 1; i < 9; ++i) {
+        a += coef[i] / (xm1 + float(i));
+    }
+    return 0.5f * log(2.0f * PI) + (xm1 + 0.5f) * log(t) - t + log(a);
+}
+float lgamma_impl(float x) {
+    if (x < 0.5f) {
+        return log(PI / abs(sin(PI * x))) - lgamma_lanczos(1.0f - x);
+    }
+    return lgamma_lanczos(x);
+}
+
+float betainc_impl(float a, float b, float x) {
+    if (x < 0.0f || x > 1.0f) return 0.0f / 0.0f;  // NaN
+    if (x == 0.0f) return 0.0f;
+    if (x == 1.0f) return 1.0f;
+
+    bool flipped = false;
+    if (x > (a + 1.0f) / (a + b + 2.0f)) {
+        float tmp = a; a = b; b = tmp;
+        x = 1.0f - x;
+        flipped = true;
+    }
+
+    float lbeta = lgamma_impl(a) + lgamma_impl(b) - lgamma_impl(a + b);
+    float front = exp(log(x) * a + log(1.0f - x) * b - lbeta) / a;
+
+    float f = 1.0f, c = 1.0f, d = 1.0f - (a + b) * x / (a + 1.0f);
+    if (abs(d) < 1.0e-30f) d = 1.0e-30f;
+    d = 1.0f / d;
+    f = d;
+
+    for (int m = 1; m <= 200; ++m) {
+        float num = float(m) * (b - float(m)) * x
+                   / ((a + 2.0f * float(m) - 1.0f) * (a + 2.0f * float(m)));
+        d = 1.0f + num * d; if (abs(d) < 1.0e-30f) d = 1.0e-30f; d = 1.0f / d;
+        c = 1.0f + num / c; if (abs(c) < 1.0e-30f) c = 1.0e-30f;
+        f *= d * c;
+
+        num = -((a + float(m)) * (a + b + float(m)) * x)
+            / ((a + 2.0f * float(m)) * (a + 2.0f * float(m) + 1.0f));
+        d = 1.0f + num * d; if (abs(d) < 1.0e-30f) d = 1.0e-30f; d = 1.0f / d;
+        c = 1.0f + num / c; if (abs(c) < 1.0e-30f) c = 1.0e-30f;
+        float delta = d * c;
+        f *= delta;
+        if (abs(delta - 1.0f) < 1.0e-7f) break;
+    }
+    float val = front * f;
+    return flipped ? (1.0f - val) : val;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n) return;
+    float a = a_data[idx];
+    float b = b_data[idx];
+    float x = x_data[idx];
+    out_data[idx] = betainc_impl(a, b, x);
+}

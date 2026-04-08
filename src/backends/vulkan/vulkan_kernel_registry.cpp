@@ -919,22 +919,18 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchROIAlignBackward(inputs[0], inputs[1], attrs)};
     });
 
-    // GridSample / AffineGrid — CPU-roundtrip fallback
+    // GridSample / AffineGrid — native Vulkan compute shaders
     table.register_single_output_kernel(OpId::GridSample, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         std::string mode = std::string(attrs.get_string(AttrKey::Mode, "bilinear"));
         std::string padding_mode = std::string(attrs.get_string(AttrKey::PaddingMode, "zeros"));
         bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
-        auto cpu_in = inputs[0].cpu();
-        auto cpu_grid = inputs[1].cpu();
-        auto result = tenzor::ops::grid_sample(cpu_in, cpu_grid, mode, padding_mode, align_corners);
-        return result.to(inputs[0].device());
+        return get_vulkan_backend()->dispatchGridSample(inputs[0], inputs[1], mode, padding_mode, align_corners);
     });
     table.register_single_output_kernel(OpId::AffineGrid, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        auto size = attrs.get_int_list(AttrKey::OutputSize);
+        auto size_span = attrs.get_int_list(AttrKey::OutputSize);
+        std::vector<int64_t> size(size_span.begin(), size_span.end());
         bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
-        auto cpu_theta = inputs[0].cpu();
-        auto result = tenzor::ops::affine_grid(cpu_theta, size, align_corners);
-        return result.to(inputs[0].device());
+        return get_vulkan_backend()->dispatchAffineGrid(inputs[0], size, align_corners);
     });
 
     table.register_kernel(OpId::GatherRelativePositionBias, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -1471,40 +1467,54 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     // ========================================================================
-    // Special Math Functions (CPU-roundtrip fallback)
+    // Special Math Functions — native Vulkan compute shaders
     // ========================================================================
-#define VK_UNARY_FALLBACK(OP_ID, FN) \
+    // Opcodes mirror special_math_unary.comp:
+    //   0=gamma, 1=lgamma, 2=digamma, 3=bessel_j0, 4=bessel_j1,
+    //   5=bessel_y0, 6=bessel_y1, 7=bessel_i0, 8=bessel_i1, 9=erfinv,
+    //   10=sinc, 11=polygamma
+    // KernelFn is a plain function pointer (no captures), so each op gets its
+    // own non-capturing lambda hard-coding the opcode.
+#define VK_REGISTER_UNARY_SPECIAL(OP_ID, OPCODE) \
     table.register_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes&) { \
-        return std::vector<Tensor>{tenzor::FN(inputs[0].to(Device::cpu())).to(inputs[0].device())}; \
-    })
-#define VK_BINARY_FALLBACK(OP_ID, FN) \
-    table.register_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes&) { \
-        return std::vector<Tensor>{tenzor::FN(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu())).to(inputs[0].device())}; \
+        return std::vector<Tensor>{ \
+            get_vulkan_backend()->dispatchSpecialMathUnary(inputs[0], (OPCODE))}; \
     })
 
-    VK_UNARY_FALLBACK(Gamma, gamma);
-    VK_UNARY_FALLBACK(Lgamma, lgamma);
-    VK_UNARY_FALLBACK(Digamma, digamma);
+    VK_REGISTER_UNARY_SPECIAL(Gamma,    0);
+    VK_REGISTER_UNARY_SPECIAL(Lgamma,   1);
+    VK_REGISTER_UNARY_SPECIAL(Digamma,  2);
+    VK_REGISTER_UNARY_SPECIAL(BesselJ0, 3);
+    VK_REGISTER_UNARY_SPECIAL(BesselJ1, 4);
+    VK_REGISTER_UNARY_SPECIAL(BesselY0, 5);
+    VK_REGISTER_UNARY_SPECIAL(BesselY1, 6);
+    VK_REGISTER_UNARY_SPECIAL(BesselI0, 7);
+    VK_REGISTER_UNARY_SPECIAL(BesselI1, 8);
+    VK_REGISTER_UNARY_SPECIAL(ErfInv,   9);
+    VK_REGISTER_UNARY_SPECIAL(Sinc,     10);
+#undef VK_REGISTER_UNARY_SPECIAL
+
     table.register_kernel(OpId::Polygamma, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t n = static_cast<int64_t>(attrs.get_float(AttrKey::Order, 0.0));
-        return std::vector<Tensor>{tenzor::polygamma(n, inputs[0].to(Device::cpu())).to(inputs[0].device())};
+        return std::vector<Tensor>{
+            get_vulkan_backend()->dispatchSpecialMathUnary(inputs[0], 11, static_cast<int32_t>(n))};
     });
-    VK_BINARY_FALLBACK(Beta, beta);
-    table.register_kernel(OpId::BetaInc, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        return std::vector<Tensor>{tenzor::betainc(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu()), inputs[2].to(Device::cpu())).to(inputs[0].device())};
-    });
-    VK_UNARY_FALLBACK(BesselJ0, bessel_j0);
-    VK_UNARY_FALLBACK(BesselJ1, bessel_j1);
-    VK_UNARY_FALLBACK(BesselY0, bessel_y0);
-    VK_UNARY_FALLBACK(BesselY1, bessel_y1);
-    VK_UNARY_FALLBACK(BesselI0, bessel_i0);
-    VK_UNARY_FALLBACK(BesselI1, bessel_i1);
-    VK_UNARY_FALLBACK(ErfInv, erfinv);
-    VK_UNARY_FALLBACK(Sinc, sinc);
-    VK_BINARY_FALLBACK(Zeta, zeta);
 
-#undef VK_UNARY_FALLBACK
-#undef VK_BINARY_FALLBACK
+    // Binary special-math: 0=beta, 1=zeta
+    table.register_kernel(OpId::Beta, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{
+            get_vulkan_backend()->dispatchSpecialMathBinary(inputs[0], inputs[1], 0)};
+    });
+    table.register_kernel(OpId::Zeta, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{
+            get_vulkan_backend()->dispatchSpecialMathBinary(inputs[0], inputs[1], 1)};
+    });
+
+    // Ternary special-math: betainc
+    table.register_kernel(OpId::BetaInc, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{
+            get_vulkan_backend()->dispatchSpecialMathTernary(inputs[0], inputs[1], inputs[2])};
+    });
 
     // ========================================================================
     // Binary Math Operations
@@ -2197,50 +2207,39 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     // ========================================================================
-    // CPU-roundtrip fallbacks for CUDA-exclusive operations
+    // Sampling / Statistics — native Vulkan compute shaders
     // ========================================================================
 
-    // Bernoulli sampling
     table.register_single_output_kernel(OpId::Bernoulli,
-        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            auto dev = inputs[0].device();
-            return tenzor::bernoulli(inputs[0].to(Device::cpu())).to(dev);
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return get_vulkan_backend()->dispatchBernoulli(inputs[0]);
         });
 
-    // Multinomial sampling
     table.register_single_output_kernel(OpId::Multinomial,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            auto dev = inputs[0].device();
             int64_t num_samples = attrs.get_int(AttrKey::NumSamples, 1);
             bool replacement = attrs.get_bool(AttrKey::Replacement, false);
-            return tenzor::multinomial(inputs[0].to(Device::cpu()), num_samples, replacement).to(dev);
+            return get_vulkan_backend()->dispatchMultinomial(inputs[0], num_samples, replacement);
         });
 
-    // Bucketize
     table.register_single_output_kernel(OpId::Bucketize,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            auto dev = inputs[0].device();
             bool right = attrs.get_bool(AttrKey::Right, false);
-            return tenzor::bucketize(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu()), right).to(dev);
+            return get_vulkan_backend()->dispatchBucketize(inputs[0], inputs[1], right);
         });
 
-    // Histogram (multi-output: returns {counts, edges})
     table.register_kernel(OpId::Histogram,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto dev = inputs[0].device();
             int64_t bins = attrs.get_int(AttrKey::NumBins, 10);
             double min_val = attrs.get_float(AttrKey::Min, 0.0);
             double max_val = attrs.get_float(AttrKey::Max, 0.0);
-            auto [counts, edges] = tenzor::histogram(inputs[0].to(Device::cpu()), bins, min_val, max_val);
-            return {counts.to(dev), edges.to(dev)};
+            auto [counts, edges] = get_vulkan_backend()->dispatchHistogram(inputs[0], bins, min_val, max_val);
+            return {counts, edges};
         });
 
-    // CDist (pairwise distance)
     table.register_single_output_kernel(OpId::CDist,
-        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            auto dev = inputs[0].device();
-            double p = attrs.get_float(AttrKey::DistP, 2.0);
-            return tenzor::cdist(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu()), p).to(dev);
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return get_vulkan_backend()->dispatchCDist(inputs[0], inputs[1]);
         });
 
     // STFT (Short-Time Fourier Transform)

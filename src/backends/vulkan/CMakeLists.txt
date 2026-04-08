@@ -137,6 +137,9 @@ if(GLSLC)
         vulkan_ops_linalg.cpp
         vulkan_ops_embed.cpp
         vulkan_ops_fused.cpp
+        vulkan_ops_special_math.cpp
+        vulkan_ops_grid_sample.cpp
+        vulkan_ops_sampling.cpp
         vulkan_kernel_registry.cpp
         vulkan_backend.hpp
         vulkan_helpers.hpp
@@ -169,6 +172,9 @@ else()
         vulkan_ops_linalg.cpp
         vulkan_ops_embed.cpp
         vulkan_ops_fused.cpp
+        vulkan_ops_special_math.cpp
+        vulkan_ops_grid_sample.cpp
+        vulkan_ops_sampling.cpp
         vulkan_kernel_registry.cpp
         vulkan_backend.hpp
         vulkan_helpers.hpp

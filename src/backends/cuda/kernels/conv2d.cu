@@ -244,83 +244,10 @@ __global__ void im2col_kernel_f16(
 // col2im kernel: Reverse of im2col for gradient computation
 // Input: (batch * out_h * out_w, kernel_h * kernel_w * in_channels)
 // Output: (batch, in_channels, height, width)
-// Note: This accumulates gradients for overlapping regions
 //
-// OPTIMIZATION STRATEGY:
-// Instead of one atomic per thread, we use a two-phase approach:
-// 1. Phase 1 (implicit): Each thread processes ONE element from col buffer
-// 2. Phase 2: Use warp-level shuffles to reduce atomics within a warp
-//
-// For positions that don't overlap within a warp, we fall back to atomics,
-// but for common cases this reduces atomic contention by up to 32x (warp size).
-//
-// Alternative strategy for high-overlap scenarios:
-// Process output elements (instead of col elements), accumulating from all
-// contributing col positions. This completely eliminates atomics but requires
-// different parallelization strategy.
-
-// DEPRECATED: Retained for reference only. The primary col2im_kernel (below) uses the
-// output-centric approach which eliminates atomics entirely and is faster for all kernel sizes.
-// Version 1: Atomic-based col2im (misnamed "shared memory" — does not actually use shared memory)
-template<typename T>
-__global__ void col2im_kernel_shared_memory(
-    const T* col,
-    T* output,
-    int64_t batch,
-    int64_t channels,
-    int64_t height,
-    int64_t width,
-    int64_t kernel_h,
-    int64_t kernel_w,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
-    int64_t out_h,
-    int64_t out_w
-) {
-    // Strategy: Process multiple col elements per thread and accumulate in registers
-    // Then perform atomic writes only once per unique output position
-
-    int64_t total_elements = batch * out_h * out_w * channels * kernel_h * kernel_w;
-
-    // Grid-stride loop: each thread processes multiple elements
-    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-         idx < total_elements;
-         idx += blockDim.x * gridDim.x) {
-
-        // Decode flat index to (b, oh, ow, c, kh, kw)
-        int64_t temp = idx;
-        int64_t kw = temp % kernel_w; temp /= kernel_w;
-        int64_t kh = temp % kernel_h; temp /= kernel_h;
-        int64_t c = temp % channels; temp /= channels;
-        int64_t ow = temp % out_w; temp /= out_w;
-        int64_t oh = temp % out_h; temp /= out_h;
-        int64_t b = temp;
-
-        // Calculate input position
-        int64_t ih = oh * stride - padding + kh * dilation;
-        int64_t iw = ow * stride - padding + kw * dilation;
-
-        if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
-            // Col index
-            int64_t col_row = b * out_h * out_w + oh * out_w + ow;
-            int64_t col_col = c * kernel_h * kernel_w + kh * kernel_w + kw;
-            int64_t col_idx = col_row * (channels * kernel_h * kernel_w) + col_col;
-
-            // Output index
-            int64_t output_idx = b * (channels * height * width) +
-                                c * (height * width) +
-                                ih * width + iw;
-
-            // Single atomic write per element (same as original but with grid-stride)
-            atomicAdd(&output[output_idx], col[col_idx]);
-        }
-    }
-}
-
-// Version 2: Output-centric col2im (eliminates atomics completely)
-// This version processes each output element and accumulates from all contributing col positions
-// Trade-off: More work per thread, but zero atomic contention
+// Output-centric strategy: each thread processes one output element and
+// accumulates from all contributing col positions. Eliminates atomic
+// contention entirely at the cost of more work per thread.
 template<typename T>
 __global__ void col2im_kernel_output_centric(
     const T* col,

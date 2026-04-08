@@ -35,7 +35,7 @@ std::atomic<uint64_t> Function::next_id_{1};
 // over the TENZOR_HIGHER_ORDER_GRAD env var.
 static std::atomic<int> g_higher_order_mode{-1}; // -1 = not set (check env var)
 
-// Counter for higher-order gradient disconnections (Warn/Silent mode).
+// Counter for higher-order gradient disconnections (Warn mode).
 static std::atomic<uint64_t> g_higher_order_disconnection_count{0};
 
 void set_higher_order_grad_mode(HigherOrderGradMode mode) {
@@ -50,12 +50,6 @@ auto get_higher_order_grad_mode() -> HigherOrderGradMode {
     static int env_mode = []() {
         if (const char* env = std::getenv("TENZOR_HIGHER_ORDER_GRAD")) {
             if (std::string(env) == "warn") return static_cast<int>(HigherOrderGradMode::Warn);
-            if (std::string(env) == "silent") {
-                std::cerr << "[tenzor] Warning: TENZOR_HIGHER_ORDER_GRAD=silent is "
-                          << "deprecated. Silent mode now behaves like Warn. "
-                          << "Use 'warn' or remove the env var (defaults to 'error').\n";
-                return static_cast<int>(HigherOrderGradMode::Warn);
-            }
         }
         return static_cast<int>(HigherOrderGradMode::Error);
     }();
@@ -267,9 +261,7 @@ auto Function::backward_with_variables(std::vector<Variable> grad_outputs) -> st
                 "Either use create_graph=false, or call "
                 "set_higher_order_grad_mode(HigherOrderGradMode::Warn) "
                 "to fall through with disconnected gradient graph.");
-        case HigherOrderGradMode::Warn:
-        case HigherOrderGradMode::Silent: {
-            // Silent is deprecated and now behaves identically to Warn.
+        case HigherOrderGradMode::Warn: {
             auto count = g_higher_order_disconnection_count.fetch_add(1, std::memory_order_relaxed) + 1;
             std::cerr << "[tenzor::autograd] Warning: '" << op_name
                       << "' does not support higher-order gradients"

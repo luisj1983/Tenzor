@@ -1105,6 +1105,257 @@ auto batchnorm2d_backward(const Tensor& grad_output,
 // GroupNorm CUDA Kernels
 // ============================================================================
 
+// Storage-type-aware load/store helpers used by the mixed-precision kernels.
+// Allow FP16/BF16 storage with float32 internal accumulation in a single kernel,
+// avoiding the previous "alloc f32 tensor + cast + run float kernel + cast back"
+// round-trip pattern.
+__device__ inline float gn_load(const float* p, int64_t i) { return p[i]; }
+__device__ inline float gn_load(const __half* p, int64_t i) { return __half2float(p[i]); }
+__device__ inline float gn_load(const __nv_bfloat16* p, int64_t i) { return __bfloat162float(p[i]); }
+
+__device__ inline void gn_store(float* p, int64_t i, float v) { p[i] = v; }
+__device__ inline void gn_store(__half* p, int64_t i, float v) { p[i] = __float2half(v); }
+__device__ inline void gn_store(__nv_bfloat16* p, int64_t i, float v) { p[i] = __float2bfloat16(v); }
+
+__device__ inline void gn_atomic_add(float* p, float v) { atomicAdd(p, v); }
+__device__ inline void gn_atomic_add(__half* p, float v) {
+    // CAS loop on the underlying short: load old value, compute new in float,
+    // CAS back. Memcpy used to avoid taking the address of a temporary.
+    auto* addr = reinterpret_cast<unsigned short*>(p);
+    unsigned short old = *addr;
+    unsigned short assumed;
+    do {
+        assumed = old;
+        __half h_old;
+        memcpy(&h_old, &assumed, sizeof(__half));
+        __half h_new = __float2half(__half2float(h_old) + v);
+        unsigned short s_new;
+        memcpy(&s_new, &h_new, sizeof(__half));
+        old = atomicCAS(addr, assumed, s_new);
+    } while (assumed != old);
+}
+__device__ inline void gn_atomic_add(__nv_bfloat16* p, float v) {
+    auto* addr = reinterpret_cast<unsigned short*>(p);
+    unsigned short old = *addr;
+    unsigned short assumed;
+    do {
+        assumed = old;
+        __nv_bfloat16 b_old;
+        memcpy(&b_old, &assumed, sizeof(__nv_bfloat16));
+        __nv_bfloat16 b_new = __float2bfloat16(__bfloat162float(b_old) + v);
+        unsigned short s_new;
+        memcpy(&s_new, &b_new, sizeof(__nv_bfloat16));
+        old = atomicCAS(addr, assumed, s_new);
+    } while (assumed != old);
+}
+
+// Mixed-precision GroupNorm forward: storage type StorageT (Float16/BFloat16),
+// float32 internal accumulation, fused load/compute/store in a single kernel.
+template<typename StorageT>
+__global__ void group_norm_forward_kernel_mixed(
+    const StorageT* __restrict__ input,
+    const StorageT* __restrict__ weight,
+    const StorageT* __restrict__ bias,
+    StorageT* __restrict__ output,
+    StorageT* __restrict__ mean_out,
+    StorageT* __restrict__ inv_std_out,
+    int64_t N, int64_t C, int64_t HW,
+    int64_t num_groups, int64_t channels_per_group,
+    float eps) {
+
+    int64_t group_idx = blockIdx.x;
+    int64_t n = group_idx / num_groups;
+    int64_t g = group_idx % num_groups;
+    if (n >= N || g >= num_groups) return;
+
+    int64_t c_start = g * channels_per_group;
+    int64_t group_size = channels_per_group * HW;
+
+    // Mean reduction (float32 accumulator)
+    float local_sum = 0.0f;
+    for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
+        int64_t c_offset = i / HW;
+        int64_t hw = i % HW;
+        int64_t c = c_start + c_offset;
+        int64_t idx = (n * C + c) * HW + hw;
+        local_sum += gn_load(input, idx);
+    }
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        local_sum += __shfl_down_sync(0xFFFFFFFF, local_sum, offset);
+    }
+    __shared__ float shared_sum[32];
+    int lane = threadIdx.x % warpSize;
+    int warp_id = threadIdx.x / warpSize;
+    if (lane == 0) shared_sum[warp_id] = local_sum;
+    __syncthreads();
+
+    float mean = 0.0f;
+    if (warp_id == 0) {
+        int num_warps = (blockDim.x + warpSize - 1) / warpSize;
+        local_sum = (lane < num_warps) ? shared_sum[lane] : 0.0f;
+        for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+            local_sum += __shfl_down_sync(0xFFFFFFFF, local_sum, offset);
+        }
+        if (lane == 0) {
+            mean = local_sum / static_cast<float>(group_size);
+            shared_sum[0] = mean;
+        }
+    }
+    __syncthreads();
+    mean = shared_sum[0];
+
+    // Variance reduction
+    float local_var = 0.0f;
+    for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
+        int64_t c_offset = i / HW;
+        int64_t hw = i % HW;
+        int64_t c = c_start + c_offset;
+        int64_t idx = (n * C + c) * HW + hw;
+        float diff = gn_load(input, idx) - mean;
+        local_var += diff * diff;
+    }
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        local_var += __shfl_down_sync(0xFFFFFFFF, local_var, offset);
+    }
+    if (lane == 0) shared_sum[warp_id] = local_var;
+    __syncthreads();
+
+    float inv_std = 0.0f;
+    if (warp_id == 0) {
+        int num_warps = (blockDim.x + warpSize - 1) / warpSize;
+        local_var = (lane < num_warps) ? shared_sum[lane] : 0.0f;
+        for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+            local_var += __shfl_down_sync(0xFFFFFFFF, local_var, offset);
+        }
+        if (lane == 0) {
+            float variance = local_var / static_cast<float>(group_size);
+            inv_std = rsqrtf(variance + eps);
+            shared_sum[0] = inv_std;
+            if (mean_out) gn_store(mean_out, group_idx, mean);
+            if (inv_std_out) gn_store(inv_std_out, group_idx, inv_std);
+        }
+    }
+    __syncthreads();
+    inv_std = shared_sum[0];
+
+    // Normalize and apply affine
+    for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
+        int64_t c_offset = i / HW;
+        int64_t hw = i % HW;
+        int64_t c = c_start + c_offset;
+        int64_t idx = (n * C + c) * HW + hw;
+        float normalized = (gn_load(input, idx) - mean) * inv_std;
+        if (weight && bias) {
+            float result = normalized * gn_load(weight, c) + gn_load(bias, c);
+            gn_store(output, idx, result);
+        } else {
+            gn_store(output, idx, normalized);
+        }
+    }
+}
+
+// Mixed-precision GroupNorm backward: storage type StorageT, float32 accumulation.
+template<typename StorageT>
+__global__ void group_norm_backward_kernel_mixed(
+    const StorageT* __restrict__ grad_output,
+    const StorageT* __restrict__ input,
+    const StorageT* __restrict__ weight,
+    const StorageT* __restrict__ mean_saved,
+    const StorageT* __restrict__ inv_std_saved,
+    StorageT* __restrict__ grad_input,
+    StorageT* __restrict__ grad_weight,
+    StorageT* __restrict__ grad_bias,
+    int64_t N, int64_t C, int64_t HW,
+    int64_t num_groups, int64_t channels_per_group) {
+
+    int64_t group_idx = blockIdx.x;
+    int64_t n = group_idx / num_groups;
+    int64_t g = group_idx % num_groups;
+    if (n >= N || g >= num_groups) return;
+
+    int64_t c_start = g * channels_per_group;
+    int64_t group_size = channels_per_group * HW;
+
+    float mean = gn_load(mean_saved, group_idx);
+    float inv_std = gn_load(inv_std_saved, group_idx);
+
+    float local_sum_dy = 0.0f;
+    float local_sum_dy_xhat = 0.0f;
+
+    for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
+        int64_t c_offset = i / HW;
+        int64_t hw = i % HW;
+        int64_t c = c_start + c_offset;
+        int64_t idx = (n * C + c) * HW + hw;
+        float dy = gn_load(grad_output, idx);
+        if (weight) dy = dy * gn_load(weight, c);
+        float xhat = (gn_load(input, idx) - mean) * inv_std;
+        local_sum_dy += dy;
+        local_sum_dy_xhat += dy * xhat;
+    }
+
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        local_sum_dy += __shfl_down_sync(0xFFFFFFFF, local_sum_dy, offset);
+        local_sum_dy_xhat += __shfl_down_sync(0xFFFFFFFF, local_sum_dy_xhat, offset);
+    }
+
+    __shared__ float shared_dy[32];
+    __shared__ float shared_dy_xhat[32];
+    int lane = threadIdx.x % warpSize;
+    int warp_id = threadIdx.x / warpSize;
+
+    if (lane == 0) {
+        shared_dy[warp_id] = local_sum_dy;
+        shared_dy_xhat[warp_id] = local_sum_dy_xhat;
+    }
+    __syncthreads();
+
+    float sum_dy = 0.0f, sum_dy_xhat = 0.0f;
+    if (warp_id == 0) {
+        int num_warps = (blockDim.x + warpSize - 1) / warpSize;
+        local_sum_dy = (lane < num_warps) ? shared_dy[lane] : 0.0f;
+        local_sum_dy_xhat = (lane < num_warps) ? shared_dy_xhat[lane] : 0.0f;
+        for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+            local_sum_dy += __shfl_down_sync(0xFFFFFFFF, local_sum_dy, offset);
+            local_sum_dy_xhat += __shfl_down_sync(0xFFFFFFFF, local_sum_dy_xhat, offset);
+        }
+        if (lane == 0) {
+            shared_dy[0] = local_sum_dy;
+            shared_dy_xhat[0] = local_sum_dy_xhat;
+        }
+    }
+    __syncthreads();
+    sum_dy = shared_dy[0];
+    sum_dy_xhat = shared_dy_xhat[0];
+
+    float inv_group_size = 1.0f / static_cast<float>(group_size);
+
+    for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
+        int64_t c_offset = i / HW;
+        int64_t hw = i % HW;
+        int64_t c = c_start + c_offset;
+        int64_t idx = (n * C + c) * HW + hw;
+        float dy = gn_load(grad_output, idx);
+        if (weight) dy = dy * gn_load(weight, c);
+        float xhat = (gn_load(input, idx) - mean) * inv_std;
+        float result = inv_std * (dy - inv_group_size * (sum_dy + xhat * sum_dy_xhat));
+        gn_store(grad_input, idx, result);
+    }
+
+    if (weight && grad_weight && grad_bias) {
+        for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
+            int64_t c_offset = i / HW;
+            int64_t hw = i % HW;
+            int64_t c = c_start + c_offset;
+            int64_t idx = (n * C + c) * HW + hw;
+            float xhat = (gn_load(input, idx) - mean) * inv_std;
+            float go = gn_load(grad_output, idx);
+            gn_atomic_add(&grad_weight[c], go * xhat);
+            gn_atomic_add(&grad_bias[c], go);
+        }
+    }
+}
+
 template<typename T>
 __global__ void group_norm_forward_kernel(
     const T* __restrict__ input,
@@ -1357,28 +1608,28 @@ auto group_norm_forward_kernel(
             output.data<double>(), mean_out.data<double>(), inv_std_out.data<double>(),
             N, C, HW, num_groups, channels_per_group, eps);
             CUDA_CHECK(cudaGetLastError());
-    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        // Mixed precision: compute in Float32, convert back
-        // Create Float32 temporaries
-        Tensor input_f32 = input.to(DType::Float32);
-        Tensor weight_f32 = weight.to(DType::Float32);
-        Tensor bias_f32 = bias.to(DType::Float32);
-        Tensor output_f32(shape, DType::Float32, input.device());
-        Tensor mean_f32({N * num_groups}, DType::Float32, input.device());
-        Tensor inv_std_f32({N * num_groups}, DType::Float32, input.device());
-
-        group_norm_forward_kernel<float><<<num_group_instances, block_size, 0, stream>>>(
-            input_f32.data<float>(), weight_f32.data<float>(), bias_f32.data<float>(),
-            output_f32.data<float>(), mean_f32.data<float>(), inv_std_f32.data<float>(),
+    } else if (input.dtype() == DType::Float16) {
+        // Mixed precision: native FP16 storage, float32 internal accumulation,
+        // single fused kernel — no extra tensor allocations or cast launches.
+        group_norm_forward_kernel_mixed<__half><<<num_group_instances, block_size, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<const __half*>(weight.data<Float16>()),
+            reinterpret_cast<const __half*>(bias.data<Float16>()),
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            reinterpret_cast<__half*>(mean_out.data<Float16>()),
+            reinterpret_cast<__half*>(inv_std_out.data<Float16>()),
             N, C, HW, num_groups, channels_per_group, eps);
-
-        CUDA_CHECK(cudaGetLastError());
-
-        // Convert outputs back to original dtype
-        output = output_f32.to(input.dtype());
-        mean_out = mean_f32.to(input.dtype());
-        inv_std_out = inv_std_f32.to(input.dtype());
-        return {output, mean_out, inv_std_out};
+            CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::BFloat16) {
+        group_norm_forward_kernel_mixed<__nv_bfloat16><<<num_group_instances, block_size, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<const __nv_bfloat16*>(weight.data<BFloat16>()),
+            reinterpret_cast<const __nv_bfloat16*>(bias.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(output.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(mean_out.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(inv_std_out.data<BFloat16>()),
+            N, C, HW, num_groups, channels_per_group, eps);
+            CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("group_norm_forward: unsupported dtype");
     }
@@ -1430,34 +1681,30 @@ auto group_norm_backward_kernel(
             grad_input.data<double>(), grad_weight.data<double>(), grad_bias.data<double>(),
             N, C, HW, num_groups, channels_per_group);
             CUDA_CHECK(cudaGetLastError());
-    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        // Mixed precision: compute in Float32, convert back
-        Tensor grad_out_f32 = grad_output.to(DType::Float32);
-        Tensor input_f32 = input.to(DType::Float32);
-        Tensor weight_f32 = weight.to(DType::Float32);
-        Tensor mean_f32 = mean_saved.to(DType::Float32);
-        Tensor inv_std_f32 = inv_std_saved.to(DType::Float32);
-
-        Tensor grad_input_f32(shape, DType::Float32, input.device());
-        Tensor grad_weight_f32({C}, DType::Float32, input.device());
-        Tensor grad_bias_f32({C}, DType::Float32, input.device());
-
-        cudaMemsetAsync(grad_weight_f32.data_ptr(), 0, C * sizeof(float), stream);
-        cudaMemsetAsync(grad_bias_f32.data_ptr(), 0, C * sizeof(float), stream);
-
-        group_norm_backward_kernel<float><<<num_group_instances, block_size, 0, stream>>>(
-            grad_out_f32.data<float>(), input_f32.data<float>(), weight_f32.data<float>(),
-            mean_f32.data<float>(), inv_std_f32.data<float>(),
-            grad_input_f32.data<float>(), grad_weight_f32.data<float>(), grad_bias_f32.data<float>(),
+    } else if (input.dtype() == DType::Float16) {
+        group_norm_backward_kernel_mixed<__half><<<num_group_instances, block_size, 0, stream>>>(
+            reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<const __half*>(weight.data<Float16>()),
+            reinterpret_cast<const __half*>(mean_saved.data<Float16>()),
+            reinterpret_cast<const __half*>(inv_std_saved.data<Float16>()),
+            reinterpret_cast<__half*>(grad_input.data<Float16>()),
+            reinterpret_cast<__half*>(grad_weight.data<Float16>()),
+            reinterpret_cast<__half*>(grad_bias.data<Float16>()),
             N, C, HW, num_groups, channels_per_group);
-
-        CUDA_CHECK(cudaGetLastError());
-
-        // Convert outputs back to original dtype
-        grad_input = grad_input_f32.to(input.dtype());
-        grad_weight = grad_weight_f32.to(input.dtype());
-        grad_bias = grad_bias_f32.to(input.dtype());
-        return {grad_input, grad_weight, grad_bias};
+            CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::BFloat16) {
+        group_norm_backward_kernel_mixed<__nv_bfloat16><<<num_group_instances, block_size, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(grad_output.data<BFloat16>()),
+            reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<const __nv_bfloat16*>(weight.data<BFloat16>()),
+            reinterpret_cast<const __nv_bfloat16*>(mean_saved.data<BFloat16>()),
+            reinterpret_cast<const __nv_bfloat16*>(inv_std_saved.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(grad_input.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(grad_weight.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(grad_bias.data<BFloat16>()),
+            N, C, HW, num_groups, channels_per_group);
+            CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("group_norm_backward: unsupported dtype");
     }

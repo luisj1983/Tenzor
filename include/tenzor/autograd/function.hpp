@@ -28,8 +28,6 @@ namespace tenzor {
 enum class HigherOrderGradMode : uint8_t {
     Error,   ///< Throw std::runtime_error (default, safe)
     Warn,    ///< Log warning per disconnection, fall through with disconnected graph
-    Silent [[deprecated("Silent mode hides correctness bugs — use Warn or Error instead.")]]
-             = 2  ///< @deprecated Behaves like Warn since v1.1. Will be removed.
 };
 
 /// Set the higher-order gradient fallback mode programmatically.

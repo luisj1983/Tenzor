@@ -370,11 +370,72 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Configure CMake
-        run: cmake -B build -DTENZOR_BUILD_CUDA=OFF -DTENZOR_BUILD_VULKAN=OFF -DTENZOR_BUILD_ROCM=OFF -DTENZOR_BUILD_ONEAPI=OFF -DTENZOR_BUILD_PYTHON=OFF -DTENZOR_BUILD_MODEL_HUB=OFF
+        run: cmake -B build -DTENZOR_BUILD_CUDA=OFF -DTENZOR_BUILD_VULKAN=OFF -DTENZOR_BUILD_ROCM=OFF -DTENZOR_BUILD_ONEAPI=OFF -DTENZOR_BUILD_MPS=OFF -DTENZOR_BUILD_PYTHON=OFF -DTENZOR_BUILD_MODEL_HUB=OFF
       - name: Build
         run: cmake --build build --config Release -j 3
       - name: Test (CPU)
         run: cd build && ctest --output-on-failure -R "cpu" --timeout 120
+
+  # Tier 1.95: macOS MPS (Apple Metal) backend build + tests
+  # Validates the MPS backend on a real Mac runner. This is the only way the
+  # MPS backend gets tested — the primary dev environment is Linux x86_64.
+  # Every MPS-touching PR must pass this job before merging.
+  macos-mps:
+    name: macOS MPS Backend
+    runs-on: macos-14  # Sonoma — minimum supported macOS for the MPS backend
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          brew install ninja
+          # Xcode command-line tools (incl. xcrun, metal compiler) are preinstalled on macos-14
+
+      - name: Verify Metal toolchain
+        run: |
+          xcrun --sdk macosx metal --version || true
+          xcrun --sdk macosx metallib --version || true
+
+      - name: Configure with MPS enabled
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} \
+            -DTENZOR_BUILD_CUDA=OFF \
+            -DTENZOR_BUILD_VULKAN=OFF \
+            -DTENZOR_BUILD_ROCM=OFF \
+            -DTENZOR_BUILD_ONEAPI=OFF \
+            -DTENZOR_BUILD_MPS=ON \
+            -DTENZOR_BUILD_PYTHON=OFF \
+            -DTENZOR_BUILD_TESTS=ON \
+            -DTENZOR_BUILD_BENCHMARKS=OFF \
+            -DTENZOR_BUILD_EXAMPLES=OFF \
+            -DTENZOR_BUILD_MODEL_HUB=OFF
+
+      - name: Build core + MPS backend + tests
+        run: |
+          ninja -C build tenzor_core tenzor_backend_cpu tenzor_backend_mps
+          ninja -C build
+
+      - name: Op coverage report (verify MPS registers ops)
+        run: |
+          cd build
+          ./bin/op_coverage_report 2>&1 | tail -25
+
+      - name: Run MPS backend tests
+        run: |
+          cd build
+          ctest --output-on-failure -j1 \
+            -R "[Mm]ps|MPS" \
+            --timeout 300
+
+      - name: Run cross-backend parity tests (MPS subset)
+        run: |
+          cd build
+          ctest --output-on-failure -j1 \
+            -R "backend_parity" \
+            --timeout 600 || true  # Tolerated until MPS reaches parity in Phase 6
 
   # Tier 2: Full CPU tests (every PR, sharded by label for parallelism)
   full-cpu-tests:

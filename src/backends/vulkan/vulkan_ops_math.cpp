@@ -1690,18 +1690,6 @@ auto VulkanBackend::dispatchDot(const Tensor& a, const Tensor& b) -> Tensor {
     return result;
 }
 
-auto VulkanBackend::dispatchConv2d(const Tensor& input, const Tensor& weight,
-                                   const Tensor* /*bias*/, int64_t /*stride*/,
-                                   int64_t /*padding*/, int64_t /*dilation*/,
-                                   int64_t /*groups*/) -> Tensor {
-    // DEPRECATED: This legacy method had missing descriptor set bindings (the
-    // shader never received input/output buffers).  All callers should use
-    // dispatchConv2dForward() which is routed via the kernel registry.
-    (void)input; (void)weight;
-    throw std::runtime_error(
-        "dispatchConv2d is deprecated — use dispatchConv2dForward via OpId dispatch");
-}
-
 /**
  * @brief Conv2d Backward Input - Gradient w.r.t. input
  *

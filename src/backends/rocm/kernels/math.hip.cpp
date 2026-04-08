@@ -2796,6 +2796,31 @@ __global__ void final_reduce_kernel(const T* partial, T* output, int num_blocks)
     }
 }
 
+// Specialised reducer that consumes float partial sums and writes a Float16 result
+// on-device. Used by the Float16 dot product to avoid a host-side cast roundtrip.
+__global__ void final_reduce_kernel_float_to_half(const float* partial, __half* output, int num_blocks) {
+    __shared__ float sdata[256];
+    int tid = threadIdx.x;
+
+    float sum = 0.0f;
+    for (int i = tid; i < num_blocks; i += blockDim.x) {
+        sum += partial[i];
+    }
+    sdata[tid] = sum;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        output[0] = __float2half(sdata[0]);
+    }
+}
+
 auto dot_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
     if (a.numel() != b.numel()) {
         throw std::invalid_argument("Tensor sizes must match for dot product");
@@ -2850,7 +2875,8 @@ auto dot_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
         HIP_CHECK(hipGetLastError());
         HIP_CHECK(hipFree(d_partial));
     } else if (a.dtype() == DType::Float16) {
-        // Compute dot product in float for accuracy, then store as Float16
+        // Compute dot product in float32 for accuracy; the final reducer fuses the
+        // float→Float16 cast on-device so there is no host roundtrip.
         float* d_partial;
         HIP_CHECK(hipMalloc(&d_partial, num_blocks * sizeof(float)));
 
@@ -2860,20 +2886,9 @@ auto dot_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
             d_partial, n);
         HIP_CHECK(hipGetLastError());
 
-        // Final reduction on GPU in float, then convert to Float16
-        // Allocate a single float on device for the reduced result
-        float* d_sum;
-        HIP_CHECK(hipMalloc(&d_sum, sizeof(float)));
-        hipLaunchKernelGGL(final_reduce_kernel<float>, dim3(1), dim3(block_size), 0, stream,
-            d_partial, d_sum, num_blocks);
+        hipLaunchKernelGGL(final_reduce_kernel_float_to_half, dim3(1), dim3(block_size), 0, stream,
+            d_partial, reinterpret_cast<__half*>(result.data<Float16>()), num_blocks);
         HIP_CHECK(hipGetLastError());
-
-        // Copy reduced float sum to host, convert to Float16, write back
-        float h_sum;
-        HIP_CHECK(hipMemcpy(&h_sum, d_sum, sizeof(float), hipMemcpyDeviceToHost));
-        Float16 sum_f16 = Float16(h_sum);
-        HIP_CHECK(hipMemcpy(result.data<Float16>(), &sum_f16, sizeof(Float16), hipMemcpyHostToDevice));
-        HIP_CHECK(hipFree(d_sum));
         HIP_CHECK(hipFree(d_partial));
     } else {
         throw std::runtime_error("dot operation only supports Float32, Float64, and Float16 dtypes");
@@ -5194,6 +5209,429 @@ auto cross_kernel(const Tensor& a, const Tensor& b, int64_t dim, hipStream_t str
         throw std::runtime_error("cross: unsupported dtype");
     }
 
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// =========================================================================
+// Special Math Functions — native ROCm device implementations
+// (replaces the previous CPU-roundtrip fallbacks in rocm_kernel_registry.cpp)
+// =========================================================================
+//
+// Standard libm names (tgammaf, lgammaf, j0f, j1f, y0f, y1f, expf, logf, sinf, etc.)
+// are usable in HIP device code via the libm shim. For functions without standard
+// equivalents (cyl_bessel_i0/i1, erfinv) we use AMD's OCML intrinsics directly.
+
+extern "C" {
+__device__ float __ocml_i0_f32(float);
+__device__ float __ocml_i1_f32(float);
+__device__ double __ocml_i0_f64(double);
+__device__ double __ocml_i1_f64(double);
+__device__ float __ocml_erfinv_f32(float);
+__device__ double __ocml_erfinv_f64(double);
+}
+
+// --- Digamma (psi function) — Cephes-style asymptotic expansion ---
+__device__ inline float digamma_dev_f32(float x) {
+    float result = 0.0f;
+    if (x < 0.5f) {
+        float y = 1.0f - x;
+        float r = 0.0f;
+        while (y < 7.0f) { r -= 1.0f / y; y += 1.0f; }
+        float y2 = 1.0f / (y * y);
+        r += logf(y) - 0.5f / y
+            - y2 * (0.0833333333f - y2 * (0.00833333333f - y2 * (0.00396825397f
+            - y2 * (0.00416666667f - y2 * 0.00757575758f))));
+        return r - 3.14159265358979f / tanf(3.14159265358979f * x);
+    }
+    while (x < 7.0f) { result -= 1.0f / x; x += 1.0f; }
+    float x2 = 1.0f / (x * x);
+    result += logf(x) - 0.5f / x
+            - x2 * (0.0833333333f - x2 * (0.00833333333f - x2 * (0.00396825397f
+            - x2 * (0.00416666667f - x2 * 0.00757575758f))));
+    return result;
+}
+__device__ inline double digamma_dev_f64(double x) {
+    double result = 0.0;
+    if (x < 0.5) {
+        double y = 1.0 - x;
+        double r = 0.0;
+        while (y < 7.0) { r -= 1.0 / y; y += 1.0; }
+        double y2 = 1.0 / (y * y);
+        r += log(y) - 0.5 / y
+            - y2 * (1.0/12.0 - y2 * (1.0/120.0 - y2 * (1.0/252.0
+            - y2 * (1.0/240.0 - y2 * (1.0/132.0)))));
+        return r - 3.14159265358979323846 / tan(3.14159265358979323846 * x);
+    }
+    while (x < 7.0) { result -= 1.0 / x; x += 1.0; }
+    double x2 = 1.0 / (x * x);
+    result += log(x) - 0.5 / x
+            - x2 * (1.0/12.0 - x2 * (1.0/120.0 - x2 * (1.0/252.0
+            - x2 * (1.0/240.0 - x2 * (1.0/132.0)))));
+    return result;
+}
+
+// --- Sinc (normalized: sin(πx)/(πx), sinc(0)=1) ---
+__device__ inline float sinc_dev_f32(float x) {
+    if (x == 0.0f) return 1.0f;
+    float px = 3.14159265358979f * x;
+    return sinf(px) / px;
+}
+__device__ inline double sinc_dev_f64(double x) {
+    if (x == 0.0) return 1.0;
+    double px = 3.14159265358979323846 * x;
+    return sin(px) / px;
+}
+
+// --- Hurwitz zeta ζ(s,q) — Euler-Maclaurin partial sum ---
+__device__ inline float zeta_dev_f32(float s, float a) {
+    float result = 0.0f;
+    #pragma unroll
+    for (int n = 0; n < 12; ++n) {
+        result += powf(a + static_cast<float>(n), -s);
+    }
+    float aN = a + 12.0f;
+    if (s != 1.0f) result += powf(aN, 1.0f - s) / (s - 1.0f);
+    result += 0.5f * powf(aN, -s);
+    return result;
+}
+__device__ inline double zeta_dev_f64(double s, double a) {
+    double result = 0.0;
+    #pragma unroll
+    for (int n = 0; n < 12; ++n) {
+        result += pow(a + static_cast<double>(n), -s);
+    }
+    double aN = a + 12.0;
+    if (s != 1.0) result += pow(aN, 1.0 - s) / (s - 1.0);
+    result += 0.5 * pow(aN, -s);
+    return result;
+}
+
+// --- Polygamma ψ^(n)(x) — direct asymptotic series for n ≥ 1 ---
+__device__ inline double polygamma_dev_f64(int n, double x) {
+    if (n == 0) return digamma_dev_f64(x);
+    double fact_n = 1.0;
+    for (int k = 1; k <= n; ++k) fact_n *= static_cast<double>(k);
+    double sign = ((n + 1) % 2 == 0) ? 1.0 : -1.0;
+    double sum = 0.0;
+    for (int k = 0; k < 100; ++k) {
+        double term = pow(x + k, -static_cast<double>(n + 1));
+        sum += term;
+        if (term < 1e-15 * fabs(sum)) break;
+    }
+    return sign * fact_n * sum;
+}
+__device__ inline float polygamma_dev_f32(int n, float x) {
+    return static_cast<float>(polygamma_dev_f64(n, static_cast<double>(x)));
+}
+
+// --- Regularized incomplete beta I_x(a, b) — Lentz continued fraction ---
+__device__ inline double betainc_dev_f64(double a, double b, double x) {
+    if (x < 0.0 || x > 1.0) return nan("");
+    if (x == 0.0) return 0.0;
+    if (x == 1.0) return 1.0;
+
+    bool flipped = false;
+    if (x > (a + 1.0) / (a + b + 2.0)) {
+        double tmp_a = a; a = b; b = tmp_a;
+        x = 1.0 - x;
+        flipped = true;
+    }
+
+    double lbeta = lgamma(a) + lgamma(b) - lgamma(a + b);
+    double front = exp(log(x) * a + log(1.0 - x) * b - lbeta) / a;
+
+    double f = 1.0, c = 1.0, d = 1.0 - (a + b) * x / (a + 1.0);
+    if (fabs(d) < 1e-30) d = 1e-30;
+    d = 1.0 / d;
+    f = d;
+
+    for (int m = 1; m <= 200; ++m) {
+        double num = static_cast<double>(m) * (b - m) * x
+                   / ((a + 2.0 * m - 1.0) * (a + 2.0 * m));
+        d = 1.0 + num * d; if (fabs(d) < 1e-30) d = 1e-30; d = 1.0 / d;
+        c = 1.0 + num / c; if (fabs(c) < 1e-30) c = 1e-30;
+        f *= d * c;
+
+        num = -((a + m) * (a + b + m) * x) / ((a + 2.0 * m) * (a + 2.0 * m + 1.0));
+        d = 1.0 + num * d; if (fabs(d) < 1e-30) d = 1e-30; d = 1.0 / d;
+        c = 1.0 + num / c; if (fabs(c) < 1e-30) c = 1e-30;
+        double delta = d * c;
+        f *= delta;
+        if (fabs(delta - 1.0) < 1e-12) break;
+    }
+    double val = front * f;
+    return flipped ? (1.0 - val) : val;
+}
+
+// =========================================================================
+// Generic unary special-math kernel macro
+// =========================================================================
+#define DEFINE_ROCM_SPECIAL_UNARY(NAME, FN_F32_EXPR, FN_F64_EXPR)                            \
+    __global__ void NAME##_kernel_f32(const float* in, float* out, int64_t n) {              \
+        HIP_KERNEL_LOOP(idx, n) { float x = in[idx]; out[idx] = (FN_F32_EXPR); }            \
+    }                                                                                         \
+    __global__ void NAME##_kernel_f64(const double* in, double* out, int64_t n) {            \
+        HIP_KERNEL_LOOP(idx, n) { double x = in[idx]; out[idx] = (FN_F64_EXPR); }           \
+    }                                                                                         \
+    __global__ void NAME##_kernel_f16(const __half* in, __half* out, int64_t n) {            \
+        HIP_KERNEL_LOOP(idx, n) {                                                             \
+            float x = __half2float(in[idx]);                                                  \
+            out[idx] = __float2half(FN_F32_EXPR);                                             \
+        }                                                                                     \
+    }                                                                                         \
+    __global__ void NAME##_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int64_t n) { \
+        HIP_KERNEL_LOOP(idx, n) {                                                             \
+            float x = static_cast<float>(in[idx]);                                            \
+            out[idx] = hip_bfloat16(FN_F32_EXPR);                                             \
+        }                                                                                     \
+    }                                                                                         \
+    auto NAME##_kernel(const Tensor& input, hipStream_t stream) -> Tensor {                  \
+        int64_t n = input.numel();                                                            \
+        std::vector<int64_t> shape(input.shape().begin(), input.shape().end());              \
+        Tensor result(shape, input.dtype(), input.device());                                 \
+        if (n == 0) return result;                                                            \
+        dim3 grid, block; compute_launch_config_1d(n, grid, block);                          \
+        if (input.dtype() == DType::Float32) {                                                \
+            hipLaunchKernelGGL(NAME##_kernel_f32, grid, block, 0, stream,                     \
+                input.data<float>(), result.data<float>(), n);                               \
+            HIP_CHECK(hipGetLastError());                                                     \
+        } else if (input.dtype() == DType::Float64) {                                         \
+            hipLaunchKernelGGL(NAME##_kernel_f64, grid, block, 0, stream,                     \
+                input.data<double>(), result.data<double>(), n);                             \
+            HIP_CHECK(hipGetLastError());                                                     \
+        } else if (input.dtype() == DType::Float16) {                                         \
+            hipLaunchKernelGGL(NAME##_kernel_f16, grid, block, 0, stream,                     \
+                reinterpret_cast<const __half*>(input.data<Float16>()),                       \
+                reinterpret_cast<__half*>(result.data<Float16>()), n);                        \
+            HIP_CHECK(hipGetLastError());                                                     \
+        } else if (input.dtype() == DType::BFloat16) {                                        \
+            hipLaunchKernelGGL(NAME##_kernel_bf16, grid, block, 0, stream,                    \
+                reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),                \
+                reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);                 \
+            HIP_CHECK(hipGetLastError());                                                     \
+        } else {                                                                              \
+            throw std::runtime_error(#NAME " only supports Float32, Float64, Float16, BFloat16"); \
+        }                                                                                     \
+        return result;                                                                        \
+    }
+
+DEFINE_ROCM_SPECIAL_UNARY(gamma,     tgammaf(x),               tgamma(x))
+DEFINE_ROCM_SPECIAL_UNARY(lgamma,    lgammaf(x),               lgamma(x))
+DEFINE_ROCM_SPECIAL_UNARY(digamma,   digamma_dev_f32(x),       digamma_dev_f64(x))
+DEFINE_ROCM_SPECIAL_UNARY(bessel_j0, j0f(x),                   j0(x))
+DEFINE_ROCM_SPECIAL_UNARY(bessel_j1, j1f(x),                   j1(x))
+DEFINE_ROCM_SPECIAL_UNARY(bessel_y0, y0f(x),                   y0(x))
+DEFINE_ROCM_SPECIAL_UNARY(bessel_y1, y1f(x),                   y1(x))
+DEFINE_ROCM_SPECIAL_UNARY(bessel_i0, __ocml_i0_f32(x),         __ocml_i0_f64(x))
+DEFINE_ROCM_SPECIAL_UNARY(bessel_i1, __ocml_i1_f32(x),         __ocml_i1_f64(x))
+DEFINE_ROCM_SPECIAL_UNARY(erfinv,    __ocml_erfinv_f32(x),     __ocml_erfinv_f64(x))
+DEFINE_ROCM_SPECIAL_UNARY(sinc,      sinc_dev_f32(x),          sinc_dev_f64(x))
+
+#undef DEFINE_ROCM_SPECIAL_UNARY
+
+// --- Beta(a, b) = exp(lgamma(a) + lgamma(b) - lgamma(a + b)) ---
+__device__ inline float beta_dev_f32(float a, float b) {
+    return expf(lgammaf(a) + lgammaf(b) - lgammaf(a + b));
+}
+__device__ inline double beta_dev_f64(double a, double b) {
+    return exp(lgamma(a) + lgamma(b) - lgamma(a + b));
+}
+__global__ void beta_kernel_f32(const float* a, const float* b, float* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = beta_dev_f32(a[idx], b[idx]); }
+}
+__global__ void beta_kernel_f64(const double* a, const double* b, double* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = beta_dev_f64(a[idx], b[idx]); }
+}
+__global__ void beta_kernel_f16(const __half* a, const __half* b, __half* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        out[idx] = __float2half(beta_dev_f32(__half2float(a[idx]), __half2float(b[idx])));
+    }
+}
+__global__ void beta_kernel_bf16(const hip_bfloat16* a, const hip_bfloat16* b, hip_bfloat16* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        out[idx] = hip_bfloat16(beta_dev_f32(static_cast<float>(a[idx]), static_cast<float>(b[idx])));
+    }
+}
+auto beta_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
+    int64_t n = a.numel();
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, a.dtype(), a.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (a.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(beta_kernel_f32, grid, block, 0, stream,
+            a.data<float>(), b.data<float>(), result.data<float>(), n);
+    } else if (a.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(beta_kernel_f64, grid, block, 0, stream,
+            a.data<double>(), b.data<double>(), result.data<double>(), n);
+    } else if (a.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(beta_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(b.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (a.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(beta_kernel_bf16, grid, block, 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(a.data<BFloat16>()),
+            reinterpret_cast<const hip_bfloat16*>(b.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
+    } else {
+        throw std::runtime_error("beta only supports Float32, Float64, Float16, BFloat16");
+    }
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// --- Hurwitz zeta ζ(s, q) ---
+__global__ void zeta_kernel_f32(const float* s, const float* q, float* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = zeta_dev_f32(s[idx], q[idx]); }
+}
+__global__ void zeta_kernel_f64(const double* s, const double* q, double* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = zeta_dev_f64(s[idx], q[idx]); }
+}
+__global__ void zeta_kernel_f16(const __half* s, const __half* q, __half* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        out[idx] = __float2half(zeta_dev_f32(__half2float(s[idx]), __half2float(q[idx])));
+    }
+}
+__global__ void zeta_kernel_bf16(const hip_bfloat16* s, const hip_bfloat16* q, hip_bfloat16* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        out[idx] = hip_bfloat16(zeta_dev_f32(static_cast<float>(s[idx]), static_cast<float>(q[idx])));
+    }
+}
+auto zeta_kernel(const Tensor& s, const Tensor& q, hipStream_t stream) -> Tensor {
+    int64_t n = s.numel();
+    std::vector<int64_t> shape(s.shape().begin(), s.shape().end());
+    Tensor result(shape, s.dtype(), s.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (s.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(zeta_kernel_f32, grid, block, 0, stream,
+            s.data<float>(), q.data<float>(), result.data<float>(), n);
+    } else if (s.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(zeta_kernel_f64, grid, block, 0, stream,
+            s.data<double>(), q.data<double>(), result.data<double>(), n);
+    } else if (s.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(zeta_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(s.data<Float16>()),
+            reinterpret_cast<const __half*>(q.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (s.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(zeta_kernel_bf16, grid, block, 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(s.data<BFloat16>()),
+            reinterpret_cast<const hip_bfloat16*>(q.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
+    } else {
+        throw std::runtime_error("zeta only supports Float32, Float64, Float16, BFloat16");
+    }
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// --- Polygamma ψ^(n)(x) — n is a scalar order ---
+__global__ void polygamma_kernel_f32(int n, const float* in, float* out, int64_t numel) {
+    HIP_KERNEL_LOOP(idx, numel) { out[idx] = polygamma_dev_f32(n, in[idx]); }
+}
+__global__ void polygamma_kernel_f64(int n, const double* in, double* out, int64_t numel) {
+    HIP_KERNEL_LOOP(idx, numel) { out[idx] = polygamma_dev_f64(n, in[idx]); }
+}
+__global__ void polygamma_kernel_f16(int n, const __half* in, __half* out, int64_t numel) {
+    HIP_KERNEL_LOOP(idx, numel) {
+        out[idx] = __float2half(polygamma_dev_f32(n, __half2float(in[idx])));
+    }
+}
+__global__ void polygamma_kernel_bf16(int n, const hip_bfloat16* in, hip_bfloat16* out, int64_t numel) {
+    HIP_KERNEL_LOOP(idx, numel) {
+        out[idx] = hip_bfloat16(polygamma_dev_f32(n, static_cast<float>(in[idx])));
+    }
+}
+auto polygamma_kernel(int64_t n, const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t numel = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    if (numel == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(numel, grid, block);
+    int n_int = static_cast<int>(n);
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(polygamma_kernel_f32, grid, block, 0, stream,
+            n_int, input.data<float>(), result.data<float>(), numel);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(polygamma_kernel_f64, grid, block, 0, stream,
+            n_int, input.data<double>(), result.data<double>(), numel);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(polygamma_kernel_f16, grid, block, 0, stream,
+            n_int,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), numel);
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(polygamma_kernel_bf16, grid, block, 0, stream,
+            n_int,
+            reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), numel);
+    } else {
+        throw std::runtime_error("polygamma only supports Float32, Float64, Float16, BFloat16");
+    }
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// --- Regularized incomplete beta I_x(a, b) ---
+__global__ void betainc_kernel_f32(const float* a, const float* b, const float* x, float* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        out[idx] = static_cast<float>(betainc_dev_f64(
+            static_cast<double>(a[idx]), static_cast<double>(b[idx]), static_cast<double>(x[idx])));
+    }
+}
+__global__ void betainc_kernel_f64(const double* a, const double* b, const double* x, double* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        out[idx] = betainc_dev_f64(a[idx], b[idx], x[idx]);
+    }
+}
+__global__ void betainc_kernel_f16(const __half* a, const __half* b, const __half* x, __half* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        double r = betainc_dev_f64(
+            static_cast<double>(__half2float(a[idx])),
+            static_cast<double>(__half2float(b[idx])),
+            static_cast<double>(__half2float(x[idx])));
+        out[idx] = __float2half(static_cast<float>(r));
+    }
+}
+__global__ void betainc_kernel_bf16(const hip_bfloat16* a, const hip_bfloat16* b, const hip_bfloat16* x, hip_bfloat16* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        double r = betainc_dev_f64(
+            static_cast<double>(static_cast<float>(a[idx])),
+            static_cast<double>(static_cast<float>(b[idx])),
+            static_cast<double>(static_cast<float>(x[idx])));
+        out[idx] = hip_bfloat16(static_cast<float>(r));
+    }
+}
+auto betainc_kernel(const Tensor& a, const Tensor& b, const Tensor& x, hipStream_t stream) -> Tensor {
+    int64_t n = a.numel();
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, a.dtype(), a.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (a.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(betainc_kernel_f32, grid, block, 0, stream,
+            a.data<float>(), b.data<float>(), x.data<float>(), result.data<float>(), n);
+    } else if (a.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(betainc_kernel_f64, grid, block, 0, stream,
+            a.data<double>(), b.data<double>(), x.data<double>(), result.data<double>(), n);
+    } else if (a.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(betainc_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(b.data<Float16>()),
+            reinterpret_cast<const __half*>(x.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (a.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(betainc_kernel_bf16, grid, block, 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(a.data<BFloat16>()),
+            reinterpret_cast<const hip_bfloat16*>(b.data<BFloat16>()),
+            reinterpret_cast<const hip_bfloat16*>(x.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
+    } else {
+        throw std::runtime_error("betainc only supports Float32, Float64, Float16, BFloat16");
+    }
     HIP_CHECK(hipGetLastError());
     return result;
 }

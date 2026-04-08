@@ -67,29 +67,6 @@ TEST_F(WarnModeCounterTest, WarnModeIncrements) {
         << "Counter should increment when Warn mode disconnects gradient graph";
 }
 
-// Silent mode is deprecated — now behaves like Warn (increments counter AND logs)
-TEST_F(WarnModeCounterTest, SilentModeDeprecatedBehavesLikeWarn) {
-    // Suppress the deprecation warning at compile time for this test
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-    set_higher_order_grad_mode(HigherOrderGradMode::Silent);
-#pragma GCC diagnostic pop
-
-    auto x = Variable(randn({3, 4}, DType::Float32, Device::cpu()), true);
-    auto z = tenzor::max(x * x, 1);
-    auto loss = tenzor::sum(z);
-
-    // Capture stderr to verify Silent now produces a warning
-    testing::internal::CaptureStderr();
-    loss.backward(std::nullopt, false, true);
-    std::string output = testing::internal::GetCapturedStderr();
-
-    EXPECT_GE(higher_order_disconnection_count(), 1u)
-        << "Counter should increment in deprecated Silent mode";
-    EXPECT_FALSE(output.empty())
-        << "Silent mode should now produce a warning (deprecated → behaves like Warn)";
-}
-
 // Warn mode logs every disconnection (no deduplication)
 TEST_F(WarnModeCounterTest, WarnModeLogsEveryDisconnection) {
     set_higher_order_grad_mode(HigherOrderGradMode::Warn);

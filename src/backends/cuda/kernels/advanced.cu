@@ -1455,6 +1455,13 @@ __global__ void histogram_kernel_impl(const float* input, int64_t* counts,
               static_cast<unsigned long long>(1));
 }
 
+// Fill bin-edge tensor on device: edges[i] = min + i * bin_width
+__global__ void fill_bin_edges_kernel(float* edges, float min_val, float bin_width, int64_t num_edges) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_edges) return;
+    edges[i] = min_val + static_cast<float>(i) * bin_width;
+}
+
 auto histogram_kernel(const Tensor& input, int64_t bins,
                       double min_val, double max_val,
                       cudaStream_t stream) -> std::pair<Tensor, Tensor> {
@@ -1463,26 +1470,43 @@ auto histogram_kernel(const Tensor& input, int64_t bins,
         in_contig = in_contig.to(DType::Float32);
     }
 
-    // Auto-detect range if not specified
-    if (min_val == 0.0 && max_val == 0.0) {
-        // Transfer min/max from device — simple fallback
-        auto in_cpu = in_contig.to(Device::cpu());
-        const float* data = in_cpu.data<float>();
-        int64_t n = in_cpu.numel();
-        float mn = data[0], mx = data[0];
-        for (int64_t i = 1; i < n; ++i) {
-            if (data[i] < mn) mn = data[i];
-            if (data[i] > mx) mx = data[i];
-        }
-        min_val = mn;
-        max_val = mx;
+    int64_t n = in_contig.numel();
+
+    // Auto-detect range if not specified — compute min/max on device via CUB,
+    // then read 2 scalars back to host (necessary metadata, not a CPU fallback).
+    if (min_val == 0.0 && max_val == 0.0 && n > 0) {
+        backend::CachedMemoryGuard scratch_guard(2 * sizeof(float));
+        float* d_min_max = static_cast<float*>(scratch_guard.get());
+
+        // CUB Min reduction
+        size_t temp_min = 0;
+        cub::DeviceReduce::Min(nullptr, temp_min, in_contig.data<float>(), d_min_max,
+                               static_cast<int>(n), stream);
+        backend::CachedMemoryGuard min_temp_guard(temp_min);
+        cub::DeviceReduce::Min(min_temp_guard.get(), temp_min, in_contig.data<float>(), d_min_max,
+                               static_cast<int>(n), stream);
+
+        // CUB Max reduction
+        size_t temp_max = 0;
+        cub::DeviceReduce::Max(nullptr, temp_max, in_contig.data<float>(), d_min_max + 1,
+                               static_cast<int>(n), stream);
+        backend::CachedMemoryGuard max_temp_guard(temp_max);
+        cub::DeviceReduce::Max(max_temp_guard.get(), temp_max, in_contig.data<float>(), d_min_max + 1,
+                               static_cast<int>(n), stream);
+
+        // Scalar readback (2 floats) — unavoidable to compute bin_width on host
+        float h_min_max[2];
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(h_min_max, d_min_max, 2 * sizeof(float),
+                                          cudaMemcpyDeviceToHost, stream));
+        TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
+        min_val = h_min_max[0];
+        max_val = h_min_max[1];
     }
     if (max_val <= min_val) max_val = min_val + 1.0;
 
     float bin_width = static_cast<float>((max_val - min_val) / bins);
 
     auto counts = tenzor::zeros({bins}, DType::Int64, in_contig.device());
-    int64_t n = in_contig.numel();
 
     if (n > 0) {
         int threads = 256;
@@ -1492,15 +1516,15 @@ auto histogram_kernel(const Tensor& input, int64_t bins,
             n, bins, static_cast<float>(min_val), bin_width);
     }
 
-    // Compute bin edges
+    // Compute bin edges on-device
     auto edges = Tensor({bins + 1}, DType::Float32, in_contig.device());
-    // Fill edges on CPU and transfer (small tensor)
-    auto edges_cpu = Tensor({bins + 1}, DType::Float32, Device::cpu());
-    float* edge_ptr = edges_cpu.data<float>();
-    for (int64_t i = 0; i <= bins; ++i) {
-        edge_ptr[i] = static_cast<float>(min_val + i * bin_width);
+    {
+        int64_t num_edges = bins + 1;
+        int threads_e = 128;
+        int blocks_e = static_cast<int>((num_edges + threads_e - 1) / threads_e);
+        fill_bin_edges_kernel<<<blocks_e, threads_e, 0, stream>>>(
+            edges.data<float>(), static_cast<float>(min_val), bin_width, num_edges);
     }
-    edges = edges_cpu.to(in_contig.device());
 
     return {counts, edges};
 }
@@ -1511,40 +1535,62 @@ auto histogram_kernel(const Tensor& input, int64_t bins,
 
 __global__ void cdist_l2_kernel_impl(const float* x1, const float* x2,
                                       float* output,
-                                      int64_t P, int64_t R, int64_t M) {
-    // x1: (P, M), x2: (R, M), output: (P, R)
+                                      int64_t B, int64_t P, int64_t R, int64_t M) {
+    // x1: (B, P, M), x2: (B, R, M), output: (B, P, R)
+    // Block: (R, P) tiles per batch; gridDim.z = B
+    int64_t b = blockIdx.z;
     int64_t p = blockIdx.y * blockDim.y + threadIdx.y;
     int64_t r = blockIdx.x * blockDim.x + threadIdx.x;
-    if (p >= P || r >= R) return;
+    if (b >= B || p >= P || r >= R) return;
 
+    const float* a_b = x1 + b * P * M;
+    const float* b_b = x2 + b * R * M;
     float sum = 0.0f;
     for (int64_t m = 0; m < M; ++m) {
-        float diff = x1[p * M + m] - x2[r * M + m];
+        float diff = a_b[p * M + m] - b_b[r * M + m];
         sum += diff * diff;
     }
-    output[p * R + r] = sqrtf(sum);
+    output[(b * P + p) * R + r] = sqrtf(sum);
 }
 
-auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
+auto cdist_kernel(const Tensor& x1, const Tensor& x2, double /*p*/,
                   cudaStream_t stream) -> Tensor {
     auto a = x1.contiguous();
     auto b = x2.contiguous();
     if (a.dtype() != DType::Float32) a = a.to(DType::Float32);
     if (b.dtype() != DType::Float32) b = b.to(DType::Float32);
 
-    int64_t P = a.shape()[0];
-    int64_t M = a.shape()[1];
-    int64_t R = b.shape()[0];
+    // Accept either 2D (P, M) or 3D (B, P, M). The 2D case is treated as B=1.
+    int64_t B, P, M, R;
+    if (a.ndim() == 2 && b.ndim() == 2) {
+        B = 1;
+        P = a.shape()[0];
+        M = a.shape()[1];
+        R = b.shape()[0];
+    } else if (a.ndim() == 3 && b.ndim() == 3) {
+        B = a.shape()[0];
+        P = a.shape()[1];
+        M = a.shape()[2];
+        R = b.shape()[1];
+        if (b.shape()[0] != B) {
+            throw std::runtime_error("cdist: batch dimensions must match");
+        }
+    } else {
+        throw std::runtime_error("cdist: inputs must be 2D or 3D");
+    }
 
-    auto result = Tensor({P, R}, DType::Float32, a.device());
+    std::vector<int64_t> result_shape;
+    if (a.ndim() == 2) result_shape = {P, R};
+    else               result_shape = {B, P, R};
+    auto result = Tensor(result_shape, DType::Float32, a.device());
 
-    if (P == 0 || R == 0) return result;
+    if (B == 0 || P == 0 || R == 0) return result;
 
     // Only L2 distance for now
-    dim3 threads(16, 16);
-    dim3 blocks((R + 15) / 16, (P + 15) / 16);
+    dim3 threads(16, 16, 1);
+    dim3 blocks((R + 15) / 16, (P + 15) / 16, B);
     cdist_l2_kernel_impl<<<blocks, threads, 0, stream>>>(
-        a.data<float>(), b.data<float>(), result.data<float>(), P, R, M);
+        a.data<float>(), b.data<float>(), result.data<float>(), B, P, R, M);
 
     return result;
 }

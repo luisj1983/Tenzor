@@ -1,0 +1,510 @@
+Initializing Tenzor library v1.0.0
+Loading CPU backend from: "/home/lee/Projects/Tenzor/build/bin/tenzor_backend_cpu.so"
+CPU backend registered: cpu
+[dispatch_table] WARNING: OpId 4 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 5 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 156 already registered in a different kernel array
+CPU dispatch table initialized (317 operations registered)
+Loading CUDA backend from: "/home/lee/Projects/Tenzor/build/bin/tenzor_backend_cuda.so"
+CUDA backend registered: cuda
+Found 1 CUDA device(s)
+CUDA dispatch table initialized (315 operations registered)
+Loading ROCm backend from: "/home/lee/Projects/Tenzor/build/bin/tenzor_backend_rocm.so"
+ROCm backend registered: rocm
+Found 1 ROCm device(s)
+[dispatch_table] WARNING: OpId 0 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 1 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 2 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 3 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 4 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 5 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 6 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 330 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 331 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 332 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 360 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 361 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 32 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 31 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 33 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 30 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 40 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 34 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 320 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 321 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 322 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 35 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 323 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 324 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 325 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 326 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 490 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 491 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 492 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 496 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 497 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 498 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 499 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 500 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 501 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 502 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 503 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 41 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 42 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 43 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 44 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 50 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 51 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 52 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 53 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 54 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 55 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 56 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 57 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 327 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 328 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 329 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 350 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 351 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 352 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 353 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 140 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 141 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 142 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 143 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 144 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 145 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 440 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 441 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 442 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 443 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 444 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 65 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 66 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 67 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 68 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 69 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 58 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 70 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 75 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 76 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 71 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 72 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 77 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 78 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 79 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 80 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 73 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 74 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 81 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 82 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 83 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 84 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 85 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 86 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 87 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 88 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 106 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 107 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 100 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 101 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 102 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 103 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 104 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 111 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 105 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 109 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 110 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 112 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 344 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 345 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 115 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 108 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 121 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 122 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 410 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 120 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 124 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 123 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 125 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 126 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 127 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 128 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 129 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 130 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 131 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 260 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 431 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 261 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 435 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 270 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 281 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 170 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 301 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 174 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 176 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 175 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 192 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 193 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 191 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 194 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 195 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 197 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 200 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 201 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 202 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 205 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 316 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 292 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 293 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 21 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 342 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 343 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 340 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 341 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 210 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 212 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 214 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 215 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 211 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 225 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 226 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 227 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 429 already registered in a different kernel array
+[dispatch_table] WARNING: OpId 430 already registered in a different kernel array
+ROCm dispatch table initialized with O(1) lookup
+ROCm dispatch table initialized (315 operations registered)
+Loading OneAPI backend from: "/home/lee/Projects/Tenzor/build/bin/tenzor_backend_oneapi.so"
+OneAPI backend registered: oneapi
+Found 1 OneAPI device(s)
+OneAPI dispatch table initialized (315 operations registered)
+Loading Vulkan backend from: "/home/lee/Projects/Tenzor/build/bin/tenzor_backend_vulkan.so"
+Found dedicated GPU: NVIDIA GeForce RTX 5070 Laptop GPU
+Found integrated GPU: AMD Radeon 890M Graphics (RADV STRIX1)
+Default Vulkan device (index 0): Dedicated GPU
+Vulkan backend registered: vulkan
+Found 2 Vulkan device(s)
+Vulkan dispatch table initialized with O(1) lookup
+Vulkan dispatch table initialized (315 operations registered)
+Tenzor initialization complete
+Operation                          CPU    CUDA    ROCm  Vulkan  OneAPI
+----------------------------------------------------------------------
+add                                ✓     ✓     ✓     ✓     ✓
+sub                                ✓     ✓     ✓     ✓     ✓
+mul                                ✓     ✓     ✓     ✓     ✓
+div                                ✓     ✓     ✓     ✓     ✓
+matmul                             ✓     ✓     ✓     ✓     ✓
+bmm                                ✓     ✓     ✓     ✓     ✓
+dot                                ✓     ✓     ✓     ✓     ✓
+add_inplace                        ✓     ✓     ✓     ✓     ✓
+sub_inplace                        ✓     ✓     ✓     ✓     ✓
+mul_inplace                        ✓     ✓     ✓     ✓     ✓
+div_inplace                        ✓     ✓     ✓     ✓     ✓
+sum                                ✓     ✓     ✓     ✓     ✓
+mean                               ✓     ✓     ✓     ✓     ✓
+max                                ✓     ✓     ✓     ✓     ✓
+min                                ✓     ✓     ✓     ✓     ✓
+argmax                             ✓     ✓     ✓     ✓     ✓
+argmin                             ✓     ✓     ✓     ✓     ✓
+prod                               ✓     ✓     ✓     ✓     ✓
+var                                ✓     ✓     ✓     ✓     ✓
+std                                ✓     ✓     ✓     ✓     ✓
+norm                               ✓     ✓     ✓     ✓     ✓
+argsort                            ✓     ✓     ✓     ✓     ✓
+any                                ✓     ✓     ✓     ✓     ✓
+all                                ✓     ✓     ✓     ✓     ✓
+median                             ✓     ✓     ✓     ✓     ✓
+mode                               ✓     ✓     ✓     ✓     ✓
+sqrt                               ✓     ✓     ✓     ✓     ✓
+neg                                ✓     ✓     ✓     ✓     ✓
+abs                                ✓     ✓     ✓     ✓     ✓
+sign                               ✓     ✓     ✓     ✓     ✓
+log                                ✓     ✓     ✓     ✓     ✓
+exp                                ✓     ✓     ✓     ✓     ✓
+pow                                ✓     ✓     ✓     ✓     ✓
+clamp                              ✓     ✓     ✓     ✓     ✓
+clamp_min                          ✓     ✓     ✓     ✓     ✓
+clamp_max                          ✓     ✓     ✓     ✓     ✓
+reciprocal                         ✓     ✓     ✓     ✓     ✓
+floor                              ✓     ✓     ✓     ✓     ✓
+ceil                               ✓     ✓     ✓     ✓     ✓
+round                              ✓     ✓     ✓     ✓     ✓
+trunc                              ✓     ✓     ✓     ✓     ✓
+sin                                ✓     ✓     ✓     ✓     ✓
+cos                                ✓     ✓     ✓     ✓     ✓
+tan                                ✓     ✓     ✓     ✓     ✓
+asin                               ✓     ✓     ✓     ✓     ✓
+acos                               ✓     ✓     ✓     ✓     ✓
+atan                               ✓     ✓     ✓     ✓     ✓
+sinh                               ✓     ✓     ✓     ✓     ✓
+cosh                               ✓     ✓     ✓     ✓     ✓
+tanh                               ✓     ✓     ✓     ✓     ✓
+relu                               ✓     ✓     ✓     ✓     ✓
+relu_backward                      ✓     ✓     ✓     ✓     ✓
+sigmoid                            ✓     ✓     ✓     ✓     ✓
+sigmoid_backward                   ✓     ✓     ✓     ✓     ✓
+tanh_activation                    ✓     ✓     ✓     ✓     ✓
+tanh_backward                      ✓     ✓     ✓     ✓     ✓
+gelu                               ✓     ✓     ✓     ✓     ✓
+gelu_backward                      ✓     ✓     ✓     ✓     ✓
+swish                              ✓     ✓     ✓     ✓     ✓
+swish_backward                     ✓     ✓     ✓     ✓     ✓
+leaky_relu                         ✓     ✓     ✓     ✓     ✓
+leaky_relu_backward                ✓     ✓     ✓     ✓     ✓
+elu                                ✓     ✓     ✓     ✓     ✓
+elu_backward                       ✓     ✓     ✓     ✓     ✓
+selu                               ✓     ✓     ✓     ✓     ✓
+selu_backward                      ✓     ✓     ✓     ✓     ✓
+mish                               ✓     ✓     ✓     ✓     ✓
+mish_backward                      ✓     ✓     ✓     ✓     ✓
+softplus                           ✓     ✓     ✓     ✓     ✓
+softplus_backward                  ✓     ✓     ✓     ✓     ✓
+softmax                            ✓     ✓     ✓     ✓     ✓
+softmax_backward                   ✓     ✓     ✓     ✓     ✓
+log_softmax                        ✓     ✓     ✓     ✓     ✓
+log_softmax_backward               ✓     ✓     ✓     ✓     ✓
+relu_inplace                       ✓     ✓     ✓     ✓     ✓
+sigmoid_inplace                    ✓     ✓     ✓     ✓     ✓
+tanh_inplace                       ✓     ✓     ✓     ✓     ✓
+leaky_relu_inplace                 ✓     ✓     ✓     ✓     ✓
+gelu_inplace                       ✓     ✓     ✓     ✓     ✓
+reshape                            ✓     ✓     ✓     ✓     ✓
+transpose                          ✓     ✓     ✓     ✓     ✓
+permute                            ✓     ✓     ✓     ✓     ✓
+squeeze                            ✓     ✓     ✓     ✓     ✓
+unsqueeze                          ✓     ✓     ✓     ✓     ✓
+flatten                            ✓     ✓     ✓     ✓     ✓
+contiguous                         ✓     ✓     ✓     ✓     ✓
+clone                              ✓     ✓     ✓     ✓     ✓
+fill                               ✓     ✓     ✓     ✓     ✓
+repeat                             ✓     ✓     ✓     ✓     ✓
+tile                               ✓     ✓     ✓     ✓     ✓
+expand                             ✓     ✓     ✓     ✓     ✓
+stack                              ✓     ✓     ✓     ✓     ✓
+split                              ✓     ✓     ✓     ✓     ✓
+chunk                              ✓     ✓     ✓     ✓     ✓
+to_memory_format                   ✓     ✓     ✓     ✓     ✓
+index_select                       ✓     ✓     ✓     ✓     ✓
+gather                             ✓     ✓     ✓     ✓     ✓
+scatter                            ✓     ✓     ✓     ✓     ✓
+masked_select                      ✓     ✓     ✓     ✓     ✓
+masked_fill                        ✓     ✓     ✓     ✓     ✓
+where                              ✓     ✓     ✓     ✓     ✓
+slice                              ✓     ✓     ✓     ✓     ✓
+cat                                ✓     ✓     ✓     ✓     ✓
+take                               ✓     ✓     ✓     ✓     ✓
+put                                ✓     ✓     ✓     ✓     ✓
+nonzero                            ✓     ✓     ✓     ✓     ✓
+one_hot                            ✓     ✓     ✓     ✓     ✓
+advanced_index                     ✓     ✓     ✓     ✓     ✓
+advanced_index_put                 ✓     ✓     ✓     ✓     ✓
+eq                                 ✓     ✓     ✓     ✓     ✓
+ne                                 ✓     ✓     ✓     ✓     ✓
+lt                                 ✓     ✓     ✓     ✓     ✓
+le                                 ✓     ✓     ✓     ✓     ✓
+gt                                 ✓     ✓     ✓     ✓     ✓
+ge                                 ✓     ✓     ✓     ✓     ✓
+batchnorm2d_mean_var               ✓     ✓     ✓     ✓     ✓
+batchnorm2d_forward                ✓     ✓     ✓     ✓     ✓
+batchnorm2d_forward_affine         ✓     ✓     ✓     ✓     ✓
+batchnorm2d_update_running_stats     ✓     ✓     ✓     ✓     ✓
+batchnorm2d_backward               ✓     ✓     ✓     ✓     ✓
+batchnorm2d_fused_training         ✓     ✓     ✓     ✓     ✓
+layer_norm                         ✓     ✓     ✓     ✓     ✓
+layer_norm_backward                ✓     ✓     ✓     ✓     ✓
+group_norm                         ✓     ✓     ✓     ✓     ✓
+group_norm_backward                ✓     ✓     ✓     ✓     ✓
+instance_norm                      ✓     ✓     ✓     ✓     ✓
+instance_norm_backward             ✓     ✓     ✓     ✓     ✓
+rms_norm                           ✓     ✓     ✓     ✓     ✓
+rms_norm_backward                  ✓     ✓     ✓     ✓     ✓
+conv2d_forward                     ✓     ✓     ✓     ✓     ✓
+conv2d_backward_input              ✓     ✓     ✓     ✓     ✓
+conv2d_backward_weight             ✓     ✓     ✓     ✓     ✓
+conv2d_backward_bias               ✓     ✓     ✓     ✓     ✓
+conv_transpose2d_forward           ✓     ✓     ✓     ✓     ✓
+depthwise_conv2d                   ✓     ✓     ✓     ✓     ✓
+conv_transpose3d_forward           ✓     ✓     ✓     ✓     ✓
+conv_transpose3d_backward_input     ✓     ✓     ✓     ✓     ✓
+conv_transpose3d_backward_weight     ✓     ✓     ✓     ✓     ✓
+conv_transpose3d_backward_bias     ✓     ✓     ✓     ✓     ✓
+maxpool2d_forward                  ✓     ✓     ✓     ✓     ✓
+maxpool2d_backward                 ✓     ✓     ✓     ✓     ✓
+avgpool2d_forward                  ✓     ✓     ✓     ✓     ✓
+avgpool2d_backward                 ✓     ✓     ✓     ✓     ✓
+adaptive_avgpool2d                 ✓     ✓     ✓     ✓     ✓
+adaptive_avgpool2d_backward        ✓     ✓     ✓     ✓     ✓
+adaptive_maxpool2d                 ✓     ✓     ✓     ✓     ✓
+adaptive_maxpool2d_backward        ✓     ✓     ✓     ✓     ✓
+unfold                             ✓     ✓     ✓     ✓     ✓
+fold                               ✓     ✓     ✓     ✓     ✓
+interpolate                        ✓     ✓     ✓     ✓     ✓
+roi_align_forward                  ✓     ✓     ✓     ✓     ✓
+roi_align_backward                 ✓     ✓     ✓     ✓     ✓
+box_iou                            ✓     ✓     ✓     ✓     ✓
+gather_relative_position_bias      ✓     ✓     ✓     ✓     ✓
+nms                                ✓     ✓     ✓     ✓     ✓
+grid_sample                        ✓     ✓     ✓     ✓     ✓
+affine_grid                        ✓     ✓     ✓     ✓     ✓
+fused_linear_relu                  ✓     ✓     ✓     ✓     ✓
+fused_conv2d_relu                  ✓     ✓     ✓     ✓     ✓
+fused_batchnorm_relu               ✓     ✓     ✓     ✓     ✓
+fused_softmax_cross_entropy        ✓     ✓     ✓     ✓     ✓
+fused_add_relu                     ✓     ✓     ✓     ✓     ✓
+fused_gelu                         ✓     ✓     ✓     ✓     ✓
+fused_layer_norm                   ✓     ✓     ✓     ✓     ✓
+fused_rms_norm                     ✓     ✓     ✓     ✓     ✓
+fused_attention                    ✓     ✓     ✓     ✓     ✓
+fused_sgd_step                     ✓     ✓     ✓     ✓     ✓
+fused_adam_step                    ✓     ✓     ✓     ✓     ✓
+fused_rmsprop_step                 ✓     ✓     ✓     ✓     ✓
+fused_adadelta_step                ✓     ✓     ✓     ✓     ✓
+fused_adagrad_step                 ✓     ✓     ✓     ✓     ✓
+fused_adam_atan2_step              ✓     ✓     ✓     ✓     ✓
+fused_conv2d_sigmoid               ✓     ✓     ✓     ✓     ✓
+fused_conv2d_tanh                  ✓     ✓     ✓     ✓     ✓
+fused_conv2d_swish                 ✓     ✓     ✓     ✓     ✓
+fused_conv2d_bn_relu               ✓     ✓     ✓     ✓     ✓
+fused_layer_norm_backward          ✓     ✓     ✓     ✓     ✓
+zeros                              ✓     ✓     ✓     ✓     ✓
+ones                               ✓     ✓     ✓     ✓     ✓
+full                               ✓     ✓     ✓     ✓     ✓
+rand                               ✓     ✓     ✓     ✓     ✓
+randn                              ✓     ✓     ✓     ✓     ✓
+arange                             ✓     ✓     ✓     ✓     ✓
+linspace                           ✓     ✓     ✓     ✓     ✓
+eye                                ✓     ✓     ✓     ✓     ✓
+randint                            ✓     ✓     ✓     ✓     ✓
+lstm_cell_forward                  ✓     ✓     ✓     ✓     ✓
+lstm_cell_backward                 ✓     ✓     ✓     ✓     ✓
+gru_cell_forward                   ✓     ✓     ✓     ✓     ✓
+gru_cell_backward                  ✓     ✓     ✓     ✓     ✓
+lstm_forward                       ✓     ✓     ✓     ✓     ✓
+gru_forward                        ✓     ✓     ✓     ✓     ✓
+lstm_multi_layer_forward           ✓     ✓     ✓     ✓     ✓
+gru_multi_layer_forward            ✓     ✓     ✓     ✓     ✓
+bilstm_forward                     ✓     ✓     ✓     ✓     ✓
+embedding                          ✓     ✓     ✓     ✓     ✓
+embedding_backward                 ✓     ✓     ✓     ✓     ✓
+linear                             ✓     ✓     ✓     ✓     ✓
+linear_backward                    ✓     ✓     ✓     ✓     ✓
+dropout                            ✓     ✓     ✓     ✓     ✓
+dropout_backward                   ✓     ✓     ✓     ✓     ✓
+topk                               ✓     ✓     ✓     ✓     ✓
+sort                               ✓     ✓     ✓     ✓     ✓
+cumsum                             ✓     ✓     ✓     ✓     ✓
+cumprod                            ✓     ✓     ✓     ✓     ✓
+unique                             ✓     ✓     ✓     ✓     ✓
+flash_attention                    ✓     ✓     ✓     ✓     ✓
+flash_attention_backward           ✓     ✓     ✓     ✓     ✓
+conv3d_forward                     ✓     ✓     ✓     ✓     ✓
+conv3d_backward_input              ✓     ✓     ✓     ✓     ✓
+conv3d_backward_weight             ✓     ✓     ✓     ✓     ✓
+conv3d_backward_bias               ✓     ✓     ✓     ✓     ✓
+maxpool3d_forward                  ✓     ✓     ✓     ✓     ✓
+maxpool3d_backward                 ✓     ✓     ✓     ✓     ✓
+avgpool3d_forward                  ✓     ✓     ✓     ✓     ✓
+avgpool3d_backward                 ✓     ✓     ✓     ✓     ✓
+adaptive_maxpool3d                 ✓     ✓     ✓     ✓     ✓
+adaptive_maxpool3d_backward        ✓     ✓     ✓     ✓     ✓
+adaptive_avgpool3d                 ✓     ✓     ✓     ✓     ✓
+adaptive_avgpool3d_backward        ✓     ✓     ✓     ✓     ✓
+cast                               ✓     ✓     ✓     ✓     ✓
+log2                               ✓     ✓     ✓     ✓     ✓
+log10                              ✓     ✓     ✓     ✓     ✓
+log1p                              ✓     ✓     ✓     ✓     ✓
+exp2                               ✓     ✓     ✓     ✓     ✓
+expm1                              ✓     ✓     ✓     ✓     ✓
+erf                                ✓     ✓     ✓     ✓     ✓
+erfc                               ✓     ✓     ✓     ✓     ✓
+isnan                              ✓     ✓     ✓     ✓     ✓
+isinf                              ✓     ✓     ✓     ✓     ✓
+isfinite                           ✓     ✓     ✓     ✓     ✓
+atan2                              ✓     ✓     ✓     ✓     ✓
+fmod                               ✓     ✓     ✓     ✓     ✓
+remainder                          ✓     ✓     ✓     ✓     ✓
+lerp                               ✓     ✓     ✓     ✓     ✓
+triu                               ✓     ✓     ✓     ✓     ✓
+tril                               ✓     ✓     ✓     ✓     ✓
+diag                               ✓     ✓     ✓     ✓     ✓
+trace                              ✓     ✓     ✓     ✓     ✓
+flip                               ✓     ✓     ✓     ✓     ✓
+roll                               ✓     ✓     ✓     ✓     ✓
+logical_and                        ✓     ✓     ✓     ✓     ✓
+logical_or                         ✓     ✓     ✓     ✓     ✓
+logical_not                        ✓     ✓     ✓     ✓     ✓
+logical_xor                        ✓     ✓     ✓     ✓     ✓
+minimum                            ✓     ✓     ✓     ✓     ✓
+maximum                            ✓     ✓     ✓     ✓     ✓
+cross                              ✓     ✓     ✓     ✓     ✓
+maxpool1d_forward                  ✓     ✓     ✓     ✓     ✓
+maxpool1d_backward                 ✓     ✓     ✓     ✓     ✓
+avgpool1d_forward                  ✓     ✓     ✓     ✓     ✓
+avgpool1d_backward                 ✓     ✓     ✓     ✓     ✓
+adaptive_maxpool1d                 ✓     ✓     ✓     ✓     ✓
+adaptive_maxpool1d_backward        ✓     ✓     ✓     ✓     ✓
+adaptive_avgpool1d                 ✓     ✓     ✓     ✓     ✓
+adaptive_avgpool1d_backward        ✓     ✓     ✓     ✓     ✓
+searchsorted                       ✓     ✓     ✓     ✓     ✓
+gumbel_softmax                     ✓     ✓     ✓     ✓     ✓
+fft                                ✓     ✓     ✓     ✓     ✓
+ifft                               ✓     ✓     ✓     ✓     ✓
+rfft                               ✓     ✓     ✓     ✓     ✓
+irfft                              ✓     ✓     ✓     ✓     ✓
+fft2                               ✓     ✓     ✓     ✓     ✓
+ifft2                              ✓     ✓     ✓     ✓     ✓
+fftn                               ✓     ✓     ✓     ✓     ✓
+ifftn                              ✓     ✓     ✓     ✓     ✓
+scatter_add                        ✓     ✓     ✓     ✓     ✓
+linalg_det                         ✓     ✓     ✓     ✓     ✓
+linalg_inv                         ✓     ✓     ✓     ✓     ✓
+linalg_solve                       ✓     ✓     ✓     ✓     ✓
+linalg_svd                         ✓     ✓     ✓     ✓     ✓
+linalg_qr                          ✓     ✓     ✓     ✓     ✓
+linalg_eigh                        ✓     ✓     ✓     ✓     ✓
+linalg_eig                         ✓     ✓     ✓     ✓     ✓
+linalg_cholesky                    ✓     ✓     ✓     ✓     ✓
+strided_fill                       ✓     ✓     ✓     ✓     ✓
+quantized_linear                   ✓     ✓     ✓     ✓     ✓
+quantized_conv2d                   ✓     ✓     ✓     ✓     ✓
+embedding_with_bounds_check        ✓     ✓     ✓     ✓     ✓
+logsumexp                          ✓     ✓     ✓     ✓     ✓
+has_inf_nan                        ✓     ✓     ✓     ✓     ✓
+embedding_bag_forward              ✓     ✓     ✓     ✓     ✓
+embedding_bag_backward             ✓     ✓     ✓     ✓     ✓
+conj                               ✓     ✓     ✓     ✓     ✓
+real                               ✓     ✓     ✓     ✓     ✓
+imag                               ✓     ✓     ✓     ✓     ✓
+angle                              ✓     ✓     ✓     ✓     ✓
+polar                              ✓     ✓     ✓     ✓     ✓
+sparse_spmm                        ✓     ✓     ✓     ✓     ✓
+sparse_spmv                        ✓     ✓     ✓     ✓     ✓
+sparse_to_dense                    ✓     ✓     ✓     ✓     ✓
+dense_to_sparse                    ✓     ✓     ✓     ✓     ✓
+sparse_add                         ✓     ✓     ✓     ✓     ✓
+stft                               ✓     ✓     ✓     ✓     ✓
+istft                              ✓     ✓     ✓     ✓     ✓
+cdist                              ✓     ✓     ✓     ✓     ✓
+multinomial                        ✓     ✓     ✓     ✓     ✓
+bernoulli                          ✓     ✓     ✓     ✓     ✓
+histogram                          ✓     ✓     ✓     ✓     ✓
+bucketize                          ✓     ✓     ✓     ✓     ✓
+gamma                              ✓     ✓     ✓     ✓     ✓
+lgamma                             ✓     ✓     ✓     ✓     ✓
+digamma                            ✓     ✓     ✓     ✓     ✓
+polygamma                          ✓     ✓     ✓     ✓     ✓
+beta                               ✓     ✓     ✓     ✓     ✓
+betainc                            ✓     ✓     ✓     ✓     ✓
+bessel_j0                          ✓     ✓     ✓     ✓     ✓
+bessel_j1                          ✓     ✓     ✓     ✓     ✓
+bessel_y0                          ✓     ✓     ✓     ✓     ✓
+bessel_y1                          ✓     ✓     ✓     ✓     ✓
+bessel_i0                          ✓     ✓     ✓     ✓     ✓
+bessel_i1                          ✓     ✓     ✓     ✓     ✓
+erfinv                             ✓     ✓     ✓     ✓     ✓
+sinc                               ✓     ✓     ✓     ✓     ✓
+zeta                               ✓     ✓     ✓     ✓     ✓
+unknown                            ✓       -       -       -       -
+unknown                            ✓       -       -       -       -
+----------------------------------------------------------------------
+TOTAL                           317/317  315/317  315/317  315/317  315/317

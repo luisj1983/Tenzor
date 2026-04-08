@@ -694,6 +694,23 @@ namespace cuda {
     Tensor polar_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor cross_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
 
+    // Special math (native CUDA implementations — replace previous CPU-roundtrip fallbacks)
+    Tensor gamma_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor lgamma_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor digamma_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor polygamma_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor beta_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor betainc_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor bessel_j0_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor bessel_j1_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor bessel_y0_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor bessel_y1_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor bessel_i0_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor bessel_i1_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor erfinv_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor sinc_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor zeta_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+
 #ifndef TENZOR_HAS_CUSPARSE
     // Native CUDA CSR sparse fallback kernels (sparse.cu)
     auto cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) -> Tensor;
@@ -894,40 +911,26 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::Erfc, cuda::erfc_dispatch);
 
     // =========================================================================
-    // Special Math Functions (CPU-roundtrip fallback until native CUDA kernels)
+    // Special Math Functions — native CUDA device kernels
     // =========================================================================
-#define CUDA_UNARY_FALLBACK(OP_ID, FN) \
-    table.register_single_output_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor { \
-        return tenzor::FN(inputs[0].to(Device::cpu())).to(inputs[0].device()); \
-    })
-#define CUDA_BINARY_FALLBACK(OP_ID, FN) \
-    table.register_single_output_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor { \
-        return tenzor::FN(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu())).to(inputs[0].device()); \
-    })
-
-    CUDA_UNARY_FALLBACK(Gamma, gamma);
-    CUDA_UNARY_FALLBACK(Lgamma, lgamma);
-    CUDA_UNARY_FALLBACK(Digamma, digamma);
-    table.register_single_output_kernel(OpId::Polygamma, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t n = static_cast<int64_t>(attrs.get_float(AttrKey::Order, 0.0));
-        return tenzor::polygamma(n, inputs[0].to(Device::cpu())).to(inputs[0].device());
-    });
-    CUDA_BINARY_FALLBACK(Beta, beta);
-    table.register_kernel(OpId::BetaInc, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        return std::vector<Tensor>{tenzor::betainc(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu()), inputs[2].to(Device::cpu())).to(inputs[0].device())};
-    });
-    CUDA_UNARY_FALLBACK(BesselJ0, bessel_j0);
-    CUDA_UNARY_FALLBACK(BesselJ1, bessel_j1);
-    CUDA_UNARY_FALLBACK(BesselY0, bessel_y0);
-    CUDA_UNARY_FALLBACK(BesselY1, bessel_y1);
-    CUDA_UNARY_FALLBACK(BesselI0, bessel_i0);
-    CUDA_UNARY_FALLBACK(BesselI1, bessel_i1);
-    CUDA_UNARY_FALLBACK(ErfInv, erfinv);
-    CUDA_UNARY_FALLBACK(Sinc, sinc);
-    CUDA_BINARY_FALLBACK(Zeta, zeta);
-
-#undef CUDA_UNARY_FALLBACK
-#undef CUDA_BINARY_FALLBACK
+    table.register_single_output_kernel(OpId::Gamma,     cuda::gamma_dispatch);
+    table.register_single_output_kernel(OpId::Lgamma,    cuda::lgamma_dispatch);
+    table.register_single_output_kernel(OpId::Digamma,   cuda::digamma_dispatch);
+    table.register_single_output_kernel(OpId::Polygamma, cuda::polygamma_dispatch);
+    table.register_single_output_kernel(OpId::Beta,      cuda::beta_dispatch);
+    table.register_single_output_kernel(OpId::BesselJ0,  cuda::bessel_j0_dispatch);
+    table.register_single_output_kernel(OpId::BesselJ1,  cuda::bessel_j1_dispatch);
+    table.register_single_output_kernel(OpId::BesselY0,  cuda::bessel_y0_dispatch);
+    table.register_single_output_kernel(OpId::BesselY1,  cuda::bessel_y1_dispatch);
+    table.register_single_output_kernel(OpId::BesselI0,  cuda::bessel_i0_dispatch);
+    table.register_single_output_kernel(OpId::BesselI1,  cuda::bessel_i1_dispatch);
+    table.register_single_output_kernel(OpId::ErfInv,    cuda::erfinv_dispatch);
+    table.register_single_output_kernel(OpId::Sinc,      cuda::sinc_dispatch);
+    table.register_single_output_kernel(OpId::Zeta,      cuda::zeta_dispatch);
+    table.register_kernel(OpId::BetaInc,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return {cuda::betainc_dispatch(inputs, attrs)};
+        });
 
     // =========================================================================
     // Bool Predicate Operations

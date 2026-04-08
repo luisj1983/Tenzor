@@ -1,0 +1,34 @@
+#version 450
+
+// Bucketize: per-element binary search of input into sorted boundaries.
+// Output is int32 (the bin index).
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer InputBuf      { float input_data[]; };
+layout(binding = 1) buffer BoundariesBuf { float boundaries[]; };
+layout(binding = 2) buffer OutputBuf     { int  out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint num_boundaries;
+    uint right;  // 0 = lower_bound, 1 = upper_bound
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n) return;
+
+    float val = input_data[idx];
+    int lo = 0;
+    int hi = int(params.num_boundaries);
+    while (lo < hi) {
+        int mid = (lo + hi) >> 1;
+        bool cond = (params.right != 0u)
+                  ? (boundaries[mid] <= val)
+                  : (boundaries[mid] <  val);
+        if (cond) lo = mid + 1;
+        else      hi = mid;
+    }
+    out_data[idx] = lo;
+}

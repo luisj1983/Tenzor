@@ -1,0 +1,40 @@
+#version 450
+
+// CDist (pairwise L2 distance) for 3D batched inputs:
+//   x1: (B, P, M), x2: (B, R, M)  →  out: (B, P, R)
+//
+// 2D inputs are treated as B=1 by the host dispatcher.
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer X1Buf  { float x1[]; };
+layout(binding = 1) buffer X2Buf  { float x2[]; };
+layout(binding = 2) buffer OutBuf { float out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint B;
+    uint P;
+    uint R;
+    uint M;
+    uint total;  // B*P*R
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.total) return;
+
+    // Decode (b, p, r)
+    uint r  = idx % params.R;
+    uint p  = (idx / params.R) % params.P;
+    uint b  = idx / (params.R * params.P);
+
+    uint a_off = b * params.P * params.M + p * params.M;
+    uint b_off = b * params.R * params.M + r * params.M;
+
+    float sum = 0.0;
+    for (uint m = 0; m < params.M; ++m) {
+        float diff = x1[a_off + m] - x2[b_off + m];
+        sum += diff * diff;
+    }
+    out_data[idx] = sqrt(sum);
+}

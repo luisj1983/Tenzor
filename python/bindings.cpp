@@ -184,18 +184,6 @@ public:
         }
 
         // Fall back to forward_impl if no forward override found.
-        // Emit a one-time deprecation warning: users should override forward().
-        {
-            static bool warned = false;
-            if (!warned) {
-                warned = true;
-                if (PyErr_WarnEx(PyExc_DeprecationWarning,
-                        "Overriding forward_impl() is deprecated. "
-                        "Override forward() instead (same as PyTorch).", 1) < 0) {
-                    throw py::error_already_set();
-                }
-            }
-        }
         PYBIND11_OVERRIDE_PURE(
             tenzor::Variable,           // Return type
             tenzor::nn::Module,         // Parent class

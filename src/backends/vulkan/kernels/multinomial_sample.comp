@@ -1,0 +1,38 @@
+#version 450
+
+// Multinomial sample: binary search on a precomputed CDF.
+// Per-batch CDF is computed by a separate single-task pass before this dispatch.
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer CdfBuf    { float cdf[]; };
+layout(binding = 1) buffer OutputBuf { int   out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_categories;
+    uint num_samples;
+    float total;
+    uint seed_lo;
+    uint seed_hi;
+    uint cdf_offset;
+    uint out_offset;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_samples) return;
+
+    uint state = params.seed_lo ^ (params.seed_hi * 0x9E3779B9u) ^ (idx * 0x85EBCA77u);
+    state = state * 1664525u + 1013904223u;
+    state = state * 1664525u + 1013904223u;
+    float u = (float(state) / 4294967295.0) * params.total;
+
+    int lo = 0;
+    int hi = int(params.num_categories) - 1;
+    while (lo < hi) {
+        int mid = (lo + hi) >> 1;
+        if (cdf[params.cdf_offset + uint(mid)] <= u) lo = mid + 1;
+        else                                          hi = mid;
+    }
+    out_data[params.out_offset + idx] = lo;
+}

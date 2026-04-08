@@ -157,6 +157,9 @@ endfunction()
 # =========================================================================
 set(ONEAPI_SYCL_SOURCES
     kernels/math.cpp
+    kernels/special_math.cpp
+    kernels/grid_sample.cpp
+    kernels/sampling.cpp
     kernels/activations.cpp
     kernels/reduction.cpp
     kernels/transform.cpp

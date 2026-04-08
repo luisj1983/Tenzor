@@ -62,6 +62,8 @@ set(ROCM_HIP_SOURCES
     kernels/nms.hip.cpp
     kernels/roi_align.hip.cpp
     kernels/vision.hip.cpp
+    kernels/grid_sample.hip.cpp
+    kernels/sampling.hip.cpp
     kernels/sort.hip.cpp
     kernels/quantization.hip.cpp
     kernels/sparse.hip.cpp

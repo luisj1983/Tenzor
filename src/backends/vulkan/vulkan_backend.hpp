@@ -246,6 +246,22 @@ public:
     auto dispatchBinaryOp(const std::string& op_name, const Tensor& a, const Tensor& b) -> Tensor;
     auto dispatchUnaryOp(const std::string& op_name, const Tensor& input) -> Tensor;
     auto dispatchUnaryOpWithParam(const std::string& op_name, const Tensor& input, float param) -> Tensor;
+    // Special-math dispatchers (vulkan_ops_special_math.cpp). Replace previous CPU fallbacks.
+    auto dispatchSpecialMathUnary(const Tensor& input, uint32_t opcode, int32_t param_int = 0) -> Tensor;
+    auto dispatchSpecialMathBinary(const Tensor& a, const Tensor& b, uint32_t opcode) -> Tensor;
+    auto dispatchSpecialMathTernary(const Tensor& a, const Tensor& b, const Tensor& x) -> Tensor;
+    // Grid sample / affine grid (vulkan_ops_grid_sample.cpp)
+    auto dispatchGridSample(const Tensor& input, const Tensor& grid,
+                            const std::string& mode_str, const std::string& padding_mode_str,
+                            bool align_corners) -> Tensor;
+    auto dispatchAffineGrid(const Tensor& theta, const std::vector<int64_t>& size, bool align_corners) -> Tensor;
+    // Sampling / statistics (vulkan_ops_sampling.cpp)
+    auto dispatchBernoulli(const Tensor& probs) -> Tensor;
+    auto dispatchBucketize(const Tensor& input, const Tensor& boundaries, bool right) -> Tensor;
+    auto dispatchCDist(const Tensor& x1, const Tensor& x2) -> Tensor;
+    auto dispatchHistogram(const Tensor& input, int64_t bins, double min_val, double max_val)
+        -> std::pair<Tensor, Tensor>;
+    auto dispatchMultinomial(const Tensor& probs, int64_t num_samples, bool replacement) -> Tensor;
     auto dispatchTrigonometricOp(const std::string& op_name, const Tensor& input) -> Tensor;
     auto dispatchHyperbolicOp(const std::string& op_name, const Tensor& input) -> Tensor;
     auto dispatchComparisonOp(const std::string& op_name, const Tensor& a, const Tensor& b) -> Tensor;
@@ -258,9 +274,6 @@ public:
     auto dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor;
     auto dispatchBmm(const Tensor& a, const Tensor& b) -> Tensor;
     auto dispatchDot(const Tensor& a, const Tensor& b) -> Tensor;
-    auto dispatchConv2d(const Tensor& input, const Tensor& weight,
-                       const Tensor* bias, int64_t stride, int64_t padding,
-                       int64_t dilation, int64_t groups) -> Tensor;
     auto dispatchConv2dForward(const Tensor& input, const Tensor& weight, const Tensor* bias, const OpAttributes& attrs) -> Tensor;
     auto dispatchConv2dWinograd(const Tensor& input, const Tensor& weight, const Tensor* bias,
                                 int64_t padding, int64_t groups) -> Tensor;

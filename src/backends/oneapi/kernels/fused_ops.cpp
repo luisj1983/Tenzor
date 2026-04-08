@@ -1294,49 +1294,61 @@ auto fused_softmax_cross_entropy_kernel(
         throw std::runtime_error("fused_softmax_cross_entropy: unsupported dtype");
     }
 
-    // Apply reduction on device
+    // Apply reduction on device using parallel sycl::reduction (was previously
+    // a serial loop in a single GPU thread — bad for non-trivial batch sizes).
     if (reduction == "mean" || reduction == "sum") {
         Tensor result({1}, logits.dtype(), logits.device());
+        const int64_t bs = batch_size;
+
         if (logits.dtype() == DType::Float32) {
             float* result_ptr = get_data_ptr<float>(result);
             const float* losses_ptr = get_data_ptr<const float>(losses);
-            const float scale = (reduction == "mean") ? 1.0f / static_cast<float>(batch_size) : 1.0f;
-            const int64_t bs = batch_size;
-            queue.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
-                float sum = 0.0f;
-                for (int64_t i = 0; i < bs; ++i) sum += losses_ptr[i];
-                result_ptr[0] = sum * scale;
-            }).wait();
+            const float scale = (reduction == "mean") ? 1.0f / static_cast<float>(bs) : 1.0f;
+            queue.memset(result_ptr, 0, sizeof(float));
+            queue.parallel_for(sycl::range<1>(bs), sycl::reduction(result_ptr, sycl::plus<float>()),
+                [=](sycl::id<1> i, auto& sum) {
+                    sum += losses_ptr[static_cast<int64_t>(i)];
+                });
+            queue.single_task([=]() { result_ptr[0] *= scale; }).wait();
         } else if (logits.dtype() == DType::Float64) {
             double* result_ptr = get_data_ptr<double>(result);
             const double* losses_ptr = get_data_ptr<const double>(losses);
-            const double scale = (reduction == "mean") ? 1.0 / static_cast<double>(batch_size) : 1.0;
-            const int64_t bs = batch_size;
-            queue.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
-                double sum = 0.0;
-                for (int64_t i = 0; i < bs; ++i) sum += losses_ptr[i];
-                result_ptr[0] = sum * scale;
-            }).wait();
+            const double scale = (reduction == "mean") ? 1.0 / static_cast<double>(bs) : 1.0;
+            queue.memset(result_ptr, 0, sizeof(double));
+            queue.parallel_for(sycl::range<1>(bs), sycl::reduction(result_ptr, sycl::plus<double>()),
+                [=](sycl::id<1> i, auto& sum) {
+                    sum += losses_ptr[static_cast<int64_t>(i)];
+                });
+            queue.single_task([=]() { result_ptr[0] *= scale; }).wait();
         } else if (logits.dtype() == DType::Float16) {
+            // Accumulate in float32 for precision, cast back to Float16 at the end.
             sycl::half* result_ptr = get_data_ptr<sycl::half>(result);
             const sycl::half* losses_ptr = get_data_ptr<const sycl::half>(losses);
-            const float scale = (reduction == "mean") ? 1.0f / static_cast<float>(batch_size) : 1.0f;
-            const int64_t bs = batch_size;
-            queue.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
-                float sum = 0.0f;
-                for (int64_t i = 0; i < bs; ++i) sum += static_cast<float>(losses_ptr[i]);
-                result_ptr[0] = sycl::half(sum * scale);
+            const float scale = (reduction == "mean") ? 1.0f / static_cast<float>(bs) : 1.0f;
+            float* scratch = sycl::malloc_device<float>(1, queue);
+            queue.memset(scratch, 0, sizeof(float));
+            queue.parallel_for(sycl::range<1>(bs), sycl::reduction(scratch, sycl::plus<float>()),
+                [=](sycl::id<1> i, auto& sum) {
+                    sum += static_cast<float>(losses_ptr[static_cast<int64_t>(i)]);
+                });
+            queue.single_task([=]() {
+                result_ptr[0] = sycl::half(scratch[0] * scale);
             }).wait();
+            sycl::free(scratch, queue);
         } else if (logits.dtype() == DType::BFloat16) {
             uint16_t* result_ptr = get_data_ptr<uint16_t>(result);
             const uint16_t* losses_ptr = get_data_ptr<const uint16_t>(losses);
-            const float scale = (reduction == "mean") ? 1.0f / static_cast<float>(batch_size) : 1.0f;
-            const int64_t bs = batch_size;
-            queue.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
-                float sum = 0.0f;
-                for (int64_t i = 0; i < bs; ++i) sum += bf16_to_f32(losses_ptr[i]);
-                result_ptr[0] = f32_to_bf16(sum * scale);
+            const float scale = (reduction == "mean") ? 1.0f / static_cast<float>(bs) : 1.0f;
+            float* scratch = sycl::malloc_device<float>(1, queue);
+            queue.memset(scratch, 0, sizeof(float));
+            queue.parallel_for(sycl::range<1>(bs), sycl::reduction(scratch, sycl::plus<float>()),
+                [=](sycl::id<1> i, auto& sum) {
+                    sum += bf16_to_f32(losses_ptr[static_cast<int64_t>(i)]);
+                });
+            queue.single_task([=]() {
+                result_ptr[0] = f32_to_bf16(scratch[0] * scale);
             }).wait();
+            sycl::free(scratch, queue);
         }
         return result;
     }
