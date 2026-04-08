@@ -1,0 +1,41 @@
+#version 450
+
+// Split packed LU factorization into separate L (unit lower-triangular) and
+// U (upper-triangular) matrices. Mirrors CUDA extract_lu_kernel.
+// One thread per (b, i, j).
+
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer PackedBuf { float packed[]; };
+layout(set = 0, binding = 1) writeonly buffer LBuf     { float L[];      };
+layout(set = 0, binding = 2) writeonly buffer UBuf     { float U[];      };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint batch_size;
+};
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint nn = n * n;
+    uint total = batch_size * nn;
+    if (gid >= total) return;
+
+    uint b = gid / nn;
+    uint ij = gid - b * nn;
+    uint i = ij / n;
+    uint j = ij - i * n;
+    uint idx = b * nn + i * n + j;
+
+    float v = packed[idx];
+    if (i > j) {
+        L[idx] = v;
+        U[idx] = 0.0;
+    } else if (i == j) {
+        L[idx] = 1.0;
+        U[idx] = v;
+    } else {
+        L[idx] = 0.0;
+        U[idx] = v;
+    }
+}

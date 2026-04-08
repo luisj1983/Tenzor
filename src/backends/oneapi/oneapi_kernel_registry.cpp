@@ -646,6 +646,10 @@ namespace oneapi {
     auto linalg_det_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
     auto linalg_inv_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
     auto linalg_solve_kernel(const Tensor& A, const Tensor& B, sycl::queue& queue) -> Tensor;
+    auto linalg_lu_kernel(const Tensor& A, sycl::queue& queue)
+        -> std::tuple<Tensor, Tensor, Tensor>;
+    auto linalg_lu_solve_kernel(const Tensor& LU_data, const Tensor& pivots,
+                                const Tensor& B, sycl::queue& queue) -> Tensor;
     auto linalg_svd_kernel(const Tensor& input, bool full_matrices,
                             sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor>;
     auto linalg_qr_kernel(const Tensor& input, sycl::queue& queue) -> std::pair<Tensor, Tensor>;
@@ -3067,6 +3071,17 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return {oneapi::linalg_solve_kernel(inputs[0], inputs[1], get_q(inputs))};
         });
 
+    table.register_kernel(OpId::LinalgLU,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            auto [L, U, pivots] = oneapi::linalg_lu_kernel(inputs[0], get_q(inputs));
+            return {L, U, pivots};
+        });
+
+    table.register_kernel(OpId::LinalgLUSolve,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::linalg_lu_solve_kernel(inputs[0], inputs[1], inputs[2], get_q(inputs))};
+        });
+
     table.register_kernel(OpId::LinalgSVD,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             bool full_matrices = attrs.get_bool(AttrKey::FullMatrices, true);
@@ -3212,6 +3227,17 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::LinalgSolve,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
             return {oneapi::linalg_solve_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::LinalgLU,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            auto [L, U, pivots] = oneapi::linalg_lu_kernel(inputs[0], get_q(inputs));
+            return {L, U, pivots};
+        });
+
+    table.register_kernel(OpId::LinalgLUSolve,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::linalg_lu_solve_kernel(inputs[0], inputs[1], inputs[2], get_q(inputs))};
         });
 
     table.register_kernel(OpId::LinalgSVD,

@@ -26,7 +26,9 @@ Snapshot captured at the start of the v1 pre-release hardening effort
 
   Target after Phase 4: **0**.
 
-## Progress (post-Phase 4.4)
+## Progress (post-Phase 5)
+
+**Full op-count parity reached: all 5 backends (CPU, CUDA, ROCm, OneAPI, Vulkan) register 317 operations.** The CPU−GPU delta is closed.
 
 | Phase | Status | Burndown after |
 |---|---|---|
@@ -38,7 +40,7 @@ Snapshot captured at the start of the v1 pre-release hardening effort
 | 4.2 Bernoulli/Multinomial/Bucketize/Histogram/CDist (× 3 backends) | ✅ done | 39 |
 | 4.3 STFT/ISTFT — CUDA + OneAPI native; ROCm/Vulkan WIP | partial | 31 |
 | 4.4 AdvancedIndex/AdvancedIndexPut (× 4 backends) | ✅ done | 17 |
-| 5  GPU LinalgLU/LinalgLUSolve | pending | — |
+| 5  GPU LinalgLU/LinalgLUSolve (× 4 backends) | ✅ done | 17 |
 | 6  MPS full implementation | pending | — |
 | 7  Sync/perf cleanup + Flash Attention bw fused | pending | — |
 | 8  Unimplemented enum entries | pending | — |
@@ -48,6 +50,13 @@ Snapshot captured at the start of the v1 pre-release hardening effort
 - OneAPI: 0 ✅
 - ROCm: 4 (4 STFT/ISTFT WIP fallback)
 - Vulkan: 13 (includes 5 special-math/sampling/sort metadata-scalar syncs that aren't true compute fallbacks + 4 STFT/ISTFT WIP fallbacks + 4 misc/vision metadata reads)
+
+## Phase 5 status (GPU LinalgLU / LinalgLUSolve)
+All four GPU backends now register LinalgLU and LinalgLUSolve natively — CPU→GPU op parity is fully closed (all 5 backends at 317/317).
+- **CUDA**: `cuda::linalg_lu_kernel` / `linalg_lu_solve_kernel` in `src/backends/cuda/kernels/linalg.cu`. Uses cuSOLVER `cusolverDn?getrf` + `cusolverDn?getrs`. Handles row→column convention via explicit `tenzor::transpose(A, -2, -1).contiguous()`, and splits packed LU via a new `extract_lu_kernel<T>` CUDA kernel. Float32/Float64 (Float16/BFloat16 promoted to Float32 then downcast). 12 tests pass.
+- **ROCm**: `rocm::linalg_lu_kernel` / `linalg_lu_solve_kernel` in `src/backends/rocm/kernels/linalg.hip.cpp`. Mirrors CUDA using rocSOLVER `rocsolver_?getrf` / `rocsolver_?getrs`, `rocblas_int` pivots, and HIP port of the extract kernel. 12 tests pass.
+- **OneAPI**: `oneapi::linalg_lu_kernel` / `linalg_lu_solve_kernel` in `src/backends/oneapi/kernels/linalg.cpp`. Uses oneMKL `lapack::getrf` / `lapack::getrs` (with scratchpad), handles row↔column transpose, splits packed LU via a SYCL `parallel_for`. Also provides a native SYCL fallback path for builds without OneMKL. 12 tests pass.
+- **Vulkan**: `VulkanBackend::dispatchLinalgLU` / `dispatchLinalgLUSolve` in `src/backends/vulkan/vulkan_ops_linalg.cpp`. Reuses the existing `runBlockedLU` blocked-panel factorization (small-matrix single-workgroup via `linalg_lu_panel`, trailing GEMM via `linalg_lu_update`) and the existing `linalg_trsm` backsolve shader. Added three new split shaders (`linalg_lu_split.comp`, `_f64.comp`, `_f16.comp`) that mirror CUDA's `extract_lu_kernel` to separate the packed factorization into unit-lower L and upper U. Float16/BFloat16 promoted to Float32. 12 tests pass.
 
 ## Phase 4.4 status (AdvancedIndex/AdvancedIndexPut)
 All four GPU backends now use native fancy-indexing kernels (no CPU roundtrip):

@@ -1,0 +1,76 @@
+#version 450
+
+// Split packed LU → (L, U) for Float16. All three buffers are uint32 arrays
+// with Float16 elements packed 2-per-word. Writes use CAS-loop-style atomic
+// exchange to avoid the race on the neighboring 16-bit half.
+
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer PackedBuf { uint packed[]; };
+layout(set = 0, binding = 1) buffer LBuf     { uint L[]; };
+layout(set = 0, binding = 2) buffer UBuf     { uint U[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint batch_size;
+};
+
+float readF16(uint buf_idx) {
+    // packed[buf_idx/2] holds two fp16 values; low bits for even, high for odd.
+    uint word = packed[buf_idx / 2];
+    uint half_bits = (buf_idx & 1u) == 0u ? (word & 0xFFFFu) : (word >> 16);
+    return unpackHalf2x16(half_bits | (half_bits << 16)).x;
+}
+
+// GLSL doesn't allow passing ssbo arrays by reference. Inline-specialized writers:
+
+void writeL(uint elem_idx, float val) {
+    uint word_idx = elem_idx / 2;
+    uint shift    = ((elem_idx & 1u) == 0u) ? 0u : 16u;
+    uint mask_keep = ((elem_idx & 1u) == 0u) ? 0xFFFF0000u : 0x0000FFFFu;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint old_val;
+    uint new_val;
+    do {
+        old_val = L[word_idx];
+        new_val = (old_val & mask_keep) | (bits << shift);
+    } while (atomicCompSwap(L[word_idx], old_val, new_val) != old_val);
+}
+
+void writeU(uint elem_idx, float val) {
+    uint word_idx = elem_idx / 2;
+    uint shift    = ((elem_idx & 1u) == 0u) ? 0u : 16u;
+    uint mask_keep = ((elem_idx & 1u) == 0u) ? 0xFFFF0000u : 0x0000FFFFu;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint old_val;
+    uint new_val;
+    do {
+        old_val = U[word_idx];
+        new_val = (old_val & mask_keep) | (bits << shift);
+    } while (atomicCompSwap(U[word_idx], old_val, new_val) != old_val);
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint nn = n * n;
+    uint total = batch_size * nn;
+    if (gid >= total) return;
+
+    uint b = gid / nn;
+    uint ij = gid - b * nn;
+    uint i = ij / n;
+    uint j = ij - i * n;
+    uint idx = b * nn + i * n + j;
+
+    float v = readF16(idx);
+    if (i > j) {
+        writeL(idx, v);
+        writeU(idx, 0.0);
+    } else if (i == j) {
+        writeL(idx, 1.0);
+        writeU(idx, v);
+    } else {
+        writeL(idx, 0.0);
+        writeU(idx, v);
+    }
+}

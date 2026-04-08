@@ -2296,6 +2296,17 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             return get_vulkan_backend()->dispatchAdvancedIndexPut(inputs[0], indices, values, num_indices);
         });
 
+    // LinalgLU / LinalgLUSolve — native blocked LU + TRSM backsolve
+    table.register_kernel(OpId::LinalgLU,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return get_vulkan_backend()->dispatchLinalgLU(inputs[0]);
+        });
+
+    table.register_single_output_kernel(OpId::LinalgLUSolve,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return get_vulkan_backend()->dispatchLinalgLUSolve(inputs[0], inputs[1], inputs[2]);
+        });
+
     std::cout << "Vulkan dispatch table initialized with O(1) lookup" << std::endl;
 }
 

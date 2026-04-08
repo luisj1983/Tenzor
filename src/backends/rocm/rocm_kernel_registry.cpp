@@ -653,6 +653,10 @@ namespace rocm {
     auto linalg_eigh_kernel(const Tensor& A, hipStream_t stream) -> std::tuple<Tensor, Tensor>;
     auto linalg_eig_kernel(const Tensor& A, hipStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
     auto linalg_cholesky_kernel(const Tensor& A, bool upper, hipStream_t stream) -> Tensor;
+    auto linalg_lu_kernel(const Tensor& A, hipStream_t stream)
+        -> std::tuple<Tensor, Tensor, Tensor>;
+    auto linalg_lu_solve_kernel(const Tensor& LU_data, const Tensor& pivots,
+                                const Tensor& B, hipStream_t stream) -> Tensor;
 
     // Sparse operations (sparse.hip.cpp) — available with or without rocSPARSE
     auto rocm_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) -> Tensor;
@@ -2482,6 +2486,16 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         bool upper = attrs.get_bool(AttrKey::Upper, false);
         return rocm::linalg_cholesky_kernel(inputs[0], upper, get_hip_stream(attrs));
     });
+    table.register_kernel(OpId::LinalgLU,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto [L, U, pivots] = rocm::linalg_lu_kernel(inputs[0], get_hip_stream(attrs));
+            return {L, U, pivots};
+        });
+    table.register_single_output_kernel(OpId::LinalgLUSolve,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            return rocm::linalg_lu_solve_kernel(
+                inputs[0], inputs[1], inputs[2], get_hip_stream(attrs));
+        });
 
     // ========================================================================
     // Sort/TopK/ArgSort/Unique Operations

@@ -216,6 +216,9 @@ namespace cuda {
     auto linalg_eigh_kernel(const Tensor& A, cudaStream_t stream) -> std::tuple<Tensor, Tensor>;
     auto linalg_eig_kernel(const Tensor& A, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
     auto linalg_cholesky_kernel(const Tensor& A, bool upper, cudaStream_t stream) -> Tensor;
+    auto linalg_lu_kernel(const Tensor& A, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
+    auto linalg_lu_solve_kernel(const Tensor& LU_data, const Tensor& pivots,
+                                const Tensor& B, cudaStream_t stream) -> Tensor;
 
     // FFT operations (cuFFT or native Cooley-Tukey + Bluestein fallback)
     auto cuda_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
@@ -2720,6 +2723,13 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         bool upper = attrs.get_bool(AttrKey::Upper, false);
         return cuda::linalg_cholesky_kernel(inputs[0], upper, get_cuda_stream(attrs));
     });
+    table.register_kernel(OpId::LinalgLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto [L, U, pivots] = cuda::linalg_lu_kernel(inputs[0], get_cuda_stream(attrs));
+        return {L, U, pivots};
+    });
+    table.register_single_output_kernel(OpId::LinalgLUSolve, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return cuda::linalg_lu_solve_kernel(inputs[0], inputs[1], inputs[2], get_cuda_stream(attrs));
+    });
 #else // !TENZOR_HAS_CUSOLVER — use native CUDA shared-memory linalg fallback
     table.register_single_output_kernel(OpId::LinalgDet, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         return cuda::linalg_det_kernel(inputs[0], get_cuda_stream(attrs));
@@ -2753,11 +2763,9 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     });
 #endif // TENZOR_HAS_CUSOLVER
 
-    // LU decomposition - falls through to CPU LAPACKE implementation
-    // The CUDA lu_kernel in linalg.cu is used internally by inverse/solve but
-    // not yet exposed as a standalone dispatch target. GPU tensors will be
-    // transferred to CPU for LU factorization until a cuSOLVER getrf wrapper
-    // is registered here.
+    // Note: LinalgLU / LinalgLUSolve are registered above only when cuSOLVER is
+    // available. Without cuSOLVER, dispatch falls through to the CPU LAPACKE
+    // implementation in src/ops/linalg.cpp.
 
     // =========================================================================
     // FFT Operations (cuFFT)

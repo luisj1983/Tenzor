@@ -135,6 +135,22 @@ class SyclTransposeSolveBF32;
 class SyclTransposeSolveBF64;
 class SyclTransposeSolveBackF32;
 class SyclTransposeSolveBackF64;
+class SyclTransposeLuF32;
+class SyclTransposeLuF64;
+class SyclTransposeLuBackF32;
+class SyclTransposeLuBackF64;
+class SyclLuExtractF32;
+class SyclLuExtractF64;
+class SyclLuPivotsCopyF32;
+class SyclLuPivotsCopyF64;
+class SyclTransposeLuSolveLuF32;
+class SyclTransposeLuSolveLuF64;
+class SyclTransposeLuSolveBF32;
+class SyclTransposeLuSolveBF64;
+class SyclTransposeLuSolveBackF32;
+class SyclTransposeLuSolveBackF64;
+class SyclLuSolvePivCopyF32;
+class SyclLuSolvePivCopyF64;
 class SyclTransposeSvdAF32;
 class SyclTransposeSvdAF64;
 class SyclTransposeSvdUF32;
@@ -378,6 +394,216 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, sycl::queue& queue) -
     } else {
         throw std::runtime_error("linalg_solve: only Float32 and Float64 supported");
     }
+}
+
+// ============================================================================
+// LinalgLU - LU factorization with partial pivoting (getrf)
+// ============================================================================
+//
+// Returns (L, U, pivots) where:
+//   - L is unit lower triangular (..., N, N)
+//   - U is upper triangular        (..., N, N)
+//   - pivots is Int32 (..., N), 1-based LAPACK convention.
+// The packed LU produced by getrf (row-major after the col→row transpose) is
+// then split into L and U on the device.
+auto linalg_lu_kernel(const Tensor& A, sycl::queue& queue)
+    -> std::tuple<Tensor, Tensor, Tensor> {
+    auto shape = A.shape();
+    auto ndim = static_cast<int64_t>(shape.size());
+    if (ndim < 2)
+        throw std::invalid_argument("linalg::lu: input must be at least 2D");
+    int64_t m = shape[ndim - 2];
+    int64_t n = shape[ndim - 1];
+    if (m != n)
+        throw std::invalid_argument("linalg::lu: expected square matrix");
+
+    // Upcast low-precision floats to Float32 for LAPACK compatibility
+    if (A.dtype() == DType::Float16 || A.dtype() == DType::BFloat16) {
+        auto orig_dt = A.dtype();
+        auto [L32, U32, P] = linalg_lu_kernel(A.to(DType::Float32), queue);
+        return {L32.to(orig_dt), U32.to(orig_dt), P};
+    }
+
+    if (A.dtype() != DType::Float32 && A.dtype() != DType::Float64)
+        throw std::runtime_error("linalg_lu: only Float32 and Float64 supported");
+
+    // Compute batch count
+    int64_t nbatch = 1;
+    for (int64_t i = 0; i + 2 < ndim; ++i) nbatch *= shape[i];
+
+    // Output shapes
+    std::vector<int64_t> mat_shape(shape.begin(), shape.end());
+    std::vector<int64_t> piv_shape(shape.begin(), shape.end() - 1);
+    // piv_shape currently has trailing N from shape[..-1]; replace with N pivots
+    piv_shape.back() = n;
+
+    Tensor L(mat_shape, A.dtype(), A.device());
+    Tensor U(mat_shape, A.dtype(), A.device());
+    Tensor pivots(piv_shape, DType::Int32, A.device());
+
+    auto run = [&](auto dummy) {
+        using T = decltype(dummy);
+        SyclDeviceBuffer<T>            d_a(n * n, queue);
+        SyclDeviceBuffer<std::int64_t> d_ipiv(n, queue);
+        auto sp_rf = ::oneapi::mkl::lapack::getrf_scratchpad_size<T>(queue, n, n, n);
+        SyclDeviceBuffer<T> scratch_rf(sp_rf, queue);
+
+        for (int64_t b = 0; b < nbatch; ++b) {
+            const T* a_in   = get_data_ptr<const T>(A) + b * n * n;
+            T*       l_out  = get_data_ptr<T>(L)       + b * n * n;
+            T*       u_out  = get_data_ptr<T>(U)       + b * n * n;
+            int32_t* p_out  = get_data_ptr<int32_t>(pivots) + b * n;
+
+            // Row-major (input) -> column-major (oneMKL) on device
+            if constexpr (std::is_same_v<T, float>) {
+                row_to_col_major<float, SyclTransposeLuF32>(d_a.get(), a_in, n, n, queue);
+            } else {
+                row_to_col_major<double, SyclTransposeLuF64>(d_a.get(), a_in, n, n, queue);
+            }
+
+            ::oneapi::mkl::lapack::getrf(
+                queue, n, n, d_a.get(), n, d_ipiv.get(),
+                scratch_rf.get(), sp_rf).wait();
+
+            // Transpose factored matrix back to row-major (packed LU).
+            // We write into l_out as a temp buffer, then split into L and U.
+            if constexpr (std::is_same_v<T, float>) {
+                col_to_row_major<float, SyclTransposeLuBackF32>(l_out, d_a.get(), n, n, queue);
+            } else {
+                col_to_row_major<double, SyclTransposeLuBackF64>(l_out, d_a.get(), n, n, queue);
+            }
+
+            // Split packed LU into L (unit lower) and U (upper). Read from l_out
+            // (which currently holds packed LU) and write back into l_out + u_out.
+            int64_t n_ = n;
+            T* packed = l_out;  // alias
+            queue.submit([&](sycl::handler& cgh) {
+                cgh.parallel_for(
+                    sycl::range<2>(static_cast<size_t>(n_), static_cast<size_t>(n_)),
+                    [=](sycl::id<2> id) {
+                        int64_t i = id[0], j = id[1];
+                        T v = packed[i * n_ + j];
+                        if (i > j) {
+                            // l_out[i,j] = packed[i,j], u_out[i,j] = 0
+                            // packed already at l_out, so l is correct; just zero u
+                            u_out[i * n_ + j] = T(0);
+                        } else if (i == j) {
+                            l_out[i * n_ + j] = T(1);
+                            u_out[i * n_ + j] = v;
+                        } else { // i < j
+                            l_out[i * n_ + j] = T(0);
+                            u_out[i * n_ + j] = v;
+                        }
+                    });
+            }).wait();
+
+            // Copy pivots from int64 -> int32
+            auto* ipiv_ptr = d_ipiv.get();
+            queue.submit([&](sycl::handler& cgh) {
+                cgh.parallel_for(
+                    sycl::range<1>(static_cast<size_t>(n)),
+                    [=](sycl::id<1> id) {
+                        p_out[id[0]] = static_cast<int32_t>(ipiv_ptr[id[0]]);
+                    });
+            }).wait();
+        }
+    };
+
+    if (A.dtype() == DType::Float32) run(float{});
+    else                              run(double{});
+
+    return {L, U, pivots};
+}
+
+// ============================================================================
+// LinalgLUSolve - Solve A x = B given packed LU (from getrf) + pivots (getrs)
+// ============================================================================
+auto linalg_lu_solve_kernel(const Tensor& LU_data, const Tensor& pivots,
+                            const Tensor& B, sycl::queue& queue) -> Tensor {
+    auto lu_shape = LU_data.shape();
+    auto b_shape  = B.shape();
+    auto lu_ndim  = static_cast<int64_t>(lu_shape.size());
+    auto b_ndim   = static_cast<int64_t>(b_shape.size());
+    if (lu_ndim < 2 || b_ndim < 2)
+        throw std::invalid_argument("linalg::lu_solve: inputs must be at least 2D");
+    int64_t n    = lu_shape[lu_ndim - 1];
+    int64_t m    = lu_shape[lu_ndim - 2];
+    if (m != n)
+        throw std::invalid_argument("linalg::lu_solve: LU must be square");
+    int64_t nrhs = b_shape[b_ndim - 1];
+
+    if (LU_data.dtype() == DType::Float16 || LU_data.dtype() == DType::BFloat16) {
+        auto orig = B.dtype();
+        auto out = linalg_lu_solve_kernel(
+            LU_data.to(DType::Float32), pivots, B.to(DType::Float32), queue);
+        return out.to(orig);
+    }
+
+    if (LU_data.dtype() != DType::Float32 && LU_data.dtype() != DType::Float64)
+        throw std::runtime_error("linalg_lu_solve: only Float32 and Float64 supported");
+
+    // Compute batch count from LU
+    int64_t nbatch = 1;
+    for (int64_t i = 0; i + 2 < lu_ndim; ++i) nbatch *= lu_shape[i];
+
+    Tensor output(std::vector<int64_t>(b_shape.begin(), b_shape.end()),
+                  B.dtype(), B.device());
+
+    // Pivots may live on a different device or be int64; bring to int32 USM on device.
+    // We re-cast each batch's pivots into a transient int64 device buffer below.
+    auto run = [&](auto dummy) {
+        using T = decltype(dummy);
+        SyclDeviceBuffer<T>            d_lu(n * n, queue);
+        SyclDeviceBuffer<T>            d_b(n * nrhs, queue);
+        SyclDeviceBuffer<std::int64_t> d_ipiv(n, queue);
+        auto sp_rs = ::oneapi::mkl::lapack::getrs_scratchpad_size<T>(
+            queue, ::oneapi::mkl::transpose::nontrans, n, nrhs, n, n);
+        SyclDeviceBuffer<T> scratch_rs(sp_rs, queue);
+
+        for (int64_t b = 0; b < nbatch; ++b) {
+            const T*       lu_in  = get_data_ptr<const T>(LU_data) + b * n * n;
+            const T*       b_in   = get_data_ptr<const T>(B)       + b * n * nrhs;
+            const int32_t* piv_in = get_data_ptr<const int32_t>(pivots) + b * n;
+            T*             x_out  = get_data_ptr<T>(output)        + b * n * nrhs;
+
+            // LU is packed row-major. oneMKL wants column-major.
+            if constexpr (std::is_same_v<T, float>) {
+                row_to_col_major<float, SyclTransposeLuSolveLuF32>(d_lu.get(), lu_in, n, n, queue);
+                row_to_col_major<float, SyclTransposeLuSolveBF32 >(d_b.get(),  b_in,  n, nrhs, queue);
+            } else {
+                row_to_col_major<double, SyclTransposeLuSolveLuF64>(d_lu.get(), lu_in, n, n, queue);
+                row_to_col_major<double, SyclTransposeLuSolveBF64 >(d_b.get(),  b_in,  n, nrhs, queue);
+            }
+
+            // Cast int32 pivots -> int64 in d_ipiv on device
+            auto* ipiv_ptr = d_ipiv.get();
+            int64_t n_ = n;
+            queue.submit([&](sycl::handler& cgh) {
+                cgh.parallel_for(
+                    sycl::range<1>(static_cast<size_t>(n_)),
+                    [=](sycl::id<1> id) {
+                        ipiv_ptr[id[0]] = static_cast<std::int64_t>(piv_in[id[0]]);
+                    });
+            }).wait();
+
+            ::oneapi::mkl::lapack::getrs(
+                queue, ::oneapi::mkl::transpose::nontrans, n, nrhs,
+                d_lu.get(), n, d_ipiv.get(), d_b.get(), n,
+                scratch_rs.get(), sp_rs).wait();
+
+            // Transpose result back to row-major
+            if constexpr (std::is_same_v<T, float>) {
+                col_to_row_major<float, SyclTransposeLuSolveBackF32>(x_out, d_b.get(), n, nrhs, queue);
+            } else {
+                col_to_row_major<double, SyclTransposeLuSolveBackF64>(x_out, d_b.get(), n, nrhs, queue);
+            }
+        }
+    };
+
+    if (LU_data.dtype() == DType::Float32) run(float{});
+    else                                   run(double{});
+
+    return output;
 }
 
 // ============================================================================
@@ -2158,6 +2384,223 @@ auto linalg_eig_kernel(const Tensor& A, sycl::queue& queue) -> std::tuple<Tensor
     else launch_eig(work.data<double>(), WR.data<double>(), WI.data<double>(), V.data<double>());
 
     return {WR, WI, V};
+}
+
+// ============================================================================
+// LU decomposition (native fallback)
+// ============================================================================
+
+auto linalg_lu_kernel(const Tensor& A, sycl::queue& queue)
+    -> std::tuple<Tensor, Tensor, Tensor> {
+    validate_linalg_dtype(A, "lu");
+    if (A.dtype() == DType::Float16) {
+        auto [L, U, P] = linalg_lu_kernel(A.to(DType::Float32), queue);
+        return {L.to(DType::Float16), U.to(DType::Float16), P};
+    }
+    if (A.dtype() == DType::BFloat16) {
+        auto [L, U, P] = linalg_lu_kernel(A.to(DType::Float32), queue);
+        return {L.to(DType::BFloat16), U.to(DType::BFloat16), P};
+    }
+
+    auto work = A.contiguous().clone();
+    auto [n, ndim] = check_square(work);
+    int64_t nbatch = batch_size(work);
+
+    auto shape = A.shape();
+    std::vector<int64_t> mat_shape(shape.begin(), shape.end());
+    std::vector<int64_t> piv_shape;
+    for (size_t i = 0; i + 2 < shape.size(); ++i) piv_shape.push_back(shape[i]);
+    piv_shape.push_back(n);
+
+    auto L = zeros(mat_shape, A.dtype(), A.device());
+    auto U = zeros(mat_shape, A.dtype(), A.device());
+    auto pivots = zeros(piv_shape, DType::Int32, A.device());
+
+    auto launch = [&](auto* a_ptr, auto* l_ptr, auto* u_ptr) {
+        using T = std::remove_pointer_t<decltype(a_ptr)>;
+        check_size_limit<T>(n, "lu");
+        int threads = std::min(static_cast<int>(n), 128);
+        if (threads < 1) threads = 1;
+        size_t smem_lu = n * n * sizeof(T) + 4 * sizeof(T);
+
+        int32_t* piv_ptr = pivots.template data<int32_t>();
+        int64_t  n_      = n;
+
+        queue.submit([&](sycl::handler& h) {
+            sycl::local_accessor<char, 1> smem(sycl::range<1>(smem_lu), h);
+            auto* data = a_ptr;
+            auto* l_o  = l_ptr;
+            auto* u_o  = u_ptr;
+            auto* piv  = piv_ptr;
+            h.parallel_for(sycl::nd_range<1>(nbatch * threads, threads),
+                [=](sycl::nd_item<1> item) {
+                    int batch_idx = item.get_group_linear_id();
+                    int tid = item.get_local_linear_id();
+                    int num_threads = item.get_local_range(0);
+                    char* smem_raw = smem.get_pointer();
+                    T* As = reinterpret_cast<T*>(smem_raw);
+                    T* scratch = As + n_ * n_;
+                    T* batch_data = data + batch_idx * n_ * n_;
+                    T* batch_l    = l_o  + batch_idx * n_ * n_;
+                    T* batch_u    = u_o  + batch_idx * n_ * n_;
+                    int32_t* batch_piv = piv + batch_idx * n_;
+
+                    for (int idx = tid; idx < n_ * n_; idx += num_threads)
+                        As[idx] = batch_data[idx];
+                    sycl::group_barrier(item.get_group());
+                    for (int k = 0; k < n_; k++) {
+                        if (tid == 0) {
+                            T max_val = sycl::fabs(As[k * n_ + k]);
+                            int max_row = k;
+                            for (int i = k + 1; i < n_; i++) {
+                                T val = sycl::fabs(As[i * n_ + k]);
+                                if (val > max_val) { max_val = val; max_row = i; }
+                            }
+                            batch_piv[k] = max_row + 1;
+                            scratch[0] = static_cast<T>(max_row);
+                        }
+                        sycl::group_barrier(item.get_group());
+                        int pivot_row = static_cast<int>(scratch[0]);
+                        if (pivot_row != k) {
+                            for (int j = tid; j < n_; j += num_threads) {
+                                T tmp = As[k * n_ + j];
+                                As[k * n_ + j] = As[pivot_row * n_ + j];
+                                As[pivot_row * n_ + j] = tmp;
+                            }
+                            sycl::group_barrier(item.get_group());
+                        }
+                        T diag = As[k * n_ + k];
+                        if (diag != T(0)) {
+                            if (tid == 0)
+                                for (int i = k + 1; i < n_; i++)
+                                    As[i * n_ + k] /= diag;
+                            sycl::group_barrier(item.get_group());
+                            for (int i = k + 1 + tid; i < n_; i += num_threads) {
+                                T mult = As[i * n_ + k];
+                                for (int j = k + 1; j < n_; j++)
+                                    As[i * n_ + j] -= mult * As[k * n_ + j];
+                            }
+                            sycl::group_barrier(item.get_group());
+                        }
+                    }
+                    // Split into L (unit lower) and U (upper)
+                    for (int idx = tid; idx < n_ * n_; idx += num_threads) {
+                        int i = idx / n_;
+                        int j = idx % n_;
+                        T v = As[idx];
+                        if (i > j) {
+                            batch_l[idx] = v;
+                            batch_u[idx] = T(0);
+                        } else if (i == j) {
+                            batch_l[idx] = T(1);
+                            batch_u[idx] = v;
+                        } else {
+                            batch_l[idx] = T(0);
+                            batch_u[idx] = v;
+                        }
+                    }
+                });
+        }).wait();
+    };
+
+    if (A.dtype() == DType::Float32)
+        launch(work.data<float>(), L.data<float>(), U.data<float>());
+    else
+        launch(work.data<double>(), L.data<double>(), U.data<double>());
+
+    return {L, U, pivots};
+}
+
+auto linalg_lu_solve_kernel(const Tensor& LU_data, const Tensor& pivots,
+                            const Tensor& B, sycl::queue& queue) -> Tensor {
+    validate_linalg_dtype(LU_data, "lu_solve");
+    if (LU_data.dtype() == DType::Float16 || LU_data.dtype() == DType::BFloat16) {
+        auto orig = B.dtype();
+        auto out = linalg_lu_solve_kernel(
+            LU_data.to(DType::Float32), pivots, B.to(DType::Float32), queue);
+        return out.to(orig);
+    }
+
+    auto work_lu = LU_data.contiguous().clone();
+    auto work_b  = B.contiguous().clone();
+    auto [n, ndim] = check_square(work_lu);
+    int64_t nbatch = batch_size(work_lu);
+    auto b_shape = B.shape();
+    int64_t nrhs = b_shape[b_shape.size() - 1];
+
+    auto launch = [&](auto* lu_ptr, auto* b_ptr) {
+        using T = std::remove_pointer_t<decltype(lu_ptr)>;
+        check_size_limit<T>(n, "lu_solve");
+        int threads = std::min(static_cast<int>(n), 128);
+        if (threads < 1) threads = 1;
+        size_t smem_solve = (n * n + n * nrhs) * sizeof(T);
+
+        int32_t* piv_ptr = pivots.template data<int32_t>();
+        int64_t n_ = n, nrhs_ = nrhs;
+
+        queue.submit([&](sycl::handler& h) {
+            sycl::local_accessor<char, 1> smem(sycl::range<1>(smem_solve), h);
+            auto* lu_data_ = lu_ptr;
+            auto* b_data_  = b_ptr;
+            auto* piv      = piv_ptr;
+            h.parallel_for(sycl::nd_range<1>(nbatch * threads, threads),
+                [=](sycl::nd_item<1> item) {
+                    int batch_idx = item.get_group_linear_id();
+                    int tid = item.get_local_linear_id();
+                    int num_threads = item.get_local_range(0);
+                    char* smem_raw = smem.get_pointer();
+                    T* LU = reinterpret_cast<T*>(smem_raw);
+                    T* Bs = LU + n_ * n_;
+                    const T* batch_lu = lu_data_ + batch_idx * n_ * n_;
+                    const int32_t* batch_piv = piv + batch_idx * n_;
+                    T* batch_b = b_data_ + batch_idx * n_ * nrhs_;
+
+                    for (int idx = tid; idx < n_ * n_; idx += num_threads)
+                        LU[idx] = batch_lu[idx];
+                    for (int idx = tid; idx < n_ * nrhs_; idx += num_threads)
+                        Bs[idx] = batch_b[idx];
+                    sycl::group_barrier(item.get_group());
+
+                    if (tid == 0) {
+                        for (int i = 0; i < n_; i++) {
+                            int piv_row = batch_piv[i] - 1;
+                            if (piv_row != i)
+                                for (int j = 0; j < nrhs_; j++) {
+                                    T tmp = Bs[i * nrhs_ + j];
+                                    Bs[i * nrhs_ + j] = Bs[piv_row * nrhs_ + j];
+                                    Bs[piv_row * nrhs_ + j] = tmp;
+                                }
+                        }
+                        for (int k = 0; k < n_; k++)
+                            for (int i = k + 1; i < n_; i++) {
+                                T mult = LU[i * n_ + k];
+                                for (int j = 0; j < nrhs_; j++)
+                                    Bs[i * nrhs_ + j] -= mult * Bs[k * nrhs_ + j];
+                            }
+                        for (int k = n_ - 1; k >= 0; k--) {
+                            T diag = LU[k * n_ + k];
+                            for (int j = 0; j < nrhs_; j++) Bs[k * nrhs_ + j] /= diag;
+                            for (int i = 0; i < k; i++) {
+                                T mult = LU[i * n_ + k];
+                                for (int j = 0; j < nrhs_; j++)
+                                    Bs[i * nrhs_ + j] -= mult * Bs[k * nrhs_ + j];
+                            }
+                        }
+                    }
+                    sycl::group_barrier(item.get_group());
+
+                    for (int idx = tid; idx < n_ * nrhs_; idx += num_threads)
+                        batch_b[idx] = Bs[idx];
+                });
+        }).wait();
+    };
+
+    if (LU_data.dtype() == DType::Float32)
+        launch(work_lu.data<float>(), work_b.data<float>());
+    else
+        launch(work_lu.data<double>(), work_b.data<double>());
+
+    return work_b;
 }
 
 #endif // TENZOR_HAS_ONEMKL

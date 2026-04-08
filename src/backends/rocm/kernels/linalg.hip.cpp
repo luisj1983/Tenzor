@@ -24,6 +24,7 @@
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/device.hpp"
 #include "tenzor/backend/rocm_caching_allocator.hip.hpp"
+#include "tenzor/ops/transform.hpp"
 #include "../rocsolver_handle_pool.hpp"
 
 #include <rocsolver/rocsolver.h>
@@ -34,6 +35,7 @@
 #include <vector>
 #include <string>
 #include <cmath>
+#include <tuple>
 #include <algorithm>
 
 // Forward-declare zeros to avoid pulling in creation.hpp
@@ -262,6 +264,31 @@ __global__ void copy_q_columns_f64(const double* a_data, double* q_data,
     q_mat[i * k + j] = a_mat[i * n_cols + j];
 }
 
+/// HIP kernel to split a row-major packed LU matrix into separate L (unit
+/// lower triangular) and U (upper triangular) tensors. One thread per element.
+template<typename T>
+__global__ void extract_lu_kernel_hip(const T* packed, T* L, T* U,
+                                      int64_t n, int64_t nbatch) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t total = nbatch * n * n;
+    if (idx >= total) return;
+
+    int64_t rem = idx % (n * n);
+    int64_t i = rem / n;
+    int64_t j = rem % n;
+
+    if (i > j) {
+        L[idx] = packed[idx];
+        U[idx] = T(0);
+    } else if (i == j) {
+        L[idx] = T(1);
+        U[idx] = packed[idx];
+    } else {
+        L[idx] = T(0);
+        U[idx] = packed[idx];
+    }
+}
+
 } // anonymous namespace
 
 // ============================================================================
@@ -473,6 +500,176 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, hipStream_t stream) -
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
     backend::rocm::RocmCachingAllocator::get().free(d_ipiv);
     return work_b;
+}
+
+// ============================================================================
+// LU Factorization (PA = LU)
+// ============================================================================
+
+auto linalg_lu_kernel(const Tensor& A, hipStream_t stream)
+    -> std::tuple<Tensor, Tensor, Tensor> {
+    // Validate dtype: support Float32/Float64 directly, upcast Float16/BFloat16.
+    auto original_dtype = A.dtype();
+    if (original_dtype == DType::Float16 || original_dtype == DType::BFloat16) {
+        auto [L32, U32, piv] = linalg_lu_kernel(A.to(DType::Float32), stream);
+        return {L32.to(original_dtype), U32.to(original_dtype), piv};
+    }
+    if (original_dtype != DType::Float32 && original_dtype != DType::Float64) {
+        throw std::invalid_argument(
+            "linalg::lu: unsupported dtype, expected Float32 or Float64");
+    }
+
+    auto [n, ndim] = check_square(A);  // throws on <2D or non-square
+    int64_t nbatch = batch_size(A);
+
+    // Build output shapes (batch_dims + [n, n] for L/U; batch_dims + [n] for pivots).
+    auto a_shape = A.shape();
+    std::vector<int64_t> mat_shape;
+    for (size_t i = 0; i + 2 < a_shape.size(); ++i) mat_shape.push_back(a_shape[i]);
+    std::vector<int64_t> piv_shape = mat_shape;
+    mat_shape.push_back(n); mat_shape.push_back(n);
+    piv_shape.push_back(n);
+
+    // Step 1: transpose A so that its row-major storage becomes the column-major
+    // representation of A. rocSOLVER will then factor A directly.
+    auto a_t = tenzor::transpose(A, -2, -1).contiguous();
+
+    auto handle = RocSOLVERHandlePool::get(stream);
+    size_t ipiv_bytes = nbatch * n * sizeof(rocblas_int);
+    auto* d_ipiv = static_cast<rocblas_int*>(
+        backend::rocm::RocmCachingAllocator::get().allocate(ipiv_bytes));
+    DeviceInfo d_info;
+
+    if (original_dtype == DType::Float32) {
+        float* data = a_t.data<float>();
+        for (int64_t b = 0; b < nbatch; ++b) {
+            float* mat = data + b * n * n;
+            rocblas_int* piv = d_ipiv + b * n;
+            ROCBLAS_CHECK_LINALG(rocsolver_sgetrf(handle, n, n, mat, n, piv, d_info.ptr));
+            check_rocsolver_info(d_info.ptr, "lu");
+        }
+    } else {
+        double* data = a_t.data<double>();
+        for (int64_t b = 0; b < nbatch; ++b) {
+            double* mat = data + b * n * n;
+            rocblas_int* piv = d_ipiv + b * n;
+            ROCBLAS_CHECK_LINALG(rocsolver_dgetrf(handle, n, n, mat, n, piv, d_info.ptr));
+            check_rocsolver_info(d_info.ptr, "lu");
+        }
+    }
+
+    // Step 2: transpose the column-major packed factors back to row-major
+    // LAPACK packed format (L below diagonal, U on/above, unit diag implicit).
+    auto packed_rm = tenzor::transpose(a_t, -2, -1).contiguous();
+
+    // Step 3: split packed factors into L (unit lower) and U (upper).
+    auto L = zeros(mat_shape, original_dtype, A.device());
+    auto U = zeros(mat_shape, original_dtype, A.device());
+    int64_t total = nbatch * n * n;
+    int threads = 256;
+    int blocks = static_cast<int>((total + threads - 1) / threads);
+    if (original_dtype == DType::Float32) {
+        extract_lu_kernel_hip<float><<<blocks, threads, 0, stream>>>(
+            packed_rm.data<float>(), L.data<float>(), U.data<float>(), n, nbatch);
+    } else {
+        extract_lu_kernel_hip<double><<<blocks, threads, 0, stream>>>(
+            packed_rm.data<double>(), L.data<double>(), U.data<double>(), n, nbatch);
+    }
+    HIP_CHECK_LINALG(hipGetLastError());
+
+    // Step 4: copy pivots (rocSOLVER returns 1-based rocblas_int) into Int32 tensor.
+    // rocblas_int is typedef'd to int32_t, but cast explicitly for clarity.
+    auto pivots_out = zeros(piv_shape, DType::Int32, A.device());
+    static_assert(sizeof(rocblas_int) == sizeof(int32_t),
+                  "rocblas_int must match int32_t width");
+    HIP_CHECK_LINALG(hipMemcpyAsync(pivots_out.data<int32_t>(),
+        reinterpret_cast<const int32_t*>(d_ipiv),
+        nbatch * n * sizeof(int32_t), hipMemcpyDeviceToDevice, stream));
+
+    HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
+    backend::rocm::RocmCachingAllocator::get().free(d_ipiv);
+    return {L, U, pivots_out};
+}
+
+// ============================================================================
+// LU Solve (X = A^{-1} B given packed LU + pivots from getrf)
+// ============================================================================
+
+auto linalg_lu_solve_kernel(const Tensor& LU_data, const Tensor& pivots,
+                             const Tensor& B, hipStream_t stream) -> Tensor {
+    auto original_dtype = B.dtype();
+    if (original_dtype == DType::Float16 || original_dtype == DType::BFloat16) {
+        return linalg_lu_solve_kernel(
+            LU_data.to(DType::Float32), pivots,
+            B.to(DType::Float32), stream).to(original_dtype);
+    }
+    if (original_dtype != DType::Float32 && original_dtype != DType::Float64) {
+        throw std::invalid_argument(
+            "linalg::lu_solve: unsupported dtype, expected Float32 or Float64");
+    }
+
+    auto lu_shape = LU_data.shape();
+    auto b_shape = B.shape();
+    auto lu_ndim = static_cast<int64_t>(lu_shape.size());
+    auto b_ndim = static_cast<int64_t>(b_shape.size());
+    if (lu_ndim < 2 || b_ndim < 2) {
+        throw std::invalid_argument("linalg::lu_solve: inputs must be at least 2D");
+    }
+    int64_t n = lu_shape[lu_ndim - 1];
+    if (lu_shape[lu_ndim - 2] != n) {
+        throw std::invalid_argument("linalg::lu_solve: LU_data must be square");
+    }
+    int64_t nrhs = b_shape[b_ndim - 1];
+    int64_t nbatch = batch_size(LU_data);
+
+    // Convert row-major packed LU into column-major form for rocSOLVER getrs:
+    // transposing the row-major tensor produces storage that, viewed as
+    // column-major, is the packed factorization in the col-major convention.
+    auto lu_cm = tenzor::transpose(LU_data, -2, -1).contiguous();
+    // Same trick for B: row-major (n, nrhs) → transpose to (nrhs, n) row-major,
+    // whose storage interpreted col-major is the (n, nrhs) col-major form of B.
+    auto b_cm = tenzor::transpose(B, -2, -1).contiguous();
+
+    // Pivots: rocSOLVER expects rocblas_int*. Our pivots are Int32; copy to
+    // a device-side rocblas_int buffer (widths match by static_assert above).
+    auto piv_dev = pivots.to(B.device()).contiguous();
+    static_assert(sizeof(rocblas_int) == sizeof(int32_t),
+                  "rocblas_int must match int32_t width");
+    size_t piv_bytes = nbatch * n * sizeof(rocblas_int);
+    auto* d_ipiv_base = static_cast<rocblas_int*>(
+        backend::rocm::RocmCachingAllocator::get().allocate(piv_bytes));
+    HIP_CHECK_LINALG(hipMemcpyAsync(d_ipiv_base,
+        reinterpret_cast<const rocblas_int*>(piv_dev.data<int32_t>()),
+        piv_bytes, hipMemcpyDeviceToDevice, stream));
+
+    auto handle = RocSOLVERHandlePool::get(stream);
+
+    if (original_dtype == DType::Float32) {
+        float* lu_ptr = lu_cm.data<float>();
+        float* b_ptr = b_cm.data<float>();
+        for (int64_t b = 0; b < nbatch; ++b) {
+            float* lu_mat = lu_ptr + b * n * n;
+            float* b_mat = b_ptr + b * n * nrhs;
+            rocblas_int* piv = d_ipiv_base + b * n;
+            ROCBLAS_CHECK_LINALG(rocsolver_sgetrs(handle, rocblas_operation_none,
+                n, nrhs, lu_mat, n, piv, b_mat, n));
+        }
+    } else {
+        double* lu_ptr = lu_cm.data<double>();
+        double* b_ptr = b_cm.data<double>();
+        for (int64_t b = 0; b < nbatch; ++b) {
+            double* lu_mat = lu_ptr + b * n * n;
+            double* b_mat = b_ptr + b * n * nrhs;
+            rocblas_int* piv = d_ipiv_base + b * n;
+            ROCBLAS_CHECK_LINALG(rocsolver_dgetrs(handle, rocblas_operation_none,
+                n, nrhs, lu_mat, n, piv, b_mat, n));
+        }
+    }
+
+    HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
+    backend::rocm::RocmCachingAllocator::get().free(d_ipiv_base);
+    // b_cm has shape (..., nrhs, n) row-major; transpose back to (..., n, nrhs).
+    return tenzor::transpose(b_cm, -2, -1).contiguous();
 }
 
 // ============================================================================
@@ -3323,6 +3520,24 @@ auto linalg_cholesky_kernel(const Tensor& A, bool upper, hipStream_t stream) -> 
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
     return work;
+}
+
+// ============================================================================
+// LU Factorization / LU Solve (no native HIP fallback)
+// ============================================================================
+
+auto linalg_lu_kernel(const Tensor& /*A*/, hipStream_t /*stream*/)
+    -> std::tuple<Tensor, Tensor, Tensor> {
+    throw std::runtime_error(
+        "linalg::lu: ROCm backend requires rocSOLVER "
+        "(built without TENZOR_HAS_ROCSOLVER)");
+}
+
+auto linalg_lu_solve_kernel(const Tensor& /*LU_data*/, const Tensor& /*pivots*/,
+                             const Tensor& /*B*/, hipStream_t /*stream*/) -> Tensor {
+    throw std::runtime_error(
+        "linalg::lu_solve: ROCm backend requires rocSOLVER "
+        "(built without TENZOR_HAS_ROCSOLVER)");
 }
 
 } // namespace rocm
