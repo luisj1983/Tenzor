@@ -262,6 +262,8 @@ public:
     auto dispatchHistogram(const Tensor& input, int64_t bins, double min_val, double max_val)
         -> std::pair<Tensor, Tensor>;
     auto dispatchMultinomial(const Tensor& probs, int64_t num_samples, bool replacement) -> Tensor;
+    // dispatchSTFT/dispatchISTFT — Phase 4.3 WIP, see vulkan_ops_stft.cpp.
+    // Not declared here while the implementation file is out of build.
     auto dispatchTrigonometricOp(const std::string& op_name, const Tensor& input) -> Tensor;
     auto dispatchHyperbolicOp(const std::string& op_name, const Tensor& input) -> Tensor;
     auto dispatchComparisonOp(const std::string& op_name, const Tensor& a, const Tensor& b) -> Tensor;

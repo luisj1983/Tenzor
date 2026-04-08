@@ -26,7 +26,7 @@ Snapshot captured at the start of the v1 pre-release hardening effort
 
   Target after Phase 4: **0**.
 
-## Progress (post-Phase 4.2)
+## Progress (post-Phase 4.3 partial)
 
 | Phase | Status | Burndown after |
 |---|---|---|
@@ -36,18 +36,24 @@ Snapshot captured at the start of the v1 pre-release hardening effort
 | 3  Tier B special math (15 ops × 4 backends) | ✅ done | 60 |
 | 4.1 GridSample/AffineGrid (× 3 backends) | ✅ done | 51 |
 | 4.2 Bernoulli/Multinomial/Bucketize/Histogram/CDist (× 3 backends) | ✅ done | 39 |
-| 4.3 STFT/ISTFT (× 4 backends) | pending | ~31 expected |
+| 4.3 STFT/ISTFT — CUDA + OneAPI native; ROCm/Vulkan WIP | partial | 31 |
 | 4.4 AdvancedIndex/AdvancedIndexPut (× 4 backends) | pending | ~11 expected |
 | 5  GPU LinalgLU/LinalgLUSolve | pending | — |
 | 6  MPS full implementation | pending | — |
 | 7  Sync/perf cleanup + Flash Attention bw fused | pending | — |
 | 8  Unimplemented enum entries | pending | — |
 
-**Burndown: 78 → 39 (-39 sites, 50%)** from CPU fallbacks in `src/backends/{cuda,rocm,vulkan,oneapi}/`. Per-backend remaining:
-- CUDA: 9 (5 AdvancedIndex + 4 STFT/ISTFT)
-- ROCm: 7 (5 AdvancedIndex + 2 STFT — though phases 4.1/4.2 covered some, need to recount after 4.3/4.4)
-- OneAPI: 6 (similar)
-- Vulkan: 17 (includes 5 special-math metadata sync sites that aren't true fallbacks)
+**Burndown: 78 → 31 (-47 sites, 60%)** from CPU fallbacks in `src/backends/{cuda,rocm,vulkan,oneapi}/`. Per-backend remaining:
+- CUDA: 5 (AdvancedIndex × 5)
+- OneAPI: 2 (AdvancedIndex × 2)
+- ROCm: 7 (5 AdvancedIndex + 2 STFT/ISTFT WIP fallback)
+- Vulkan: 17 (includes 5 special-math/sampling metadata syncs that aren't true compute fallbacks + 2 STFT/ISTFT WIP fallbacks + 5 AdvancedIndex + scattered)
+
+## Phase 4.3 partial status (STFT/ISTFT)
+- **CUDA**: native (`stft_cuda_kernel`/`istft_cuda_kernel` in `src/backends/cuda/kernels/advanced.cu`). Frame+window kernel + cuFFT batched RFFT/IRFFT + output-centric overlap-add. **6/6 tests pass.** Bonus: added Complex64/Complex128 support to CUDA `contiguous_kernel` (was missing). 
+- **OneAPI**: native (`src/backends/oneapi/kernels/stft.cpp`). Same algorithm in SYCL with sycl::reduction-style atomics. Handles OneAPI's Float32-with-trailing-2-dim FFT output convention. **6/6 tests pass.** Added Complex64/Complex128 support to OneAPI `contiguous_kernel` (was missing).
+- **ROCm**: WIP — `src/backends/rocm/kernels/stft.hip.cpp` exists but produces wrong shape on batched FFT input. Excluded from CMakeLists; registry uses CPU fallback with TODO. Bonus: added Complex64/Complex128 support to ROCm `contiguous_kernel`.
+- **Vulkan**: WIP — `src/backends/vulkan/vulkan_ops_stft.cpp` + 3 shaders exist; forward STFT works (shape and value tests pass) but inverse round-trip has reconstruction error ~2.0 vs 0.1 tolerance. Excluded from CMakeLists; registry uses CPU fallback with TODO. Bonus: fixed two unrelated pre-existing Vulkan bugs — `dispatchContiguous` and `dispatchPermute` now handle Complex64 (8-byte type was falling through to 4-byte shader).
 
 ## Phase 4.2 known limitation
 Histogram and Multinomial in `vulkan_ops_sampling.cpp` have ~3 `to(Device::cpu())` calls for **single-scalar metadata reads** (CDF total for multinomial; min/max bounds for histogram auto-range). These are NOT compute fallbacks — they read 4 bytes for kernel launch parameters. The grep counts them but they're functionally equivalent to CUDA's `cudaMemcpy(&info, devInfo, ...)` pattern.

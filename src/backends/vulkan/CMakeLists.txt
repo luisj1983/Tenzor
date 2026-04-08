@@ -140,6 +140,7 @@ if(GLSLC)
         vulkan_ops_special_math.cpp
         vulkan_ops_grid_sample.cpp
         vulkan_ops_sampling.cpp
+        # vulkan_ops_stft.cpp — Phase 4.3 WIP, see registry TODO for status
         vulkan_kernel_registry.cpp
         vulkan_backend.hpp
         vulkan_helpers.hpp
@@ -175,6 +176,7 @@ else()
         vulkan_ops_special_math.cpp
         vulkan_ops_grid_sample.cpp
         vulkan_ops_sampling.cpp
+        # vulkan_ops_stft.cpp — Phase 4.3 WIP, see registry TODO for status
         vulkan_kernel_registry.cpp
         vulkan_backend.hpp
         vulkan_helpers.hpp

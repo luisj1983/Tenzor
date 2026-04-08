@@ -64,6 +64,7 @@ set(ROCM_HIP_SOURCES
     kernels/vision.hip.cpp
     kernels/grid_sample.hip.cpp
     kernels/sampling.hip.cpp
+    # kernels/stft.hip.cpp — Phase 4.3 WIP, see registry TODO for status
     kernels/sort.hip.cpp
     kernels/quantization.hip.cpp
     kernels/sparse.hip.cpp

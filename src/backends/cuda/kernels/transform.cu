@@ -157,6 +157,19 @@ auto contiguous_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
             reinterpret_cast<bool*>(result.data_ptr()),
             meta, ndim, total_elements);
             CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Complex64) {
+        // Complex64 = 2x float; treat as float2 (8 bytes/element)
+        contiguous_kernel_impl<float2><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const float2*>(input.data_ptr()),
+            reinterpret_cast<float2*>(result.data_ptr()),
+            meta, ndim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Complex128) {
+        contiguous_kernel_impl<double2><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const double2*>(input.data_ptr()),
+            reinterpret_cast<double2*>(result.data_ptr()),
+            meta, ndim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Contiguous: unsupported dtype");
     }

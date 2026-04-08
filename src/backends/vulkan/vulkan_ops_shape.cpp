@@ -288,9 +288,16 @@ auto VulkanBackend::dispatchPermute(const Tensor& input, const std::vector<int64
 
     // Get pipeline - select dtype-specific shader variant
     std::string permute_shader;
-    if (input.dtype() == DType::Float64) permute_shader = "permute_f64";
+    if (input.dtype() == DType::Float64 || input.dtype() == DType::Int64 ||
+        input.dtype() == DType::Complex64) {
+        // 8-byte types share the f64 shader (uvec2/uint64 layout)
+        permute_shader = "permute_f64";
+    }
     else if (input.dtype() == DType::Float16) permute_shader = "permute_f16";
     else if (input.dtype() == DType::BFloat16) permute_shader = "permute_bf16";
+    else if (input.dtype() == DType::Complex128) {
+        throw std::runtime_error("Vulkan dispatchPermute: Complex128 not yet supported");
+    }
     else permute_shader = "permute";
     auto* pipeline = getPipeline(permute_shader, device_id);
     auto& ctx = devices_[device_id];
@@ -548,13 +555,19 @@ auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
 
     // Select shader based on dtype (element size must match shader buffer layout)
     std::string shader_name = "strided_copy";
-    if (input.dtype() == DType::Float64 || input.dtype() == DType::Int64) {
+    if (input.dtype() == DType::Float64 || input.dtype() == DType::Int64 ||
+        input.dtype() == DType::Complex64) {
         shader_name = "strided_copy_f64";  // uvec2 layout works for any 8-byte type
     } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         shader_name = "strided_copy_f16";
     } else if (input.dtype() == DType::UInt8 || input.dtype() == DType::Bool ||
                input.dtype() == DType::Int8) {
         shader_name = "strided_copy_u8";
+    } else if (input.dtype() == DType::Complex128) {
+        // 16-byte type — no existing shader; copy as 2x8-byte adjacent elements
+        // by treating the buffer as twice as long with 8-byte stride
+        throw std::runtime_error(
+            "Vulkan dispatchContiguous: Complex128 not yet supported");
     }
 
     auto* pipeline = getPipeline(shader_name, device_id);

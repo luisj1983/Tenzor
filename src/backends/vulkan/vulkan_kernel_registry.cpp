@@ -2242,7 +2242,13 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             return get_vulkan_backend()->dispatchCDist(inputs[0], inputs[1]);
         });
 
-    // STFT (Short-Time Fourier Transform)
+    // STFT / ISTFT — TEMPORARY CPU fallback
+    // TODO(phase4.3-vulkan): Native dispatchSTFT/dispatchISTFT exist in
+    // src/backends/vulkan/vulkan_ops_stft.cpp. Forward STFT works (shape and
+    // value tests pass), but the inverse round-trip has reconstruction error
+    // ~2.0 (vs 0.1 tolerance). Suspected: subtle Complex64 transpose/reshape
+    // interaction or output-centric overlap-add bounds. Reverted to CPU
+    // fallback until the bug is isolated.
     table.register_single_output_kernel(OpId::STFT,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             auto dev = inputs[0].device();
@@ -2257,7 +2263,6 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
                                      window, center, normalized, onesided).to(dev);
         });
 
-    // ISTFT (Inverse STFT)
     table.register_single_output_kernel(OpId::ISTFT,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             auto dev = inputs[0].device();

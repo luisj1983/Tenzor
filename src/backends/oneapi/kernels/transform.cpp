@@ -758,6 +758,40 @@ auto contiguous_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             out_ptr[flat_idx] = in_ptr[in_idx];
         });
     }
+    else if (input.dtype() == DType::Complex64) {
+        // 8-byte complex: treat as 2 floats but use a 64-bit raw integer for the copy
+        const uint64_t* in_ptr = get_data_ptr<const uint64_t>(input);
+        uint64_t* out_ptr = get_data_ptr<uint64_t>(output);
+
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+            int64_t remaining = flat_idx;
+            int64_t in_idx = 0;
+            for (size_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / out_strides_arr[d];
+                remaining %= out_strides_arr[d];
+                in_idx += coord * in_strides_arr[d];
+            }
+            out_ptr[flat_idx] = in_ptr[in_idx];
+        });
+    }
+    else if (input.dtype() == DType::Complex128) {
+        // 16-byte complex: copy in two halves via uint64_t pair
+        const uint64_t* in_ptr = get_data_ptr<const uint64_t>(input);
+        uint64_t* out_ptr = get_data_ptr<uint64_t>(output);
+
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+            int64_t remaining = flat_idx;
+            int64_t in_idx = 0;
+            for (size_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / out_strides_arr[d];
+                remaining %= out_strides_arr[d];
+                in_idx += coord * in_strides_arr[d];
+            }
+            // 2 uint64s per element
+            out_ptr[flat_idx * 2 + 0] = in_ptr[in_idx * 2 + 0];
+            out_ptr[flat_idx * 2 + 1] = in_ptr[in_idx * 2 + 1];
+        });
+    }
     else {
         throw std::runtime_error("Unsupported dtype for contiguous kernel");
     }

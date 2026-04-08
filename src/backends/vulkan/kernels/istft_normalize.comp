@@ -1,0 +1,20 @@
+#version 450
+
+// ISTFT normalization: divide each output sample by the accumulated window²
+// to recover the original signal amplitude.
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer OutputBuf { float output_data[]; };
+layout(binding = 1) buffer WSumBuf   { float wsum[]; };
+
+layout(push_constant) uniform PushConstants {
+    int total;
+} params;
+
+void main() {
+    int idx = int(gl_GlobalInvocationID.x);
+    if (idx >= params.total) return;
+    float ws = wsum[idx];
+    if (ws > 1e-11) output_data[idx] /= ws;
+}

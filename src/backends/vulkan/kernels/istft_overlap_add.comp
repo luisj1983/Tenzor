@@ -1,0 +1,51 @@
+#version 450
+
+// ISTFT overlap-add (output-centric variant — no atomics needed):
+//   For each output position (b, p), sum contributions from all frames
+//   whose [f*hop, f*hop + n_fft) span includes p. Each output position is
+//   touched by at most ceil(n_fft / hop_length) frames, so the inner loop is
+//   bounded and small.
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer FramesBuf { float frames[]; };  // (B, num_frames, n_fft)
+layout(binding = 1) buffer WindowBuf { float window[]; };
+layout(binding = 2) buffer OutputBuf { float output_data[]; };
+layout(binding = 3) buffer WSumBuf   { float wsum[]; };
+
+layout(push_constant) uniform PushConstants {
+    int batch_size;
+    int num_frames;
+    int n_fft;
+    int hop_length;
+    int expected_length;
+    int total;  // batch_size * expected_length
+} params;
+
+void main() {
+    int idx = int(gl_GlobalInvocationID.x);
+    if (idx >= params.total) return;
+
+    int p = idx % params.expected_length;
+    int b = idx / params.expected_length;
+
+    // Frames that touch position p: f such that f*hop <= p < f*hop + n_fft.
+    // → f in [(p - n_fft + 1) / hop, p / hop]
+    int f_min = (p - params.n_fft + 1 + params.hop_length - 1) / params.hop_length;
+    if (f_min < 0) f_min = 0;
+    int f_max = p / params.hop_length;
+    if (f_max >= params.num_frames) f_max = params.num_frames - 1;
+
+    float val_sum = 0.0;
+    float w2_sum  = 0.0;
+    for (int f = f_min; f <= f_max; ++f) {
+        int i = p - f * params.hop_length;
+        if (i < 0 || i >= params.n_fft) continue;
+        float w = window[i];
+        val_sum += frames[((b * params.num_frames) + f) * params.n_fft + i] * w;
+        w2_sum  += w * w;
+    }
+
+    output_data[b * params.expected_length + p] = val_sum;
+    wsum[b * params.expected_length + p] = w2_sum;
+}

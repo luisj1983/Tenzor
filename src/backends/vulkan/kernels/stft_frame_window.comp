@@ -1,0 +1,53 @@
+#version 450
+
+// STFT frame+window: build (B, num_frames, n_fft) windowed framed signal
+// from a (B, signal_length) input. Reflection padding is embedded in the
+// indexing math (no separate pad pass needed).
+//
+// Float32 only — host promotes other dtypes via dispatchCast.
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer SignalBuf { float signal[]; };
+layout(binding = 1) buffer WindowBuf { float window[]; };
+layout(binding = 2) buffer FramedBuf { float framed[]; };
+
+layout(push_constant) uniform PushConstants {
+    int batch_size;
+    int signal_length;
+    int num_frames;
+    int n_fft;
+    int hop_length;
+    int pad;        // n_fft/2 if center else 0
+    int total;      // batch_size * num_frames * n_fft
+} params;
+
+void main() {
+    int idx = int(gl_GlobalInvocationID.x);
+    if (idx >= params.total) return;
+
+    int i = idx % params.n_fft;
+    int f = (idx / params.n_fft) % params.num_frames;
+    int b = idx / (params.n_fft * params.num_frames);
+
+    int sig_idx = f * params.hop_length + i - params.pad;
+
+    float val;
+    if (params.signal_length <= 1) {
+        val = (params.signal_length == 1) ? signal[b * params.signal_length] : 0.0;
+    } else if (sig_idx < 0) {
+        // Reflect-pad on the left
+        int r = -sig_idx;
+        if (r >= params.signal_length) r = params.signal_length - 1;
+        val = signal[b * params.signal_length + r];
+    } else if (sig_idx >= params.signal_length) {
+        // Reflect-pad on the right
+        int r = 2 * params.signal_length - 2 - sig_idx;
+        if (r < 0) r = 0;
+        val = signal[b * params.signal_length + r];
+    } else {
+        val = signal[b * params.signal_length + sig_idx];
+    }
+
+    framed[idx] = val * window[i];
+}

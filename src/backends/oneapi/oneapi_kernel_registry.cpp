@@ -118,6 +118,18 @@ namespace oneapi {
     auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
                       sycl::queue& queue) -> Tensor;
 
+    // STFT / ISTFT (native OneAPI — replaces previous CPU fallbacks)
+    auto stft_kernel(const Tensor& input, int64_t n_fft,
+                     int64_t hop_length, int64_t win_length,
+                     const Tensor& window, bool center,
+                     bool normalized, bool onesided,
+                     sycl::queue& queue) -> Tensor;
+    auto istft_kernel(const Tensor& input, int64_t n_fft,
+                      int64_t hop_length, int64_t win_length,
+                      const Tensor& window, bool center,
+                      bool normalized, bool onesided,
+                      int64_t length, sycl::queue& queue) -> Tensor;
+
     // Bool predicates
     auto isnan_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
     auto isinf_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
@@ -3537,25 +3549,22 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return oneapi::cdist_kernel(inputs[0], inputs[1], p, get_q(inputs));
         });
 
-    // STFT (Short-Time Fourier Transform)
+    // STFT / ISTFT — native OneAPI kernels
     table.register_single_output_kernel(OpId::STFT,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            auto dev = inputs[0].device();
             int64_t n_fft = attrs.get_int(AttrKey::NFft);
             int64_t hop_length = attrs.get_int(AttrKey::HopLength, -1);
             int64_t win_length = attrs.get_int(AttrKey::WinLength, -1);
             bool center = attrs.get_bool(AttrKey::Centered, true);
             bool normalized = attrs.get_bool(AttrKey::Normalized, false);
             bool onesided = attrs.get_bool(AttrKey::OnesidedAttr, true);
-            Tensor window = (inputs.size() > 1) ? inputs[1].to(Device::cpu()) : Tensor();
-            return tenzor::fft::stft(inputs[0].to(Device::cpu()), n_fft, hop_length, win_length,
-                                     window, center, normalized, onesided).to(dev);
+            Tensor window = (inputs.size() > 1) ? inputs[1] : Tensor();
+            return oneapi::stft_kernel(inputs[0], n_fft, hop_length, win_length,
+                                       window, center, normalized, onesided, get_q(inputs));
         });
 
-    // ISTFT (Inverse STFT)
     table.register_single_output_kernel(OpId::ISTFT,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            auto dev = inputs[0].device();
             int64_t n_fft = attrs.get_int(AttrKey::NFft);
             int64_t hop_length = attrs.get_int(AttrKey::HopLength, -1);
             int64_t win_length = attrs.get_int(AttrKey::WinLength, -1);
@@ -3563,10 +3572,10 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             bool normalized = attrs.get_bool(AttrKey::Normalized, false);
             bool onesided = attrs.get_bool(AttrKey::OnesidedAttr, true);
             int64_t length_val = attrs.get_int(AttrKey::N, -1);
-            std::optional<int64_t> length = length_val >= 0 ? std::optional<int64_t>(length_val) : std::nullopt;
-            Tensor window = (inputs.size() > 1) ? inputs[1].to(Device::cpu()) : Tensor();
-            return tenzor::fft::istft(inputs[0].to(Device::cpu()), n_fft, hop_length, win_length,
-                                      window, center, normalized, onesided, length).to(dev);
+            Tensor window = (inputs.size() > 1) ? inputs[1] : Tensor();
+            return oneapi::istft_kernel(inputs[0], n_fft, hop_length, win_length,
+                                        window, center, normalized, onesided,
+                                        length_val, get_q(inputs));
         });
 
     // AdvancedIndex (fancy indexing)

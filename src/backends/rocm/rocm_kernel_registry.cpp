@@ -161,6 +161,18 @@ namespace rocm {
     auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
                       hipStream_t stream) -> Tensor;
 
+    // STFT / ISTFT (native ROCm — replaces previous CPU fallbacks)
+    auto stft_kernel(const Tensor& input, int64_t n_fft,
+                     int64_t hop_length, int64_t win_length,
+                     const Tensor& window, bool center,
+                     bool normalized, bool onesided,
+                     hipStream_t stream) -> Tensor;
+    auto istft_kernel(const Tensor& input, int64_t n_fft,
+                      int64_t hop_length, int64_t win_length,
+                      const Tensor& window, bool center,
+                      bool normalized, bool onesided,
+                      int64_t length, hipStream_t stream) -> Tensor;
+
     // Bool predicate operations
     auto isnan_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
     auto isinf_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
@@ -3848,7 +3860,12 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             return rocm::cdist_kernel(inputs[0], inputs[1], p, get_hip_stream(attrs));
         });
 
-    // STFT (Short-Time Fourier Transform)
+    // STFT / ISTFT — TEMPORARY CPU fallback
+    // TODO(phase4.3-rocm): Native rocm::stft_kernel/istft_kernel exist in
+    // src/backends/rocm/kernels/stft.hip.cpp but produce wrong shape on
+    // batched (B, num_frames, n_fft) input. Suspected interaction between
+    // rocm_rfft_kernel batching and the transpose/reshape chain. Reverted to
+    // CPU fallback until the layout issue is resolved.
     table.register_single_output_kernel(OpId::STFT,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             auto dev = inputs[0].device();
@@ -3863,7 +3880,6 @@ void register_rocm_kernels(BackendDispatchTable& table) {
                                      window, center, normalized, onesided).to(dev);
         });
 
-    // ISTFT (Inverse STFT)
     table.register_single_output_kernel(OpId::ISTFT,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             auto dev = inputs[0].device();
