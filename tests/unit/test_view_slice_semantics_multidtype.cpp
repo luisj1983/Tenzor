@@ -95,18 +95,25 @@ TEST_P(ViewSliceMultiBackendTest, ContiguousCreatesIndependentCopy) {
     }
     auto t = t_cpu.to(device);
 
-    auto s = t.slice(0, 1, 3);        // view of rows 1-2
-    auto c = s.contiguous();           // independent copy
+    // Use a non-contiguous slice (stride > 1) so that `.contiguous()` is
+    // forced to materialize a copy regardless of device. An already-
+    // contiguous slice may legally return the same view (zero-copy), which
+    // would share storage with the source tensor on the CPU backend and
+    // make the independence check meaningless.
+    auto s = t.slice(0, 0, 4, 2);     // view of rows 0 and 2 (stride 2)
+    auto c = s.contiguous();           // independent copy (non-contiguous src)
     EXPECT_EQ(c.numel(), 8);
 
-    // Modify the original tensor on CPU, re-upload
-    data[4] = 999.0f;  // first element of row 1
+    // Modify the CPU-side source and re-upload to the device (on CPU,
+    // to(cpu()) is a no-op, so this also mutates the original device tensor
+    // since they share storage).
+    data[0] = 999.0f;  // first element of row 0 in the slice
     t = t_cpu.to(device);
 
-    // The contiguous copy should NOT be affected
+    // The contiguous copy must not be affected by the post-copy mutation.
     auto c_cpu = c.to(Device::cpu());
     auto* c_data = c_cpu.data<float>();
-    EXPECT_FLOAT_EQ(c_data[0], 4.0f);  // original value before modification
+    EXPECT_FLOAT_EQ(c_data[0], 0.0f);  // original row-0, col-0 value
 }
 
 // ============================================================================

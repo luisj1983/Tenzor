@@ -1813,9 +1813,11 @@ auto launch_advanced_index_gather(
 
     int threads = 256;
     int blocks = static_cast<int>((prep.total + threads - 1) / threads);
+    // Use data_ptr() + reinterpret_cast for CUDA-native types (__half, __nv_bfloat16)
+    // that don't have Tensor::data<T>() instantiations in the core library.
     advanced_index_gather_kernel<T><<<blocks, threads, 0, stream>>>(
-        src_contig.data<T>(),
-        result.data<T>(),
+        reinterpret_cast<const T*>(src_contig.data_ptr()),
+        reinterpret_cast<T*>(result.data_ptr()),
         d_idx_ptrs,
         prep.meta,
         prep.total);
@@ -1853,9 +1855,11 @@ auto launch_advanced_index_put(
 
     int threads = 256;
     int blocks = static_cast<int>((prep.total + threads - 1) / threads);
+    // Use data_ptr() + reinterpret_cast for CUDA-native types (__half, __nv_bfloat16)
+    // that don't have Tensor::data<T>() instantiations in the core library.
     advanced_index_put_kernel<T><<<blocks, threads, 0, stream>>>(
-        result_contig.data<T>(),
-        values_contig.data<T>(),
+        reinterpret_cast<T*>(result_contig.data_ptr()),
+        reinterpret_cast<const T*>(values_contig.data_ptr()),
         d_idx_ptrs,
         prep.meta,
         prep.total);

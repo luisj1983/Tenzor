@@ -19,14 +19,19 @@
 using namespace tenzor;
 using namespace tenzor::testing;
 
+// Macro (not a method) so that GTEST_SKIP's internal `return`
+// statement returns from the TEST_P body rather than from a helper
+// method — otherwise the test continues and fails on the first op
+// that doesn't support Float16.
+#define skipIfHalf() \
+    do { \
+        if (dtype() == DType::Float16 || dtype() == DType::BFloat16) { \
+            GTEST_SKIP() << "JVP requires higher precision than Float16"; \
+        } \
+    } while (0)
+
 class JVPExpandedMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
-    void skipIfHalf() {
-        if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
-            GTEST_SKIP() << "JVP requires higher precision than Float16";
-        }
-    }
-
     // Create randn with small scale for numerical stability
     Tensor small_randn(std::vector<int64_t> shape, float scale = 0.5f) {
         return tenzor::mul(tenzor::randn(shape, dtype(), device()), scale);

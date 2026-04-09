@@ -60,15 +60,16 @@ auto SpectralNorm::apply(std::shared_ptr<Module> module,
     sn->u_ = randn({h}, weight.dtype(), weight.device());
     sn->v_ = randn({w}, weight.dtype(), weight.device());
 
-    // Normalize initial vectors
+    // Normalize initial vectors. Upcast the scalar norm to Float32 so reading
+    // works for any input dtype (Float16/BFloat16/Float64/Float32).
     auto u_norm = norm(sn->u_);
-    float u_norm_val = u_norm.data<float>()[0];
+    float u_norm_val = u_norm.to(Device::cpu()).to(DType::Float32).data<float>()[0];
     if (u_norm_val > 0) {
         sn->u_ = div(sn->u_, u_norm_val);
     }
 
     auto v_norm = norm(sn->v_);
-    float v_norm_val = v_norm.data<float>()[0];
+    float v_norm_val = v_norm.to(Device::cpu()).to(DType::Float32).data<float>()[0];
     if (v_norm_val > 0) {
         sn->v_ = div(sn->v_, v_norm_val);
     }
@@ -127,7 +128,7 @@ auto SpectralNorm::power_iteration(const Tensor& weight_2d) -> void {
         Tensor v_new = reshape(matmul(wt, u_col), {static_cast<int64_t>(v_.shape()[0])});
 
         auto v_norm_t = norm(v_new);
-        float v_norm_val = v_norm_t.data<float>()[0];
+        float v_norm_val = v_norm_t.to(Device::cpu()).to(DType::Float32).data<float>()[0];
         if (v_norm_val > eps_) {
             v_ = div(v_new, v_norm_val);
         }
@@ -137,7 +138,7 @@ auto SpectralNorm::power_iteration(const Tensor& weight_2d) -> void {
         Tensor u_new = reshape(matmul(weight_2d, v_col), {static_cast<int64_t>(u_.shape()[0])});
 
         auto u_norm_t = norm(u_new);
-        float u_norm_val = u_norm_t.data<float>()[0];
+        float u_norm_val = u_norm_t.to(Device::cpu()).to(DType::Float32).data<float>()[0];
         if (u_norm_val > eps_) {
             u_ = div(u_new, u_norm_val);
         }
@@ -152,7 +153,7 @@ auto SpectralNorm::power_iteration(const Tensor& weight_2d) -> void {
 
 auto SpectralNorm::compute_weight(const Tensor& weight) -> Tensor {
     // W_normalized = W / sigma(W)
-    float sigma_val = sigma_.data<float>()[0];
+    float sigma_val = sigma_.to(Device::cpu()).to(DType::Float32).data<float>()[0];
     if (sigma_val < eps_) {
         sigma_val = static_cast<float>(eps_);
     }

@@ -70,16 +70,13 @@ auto jacobian(std::function<Variable(const Variable&)> func,
         auto flat_input = tenzor::reshape(input_data, {n});
 
         for (int64_t i = 0; i < n; ++i) {
-            // Create standard basis vector e_i
-            auto e_i = tenzor::zeros({n}, input_data.dtype(), input_data.device());
-            // Set e_i[i] = 1.0
-            auto one = tenzor::ones({1}, input_data.dtype(), input_data.device());
-            // Use narrow + add to set single element
-            // Simple approach: create on CPU, fill, transfer
-            auto e_i_cpu = tenzor::zeros({n}, input_data.dtype(), Device::cpu());
-            float* ptr = e_i_cpu.data<float>();
-            ptr[i] = 1.0f;
-            e_i = e_i_cpu.to(input_data.device());
+            // Create standard basis vector e_i. Build in Float32 on CPU (so we
+            // can always use data<float>()), then cast to the input dtype and
+            // device. This avoids hard-coding data<float>() on a tensor of an
+            // arbitrary dtype (Float64/Float16/BFloat16 would dtype-mismatch).
+            auto e_i_cpu = tenzor::zeros({n}, DType::Float32, Device::cpu());
+            e_i_cpu.data<float>()[i] = 1.0f;
+            auto e_i = e_i_cpu.to(input_data.dtype()).to(input_data.device());
             e_i = tenzor::reshape(e_i, std::vector<int64_t>(input_data.shape().begin(), input_data.shape().end()));
 
             auto [_, jvp_col] = jvp(func, input, e_i);
@@ -101,11 +98,11 @@ auto jacobian(std::function<Variable(const Variable&)> func,
             auto out = func(inp);
             auto flat_out = tenzor::reshape(out, {m});
 
-            // Create gradient vector e_j
-            auto e_j_cpu = tenzor::zeros({m}, input_data.dtype(), Device::cpu());
-            float* ptr = e_j_cpu.data<float>();
-            ptr[j] = 1.0f;
-            auto e_j = e_j_cpu.to(input_data.device());
+            // Create gradient vector e_j. Use Float32 for the construction
+            // (so data<float>() is valid) and cast to the input dtype after.
+            auto e_j_cpu = tenzor::zeros({m}, DType::Float32, Device::cpu());
+            e_j_cpu.data<float>()[j] = 1.0f;
+            auto e_j = e_j_cpu.to(input_data.dtype()).to(input_data.device());
             e_j = tenzor::reshape(e_j, std::vector<int64_t>(out.tensor().shape().begin(), out.tensor().shape().end()));
 
             // Backward with e_j to get row j of Jacobian

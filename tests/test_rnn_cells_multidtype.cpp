@@ -55,8 +55,9 @@ TEST_P(RNNCellsMultiDTypeTest, RNNCell_GradientFlow) {
     auto hx = Variable(createRandn({batch_size, hidden_size}), true);
 
     auto output = cell.forward(input, hx);
-    auto loss = tenzor::sum(output.tensor());
-    auto loss_var = Variable(loss, true);
+    // Reduce to a scalar via the autograd-aware sum so the backward chain
+    // stays connected to the cell's input/hx Variables.
+    auto loss_var = tenzor::sum(output);
     loss_var.backward();
 
     EXPECT_TRUE(input.grad().has_value());
@@ -113,8 +114,9 @@ TEST_P(RNNCellsMultiDTypeTest, GRUCell_GradientFlow) {
     auto hx = Variable(createRandn({batch_size, hidden_size}), true);
 
     auto output = cell.forward(input, hx);
-    auto loss = tenzor::sum(output.tensor());
-    auto loss_var = Variable(loss, true);
+    // Reduce to a scalar via the autograd-aware sum so the backward chain
+    // stays connected to the cell's input/hx Variables.
+    auto loss_var = tenzor::sum(output);
     loss_var.backward();
 
     EXPECT_TRUE(input.grad().has_value());

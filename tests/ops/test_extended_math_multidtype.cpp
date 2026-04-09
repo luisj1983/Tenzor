@@ -122,9 +122,13 @@ TEST_P(ExtendedMathMultiDTypeTest, Expm1SmallValues) {
     auto result = tenzor::expm1(input);
     auto result_f32 = result.to(Device::cpu()).to(DType::Float32);
     auto* r = result_f32.data<float>();
-    EXPECT_NEAR(r[0], 0.0f, atol());                         // expm1(0) = 0
-    EXPECT_NEAR(r[1], std::exp(1.0f) - 1.0f, atol());        // e - 1
-    EXPECT_NEAR(r[2], std::expm1(0.001f), std::max(atol(), 1e-4f));
+    EXPECT_NEAR(r[0], 0.0f, atol());                                  // expm1(0) = 0
+    // Use std::expm1 (the accurate implementation) rather than
+    // `exp(1.0f) - 1.0f`, which loses precision in Float32 subtraction
+    // and fails the tight Float64 tolerance.
+    EXPECT_NEAR(r[1], static_cast<float>(std::expm1(1.0)), atol());   // e - 1
+    EXPECT_NEAR(r[2], static_cast<float>(std::expm1(0.001)),
+                std::max(atol(), 1e-4f));
 }
 
 // ============================================================================

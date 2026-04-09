@@ -156,7 +156,12 @@ TEST_P(SyncBatchNormTest, GradientFlow) {
 
     auto out_shape = output.shape();
     std::vector<int64_t> shape_vec(out_shape.begin(), out_shape.end());
-    auto grad_output = tenzor::ones(shape_vec, DType::Float32, device);
+    // Use a non-constant grad_output. With grad_output=ones and weight=1, the
+    // analytic input gradient of batch normalization is exactly zero (BN's
+    // Jacobian has the constant vector in its null space — adding a constant
+    // to all outputs leaves mean/variance unchanged, so the input is
+    // unaffected). A random grad_output exercises the full backward formula.
+    auto grad_output = tenzor::randn(shape_vec, DType::Float32, device);
     output.backward(grad_output);
 
     EXPECT_TRUE(input.has_grad());

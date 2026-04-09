@@ -1439,71 +1439,30 @@ auto AdaptiveMaxPool2d::forward_impl(const Variable& input) -> Variable {
         throw std::invalid_argument("AdaptiveMaxPool2d expects 4D input [batch, channels, height, width]");
     }
 
-    int64_t N = input_shape[0];
-    int64_t C = input_shape[1];
-    int64_t H_in = input_shape[2];
-    int64_t W_in = input_shape[3];
-    int64_t H_out = output_h_;
-    int64_t W_out = output_w_;
+    Device device = input.tensor().device();
+    std::vector<int64_t> in_shape_vec(input_shape.begin(), input_shape.end());
 
-    auto dtype = input.tensor().dtype();
-    auto output = zeros({N, C, H_out, W_out}, dtype, input.tensor().device());
+    OpAttributes fwd_attrs;
+    fwd_attrs.set(AttrKey::OutputSizeH, output_h_);
+    fwd_attrs.set(AttrKey::OutputSizeW, output_w_);
 
-    if (input.tensor().device().type == Device::Type::CPU) {
-        if (dtype == DType::Float32) {
-            const float* in_data = input.tensor().data<float>();
-            float* out_data = output.data<float>();
+    // Dispatch to backend kernel (CPU kernel supports Float32/Float64/Float16/BFloat16,
+    // matching the other adaptive-pool layers).  The inlined CPU path that only
+    // handled Float32/Float64 has been removed.
+    std::vector<Tensor> inputs = {input.tensor()};
+    auto fwd_result = dispatch_to_device(OpId::AdaptiveMaxPool2d, device.type, inputs, fwd_attrs);
+    Tensor output = fwd_result[0];
+    Tensor indices = fwd_result[1];
 
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t h = 0; h < H_out; ++h) {
-                        int64_t h_start = h * H_in / H_out;
-                        int64_t h_end = (h + 1) * H_in / H_out;
-                        for (int64_t w = 0; w < W_out; ++w) {
-                            int64_t w_start = w * W_in / W_out;
-                            int64_t w_end = (w + 1) * W_in / W_out;
-                            float max_val = -std::numeric_limits<float>::infinity();
-                            for (int64_t hi = h_start; hi < h_end; ++hi) {
-                                for (int64_t wi = w_start; wi < w_end; ++wi) {
-                                    float val = in_data[((n * C + c) * H_in + hi) * W_in + wi];
-                                    if (val > max_val) max_val = val;
-                                }
-                            }
-                            out_data[((n * C + c) * H_out + h) * W_out + w] = max_val;
-                        }
-                    }
-                }
-            }
-        } else if (dtype == DType::Float64) {
-            const double* in_data = input.tensor().data<double>();
-            double* out_data = output.data<double>();
+    auto result = Variable(output, input.requires_grad());
 
-            for (int64_t n = 0; n < N; ++n) {
-                for (int64_t c = 0; c < C; ++c) {
-                    for (int64_t h = 0; h < H_out; ++h) {
-                        int64_t h_start = h * H_in / H_out;
-                        int64_t h_end = (h + 1) * H_in / H_out;
-                        for (int64_t w = 0; w < W_out; ++w) {
-                            int64_t w_start = w * W_in / W_out;
-                            int64_t w_end = (w + 1) * W_in / W_out;
-                            double max_val = -std::numeric_limits<double>::infinity();
-                            for (int64_t hi = h_start; hi < h_end; ++hi) {
-                                for (int64_t wi = w_start; wi < w_end; ++wi) {
-                                    double val = in_data[((n * C + c) * H_in + hi) * W_in + wi];
-                                    if (val > max_val) max_val = val;
-                                }
-                            }
-                            out_data[((n * C + c) * H_out + h) * W_out + w] = max_val;
-                        }
-                    }
-                }
-            }
-        } else {
-            throw std::runtime_error("AdaptiveMaxPool2d: unsupported dtype");
-        }
+    if (input.requires_grad()) {
+        auto backward_fn = std::make_shared<MaxPoolNdBackward<OpId::AdaptiveMaxPool2dBackward>>(
+            in_shape_vec, indices);
+        wire_grad_fn(result, input, backward_fn);
     }
 
-    return Variable(output, input.requires_grad());
+    return result;
 }
 
 // ============================================================================

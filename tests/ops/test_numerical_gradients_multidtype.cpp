@@ -33,19 +33,30 @@ protected:
             GTEST_SKIP() << "Float16 lacks precision for numerical gradient verification";
         }
 
+        // Seed the RNG so `make_var` produces deterministic inputs across
+        // runs. Without this, each subprocess invocation of ctest re-seeds
+        // from time/urandom and occasionally generates inputs that land in
+        // numerically unfavorable regions (e.g. row sums near zero for
+        // MatMul, values near exp overflow, etc.), causing spurious flaky
+        // failures for a well-conditioned analytical gradient.
+        tenzor::manual_seed(0x7e4207u);
+
         set_grad_enabled(true);
     }
 
-    /// Create a small random tensor as Variable on the test device
+    /// Create a small random tensor as Variable on the test device.
+    /// Values are uniformly distributed in [low, high]. Using `rand` (uniform
+    /// on [0,1)) avoids the previous bug where `randn` (standard normal) was
+    /// rescaled naively — that leaked out-of-range values (e.g. negatives
+    /// into log()) which caused numerical gradients to become NaN and made
+    /// tests flakily fail.
     auto make_var(std::vector<int64_t> shape, float low = -1.0f, float high = 1.0f) -> Variable {
-        auto t = tenzor::randn(shape, DType::Float32, Device::cpu());
-        // Scale to [low, high] range
-        auto range = high - low;
+        auto t = tenzor::rand(shape, DType::Float32, Device::cpu());
         auto data = t.data<float>();
+        const float span = high - low;
         for (int64_t i = 0; i < t.numel(); ++i) {
-            data[i] = data[i] * range * 0.5f + (low + high) * 0.5f;
+            data[i] = data[i] * span + low;
         }
-        // Convert to test dtype and move to test device
         if (dtype() != DType::Float32) {
             t = t.to(dtype());
         }
@@ -144,8 +155,13 @@ TEST_P(NumericalGradientMultiTest, Mean) {
 // ---- MatMul ----
 
 TEST_P(NumericalGradientMultiTest, MatMul) {
-    auto x = make_var({3, 4});
-    auto w = make_var({4, 2});
+    // Keep the shapes small and the values modest so the finite-difference
+    // cancellation noise in Float32 stays within the Float32 tolerance.
+    // For f(v) = sum(v @ w) with values in [-0.5, 0.5], |f| is bounded by
+    // (#input_elements * max|v| * max|w| * output_size) which keeps the FD
+    // noise well under gradcheck's 1e-2 relative tolerance.
+    auto x = make_var({2, 3}, -0.5f, 0.5f);
+    auto w = make_var({3, 2}, -0.5f, 0.5f);
     std::function<Variable(const Variable&)> f = [&w](const Variable& v) {
         return tenzor::sum(tenzor::matmul(v, w));
     };

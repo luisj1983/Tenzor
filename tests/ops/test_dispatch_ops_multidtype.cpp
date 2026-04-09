@@ -19,14 +19,19 @@
 using namespace tenzor;
 using namespace tenzor::testing;
 
+// Macro (not a method) so that GTEST_SKIP's internal `return`
+// statement returns from the TEST_P body rather than from a helper
+// method — otherwise the test continues and fails on the first op
+// that doesn't support Float16.
+#define skipIfHalf() \
+    do { \
+        if (dtype() == DType::Float16 || dtype() == DType::BFloat16) { \
+            GTEST_SKIP() << "Test requires Float32/Float64 precision"; \
+        } \
+    } while (0)
+
 class DispatchOpsMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
-    void skipIfHalf() {
-        if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
-            GTEST_SKIP() << "Test requires Float32/Float64 precision";
-        }
-    }
-
     Tensor makeInt64Tensor(std::initializer_list<int64_t> vals) {
         auto t = tenzor::zeros({static_cast<int64_t>(vals.size())}, DType::Int64, Device::cpu());
         auto* ptr = t.data<int64_t>();

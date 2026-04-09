@@ -251,8 +251,8 @@ TEST_P(PoolingMultiDTypeTest, AdaptiveMaxPool2dGradientFlow) {
     Variable input = createInput({1, 2, 8, 8}, true);
     auto output = pool.forward(input);
 
-    auto loss = tenzor::sum(output.tensor());
-    auto loss_var = Variable(loss, true);
+    // Use the autograd-aware sum so backward reaches `input`.
+    auto loss_var = tenzor::sum(output);
     loss_var.backward();
 
     ASSERT_TRUE(input.grad().has_value());

@@ -55,17 +55,14 @@ auto LAMB::step_impl() -> void {
 
         double param_norm = 0.0;
         double update_norm = 0.0;
-        // Read scalar values (move to CPU if needed)
+        // Read scalar values (move to CPU and upcast to Float32 so the read
+        // works uniformly for Float16 / BFloat16 parameters too — the reduced
+        // norms are small tensors so the conversion cost is negligible).
         {
-            auto pn = param_norm_t.to(Device::cpu());
-            auto un = update_norm_t.to(Device::cpu());
-            if (pn.dtype() == DType::Float32) {
-                param_norm = static_cast<double>(pn.data<float>()[0]);
-                update_norm = static_cast<double>(un.data<float>()[0]);
-            } else {
-                param_norm = pn.data<double>()[0];
-                update_norm = un.data<double>()[0];
-            }
+            auto pn = param_norm_t.to(Device::cpu()).to(DType::Float32);
+            auto un = update_norm_t.to(Device::cpu()).to(DType::Float32);
+            param_norm = static_cast<double>(pn.data<float>()[0]);
+            update_norm = static_cast<double>(un.data<float>()[0]);
         }
 
         double trust_ratio = 1.0;

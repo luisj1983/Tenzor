@@ -79,7 +79,21 @@ auto TanhBackward_AG::backward_with_variables(std::vector<Variable> grad_outputs
 }
 
 // GeluBackward implementation
-// Saves input. backward: grad * (0.5 * (1 + erf(x/sqrt(2))) + x * (1/sqrt(2*pi)) * exp(-x^2/2))
+//
+// IMPORTANT: the backward must match the *forward* implementation, which
+// uses the tanh approximation:
+//
+//     gelu(x) = 0.5 * x * (1 + tanh(s(x)))
+//     s(x)    = sqrt(2/pi) * (x + 0.044715 * x^3)
+//
+// A previous implementation used the derivative of the exact erf-based
+// GELU, which disagrees with the tanh-approx forward by up to ~0.02 at
+// some x — enough to fail `gradcheck` under Float64 tolerances.
+//
+// Derivative of the tanh-approx GELU:
+//     s'(x)   = sqrt(2/pi) * (1 + 3 * 0.044715 * x^2)
+//     sech²(s) = 1 - tanh²(s)
+//     g'(x)   = 0.5 * (1 + tanh(s)) + 0.5 * x * sech²(s) * s'(x)
 auto GeluBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
     throw std::runtime_error("GeluBackward::forward should not be called");
 }
@@ -87,48 +101,64 @@ auto GeluBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 auto GeluBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     const auto& grad = grad_outputs[0];
     const auto& input = saved_tensors_[0];
-    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
 
-    // Constants
-    constexpr double sqrt2 = 1.4142135623730951;
-    constexpr double inv_sqrt_2pi = 0.3989422804014327;  // 1/sqrt(2*pi)
+    constexpr double sqrt_2_over_pi = 0.7978845608028654;  // sqrt(2/pi)
+    constexpr double coeff          = 0.044715;
+    constexpr double deriv_coeff    = 3.0 * coeff;          // 0.134145
 
-    // cdf = 0.5 * (1 + erf(x / sqrt(2)))
-    auto x_over_sqrt2 = mul(input, 1.0 / sqrt2);
-    auto erf_val = erf(x_over_sqrt2);
-    auto cdf = mul(add(erf_val, 1.0), 0.5);
+    auto x_sq     = mul(input, input);                                 // x^2
+    auto x_cubed  = mul(x_sq, input);                                  // x^3
 
-    // pdf = (1/sqrt(2*pi)) * exp(-x^2/2)
-    auto x_sq = mul(input, input);
-    auto neg_half_x_sq = mul(x_sq, -0.5);
-    auto pdf = mul(exp(neg_half_x_sq), inv_sqrt_2pi);
+    // s(x) = sqrt_2_over_pi * (x + 0.044715 * x^3)
+    auto inner    = mul(add(input, mul(x_cubed, coeff)), sqrt_2_over_pi);
 
-    // grad_input = grad * (cdf + x * pdf)
-    auto x_times_pdf = mul(input, pdf);
-    auto result = mul(grad, add(cdf, x_times_pdf));
-    return {result};
+    auto T        = tenzor::tanh(inner);                               // tanh(s)
+    auto T_sq     = mul(T, T);                                         // tanh²(s)
+    auto sech_sq  = add(neg(T_sq), 1.0);                               // 1 - tanh²
+
+    // s'(x) = sqrt_2_over_pi * (1 + 0.134145 * x^2)
+    auto s_prime  = mul(add(mul(x_sq, deriv_coeff), 1.0), sqrt_2_over_pi);
+
+    // g'(x) = 0.5 * (1 + T) + 0.5 * x * (1 - T^2) * s'(x)
+    auto term1    = mul(add(T, 1.0), 0.5);
+    auto term2    = mul(mul(mul(input, sech_sq), s_prime), 0.5);
+    auto g_prime  = add(term1, term2);
+
+    return {mul(grad, g_prime)};
 }
 
 auto GeluBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    // GELU backward: grad * (cdf + x * pdf)
-    // where cdf = 0.5 * (1 + erf(x/sqrt(2))), pdf = (1/sqrt(2*pi)) * exp(-x^2/2)
+    // Match the tanh-approx forward — see the comment on backward() above for
+    // the derivation. This Variable-based path is used for higher-order
+    // autograd (double backward); it must compute the same function as the
+    // Tensor-based backward() above.
     Variable input_var(saved_tensors_[0], false);
 
-    constexpr double sqrt2 = 1.4142135623730951;
-    constexpr double inv_sqrt_2pi = 0.3989422804014327;
+    constexpr double sqrt_2_over_pi = 0.7978845608028654;
+    constexpr double coeff          = 0.044715;
+    constexpr double deriv_coeff    = 3.0 * coeff;
 
-    // cdf = 0.5 * (1 + erf(x / sqrt(2)))
-    auto x_over_sqrt2 = input_var * (1.0 / sqrt2);
-    auto erf_val = tenzor::erf(x_over_sqrt2);
-    auto cdf = (erf_val + 1.0) * 0.5;
+    auto x_sq    = input_var * input_var;
+    auto x_cubed = x_sq * input_var;
 
-    // pdf = (1/sqrt(2*pi)) * exp(-x^2/2)
-    auto x_sq = input_var * input_var;
-    auto neg_half_x_sq = x_sq * (-0.5);
-    auto pdf = tenzor::exp(neg_half_x_sq) * inv_sqrt_2pi;
+    // s(x) = sqrt_2_over_pi * (x + 0.044715 * x^3)
+    auto inner   = (input_var + x_cubed * coeff) * sqrt_2_over_pi;
 
-    // grad_input = grad * (cdf + x * pdf)
-    return {grad_outputs[0] * (cdf + input_var * pdf)};
+    auto T       = tenzor::tanh(inner);
+    auto T_sq    = T * T;
+    // 1 - T^2 — Variable doesn't have a scalar-minus-Variable operator, so
+    // rewrite as (-(T^2)) + 1.
+    auto sech_sq = tenzor::neg(T_sq) + 1.0;
+
+    // s'(x) = sqrt_2_over_pi * (1 + 0.134145 * x^2)
+    auto s_prime = (x_sq * deriv_coeff + 1.0) * sqrt_2_over_pi;
+
+    // g'(x) = 0.5 * (1 + T) + 0.5 * x * (1 - T^2) * s'(x)
+    auto term1   = (T + 1.0) * 0.5;
+    auto term2   = (input_var * sech_sq * s_prime) * 0.5;
+    auto g_prime = term1 + term2;
+
+    return {grad_outputs[0] * g_prime};
 }
 
 // EluBackward implementation

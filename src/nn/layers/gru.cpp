@@ -5,6 +5,7 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/autograd/function.hpp"
+#include "tenzor/autograd/ops.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
@@ -71,44 +72,39 @@ auto GRUCell::forward(const Variable& input, const Variable& hx) -> Variable {
     // Compute combined gates efficiently (2 linear calls instead of 6)
     // gates_ih: (batch, 3 * hidden_size) = [r_i | z_i | n_i]
     // gates_hh: (batch, 3 * hidden_size) = [r_h | z_h | n_h]
-    auto gates_ih = weight_ih_->forward(input);    // (batch, 3*hidden_size)
-    auto gates_hh = weight_hh_->forward(h);        // (batch, 3*hidden_size)
+    //
+    // IMPORTANT: stay on the autograd-aware Variable path. Extracting
+    // .tensor() and re-wrapping with `Variable(t, true)` would create orphan
+    // Variables with no grad_fn, so backward() couldn't reach `input`/`hx`.
+    auto gates_ih = weight_ih_->forward(input);  // (batch, 3*hidden_size)
+    auto gates_hh = weight_hh_->forward(h);      // (batch, 3*hidden_size)
 
-    auto gates_ih_t = gates_ih.tensor().contiguous();
-    auto gates_hh_t = gates_hh.tensor().contiguous();
+    // Slice each gates tensor into 3 sub-variables (r, z, n) along dim=1.
+    // (autograd::chunk does not exist yet — use slice which is autograd-aware.)
+    const int64_t H = hidden_size_;
+    auto r_i = ::tenzor::slice(gates_ih, 1, 0,     H);
+    auto z_i = ::tenzor::slice(gates_ih, 1, H,   2*H);
+    auto n_i = ::tenzor::slice(gates_ih, 1, 2*H, 3*H);
+    auto r_h = ::tenzor::slice(gates_hh, 1, 0,     H);
+    auto z_h = ::tenzor::slice(gates_hh, 1, H,   2*H);
+    auto n_h = ::tenzor::slice(gates_hh, 1, 2*H, 3*H);
 
-    // Split gates into 3 chunks
-    auto ih_chunks = chunk(gates_ih_t, 3, 1);  // [r_i, z_i, n_i]
-    auto hh_chunks = chunk(gates_hh_t, 3, 1);  // [r_h, z_h, n_h]
+    // Reset gate: r_t = σ(r_i + r_h)
+    auto r_t = ::tenzor::sigmoid(r_i + r_h);
 
-    auto r_i = ih_chunks[0];
-    auto z_i = ih_chunks[1];
-    auto n_i = ih_chunks[2];
-    auto r_h = hh_chunks[0];
-    auto z_h = hh_chunks[1];
-    auto n_h = hh_chunks[2];
+    // Update gate: z_t = σ(z_i + z_h)
+    auto z_t = ::tenzor::sigmoid(z_i + z_h);
 
-    // Compute reset gate: r_t = σ(r_i + r_h)
-    auto r_t = nn::sigmoid(Variable(r_i + r_h, true));
+    // New gate: n_t = tanh(n_i + r_t ⊙ n_h)
+    auto n_t = ::tenzor::tanh(n_i + r_t * n_h);
 
-    // Compute update gate: z_t = σ(z_i + z_h)
-    auto z_t = nn::sigmoid(Variable(z_i + z_h, true));
+    // h_new = (1 - z_t) ⊙ n_t + z_t ⊙ h
+    //       = n_t + z_t ⊙ (h - n_t)
+    // (this formulation only needs Variable - Variable / Variable * Variable
+    //  / Variable + Variable, all of which are autograd-aware)
+    auto h_new = n_t + z_t * (h - n_t);
 
-    // Compute new gate: n_t = tanh(n_i + r_t ⊙ n_h)
-    auto n_h_reset = r_t.tensor() * n_h;
-    auto n_t = nn::tanh(Variable(n_i + n_h_reset, true));
-
-    // Compute new hidden state: h_t = (1 - z_t) ⊙ n_t + z_t ⊙ h_{t-1}
-    auto z_tensor = z_t.tensor();
-    auto n_tensor = n_t.tensor();
-    auto h_tensor = h.tensor();
-
-    // h_new = z_t * h + (1 - z_t) * n_t = z_t * h + n_t - z_t * n_t
-    //       = n_t + z_t * (h - n_t)
-    auto h_minus_n = h_tensor - n_tensor;
-    auto h_new_tensor = n_tensor + z_tensor * h_minus_n;
-
-    return Variable(h_new_tensor, true);
+    return h_new;
 }
 
 auto GRUCell::forward_with_precomputed_ih(const Tensor& gates_ih, const Variable& hx) -> Variable {
@@ -365,58 +361,52 @@ auto GRU::forward(const Variable& input, const Variable& hx,
     }
 
     // =========================================================================
-    // STANDARD PATH: Use autograd operations (required for training/gradients)
+    // STANDARD PATH: Autograd-correct per-timestep forward.
+    // Mirror LSTM standard path — see lstm.cpp for rationale.
     // =========================================================================
+    auto split_states_per_layer = [&](const Variable& stacked_states,
+                                      std::vector<Variable>& out) {
+        for (int64_t i = 0; i < num_layers_ * num_directions; ++i) {
+            auto sliced = ::tenzor::slice(stacked_states, 0, i, i + 1);
+            auto sq = ::tenzor::squeeze(sliced, 0);  // (batch, hidden)
+            out.push_back(sq);
+        }
+    };
 
-    // Split states by layer
     std::vector<Variable> h_layers;
-    for (int64_t i = 0; i < num_layers_ * num_directions; ++i) {
-        auto h_tensor = h.tensor();
-        auto h_layer = h_tensor.slice(0, i, i + 1).reshape({batch_size, hidden_size_});
-        h_layers.push_back(Variable(h_layer, false));
-    }
+    split_states_per_layer(h, h_layers);
 
-    // Process through layers
-    Variable layer_input = x;
+    Variable layer_input = x;  // (seq, batch, feat)
     std::vector<Variable> final_h_states;
 
     for (int64_t layer = 0; layer < num_layers_; ++layer) {
         auto& forward_cell = forward_cells_[layer];
         Variable forward_h = h_layers[layer * num_directions];
 
-        int64_t layer_feat_size = (layer == 0) ? input_size_ : (hidden_size_ * num_directions);
-
-        // OPTIMIZATION: Pre-compute all input-to-hidden gates at once
-        // Instead of calling weight_ih->forward() seq_len times, we do it ONCE
-        // Reshape from (seq, batch, feat) to (seq*batch, feat)
-        auto x_tensor = layer_input.tensor().contiguous();
-        auto x_flat = x_tensor.reshape({seq_len * batch_size, layer_feat_size});
-
-        // Compute all input gates at once: (seq*batch, 3*hidden)
-        auto all_gates_ih = forward_cell->weight_ih()->forward(Variable(x_flat, false));
-
-        // Reshape to (seq, batch, 3*hidden)
-        auto gates_ih_tensor = all_gates_ih.tensor().reshape({seq_len, batch_size, 3 * hidden_size_});
+        const bool have_lengths = lengths.is_valid() && lengths.numel() > 0;
+        Tensor lengths_dev;
+        if (have_lengths) {
+            lengths_dev = lengths.to(input.device()).to(DType::Float32);
+        }
 
         std::vector<Variable> forward_outputs;
+        forward_outputs.reserve(static_cast<size_t>(seq_len));
 
-        // Forward pass with pre-computed input gates
         for (int64_t t = 0; t < seq_len; ++t) {
-            // Extract pre-computed input gates for this timestep
-            auto gates_ih_t = gates_ih_tensor.slice(0, t, t + 1).reshape({batch_size, 3 * hidden_size_});
+            auto x_t_raw = ::tenzor::slice(layer_input, 0, t, t + 1);
+            auto x_t = ::tenzor::squeeze(x_t_raw, 0);
 
-            auto h_next = forward_cell->forward_with_precomputed_ih(gates_ih_t, forward_h);
+            auto h_next = forward_cell->forward(x_t, forward_h);
 
-            // Apply sequence length masking: preserve old state for padded positions
-            if (lengths.is_valid() && lengths.numel() > 0) {
-                auto lengths_dev = lengths.to(input.device()).to(DType::Float32);
+            if (have_lengths) {
                 auto t_scalar = full({batch_size}, static_cast<float>(t), DType::Float32, input.device());
-                auto mask = gt(lengths_dev, t_scalar).to(input.dtype()).reshape({batch_size, 1});
-                auto one_minus_mask = full({batch_size, 1}, 1.0f, input.dtype(), input.device()) - mask;
+                auto mask_t = gt(lengths_dev, t_scalar).to(input.dtype()).reshape({batch_size, 1});
+                auto one_minus_mask_t =
+                    full({batch_size, 1}, 1.0f, input.dtype(), input.device()) - mask_t;
+                Variable mask_v(mask_t, false);
+                Variable one_minus_mask_v(one_minus_mask_t, false);
 
-                forward_h = Variable(
-                    mask * h_next.tensor() + one_minus_mask * forward_h.tensor(),
-                    h_next.requires_grad() || forward_h.requires_grad());
+                forward_h = mask_v * h_next + one_minus_mask_v * forward_h;
             } else {
                 forward_h = h_next;
             }
@@ -425,34 +415,38 @@ auto GRU::forward(const Variable& input, const Variable& hx,
 
         final_h_states.push_back(forward_h);
 
-        Variable layer_output = layer_input;
+        auto stack_timesteps = [](const std::vector<Variable>& step_outputs) {
+            std::vector<Variable> expanded;
+            expanded.reserve(step_outputs.size());
+            for (const auto& v : step_outputs) {
+                expanded.push_back(::tenzor::unsqueeze(v, 0));
+            }
+            return ::tenzor::cat(expanded, 0);
+        };
 
+        Variable layer_output;
         if (bidirectional_) {
             auto& backward_cell = backward_cells_[layer];
             Variable backward_h = h_layers[layer * num_directions + 1];
 
-            // Pre-compute all backward input gates
-            auto all_gates_ih_bwd = backward_cell->weight_ih()->forward(Variable(x_flat, false));
-            auto gates_ih_bwd_tensor = all_gates_ih_bwd.tensor().reshape({seq_len, batch_size, 3 * hidden_size_});
-
             std::vector<Variable> backward_outputs;
+            backward_outputs.reserve(static_cast<size_t>(seq_len));
 
-            // Backward pass with pre-computed input gates
             for (int64_t t = seq_len - 1; t >= 0; --t) {
-                auto gates_ih_t = gates_ih_bwd_tensor.slice(0, t, t + 1).reshape({batch_size, 3 * hidden_size_});
+                auto x_t_raw = ::tenzor::slice(layer_input, 0, t, t + 1);
+                auto x_t = ::tenzor::squeeze(x_t_raw, 0);
 
-                auto h_next = backward_cell->forward_with_precomputed_ih(gates_ih_t, backward_h);
+                auto h_next = backward_cell->forward(x_t, backward_h);
 
-                // Apply sequence length masking for backward direction
-                if (lengths.is_valid() && lengths.numel() > 0) {
-                    auto lengths_dev = lengths.to(input.device()).to(DType::Float32);
+                if (have_lengths) {
                     auto t_scalar = full({batch_size}, static_cast<float>(t), DType::Float32, input.device());
-                    auto mask = gt(lengths_dev, t_scalar).to(input.dtype()).reshape({batch_size, 1});
-                    auto one_minus_mask = full({batch_size, 1}, 1.0f, input.dtype(), input.device()) - mask;
+                    auto mask_t = gt(lengths_dev, t_scalar).to(input.dtype()).reshape({batch_size, 1});
+                    auto one_minus_mask_t =
+                        full({batch_size, 1}, 1.0f, input.dtype(), input.device()) - mask_t;
+                    Variable mask_v(mask_t, false);
+                    Variable one_minus_mask_v(one_minus_mask_t, false);
 
-                    backward_h = Variable(
-                        mask * h_next.tensor() + one_minus_mask * backward_h.tensor(),
-                        h_next.requires_grad() || backward_h.requires_grad());
+                    backward_h = mask_v * h_next + one_minus_mask_v * backward_h;
                 } else {
                     backward_h = h_next;
                 }
@@ -462,23 +456,17 @@ auto GRU::forward(const Variable& input, const Variable& hx,
             std::reverse(backward_outputs.begin(), backward_outputs.end());
             final_h_states.push_back(backward_h);
 
-            // Concatenate forward and backward
-            std::vector<Tensor> output_tensors;
+            std::vector<Variable> concat_per_t;
+            concat_per_t.reserve(static_cast<size_t>(seq_len));
             for (int64_t t = 0; t < seq_len; ++t) {
-                std::vector<Tensor> tensors_to_concat = {forward_outputs[t].tensor(), backward_outputs[t].tensor()};
-                auto concatenated = cat(tensors_to_concat, 1);
-                output_tensors.push_back(concatenated);
+                std::vector<Variable> pair = {forward_outputs[t], backward_outputs[t]};
+                concat_per_t.push_back(::tenzor::cat(pair, 1));
             }
-            layer_output = Variable(stack(output_tensors, 0), true);
+            layer_output = stack_timesteps(concat_per_t);
         } else {
-            std::vector<Tensor> output_tensors;
-            for (const auto& out : forward_outputs) {
-                output_tensors.push_back(out.tensor());
-            }
-            layer_output = Variable(stack(output_tensors, 0), true);
+            layer_output = stack_timesteps(forward_outputs);
         }
 
-        // Apply dropout
         if (dropout_ && layer < num_layers_ - 1) {
             layer_output = dropout_->forward(layer_output);
         }
@@ -489,17 +477,19 @@ auto GRU::forward(const Variable& input, const Variable& hx,
     Variable output = layer_input;
 
     if (batch_first_) {
-        output = Variable(output.tensor().transpose(0, 1), output.requires_grad());
+        output = ::tenzor::transpose(output, 0, 1);
     }
 
-    // Stack final states
-    // Each hidden state is (batch, hidden_size), stack to (num_layers * num_directions, batch, hidden_size)
-    std::vector<Tensor> h_final_tensors;
-    for (const auto& h_state : final_h_states) {
-        h_final_tensors.push_back(h_state.tensor());
-    }
+    auto stack_layer_states = [](const std::vector<Variable>& states) {
+        std::vector<Variable> expanded;
+        expanded.reserve(states.size());
+        for (const auto& s : states) {
+            expanded.push_back(::tenzor::unsqueeze(s, 0));
+        }
+        return ::tenzor::cat(expanded, 0);
+    };
 
-    Variable h_final(stack(std::span<const Tensor>(h_final_tensors), 0), false);
+    Variable h_final = stack_layer_states(final_h_states);
 
     return {output, h_final};
 }

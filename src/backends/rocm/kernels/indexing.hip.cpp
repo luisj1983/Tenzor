@@ -2970,10 +2970,12 @@ auto launch_advanced_index_gather_hip(
 
     int threads = 256;
     int blocks = static_cast<int>((prep.total + threads - 1) / threads);
+    // Use data_ptr() + reinterpret_cast for HIP-native types (__half, hip_bfloat16)
+    // that don't have Tensor::data<T>() instantiations in the core library.
     hipLaunchKernelGGL(advanced_index_gather_kernel_hip<T>,
         dim3(blocks), dim3(threads), 0, stream,
-        src_contig.data<T>(),
-        result.data<T>(),
+        reinterpret_cast<const T*>(src_contig.data_ptr()),
+        reinterpret_cast<T*>(result.data_ptr()),
         d_idx_ptrs,
         prep.meta,
         prep.total);
@@ -3015,10 +3017,12 @@ auto launch_advanced_index_put_hip(
 
     int threads = 256;
     int blocks = static_cast<int>((prep.total + threads - 1) / threads);
+    // Use data_ptr() + reinterpret_cast for HIP-native types (__half, hip_bfloat16)
+    // that don't have Tensor::data<T>() instantiations in the core library.
     hipLaunchKernelGGL(advanced_index_put_kernel_hip<T>,
         dim3(blocks), dim3(threads), 0, stream,
-        result_contig.data<T>(),
-        values_contig.data<T>(),
+        reinterpret_cast<T*>(result_contig.data_ptr()),
+        reinterpret_cast<const T*>(values_contig.data_ptr()),
         d_idx_ptrs,
         prep.meta,
         prep.total);

@@ -19,6 +19,17 @@
 using namespace tenzor;
 using namespace tenzor::testing;
 
+// Macro (not a method) so GTEST_SKIP's internal `return` applies to the
+// TEST_P body rather than the helper method. Used by tests whose input
+// magnitudes exceed Float16's representable range (Float16 max ≈ 6.55e4,
+// min-normal ≈ 6.10e-5).
+#define SKIP_IF_FLOAT16_UNREPRESENTABLE(reason) \
+    do { \
+        if (dtype() == DType::Float16 || dtype() == DType::BFloat16) { \
+            GTEST_SKIP() << reason; \
+        } \
+    } while (0)
+
 class NumericalPrecisionMultiBackendDTypeTest : public MultiBackendDTypeTest {};
 
 // ============================================================================
@@ -63,6 +74,9 @@ TEST_P(NumericalPrecisionMultiBackendDTypeTest, SoftmaxLargePositiveValues) {
 }
 
 TEST_P(NumericalPrecisionMultiBackendDTypeTest, SoftmaxVeryLargeValues) {
+    // 1e30 overflows Float16/BFloat16 on conversion (becomes +Inf), so the
+    // test loses its meaning for those dtypes.
+    SKIP_IF_FLOAT16_UNREPRESENTABLE("1e30 exceeds Float16/BFloat16 range");
     // Even more extreme values
     auto data = zeros({1, 3}, DType::Float32, Device::cpu());
     auto* ptr = data.data<float>();
@@ -146,6 +160,10 @@ TEST_P(NumericalPrecisionMultiBackendDTypeTest, SoftmaxUniformInput) {
 // ============================================================================
 
 TEST_P(NumericalPrecisionMultiBackendDTypeTest, LogSmallPositiveValues) {
+    // 1e-30 underflows to zero in Float16/BFloat16 on conversion, and log(0)
+    // is -Inf which the test explicitly disallows — so the test can only be
+    // meaningful for Float32/Float64.
+    SKIP_IF_FLOAT16_UNREPRESENTABLE("1e-30 underflows in Float16/BFloat16");
     auto data = zeros({4}, DType::Float32, Device::cpu());
     auto* ptr = data.data<float>();
     ptr[0] = 1e-30f;
@@ -183,6 +201,8 @@ TEST_P(NumericalPrecisionMultiBackendDTypeTest, LogOfOne) {
 }
 
 TEST_P(NumericalPrecisionMultiBackendDTypeTest, LogOfLargeValues) {
+    // 1e10, 1e20, 1e30 all overflow Float16/BFloat16 on conversion.
+    SKIP_IF_FLOAT16_UNREPRESENTABLE("1e10..1e30 exceed Float16/BFloat16 range");
     auto data = zeros({3}, DType::Float32, Device::cpu());
     auto* ptr = data.data<float>();
     ptr[0] = 1e10f;

@@ -3038,6 +3038,10 @@ auto sign_kernel(const Tensor& input) -> Tensor {
 
 // Equal kernel - element-wise equality comparison
 auto eq_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    if (a.dtype() == DType::Float16 || a.dtype() == DType::BFloat16) {
+        return eq_kernel(a.to(DType::Float32), b.to(DType::Float32));
+    }
+
     detail::validate_elementwise(a, b);
 
     auto shape_a = a.shape();
@@ -3236,6 +3240,11 @@ auto eq_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 
 // Not equal kernel
 auto ne_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    // Upcast Float16/BFloat16 to Float32 — result is Bool so no downcast needed.
+    if (a.dtype() == DType::Float16 || a.dtype() == DType::BFloat16) {
+        return ne_kernel(a.to(DType::Float32), b.to(DType::Float32));
+    }
+
     detail::validate_elementwise(a, b);
 
     auto shape_a = a.shape();
@@ -3301,6 +3310,10 @@ auto ne_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 
 // Less than kernel
 auto lt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    if (a.dtype() == DType::Float16 || a.dtype() == DType::BFloat16) {
+        return lt_kernel(a.to(DType::Float32), b.to(DType::Float32));
+    }
+
     detail::validate_elementwise(a, b);
 
     auto shape_a = a.shape();
@@ -3437,6 +3450,10 @@ auto lt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 
 // Less than or equal kernel
 auto le_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    if (a.dtype() == DType::Float16 || a.dtype() == DType::BFloat16) {
+        return le_kernel(a.to(DType::Float32), b.to(DType::Float32));
+    }
+
     detail::validate_elementwise(a, b);
 
     auto shape_a = a.shape();
@@ -3813,6 +3830,12 @@ auto dot_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 
 // Trigonometric functions (SIMD + OpenMP optimized)
 auto sin_kernel(const Tensor& input) -> Tensor {
+    // Float16/BFloat16: upcast to Float32, compute, cast back.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto orig_dtype = input.dtype();
+        return sin_kernel(input.to(DType::Float32)).to(orig_dtype);
+    }
+
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
     int64_t n = input.numel();
@@ -3849,6 +3872,12 @@ auto sin_kernel(const Tensor& input) -> Tensor {
 }
 
 auto cos_kernel(const Tensor& input) -> Tensor {
+    // Float16/BFloat16: upcast to Float32, compute, cast back.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto orig_dtype = input.dtype();
+        return cos_kernel(input.to(DType::Float32)).to(orig_dtype);
+    }
+
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
     int64_t n = input.numel();
@@ -4532,10 +4561,24 @@ auto unary_bool_kernel(const Tensor& input, F32Fn f32_fn, F64Fn f64_fn,
     return result;
 }
 
-// Helper: binary element-wise op with broadcast support
+// Helper: binary element-wise op with broadcast support.
+//
+// Float16/BFloat16 inputs are transparently upcast to Float32, computed, and
+// the result cast back to the original dtype. This keeps the math kernels
+// using std::atan2/std::fmod/... which are only defined for native float and
+// double — and matches the accuracy strategy used by the normalization layers
+// (compute in FP32 for numerical stability).
 template<typename F32Fn, typename F64Fn>
 auto binary_math_kernel(const Tensor& a, const Tensor& b, F32Fn f32_fn, F64Fn f64_fn,
                         const char* op_name) -> Tensor {
+    if (a.dtype() == DType::Float16 || a.dtype() == DType::BFloat16) {
+        auto orig_dtype = a.dtype();
+        auto a_f32 = a.to(DType::Float32);
+        auto b_f32 = b.to(DType::Float32);
+        auto result_f32 = binary_math_kernel(a_f32, b_f32, f32_fn, f64_fn, op_name);
+        return result_f32.to(orig_dtype);
+    }
+
     detail::validate_elementwise(a, b);
     auto shape_a = a.shape();
     auto shape_b = b.shape();
@@ -4677,6 +4720,17 @@ auto lerp_kernel(std::span<const Tensor> inputs) -> Tensor {
     const auto& start = inputs[0];
     const auto& end = inputs[1];
     const auto& weight = inputs[2];
+
+    // Upcast Float16/BFloat16 to Float32 for numerical stability.
+    if (start.dtype() == DType::Float16 || start.dtype() == DType::BFloat16) {
+        auto orig_dtype = start.dtype();
+        Tensor start_f32 = start.to(DType::Float32);
+        Tensor end_f32 = end.to(DType::Float32);
+        Tensor weight_f32 = weight.to(DType::Float32);
+        std::vector<Tensor> upcast_inputs = {start_f32, end_f32, weight_f32};
+        Tensor result_f32 = lerp_kernel(upcast_inputs);
+        return result_f32.to(orig_dtype);
+    }
 
     auto shape_vec = std::vector<int64_t>(start.shape().begin(), start.shape().end());
     Tensor result(shape_vec, start.dtype(), start.device());
@@ -4928,6 +4982,12 @@ auto angle_kernel(const Tensor& input) -> Tensor {
         for (int64_t i = 0; i < n; ++i) out[i] = std::arg(in[i]);
         return result;
     }
+    // Float16/BFloat16: compute in Float32 and cast back.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto orig_dtype = input.dtype();
+        Tensor result_f32 = angle_kernel(input.to(DType::Float32));
+        return result_f32.to(orig_dtype);
+    }
     // For real dtypes, angle is 0 for positive, pi for negative
     return TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "angle", [&]() -> Tensor {
         Tensor result(shape_vec, input.dtype(), input.device());
@@ -4946,6 +5006,12 @@ auto polar_kernel(const Tensor& abs_t, const Tensor& angle_t) -> Tensor {
     }
     auto shape_vec = std::vector<int64_t>(abs_t.shape().begin(), abs_t.shape().end());
     int64_t n = abs_t.numel();
+
+    // Float16/BFloat16: upcast to Float32, compute (yielding Complex64), return.
+    // (polar() has no "complex_half" output dtype in the system.)
+    if (abs_t.dtype() == DType::Float16 || abs_t.dtype() == DType::BFloat16) {
+        return polar_kernel(abs_t.to(DType::Float32), angle_t.to(DType::Float32));
+    }
 
     return TENZOR_DISPATCH_FLOATING_TYPES(abs_t.dtype(), "polar", [&]() -> Tensor {
         using complex_t = std::complex<scalar_t>;
@@ -5317,6 +5383,17 @@ auto betainc_kernel(std::span<const Tensor> inputs) -> Tensor {
         }
         return front * f;
     };
+
+    // Float16/BFloat16: upcast inputs to Float32, compute, cast result back.
+    if (a_t.dtype() == DType::Float16 || a_t.dtype() == DType::BFloat16) {
+        auto orig_dtype = a_t.dtype();
+        std::vector<Tensor> upcast = {
+            a_t.to(DType::Float32),
+            b_t.to(DType::Float32),
+            x_t.to(DType::Float32),
+        };
+        return betainc_kernel(upcast).to(orig_dtype);
+    }
 
     // Element-wise ternary operation
     auto out_shape = a_t.shape();

@@ -299,8 +299,8 @@ TEST_P(FlattenMultiDTypeTest, PixelShuffleGradientFlow) {
     Variable input = createInput({1, 8, 4, 4}, true);
     auto output = ps.forward(input);
 
-    auto loss = tenzor::sum(output.tensor());
-    auto loss_var = Variable(loss, true);
+    // Use the autograd-aware sum so backward reaches `input`.
+    auto loss_var = tenzor::sum(output);
     loss_var.backward();
 
     ASSERT_TRUE(input.grad().has_value());
@@ -328,8 +328,8 @@ TEST_P(FlattenMultiDTypeTest, PixelUnshuffleGradientFlow) {
     Variable input = createInput({1, 2, 8, 8}, true);
     auto output = pus.forward(input);
 
-    auto loss = tenzor::sum(output.tensor());
-    auto loss_var = Variable(loss, true);
+    // Use the autograd-aware sum so backward reaches `input`.
+    auto loss_var = tenzor::sum(output);
     loss_var.backward();
 
     ASSERT_TRUE(input.grad().has_value());

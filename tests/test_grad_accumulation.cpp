@@ -67,15 +67,21 @@ TEST_P(GradAccumulationTest, ShouldSync) {
     auto optimizer = makeOptimizer(param);
     nn::utils::GradientAccumulator accum(*optimizer, kAccumulationSteps);
 
-    // During accumulation, should_sync() should return false
-    for (int64_t i = 0; i < kAccumulationSteps - 1; ++i) {
+    // During accumulation (steps 1 .. N-2, exclusive of the boundary),
+    // should_sync() should return false. The Nth step (step N-1 when
+    // zero-indexed through current_step_) IS the boundary where
+    // should_sync() flips to true; the loop therefore only covers the
+    // earlier non-boundary steps.
+    for (int64_t i = 0; i < kAccumulationSteps - 2; ++i) {
         accum.step();
         EXPECT_FALSE(accum.should_sync())
             << "should_sync() should be false during accumulation at step " << i;
     }
 
-    // At the accumulation boundary, should_sync() should return true
-    // (checked before step triggers the optimizer update)
+    // Take the step that reaches the boundary. After this, current_step_ ==
+    // kAccumulationSteps - 1 and should_sync() returns true (the next
+    // backward pass is the sync step).
+    accum.step();
     EXPECT_TRUE(accum.should_sync())
         << "should_sync() should be true at the accumulation boundary";
 }

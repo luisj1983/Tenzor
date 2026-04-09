@@ -15,13 +15,19 @@
 using namespace tenzor;
 using namespace tenzor::testing;
 
+// Macro (not a method) so that GTEST_SKIP's internal `return`
+// statement returns from the TEST_P body rather than from a helper
+// method — otherwise the test continues and fails on the first op
+// that doesn't support Float16.
+#define skipIfHalf() \
+    do { \
+        if (dtype() == DType::Float16 || dtype() == DType::BFloat16) { \
+            GTEST_SKIP() << "RNN cells require higher precision than Float16"; \
+        } \
+    } while (0)
+
 class RNNCellsDispatchMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
-    void skipIfHalf() {
-        if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
-            GTEST_SKIP() << "RNN cells require higher precision than Float16";
-        }
-    }
 };
 
 // ============================================================================
@@ -143,7 +149,10 @@ TEST_P(RNNCellsDispatchMultiDTypeTest, GRUMultiLayerForward) {
 
 TEST_P(RNNCellsDispatchMultiDTypeTest, BiLSTMForward) {
     skipIfHalf();
-    nn::LSTM bilstm(10, 20, 1, true, true);  // bidirectional=true
+    // Positional args: (input_size, hidden_size, num_layers, bias,
+    //                   batch_first, dropout, bidirectional)
+    nn::LSTM bilstm(10, 20, 1, /*bias=*/true, /*batch_first=*/false,
+                    /*dropout=*/0.0, /*bidirectional=*/true);
     convert_model(bilstm);
 
     auto input = createInput({5, 4, 10}, false);

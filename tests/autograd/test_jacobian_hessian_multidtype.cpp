@@ -18,13 +18,19 @@
 using namespace tenzor;
 using namespace tenzor::testing;
 
+// Macro (not a method) so that GTEST_SKIP's internal `return`
+// statement returns from the TEST_P body rather than from a helper
+// method — otherwise the test continues and fails on the first op
+// that doesn't support Float16.
+#define skipIfHalf() \
+    do { \
+        if (dtype() == DType::Float16 || dtype() == DType::BFloat16) { \
+            GTEST_SKIP() << "Jacobian/Hessian requires higher precision"; \
+        } \
+    } while (0)
+
 class JacobianHessianMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
-    void skipIfHalf() {
-        if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
-            GTEST_SKIP() << "Jacobian/Hessian requires higher precision";
-        }
-    }
 };
 
 TEST_P(JacobianHessianMultiDTypeTest, JacobianIdentity) {

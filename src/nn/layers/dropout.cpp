@@ -435,21 +435,23 @@ auto VariationalDropout::forward_impl(const Variable& input) -> Variable {
             mask_shape = shape_vec;
         }
 
-        // Generate Bernoulli mask: 1 with probability (1-p), 0 with probability p
-        auto rand_vals = rand(mask_shape, input.tensor().dtype(), input.tensor().device());
-        auto threshold = full(mask_shape, static_cast<float>(1.0 - p_),
-                            input.tensor().dtype(), input.tensor().device());
-        // mask = (rand >= p) ? 1 : 0 — implemented as rand < (1-p)
-        // Use comparison: values < threshold get 1.0, else 0.0
-        mask_ = zeros(mask_shape, input.tensor().dtype(), input.tensor().device());
+        // Generate Bernoulli mask in Float32 regardless of the parameter dtype,
+        // then cast to the target dtype. This keeps the loop using a concrete
+        // element type that `data<float>()` can read for every input dtype
+        // (Float16/BFloat16/Float32/Float64).
+        const auto target_dtype = input.tensor().dtype();
+        const auto target_device = input.tensor().device();
+        auto rand_vals = rand(mask_shape, DType::Float32, target_device);
+        auto mask_f32 = zeros(mask_shape, DType::Float32, target_device);
         auto rand_data = rand_vals.data<float>();
-        auto mask_data = mask_.data<float>();
+        auto mask_data = mask_f32.data<float>();
         int64_t mask_numel = 1;
         for (auto d : mask_shape) mask_numel *= d;
-        float thresh = static_cast<float>(1.0 - p_);
+        const float thresh = static_cast<float>(1.0 - p_);
         for (int64_t i = 0; i < mask_numel; ++i) {
             mask_data[i] = (rand_data[i] < thresh) ? 1.0f : 0.0f;
         }
+        mask_ = (target_dtype == DType::Float32) ? mask_f32 : mask_f32.to(target_dtype);
 
         mask_valid_ = true;
     }
