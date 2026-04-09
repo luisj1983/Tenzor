@@ -418,9 +418,11 @@ TEST_F(GradientCheckpointTest, CheckpointStatsAccumulation) {
 
 int main(int argc, char** argv) {
     // Initialize Tenzor library (loads backends and registers operations)
-    tenzor::initialize();
 
     ::testing::InitGoogleTest(&argc, argv);
+    if (!::testing::GTEST_FLAG(list_tests)) {
+        tenzor::initialize();
+    }
     int result = RUN_ALL_TESTS();
 
     // Cleanup

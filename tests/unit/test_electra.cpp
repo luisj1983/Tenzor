@@ -516,6 +516,8 @@ TEST_F(ElectraTest, DISABLED_BenchmarkInference) {
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
-    tenzor::initialize();  // Initialize Tenzor library and backends
+    if (!::testing::GTEST_FLAG(list_tests)) {
+        tenzor::initialize();  // Initialize Tenzor library and backends
+    }
     return RUN_ALL_TESTS();
 }

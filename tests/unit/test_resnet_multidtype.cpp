@@ -848,7 +848,9 @@ TEST_P(ResNetMultiDTypeTest, DeepNetworkGradientFlow) {
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(ResNetMultiDTypeTest);
 
 int main(int argc, char** argv) {
-    tenzor::initialize();
     ::testing::InitGoogleTest(&argc, argv);
+    if (!::testing::GTEST_FLAG(list_tests)) {
+        tenzor::initialize();
+    }
     return RUN_ALL_TESTS();
 }

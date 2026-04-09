@@ -134,7 +134,9 @@ int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
 
     try {
-        tenzor::initialize();
+        if (!::testing::GTEST_FLAG(list_tests)) {
+            tenzor::initialize();
+        }
     } catch (const std::exception& e) {
         std::cerr << "Failed to initialize Tenzor: " << e.what() << std::endl;
         return 1;

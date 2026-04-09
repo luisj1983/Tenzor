@@ -873,13 +873,15 @@ TEST_F(DataParallelSingleGPUTest, Stress_VaryingBatchSizes) {
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
+    if (!::testing::GTEST_FLAG(list_tests)) {
+        tenzor::initialize();
+    }
 
     std::cout << "========================================\n";
     std::cout << "DataParallel Single-GPU Test Suite\n";
     std::cout << "========================================\n";
 
     // Initialize Tenzor library before checking CUDA availability
-    tenzor::initialize();
 
     bool cuda_available = DataParallelSingleGPUTest::is_cuda_available();
     int device_count = DataParallelSingleGPUTest::get_device_count();

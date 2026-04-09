@@ -654,7 +654,9 @@ INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(YOLOMultiDTypeTest);
 // ============================================================================
 
 int main(int argc, char** argv) {
-    tenzor::initialize();  // Initialize Tenzor library and backends
     ::testing::InitGoogleTest(&argc, argv);
+    if (!::testing::GTEST_FLAG(list_tests)) {
+        tenzor::initialize();
+    }
     return RUN_ALL_TESTS();
 }

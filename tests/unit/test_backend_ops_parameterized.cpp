@@ -77,36 +77,17 @@ bool is_backend_available(Device::Type type) {
     }
 }
 
-// Get all available backends for testing
+// Get all possible backends for parameterized testing.
+// Actual availability is checked in SetUp() after initialization,
+// not here — this runs at static init time (INSTANTIATE_TEST_SUITE_P)
+// and must not trigger heavy GPU backend initialization.
 std::vector<BackendConfig> get_available_backends() {
-    // Initialize Tenzor first so backends are loaded
-    static bool initialized = false;
-    if (!initialized) {
-        tenzor::initialize();
-        initialized = true;
-    }
-
-    std::vector<BackendConfig> configs;
-
-    // Always include CPU
-    configs.push_back({"CPU", Device::Type::CPU, 0, true});
-
-    // Check CUDA
-    if (is_backend_available(Device::Type::CUDA)) {
-        configs.push_back({"CUDA", Device::Type::CUDA, 0, true});
-    }
-
-    // Check OneAPI
-    if (is_backend_available(Device::Type::OneAPI)) {
-        configs.push_back({"OneAPI", Device::Type::OneAPI, 0, true});
-    }
-
-    // Check ROCm (if enabled)
-    if (is_backend_available(Device::Type::ROCm)) {
-        configs.push_back({"ROCm", Device::Type::ROCm, 0, true});
-    }
-
-    return configs;
+    return {
+        {"CPU",   Device::Type::CPU,   0, true},
+        {"CUDA",  Device::Type::CUDA,  0, true},
+        {"OneAPI", Device::Type::OneAPI, 0, true},
+        {"ROCm",  Device::Type::ROCm,  0, true},
+    };
 }
 
 // ============================================================================
@@ -127,7 +108,7 @@ protected:
         }
 
         // Skip if backend not available
-        if (!config_.is_available) {
+        if (!is_backend_available(config_.type)) {
             GTEST_SKIP() << config_.name << " backend not available";
         }
     }

@@ -554,14 +554,9 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Sub, cpu::sub_kernel);
     TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Mul, cpu::mul_kernel);
     TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Div, cpu::div_kernel);
-    TENZOR_REGISTER_BINARY_KERNEL(table, MatMul, cpu::matmul_kernel);
-    TENZOR_REGISTER_BINARY_KERNEL(table, Bmm, cpu::bmm_kernel);
-    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Dot, cpu::dot_kernel);
-
-    // Single-output registrations for optimized dispatch (no vector allocation)
-    // These avoid ~0.5-2us overhead per call from std::vector creation
     TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, MatMul, cpu::matmul_kernel);
     TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Bmm, cpu::bmm_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Dot, cpu::dot_kernel);
 
     // Inplace operations
     TENZOR_REGISTER_INPLACE_KERNEL(table, AddInplace, cpu::add_inplace_kernel);

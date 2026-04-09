@@ -45,7 +45,7 @@ protected:
             initialized = true;
         }
 
-        if (!config_.is_available) {
+        if (!is_backend_available(config_.type)) {
             GTEST_SKIP() << config_.name << " backend not available";
         }
     }

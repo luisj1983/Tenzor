@@ -252,9 +252,11 @@ TEST_F(CrossBackendTest, CPUToOneAPITransfer) {
 
 int main(int argc, char** argv) {
     // Initialize Tenzor library and load backends
-    tenzor::initialize();
 
     ::testing::InitGoogleTest(&argc, argv);
+    if (!::testing::GTEST_FLAG(list_tests)) {
+        tenzor::initialize();
+    }
 
     std::cout << "\n";
     std::cout << "========================================\n";

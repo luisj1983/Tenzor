@@ -123,7 +123,9 @@ TEST(SliceBackendParityTest, BoxAreaComputation) {
 }
 
 int main(int argc, char** argv) {
-    tenzor::initialize();
     ::testing::InitGoogleTest(&argc, argv);
+    if (!::testing::GTEST_FLAG(list_tests)) {
+        tenzor::initialize();
+    }
     return RUN_ALL_TESTS();
 }

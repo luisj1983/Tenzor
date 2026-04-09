@@ -74,35 +74,23 @@ inline bool is_backend_available(Device::Type type) {
 
 /**
  * @brief Get all available backends for testing
+ *
+ * Returns all possible backend configs without initializing the library.
+ * Actual availability is checked lazily in is_backend_available() during
+ * test SetUp(), so INSTANTIATE_TEST_SUITE_P (which runs at static init
+ * time, including during --gtest_list_tests) does not trigger heavy GPU
+ * backend initialization that can segfault under concurrent test discovery.
  */
 inline std::vector<BackendConfig> get_available_backends() {
-    static bool initialized = false;
-    if (!initialized) {
-        tenzor::initialize();
-        initialized = true;
-    }
-
-    std::vector<BackendConfig> configs;
-
-    // Always include CPU
-    configs.push_back({"CPU", Device::Type::CPU, 0, true});
-
-    // Check CUDA
-    if (is_backend_available(Device::Type::CUDA)) {
-        configs.push_back({"CUDA", Device::Type::CUDA, 0, true});
-    }
-
-    // Check OneAPI
-    if (is_backend_available(Device::Type::OneAPI)) {
-        configs.push_back({"OneAPI", Device::Type::OneAPI, 0, true});
-    }
-
-    // Check ROCm (opt-in via TENZOR_TEST_ROCM=1)
-    if (is_backend_available(Device::Type::ROCm)) {
-        configs.push_back({"ROCm", Device::Type::ROCm, 0, true});
-    }
-
-    return configs;
+    // Return all possible backends.  Tests should call
+    //   tenzor::initialize() in SetUp() and GTEST_SKIP() when a
+    //   backend is unavailable, rather than filtering here.
+    return {
+        {"CPU",   Device::Type::CPU,   0, true},
+        {"CUDA",  Device::Type::CUDA,  0, true},
+        {"OneAPI", Device::Type::OneAPI, 0, true},
+        {"ROCm",  Device::Type::ROCm,  0, true},
+    };
 }
 
 } // namespace tenzor::test
