@@ -17,6 +17,11 @@
 namespace tenzor {
 namespace cuda {
 
+// Forward declarations for activation kernels (defined in kernels/activations.cu)
+auto sigmoid_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+auto tanh_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+auto swish_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+
 // ============================================================================
 // FP16 Saturating Clamp Kernel
 // ============================================================================
@@ -962,9 +967,11 @@ auto cudnn_fused_conv2d_sigmoid_forward(
     int64_t groups,
     cudaStream_t stream
 ) -> Tensor {
-    return cudnn_fused_conv2d_activation_forward(
-        input, weight, bias, stride, padding, dilation, groups,
-        CUDNN_ACTIVATION_SIGMOID, 0.0, stream);
+    // cudnnConvolutionBiasActivationForward does not support SIGMOID on most
+    // GPU/cuDNN combos.  Compose conv2d + sigmoid instead.
+    Tensor result = cudnn_conv2d_forward(input, weight, bias, stride, padding,
+                                          dilation, groups, stream);
+    return sigmoid_kernel(result, stream);
 }
 
 auto cudnn_fused_conv2d_tanh_forward(
@@ -977,9 +984,11 @@ auto cudnn_fused_conv2d_tanh_forward(
     int64_t groups,
     cudaStream_t stream
 ) -> Tensor {
-    return cudnn_fused_conv2d_activation_forward(
-        input, weight, bias, stride, padding, dilation, groups,
-        CUDNN_ACTIVATION_TANH, 0.0, stream);
+    // cudnnConvolutionBiasActivationForward does not support TANH on most
+    // GPU/cuDNN combos.  Compose conv2d + tanh instead.
+    Tensor result = cudnn_conv2d_forward(input, weight, bias, stride, padding,
+                                          dilation, groups, stream);
+    return tanh_kernel(result, stream);
 }
 
 auto cudnn_fused_conv2d_swish_forward(
@@ -992,9 +1001,11 @@ auto cudnn_fused_conv2d_swish_forward(
     int64_t groups,
     cudaStream_t stream
 ) -> Tensor {
-    return cudnn_fused_conv2d_activation_forward(
-        input, weight, bias, stride, padding, dilation, groups,
-        CUDNN_ACTIVATION_SWISH, 1.0, stream);
+    // cudnnConvolutionBiasActivationForward does not support SWISH on most
+    // GPU/cuDNN combos.  Compose conv2d + swish instead.
+    Tensor result = cudnn_conv2d_forward(input, weight, bias, stride, padding,
+                                          dilation, groups, stream);
+    return swish_kernel(result, stream);
 }
 
 // ============================================================================

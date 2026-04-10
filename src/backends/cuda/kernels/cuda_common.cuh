@@ -119,10 +119,14 @@ static_assert(sizeof(int) == sizeof(int32_t),
 
 /**
  * @brief Saturating float-to-half conversion.
- * Clamps input to the valid FP16 range [-65504, 65504] before conversion,
- * preventing inf on overflow.
+ * Clamps finite input to the valid FP16 range [-65504, 65504] before
+ * conversion, preventing overflow.  NaN and Inf are preserved.
  */
 __device__ __forceinline__ __half float2half_sat(float x) {
+    // Preserve NaN and Inf (isinf/isnan would be destroyed by the clamp)
+    if (::isnan(x) || ::isinf(x)) {
+        return __float2half(x);
+    }
     constexpr float kHalfMax = 65504.0f;
     x = fminf(fmaxf(x, -kHalfMax), kHalfMax);
     return __float2half(x);

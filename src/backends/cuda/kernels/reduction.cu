@@ -1654,6 +1654,11 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
     auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
     stream = resolved_stream;
 
+    // Normalize negative dim (but INT64_MIN means full reduction)
+    if (dim < 0 && dim != INT64_MIN) {
+        dim += input.ndim();
+    }
+
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();
@@ -1775,6 +1780,11 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
 auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
     auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
     stream = resolved_stream;
+
+    // Normalize negative dim (but INT64_MIN means full reduction)
+    if (dim < 0 && dim != INT64_MIN) {
+        dim += input.ndim();
+    }
 
     const auto dtype = input.dtype();
     const auto& device = input.device();
@@ -4177,6 +4187,14 @@ __global__ void norm_along_dim_kernel(
 
 // Norm kernel implementation
 auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
+    // Float16/BFloat16: upcast to Float32, compute norm, downcast result
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        Tensor f32_input = input.to(DType::Float32);
+        Tensor f32_result = norm_kernel(f32_input, p, dim, keepdim, stream);
+        return f32_result.to(orig);
+    }
+
     auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
     stream = resolved_stream;
 

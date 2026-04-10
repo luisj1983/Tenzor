@@ -2001,6 +2001,11 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Ten
         // Create output tensor
         Tensor result({M, N}, a_contig.dtype(), a_contig.device());
 
+        // Handle zero-dimension case: return zero-filled tensor
+        if (M == 0 || N == 0 || K == 0) {
+            return result;
+        }
+
         // Dispatch based on dtype
         if (a_contig.dtype() == DType::Float32 && b_contig.dtype() == DType::Float32) {
             const float* a_data = a_contig.data<float>();

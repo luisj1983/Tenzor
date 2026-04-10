@@ -231,6 +231,7 @@ auto topk_kernel(const Tensor& input, int64_t k, int64_t dim, bool largest,
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     const auto& shape = input_cont.shape();
     const int64_t ndim = input.ndim();
+    if (dim < 0) dim += ndim;
     const int64_t dim_size = shape[dim];
     const auto dtype = input.dtype();
     const auto device = input.device();
@@ -269,6 +270,7 @@ auto topk_kernel(const Tensor& input, int64_t k, int64_t dim, bool largest,
         auto* input_ptr = reinterpret_cast<const T*>(input_cont.data_ptr());
         auto* values_ptr = reinterpret_cast<T*>(values.data_ptr());
         auto* indices_ptr = reinterpret_cast<int64_t*>(indices.data_ptr());
+
         topk_slice_kernel<T><<<num_slices, block_size, smem_size, stream>>>(
             input_ptr, values_ptr, indices_ptr,
             dim_size, k, inner_size, outer_stride, k_stride, largest);
@@ -876,6 +878,13 @@ auto unique_kernel(const Tensor& input, bool sorted_output, bool return_inverse,
             return unique_thrust<int32_t>(flat, sorted_output, return_inverse, return_counts, stream);
         case DType::Int64:
             return unique_thrust<int64_t>(flat, sorted_output, return_inverse, return_counts, stream);
+        case DType::Bool: {
+            // Bool -> Int32 for sort/unique, then cast back
+            Tensor flat_i32 = flat.to(DType::Int32);
+            auto [uniq, inv, cnt] = unique_thrust<int32_t>(flat_i32, sorted_output, return_inverse, return_counts, stream);
+            Tensor uniq_bool = uniq.to(DType::Bool);
+            return {uniq_bool, inv, cnt};
+        }
         default:
             throw std::runtime_error("unique CUDA: unsupported dtype");
     }

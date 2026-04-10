@@ -126,8 +126,10 @@ protected:
         EXPECT_EQ(values.shape()[0], 3);
         EXPECT_EQ(indices.shape()[0], 3);
 
-        auto vals = values.to(Device::cpu()).template data<T>();
-        auto idxs = indices.to(Device::cpu()).template data<int64_t>();
+        auto vals_cpu = values.to(Device::cpu());
+        auto idxs_cpu = indices.to(Device::cpu());
+        auto vals = vals_cpu.template data<T>();
+        auto idxs = idxs_cpu.template data<int64_t>();
 
         TypedVerifier<T>::expectEq(vals[0], static_cast<T>(5), "TopK value 0");
         TypedVerifier<T>::expectEq(vals[1], static_cast<T>(4), "TopK value 1");
@@ -145,7 +147,8 @@ protected:
 
         auto [values, indices] = topk(t, 2, 0, false, true);
 
-        auto vals = values.to(Device::cpu()).template data<T>();
+        auto vals_cpu = values.to(Device::cpu());
+        auto vals = vals_cpu.template data<T>();
         TypedVerifier<T>::expectEq(vals[0], static_cast<T>(1), "TopK smallest value 0");
         TypedVerifier<T>::expectEq(vals[1], static_cast<T>(2), "TopK smallest value 1");
     }

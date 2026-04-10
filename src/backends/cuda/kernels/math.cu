@@ -478,6 +478,10 @@ __global__ void div_kernel_device(const T* a, const T* b, T* c, int64_t n) {
 // range as Float32 so overflow is rare, but accumulation across deep nets or
 // large reductions can exceed the finite range.
 __device__ __forceinline__ __nv_bfloat16 float2bfloat16_sat(float x) {
+    // Preserve NaN and Inf through conversion
+    if (::isnan(x) || ::isinf(x)) {
+        return __float2bfloat16(x);
+    }
     constexpr float kBF16Max = 3.3895313892515355e+38f;  // 0x7F7F in BF16
     x = fminf(fmaxf(x, -kBF16Max), kBF16Max);
     return __float2bfloat16(x);
@@ -2027,6 +2031,13 @@ __global__ void reciprocal_kernel_impl(const T* input, T* output, int64_t n) {
 // Launcher functions for trigonometric operations
 #define DEFINE_TRIG_KERNEL(name) \
 auto name##_kernel(const Tensor& input, cudaStream_t stream) -> Tensor { \
+    /* Float16/BFloat16: upcast to Float32, compute, downcast */ \
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) { \
+        DType orig = input.dtype(); \
+        Tensor f32_input = input.to(DType::Float32); \
+        Tensor f32_result = name##_kernel(f32_input, stream); \
+        return f32_result.to(orig); \
+    } \
     int64_t n = input.numel(); \
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end()); \
     Tensor result(shape, input.dtype(), input.device()); \
@@ -2037,7 +2048,7 @@ auto name##_kernel(const Tensor& input, cudaStream_t stream) -> Tensor { \
     } else if (input.dtype() == DType::Float64) { \
         name##_kernel_impl<<<grid, block, 0, stream>>>(input.data<double>(), result.data<double>(), n); \
     } else { \
-        throw std::runtime_error(#name " operation only supports Float32 and Float64 dtypes"); \
+        throw std::runtime_error(#name " operation only supports floating point dtypes"); \
     } \
     CUDA_CHECK(cudaGetLastError()); \
     return result; \
@@ -2504,7 +2515,7 @@ auto expand_kernel(const Tensor& input, const std::vector<int64_t>& shape, void*
     for (size_t i = 0; i < input_shape_vec.size(); ++i) {
         int64_t output_dim = i + input_dim_offset;
         if (input_shape_vec[i] != 1 && input_shape_vec[i] != shape[output_dim]) {
-            throw std::invalid_argument(
+            throw std::runtime_error(
                 "Cannot expand dimension from size " + std::to_string(input_shape_vec[i]) +
                 " to " + std::to_string(shape[output_dim]));
         }
@@ -4697,23 +4708,44 @@ static std::pair<cudaStream_t, cuda::StreamGuard> get_dispatch_stream(
     return {guard.get(), std::move(guard)};
 }
 
+// Helper: upcast FP8 inputs to Float32, perform op, downcast result
+static bool is_fp8(DType dt) {
+    return dt == DType::FP8_E4M3 || dt == DType::FP8_E5M2;
+}
+
 Tensor add_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
     auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
+    if (is_fp8(inputs[0].dtype())) {
+        DType orig = inputs[0].dtype();
+        return add_kernel(inputs[0].to(DType::Float32), inputs[1].to(DType::Float32), stream).to(orig);
+    }
     return add_kernel(inputs[0], inputs[1], stream);
 }
 
 Tensor sub_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
     auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
+    if (is_fp8(inputs[0].dtype())) {
+        DType orig = inputs[0].dtype();
+        return sub_kernel(inputs[0].to(DType::Float32), inputs[1].to(DType::Float32), stream).to(orig);
+    }
     return sub_kernel(inputs[0], inputs[1], stream);
 }
 
 Tensor mul_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
     auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
+    if (is_fp8(inputs[0].dtype())) {
+        DType orig = inputs[0].dtype();
+        return mul_kernel(inputs[0].to(DType::Float32), inputs[1].to(DType::Float32), stream).to(orig);
+    }
     return mul_kernel(inputs[0], inputs[1], stream);
 }
 
 Tensor div_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
     auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
+    if (is_fp8(inputs[0].dtype())) {
+        DType orig = inputs[0].dtype();
+        return div_kernel(inputs[0].to(DType::Float32), inputs[1].to(DType::Float32), stream).to(orig);
+    }
     return div_kernel(inputs[0], inputs[1], stream);
 }
 
@@ -5059,6 +5091,14 @@ auto cuda_cast_kernel(const Tensor& input, DType target_dtype, cudaStream_t stre
             case DType::Bool:
                 cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<bool>(), n); break;
                 CUDA_CHECK(cudaGetLastError());
+            case DType::FP8_E4M3:
+            case DType::FP8_E5M2: {
+                // FP8 conversion via CPU (host-only bit manipulation)
+                Tensor cpu_input = input.to(Device::cpu());
+                Tensor cpu_result = cpu_input.to(target_dtype);
+                result = cpu_result.to(input.device());
+                break;
+            }
             default:
                 throw std::runtime_error("cast: unsupported target dtype for Float16 source");
         }
@@ -5108,12 +5148,34 @@ auto cuda_cast_kernel(const Tensor& input, DType target_dtype, cudaStream_t stre
             case DType::Bool:
                 cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<bool>(), n); break;
                 CUDA_CHECK(cudaGetLastError());
+            case DType::FP8_E4M3:
+            case DType::FP8_E5M2: {
+                // FP8 conversion via CPU (host-only bit manipulation)
+                Tensor cpu_input = input.to(Device::cpu());
+                Tensor cpu_result = cpu_input.to(target_dtype);
+                result = cpu_result.to(input.device());
+                break;
+            }
             default:
                 throw std::runtime_error("cast: unsupported target dtype for BFloat16 source");
         }
     }
+    // ---- FP8 source or target: use CPU roundtrip ----
+    // FP8 conversion operators are host-only (complex bit manipulation).
+    // Move to CPU, convert, move back.  FP8 tensors are typically small
+    // (quantized weights/activations) so the overhead is negligible.
+    else if (src_dtype == DType::FP8_E4M3 || src_dtype == DType::FP8_E5M2) {
+        Tensor cpu_input = input.to(Device::cpu());
+        Tensor cpu_result = cpu_input.to(target_dtype);
+        result = cpu_result.to(input.device());
+    }
     // ---- Standard source types (non-half) ----
     else {
+        if (target_dtype == DType::FP8_E4M3 || target_dtype == DType::FP8_E5M2) {
+            Tensor cpu_input = input.to(Device::cpu());
+            Tensor cpu_result = cpu_input.to(target_dtype);
+            result = cpu_result.to(input.device());
+        } else {
         switch (src_dtype) {
             case DType::Float32:
                 result = cast_from_standard<float>(input, target_dtype, n, grid, block, stream); break;
@@ -5139,6 +5201,7 @@ auto cuda_cast_kernel(const Tensor& input, DType target_dtype, cudaStream_t stre
                 result = cast_from_standard<bool>(input, target_dtype, n, grid, block, stream); break;
             default:
                 throw std::runtime_error("cast: unsupported source dtype");
+        }
         }
     }
 
@@ -5754,28 +5817,34 @@ auto lerp_kernel(const Tensor& start, const Tensor& end, const Tensor& weight, c
     if (start.dtype() != end.dtype() || start.dtype() != weight.dtype())
         throw std::runtime_error("lerp: all tensors must have the same dtype");
     int64_t n = start.numel();
+    // Broadcast weight to match start/end shape if needed
+    Tensor w_bcast = weight;
+    if (weight.numel() != n) {
+        std::vector<int64_t> target_shape(start.shape().begin(), start.shape().end());
+        w_bcast = weight.expand(target_shape).contiguous();
+    }
     std::vector<int64_t> shape(start.shape().begin(), start.shape().end());
     Tensor result(shape, start.dtype(), start.device());
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
     if (start.dtype() == DType::Float32) {
-        lerp_kernel_f32<<<grid, block, 0, stream>>>(start.data<float>(), end.data<float>(), weight.data<float>(), result.data<float>(), n);
+        lerp_kernel_f32<<<grid, block, 0, stream>>>(start.data<float>(), end.data<float>(), w_bcast.data<float>(), result.data<float>(), n);
         CUDA_CHECK(cudaGetLastError());
     } else if (start.dtype() == DType::Float64) {
-        lerp_kernel_f64<<<grid, block, 0, stream>>>(start.data<double>(), end.data<double>(), weight.data<double>(), result.data<double>(), n);
+        lerp_kernel_f64<<<grid, block, 0, stream>>>(start.data<double>(), end.data<double>(), w_bcast.data<double>(), result.data<double>(), n);
         CUDA_CHECK(cudaGetLastError());
     } else if (start.dtype() == DType::Float16) {
         lerp_kernel_f16<<<grid, block, 0, stream>>>(
             reinterpret_cast<const __half*>(start.data<Float16>()),
             reinterpret_cast<const __half*>(end.data<Float16>()),
-            reinterpret_cast<const __half*>(weight.data<Float16>()),
+            reinterpret_cast<const __half*>(w_bcast.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
         CUDA_CHECK(cudaGetLastError());
     } else if (start.dtype() == DType::BFloat16) {
         lerp_kernel_bf16<<<grid, block, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(start.data<BFloat16>()),
             reinterpret_cast<const __nv_bfloat16*>(end.data<BFloat16>()),
-            reinterpret_cast<const __nv_bfloat16*>(weight.data<BFloat16>()),
+            reinterpret_cast<const __nv_bfloat16*>(w_bcast.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
         CUDA_CHECK(cudaGetLastError());
     } else {
@@ -6353,6 +6422,15 @@ auto angle_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
             input.data<double>(), result.data<double>(), n);
         CUDA_CHECK(cudaGetLastError());
         return result;
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        // Upcast to Float32, compute angle, downcast
+        DType orig = input.dtype();
+        Tensor f32_input = input.to(DType::Float32);
+        Tensor result(shape, DType::Float32, input.device());
+        angle_kernel_f32<<<grid, block, 0, stream>>>(
+            f32_input.data<float>(), result.data<float>(), n);
+        CUDA_CHECK(cudaGetLastError());
+        return result.to(orig);
     }
     throw std::runtime_error("angle: unsupported dtype");
 }
@@ -6406,8 +6484,18 @@ auto polar_kernel(const Tensor& abs_t, const Tensor& angle_t, cudaStream_t strea
             reinterpret_cast<double*>(result.data_ptr()), n);
         CUDA_CHECK(cudaGetLastError());
         return result;
+    } else if (abs_t.dtype() == DType::Float16 || abs_t.dtype() == DType::BFloat16) {
+        // Upcast to Float32, compute polar, return Complex64
+        Tensor abs_f32 = abs_t.to(DType::Float32);
+        Tensor angle_f32 = angle_t.to(DType::Float32);
+        Tensor result(shape, DType::Complex64, abs_t.device());
+        polar_kernel_f32<<<grid, block, 0, stream>>>(
+            abs_f32.data<float>(), angle_f32.data<float>(),
+            reinterpret_cast<float*>(result.data_ptr()), n);
+        CUDA_CHECK(cudaGetLastError());
+        return result;
     }
-    throw std::runtime_error("polar: only Float32 and Float64 inputs are supported");
+    throw std::runtime_error("polar: only Float32, Float64, Float16, and BFloat16 inputs are supported");
 }
 
 // Complex number dispatch wrappers

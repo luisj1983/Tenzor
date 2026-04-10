@@ -25,32 +25,25 @@ auto clip_grad_norm_(std::vector<std::shared_ptr<Variable>> parameters,
 
     double total_norm = 0.0;
 
+    // Helper to read a scalar norm tensor (may be on GPU, may be F16/BF16)
+    auto read_scalar = [](const Tensor& t) -> double {
+        Tensor cpu_f32 = t.to(DType::Float32).to(Device::cpu());
+        return static_cast<double>(cpu_f32.data<float>()[0]);
+    };
+
     if (std::isinf(norm_type)) {
         // Max norm: find the maximum absolute value across all gradients
         for (auto& g : grads) {
             auto g_abs = tenzor::abs(g);
-            // Flatten and get max
             auto g_max = tenzor::norm(g_abs, std::numeric_limits<float>::infinity());
-            // Convert scalar tensor to double
-            float val = 0.0f;
-            if (g_max.dtype() == DType::Float32) {
-                val = g_max.data<float>()[0];
-            } else if (g_max.dtype() == DType::Float64) {
-                val = static_cast<float>(g_max.data<double>()[0]);
-            }
-            total_norm = std::max(total_norm, static_cast<double>(val));
+            total_norm = std::max(total_norm, read_scalar(g_max));
         }
     } else {
         // p-norm: compute (sum(|g|^p))^(1/p) across all parameters
         for (auto& g : grads) {
             auto g_norm = tenzor::norm(g, static_cast<float>(norm_type));
-            float val = 0.0f;
-            if (g_norm.dtype() == DType::Float32) {
-                val = g_norm.data<float>()[0];
-            } else if (g_norm.dtype() == DType::Float64) {
-                val = static_cast<float>(g_norm.data<double>()[0]);
-            }
-            total_norm += std::pow(static_cast<double>(val), norm_type);
+            double val = read_scalar(g_norm);
+            total_norm += std::pow(val, norm_type);
         }
         total_norm = std::pow(total_norm, 1.0 / norm_type);
     }

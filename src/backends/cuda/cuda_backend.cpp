@@ -468,10 +468,11 @@ public:
                     return;
                 }
             }
-            // Use async transfer for H2D and D2D — host doesn't need to wait
-            // for the copy to complete, GPU-side ordering is guaranteed by stream.
-            cudaStream_t stream = cudaStreamPerThread;  // per-thread default stream
-            err = cudaMemcpyAsync(dst, src, bytes, cuda_kind, stream);
+            // Use async transfer for H2D and D2D on the default (legacy) stream.
+            // This ensures ordering with kernel launches which also default to
+            // stream 0, preventing races where a kernel reads input data before
+            // the H2D copy completes.
+            err = cudaMemcpyAsync(dst, src, bytes, cuda_kind, nullptr);
         } else {
             // D2H and H2H: use synchronous copy since host needs data immediately
             err = cudaMemcpy(dst, src, bytes, cuda_kind);

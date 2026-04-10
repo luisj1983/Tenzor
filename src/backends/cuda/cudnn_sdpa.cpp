@@ -347,9 +347,22 @@ auto cudnn_sdpa_forward(
     float scale
 ) -> Tensor {
     // FP32/BF16 bypass: route to custom flash attention kernel
-    // BF16 is handled by fused_attention_cuda via upcast to FP32
+    // fused_attention_cuda expects 3D (batch*heads, seq, head_dim), so reshape if 4D
     if (Q.dtype() == DType::Float32 || Q.dtype() == DType::BFloat16) {
-        auto [output, lse] = fused_attention_cuda(Q, K, V, scale);
+        auto q_shape = Q.shape();
+        bool is_4d = (q_shape.size() == 4);
+        Tensor Q3 = Q, K3 = K, V3 = V;
+        if (is_4d) {
+            int64_t b = q_shape[0], h = q_shape[1], sq = q_shape[2], d = q_shape[3];
+            int64_t sk = K.shape()[2];
+            Q3 = Q.reshape({b * h, sq, d});
+            K3 = K.reshape({b * h, sk, d});
+            V3 = V.reshape({b * h, sk, d});
+        }
+        auto [output, lse] = fused_attention_cuda(Q3, K3, V3, scale);
+        if (is_4d) {
+            output = output.reshape({q_shape[0], q_shape[1], q_shape[2], q_shape[3]});
+        }
         return output;
     }
 

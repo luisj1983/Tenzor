@@ -25,6 +25,7 @@
 #include <cuda_runtime.h>
 #include <cstdlib>
 #include <limits>
+#include <sstream>
 #include <tuple>
 
 namespace tenzor {
@@ -2406,8 +2407,21 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return cuda::trace_kernel(inputs[0], get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Flip, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
-        return cuda::flip_kernel(inputs[0], dim, get_cuda_stream(attrs));
+        // Dims is a comma-separated string of dimensions to flip
+        auto dims_sv = attrs.get_string(AttrKey::Dims, "0");
+        std::string dims_str(dims_sv);
+        auto stream = get_cuda_stream(attrs);
+        Tensor result = inputs[0];
+        // Parse comma-separated dims and flip each
+        std::istringstream ss(dims_str);
+        std::string token;
+        while (std::getline(ss, token, ',')) {
+            if (!token.empty()) {
+                int64_t dim = std::stoll(token);
+                result = cuda::flip_kernel(result, dim, stream);
+            }
+        }
+        return result;
     });
 
     // =========================================================================

@@ -434,14 +434,14 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                     // re-entrant locking (has_grad/set_grad also lock grad_mutex_
                     // when thread_safe_ is true, causing self-deadlock).
                     auto accumulate_unlocked = [&]() {
+                        // Cast gradient to match the variable's dtype (e.g., F16 params
+                        // may receive F32 gradients from ops that upcast for precision)
+                        DType var_dtype = var.tensor().dtype();
+                        if (grad_to_apply.dtype() != var_dtype) {
+                            grad_to_apply = grad_to_apply.to(var_dtype);
+                        }
                         if (var.impl_->grad_.has_value()) {
-                            auto existing_grad = var.impl_->grad_.value();
-                            if (grad_to_apply.dtype() != existing_grad.dtype()) {
-                                DType target = promote_types(grad_to_apply.dtype(), existing_grad.dtype());
-                                existing_grad = existing_grad.to(target);
-                                grad_to_apply = grad_to_apply.to(target);
-                            }
-                            var.impl_->grad_ = existing_grad + grad_to_apply;
+                            var.impl_->grad_ = var.impl_->grad_.value() + grad_to_apply;
                         } else {
                             var.impl_->grad_ = grad_to_apply;
                         }

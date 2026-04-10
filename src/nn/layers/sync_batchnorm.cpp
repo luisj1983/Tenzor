@@ -231,7 +231,7 @@ auto SyncBatchNorm::forward_impl(const Variable& input) -> Variable {
         auto local_sum_sq = sum(sum(sum(x_sq, 3, false), 2, false), 0, false);
 
         // Pack [local_sum, local_sum_sq, count] for a single all-reduce
-        auto count_tensor = full({1}, static_cast<float>(local_count), DType::Float32);
+        auto count_tensor = full({1}, static_cast<float>(local_count), DType::Float32).to(x.device());
         auto packed = cat({local_sum, local_sum_sq, count_tensor}, 0);
 
         // All-reduce across ranks (SUM)
@@ -243,7 +243,8 @@ auto SyncBatchNorm::forward_impl(const Variable& input) -> Variable {
         auto global_sum = packed.slice(0, 0, C);
         auto global_sum_sq = packed.slice(0, C, 2 * C);
         auto global_count_t = packed.slice(0, 2 * C, 2 * C + 1);
-        float global_count_f = global_count_t.data<float>()[0];
+        // Move to CPU to read the scalar value (tensor may be on GPU)
+        float global_count_f = global_count_t.to(Device::cpu()).data<float>()[0];
         global_count = static_cast<int64_t>(global_count_f);
         float inv_count = 1.0f / global_count_f;
 
