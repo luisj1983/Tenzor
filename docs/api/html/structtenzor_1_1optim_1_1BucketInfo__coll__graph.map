@@ -1,5 +1,0 @@
-<map id="tenzor::optim::BucketInfo" name="tenzor::optim::BucketInfo">
-<area shape="rect" id="Node000001" title="Information about a gradient bucket." alt="" coords="5,106,191,134"/>
-<area shape="rect" id="Node000002" href="$structtenzor_1_1Device.html" title="Device specification for tensor placement." alt="" coords="40,5,156,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="100,47,101,106,95,105,96,50"/>
-</map>

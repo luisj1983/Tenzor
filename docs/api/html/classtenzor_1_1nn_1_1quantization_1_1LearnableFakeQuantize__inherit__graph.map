@@ -1,7 +1,0 @@
-<map id="tenzor::nn::quantization::LearnableFakeQuantize" name="tenzor::nn::quantization::LearnableFakeQuantize">
-<area shape="rect" id="Node000001" title="Learnable fake quantization with trainable parameters." alt="" coords="5,174,186,218"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1quantization_1_1FakeQuantize.html" title="Fake quantization module for QAT." alt="" coords="8,81,183,126"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="97,139,98,174,93,173,94,143"/>
-<area shape="rect" id="Node000003" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="24,5,167,33"/>
-<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="96,46,98,81,93,80,95,51"/>
-</map>

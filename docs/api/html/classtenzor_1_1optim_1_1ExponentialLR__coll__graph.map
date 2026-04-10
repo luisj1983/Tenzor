@@ -1,5 +1,0 @@
-<map id="tenzor::optim::ExponentialLR" name="tenzor::optim::ExponentialLR">
-<area shape="rect" id="Node000001" title="Exponential learning rate scheduler." alt="" coords="5,81,215,109"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1optim_1_1LRScheduler.html" title="Base class for learning rate schedulers." alt="" coords="12,5,208,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="112,47,112,82,108,79,108,51"/>
-</map>

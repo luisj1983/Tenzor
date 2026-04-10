@@ -1,5 +1,0 @@
-<map id="tenzor::optim::CosineAnnealingLR" name="tenzor::optim::CosineAnnealingLR">
-<area shape="rect" id="Node000001" title="Cosine annealing learning rate scheduler." alt="" coords="5,81,247,109"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1optim_1_1LRScheduler.html" title="Base class for learning rate schedulers." alt="" coords="28,5,224,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="128,47,128,82,124,79,124,51"/>
-</map>

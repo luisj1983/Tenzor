@@ -1,9 +1,0 @@
-<map id="tenzor::ops::FusionOptimizer::Statistics" name="tenzor::ops::FusionOptimizer::Statistics">
-<area shape="rect" id="Node000001" title="Optimization statistics." alt="" coords="5,318,213,362"/>
-<area shape="rect" id="Node000002" title=" " alt="" coords="28,200,190,245"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="111,259,112,318,106,316,107,262"/>
-<area shape="rect" id="Node000003" title=" " alt="" coords="66,99,152,127"/>
-<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="110,140,112,200,106,199,108,145"/>
-<area shape="rect" id="Node000004" title=" " alt="" coords="40,5,178,50"/>
-<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="110,63,112,99,106,98,108,68"/>
-</map>

@@ -1,5 +1,0 @@
-<map id="tenzor::models::RobertaQAOutput" name="tenzor::models::RobertaQAOutput">
-<area shape="rect" id="Node000001" title="Output structure for question answering." alt="" coords="5,128,246,156"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1Variable.html" title="Gradient&#45;enabled tensor wrapper for automatic differentiation." alt="" coords="64,5,187,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="128,47,128,128,123,127,123,50"/>
-</map>

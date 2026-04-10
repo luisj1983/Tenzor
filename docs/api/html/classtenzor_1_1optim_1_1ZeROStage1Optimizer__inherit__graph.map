@@ -1,9 +1,0 @@
-<map id="tenzor::optim::ZeROStage1Optimizer" name="tenzor::optim::ZeROStage1Optimizer">
-<area shape="rect" id="Node000001" title="ZeRO Stage 1: Optimizer State Partitioning." alt="" coords="5,81,203,126"/>
-<area shape="rect" id="Node000003" href="$classtenzor_1_1optim_1_1ZeROStage2Optimizer.html" title="ZeRO Stage 2: Gradient + Optimizer State Partitioning." alt="" coords="5,174,203,218"/>
-<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="105,139,107,174,101,173,103,144"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1optim_1_1Optimizer.html" title="Abstract base class for all optimizers." alt="" coords="14,5,194,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="105,46,107,81,101,80,103,51"/>
-<area shape="rect" id="Node000004" href="$classtenzor_1_1optim_1_1ZeROStage3Optimizer.html" title="ZeRO Stage 3: Full Model Partitioning." alt="" coords="5,266,203,311"/>
-<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="106,232,106,267,102,265,102,236"/>
-</map>

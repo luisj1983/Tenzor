@@ -1,9 +1,0 @@
-<map id="include/tenzor/core/memory_manager.hpp" name="include/tenzor/core/memory_manager.hpp">
-<area shape="rect" id="Node000001" title="Memory manager for ZeRO offload with tensor tracking and eviction." alt="" coords="108,5,280,50"/>
-<area shape="rect" id="Node000002" href="$offload__engine_8hpp.html" title="High&#45;level offload engine for ZeRO optimizer Phase 2." alt="" coords="18,98,168,143"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="157,62,119,99,115,96,161,58"/>
-<area shape="rect" id="Node000004" href="$offload_8hpp.html" title="High&#45;level Parameter Offloading API for ZeRO Phase 2." alt="" coords="192,106,402,134"/>
-<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="231,58,285,106,279,106,229,63"/>
-<area shape="rect" id="Node000003" href="$zero__optimizer_8hpp.html" title="ZeRO Stage 1 Optimizer with state partitioning and CPU offload." alt="" coords="5,191,181,235"/>
-<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="95,156,96,191,90,190,91,160"/>
-</map>

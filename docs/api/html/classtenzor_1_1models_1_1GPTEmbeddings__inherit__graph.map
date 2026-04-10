@@ -1,5 +1,0 @@
-<map id="tenzor::models::GPTEmbeddings" name="tenzor::models::GPTEmbeddings">
-<area shape="rect" id="Node000001" title="GPT embeddings layer." alt="" coords="5,81,238,109"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="50,5,193,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="123,47,124,82,119,79,120,51"/>
-</map>

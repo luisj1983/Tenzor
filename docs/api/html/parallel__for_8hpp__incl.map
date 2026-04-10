@@ -1,7 +1,0 @@
-<map id="include/tenzor/parallel/parallel_for.hpp" name="include/tenzor/parallel/parallel_for.hpp">
-<area shape="rect" id="Node000001" title="Parallel loop execution primitives." alt="" coords="15,5,181,50"/>
-<area shape="rect" id="Node000002" title=" " alt="" coords="5,98,92,126"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="87,49,66,86,62,83,83,52"/>
-<area shape="rect" id="Node000003" title=" " alt="" coords="116,98,181,126"/>
-<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="112,48,135,85,130,84,110,53"/>
-</map>

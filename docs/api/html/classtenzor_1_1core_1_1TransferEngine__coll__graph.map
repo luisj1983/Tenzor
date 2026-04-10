@@ -1,7 +1,0 @@
-<map id="tenzor::core::TransferEngine" name="tenzor::core::TransferEngine">
-<area shape="rect" id="Node000001" title="High&#45;performance async CPU&lt;&#45;&gt;GPU transfer engine." alt="" coords="80,173,282,201"/>
-<area shape="rect" id="Node000002" title=" " alt="" coords="5,5,168,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="89,46,100,98,110,124,124,147,136,160,153,173,148,172,133,164,119,151,105,126,95,99,87,51"/>
-<area shape="rect" id="Node000003" title=" " alt="" coords="192,5,360,33"/>
-<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="278,47,271,99,263,126,249,151,235,164,218,175,216,170,231,160,244,147,258,124,266,98,274,51"/>
-</map>

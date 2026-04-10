@@ -1,9 +1,0 @@
-<map id="tenzor::ops::FusionPattern::Match" name="tenzor::ops::FusionPattern::Match">
-<area shape="rect" id="Node000001" title="Pattern match result." alt="" coords="60,200,250,245"/>
-<area shape="rect" id="Node000002" title=" " alt="" coords="5,99,164,127"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="82,140,85,159,90,175,113,199,108,200,86,177,80,160,80,145"/>
-<area shape="rect" id="Node000003" title=" " alt="" coords="188,99,274,127"/>
-<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="222,140,201,178,180,202,177,198,197,174,217,143"/>
-<area shape="rect" id="Node000004" title=" " alt="" coords="162,5,300,50"/>
-<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="233,63,234,100,229,98,230,68"/>
-</map>

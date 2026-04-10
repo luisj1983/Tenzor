@@ -1,5 +1,0 @@
-<map id="tenzor::models::SwinMLP" name="tenzor::models::SwinMLP">
-<area shape="rect" id="Node000001" title="MLP block with GELU activation for Swin Transformer." alt="" coords="5,81,190,109"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="26,5,169,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="99,47,100,82,95,80,96,51"/>
-</map>

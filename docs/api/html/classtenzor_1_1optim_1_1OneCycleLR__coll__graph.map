@@ -1,5 +1,0 @@
-<map id="tenzor::optim::OneCycleLR" name="tenzor::optim::OneCycleLR">
-<area shape="rect" id="Node000001" title="One cycle learning rate scheduler." alt="" coords="6,81,201,109"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1optim_1_1LRScheduler.html" title="Base class for learning rate schedulers." alt="" coords="5,5,202,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="105,47,106,82,101,79,102,51"/>
-</map>

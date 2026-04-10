@@ -1,5 +1,0 @@
-<map id="include/tenzor/nn/detection/mask_head.hpp" name="include/tenzor/nn/detection/mask_head.hpp">
-<area shape="rect" id="Node000001" title="Mask prediction head for Mask R&#45;CNN." alt="" coords="5,5,204,50"/>
-<area shape="rect" id="Node000002" href="$mask__rcnn_8hpp.html" title="Mask R&#45;CNN for instance segmentation." alt="" coords="22,98,187,143"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="106,64,107,99,102,97,103,68"/>
-</map>

@@ -1,7 +1,0 @@
-<map id="tenzor::models::ModelWeightInfo" name="tenzor::models::ModelWeightInfo">
-<area shape="rect" id="Node000001" title="Model weight information." alt="" coords="5,267,242,295"/>
-<area shape="rect" id="Node000002" title=" " alt="" coords="80,99,167,127"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="126,141,126,267,121,266,121,144"/>
-<area shape="rect" id="Node000003" title=" " alt="" coords="54,5,193,50"/>
-<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="124,63,126,99,121,98,123,68"/>
-</map>

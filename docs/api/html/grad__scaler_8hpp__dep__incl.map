@@ -1,5 +1,0 @@
-<map id="include/tenzor/nn/amp/grad_scaler.hpp" name="include/tenzor/nn/amp/grad_scaler.hpp">
-<area shape="rect" id="Node000001" title="Automatic Mixed Precision (AMP) gradient scaler for loss scaling." alt="" coords="11,5,177,50"/>
-<area shape="rect" id="Node000002" href="$mixed__precision_8hpp.html" title="Mixed precision training utilities for FP16/BF16 training." alt="" coords="5,98,183,143"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="96,64,97,99,91,97,92,68"/>
-</map>

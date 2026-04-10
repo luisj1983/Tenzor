@@ -1,5 +1,0 @@
-<map id="tenzor::models::Darknet53" name="tenzor::models::Darknet53">
-<area shape="rect" id="Node000001" title="Darknet53 backbone for YOLOv3." alt="" coords="5,81,200,109"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="31,5,174,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="104,47,105,82,100,80,101,51"/>
-</map>

@@ -1,9 +1,0 @@
-<map id="tenzor::DTypeException" name="tenzor::DTypeException">
-<area shape="rect" id="Node000001" title="Data type errors (unsupported dtype, type mismatch, etc.)." alt="" coords="6,232,181,260"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1TenzorException.html" title="Base exception class for all Tenzor errors." alt="" coords="5,157,182,184"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="95,198,96,233,91,231,92,202"/>
-<area shape="rect" id="Node000003" title=" " alt="" coords="24,81,163,109"/>
-<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="95,122,96,157,91,156,92,127"/>
-<area shape="rect" id="Node000004" title=" " alt="" coords="37,5,150,33"/>
-<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="94,46,96,81,91,80,93,51"/>
-</map>

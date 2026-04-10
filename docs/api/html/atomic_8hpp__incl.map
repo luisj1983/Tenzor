@@ -1,7 +1,0 @@
-<map id="include/tenzor/parallel/atomic.hpp" name="include/tenzor/parallel/atomic.hpp">
-<area shape="rect" id="Node000001" title="Lock&#45;free atomic operations for thread&#45;safe tensor operations." alt="" coords="5,5,172,50"/>
-<area shape="rect" id="Node000002" title=" " alt="" coords="7,98,74,126"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="78,49,58,86,54,83,74,52"/>
-<area shape="rect" id="Node000003" title=" " alt="" coords="98,98,175,126"/>
-<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="102,48,124,84,118,84,100,53"/>
-</map>

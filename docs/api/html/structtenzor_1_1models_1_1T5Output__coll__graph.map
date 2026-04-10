@@ -1,5 +1,0 @@
-<map id="tenzor::models::T5Output" name="tenzor::models::T5Output">
-<area shape="rect" id="Node000001" title="Output structure for T5 models." alt="" coords="5,128,192,156"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1Variable.html" title="Gradient&#45;enabled tensor wrapper for automatic differentiation." alt="" coords="37,5,160,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="101,47,101,128,96,127,96,50"/>
-</map>

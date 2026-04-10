@@ -1,9 +1,0 @@
-<map id="include/tenzor/utils/config.hpp" name="include/tenzor/utils/config.hpp">
-<area shape="rect" id="Node000001" title="Runtime configuration management." alt="" coords="76,5,222,50"/>
-<area shape="rect" id="Node000002" title=" " alt="" coords="5,98,64,126"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="122,50,67,91,64,86,116,51"/>
-<area shape="rect" id="Node000003" title=" " alt="" coords="88,98,211,126"/>
-<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="151,48,152,84,147,81,147,52"/>
-<area shape="rect" id="Node000004" title=" " alt="" coords="235,98,309,126"/>
-<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="182,48,242,89,237,89,181,53"/>
-</map>

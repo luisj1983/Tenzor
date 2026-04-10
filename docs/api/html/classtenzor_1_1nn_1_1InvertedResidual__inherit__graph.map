@@ -1,5 +1,0 @@
-<map id="tenzor::nn::InvertedResidual" name="tenzor::nn::InvertedResidual">
-<area shape="rect" id="Node000001" title="Inverted residual block (Mobile Inverted Bottleneck Convolution)." alt="" coords="5,81,210,109"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="36,5,179,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="109,47,110,82,105,79,106,51"/>
-</map>

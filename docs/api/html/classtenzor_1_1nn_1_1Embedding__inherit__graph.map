@@ -1,5 +1,0 @@
-<map id="tenzor::nn::Embedding" name="tenzor::nn::Embedding">
-<area shape="rect" id="Node000001" title="Lookup table embedding layer." alt="" coords="5,81,173,109"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="18,5,160,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="91,47,91,82,87,80,87,51"/>
-</map>

@@ -41,3 +41,14 @@ CTestTestfile.cmake
 
 # Documentation
 docs/_build/
+docs/api/html/
+docs/api/xml/
+
+# Example / test run artifacts at repo root
+/*.onnx
+/*.pth
+/currentfailures.txt
+
+# Sanitizer / fuzz output
+fuzz-*.log
+crash-*

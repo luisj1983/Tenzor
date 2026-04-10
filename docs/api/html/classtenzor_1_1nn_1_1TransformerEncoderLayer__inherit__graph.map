@@ -1,5 +1,0 @@
-<map id="tenzor::nn::TransformerEncoderLayer" name="tenzor::nn::TransformerEncoderLayer">
-<area shape="rect" id="Node000001" title="Transformer Encoder Layer." alt="" coords="5,81,230,126"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="46,5,189,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="119,47,120,81,115,79,116,51"/>
-</map>

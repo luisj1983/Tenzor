@@ -1,5 +1,0 @@
-<map id="tenzor::nn::AdaptiveComputationalTime" name="tenzor::nn::AdaptiveComputationalTime">
-<area shape="rect" id="Node000001" title="Adaptive Computational Time (ACT) module." alt="" coords="5,81,287,109"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="75,5,217,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="148,47,148,82,144,79,144,51"/>
-</map>

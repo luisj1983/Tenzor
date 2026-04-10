@@ -1,7 +1,0 @@
-<map id="tenzor::SqueezeBackward" name="tenzor::SqueezeBackward">
-<area shape="rect" id="Node000001" title="Squeeze gradient function." alt="" coords="5,174,195,201"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1Function.html" title="Base class for autograd differentiable functions." alt="" coords="37,98,163,126"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="102,140,102,174,98,172,98,143"/>
-<area shape="rect" id="Node000003" title=" " alt="" coords="12,5,188,50"/>
-<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="101,63,103,98,97,97,99,68"/>
-</map>

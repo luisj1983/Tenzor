@@ -1,5 +1,0 @@
-<map id="include/tenzor/nn/quantization.hpp" name="include/tenzor/nn/quantization.hpp">
-<area shape="rect" id="Node000001" title="Main header for quantization support." alt="" coords="5,5,252,33"/>
-<area shape="rect" id="Node000002" href="$quantize__api_8hpp.html" title="High&#45;level quantization API for model conversion." alt="" coords="29,81,228,126"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="130,47,131,81,126,79,127,51"/>
-</map>

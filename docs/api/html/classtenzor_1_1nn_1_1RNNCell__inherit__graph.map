@@ -1,5 +1,0 @@
-<map id="tenzor::nn::RNNCell" name="tenzor::nn::RNNCell">
-<area shape="rect" id="Node000001" title="Single RNN cell." alt="" coords="5,81,154,109"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="8,5,151,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="81,47,82,81,77,80,78,51"/>
-</map>

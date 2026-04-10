@@ -1,7 +1,0 @@
-<map id="tenzor::optim::ZeROStage1Config" name="tenzor::optim::ZeROStage1Config">
-<area shape="rect" id="Node000001" title="Configuration for ZeRO Stage 1 Optimizer." alt="" coords="12,241,210,285"/>
-<area shape="rect" id="Node000002" title=" " alt="" coords="5,123,217,168"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="113,182,114,241,108,239,109,185"/>
-<area shape="rect" id="Node000003" href="$classtenzor_1_1distributed_1_1ProcessGroup.html" title="Process group for distributed training." alt="" coords="41,5,181,50"/>
-<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="112,63,114,123,108,122,110,68"/>
-</map>

@@ -1,5 +1,0 @@
-<map id="tenzor::models::ElectraDiscriminator" name="tenzor::models::ElectraDiscriminator">
-<area shape="rect" id="Node000001" title="ELECTRA Discriminator." alt="" coords="5,81,265,109"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="64,5,206,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="137,47,137,82,133,79,133,51"/>
-</map>

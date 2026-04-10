@@ -1,7 +1,0 @@
-<map id="tenzor::models::BertConfig" name="tenzor::models::BertConfig">
-<area shape="rect" id="Node000001" title="Configuration for BERT models." alt="" coords="5,200,200,228"/>
-<area shape="rect" id="Node000002" title=" " alt="" coords="59,99,146,127"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="105,141,105,200,100,199,100,144"/>
-<area shape="rect" id="Node000003" title=" " alt="" coords="33,5,172,50"/>
-<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="104,63,105,99,100,98,101,68"/>
-</map>

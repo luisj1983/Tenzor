@@ -1,9 +1,0 @@
-<map id="include/tenzor/distributed/distributed.hpp" name="include/tenzor/distributed/distributed.hpp">
-<area shape="rect" id="Node000001" title="Distributed training API and process group management." alt="" coords="217,5,405,50"/>
-<area shape="rect" id="Node000002" href="$gloo__backend_8hpp.html" title="Gloo backend for CPU&#45;based distributed communication." alt="" coords="5,98,193,143"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="249,56,151,100,149,95,244,57"/>
-<area shape="rect" id="Node000003" href="$nccl__backend_8hpp.html" title="NCCL backend for GPU&#45;to&#45;GPU distributed communication." alt="" coords="217,98,405,143"/>
-<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="313,64,313,99,309,96,309,68"/>
-<area shape="rect" id="Node000004" href="$zero__optimizer_8hpp.html" title="ZeRO Stage 1 Optimizer with state partitioning and CPU offload." alt="" coords="429,98,604,143"/>
-<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="375,54,470,97,465,97,373,59"/>
-</map>

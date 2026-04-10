@@ -1,7 +1,0 @@
-<map id="tenzor::models::ElectraConfig" name="tenzor::models::ElectraConfig">
-<area shape="rect" id="Node000001" title="Configuration for ELECTRA models." alt="" coords="5,200,218,228"/>
-<area shape="rect" id="Node000002" title=" " alt="" coords="68,99,155,127"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="114,141,114,200,109,199,109,144"/>
-<area shape="rect" id="Node000003" title=" " alt="" coords="42,5,181,50"/>
-<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="113,63,114,100,109,98,110,68"/>
-</map>

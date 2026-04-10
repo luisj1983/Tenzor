@@ -1,5 +1,0 @@
-<map id="tenzor::nn::LogSoftmax" name="tenzor::nn::LogSoftmax">
-<area shape="rect" id="Node000001" title="Log&#45;Softmax activation function." alt="" coords="5,81,177,109"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="20,5,162,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="93,47,93,82,89,80,89,51"/>
-</map>

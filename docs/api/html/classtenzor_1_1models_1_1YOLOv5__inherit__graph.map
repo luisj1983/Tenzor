@@ -1,5 +1,0 @@
-<map id="tenzor::models::YOLOv5" name="tenzor::models::YOLOv5">
-<area shape="rect" id="Node000001" title="YOLOv5 complete model." alt="" coords="5,81,182,109"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="22,5,165,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="95,47,96,82,91,80,92,51"/>
-</map>

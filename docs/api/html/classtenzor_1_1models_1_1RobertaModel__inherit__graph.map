@@ -1,5 +1,0 @@
-<map id="tenzor::models::RobertaModel" name="tenzor::models::RobertaModel">
-<area shape="rect" id="Node000001" title="Base RoBERTa model." alt="" coords="5,81,223,109"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="43,5,185,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="116,47,116,82,112,79,112,51"/>
-</map>

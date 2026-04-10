@@ -1,5 +1,0 @@
-<map id="tenzor::nn::PatchEmbedding" name="tenzor::nn::PatchEmbedding">
-<area shape="rect" id="Node000001" title="Patch embedding layer for Vision Transformers." alt="" coords="5,81,208,109"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="35,5,178,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="108,47,109,82,104,79,105,51"/>
-</map>

@@ -1,5 +1,0 @@
-<map id="tenzor::nn::FusedMBConv" name="tenzor::nn::FusedMBConv">
-<area shape="rect" id="Node000001" title="Fused Mobile Inverted Bottleneck (for EfficientNetV2)." alt="" coords="5,81,192,109"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="27,5,170,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="100,47,101,82,96,80,97,51"/>
-</map>

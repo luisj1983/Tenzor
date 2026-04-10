@@ -1,5 +1,0 @@
-<map id="tenzor::models::AlbertEmbeddings" name="tenzor::models::AlbertEmbeddings">
-<area shape="rect" id="Node000001" title="ALBERT embeddings with factorized parameterization." alt="" coords="5,81,251,109"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="57,5,199,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="130,47,130,82,126,79,126,51"/>
-</map>

@@ -1,5 +1,0 @@
-<map id="tenzor::models::BertForQuestionAnswering" name="tenzor::models::BertForQuestionAnswering">
-<area shape="rect" id="Node000001" title="BERT for question answering." alt="" coords="5,81,237,126"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="50,5,192,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="123,47,123,81,119,79,119,51"/>
-</map>

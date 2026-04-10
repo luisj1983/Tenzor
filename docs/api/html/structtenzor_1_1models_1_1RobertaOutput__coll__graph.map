@@ -1,5 +1,0 @@
-<map id="tenzor::models::RobertaOutput" name="tenzor::models::RobertaOutput">
-<area shape="rect" id="Node000001" title="Output structure for RoBERTa models." alt="" coords="5,128,227,156"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1Variable.html" title="Gradient&#45;enabled tensor wrapper for automatic differentiation." alt="" coords="54,5,178,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="118,47,119,128,113,127,114,50"/>
-</map>

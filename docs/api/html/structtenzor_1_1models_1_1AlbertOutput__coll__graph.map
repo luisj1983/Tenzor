@@ -1,5 +1,0 @@
-<map id="tenzor::models::AlbertOutput" name="tenzor::models::AlbertOutput">
-<area shape="rect" id="Node000001" title="Output structure for ALBERT models." alt="" coords="5,128,215,156"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1Variable.html" title="Gradient&#45;enabled tensor wrapper for automatic differentiation." alt="" coords="48,5,172,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="112,47,113,128,107,127,108,50"/>
-</map>

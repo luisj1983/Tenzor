@@ -1,7 +1,0 @@
-<map id="tenzor::models::ViTConfig" name="tenzor::models::ViTConfig">
-<area shape="rect" id="Node000001" title="Configuration for Vision Transformer models." alt="" coords="5,200,193,228"/>
-<area shape="rect" id="Node000002" title=" " alt="" coords="56,99,142,127"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="101,141,102,200,96,199,97,144"/>
-<area shape="rect" id="Node000003" title=" " alt="" coords="30,5,168,50"/>
-<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="100,63,102,99,96,98,98,68"/>
-</map>
