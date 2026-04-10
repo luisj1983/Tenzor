@@ -76,39 +76,33 @@ auto pack_padded_sequence(const Tensor& input, const Tensor& lengths,
     int64_t total = 0;
     for (auto bs : batch_sizes_vec) total += bs;
 
-    // Pack data: for each timestep t, take batch_sizes[t] elements from sorted sequences
-    Tensor packed_data = zeros({total, features}, input.dtype(), input.device());
-
-    // Reorder input by sorted_idx
-    Tensor reordered = seq_input;  // (seq_len, batch, features)
+    // Pack data: work on CPU to avoid device-pointer memcpy issues
+    Device orig_device = input.device();
+    Tensor seq_input_cpu = seq_input.to(Device::cpu()).contiguous();
+    Tensor packed_data_cpu = zeros({total, features}, input.dtype(), Device::cpu());
 
     int64_t offset = 0;
     for (int64_t t = 0; t < actual_max_len; ++t) {
         int64_t bs = batch_sizes_vec[t];
         for (int64_t b = 0; b < bs; ++b) {
-            // Copy seq_input[t, sorted_idx[b], :] to packed_data[offset + b, :]
-            auto src = tenzor::slice(tenzor::slice(reordered, 0, t, t + 1), 1, sorted_idx[b], sorted_idx[b] + 1);
-            src = src.reshape({features});
-            auto dst = tenzor::slice(packed_data, 0, offset + b, offset + b + 1).reshape({features});
-            // Copy via fill from source
-            auto src_data = src.to(Device::cpu());
-            auto dst_packed = packed_data;
-            // Use direct element copy
+            // Copy seq_input_cpu[t, sorted_idx[b], :] to packed_data_cpu[offset + b, :]
             if (features > 0) {
-                auto row = src.reshape({1, features});
-                // Write into packed_data at offset+b
-                auto target = tenzor::slice(packed_data, 0, offset + b, offset + b + 1);
-                // Copy via tensor assignment
-                auto src_cont = src.contiguous();
+                size_t elem_size = packed_data_cpu.dtype_size();
+                int64_t src_offset = (t * batch_size + sorted_idx[b]) * features;
+                int64_t dst_offset = (offset + b) * features;
                 std::memcpy(
-                    static_cast<char*>(packed_data.data_ptr()) + (offset + b) * features * packed_data.dtype_size(),
-                    src_cont.data_ptr(),
-                    features * packed_data.dtype_size()
+                    static_cast<char*>(packed_data_cpu.data_ptr()) + dst_offset * elem_size,
+                    static_cast<const char*>(seq_input_cpu.data_ptr()) + src_offset * elem_size,
+                    features * elem_size
                 );
             }
         }
         offset += bs;
     }
+
+    // Move packed data back to original device
+    Tensor packed_data = (orig_device.type != Device::Type::CPU)
+        ? packed_data_cpu.to(orig_device) : packed_data_cpu;
 
     // Create result tensors
     Tensor batch_sizes_tensor = zeros({actual_max_len}, DType::Int64, Device::cpu());
@@ -153,16 +147,6 @@ auto pad_packed_sequence(const PackedSequence& packed,
         max_seq_len = total_length;
     }
 
-    // Create output tensor filled with padding value
-    Tensor output;
-    if (batch_first) {
-        output = full({batch_size, max_seq_len, features}, padding_value,
-                      packed.data.dtype(), packed.data.device());
-    } else {
-        output = full({max_seq_len, batch_size, features}, padding_value,
-                      packed.data.dtype(), packed.data.device());
-    }
-
     // Compute lengths from batch_sizes
     std::vector<int64_t> sorted_lengths(batch_size, 0);
     int64_t actual_len = bs_tensor.numel();
@@ -172,28 +156,37 @@ auto pad_packed_sequence(const PackedSequence& packed,
         }
     }
 
-    // Unpack data into output
+    // Work on CPU to avoid device-pointer memcpy issues, then move back
+    Device orig_device = packed.data.device();
+    Tensor packed_cpu = packed.data.to(Device::cpu()).contiguous();
+    size_t elem_size = packed_cpu.dtype_size();
+
+    Tensor output_cpu;
+    if (batch_first) {
+        output_cpu = full({batch_size, max_seq_len, features}, padding_value,
+                          packed.data.dtype(), Device::cpu());
+    } else {
+        output_cpu = full({max_seq_len, batch_size, features}, padding_value,
+                          packed.data.dtype(), Device::cpu());
+    }
+
     int64_t offset = 0;
     for (int64_t t = 0; t < actual_len; ++t) {
         int64_t bs = bs_data[t];
         for (int64_t b = 0; b < bs; ++b) {
-            auto src = tenzor::slice(packed.data, 0, offset + b, offset + b + 1).reshape({features});
-            auto src_cont = src.contiguous();
-
+            int64_t src_off = (offset + b) * features;
             if (batch_first) {
-                // output[b, t, :] = src
+                int64_t dst_off = (b * max_seq_len + t) * features;
                 std::memcpy(
-                    static_cast<char*>(output.data_ptr()) + (b * max_seq_len * features + t * features) * output.dtype_size(),
-                    src_cont.data_ptr(),
-                    features * output.dtype_size()
-                );
+                    static_cast<char*>(output_cpu.data_ptr()) + dst_off * elem_size,
+                    static_cast<const char*>(packed_cpu.data_ptr()) + src_off * elem_size,
+                    features * elem_size);
             } else {
-                // output[t, b, :] = src
+                int64_t dst_off = (t * batch_size + b) * features;
                 std::memcpy(
-                    static_cast<char*>(output.data_ptr()) + (t * batch_size * features + b * features) * output.dtype_size(),
-                    src_cont.data_ptr(),
-                    features * output.dtype_size()
-                );
+                    static_cast<char*>(output_cpu.data_ptr()) + dst_off * elem_size,
+                    static_cast<const char*>(packed_cpu.data_ptr()) + src_off * elem_size,
+                    features * elem_size);
             }
         }
         offset += bs;
@@ -203,43 +196,39 @@ auto pad_packed_sequence(const PackedSequence& packed,
     Tensor lengths_tensor = zeros({batch_size}, DType::Int64, Device::cpu());
     auto* len_out = lengths_tensor.data<int64_t>();
 
-    // Also unsort the output
+    // Unsort output on CPU
+    auto* si_data = packed.sorted_indices.data<int64_t>();
     if (batch_first) {
-        Tensor unsorte_output = zeros_like(output);
-        // Use sorted_indices to map back
-        auto* si_data = packed.sorted_indices.data<int64_t>();
+        Tensor unsorted_cpu = zeros_like(output_cpu);
         for (int64_t sorted_pos = 0; sorted_pos < batch_size; ++sorted_pos) {
             int64_t orig_pos = si_data[sorted_pos];
             len_out[orig_pos] = sorted_lengths[sorted_pos];
-            // Copy output[sorted_pos, :, :] to unsorted_output[orig_pos, :, :]
             std::memcpy(
-                static_cast<char*>(unsorte_output.data_ptr()) + orig_pos * max_seq_len * features * output.dtype_size(),
-                static_cast<char*>(output.data_ptr()) + sorted_pos * max_seq_len * features * output.dtype_size(),
-                max_seq_len * features * output.dtype_size()
-            );
+                static_cast<char*>(unsorted_cpu.data_ptr()) + orig_pos * max_seq_len * features * elem_size,
+                static_cast<char*>(output_cpu.data_ptr()) + sorted_pos * max_seq_len * features * elem_size,
+                max_seq_len * features * elem_size);
         }
-        output = unsorte_output;
+        output_cpu = unsorted_cpu;
     } else {
-        // For seq-first layout, we need to unsort along dim=1 for each timestep
-        Tensor unsorted_output = zeros_like(output);
-        auto* si_data = packed.sorted_indices.data<int64_t>();
+        Tensor unsorted_cpu = zeros_like(output_cpu);
         for (int64_t t = 0; t < max_seq_len; ++t) {
             for (int64_t sorted_pos = 0; sorted_pos < batch_size; ++sorted_pos) {
                 int64_t orig_pos = si_data[sorted_pos];
-                if (t == 0) {
-                    len_out[orig_pos] = sorted_lengths[sorted_pos];
-                }
+                if (t == 0) len_out[orig_pos] = sorted_lengths[sorted_pos];
                 std::memcpy(
-                    static_cast<char*>(unsorted_output.data_ptr()) + (t * batch_size + orig_pos) * features * output.dtype_size(),
-                    static_cast<char*>(output.data_ptr()) + (t * batch_size + sorted_pos) * features * output.dtype_size(),
-                    features * output.dtype_size()
-                );
+                    static_cast<char*>(unsorted_cpu.data_ptr()) + (t * batch_size + orig_pos) * features * elem_size,
+                    static_cast<char*>(output_cpu.data_ptr()) + (t * batch_size + sorted_pos) * features * elem_size,
+                    features * elem_size);
             }
         }
-        output = unsorted_output;
+        output_cpu = unsorted_cpu;
     }
 
-    return {std::move(output), std::move(lengths_tensor)};
+    // Move output back to original device
+    Tensor output_final = (orig_device.type != Device::Type::CPU)
+        ? output_cpu.to(orig_device) : output_cpu;
+
+    return {std::move(output_final), std::move(lengths_tensor)};
 }
 
 auto pack_sequence(const std::vector<Tensor>& sequences, bool enforce_sorted)

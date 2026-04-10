@@ -1079,14 +1079,21 @@ auto Tensor::fill_(double value) -> Tensor& {
             // Fast path: memset to zero directly on device
             backend->memset(data_ptr(), 0, size_bytes, device().index);
         } else {
-            // Dispatch to backend's Fill kernel on the target device
+            // Use in-place StridedFill to preserve tensor identity (version tracking, views)
             auto& table = DispatchTableRegistry::get_table(impl_->device.type);
-            OpAttributes attrs;
-            attrs.set(AttrKey::Value, static_cast<double>(value));
-            std::array<Tensor, 1> inputs = {*this};
-            auto result = table.dispatch(OpId::Fill, inputs, attrs);
-            if (!result.empty()) {
-                impl_ = result[0].impl_;
+            if (table.has_inplace_kernel(OpId::StridedFill)) {
+                OpAttributes attrs;
+                attrs.set(AttrKey::Value, value);
+                table.dispatch_inplace(OpId::StridedFill, *this, {}, attrs);
+            } else {
+                // Fallback: dispatch Fill and replace impl
+                OpAttributes attrs;
+                attrs.set(AttrKey::Value, static_cast<double>(value));
+                std::array<Tensor, 1> inputs = {*this};
+                auto result = table.dispatch(OpId::Fill, inputs, attrs);
+                if (!result.empty()) {
+                    impl_ = result[0].impl_;
+                }
             }
         }
         bump_version();

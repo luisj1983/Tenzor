@@ -61,8 +61,8 @@ auto numerical_gradient(
     // Adjust epsilon based on dtype to avoid precision loss
     // Float32 needs larger epsilon due to ~7 digits of precision
     // Float64 can use smaller epsilon with ~15 digits of precision
-    if (input.dtype() == DType::Float32 && eps < 1e-4) {
-        eps = 1e-4;  // Minimum safe epsilon for Float32
+    if (input.dtype() == DType::Float32 && eps < 5e-4) {
+        eps = 5e-4;  // Minimum safe epsilon for Float32 (avoids catastrophic cancellation)
     }
 
     // Create gradient tensor with same shape as input
@@ -323,9 +323,12 @@ auto gradcheck_detailed(
     }
 
     // Adjust epsilon and tolerances based on dtype
+    // Float32 has ~7 decimal digits of precision. For functions like cos near
+    // zero where cos(x+h)-cos(x-h) involves catastrophic cancellation, we need
+    // larger epsilon (sqrt of machine epsilon ≈ 3.5e-4) and looser tolerance.
     if (input.dtype() == DType::Float32) {
-        if (eps < 1e-4) eps = 1e-4;
-        if (atol < 1e-4) atol = 1e-4;
+        if (eps < 5e-4) eps = 5e-4;
+        if (atol < 5e-4) atol = 5e-4;
         if (rtol < 1e-2) rtol = 1e-2;
     }
 

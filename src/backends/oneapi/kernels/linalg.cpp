@@ -8,6 +8,7 @@
  */
 
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/ops/linalg.hpp"
 #include "../sycl_buffer_guard.hpp"
 #include <sycl/sycl.hpp>
 #include <stdexcept>
@@ -185,10 +186,39 @@ class SyclDetCombineF64;
 auto linalg_det_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     auto shape = input.shape();
     int64_t n = shape[shape.size() - 1];
+    int64_t nbatch = 1;
+    std::vector<int64_t> out_shape;
+    for (size_t i = 0; i + 2 < shape.size(); i++) {
+        out_shape.push_back(shape[i]);
+        nbatch *= shape[i];
+    }
+    if (out_shape.empty()) out_shape.push_back(1);
+
+    // For batched input, delegate to native SYCL det kernel which handles batching
+    if (nbatch > 1) {
+        // Use the native SYCL implementation that handles batching
+        // Forward declare the native version at file scope
+        auto work = clone_kernel(input, queue);
+        Tensor output(out_shape, input.dtype(), input.device());
+        // Process each batch element individually
+        for (int64_t b = 0; b < nbatch; b++) {
+            // Extract single matrix: shape {n, n}
+            auto batch_data = Tensor({n, n}, input.dtype(), input.device());
+            queue.memcpy(const_cast<void*>(batch_data.data_ptr()),
+                        static_cast<const char*>(input.data_ptr()) + b * n * n * input.dtype_size(),
+                        n * n * input.dtype_size()).wait();
+            // Compute det for single matrix
+            Tensor single_det = linalg_det_kernel(batch_data, queue);
+            // Copy result to output
+            queue.memcpy(static_cast<char*>(const_cast<void*>(output.data_ptr())) + b * input.dtype_size(),
+                        single_det.data_ptr(), input.dtype_size()).wait();
+        }
+        return output;
+    }
 
     // Copy input for in-place LU
     Tensor a = clone_kernel(input, queue);
-    Tensor output({1}, input.dtype(), input.device());
+    Tensor output(out_shape, input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
         SyclDeviceBuffer<float> d_a(n * n, queue);
@@ -906,10 +936,11 @@ auto linalg_eig_kernel(const Tensor& input, sycl::queue& queue) -> std::tuple<Te
 }
 #else
 auto linalg_eig_kernel(const Tensor& input, sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor> {
-    (void)input; (void)queue;
-    throw std::runtime_error(
-        "linalg_eig: oneapi::mkl::lapack::geev is not available in the installed oneMKL version. "
-        "Non-symmetric eigendecomposition requires a newer oneMKL or the CPU backend.");
+    // geev not available — compute on CPU and transfer results back to device
+    (void)queue;
+    auto cpu_input = input.to(Device::cpu());
+    auto [wr_cpu, wi_cpu, v_cpu] = ::tenzor::linalg::eig(cpu_input);
+    return {wr_cpu.to(input.device()), wi_cpu.to(input.device()), v_cpu.to(input.device())};
 }
 #endif // TENZOR_HAS_ONEMKL_GEEV
 

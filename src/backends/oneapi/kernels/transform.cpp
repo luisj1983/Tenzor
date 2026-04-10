@@ -1792,6 +1792,36 @@ auto cast_kernel(const Tensor& input, DType target_dtype, sycl::queue& queue) ->
         queue.parallel_for<CastF64ToI64>(sycl::range<1>(numel), [=](sycl::id<1> i) {
             out[i] = static_cast<int64_t>(in[i]);
         });
+    } else if ((src == DType::FP8_E4M3 || src == DType::FP8_E5M2) && dst == DType::Float32) {
+        // FP8 → Float32: host-side conversion (FP8 bit manipulation not in device code)
+        const uint8_t* in = get_data_ptr<const uint8_t>(input);
+        float* out = get_data_ptr<float>(output);
+        std::vector<uint8_t> h_in(numel);
+        std::vector<float> h_out(numel);
+        queue.memcpy(h_in.data(), in, numel * sizeof(uint8_t)).wait();
+        if (src == DType::FP8_E4M3) {
+            for (int64_t i = 0; i < numel; ++i)
+                h_out[i] = static_cast<float>(FP8_E4M3(h_in[i]));
+        } else {
+            for (int64_t i = 0; i < numel; ++i)
+                h_out[i] = static_cast<float>(FP8_E5M2(h_in[i]));
+        }
+        queue.memcpy(out, h_out.data(), numel * sizeof(float)).wait();
+    } else if (src == DType::Float32 && (dst == DType::FP8_E4M3 || dst == DType::FP8_E5M2)) {
+        // Float32 → FP8: host-side conversion
+        const float* in = get_data_ptr<const float>(input);
+        uint8_t* out = get_data_ptr<uint8_t>(output);
+        std::vector<float> h_in(numel);
+        std::vector<uint8_t> h_out(numel);
+        queue.memcpy(h_in.data(), in, numel * sizeof(float)).wait();
+        if (dst == DType::FP8_E4M3) {
+            for (int64_t i = 0; i < numel; ++i)
+                h_out[i] = FP8_E4M3(h_in[i]).bits;
+        } else {
+            for (int64_t i = 0; i < numel; ++i)
+                h_out[i] = FP8_E5M2(h_in[i]).bits;
+        }
+        queue.memcpy(out, h_out.data(), numel * sizeof(uint8_t)).wait();
     } else {
         // Two-hop: src -> Float32 -> dst
         if (src != DType::Float32) {
@@ -1809,6 +1839,10 @@ auto cast_kernel(const Tensor& input, DType target_dtype, sycl::queue& queue) ->
 // ============================================================================
 class StridedFillKernelF32;
 class StridedFillKernelF64;
+class StridedFillKernelF16;
+class StridedFillKernelBF16;
+class StridedFillKernelI32;
+class StridedFillKernelI64;
 
 auto strided_fill_kernel(Tensor& self, double value, sycl::queue& queue) -> void {
     int64_t numel = self.numel();
@@ -1822,14 +1856,14 @@ auto strided_fill_kernel(Tensor& self, double value, sycl::queue& queue) -> void
         if (self.dtype() == DType::Float32) {
             float val = static_cast<float>(value);
             float* ptr = get_data_ptr<float>(self);
-            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) { ptr[i] = val; });
+            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) { ptr[i] = val; }).wait();
         } else if (self.dtype() == DType::Float64) {
             double* ptr = get_data_ptr<double>(self);
-            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) { ptr[i] = value; });
+            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) { ptr[i] = value; }).wait();
         } else {
             Tensor filled = fill_kernel(self, static_cast<float>(value), queue);
             queue.memcpy(const_cast<void*>(self.data_ptr()), filled.data_ptr(),
-                         numel * self.dtype_size());
+                         numel * self.dtype_size()).wait();
         }
         return;
     }
@@ -1853,7 +1887,7 @@ auto strided_fill_kernel(Tensor& self, double value, sycl::queue& queue) -> void
                 offset += coord * strides_arr[d];
             }
             ptr[offset] = val;
-        });
+        }).wait();
     } else if (self.dtype() == DType::Float64) {
         double* ptr = get_data_ptr<double>(self);
         queue.parallel_for<StridedFillKernelF64>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
@@ -1865,7 +1899,59 @@ auto strided_fill_kernel(Tensor& self, double value, sycl::queue& queue) -> void
                 offset += coord * strides_arr[d];
             }
             ptr[offset] = value;
-        });
+        }).wait();
+    } else if (self.dtype() == DType::Float16) {
+        sycl::half val = sycl::half(static_cast<float>(value));
+        sycl::half* ptr = get_data_ptr<sycl::half>(self);
+        queue.parallel_for<StridedFillKernelF16>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+            int64_t remaining = flat_idx;
+            int64_t offset = 0;
+            for (size_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / cont_strides_arr[d];
+                remaining %= cont_strides_arr[d];
+                offset += coord * strides_arr[d];
+            }
+            ptr[offset] = val;
+        }).wait();
+    } else if (self.dtype() == DType::BFloat16) {
+        uint16_t val = f32_to_bf16(static_cast<float>(value));
+        uint16_t* ptr = get_data_ptr<uint16_t>(self);
+        queue.parallel_for<StridedFillKernelBF16>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+            int64_t remaining = flat_idx;
+            int64_t offset = 0;
+            for (size_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / cont_strides_arr[d];
+                remaining %= cont_strides_arr[d];
+                offset += coord * strides_arr[d];
+            }
+            ptr[offset] = val;
+        }).wait();
+    } else if (self.dtype() == DType::Int32) {
+        int32_t val = static_cast<int32_t>(value);
+        int32_t* ptr = get_data_ptr<int32_t>(self);
+        queue.parallel_for<StridedFillKernelI32>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+            int64_t remaining = flat_idx;
+            int64_t offset = 0;
+            for (size_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / cont_strides_arr[d];
+                remaining %= cont_strides_arr[d];
+                offset += coord * strides_arr[d];
+            }
+            ptr[offset] = val;
+        }).wait();
+    } else if (self.dtype() == DType::Int64) {
+        int64_t val = static_cast<int64_t>(value);
+        int64_t* ptr = get_data_ptr<int64_t>(self);
+        queue.parallel_for<StridedFillKernelI64>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+            int64_t remaining = flat_idx;
+            int64_t offset = 0;
+            for (size_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / cont_strides_arr[d];
+                remaining %= cont_strides_arr[d];
+                offset += coord * strides_arr[d];
+            }
+            ptr[offset] = val;
+        }).wait();
     } else {
         throw std::runtime_error("strided_fill: unsupported dtype for non-contiguous fill");
     }

@@ -398,7 +398,7 @@ namespace oneapi {
     auto avg_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
     auto max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> std::pair<Tensor, Tensor>;
     auto adaptive_avg_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
-    auto adaptive_max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
+    auto adaptive_max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> std::vector<Tensor>;
     auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
                                     const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
     auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& indices,
@@ -703,6 +703,32 @@ static sycl::queue& get_q_device(int32_t device_id) {
 }
 
 // ============================================================================
+// FP8 emulation helpers
+// ============================================================================
+static bool is_fp8(DType dt) {
+    return dt == DType::FP8_E4M3 || dt == DType::FP8_E5M2;
+}
+
+static DType fp8_result_dtype(DType a, DType b) {
+    // Type promotion: FP8 + FP8 → wider FP8, FP8 + Float → Float
+    if (!is_fp8(a)) return a;
+    if (!is_fp8(b)) return b;
+    // E5M2 has wider range than E4M3
+    if (a == DType::FP8_E5M2 || b == DType::FP8_E5M2) return DType::FP8_E5M2;
+    return DType::FP8_E4M3;
+}
+
+// Binary FP8 emulation: widen to Float32, compute, narrow back
+template<typename BinaryOp>
+static Tensor fp8_binary_emulate(const Tensor& a, const Tensor& b, BinaryOp op) {
+    DType out_dtype = fp8_result_dtype(a.dtype(), b.dtype());
+    Tensor a_f32 = is_fp8(a.dtype()) ? a.to(DType::Float32) : a;
+    Tensor b_f32 = is_fp8(b.dtype()) ? b.to(DType::Float32) : b;
+    Tensor result_f32 = op(a_f32, b_f32);
+    return is_fp8(out_dtype) ? result_f32.to(out_dtype) : result_f32;
+}
+
+// ============================================================================
 // Helper: parse DType from typed attributes
 // ============================================================================
 static DType parse_dtype(const OpAttributes& attrs) {
@@ -738,26 +764,50 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Add,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            if (is_fp8(inputs[0].dtype()) || is_fp8(inputs[1].dtype())) {
+                return {fp8_binary_emulate(inputs[0], inputs[1],
+                    [&](const Tensor& a, const Tensor& b) { return oneapi::add_kernel(a, b, get_q(inputs)); })};
+            }
             return {oneapi::add_kernel(inputs[0], inputs[1], get_q(inputs))};
         });
 
     table.register_kernel(OpId::Sub,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            if (is_fp8(inputs[0].dtype()) || is_fp8(inputs[1].dtype())) {
+                return {fp8_binary_emulate(inputs[0], inputs[1],
+                    [&](const Tensor& a, const Tensor& b) { return oneapi::sub_kernel(a, b, get_q(inputs)); })};
+            }
             return {oneapi::sub_kernel(inputs[0], inputs[1], get_q(inputs))};
         });
 
     table.register_kernel(OpId::Mul,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            if (is_fp8(inputs[0].dtype()) || is_fp8(inputs[1].dtype())) {
+                return {fp8_binary_emulate(inputs[0], inputs[1],
+                    [&](const Tensor& a, const Tensor& b) { return oneapi::mul_kernel(a, b, get_q(inputs)); })};
+            }
             return {oneapi::mul_kernel(inputs[0], inputs[1], get_q(inputs))};
         });
 
     table.register_kernel(OpId::Div,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            if (is_fp8(inputs[0].dtype()) || is_fp8(inputs[1].dtype())) {
+                return {fp8_binary_emulate(inputs[0], inputs[1],
+                    [&](const Tensor& a, const Tensor& b) { return oneapi::div_kernel(a, b, get_q(inputs)); })};
+            }
             return {oneapi::div_kernel(inputs[0], inputs[1], get_q(inputs))};
         });
 
     table.register_kernel(OpId::MatMul,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            if (is_fp8(inputs[0].dtype()) || is_fp8(inputs[1].dtype())) {
+                return {fp8_binary_emulate(inputs[0], inputs[1],
+                    [&](const Tensor& a, const Tensor& b) {
+                        auto r = oneapi::matmul_kernel(a, b, get_q(inputs));
+                        oneapi::fp16_saturate_if_needed(r, get_q(inputs));
+                        return r;
+                    })};
+            }
             auto result = oneapi::matmul_kernel(inputs[0], inputs[1], get_q(inputs));
             oneapi::fp16_saturate_if_needed(result, get_q(inputs));
             return {result};
@@ -1042,7 +1092,22 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Lerp,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
-            return {oneapi::lerp_kernel(inputs[0], inputs[1], inputs[2], get_q(inputs))};
+            const auto& start = inputs[0];
+            const auto& end = inputs[1];
+            Tensor weight = inputs[2];
+            // Broadcast weight to match start shape if needed
+            if (weight.numel() == 1 && start.numel() > 1) {
+                auto shape_span = start.shape();
+                std::string shape_str;
+                for (size_t i = 0; i < shape_span.size(); ++i) {
+                    if (i > 0) shape_str += ',';
+                    shape_str += std::to_string(shape_span[i]);
+                }
+                OpAttributes expand_attrs;
+                expand_attrs.set(AttrKey::Shape, shape_str);
+                weight = oneapi::expand_kernel(weight, expand_attrs, get_q(inputs));
+            }
+            return {oneapi::lerp_kernel(start, end, weight, get_q(inputs))};
         });
 
     // =========================================================================
@@ -1723,7 +1788,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::AdaptiveMaxPool2d,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            return {oneapi::adaptive_max_pool2d_kernel(inputs[0], attrs, get_q(inputs))};
+            return oneapi::adaptive_max_pool2d_kernel(inputs[0], attrs, get_q(inputs));
         });
 
     table.register_kernel(OpId::AvgPool2dBackward,
@@ -1757,8 +1822,15 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::AdaptiveMaxPool2dBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t H_in = attrs.get_int(AttrKey::InputH, 0);
-            int64_t W_in = attrs.get_int(AttrKey::InputW, 0);
+            int64_t H_in = 0, W_in = 0;
+            if (attrs.has(AttrKey::InputShape)) {
+                auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+                H_in = input_shape.size() >= 3 ? input_shape[2] : 0;
+                W_in = input_shape.size() >= 4 ? input_shape[3] : 0;
+            } else {
+                H_in = attrs.get_int(AttrKey::InputH, 0);
+                W_in = attrs.get_int(AttrKey::InputW, 0);
+            }
             return {oneapi::adaptive_maxpool2d_backward(inputs[0], inputs[1], H_in, W_in, get_q(inputs))};
         });
 
@@ -1830,6 +1902,10 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             auto ks = attrs.get_int_list(AttrKey::KernelSize);
             auto st = attrs.get_int_list(AttrKey::Stride);
             auto pd = attrs.get_int_list(AttrKey::Padding);
+            // Expand single value to 3-element vector for isotropic pooling
+            if (ks.size() == 1) ks = {ks[0], ks[0], ks[0]};
+            if (st.size() == 1) st = {st[0], st[0], st[0]};
+            if (pd.size() == 1) pd = {pd[0], pd[0], pd[0]};
             return oneapi::maxpool3d_forward(inputs[0], ks, st, pd, get_q(inputs));
         });
 
@@ -1844,6 +1920,9 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             auto ks = attrs.get_int_list(AttrKey::KernelSize);
             auto st = attrs.get_int_list(AttrKey::Stride);
             auto pd = attrs.get_int_list(AttrKey::Padding);
+            if (ks.size() == 1) ks = {ks[0], ks[0], ks[0]};
+            if (st.size() == 1) st = {st[0], st[0], st[0]};
+            if (pd.size() == 1) pd = {pd[0], pd[0], pd[0]};
             return {oneapi::avgpool3d_forward(inputs[0], ks, st, pd, get_q(inputs))};
         });
 
@@ -1852,13 +1931,25 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             auto ks = attrs.get_int_list(AttrKey::KernelSize);
             auto st = attrs.get_int_list(AttrKey::Stride);
             auto pd = attrs.get_int_list(AttrKey::Padding);
+            if (ks.size() == 1) ks = {ks[0], ks[0], ks[0]};
+            if (st.size() == 1) st = {st[0], st[0], st[0]};
+            if (pd.size() == 1) pd = {pd[0], pd[0], pd[0]};
             auto input_shape = attrs.get_int_list(AttrKey::InputShape);
             return {oneapi::avgpool3d_backward(inputs[0], ks, st, pd, input_shape, get_q(inputs))};
         });
 
     table.register_kernel(OpId::AdaptiveMaxPool3d,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto output_size = attrs.get_int_list(AttrKey::OutputSize);
+            std::vector<int64_t> output_size;
+            if (attrs.has(AttrKey::OutputSize)) {
+                output_size = attrs.get_int_list(AttrKey::OutputSize);
+            } else {
+                output_size = {
+                    attrs.get_int(AttrKey::OutputSizeD, 1),
+                    attrs.get_int(AttrKey::OutputSizeH, 1),
+                    attrs.get_int(AttrKey::OutputSizeW, 1)
+                };
+            }
             return oneapi::adaptive_maxpool3d_forward(inputs[0], output_size, get_q(inputs));
         });
 
@@ -1870,7 +1961,16 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::AdaptiveAvgPool3d,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto output_size = attrs.get_int_list(AttrKey::OutputSize);
+            std::vector<int64_t> output_size;
+            if (attrs.has(AttrKey::OutputSize)) {
+                output_size = attrs.get_int_list(AttrKey::OutputSize);
+            } else {
+                output_size = {
+                    attrs.get_int(AttrKey::OutputSizeD, 1),
+                    attrs.get_int(AttrKey::OutputSizeH, 1),
+                    attrs.get_int(AttrKey::OutputSizeW, 1)
+                };
+            }
             return {oneapi::adaptive_avgpool3d_forward(inputs[0], output_size, get_q(inputs))};
         });
 
@@ -1918,8 +2018,29 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::BatchNorm2dBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+            // Dispatch provides: [grad_output, input, weight/gamma, mean, invstd]
+            // Kernel expects:    (grad_output, input, mean, variance, gamma, epsilon)
+            // The backward saves invstd = 1/sqrt(var+eps), convert back to variance
+            // var = (1/invstd)^2 - eps
+            const auto& grad_output = inputs[0];
+            const auto& input = inputs[1];
+            const auto& gamma = inputs[2];
+            const auto& mean = inputs[3];
+            const auto& invstd = inputs[4];
+
+            // Convert invstd back to variance: var = 1/invstd^2 - eps
+            auto invstd_sq = tenzor::mul(invstd, invstd);
+            auto one_over_invstd_sq = tenzor::div(
+                tenzor::ones(std::vector<int64_t>(invstd.shape().begin(), invstd.shape().end()),
+                             invstd.dtype(), invstd.device()),
+                invstd_sq);
+            auto eps_tensor = tenzor::full(
+                std::vector<int64_t>(invstd.shape().begin(), invstd.shape().end()),
+                static_cast<double>(epsilon), invstd.dtype(), invstd.device());
+            auto variance = tenzor::sub(one_over_invstd_sq, eps_tensor);
+
             auto [grad_input, grad_gamma, grad_beta] = oneapi::batchnorm2d_backward(
-                inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], epsilon, get_q(inputs));
+                grad_output, input, mean, variance, gamma, epsilon, get_q(inputs));
             return {grad_input, grad_gamma, grad_beta};
         });
 
@@ -2885,6 +3006,15 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Flip,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // Support both single Dim and multi-Dims (string-encoded list)
+            if (attrs.has(AttrKey::Dims)) {
+                auto dims = attrs.get_int_list(AttrKey::Dims);
+                Tensor result = inputs[0];
+                for (auto d : dims) {
+                    result = oneapi::flip_kernel(result, d, get_q(inputs));
+                }
+                return {result};
+            }
             int64_t dim = attrs.get_int(AttrKey::Dim, 0);
             return {oneapi::flip_kernel(inputs[0], dim, get_q(inputs))};
         });

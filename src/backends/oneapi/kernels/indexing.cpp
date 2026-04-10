@@ -1036,6 +1036,10 @@ auto argsort_kernel(const Tensor& input, int64_t dim, bool descending, sycl::que
 // ============================================================================
 class ScatterAddKernelFloat32;
 class ScatterAddKernelFloat64;
+class ScatterAddKernelFloat16;
+class ScatterAddKernelFloat16Convert;
+class ScatterAddKernelBFloat16;
+class ScatterAddKernelBFloat16Convert;
 class ScatterAddKernelInt32;
 class ScatterAddKernelInt64;
 
@@ -1184,6 +1188,89 @@ auto scatter_add_kernel(const Tensor& self, int64_t dim, const Tensor& index, co
                 atomic_out(out_ptr[out_offset]);
             atomic_out.fetch_add(src_ptr[flat]);
         }).wait();
+    } else if (self.dtype() == DType::Float16) {
+        // Float16: use float32 accumulator since atomic_ref<half> not widely supported
+        float* acc = sycl::malloc_device<float>(self.numel(), queue);
+        const sycl::half* self_ptr = get_data_ptr<const sycl::half>(output);
+        // Convert output to float32
+        queue.parallel_for(sycl::range<1>(self.numel()), [=](sycl::id<1> i) {
+            acc[i] = static_cast<float>(self_ptr[i]);
+        }).wait();
+
+        const sycl::half* src_ptr = get_data_ptr<const sycl::half>(src);
+        const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
+        std::array<int64_t, 8> d_out_strides{}, d_idx_strides{};
+        for (int64_t d = 0; d < ndim; ++d) {
+            d_out_strides[d] = out_strides[d];
+            d_idx_strides[d] = idx_strides[d];
+        }
+
+        queue.parallel_for<ScatterAddKernelFloat16>(sycl::range<1>(idx_numel), [=](sycl::id<1> id) {
+            int64_t flat = id[0];
+            int64_t remaining = flat;
+            int64_t out_offset = 0;
+            for (int64_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / d_idx_strides[d];
+                remaining %= d_idx_strides[d];
+                if (d == dim) {
+                    out_offset += idx_ptr[flat] * d_out_strides[d];
+                } else {
+                    out_offset += coord * d_out_strides[d];
+                }
+            }
+            sycl::atomic_ref<float, sycl::memory_order::relaxed,
+                            sycl::memory_scope::device,
+                            sycl::access::address_space::global_space>
+                atomic_out(acc[out_offset]);
+            atomic_out.fetch_add(static_cast<float>(src_ptr[flat]));
+        }).wait();
+
+        // Convert back to half
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<ScatterAddKernelFloat16Convert>(sycl::range<1>(self.numel()), [=](sycl::id<1> i) {
+            out_ptr[i] = sycl::half(acc[i]);
+        }).wait();
+        sycl::free(acc, queue);
+    } else if (self.dtype() == DType::BFloat16) {
+        float* acc = sycl::malloc_device<float>(self.numel(), queue);
+        const uint16_t* self_ptr = get_data_ptr<const uint16_t>(output);
+        queue.parallel_for(sycl::range<1>(self.numel()), [=](sycl::id<1> i) {
+            acc[i] = bf16_to_f32(self_ptr[i]);
+        }).wait();
+
+        const uint16_t* src_ptr = get_data_ptr<const uint16_t>(src);
+        const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
+        std::array<int64_t, 8> d_out_strides{}, d_idx_strides{};
+        for (int64_t d = 0; d < ndim; ++d) {
+            d_out_strides[d] = out_strides[d];
+            d_idx_strides[d] = idx_strides[d];
+        }
+
+        queue.parallel_for<ScatterAddKernelBFloat16>(sycl::range<1>(idx_numel), [=](sycl::id<1> id) {
+            int64_t flat = id[0];
+            int64_t remaining = flat;
+            int64_t out_offset = 0;
+            for (int64_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / d_idx_strides[d];
+                remaining %= d_idx_strides[d];
+                if (d == dim) {
+                    out_offset += idx_ptr[flat] * d_out_strides[d];
+                } else {
+                    out_offset += coord * d_out_strides[d];
+                }
+            }
+            sycl::atomic_ref<float, sycl::memory_order::relaxed,
+                            sycl::memory_scope::device,
+                            sycl::access::address_space::global_space>
+                atomic_out(acc[out_offset]);
+            atomic_out.fetch_add(bf16_to_f32(src_ptr[flat]));
+        }).wait();
+
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for<ScatterAddKernelBFloat16Convert>(sycl::range<1>(self.numel()), [=](sycl::id<1> i) {
+            out_ptr[i] = f32_to_bf16(acc[i]);
+        }).wait();
+        sycl::free(acc, queue);
     } else {
         throw std::runtime_error("scatter_add: unsupported dtype");
     }

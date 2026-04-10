@@ -824,6 +824,13 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
 
 // Norm kernel - compute Lp norm
 auto norm_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
+    // Float16/BFloat16: compute in Float32 for numerical stability
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        auto result = norm_kernel(input.to(DType::Float32), attrs, queue);
+        return result.to(orig);
+    }
+
     float p = static_cast<float>(attrs.get_float(AttrKey::P, 2.0));
     int64_t dim = attrs.get_int(AttrKey::Dim, -1);
     bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);

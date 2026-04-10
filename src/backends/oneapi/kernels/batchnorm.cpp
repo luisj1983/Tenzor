@@ -399,7 +399,7 @@ static auto batchnorm2d_forward_sycl(const Tensor& input, const Tensor& mean, co
             const double std_inv = 1.0 / sycl::sqrt(var_ptr[c] + static_cast<double>(epsilon));
             const int64_t i = ((n * C + c) * H * W) + hw;
             out_ptr[i] = (in_ptr[i] - mean_ptr[c]) * std_inv;
-        });
+        }).wait();
     } else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
         const bool stats_f32 = (mean.dtype() == DType::Float32);
@@ -415,7 +415,7 @@ static auto batchnorm2d_forward_sycl(const Tensor& input, const Tensor& mean, co
             const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
             const int64_t i = ((n * C + c) * H * W) + hw;
             out_ptr[i] = sycl::half((static_cast<float>(in_ptr[i]) - m) * std_inv);
-        });
+        }).wait();
     } else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
         const bool stats_f32 = (mean.dtype() == DType::Float32);
@@ -431,7 +431,7 @@ static auto batchnorm2d_forward_sycl(const Tensor& input, const Tensor& mean, co
             const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
             const int64_t i = ((n * C + c) * H * W) + hw;
             out_ptr[i] = f32_to_bf16((bf16_to_f32(in_ptr[i]) - m) * std_inv);
-        });
+        }).wait();
     } else {
         throw std::runtime_error("Unsupported dtype for batchnorm2d_forward");
     }
@@ -456,7 +456,7 @@ static auto batchnorm2d_forward_affine_sycl(const Tensor& input, const Tensor& m
             const double std_inv = 1.0 / sycl::sqrt(var_ptr[c] + static_cast<double>(epsilon));
             const int64_t i = ((n * C + c) * H * W) + hw;
             out_ptr[i] = g_ptr[c] * (in_ptr[i] - mean_ptr[c]) * std_inv + b_ptr[c];
-        });
+        }).wait();
     } else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
         const bool stats_f32 = (mean.dtype() == DType::Float32);
@@ -476,7 +476,7 @@ static auto batchnorm2d_forward_affine_sycl(const Tensor& input, const Tensor& m
             const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
             const int64_t i = ((n * C + c) * H * W) + hw;
             out_ptr[i] = sycl::half(g * (static_cast<float>(in_ptr[i]) - m) * std_inv + b);
-        });
+        }).wait();
     } else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
         const bool stats_f32 = (mean.dtype() == DType::Float32);
@@ -496,7 +496,7 @@ static auto batchnorm2d_forward_affine_sycl(const Tensor& input, const Tensor& m
             const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
             const int64_t i = ((n * C + c) * H * W) + hw;
             out_ptr[i] = f32_to_bf16(g * (bf16_to_f32(in_ptr[i]) - m) * std_inv + b);
-        });
+        }).wait();
     } else {
         throw std::runtime_error("Unsupported dtype for batchnorm2d_forward_affine");
     }
@@ -535,7 +535,7 @@ static auto batchnorm2d_backward_sycl(const Tensor& grad_output, const Tensor& i
                 }
             grad_gamma_ptr[c] = sum_go_norm;
             grad_beta_ptr[c] = sum_go;
-        });
+        }).wait();
 
         // The input gradient kernel reads grad_gamma and grad_beta written above
         queue.wait();
@@ -548,7 +548,7 @@ static auto batchnorm2d_backward_sycl(const Tensor& grad_output, const Tensor& i
             const double x_norm = (in_ptr[i] - mean_ptr[c]) * std_inv;
             grad_in_ptr[i] = gamma_ptr[c] * std_inv * (grad_out_ptr[i] -
                 grad_beta_ptr[c] * scale - x_norm * grad_gamma_ptr[c] * scale);
-        });
+        }).wait();
     } else if (input.dtype() == DType::Float16) {
         const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
@@ -576,7 +576,7 @@ static auto batchnorm2d_backward_sycl(const Tensor& grad_output, const Tensor& i
                 }
             grad_gamma_ptr[c] = sycl::half(sum_go_norm);
             grad_beta_ptr[c] = sycl::half(sum_go);
-        });
+        }).wait();
 
         // The input gradient kernel reads grad_gamma and grad_beta written above
         queue.wait();
@@ -593,7 +593,7 @@ static auto batchnorm2d_backward_sycl(const Tensor& grad_output, const Tensor& i
             grad_in_ptr[i] = sycl::half(g * std_inv * (static_cast<float>(grad_out_ptr[i]) -
                 static_cast<float>(grad_beta_ptr[c]) * scale -
                 x_norm * static_cast<float>(grad_gamma_ptr[c]) * scale));
-        });
+        }).wait();
     } else if (input.dtype() == DType::BFloat16) {
         const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
@@ -621,7 +621,7 @@ static auto batchnorm2d_backward_sycl(const Tensor& grad_output, const Tensor& i
                 }
             grad_gamma_ptr[c] = f32_to_bf16(sum_go_norm);
             grad_beta_ptr[c] = f32_to_bf16(sum_go);
-        });
+        }).wait();
 
         // The input gradient kernel reads grad_gamma and grad_beta written above
         queue.wait();
@@ -638,7 +638,7 @@ static auto batchnorm2d_backward_sycl(const Tensor& grad_output, const Tensor& i
             grad_in_ptr[i] = f32_to_bf16(g * std_inv * (bf16_to_f32(grad_out_ptr[i]) -
                 bf16_to_f32(grad_beta_ptr[c]) * scale -
                 x_norm * bf16_to_f32(grad_gamma_ptr[c]) * scale));
-        });
+        }).wait();
     } else {
         throw std::runtime_error("Unsupported dtype for batchnorm2d_backward");
     }
@@ -681,7 +681,7 @@ auto batchnorm2d_forward(const Tensor& input, const Tensor& mean, const Tensor& 
 
             const int64_t input_idx = ((n * C + c) * H * W) + hw;
             out_ptr[input_idx] = (in_ptr[input_idx] - m) * std_inv;
-        });
+        }).wait();
     }
     else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
@@ -700,7 +700,7 @@ auto batchnorm2d_forward(const Tensor& input, const Tensor& mean, const Tensor& 
 
             const int64_t input_idx = ((n * C + c) * H * W) + hw;
             out_ptr[input_idx] = (in_ptr[input_idx] - m) * std_inv;
-        });
+        }).wait();
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
@@ -725,7 +725,7 @@ auto batchnorm2d_forward(const Tensor& input, const Tensor& mean, const Tensor& 
             const int64_t input_idx = ((n * C + c) * H * W) + hw;
             const float val = static_cast<float>(in_ptr[input_idx]);
             out_ptr[input_idx] = sycl::half((val - m) * std_inv);
-        });
+        }).wait();
     }
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
@@ -750,7 +750,7 @@ auto batchnorm2d_forward(const Tensor& input, const Tensor& mean, const Tensor& 
             const int64_t input_idx = ((n * C + c) * H * W) + hw;
             const float val = bf16_to_f32(in_ptr[input_idx]);
             out_ptr[input_idx] = f32_to_bf16((val - m) * std_inv);
-        });
+        }).wait();
     }
     else {
         throw std::runtime_error("Unsupported dtype for batchnorm2d_forward (pure SYCL)");
@@ -794,7 +794,7 @@ auto batchnorm2d_forward_affine(const Tensor& input, const Tensor& mean, const T
 
             const int64_t input_idx = ((n * C + c) * H * W) + hw;
             out_ptr[input_idx] = g * (in_ptr[input_idx] - m) * std_inv + b;
-        });
+        }).wait();
     }
     else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
@@ -817,7 +817,7 @@ auto batchnorm2d_forward_affine(const Tensor& input, const Tensor& mean, const T
 
             const int64_t input_idx = ((n * C + c) * H * W) + hw;
             out_ptr[input_idx] = g * (in_ptr[input_idx] - m) * std_inv + b;
-        });
+        }).wait();
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
@@ -846,7 +846,7 @@ auto batchnorm2d_forward_affine(const Tensor& input, const Tensor& mean, const T
             const int64_t input_idx = ((n * C + c) * H * W) + hw;
             const float val = static_cast<float>(in_ptr[input_idx]);
             out_ptr[input_idx] = sycl::half(g * (val - m) * std_inv + b);
-        });
+        }).wait();
     }
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
@@ -875,7 +875,7 @@ auto batchnorm2d_forward_affine(const Tensor& input, const Tensor& mean, const T
             const int64_t input_idx = ((n * C + c) * H * W) + hw;
             const float val = bf16_to_f32(in_ptr[input_idx]);
             out_ptr[input_idx] = f32_to_bf16(g * (val - m) * std_inv + b);
-        });
+        }).wait();
     }
     else {
         throw std::runtime_error("Unsupported dtype for batchnorm2d_forward_affine (pure SYCL)");
@@ -926,7 +926,7 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
 
             grad_gamma_ptr[c] = sum_grad_out_norm;
             grad_beta_ptr[c] = sum_grad_out;
-        });
+        }).wait();
 
         // Compute grad_input
         const float scale = 1.0f / static_cast<float>(N * spatial);
@@ -946,7 +946,7 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
             grad_in_ptr[input_idx] = g * std_inv * (grad_out_ptr[input_idx] -
                                                       grad_beta_ptr[c] * scale -
                                                       x_norm * grad_gamma_ptr[c] * scale);
-        });
+        }).wait();
     }
     else if (input.dtype() == DType::Float64) {
         const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
@@ -976,7 +976,7 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
 
             grad_gamma_ptr[c] = sum_grad_out_norm;
             grad_beta_ptr[c] = sum_grad_out;
-        });
+        }).wait();
 
         // Compute grad_input
         const double scale = 1.0 / static_cast<double>(N * spatial);
@@ -996,7 +996,7 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
             grad_in_ptr[input_idx] = g * std_inv * (grad_out_ptr[input_idx] -
                                                       grad_beta_ptr[c] * scale -
                                                       x_norm * grad_gamma_ptr[c] * scale);
-        });
+        }).wait();
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
@@ -1032,7 +1032,7 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
 
             grad_gamma_ptr[c] = sycl::half(sum_grad_out_norm);
             grad_beta_ptr[c] = sycl::half(sum_grad_out);
-        });
+        }).wait();
 
         // Compute grad_input
         const float scale = 1.0f / static_cast<float>(N * spatial);
@@ -1056,7 +1056,7 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
             grad_in_ptr[input_idx] = sycl::half(g * std_inv * (grad_out_val -
                                                       grad_beta_val * scale -
                                                       x_norm * grad_gamma_val * scale));
-        });
+        }).wait();
     }
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
@@ -1092,7 +1092,7 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
 
             grad_gamma_ptr[c] = f32_to_bf16(sum_grad_out_norm);
             grad_beta_ptr[c] = f32_to_bf16(sum_grad_out);
-        });
+        }).wait();
 
         // Compute grad_input
         const float scale = 1.0f / static_cast<float>(N * spatial);
@@ -1116,7 +1116,7 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
             grad_in_ptr[input_idx] = f32_to_bf16(g * std_inv * (grad_out_val -
                                                       grad_beta_val * scale -
                                                       x_norm * grad_gamma_val * scale));
-        });
+        }).wait();
     }
     else {
         throw std::runtime_error("Unsupported dtype for batchnorm2d_backward (pure SYCL)");
@@ -1143,7 +1143,7 @@ auto batchnorm2d_update_running_stats(Tensor& running_mean, Tensor& running_var,
             const int64_t c = c_id[0];
             run_mean_ptr[c] = (1.0f - momentum) * run_mean_ptr[c] + momentum * batch_mean_ptr[c];
             run_var_ptr[c] = (1.0f - momentum) * run_var_ptr[c] + momentum * batch_var_ptr[c];
-        });
+        }).wait();
     }
     else if (running_mean.dtype() == DType::Float64) {
         double* run_mean_ptr = get_data_ptr<double>(running_mean);
@@ -1156,7 +1156,7 @@ auto batchnorm2d_update_running_stats(Tensor& running_mean, Tensor& running_var,
             const int64_t c = c_id[0];
             run_mean_ptr[c] = (1.0 - momentum_d) * run_mean_ptr[c] + momentum_d * batch_mean_ptr[c];
             run_var_ptr[c] = (1.0 - momentum_d) * run_var_ptr[c] + momentum_d * batch_var_ptr[c];
-        });
+        }).wait();
     }
     else if (running_mean.dtype() == DType::Float16) {
         sycl::half* run_mean_ptr = get_data_ptr<sycl::half>(running_mean);
@@ -1174,7 +1174,7 @@ auto batchnorm2d_update_running_stats(Tensor& running_mean, Tensor& running_var,
 
             run_mean_ptr[c] = sycl::half((1.0f - momentum) * run_mean + momentum * batch_mean);
             run_var_ptr[c] = sycl::half((1.0f - momentum) * run_var + momentum * batch_var);
-        });
+        }).wait();
     }
     else if (running_mean.dtype() == DType::BFloat16) {
         uint16_t* run_mean_ptr = get_data_ptr<uint16_t>(running_mean);
@@ -1192,7 +1192,7 @@ auto batchnorm2d_update_running_stats(Tensor& running_mean, Tensor& running_var,
 
             run_mean_ptr[c] = f32_to_bf16((1.0f - momentum) * run_mean + momentum * batch_mean);
             run_var_ptr[c] = f32_to_bf16((1.0f - momentum) * run_var + momentum * batch_var);
-        });
+        }).wait();
     }
     else {
         throw std::runtime_error("Unsupported dtype for batchnorm2d_update_running_stats");
@@ -1242,7 +1242,7 @@ auto batchnorm2d_mean_var(const Tensor& input, sycl::queue& queue) -> std::vecto
             }
 
             mean_ptr[c] = sum / static_cast<float>(total_elements);
-        });
+        }).wait();
 
         // Compute variance for each channel
         queue.parallel_for<BatchNorm2dVarianceKernelFloat32>(sycl::range<1>(C), [=](sycl::id<1> c_id) {
@@ -1261,7 +1261,7 @@ auto batchnorm2d_mean_var(const Tensor& input, sycl::queue& queue) -> std::vecto
             }
 
             var_ptr[c] = sum_sq_diff / static_cast<float>(total_elements);
-        });
+        }).wait();
     }
     else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
@@ -1283,7 +1283,7 @@ auto batchnorm2d_mean_var(const Tensor& input, sycl::queue& queue) -> std::vecto
             }
 
             mean_ptr[c] = sum / static_cast<double>(total_elements);
-        });
+        }).wait();
 
         // Compute variance for each channel
         queue.parallel_for<BatchNorm2dVarianceKernelFloat64>(sycl::range<1>(C), [=](sycl::id<1> c_id) {
@@ -1302,7 +1302,7 @@ auto batchnorm2d_mean_var(const Tensor& input, sycl::queue& queue) -> std::vecto
             }
 
             var_ptr[c] = sum_sq_diff / static_cast<double>(total_elements);
-        });
+        }).wait();
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
@@ -1325,7 +1325,7 @@ auto batchnorm2d_mean_var(const Tensor& input, sycl::queue& queue) -> std::vecto
             }
 
             mean_ptr[c] = sum / static_cast<float>(total_elements);
-        });
+        }).wait();
 
         // Compute variance for each channel using float accumulation
         queue.parallel_for<BatchNorm2dVarianceKernelFloat16>(sycl::range<1>(C), [=](sycl::id<1> c_id) {
@@ -1344,7 +1344,7 @@ auto batchnorm2d_mean_var(const Tensor& input, sycl::queue& queue) -> std::vecto
             }
 
             var_ptr[c] = sum_sq_diff / static_cast<float>(total_elements);
-        });
+        }).wait();
     }
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
@@ -1367,7 +1367,7 @@ auto batchnorm2d_mean_var(const Tensor& input, sycl::queue& queue) -> std::vecto
             }
 
             mean_ptr[c] = sum / static_cast<float>(total_elements);
-        });
+        }).wait();
 
         // Compute variance for each channel using float accumulation
         queue.parallel_for<BatchNorm2dVarianceKernelBFloat16>(sycl::range<1>(C), [=](sycl::id<1> c_id) {
@@ -1386,7 +1386,7 @@ auto batchnorm2d_mean_var(const Tensor& input, sycl::queue& queue) -> std::vecto
             }
 
             var_ptr[c] = sum_sq_diff / static_cast<float>(total_elements);
-        });
+        }).wait();
     }
     else {
         throw std::runtime_error("Unsupported dtype for batchnorm2d_mean_var (pure SYCL)");

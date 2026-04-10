@@ -495,6 +495,20 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
         // Full reduction: mean of all elements
         const int64_t total_size = in_cont.numel();
 
+        // Handle empty tensor: mean of empty = NaN (0/0)
+        if (total_size == 0) {
+            if (in_cont.dtype() == DType::Float32) {
+                float* out_ptr = get_data_ptr<float>(output);
+                float nan_val = std::numeric_limits<float>::quiet_NaN();
+                queue.memcpy(out_ptr, &nan_val, sizeof(float)).wait();
+            } else if (in_cont.dtype() == DType::Float64) {
+                double* out_ptr = get_data_ptr<double>(output);
+                double nan_val = std::numeric_limits<double>::quiet_NaN();
+                queue.memcpy(out_ptr, &nan_val, sizeof(double)).wait();
+            }
+            return output;
+        }
+
         if (in_cont.dtype() == DType::Float32) {
             const float* in_ptr = get_data_ptr<const float>(in_cont);
             float* out_ptr = get_data_ptr<float>(output);
@@ -1752,7 +1766,7 @@ auto unique_kernel(const Tensor& input, bool sorted, bool return_inverse, bool r
         auto [u, inv, cnt] = unique_kernel(f32, sorted, return_inverse, return_counts, queue);
         return {cast_kernel(u, input.dtype(), queue), inv, cnt};
     }
-    if (input.dtype() == DType::Int8 || input.dtype() == DType::UInt8) {
+    if (input.dtype() == DType::Int8 || input.dtype() == DType::UInt8 || input.dtype() == DType::Bool) {
         auto i32 = cast_kernel(input, DType::Int32, queue);
         auto [u, inv, cnt] = unique_kernel(i32, sorted, return_inverse, return_counts, queue);
         return {cast_kernel(u, input.dtype(), queue), inv, cnt};

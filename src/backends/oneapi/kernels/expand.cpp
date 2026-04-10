@@ -13,6 +13,9 @@ struct ExpandKernelFloat32 {};
 struct ExpandKernelFloat64 {};
 struct ExpandKernelFloat16 {};
 struct ExpandKernelBFloat16 {};
+struct ExpandKernelInt32 {};
+struct ExpandKernelInt64 {};
+struct ExpandKernelBool {};
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -180,7 +183,7 @@ auto expand_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& 
             oss << "expand: cannot expand dimension " << i << " from size "
                 << input_shape[i] << " to " << target_shape[i]
                 << " (dimension must be 1 or match target)";
-            throw std::invalid_argument(oss.str());
+            throw std::runtime_error(oss.str());
         }
     }
 
@@ -261,6 +264,96 @@ auto expand_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& 
         }
 
         queue.parallel_for<ExpandKernelBFloat16>(sycl::range<1>(output_size), [=](sycl::id<1> idx) {
+            int64_t output_idx = idx[0];
+            int64_t input_idx = 0;
+            int64_t remaining = output_idx;
+
+            for (int64_t dim = ndim - 1; dim >= 0; --dim) {
+                int64_t output_coord = remaining % output_shape_arr[dim];
+                remaining /= output_shape_arr[dim];
+
+                int64_t input_coord = (input_shape_arr[dim] == 1) ? 0 : output_coord;
+                input_idx += input_coord * input_strides_arr[dim];
+            }
+
+            output_ptr[output_idx] = input_ptr[input_idx];
+        }).wait();
+    }
+    else if (input.dtype() == DType::Int32) {
+        const int32_t* input_ptr = get_data_ptr<const int32_t>(input);
+        int32_t* output_ptr = get_data_ptr<int32_t>(output);
+
+        int64_t input_shape_arr[16];
+        int64_t output_shape_arr[16];
+        int64_t input_strides_arr[16];
+
+        for (int64_t i = 0; i < ndim; ++i) {
+            input_shape_arr[i] = input_shape[i];
+            output_shape_arr[i] = target_shape[i];
+            input_strides_arr[i] = input_strides[i];
+        }
+
+        queue.parallel_for<ExpandKernelInt32>(sycl::range<1>(output_size), [=](sycl::id<1> idx) {
+            int64_t output_idx = idx[0];
+            int64_t input_idx = 0;
+            int64_t remaining = output_idx;
+
+            for (int64_t dim = ndim - 1; dim >= 0; --dim) {
+                int64_t output_coord = remaining % output_shape_arr[dim];
+                remaining /= output_shape_arr[dim];
+
+                int64_t input_coord = (input_shape_arr[dim] == 1) ? 0 : output_coord;
+                input_idx += input_coord * input_strides_arr[dim];
+            }
+
+            output_ptr[output_idx] = input_ptr[input_idx];
+        }).wait();
+    }
+    else if (input.dtype() == DType::Int64) {
+        const int64_t* input_ptr = get_data_ptr<const int64_t>(input);
+        int64_t* output_ptr = get_data_ptr<int64_t>(output);
+
+        int64_t input_shape_arr[16];
+        int64_t output_shape_arr[16];
+        int64_t input_strides_arr[16];
+
+        for (int64_t i = 0; i < ndim; ++i) {
+            input_shape_arr[i] = input_shape[i];
+            output_shape_arr[i] = target_shape[i];
+            input_strides_arr[i] = input_strides[i];
+        }
+
+        queue.parallel_for<ExpandKernelInt64>(sycl::range<1>(output_size), [=](sycl::id<1> idx) {
+            int64_t output_idx = idx[0];
+            int64_t input_idx = 0;
+            int64_t remaining = output_idx;
+
+            for (int64_t dim = ndim - 1; dim >= 0; --dim) {
+                int64_t output_coord = remaining % output_shape_arr[dim];
+                remaining /= output_shape_arr[dim];
+
+                int64_t input_coord = (input_shape_arr[dim] == 1) ? 0 : output_coord;
+                input_idx += input_coord * input_strides_arr[dim];
+            }
+
+            output_ptr[output_idx] = input_ptr[input_idx];
+        }).wait();
+    }
+    else if (input.dtype() == DType::Bool) {
+        const uint8_t* input_ptr = get_data_ptr<const uint8_t>(input);
+        uint8_t* output_ptr = get_data_ptr<uint8_t>(output);
+
+        int64_t input_shape_arr[16];
+        int64_t output_shape_arr[16];
+        int64_t input_strides_arr[16];
+
+        for (int64_t i = 0; i < ndim; ++i) {
+            input_shape_arr[i] = input_shape[i];
+            output_shape_arr[i] = target_shape[i];
+            input_strides_arr[i] = input_strides[i];
+        }
+
+        queue.parallel_for<ExpandKernelBool>(sycl::range<1>(output_size), [=](sycl::id<1> idx) {
             int64_t output_idx = idx[0];
             int64_t input_idx = 0;
             int64_t remaining = output_idx;
