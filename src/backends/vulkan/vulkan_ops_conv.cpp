@@ -7,23 +7,12 @@ namespace tenzor {
 // ============================================================================
 
 auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& weight, const Tensor* bias, const OpAttributes& attrs) -> Tensor {
-    // For Float16, upcast to Float32 to avoid overflow in accumulation
-    // (conv2d sums over kernel*channels elements, result can exceed F16 max 65504)
-    if (input.dtype() == DType::Float16) {
-        auto input_f32 = input.to(DType::Float32);
-        auto weight_f32 = weight.to(DType::Float32);
-        std::optional<Tensor> bias_f32;
-        const Tensor* bias_f32_ptr = nullptr;
-        if (bias) {
-            bias_f32 = bias->to(DType::Float32);
-            bias_f32_ptr = &*bias_f32;
-        }
-        auto result_f32 = dispatchConv2dForward(input_f32, weight_f32, bias_f32_ptr, attrs);
-        // Saturating conversion: clamp to Float16 representable range to prevent
-        // Inf/NaN from overflow when converting back to Float16
-        result_f32 = dispatchClamp(result_f32, -65504.0f, 65504.0f);
-        return result_f32.to(DType::Float16);
-    }
+    // Phase 2.1: Float16 path now runs natively via `conv2d_forward_f16.comp`,
+    // which accumulates in float32 internally (see that shader's `float sum`
+    // accumulator at line 45). The previous host-side upcast to Float32
+    // doubled memory bandwidth and VRAM for zero numerical benefit. The
+    // shader selection below at the `input.dtype() == DType::Float16` branch
+    // used to be unreachable because of the upcast — now it lights up.
 
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();

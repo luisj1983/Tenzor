@@ -78,6 +78,20 @@ private:
     rocblas_handle handle_ = nullptr;
 };
 
+/**
+ * @brief Return a thread-local rocBLAS handle, lazily constructed on first use.
+ *
+ * rocblas_create_handle() is expensive (allocates pinned host memory, probes
+ * device properties). The matmul path previously constructed a fresh handle
+ * on every call; now we cache one per thread and only swap the stream, which
+ * is a cheap pointer store inside rocBLAS.
+ */
+static RocblasHandle& cached_rocblas_handle(hipStream_t stream) {
+    thread_local RocblasHandle h;
+    h.set_stream(stream);
+    return h;
+}
+
 // ============================================================================
 // Native HIP Matrix Multiplication Kernels (Fallback)
 // ============================================================================
@@ -647,8 +661,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
 
         // Use rocBLAS GEMM with M=1
         try {
-            RocblasHandle handle;
-            handle.set_stream(stream);
+            auto& handle = cached_rocblas_handle(stream);
 
             // rocBLAS uses column-major, we use row-major
             // C = A * B in row-major => C^T = B^T * A^T in column-major
@@ -792,8 +805,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
 
         // Use rocBLAS GEMM with N=1
         try {
-            RocblasHandle handle;
-            handle.set_stream(stream);
+            auto& handle = cached_rocblas_handle(stream);
 
             rocblas_operation trans_a = rocblas_operation_none;
             rocblas_operation trans_b = rocblas_operation_none;
@@ -971,9 +983,8 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
     bool use_rocblas = true;
 
     try {
-        // Create rocBLAS handle and set stream
-        RocblasHandle handle;
-        handle.set_stream(stream);
+        // Reuse the thread-local rocBLAS handle (cheap stream swap per call)
+        auto& handle = cached_rocblas_handle(stream);
 
         // rocBLAS GEMM parameters
         // Note: rocBLAS uses column-major, we use row-major

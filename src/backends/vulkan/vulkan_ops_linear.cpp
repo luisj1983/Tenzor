@@ -9,21 +9,13 @@ namespace tenzor {
 auto VulkanBackend::dispatchLinear(const Tensor& input, const Tensor& weight, const Tensor* bias) -> Tensor {
     // Linear: output = input @ weight^T + bias
     // input: (*, K), weight: (N, K) -> output: (*, N)
-
-    // Float16: upcast to Float32 for numerical stability (F16 range overflow risk)
-    if (input.dtype() == DType::Float16) {
-        DType orig_dtype = input.dtype();
-        auto input_f32 = input.to(DType::Float32);
-        auto weight_f32 = weight.to(DType::Float32);
-        Tensor bias_f32;
-        const Tensor* bias_ptr = nullptr;
-        if (bias) {
-            bias_f32 = bias->to(DType::Float32);
-            bias_ptr = &bias_f32;
-        }
-        auto result_f32 = dispatchLinear(input_f32, weight_f32, bias_ptr);
-        return result_f32.to(orig_dtype);
-    }
+    //
+    // FP16 / BF16 note: both linear_f16.comp and linear_bf16.comp already
+    // accumulate their dot products in float32 while keeping FP16/BF16 I/O
+    // (see e.g. linear_f16.comp lines 58-96). There is no need to upcast on
+    // the host before dispatch — doing so doubles the bandwidth and VRAM
+    // footprint for no numerical win. Shader selection happens below via
+    // `shader_name` so each dtype lands on its native-I/O variant.
 
     Tensor input_contig = input.is_contiguous() ? input : dispatchContiguous(input);
     Tensor weight_contig = weight.is_contiguous() ? weight : dispatchContiguous(weight);

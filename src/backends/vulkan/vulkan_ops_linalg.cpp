@@ -1862,17 +1862,10 @@ auto VulkanBackend::dispatchLSTMCellForward(const Tensor& input, const Tensor& h
                                              const Tensor& weight_ih, const Tensor& weight_hh,
                                              const Tensor& bias_ih, const Tensor& bias_hh)
     -> std::vector<Tensor> {
-    // Float16: upcast to Float32 for numerical stability (F16 range overflow in matmul gates)
-    if (input.dtype() == DType::Float16) {
-        DType orig = input.dtype();
-        auto results = dispatchLSTMCellForward(
-            input.to(DType::Float32), hx.to(DType::Float32), cx.to(DType::Float32),
-            weight_ih.to(DType::Float32), weight_hh.to(DType::Float32),
-            bias_ih.numel() > 0 ? bias_ih.to(DType::Float32) : bias_ih,
-            bias_hh.numel() > 0 ? bias_hh.to(DType::Float32) : bias_hh);
-        for (auto& r : results) r = r.to(orig);
-        return results;
-    }
+    // Phase 2.1: Float16 path runs natively via `lstm_cell_f16.comp`, which
+    // accumulates in float32 internally. The internal dispatchMatmul that
+    // computes the gates also keeps FP16 I/O with an FP32 accumulator, so
+    // no host upcast is needed.
 
     auto in_shape = input.shape();
     auto hx_shape = hx.shape();
@@ -1880,9 +1873,13 @@ auto VulkanBackend::dispatchLSTMCellForward(const Tensor& input, const Tensor& h
     int64_t hidden_size = hx_shape[1];
     int32_t device_id = input.device().index;
 
-    bool is_f64 = (input.dtype() == DType::Float64);
+    bool is_f64  = (input.dtype() == DType::Float64);
+    bool is_f16  = (input.dtype() == DType::Float16);
     bool is_bf16 = (input.dtype() == DType::BFloat16);
-    std::string cell_shader = is_f64 ? "lstm_cell_f64" : is_bf16 ? "lstm_cell_bf16" : "lstm_cell";
+    std::string cell_shader = is_f64  ? "lstm_cell_f64"
+                            : is_f16  ? "lstm_cell_f16"
+                            : is_bf16 ? "lstm_cell_bf16"
+                                      : "lstm_cell";
 
     // Compute gates = input @ W_ih^T + hx @ W_hh^T + bias_ih + bias_hh
     Tensor W_ih_t = dispatchTranspose(weight_ih, 0, 1);
@@ -1935,16 +1932,8 @@ auto VulkanBackend::dispatchGRUCellForward(const Tensor& input, const Tensor& hx
                                             const Tensor& weight_ih, const Tensor& weight_hh,
                                             const Tensor& bias_ih, const Tensor& bias_hh)
     -> Tensor {
-    // Float16: upcast to Float32 for numerical stability (F16 range overflow in matmul gates)
-    if (input.dtype() == DType::Float16) {
-        DType orig = input.dtype();
-        auto result = dispatchGRUCellForward(
-            input.to(DType::Float32), hx.to(DType::Float32),
-            weight_ih.to(DType::Float32), weight_hh.to(DType::Float32),
-            bias_ih.numel() > 0 ? bias_ih.to(DType::Float32) : bias_ih,
-            bias_hh.numel() > 0 ? bias_hh.to(DType::Float32) : bias_hh);
-        return result.to(orig);
-    }
+    // Phase 2.1: Float16 path runs natively via `gru_cell_f16.comp`, which
+    // accumulates in float32 internally.
 
     auto in_shape = input.shape();
     auto hx_shape = hx.shape();
@@ -1952,9 +1941,13 @@ auto VulkanBackend::dispatchGRUCellForward(const Tensor& input, const Tensor& hx
     int64_t hidden_size = hx_shape[1];
     int32_t device_id = input.device().index;
 
-    bool is_f64 = (input.dtype() == DType::Float64);
+    bool is_f64  = (input.dtype() == DType::Float64);
+    bool is_f16  = (input.dtype() == DType::Float16);
     bool is_bf16 = (input.dtype() == DType::BFloat16);
-    std::string cell_shader = is_f64 ? "gru_cell_f64" : is_bf16 ? "gru_cell_bf16" : "gru_cell";
+    std::string cell_shader = is_f64  ? "gru_cell_f64"
+                            : is_f16  ? "gru_cell_f16"
+                            : is_bf16 ? "gru_cell_bf16"
+                                      : "gru_cell";
 
     // Compute gate projections
     Tensor W_ih_t = dispatchTranspose(weight_ih, 0, 1);

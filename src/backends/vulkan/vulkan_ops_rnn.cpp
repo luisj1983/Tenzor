@@ -215,21 +215,15 @@ auto VulkanBackend::dispatchLSTMCellBackward(const Tensor& grad_h, const Tensor&
                                               const Tensor& gates, const Tensor& c_prev,
                                               const Tensor& c_out,
                                               int64_t batch_size, int64_t hidden_size) -> std::vector<Tensor> {
-    // Float16: upcast to Float32 for numerical stability
-    if (grad_h.dtype() == DType::Float16) {
-        DType orig = grad_h.dtype();
-        auto results = dispatchLSTMCellBackward(
-            grad_h.to(DType::Float32), grad_c_next.to(DType::Float32),
-            gates.to(DType::Float32), c_prev.to(DType::Float32),
-            c_out.to(DType::Float32), batch_size, hidden_size);
-        for (auto& r : results) r = r.to(orig);
-        return results;
-    }
-
+    // Phase 2.1: Float16 path runs natively via `lstm_cell_backward_f16.comp`.
     int32_t device_id = grad_h.device().index;
-    bool is_f64 = (grad_h.dtype() == DType::Float64);
+    bool is_f64  = (grad_h.dtype() == DType::Float64);
+    bool is_f16  = (grad_h.dtype() == DType::Float16);
     bool is_bf16 = (grad_h.dtype() == DType::BFloat16);
-    std::string shader = is_f64 ? "lstm_cell_backward_f64" : is_bf16 ? "lstm_cell_backward_bf16" : "lstm_cell_backward";
+    std::string shader = is_f64  ? "lstm_cell_backward_f64"
+                       : is_f16  ? "lstm_cell_backward_f16"
+                       : is_bf16 ? "lstm_cell_backward_bf16"
+                                 : "lstm_cell_backward";
 
     size_t elem_size = grad_h.dtype_size();
     size_t state_bytes = batch_size * hidden_size * elem_size;
@@ -283,21 +277,15 @@ auto VulkanBackend::dispatchLSTMCellBackward(const Tensor& grad_h, const Tensor&
 auto VulkanBackend::dispatchGRUCellBackward(const Tensor& grad_h, const Tensor& gates_x,
                                              const Tensor& gates_h, const Tensor& h_prev,
                                              int64_t batch_size, int64_t hidden_size) -> std::vector<Tensor> {
-    // Float16: upcast to Float32 for numerical stability
-    if (grad_h.dtype() == DType::Float16) {
-        DType orig = grad_h.dtype();
-        auto results = dispatchGRUCellBackward(
-            grad_h.to(DType::Float32), gates_x.to(DType::Float32),
-            gates_h.to(DType::Float32), h_prev.to(DType::Float32),
-            batch_size, hidden_size);
-        for (auto& r : results) r = r.to(orig);
-        return results;
-    }
-
+    // Phase 2.1: Float16 path runs natively via `gru_cell_backward_f16.comp`.
     int32_t device_id = grad_h.device().index;
-    bool is_f64 = (grad_h.dtype() == DType::Float64);
+    bool is_f64  = (grad_h.dtype() == DType::Float64);
+    bool is_f16  = (grad_h.dtype() == DType::Float16);
     bool is_bf16 = (grad_h.dtype() == DType::BFloat16);
-    std::string shader = is_f64 ? "gru_cell_backward_f64" : is_bf16 ? "gru_cell_backward_bf16" : "gru_cell_backward";
+    std::string shader = is_f64  ? "gru_cell_backward_f64"
+                       : is_f16  ? "gru_cell_backward_f16"
+                       : is_bf16 ? "gru_cell_backward_bf16"
+                                 : "gru_cell_backward";
 
     size_t elem_size = grad_h.dtype_size();
     size_t state_bytes = batch_size * hidden_size * elem_size;
