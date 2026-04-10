@@ -244,6 +244,9 @@ enum class AttrKey : uint16_t {
     // Grid sample parameters
     PaddingMode,       // Grid sample padding mode string
 
+    // Dispatch-level flags
+    IgnoreAliasCheck,  // Allow dispatch_inplace() target to alias inputs (e.g. a.add_(a.view(...)))
+
     // Sentinel
     _Count
 };

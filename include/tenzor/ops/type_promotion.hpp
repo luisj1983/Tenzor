@@ -10,17 +10,10 @@
 
 namespace tenzor {
 
-/**
- * @brief Determine the promoted dtype for two dtypes.
- *
- * Follows NumPy/PyTorch promotion rules:
- * - Float64 > Float32 > Float16/BFloat16
- * - Int64 > Int32 > Int16 > Int8/UInt8
- * - Float wins over Int (Int32 + Float32 -> Float32)
- * - Bool promotes to anything
- * - Complex128 > Complex64, complex wins over real
- */
-auto promote_types(DType a, DType b) -> DType;
+// promote_types() moved to include/tenzor/core/dtype.hpp as a constexpr
+// function so any layer can use it without pulling in ops/. It is re-exported
+// here via the core header include above; existing code continues to work
+// unchanged.
 
 /**
  * @brief Determine the result dtype for a binary operation on two tensors.

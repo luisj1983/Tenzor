@@ -305,6 +305,10 @@ inline Tensor dispatch_single(
  * @brief Dispatch with explicit device type (for creation operations).
  *
  * Used when inputs are empty and device must be specified explicitly.
+ * Routes through the interceptor stack so profiling / tracing / autocast
+ * see every dispatch path consistently. Autocast is a no-op for creation
+ * ops (no inputs to cast), but other interceptors may still observe the
+ * call.
  *
  * @param op Operation identifier
  * @param device_type Target device type
@@ -323,8 +327,12 @@ inline std::vector<Tensor> dispatch_to_device(
     std::span<const Tensor> inputs,
     const OpAttributes& attrs = {})
 {
-    const auto& table = DispatchTableRegistry::get_table_const(device_type);
-    return table.dispatch(op, inputs, attrs);
+    DispatchNext terminal = [device_type](OpId o, std::span<const Tensor> ins,
+                                          const OpAttributes& a) -> std::vector<Tensor> {
+        const auto& table = DispatchTableRegistry::get_table_const(device_type);
+        return table.dispatch(o, ins, a);
+    };
+    return DispatchInterceptorStack::run(op, inputs, attrs, std::move(terminal));
 }
 
 /**
@@ -332,6 +340,14 @@ inline std::vector<Tensor> dispatch_to_device(
  *
  * Routes to the inplace kernel directly, avoiding const_cast.
  * The target tensor is modified in-place.
+ *
+ * @note Intentionally bypasses the DispatchInterceptorStack. Autocast on
+ *       in-place ops is semantically ambiguous (casting the target to a
+ *       narrower dtype would change the tensor's own dtype and break the
+ *       in-place contract), so PyTorch and Tenzor both disable autocast for
+ *       in-place ops. Profiling and tracing interceptors that need to see
+ *       every dispatch should also hook Tensor's in-place operators
+ *       (`operator+=`, etc.) to observe these calls.
  *
  * @param op Operation identifier (should be an inplace op)
  * @param target The tensor to modify in-place

@@ -360,32 +360,170 @@ constexpr auto is_quantized(DType dtype) -> bool {
 }
 
 /**
- * @brief DType promotion rules for binary operations and gradient accumulation.
- *
- * When two tensors with different dtypes are combined, the result dtype is
- * determined by the following rules (highest priority first):
- *
- * 1. Complex types dominate: Float + Complex -> Complex
- *    - Float32 + Complex64 -> Complex64
- *    - Float64 + Complex128 -> Complex128
- *
- * 2. Float types dominate over integer:
- *    - Int32 + Float32 -> Float32
- *    - Int64 + Float64 -> Float64
- *    - Float16 + Int32 -> Float32 (NOT Float16 — Float16 can only represent integers up to 2048)
- *    - BFloat16 + Int64 -> Float32 (same reason — BFloat16 range insufficient for integers)
- *
- * 3. Higher precision wins within category:
- *    - Float16 + Float32 -> Float32
- *    - Float32 + Float64 -> Float64
- *    - Int8 + Int32 -> Int32
- *    - BFloat16 + Float32 -> Float32
- *
- * 4. Bool promotes to the other type:
- *    - Bool + Float32 -> Float32
- *    - Bool + Int32 -> Int32
- *
- * These rules match PyTorch's type promotion semantics.
+ * @brief Check if a dtype is a floating-point type (including Float16, BFloat16, FP8).
  */
+constexpr auto is_floating_type(DType dtype) -> bool {
+    return dtype == DType::Float32 || dtype == DType::Float64 ||
+           dtype == DType::Float16 || dtype == DType::BFloat16 ||
+           dtype == DType::FP8_E4M3 || dtype == DType::FP8_E5M2;
+}
+
+/**
+ * @brief Check if a dtype is a signed or unsigned integer (not Bool, not quantized).
+ */
+constexpr auto is_integer_type(DType dtype) -> bool {
+    return dtype == DType::Int8  || dtype == DType::Int16  ||
+           dtype == DType::Int32 || dtype == DType::Int64  ||
+           dtype == DType::UInt8 || dtype == DType::UInt16 ||
+           dtype == DType::UInt32 || dtype == DType::UInt64;
+}
+
+/**
+ * @brief Check if a dtype is a complex type.
+ */
+constexpr auto is_complex_type(DType dtype) -> bool {
+    return dtype == DType::Complex64 || dtype == DType::Complex128;
+}
+
+namespace detail {
+
+// Priority ordering for type promotion (higher = wider type).
+// Used internally by promote_types().
+constexpr auto dtype_priority(DType dt) -> int {
+    switch (dt) {
+        case DType::Bool:       return 0;
+        case DType::UInt8:      return 1;
+        case DType::Int8:       return 2;
+        case DType::UInt16:     return 3;
+        case DType::Int16:      return 4;
+        case DType::UInt32:     return 5;
+        case DType::Int32:      return 6;
+        case DType::UInt64:     return 7;
+        case DType::Int64:      return 8;
+        case DType::FP8_E4M3:   return 8;   // FP8 types promote to Float32
+        case DType::FP8_E5M2:   return 8;   // (same priority as narrow floats)
+        case DType::Float16:    return 9;
+        case DType::BFloat16:   return 10;
+        case DType::Float32:    return 11;
+        case DType::Float64:    return 12;
+        case DType::Complex64:  return 13;
+        case DType::Complex128: return 14;
+        default:                return -1;
+    }
+}
+
+} // namespace detail
+
+/**
+ * @brief Determine the promoted dtype for two dtypes.
+ *
+ * Follows NumPy/PyTorch promotion rules (torch.result_type semantics):
+ *
+ * 1. Complex dominates: Float + Complex -> Complex (widens if the float is wider).
+ * 2. Float wins over integer — but Float16/BFloat16 + any integer -> Float32
+ *    because those float types cannot exactly represent typical integers.
+ * 3. Within category, higher precision wins.
+ * 4. Bool promotes to the other type.
+ * 5. Quantized + Float -> at-least-Float32 (implicit dequantization).
+ * 6. Quantized + Integer -> Float32 (dequantization needed).
+ * 7. Mixed FP8 (E4M3 + E5M2) -> E5M2 (wider range).
+ *
+ * This function is `constexpr` and lives in the core header so any layer
+ * (core, ops, autograd, nn, backends) can use it without pulling in `ops/`.
+ *
+ * @param a First dtype
+ * @param b Second dtype
+ * @return The promoted (common) dtype
+ */
+constexpr auto promote_types(DType a, DType b) -> DType {
+    // Same type: no promotion needed.
+    if (a == b) return a;
+
+    // Bool promotes to anything (except quantized, which we handle below).
+    if (a == DType::Bool && !is_quantized(b)) return b;
+    if (b == DType::Bool && !is_quantized(a)) return a;
+
+    // Complex wins over everything.
+    if (is_complex_type(a) && is_complex_type(b)) {
+        return detail::dtype_priority(a) >= detail::dtype_priority(b) ? a : b;
+    }
+    if (is_complex_type(a)) {
+        if (b == DType::Float64) return DType::Complex128;
+        return a;
+    }
+    if (is_complex_type(b)) {
+        if (a == DType::Float64) return DType::Complex128;
+        return b;
+    }
+
+    // Quantized type promotion:
+    // - Quantized + Float -> Float32 (or wider if the float type is wider)
+    // - Quantized + Quantized -> QInt8 (signed wins over unsigned)
+    // - Quantized + Integer -> Float32 (dequantization needed)
+    if (is_quantized(a) || is_quantized(b)) {
+        if (is_floating_type(a)) {
+            return (detail::dtype_priority(a) >= detail::dtype_priority(DType::Float32))
+                       ? a
+                       : DType::Float32;
+        }
+        if (is_floating_type(b)) {
+            return (detail::dtype_priority(b) >= detail::dtype_priority(DType::Float32))
+                       ? b
+                       : DType::Float32;
+        }
+        if (is_complex_type(a)) return a;
+        if (is_complex_type(b)) return b;
+        if (is_quantized(a) && is_quantized(b)) {
+            if (a == b) return a;
+            return DType::QInt8;  // signed type wins
+        }
+        return DType::Float32;  // quantized + integer -> dequant needed
+    }
+
+    // FP8 type promotion:
+    // - FP8 + same FP8 -> same FP8 (handled by a == b above)
+    // - FP8_E4M3 + FP8_E5M2 -> FP8_E5M2 (wider dynamic range)
+    // - FP8 + non-FP8 -> Float32 (or wider if the other type is wider)
+    if (a == DType::FP8_E4M3 || a == DType::FP8_E5M2) {
+        if (b == DType::Float64) return DType::Float64;
+        if (b == DType::FP8_E4M3 || b == DType::FP8_E5M2) {
+            return DType::FP8_E5M2;  // mixed FP8 -> wider range
+        }
+        if (detail::dtype_priority(b) >= detail::dtype_priority(DType::Float32)) return b;
+        return DType::Float32;
+    }
+    if (b == DType::FP8_E4M3 || b == DType::FP8_E5M2) {
+        if (a == DType::Float64) return DType::Float64;
+        if (detail::dtype_priority(a) >= detail::dtype_priority(DType::Float32)) return a;
+        return DType::Float32;
+    }
+
+    // Float wins over integer.
+    // Float16/BFloat16 can only represent integers up to 2048 exactly
+    // (mantissa is 10/7 bits respectively), so any integer type mixed with
+    // Float16/BFloat16 promotes to Float32 to avoid silent precision loss.
+    // This matches NumPy/PyTorch semantics (torch.result_type).
+    if (is_floating_type(a) && is_integer_type(b)) {
+        if (a == DType::Float16 || a == DType::BFloat16) return DType::Float32;
+        return a;
+    }
+    if (is_floating_type(b) && is_integer_type(a)) {
+        if (b == DType::Float16 || b == DType::BFloat16) return DType::Float32;
+        return b;
+    }
+
+    // Both floating: promote to wider.
+    if (is_floating_type(a) && is_floating_type(b)) {
+        return detail::dtype_priority(a) >= detail::dtype_priority(b) ? a : b;
+    }
+
+    // Both integer: promote to wider.
+    if (is_integer_type(a) && is_integer_type(b)) {
+        return detail::dtype_priority(a) >= detail::dtype_priority(b) ? a : b;
+    }
+
+    // Fallback: take the higher priority type.
+    return detail::dtype_priority(a) >= detail::dtype_priority(b) ? a : b;
+}
 
 } // namespace tenzor

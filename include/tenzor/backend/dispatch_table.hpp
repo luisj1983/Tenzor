@@ -353,6 +353,25 @@ struct alignas(64) BackendDispatchTable {
         if (!fn) [[unlikely]] {
             throw_unsupported(op);
         }
+
+        // Alias safety: reject an in-place kernel whose target overlaps with
+        // any of its other inputs in a way that would stomp on reads (e.g.
+        // `a.copy_(a.view(...))`). Ops that need self-alias must opt in via
+        // AttrKey::IgnoreAliasCheck. `x.op_(x)` is already allowed by
+        // may_alias() treating same-impl references as non-aliasing.
+        if (!others.empty() && !attrs.get_bool(AttrKey::IgnoreAliasCheck, false)) [[unlikely]] {
+            for (const auto& other : others) {
+                if (may_alias(target, other)) {
+                    std::string msg = "dispatch_inplace: target tensor of ";
+                    msg += std::string(op_id_to_name(op));
+                    msg += " aliases an input tensor. Clone the input first, "
+                           "or set AttrKey::IgnoreAliasCheck=true if "
+                           "self-aliasing is intentional.";
+                    throw std::runtime_error(std::move(msg));
+                }
+            }
+        }
+
         auto pre_version = target.version();
         auto& result = fn(target, others, attrs);
         // Auto-bump version counter only if kernel didn't already bump

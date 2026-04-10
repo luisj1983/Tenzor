@@ -1267,6 +1267,31 @@ public:
 };
 
 /**
+ * @brief Conservatively detect whether two tensors may alias the same memory.
+ *
+ * Used by dispatch_inplace() to catch bugs where an in-place op's target
+ * overlaps with one of its input tensors (for example `a.copy_(a.view(...))`
+ * where reads from the source would stomp on writes to the target).
+ *
+ * Semantics:
+ *   - Two references to the exact same Tensor object (same TensorImpl) are
+ *     treated as NON-aliasing. This is the `x.add_(x)` case, which most
+ *     element-wise in-place kernels handle correctly.
+ *   - Different storage objects are never aliasing.
+ *   - Same storage with overlapping byte ranges returns true. This
+ *     overestimates aliasing for strided views (the real touched bytes may
+ *     be sparser than the [offset, offset+numel*dtype_size) span), which is
+ *     safe: false positives can be silenced with
+ *     `AttrKey::IgnoreAliasCheck`, but false negatives cause data corruption.
+ *
+ * @param a First tensor
+ * @param b Second tensor
+ * @return true if the two tensors may alias each other in a way that an
+ *         in-place kernel could corrupt
+ */
+auto may_alias(const Tensor& a, const Tensor& b) -> bool;
+
+/**
  * @brief Internal tensor implementation (PImpl pattern).
  *
  * Manages the actual tensor data and metadata. Not intended for direct use.

@@ -349,26 +349,69 @@ auto Tensor::storage() const -> const intrusive_ptr<Storage>& {
     return impl_->storage;
 }
 
+auto may_alias(const Tensor& a, const Tensor& b) -> bool {
+    // Uninitialized tensors never alias.
+    if (!a.impl() || !b.impl()) return false;
+
+    // Same Tensor object (same impl): treat as non-aliasing. Most in-place
+    // kernels handle x.op_(x) correctly; this avoids false positives on the
+    // common idiom while still catching view/slice aliasing.
+    if (a.impl().get() == b.impl().get()) return false;
+
+    // Different storage: definitely no alias.
+    const auto& sa = a.storage();
+    const auto& sb = b.storage();
+    if (!sa || !sb) return false;
+    if (sa.get() != sb.get()) return false;
+
+    // Same storage: compute byte spans. This overestimates touched bytes for
+    // strided views (safe — the alternative would be to walk the stride
+    // pattern, which is both expensive and unnecessary here).
+    const auto esize_a = static_cast<int64_t>(a.dtype_size());
+    const auto esize_b = static_cast<int64_t>(b.dtype_size());
+    const auto start_a = a.offset() * esize_a;
+    const auto start_b = b.offset() * esize_b;
+    const auto end_a   = start_a + a.numel() * esize_a;
+    const auto end_b   = start_b + b.numel() * esize_b;
+    return start_a < end_b && start_b < end_a;
+}
+
 auto Tensor::set_requires_grad(bool requires_grad) -> void {
     if (!impl_) throw std::runtime_error("Operation on uninitialized tensor");
     impl_->requires_grad = requires_grad;
 }
 
+// NOTE: mutable_shape(), mutable_strides(), and set_offset() are internal
+// mutators used by backend kernels constructing view-like result tensors.
+// Callers must hold external synchronization; these are not thread-safe.
+//
+// Each mutator invalidates BOTH the contiguity cache and the memory-format
+// cache (previously only the contiguity cache), and bumps the version counter
+// so that autograd's in-place detection can catch a saved tensor whose
+// metadata was changed out from under it.
+
 auto Tensor::mutable_shape() -> std::vector<int64_t>& {
     if (!impl_) throw std::runtime_error("Operation on uninitialized tensor");
     impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
+    impl_->memory_format_cache_.store(-1, std::memory_order_release);
+    impl_->version_counter_.fetch_add(1, std::memory_order_release);
     return impl_->shape;
 }
 
 auto Tensor::mutable_strides() -> std::vector<int64_t>& {
     if (!impl_) throw std::runtime_error("Operation on uninitialized tensor");
     impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
+    impl_->memory_format_cache_.store(-1, std::memory_order_release);
+    impl_->version_counter_.fetch_add(1, std::memory_order_release);
     return impl_->strides;
 }
 
 auto Tensor::set_offset(int64_t offset) -> void {
     if (!impl_) throw std::runtime_error("Operation on uninitialized tensor");
     impl_->offset = offset;
+    impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
+    impl_->memory_format_cache_.store(-1, std::memory_order_release);
+    impl_->version_counter_.fetch_add(1, std::memory_order_release);
 }
 
 auto Tensor::invalidate_contiguity_cache() -> void {
