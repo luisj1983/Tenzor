@@ -4,6 +4,7 @@ set(TENZOR_CORE_SOURCES
     core/storage.cpp
     core/device.cpp
     core/dtype.cpp
+    core/dlpack.cpp
     core/shape.cpp
     core/init.cpp
     core/caching_allocator.cpp
@@ -118,6 +119,7 @@ set(TENZOR_CORE_SOURCES
     nn/optim/adadelta.cpp
     nn/optim/lamb.cpp
     nn/optim/sparse_adam.cpp
+    nn/optim/lion.cpp
     nn/optim/zero_optimizer.cpp
     nn/optim/gradient_utils.cpp
     nn/optim/scheduler.cpp

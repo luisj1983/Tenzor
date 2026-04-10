@@ -42,6 +42,10 @@ target_link_libraries(test_zero_stage1_distributed PRIVATE tenzor_core GTest::gt
 add_executable(test_gradient_utils optim/test_gradient_utils.cpp)
 target_link_libraries(test_gradient_utils PRIVATE tenzor_core GTest::gtest_main)
 
+# Lion optimizer (Phase 5.2)
+add_executable(test_lion optim/test_lion.cpp)
+target_link_libraries(test_lion PRIVATE tenzor_core GTest::gtest_main)
+
 # ZeRO Stage 2 Optimizer tests (Phase 5 - Gradient Partitioning)
 add_executable(test_zero_stage2 optim/test_zero_stage2.cpp)
 target_link_libraries(test_zero_stage2 PRIVATE tenzor_core GTest::gtest_main)
@@ -120,6 +124,7 @@ tenzor_discover_tests(test_zero_stage1 LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_zero_stage1_integration LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_zero_stage1_distributed LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_gradient_utils LABELS "nn" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_lion LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_zero_stage2 LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_zero_stage2_integration LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_zero_stage3 LABELS "nn" DISCOVERY_TIMEOUT 60)
