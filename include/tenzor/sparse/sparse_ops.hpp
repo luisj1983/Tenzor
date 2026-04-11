@@ -83,5 +83,27 @@ auto spgemm(const SparseTensor& a, const SparseTensor& b) -> SparseTensor;
  */
 auto sparse_triangular_solve(const SparseTensor& L, const Tensor& b, bool upper = false) -> Tensor;
 
+/**
+ * @brief Sampled dense-dense matrix multiplication.
+ *
+ * Computes C = mask * (A @ B^T) element-wise, where `mask` provides the
+ * sparsity pattern (CSR): only entries at (i, j) where mask[i, j] is
+ * non-zero are actually computed and stored. Returns a sparse matrix
+ * with the same sparsity pattern as `mask` but with values filled from
+ * the A @ B^T dot products.
+ *
+ * SDDMM is the bottleneck of many graph neural networks and attention
+ * layers (e.g. FlashAttention's score computation with a pre-defined
+ * pattern mask). This CPU implementation walks the mask's row pointer
+ * and column index, computing one dot product per non-zero. Each dot
+ * product is A[i, :] · B[j, :].
+ *
+ * @param mask Sparse mask (CSR) of shape (M, N)
+ * @param A Dense matrix of shape (M, K)
+ * @param B Dense matrix of shape (N, K) — note: read row-wise as B[j, :]
+ * @return Sparse result (CSR) with mask's pattern and dot-product values
+ */
+auto sddmm(const SparseTensor& mask, const Tensor& A, const Tensor& B) -> SparseTensor;
+
 } // namespace sparse
 } // namespace tenzor

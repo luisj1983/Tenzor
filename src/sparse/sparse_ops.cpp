@@ -1267,5 +1267,110 @@ auto sparse_triangular_solve(const SparseTensor& L, const Tensor& b, bool upper)
     }
 }
 
+// ============================================================================
+// SDDMM — Sampled Dense-Dense Matrix Multiplication (Phase 6.2)
+// ============================================================================
+
+namespace {
+
+template <typename T>
+auto cpu_sddmm_csr(const Tensor& mask_row_ptr,
+                   const Tensor& mask_col_ind,
+                   const Tensor& A,
+                   const Tensor& B,
+                   int64_t M,
+                   int64_t N,
+                   int64_t K) -> Tensor {
+    const auto nnz = mask_col_ind.numel();
+    Tensor values({nnz}, A.dtype(), A.device());
+
+    const auto* rp = mask_row_ptr.data<int64_t>();
+    const auto* ci = mask_col_ind.data<int64_t>();
+    const auto* a  = A.data<T>();
+    const auto* b  = B.data<T>();
+    auto* v        = values.data<T>();
+
+    // For each row i, walk its non-zeros and compute A[i,:] . B[j,:]
+    // (treating B as row-major with B[j,k] = b[j*K + k]).
+    #pragma omp parallel for if(M > 64)
+    for (int64_t i = 0; i < M; ++i) {
+        const int64_t start = rp[i];
+        const int64_t end   = rp[i + 1];
+        const T* a_row = a + i * K;
+        for (int64_t p = start; p < end; ++p) {
+            const int64_t j = ci[p];
+            const T* b_row = b + j * K;
+            T acc = T{0};
+            for (int64_t k = 0; k < K; ++k) {
+                acc += a_row[k] * b_row[k];
+            }
+            v[p] = acc;
+        }
+    }
+    return values;
+}
+
+} // anonymous namespace
+
+auto sddmm(const SparseTensor& mask, const Tensor& A, const Tensor& B) -> SparseTensor {
+    // Shape validation.
+    auto mask_shape = mask.shape();
+    if (mask_shape.size() != 2) {
+        throw std::runtime_error("sddmm: mask must be 2D (M, N)");
+    }
+    auto a_shape = A.shape();
+    auto b_shape = B.shape();
+    if (a_shape.size() != 2 || b_shape.size() != 2) {
+        throw std::runtime_error("sddmm: A and B must be 2D");
+    }
+    const int64_t M = mask_shape[0];
+    const int64_t N = mask_shape[1];
+    if (a_shape[0] != M) {
+        throw std::runtime_error("sddmm: A.shape[0] must equal mask.shape[0]");
+    }
+    if (b_shape[0] != N) {
+        throw std::runtime_error("sddmm: B.shape[0] must equal mask.shape[1] "
+                                 "(B is read row-wise: B[j, :] is the j-th "
+                                 "output column vector)");
+    }
+    if (a_shape[1] != b_shape[1]) {
+        throw std::runtime_error("sddmm: A.shape[1] must equal B.shape[1] "
+                                 "(shared reduction dimension K)");
+    }
+    if (A.dtype() != B.dtype()) {
+        throw std::runtime_error("sddmm: A and B must have the same dtype");
+    }
+
+    // Normalize to CSR for uniform access.
+    SparseTensor csr_mask = mask;
+    if (csr_mask.layout() != SparseLayout::CSR) {
+        csr_mask = csr_mask.to_csr();
+    }
+
+    const int64_t K = a_shape[1];
+    Tensor values;
+    if (A.dtype() == DType::Float32) {
+        values = cpu_sddmm_csr<float>(csr_mask.crow_indices(),
+                                      csr_mask.col_indices(),
+                                      A.contiguous(), B.contiguous(),
+                                      M, N, K);
+    } else if (A.dtype() == DType::Float64) {
+        values = cpu_sddmm_csr<double>(csr_mask.crow_indices(),
+                                       csr_mask.col_indices(),
+                                       A.contiguous(), B.contiguous(),
+                                       M, N, K);
+    } else {
+        throw std::runtime_error("sddmm: unsupported dtype " +
+                                 std::string(dtype_name(A.dtype())));
+    }
+
+    // Build the result CSR using the same row_ptr / col_ind as the mask
+    // but with the freshly-computed dot-product values.
+    return SparseTensor::sparse_csr(csr_mask.crow_indices(),
+                                    csr_mask.col_indices(),
+                                    values,
+                                    {M, N});
+}
+
 } // namespace sparse
 } // namespace tenzor

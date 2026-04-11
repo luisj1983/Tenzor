@@ -208,6 +208,63 @@ private:
 };
 
 // ============================================================================
+// Laplace Distribution (Phase 6.1)
+// ============================================================================
+
+/**
+ * @brief Laplace (double exponential) distribution parameterized by
+ *        location and scale.
+ *
+ * PDF(x) = (1 / (2b)) * exp(-|x - mu| / b)
+ *
+ * Sampling uses inverse-CDF transform: if U ~ Uniform(-0.5, 0.5), then
+ * `mu - b * sign(U) * log(1 - 2|U|)` is Laplace(mu, b). We generate U in
+ * (epsilon, 1-epsilon) first to avoid log(0) at the tails.
+ */
+class Laplace : public Distribution {
+public:
+    Laplace(Tensor loc, Tensor scale)
+        : loc_(std::move(loc)), scale_(std::move(scale)) {}
+
+    auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        auto shape = sample_shape.empty()
+            ? std::vector<int64_t>(loc_.shape().begin(), loc_.shape().end())
+            : sample_shape;
+        // u in (eps, 1-eps)
+        auto u = rand(shape, loc_.dtype(), loc_.device());
+        constexpr float kEps = 1e-7f;
+        auto u_clamped = tenzor::clamp(u, kEps, 1.0f - kEps);
+        // Center at 0.5 so we can take sign and log symmetrically.
+        auto centered = u_clamped - 0.5f;  // in (-0.5, 0.5)
+        auto abs_c = tenzor::abs(centered);
+        auto sign_c = tenzor::sign(centered);
+        auto one_minus_2abs = tenzor::log(1.0f - 2.0f * abs_c);
+        // x = mu - b * sign * log(1 - 2|u - 0.5|)
+        return loc_ - scale_ * sign_c * one_minus_2abs;
+    }
+
+    auto log_prob(const Tensor& value) -> Tensor override {
+        // log(1 / (2b)) - |x - mu| / b
+        auto diff = tenzor::abs(value - loc_);
+        auto log_2b = tenzor::log(scale_ * 2.0f);
+        return tenzor::neg(log_2b) - diff / scale_;
+    }
+
+    auto entropy() -> Tensor override {
+        // 1 + log(2b)
+        auto log_2b = tenzor::log(scale_ * 2.0f);
+        return log_2b + 1.0f;
+    }
+
+    auto mean() -> Tensor override { return loc_; }
+    auto variance() -> Tensor override { return scale_ * scale_ * 2.0f; }
+
+private:
+    Tensor loc_;
+    Tensor scale_;
+};
+
+// ============================================================================
 // Bernoulli Distribution
 // ============================================================================
 
