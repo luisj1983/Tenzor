@@ -95,7 +95,8 @@ class TestLossFunctions:
     def test_multi_margin_loss(self, device):
         loss_fn = tz.nn.MultiMarginLoss()
         pred = make_var([4, 4], device)
-        target = make_var([4, 4], device)
+        # MultiMarginLoss expects integer class labels, not a Variable target.
+        target = tz.zeros([4], dtype=tz.dtype.int64, device=device)
         loss = loss_fn(pred, target)
 
     def test_gaussian_nll_loss(self, device):

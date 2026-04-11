@@ -598,6 +598,13 @@ PYBIND11_MODULE(tenzor_core, m) {
     // Device
     py::class_<tenzor::Device>(m, "Device")
         .def(py::init<tenzor::Device::Type, int32_t>())
+        // String constructor: accepts "cpu", "cuda", "cuda:1", "rocm", etc.
+        // Paired with py::implicitly_convertible below so every pybind
+        // function that takes `const Device&` can be called with a Python
+        // string transparently — matches PyTorch's Python API ergonomics.
+        .def(py::init([](const std::string& s) {
+            return tenzor::Device::from_string(s);
+        }), py::arg("spec"))
         .def_static("cpu", &tenzor::Device::cpu)
         .def_static("cuda", &tenzor::Device::cuda, py::arg("index") = 0)
         .def_static("rocm", &tenzor::Device::rocm, py::arg("index") = 0)
@@ -607,7 +614,30 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def_readonly("index", &tenzor::Device::index)
         .def("__repr__", [](const tenzor::Device& d) {
             return d.to_string();
+        })
+        .def("__str__", [](const tenzor::Device& d) {
+            return d.to_string();
+        })
+        .def("__eq__", [](const tenzor::Device& a, const tenzor::Device& b) {
+            return a.type == b.type && a.index == b.index;
+        }, py::is_operator())
+        .def("__eq__", [](const tenzor::Device& a, const std::string& s) {
+            try {
+                auto b = tenzor::Device::from_string(s);
+                return a.type == b.type && a.index == b.index;
+            } catch (...) { return false; }
+        }, py::is_operator())
+        .def("__ne__", [](const tenzor::Device& a, const tenzor::Device& b) {
+            return !(a.type == b.type && a.index == b.index);
+        }, py::is_operator())
+        .def("__hash__", [](const tenzor::Device& d) {
+            return std::hash<int>{}(static_cast<int>(d.type)) ^
+                   (std::hash<int>{}(d.index) << 1);
         });
+    // Accept string wherever the Python API expects a Device. Parses
+    // through Device::from_string, so "cpu" / "cuda:0" / "rocm" / etc.
+    // all work. Must be declared after the class binding.
+    py::implicitly_convertible<std::string, tenzor::Device>();
 
     // DeviceGuard — RAII device context manager
     py::class_<tenzor::DeviceGuard>(m, "DeviceGuard",
@@ -804,6 +834,20 @@ Returns:
              py::arg("name"), "Find dimension index by name")
         .def_property_readonly("dtype", &tenzor::Tensor::dtype)
         .def_property_readonly("device", &tenzor::Tensor::device)
+        // `device_type` returns a short string like "cpu"/"cuda"/"rocm"
+        // so tests and user code can compare directly against the string
+        // parameter names they already use in parametrized fixtures.
+        .def_property_readonly("device_type", [](const tenzor::Tensor& self) {
+            switch (self.device().type) {
+                case tenzor::Device::Type::CPU:    return "cpu";
+                case tenzor::Device::Type::CUDA:   return "cuda";
+                case tenzor::Device::Type::ROCm:   return "rocm";
+                case tenzor::Device::Type::OneAPI: return "oneapi";
+                case tenzor::Device::Type::Vulkan: return "vulkan";
+                case tenzor::Device::Type::MPS:    return "mps";
+            }
+            return "unknown";
+        })
         .def_property_readonly("is_cuda", [](const tenzor::Tensor& self) {
             return self.device().type == tenzor::Device::Type::CUDA;
         })
@@ -2650,8 +2694,10 @@ Returns:
             return t;
         }
 
-        // Create tensor and fill
-        auto t = tenzor::empty(shape, actual_dtype, device);
+        // Build the tensor on CPU first — writing to t.data<T>() directly
+        // on a GPU device would dereference a device pointer from host code
+        // and crash. After filling, transfer to the requested device.
+        auto t = tenzor::empty(shape, actual_dtype, tenzor::Device::cpu());
         if (actual_dtype == tenzor::DType::Float64) {
             auto* ptr = t.data<double>();
             for (size_t i = 0; i < values.size(); ++i)
@@ -2670,11 +2716,14 @@ Returns:
                 ptr[i] = static_cast<int32_t>(values[i]);
         } else {
             // Fallback: fill as float, then cast
-            auto ft = tenzor::empty(shape, tenzor::DType::Float32, device);
+            auto ft = tenzor::empty(shape, tenzor::DType::Float32, tenzor::Device::cpu());
             auto* ptr = ft.data<float>();
             for (size_t i = 0; i < values.size(); ++i)
                 ptr[i] = static_cast<float>(values[i]);
             t = ft.to(actual_dtype);
+        }
+        if (device.type != tenzor::Device::Type::CPU) {
+            t = t.to(device);
         }
         return t;
     }, "Create a tensor from Python data (lists, nested lists, or scalar)",
@@ -5811,7 +5860,9 @@ Example::
           py::arg("input"), py::arg("negative_slope") = 0.01);
     nn.def("elu", &tenzor::nn::elu, "ELU activation function",
           py::arg("input"), py::arg("alpha") = 1.0);
-    nn.def("gelu", &tenzor::nn::gelu, "GELU activation function");
+    nn.def("gelu", &tenzor::nn::gelu,
+           py::arg("input"), py::arg("approximate") = "none",
+           "GELU activation function");
     nn.def("sigmoid", &tenzor::nn::sigmoid, "Sigmoid activation function");
     nn.def("tanh", &tenzor::nn::tanh, "Tanh activation function");
     nn.def("softmax", &tenzor::nn::softmax, "Softmax activation function",
@@ -9604,7 +9655,13 @@ Example::
         .def_readwrite("num_hidden_layers", &tenzor::models::BertConfig::num_hidden_layers)
         .def_readwrite("num_attention_heads", &tenzor::models::BertConfig::num_attention_heads)
         .def_readwrite("vocab_size", &tenzor::models::BertConfig::vocab_size)
+        .def_readwrite("intermediate_size", &tenzor::models::BertConfig::intermediate_size)
+        .def_readwrite("hidden_dropout_prob", &tenzor::models::BertConfig::hidden_dropout_prob)
+        .def_readwrite("attention_probs_dropout_prob", &tenzor::models::BertConfig::attention_probs_dropout_prob)
         .def_readwrite("max_position_embeddings", &tenzor::models::BertConfig::max_position_embeddings)
+        .def_readwrite("type_vocab_size", &tenzor::models::BertConfig::type_vocab_size)
+        .def_readwrite("layer_norm_eps", &tenzor::models::BertConfig::layer_norm_eps)
+        .def_readwrite("hidden_act", &tenzor::models::BertConfig::hidden_act)
         .def_static("base", &tenzor::models::BertConfig::base, "BERT-Base config")
         .def_static("large", &tenzor::models::BertConfig::large, "BERT-Large config");
 

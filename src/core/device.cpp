@@ -25,31 +25,46 @@ static auto parse_device_index(std::string_view str, size_t prefix_len) -> int {
 }
 
 auto Device::from_string(std::string_view str) -> Device {
+    // Match PyTorch: both "cuda" and "cuda:0" are valid; bare device names
+    // default to index 0 so callers can write Device::from_string("cuda")
+    // without knowing the device count.
     if (str == "cpu") {
         return Device::cpu();
     }
 
+    if (str == "cuda") {
+        return Device::cuda(0);
+    }
     if (str.starts_with("cuda:")) {
         return Device::cuda(parse_device_index(str, 5));
     }
 
+    if (str == "rocm") {
+        return Device::rocm(0);
+    }
     if (str.starts_with("rocm:")) {
         return Device::rocm(parse_device_index(str, 5));
     }
 
+    if (str == "oneapi") {
+        return Device::oneapi(0);
+    }
     if (str.starts_with("oneapi:")) {
         return Device::oneapi(parse_device_index(str, 7));
     }
 
+    if (str == "vulkan") {
+        return Device::vulkan(0);
+    }
     if (str.starts_with("vulkan:")) {
         return Device::vulkan(parse_device_index(str, 7));
     }
 
-    if (str.starts_with("mps:")) {
-        return Device::mps(parse_device_index(str, 4));
-    }
     if (str == "mps") {
         return Device::mps(0);
+    }
+    if (str.starts_with("mps:")) {
+        return Device::mps(parse_device_index(str, 4));
     }
 
     throw DeviceException("Invalid device string: " + std::string(str));
