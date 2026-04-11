@@ -18,13 +18,28 @@
 #include "../cublas_handle_pool.hpp"
 #endif
 
+#include <cstdlib>
+#include <cstring>
 #include <random>
 #include "tenzor/ops/fp8_scaling.hpp"
 
 namespace tenzor::cuda::matmul {
 
-// Thread-local configuration flags
-static thread_local bool g_allow_tf32 = true;
+// Thread-local configuration flags.
+//
+// The TF32 default is read from TENZOR_DISABLE_TF32 on first access: set
+// this to 1 in the environment (or from a test main()) to force full
+// IEEE 754 FP32 on cuBLAS matmuls. This is needed for CPU↔CUDA parity
+// tests where the default TF32 path silently drops ~13 mantissa bits.
+// Once set, explicit set_allow_tf32() calls still override the default.
+static auto tf32_default_from_env() -> bool {
+    const char* v = std::getenv("TENZOR_DISABLE_TF32");
+    if (v && (std::strcmp(v, "1") == 0 || std::strcmp(v, "true") == 0)) {
+        return false;
+    }
+    return true;
+}
+static thread_local bool g_allow_tf32 = tf32_default_from_env();
 static thread_local bool g_warn_fp16_saturation = false;
 
 auto allow_tf32() -> bool { return g_allow_tf32; }

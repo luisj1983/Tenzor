@@ -288,46 +288,72 @@ inline __m256 pow_avx2(__m256 x, float y) {
 }
 
 /**
- * @brief AVX2 vectorized sin using polynomial approximation
- * Uses Chebyshev polynomial, accurate to ~1e-6
+ * @brief AVX2 vectorized sin using polynomial approximation.
+ *
+ * Range-reduces to [-π/2, π/2] using k = round(x/π), x' = x - k·π,
+ * then applies a degree-9 Taylor series for sin centered at 0. On the
+ * reduced interval the truncation error is bounded by (π/2)^11/11! ≈
+ * 9e-6, well within Float32 epsilon. Using [-π, π] reduction instead
+ * (as an earlier version did) produced ~2e-3 error near ±π because the
+ * Taylor polynomial diverges that far out.
+ *
+ * sin(x + k·π) = (-1)^k · sin(x), so we flip the sign of the result
+ * when k is odd.
  */
 inline __m256 sin_avx2(__m256 x) {
-    // Range reduction to [-π, π]
-    __m256 inv_2pi = _mm256_set1_ps(0.15915494309f);  // 1/(2π)
-    __m256 two_pi = _mm256_set1_ps(6.28318530718f);
+    __m256 inv_pi = _mm256_set1_ps(0.318309886183791f);   // 1/π
+    __m256 pi     = _mm256_set1_ps(3.14159265358979f);    // π
 
-    // k = round(x / (2π))
-    __m256 k = _mm256_round_ps(_mm256_mul_ps(x, inv_2pi), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-    // x = x - k * 2π
+    // k = round(x / π) — nearest-even rounding to an integer.
+    __m256 kf = _mm256_round_ps(_mm256_mul_ps(x, inv_pi),
+                                _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+
+    // x <- x - k·π, now in [-π/2, π/2].
 #ifdef TENZOR_FAST_MATH_FMA
-    x = _mm256_fnmadd_ps(k, two_pi, x);
+    x = _mm256_fnmadd_ps(kf, pi, x);
 #else
-    x = _mm256_sub_ps(x, _mm256_mul_ps(k, two_pi));
+    x = _mm256_sub_ps(x, _mm256_mul_ps(kf, pi));
 #endif
 
-    // Polynomial coefficients for sin(x) on [-π, π]
-    // sin(x) ≈ x - x³/6 + x⁵/120 - x⁷/5040 + x⁹/362880
+    // Degree-11 Taylor series for sin about 0. On [-π/2, π/2] the
+    // truncation error is bounded by (π/2)^13/13! ≈ 5.7e-8, well
+    // within Float32 epsilon. Degree-9 alone was ~3e-6 at the edge,
+    // which matters for precision-sensitive comparisons.
     __m256 x2 = _mm256_mul_ps(x, x);
-    __m256 x3 = _mm256_mul_ps(x2, x);
 
-    __m256 c3 = _mm256_set1_ps(-0.16666666666f);   // -1/6
-    __m256 c5 = _mm256_set1_ps(0.00833333333f);    // 1/120
-    __m256 c7 = _mm256_set1_ps(-0.00019841270f);   // -1/5040
-    __m256 c9 = _mm256_set1_ps(0.0000027557319f);  // 1/362880
+    __m256 c3  = _mm256_set1_ps(-0.16666666666f);    // -1/6
+    __m256 c5  = _mm256_set1_ps(0.00833333333f);     // 1/120
+    __m256 c7  = _mm256_set1_ps(-0.00019841270f);    // -1/5040
+    __m256 c9  = _mm256_set1_ps(0.0000027557319f);   // 1/362880
+    __m256 c11 = _mm256_set1_ps(-2.5052108e-8f);     // -1/39916800
 
 #ifdef TENZOR_FAST_MATH_FMA
-    __m256 p = _mm256_fmadd_ps(c9, x2, c7);
+    __m256 p = _mm256_fmadd_ps(c11, x2, c9);
+    p = _mm256_fmadd_ps(p, x2, c7);
     p = _mm256_fmadd_ps(p, x2, c5);
     p = _mm256_fmadd_ps(p, x2, c3);
     p = _mm256_fmadd_ps(p, x2, _mm256_set1_ps(1.0f));
-    return _mm256_mul_ps(p, x);
+    __m256 result = _mm256_mul_ps(p, x);
 #else
-    __m256 p = _mm256_add_ps(_mm256_mul_ps(c9, x2), c7);
+    __m256 p = _mm256_add_ps(_mm256_mul_ps(c11, x2), c9);
+    p = _mm256_add_ps(_mm256_mul_ps(p, x2), c7);
     p = _mm256_add_ps(_mm256_mul_ps(p, x2), c5);
     p = _mm256_add_ps(_mm256_mul_ps(p, x2), c3);
     p = _mm256_add_ps(_mm256_mul_ps(p, x2), _mm256_set1_ps(1.0f));
-    return _mm256_mul_ps(p, x);
+    __m256 result = _mm256_mul_ps(p, x);
 #endif
+
+    // Flip the sign of lanes where k is odd: sin(x + k·π) = (-1)^k · sin(x').
+    // Convert kf to integer, mask the low bit, and produce a sign mask.
+    __m256i ki = _mm256_cvtps_epi32(kf);
+    __m256i one = _mm256_set1_epi32(1);
+    __m256i odd = _mm256_and_si256(ki, one);                // 0 or 1
+    // Build a lane mask that's all-ones when odd, all-zero when even.
+    __m256i odd_mask = _mm256_cmpeq_epi32(odd, one);
+    // sign_bit = 0x80000000 where odd, 0 elsewhere — XOR-in the sign.
+    __m256i sign_bit = _mm256_and_si256(odd_mask, _mm256_set1_epi32(0x80000000));
+    result = _mm256_xor_ps(result, _mm256_castsi256_ps(sign_bit));
+    return result;
 }
 
 /**
@@ -568,27 +594,46 @@ inline __m512 pow_avx512(__m512 x, float y) {
 }
 
 /**
- * @brief AVX-512 vectorized sin
+ * @brief AVX-512 vectorized sin.
+ *
+ * Range-reduces to [-π/2, π/2] via k = round(x/π), then applies a
+ * degree-9 Taylor series centered at 0 and flips sign on odd k. The
+ * earlier [-π, π] reduction left ~2e-3 error near ±π (the Taylor
+ * series diverges that far out); this reduction bounds the error at
+ * ~9e-6 on the whole domain.
  */
 inline __m512 sin_avx512(__m512 x) {
-    __m512 inv_2pi = _mm512_set1_ps(0.15915494309f);
-    __m512 two_pi = _mm512_set1_ps(6.28318530718f);
+    __m512 inv_pi = _mm512_set1_ps(0.318309886183791f);  // 1/π
+    __m512 pi     = _mm512_set1_ps(3.14159265358979f);   // π
 
-    __m512 k = _mm512_roundscale_ps(_mm512_mul_ps(x, inv_2pi), _MM_FROUND_TO_NEAREST_INT);
-    x = _mm512_fnmadd_ps(k, two_pi, x);
+    __m512 kf = _mm512_roundscale_ps(_mm512_mul_ps(x, inv_pi),
+                                     _MM_FROUND_TO_NEAREST_INT);
+    x = _mm512_fnmadd_ps(kf, pi, x);
 
     __m512 x2 = _mm512_mul_ps(x, x);
 
-    __m512 c3 = _mm512_set1_ps(-0.16666666666f);
-    __m512 c5 = _mm512_set1_ps(0.00833333333f);
-    __m512 c7 = _mm512_set1_ps(-0.00019841270f);
-    __m512 c9 = _mm512_set1_ps(0.0000027557319f);
+    __m512 c3  = _mm512_set1_ps(-0.16666666666f);
+    __m512 c5  = _mm512_set1_ps(0.00833333333f);
+    __m512 c7  = _mm512_set1_ps(-0.00019841270f);
+    __m512 c9  = _mm512_set1_ps(0.0000027557319f);
+    __m512 c11 = _mm512_set1_ps(-2.5052108e-8f);
 
-    __m512 p = _mm512_fmadd_ps(c9, x2, c7);
+    __m512 p = _mm512_fmadd_ps(c11, x2, c9);
+    p = _mm512_fmadd_ps(p, x2, c7);
     p = _mm512_fmadd_ps(p, x2, c5);
     p = _mm512_fmadd_ps(p, x2, c3);
     p = _mm512_fmadd_ps(p, x2, _mm512_set1_ps(1.0f));
-    return _mm512_mul_ps(p, x);
+    __m512 result = _mm512_mul_ps(p, x);
+
+    // Flip the sign of lanes where k is odd: sin(x + k·π) = (-1)^k · sin(x').
+    __m512i ki = _mm512_cvtps_epi32(kf);
+    __m512i odd_mask = _mm512_and_si512(ki, _mm512_set1_epi32(1));
+    __mmask16 odd_lanes =
+        _mm512_cmpeq_epi32_mask(odd_mask, _mm512_set1_epi32(1));
+    // XOR in the sign bit for odd lanes.
+    __m512 sign_flip = _mm512_castsi512_ps(_mm512_set1_epi32(0x80000000));
+    result = _mm512_mask_xor_ps(result, odd_lanes, result, sign_flip);
+    return result;
 }
 
 /**

@@ -13,31 +13,43 @@ layout(push_constant) uniform PushConstants {
     uint op;         // Operation: 0=sin, 1=cos, 2=tan, 3=asin, 4=acos, 5=atan
 } params;
 
-// Algorithm matches CPU sin_avx2(): range reduction to [-pi, pi] then
-// degree-9 Taylor polynomial.  Using the same constants ensures bitwise
-// parity with the CPU backend.
-const float INV_2PI = 0.15915494309;  // 1/(2*pi)
-const float TWO_PI  = 6.28318530718;  // 2*pi
-const float PI_OVER_2 = 1.57079632679; // pi/2
+// Algorithm matches the CPU fast-math sin: range-reduce to [-pi/2, pi/2]
+// via k = round(x/pi), x' = x - k*pi, then apply a degree-11 Taylor
+// polynomial centered at 0 and flip sign on odd k
+// (sin(x + k*pi) = (-1)^k * sin(x')). Using the same reduction and
+// coefficients keeps Vulkan and CPU outputs bitwise-identical.
+//
+// The earlier [-pi, pi] reduction with a degree-9 polynomial produced
+// ~2e-3 error near +/-pi because the Taylor series diverges that far
+// out; the tighter reduction + extra term bounds the worst case at
+// ~6e-8 over the whole domain.
+const float INV_PI    = 0.318309886183791;
+const float PI        = 3.14159265358979;
+const float PI_OVER_2 = 1.57079632679;
 
-// Polynomial coefficients for sin(x) on [-pi, pi]
-const float S3 = -0.16666666666;   // -1/3!
-const float S5 =  0.00833333333;   //  1/5!
-const float S7 = -0.00019841270;   // -1/7!
-const float S9 =  0.0000027557319; //  1/9!
+const float S3  = -0.16666666666;
+const float S5  =  0.00833333333;
+const float S7  = -0.00019841270;
+const float S9  =  0.0000027557319;
+const float S11 = -2.5052108e-8;
 
 float fast_sin(float x) {
-    // Range reduction: x = x - round(x/(2*pi)) * 2*pi
-    float k = round(x * INV_2PI);
-    x = x - k * TWO_PI;
+    // Range reduction to [-pi/2, pi/2].
+    float kf = round(x * INV_PI);
+    x = x - kf * PI;
 
-    // Horner evaluation: sin(x) ≈ x*(1 + x²*(c3 + x²*(c5 + x²*(c7 + x²*c9))))
     float x2 = x * x;
-    float p = S9 * x2 + S7;
+    float p = S11 * x2 + S9;
+    p = p * x2 + S7;
     p = p * x2 + S5;
     p = p * x2 + S3;
     p = p * x2 + 1.0;
-    return p * x;
+    float r = p * x;
+
+    // Flip the sign where k is odd.
+    int ki = int(kf);
+    if ((ki & 1) != 0) r = -r;
+    return r;
 }
 
 float fast_cos(float x) {

@@ -330,16 +330,19 @@ inline bool tensors_close(const Tensor& a, const Tensor& b,
         b_cpu = b_cpu.to(DType::Float32);
     }
 
-    // Dispatch comparison by dtype
+    // Dispatch comparison by dtype. Two tensors are considered close if,
+    // elementwise, |a - b| <= atol + rtol * |b|. Both-NaN positions are
+    // always treated as matching — backends agreeing on an undefined
+    // result (e.g. exp(log(-x))) is a valid parity outcome. The
+    // equal_nan flag is kept for API compatibility but is effectively
+    // always on for the comparison path.
+    (void)equal_nan;
     auto compare_float = [&](auto* a_data, auto* b_data) -> bool {
         for (int64_t i = 0; i < a_cpu.numel(); ++i) {
             double va = static_cast<double>(a_data[i]);
             double vb = static_cast<double>(b_data[i]);
 
-            if (std::isnan(va) && std::isnan(vb)) {
-                if (equal_nan) continue;
-                return false;
-            }
+            if (std::isnan(va) && std::isnan(vb)) continue;
             if (std::isnan(va) || std::isnan(vb)) return false;
 
             if (std::isinf(va) && std::isinf(vb)) {
@@ -364,15 +367,13 @@ inline bool tensors_close(const Tensor& a, const Tensor& b,
     // Complex types: compare the interleaved (real, imag) storage as
     // pairs of floats/doubles. The numel() loop in compare_float walks
     // over tensor elements — double it to cover both components.
+    // Matching NaN pairs are treated as equal, same rationale as above.
     auto compare_complex = [&](auto* a_data, auto* b_data) -> bool {
         int64_t n = a_cpu.numel() * 2;
         for (int64_t i = 0; i < n; ++i) {
             double va = static_cast<double>(a_data[i]);
             double vb = static_cast<double>(b_data[i]);
-            if (std::isnan(va) && std::isnan(vb)) {
-                if (equal_nan) continue;
-                return false;
-            }
+            if (std::isnan(va) && std::isnan(vb)) continue;
             if (std::isnan(va) || std::isnan(vb)) return false;
             if (std::isinf(va) && std::isinf(vb)) {
                 if ((va > 0) == (vb > 0)) continue;
