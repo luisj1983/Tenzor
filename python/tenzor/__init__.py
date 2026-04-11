@@ -110,6 +110,38 @@ if _os.path.exists(_autograd_path):
 from .tenzor_core import linalg
 _sys.modules['tenzor.linalg'] = linalg
 
+# ----------------------------------------------------------------
+# Phase 2.6 — __tensor_function__ subclass override protocol.
+#
+# Load the override helper module and wrap a curated set of the most
+# commonly used public ops so Tensor subclasses that define
+# __tensor_function__ intercept them. Covers:
+#   add/sub/mul/div/matmul/bmm/sum/mean/max/min
+#
+# Users can extend the wrapped set via tz.overrides.implements; see
+# tenzor/overrides.py for the full protocol semantics.
+# ----------------------------------------------------------------
+_overrides_path = _os.path.join(_os.path.dirname(__file__), 'overrides.py')
+_overrides_spec = _importlib_util.spec_from_file_location(
+    'tenzor.overrides', _overrides_path)
+_overrides_module = _importlib_util.module_from_spec(_overrides_spec)
+_overrides_spec.loader.exec_module(_overrides_module)
+_sys.modules['tenzor.overrides'] = _overrides_module
+overrides = _overrides_module
+
+# Apply the @implements wrapper to the curated set of common ops.
+# Only wrap names that exist on this module (the C++ binding surface
+# can vary between builds, so be tolerant).
+for _op_name in (
+    "add", "sub", "mul", "div", "matmul", "bmm",
+    "sum", "mean", "max", "min",
+    "sqrt", "exp", "log", "abs", "neg",
+):
+    _op = globals().get(_op_name)
+    if _op is not None and callable(_op):
+        globals()[_op_name] = overrides.implements(_op)
+del _op_name, _op
+
 __version__ = "1.0.0"
 
 __all__ = [
