@@ -256,7 +256,22 @@ QuantizedConv2d::QuantizedConv2d(
     groups_(groups),
     weight_(Tensor({out_channels, in_channels / groups, kernel_size, kernel_size},
                    DType::Int8, Device::cpu()), weight_qparams),
-    bias_scale_(bias_scale) {}
+    bias_scale_(bias_scale) {
+    if (groups <= 0) {
+        throw std::invalid_argument(
+            "QuantizedConv2d: groups must be positive, got " + std::to_string(groups));
+    }
+    if (in_channels % groups != 0) {
+        throw std::invalid_argument(
+            "QuantizedConv2d: in_channels (" + std::to_string(in_channels) +
+            ") must be divisible by groups (" + std::to_string(groups) + ")");
+    }
+    if (out_channels % groups != 0) {
+        throw std::invalid_argument(
+            "QuantizedConv2d: out_channels (" + std::to_string(out_channels) +
+            ") must be divisible by groups (" + std::to_string(groups) + ")");
+    }
+}
 
 auto QuantizedConv2d::forward_impl(const Variable& input) -> Variable {
     // Inference-only: see QuantizedLinear::forward_impl for rationale.
