@@ -385,10 +385,14 @@ TEST(NNOperationParity, ELU) {
 
     auto input = randn({32, 64}, DType::Float32, Device::cpu());
 
+    // ELU for x<0 is alpha*(exp(x)-1); the exp evaluation differs by
+    // ~0.5 ULP (~6e-8) between CPU (MKL VML) and CUDA (expf intrinsic).
+    // The previous atol=1e-8 was tighter than a single Float32 ULP and
+    // trivially failed. Raise to atol=1e-6, matching Softplus/GELU.
     test_operation_parity([](const std::vector<Tensor>& inputs) {
         auto input_var = Variable(inputs[0], false);
         return nn::elu(input_var, 1.0f).tensor();
-    }, {input}, 1e-6f, 1e-8f, "ELU");
+    }, {input}, 1e-5f, 1e-6f, "ELU");
 }
 
 TEST(NNOperationParity, GELU) {
