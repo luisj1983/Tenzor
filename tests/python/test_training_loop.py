@@ -35,15 +35,16 @@ def test_linear_training_step():
 
     # Forward pass
     output = model(x)
-    assert output.shape() == [3, 2], f"Expected shape [3, 2], got {output.shape()}"
+    assert output.shape == [3, 2], f"Expected shape [3, 2], got {output.shape}"
 
-    # Compute MSE loss
-    diff = output - target
-    loss = (diff * diff).tensor().mean()
-    loss_var = tz.Variable(loss, True)
+    # Compute MSE loss as a Variable-valued scalar so the autograd graph
+    # stays connected back to the model's parameters. Wrapping a raw
+    # Tensor .mean() in a fresh Variable severs the graph.
+    import tenzor.nn.functional as F
+    loss = F.mse_loss(output, target)
 
     # Backward pass
-    loss_var.backward()
+    loss.backward()
 
     # Create SGD optimizer and step
     optimizer = tz.optim.SGD(model.parameters(), lr=0.01)

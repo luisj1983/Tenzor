@@ -137,6 +137,12 @@ class Module(_CppModule):
         object.__setattr__(self, '_submodule_cache', None)
         object.__setattr__(self, '_param_cache', None)
         object.__setattr__(self, '_buffer_cache', None)
+        # Python-side subclass preservation: pybind11's register_module
+        # stores the C++ Module part and slicing drops the Python subclass
+        # reference on lookup. We keep a parallel dict of Python refs so
+        # `self.submodule` returns the original Python instance and forward
+        # dispatch routes through the Python trampoline (forward_impl).
+        object.__setattr__(self, '_py_submodules', {})
 
     def __setattr__(self, name: str, value) -> None:
         """
@@ -156,13 +162,18 @@ class Module(_CppModule):
         if isinstance(value, _CppModule):
             with object.__getattribute__(self, '_cache_lock'):
                 object.__setattr__(self, '_submodule_cache', None)
+                # Keep the Python reference so forward() resolves to the
+                # subclass's Python method rather than the sliced C++ base.
+                py_submods = object.__getattribute__(self, '_py_submodules')
+                py_submods[name] = value
                 self.register_module(name, value)
             return
 
         # Handle Variable assignment (potential parameter)
         if isinstance(value, _core.Variable):
             with object.__getattribute__(self, '_cache_lock'):
-                if value.requires_grad():
+                # requires_grad is a property (bool), not a method.
+                if value.requires_grad:
                     object.__setattr__(self, '_param_cache', None)
                     self.register_parameter(name, value)
                 else:
@@ -226,6 +237,13 @@ class Module(_CppModule):
         # Lock protects cache population against concurrent __setattr__ invalidation.
         lock = object.__getattribute__(self, '_cache_lock')
 
+        # Prefer the Python-side subclass reference if we stored one in
+        # __setattr__ — this preserves the subclass identity that pybind11
+        # loses when it round-trips a shared_ptr<Module> through C++.
+        py_submods = object.__getattribute__(self, '_py_submodules')
+        if name in py_submods:
+            return py_submods[name]
+
         with lock:
             submodule_cache = object.__getattribute__(self, '_submodule_cache')
             if submodule_cache is None:
@@ -263,6 +281,8 @@ class Module(_CppModule):
         if name in submodules:
             with lock:
                 self.unregister_module(name)
+                py_submods = object.__getattribute__(self, '_py_submodules')
+                py_submods.pop(name, None)
                 self._param_cache = None
                 self._buffer_cache = None
                 self._submodule_cache = None

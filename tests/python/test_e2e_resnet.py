@@ -58,29 +58,29 @@ def test_resnet_training_loss_decreases():
     model = SmallResNet(in_features=8, hidden=16, num_classes=4)
     model.train()
 
-    optimizer = tz.optim.Adam(model.parameters(), lr=0.01)
+    import tenzor.nn.functional as F
+    optimizer = tz.optim.Adam(model.parameters(), lr=0.05)
+
+    # Use a FIXED input/target across steps so the optimizer can actually
+    # converge — previously the test regenerated random data every step,
+    # which made loss-decrease expectations noise-dominated. Also go
+    # through F.mse_loss on the Variable so the autograd graph stays
+    # connected (wrapping a raw Tensor .mean() in a fresh Variable severs
+    # the graph and leaves gradients at zero).
+    x = tz.Variable(tz.randn([4, 8]), False)
+    target = tz.Variable(tz.randn([4, 4]), False)
 
     losses = []
-    for step in range(5):
+    for step in range(20):
         optimizer.zero_grad()
-
-        # Synthetic data
-        x = tz.Variable(tz.randn([4, 8]), True)
-        target = tz.Variable(tz.randn([4, 4]), False)
-
         output = model(x)
-        assert output.shape() == [4, 4], f"Step {step}: expected [4,4], got {output.shape()}"
-
-        diff = output - target
-        loss = (diff * diff).tensor().mean()
-        loss_val = float(loss.item())
-        losses.append(loss_val)
-
-        loss_var = tz.Variable(loss, True)
-        loss_var.backward()
+        assert output.shape == [4, 4], f"Step {step}: expected [4,4], got {output.shape}"
+        loss = F.mse_loss(output, target)
+        losses.append(float(loss.tensor().item()))
+        loss.backward()
         optimizer.step()
 
-    # Verify loss decreased overall (first -> last)
+    # Verify loss decreased overall (first -> last).
     assert losses[-1] < losses[0], (
         f"Loss should decrease: first={losses[0]:.4f}, last={losses[-1]:.4f}"
     )
@@ -96,18 +96,17 @@ def test_resnet_gradient_flow_through_skip():
     x = tz.Variable(tz.randn([2, 4]), True)
     target = tz.Variable(tz.randn([2, 2]), False)
 
+    import tenzor.nn.functional as F
     output = model(x)
-    diff = output - target
-    loss = (diff * diff).tensor().mean()
-    loss_var = tz.Variable(loss, True)
-    loss_var.backward()
+    loss = F.mse_loss(output, target)
+    loss.backward()
 
-    # All parameters should have gradients
+    # All parameters should have gradients. Variable.grad returns a
+    # Tensor (not a Variable), so sum/item directly on the tensor.
     for param in model.parameters():
-        grad = param.grad()
+        grad = param.grad
         assert grad is not None, "All parameters should receive gradients"
-        # Gradient should not be all zeros
-        grad_sum = abs(float(grad.tensor().sum().item()))
+        grad_sum = abs(float(grad.sum().item()))
         assert grad_sum > 0, "Gradient should be non-zero"
 
 
@@ -120,7 +119,7 @@ def test_resnet_eval_mode():
 
     x = tz.Variable(tz.randn([2, 4]), False)
     output = model(x)
-    assert output.shape() == [2, 2]
+    assert output.shape == [2, 2]
 
 
 if __name__ == "__main__":

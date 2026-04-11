@@ -50,8 +50,8 @@ def test_basic_module_subclass():
     # Forward pass
     x = tz.Variable(tz.randn([3, 10]), requires_grad=False)
     y = layer(x)
-    print(f"Input shape: {x.shape()}")
-    print(f"Output shape: {y.shape()}")
+    print(f"Input shape: {x.shape}")
+    print(f"Output shape: {y.shape}")
 
     print("PASSED: Basic Module subclassing works!\n")
 
@@ -94,8 +94,8 @@ def test_builtin_layers_composition():
     # Forward pass - input shape is [batch_size, in_features]
     x = tz.Variable(tz.randn([32, 784]), requires_grad=False)
     y = model(x)
-    print(f"Input shape: {x.shape()}")
-    print(f"Output shape: {y.shape()}")
+    print(f"Input shape: {x.shape}")
+    print(f"Output shape: {y.shape}")
 
     print("PASSED: Built-in layer composition works!\n")
 
@@ -120,8 +120,8 @@ def test_sequential_container():
     # Forward pass - input shape is [batch_size, in_features]
     x = tz.Variable(tz.randn([8, 10]), requires_grad=False)
     y = model(x)
-    print(f"Input shape: {x.shape()}")
-    print(f"Output shape: {y.shape()}")
+    print(f"Input shape: {x.shape}")
+    print(f"Output shape: {y.shape}")
 
     print("PASSED: Sequential container works!\n")
 
@@ -178,8 +178,8 @@ def test_nested_modules():
     # Forward pass - input shape is [batch_size, in_features]
     x = tz.Variable(tz.randn([16, 32]), requires_grad=False)
     y = net(x)
-    print(f"Input shape: {x.shape()}")
-    print(f"Output shape: {y.shape()}")
+    print(f"Input shape: {x.shape}")
+    print(f"Output shape: {y.shape}")
 
     print("PASSED: Nested module composition works!\n")
 

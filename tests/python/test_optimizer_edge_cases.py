@@ -38,6 +38,26 @@ def test_sgd_zero_gradient_step():
     assert diff < 1e-7, f"Weights changed with zero gradients: diff={diff}"
 
 
+import tenzor.nn.functional as _F
+
+
+def _scalar_mse_loss(model, x):
+    """Compute a scalar MSE loss on the model output so backward flows
+    back to the parameters. Wrapping the raw Tensor .mean() in a fresh
+    Variable would sever the autograd graph and leave .grad = None."""
+    out = model(x)
+    zero = tz.Variable(tz.zeros([int(s) for s in out.shape]), False)
+    return _F.mse_loss(out, zero)
+
+
+def _l2_norm(t):
+    """Compute ||t||_2 via sum of squares — Tensor.norm() isn't wired up."""
+    flat = (t * t)
+    total = float(flat.sum().item())
+    import math
+    return math.sqrt(total)
+
+
 def test_adam_basic_step():
     """Adam optimizer should update weights after backward."""
     _init()
@@ -49,10 +69,8 @@ def test_adam_basic_step():
     initial_weight = params[0].tensor().clone()
 
     x = tz.Variable(tz.randn([2, 4]), True)
-    output = model(x)
-    loss = (output * output).tensor().mean()
-    loss_var = tz.Variable(loss, True)
-    loss_var.backward()
+    loss = _scalar_mse_loss(model, x)
+    loss.backward()
 
     optimizer.step()
 
@@ -67,25 +85,18 @@ def test_adamw_weight_decay():
     model = tz.nn.Linear(4, 2)
     model.train()
 
-    # High weight decay to make effect visible
     optimizer = tz.optim.AdamW(model.parameters(), lr=0.01, weight_decay=0.1)
-
     params = list(model.parameters())
-    initial_norm = float(params[0].tensor().norm().item())
+    initial_norm = _l2_norm(params[0].tensor())
 
-    # Several steps with backward
     for _ in range(3):
         optimizer.zero_grad()
         x = tz.Variable(tz.randn([2, 4]), True)
-        output = model(x)
-        loss = (output * output).tensor().mean()
-        loss_var = tz.Variable(loss, True)
-        loss_var.backward()
+        loss = _scalar_mse_loss(model, x)
+        loss.backward()
         optimizer.step()
 
-    final_norm = float(params[0].tensor().norm().item())
-    # Weight decay should shrink weights (norm should decrease or at least not grow much)
-    # This is a soft check since gradient updates can increase norms
+    final_norm = _l2_norm(params[0].tensor())
     assert final_norm < initial_norm * 2.0, (
         f"Weights grew too much with weight decay: {initial_norm:.4f} -> {final_norm:.4f}"
     )
@@ -100,22 +111,20 @@ def test_multiple_steps_without_zero_grad():
 
     # Step 1
     x = tz.Variable(tz.randn([2, 4]), True)
-    output = model(x)
-    loss = (output * output).tensor().mean()
-    tz.Variable(loss, True).backward()
+    loss = _scalar_mse_loss(model, x)
+    loss.backward()
 
     params = list(model.parameters())
-    grad_after_first = params[0].grad().tensor().clone()
+    # Variable.grad is already a Tensor (not a Variable), so clone directly.
+    grad_after_first = params[0].grad.clone()
 
     # Step 2 without zero_grad - gradients should accumulate
     x2 = tz.Variable(tz.randn([2, 4]), True)
-    output2 = model(x2)
-    loss2 = (output2 * output2).tensor().mean()
-    tz.Variable(loss2, True).backward()
+    loss2 = _scalar_mse_loss(model, x2)
+    loss2.backward()
 
-    grad_after_second = params[0].grad().tensor()
+    grad_after_second = params[0].grad
 
-    # Accumulated gradient should differ from first gradient
     diff = float((grad_after_second - grad_after_first).abs().sum().item())
     assert diff > 1e-7, "Gradients should accumulate without zero_grad"
 
@@ -131,9 +140,8 @@ def test_sgd_with_momentum():
     for _ in range(3):
         optimizer.zero_grad()
         x = tz.Variable(tz.randn([2, 4]), True)
-        output = model(x)
-        loss = (output * output).tensor().mean()
-        tz.Variable(loss, True).backward()
+        loss = _scalar_mse_loss(model, x)
+        loss.backward()
         optimizer.step()
 
     # If we got here without error, momentum is working

@@ -24,10 +24,10 @@ def test_variable_creation():
     print("Testing Variable creation...")
     t = tz.Tensor([2, 3], tz.dtype.float32)
     v = tz.Variable(t, True)
-    assert v.requires_grad(), "Should require grad"
+    assert v.requires_grad, "Should require grad"
 
     v2 = tz.Variable(t, False)
-    assert not v2.requires_grad(), "Should not require grad"
+    assert not v2.requires_grad, "Should not require grad"
     print("  Variable creation OK")
 
 

@@ -125,7 +125,7 @@ def test_transformer_training_loss_decreases():
         target = tz.Variable(t_data, False)
 
         output = model(x)
-        assert output.shape() == [4, 6, 4], f"Step {step}: expected [4,6,4], got {output.shape()}"
+        assert output.shape == [4, 6, 4], f"Step {step}: expected [4,6,4], got {output.shape}"
 
         diff = output - target
         loss = tz.mean(diff * diff)
@@ -184,7 +184,7 @@ def test_transformer_eval_mode():
 
     x = tz.Variable(tz.randn([2, 3, 4]), False)
     output = model(x)
-    assert output.shape() == [2, 3, 2]
+    assert output.shape == [2, 3, 2]
 
 
 if __name__ == "__main__":

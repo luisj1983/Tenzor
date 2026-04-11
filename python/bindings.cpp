@@ -7450,6 +7450,13 @@ Example::
     distributed.def("barrier", &tenzor::distributed::barrier,
         "Barrier synchronization across all processes");
 
+    // Expose the default process group created by init_process_group so
+    // Python code can pass it to DDP / FSDP without pickling a separate
+    // PG instance across fork() boundaries.
+    distributed.def("get_process_group", []() {
+        return tenzor::distributed::DistributedContext::get_process_group();
+    }, "Get the default process group initialized by init_process_group()");
+
     distributed.def("all_reduce", &tenzor::distributed::all_reduce,
         "All-reduce operation on tensor",
         py::arg("tensor"), py::arg("op") = tenzor::distributed::ReduceOp::SUM);
