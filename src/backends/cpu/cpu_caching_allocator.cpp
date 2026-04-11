@@ -144,6 +144,16 @@ void CPUCachingAllocator::deallocate(void* ptr) {
         return;
     }
 
+    // Shutdown-safety: if the thread-local pool wrapper has already been
+    // destroyed (its dtor sets `valid=false`), avoid touching its
+    // unordered_map — the storage has been torn down and dereferencing it
+    // is UB. The OS reclaims any leaked bytes at process exit, and tensors
+    // that outlive the pool are only hit during static-destructor teardown
+    // (e.g. parametrization_registry dropping saved tensors on exit).
+    if (!tl_pool_wrapper_.valid) {
+        return;
+    }
+
     auto& local = get_local_pool();
 
     // Check thread-local allocated blocks first
