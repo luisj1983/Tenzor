@@ -101,6 +101,43 @@ enum class DataLayout {
 };
 
 // ============================================================================
+// NHWC → NCHW transpose for conv2d output.
+//
+// rocBLAS (column-major) given a row-major (M×K) col_buffer with ld=K and
+// a row-major (N×K) weight_ptr with ld=K, where we ask op(A)=trans(weight)
+// and op(B)=col, computes op(A) · op(B) = (N,K) · (K,M) = (N×M). Written
+// back with ld=N, the resulting memory layout is (M,N) row-major — i.e.
+// output[b*OH*OW + oh*OW + ow, oc] — which flattens as
+// [b, oh, ow, oc] (NHWC), not [b, oc, oh, ow] (NCHW). Conv2d's public
+// contract is NCHW, so we GEMM into a temp buffer and permute with
+// this kernel.
+// ============================================================================
+template<typename T>
+__global__ void conv_nhwc_to_nchw_kernel(
+    const T* __restrict__ nhwc,   // shape: (batch * out_h * out_w, channels_per_group)
+    T* __restrict__ nchw_out,     // shape: (batch, out_channels, out_h, out_w)
+    int64_t batch,
+    int64_t out_h,
+    int64_t out_w,
+    int64_t out_channels,         // total output channels (across all groups)
+    int64_t channels_per_group,
+    int64_t channel_offset        // group's first channel in the global output
+) {
+    int64_t total_spatial = batch * out_h * out_w;
+    HIP_KERNEL_LOOP(idx, total_spatial * channels_per_group) {
+        int64_t c = idx % channels_per_group;
+        int64_t spatial_idx = idx / channels_per_group;
+        int64_t b = spatial_idx / (out_h * out_w);
+        int64_t hw = spatial_idx % (out_h * out_w);
+        int64_t h = hw / out_w;
+        int64_t w = hw % out_w;
+        int64_t global_c = channel_offset + c;
+        int64_t nchw_idx = ((b * out_channels + global_c) * out_h + h) * out_w + w;
+        nchw_out[nchw_idx] = nhwc[idx];
+    }
+}
+
+// ============================================================================
 // im2col HIP Kernel - Optimized for AMD GPUs
 // ============================================================================
 
@@ -869,13 +906,12 @@ auto conv2d_forward_kernel(
             float beta = 0.0f;
 
             const float* weight_ptr = weight.data<float>() + out_start * in_channels_per_group * kernel_h * kernel_w;
-            float* output_ptr;
 
-            if (layout == DataLayout::NCHW) {
-                output_ptr = output.data<float>() + out_start * out_h * out_w;
-            } else {  // NHWC
-                output_ptr = output.data<float>() + out_start;
-            }
+            // GEMM into a temp buffer in NHWC order, then transpose to
+            // NCHW. Writing rocblas_sgemm directly into the NCHW output
+            // pointer stored (b*oh*ow, oc) row-major = NHWC, not NCHW.
+            HipBuffer gemm_out_buf(M * N * sizeof(float));
+            float* gemm_out = gemm_out_buf.as<float>();
 
             // rocBLAS uses column-major ordering (same as cuBLAS)
             ROCBLAS_CHECK(rocblas_sgemm(
@@ -891,9 +927,23 @@ auto conv2d_forward_kernel(
                 col_buffer,                  // col matrix
                 K,                           // leading dimension
                 &beta,
-                output_ptr,                  // output matrix
+                gemm_out,                    // NHWC-order temp buffer
                 N                            // leading dimension
             ));
+
+            if (layout == DataLayout::NCHW) {
+                dim3 t_grid, t_block;
+                compute_launch_config_1d(M * N, t_grid, t_block);
+                conv_nhwc_to_nchw_kernel<float><<<t_grid, t_block, 0, stream>>>(
+                    gemm_out, output.data<float>(),
+                    batch, out_h, out_w, out_channels, N, out_start
+                );
+                HIP_CHECK(hipGetLastError());
+            } else {  // NHWC — the GEMM output layout matches the tensor layout
+                float* output_ptr = output.data<float>() + out_start;
+                HIP_CHECK(hipMemcpyAsync(output_ptr, gemm_out,
+                    M * N * sizeof(float), hipMemcpyDeviceToDevice, stream));
+            }
 
         } else if (dtype == DType::Float64) {
             HipBuffer col_buf(col_rows * col_cols * sizeof(double));
@@ -919,13 +969,9 @@ auto conv2d_forward_kernel(
             double beta = 0.0;
 
             const double* weight_ptr = weight.data<double>() + out_start * in_channels_per_group * kernel_h * kernel_w;
-            double* output_ptr;
 
-            if (layout == DataLayout::NCHW) {
-                output_ptr = output.data<double>() + out_start * out_h * out_w;
-            } else {  // NHWC
-                output_ptr = output.data<double>() + out_start;
-            }
+            HipBuffer gemm_out_buf(M * N * sizeof(double));
+            double* gemm_out = gemm_out_buf.as<double>();
 
             // rocBLAS dgemm for double precision
             ROCBLAS_CHECK(rocblas_dgemm(
@@ -941,9 +987,23 @@ auto conv2d_forward_kernel(
                 col_buffer,                  // col matrix
                 K,                           // leading dimension
                 &beta,
-                output_ptr,                  // output matrix
+                gemm_out,                    // NHWC-order temp buffer
                 N                            // leading dimension
             ));
+
+            if (layout == DataLayout::NCHW) {
+                dim3 t_grid, t_block;
+                compute_launch_config_1d(M * N, t_grid, t_block);
+                conv_nhwc_to_nchw_kernel<double><<<t_grid, t_block, 0, stream>>>(
+                    gemm_out, output.data<double>(),
+                    batch, out_h, out_w, out_channels, N, out_start
+                );
+                HIP_CHECK(hipGetLastError());
+            } else {  // NHWC — direct copy
+                double* output_ptr = output.data<double>() + out_start;
+                HIP_CHECK(hipMemcpyAsync(output_ptr, gemm_out,
+                    M * N * sizeof(double), hipMemcpyDeviceToDevice, stream));
+            }
 
         } else if (dtype == DType::Float16) {
             HipBuffer col_buf(col_rows * col_cols * sizeof(__half));
@@ -973,13 +1033,9 @@ auto conv2d_forward_kernel(
             rocblas_half beta_h  = rocblas_half{kFP16Zero};
 
             const rocblas_half* weight_ptr = reinterpret_cast<const rocblas_half*>(weight.data<Float16>()) + out_start * in_channels_per_group * kernel_h * kernel_w;
-            rocblas_half* output_ptr;
 
-            if (layout == DataLayout::NCHW) {
-                output_ptr = reinterpret_cast<rocblas_half*>(output.data<Float16>()) + out_start * out_h * out_w;
-            } else {  // NHWC
-                output_ptr = reinterpret_cast<rocblas_half*>(output.data<Float16>()) + out_start;
-            }
+            HipBuffer gemm_out_buf(M * N * sizeof(__half));
+            __half* gemm_out = gemm_out_buf.as<__half>();
 
             // rocBLAS hgemm for half precision
             ROCBLAS_CHECK(rocblas_hgemm(
@@ -995,9 +1051,25 @@ auto conv2d_forward_kernel(
                 reinterpret_cast<const rocblas_half*>(col_buffer),  // col matrix
                 K,                           // leading dimension
                 &beta_h,
-                output_ptr,                  // output matrix
+                reinterpret_cast<rocblas_half*>(gemm_out),  // NHWC-order temp
                 N                            // leading dimension
             ));
+
+            if (layout == DataLayout::NCHW) {
+                dim3 t_grid, t_block;
+                compute_launch_config_1d(M * N, t_grid, t_block);
+                conv_nhwc_to_nchw_kernel<__half><<<t_grid, t_block, 0, stream>>>(
+                    gemm_out,
+                    reinterpret_cast<__half*>(output.data<Float16>()),
+                    batch, out_h, out_w, out_channels, N, out_start
+                );
+                HIP_CHECK(hipGetLastError());
+            } else {  // NHWC — direct copy
+                __half* output_ptr =
+                    reinterpret_cast<__half*>(output.data<Float16>()) + out_start;
+                HIP_CHECK(hipMemcpyAsync(output_ptr, gemm_out,
+                    M * N * sizeof(__half), hipMemcpyDeviceToDevice, stream));
+            }
 
         } else {
             throw std::runtime_error("Conv2d: unsupported dtype (only Float32, Float64, and Float16 supported)");
