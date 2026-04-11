@@ -220,8 +220,15 @@ TEST(NNOperationParity, AdaptiveAvgPool2d) {
 }
 
 TEST(NNOperationParity, AdaptiveMaxPool2d) {
-    // No AdaptiveMaxPool2d module class available yet
-    GTEST_SKIP() << "AdaptiveMaxPool2d module not available";
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    auto input = randn({1, 16, 8, 8}, DType::Float32, Device::cpu());
+
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        nn::AdaptiveMaxPool2d pool(4, 4);
+        return pool.forward(Variable(inputs[0], false)).tensor();
+    }, {input}, 1e-6f, 1e-8f, "AdaptiveMaxPool2d");
 }
 
 // ============================================================================
