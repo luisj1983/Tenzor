@@ -89,6 +89,7 @@ tenzor_add_test(NAME test_dtype_promotion SOURCE test_dtype_promotion.cpp LABELS
 tenzor_add_test(NAME test_alias_detection SOURCE test_alias_detection.cpp LABELS core)
 tenzor_add_test(NAME test_mutation_version SOURCE test_mutation_version.cpp LABELS core)
 tenzor_add_test(NAME test_dispatch_interceptor_stack SOURCE test_dispatch_interceptor_stack.cpp LABELS core)
+tenzor_add_test(NAME test_dispatch_coverage SOURCE test_dispatch_coverage.cpp LABELS core)
 tenzor_add_test(NAME test_dlpack_interop SOURCE test_dlpack_interop.cpp LABELS core)
 tenzor_add_test(NAME test_inplace_version_detection SOURCE test_inplace_version_detection.cpp LABELS core)
 tenzor_add_test(NAME test_laplace_distribution SOURCE test_laplace_distribution.cpp LABELS core)

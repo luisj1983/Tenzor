@@ -102,13 +102,51 @@ TEST_F(QuantizationConversionTest, ConvertConv2dToQuantized) {
 // Test 3: Round-Trip Conversion (Float -> Quantized -> Float)
 // ===========================================================================
 
+namespace {
+
+using NamedParams = std::vector<std::pair<std::string, std::shared_ptr<Variable>>>;
+
+auto find_param(const NamedParams& params, const std::string& name)
+    -> std::shared_ptr<Variable> {
+    for (const auto& [pname, pvar] : params) {
+        if (pname == name || pname.find(name) != std::string::npos) {
+            return pvar;
+        }
+    }
+    return nullptr;
+}
+
+// Helper: compute max-abs error between two tensors. Both are moved to CPU
+// Float32 before the comparison so we don't trip on dtype / device mismatch.
+auto max_abs_error(const Tensor& a, const Tensor& b) -> float {
+    Tensor af = (a.device() != Device::cpu()) ? a.to(Device::cpu()) : a;
+    Tensor bf = (b.device() != Device::cpu()) ? b.to(Device::cpu()) : b;
+    if (af.dtype() != DType::Float32) af = af.to(DType::Float32);
+    if (bf.dtype() != DType::Float32) bf = bf.to(DType::Float32);
+    const float* ap = af.data<float>();
+    const float* bp = bf.data<float>();
+    const int64_t n = af.numel();
+    float max_err = 0.0f;
+    for (int64_t i = 0; i < n; ++i) {
+        const float e = std::fabs(ap[i] - bp[i]);
+        if (e > max_err) max_err = e;
+    }
+    return max_err;
+}
+
+} // namespace
+
 TEST_F(QuantizationConversionTest, RoundTripConversion) {
     // Create original Linear layer
     auto original_linear = std::make_shared<Linear>(256, 128, true);
 
-    // Get original parameters
-    auto orig_params = original_linear->parameters();
+    // Capture original weights by value so the quantize→dequant round trip
+    // can't alias back into the comparison.
+    auto orig_params = original_linear->named_parameters();
     ASSERT_FALSE(orig_params.empty());
+    auto orig_weight_var = find_param(orig_params, "weight");
+    ASSERT_NE(orig_weight_var, nullptr);
+    Tensor orig_weight = orig_weight_var->tensor().clone();
 
     // Convert to quantized
     auto q_linear = convert_to_quantized(original_linear, get_qconfig());
@@ -118,12 +156,125 @@ TEST_F(QuantizationConversionTest, RoundTripConversion) {
     auto recovered_linear = convert_from_quantized(q_linear);
     ASSERT_NE(recovered_linear, nullptr);
 
-    // In full implementation, would verify:
-    // 1. Recovered weights are close to original (within quantization error)
-    // 2. Forward pass produces similar results
-    // 3. Layer structure is preserved
+    // The recovered module must be a real Linear (not the quantized stub)
+    // and must carry correctly dequantized weights — the old bug just
+    // cast int8→float32 without multiplying by scale, so the error there
+    // could be arbitrarily large.
+    auto float_linear = std::dynamic_pointer_cast<Linear>(recovered_linear);
+    ASSERT_NE(float_linear, nullptr) << "recovered module is not a Linear";
 
-    std::cout << "[Test] Round-trip conversion completed" << std::endl;
+    auto recovered_params = float_linear->named_parameters();
+    auto recovered_weight_var = find_param(recovered_params, "weight");
+    ASSERT_NE(recovered_weight_var, nullptr);
+    const Tensor& recovered_weight = recovered_weight_var->tensor();
+
+    // Shape preserved
+    {
+        auto rs = recovered_weight.shape();
+        auto os = orig_weight.shape();
+        ASSERT_EQ(rs.size(), os.size());
+        for (size_t i = 0; i < rs.size(); ++i) EXPECT_EQ(rs[i], os[i]);
+    }
+    EXPECT_EQ(recovered_weight.dtype(), DType::Float32);
+
+    // INT8 symmetric quantization gives max abs error ≈ max(|w|) / 127
+    // for the worst-case bucket. Pick a loose-but-meaningful bound: 2x
+    // that, i.e. ≤ 2 * max(|w|) / 127, which comfortably accommodates
+    // rounding without accepting the old broken path (which would give
+    // errors on the order of max(|w|) itself).
+    Tensor orig_abs = orig_weight.clone();
+    if (orig_abs.dtype() != DType::Float32) orig_abs = orig_abs.to(DType::Float32);
+    const float* op = orig_abs.data<float>();
+    float max_abs = 0.0f;
+    for (int64_t i = 0; i < orig_abs.numel(); ++i) {
+        max_abs = std::max(max_abs, std::fabs(op[i]));
+    }
+    const float tolerance = std::max(1e-4f, 2.0f * max_abs / 127.0f);
+
+    const float err = max_abs_error(recovered_weight, orig_weight);
+    EXPECT_LT(err, tolerance)
+        << "recovered linear weight diverged too far from original "
+        << "(max_abs=" << max_abs << ", tolerance=" << tolerance
+        << ", err=" << err << "). Most likely cause is a broken dequant "
+        << "path that skips scale/zero_point.";
+
+    std::cout << "[Test] Linear round-trip max abs err = " << err
+              << " (tolerance " << tolerance << ")" << std::endl;
+}
+
+// ===========================================================================
+// Test 3b: Conv2d Round-Trip (exercises the new dequant path)
+// ===========================================================================
+
+TEST_F(QuantizationConversionTest, Conv2dRoundTripConversion) {
+    // Stride=2, padding=1, non-trivial groups=1, bias on — exercises
+    // every field that QuantizedConv2d's dequant has to carry through.
+    auto original_conv = std::make_shared<Conv2d>(
+        /*in_channels=*/16, /*out_channels=*/32, /*kernel_size=*/3,
+        /*stride=*/2, /*padding=*/1, /*dilation=*/1, /*groups=*/1, /*bias=*/true);
+
+    auto orig_params = original_conv->named_parameters();
+    auto orig_weight_var = find_param(orig_params, "weight");
+    ASSERT_NE(orig_weight_var, nullptr);
+    Tensor orig_weight = orig_weight_var->tensor().clone();
+    auto orig_bias_var = find_param(orig_params, "bias");
+    const bool had_bias = (orig_bias_var != nullptr);
+    Tensor orig_bias;
+    if (had_bias) {
+        orig_bias = orig_bias_var->tensor().clone();
+    }
+
+    auto q_conv = convert_to_quantized(original_conv, get_qconfig());
+    ASSERT_NE(q_conv, nullptr);
+
+    auto recovered = convert_from_quantized(q_conv);
+    ASSERT_NE(recovered, nullptr);
+
+    auto float_conv = std::dynamic_pointer_cast<Conv2d>(recovered);
+    ASSERT_NE(float_conv, nullptr)
+        << "recovered module is not a Conv2d — dequant stub likely returned "
+           "the quantized module unchanged";
+
+    auto recovered_params = float_conv->named_parameters();
+    auto recovered_weight_var = find_param(recovered_params, "weight");
+    ASSERT_NE(recovered_weight_var, nullptr);
+    const Tensor& recovered_weight = recovered_weight_var->tensor();
+
+    {
+        auto rs = recovered_weight.shape();
+        auto os = orig_weight.shape();
+        ASSERT_EQ(rs.size(), os.size());
+        for (size_t i = 0; i < rs.size(); ++i) EXPECT_EQ(rs[i], os[i]);
+    }
+    EXPECT_EQ(recovered_weight.dtype(), DType::Float32);
+
+    // Same tolerance derivation as the Linear test.
+    Tensor orig_abs = orig_weight.clone();
+    if (orig_abs.dtype() != DType::Float32) orig_abs = orig_abs.to(DType::Float32);
+    const float* op = orig_abs.data<float>();
+    float max_abs = 0.0f;
+    for (int64_t i = 0; i < orig_abs.numel(); ++i) {
+        max_abs = std::max(max_abs, std::fabs(op[i]));
+    }
+    const float tolerance = std::max(1e-4f, 2.0f * max_abs / 127.0f);
+
+    const float err = max_abs_error(recovered_weight, orig_weight);
+    EXPECT_LT(err, tolerance)
+        << "recovered conv2d weight diverged too far (max_abs=" << max_abs
+        << ", tolerance=" << tolerance << ", err=" << err << ")";
+
+    if (had_bias) {
+        auto recovered_bias_var = find_param(recovered_params, "bias");
+        ASSERT_NE(recovered_bias_var, nullptr) << "bias was dropped during dequant";
+        const Tensor& recovered_bias = recovered_bias_var->tensor();
+        auto rbs = recovered_bias.shape();
+        auto obs = orig_bias.shape();
+        ASSERT_EQ(rbs.size(), obs.size());
+        for (size_t i = 0; i < rbs.size(); ++i) EXPECT_EQ(rbs[i], obs[i]);
+    }
+
+    std::cout << "[Test] Conv2d round-trip max abs err = " << err
+              << " (tolerance " << tolerance << ")" << std::endl;
 }
 
 // ===========================================================================

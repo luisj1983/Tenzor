@@ -447,6 +447,13 @@ auto initialize() -> void {
         std::cout << "Vulkan backend not found at: " << vulkan_backend_path << std::endl;
     }
 
+    // Now that every backend that intends to register has done so, scan
+    // the dispatch tables and report any OpId with zero coverage. This
+    // converts late "operation not supported" exceptions into a single
+    // startup-time report; in strict mode (TENZOR_DISPATCH_STRICT=1 env
+    // var) it throws so CI can catch coverage regressions.
+    DispatchTableRegistry::validate_coverage(/*strict=*/false);
+
     std::cout << "Tenzor initialization complete" << std::endl;
 
     g_initialized.store(true, std::memory_order_release);

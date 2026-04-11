@@ -58,6 +58,7 @@ struct VariableImpl {
           grad_fn_(other.grad_fn_),
           requires_grad_(other.requires_grad_.load(std::memory_order_acquire)),
           retain_grad_(other.retain_grad_.load(std::memory_order_acquire)),
+          was_non_leaf_(other.was_non_leaf_.load(std::memory_order_acquire)),
           hooks_([&]() { std::shared_lock lock(other.hooks_mutex_); return other.hooks_; }()),
           next_hook_id_(other.next_hook_id_.load(std::memory_order_acquire)),
           grad_mutex_(other.grad_mutex_),  // Share mutex — copies share grad_ storage
@@ -71,6 +72,7 @@ struct VariableImpl {
           grad_fn_(std::move(other.grad_fn_)),
           requires_grad_(other.requires_grad_.load(std::memory_order_acquire)),
           retain_grad_(other.retain_grad_.load(std::memory_order_acquire)),
+          was_non_leaf_(other.was_non_leaf_.load(std::memory_order_acquire)),
           hooks_([&]() { std::unique_lock lock(other.hooks_mutex_); return std::move(other.hooks_); }()),
           next_hook_id_(other.next_hook_id_.load(std::memory_order_acquire)),
           grad_mutex_(std::move(other.grad_mutex_)),
@@ -91,6 +93,7 @@ struct VariableImpl {
             grad_fn_ = other.grad_fn_;
             requires_grad_.store(other.requires_grad_.load(std::memory_order_relaxed), std::memory_order_relaxed);
             retain_grad_.store(other.retain_grad_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            was_non_leaf_.store(other.was_non_leaf_.load(std::memory_order_relaxed), std::memory_order_relaxed);
             {
                 std::shared_lock hlock(other.hooks_mutex_);
                 hooks_ = other.hooks_;
@@ -115,6 +118,7 @@ struct VariableImpl {
             grad_fn_ = std::move(other.grad_fn_);
             requires_grad_.store(other.requires_grad_.load(std::memory_order_relaxed), std::memory_order_relaxed);
             retain_grad_.store(other.retain_grad_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            was_non_leaf_.store(other.was_non_leaf_.load(std::memory_order_relaxed), std::memory_order_relaxed);
             {
                 std::unique_lock hlock(hooks_mutex_);
                 hooks_ = std::move(other.hooks_);
@@ -148,6 +152,13 @@ struct VariableImpl {
 
     /// Whether to retain gradient for non-leaf variables (atomic for thread-safe concurrent access)
     std::atomic<bool> retain_grad_{false};
+
+    /// Latched "was created as non-leaf" flag. set_grad_fn() sets this to
+    /// true the first time a grad_fn is attached; the engine later clears
+    /// grad_fn_ during backward cleanup but this flag stays set, so
+    /// post-backward diagnostics (e.g. the retain_grad warning) can still
+    /// tell whether this Variable originated from an operation.
+    std::atomic<bool> was_non_leaf_{false};
 
     /// Backward hooks keyed by ID (monotonically increasing, so insertion-order coincides)
     std::map<size_t, std::function<Tensor(const Tensor&)>> hooks_;

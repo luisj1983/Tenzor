@@ -5,6 +5,7 @@
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/sparse/sparse_ops.hpp"
+#include "tenzor/utils/logging.hpp"
 #include <iostream>
 #include <vector>
 
@@ -51,6 +52,27 @@ auto Variable::tensor() -> Tensor& {
 auto Variable::grad() const -> const std::optional<Tensor>& {
     if (!impl_) {
         throw std::runtime_error("Cannot access grad of uninitialized Variable");
+    }
+    // Match PyTorch: warn at most once when .grad is accessed on a
+    // non-leaf Variable that has no stored gradient and was not marked
+    // with retain_grad(). Use was_non_leaf_ rather than the live
+    // grad_fn_ pointer so the check still fires after the backward
+    // engine has cleared grad_fn_. The empty-grad check lets internal
+    // consumers (engine seeding root, checkpointing, functional autograd
+    // helpers) read the grad field without spurious warnings — those
+    // paths always populate grad_ before reading it.
+    const bool is_non_leaf = impl_->was_non_leaf_.load(std::memory_order_acquire);
+    const bool wants_grad = impl_->requires_grad_;
+    const bool retained = impl_->retain_grad_.load(std::memory_order_acquire);
+    const bool grad_empty = !impl_->grad_.has_value();
+    if (is_non_leaf && wants_grad && !retained && grad_empty) {
+        TENZOR_WARN_ONCE(
+            "The .grad attribute of a Variable that is not a leaf Variable "
+            "is being accessed. Its .grad attribute won't be populated "
+            "during autograd.backward(). If you indeed want the .grad field "
+            "to be populated for a non-leaf Variable, use .retain_grad() on "
+            "the non-leaf Variable. If you access the non-leaf Variable by "
+            "mistake, make sure you access the leaf Variable instead.");
     }
     return impl_->grad_;
 }
@@ -199,6 +221,15 @@ auto Variable::set_grad_fn(std::shared_ptr<Function> fn) -> void {
         impl_->creation_metadata_ = std::move(meta);
     }
 
+    // Latch "was created as non-leaf" before moving fn into the impl.
+    // The engine later clears grad_fn_ during backward cleanup, but this
+    // flag stays set so post-backward diagnostics (e.g. the retain_grad
+    // warning) can still tell whether this Variable originated from an
+    // operation. Only transitions false → true; a later set_grad_fn(nullptr)
+    // does not unlatch it.
+    if (fn) {
+        impl_->was_non_leaf_.store(true, std::memory_order_release);
+    }
     impl_->grad_fn_ = std::move(fn);
 }
 

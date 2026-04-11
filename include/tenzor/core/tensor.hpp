@@ -7,14 +7,34 @@
  * Uses PImpl pattern for efficient memory management and copy semantics.
  *
  * @par Thread Safety
- * - **Read operations** (shape, dtype, data access, const methods) are thread-safe.
- *   Multiple threads may read the same tensor concurrently.
- * - **Concurrent read + write** to the same tensor requires external synchronization.
- *   This includes in-place operations (+=, fill_), reshape, and any mutation.
- * - **Independent tensors** can be operated on concurrently without synchronization.
- * - **Autograd forward pass** is NOT thread-safe on shared Variables. Each thread
- *   should use its own Variable or synchronize access.
- * - **Autograd backward pass** is thread-safe with per-Variable `make_thread_safe()`.
+ * Tensor objects are **not internally synchronized** for mutation. The following
+ * rules apply:
+ * - **Concurrent const reads with no writer** are safe. Multiple threads may
+ *   call const methods (`shape()`, `strides()`, `dtype()`, `data<T>()`, etc.)
+ *   on the same tensor as long as no other thread is mutating it.
+ * - **Concurrent read + write to the same tensor is undefined behaviour**
+ *   and requires external synchronization. `shape_` and `strides_` are stored
+ *   as plain `std::vector<int64_t>`; readers racing against `resize_`, a
+ *   view-producing op, or any in-place mutation can observe torn state.
+ *   Affected operations include in-place arithmetic (`+=`, `fill_`), reshape,
+ *   transpose/permute, and every shape-changing op.
+ * - **Independent tensors** can be operated on concurrently without
+ *   synchronization even when they share underlying `Storage`, because
+ *   `Storage`'s reference count and mutability bits are atomic.
+ * - **Cached derived state** — `is_contiguous_cache_`, `memory_format_cache_`,
+ *   and `version_counter_` — is stored as `std::atomic`, so cache invalidation
+ *   is race-free even while a writer updates shape/strides. This does *not*
+ *   make shape/strides reads safe; it only means the cache itself cannot
+ *   be left in an inconsistent half-updated state.
+ * - **Autograd forward pass** is NOT thread-safe on shared Variables. Each
+ *   thread should use its own Variable or synchronize access externally.
+ * - **Autograd backward pass** is thread-safe for gradient accumulation when
+ *   the Variable is marked with `make_thread_safe()` — that path uses an
+ *   internal `grad_mutex_`.
+ *
+ * @note If you need lock-free concurrent shape/strides reads across a resize,
+ * enable the atomic shape-snapshot build option (planned, see
+ * `TensorImpl::shape_info_`). Until then, external synchronization is required.
  */
 
 #pragma once

@@ -5,6 +5,7 @@
 
 #include "tenzor/quantization/quantize_api.hpp"
 #include "tenzor/nn/quantization/quantized_layers.hpp"
+#include "tenzor/nn/quantization/quantize.hpp"
 #include "tenzor/nn/quantization/fake_quantize.hpp"
 #include "tenzor/nn/layers/linear.hpp"
 #include "tenzor/nn/layers/conv.hpp"
@@ -62,110 +63,65 @@ public:
             return nullptr;
         }
 
-        // Try to cast to quantized types and convert back
+        // Sequential containers recurse first so nested modules get dequantized.
+        if (auto seq = std::dynamic_pointer_cast<Sequential>(module)) {
+            return dequantize_sequential(seq);
+        }
+
         if (auto q_linear = std::dynamic_pointer_cast<QuantizedLinear>(module)) {
-            // Dequantize weights and bias, reconstruct float Linear
-            auto weight_params = q_linear->named_parameters();
-
-            // Find quantized weight and bias
-            Tensor weight_dequant;
-            Tensor bias_dequant;
-
-            for (const auto& [name, param] : weight_params) {
-                if (name.find("weight") != std::string::npos) {
-                    // Dequantize weight: scale from int8 to float
-                    weight_dequant = param->tensor().to(DType::Float32);
-                } else if (name.find("bias") != std::string::npos) {
-                    bias_dequant = param->tensor().to(DType::Float32);
-                }
+            // Proper dequantization: dequantize_tensor() applies scale and
+            // zero_point, so the resulting float tensor is the real recovered
+            // weight, not a plain int→float cast of the quantized integers.
+            Tensor weight_dequant = dequantize_tensor(q_linear->weight());
+            if (weight_dequant.dtype() != DType::Float32) {
+                weight_dequant = weight_dequant.to(DType::Float32);
             }
 
-            // Create float Linear with dequantized weights
-            // Note: We lose exact in/out features information, but weights contain this
             auto shape = weight_dequant.shape();
-            if (shape.size() >= 2) {
-                int64_t out_features = shape[0];
-                int64_t in_features = shape[1];
-                auto linear = std::make_shared<Linear>(in_features, out_features);
-
-                // Load dequantized state
-                std::unordered_map<std::string, Tensor> state;
-                state["weight"] = weight_dequant;
-                if (bias_dequant.numel() > 0) {
-                    state["bias"] = bias_dequant;
-                }
-                linear->load_state_dict(state);
-
-                return linear;
+            if (shape.size() < 2) {
+                return module;
             }
+            const int64_t out_features = shape[0];
+            const int64_t in_features = shape[1];
+            const bool has_bias = q_linear->has_bias();
+            auto linear = std::make_shared<Linear>(in_features, out_features, has_bias);
 
-            // Fallback: return as-is if shape extraction fails
-            return module;
+            std::unordered_map<std::string, Tensor> state;
+            state["weight"] = weight_dequant;
+            if (has_bias) {
+                const Tensor& b = q_linear->bias();
+                state["bias"] = (b.dtype() == DType::Float32) ? b : b.to(DType::Float32);
+            }
+            linear->load_state_dict(state);
+            return linear;
         }
 
         if (auto q_conv = std::dynamic_pointer_cast<QuantizedConv2d>(module)) {
-            // Dequantize Conv2d weights and bias
-            auto params = q_conv->named_parameters();
-
-            Tensor weight_dequant;
-            Tensor bias_dequant;
-
-            for (const auto& [name, param] : params) {
-                if (name.find("weight") != std::string::npos) {
-                    weight_dequant = param->tensor().to(DType::Float32);
-                } else if (name.find("bias") != std::string::npos) {
-                    bias_dequant = param->tensor().to(DType::Float32);
-                }
+            Tensor weight_dequant = dequantize_tensor(q_conv->weight());
+            if (weight_dequant.dtype() != DType::Float32) {
+                weight_dequant = weight_dequant.to(DType::Float32);
             }
 
-            // Reconstruct Conv2d with dequantized weights, preserving all metadata
-            auto shape = weight_dequant.shape();
-            if (shape.size() >= 4) {
-                int64_t out_channels = shape[0];
-                int64_t in_channels = shape[1];
-                int64_t kernel_h = shape[2];
-                int64_t kernel_w = shape[3];
+            const bool has_bias = q_conv->has_bias();
+            auto conv = std::make_shared<Conv2d>(
+                q_conv->in_channels(),
+                q_conv->out_channels(),
+                q_conv->kernel_size(),
+                q_conv->stride(),
+                q_conv->padding(),
+                q_conv->dilation(),
+                q_conv->groups(),
+                has_bias
+            );
 
-                // Preserve stride, padding, dilation, groups from quantized module
-                int64_t stride = q_conv->stride();
-                int64_t padding = q_conv->padding();
-                int64_t dilation = q_conv->dilation();
-                int64_t groups = q_conv->groups();
-
-                std::shared_ptr<Conv2d> conv;
-                if (kernel_h == kernel_w) {
-                    conv = std::make_shared<Conv2d>(
-                        in_channels * groups, out_channels, kernel_h,
-                        stride, padding, dilation, groups
-                    );
-                } else {
-                    conv = std::make_shared<Conv2d>(
-                        in_channels * groups, out_channels,
-                        std::pair<int64_t, int64_t>{kernel_h, kernel_w},
-                        std::pair<int64_t, int64_t>{stride, stride},
-                        std::pair<int64_t, int64_t>{padding, padding},
-                        std::pair<int64_t, int64_t>{dilation, dilation},
-                        groups
-                    );
-                }
-
-                // Load dequantized state
-                std::unordered_map<std::string, Tensor> state;
-                state["weight"] = weight_dequant;
-                if (bias_dequant.numel() > 0) {
-                    state["bias"] = bias_dequant;
-                }
-                conv->load_state_dict(state);
-
-                return conv;
+            std::unordered_map<std::string, Tensor> state;
+            state["weight"] = weight_dequant;
+            if (has_bias) {
+                const Tensor& b = q_conv->bias();
+                state["bias"] = (b.dtype() == DType::Float32) ? b : b.to(DType::Float32);
             }
-
-            return module;
-        }
-
-        // Try Sequential
-        if (auto seq = std::dynamic_pointer_cast<Sequential>(module)) {
-            return dequantize_sequential(seq);
+            conv->load_state_dict(state);
+            return conv;
         }
 
         return module;

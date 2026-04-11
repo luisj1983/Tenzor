@@ -58,38 +58,10 @@ public:
         return module;
     }
 
-    // Convert quantized module to float
-    auto from_quantized(std::shared_ptr<nn::Module> module) -> std::shared_ptr<nn::Module> {
-        if (!module) return nullptr;
-
-        // Try Sequential container
-        if (auto seq = std::dynamic_pointer_cast<nn::Sequential>(module)) {
-            return convert_sequential_from_quantized(seq);
-        }
-
-        // Reverse conversion (quantized → float) for non-Sequential modules.
-        // For QuantizedLinear/QuantizedConv2d, dequantize the weight and
-        // construct a fresh Linear/Conv2d. Non-quantized modules pass through.
-        if (auto q_linear = std::dynamic_pointer_cast<nn::quantization::QuantizedLinear>(module)) {
-            const auto& q_weight = q_linear->weight();
-            Tensor dequant_w = dequantize_tensor(q_weight);
-            if (dequant_w.dtype() != DType::Float32) {
-                dequant_w = dequant_w.to(DType::Float32);
-            }
-            auto weight_shape = dequant_w.shape();
-            int64_t out_features = weight_shape[0];
-            int64_t in_features = weight_shape[1];
-            auto linear = std::make_shared<nn::Linear>(in_features, out_features, /*bias=*/false);
-            std::unordered_map<std::string, Tensor> state;
-            state["weight"] = dequant_w;
-            linear->load_state_dict(state);
-            return linear;
-        }
-        // QuantizedConv2d reverse conversion is not yet implemented —
-        // the kernel shape / stride / padding metadata needs to be wired
-        // through the dequant path. Tracked as a follow-up.
-        return module;
-    }
+    // Note: convert_from_quantized is implemented in src/quantization/module_conversion.cpp
+    // via ModuleQuantizer::convert_from_quantized(). That is the live path called by
+    // the public API; this ModuleConverter class is the alternate path used only by
+    // to_quantized() here.
 
     // Prepare module for QAT by inserting FakeQuantize modules after quantizable layers
     auto prepare_for_qat(std::shared_ptr<nn::Module> module) -> std::shared_ptr<nn::Module> {
@@ -139,19 +111,6 @@ private:
         return quantized_seq;
     }
 
-    auto convert_sequential_from_quantized(std::shared_ptr<nn::Sequential> seq)
-        -> std::shared_ptr<nn::Sequential> {
-        auto float_seq = std::make_shared<nn::Sequential>();
-
-        // Iterate through and convert each quantized module back to float
-        for (const auto& module : seq->modules()) {
-            auto converted = from_quantized(module);
-            float_seq->add_module(converted);
-        }
-
-        return float_seq;
-    }
-
     const QConfig& qconfig_;
 };
 
@@ -163,16 +122,6 @@ auto convert_module_to_quantized_recursive(
 ) -> std::shared_ptr<nn::Module> {
     ModuleConverter converter(qconfig);
     return converter.to_quantized(module);
-}
-
-auto convert_module_from_quantized_recursive(
-    std::shared_ptr<nn::Module> module,
-    const std::string& prefix = ""
-) -> std::shared_ptr<nn::Module> {
-    // Use default qconfig (not needed for dequantization)
-    auto qconfig = DefaultQConfigs::default_qconfig();
-    ModuleConverter converter(qconfig);
-    return converter.from_quantized(module);
 }
 
 auto prepare_module_for_qat_recursive(

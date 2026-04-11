@@ -537,6 +537,34 @@ public:
         return tables_[static_cast<size_t>(type)].backend;
     }
 
+    /**
+     * @brief Walk every OpId and log a warning for each op that is not
+     *        registered in *any* active backend.
+     *
+     * Called once at the end of `tenzor::initialize()` after all backends
+     * have been loaded. Converts what would otherwise be late runtime
+     * "operation not supported" exceptions into a single visible startup
+     * report.
+     *
+     * Behaviour:
+     * - By default (or when `TENZOR_DISPATCH_STRICT=0` / unset): emit a
+     *   WARNING log line per uncovered op and return false. Returns true
+     *   if every OpId is covered by at least one backend.
+     * - When `TENZOR_DISPATCH_STRICT=1` is set at process start (or the
+     *   caller passes `strict=true`): throw `std::runtime_error` listing
+     *   every uncovered op so CI catches coverage regressions.
+     *
+     * Ops that only a single platform can sensibly implement (e.g.
+     * vendor-specific fused ops) can still trip the warning — that is
+     * by design, so anyone adding an op to the enum is reminded to
+     * decide which backends should carry it.
+     *
+     * @param strict If true, throw on any uncovered op. If false (the
+     *               default), only log.
+     * @return true if every OpId is covered, false otherwise.
+     */
+    static auto validate_coverage(bool strict = false) -> bool;
+
 private:
     /// Dispatch tables indexed by Device::Type
     static std::array<BackendDispatchTable, DEVICE_TYPE_COUNT> tables_;

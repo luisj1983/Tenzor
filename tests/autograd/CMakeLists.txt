@@ -38,10 +38,15 @@ target_link_libraries(test_hooks PRIVATE tenzor_core GTest::gtest_main)
 add_executable(test_inplace_autograd test_inplace_autograd.cpp)
 target_link_libraries(test_inplace_autograd PRIVATE tenzor_core GTest::gtest_main)
 
+# retain_grad warning (Phase 3.2) — isolated so the warn-once flag is fresh
+add_executable(test_retain_grad_warning test_retain_grad_warning.cpp)
+target_link_libraries(test_retain_grad_warning PRIVATE tenzor_core GTest::gtest_main)
+
 # ============================================================================
 # Test Registration
 # ============================================================================
 tenzor_discover_tests(test_autograd_edge_cases LABELS "autograd" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_retain_grad_warning LABELS "autograd" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_higher_order_gradients LABELS "autograd" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_higher_order_nn LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 # Parameterized backend tests use PRE_TEST discovery so that test listing

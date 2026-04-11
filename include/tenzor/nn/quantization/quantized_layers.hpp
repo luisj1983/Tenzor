@@ -185,6 +185,12 @@ public:
     auto padding() const -> int64_t { return padding_; }
     auto dilation() const -> int64_t { return dilation_; }
     auto groups() const -> int64_t { return groups_; }
+    auto in_channels() const -> int64_t { return in_channels_; }
+    auto out_channels() const -> int64_t { return out_channels_; }
+    auto kernel_size() const -> int64_t { return kernel_size_; }
+    auto weight() const -> const QuantizedTensor& { return weight_; }
+    auto has_bias() const -> bool { return bias_.has_value(); }
+    auto bias() const -> const Tensor& { return *bias_; }
 
     static auto from_float(const Conv2d& fp_conv, const QConfig& qconfig)
         -> std::shared_ptr<QuantizedConv2d>;

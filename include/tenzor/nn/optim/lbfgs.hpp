@@ -17,19 +17,33 @@ namespace tenzor {
 namespace optim {
 
 /**
+ * @brief Line search variant for LBFGS.
+ *
+ * - `Armijo`: sufficient-decrease backtracking. Cheaper per iteration but
+ *   cannot guarantee the curvature condition, so L-BFGS history updates can
+ *   skip more often on non-quadratic losses.
+ * - `StrongWolfe`: Nocedal-Wright Algorithms 3.5 + 3.6 (bracketing + zoom)
+ *   with cubic interpolation. Finds an alpha satisfying both Armijo
+ *   (f(x + alpha*p) <= f + c1*alpha*grad.p) and the strong curvature
+ *   condition (|grad(x + alpha*p).p| <= c2*|grad.p|). Default — matches
+ *   `torch.optim.LBFGS(line_search_fn="strong_wolfe")`.
+ */
+enum class LBFGSLineSearch : std::uint8_t {
+    Armijo = 0,
+    StrongWolfe = 1,
+};
+
+/**
  * @brief L-BFGS optimizer matching torch.optim.LBFGS.
  *
- * Implements the two-loop recursion from Nocedal-Wright (Algorithm 7.4) with
- * an Armijo backtracking line search by default. The full-batch setting is
- * assumed; each call to step(closure) performs up to `max_iter` inner
- * iterations, each invoking the closure to recompute the loss and gradient.
+ * Implements the two-loop recursion from Nocedal-Wright (Algorithm 7.4). The
+ * full-batch setting is assumed; each call to step(closure) performs up to
+ * `max_iter` inner iterations, each invoking the closure to recompute loss
+ * and gradient.
  *
  * Defaults match torch.optim.LBFGS:
  *   lr=1.0, max_iter=20, max_eval=None (1.25*max_iter), tolerance_grad=1e-7,
- *   tolerance_change=1e-9, history_size=100.
- *
- * The line search defaults to Armijo backtracking. Strong Wolfe is not yet
- * implemented; pass line_search_fn="" to use the default.
+ *   tolerance_change=1e-9, history_size=100, line_search=StrongWolfe.
  *
  * @code
  * auto optimizer = LBFGS(model.parameters(), 1.0);
@@ -50,7 +64,8 @@ public:
           int max_eval = -1,          // -1 → 1.25 * max_iter
           double tolerance_grad = 1e-7,
           double tolerance_change = 1e-9,
-          int history_size = 100);
+          int history_size = 100,
+          LBFGSLineSearch line_search = LBFGSLineSearch::StrongWolfe);
 
     /**
      * @brief step() without a closure is not supported.
@@ -83,6 +98,7 @@ private:
     double tolerance_grad_;
     double tolerance_change_;
     int history_size_;
+    LBFGSLineSearch line_search_;
 
     // Persistent state across step() calls.
     std::deque<Tensor> s_history_;   // parameter deltas

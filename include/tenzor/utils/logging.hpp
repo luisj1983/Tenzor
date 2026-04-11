@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <source_location>
@@ -100,5 +101,17 @@ private:
 #define TENZOR_LOG_WARNING(msg) ::tenzor::Logger::instance().warning(msg)
 #define TENZOR_LOG_ERROR(msg) ::tenzor::Logger::instance().error(msg)
 #define TENZOR_LOG_FATAL(msg) ::tenzor::Logger::instance().fatal(msg)
+
+// Emit a warning at most once for a given call site over the lifetime of
+// the process. Safe under concurrent calls (std::call_once is thread-safe).
+// The flag is a function-local static so the macro is self-contained and
+// requires no header for <mutex> at the call site.
+#define TENZOR_WARN_ONCE(msg)                                           \
+    do {                                                                \
+        static ::std::once_flag _tenzor_warn_once_flag;                 \
+        ::std::call_once(_tenzor_warn_once_flag, []() {                 \
+            ::tenzor::Logger::instance().warning(msg);                  \
+        });                                                             \
+    } while (0)
 
 } // namespace tenzor

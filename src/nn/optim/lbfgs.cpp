@@ -2,10 +2,12 @@
  * @file lbfgs.cpp
  * @brief L-BFGS quasi-Newton optimizer implementation.
  *
- * Two-loop recursion (Nocedal-Wright Algorithm 7.4) with an Armijo backtracking
- * line search. The implementation flattens all parameter tensors into a single
- * 1D vector for the curvature-history updates, then scatters the updated
- * vector back into the original parameter tensors.
+ * Two-loop recursion (Nocedal-Wright Algorithm 7.4) with either Armijo
+ * backtracking or a strong-Wolfe bracketing-and-zoom line search
+ * (Algorithms 3.5 + 3.6, with cubic interpolation inside zoom). The
+ * implementation flattens all parameter tensors into a single 1D vector for
+ * the curvature-history updates, then scatters the updated vector back into
+ * the original parameter tensors.
  */
 
 #include "tenzor/nn/optim/lbfgs.hpp"
@@ -14,7 +16,9 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/indexing.hpp"   // narrow
+#include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 
 namespace tenzor::optim {
@@ -53,6 +57,47 @@ auto scalar_like(double value, const Tensor& ref) -> Tensor {
     return full({1}, value, ref.dtype(), ref.device());
 }
 
+auto loss_to_double(const Variable& v) -> double {
+    auto lt = (v.tensor().device() == Device::cpu())
+        ? v.tensor() : v.tensor().to(Device::cpu());
+    if (lt.dtype() == DType::Float64) {
+        return lt.data<double>()[0];
+    }
+    if (lt.dtype() != DType::Float32) {
+        lt = lt.to(DType::Float32);
+    }
+    return static_cast<double>(lt.data<float>()[0]);
+}
+
+// Cubic interpolation minimizer between two points (x1, f1, g1) and
+// (x2, f2, g2), where f is the 1D function value and g is its derivative.
+// Falls back to bisection when the cubic is degenerate or the minimizer
+// falls outside the bracket. Follows Nocedal-Wright eq. (3.59).
+auto cubic_interpolate(double x1, double f1, double g1,
+                       double x2, double f2, double g2,
+                       double bound_min, double bound_max) -> double {
+    // Degenerate bracket — nothing to interpolate.
+    const double width = x2 - x1;
+    if (std::fabs(width) < 1e-30) {
+        return x1;
+    }
+    const double d1 = g1 + g2 - 3.0 * (f1 - f2) / width;
+    const double d2_sq = d1 * d1 - g1 * g2;
+    if (d2_sq >= 0.0) {
+        const double d2 = std::sqrt(d2_sq);
+        double x_min;
+        if (x1 <= x2) {
+            x_min = x2 - (x2 - x1) * ((g2 + d2 - d1) / (g2 - g1 + 2.0 * d2));
+        } else {
+            x_min = x1 - (x1 - x2) * ((g1 + d2 - d1) / (g1 - g2 + 2.0 * d2));
+        }
+        // Clamp to the bracket bounds — reject extrapolation.
+        return std::min(std::max(x_min, bound_min), bound_max);
+    }
+    // Fallback: bisection.
+    return 0.5 * (bound_min + bound_max);
+}
+
 } // anonymous namespace
 
 LBFGS::LBFGS(std::vector<std::shared_ptr<Variable>> params,
@@ -61,14 +106,16 @@ LBFGS::LBFGS(std::vector<std::shared_ptr<Variable>> params,
              int max_eval,
              double tolerance_grad,
              double tolerance_change,
-             int history_size)
+             int history_size,
+             LBFGSLineSearch line_search)
     : Optimizer(std::move(params)),
       lr_(lr),
       max_iter_(max_iter),
       max_eval_(max_eval >= 0 ? max_eval : static_cast<int>(max_iter * 5 / 4)),
       tolerance_grad_(tolerance_grad),
       tolerance_change_(tolerance_change),
-      history_size_(history_size) {
+      history_size_(history_size),
+      line_search_(line_search) {
     if (parameters_.empty()) {
         throw std::invalid_argument("LBFGS: parameter list must be non-empty");
     }
@@ -175,17 +222,7 @@ auto LBFGS::two_loop_recursion(const Tensor& grad) const -> Tensor {
 auto LBFGS::step(std::function<Variable()> closure) -> Variable {
     // Initial evaluation.
     Variable loss_var = closure();
-    double loss = 0.0;
-    {
-        auto lt = (loss_var.tensor().device() == Device::cpu())
-            ? loss_var.tensor() : loss_var.tensor().to(Device::cpu());
-        if (lt.dtype() == DType::Float64) {
-            loss = static_cast<double>(lt.data<double>()[0]);
-        } else {
-            if (lt.dtype() != DType::Float32) lt = lt.to(DType::Float32);
-            loss = static_cast<double>(lt.data<float>()[0]);
-        }
-    }
+    double loss = loss_to_double(loss_var);
 
     int func_evals = 1;
     auto flat_grad = gather_flat_grad();
@@ -195,6 +232,9 @@ auto LBFGS::step(std::function<Variable()> closure) -> Variable {
     if (opt_cond <= tolerance_grad_) {
         return loss_var;
     }
+
+    const double c1 = 1e-4;
+    const double c2 = 0.9;   // Standard strong-Wolfe curvature constant for L-BFGS.
 
     // Inner L-BFGS iteration loop.
     for (int iter = 0; iter < max_iter_; ++iter) {
@@ -236,62 +276,269 @@ auto LBFGS::step(std::function<Variable()> closure) -> Variable {
         prev_loss_ = loss;
         has_prev_state_ = true;
 
-        // Armijo backtracking line search.
-        double t = lr_;
-        const double c1 = 1e-4;
-        bool step_accepted = false;
-        Tensor trial_step = direction * scalar_like(t, direction);
-        apply_flat_delta(trial_step);
+        // Track the applied step size so each line-search probe can move
+        // from the current position directly to the target alpha.
+        double current_alpha = 0.0;
+        const double loss_0 = loss;
+        const double gtd_0 = gtd;
 
-        Variable new_loss_var = closure();
-        func_evals += 1;
-
-        auto loss_to_double = [](const Variable& v) -> double {
-            auto lt = (v.tensor().device() == Device::cpu())
-                ? v.tensor() : v.tensor().to(Device::cpu());
-            if (lt.dtype() == DType::Float64) return lt.data<double>()[0];
-            if (lt.dtype() != DType::Float32) lt = lt.to(DType::Float32);
-            return static_cast<double>(lt.data<float>()[0]);
+        // Helper: move parameters to target_alpha and re-evaluate loss
+        // and gradient. Returns (loss, gtd_new, flat_grad_new, loss_var_new).
+        auto eval_at = [&](double target_alpha)
+            -> std::tuple<double, double, Tensor, Variable> {
+            const double delta_alpha = target_alpha - current_alpha;
+            if (std::fabs(delta_alpha) > 0.0) {
+                Tensor delta = direction * scalar_like(delta_alpha, direction);
+                apply_flat_delta(delta);
+                current_alpha = target_alpha;
+            }
+            Variable new_loss_var = closure();
+            func_evals += 1;
+            double new_loss_val = loss_to_double(new_loss_var);
+            Tensor new_flat_grad = gather_flat_grad();
+            double new_gtd = flat_dot(new_flat_grad, direction);
+            return {new_loss_val, new_gtd, new_flat_grad, new_loss_var};
         };
 
-        double new_loss = loss_to_double(new_loss_var);
+        Variable new_loss_var = loss_var;
+        double new_loss = loss;
+        Tensor new_flat_grad = flat_grad;
+        double accepted_alpha = 0.0;
 
-        // Backtracking loop.
-        int ls_iter = 0;
-        const int ls_max = 25;
-        while (new_loss > loss + c1 * t * gtd && ls_iter < ls_max) {
-            // Undo trial step and shrink.
-            auto undo_step = trial_step * scalar_like(-1.0, trial_step);
-            apply_flat_delta(undo_step);
+        if (line_search_ == LBFGSLineSearch::StrongWolfe) {
+            // --- Bracketing (Nocedal-Wright Algorithm 3.5) ---
+            double alpha_prev = 0.0;
+            double phi_prev = loss_0;
+            double gtd_prev = gtd_0;
 
-            t *= 0.5;
-            if (t < 1e-12) break;
+            double alpha_curr = lr_;
+            double alpha_max = std::max(lr_ * 10.0, 10.0);
 
-            trial_step = direction * scalar_like(t, direction);
-            apply_flat_delta(trial_step);
+            // Each probe spends one func eval; bail out if budget exhausted.
+            const int ls_budget = std::max(1, max_eval_ - func_evals);
+            int ls_remaining = ls_budget;
+            const int max_ls_probes = 25;
 
-            new_loss_var = closure();
-            func_evals += 1;
-            new_loss = loss_to_double(new_loss_var);
-            ls_iter += 1;
+            bool bracket_found = false;
+            double alpha_lo = 0.0, alpha_hi = 0.0;
+            double phi_lo = 0.0, phi_hi = 0.0;
+            double gtd_lo = 0.0, gtd_hi = 0.0;
+            double phi_curr = 0.0, gtd_curr = 0.0;
+            Tensor grad_curr = flat_grad;
+            Variable loss_var_curr = loss_var;
 
-            if (func_evals >= max_eval_) break;
+            int ls_iter = 0;
+            // bracketing_done: a Wolfe-satisfying alpha was found outright
+            // (no zoom needed) or a bracket [lo, hi] was built.
+            bool wolfe_ok = false;
+            while (ls_iter < max_ls_probes && ls_remaining > 0) {
+                auto [p, g, fg, lv] = eval_at(alpha_curr);
+                phi_curr = p;
+                gtd_curr = g;
+                grad_curr = fg;
+                loss_var_curr = lv;
+                ls_remaining -= 1;
+                ls_iter += 1;
+
+                const bool armijo_fail =
+                    phi_curr > loss_0 + c1 * alpha_curr * gtd_0;
+                const bool non_decrease = (ls_iter > 1 && phi_curr >= phi_prev);
+                if (armijo_fail || non_decrease) {
+                    alpha_lo = alpha_prev; alpha_hi = alpha_curr;
+                    phi_lo  = phi_prev;    phi_hi  = phi_curr;
+                    gtd_lo  = gtd_prev;    gtd_hi  = gtd_curr;
+                    bracket_found = true;
+                    break;
+                }
+                if (std::fabs(gtd_curr) <= -c2 * gtd_0) {
+                    // Strong Wolfe satisfied — done.
+                    wolfe_ok = true;
+                    accepted_alpha = alpha_curr;
+                    new_loss = phi_curr;
+                    new_flat_grad = grad_curr;
+                    new_loss_var = loss_var_curr;
+                    break;
+                }
+                if (gtd_curr >= 0.0) {
+                    alpha_lo = alpha_curr; alpha_hi = alpha_prev;
+                    phi_lo  = phi_curr;    phi_hi  = phi_prev;
+                    gtd_lo  = gtd_curr;    gtd_hi  = gtd_prev;
+                    bracket_found = true;
+                    break;
+                }
+                // Step forward: cubic-extrapolate between (alpha_prev, alpha_curr).
+                double next_alpha = cubic_interpolate(
+                    alpha_prev, phi_prev, gtd_prev,
+                    alpha_curr, phi_curr, gtd_curr,
+                    alpha_curr * 2.0, alpha_max);
+                if (!(next_alpha > alpha_curr + 1e-12)) {
+                    // Ensure progress — at least double the step.
+                    next_alpha = std::min(alpha_curr * 2.0, alpha_max);
+                }
+                alpha_prev = alpha_curr;
+                phi_prev = phi_curr;
+                gtd_prev = gtd_curr;
+                alpha_curr = next_alpha;
+                if (alpha_curr >= alpha_max) {
+                    // Reached the hard upper bound without Wolfe — use it as
+                    // the best-effort alpha and stop.
+                    alpha_curr = alpha_max;
+                    auto [p2, g2, fg2, lv2] = eval_at(alpha_curr);
+                    ls_remaining -= 1;
+                    accepted_alpha = alpha_curr;
+                    new_loss = p2;
+                    new_flat_grad = fg2;
+                    new_loss_var = lv2;
+                    wolfe_ok = false;
+                    break;
+                }
+            }
+
+            // --- Zoom (Nocedal-Wright Algorithm 3.6) ---
+            if (!wolfe_ok && bracket_found) {
+                int zoom_iter = 0;
+                const int max_zoom = 25;
+                // Best-effort: remember the lowest-loss probe so we always
+                // finish with *something* better than alpha=0.
+                double best_alpha = alpha_lo;
+                double best_loss = phi_lo;
+                Tensor best_grad = flat_grad;  // dummy; will overwrite below.
+                Variable best_loss_var = loss_var;
+
+                // Seed "best" with current loss/grad at alpha_lo if we know
+                // the grad there. alpha_lo was loaded from alpha_prev, which
+                // we evaluated only before the last probe — grad_prev wasn't
+                // captured. Safest: re-evaluate at alpha_lo so we own a
+                // consistent (loss, grad) pair for fallback.
+                {
+                    auto [p_lo, g_lo, fg_lo, lv_lo] = eval_at(alpha_lo);
+                    ls_remaining -= 1;
+                    phi_lo = p_lo; gtd_lo = g_lo;
+                    best_alpha = alpha_lo;
+                    best_loss = p_lo;
+                    best_grad = fg_lo;
+                    best_loss_var = lv_lo;
+                }
+
+                while (zoom_iter < max_zoom && ls_remaining > 0) {
+                    const double bracket_min = std::min(alpha_lo, alpha_hi);
+                    const double bracket_max = std::max(alpha_lo, alpha_hi);
+                    const double width = bracket_max - bracket_min;
+                    // Reject a vanishing bracket.
+                    if (width < 1e-12) break;
+
+                    double alpha_j = cubic_interpolate(
+                        alpha_lo, phi_lo, gtd_lo,
+                        alpha_hi, phi_hi, gtd_hi,
+                        bracket_min, bracket_max);
+                    // Safeguarding (More-Thuente style): force alpha_j into
+                    // the half of the bracket adjacent to alpha_lo (the
+                    // side with the lower loss), guaranteeing at least a
+                    // bisection-rate contraction each iteration. Without
+                    // this, cubic interpolation on ill-conditioned losses
+                    // can stall near the high-loss end of the bracket.
+                    const double eps_inner = 0.1 * width;
+                    double clamp_min, clamp_max;
+                    if (alpha_lo < alpha_hi) {
+                        clamp_min = bracket_min + eps_inner;
+                        clamp_max = bracket_min + 0.5 * width;
+                    } else {
+                        clamp_min = bracket_max - 0.5 * width;
+                        clamp_max = bracket_max - eps_inner;
+                    }
+                    if (clamp_min > clamp_max) clamp_min = clamp_max;
+                    if (alpha_j < clamp_min) alpha_j = clamp_min;
+                    if (alpha_j > clamp_max) alpha_j = clamp_max;
+
+                    auto [p_j, g_j, fg_j, lv_j] = eval_at(alpha_j);
+                    ls_remaining -= 1;
+                    zoom_iter += 1;
+
+                    if (p_j < best_loss) {
+                        best_loss = p_j;
+                        best_alpha = alpha_j;
+                        best_grad = fg_j;
+                        best_loss_var = lv_j;
+                    }
+
+                    const bool armijo_fail_j =
+                        p_j > loss_0 + c1 * alpha_j * gtd_0;
+                    if (armijo_fail_j || p_j >= phi_lo) {
+                        alpha_hi = alpha_j;
+                        phi_hi = p_j;
+                        gtd_hi = g_j;
+                    } else {
+                        if (std::fabs(g_j) <= -c2 * gtd_0) {
+                            accepted_alpha = alpha_j;
+                            new_loss = p_j;
+                            new_flat_grad = fg_j;
+                            new_loss_var = lv_j;
+                            wolfe_ok = true;
+                            break;
+                        }
+                        if (g_j * (alpha_hi - alpha_lo) >= 0.0) {
+                            alpha_hi = alpha_lo;
+                            phi_hi = phi_lo;
+                            gtd_hi = gtd_lo;
+                        }
+                        alpha_lo = alpha_j;
+                        phi_lo = p_j;
+                        gtd_lo = g_j;
+                    }
+                }
+
+                if (!wolfe_ok) {
+                    // Best-effort: fall back to the lowest-loss probe seen.
+                    // eval_at() handles the move-to-target from current_alpha.
+                    auto [p_b, g_b, fg_b, lv_b] = eval_at(best_alpha);
+                    accepted_alpha = best_alpha;
+                    new_loss = p_b;
+                    new_flat_grad = fg_b;
+                    new_loss_var = lv_b;
+                }
+            } else if (!wolfe_ok && !bracket_found) {
+                // Budget exhausted before finding a bracket or a Wolfe alpha.
+                // Use whatever the final probe produced.
+                accepted_alpha = alpha_curr;
+                new_loss = phi_curr;
+                new_flat_grad = grad_curr;
+                new_loss_var = loss_var_curr;
+            }
+        } else {
+            // --- Armijo backtracking (unchanged semantics) ---
+            double t = lr_;
+            auto [p0, g0, fg0, lv0] = eval_at(t);
+            new_loss = p0;
+            new_flat_grad = fg0;
+            new_loss_var = lv0;
+
+            int ls_iter = 0;
+            const int ls_max = 25;
+            while (new_loss > loss_0 + c1 * t * gtd_0 && ls_iter < ls_max) {
+                t *= 0.5;
+                if (t < 1e-12) break;
+                auto [p, g, fg, lv] = eval_at(t);
+                new_loss = p;
+                new_flat_grad = fg;
+                new_loss_var = lv;
+                ls_iter += 1;
+                if (func_evals >= max_eval_) break;
+            }
+            accepted_alpha = t;
         }
-        step_accepted = true;
 
-        // Refresh gradient and loss after the accepted step.
+        // Refresh loss / grad / optimality check with the accepted point.
         loss_var = new_loss_var;
         loss = new_loss;
-        flat_grad = gather_flat_grad();
+        flat_grad = new_flat_grad;
         opt_cond = flat_max_abs(flat_grad);
 
         // Convergence checks.
         if (opt_cond <= tolerance_grad_) break;
-        double step_size = std::fabs(t) * flat_max_abs(direction);
+        double step_size = std::fabs(accepted_alpha) * flat_max_abs(direction);
         if (step_size <= tolerance_change_) break;
         if (std::fabs(loss - prev_loss_) < tolerance_change_) break;
         if (func_evals >= max_eval_) break;
-        (void)step_accepted;
     }
 
     return loss_var;
