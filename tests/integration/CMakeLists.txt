@@ -95,6 +95,17 @@ target_link_libraries(test_distributed PRIVATE
     GTest::gtest_main
 )
 
+# Propagate TENZOR_HAS_MPI and link MPI::MPI_CXX so the MPIBackend-specific
+# test block in test_distributed.cpp compiles. The macro is PRIVATE on
+# tenzor_core, so test binaries have to opt in explicitly.
+if(TENZOR_BUILD_MPI)
+    find_package(MPI QUIET COMPONENTS CXX)
+    if(MPI_CXX_FOUND)
+        target_compile_definitions(test_distributed PRIVATE TENZOR_HAS_MPI)
+        target_link_libraries(test_distributed PRIVATE MPI::MPI_CXX)
+    endif()
+endif()
+
 # Distributed tests require special setup (multi-process environment)
 # Tests will automatically skip if RANK/WORLD_SIZE environment variables are not set
 gtest_discover_tests(test_distributed DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")

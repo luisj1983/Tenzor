@@ -206,6 +206,7 @@ set(TENZOR_CORE_SOURCES
     distributed/pipeline_parallel.cpp
     distributed/nccl_backend.cpp
     distributed/gloo_backend.cpp
+    distributed/mpi_backend.cpp
     distributed/rpc/function_registry.cpp
     distributed/rpc/rpc_agent.cpp
     distributed/rpc/rref.cpp
@@ -438,6 +439,32 @@ if(TENZOR_BUILD_CUDA)
         else()
             message(WARNING "NCCL not found — distributed GPU training disabled. "
                     "Set -DTENZOR_REQUIRE_NCCL=ON to make this an error.")
+        endif()
+    endif()
+endif()
+
+# MPI backend (Phase 1.5 — OpenMPI / MPICH / Intel MPI).
+#
+# Opt-in via TENZOR_BUILD_MPI=ON. When enabled, we look for an MPI
+# implementation on the system; the wrapper library mpi_backend.cpp
+# guards its body on TENZOR_HAS_MPI, so an unsuccessful find just
+# leaves the .cpp as an empty translation unit. TENZOR_REQUIRE_MPI
+# turns "not found" into a hard error for CI.
+option(TENZOR_BUILD_MPI "Enable MPI distributed backend" OFF)
+option(TENZOR_REQUIRE_MPI "Fail the configure step if MPI is not found" OFF)
+if(TENZOR_BUILD_MPI)
+    find_package(MPI COMPONENTS CXX)
+    if(MPI_CXX_FOUND)
+        target_link_libraries(tenzor_core PRIVATE MPI::MPI_CXX)
+        target_compile_definitions(tenzor_core PRIVATE TENZOR_HAS_MPI)
+        message(STATUS "MPI backend: enabled (${MPI_CXX_VERSION_MAJOR}.${MPI_CXX_VERSION_MINOR})")
+    else()
+        if(TENZOR_REQUIRE_MPI)
+            message(FATAL_ERROR "MPI library required (-DTENZOR_REQUIRE_MPI=ON) but not found. "
+                    "Install OpenMPI / MPICH / Intel MPI and ensure mpicxx is on PATH.")
+        else()
+            message(WARNING "TENZOR_BUILD_MPI=ON but MPI not found — MPI backend will "
+                    "compile to an empty stub. Install MPI or unset TENZOR_BUILD_MPI.")
         endif()
     endif()
 endif()

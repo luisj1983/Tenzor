@@ -196,7 +196,11 @@ auto MPIBackend::all_gather(const Tensor& tensor, std::vector<Tensor>& output) -
     }
 
     Tensor send_host_buf;
-    void* send_ptr = get_send_ptr(tensor, send_host_buf);
+    // Intel MPI declares the send buffer parameter as non-const void*;
+    // OpenMPI uses const void*. get_send_ptr() returns const to reflect
+    // that we don't modify the sender, so cast it away at the API
+    // boundary (MPI is not supposed to write into this buffer anyway).
+    void* send_ptr = const_cast<void*>(get_send_ptr(tensor, send_host_buf));
 
     // Allocate contiguous receive buffer
     size_t total_elements = tensor.numel() * world_size_;
@@ -241,7 +245,7 @@ auto MPIBackend::gather(const Tensor& tensor, std::vector<Tensor>& output,
     }
 
     Tensor send_host_buf;
-    void* send_ptr = get_send_ptr(tensor, send_host_buf);
+    void* send_ptr = const_cast<void*>(get_send_ptr(tensor, send_host_buf));
 
     if (rank_ == dst_rank) {
         if (output.size() != static_cast<size_t>(world_size_)) {
@@ -416,7 +420,7 @@ auto MPIBackend::send(const Tensor& tensor, int dst_rank) -> void {
     }
 
     Tensor host_buf;
-    void* ptr = get_send_ptr(tensor, host_buf);
+    void* ptr = const_cast<void*>(get_send_ptr(tensor, host_buf));
 
     MPI_CHECK(MPI_Send(
         ptr,

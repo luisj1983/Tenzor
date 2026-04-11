@@ -40,7 +40,9 @@ enum class ReduceOp {
 enum class Backend {
     NCCL,  ///< NVIDIA NCCL for GPU-to-GPU communication
     GLOO,  ///< Gloo for CPU and fallback communication
-    MPI    ///< MPI backend (not implemented)
+    MPI    ///< MPI backend — enabled when Tenzor is built with
+           ///< -DTENZOR_BUILD_MPI=ON and an MPI implementation is
+           ///< present. Defined in src/distributed/mpi_backend.cpp.
 };
 
 /**

@@ -175,6 +175,69 @@ TEST(BackendConversionTest, StringToBackend) {
 }
 
 // ============================================================================
+// MPI Backend smoke tests (Phase 1.5)
+//
+// Only compiled in when Tenzor was built with -DTENZOR_BUILD_MPI=ON. Runs a
+// single-process init/barrier/all-reduce against the real MPI implementation
+// (MPI-2 and later support a lone-process mode where MPI_COMM_WORLD has
+// size 1). Multi-rank correctness is covered by run_mpi_distributed_test.sh
+// when launched via mpiexec / mpirun.
+// ============================================================================
+#ifdef TENZOR_HAS_MPI
+#include "tenzor/distributed/mpi_backend.hpp"
+
+TEST(MPIBackendTest, SingleProcessInitBarrierAllReduce) {
+    distributed::MPIBackend backend;
+    // rank=-1 / world_size=-1 → skip the caller-vs-MPI cross-check and
+    // accept whatever MPI reports. For a non-mpiexec launch that's
+    // rank=0, world=1 — which is exactly what the test expects.
+    backend.initialize(-1, -1, /*master_addr=*/"", /*master_port=*/0);
+    EXPECT_EQ(backend.backend_type(), distributed::Backend::MPI);
+    EXPECT_TRUE(backend.supports_device(Device::Type::CPU));
+
+    EXPECT_NO_THROW(backend.barrier());
+
+    // With world_size=1, all-reduce is a no-op (the input equals the
+    // output), but the call path still exercises MPI_Allreduce and
+    // the datatype / reduce-op translation helpers.
+    Tensor data = ones({8}, DType::Float32, Device::cpu());
+    auto* p = data.data<float>();
+    for (int64_t i = 0; i < data.numel(); ++i) p[i] = 1.0f + i;
+    EXPECT_NO_THROW(backend.all_reduce(data, distributed::ReduceOp::SUM));
+    for (int64_t i = 0; i < data.numel(); ++i) {
+        EXPECT_FLOAT_EQ(p[i], 1.0f + i);
+    }
+
+    EXPECT_NO_THROW(backend.finalize());
+}
+
+TEST(MPIBackendTest, FactoryProducesMpiBackendWhenRequested) {
+    // Going through the public init_process_group path verifies that
+    // the factory branch in distributed.cpp was updated to instantiate
+    // MPIBackend rather than throwing "not implemented". We stop
+    // short of initializing a process group fully (that's exercised
+    // via the standalone MPIBackend smoke test above) — the factory
+    // itself just constructs the backend and calls initialize().
+    //
+    // With a lone-process launch, init_process_group("mpi") succeeds
+    // and populates a 1-rank world. The destructor shuts MPI back down
+    // for the next test.
+    try {
+        distributed::init_process_group("mpi", /*rank=*/0, /*world_size=*/1);
+        EXPECT_TRUE(distributed::is_initialized());
+        distributed::destroy_process_group();
+    } catch (const std::exception& e) {
+        // If MPI is already finalized by a previous test running in
+        // the same process, the re-init will throw — that's fine,
+        // we've already proven the factory path exists by reaching
+        // this point. Make the failure loud though, so an unrelated
+        // regression doesn't get silently eaten.
+        ADD_FAILURE() << "init_process_group(\"mpi\") threw: " << e.what();
+    }
+}
+#endif // TENZOR_HAS_MPI
+
+// ============================================================================
 // Gloo Backend Tests
 // ============================================================================
 
