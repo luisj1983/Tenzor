@@ -1,4 +1,4 @@
-#include "tenzor/parallel/threadpool.hpp"
+#include "tenzor/utils/threading/threadpool.hpp"
 
 namespace tenzor {
 

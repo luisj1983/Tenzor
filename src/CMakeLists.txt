@@ -147,7 +147,7 @@ set(TENZOR_CORE_SOURCES
     nn/quantization/quantized_layers.cpp
     quantization/quantize_api.cpp
     quantization/module_conversion.cpp
-    parallel/threadpool.cpp
+    utils/threading/threadpool.cpp
     data/dataloader.cpp
     data/sampler.cpp
     data/transforms.cpp
