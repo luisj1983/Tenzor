@@ -214,6 +214,16 @@ auto SparseTensor::from_dense(const Tensor& dense, SparseLayout layout) -> Spars
 }
 
 auto SparseTensor::to_dense() const -> Tensor {
+    // to_dense() dereferences the index buffer directly with CPU pointer
+    // arithmetic, so for GPU-resident sparse tensors we must round-trip
+    // through CPU for the densification and then push the dense result
+    // back to the original device. A proper device-aware implementation
+    // lives in the sparse-op follow-up; this keeps the public API honest.
+    if (values_.device().type != Device::Type::CPU) {
+        const Device orig_device = values_.device();
+        return this->to(Device::cpu()).to_dense().to(orig_device);
+    }
+
     auto result = zeros(shape_, values_.dtype(), values_.device());
 
     if (layout_ == SparseLayout::COO) {

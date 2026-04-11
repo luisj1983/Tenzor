@@ -668,6 +668,17 @@ namespace rocm {
     // Sparse operations (sparse.hip.cpp) — available with or without rocSPARSE
     auto rocm_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) -> Tensor;
     auto rocm_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) -> Tensor;
+#ifdef TENZOR_HAS_ROCSPARSE
+    // SpGEMM / triangular solve are only defined in the rocSPARSE path —
+    // the HIP fallback at the bottom of sparse.hip.cpp intentionally
+    // omits them. sparse_ops.cpp will fall through to the CPU path if
+    // has_kernel returns false.
+    auto rocm_spgemm_kernel(const SparseTensor& a, const SparseTensor& b) -> SparseTensor;
+    auto rocm_sparse_trsv_kernel(const SparseTensor& L, const Tensor& b,
+                                  bool upper) -> Tensor;
+    auto rocm_sparse_trsm_kernel(const SparseTensor& L, const Tensor& B,
+                                  bool upper) -> Tensor;
+#endif
 
     // Sort/TopK/ArgSort/Unique operations (sort.hip.cpp)
     auto sort_kernel(const Tensor& input, int64_t dim, bool descending,
@@ -2230,26 +2241,13 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // internally dispatch to rocSPARSE when inputs are on ROCm.
     // =========================================================================
 
-#ifdef TENZOR_HAS_ROCSPARSE
-    // SparseSpMM: sparse(M,K) @ dense(K,N) -> dense(M,N)
-    table.register_single_output_kernel(OpId::SparseSpMM,
-        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            int64_t M = attrs.get_int(AttrKey::M);
-            int64_t K = attrs.get_int(AttrKey::K);
-            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
-            return sparse::spmm(sp, inputs[3]);
-        });
-
-    // SparseSpMV: sparse(M,K) @ vec(K) -> vec(M)
-    table.register_single_output_kernel(OpId::SparseSpMV,
-        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            int64_t M = attrs.get_int(AttrKey::M);
-            int64_t K = attrs.get_int(AttrKey::K);
-            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
-            return sparse::spmv(sp, inputs[3]);
-        });
-#else // !TENZOR_HAS_ROCSPARSE — use native HIP CSR fallback kernels
-    // SparseSpMM: sparse(M,K) @ dense(K,N) -> dense(M,N)
+    // SparseSpMM: sparse(M,K) @ dense(K,N) -> dense(M,N).
+    //
+    // NOTE: previously the rocSPARSE branch of this lambda called
+    // sparse::spmm() recursively, which bounced back into tenzor_core
+    // (where TENZOR_HAS_ROCSPARSE is not defined) and silently fell
+    // through to the CPU path on device pointers. Call the kernel
+    // directly, same as the HIP fallback path has always done.
     table.register_single_output_kernel(OpId::SparseSpMM,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t M = attrs.get_int(AttrKey::M);
@@ -2258,13 +2256,46 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             return rocm::rocm_spmm_kernel(sp, inputs[3]);
         });
 
-    // SparseSpMV: sparse(M,K) @ vec(K) -> vec(M)
+    // SparseSpMV: sparse(M,K) @ vec(K) -> vec(M).
     table.register_single_output_kernel(OpId::SparseSpMV,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
             return rocm::rocm_spmv_kernel(sp, inputs[3]);
+        });
+
+#ifdef TENZOR_HAS_ROCSPARSE
+    // SparseSpGEMM: sparse(M,K) × sparse(K,N) -> sparse(M,N).
+    // Inputs [0..2] are A's CSR components, [3..5] are B's. Lambda
+    // returns the three CSR components of the product.
+    table.register_kernel(OpId::SparseSpGEMM,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            int64_t N = attrs.get_int(AttrKey::N);
+            auto a = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            auto b = SparseTensor::sparse_csr(inputs[3], inputs[4], inputs[5], {K, N});
+            auto c = rocm::rocm_spgemm_kernel(a, b);
+            return {c.crow_indices(), c.col_indices(), c.values()};
+        });
+
+    // SparseTrsv: solve L*x = b.
+    table.register_single_output_kernel(OpId::SparseTrsv,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t N = attrs.get_int(AttrKey::N);
+            bool upper = attrs.get_bool(AttrKey::Upper, false);
+            auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N});
+            return rocm::rocm_sparse_trsv_kernel(L, inputs[3], upper);
+        });
+
+    // SparseTrsm: solve L*X = B (multi-RHS).
+    table.register_single_output_kernel(OpId::SparseTrsm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t N = attrs.get_int(AttrKey::N);
+            bool upper = attrs.get_bool(AttrKey::Upper, false);
+            auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N});
+            return rocm::rocm_sparse_trsm_kernel(L, inputs[3], upper);
         });
 #endif // TENZOR_HAS_ROCSPARSE
 
@@ -2284,14 +2315,10 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             return {sp.crow_indices(), sp.col_indices(), sp.values()};
         });
 
-    // SparseAdd: sparse(M,K) + dense(M,K) -> dense(M,K)
-    table.register_single_output_kernel(OpId::SparseAdd,
-        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            int64_t M = attrs.get_int(AttrKey::M);
-            int64_t K = attrs.get_int(AttrKey::K);
-            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
-            return sparse::add(sp, inputs[3]);
-        });
+    // NOTE: SparseAdd on ROCm intentionally has no dedicated lambda —
+    // see the matching comment in cuda_kernel_registry.cpp. The previous
+    // implementation recursed through sparse::add and the dispatch table,
+    // blowing the stack on GPU inputs.
 
     // =========================================================================
     // Single-output kernel registrations

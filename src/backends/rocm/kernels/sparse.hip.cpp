@@ -452,6 +452,312 @@ Tensor rocm_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
     return result;
 }
 
+// ============================================================================
+// SpGEMM — sparse × sparse → sparse (CSR × CSR → CSR) via rocsparse_spgemm
+// ============================================================================
+
+/// RAII guard for rocSPARSE csr2csr compression descriptors — not used here
+/// but the same pattern applies for any rocSPARSE handle.
+
+SparseTensor rocm_spgemm_kernel(const SparseTensor& a, const SparseTensor& b) {
+    auto a_shape = a.shape();
+    auto b_shape = b.shape();
+    if (a_shape.size() != 2 || b_shape.size() != 2) {
+        throw std::runtime_error("rocm_spgemm: both inputs must be 2D");
+    }
+    const int64_t M = a_shape[0];
+    const int64_t K = a_shape[1];
+    const int64_t N = b_shape[1];
+    if (K != b_shape[0]) {
+        throw std::runtime_error("rocm_spgemm: inner dimensions must match ("
+            + std::to_string(K) + " vs " + std::to_string(b_shape[0]) + ")");
+    }
+    if (a.dtype() != b.dtype()) {
+        throw std::runtime_error("rocm_spgemm: dtype mismatch");
+    }
+    const DType dtype = a.dtype();
+    if (dtype != DType::Float32 && dtype != DType::Float64) {
+        throw std::runtime_error("rocm_spgemm: only Float32/Float64 supported, got "
+            + std::string(dtype_name(dtype)));
+    }
+
+    auto a_csr = ensure_csr_on_gpu(a);
+    auto b_csr = ensure_csr_on_gpu(b);
+    const int64_t nnz_a = a_csr.nnz();
+    const int64_t nnz_b = b_csr.nnz();
+
+    auto a_crow = a_csr.crow_indices().contiguous();
+    auto a_col  = a_csr.col_indices().contiguous();
+    auto a_vals = a_csr.values().contiguous();
+    auto b_crow = b_csr.crow_indices().contiguous();
+    auto b_col  = b_csr.col_indices().contiguous();
+    auto b_vals = b_csr.values().contiguous();
+
+    rocsparse_handle handle = get_rocsparse_handle();
+    const rocsparse_datatype roc_dtype = get_rocsparse_data_type(dtype);
+
+    // A descriptor.
+    rocsparse_spmat_descr mat_a;
+    ROCSPARSE_CHECK(rocsparse_create_csr_descr(
+        &mat_a, M, K, nnz_a,
+        const_cast<void*>(static_cast<const void*>(a_crow.data<int64_t>())),
+        const_cast<void*>(static_cast<const void*>(a_col.data<int64_t>())),
+        const_cast<void*>(a_vals.data_ptr()),
+        rocsparse_indextype_i64, rocsparse_indextype_i64,
+        rocsparse_index_base_zero, roc_dtype));
+    SpMatGuard a_guard(mat_a);
+
+    // B descriptor.
+    rocsparse_spmat_descr mat_b;
+    ROCSPARSE_CHECK(rocsparse_create_csr_descr(
+        &mat_b, K, N, nnz_b,
+        const_cast<void*>(static_cast<const void*>(b_crow.data<int64_t>())),
+        const_cast<void*>(static_cast<const void*>(b_col.data<int64_t>())),
+        const_cast<void*>(b_vals.data_ptr()),
+        rocsparse_indextype_i64, rocsparse_indextype_i64,
+        rocsparse_index_base_zero, roc_dtype));
+    SpMatGuard b_guard(mat_b);
+
+    // C descriptor: start with an empty CSR with a pre-allocated row ptr
+    // buffer. rocsparse_spgemm nnz stage fills it in; compute stage fills
+    // col_ind / values once they are allocated.
+    auto c_crow = zeros(std::vector<int64_t>{M + 1}, DType::Int64, Device::rocm());
+    rocsparse_spmat_descr mat_c;
+    ROCSPARSE_CHECK(rocsparse_create_csr_descr(
+        &mat_c, M, N, 0,
+        c_crow.data<int64_t>(), nullptr, nullptr,
+        rocsparse_indextype_i64, rocsparse_indextype_i64,
+        rocsparse_index_base_zero, roc_dtype));
+    SpMatGuard c_guard(mat_c);
+
+    // D descriptor is a nullptr alias for "no D matrix" — beta must be 0.
+    // rocsparse_spgemm requires a valid D descriptor; reuse C for this
+    // purpose since it will be read only when beta != 0.
+    rocsparse_spmat_descr mat_d;
+    ROCSPARSE_CHECK(rocsparse_create_csr_descr(
+        &mat_d, M, N, 0,
+        c_crow.data<int64_t>(), nullptr, nullptr,
+        rocsparse_indextype_i64, rocsparse_indextype_i64,
+        rocsparse_index_base_zero, roc_dtype));
+    SpMatGuard d_guard(mat_d);
+
+    const rocsparse_operation op_none = rocsparse_operation_none;
+
+    float  alpha_f = 1.0f, beta_f = 0.0f;
+    double alpha_d = 1.0,  beta_d = 0.0;
+    void* alpha = (dtype == DType::Float32) ? static_cast<void*>(&alpha_f)
+                                            : static_cast<void*>(&alpha_d);
+    void* beta  = (dtype == DType::Float32) ? static_cast<void*>(&beta_f)
+                                            : static_cast<void*>(&beta_d);
+
+    // Stage 1: buffer size.
+    size_t buffer_size = 0;
+    ROCSPARSE_CHECK(rocsparse_spgemm(
+        handle, op_none, op_none, alpha, mat_a, mat_b, beta, mat_d, mat_c,
+        roc_dtype, rocsparse_spgemm_alg_default,
+        rocsparse_spgemm_stage_buffer_size, &buffer_size, nullptr));
+    HipBuffer workspace(buffer_size);
+
+    // Stage 2: nnz. Fills in c_crow and computes the nnz of C.
+    ROCSPARSE_CHECK(rocsparse_spgemm(
+        handle, op_none, op_none, alpha, mat_a, mat_b, beta, mat_d, mat_c,
+        roc_dtype, rocsparse_spgemm_alg_default,
+        rocsparse_spgemm_stage_nnz, &buffer_size, workspace.ptr));
+
+    int64_t c_rows = 0, c_cols = 0, c_nnz = 0;
+    ROCSPARSE_CHECK(rocsparse_spmat_get_size(mat_c, &c_rows, &c_cols, &c_nnz));
+
+    auto c_col  = zeros(std::vector<int64_t>{c_nnz}, DType::Int64, Device::rocm());
+    auto c_vals = zeros(std::vector<int64_t>{c_nnz}, dtype,         Device::rocm());
+
+    ROCSPARSE_CHECK(rocsparse_csr_set_pointers(
+        mat_c,
+        c_crow.data<int64_t>(),
+        c_col.data<int64_t>(),
+        c_vals.data_ptr()));
+
+    // Stage 3: compute.
+    ROCSPARSE_CHECK(rocsparse_spgemm(
+        handle, op_none, op_none, alpha, mat_a, mat_b, beta, mat_d, mat_c,
+        roc_dtype, rocsparse_spgemm_alg_default,
+        rocsparse_spgemm_stage_compute, &buffer_size, workspace.ptr));
+
+    HIP_CHECK_SPARSE(hipDeviceSynchronize());
+
+    return SparseTensor::sparse_csr(
+        c_crow, c_col, c_vals,
+        std::vector<int64_t>{M, N});
+}
+
+// ============================================================================
+// SpSV — triangular solve L*x = b (single RHS) via rocsparse_spsv
+// ============================================================================
+
+Tensor rocm_sparse_trsv_kernel(const SparseTensor& L, const Tensor& b, bool upper) {
+    auto L_shape = L.shape();
+    if (L_shape.size() != 2 || L_shape[0] != L_shape[1]) {
+        throw std::runtime_error("rocm_sparse_trsv: L must be square 2D");
+    }
+    if (b.ndim() != 1) {
+        throw std::runtime_error("rocm_sparse_trsv: b must be 1D");
+    }
+    const int64_t N = L_shape[0];
+    if (b.shape()[0] != N) {
+        throw std::runtime_error("rocm_sparse_trsv: dimension mismatch");
+    }
+    const DType dtype = b.dtype();
+    if (dtype != DType::Float32 && dtype != DType::Float64) {
+        throw std::runtime_error("rocm_sparse_trsv: only Float32/Float64 supported, got "
+            + std::string(dtype_name(dtype)));
+    }
+
+    auto L_csr = ensure_csr_on_gpu(L);
+    const int64_t nnz = L_csr.nnz();
+    auto L_crow = L_csr.crow_indices().contiguous();
+    auto L_col  = L_csr.col_indices().contiguous();
+    auto L_vals = L_csr.values().contiguous();
+
+    auto b_gpu = (b.device().type != Device::Type::ROCm)
+                   ? b.to(Device::rocm()).contiguous()
+                   : b.contiguous();
+    auto result = zeros(std::vector<int64_t>{N}, dtype, Device::rocm());
+
+    rocsparse_handle handle = get_rocsparse_handle();
+    const rocsparse_datatype roc_dtype = get_rocsparse_data_type(dtype);
+
+    // L matrix descriptor.
+    rocsparse_spmat_descr mat_L;
+    ROCSPARSE_CHECK(rocsparse_create_csr_descr(
+        &mat_L, N, N, nnz,
+        const_cast<void*>(static_cast<const void*>(L_crow.data<int64_t>())),
+        const_cast<void*>(static_cast<const void*>(L_col.data<int64_t>())),
+        const_cast<void*>(L_vals.data_ptr()),
+        rocsparse_indextype_i64, rocsparse_indextype_i64,
+        rocsparse_index_base_zero, roc_dtype));
+    SpMatGuard L_guard(mat_L);
+
+    // Fill mode + diagonal type.
+    rocsparse_fill_mode fill_mode = upper ? rocsparse_fill_mode_upper
+                                          : rocsparse_fill_mode_lower;
+    rocsparse_diag_type diag_type = rocsparse_diag_type_non_unit;
+    ROCSPARSE_CHECK(rocsparse_spmat_set_attribute(
+        mat_L, rocsparse_spmat_fill_mode, &fill_mode, sizeof(fill_mode)));
+    ROCSPARSE_CHECK(rocsparse_spmat_set_attribute(
+        mat_L, rocsparse_spmat_diag_type, &diag_type, sizeof(diag_type)));
+
+    // Dense vector descriptors.
+    rocsparse_dnvec_descr vec_x;
+    ROCSPARSE_CHECK(rocsparse_create_dnvec_descr(
+        &vec_x, N, const_cast<void*>(b_gpu.data_ptr()), roc_dtype));
+    DnVecGuard x_guard(vec_x);
+
+    rocsparse_dnvec_descr vec_y;
+    ROCSPARSE_CHECK(rocsparse_create_dnvec_descr(
+        &vec_y, N, result.data_ptr(), roc_dtype));
+    DnVecGuard y_guard(vec_y);
+
+    float  alpha_f = 1.0f;
+    double alpha_d = 1.0;
+    void* alpha = (dtype == DType::Float32) ? static_cast<void*>(&alpha_f)
+                                            : static_cast<void*>(&alpha_d);
+
+    // Stage 1: buffer size.
+    size_t buffer_size = 0;
+    ROCSPARSE_CHECK(rocsparse_spsv(
+        handle, rocsparse_operation_none, alpha, mat_L, vec_x, vec_y,
+        roc_dtype, rocsparse_spsv_alg_default,
+        rocsparse_spsv_stage_buffer_size, &buffer_size, nullptr));
+    HipBuffer workspace(buffer_size);
+
+    // Stage 2: preprocess.
+    ROCSPARSE_CHECK(rocsparse_spsv(
+        handle, rocsparse_operation_none, alpha, mat_L, vec_x, vec_y,
+        roc_dtype, rocsparse_spsv_alg_default,
+        rocsparse_spsv_stage_preprocess, &buffer_size, workspace.ptr));
+
+    // Stage 3: compute.
+    ROCSPARSE_CHECK(rocsparse_spsv(
+        handle, rocsparse_operation_none, alpha, mat_L, vec_x, vec_y,
+        roc_dtype, rocsparse_spsv_alg_default,
+        rocsparse_spsv_stage_compute, &buffer_size, workspace.ptr));
+
+    HIP_CHECK_SPARSE(hipDeviceSynchronize());
+    return result;
+}
+
+// Multi-RHS triangular solve: loops per column calling SpSV. As on the
+// CUDA side, this is O(K) suboptimal — rocsparse has SpSM (multi-RHS)
+// but caching descriptors and workspace across K calls is a follow-up.
+Tensor rocm_sparse_trsm_kernel(const SparseTensor& L, const Tensor& B, bool upper) {
+    auto L_shape = L.shape();
+    if (L_shape.size() != 2 || L_shape[0] != L_shape[1]) {
+        throw std::runtime_error("rocm_sparse_trsm: L must be square 2D");
+    }
+    if (B.ndim() != 2) {
+        throw std::runtime_error("rocm_sparse_trsm: B must be 2D");
+    }
+    const int64_t N = L_shape[0];
+    const int64_t K = B.shape()[1];
+    if (B.shape()[0] != N) {
+        throw std::runtime_error("rocm_sparse_trsm: dimension mismatch");
+    }
+    const DType dtype = B.dtype();
+    if (dtype != DType::Float32 && dtype != DType::Float64) {
+        throw std::runtime_error("rocm_sparse_trsm: only Float32/Float64 supported");
+    }
+
+    auto B_gpu = (B.device().type != Device::Type::ROCm)
+                   ? B.to(Device::rocm()).contiguous()
+                   : B.contiguous();
+    auto X = zeros(std::vector<int64_t>{N, K}, dtype, Device::rocm());
+
+    for (int64_t k = 0; k < K; ++k) {
+        // Gather B[:, k] into a contiguous 1D buffer on GPU.
+        Tensor b_col = zeros(std::vector<int64_t>{N}, dtype, Device::rocm());
+        if (dtype == DType::Float32) {
+            auto* dst = b_col.data<float>();
+            const auto* src = B_gpu.data<float>();
+            for (int64_t i = 0; i < N; ++i) {
+                HIP_CHECK_SPARSE(hipMemcpy(
+                    dst + i, src + i * K + k, sizeof(float),
+                    hipMemcpyDeviceToDevice));
+            }
+        } else {
+            auto* dst = b_col.data<double>();
+            const auto* src = B_gpu.data<double>();
+            for (int64_t i = 0; i < N; ++i) {
+                HIP_CHECK_SPARSE(hipMemcpy(
+                    dst + i, src + i * K + k, sizeof(double),
+                    hipMemcpyDeviceToDevice));
+            }
+        }
+
+        auto x_col = rocm_sparse_trsv_kernel(L, b_col, upper);
+
+        // Scatter x_col back into X[:, k].
+        if (dtype == DType::Float32) {
+            auto* dst = X.data<float>();
+            const auto* src = x_col.data<float>();
+            for (int64_t i = 0; i < N; ++i) {
+                HIP_CHECK_SPARSE(hipMemcpy(
+                    dst + i * K + k, src + i, sizeof(float),
+                    hipMemcpyDeviceToDevice));
+            }
+        } else {
+            auto* dst = X.data<double>();
+            const auto* src = x_col.data<double>();
+            for (int64_t i = 0; i < N; ++i) {
+                HIP_CHECK_SPARSE(hipMemcpy(
+                    dst + i * K + k, src + i, sizeof(double),
+                    hipMemcpyDeviceToDevice));
+            }
+        }
+    }
+
+    HIP_CHECK_SPARSE(hipDeviceSynchronize());
+    return X;
+}
+
 } // namespace rocm
 } // namespace tenzor
 

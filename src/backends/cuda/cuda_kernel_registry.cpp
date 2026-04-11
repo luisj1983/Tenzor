@@ -715,10 +715,23 @@ namespace cuda {
     Tensor sinc_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor zeta_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
 
-#ifndef TENZOR_HAS_CUSPARSE
-    // Native CUDA CSR sparse fallback kernels (sparse.cu)
+    // Sparse kernels (sparse.cu). Definitions exist in both the
+    // TENZOR_HAS_CUSPARSE path (cuSPARSE-backed) and the fallback path
+    // (hand-written CUDA CSR kernels), so the forward declarations are
+    // unconditional.
     auto cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) -> Tensor;
     auto cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) -> Tensor;
+#ifdef TENZOR_HAS_CUSPARSE
+    // SpGEMM and triangular solve are only defined when cuSPARSE is
+    // available — the hand-rolled fallback intentionally doesn't cover
+    // them. sparse_ops.cpp will fall through to the CPU implementation
+    // if has_kernel(SparseSpGEMM/Trsv/Trsm) returns false.
+    auto cuda_spgemm_kernel(const SparseTensor& a, const SparseTensor& b,
+                            void* stream) -> SparseTensor;
+    auto cuda_sparse_trsv_kernel(const SparseTensor& L, const Tensor& b,
+                                  bool upper, void* stream) -> Tensor;
+    auto cuda_sparse_trsm_kernel(const SparseTensor& L, const Tensor& B,
+                                  bool upper, void* stream) -> Tensor;
 #endif
 
 } // namespace cuda
@@ -3119,26 +3132,14 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // internally dispatch to cuSPARSE when inputs are on CUDA.
     // =========================================================================
 
-#ifdef TENZOR_HAS_CUSPARSE
-    // SparseSpMM: sparse(M,K) @ dense(K,N) -> dense(M,N)
-    table.register_single_output_kernel(OpId::SparseSpMM,
-        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            int64_t M = attrs.get_int(AttrKey::M);
-            int64_t K = attrs.get_int(AttrKey::K);
-            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
-            return sparse::spmm(sp, inputs[3]);
-        });
-
-    // SparseSpMV: sparse(M,K) @ vec(K) -> vec(M)
-    table.register_single_output_kernel(OpId::SparseSpMV,
-        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            int64_t M = attrs.get_int(AttrKey::M);
-            int64_t K = attrs.get_int(AttrKey::K);
-            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
-            return sparse::spmv(sp, inputs[3]);
-        });
-#else // !TENZOR_HAS_CUSPARSE — use native CUDA CSR fallback kernels
-    // SparseSpMM: sparse(M,K) @ dense(K,N) -> dense(M,N)
+    // SparseSpMM: sparse(M,K) @ dense(K,N) -> dense(M,N).
+    //
+    // NOTE: previously this lambda called `sparse::spmm(sp, inputs[3])`
+    // which recursed back into the top-level sparse::spmm in tenzor_core,
+    // whose cuSPARSE branch is compiled out (TENZOR_HAS_CUSPARSE is only
+    // defined inside this backend .so), so it fell through to cpu_spmm()
+    // and segfaulted on device pointers. Call the kernel directly — the
+    // same pattern the cuSPARSE-absent fallback has always used.
     table.register_single_output_kernel(OpId::SparseSpMM,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t M = attrs.get_int(AttrKey::M);
@@ -3147,13 +3148,47 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             return cuda::cuda_spmm_kernel(sp, inputs[3]);
         });
 
-    // SparseSpMV: sparse(M,K) @ vec(K) -> vec(M)
+    // SparseSpMV: sparse(M,K) @ vec(K) -> vec(M).
     table.register_single_output_kernel(OpId::SparseSpMV,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
             return cuda::cuda_spmv_kernel(sp, inputs[3]);
+        });
+
+#ifdef TENZOR_HAS_CUSPARSE
+    // SparseSpGEMM: sparse(M,K) × sparse(K,N) -> sparse(M,N).
+    // Inputs [0..2] are A's CSR components, [3..5] are B's. M/K/N in attrs.
+    // The kernel returns a SparseTensor which we unpack into 3 result
+    // tensors for the multi-output dispatch interface.
+    table.register_kernel(OpId::SparseSpGEMM,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            int64_t N = attrs.get_int(AttrKey::N);
+            auto a = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            auto b = SparseTensor::sparse_csr(inputs[3], inputs[4], inputs[5], {K, N});
+            auto c = cuda::cuda_spgemm_kernel(a, b, /*stream=*/nullptr);
+            return {c.crow_indices(), c.col_indices(), c.values()};
+        });
+
+    // SparseTrsv: solve L*x = b  (b is 1D, length N).
+    table.register_single_output_kernel(OpId::SparseTrsv,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t N = attrs.get_int(AttrKey::N);
+            bool upper = attrs.get_bool(AttrKey::Upper, false);
+            auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N});
+            return cuda::cuda_sparse_trsv_kernel(L, inputs[3], upper, /*stream=*/nullptr);
+        });
+
+    // SparseTrsm: solve L*X = B  (B is 2D, N × K_rhs).
+    table.register_single_output_kernel(OpId::SparseTrsm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t N = attrs.get_int(AttrKey::N);
+            bool upper = attrs.get_bool(AttrKey::Upper, false);
+            auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N});
+            return cuda::cuda_sparse_trsm_kernel(L, inputs[3], upper, /*stream=*/nullptr);
         });
 #endif // TENZOR_HAS_CUSPARSE
 
@@ -3260,14 +3295,14 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             return {sp.crow_indices(), sp.col_indices(), sp.values()};
         });
 
-    // SparseAdd: sparse(M,K) + dense(M,K) -> dense(M,K)
-    table.register_single_output_kernel(OpId::SparseAdd,
-        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            int64_t M = attrs.get_int(AttrKey::M);
-            int64_t K = attrs.get_int(AttrKey::K);
-            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
-            return sparse::add(sp, inputs[3]);
-        });
+    // NOTE: SparseAdd on CUDA intentionally has no dedicated lambda. The
+    // previous implementation called `sparse::add(sp, inputs[3])` which
+    // recursed back into tenzor_core's sparse::add → dispatch_gpu_add →
+    // this lambda → ..., overflowing the stack. There is no cusparse
+    // primitive for (sparse + dense) → dense; the op is cheap enough
+    // that sparse::add's CPU fallback (which now round-trips operands
+    // through CPU) is an acceptable implementation until a real
+    // on-device kernel lands.
 }
 
 } // namespace tenzor

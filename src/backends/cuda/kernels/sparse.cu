@@ -414,6 +414,374 @@ Tensor cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec, cudaStrea
     return result;
 }
 
+// Two-argument overloads used by cuda_kernel_registry.cpp. The
+// three-argument forms take an optional stream — sparse_ops.cpp can't
+// reference cudaStream_t without pulling in CUDA headers, so the
+// two-argument versions forward with stream=0 (default stream).
+Tensor cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
+    return cuda_spmm_kernel(sparse, dense, /*stream=*/0);
+}
+
+Tensor cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
+    return cuda_spmv_kernel(sparse, vec, /*stream=*/0);
+}
+
+// ============================================================================
+// SpGEMM — sparse × sparse → sparse (CSR × CSR → CSR)
+// ============================================================================
+//
+// cuSPARSE generic SpGEMM API (available since CUDA 11.3). The call sequence
+// is fixed: createDescr → workEstimation (2×, once for each internal buffer)
+// → compute (2×) → copy result → destroyDescr.
+//
+// Workspace buffers are allocated per call. Caching by sparsity pattern is a
+// natural follow-up (plan item referenced in sparse_ops.cpp) but requires
+// invalidation logic; keep it simple for the first GPU integration.
+
+/// RAII guard for cusparseSpGEMM descriptors.
+struct SpGEMMDescrGuard {
+    cusparseSpGEMMDescr_t desc = nullptr;
+    SpGEMMDescrGuard() { CUSPARSE_CHECK(cusparseSpGEMM_createDescr(&desc)); }
+    ~SpGEMMDescrGuard() { if (desc) cusparseSpGEMM_destroyDescr(desc); }
+    SpGEMMDescrGuard(const SpGEMMDescrGuard&) = delete;
+    SpGEMMDescrGuard& operator=(const SpGEMMDescrGuard&) = delete;
+};
+
+SparseTensor cuda_spgemm_kernel(const SparseTensor& a, const SparseTensor& b,
+                                 void* stream_opaque) {
+    // sparse_ops.cpp can't include cuda_runtime.h, so the stream is passed
+    // in as a void*. cudaStream_t is a typedef for `CUstream_st*` — a
+    // pointer — so this cast is ABI-safe.
+    cudaStream_t stream = static_cast<cudaStream_t>(stream_opaque);
+    auto a_shape = a.shape();
+    auto b_shape = b.shape();
+    if (a_shape.size() != 2 || b_shape.size() != 2) {
+        throw std::runtime_error("cuda_spgemm: both inputs must be 2D");
+    }
+    const int64_t M = a_shape[0];
+    const int64_t K = a_shape[1];
+    const int64_t N = b_shape[1];
+    if (K != b_shape[0]) {
+        throw std::runtime_error("cuda_spgemm: inner dimensions must match ("
+            + std::to_string(K) + " vs " + std::to_string(b_shape[0]) + ")");
+    }
+    if (a.dtype() != b.dtype()) {
+        throw std::runtime_error("cuda_spgemm: dtype mismatch");
+    }
+    const DType dtype = a.dtype();
+    if (dtype != DType::Float32 && dtype != DType::Float64) {
+        throw std::runtime_error("cuda_spgemm: only Float32 and Float64 supported, got "
+            + std::string(dtype_name(dtype)));
+    }
+
+    // Move both operands to CSR on GPU.
+    auto a_csr = ensure_csr_on_gpu(a, stream);
+    auto b_csr = ensure_csr_on_gpu(b, stream);
+    const int64_t nnz_a = a_csr.nnz();
+    const int64_t nnz_b = b_csr.nnz();
+
+    auto a_crow = a_csr.crow_indices().contiguous();
+    auto a_col  = a_csr.col_indices().contiguous();
+    auto a_vals = a_csr.values().contiguous();
+    auto b_crow = b_csr.crow_indices().contiguous();
+    auto b_col  = b_csr.col_indices().contiguous();
+    auto b_vals = b_csr.values().contiguous();
+
+    cusparseHandle_t handle = CuSPARSEHandlePool::get(stream);
+    const cudaDataType cuda_dtype = get_cuda_data_type(dtype);
+
+    // A descriptor.
+    cusparseSpMatDescr_t mat_a;
+    CUSPARSE_CHECK(cusparseCreateCsr(
+        &mat_a, M, K, nnz_a,
+        const_cast<void*>(static_cast<const void*>(a_crow.data<int64_t>())),
+        const_cast<void*>(static_cast<const void*>(a_col.data<int64_t>())),
+        const_cast<void*>(a_vals.data_ptr()),
+        CUSPARSE_INDEX_64I, CUSPARSE_INDEX_64I,
+        CUSPARSE_INDEX_BASE_ZERO, cuda_dtype));
+    SpMatGuard a_guard(mat_a);
+
+    // B descriptor.
+    cusparseSpMatDescr_t mat_b;
+    CUSPARSE_CHECK(cusparseCreateCsr(
+        &mat_b, K, N, nnz_b,
+        const_cast<void*>(static_cast<const void*>(b_crow.data<int64_t>())),
+        const_cast<void*>(static_cast<const void*>(b_col.data<int64_t>())),
+        const_cast<void*>(b_vals.data_ptr()),
+        CUSPARSE_INDEX_64I, CUSPARSE_INDEX_64I,
+        CUSPARSE_INDEX_BASE_ZERO, cuda_dtype));
+    SpMatGuard b_guard(mat_b);
+
+    // C descriptor: start with an empty CSR placeholder; cuSPARSE will tell
+    // us the required output nnz after the compute step and we allocate
+    // then. The initial row-pointer buffer is (M+1) entries so the
+    // descriptor is well-formed.
+    auto c_crow = zeros(std::vector<int64_t>{M + 1}, DType::Int64, Device::cuda());
+    cusparseSpMatDescr_t mat_c;
+    CUSPARSE_CHECK(cusparseCreateCsr(
+        &mat_c, M, N, 0,
+        c_crow.data<int64_t>(),
+        nullptr, nullptr,
+        CUSPARSE_INDEX_64I, CUSPARSE_INDEX_64I,
+        CUSPARSE_INDEX_BASE_ZERO, cuda_dtype));
+    SpMatGuard c_guard(mat_c);
+
+    SpGEMMDescrGuard spgemm_desc;
+
+    const cusparseOperation_t opA = CUSPARSE_OPERATION_NON_TRANSPOSE;
+    const cusparseOperation_t opB = CUSPARSE_OPERATION_NON_TRANSPOSE;
+
+    float  alpha_f = 1.0f, beta_f = 0.0f;
+    double alpha_d = 1.0,  beta_d = 0.0;
+    void* alpha = (dtype == DType::Float32) ? static_cast<void*>(&alpha_f)
+                                            : static_cast<void*>(&alpha_d);
+    void* beta  = (dtype == DType::Float32) ? static_cast<void*>(&beta_f)
+                                            : static_cast<void*>(&beta_d);
+
+    // Phase 1: work estimation — determines buffer1 size.
+    size_t buffer1_size = 0;
+    CUSPARSE_CHECK(cusparseSpGEMM_workEstimation(
+        handle, opA, opB, alpha, mat_a, mat_b, beta, mat_c,
+        cuda_dtype, CUSPARSE_SPGEMM_DEFAULT, spgemm_desc.desc,
+        &buffer1_size, nullptr));
+    CudaBuffer buffer1(buffer1_size);
+    CUSPARSE_CHECK(cusparseSpGEMM_workEstimation(
+        handle, opA, opB, alpha, mat_a, mat_b, beta, mat_c,
+        cuda_dtype, CUSPARSE_SPGEMM_DEFAULT, spgemm_desc.desc,
+        &buffer1_size, buffer1.ptr));
+
+    // Phase 2: compute — determines buffer2 size and computes the
+    // structure of C (still on cusparse-owned memory).
+    size_t buffer2_size = 0;
+    CUSPARSE_CHECK(cusparseSpGEMM_compute(
+        handle, opA, opB, alpha, mat_a, mat_b, beta, mat_c,
+        cuda_dtype, CUSPARSE_SPGEMM_DEFAULT, spgemm_desc.desc,
+        &buffer2_size, nullptr));
+    CudaBuffer buffer2(buffer2_size);
+    CUSPARSE_CHECK(cusparseSpGEMM_compute(
+        handle, opA, opB, alpha, mat_a, mat_b, beta, mat_c,
+        cuda_dtype, CUSPARSE_SPGEMM_DEFAULT, spgemm_desc.desc,
+        &buffer2_size, buffer2.ptr));
+
+    // Query the resulting C dimensions and nnz.
+    int64_t c_rows = 0, c_cols = 0, c_nnz = 0;
+    CUSPARSE_CHECK(cusparseSpMatGetSize(mat_c, &c_rows, &c_cols, &c_nnz));
+
+    // Allocate user-owned C arrays. c_crow is already M+1 wide.
+    auto c_col  = zeros(std::vector<int64_t>{c_nnz}, DType::Int64, Device::cuda());
+    auto c_vals = zeros(std::vector<int64_t>{c_nnz}, dtype,         Device::cuda());
+
+    // Point the descriptor at our allocated arrays, then copy the
+    // cusparse-internal CSR arrays into them.
+    CUSPARSE_CHECK(cusparseCsrSetPointers(
+        mat_c,
+        c_crow.data<int64_t>(),
+        c_col.data<int64_t>(),
+        c_vals.data_ptr()));
+    CUSPARSE_CHECK(cusparseSpGEMM_copy(
+        handle, opA, opB, alpha, mat_a, mat_b, beta, mat_c,
+        cuda_dtype, CUSPARSE_SPGEMM_DEFAULT, spgemm_desc.desc));
+
+    CUDA_CHECK_SPARSE(cudaStreamSynchronize(stream));
+
+    return SparseTensor::sparse_csr(
+        c_crow, c_col, c_vals,
+        std::vector<int64_t>{M, N});
+}
+
+// ============================================================================
+// SpSV — triangular solve L*x = b  (or U*x = b) for a single RHS
+// ============================================================================
+//
+// Uses cuSPARSE's generic SpSV (available since CUDA 11.3). Each call does
+// its own analysis pass — descriptor caching keyed on sparsity pattern is a
+// natural follow-up if triangular solve becomes a hot path.
+
+struct SpSVDescrGuard {
+    cusparseSpSVDescr_t desc = nullptr;
+    SpSVDescrGuard() { CUSPARSE_CHECK(cusparseSpSV_createDescr(&desc)); }
+    ~SpSVDescrGuard() { if (desc) cusparseSpSV_destroyDescr(desc); }
+    SpSVDescrGuard(const SpSVDescrGuard&) = delete;
+    SpSVDescrGuard& operator=(const SpSVDescrGuard&) = delete;
+};
+
+Tensor cuda_sparse_trsv_kernel(const SparseTensor& L, const Tensor& b,
+                                bool upper, void* stream_opaque) {
+    cudaStream_t stream = static_cast<cudaStream_t>(stream_opaque);
+    auto L_shape = L.shape();
+    if (L_shape.size() != 2 || L_shape[0] != L_shape[1]) {
+        throw std::runtime_error("cuda_sparse_trsv: L must be square 2D");
+    }
+    if (b.ndim() != 1) {
+        throw std::runtime_error("cuda_sparse_trsv: b must be 1D");
+    }
+    const int64_t N = L_shape[0];
+    if (b.shape()[0] != N) {
+        throw std::runtime_error("cuda_sparse_trsv: dimension mismatch");
+    }
+    const DType dtype = b.dtype();
+    if (dtype != DType::Float32 && dtype != DType::Float64) {
+        throw std::runtime_error("cuda_sparse_trsv: only Float32/Float64 supported, got "
+            + std::string(dtype_name(dtype)));
+    }
+
+    auto L_csr = ensure_csr_on_gpu(L, stream);
+    const int64_t nnz = L_csr.nnz();
+    auto L_crow = L_csr.crow_indices().contiguous();
+    auto L_col  = L_csr.col_indices().contiguous();
+    auto L_vals = L_csr.values().contiguous();
+
+    auto b_gpu = (b.device().type != Device::Type::CUDA)
+                   ? b.to(Device::cuda()).contiguous()
+                   : b.contiguous();
+    auto result = zeros(std::vector<int64_t>{N}, dtype, Device::cuda());
+
+    cusparseHandle_t handle = CuSPARSEHandlePool::get(stream);
+    const cudaDataType cuda_dtype = get_cuda_data_type(dtype);
+
+    // L matrix descriptor.
+    cusparseSpMatDescr_t mat_L;
+    CUSPARSE_CHECK(cusparseCreateCsr(
+        &mat_L, N, N, nnz,
+        const_cast<void*>(static_cast<const void*>(L_crow.data<int64_t>())),
+        const_cast<void*>(static_cast<const void*>(L_col.data<int64_t>())),
+        const_cast<void*>(L_vals.data_ptr()),
+        CUSPARSE_INDEX_64I, CUSPARSE_INDEX_64I,
+        CUSPARSE_INDEX_BASE_ZERO, cuda_dtype));
+    SpMatGuard L_guard(mat_L);
+
+    // Fill mode (lower / upper) and diagonal type (non-unit — the solver
+    // reads the diagonal entry from the matrix values).
+    cusparseFillMode_t fill_mode = upper ? CUSPARSE_FILL_MODE_UPPER
+                                          : CUSPARSE_FILL_MODE_LOWER;
+    cusparseDiagType_t diag_type = CUSPARSE_DIAG_TYPE_NON_UNIT;
+    CUSPARSE_CHECK(cusparseSpMatSetAttribute(
+        mat_L, CUSPARSE_SPMAT_FILL_MODE, &fill_mode, sizeof(fill_mode)));
+    CUSPARSE_CHECK(cusparseSpMatSetAttribute(
+        mat_L, CUSPARSE_SPMAT_DIAG_TYPE, &diag_type, sizeof(diag_type)));
+
+    // Dense vector descriptors for x (input b) and y (output result).
+    cusparseDnVecDescr_t vec_x;
+    CUSPARSE_CHECK(cusparseCreateDnVec(
+        &vec_x, N, const_cast<void*>(b_gpu.data_ptr()), cuda_dtype));
+    DnVecGuard x_guard(vec_x);
+
+    cusparseDnVecDescr_t vec_y;
+    CUSPARSE_CHECK(cusparseCreateDnVec(
+        &vec_y, N, result.data_ptr(), cuda_dtype));
+    DnVecGuard y_guard(vec_y);
+
+    SpSVDescrGuard spsv_desc;
+
+    float  alpha_f = 1.0f;
+    double alpha_d = 1.0;
+    void* alpha = (dtype == DType::Float32) ? static_cast<void*>(&alpha_f)
+                                            : static_cast<void*>(&alpha_d);
+
+    // Analysis: cuSPARSE inspects the sparsity pattern and computes any
+    // internal data structures needed for the solve. The workspace
+    // returned here is consumed by both bufferSize and analysis.
+    size_t buffer_size = 0;
+    CUSPARSE_CHECK(cusparseSpSV_bufferSize(
+        handle, CUSPARSE_OPERATION_NON_TRANSPOSE, alpha, mat_L,
+        vec_x, vec_y, cuda_dtype, CUSPARSE_SPSV_ALG_DEFAULT,
+        spsv_desc.desc, &buffer_size));
+    CudaBuffer workspace(buffer_size);
+    CUSPARSE_CHECK(cusparseSpSV_analysis(
+        handle, CUSPARSE_OPERATION_NON_TRANSPOSE, alpha, mat_L,
+        vec_x, vec_y, cuda_dtype, CUSPARSE_SPSV_ALG_DEFAULT,
+        spsv_desc.desc, workspace.ptr));
+
+    // Solve.
+    CUSPARSE_CHECK(cusparseSpSV_solve(
+        handle, CUSPARSE_OPERATION_NON_TRANSPOSE, alpha, mat_L,
+        vec_x, vec_y, cuda_dtype, CUSPARSE_SPSV_ALG_DEFAULT,
+        spsv_desc.desc));
+
+    CUDA_CHECK_SPARSE(cudaStreamSynchronize(stream));
+    return result;
+}
+
+// Triangular solve with multiple right-hand sides: solve L * X = B where
+// B is (N, K). We loop per column calling SpSV because the existing CPU
+// code does the same — cuSPARSE has a matrix variant (SpSM) we can add
+// later if this becomes a bottleneck.
+Tensor cuda_sparse_trsm_kernel(const SparseTensor& L, const Tensor& B,
+                                bool upper, void* stream_opaque) {
+    cudaStream_t stream = static_cast<cudaStream_t>(stream_opaque);
+    auto L_shape = L.shape();
+    if (L_shape.size() != 2 || L_shape[0] != L_shape[1]) {
+        throw std::runtime_error("cuda_sparse_trsm: L must be square 2D");
+    }
+    if (B.ndim() != 2) {
+        throw std::runtime_error("cuda_sparse_trsm: B must be 2D");
+    }
+    const int64_t N = L_shape[0];
+    const int64_t K = B.shape()[1];
+    if (B.shape()[0] != N) {
+        throw std::runtime_error("cuda_sparse_trsm: dimension mismatch");
+    }
+
+    auto B_gpu = (B.device().type != Device::Type::CUDA)
+                   ? B.to(Device::cuda()).contiguous()
+                   : B.contiguous();
+    auto X = zeros(std::vector<int64_t>{N, K}, B.dtype(), Device::cuda());
+
+    // We can't take column views of a row-major matrix cheaply (a column
+    // is strided by K), so extract each column to a contiguous buffer,
+    // call SpSV, and write back. Each SpSV call re-runs analysis — this
+    // is O(K) suboptimal and is flagged as a follow-up: caching the
+    // analysis across calls for the same L would eliminate the overhead.
+    auto B_t = B_gpu;  // alias
+    for (int64_t k = 0; k < K; ++k) {
+        // Extract B[:, k] into a dense 1-D tensor on GPU.
+        Tensor b_col = zeros(std::vector<int64_t>{N}, B.dtype(), Device::cuda());
+        if (B.dtype() == DType::Float32) {
+            auto* dst = b_col.data<float>();
+            const auto* src = B_t.data<float>();
+            for (int64_t i = 0; i < N; ++i) {
+                CUDA_CHECK_SPARSE(cudaMemcpyAsync(
+                    dst + i, src + i * K + k, sizeof(float),
+                    cudaMemcpyDeviceToDevice, stream));
+            }
+        } else if (B.dtype() == DType::Float64) {
+            auto* dst = b_col.data<double>();
+            const auto* src = B_t.data<double>();
+            for (int64_t i = 0; i < N; ++i) {
+                CUDA_CHECK_SPARSE(cudaMemcpyAsync(
+                    dst + i, src + i * K + k, sizeof(double),
+                    cudaMemcpyDeviceToDevice, stream));
+            }
+        } else {
+            throw std::runtime_error("cuda_sparse_trsm: only Float32/Float64 supported");
+        }
+
+        auto x_col = cuda_sparse_trsv_kernel(L, b_col, upper, stream_opaque);
+
+        // Scatter x_col back to X[:, k].
+        if (B.dtype() == DType::Float32) {
+            auto* dst = X.data<float>();
+            const auto* src = x_col.data<float>();
+            for (int64_t i = 0; i < N; ++i) {
+                CUDA_CHECK_SPARSE(cudaMemcpyAsync(
+                    dst + i * K + k, src + i, sizeof(float),
+                    cudaMemcpyDeviceToDevice, stream));
+            }
+        } else {
+            auto* dst = X.data<double>();
+            const auto* src = x_col.data<double>();
+            for (int64_t i = 0; i < N; ++i) {
+                CUDA_CHECK_SPARSE(cudaMemcpyAsync(
+                    dst + i * K + k, src + i, sizeof(double),
+                    cudaMemcpyDeviceToDevice, stream));
+            }
+        }
+    }
+
+    CUDA_CHECK_SPARSE(cudaStreamSynchronize(stream));
+    return X;
+}
+
 } // namespace cuda
 } // namespace tenzor
 

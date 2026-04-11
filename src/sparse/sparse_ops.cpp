@@ -4,6 +4,7 @@
 #include "tenzor/backend/dispatch_table.hpp"
 #include <algorithm>
 #include <cstring>
+#include <optional>
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
@@ -18,7 +19,15 @@
 #include <mkl_spblas.h>
 #endif
 
-// Forward declarations for CUDA sparse kernels (defined in kernels/sparse.cu)
+// Forward declarations for CUDA sparse kernels (defined in kernels/sparse.cu).
+// These symbols live in the tenzor_backend_cuda.so shared object, which is
+// loaded dynamically at runtime via dlopen. sparse_ops.cpp compiles into
+// tenzor_core.so; direct calls to the `tenzor::cuda::*` kernels here would
+// be unresolved external references at tenzor_core link time. Instead, all
+// CUDA sparse dispatch goes through the OpId dispatch table (see the
+// should_use_cuda branch in each top-level sparse op below). The lambdas
+// registered in src/backends/cuda/cuda_kernel_registry.cpp sit on the
+// correct side of the dynamic boundary and call the kernels directly.
 #ifdef TENZOR_HAS_CUSPARSE
 namespace tenzor {
 namespace cuda {
@@ -133,6 +142,49 @@ DType compute_dtype_for(DType dtype) {
 [[maybe_unused]] bool should_use_vulkan_vec(const SparseTensor& sparse, const Tensor& vec) {
     return (vec.device().type == Device::Type::Vulkan ||
             sparse.device().type == Device::Type::Vulkan);
+}
+
+/// Extract a SparseTensor as CSR components (crow_indices, col_indices, values)
+/// for dispatch-table routing. SparseTensor::to_csr() is CPU-only because its
+/// coalesce() step dereferences the indices buffer directly, so any GPU COO
+/// input must be round-tripped through CPU for the structural conversion.
+/// Values stay on their original device after the round-trip. This is a
+/// one-time cost per sparse matrix structure and acceptable while a proper
+/// device-aware coalesce() is outstanding.
+struct CsrComponents {
+    Tensor crow;
+    Tensor col;
+    Tensor values;
+};
+
+[[maybe_unused]] CsrComponents extract_csr_on_device(const SparseTensor& sparse) {
+    const Device orig_device = sparse.device();
+    // Choose the CSR source without a default-constructed SparseTensor
+    // (SparseTensor has no public default ctor).
+    auto build_csr = [&]() -> SparseTensor {
+        if (sparse.layout() == SparseLayout::CSR) {
+            // Already CSR — return as-is regardless of device. Its
+            // components are plain tensors on the same device.
+            return sparse;
+        }
+        if (orig_device.type == Device::Type::CPU) {
+            return sparse.to_csr();
+        }
+        // COO-on-GPU: round-trip to CPU for the coalesce/convert step.
+        // The caller moves the resulting components back to the original
+        // device below.
+        return sparse.to(Device::cpu()).to_csr();
+    };
+    const SparseTensor csr = build_csr();
+    auto crow = csr.crow_indices();
+    auto col  = csr.col_indices();
+    auto vals = csr.values();
+    if (orig_device.type != Device::Type::CPU && csr.device() != orig_device) {
+        crow = crow.to(orig_device);
+        col  = col.to(orig_device);
+        vals = vals.to(orig_device);
+    }
+    return {crow, col, vals};
 }
 
 /// Return true if sparse/dense are on OneAPI/SYCL and oneMKL sparse is available.
@@ -592,39 +644,44 @@ auto spmm(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
         }
     }
 
-#ifdef TENZOR_HAS_CUSPARSE
-    if (should_use_cuda(sparse_compute, dense_compute)) {
-        auto result = cuda::cuda_spmm_kernel(sparse_compute, dense_compute);
-        return (orig_dtype != comp_dtype) ? result.to(orig_dtype) : result;
-    }
-#endif
-
-#ifdef TENZOR_ROCM_BACKEND
-    if (should_use_rocm(sparse_compute, dense_compute)) {
-        auto result = rocm::rocm_spmm_kernel(sparse_compute, dense_compute);
-        return (orig_dtype != comp_dtype) ? result.to(orig_dtype) : result;
-    }
-#endif
-
-#ifdef TENZOR_HAS_ONEMKL
-    if (should_use_oneapi(sparse_compute, dense_compute)) {
-        auto result = oneapi::oneapi_spmm_kernel(sparse_compute, dense_compute);
-        return (orig_dtype != comp_dtype) ? result.to(orig_dtype) : result;
-    }
-#endif
-
-    // Vulkan path: dispatch via OpId table (backend loaded dynamically)
-    if (should_use_vulkan(sparse_compute, dense_compute)) {
-        auto csr = sparse_compute.to_csr();
-        std::vector<Tensor> inputs = {csr.crow_indices(), csr.col_indices(), csr.values(), dense_compute};
+    // GPU paths — CUDA / ROCm / OneAPI / Vulkan all route through their
+    // respective dispatch tables so the call crosses the backend .so
+    // boundary. The direct `tenzor::cuda::*` / `tenzor::rocm::*` calls
+    // that used to live here only worked from *inside* the backend .so
+    // because the TENZOR_HAS_CUSPARSE / TENZOR_HAS_ROCSPARSE macros are
+    // only defined there; from tenzor_core they were compiled out and
+    // the function silently fell through to cpu_spmm on device pointers.
+    auto dispatch_gpu_spmm = [&](Device::Type dev_type) -> std::optional<Tensor> {
+        auto& table = DispatchTableRegistry::get_table(dev_type);
+        if (!table.has_kernel(OpId::SparseSpMM)) return std::nullopt;
+        auto ac = extract_csr_on_device(sparse_compute);
+        Tensor dense_on_dev = (dense_compute.device().type == dev_type)
+                                 ? dense_compute
+                                 : dense_compute.to(Device{dev_type, 0});
+        std::vector<Tensor> inputs = {ac.crow, ac.col, ac.values, dense_on_dev};
         OpAttributes attrs;
         attrs.set(AttrKey::M, M);
         attrs.set(AttrKey::K, K);
         attrs.set(AttrKey::N, N);
-        auto& table = DispatchTableRegistry::get_table(Device::Type::Vulkan);
-        auto results = table.dispatch(OpId::SparseSpMM, inputs, attrs);
-        auto result = results[0];
+        auto result = table.dispatch_single(OpId::SparseSpMM, inputs, attrs);
         return (orig_dtype != comp_dtype) ? result.to(orig_dtype) : result;
+    };
+
+    if (sparse_compute.device().type == Device::Type::CUDA ||
+        dense_compute.device().type == Device::Type::CUDA) {
+        if (auto r = dispatch_gpu_spmm(Device::Type::CUDA)) return *r;
+    }
+    if (sparse_compute.device().type == Device::Type::ROCm ||
+        dense_compute.device().type == Device::Type::ROCm) {
+        if (auto r = dispatch_gpu_spmm(Device::Type::ROCm)) return *r;
+    }
+    if (sparse_compute.device().type == Device::Type::OneAPI ||
+        dense_compute.device().type == Device::Type::OneAPI) {
+        if (auto r = dispatch_gpu_spmm(Device::Type::OneAPI)) return *r;
+    }
+    if (sparse_compute.device().type == Device::Type::Vulkan ||
+        dense_compute.device().type == Device::Type::Vulkan) {
+        if (auto r = dispatch_gpu_spmm(Device::Type::Vulkan)) return *r;
     }
 
     // CPU path: MKL-accelerated with scalar fallback
@@ -665,38 +722,38 @@ auto spmv(const SparseTensor& sparse, const Tensor& vec) -> Tensor {
         }
     }
 
-#ifdef TENZOR_HAS_CUSPARSE
-    if (should_use_cuda_vec(sparse_compute, vec_compute)) {
-        auto result = cuda::cuda_spmv_kernel(sparse_compute, vec_compute);
-        return (orig_dtype != comp_dtype) ? result.to(orig_dtype) : result;
-    }
-#endif
-
-#ifdef TENZOR_ROCM_BACKEND
-    if (should_use_rocm_vec(sparse_compute, vec_compute)) {
-        auto result = rocm::rocm_spmv_kernel(sparse_compute, vec_compute);
-        return (orig_dtype != comp_dtype) ? result.to(orig_dtype) : result;
-    }
-#endif
-
-#ifdef TENZOR_HAS_ONEMKL
-    if (should_use_oneapi_vec(sparse_compute, vec_compute)) {
-        auto result = oneapi::oneapi_spmv_kernel(sparse_compute, vec_compute);
-        return (orig_dtype != comp_dtype) ? result.to(orig_dtype) : result;
-    }
-#endif
-
-    // Vulkan path: dispatch via OpId table
-    if (should_use_vulkan_vec(sparse_compute, vec_compute)) {
-        auto csr = sparse_compute.to_csr();
-        std::vector<Tensor> inputs = {csr.crow_indices(), csr.col_indices(), csr.values(), vec_compute};
+    // GPU path for spmv — symmetric to spmm above. See the long comment
+    // on spmm() for why direct `cuda::*` calls don't work from here.
+    auto dispatch_gpu_spmv = [&](Device::Type dev_type) -> std::optional<Tensor> {
+        auto& table = DispatchTableRegistry::get_table(dev_type);
+        if (!table.has_kernel(OpId::SparseSpMV)) return std::nullopt;
+        auto sc = extract_csr_on_device(sparse_compute);
+        Tensor vec_on_dev = (vec_compute.device().type == dev_type)
+                                ? vec_compute
+                                : vec_compute.to(Device{dev_type, 0});
+        std::vector<Tensor> inputs = {sc.crow, sc.col, sc.values, vec_on_dev};
         OpAttributes attrs;
         attrs.set(AttrKey::M, M);
         attrs.set(AttrKey::K, K);
-        auto& table = DispatchTableRegistry::get_table(Device::Type::Vulkan);
-        auto results = table.dispatch(OpId::SparseSpMV, inputs, attrs);
-        auto result = results[0];
+        auto result = table.dispatch_single(OpId::SparseSpMV, inputs, attrs);
         return (orig_dtype != comp_dtype) ? result.to(orig_dtype) : result;
+    };
+
+    if (sparse_compute.device().type == Device::Type::CUDA ||
+        vec_compute.device().type == Device::Type::CUDA) {
+        if (auto r = dispatch_gpu_spmv(Device::Type::CUDA)) return *r;
+    }
+    if (sparse_compute.device().type == Device::Type::ROCm ||
+        vec_compute.device().type == Device::Type::ROCm) {
+        if (auto r = dispatch_gpu_spmv(Device::Type::ROCm)) return *r;
+    }
+    if (sparse_compute.device().type == Device::Type::OneAPI ||
+        vec_compute.device().type == Device::Type::OneAPI) {
+        if (auto r = dispatch_gpu_spmv(Device::Type::OneAPI)) return *r;
+    }
+    if (sparse_compute.device().type == Device::Type::Vulkan ||
+        vec_compute.device().type == Device::Type::Vulkan) {
+        if (auto r = dispatch_gpu_spmv(Device::Type::Vulkan)) return *r;
     }
 
     // CPU path: MKL-accelerated with scalar fallback
@@ -721,21 +778,43 @@ auto add(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
         return add(sparse_promoted, dense_promoted);
     }
 
-    // Vulkan path: dispatch via OpId table
-    if (should_use_vulkan(sparse, dense)) {
-        auto csr = sparse.to_csr();
-        auto sp_shape = sparse.shape();
-        std::vector<Tensor> inputs = {csr.crow_indices(), csr.col_indices(), csr.values(), dense};
+    auto sp_shape = sparse.shape();
+
+    // GPU path: route through dispatch table for any backend that has a
+    // SparseAdd kernel registered. Symmetric to the spmm/spmv pattern.
+    auto dispatch_gpu_add = [&](Device::Type dev_type) -> std::optional<Tensor> {
+        auto& table = DispatchTableRegistry::get_table(dev_type);
+        if (!table.has_kernel(OpId::SparseAdd)) return std::nullopt;
+        auto sc = extract_csr_on_device(sparse);
+        Tensor dense_on_dev = (dense.device().type == dev_type)
+                                 ? dense
+                                 : dense.to(Device{dev_type, 0});
+        std::vector<Tensor> inputs = {sc.crow, sc.col, sc.values, dense_on_dev};
         OpAttributes attrs;
         attrs.set(AttrKey::M, sp_shape[0]);
         attrs.set(AttrKey::K, sp_shape.size() > 1 ? sp_shape[1] : int64_t(1));
-        auto& table = DispatchTableRegistry::get_table(Device::Type::Vulkan);
-        auto results = table.dispatch(OpId::SparseAdd, inputs, attrs);
-        return results[0];
+        return table.dispatch_single(OpId::SparseAdd, inputs, attrs);
+    };
+
+    for (auto dev_type : {Device::Type::CUDA, Device::Type::ROCm,
+                          Device::Type::OneAPI, Device::Type::Vulkan}) {
+        if (sparse.device().type == dev_type || dense.device().type == dev_type) {
+            if (auto r = dispatch_gpu_add(dev_type)) return *r;
+        }
     }
 
+    // CPU fallback. to_dense() now round-trips any GPU sparse to CPU,
+    // and we additionally ensure the dense RHS is on CPU so the direct
+    // pointer arithmetic below doesn't segfault.
     auto result = sparse.to_dense();
-    auto dense_c = dense.contiguous();
+    Tensor dense_cpu = (dense.device().type != Device::Type::CPU)
+                          ? dense.to(Device::cpu())
+                          : dense;
+    const Device orig_device = dense.device();
+    if (result.device().type != Device::Type::CPU) {
+        result = result.to(Device::cpu());
+    }
+    auto dense_c = dense_cpu.contiguous();
     auto result_c = result.contiguous();
 
     int64_t n = result_c.numel();
@@ -776,6 +855,10 @@ auto add(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
             std::string(dtype_name(result_c.dtype())));
     }
 
+    // Move back to the caller's original device if we round-tripped.
+    if (orig_device.type != Device::Type::CPU && result_c.device() != orig_device) {
+        return result_c.to(orig_device);
+    }
     return result_c;
 }
 
@@ -1007,16 +1090,52 @@ auto spgemm(const SparseTensor& a, const SparseTensor& b) -> SparseTensor {
         throw std::runtime_error("spgemm: dtype mismatch");
     }
 
-    // Convert to CSR for efficient row-based iteration
+    // GPU path: CUDA (with cuSPARSE registered in the CUDA backend .so)
+    // routes through the dispatch table. The lambda in
+    // cuda_kernel_registry.cpp reconstructs a CSR SparseTensor from the
+    // components and calls cuda::cuda_spgemm_kernel directly. Same pattern
+    // as the existing Vulkan sparse path.
+    if (a.device().type == Device::Type::CUDA ||
+        b.device().type == Device::Type::CUDA) {
+        auto ac = extract_csr_on_device(a);
+        auto bc = extract_csr_on_device(b);
+        std::vector<Tensor> inputs = {
+            ac.crow, ac.col, ac.values,
+            bc.crow, bc.col, bc.values,
+        };
+        OpAttributes attrs;
+        attrs.set(AttrKey::M, M);
+        attrs.set(AttrKey::K, K);
+        attrs.set(AttrKey::N, N);
+        auto& table = DispatchTableRegistry::get_table(Device::Type::CUDA);
+        if (table.has_kernel(OpId::SparseSpGEMM)) {
+            auto results = table.dispatch(OpId::SparseSpGEMM, inputs, attrs);
+            // Lambda returns a dense tensor carrying the CSR components —
+            // see the matching un-pack in cuda_kernel_registry.cpp. The
+            // first result is a packed 3-tensor result we decode as a
+            // CSR SparseTensor.
+            // (Simpler: the lambda constructs the SparseTensor itself and
+            // densifies, but that's wasteful for SpGEMM whose output is
+            // naturally sparse. We pass the three output CSR components as
+            // three successive result tensors.)
+            if (results.size() != 3) {
+                throw std::runtime_error(
+                    "sparse::spgemm: CUDA SpGEMM dispatch must return 3 tensors "
+                    "(crow, col, values), got " + std::to_string(results.size()));
+            }
+            return SparseTensor::sparse_csr(
+                results[0], results[1], results[2],
+                std::vector<int64_t>{M, N});
+        }
+        // Fall through to CPU path if the CUDA backend is loaded but the
+        // SpGEMM kernel wasn't registered (e.g. cuSPARSE missing at build).
+    }
+
+    // CPU path: convert to CSR for efficient row-based iteration, then
+    // transfer any device-resident operands to CPU, run the sequential
+    // CSR × CSR algorithm, and restore the original device.
     auto a_csr = a.to_csr();
     auto b_csr = b.to_csr();
-
-    // GPU SpGEMM is not yet implemented. The top-level dispatch is CPU-only:
-    // we transfer inputs to CPU if needed and bring the result back to the
-    // original device. A proper implementation requires routing through the
-    // OpId::SparseSpMM-style dispatch table with cuSPARSE / rocSPARSE-native
-    // kernels (cusparseSpGEMM_workEstimation → cusparseSpGEMM_compute, or
-    // rocsparse_spgemm with a cached workspace). Tracked as a follow-up.
     Device target_device = a.device();
     SparseTensor a_compute = (target_device.type != Device::Type::CPU)
         ? a_csr.to(Device::cpu()) : a_csr;
@@ -1168,14 +1287,32 @@ auto sparse_triangular_solve(const SparseTensor& L, const Tensor& b, bool upper)
         throw std::runtime_error("sparse_triangular_solve: b must be 1D or 2D");
     }
 
-    // Convert to CSR for row-based access
-    auto L_csr = L.to_csr();
+    // GPU path: dispatch through the OpId table so the call crosses the
+    // backend .so boundary where cuSPARSE linkage lives.
+    if (b.device().type == Device::Type::CUDA ||
+        L.device().type == Device::Type::CUDA) {
+        auto Lc = extract_csr_on_device(L);
+        // b may need to be moved to CUDA if only L was on CUDA.
+        Tensor b_gpu = (b.device().type == Device::Type::CUDA)
+                          ? b
+                          : b.to(Device::cuda());
+        std::vector<Tensor> inputs = {Lc.crow, Lc.col, Lc.values, b_gpu};
+        OpAttributes attrs;
+        attrs.set(AttrKey::N, N);
+        attrs.set(AttrKey::Upper, upper);
+        auto& table = DispatchTableRegistry::get_table(Device::Type::CUDA);
+        const OpId op = (b.ndim() == 1) ? OpId::SparseTrsv : OpId::SparseTrsm;
+        if (table.has_kernel(op)) {
+            auto result = table.dispatch_single(op, inputs, attrs);
+            return result;
+        }
+        // Fall through to CPU if the CUDA backend lacks the kernel.
+    }
 
-    // GPU triangular solve is not yet implemented. The top-level dispatch is
-    // CPU-only: we transfer inputs to CPU and bring the result back. A proper
-    // implementation requires cusparseSpSV_analysis+solve or
-    // rocsparse_csrsv_analysis+solve with cached descriptors. Tracked as a
-    // follow-up.
+    // CPU path: convert to CSR for row-based access, transfer any
+    // device-resident operands to CPU, run the sequential substitution,
+    // then restore the original device.
+    auto L_csr = L.to_csr();
     Device target_device = b.device();
     SparseTensor L_compute = L_csr;
     Tensor b_compute = b;

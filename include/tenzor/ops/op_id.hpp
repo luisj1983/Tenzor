@@ -470,6 +470,9 @@ enum class OpId : uint16_t {
     SparseToDense,             // Convert sparse tensor to dense
     DenseToSparse,             // Convert dense tensor to sparse (CSR)
     SparseAdd,                 // Sparse + Dense addition
+    SparseSpGEMM = 465,        // Sparse × Sparse → Sparse (CSR × CSR → CSR)
+    SparseTrsv,                // Sparse lower/upper triangular solve: L*x = b
+    SparseTrsm,                // Sparse triangular multi-RHS solve: L*X = B
 
     // =========================================================================
     // Signal Processing Operations (470-479)
