@@ -15,8 +15,8 @@ class SparseTest : public BackendTest {};
 
 TEST_P(SparseTest, COOConstruction) {
     // 3x4 sparse matrix with 3 non-zeros
-    auto indices = Tensor({2, int64_t(3)}, DType::Int64, device);
-    auto values = Tensor({int64_t(3)}, DType::Float32, device);
+    auto indices = Tensor({2, int64_t(3)}, DType::Int64, Device::cpu());
+    auto values = Tensor({int64_t(3)}, DType::Float32, Device::cpu());
 
     auto* idx = indices.data<int64_t>();
     idx[0] = 0; idx[1] = 1; idx[2] = 2;  // rows
@@ -41,9 +41,9 @@ TEST_P(SparseTest, COOConstruction) {
 
 TEST_P(SparseTest, CSRConstruction) {
     // 3x4 CSR with 4 non-zeros
-    auto crow = Tensor({int64_t(4)}, DType::Int64, device);
-    auto col = Tensor({int64_t(4)}, DType::Int64, device);
-    auto values = Tensor({int64_t(4)}, DType::Float32, device);
+    auto crow = Tensor({int64_t(4)}, DType::Int64, Device::cpu());
+    auto col = Tensor({int64_t(4)}, DType::Int64, Device::cpu());
+    auto values = Tensor({int64_t(4)}, DType::Float32, Device::cpu());
 
     auto* cp = crow.data<int64_t>();
     cp[0] = 0; cp[1] = 1; cp[2] = 3; cp[3] = 4;
@@ -67,8 +67,8 @@ TEST_P(SparseTest, CSRConstruction) {
 
 TEST_P(SparseTest, COOToDense) {
     // Build sparse [[0, 1], [2, 0]]
-    auto indices = Tensor({2, int64_t(2)}, DType::Int64, device);
-    auto values = Tensor({int64_t(2)}, DType::Float32, device);
+    auto indices = Tensor({2, int64_t(2)}, DType::Int64, Device::cpu());
+    auto values = Tensor({int64_t(2)}, DType::Float32, Device::cpu());
 
     auto* idx = indices.data<int64_t>();
     idx[0] = 0; idx[1] = 1;  // rows
@@ -89,9 +89,9 @@ TEST_P(SparseTest, COOToDense) {
 
 TEST_P(SparseTest, CSRToDense) {
     // Build sparse [[5, 0], [0, 7]]
-    auto crow = Tensor({int64_t(3)}, DType::Int64, device);
-    auto col = Tensor({int64_t(2)}, DType::Int64, device);
-    auto values = Tensor({int64_t(2)}, DType::Float32, device);
+    auto crow = Tensor({int64_t(3)}, DType::Int64, Device::cpu());
+    auto col = Tensor({int64_t(2)}, DType::Int64, Device::cpu());
+    auto values = Tensor({int64_t(2)}, DType::Float32, Device::cpu());
 
     auto* cp = crow.data<int64_t>();
     cp[0] = 0; cp[1] = 1; cp[2] = 2;
@@ -118,12 +118,13 @@ TEST_P(SparseTest, CSRToDense) {
 
 TEST_P(SparseTest, DenseSparseRoundtrip) {
     // Create a dense matrix with some zeros
-    auto dense = zeros({3, 3}, DType::Float32, device);
-    auto* dp = dense.data<float>();
+    auto dense_cpu = zeros({3, 3}, DType::Float32, Device::cpu());
+    auto* dp = dense_cpu.data<float>();
     dp[0] = 1.0f;  // [0,0]
     dp[4] = 2.0f;  // [1,1]
     dp[8] = 3.0f;  // [2,2]
 
+    auto dense = dense_cpu.to(device);
     auto sparse = to_sparse(dense);
     EXPECT_EQ(sparse.nnz(), 3);
 
@@ -142,8 +143,8 @@ TEST_P(SparseTest, DenseSparseRoundtrip) {
 
 TEST_P(SparseTest, COOToCSRConversion) {
     // Build COO and convert to CSR
-    auto indices = Tensor({2, int64_t(3)}, DType::Int64, device);
-    auto values = Tensor({int64_t(3)}, DType::Float32, device);
+    auto indices = Tensor({2, int64_t(3)}, DType::Int64, Device::cpu());
+    auto values = Tensor({int64_t(3)}, DType::Float32, Device::cpu());
 
     auto* idx = indices.data<int64_t>();
     idx[0] = 0; idx[1] = 1; idx[2] = 2;  // rows
@@ -167,9 +168,9 @@ TEST_P(SparseTest, COOToCSRConversion) {
 }
 
 TEST_P(SparseTest, CSRToCOOConversion) {
-    auto crow = Tensor({int64_t(3)}, DType::Int64, device);
-    auto col = Tensor({int64_t(2)}, DType::Int64, device);
-    auto values = Tensor({int64_t(2)}, DType::Float32, device);
+    auto crow = Tensor({int64_t(3)}, DType::Int64, Device::cpu());
+    auto col = Tensor({int64_t(2)}, DType::Int64, Device::cpu());
+    auto values = Tensor({int64_t(2)}, DType::Float32, Device::cpu());
 
     auto* cp = crow.data<int64_t>();
     cp[0] = 0; cp[1] = 1; cp[2] = 2;
@@ -201,8 +202,8 @@ TEST_P(SparseTest, CSRToCOOConversion) {
 
 TEST_P(SparseTest, CoalesceDuplicates) {
     // Two entries at same position should be summed
-    auto indices = Tensor({2, int64_t(3)}, DType::Int64, device);
-    auto values = Tensor({int64_t(3)}, DType::Float32, device);
+    auto indices = Tensor({2, int64_t(3)}, DType::Int64, Device::cpu());
+    auto values = Tensor({int64_t(3)}, DType::Float32, Device::cpu());
 
     auto* idx = indices.data<int64_t>();
     idx[0] = 0; idx[1] = 0; idx[2] = 1;  // rows: two at row 0
@@ -231,8 +232,8 @@ TEST_P(SparseTest, CoalesceDuplicates) {
 TEST_P(SparseTest, SpMMCorrectness) {
     // A (2x3 sparse) * B (3x2 dense) = C (2x2 dense)
     // A = [[1, 0, 2], [0, 3, 0]]
-    auto indices = Tensor({2, int64_t(3)}, DType::Int64, device);
-    auto values = Tensor({int64_t(3)}, DType::Float32, device);
+    auto indices = Tensor({2, int64_t(3)}, DType::Int64, Device::cpu());
+    auto values = Tensor({int64_t(3)}, DType::Float32, Device::cpu());
 
     auto* idx = indices.data<int64_t>();
     idx[0] = 0; idx[1] = 0; idx[2] = 1;  // rows
@@ -244,11 +245,12 @@ TEST_P(SparseTest, SpMMCorrectness) {
     auto A = SparseTensor::sparse_coo(indices, values, {2, 3});
 
     // B = [[1, 4], [2, 5], [3, 6]]
-    auto B = zeros({3, 2}, DType::Float32, device);
-    auto* bp = B.data<float>();
+    auto B_cpu = zeros({3, 2}, DType::Float32, Device::cpu());
+    auto* bp = B_cpu.data<float>();
     bp[0] = 1.0f; bp[1] = 4.0f;
     bp[2] = 2.0f; bp[3] = 5.0f;
     bp[4] = 3.0f; bp[5] = 6.0f;
+    auto B = B_cpu.to(device);
 
     auto C = sparse::spmm(A, B).to(Device::cpu());
 
@@ -267,8 +269,8 @@ TEST_P(SparseTest, SpMMCorrectness) {
 TEST_P(SparseTest, SpMVCorrectness) {
     // A = [[1, 0], [0, 2]], x = [3, 4]
     // y = A*x = [3, 8]
-    auto indices = Tensor({2, int64_t(2)}, DType::Int64, device);
-    auto values = Tensor({int64_t(2)}, DType::Float32, device);
+    auto indices = Tensor({2, int64_t(2)}, DType::Int64, Device::cpu());
+    auto values = Tensor({int64_t(2)}, DType::Float32, Device::cpu());
 
     auto* idx = indices.data<int64_t>();
     idx[0] = 0; idx[1] = 1;  // rows
@@ -279,7 +281,7 @@ TEST_P(SparseTest, SpMVCorrectness) {
 
     auto A = SparseTensor::sparse_coo(indices, values, {2, 2});
 
-    auto x = Tensor({int64_t(2)}, DType::Float32, device);
+    auto x = Tensor({int64_t(2)}, DType::Float32, Device::cpu());
     auto* xp = x.data<float>();
     xp[0] = 3.0f; xp[1] = 4.0f;
 
@@ -295,8 +297,8 @@ TEST_P(SparseTest, SpMVCorrectness) {
 
 TEST_P(SparseTest, SparseDenseAdd) {
     // sparse [[1, 0], [0, 2]] + dense [[10, 20], [30, 40]]
-    auto indices = Tensor({2, int64_t(2)}, DType::Int64, device);
-    auto values = Tensor({int64_t(2)}, DType::Float32, device);
+    auto indices = Tensor({2, int64_t(2)}, DType::Int64, Device::cpu());
+    auto values = Tensor({int64_t(2)}, DType::Float32, Device::cpu());
 
     auto* idx = indices.data<int64_t>();
     idx[0] = 0; idx[1] = 1;
@@ -307,7 +309,7 @@ TEST_P(SparseTest, SparseDenseAdd) {
 
     auto sp = SparseTensor::sparse_coo(indices, values, {2, 2});
 
-    auto dense = Tensor({2, 2}, DType::Float32, device);
+    auto dense = Tensor({2, 2}, DType::Float32, Device::cpu());
     auto* dp = dense.data<float>();
     dp[0] = 10.0f; dp[1] = 20.0f; dp[2] = 30.0f; dp[3] = 40.0f;
 
@@ -325,15 +327,15 @@ TEST_P(SparseTest, SparseDenseAdd) {
 
 TEST_P(SparseTest, SparseSparseAdd) {
     // A = [[1, 0], [0, 0]], B = [[0, 0], [0, 2]]
-    auto idx_a = Tensor({2, int64_t(1)}, DType::Int64, device);
-    auto val_a = Tensor({int64_t(1)}, DType::Float32, device);
+    auto idx_a = Tensor({2, int64_t(1)}, DType::Int64, Device::cpu());
+    auto val_a = Tensor({int64_t(1)}, DType::Float32, Device::cpu());
     idx_a.data<int64_t>()[0] = 0;
     idx_a.data<int64_t>()[1] = 0;
     val_a.data<float>()[0] = 1.0f;
     auto A = SparseTensor::sparse_coo(idx_a, val_a, {2, 2});
 
-    auto idx_b = Tensor({2, int64_t(1)}, DType::Int64, device);
-    auto val_b = Tensor({int64_t(1)}, DType::Float32, device);
+    auto idx_b = Tensor({2, int64_t(1)}, DType::Int64, Device::cpu());
+    auto val_b = Tensor({int64_t(1)}, DType::Float32, Device::cpu());
     idx_b.data<int64_t>()[0] = 1;
     idx_b.data<int64_t>()[1] = 1;
     val_b.data<float>()[0] = 2.0f;
@@ -353,8 +355,8 @@ TEST_P(SparseTest, SparseSparseAdd) {
 // ============================================================================
 
 TEST_P(SparseTest, ScalarMul) {
-    auto indices = Tensor({2, int64_t(2)}, DType::Int64, device);
-    auto values = Tensor({int64_t(2)}, DType::Float32, device);
+    auto indices = Tensor({2, int64_t(2)}, DType::Int64, Device::cpu());
+    auto values = Tensor({int64_t(2)}, DType::Float32, Device::cpu());
 
     auto* idx = indices.data<int64_t>();
     idx[0] = 0; idx[1] = 1;
@@ -379,8 +381,8 @@ TEST_P(SparseTest, ScalarMul) {
 // ============================================================================
 
 TEST_P(SparseTest, EmptySparse) {
-    auto indices = Tensor({2, int64_t(0)}, DType::Int64, device);
-    auto values = Tensor({int64_t(0)}, DType::Float32, device);
+    auto indices = Tensor({2, int64_t(0)}, DType::Int64, Device::cpu());
+    auto values = Tensor({int64_t(0)}, DType::Float32, Device::cpu());
     auto sp = SparseTensor::sparse_coo(indices, values, {3, 3});
 
     EXPECT_EQ(sp.nnz(), 0);
@@ -393,8 +395,8 @@ TEST_P(SparseTest, EmptySparse) {
 }
 
 TEST_P(SparseTest, SingleElement) {
-    auto indices = Tensor({2, int64_t(1)}, DType::Int64, device);
-    auto values = Tensor({int64_t(1)}, DType::Float32, device);
+    auto indices = Tensor({2, int64_t(1)}, DType::Int64, Device::cpu());
+    auto values = Tensor({int64_t(1)}, DType::Float32, Device::cpu());
 
     indices.data<int64_t>()[0] = 0;
     indices.data<int64_t>()[1] = 0;
@@ -406,8 +408,8 @@ TEST_P(SparseTest, SingleElement) {
 }
 
 TEST_P(SparseTest, Float64Support) {
-    auto indices = Tensor({2, int64_t(2)}, DType::Int64, device);
-    auto values = Tensor({int64_t(2)}, DType::Float64, device);
+    auto indices = Tensor({2, int64_t(2)}, DType::Int64, Device::cpu());
+    auto values = Tensor({int64_t(2)}, DType::Float64, Device::cpu());
 
     auto* idx = indices.data<int64_t>();
     idx[0] = 0; idx[1] = 1;

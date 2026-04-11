@@ -924,7 +924,15 @@ auto to_sparse(const Tensor& dense) -> SparseTensor {
         throw std::runtime_error("to_sparse: only 2D tensors supported");
     }
 
+    // Densification scan happens on CPU — device pointers can't be dereferenced
+    // from host code. Stage to CPU, build indices/values there, then transfer the
+    // resulting sparse tensor back to the input device so the return type still
+    // lives where the caller expects it.
+    auto orig_device = dense.device();
     auto cont = dense.contiguous();
+    if (cont.device() != Device::cpu()) {
+        cont = cont.to(Device::cpu());
+    }
     int64_t nrows = cont.shape()[0];
     int64_t ncols = cont.shape()[1];
 
@@ -946,14 +954,15 @@ auto to_sparse(const Tensor& dense) -> SparseTensor {
             }
         }
         int64_t nnz = static_cast<int64_t>(vals_f32.size());
-        auto indices = Tensor({2, nnz}, DType::Int64, cont.device());
-        auto values = Tensor({nnz}, DType::Float32, cont.device());
+        auto indices = Tensor({2, nnz}, DType::Int64, Device::cpu());
+        auto values = Tensor({nnz}, DType::Float32, Device::cpu());
         auto* ip = indices.data<int64_t>();
         auto* vp = values.data<float>();
         std::memcpy(ip, row_idx.data(), nnz * sizeof(int64_t));
         std::memcpy(ip + nnz, col_idx.data(), nnz * sizeof(int64_t));
         std::memcpy(vp, vals_f32.data(), nnz * sizeof(float));
-        return SparseTensor::sparse_coo(indices, values, {nrows, ncols});
+        auto sparse = SparseTensor::sparse_coo(indices, values, {nrows, ncols});
+        return orig_device == Device::cpu() ? sparse : sparse.to(orig_device);
     } else if (cont.dtype() == DType::Float64) {
         auto* ptr = cont.data<double>();
         for (int64_t r = 0; r < nrows; ++r) {
@@ -967,14 +976,15 @@ auto to_sparse(const Tensor& dense) -> SparseTensor {
             }
         }
         int64_t nnz = static_cast<int64_t>(vals_f64.size());
-        auto indices = Tensor({2, nnz}, DType::Int64, cont.device());
-        auto values = Tensor({nnz}, DType::Float64, cont.device());
+        auto indices = Tensor({2, nnz}, DType::Int64, Device::cpu());
+        auto values = Tensor({nnz}, DType::Float64, Device::cpu());
         auto* ip = indices.data<int64_t>();
         auto* vp = values.data<double>();
         std::memcpy(ip, row_idx.data(), nnz * sizeof(int64_t));
         std::memcpy(ip + nnz, col_idx.data(), nnz * sizeof(int64_t));
         std::memcpy(vp, vals_f64.data(), nnz * sizeof(double));
-        return SparseTensor::sparse_coo(indices, values, {nrows, ncols});
+        auto sparse = SparseTensor::sparse_coo(indices, values, {nrows, ncols});
+        return orig_device == Device::cpu() ? sparse : sparse.to(orig_device);
     }
     throw std::runtime_error("to_sparse: unsupported dtype");
 }
