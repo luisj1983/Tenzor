@@ -8,6 +8,7 @@
 #include <tenzor/autograd/graph_optimizer.hpp>
 #include <tenzor/onnx/graph_module.hpp>
 #include <tenzor/core/device_guard.hpp>
+#include <tenzor/core/dlpack.hpp>
 #include <tenzor/ops/custom_op.hpp>
 #include <tenzor/ops/indexing.hpp>
 #include <tenzor/ops/advanced.hpp>
@@ -1161,6 +1162,73 @@ Returns:
             "No-op on GPU tensors, on non-CUDA builds, or if the "
             "underlying buffer cannot be registered. Returns self.",
             py::call_guard<py::gil_scoped_release>())
+        // ---------------------------------------------------------------
+        // Phase 2.3 — DLPack protocol.
+        //
+        // `__dlpack__(stream=None)` returns a PyCapsule named "dltensor"
+        // wrapping a DLManagedTensor*. Consumers (np.from_dlpack,
+        // torch.from_dlpack, cupy.from_dlpack, jax.dlpack.from_dlpack,
+        // tvm.contrib.dlpack) rename the capsule to "used_dltensor" when
+        // they take ownership so our destructor doesn't double-free.
+        //
+        // `__dlpack_device__()` returns (device_type_code, device_id)
+        // per the DLPack protocol so consumers can make stream/device
+        // decisions without touching the payload.
+        // ---------------------------------------------------------------
+        .def("__dlpack__", [](const tenzor::Tensor& self, py::object /*stream*/) -> py::capsule {
+                // We accept the `stream` argument for protocol compatibility
+                // but don't currently synchronize on it — producers that
+                // need stream ordering should synchronize their own work
+                // before handing out the tensor. A future cuda_stream_wait
+                // hook can thread through here without changing the API.
+                DLManagedTensor* managed = tenzor::to_dlpack(self);
+                // Capsule destructor: if the consumer never renamed the
+                // capsule to "used_dltensor", call the DLPack deleter
+                // exactly once to release our storage reference.
+                auto destructor = [](PyObject* capsule) {
+                    // Check the capsule name: if the consumer renamed it
+                    // to "used_dltensor", they now own the payload and
+                    // we must not delete it.
+                    if (PyCapsule_IsValid(capsule, "used_dltensor")) {
+                        return;
+                    }
+                    auto* m = static_cast<DLManagedTensor*>(
+                        PyCapsule_GetPointer(capsule, "dltensor"));
+                    if (m && m->deleter) {
+                        m->deleter(m);
+                    }
+                    // Clear the Python error state in case GetPointer failed
+                    // with the wrong name — we've already handled both
+                    // legitimate cases above.
+                    if (PyErr_Occurred()) PyErr_Clear();
+                };
+                return py::capsule(managed, "dltensor", destructor);
+            },
+            py::arg("stream") = py::none(),
+            "DLPack producer hook: return a PyCapsule wrapping a "
+            "DLManagedTensor. Enables zero-copy interop with NumPy, JAX, "
+            "CuPy, PyTorch, and TVM via their respective from_dlpack() "
+            "entry points.")
+        .def("__dlpack_device__", [](const tenzor::Tensor& self) -> py::tuple {
+                // Return (device_type_code, device_id) as int pair.
+                // device_type_code matches the DLDeviceType enum values:
+                //   kDLCPU=1, kDLCUDA=2, kDLROCM=10, kDLVulkan=7,
+                //   kDLOneAPI=14, kDLMetal=8. See dlpack.h for full list.
+                int type_code = 0;
+                switch (self.device().type) {
+                    case tenzor::Device::Type::CPU:    type_code = kDLCPU;    break;
+                    case tenzor::Device::Type::CUDA:   type_code = kDLCUDA;   break;
+                    case tenzor::Device::Type::ROCm:   type_code = kDLROCM;   break;
+                    case tenzor::Device::Type::Vulkan: type_code = kDLVulkan; break;
+                    case tenzor::Device::Type::OneAPI: type_code = kDLOneAPI; break;
+                    case tenzor::Device::Type::MPS:    type_code = kDLMetal;  break;
+                    case tenzor::Device::Type::COUNT:
+                        throw std::runtime_error("__dlpack_device__: COUNT is not a real device");
+                }
+                return py::make_tuple(type_code, self.device().index);
+            },
+            "DLPack device hook: return the (device_type_code, device_id) "
+            "tuple for this tensor. Part of the DLPack consumer protocol.")
         // Buffer protocol support (enables memoryview, numpy.asarray, etc.)
         .def_buffer([](tenzor::Tensor& t) -> py::buffer_info {
             if (t.device().type != tenzor::Device::Type::CPU) {
@@ -2392,6 +2460,44 @@ Returns:
             // Copy value to target with broadcasting
             copy_with_broadcast(target, val);
         }, py::arg("key"), py::arg("value"), "Set tensor slice or element");
+
+    // DLPack consumer hook — accepts anything with `__dlpack__` (the
+    // modern protocol) or a raw capsule named "dltensor" (legacy /
+    // direct path). Matches the torch.from_dlpack / numpy.from_dlpack
+    // signature.
+    m.def("from_dlpack", [](py::object obj) -> tenzor::Tensor {
+            py::capsule capsule;
+            if (py::hasattr(obj, "__dlpack__")) {
+                // Modern protocol: call the producer to obtain a capsule.
+                // Pass stream=None — we don't have a compute stream to
+                // synchronize on at the module boundary.
+                py::object raw = obj.attr("__dlpack__")();
+                capsule = raw.cast<py::capsule>();
+            } else {
+                // Legacy: the caller handed us the capsule directly.
+                capsule = obj.cast<py::capsule>();
+            }
+            // Fetch the DLManagedTensor* before renaming so from_dlpack
+            // can transfer ownership; from_dlpack's internal deleter
+            // will call the producer's deleter.
+            auto* managed = static_cast<DLManagedTensor*>(
+                PyCapsule_GetPointer(capsule.ptr(), "dltensor"));
+            if (!managed) {
+                throw std::runtime_error(
+                    "from_dlpack: invalid capsule (expected name 'dltensor')");
+            }
+            // Rename the capsule so the original producer's destructor
+            // won't call the DLPack deleter a second time when the
+            // capsule is garbage-collected.
+            PyCapsule_SetName(capsule.ptr(), "used_dltensor");
+            return tenzor::from_dlpack(managed);
+        },
+        py::arg("obj"),
+        "Zero-copy import from a DLPack producer (NumPy 2.0+, PyTorch, "
+        "JAX, CuPy, TVM, or any object exposing __dlpack__). Returns a "
+        "Tenzor tensor that shares memory with the original — the "
+        "producer's storage is kept alive until the returned tensor is "
+        "destroyed.");
 
     // Operations
     m.def("zeros", &tenzor::zeros, "Create tensor filled with zeros",
