@@ -14,21 +14,31 @@
 
 using namespace tenzor;
 
-class SparseGPUTest : public ::testing::Test {
+// Parametrized over backend name so one fixture exercises every GPU
+// backend the build actually supports. Each parametrization probes the
+// backend at setup time and skips itself if the backend isn't
+// available (e.g. ROCm on a CUDA-only box, or vice versa), so a single
+// test binary covers both CUDA and ROCm without duplicating code.
+class SparseGPUTest : public ::testing::TestWithParam<std::string> {
 protected:
     void SetUp() override {
         initialize();
-        // Try CUDA first, then ROCm
+        const auto& name = GetParam();
         try {
-            device_ = Device::cuda(0);
+            if (name == "cuda") {
+                device_ = Device::cuda(0);
+            } else if (name == "rocm") {
+                device_ = Device::rocm(0);
+            } else if (name == "oneapi") {
+                device_ = Device::oneapi(0);
+            } else if (name == "vulkan") {
+                device_ = Device::vulkan(0);
+            } else {
+                FAIL() << "Unknown backend: " << name;
+            }
             tenzor::zeros({2}, DType::Float32, device_);
         } catch (...) {
-            try {
-                device_ = Device::rocm(0);
-                tenzor::zeros({2}, DType::Float32, device_);
-            } catch (...) {
-                GTEST_SKIP() << "No GPU device available";
-            }
+            GTEST_SKIP() << "Backend " << name << " not available";
         }
     }
     Device device_ = Device::cpu();
@@ -75,7 +85,7 @@ static void expect_tensors_close(const Tensor& a, const Tensor& b, float atol = 
 // SpMM: Sparse @ Dense matrix multiplication
 // ============================================================================
 
-TEST_F(SparseGPUTest, SpMM_GPUvsCPU) {
+TEST_P(SparseGPUTest, SpMM_GPUvsCPU) {
     auto sparse_cpu = make_test_sparse(Device::cpu());
     auto sparse_gpu = make_test_sparse(device_);
 
@@ -97,7 +107,7 @@ TEST_F(SparseGPUTest, SpMM_GPUvsCPU) {
 // SpMV: Sparse @ Dense vector multiplication
 // ============================================================================
 
-TEST_F(SparseGPUTest, SpMV_GPUvsCPU) {
+TEST_P(SparseGPUTest, SpMV_GPUvsCPU) {
     auto sparse_cpu = make_test_sparse(Device::cpu());
     auto sparse_gpu = make_test_sparse(device_);
 
@@ -116,7 +126,7 @@ TEST_F(SparseGPUTest, SpMV_GPUvsCPU) {
 // SparseToDense / DenseToSparse roundtrip
 // ============================================================================
 
-TEST_F(SparseGPUTest, ToDenseRoundtrip) {
+TEST_P(SparseGPUTest, ToDenseRoundtrip) {
     auto sparse_gpu = make_test_sparse(device_);
 
     // Sparse -> Dense
@@ -133,7 +143,7 @@ TEST_F(SparseGPUTest, ToDenseRoundtrip) {
 // SparseAdd: Sparse + Dense
 // ============================================================================
 
-TEST_F(SparseGPUTest, SparseAdd_GPUvsCPU) {
+TEST_P(SparseGPUTest, SparseAdd_GPUvsCPU) {
     auto sparse_cpu = make_test_sparse(Device::cpu());
     auto sparse_gpu = make_test_sparse(device_);
 
@@ -154,9 +164,9 @@ TEST_F(SparseGPUTest, SparseAdd_GPUvsCPU) {
 // (the default on a CUDA install) currently routes through the GPU kernel.
 // The ROCm path lands in the next plan item.
 
-TEST_F(SparseGPUTest, SpGEMM_GPUvsCPU) {
-    if (device_.type != Device::Type::CUDA) {
-        GTEST_SKIP() << "SpGEMM GPU path currently only wired for CUDA";
+TEST_P(SparseGPUTest, SpGEMM_GPUvsCPU) {
+    if (device_.type != Device::Type::CUDA && device_.type != Device::Type::ROCm) {
+        GTEST_SKIP() << "SpGEMM GPU path currently only wired for CUDA/ROCm";
     }
     auto a_cpu = make_test_sparse(Device::cpu());
     auto b_cpu = make_test_sparse(Device::cpu());
@@ -175,9 +185,9 @@ TEST_F(SparseGPUTest, SpGEMM_GPUvsCPU) {
     expect_tensors_close(dense_gpu, dense_cpu);
 }
 
-TEST_F(SparseGPUTest, SpGEMM_LargerRandom_GPUvsCPU) {
-    if (device_.type != Device::Type::CUDA) {
-        GTEST_SKIP() << "SpGEMM GPU path currently only wired for CUDA";
+TEST_P(SparseGPUTest, SpGEMM_LargerRandom_GPUvsCPU) {
+    if (device_.type != Device::Type::CUDA && device_.type != Device::Type::ROCm) {
+        GTEST_SKIP() << "SpGEMM GPU path currently only wired for CUDA/ROCm";
     }
     // 128 × 128 random-ish structure: diagonal + a few off-diagonal entries,
     // built manually so the test is deterministic.
@@ -253,9 +263,9 @@ static SparseTensor make_lower_triangular(Device device) {
     return sparse.to(device);
 }
 
-TEST_F(SparseGPUTest, SparseTrsv_GPUvsCPU) {
-    if (device_.type != Device::Type::CUDA) {
-        GTEST_SKIP() << "Sparse TRSV GPU path currently only wired for CUDA";
+TEST_P(SparseGPUTest, SparseTrsv_GPUvsCPU) {
+    if (device_.type != Device::Type::CUDA && device_.type != Device::Type::ROCm) {
+        GTEST_SKIP() << "Sparse TRSV GPU path currently only wired for CUDA/ROCm";
     }
     auto L_cpu = make_lower_triangular(Device::cpu());
     auto L_gpu = make_lower_triangular(device_);
@@ -270,9 +280,9 @@ TEST_F(SparseGPUTest, SparseTrsv_GPUvsCPU) {
     expect_tensors_close(x_gpu, x_cpu, /*atol=*/1e-5f);
 }
 
-TEST_F(SparseGPUTest, SparseTrsm_GPUvsCPU) {
-    if (device_.type != Device::Type::CUDA) {
-        GTEST_SKIP() << "Sparse TRSM GPU path currently only wired for CUDA";
+TEST_P(SparseGPUTest, SparseTrsm_GPUvsCPU) {
+    if (device_.type != Device::Type::CUDA && device_.type != Device::Type::ROCm) {
+        GTEST_SKIP() << "Sparse TRSM GPU path currently only wired for CUDA/ROCm";
     }
     auto L_cpu = make_lower_triangular(Device::cpu());
     auto L_gpu = make_lower_triangular(device_);
@@ -290,3 +300,17 @@ TEST_F(SparseGPUTest, SparseTrsm_GPUvsCPU) {
     auto X_gpu = sparse::sparse_triangular_solve(L_gpu, B_gpu, /*upper=*/false);
     expect_tensors_close(X_gpu, X_cpu, /*atol=*/1e-5f);
 }
+
+
+// ============================================================================
+// Backend instantiations
+// ============================================================================
+INSTANTIATE_TEST_SUITE_P(
+    CUDA, SparseGPUTest,
+    ::testing::Values(std::string("cuda")),
+    [](const ::testing::TestParamInfo<std::string>& info) { return info.param; });
+
+INSTANTIATE_TEST_SUITE_P(
+    ROCm, SparseGPUTest,
+    ::testing::Values(std::string("rocm")),
+    [](const ::testing::TestParamInfo<std::string>& info) { return info.param; });

@@ -440,3 +440,9 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Values("cuda"),
     [](const ::testing::TestParamInfo<std::string>& info) { return info.param; }
 );
+
+INSTANTIATE_TEST_SUITE_P(
+    ROCm, SparseTest,
+    ::testing::Values("rocm"),
+    [](const ::testing::TestParamInfo<std::string>& info) { return info.param; }
+);

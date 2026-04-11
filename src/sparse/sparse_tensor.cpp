@@ -358,15 +358,19 @@ auto SparseTensor::to_dense() const -> Tensor {
 auto SparseTensor::to_coo() const -> SparseTensor {
     if (layout_ == SparseLayout::COO) return *this;
 
+    // All branches below do host-side pointer iteration over the index
+    // arrays, so stage to CPU up front and transfer the result back
+    // after. Same pattern as coalesce / to_csr / to_sparse.
+    const auto orig_device = values_.device();
+
     if (layout_ == SparseLayout::CSR) {
-        // CSR -> COO
-        auto crow = crow_indices_.contiguous();
-        auto col = col_indices_.contiguous();
+        auto crow = crow_indices_.to(Device::cpu()).contiguous();
+        auto col = col_indices_.to(Device::cpu()).contiguous();
         auto* crow_ptr = crow.data<int64_t>();
         auto* col_ptr = col.data<int64_t>();
         int64_t nrows = shape_[0];
 
-        auto row_indices = Tensor({nnz_}, DType::Int64, values_.device());
+        auto row_indices = Tensor({nnz_}, DType::Int64, Device::cpu());
         auto* row_ptr = row_indices.data<int64_t>();
         for (int64_t row = 0; row < nrows; ++row) {
             for (int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
@@ -374,21 +378,22 @@ auto SparseTensor::to_coo() const -> SparseTensor {
             }
         }
 
-        auto indices = Tensor({2, nnz_}, DType::Int64, values_.device());
+        auto indices = Tensor({2, nnz_}, DType::Int64, Device::cpu());
         auto* idx_ptr = indices.data<int64_t>();
         std::memcpy(idx_ptr, row_ptr, nnz_ * sizeof(int64_t));
         std::memcpy(idx_ptr + nnz_, col_ptr, nnz_ * sizeof(int64_t));
 
-        return sparse_coo(indices, values_, shape_);
+        auto cpu_values = values_.to(Device::cpu());
+        auto result = sparse_coo(indices, cpu_values, shape_);
+        return orig_device == Device::cpu() ? result : result.to(orig_device);
     } else if (layout_ == SparseLayout::CSC) {
-        // CSC -> COO
-        auto ccol = ccol_indices_.contiguous();
-        auto row = row_indices_.contiguous();
+        auto ccol = ccol_indices_.to(Device::cpu()).contiguous();
+        auto row = row_indices_.to(Device::cpu()).contiguous();
         auto* ccol_ptr = ccol.data<int64_t>();
         auto* row_ptr = row.data<int64_t>();
         int64_t ncols = shape_[1];
 
-        auto col_indices = Tensor({nnz_}, DType::Int64, values_.device());
+        auto col_indices = Tensor({nnz_}, DType::Int64, Device::cpu());
         auto* col_ptr = col_indices.data<int64_t>();
         for (int64_t col = 0; col < ncols; ++col) {
             for (int64_t j = ccol_ptr[col]; j < ccol_ptr[col + 1]; ++j) {
@@ -396,12 +401,14 @@ auto SparseTensor::to_coo() const -> SparseTensor {
             }
         }
 
-        auto indices = Tensor({2, nnz_}, DType::Int64, values_.device());
+        auto indices = Tensor({2, nnz_}, DType::Int64, Device::cpu());
         auto* idx_ptr = indices.data<int64_t>();
         std::memcpy(idx_ptr, row_ptr, nnz_ * sizeof(int64_t));
         std::memcpy(idx_ptr + nnz_, col_ptr, nnz_ * sizeof(int64_t));
 
-        return sparse_coo(indices, values_, shape_);
+        auto cpu_values = values_.to(Device::cpu());
+        auto result = sparse_coo(indices, cpu_values, shape_);
+        return orig_device == Device::cpu() ? result : result.to(orig_device);
     } else if (layout_ == SparseLayout::BSR) {
         // BSR -> COO: expand blocks into individual elements
         // Easier to go via dense for correctness
@@ -417,16 +424,20 @@ auto SparseTensor::to_csr() const -> SparseTensor {
         throw std::runtime_error("to_csr: only 2D sparse tensors supported");
     }
 
-    // COO -> CSR: sort by row, build crow_indices
+    // Same host-vs-device pointer hazard as coalesce/to_sparse: the
+    // histogram + prefix-sum + col fill loop runs on the host, so we
+    // stage indices and values to CPU and transfer the resulting CSR
+    // back to the source device at the end.
+    const auto orig_device = values_.device();
     auto coo = coalesce();
-    auto idx = coo.indices_.contiguous();
-    auto vals = coo.values_.contiguous();
+    auto idx = coo.indices_.to(Device::cpu()).contiguous();
+    auto vals = coo.values_.to(Device::cpu()).contiguous();
     auto* idx_ptr = idx.data<int64_t>();
     int64_t nrows = shape_[0];
     int64_t coalesced_nnz = coo.nnz();
 
-    auto crow = Tensor({nrows + 1}, DType::Int64, values_.device());
-    auto col = Tensor({coalesced_nnz}, DType::Int64, values_.device());
+    auto crow = Tensor({nrows + 1}, DType::Int64, Device::cpu());
+    auto col = Tensor({coalesced_nnz}, DType::Int64, Device::cpu());
     auto* crow_ptr = crow.data<int64_t>();
     auto* col_ptr = col.data<int64_t>();
 
@@ -445,7 +456,11 @@ auto SparseTensor::to_csr() const -> SparseTensor {
         col_ptr[i] = idx_ptr[coalesced_nnz + i];
     }
 
-    return sparse_csr(crow, col, vals, shape_);
+    auto result = sparse_csr(crow, col, vals, shape_);
+    if (orig_device != Device::cpu()) {
+        result = result.to(orig_device);
+    }
+    return result;
 }
 
 auto SparseTensor::transpose() const -> SparseTensor {
@@ -504,8 +519,15 @@ auto SparseTensor::coalesce() const -> SparseTensor {
         return result;
     }
 
-    auto idx = indices_.contiguous();
-    auto vals = values_.contiguous();
+    // Coalesce runs on the host — the sort/merge is a pure-CPU loop over
+    // idx_ptr[...] and vp[...]. If the sparse tensor is on a GPU the
+    // contiguous() call just returns a device-resident tensor, and then
+    // .data<T>() yields a device pointer that host code can't deref
+    // (segfault). Stage indices and values to CPU, do the work there,
+    // then transfer the result back to the source device at the end.
+    const auto orig_device = indices_.device();
+    auto idx = indices_.to(Device::cpu()).contiguous();
+    auto vals = values_.to(Device::cpu()).contiguous();
     auto* idx_ptr = idx.data<int64_t>();
 
     // Compute compound (linearized row-major) key for each element.
@@ -564,8 +586,10 @@ auto SparseTensor::coalesce() const -> SparseTensor {
         i = j;
     }
 
-    // Build new indices tensor (compact from pre-allocated buffer)
-    auto new_indices = Tensor({sparse_dim_, new_nnz}, DType::Int64, values_.device());
+    // Build new indices tensor (compact from pre-allocated buffer).
+    // Build on CPU so the host-side memcpy/data<T>() pattern is legal;
+    // the final result is transferred back to orig_device at the end.
+    auto new_indices = Tensor({sparse_dim_, new_nnz}, DType::Int64, Device::cpu());
     auto* ni_ptr = new_indices.data<int64_t>();
     for (int64_t d = 0; d < sparse_dim_; ++d) {
         std::memcpy(ni_ptr + d * new_nnz,
@@ -573,8 +597,8 @@ auto SparseTensor::coalesce() const -> SparseTensor {
                     new_nnz * sizeof(int64_t));
     }
 
-    // Build new values (sum duplicates)
-    auto new_values = zeros({new_nnz}, vals.dtype(), vals.device());
+    // Build new values (sum duplicates). Also on CPU; transferred back below.
+    auto new_values = zeros({new_nnz}, vals.dtype(), Device::cpu());
     if (vals.dtype() == DType::Float32) {
         auto* vp = vals.data<float>();
         auto* nvp = new_values.data<float>();
@@ -599,6 +623,9 @@ auto SparseTensor::coalesce() const -> SparseTensor {
 
     auto result = sparse_coo(new_indices, new_values, shape_);
     result.coalesced_ = true;
+    if (orig_device != Device::cpu()) {
+        result = result.to(orig_device);
+    }
     return result;
 }
 
