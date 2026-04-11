@@ -31,6 +31,12 @@ Tensor mps_sigmoid_kernel(const Tensor& input);
 Tensor mps_neg_kernel(const Tensor& input);
 Tensor mps_exp_kernel(const Tensor& input);
 Tensor mps_log_kernel(const Tensor& input);
+// Phase 3.2 additions — native Metal replacements for unary CPU fallbacks.
+Tensor mps_tanh_kernel(const Tensor& input);
+Tensor mps_sqrt_kernel(const Tensor& input);
+Tensor mps_abs_kernel(const Tensor& input);
+Tensor mps_pow_kernel(const Tensor& base, const Tensor& exponent);
+Tensor mps_clamp_kernel(const Tensor& input, float min_val, float max_val);
 Tensor mps_matmul_kernel(const Tensor& a, const Tensor& b);
 Tensor mps_linear_kernel(const Tensor& input, const Tensor& weight, const Tensor& bias);
 Tensor mps_embedding_kernel(const Tensor& weight, const Tensor& indices);
@@ -192,26 +198,34 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
             return inputs[0].to(Device::cpu()).transpose().to(dev);
         });
 
-    // Activation backward helpers
-    MPS_UNARY_FALLBACK(Tanh, tanh);
-    MPS_UNARY_FALLBACK(Sqrt, sqrt);
-    MPS_UNARY_FALLBACK(Abs, abs);
+    // Phase 3.2: native Metal unary / binary kernels (previously CPU
+    // fallbacks). These replace MPS_UNARY_FALLBACK for Tanh/Sqrt/Abs
+    // and the hand-coded CPU lambdas for Pow/Clamp.
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Tanh, mps_tanh_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Sqrt, mps_sqrt_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Abs,  mps_abs_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Pow, mps_pow_kernel);
 
-    // Element-wise operations used in backward
-    MPS_BINARY_FALLBACK(Pow, pow);
+    // Clamp needs scalar min/max plumbed through OpAttributes, so it
+    // can't use the unary register macro directly.
+    table.register_single_output_kernel(OpId::Clamp,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            float min_val = static_cast<float>(
+                attrs.get_float(AttrKey::Min, std::numeric_limits<double>::lowest()));
+            float max_val = static_cast<float>(
+                attrs.get_float(AttrKey::Max, std::numeric_limits<double>::max()));
+            return mps_clamp_kernel(inputs[0], min_val, max_val);
+        });
 
-    // Comparison operations (used in masks for backward)
+    // GreaterThan stays on the CPU fallback for now: the native
+    // gt_kernel would write Float32 0/1 but the rest of Tenzor expects
+    // a Bool output tensor, and `dispatch_binary` creates the output
+    // with the input dtype. Making GT native needs a dedicated
+    // comparison dispatcher that allocates a Bool output. Leaving as
+    // CPU fallback until that helper lands.
     table.register_kernel(OpId::GreaterThan, [](std::span<const Tensor> inputs, const OpAttributes&) {
         auto dev = inputs[0].device();
         return std::vector<Tensor>{tenzor::gt(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu())).to(dev)};
-    });
-
-    // Clamp (used by many activations backward)
-    table.register_kernel(OpId::Clamp, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto dev = inputs[0].device();
-        double min_val = attrs.get_float(AttrKey::Min, std::numeric_limits<double>::lowest());
-        double max_val = attrs.get_float(AttrKey::Max, std::numeric_limits<double>::max());
-        return std::vector<Tensor>{tenzor::clamp(inputs[0].to(Device::cpu()), min_val, max_val).to(dev)};
     });
 
     // Creation ops (needed for backward: zeros_like, ones_like for gradient init)

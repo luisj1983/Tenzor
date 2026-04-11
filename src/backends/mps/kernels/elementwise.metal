@@ -93,6 +93,57 @@ kernel void log_kernel(
     output[id] = log(input[id]);
 }
 
+// Phase 3.2 additions — replace previously CPU-fallback unary ops with
+// native Metal kernels. Single-threaded per-element, no reductions.
+
+kernel void tanh_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output       [[buffer(1)]],
+    uint id                    [[thread_position_in_grid]])
+{
+    output[id] = tanh(input[id]);
+}
+
+kernel void sqrt_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output       [[buffer(1)]],
+    uint id                    [[thread_position_in_grid]])
+{
+    output[id] = sqrt(input[id]);
+}
+
+kernel void abs_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output       [[buffer(1)]],
+    uint id                    [[thread_position_in_grid]])
+{
+    output[id] = fabs(input[id]);
+}
+
+// Clamp uses a constant buffer for min/max values, since both are
+// scalars supplied at dispatch time.
+kernel void clamp_kernel(
+    device const float* input     [[buffer(0)]],
+    device float* output          [[buffer(1)]],
+    constant float& min_val       [[buffer(2)]],
+    constant float& max_val       [[buffer(3)]],
+    uint id                       [[thread_position_in_grid]])
+{
+    output[id] = clamp(input[id], min_val, max_val);
+}
+
+// pow takes element-wise base and scalar exponent (or elementwise exponent).
+// The host side currently uses the binary elementwise form (tenzor::pow(a, b)),
+// so both buffers are full tensors. Match that shape here.
+kernel void pow_kernel(
+    device const float* base [[buffer(0)]],
+    device const float* exponent [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    uint id [[thread_position_in_grid]])
+{
+    output[id] = pow(base[id], exponent[id]);
+}
+
 // ============================================================================
 // Softmax (two-pass: max-subtract, exp-sum-normalize)
 // ============================================================================

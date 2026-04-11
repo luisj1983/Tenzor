@@ -190,6 +190,58 @@ Tensor mps_log_kernel(const Tensor& input) {
     return dispatch_unary("log_kernel", input);
 }
 
+// Phase 3.2 additions — replace CPU fallbacks with native Metal.
+
+Tensor mps_tanh_kernel(const Tensor& input) {
+    return dispatch_unary("tanh_kernel", input);
+}
+
+Tensor mps_sqrt_kernel(const Tensor& input) {
+    return dispatch_unary("sqrt_kernel", input);
+}
+
+Tensor mps_abs_kernel(const Tensor& input) {
+    return dispatch_unary("abs_kernel", input);
+}
+
+Tensor mps_pow_kernel(const Tensor& base, const Tensor& exponent) {
+    return dispatch_binary("pow_kernel", base, exponent);
+}
+
+// Clamp takes scalar min/max via setBytes, so it needs its own dispatcher
+// rather than reusing dispatch_unary.
+Tensor mps_clamp_kernel(const Tensor& input, float min_val, float max_val) {
+    auto shape = input.shape();
+    std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+    Tensor output(shape_vec, input.dtype(), input.device());
+    size_t numel = input.numel();
+
+    auto pipeline = get_pipeline("clamp_kernel");
+    id<MTLBuffer> buf_in = get_buffer(input);
+    id<MTLBuffer> buf_out = get_buffer(output);
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:buf_in offset:0 atIndex:0];
+    [encoder setBuffer:buf_out offset:0 atIndex:1];
+    [encoder setBytes:&min_val length:sizeof(float) atIndex:2];
+    [encoder setBytes:&max_val length:sizeof(float) atIndex:3];
+
+    MTLSize grid = MTLSizeMake(numel, 1, 1);
+    NSUInteger threadgroup_size = std::min(
+        static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
+        static_cast<NSUInteger>(numel));
+    MTLSize threads = MTLSizeMake(threadgroup_size, 1, 1);
+
+    [encoder dispatchThreads:grid threadsPerThreadgroup:threads];
+    [encoder endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+
+    return output;
+}
+
 // MatMul using Metal Performance Shaders
 Tensor mps_matmul_kernel(const Tensor& a, const Tensor& b) {
     ensure_initialized();
