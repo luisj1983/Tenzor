@@ -32,9 +32,11 @@
  *   the Variable is marked with `make_thread_safe()` — that path uses an
  *   internal `grad_mutex_`.
  *
- * @note If you need lock-free concurrent shape/strides reads across a resize,
- * enable the atomic shape-snapshot build option (planned, see
- * `TensorImpl::shape_info_`). Until then, external synchronization is required.
+ * @note For async work that needs a stable shape/strides pair across
+ * thread boundaries, call :func:`shape_info_snapshot` — it returns an
+ * immutable ``std::shared_ptr<const ShapeInfo>`` that owns its own
+ * copy of the shape/strides vectors and is unaffected by subsequent
+ * mutations to the source tensor.
  */
 
 #pragma once
@@ -67,6 +69,30 @@ namespace tenzor {
  * Using ChannelsLast format on modern GPUs with Tensor Cores can provide
  * 30-100% speedup for convolution operations.
  */
+/**
+ * @brief Immutable snapshot of a tensor's shape and strides.
+ *
+ * Produced by :func:`Tensor::shape_info_snapshot`. The snapshot is
+ * independent of the Tensor it came from — once constructed, its
+ * contents never change, so the caller can share it freely across
+ * threads or capture it into an async kernel closure without worrying
+ * about the source tensor being reshaped underneath them.
+ *
+ * Holding a snapshot alive is as cheap as bumping a shared_ptr
+ * refcount. The snapshot owns its data; the source Tensor can be
+ * destroyed without invalidating the snapshot.
+ *
+ * @note The snapshot captures only shape/strides/offset. It does NOT
+ * reference the storage buffer. For a stable data-pointer view,
+ * combine this with :func:`Tensor::storage` which itself is
+ * intrusive-refcounted.
+ */
+struct ShapeInfo {
+    std::vector<int64_t> shape;     ///< Tensor shape at capture time
+    std::vector<int64_t> strides;   ///< Strides at capture time
+    int64_t offset{0};              ///< Offset into storage at capture time
+};
+
 enum class MemoryFormat {
     Contiguous,      ///< Standard row-major (NCHW for 4D)
     ChannelsLast,    ///< Channels-last layout (NHWC for 4D)
@@ -1257,6 +1283,34 @@ public:
     auto pin_memory() -> Tensor&;
 
     /**
+     * @brief Return an immutable snapshot of this tensor's shape,
+     *        strides, and storage offset.
+     *
+     * The returned :class:`ShapeInfo` is a standalone shared_ptr that
+     * owns its own copies of the shape/strides vectors and is safe to
+     * share across threads or capture into async-kernel closures:
+     * mutating the source Tensor (reshape, resize, transpose in place,
+     * etc.) does not affect snapshots taken before the mutation.
+     *
+     * Under the hood, TensorImpl keeps a lazy cache: the first call
+     * constructs a new ShapeInfo from the current state and stores it
+     * atomically; subsequent calls return the cached pointer as long
+     * as no mutator has invalidated it. Mutators
+     * (`mutable_shape`, `mutable_strides`, `set_offset`) reset the
+     * cache so the next snapshot rebuilds.
+     *
+     * @note The snapshot captures a stable shape/strides pair for the
+     * caller's subsequent use, but TensorImpl's internal mutators are
+     * still lock-free; if another thread races a mutation against a
+     * snapshot-building read, the caller is responsible for external
+     * synchronization (same contract as `.shape()` itself).
+     *
+     * @return shared_ptr to an immutable ShapeInfo, or nullptr if the
+     *         tensor is uninitialized.
+     */
+    auto shape_info_snapshot() const -> std::shared_ptr<const ShapeInfo>;
+
+    /**
      * @brief Set the requires_grad flag.
      */
     auto set_requires_grad(bool requires_grad) -> void;
@@ -1388,7 +1442,8 @@ public:
         , names_(other.names_)
         , is_contiguous_cache_(other.is_contiguous_cache_.load(std::memory_order_relaxed))
         , memory_format_cache_(other.memory_format_cache_.load(std::memory_order_relaxed))
-        , version_counter_(other.version_counter_.load(std::memory_order_relaxed)) {}
+        , version_counter_(other.version_counter_.load(std::memory_order_relaxed))
+        , shape_info_cache_(std::atomic_load(&other.shape_info_cache_)) {}
 
     TensorImpl& operator=(const TensorImpl&) = delete;
 
@@ -1444,6 +1499,15 @@ private:
     // Mutation paths (increment_version()) use release ordering; version checks
     // in autograd use acquire ordering to observe the mutated tensor state.
     std::atomic<uint64_t> version_counter_{0};  ///< Mutation version for autograd in-place detection
+
+    /// Lazy, invalidation-on-mutation cache of an immutable ShapeInfo
+    /// snapshot. Produced on first call to Tensor::shape_info_snapshot()
+    /// and reset to nullptr by mutable_shape/strides/set_offset. Uses
+    /// plain std::shared_ptr with std::atomic_load/store free functions
+    /// for portability — std::atomic<std::shared_ptr<T>> (C++20) works
+    /// but the free functions are still supported and avoid gcc
+    /// std::atomic<shared_ptr> initializer-list quirks.
+    mutable std::shared_ptr<const ShapeInfo> shape_info_cache_;
 };
 
 /**

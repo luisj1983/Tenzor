@@ -359,6 +359,31 @@ auto Tensor::is_pinned() const -> bool {
     return impl_->storage->is_pinned();
 }
 
+auto Tensor::shape_info_snapshot() const -> std::shared_ptr<const ShapeInfo> {
+    if (!impl_) return nullptr;
+    // Fast path: return the cached snapshot if a previous call built
+    // one and no mutator has invalidated it since. std::atomic_load on
+    // a plain shared_ptr is supported under C++20/23.
+    auto cached = std::atomic_load(&impl_->shape_info_cache_);
+    if (cached) {
+        return cached;
+    }
+    // Build a fresh immutable snapshot from the current state. Copies
+    // the shape/strides vectors so the returned ShapeInfo owns its
+    // data and is safe to share across threads regardless of what
+    // happens to the source Tensor afterwards.
+    auto fresh = std::make_shared<const ShapeInfo>(ShapeInfo{
+        /* shape   */ impl_->shape,
+        /* strides */ impl_->strides,
+        /* offset  */ impl_->offset,
+    });
+    // Atomically install the cache. Racing writers that invalidate
+    // between our build and store will simply leave us with a
+    // one-shot-stale cache entry; the next reader will rebuild.
+    std::atomic_store(&impl_->shape_info_cache_, fresh);
+    return fresh;
+}
+
 auto Tensor::pin_memory() -> Tensor& {
     if (!impl_ || !impl_->storage) return *this;
     // Only CPU tensors can be pinned; Storage::pin() handles the
@@ -415,6 +440,11 @@ auto Tensor::mutable_shape() -> std::vector<int64_t>& {
     impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
     impl_->memory_format_cache_.store(-1, std::memory_order_release);
     impl_->version_counter_.fetch_add(1, std::memory_order_release);
+    // Phase 3.1b — invalidate the shape/strides snapshot cache; the
+    // caller is about to modify the returned reference and any
+    // existing snapshot is now stale. Next call to shape_info_snapshot()
+    // will rebuild from the post-mutation state.
+    std::atomic_store(&impl_->shape_info_cache_, std::shared_ptr<const ShapeInfo>{});
     return impl_->shape;
 }
 
@@ -423,6 +453,7 @@ auto Tensor::mutable_strides() -> std::vector<int64_t>& {
     impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
     impl_->memory_format_cache_.store(-1, std::memory_order_release);
     impl_->version_counter_.fetch_add(1, std::memory_order_release);
+    std::atomic_store(&impl_->shape_info_cache_, std::shared_ptr<const ShapeInfo>{});
     return impl_->strides;
 }
 
@@ -432,6 +463,7 @@ auto Tensor::set_offset(int64_t offset) -> void {
     impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
     impl_->memory_format_cache_.store(-1, std::memory_order_release);
     impl_->version_counter_.fetch_add(1, std::memory_order_release);
+    std::atomic_store(&impl_->shape_info_cache_, std::shared_ptr<const ShapeInfo>{});
 }
 
 auto Tensor::invalidate_contiguity_cache() -> void {
