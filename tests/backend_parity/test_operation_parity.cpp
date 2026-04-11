@@ -11,6 +11,7 @@
 #include "parity_test_utils.hpp"
 #include <cmath>
 #include <algorithm>
+#include <cstdlib>
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -536,6 +537,11 @@ TEST(MathOperationParity, ComplexExpression2) {
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
+
+    // Force full IEEE 754 FP32 on CUDA matmul (disable TF32 tensor
+    // cores) so CPU↔CUDA parity for Float32 matmul is measurable. See
+    // src/backends/cuda/kernels/matmul.cu for the env-var hook.
+    setenv("TENZOR_DISABLE_TF32", "1", /*overwrite=*/1);
 
     // Initialize Tenzor library
     try {

@@ -8,6 +8,7 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include <tenzor/nn/functional.hpp>
 #include "../backend_test_fixture.hpp"
 
 using namespace tenzor;
@@ -203,35 +204,39 @@ TEST_P(GradientParityBackendTest, SoftmaxBackward) {
 // ============================================================================
 
 TEST_P(GradientParityBackendTest, Conv2dBackward) {
-    // Conv2d: input (1,3,8,8), weight (4,3,3,3)
+    // Previously this test called tenzor::linear() as a "proxy" with a
+    // 4D input — that doesn't even make sense shape-wise and every
+    // non-CPU backend returned zeros while CPU silently produced
+    // garbage. Replace with a real conv2d backward: input (1,3,8,8),
+    // weight (4,3,3,3), bias (4), stride=1, padding=1.
     auto input_data = randn({1, 3, 8, 8}, DType::Float32, Device::cpu());
     auto weight_data = randn({4, 3, 3, 3}, DType::Float32, Device::cpu());
     auto bias_data = randn({4}, DType::Float32, Device::cpu());
 
-    // CPU reference
-    auto input_cpu = Variable(input_data.clone(), true);
-    auto weight_cpu = Variable(weight_data.clone(), true);
-    auto bias_cpu = Variable(bias_data.clone(), true);
-    auto out_cpu = tenzor::linear(input_cpu, weight_cpu, bias_cpu);  // linear as proxy
-    auto loss_cpu = tenzor::sum(out_cpu);
-    loss_cpu.backward();
+    auto run = [&](const Device& dev) {
+        auto input = Variable(input_data.to(dev), true);
+        auto weight = Variable(weight_data.to(dev), true);
+        auto bias = Variable(bias_data.to(dev), true);
+        auto out = tenzor::nn::functional::conv2d(
+            input, weight, bias, /*stride=*/{1, 1},
+            /*padding=*/{1, 1}, /*dilation=*/{1, 1}, /*groups=*/1);
+        auto loss = tenzor::sum(out);
+        loss.backward();
+        if (dev.type != Device::Type::CPU) dev.synchronize();
+        return input;
+    };
+
+    auto input_cpu = run(Device::cpu());
 
     if (device.type == Device::Type::CPU) {
         ASSERT_TRUE(input_cpu.has_grad());
         return;
     }
 
-    // Backend
-    auto input_dev = Variable(input_data.to(device), true);
-    auto weight_dev = Variable(weight_data.to(device), true);
-    auto bias_dev = Variable(bias_data.to(device), true);
-    auto out_dev = tenzor::linear(input_dev, weight_dev, bias_dev);
-    auto loss_dev = tenzor::sum(out_dev);
-    loss_dev.backward();
-    device.synchronize();
-
+    auto input_dev = run(device);
     ASSERT_TRUE(input_dev.has_grad());
-    compareGradientWithCPU(input_cpu.grad().value(), input_dev.grad().value(), 1e-4f, 1e-3f);
+    compareGradientWithCPU(input_cpu.grad().value(), input_dev.grad().value(),
+                           1e-4f, 1e-3f);
 }
 
 TEST_P(GradientParityBackendTest, BatchNormBackward) {

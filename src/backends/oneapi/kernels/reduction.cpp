@@ -1222,7 +1222,9 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& 
             total_size *= s;
         }
 
-        std::vector<int64_t> out_shape = keepdim ? std::vector<int64_t>(shape.size(), 1) : std::vector<int64_t>{1};
+        // Full reduction without keepdim yields a scalar (shape {}),
+        // matching the CPU backend and PyTorch conventions.
+        std::vector<int64_t> out_shape = keepdim ? std::vector<int64_t>(shape.size(), 1) : std::vector<int64_t>{};
         Tensor output(out_shape, DType::Int64, input.device());
         int64_t* out_ptr = get_data_ptr<int64_t>(output);
 
@@ -1383,7 +1385,9 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& 
             total_size *= s;
         }
 
-        std::vector<int64_t> out_shape = keepdim ? std::vector<int64_t>(shape.size(), 1) : std::vector<int64_t>{1};
+        // Full reduction without keepdim yields a scalar (shape {}),
+        // matching the CPU backend and PyTorch conventions.
+        std::vector<int64_t> out_shape = keepdim ? std::vector<int64_t>(shape.size(), 1) : std::vector<int64_t>{};
         Tensor output(out_shape, DType::Int64, input.device());
         int64_t* out_ptr = get_data_ptr<int64_t>(output);
 

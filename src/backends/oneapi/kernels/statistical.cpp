@@ -86,7 +86,10 @@ auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
         if (keepdim) {
             out_shape.resize(shape.size(), 1);
         } else {
-            out_shape = {1};
+            // Full reduction without keepdim yields a zero-dim scalar
+            // (shape {}), not a length-1 vector. This matches the CPU
+            // backend and PyTorch conventions.
+            out_shape = {};
         }
 
         if (input.dtype() == DType::Float32) {
@@ -303,7 +306,10 @@ auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
         if (keepdim) {
             out_shape.resize(shape.size(), 1);
         } else {
-            out_shape = {1};
+            // Full reduction without keepdim yields a zero-dim scalar
+            // (shape {}), not a length-1 vector. This matches the CPU
+            // backend and PyTorch conventions.
+            out_shape = {};
         }
 
         if (input.dtype() == DType::Float32) {
@@ -509,8 +515,9 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
     // Compute output shape
     std::vector<int64_t> out_shape;
     if (dim == -1) {
-        // Full reduction
-        out_shape = keepdim ? std::vector<int64_t>(shape.size(), 1) : std::vector<int64_t>{1};
+        // Full reduction — scalar (shape {}) without keepdim, matches
+        // CPU backend and PyTorch conventions.
+        out_shape = keepdim ? std::vector<int64_t>(shape.size(), 1) : std::vector<int64_t>{};
     } else {
         // Dimensional reduction
         if (dim < 0 || dim >= static_cast<int64_t>(shape.size())) {
@@ -850,7 +857,10 @@ auto norm_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
         if (keepdim) {
             out_shape.resize(shape.size(), 1);
         } else {
-            out_shape = {1};
+            // Full reduction without keepdim yields a zero-dim scalar
+            // (shape {}), not a length-1 vector. This matches the CPU
+            // backend and PyTorch conventions.
+            out_shape = {};
         }
 
         int64_t n = input.numel();

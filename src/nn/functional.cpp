@@ -16,6 +16,7 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/autograd/function.hpp"
+#include "conv_autograd.hpp"
 #include <stdexcept>
 #include <cmath>
 #include <cstring>
@@ -61,7 +62,38 @@ auto conv2d(const Variable& input, const Variable& weight,
 
     bool requires_grad = input.requires_grad() || weight.requires_grad() ||
                          (bias.has_value() && bias->requires_grad());
-    return Variable(result[0], requires_grad);
+    Variable output(result[0], requires_grad);
+
+    // Wire the autograd graph so backward() through F::conv2d actually
+    // populates input/weight/bias grads. Previously this path returned a
+    // Variable with no grad_fn, so anything using the functional API
+    // (not the Conv2d module) silently had no gradient.
+    if (requires_grad && ::tenzor::is_grad_enabled()) {
+        std::vector<Tensor> tensors_to_save = {input.tensor(), weight.tensor()};
+        if (bias.has_value()) {
+            tensors_to_save.push_back(bias->tensor());
+        }
+        auto grad_fn = std::make_shared<internal::Conv2dBackward>(
+            stride.first, stride.second,
+            padding.first, padding.second,
+            dilation.first, dilation.second,
+            groups,
+            std::move(tensors_to_save));
+
+        std::vector<Variable> input_vars = {input, weight};
+        if (bias.has_value()) input_vars.push_back(*bias);
+        grad_fn->set_input_variables(input_vars);
+
+        std::vector<std::shared_ptr<::tenzor::Function>> next_funcs;
+        next_funcs.push_back(input.grad_fn());
+        next_funcs.push_back(weight.grad_fn());
+        if (bias.has_value()) next_funcs.push_back(bias->grad_fn());
+        grad_fn->set_next_functions(next_funcs);
+
+        output.set_grad_fn(grad_fn);
+    }
+
+    return output;
 }
 
 auto conv1d(const Variable& input, const Variable& weight,
