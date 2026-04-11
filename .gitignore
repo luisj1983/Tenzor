@@ -28,6 +28,7 @@ dist/
 *~
 .DS_Store
 .cache/
+.claude/
 
 # CMake
 CMakeCache.txt
