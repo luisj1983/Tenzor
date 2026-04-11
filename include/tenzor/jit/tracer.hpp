@@ -380,6 +380,7 @@ public:
 
 private:
     Tracer& tracer_;
+    bool interceptor_installed_{false};
 };
 
 /**

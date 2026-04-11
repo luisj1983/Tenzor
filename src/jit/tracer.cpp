@@ -5,6 +5,8 @@
 
 #include "../../include/tenzor/jit/tracer.hpp"
 #include "../../include/tenzor/jit/compiler.hpp"
+#include "../../include/tenzor/jit/tracing_interceptor.hpp"
+#include "../../include/tenzor/backend/dispatch_interceptor.hpp"
 #include <sstream>
 #include <iomanip>
 #include <stdexcept>
@@ -315,9 +317,23 @@ auto Tracer::generate_tensor_id() -> std::string {
 
 TracingGuard::TracingGuard() : tracer_(Tracer::get_instance()) {
     tracer_.start_trace();
+
+    // Install a dispatch interceptor that records every op passing
+    // through the dispatcher. Without this, `Tracer::record_op` is
+    // never called and `end_trace` returns an empty graph — the
+    // "CompiledModule produced no outputs" symptom observed in
+    // Phase 6.5. The mirror pattern in compile.cpp's
+    // CompiledFunction::trace_and_compile does this correctly.
+    auto interceptor = make_tracing_interceptor(
+        tracer_, /*on_graph_break=*/nullptr);
+    DispatchInterceptorStack::push(std::move(interceptor));
+    interceptor_installed_ = true;
 }
 
 TracingGuard::~TracingGuard() {
+    if (interceptor_installed_) {
+        DispatchInterceptorStack::pop();
+    }
     if (tracer_.is_tracing()) {
         tracer_.clear();
     }

@@ -77,14 +77,25 @@ TEST(DynamicBatcherTest, ServerConfigAuthDefaults) {
 // receive tensors of the expected shape.
 // ============================================================================
 
-// DISABLED: the DynamicBatcher dispatches through a jit::CompiledModule,
-// and jit::CompiledModule::trace() currently produces a graph whose
-// forward path throws "CompiledModule produced no outputs" for even a
-// simple nn::Linear layer. This is a real gap in the JIT tracer's
-// handling of nn::Module forward paths — the batcher/serving stack
-// itself is wired correctly. Enable this test once the JIT tracer can
-// produce an executable graph for Linear (Phase 6.4 / JIT scripting
-// follow-up).
+// STILL DISABLED. Phase 6.4 partially fixed the tracer: TracingGuard
+// in src/jit/tracer.cpp now installs a DispatchInterceptor on
+// construction, so ops running through `module->forward(dummy_input)`
+// during trace() ARE recorded into the graph. The "CompiledModule
+// produced no outputs" error is resolved.
+//
+// The remaining blocker is parameter capture: when a Linear layer's
+// forward calls matmul(x, weight), the tracer records weight's tensor
+// ID as an input to the Matmul node, but the weight isn't tracked as
+// a graph input. At execution time, Graph::forward only pre-populates
+// value_map with the user's runtime input, so the weight ID is
+// missing and we get "Input value not available: t1".
+//
+// A proper fix needs the tracer to walk module->parameters() and
+// register them as constant values stored in the graph, and
+// Graph::forward to pre-populate value_map with those constants. That
+// is a separate multi-hour JIT refactor (touches tracer.cpp,
+// graph.{hpp,cpp}, and the Value storage model) and is the real
+// remaining gap between "tracer records ops" and "serving end-to-end".
 TEST(DynamicBatcherTest, DISABLED_SubmitBatchRoundtrip) {
     // Trace a small Linear layer so the batcher has a real CompiledModule
     // to dispatch against.
