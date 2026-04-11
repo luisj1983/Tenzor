@@ -2293,6 +2293,92 @@ auto VulkanBackend::dispatchFlashAttention(
         seq_len_k = K.shape()[1];
     }
 
+    // Phase 5.4: fast path — use the tiled FlashAttention-2 shader
+    // (flash_attention.comp) when the configuration fits its current
+    // constraints:
+    //   - Float32 only
+    //   - head_dim / head_v <= 128
+    //   - no causal mask (the shader doesn't implement masking)
+    //   - contiguous Q, K, V
+    //
+    // The tiled path avoids materializing the full seq_q × seq_k
+    // attention matrix — it streams K/V blocks through shared memory
+    // with an online softmax. Falls through to the composed path
+    // below on any edge case or dtype mismatch.
+    int64_t head_v = v_flat.shape()[2];
+    const int64_t kMaxHeadDimTiled = 128;
+    if (!causal
+        && Q.dtype() == DType::Float32
+        && K.dtype() == DType::Float32
+        && V.dtype() == DType::Float32
+        && d_k <= kMaxHeadDimTiled
+        && head_v <= kMaxHeadDimTiled
+        && seq_len_q > 0 && seq_len_k > 0)
+    {
+        Tensor q_contig = q_flat.is_contiguous() ? q_flat : dispatchContiguous(q_flat);
+        Tensor k_contig = k_flat.is_contiguous() ? k_flat : dispatchContiguous(k_flat);
+        Tensor v_contig = v_flat.is_contiguous() ? v_flat : dispatchContiguous(v_flat);
+
+        Tensor output_flat({batch_heads, seq_len_q, head_v},
+                           DType::Float32, Q.device());
+
+        int32_t device_id = Q.device().index;
+        auto* pipeline = getPipeline("flash_attention", device_id);
+
+        struct PushConstants {
+            int32_t seq_q;
+            int32_t seq_k;
+            int32_t head_dim;
+            int32_t head_v;
+            float scale;
+        } pc;
+        pc.seq_q    = static_cast<int32_t>(seq_len_q);
+        pc.seq_k    = static_cast<int32_t>(seq_len_k);
+        pc.head_dim = static_cast<int32_t>(d_k);
+        pc.head_v   = static_cast<int32_t>(head_v);
+        pc.scale    = scale;
+
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, q_contig.data_ptr()},
+            {1, k_contig.data_ptr()},
+            {2, v_contig.data_ptr()},
+            {3, output_flat.data_ptr()},
+        };
+        std::vector<size_t> sizes = {
+            static_cast<size_t>(q_contig.numel()) * sizeof(float),
+            static_cast<size_t>(k_contig.numel()) * sizeof(float),
+            static_cast<size_t>(v_contig.numel()) * sizeof(float),
+            static_cast<size_t>(output_flat.numel()) * sizeof(float),
+        };
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(PushConstants), &pc);
+
+        // Dispatch: (num_q_tiles, batch_heads, 1). Br = 16 matches the
+        // shader's local_size_x.
+        const uint32_t Br = 16;
+        uint32_t num_q_tiles = static_cast<uint32_t>((seq_len_q + Br - 1) / Br);
+        vkCmdDispatch(cmd,
+                      num_q_tiles,
+                      static_cast<uint32_t>(batch_heads),
+                      1);
+
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+        synchronize(device_id);
+
+        // Restore original shape.
+        if (has_head_dim) {
+            return output_flat.reshape({q_shape[0], q_shape[1], seq_len_q, head_v});
+        }
+        return output_flat;
+    }
+
     // Step 1: Compute attention scores = Q @ K^T, scaled by 1/sqrt(d_k)
     // K^T is [batch_heads, d_k, seq_len_k]
     Tensor k_transposed = k_flat.transpose(-2, -1);

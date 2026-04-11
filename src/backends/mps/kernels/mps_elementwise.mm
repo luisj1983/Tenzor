@@ -13,6 +13,8 @@
 #include "../mps_backend.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
+#include <cstdint>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -83,6 +85,19 @@ id<MTLBuffer> get_buffer(const Tensor& tensor) {
                                   deallocator:nil];
 }
 
+// Phase 3.3: append a dtype suffix so we dispatch the right-typed
+// shader variant. Shaders follow the convention
+//   base_name             (Float32, default)
+//   base_name_f16         (Float16 / half)
+// Extend here if/when bfloat16 variants land (Metal 3.1+ only).
+static std::string shader_name_for_dtype(const std::string& base, DType dtype) {
+    switch (dtype) {
+        case DType::Float32: return base;
+        case DType::Float16: return base + "_f16";
+        default:             return base;  // caller will fail at get_pipeline
+    }
+}
+
 // Dispatch a binary element-wise operation
 Tensor dispatch_binary(const std::string& shader_name,
                        const Tensor& a, const Tensor& b) {
@@ -91,7 +106,7 @@ Tensor dispatch_binary(const std::string& shader_name,
     Tensor output(shape_vec, a.dtype(), a.device());
     size_t numel = a.numel();
 
-    auto pipeline = get_pipeline(shader_name);
+    auto pipeline = get_pipeline(shader_name_for_dtype(shader_name, a.dtype()));
     id<MTLBuffer> buf_a = get_buffer(a);
     id<MTLBuffer> buf_b = get_buffer(b);
     id<MTLBuffer> buf_out = get_buffer(output);
@@ -124,7 +139,7 @@ Tensor dispatch_unary(const std::string& shader_name, const Tensor& input) {
     Tensor output(shape_vec, input.dtype(), input.device());
     size_t numel = input.numel();
 
-    auto pipeline = get_pipeline(shader_name);
+    auto pipeline = get_pipeline(shader_name_for_dtype(shader_name, input.dtype()));
     id<MTLBuffer> buf_in = get_buffer(input);
     id<MTLBuffer> buf_out = get_buffer(output);
 
@@ -216,7 +231,7 @@ Tensor mps_clamp_kernel(const Tensor& input, float min_val, float max_val) {
     Tensor output(shape_vec, input.dtype(), input.device());
     size_t numel = input.numel();
 
-    auto pipeline = get_pipeline("clamp_kernel");
+    auto pipeline = get_pipeline(shader_name_for_dtype("clamp_kernel", input.dtype()));
     id<MTLBuffer> buf_in = get_buffer(input);
     id<MTLBuffer> buf_out = get_buffer(output);
 
@@ -225,8 +240,31 @@ Tensor mps_clamp_kernel(const Tensor& input, float min_val, float max_val) {
     [encoder setComputePipelineState:pipeline];
     [encoder setBuffer:buf_in offset:0 atIndex:0];
     [encoder setBuffer:buf_out offset:0 atIndex:1];
-    [encoder setBytes:&min_val length:sizeof(float) atIndex:2];
-    [encoder setBytes:&max_val length:sizeof(float) atIndex:3];
+    // Phase 3.3: push min/max as half when input is Float16 so the
+    // constant-buffer types match the shader's `constant half&`.
+    if (input.dtype() == DType::Float16) {
+        uint16_t min_h = 0, max_h = 0;
+        // IEEE 754 half-precision conversion. Metal's `half` is standard
+        // IEEE 754 binary16. Use __fp16 if available via the host
+        // compiler, else a small inline conversion.
+        auto f32_to_f16 = [](float f) -> uint16_t {
+            uint32_t bits;
+            std::memcpy(&bits, &f, sizeof(bits));
+            uint32_t sign = (bits >> 16) & 0x8000;
+            int32_t exp = static_cast<int32_t>((bits >> 23) & 0xff) - 127 + 15;
+            uint32_t mant = bits & 0x7fffff;
+            if (exp <= 0) return static_cast<uint16_t>(sign);
+            if (exp >= 31) return static_cast<uint16_t>(sign | 0x7c00);
+            return static_cast<uint16_t>(sign | (exp << 10) | (mant >> 13));
+        };
+        min_h = f32_to_f16(min_val);
+        max_h = f32_to_f16(max_val);
+        [encoder setBytes:&min_h length:sizeof(uint16_t) atIndex:2];
+        [encoder setBytes:&max_h length:sizeof(uint16_t) atIndex:3];
+    } else {
+        [encoder setBytes:&min_val length:sizeof(float) atIndex:2];
+        [encoder setBytes:&max_val length:sizeof(float) atIndex:3];
+    }
 
     MTLSize grid = MTLSizeMake(numel, 1, 1);
     NSUInteger threadgroup_size = std::min(

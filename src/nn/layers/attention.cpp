@@ -292,15 +292,24 @@ auto MultiheadAttention::scaled_dot_product_attention(
 
     // CPU Flash Attention: O(N) memory via tiled online softmax with fused dropout
     // Uses OpId::FlashAttention for 4D [batch, num_heads, seq_len, head_dim] tensors
-    // Conditions: CPU, Float32, head_dim <= 256, no explicit attention mask
-    // When is_causal_ is true, the kernel handles causal masking internally (no explicit mask needed)
-    // When is_causal_ is false, we still require no external mask for the flash path
-    // Dropout is handled inside the fused kernel via Philox RNG (no training guard needed)
-    // need_weights must be false (flash attention path doesn't compute attention weights)
+    // Conditions: CPU (tiled flash kernel) or Vulkan (tiled flash shader),
+    // Float32, head_dim within the kernel's supported range, no explicit
+    // attention mask.
+    // Vulkan path needs head_dim <= 128 (flash_attention.comp constraint)
+    // and does not implement causal masking, so causal still falls through.
+    // CPU path supports head_dim <= 256 and causal handled internally.
+    // Dropout is handled inside the CPU kernel via Philox RNG; the
+    // Vulkan shader does not implement dropout yet, so training skips it.
+    // need_weights must be false (neither path computes attention weights).
+    bool dev_cpu = (query.device().type == Device::Type::CPU);
+    bool dev_vulkan = (query.device().type == Device::Type::Vulkan);
+    int64_t flash_max_head_dim = dev_vulkan ? 128 : 256;
+    bool vulkan_causal_supported = false;  // tiled shader does not mask
     bool can_use_flash_attention = !need_weights &&
-                                   query.device().type == Device::Type::CPU &&
+                                   (dev_cpu || dev_vulkan) &&
                                    query.dtype() == DType::Float32 &&
-                                   head_dim <= 256 &&
+                                   head_dim <= flash_max_head_dim &&
+                                   (dev_cpu || !is_causal_ || vulkan_causal_supported) &&
                                    (is_causal_ || !attn_mask.is_valid() || attn_mask.shape().size() == 0);
 
     if (can_use_flash_attention && !is_training()) {

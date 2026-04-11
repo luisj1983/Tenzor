@@ -145,6 +145,141 @@ kernel void pow_kernel(
 }
 
 // ============================================================================
+// Phase 3.3: Float16 (half) variants for every elementwise kernel above.
+// Naming convention: <base>_f16. The host-side helper
+// shader_name_for_dtype() in mps_elementwise.mm picks the right variant
+// based on the input tensor's dtype. All kernels keep their I/O as half
+// and compute in half as well — bfloat16 variants would need Metal 3.1+
+// and are deferred.
+// ============================================================================
+
+// --- Binary element-wise operations (fp16) ---
+
+kernel void add_kernel_f16(
+    device const half* a   [[buffer(0)]],
+    device const half* b   [[buffer(1)]],
+    device half* output    [[buffer(2)]],
+    uint id                [[thread_position_in_grid]])
+{
+    output[id] = a[id] + b[id];
+}
+
+kernel void sub_kernel_f16(
+    device const half* a   [[buffer(0)]],
+    device const half* b   [[buffer(1)]],
+    device half* output    [[buffer(2)]],
+    uint id                [[thread_position_in_grid]])
+{
+    output[id] = a[id] - b[id];
+}
+
+kernel void mul_kernel_f16(
+    device const half* a   [[buffer(0)]],
+    device const half* b   [[buffer(1)]],
+    device half* output    [[buffer(2)]],
+    uint id                [[thread_position_in_grid]])
+{
+    output[id] = a[id] * b[id];
+}
+
+kernel void div_kernel_f16(
+    device const half* a   [[buffer(0)]],
+    device const half* b   [[buffer(1)]],
+    device half* output    [[buffer(2)]],
+    uint id                [[thread_position_in_grid]])
+{
+    output[id] = a[id] / b[id];
+}
+
+// --- Unary element-wise operations (fp16) ---
+
+kernel void relu_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = max((half)0.0, input[id]);
+}
+
+kernel void sigmoid_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    // Compute in float for range safety, cast back to half.
+    float x = (float)input[id];
+    output[id] = (half)(1.0f / (1.0f + exp(-x)));
+}
+
+kernel void neg_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = -input[id];
+}
+
+kernel void exp_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = (half)exp((float)input[id]);
+}
+
+kernel void log_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = (half)log((float)input[id]);
+}
+
+kernel void tanh_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = (half)tanh((float)input[id]);
+}
+
+kernel void sqrt_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = sqrt(input[id]);
+}
+
+kernel void abs_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = fabs(input[id]);
+}
+
+kernel void clamp_kernel_f16(
+    device const half* input     [[buffer(0)]],
+    device half* output          [[buffer(1)]],
+    constant half& min_val       [[buffer(2)]],
+    constant half& max_val       [[buffer(3)]],
+    uint id                      [[thread_position_in_grid]])
+{
+    output[id] = clamp(input[id], min_val, max_val);
+}
+
+kernel void pow_kernel_f16(
+    device const half* base     [[buffer(0)]],
+    device const half* exponent [[buffer(1)]],
+    device half* output         [[buffer(2)]],
+    uint id                     [[thread_position_in_grid]])
+{
+    // Compute in float for numerical stability, then cast back.
+    output[id] = (half)pow((float)base[id], (float)exponent[id]);
+}
+
+// ============================================================================
 // Softmax (two-pass: max-subtract, exp-sum-normalize)
 // ============================================================================
 

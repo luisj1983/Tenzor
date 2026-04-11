@@ -1,0 +1,172 @@
+#version 450
+
+// ============================================================================
+// FlashAttention-2 tiled kernel (Vulkan, Float32)
+// ============================================================================
+//
+// Computes scaled dot-product attention with online softmax so the
+// full (seq_q × seq_k) attention matrix never has to be materialized in
+// memory. This is the Phase 5.4 follow-up to the composed-ops
+// `dispatchFlashAttention` path.
+//
+// Input layout (flat, batch_heads = batch * num_heads):
+//   Q[B, S_q, D]   — queries
+//   K[B, S_k, D]   — keys
+//   V[B, S_k, Dv]  — values
+// Output:
+//   O[B, S_q, Dv]  — attention output
+//
+// Algorithm (per thread, one Q row in a Br-sized tile):
+//   1. Load its Q row into registers.
+//   2. For each K/V block of Bc rows:
+//      a. Collaboratively load K and V into shared memory.
+//      b. Compute S_ij = Q_i · K_j · scale for j in the block.
+//      c. new_max = max(running_max, max(S))
+//      d. P_ij    = exp(S_ij - new_max)
+//      e. corr    = exp(running_max - new_max)
+//      f. running_sum = corr * running_sum + sum(P)
+//      g. O       = corr * O + P · V
+//      h. running_max = new_max
+//   3. Normalize: O_i /= running_sum_i
+//
+// Limitations (all documented in dispatchFlashAttention's fast-path
+// gating):
+//   - Float32 only (no FP16 variant yet).
+//   - head_dim and head_v up to MAX_HEAD_DIM = 128.
+//   - No causal mask (caller falls through to the composed path).
+//   - Workgroup size fixed at Br = 16 threads.
+//
+// Dispatch: (num_q_tiles, batch_heads, 1) workgroups where
+//   num_q_tiles = ceil(S_q / Br).
+
+#define Br 16
+#define Bc 32
+#define MAX_HEAD_DIM 128
+
+layout(local_size_x = Br, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) buffer QBuf { float q_data[]; };
+layout(set = 0, binding = 1) buffer KBuf { float k_data[]; };
+layout(set = 0, binding = 2) buffer VBuf { float v_data[]; };
+layout(set = 0, binding = 3) buffer OBuf { float o_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    int seq_q;      // S_q
+    int seq_k;      // S_k
+    int head_dim;   // D  (<= MAX_HEAD_DIM)
+    int head_v;     // Dv (<= MAX_HEAD_DIM)
+    float scale;    // usually 1 / sqrt(D)
+};
+
+// Shared memory for one K block and one V block — re-used across Q rows
+// within a workgroup and re-loaded on each iteration of the K/V loop.
+shared float Ks[Bc][MAX_HEAD_DIM];
+shared float Vs[Bc][MAX_HEAD_DIM];
+
+void main() {
+    int tid    = int(gl_LocalInvocationID.x);   // 0..Br-1
+    int q_tile = int(gl_WorkGroupID.x);          // which Br-tile of queries
+    int batch  = int(gl_WorkGroupID.y);          // which batch_head
+
+    int q_row = q_tile * Br + tid;
+    bool valid = (q_row < seq_q);
+
+    // Per-thread Q register copy.
+    float q_vec[MAX_HEAD_DIM];
+    for (int d = 0; d < MAX_HEAD_DIM; ++d) q_vec[d] = 0.0;
+    if (valid) {
+        for (int d = 0; d < head_dim; ++d) {
+            q_vec[d] = q_data[(batch * seq_q + q_row) * head_dim + d];
+        }
+    }
+
+    // Per-thread output accumulator and running softmax stats.
+    float o_vec[MAX_HEAD_DIM];
+    for (int d = 0; d < MAX_HEAD_DIM; ++d) o_vec[d] = 0.0;
+    float row_max = -1e30;
+    float row_sum = 0.0;
+
+    int num_k_blocks = (seq_k + Bc - 1) / Bc;
+    for (int kb = 0; kb < num_k_blocks; ++kb) {
+        int k_start = kb * Bc;
+
+        // Collaborative load. Br=16 threads load Bc=32 rows, so each
+        // thread handles exactly rows_per_thread = Bc/Br = 2 rows of K and V.
+        const int rows_per_thread = 2;  // = Bc / Br
+        for (int r = 0; r < rows_per_thread; ++r) {
+            int kk = tid * rows_per_thread + r;  // 0..Bc-1
+            int k_row = k_start + kk;
+            if (k_row < seq_k) {
+                for (int d = 0; d < head_dim; ++d) {
+                    Ks[kk][d] = k_data[(batch * seq_k + k_row) * head_dim + d];
+                }
+                for (int d = 0; d < head_v; ++d) {
+                    Vs[kk][d] = v_data[(batch * seq_k + k_row) * head_v + d];
+                }
+                // Zero out the rest so head_dim/head_v < MAX_HEAD_DIM don't
+                // read stale shared memory.
+                for (int d = head_dim; d < MAX_HEAD_DIM; ++d) Ks[kk][d] = 0.0;
+                for (int d = head_v;   d < MAX_HEAD_DIM; ++d) Vs[kk][d] = 0.0;
+            } else {
+                for (int d = 0; d < MAX_HEAD_DIM; ++d) Ks[kk][d] = 0.0;
+                for (int d = 0; d < MAX_HEAD_DIM; ++d) Vs[kk][d] = 0.0;
+            }
+        }
+        barrier();
+
+        // Compute S_ij = Q_i · K_j · scale for j in this K block. Also
+        // mark out-of-range positions so they don't contribute to the
+        // softmax.
+        float S[Bc];
+        for (int j = 0; j < Bc; ++j) {
+            int k_row = k_start + j;
+            if (k_row < seq_k) {
+                float s = 0.0;
+                for (int d = 0; d < head_dim; ++d) {
+                    s += q_vec[d] * Ks[j][d];
+                }
+                S[j] = s * scale;
+            } else {
+                S[j] = -1e30;
+            }
+        }
+
+        // Tile max for this block.
+        float tile_max = S[0];
+        for (int j = 1; j < Bc; ++j) tile_max = max(tile_max, S[j]);
+
+        float new_max = max(row_max, tile_max);
+        float correction = (row_max == -1e30) ? 0.0 : exp(row_max - new_max);
+
+        // P_ij and tile sum.
+        float P[Bc];
+        float tile_sum = 0.0;
+        for (int j = 0; j < Bc; ++j) {
+            P[j] = exp(S[j] - new_max);
+            tile_sum += P[j];
+        }
+
+        // Running sum update.
+        row_sum = correction * row_sum + tile_sum;
+
+        // Output accumulator update: O = corr * O + P · V
+        for (int d = 0; d < head_v; ++d) {
+            float acc = correction * o_vec[d];
+            for (int j = 0; j < Bc; ++j) {
+                acc += P[j] * Vs[j][d];
+            }
+            o_vec[d] = acc;
+        }
+
+        row_max = new_max;
+        barrier();  // next iteration will overwrite Ks/Vs
+    }
+
+    // Final normalization and write-back.
+    if (valid && row_sum > 0.0) {
+        float inv_sum = 1.0 / row_sum;
+        for (int d = 0; d < head_v; ++d) {
+            o_data[(batch * seq_q + q_row) * head_v + d] = o_vec[d] * inv_sum;
+        }
+    }
+}

@@ -93,3 +93,4 @@ tenzor_add_test(NAME test_dlpack_interop SOURCE test_dlpack_interop.cpp LABELS c
 tenzor_add_test(NAME test_inplace_version_detection SOURCE test_inplace_version_detection.cpp LABELS core)
 tenzor_add_test(NAME test_laplace_distribution SOURCE test_laplace_distribution.cpp LABELS core)
 tenzor_add_test(NAME test_sddmm SOURCE test_sddmm.cpp LABELS core)
+tenzor_add_test(NAME test_vulkan_flash_attention_parity SOURCE test_vulkan_flash_attention_parity.cpp LABELS core)
