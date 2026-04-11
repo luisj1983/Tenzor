@@ -911,6 +911,170 @@ Returns:
         .def("zero_", &tenzor::Tensor::zero_,
              "Fill tensor with zeros in-place",
              py::call_guard<py::gil_scoped_release>())
+        // ---------------------------------------------------------------
+        // Named in-place methods (Phase 2.1 — match torch.Tensor API).
+        //
+        // Arithmetic variants forward to the existing tenzor::add_/sub_/mul_/div_
+        // C++ free functions which actually perform an in-place kernel
+        // call. The unary math and activation variants take a "compute
+        // out-of-place then assign" shortcut: pybind11 passes `Tensor&
+        // self` as a reference to the C++ object backing the Python
+        // instance, and Tensor's copy-assign is pImpl-based, so writing
+        // `self = ...` replaces the impl and the Python-visible tensor
+        // picks up the new value. Semantically this matches what the
+        // user expects from `.abs_()` etc.; the efficiency gap only
+        // matters at very large tensor sizes and a future native
+        // in-place kernel can slot in without API changes.
+        // ---------------------------------------------------------------
+        .def("add_", [](tenzor::Tensor& self, const tenzor::Tensor& other) -> tenzor::Tensor& {
+                tenzor::add_(self, other); return self;
+            }, py::arg("other"),
+            "In-place addition: self += other. Returns self.",
+            py::call_guard<py::gil_scoped_release>())
+        .def("sub_", [](tenzor::Tensor& self, const tenzor::Tensor& other) -> tenzor::Tensor& {
+                tenzor::sub_(self, other); return self;
+            }, py::arg("other"),
+            "In-place subtraction: self -= other. Returns self.",
+            py::call_guard<py::gil_scoped_release>())
+        .def("mul_", [](tenzor::Tensor& self, const tenzor::Tensor& other) -> tenzor::Tensor& {
+                tenzor::mul_(self, other); return self;
+            }, py::arg("other"),
+            "In-place multiplication: self *= other. Returns self.",
+            py::call_guard<py::gil_scoped_release>())
+        .def("div_", [](tenzor::Tensor& self, const tenzor::Tensor& other) -> tenzor::Tensor& {
+                tenzor::div_(self, other); return self;
+            }, py::arg("other"),
+            "In-place division: self /= other. Returns self.",
+            py::call_guard<py::gil_scoped_release>())
+        .def("pow_", [](tenzor::Tensor& self, float exponent) -> tenzor::Tensor& {
+                self = tenzor::pow(self, exponent); return self;
+            }, py::arg("exponent"),
+            "In-place power: self = self ** exponent. Returns self.",
+            py::call_guard<py::gil_scoped_release>())
+        .def("neg_", [](tenzor::Tensor& self) -> tenzor::Tensor& {
+                self = tenzor::neg(self); return self;
+            },
+            "In-place negation: self = -self. Returns self.",
+            py::call_guard<py::gil_scoped_release>())
+        .def("abs_", [](tenzor::Tensor& self) -> tenzor::Tensor& {
+                self = tenzor::abs(self); return self;
+            },
+            "In-place absolute value. Returns self.",
+            py::call_guard<py::gil_scoped_release>())
+        .def("sqrt_", [](tenzor::Tensor& self) -> tenzor::Tensor& {
+                self = tenzor::sqrt(self); return self;
+            },
+            "In-place square root. Returns self.",
+            py::call_guard<py::gil_scoped_release>())
+        .def("exp_", [](tenzor::Tensor& self) -> tenzor::Tensor& {
+                self = tenzor::exp(self); return self;
+            },
+            "In-place exponential. Returns self.",
+            py::call_guard<py::gil_scoped_release>())
+        .def("log_", [](tenzor::Tensor& self) -> tenzor::Tensor& {
+                self = tenzor::log(self); return self;
+            },
+            "In-place natural log. Returns self.",
+            py::call_guard<py::gil_scoped_release>())
+        .def("reciprocal_", [](tenzor::Tensor& self) -> tenzor::Tensor& {
+                self = tenzor::reciprocal(self); return self;
+            },
+            "In-place reciprocal (1/x). Returns self.",
+            py::call_guard<py::gil_scoped_release>())
+        .def("sign_", [](tenzor::Tensor& self) -> tenzor::Tensor& {
+                self = tenzor::sign(self); return self;
+            },
+            "In-place sign. Returns self.",
+            py::call_guard<py::gil_scoped_release>())
+        // Activations — these have real in-place kernels registered
+        // under OpId::ReLUInplace / SigmoidInplace / TanhInplace, so we
+        // dispatch directly through the table rather than computing
+        // out-of-place.
+        .def("relu_", [](tenzor::Tensor& self) -> tenzor::Tensor& {
+                auto& table = tenzor::DispatchTableRegistry::get_table(self.device().type);
+                table.dispatch_inplace(tenzor::OpId::ReLUInplace, self, {}, {});
+                return self;
+            },
+            "In-place ReLU. Returns self.",
+            py::call_guard<py::gil_scoped_release>())
+        .def("sigmoid_", [](tenzor::Tensor& self) -> tenzor::Tensor& {
+                auto& table = tenzor::DispatchTableRegistry::get_table(self.device().type);
+                table.dispatch_inplace(tenzor::OpId::SigmoidInplace, self, {}, {});
+                return self;
+            },
+            "In-place sigmoid. Returns self.",
+            py::call_guard<py::gil_scoped_release>())
+        .def("tanh_", [](tenzor::Tensor& self) -> tenzor::Tensor& {
+                auto& table = tenzor::DispatchTableRegistry::get_table(self.device().type);
+                table.dispatch_inplace(tenzor::OpId::TanhInplace, self, {}, {});
+                return self;
+            },
+            "In-place tanh. Returns self.",
+            py::call_guard<py::gil_scoped_release>())
+        // Clamps.
+        .def("clamp_", [](tenzor::Tensor& self, float min_val, float max_val) -> tenzor::Tensor& {
+                self = tenzor::clamp(self, min_val, max_val); return self;
+            }, py::arg("min"), py::arg("max"),
+            "In-place clamp to [min, max]. Returns self.",
+            py::call_guard<py::gil_scoped_release>())
+        .def("clamp_min_", [](tenzor::Tensor& self, float min_val) -> tenzor::Tensor& {
+                self = tenzor::clamp_min(self, min_val); return self;
+            }, py::arg("min"),
+            "In-place lower clamp: self = max(self, min). Returns self.",
+            py::call_guard<py::gil_scoped_release>())
+        .def("clamp_max_", [](tenzor::Tensor& self, float max_val) -> tenzor::Tensor& {
+                self = tenzor::clamp_max(self, max_val); return self;
+            }, py::arg("max"),
+            "In-place upper clamp: self = min(self, max). Returns self.",
+            py::call_guard<py::gil_scoped_release>())
+        // Copy / randomization.
+        .def("copy_", [](tenzor::Tensor& self, const tenzor::Tensor& src) -> tenzor::Tensor& {
+                // Mirror torch.Tensor.copy_: the source is copied into
+                // self, with dtype/device conversion as needed. Shapes
+                // must be broadcastable; for now we require exact match
+                // to keep the semantics simple.
+                auto ss = self.shape();
+                auto xs = src.shape();
+                if (ss.size() != xs.size() ||
+                    !std::equal(ss.begin(), ss.end(), xs.begin())) {
+                    throw py::value_error(
+                        "Tensor.copy_: shape mismatch (requires identical shapes for now)");
+                }
+                tenzor::Tensor converted = src;
+                if (converted.dtype() != self.dtype()) {
+                    converted = converted.to(self.dtype());
+                }
+                if (converted.device() != self.device()) {
+                    converted = converted.to(self.device());
+                }
+                self = converted; return self;
+            }, py::arg("src"),
+            "Copy src into self (with dtype/device conversion). Returns self.",
+            py::call_guard<py::gil_scoped_release>())
+        .def("normal_", [](tenzor::Tensor& self, double mean, double std) -> tenzor::Tensor& {
+                auto shape_vec = std::vector<int64_t>(self.shape().begin(), self.shape().end());
+                auto sampled = tenzor::randn(shape_vec, self.dtype(), self.device());
+                if (std != 1.0 || mean != 0.0) {
+                    auto scale = tenzor::full({1}, std, self.dtype(), self.device());
+                    auto shift = tenzor::full({1}, mean, self.dtype(), self.device());
+                    sampled = sampled * scale + shift;
+                }
+                self = sampled; return self;
+            }, py::arg("mean") = 0.0, py::arg("std") = 1.0,
+            "Fill self with samples from N(mean, std^2) in-place. Returns self.",
+            py::call_guard<py::gil_scoped_release>())
+        .def("uniform_", [](tenzor::Tensor& self, double low, double high) -> tenzor::Tensor& {
+                auto shape_vec = std::vector<int64_t>(self.shape().begin(), self.shape().end());
+                auto sampled = tenzor::rand(shape_vec, self.dtype(), self.device());
+                if (low != 0.0 || high != 1.0) {
+                    auto scale = tenzor::full({1}, high - low, self.dtype(), self.device());
+                    auto shift = tenzor::full({1}, low, self.dtype(), self.device());
+                    sampled = sampled * scale + shift;
+                }
+                self = sampled; return self;
+            }, py::arg("low") = 0.0, py::arg("high") = 1.0,
+            "Fill self with samples from U[low, high) in-place. Returns self.",
+            py::call_guard<py::gil_scoped_release>())
         // Buffer protocol support (enables memoryview, numpy.asarray, etc.)
         .def_buffer([](tenzor::Tensor& t) -> py::buffer_info {
             if (t.device().type != tenzor::Device::Type::CPU) {
@@ -8631,6 +8795,16 @@ Example::
     // Standard Datasets
     // =========================================================================
     auto datasets = data_mod.def_submodule("datasets", "Standard dataset loaders");
+
+    // MapDataset is the C++ base class of the concrete datasets below
+    // (MNIST / CIFAR / ImageFolder / ...). pybind11 requires every base
+    // class referenced by a derived py::class_ to have been registered
+    // already, so we declare it here as a bare holder before the
+    // derived bindings. Previously this was omitted and importing
+    // tenzor threw `type "MNIST" referenced unknown base type
+    // "tenzor::data::MapDataset"` at module load time.
+    py::class_<tenzor::data::MapDataset, tenzor::data::Dataset,
+               std::shared_ptr<tenzor::data::MapDataset>>(data_mod, "MapDataset");
 
     py::class_<tenzor::data::datasets::MNIST, tenzor::data::MapDataset,
                std::shared_ptr<tenzor::data::datasets::MNIST>>(datasets, "MNIST",
