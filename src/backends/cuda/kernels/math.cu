@@ -5033,6 +5033,42 @@ Tensor cast_from_standard(const Tensor& input, DType target_dtype, int64_t n,
     return result;
 }
 
+// Complex64/Complex128 cast helpers. Storage is interleaved (re, im)
+// pairs of float/double, so real→complex zero-fills the imag channel
+// and complex→real drops it. Needed by any op that calls .to(Complex*)
+// (the FFT parity tests hit this when promoting Float32 inputs before
+// calling fft()).
+__global__ void cast_f32_to_c64_kernel(const float* in, float* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(i, n) {
+        out[2 * i]     = in[i];
+        out[2 * i + 1] = 0.0f;
+    }
+}
+__global__ void cast_f64_to_c128_kernel(const double* in, double* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(i, n) {
+        out[2 * i]     = in[i];
+        out[2 * i + 1] = 0.0;
+    }
+}
+__global__ void cast_c64_to_f32_kernel(const float* in, float* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(i, n) { out[i] = in[2 * i]; }
+}
+__global__ void cast_c128_to_f64_kernel(const double* in, double* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(i, n) { out[i] = in[2 * i]; }
+}
+__global__ void cast_c64_to_c128_kernel(const float* in, double* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(i, n) {
+        out[2 * i]     = static_cast<double>(in[2 * i]);
+        out[2 * i + 1] = static_cast<double>(in[2 * i + 1]);
+    }
+}
+__global__ void cast_c128_to_c64_kernel(const double* in, float* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(i, n) {
+        out[2 * i]     = static_cast<float>(in[2 * i]);
+        out[2 * i + 1] = static_cast<float>(in[2 * i + 1]);
+    }
+}
+
 auto cuda_cast_kernel(const Tensor& input, DType target_dtype, cudaStream_t stream) -> Tensor {
     if (input.dtype() == target_dtype) {
         return input;  // No conversion needed
@@ -5045,6 +5081,52 @@ auto cuda_cast_kernel(const Tensor& input, DType target_dtype, cudaStream_t stre
 
     Tensor result(shape, target_dtype, input.device());
     DType src_dtype = input.dtype();
+
+    // Complex conversions: short-circuit before the main per-type dispatch
+    // because Complex64/128 storage is interleaved pairs of real/imag, not
+    // a single element the generic cast_from_standard template understands.
+    if (src_dtype == DType::Float32 && target_dtype == DType::Complex64) {
+        cast_f32_to_c64_kernel<<<grid, block, 0, stream>>>(
+            input.data<float>(),
+            reinterpret_cast<float*>(const_cast<void*>(result.data_ptr())), n);
+        CUDA_CHECK(cudaGetLastError());
+        return result;
+    }
+    if (src_dtype == DType::Float64 && target_dtype == DType::Complex128) {
+        cast_f64_to_c128_kernel<<<grid, block, 0, stream>>>(
+            input.data<double>(),
+            reinterpret_cast<double*>(const_cast<void*>(result.data_ptr())), n);
+        CUDA_CHECK(cudaGetLastError());
+        return result;
+    }
+    if (src_dtype == DType::Complex64 && target_dtype == DType::Float32) {
+        cast_c64_to_f32_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const float*>(input.data_ptr()),
+            result.data<float>(), n);
+        CUDA_CHECK(cudaGetLastError());
+        return result;
+    }
+    if (src_dtype == DType::Complex128 && target_dtype == DType::Float64) {
+        cast_c128_to_f64_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const double*>(input.data_ptr()),
+            result.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
+        return result;
+    }
+    if (src_dtype == DType::Complex64 && target_dtype == DType::Complex128) {
+        cast_c64_to_c128_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const float*>(input.data_ptr()),
+            reinterpret_cast<double*>(const_cast<void*>(result.data_ptr())), n);
+        CUDA_CHECK(cudaGetLastError());
+        return result;
+    }
+    if (src_dtype == DType::Complex128 && target_dtype == DType::Complex64) {
+        cast_c128_to_c64_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const double*>(input.data_ptr()),
+            reinterpret_cast<float*>(const_cast<void*>(result.data_ptr())), n);
+        CUDA_CHECK(cudaGetLastError());
+        return result;
+    }
 
     // ---- Float16 source ----
     if (src_dtype == DType::Float16) {

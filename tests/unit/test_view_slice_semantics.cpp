@@ -97,16 +97,24 @@ TEST_F(ViewSliceTest, ContiguousCreatesIndependentCopy) {
         data[i] = static_cast<float>(i);
     }
 
-    auto s = t.slice(0, 1, 3);        // view of rows 1-2
+    // Slicing rows of a row-major tensor leaves it contiguous, and
+    // `.contiguous()` on an already-contiguous tensor is a no-op view
+    // (matches PyTorch). To exercise the copy path, transpose first so
+    // the resulting view is genuinely non-contiguous.
+    auto s = t.transpose(0, 1);        // {4, 4} column-major view
+    EXPECT_FALSE(s.is_contiguous());
     auto c = s.contiguous();           // independent copy
-    EXPECT_EQ(c.numel(), 8);
+    EXPECT_TRUE(c.is_contiguous());
+    EXPECT_EQ(c.numel(), 16);
 
-    // Modify the original tensor
-    data[4] = 999.0f;  // first element of row 1
-
-    // The contiguous copy should NOT be affected
+    // c[0] is t.T[0][0] = t[0][0] = 0.
     auto* c_data = c.data<float>();
-    EXPECT_FLOAT_EQ(c_data[0], 4.0f);  // original value before modification
+    ASSERT_FLOAT_EQ(c_data[0], 0.0f);
+
+    // Mutate the original. c — being an independent copy — must not
+    // change.
+    data[0] = 999.0f;
+    EXPECT_FLOAT_EQ(c_data[0], 0.0f);
 }
 
 // ============================================================================

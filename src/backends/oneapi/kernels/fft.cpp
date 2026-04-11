@@ -191,13 +191,18 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
     int64_t inner_size = 1;
     for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
 
-    // Output shape: insert trailing dim=2 for complex
-    std::vector<int64_t> out_shape = shape;
-    out_shape.push_back(2);
+    // Output shape: same shape as input, dtype Complex64/128. No trailing
+    // 2 dim — the interleaved storage is the physical layout of Complex64
+    // and we stay consistent with the CPU and CUDA backends.
+    std::vector<int64_t> out_shape(shape.begin(), shape.end());
     int64_t out_numel = 1;
     for (auto s : out_shape) out_numel *= s;
 
-    if (input.dtype() == DType::Float32) {
+    // The public `tenzor::fft::fft` op promotes Float32/Float64 inputs to
+    // Complex64/Complex128 before dispatch, so we only ever see a complex
+    // dtype here. The old "Float32 + trailing 2" convention has been
+    // retired to match the CPU kernel's output layout.
+    if (input.dtype() == DType::Complex64) {
         // Build interleaved complex buffer: (batch_size * signal_len * inner_size) complex values
         // stored as 2*N floats. We need contiguous layout along the FFT dimension for oneMKL.
         //
@@ -212,24 +217,15 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
         SyclDevicePtr<float> complex_buf_owner(complex_buf_floats, queue);
         float* complex_buf = complex_buf_owner.get();
 
-        // Copy real input into complex buffer (real parts), zero imaginary parts
-        const float* in_ptr = get_data_ptr<const float>(input);
+        // Read the interleaved (re, im) float pair storage of Complex64.
+        const float* in_ptr = reinterpret_cast<const float*>(input.data_ptr());
 
         if (dim == ndim - 1 && inner_size == 1) {
-            // Fast path: FFT along last dimension, data is contiguous per batch
-            // Interleave: complex_buf[2*i] = in_ptr[i], complex_buf[2*i+1] = 0
-            int64_t total_reals = batch_size * signal_len;
-            queue.parallel_for(sycl::range<1>(total_reals), [=](sycl::id<1> idx) {
-                complex_buf[2 * idx] = in_ptr[idx];
-                complex_buf[2 * idx + 1] = 0.0f;
-            });
-            // No wait needed — in-order queue guarantees DFT sees completed gather
+            // Fast path: FFT along last dim, contiguous complex per batch.
+            queue.memcpy(complex_buf, in_ptr, complex_buf_floats * sizeof(float));
 
-            // Create oneMKL DFT descriptor for batched 1D C2C
             dft::descriptor<dft::precision::SINGLE, dft::domain::COMPLEX> desc(signal_len);
             desc.set_value(dft::config_param::NUMBER_OF_TRANSFORMS, batch_size);
-            // Input/output strides: oneMKL uses {offset, stride} where offset=0
-            // For interleaved complex, the "distance" between transforms is signal_len complex elements
             std::int64_t fwd_strides[2] = {0, 1};
             desc.set_value(dft::config_param::FWD_STRIDES, fwd_strides);
             desc.set_value(dft::config_param::FWD_DISTANCE, signal_len);
@@ -237,11 +233,9 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
             desc.commit(queue);
 
             dft::compute_forward(desc, reinterpret_cast<std::complex<float>*>(complex_buf));
-            // No wait needed — in-order queue guarantees subsequent ops see completed DFT
         } else {
-            // General path: gather strided real data into contiguous complex buffer
-            // Layout: transform t = b * inner_size + inner
-            // Input index for element j of transform t: b * signal_len * inner_size + j * inner_size + inner
+            // General path: gather strided complex pairs into contiguous
+            // complex buffer. Each complex element is 2 consecutive floats.
             queue.parallel_for(sycl::range<1>(total_transforms * signal_len),
                 [=](sycl::id<1> flat_idx) {
                     int64_t idx = flat_idx[0];
@@ -249,13 +243,11 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                     int64_t j = idx % signal_len;
                     int64_t b = t / inner_size;
                     int64_t inner = t % inner_size;
-                    int64_t in_idx = b * signal_len * inner_size + j * inner_size + inner;
-                    complex_buf[2 * idx] = in_ptr[in_idx];
-                    complex_buf[2 * idx + 1] = 0.0f;
+                    int64_t in_idx = (b * signal_len * inner_size + j * inner_size + inner) * 2;
+                    complex_buf[2 * idx]     = in_ptr[in_idx];
+                    complex_buf[2 * idx + 1] = in_ptr[in_idx + 1];
                 });
-            // No wait needed — in-order queue guarantees DFT sees completed gather
 
-            // Each transform is contiguous signal_len complex elements
             dft::descriptor<dft::precision::SINGLE, dft::domain::COMPLEX> desc(signal_len);
             desc.set_value(dft::config_param::NUMBER_OF_TRANSFORMS, total_transforms);
             std::int64_t fwd_strides[2] = {0, 1};
@@ -265,7 +257,6 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
             desc.commit(queue);
 
             dft::compute_forward(desc, reinterpret_cast<std::complex<float>*>(complex_buf));
-            // No wait needed — in-order queue guarantees subsequent ops see completed DFT
         }
 
         // Apply normalization
@@ -275,14 +266,13 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                             static_cast<float>(norm_factor));
         }
 
-        // Scatter complex results back to output tensor layout
-        // Output shape: (..., signal_len, ..., 2)
-        // out_idx for transform t, frequency k: (b * signal_len * inner_size + k * inner_size + inner) * 2
-        Tensor output(out_shape, DType::Float32, input.device());
-        float* out_ptr = get_data_ptr<float>(output);
+        // Scatter complex results back to output tensor. Output is Complex64
+        // with the same shape as input — no trailing 2 dim. The physical
+        // storage is still interleaved (re, im) pairs.
+        Tensor output(out_shape, DType::Complex64, input.device());
+        float* out_ptr = reinterpret_cast<float*>(const_cast<void*>(output.data_ptr()));
 
         if (dim == ndim - 1 && inner_size == 1) {
-            // Direct copy — complex_buf layout matches output layout
             queue.memcpy(out_ptr, complex_buf, complex_buf_floats * sizeof(float)).wait();
         } else {
             queue.parallel_for(sycl::range<1>(total_transforms * signal_len),
@@ -293,27 +283,23 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                     int64_t b = t / inner_size;
                     int64_t inner = t % inner_size;
                     int64_t out_idx = (b * signal_len * inner_size + k * inner_size + inner) * 2;
-                    out_ptr[out_idx] = complex_buf[2 * idx];
+                    out_ptr[out_idx]     = complex_buf[2 * idx];
                     out_ptr[out_idx + 1] = complex_buf[2 * idx + 1];
                 }).wait();
         }
 
         return output;
 
-    } else if (input.dtype() == DType::Float64) {
+    } else if (input.dtype() == DType::Complex128) {
         int64_t total_transforms = batch_size * inner_size;
         int64_t complex_buf_doubles = total_transforms * signal_len * 2;
 
         SyclDevicePtr<double> complex_buf_owner(complex_buf_doubles, queue);
         double* complex_buf = complex_buf_owner.get();
-        const double* in_ptr = get_data_ptr<const double>(input);
+        const double* in_ptr = reinterpret_cast<const double*>(input.data_ptr());
 
         if (dim == ndim - 1 && inner_size == 1) {
-            int64_t total_reals = batch_size * signal_len;
-            queue.parallel_for(sycl::range<1>(total_reals), [=](sycl::id<1> idx) {
-                complex_buf[2 * idx] = in_ptr[idx];
-                complex_buf[2 * idx + 1] = 0.0;
-            });
+            queue.memcpy(complex_buf, in_ptr, complex_buf_doubles * sizeof(double));
 
             dft::descriptor<dft::precision::DOUBLE, dft::domain::COMPLEX> desc(signal_len);
             desc.set_value(dft::config_param::NUMBER_OF_TRANSFORMS, batch_size);
@@ -332,9 +318,9 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                     int64_t j = idx % signal_len;
                     int64_t b = t / inner_size;
                     int64_t inner = t % inner_size;
-                    int64_t in_idx = b * signal_len * inner_size + j * inner_size + inner;
-                    complex_buf[2 * idx] = in_ptr[in_idx];
-                    complex_buf[2 * idx + 1] = 0.0;
+                    int64_t in_idx = (b * signal_len * inner_size + j * inner_size + inner) * 2;
+                    complex_buf[2 * idx]     = in_ptr[in_idx];
+                    complex_buf[2 * idx + 1] = in_ptr[in_idx + 1];
                 });
 
             dft::descriptor<dft::precision::DOUBLE, dft::domain::COMPLEX> desc(signal_len);
@@ -353,8 +339,8 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
             apply_scale_f64(queue, complex_buf, complex_buf_doubles, norm_factor);
         }
 
-        Tensor output(out_shape, DType::Float64, input.device());
-        double* out_ptr = get_data_ptr<double>(output);
+        Tensor output(out_shape, DType::Complex128, input.device());
+        double* out_ptr = reinterpret_cast<double*>(const_cast<void*>(output.data_ptr()));
 
         if (dim == ndim - 1 && inner_size == 1) {
             queue.memcpy(out_ptr, complex_buf, complex_buf_doubles * sizeof(double)).wait();
@@ -367,66 +353,16 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                     int64_t b = t / inner_size;
                     int64_t inner = t % inner_size;
                     int64_t out_idx = (b * signal_len * inner_size + k * inner_size + inner) * 2;
-                    out_ptr[out_idx] = complex_buf[2 * idx];
+                    out_ptr[out_idx]     = complex_buf[2 * idx];
                     out_ptr[out_idx + 1] = complex_buf[2 * idx + 1];
                 }).wait();
         }
 
         return output;
 
-    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        // Upcast to Float32, compute FFT, downcast result
-        // All conversions done on device — zero host transfers for dtype conversion
-        DType orig_dtype = input.dtype();
-        int64_t numel = input.numel();
-
-        // Allocate device-side Float32 buffer and upcast on device
-        Tensor f32_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                         DType::Float32, input.device());
-        float* f32_ptr = static_cast<float*>(const_cast<void*>(f32_input.data_ptr()));
-
-        if (orig_dtype == DType::Float16) {
-            const sycl::half* src = static_cast<const sycl::half*>(input.data_ptr());
-            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
-                f32_ptr[i] = static_cast<float>(src[i]);
-            }).wait();
-        } else {
-            // BFloat16 stored as uint16_t
-            const uint16_t* src = static_cast<const uint16_t*>(input.data_ptr());
-            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
-                uint32_t bits = static_cast<uint32_t>(src[i]) << 16;
-                float val;
-                __builtin_memcpy(&val, &bits, sizeof(float));
-                f32_ptr[i] = val;
-            }).wait();
-        }
-
-        Tensor f32_result = fft_kernel(f32_input, dim, n, norm, queue);
-
-        // Downcast result on device — zero host transfers
-        int64_t out_numel = f32_result.numel();
-        Tensor output(std::vector<int64_t>(f32_result.shape().begin(), f32_result.shape().end()),
-                      orig_dtype, input.device());
-        const float* f32_out = static_cast<const float*>(f32_result.data_ptr());
-
-        if (orig_dtype == DType::Float16) {
-            sycl::half* dst = static_cast<sycl::half*>(const_cast<void*>(output.data_ptr()));
-            queue.parallel_for(sycl::range<1>(out_numel), [=](sycl::id<1> i) {
-                dst[i] = sycl::half(f32_out[i]);
-            }).wait();
-        } else {
-            uint16_t* dst = static_cast<uint16_t*>(const_cast<void*>(output.data_ptr()));
-            queue.parallel_for(sycl::range<1>(out_numel), [=](sycl::id<1> i) {
-                uint32_t bits;
-                __builtin_memcpy(&bits, &f32_out[i], sizeof(uint32_t));
-                dst[i] = static_cast<uint16_t>(bits >> 16);
-            }).wait();
-        }
-
-        return output;
-
     } else {
-        throw std::runtime_error("fft_kernel: unsupported dtype (expected Float32 or Float64)");
+        throw std::runtime_error(
+            "fft_kernel: unsupported dtype (expected Complex64 or Complex128)");
     }
 }
 
@@ -448,33 +384,32 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
     int64_t ndim = shape.size();
     if (dim < 0) dim += ndim;
 
-    // Expect complex input: last dim = 2
-    if (shape[ndim - 1] != 2) {
-        throw std::runtime_error("ifft_kernel: expected complex input (last dim = 2)");
+    // Expect Complex64/Complex128 input — matches the fft_kernel output
+    // contract and the CPU backend.
+    if (input.dtype() != DType::Complex64 && input.dtype() != DType::Complex128) {
+        throw std::runtime_error(
+            "ifft_kernel: expected Complex64 or Complex128 input");
     }
 
     int64_t signal_len = shape[dim];
     int64_t batch_size = 1;
     for (int64_t i = 0; i < dim; ++i) batch_size *= shape[i];
     int64_t inner_size = 1;
-    for (int64_t i = dim + 1; i < ndim - 1; ++i) inner_size *= shape[i];
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
 
-    // Output has same shape as input (complex)
-    std::vector<int64_t> out_shape = shape;
-    int64_t out_numel = input.numel();
+    // Output has same shape as input (complex, same dtype).
+    std::vector<int64_t> out_shape(shape.begin(), shape.end());
 
-    if (input.dtype() == DType::Float32) {
+    if (input.dtype() == DType::Complex64) {
         int64_t total_transforms = batch_size * inner_size;
         int64_t complex_buf_floats = total_transforms * signal_len * 2;
 
         SyclDevicePtr<float> complex_buf_owner(complex_buf_floats, queue);
         float* complex_buf = complex_buf_owner.get();
-        const float* in_ptr = get_data_ptr<const float>(input);
+        const float* in_ptr = reinterpret_cast<const float*>(input.data_ptr());
 
         // Gather interleaved complex data into contiguous per-transform layout
-        if (dim == ndim - 2 && inner_size == 1) {
-            // Fast path: dim is second-to-last, last dim is 2 (complex)
-            // Input layout: batch * signal_len * 2 — already contiguous per transform
+        if (dim == ndim - 1 && inner_size == 1) {
             queue.memcpy(complex_buf, in_ptr, complex_buf_floats * sizeof(float));
         } else {
             queue.parallel_for(sycl::range<1>(total_transforms * signal_len),
@@ -484,9 +419,8 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
                     int64_t j = idx % signal_len;
                     int64_t b = t / inner_size;
                     int64_t inner = t % inner_size;
-                    // Input index: (b * signal_len * inner_size + j * inner_size + inner) * 2
                     int64_t in_idx = (b * signal_len * inner_size + j * inner_size + inner) * 2;
-                    complex_buf[2 * idx] = in_ptr[in_idx];
+                    complex_buf[2 * idx]     = in_ptr[in_idx];
                     complex_buf[2 * idx + 1] = in_ptr[in_idx + 1];
                 });
         }
@@ -509,11 +443,10 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
                             static_cast<float>(norm_factor));
         }
 
-        // Scatter back to output layout
-        Tensor output(out_shape, DType::Float32, input.device());
-        float* out_ptr = get_data_ptr<float>(output);
+        Tensor output(out_shape, DType::Complex64, input.device());
+        float* out_ptr = reinterpret_cast<float*>(const_cast<void*>(output.data_ptr()));
 
-        if (dim == ndim - 2 && inner_size == 1) {
+        if (dim == ndim - 1 && inner_size == 1) {
             queue.memcpy(out_ptr, complex_buf, complex_buf_floats * sizeof(float)).wait();
         } else {
             queue.parallel_for(sycl::range<1>(total_transforms * signal_len),
@@ -524,22 +457,22 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
                     int64_t b = t / inner_size;
                     int64_t inner = t % inner_size;
                     int64_t out_idx = (b * signal_len * inner_size + k * inner_size + inner) * 2;
-                    out_ptr[out_idx] = complex_buf[2 * idx];
+                    out_ptr[out_idx]     = complex_buf[2 * idx];
                     out_ptr[out_idx + 1] = complex_buf[2 * idx + 1];
                 }).wait();
         }
 
         return output;
 
-    } else if (input.dtype() == DType::Float64) {
+    } else {  // Complex128
         int64_t total_transforms = batch_size * inner_size;
         int64_t complex_buf_doubles = total_transforms * signal_len * 2;
 
         SyclDevicePtr<double> complex_buf_owner(complex_buf_doubles, queue);
         double* complex_buf = complex_buf_owner.get();
-        const double* in_ptr = get_data_ptr<const double>(input);
+        const double* in_ptr = reinterpret_cast<const double*>(input.data_ptr());
 
-        if (dim == ndim - 2 && inner_size == 1) {
+        if (dim == ndim - 1 && inner_size == 1) {
             queue.memcpy(complex_buf, in_ptr, complex_buf_doubles * sizeof(double));
         } else {
             queue.parallel_for(sycl::range<1>(total_transforms * signal_len),
@@ -550,7 +483,7 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
                     int64_t b = t / inner_size;
                     int64_t inner = t % inner_size;
                     int64_t in_idx = (b * signal_len * inner_size + j * inner_size + inner) * 2;
-                    complex_buf[2 * idx] = in_ptr[in_idx];
+                    complex_buf[2 * idx]     = in_ptr[in_idx];
                     complex_buf[2 * idx + 1] = in_ptr[in_idx + 1];
                 });
         }
@@ -570,10 +503,10 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
             apply_scale_f64(queue, complex_buf, complex_buf_doubles, norm_factor);
         }
 
-        Tensor output(out_shape, DType::Float64, input.device());
-        double* out_ptr = get_data_ptr<double>(output);
+        Tensor output(out_shape, DType::Complex128, input.device());
+        double* out_ptr = reinterpret_cast<double*>(const_cast<void*>(output.data_ptr()));
 
-        if (dim == ndim - 2 && inner_size == 1) {
+        if (dim == ndim - 1 && inner_size == 1) {
             queue.memcpy(out_ptr, complex_buf, complex_buf_doubles * sizeof(double)).wait();
         } else {
             queue.parallel_for(sycl::range<1>(total_transforms * signal_len),
@@ -584,36 +517,12 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
                     int64_t b = t / inner_size;
                     int64_t inner = t % inner_size;
                     int64_t out_idx = (b * signal_len * inner_size + k * inner_size + inner) * 2;
-                    out_ptr[out_idx] = complex_buf[2 * idx];
+                    out_ptr[out_idx]     = complex_buf[2 * idx];
                     out_ptr[out_idx + 1] = complex_buf[2 * idx + 1];
                 }).wait();
         }
 
         return output;
-
-    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        DType orig_dtype = input.dtype();
-        int64_t numel = input.numel();
-
-        Tensor f32_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                         DType::Float32, input.device());
-        device_upcast_to_f32(input.data_ptr(),
-                             static_cast<float*>(const_cast<void*>(f32_input.data_ptr())),
-                             numel, orig_dtype, queue);
-
-        Tensor f32_result = ifft_kernel(f32_input, dim, n, norm, queue);
-
-        int64_t out_numel = f32_result.numel();
-        Tensor output(std::vector<int64_t>(f32_result.shape().begin(), f32_result.shape().end()),
-                      orig_dtype, input.device());
-        device_downcast_from_f32(static_cast<const float*>(f32_result.data_ptr()),
-                                 const_cast<void*>(output.data_ptr()),
-                                 out_numel, orig_dtype, queue);
-
-        return output;
-
-    } else {
-        throw std::runtime_error("ifft_kernel: unsupported dtype (expected Float32 or Float64)");
     }
 }
 
@@ -622,12 +531,18 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
 // ============================================================================
 //
 // Input: real tensor of shape (..., signal_len, ...)
-// Output: complex tensor of shape (..., signal_len/2+1, ..., 2)
+// Output: complex tensor of shape (..., signal_len/2+1, ...)
+//         dtype Complex64 (or Complex128 for Float64 input)
 //
 // oneMKL DFT with domain::REAL performs R2C. The output is N/2+1 complex values.
 // oneMKL stores R2C output in CCS (Complex-Conjugate-Symmetric) packed format
 // by default. We use DFTI_NOT_INPLACE with separate real input and complex output
 // buffers to get standard interleaved complex output.
+//
+// The tensor's physical storage is the same interleaved (real, imag) float
+// pair layout used by std::complex<float>, so there is no conversion step
+// beyond labelling the dtype correctly — we just avoid introducing a
+// trailing length-2 dim that breaks backend parity with the CPU kernel.
 // ============================================================================
 auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                  const std::string& norm, sycl::queue& queue) -> Tensor {
@@ -646,10 +561,11 @@ auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
     int64_t inner_size = 1;
     for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
 
-    // Output shape: replace dim with out_len, append trailing 2
+    // Output shape: replace dim with out_len. The dtype is Complex64/128,
+    // so there is no trailing 2 dimension — each element is one complex
+    // value of 8 or 16 bytes.
     std::vector<int64_t> out_shape = shape;
     out_shape[dim] = out_len;
-    out_shape.push_back(2);
     int64_t out_numel = 1;
     for (auto s : out_shape) out_numel *= s;
 
@@ -711,9 +627,11 @@ auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                             static_cast<float>(norm_factor));
         }
 
-        // Scatter complex results to output tensor
-        Tensor output(out_shape, DType::Float32, input.device());
-        float* out_ptr = get_data_ptr<float>(output);
+        // Scatter complex results to output tensor. Output is Complex64
+        // (same interleaved (re, im) float storage as complex_buf).
+        Tensor output(out_shape, DType::Complex64, input.device());
+        float* out_ptr = reinterpret_cast<float*>(
+            const_cast<void*>(output.data_ptr()));
 
         if (dim == ndim - 1 && inner_size == 1) {
             queue.memcpy(out_ptr, complex_buf,
@@ -781,8 +699,9 @@ auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
             apply_scale_f64(queue, complex_buf, total_transforms * out_len * 2, norm_factor);
         }
 
-        Tensor output(out_shape, DType::Float64, input.device());
-        double* out_ptr = get_data_ptr<double>(output);
+        Tensor output(out_shape, DType::Complex128, input.device());
+        double* out_ptr = reinterpret_cast<double*>(
+            const_cast<void*>(output.data_ptr()));
 
         if (dim == ndim - 1 && inner_size == 1) {
             queue.memcpy(out_ptr, complex_buf,
@@ -813,16 +732,11 @@ auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                              static_cast<float*>(const_cast<void*>(f32_input.data_ptr())),
                              numel, orig_dtype, queue);
 
-        Tensor f32_result = rfft_kernel(f32_input, dim, n, norm, queue);
-
-        int64_t out_numel = f32_result.numel();
-        Tensor output(std::vector<int64_t>(f32_result.shape().begin(), f32_result.shape().end()),
-                      orig_dtype, input.device());
-        device_downcast_from_f32(static_cast<const float*>(f32_result.data_ptr()),
-                                 const_cast<void*>(output.data_ptr()),
-                                 out_numel, orig_dtype, queue);
-
-        return output;
+        // There is no Complex16/Complex32 dtype, so half/bfloat input
+        // promotes to Float32 and we return Complex64 directly — the
+        // caller will downcast only if it has a real-valued target.
+        (void)orig_dtype;
+        return rfft_kernel(f32_input, dim, n, norm, queue);
 
     } else {
         throw std::runtime_error("rfft_kernel: unsupported dtype (expected Float32 or Float64)");
@@ -833,10 +747,15 @@ auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 // IRFFT - 1D Complex-to-Real Inverse FFT
 // ============================================================================
 //
-// Input: complex tensor (..., N/2+1, ..., 2) with Float32/Float64
-// Output: real tensor (..., n, ...)
+// Input: complex tensor shape (..., N/2+1, ...) with dtype Complex64/128
+// Output: real tensor shape (..., n, ...) with dtype Float32/64
 //
 // oneMKL backward transform with domain::REAL performs C2R.
+//
+// The Complex64 physical layout is identical to the previous
+// "Float32 + trailing 2" contract this kernel used to accept, so the
+// per-element load/store in the scatter/gather loops is unchanged; only
+// the shape-accounting and dtype checks move.
 // ============================================================================
 auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                   const std::string& norm, sycl::queue& queue) -> Tensor {
@@ -847,8 +766,13 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
     int64_t ndim = shape.size();
     if (dim < 0) dim += ndim;
 
-    if (shape[ndim - 1] != 2) {
-        throw std::runtime_error("irfft_kernel: expected complex input (last dim = 2)");
+    // Input must be a complex dtype. Back-compat for Float32 + trailing-2
+    // layouts is intentionally dropped — rfft_kernel now always returns
+    // Complex64/Complex128, and callers that needed the old contract
+    // will see a clear error.
+    if (input.dtype() != DType::Complex64 && input.dtype() != DType::Complex128) {
+        throw std::runtime_error(
+            "irfft_kernel: expected Complex64 or Complex128 input");
     }
 
     int64_t complex_len = shape[dim]; // N/2 + 1
@@ -857,18 +781,16 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
     int64_t batch_size = 1;
     for (int64_t i = 0; i < dim; ++i) batch_size *= shape[i];
     int64_t inner_size = 1;
-    for (int64_t i = dim + 1; i < ndim - 1; ++i) inner_size *= shape[i];
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
 
-    // Output shape: real tensor without trailing 2
-    std::vector<int64_t> out_shape;
-    for (int64_t i = 0; i < dim; ++i) out_shape.push_back(shape[i]);
-    out_shape.push_back(output_len);
-    for (int64_t i = dim + 1; i < ndim - 1; ++i) out_shape.push_back(shape[i]);
+    // Output shape: replace dim with output_len.
+    std::vector<int64_t> out_shape(shape.begin(), shape.end());
+    out_shape[dim] = output_len;
 
     int64_t out_numel = 1;
     for (auto s : out_shape) out_numel *= s;
 
-    if (input.dtype() == DType::Float32) {
+    if (input.dtype() == DType::Complex64) {
         int64_t total_transforms = batch_size * inner_size;
 
         // Allocate contiguous complex input buffer and real output buffer
@@ -877,10 +799,11 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
         SyclDevicePtr<float> real_buf_owner(total_transforms * output_len, queue);
         float* real_buf = real_buf_owner.get();
 
-        const float* in_ptr = get_data_ptr<const float>(input);
+        // Read Complex64 input as interleaved (re, im) floats.
+        const float* in_ptr = reinterpret_cast<const float*>(input.data_ptr());
 
         // Gather complex input into contiguous per-transform layout
-        if (dim == ndim - 2 && inner_size == 1) {
+        if (dim == ndim - 1 && inner_size == 1) {
             queue.memcpy(complex_buf, in_ptr,
                          total_transforms * complex_len * 2 * sizeof(float));
         } else {
@@ -931,7 +854,7 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
         Tensor output(out_shape, DType::Float32, input.device());
         float* out_ptr = get_data_ptr<float>(output);
 
-        if (dim == ndim - 2 && inner_size == 1) {
+        if (dim == ndim - 1 && inner_size == 1) {
             queue.memcpy(out_ptr, real_buf,
                          total_transforms * output_len * sizeof(float)).wait();
         } else {
@@ -949,7 +872,7 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
         return output;
 
-    } else if (input.dtype() == DType::Float64) {
+    } else if (input.dtype() == DType::Complex128) {
         int64_t total_transforms = batch_size * inner_size;
 
         SyclDevicePtr<double> complex_buf_owner(total_transforms * complex_len * 2, queue);
@@ -957,9 +880,9 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
         SyclDevicePtr<double> real_buf_owner(total_transforms * output_len, queue);
         double* real_buf = real_buf_owner.get();
 
-        const double* in_ptr = get_data_ptr<const double>(input);
+        const double* in_ptr = reinterpret_cast<const double*>(input.data_ptr());
 
-        if (dim == ndim - 2 && inner_size == 1) {
+        if (dim == ndim - 1 && inner_size == 1) {
             queue.memcpy(complex_buf, in_ptr,
                          total_transforms * complex_len * 2 * sizeof(double));
         } else {
@@ -1002,7 +925,7 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
         Tensor output(out_shape, DType::Float64, input.device());
         double* out_ptr = get_data_ptr<double>(output);
 
-        if (dim == ndim - 2 && inner_size == 1) {
+        if (dim == ndim - 1 && inner_size == 1) {
             queue.memcpy(out_ptr, real_buf,
                          total_transforms * output_len * sizeof(double)).wait();
         } else {
@@ -1020,29 +943,9 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
         return output;
 
-    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        DType orig_dtype = input.dtype();
-        int64_t numel = input.numel();
-
-        Tensor f32_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                         DType::Float32, input.device());
-        device_upcast_to_f32(input.data_ptr(),
-                             static_cast<float*>(const_cast<void*>(f32_input.data_ptr())),
-                             numel, orig_dtype, queue);
-
-        Tensor f32_result = irfft_kernel(f32_input, dim, n, norm, queue);
-
-        int64_t out_numel = f32_result.numel();
-        Tensor output(std::vector<int64_t>(f32_result.shape().begin(), f32_result.shape().end()),
-                      orig_dtype, input.device());
-        device_downcast_from_f32(static_cast<const float*>(f32_result.data_ptr()),
-                                 const_cast<void*>(output.data_ptr()),
-                                 out_numel, orig_dtype, queue);
-
-        return output;
-
     } else {
-        throw std::runtime_error("irfft_kernel: unsupported dtype (expected Float32 or Float64)");
+        throw std::runtime_error(
+            "irfft_kernel: unsupported dtype (expected Complex64 or Complex128)");
     }
 }
 

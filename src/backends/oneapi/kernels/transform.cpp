@@ -1822,6 +1822,51 @@ auto cast_kernel(const Tensor& input, DType target_dtype, sycl::queue& queue) ->
                 h_out[i] = FP8_E5M2(h_in[i]).bits;
         }
         queue.memcpy(out, h_out.data(), numel * sizeof(uint8_t)).wait();
+    } else if (src == DType::Float32 && dst == DType::Complex64) {
+        // Real → complex: fill imaginary part with zeros. Complex64
+        // storage is interleaved (re, im) float pairs.
+        const float* in = get_data_ptr<const float>(input);
+        float* out = reinterpret_cast<float*>(const_cast<void*>(output.data_ptr()));
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            int64_t k = i[0];
+            out[2 * k]     = in[k];
+            out[2 * k + 1] = 0.0f;
+        });
+    } else if (src == DType::Float64 && dst == DType::Complex128) {
+        const double* in = get_data_ptr<const double>(input);
+        double* out = reinterpret_cast<double*>(const_cast<void*>(output.data_ptr()));
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            int64_t k = i[0];
+            out[2 * k]     = in[k];
+            out[2 * k + 1] = 0.0;
+        });
+    } else if (src == DType::Complex64 && dst == DType::Float32) {
+        // Complex → real: drop the imaginary part.
+        const float* in = reinterpret_cast<const float*>(input.data_ptr());
+        float* out = get_data_ptr<float>(output);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            int64_t k = i[0];
+            out[k] = in[2 * k];
+        });
+    } else if (src == DType::Complex128 && dst == DType::Float64) {
+        const double* in = reinterpret_cast<const double*>(input.data_ptr());
+        double* out = get_data_ptr<double>(output);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            int64_t k = i[0];
+            out[k] = in[2 * k];
+        });
+    } else if (src == DType::Complex64 && dst == DType::Complex128) {
+        const float* in = reinterpret_cast<const float*>(input.data_ptr());
+        double* out = reinterpret_cast<double*>(const_cast<void*>(output.data_ptr()));
+        queue.parallel_for(sycl::range<1>(numel * 2), [=](sycl::id<1> i) {
+            out[i[0]] = static_cast<double>(in[i[0]]);
+        });
+    } else if (src == DType::Complex128 && dst == DType::Complex64) {
+        const double* in = reinterpret_cast<const double*>(input.data_ptr());
+        float* out = reinterpret_cast<float*>(const_cast<void*>(output.data_ptr()));
+        queue.parallel_for(sycl::range<1>(numel * 2), [=](sycl::id<1> i) {
+            out[i[0]] = static_cast<float>(in[i[0]]);
+        });
     } else {
         // Two-hop: src -> Float32 -> dst
         if (src != DType::Float32) {

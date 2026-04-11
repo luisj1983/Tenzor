@@ -34,6 +34,9 @@ auto GraphWriter::write(const Graph& graph) -> void {
     write_values(graph);
     write_nodes(graph);
     write_tensors(graph);
+    // v2 additions: graph input/output ID lists, captured constants.
+    write_io_lists(graph);
+    write_constants(graph);
 }
 
 auto GraphWriter::write_header() -> void {
@@ -49,30 +52,53 @@ auto GraphWriter::write_metadata(const Graph& graph) -> void {
 }
 
 auto GraphWriter::write_values(const Graph& graph) -> void {
-    // Create value index map
-    std::unordered_map<std::string, uint64_t> value_indices;
-    uint64_t idx = 0;
-
-    // Collect all values
-    std::vector<std::shared_ptr<Value>> all_values;
+    // Collect every Value reachable via (a) node outputs, (b) graph
+    // inputs (which have no producing node), and (c) graph outputs
+    // (in case something exotic landed there without a producer).
+    // Deduplicated by Value ID — the same Value can be referenced
+    // from multiple places.
+    std::unordered_map<std::string, std::shared_ptr<Value>> seen;
+    for (const auto& input : graph.inputs())  seen.emplace(input->id(),  input);
+    for (const auto& output : graph.outputs()) seen.emplace(output->id(), output);
     for (const auto& node : graph.nodes()) {
         for (const auto& output : node->outputs()) {
-            all_values.push_back(output);
+            seen.emplace(output->id(), output);
         }
     }
 
-    // Write value count
+    std::vector<std::shared_ptr<Value>> all_values;
+    all_values.reserve(seen.size());
+    for (auto& [id, v] : seen) all_values.push_back(v);
+
     write_uint64(all_values.size());
-
-    // Write each value
     for (const auto& value : all_values) {
-        value_indices[value->id()] = idx++;
-
         write_string(value->id());
         write_int64_vector(value->shape());
         write_uint32(static_cast<uint32_t>(value->dtype()));
         write_uint32(static_cast<uint32_t>(value->device().type));
         write_int64(value->device().index);
+    }
+}
+
+// v2: write the lists of graph input and output IDs so the reader
+// can call set_inputs()/set_outputs() with the right Values. Without
+// this the loaded graph silently had empty inputs/outputs, which
+// broke every round-trip test.
+auto GraphWriter::write_io_lists(const Graph& graph) -> void {
+    write_uint64(graph.inputs().size());
+    for (const auto& v : graph.inputs()) write_string(v->id());
+    write_uint64(graph.outputs().size());
+    for (const auto& v : graph.outputs()) write_string(v->id());
+}
+
+// v2: serialize the captured-parameter constants map so traced
+// modules survive a save/load round trip.
+auto GraphWriter::write_constants(const Graph& graph) -> void {
+    const auto& constants = graph.constants();
+    write_uint64(constants.size());
+    for (const auto& [id, tensor] : constants) {
+        write_string(id);
+        write_tensor(tensor);
     }
 }
 
@@ -214,6 +240,9 @@ auto GraphReader::read() -> std::shared_ptr<Graph> {
     read_values(*graph);
     read_nodes(*graph);
     read_tensors(*graph);
+    // v2 additions: graph input/output ID lists + constants map.
+    read_io_lists(*graph);
+    read_constants(*graph);
 
     return graph;
 }
@@ -232,12 +261,11 @@ auto GraphReader::read_header() -> void {
 }
 
 auto GraphReader::read_metadata(Graph& graph) -> void {
-    uint64_t num_nodes = read_uint64();
-    uint64_t num_values = read_uint64();
-    uint64_t num_inputs = read_uint64();
-    uint64_t num_outputs = read_uint64();
-
-    // Metadata stored for validation
+    meta_num_nodes_ = read_uint64();
+    (void)read_uint64();  // num_values — consumed by read_values() directly
+    meta_num_inputs_ = read_uint64();
+    meta_num_outputs_ = read_uint64();
+    (void)graph;
 }
 
 auto GraphReader::read_values(Graph& graph) -> void {
@@ -256,82 +284,117 @@ auto GraphReader::read_values(Graph& graph) -> void {
 }
 
 auto GraphReader::read_nodes(Graph& graph) -> void {
-    // Determine node count from position
-    while (file_.peek() != EOF) {
-        try {
-            OpType op_type = static_cast<OpType>(read_uint32());
-            std::string name = read_string();
+    // Use the metadata-declared node count rather than a peek+try/catch
+    // loop. The old loop could not coexist with any trailing section
+    // (v2 adds I/O lists and constants) — it would either stop short
+    // or swallow unrelated bytes as "bad node" exceptions.
+    for (uint64_t n = 0; n < meta_num_nodes_; ++n) {
+        OpType op_type = static_cast<OpType>(read_uint32());
+        std::string name = read_string();
 
-            auto node = graph.create_node(op_type, name);
+        auto node = graph.create_node(op_type, name);
 
-            // Read inputs
-            uint64_t num_inputs = read_uint64();
-            for (uint64_t i = 0; i < num_inputs; ++i) {
-                std::string input_id = read_string();
-                auto value = graph.get_value(input_id);
-                if (value) {
-                    node->add_input(value);
-                }
+        // Read inputs
+        uint64_t num_inputs = read_uint64();
+        for (uint64_t i = 0; i < num_inputs; ++i) {
+            std::string input_id = read_string();
+            auto value = graph.get_value(input_id);
+            if (value) {
+                node->add_input(value);
             }
-
-            // Read outputs
-            uint64_t num_outputs = read_uint64();
-            for (uint64_t i = 0; i < num_outputs; ++i) {
-                std::string output_id = read_string();
-                auto value = graph.get_value(output_id);
-                if (value) {
-                    value->set_node(node);
-                    node->add_output(value);
-                }
-            }
-
-            // Read attributes
-            uint64_t num_float_attrs = read_uint64();
-            for (uint64_t i = 0; i < num_float_attrs; ++i) {
-                std::string name = read_string();
-                float val = read_float();
-                node->set_attr(name, val);
-            }
-
-            uint64_t num_int_attrs = read_uint64();
-            for (uint64_t i = 0; i < num_int_attrs; ++i) {
-                std::string name = read_string();
-                int64_t val = read_int64();
-                node->set_int_attr(name, val);
-            }
-
-            uint64_t num_vec_attrs = read_uint64();
-            for (uint64_t i = 0; i < num_vec_attrs; ++i) {
-                std::string name = read_string();
-                std::vector<int64_t> val = read_int64_vector();
-                node->set_vec_attr(name, std::move(val));
-            }
-
-            uint64_t num_bool_attrs = read_uint64();
-            for (uint64_t i = 0; i < num_bool_attrs; ++i) {
-                std::string name = read_string();
-                bool val = read_bool();
-                node->set_bool_attr(name, val);
-            }
-
-            uint64_t num_tensor_attrs = read_uint64();
-            for (uint64_t i = 0; i < num_tensor_attrs; ++i) {
-                std::string name = read_string();
-                Tensor val = read_tensor();
-                node->set_tensor_attr(name, std::move(val));
-            }
-
-            graph.add_node(node);
-
-        } catch (const std::exception&) {
-            // End of nodes section
-            break;
         }
+
+        // Read outputs
+        uint64_t num_outputs = read_uint64();
+        for (uint64_t i = 0; i < num_outputs; ++i) {
+            std::string output_id = read_string();
+            auto value = graph.get_value(output_id);
+            if (value) {
+                value->set_node(node);
+                node->add_output(value);
+            }
+        }
+
+        // Read attributes
+        uint64_t num_float_attrs = read_uint64();
+        for (uint64_t i = 0; i < num_float_attrs; ++i) {
+            std::string attr_name = read_string();
+            float val = read_float();
+            node->set_attr(attr_name, val);
+        }
+
+        uint64_t num_int_attrs = read_uint64();
+        for (uint64_t i = 0; i < num_int_attrs; ++i) {
+            std::string attr_name = read_string();
+            int64_t val = read_int64();
+            node->set_int_attr(attr_name, val);
+        }
+
+        uint64_t num_vec_attrs = read_uint64();
+        for (uint64_t i = 0; i < num_vec_attrs; ++i) {
+            std::string attr_name = read_string();
+            std::vector<int64_t> val = read_int64_vector();
+            node->set_vec_attr(attr_name, std::move(val));
+        }
+
+        uint64_t num_bool_attrs = read_uint64();
+        for (uint64_t i = 0; i < num_bool_attrs; ++i) {
+            std::string attr_name = read_string();
+            bool val = read_bool();
+            node->set_bool_attr(attr_name, val);
+        }
+
+        uint64_t num_tensor_attrs = read_uint64();
+        for (uint64_t i = 0; i < num_tensor_attrs; ++i) {
+            std::string attr_name = read_string();
+            Tensor val = read_tensor();
+            node->set_tensor_attr(attr_name, std::move(val));
+        }
+
+        graph.add_node(node);
     }
 }
 
 auto GraphReader::read_tensors(Graph& graph) -> void {
     // Reserved for future use
+    (void)graph;
+}
+
+// v2: read the graph input/output ID lists written by write_io_lists.
+// We resolve each ID to a Value via graph.get_value() (populated by
+// read_values above) and wire them into the graph via set_inputs /
+// set_outputs — otherwise Graph::forward() has no idea which Values
+// are inputs vs. intermediates.
+auto GraphReader::read_io_lists(Graph& graph) -> void {
+    uint64_t num_inputs = read_uint64();
+    std::vector<std::shared_ptr<Value>> ins;
+    ins.reserve(num_inputs);
+    for (uint64_t i = 0; i < num_inputs; ++i) {
+        std::string id = read_string();
+        auto v = graph.get_value(id);
+        if (v) ins.push_back(v);
+    }
+    graph.set_inputs(std::move(ins));
+
+    uint64_t num_outputs = read_uint64();
+    std::vector<std::shared_ptr<Value>> outs;
+    outs.reserve(num_outputs);
+    for (uint64_t i = 0; i < num_outputs; ++i) {
+        std::string id = read_string();
+        auto v = graph.get_value(id);
+        if (v) outs.push_back(v);
+    }
+    graph.set_outputs(std::move(outs));
+}
+
+// v2: read the captured-parameter constants map.
+auto GraphReader::read_constants(Graph& graph) -> void {
+    uint64_t num_constants = read_uint64();
+    for (uint64_t i = 0; i < num_constants; ++i) {
+        std::string id = read_string();
+        Tensor tensor = read_tensor();
+        graph.set_constant(id, tensor);
+    }
 }
 
 auto GraphReader::read_uint32() -> uint32_t {

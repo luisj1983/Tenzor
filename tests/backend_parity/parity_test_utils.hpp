@@ -361,6 +361,31 @@ inline bool tensors_close(const Tensor& a, const Tensor& b,
         return true;
     };
 
+    // Complex types: compare the interleaved (real, imag) storage as
+    // pairs of floats/doubles. The numel() loop in compare_float walks
+    // over tensor elements — double it to cover both components.
+    auto compare_complex = [&](auto* a_data, auto* b_data) -> bool {
+        int64_t n = a_cpu.numel() * 2;
+        for (int64_t i = 0; i < n; ++i) {
+            double va = static_cast<double>(a_data[i]);
+            double vb = static_cast<double>(b_data[i]);
+            if (std::isnan(va) && std::isnan(vb)) {
+                if (equal_nan) continue;
+                return false;
+            }
+            if (std::isnan(va) || std::isnan(vb)) return false;
+            if (std::isinf(va) && std::isinf(vb)) {
+                if ((va > 0) == (vb > 0)) continue;
+                return false;
+            }
+            double diff = std::abs(va - vb);
+            double threshold =
+                static_cast<double>(atol) + static_cast<double>(rtol) * std::abs(vb);
+            if (diff > threshold) return false;
+        }
+        return true;
+    };
+
     switch (a_cpu.dtype()) {
         case DType::Float32:
             return compare_float(a_cpu.data<float>(), b_cpu.data<float>());
@@ -378,6 +403,14 @@ inline bool tensors_close(const Tensor& a, const Tensor& b,
             return compare_int(a_cpu.data<uint8_t>(), b_cpu.data<uint8_t>());
         case DType::Bool:
             return compare_int(a_cpu.data<uint8_t>(), b_cpu.data<uint8_t>());
+        case DType::Complex64:
+            return compare_complex(
+                reinterpret_cast<const float*>(a_cpu.data_ptr()),
+                reinterpret_cast<const float*>(b_cpu.data_ptr()));
+        case DType::Complex128:
+            return compare_complex(
+                reinterpret_cast<const double*>(a_cpu.data_ptr()),
+                reinterpret_cast<const double*>(b_cpu.data_ptr()));
         default:
             // Fall back to Float32 comparison for any unhandled dtype
             return compare_float(a_cpu.data<float>(), b_cpu.data<float>());
@@ -430,6 +463,31 @@ inline float max_abs_diff(const Tensor& a, const Tensor& b) {
             max_diff = std::max(max_diff, static_cast<int32_t>(std::abs(a_data[i] - b_data[i])));
         }
         return static_cast<float>(max_diff);
+    }
+
+    if (a_cpu.dtype() == DType::Complex64 || a_cpu.dtype() == DType::Complex128) {
+        // Treat the storage as interleaved (real, imag) pairs of
+        // the underlying real component type and take the max abs
+        // component difference (not the magnitude diff — that would
+        // require a sqrt per element and hides per-component errors).
+        int64_t n = a_cpu.numel() * 2;
+        if (a_cpu.dtype() == DType::Complex64) {
+            const float* a_data = reinterpret_cast<const float*>(a_cpu.data_ptr());
+            const float* b_data = reinterpret_cast<const float*>(b_cpu.data_ptr());
+            float max_diff = 0.0f;
+            for (int64_t i = 0; i < n; ++i) {
+                max_diff = std::max(max_diff, std::abs(a_data[i] - b_data[i]));
+            }
+            return max_diff;
+        } else {
+            const double* a_data = reinterpret_cast<const double*>(a_cpu.data_ptr());
+            const double* b_data = reinterpret_cast<const double*>(b_cpu.data_ptr());
+            double max_diff = 0.0;
+            for (int64_t i = 0; i < n; ++i) {
+                max_diff = std::max(max_diff, std::abs(a_data[i] - b_data[i]));
+            }
+            return static_cast<float>(max_diff);
+        }
     }
 
     // Default: Float32 path (also handles promoted half types)

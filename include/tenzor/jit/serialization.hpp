@@ -34,8 +34,15 @@ namespace jit {
  * @brief Serialization format version.
  *
  * Increment when making incompatible changes to format.
+ *
+ * v2 (2026-04-11): write graph input/output ID lists, include values
+ *                  that are graph inputs (not only node outputs), and
+ *                  serialize the captured-parameter constants map.
+ *                  v1 silently dropped all three which made loaded
+ *                  graphs lose their inputs/outputs and fail to
+ *                  execute traced modules.
  */
-constexpr uint32_t SERIALIZATION_VERSION = 1;
+constexpr uint32_t SERIALIZATION_VERSION = 2;
 
 /**
  * @brief Magic number for Tenzor JIT files.
@@ -106,6 +113,16 @@ private:
      */
     auto write_tensors(const Graph& graph) -> void;
 
+    /**
+     * @brief Write graph input/output ID lists (v2+).
+     */
+    auto write_io_lists(const Graph& graph) -> void;
+
+    /**
+     * @brief Write captured parameter constants map (v2+).
+     */
+    auto write_constants(const Graph& graph) -> void;
+
     // Primitive write methods
     auto write_uint32(uint32_t val) -> void;
     auto write_uint64(uint64_t val) -> void;
@@ -156,6 +173,12 @@ public:
 private:
     std::ifstream file_;
     uint32_t version_;
+    // Counts from the metadata section — saved so read_nodes() knows
+    // exactly how many nodes to read (the old code used a peek+try/catch
+    // loop that conflicted with any trailing section past the nodes).
+    uint64_t meta_num_nodes_{0};
+    uint64_t meta_num_inputs_{0};
+    uint64_t meta_num_outputs_{0};
 
     /**
      * @brief Read and validate header.
@@ -191,6 +214,16 @@ private:
      * @param graph Graph to populate
      */
     auto read_tensors(Graph& graph) -> void;
+
+    /**
+     * @brief Read graph input/output ID lists (v2+) and wire them.
+     */
+    auto read_io_lists(Graph& graph) -> void;
+
+    /**
+     * @brief Read captured parameter constants map (v2+).
+     */
+    auto read_constants(Graph& graph) -> void;
 
     // Primitive read methods
     auto read_uint32() -> uint32_t;

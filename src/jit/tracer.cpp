@@ -314,6 +314,14 @@ auto Tracer::clear() -> void {
     tensor_id_map_.clear();
     tensor_storage_.clear();
     next_tensor_id_ = 0;
+    // clear() is the tracer's full reset — it stops tracing too, so
+    // TracingGuard's destructor leaves the global tracer in a clean
+    // state for the next guard. The Tracer API contract is:
+    //   - start_trace() turns tracing on
+    //   - end_trace() / clear() turn it off
+    // Previously clear() only purged recorded state; tracing_ was left
+    // on, so back-to-back TracingGuards bled state into each other.
+    tracing_ = false;
 }
 
 auto Tracer::get_instance() -> Tracer& {

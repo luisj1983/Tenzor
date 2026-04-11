@@ -172,7 +172,12 @@ auto Tensor::ndim() const -> int64_t {
 }
 
 auto Tensor::numel() const -> int64_t {
-    if (!impl_) throw std::runtime_error("Operation on uninitialized tensor");
+    // An undefined Tensor has zero elements. This matches PyTorch's
+    // `Tensor::numel()` semantics and lets callers use `t.numel() == 0`
+    // as a presence check on default-constructed Tensors (e.g. the
+    // static empty returned by Node::get_tensor_attr() when the
+    // attribute is absent).
+    if (!impl_) return 0;
     return impl_->numel();
 }
 
