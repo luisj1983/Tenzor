@@ -203,6 +203,16 @@ auto Tracer::end_trace(const std::vector<Variable>& inputs,
                 auto value = graph->create_value(input_id, info.shape, info.dtype, info.device);
                 value_map[input_id] = value;
                 node->add_input(value);
+
+                // Phase 6.4: capture the actual Tensor as a graph
+                // constant so Graph::forward can pre-populate its
+                // value_map. Without this, running the graph would
+                // fail with "Input value not available" for every
+                // module parameter.
+                auto storage_it = tensor_storage_.find(input_id);
+                if (storage_it != tensor_storage_.end()) {
+                    graph->set_constant(input_id, storage_it->second);
+                }
             }
         }
 
@@ -278,6 +288,11 @@ auto Tracer::register_tensor(const Tensor& tensor) -> std::string {
     }
 
     tensor_info_[id] = TensorInfo(shape, tensor.dtype(), tensor.device());
+    // Phase 6.4: retain the full Tensor so end_trace() can later decide
+    // which tensors are parameters (constants) vs intermediates vs
+    // graph inputs. Shallow Tensor copy is cheap — intrusive refcount
+    // on the underlying storage.
+    tensor_storage_[id] = tensor;
     return id;
 }
 
@@ -297,6 +312,7 @@ auto Tracer::clear() -> void {
     ops_.clear();
     tensor_info_.clear();
     tensor_id_map_.clear();
+    tensor_storage_.clear();
     next_tensor_id_ = 0;
 }
 

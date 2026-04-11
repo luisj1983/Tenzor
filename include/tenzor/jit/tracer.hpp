@@ -329,6 +329,11 @@ private:
     std::vector<TracedOp> ops_;                                 ///< Recorded operations
     std::unordered_map<std::string, TensorInfo> tensor_info_;   ///< Tensor metadata
     std::unordered_map<void*, std::string> tensor_id_map_;      ///< Pointer to ID mapping
+    /// Phase 6.4: retain the actual Tensor (not just metadata) for
+    /// every tensor seen during tracing. end_trace() uses this to
+    /// capture module parameters as graph constants that live inside
+    /// the Graph and get pre-populated into value_map at forward time.
+    std::unordered_map<std::string, Tensor> tensor_storage_;
     int64_t next_tensor_id_{0};                                 ///< Counter for unique IDs
 
     /**

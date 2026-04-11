@@ -746,11 +746,34 @@ public:
      */
     auto find_nodes_by_type(const std::string& type_name) const -> std::vector<std::shared_ptr<Node>>;
 
+    /**
+     * @brief Record a captured parameter / constant tensor.
+     *
+     * Called by the tracer during end_trace() for every tensor that
+     * appears as an op input but is not a graph input. These tensors
+     * (typically nn::Module parameters) are pre-populated into the
+     * runtime value_map during Graph::forward.
+     */
+    auto set_constant(const std::string& value_id, const Tensor& tensor) -> void {
+        constants_[value_id] = tensor;
+    }
+
+    /// Read captured constants map.
+    auto constants() const -> const std::unordered_map<std::string, Tensor>& {
+        return constants_;
+    }
+
 private:
     std::vector<std::shared_ptr<Node>> nodes_;              ///< All nodes (topologically sorted)
     std::unordered_map<std::string, std::shared_ptr<Value>> values_;  ///< ID -> Value map
     std::vector<std::shared_ptr<Value>> inputs_;            ///< Graph inputs
     std::vector<std::shared_ptr<Value>> outputs_;           ///< Graph outputs
+    /// Captured parameter / constant tensors, keyed by Value ID. These
+    /// are Tensors that were read by traced ops but were not graph
+    /// inputs (e.g. Linear's weight/bias). During Graph::forward they
+    /// are pre-populated into the runtime value_map before any node
+    /// executes.
+    std::unordered_map<std::string, Tensor> constants_;
     int64_t next_node_id_{0};                               ///< Node ID counter
     mutable bool needs_retrace_{false};                        ///< Set when ShapeGuard detects mismatch
 

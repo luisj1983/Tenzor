@@ -77,26 +77,17 @@ TEST(DynamicBatcherTest, ServerConfigAuthDefaults) {
 // receive tensors of the expected shape.
 // ============================================================================
 
-// STILL DISABLED. Phase 6.4 partially fixed the tracer: TracingGuard
-// in src/jit/tracer.cpp now installs a DispatchInterceptor on
-// construction, so ops running through `module->forward(dummy_input)`
-// during trace() ARE recorded into the graph. The "CompiledModule
-// produced no outputs" error is resolved.
-//
-// The remaining blocker is parameter capture: when a Linear layer's
-// forward calls matmul(x, weight), the tracer records weight's tensor
-// ID as an input to the Matmul node, but the weight isn't tracked as
-// a graph input. At execution time, Graph::forward only pre-populates
-// value_map with the user's runtime input, so the weight ID is
-// missing and we get "Input value not available: t1".
-//
-// A proper fix needs the tracer to walk module->parameters() and
-// register them as constant values stored in the graph, and
-// Graph::forward to pre-populate value_map with those constants. That
-// is a separate multi-hour JIT refactor (touches tracer.cpp,
-// graph.{hpp,cpp}, and the Value storage model) and is the real
-// remaining gap between "tracer records ops" and "serving end-to-end".
-TEST(DynamicBatcherTest, DISABLED_SubmitBatchRoundtrip) {
+// Phase 6.4: end-to-end serving roundtrip. The chain is:
+//   1. TracingGuard's constructor installs the DispatchInterceptor so
+//      ops passing through `module->forward(dummy_input)` are recorded
+//      (fix in src/jit/tracer.cpp earlier in this branch).
+//   2. The tracer captures module parameters (Linear's weight/bias) as
+//      graph constants stored in Graph::constants_ via end_trace().
+//   3. Graph::forward pre-populates the runtime value_map with those
+//      constants before executing any node.
+//   4. DynamicBatcher dispatches through the jit::CompiledModule and
+//      returns results.
+TEST(DynamicBatcherTest, SubmitBatchRoundtrip) {
     // Trace a small Linear layer so the batcher has a real CompiledModule
     // to dispatch against.
     auto model = std::make_shared<tenzor::nn::Linear>(/*in=*/4, /*out=*/2, /*bias=*/true);

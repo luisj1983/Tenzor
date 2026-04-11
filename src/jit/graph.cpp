@@ -1238,6 +1238,14 @@ auto Graph::forward(const std::vector<Variable>& runtime_inputs) -> std::vector<
         value_map[inputs_[i]->id()] = runtime_inputs[i];
     }
 
+    // Phase 6.4: pre-populate with captured constants (module
+    // parameters, etc.) so ops that reference them don't fail with
+    // "Input value not available". Constants are wrapped in Variables
+    // with requires_grad=false — the graph is in inference mode.
+    for (const auto& [id, tensor] : constants_) {
+        value_map.emplace(id, Variable(tensor, /*requires_grad=*/false));
+    }
+
     // Execute nodes in topological order
     for (const auto& node : nodes_) {
         execute_node(node, value_map);
