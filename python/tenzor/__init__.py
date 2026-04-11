@@ -93,6 +93,17 @@ if _os.path.exists(_data_path):
     _data_spec = _importlib_util.spec_from_file_location('tenzor.data', _data_path)
     _data_module = _importlib_util.module_from_spec(_data_spec)
     _data_spec.loader.exec_module(_data_module)
+    # Re-attach the C++ data submodules (transforms, datasets) which are
+    # registered under tenzor_core.data and would otherwise be shadowed
+    # by the pure-Python tenzor.data wrapper that replaces sys.modules
+    # ['tenzor.data'] below. Same pattern as tenzor.nn / tenzor.nn.functional.
+    from .tenzor_core import data as _cpp_data
+    if hasattr(_cpp_data, 'transforms'):
+        _data_module.transforms = _cpp_data.transforms
+        _sys.modules['tenzor.data.transforms'] = _cpp_data.transforms
+    if hasattr(_cpp_data, 'datasets'):
+        _data_module.datasets = _cpp_data.datasets
+        _sys.modules['tenzor.data.datasets'] = _cpp_data.datasets
     _sys.modules['tenzor.data'] = _data_module
     data = _data_module
 

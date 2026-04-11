@@ -31,7 +31,7 @@ def test_random_vertical_flip_shape():
     img = _make_image()
     target = tz.zeros([1])
     out_img, out_target = t(img, target)
-    assert out_img.shape() == img.shape(), f"Shape mismatch: {out_img.shape()} vs {img.shape()}"
+    assert out_img.shape == img.shape, f"Shape mismatch: {out_img.shape} vs {img.shape}"
 
 
 def test_random_vertical_flip_no_flip():
@@ -41,7 +41,7 @@ def test_random_vertical_flip_no_flip():
     target = tz.zeros([1])
     out_img, _ = t(img, target)
     # With p=0, output should be identical to input
-    assert out_img.shape() == img.shape()
+    assert out_img.shape == img.shape
 
 
 def test_center_crop():
@@ -50,7 +50,7 @@ def test_center_crop():
     img = _make_image(32, 32)
     target = tz.zeros([1])
     out_img, _ = t(img, target)
-    assert out_img.shape() == [3, 16, 16], f"Expected [3,16,16], got {out_img.shape()}"
+    assert out_img.shape == [3, 16, 16], f"Expected [3,16,16], got {out_img.shape}"
 
 
 def test_random_crop():
@@ -59,7 +59,7 @@ def test_random_crop():
     img = _make_image(32, 32)
     target = tz.zeros([1])
     out_img, _ = t(img, target)
-    assert out_img.shape() == [3, 24, 24], f"Expected [3,24,24], got {out_img.shape()}"
+    assert out_img.shape == [3, 24, 24], f"Expected [3,24,24], got {out_img.shape}"
 
 
 def test_random_crop_with_padding():
@@ -68,7 +68,7 @@ def test_random_crop_with_padding():
     img = _make_image(32, 32)
     target = tz.zeros([1])
     out_img, _ = t(img, target)
-    assert out_img.shape() == [3, 32, 32], f"Expected [3,32,32], got {out_img.shape()}"
+    assert out_img.shape == [3, 32, 32], f"Expected [3,32,32], got {out_img.shape}"
 
 
 def test_resize():
@@ -77,7 +77,7 @@ def test_resize():
     img = _make_image(32, 32)
     target = tz.zeros([1])
     out_img, _ = t(img, target)
-    assert out_img.shape() == [3, 16, 16], f"Expected [3,16,16], got {out_img.shape()}"
+    assert out_img.shape == [3, 16, 16], f"Expected [3,16,16], got {out_img.shape}"
 
 
 def test_resize_upscale():
@@ -86,7 +86,7 @@ def test_resize_upscale():
     img = _make_image(32, 32)
     target = tz.zeros([1])
     out_img, _ = t(img, target)
-    assert out_img.shape() == [3, 64, 64], f"Expected [3,64,64], got {out_img.shape()}"
+    assert out_img.shape == [3, 64, 64], f"Expected [3,64,64], got {out_img.shape}"
 
 
 def test_random_resized_crop():
@@ -95,7 +95,7 @@ def test_random_resized_crop():
     img = _make_image(32, 32)
     target = tz.zeros([1])
     out_img, _ = t(img, target)
-    assert out_img.shape() == [3, 24, 24], f"Expected [3,24,24], got {out_img.shape()}"
+    assert out_img.shape == [3, 24, 24], f"Expected [3,24,24], got {out_img.shape}"
 
 
 def test_gaussian_blur():
@@ -104,7 +104,7 @@ def test_gaussian_blur():
     img = _make_image(16, 16)
     target = tz.zeros([1])
     out_img, _ = t(img, target)
-    assert out_img.shape() == img.shape(), f"Shape mismatch: {out_img.shape()} vs {img.shape()}"
+    assert out_img.shape == img.shape, f"Shape mismatch: {out_img.shape} vs {img.shape}"
 
 
 def test_gaussian_blur_odd_kernel():
@@ -123,7 +123,7 @@ def test_random_affine():
     img = _make_image(32, 32)
     target = tz.zeros([1])
     out_img, _ = t(img, target)
-    assert out_img.shape() == img.shape(), f"Shape mismatch: {out_img.shape()} vs {img.shape()}"
+    assert out_img.shape == img.shape, f"Shape mismatch: {out_img.shape} vs {img.shape}"
 
 
 def test_random_affine_with_scale():
@@ -132,7 +132,7 @@ def test_random_affine_with_scale():
     img = _make_image(16, 16)
     target = tz.zeros([1])
     out_img, _ = t(img, target)
-    assert out_img.shape() == img.shape()
+    assert out_img.shape == img.shape
 
 
 def test_compose_new_transforms():
@@ -148,7 +148,7 @@ def test_compose_new_transforms():
     img = _make_image(32, 32)
     target = tz.zeros([1])
     out_img, _ = t(img, target)
-    assert out_img.shape() == [3, 28, 28], f"Expected [3,28,28], got {out_img.shape()}"
+    assert out_img.shape == [3, 28, 28], f"Expected [3,28,28], got {out_img.shape}"
 
 
 if __name__ == "__main__":

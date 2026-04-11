@@ -26,9 +26,9 @@ def test_huber_loss_basic():
     target = tz.Variable(tz.randn([4, 3]), False)
 
     loss = F.huber_loss(pred, target, delta=1.0, reduction="mean")
-    assert loss.shape() == [] or loss.tensor().numel() == 1
+    assert loss.shape == [] or loss.tensor().numel == 1
     loss.backward()
-    assert pred.grad() is not None
+    assert pred.grad is not None
 
 
 def test_huber_loss_reductions():
@@ -52,7 +52,7 @@ def test_smooth_l1_loss_gradient():
 
     loss = F.smooth_l1_loss(pred, target, beta=0.5)
     loss.backward()
-    assert pred.grad() is not None
+    assert pred.grad is not None
 
 
 def test_triplet_margin_loss():
@@ -66,9 +66,9 @@ def test_triplet_margin_loss():
     assert val >= 0.0, "Triplet loss should be non-negative"
 
     loss.backward()
-    assert anchor.grad() is not None
-    assert positive.grad() is not None
-    assert negative.grad() is not None
+    assert anchor.grad is not None
+    assert positive.grad is not None
+    assert negative.grad is not None
 
 
 def test_cosine_embedding_loss():
@@ -81,7 +81,7 @@ def test_cosine_embedding_loss():
 
     loss = F.cosine_embedding_loss(x1, x2, target, margin=0.0)
     loss.backward()
-    assert x1.grad() is not None
+    assert x1.grad is not None
 
 
 def test_bce_with_logits_gradient():
@@ -91,7 +91,7 @@ def test_bce_with_logits_gradient():
 
     loss = F.binary_cross_entropy_with_logits(logits, targets)
     loss.backward()
-    assert logits.grad() is not None
+    assert logits.grad is not None
 
 
 def test_kl_div_loss():
@@ -102,7 +102,7 @@ def test_kl_div_loss():
 
     loss = F.kl_div(log_probs, target, reduction="mean")
     loss.backward()
-    assert log_probs.grad() is not None
+    assert log_probs.grad is not None
 
 
 def test_mse_loss_zero_input():

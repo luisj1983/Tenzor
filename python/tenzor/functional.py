@@ -26,6 +26,28 @@ from .. import tenzor_core as _core
 _nn = _core.nn
 
 
+def _reduction(r):
+    """Accept a string reduction ('mean'|'sum'|'none') OR a Reduction enum.
+
+    The C++ bindings expose ``tenzor_core.nn.Reduction`` as a pybind11
+    enum, but all functional loss wrappers in this module accept a plain
+    Python string to match PyTorch's API. Pass-through enum values are
+    returned untouched so callers that already use the enum still work.
+    """
+    if isinstance(r, str):
+        key = r.lower()
+        if key == "mean":
+            return _nn.Reduction.MEAN
+        if key == "sum":
+            return _nn.Reduction.SUM
+        if key == "none":
+            return _nn.Reduction.NONE
+        raise ValueError(
+            f"Invalid reduction {r!r}. Expected 'mean', 'sum', or 'none'."
+        )
+    return r
+
+
 # ---------------------------------------------------------------------------
 # Activation functions
 # ---------------------------------------------------------------------------
@@ -384,7 +406,7 @@ def mse_loss(input: Variable, target: Variable, reduction: str = "mean") -> Vari
     -------
     >>> loss = F.mse_loss(predictions, targets)
     """
-    return _nn.mse_loss(input, target, reduction)
+    return _nn.mse_loss(input, target, _reduction(reduction))
 
 
 def l1_loss(input: Variable, target: Variable, reduction: str = "mean") -> Variable:
@@ -409,7 +431,7 @@ def l1_loss(input: Variable, target: Variable, reduction: str = "mean") -> Varia
     -------
     >>> loss = F.l1_loss(predictions, targets)
     """
-    return _nn.l1_loss(input, target, reduction)
+    return _nn.l1_loss(input, target, _reduction(reduction))
 
 
 def cross_entropy(input: Variable, target: Variable, reduction: str = "mean") -> Variable:
@@ -438,7 +460,7 @@ def cross_entropy(input: Variable, target: Variable, reduction: str = "mean") ->
     -------
     >>> loss = F.cross_entropy(logits, labels)
     """
-    return _nn.cross_entropy(input, target, reduction)
+    return _nn.cross_entropy(input, target, _reduction(reduction))
 
 
 def nll_loss(input: Variable, target: Variable, reduction: str = "mean") -> Variable:
@@ -464,7 +486,7 @@ def nll_loss(input: Variable, target: Variable, reduction: str = "mean") -> Vari
     >>> log_probs = F.log_softmax(logits, dim=-1)
     >>> loss = F.nll_loss(log_probs, labels)
     """
-    return _nn.nll_loss(input, target, reduction)
+    return _nn.nll_loss(input, target, _reduction(reduction))
 
 
 def bce_loss(input: Variable, target: Variable, reduction: str = "mean") -> Variable:
@@ -489,7 +511,7 @@ def bce_loss(input: Variable, target: Variable, reduction: str = "mean") -> Vari
     -------
     >>> loss = F.bce_loss(F.sigmoid(logits), labels)
     """
-    return _nn.bce_loss(input, target, reduction)
+    return _nn.bce_loss(input, target, _reduction(reduction))
 
 
 def kl_div(input: Variable, target: Variable, reduction: str = "mean", log_target: bool = False) -> Variable:
@@ -575,7 +597,7 @@ def smooth_l1_loss(input: Variable, target: Variable, reduction: str = "mean", b
     -------
     >>> loss = F.smooth_l1_loss(predictions, targets)
     """
-    return _nn.smooth_l1_loss(input, target, reduction, beta)
+    return _nn.smooth_l1_loss(input, target, _reduction(reduction), beta)
 
 
 def soft_margin_loss(input: Variable, target: Variable, reduction: str = "mean") -> Variable:
@@ -595,7 +617,7 @@ def soft_margin_loss(input: Variable, target: Variable, reduction: str = "mean")
     Variable
         Loss value.
     """
-    return _nn.soft_margin_loss(input, target, reduction)
+    return _nn.soft_margin_loss(input, target, _reduction(reduction))
 
 
 def hinge_embedding_loss(input: Variable, target: Variable, margin: float = 1.0, reduction: str = "mean") -> Variable:
@@ -617,7 +639,7 @@ def hinge_embedding_loss(input: Variable, target: Variable, margin: float = 1.0,
     Variable
         Loss value.
     """
-    return _nn.hinge_embedding_loss(input, target, margin, reduction)
+    return _nn.hinge_embedding_loss(input, target, margin, _reduction(reduction))
 
 
 def poisson_nll_loss(input: Variable, target: Variable, log_input: bool = True, full: bool = False, eps: float = 1e-8,
@@ -644,7 +666,7 @@ def poisson_nll_loss(input: Variable, target: Variable, log_input: bool = True, 
     Variable
         Loss value.
     """
-    return _nn.poisson_nll_loss(input, target, log_input, full, eps, reduction)
+    return _nn.poisson_nll_loss(input, target, log_input, full, eps, _reduction(reduction))
 
 
 def cosine_embedding_loss(input1: Variable, input2: Variable, target: Variable, margin: float = 0.0, reduction: str = "mean") -> Variable:
@@ -666,7 +688,7 @@ def cosine_embedding_loss(input1: Variable, input2: Variable, target: Variable, 
     Variable
         Loss value.
     """
-    return _nn.cosine_embedding_loss(input1, input2, target, margin, reduction)
+    return _nn.cosine_embedding_loss(input1, input2, target, margin, _reduction(reduction))
 
 
 def triplet_margin_loss(anchor: Variable, positive: Variable, negative: Variable, margin: float = 1.0, p: float = 2.0,
@@ -692,7 +714,7 @@ def triplet_margin_loss(anchor: Variable, positive: Variable, negative: Variable
         Loss value.
     """
     return _nn.triplet_margin_loss(anchor, positive, negative, margin, p,
-                                   swap, reduction)
+                                   swap, _reduction(reduction))
 
 
 def multi_label_soft_margin_loss(input: Variable, target: Variable, reduction: str = "mean") -> Variable:
@@ -712,7 +734,7 @@ def multi_label_soft_margin_loss(input: Variable, target: Variable, reduction: s
     Variable
         Loss value.
     """
-    return _nn.multi_label_soft_margin_loss(input, target, reduction)
+    return _nn.multi_label_soft_margin_loss(input, target, _reduction(reduction))
 
 
 def multi_margin_loss(input: Variable, target: Variable, p: int = 1, margin: float = 1.0, reduction: str = "mean") -> Variable:
@@ -736,7 +758,7 @@ def multi_margin_loss(input: Variable, target: Variable, p: int = 1, margin: flo
     Variable
         Loss value.
     """
-    return _nn.multi_margin_loss(input, target, p, margin, reduction)
+    return _nn.multi_margin_loss(input, target, p, margin, _reduction(reduction))
 
 
 def gaussian_nll_loss(input: Variable, target: Variable, var: Variable, full: bool = False, eps: float = 1e-6,
@@ -763,7 +785,7 @@ def gaussian_nll_loss(input: Variable, target: Variable, var: Variable, full: bo
     Variable
         Loss value.
     """
-    return _nn.gaussian_nll_loss(input, target, var, full, eps, reduction)
+    return _nn.gaussian_nll_loss(input, target, var, full, eps, _reduction(reduction))
 
 
 # ---------------------------------------------------------------------------
@@ -1232,7 +1254,7 @@ def binary_cross_entropy_with_logits(input: Variable, target: Variable, reductio
     -------
     >>> loss = F.binary_cross_entropy_with_logits(logits, labels)
     """
-    return _nn.functional_binary_cross_entropy_with_logits(input, target, reduction)
+    return _nn.functional_binary_cross_entropy_with_logits(input, target, _reduction(reduction))
 
 
 # ---------------------------------------------------------------------------

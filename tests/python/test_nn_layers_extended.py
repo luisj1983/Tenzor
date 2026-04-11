@@ -96,7 +96,9 @@ class TestAttention:
         q = make_var([4, 2, 32], device)  # seq=4, batch=2, embed=32
         k = make_var([4, 2, 32], device)
         v = make_var([4, 2, 32], device)
-        out = attn(q, k, v)
+        # forward takes multiple inputs; Module.__call__ only supports one.
+        # Returns (output, attn_weights) tuple.
+        out, _weights = attn.forward(q, k, v)
         assert out.data.shape[0] == 4
         assert out.data.shape[2] == 32
 
@@ -111,5 +113,6 @@ class TestEmbedding:
         emb = tz.nn.EmbeddingBag(10, 4, mode="sum")
         indices = tz.Variable(tz.tensor([0, 1, 2, 3], tz.dtype.int64, device), False)
         offsets = tz.Variable(tz.tensor([0, 2], tz.dtype.int64, device), False)
-        out = emb(indices, offsets)
+        # forward takes (indices, offsets); __call__ only passes one input.
+        out = emb.forward(indices, offsets)
         assert out.data.shape == [2, 4]

@@ -27,7 +27,7 @@ def test_cosine_similarity_basic():
 
     sim = F.cosine_similarity(x1, x2, dim=1)
     # Should produce [4] output
-    assert sim.tensor().numel() == 4
+    assert sim.tensor().numel == 4
 
 
 def test_cosine_similarity_identical():
@@ -36,10 +36,6 @@ def test_cosine_similarity_identical():
     x = tz.Variable(tz.randn([4, 8]), False)
     sim = F.cosine_similarity(x, x, dim=1)
     vals = sim.tensor()
-    # Each element should be close to 1.0
-    for i in range(4):
-        val = float(vals.item())  # Simplified; may need indexing
-    # At minimum, the mean should be close to 1
     mean_sim = float(vals.mean().item())
     assert mean_sim > 0.99, f"Self-similarity should be ~1, got {mean_sim}"
 
@@ -52,7 +48,7 @@ def test_conv2d_shape():
     w = tz.Variable(tz.randn([16, 3, 3, 3]), True)
 
     out = F.conv2d(x, w, stride=1, padding=1)
-    assert out.shape() == [2, 16, 8, 8], f"Expected [2,16,8,8], got {out.shape()}"
+    assert out.shape == [2, 16, 8, 8], f"Expected [2,16,8,8], got {out.shape}"
 
 
 def test_conv2d_gradient():
@@ -61,23 +57,23 @@ def test_conv2d_gradient():
     w = tz.Variable(tz.randn([1, 1, 3, 3]), True)
 
     out = F.conv2d(x, w, padding=1)
-    loss = out.tensor().sum()
-    tz.Variable(loss, True).backward()
+    # Reduce on the Variable so the autograd graph stays connected all
+    # the way back to x / w. Wrapping out.tensor().sum() in a fresh
+    # Variable would sever the graph and leave .grad = None.
+    zero_shape = [int(s) for s in out.shape]
+    target = tz.Variable(tz.zeros(zero_shape), False)
+    loss = F.mse_loss(out, target)
+    loss.backward()
 
-    assert x.grad() is not None, "Input should have gradients"
-    assert w.grad() is not None, "Weight should have gradients"
+    assert x.grad is not None, "Input should have gradients"
+    assert w.grad is not None, "Weight should have gradients"
 
 
 def test_normalize_basic():
     _init()
     x = tz.Variable(tz.randn([4, 8]), False)
     out = F.normalize(x, p=2.0, dim=1)
-    assert out.shape() == [4, 8]
-
-    # Each row should have unit L2 norm
-    # Check by computing norm of output
-    norms = out.tensor().norm()  # Overall norm
-    # Can't easily check per-row without indexing, but shape should match
+    assert out.shape == [4, 8]
 
 
 def test_normalize_preserves_direction():
@@ -85,7 +81,7 @@ def test_normalize_preserves_direction():
     _init()
     x = tz.Variable(tz.randn([2, 4]), False)
     out = F.normalize(x, p=2.0, dim=1)
-    assert out.shape() == x.shape()
+    assert out.shape == x.shape
 
 
 def test_sdpa_shape():
@@ -97,7 +93,7 @@ def test_sdpa_shape():
     v = tz.Variable(tz.randn([B, H, S, E]), True)
 
     out = F.scaled_dot_product_attention(q, k, v)
-    assert out.shape() == [B, H, L, E], f"Expected [{B},{H},{L},{E}], got {out.shape()}"
+    assert out.shape == [B, H, L, E], f"Expected [{B},{H},{L},{E}], got {out.shape}"
 
 
 def test_sdpa_causal():
@@ -109,7 +105,7 @@ def test_sdpa_causal():
     v = tz.Variable(tz.randn([B, H, L, E]), True)
 
     out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
-    assert out.shape() == [B, H, L, E]
+    assert out.shape == [B, H, L, E]
 
 
 if __name__ == "__main__":

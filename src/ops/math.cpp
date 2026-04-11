@@ -190,6 +190,44 @@ auto matmul(const Tensor& a, const Tensor& b) -> Tensor {
             auto result = bmm(ac, bc);
             return result;
         }
+        // 4D+ inputs: collapse leading batch dims into a single batch
+        // dimension, bmm, then restore the original leading shape. Requires
+        // both operands to share the same leading dims (standard PyTorch
+        // torch.matmul contract — no broadcasting across batch dims here).
+        if (ac.shape().size() > 3 || bc.shape().size() > 3) {
+            const auto& a_shape = ac.shape();
+            const auto& b_shape = bc.shape();
+            if (a_shape.size() != b_shape.size()) {
+                throw std::runtime_error(
+                    "matmul: 4D+ operands must have the same number of "
+                    "dimensions (got " + std::to_string(a_shape.size()) +
+                    "D and " + std::to_string(b_shape.size()) + "D)");
+            }
+            const int64_t ndim = static_cast<int64_t>(a_shape.size());
+            int64_t batch = 1;
+            for (int64_t i = 0; i < ndim - 2; ++i) {
+                if (a_shape[i] != b_shape[i]) {
+                    throw std::runtime_error(
+                        "matmul: batch dimensions must match, got " +
+                        std::to_string(a_shape[i]) + " vs " +
+                        std::to_string(b_shape[i]) + " at dim " +
+                        std::to_string(i));
+                }
+                batch *= a_shape[i];
+            }
+            const int64_t M = a_shape[ndim - 2];
+            const int64_t K = a_shape[ndim - 1];
+            const int64_t N = b_shape[ndim - 1];
+            auto ar = ac.reshape({batch, M, K});
+            auto br = bc.reshape({batch, K, N});
+            auto cr = bmm(ar, br);
+            // Rebuild the output shape: leading batch dims + (M, N).
+            std::vector<int64_t> out_shape(a_shape.begin(),
+                                           a_shape.begin() + (ndim - 2));
+            out_shape.push_back(M);
+            out_shape.push_back(N);
+            return cr.reshape(out_shape);
+        }
         return bmm(ac, bc);
     }
     auto ac = ap.is_contiguous() ? ap : ap.contiguous();

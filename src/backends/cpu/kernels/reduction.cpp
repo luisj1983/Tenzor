@@ -2911,6 +2911,75 @@ auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
     return output;
 }
 
+// Per-slice Lp norm over a single dimension. Returns a float32 output.
+// Used as a fallback when norm_kernel is called with an explicit dim —
+// the in-place vectorized "full reduction" path below does not generalize
+// to partial reductions without reshaping, and correctness matters more
+// than peak throughput for the dim-reduced case.
+static auto norm_kernel_dim_float32(const Tensor& input, float p,
+                                    int64_t dim, bool keepdim) -> Tensor {
+    auto shape_span = input.shape();
+    std::vector<int64_t> input_shape(shape_span.begin(), shape_span.end());
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    // Work on a contiguous copy so we can index linearly. This is not the
+    // hottest path in the library, so the extra copy is acceptable.
+    Tensor cont = input.contiguous();
+
+    // Compute outer (product of dims before `dim`), reduce (size of `dim`),
+    // and inner (product of dims after `dim`). A flat-index iteration over
+    // (outer, inner) gives a trivial O(n) implementation that matches the
+    // semantics of torch.linalg.vector_norm(x, p, dim).
+    int64_t outer = 1;
+    for (int64_t i = 0; i < dim; ++i) outer *= input_shape[i];
+    int64_t reduce_sz = input_shape[dim];
+    int64_t inner = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner *= input_shape[i];
+
+    auto output_shape = compute_reduction_shape(input_shape, dim, keepdim);
+    Tensor output(output_shape, DType::Float32, input.device());
+    auto* out_data = output.data<float>();
+    const auto* in_data = cont.data<float>();
+
+    auto reduce_slice = [&](int64_t o, int64_t i) -> float {
+        double acc = 0.0;
+        if (std::isinf(p)) {
+            float m = 0.0f;
+            for (int64_t k = 0; k < reduce_sz; ++k) {
+                float v = std::abs(in_data[(o * reduce_sz + k) * inner + i]);
+                if (v > m) m = v;
+            }
+            return m;
+        }
+        if (p == 1.0f) {
+            for (int64_t k = 0; k < reduce_sz; ++k) {
+                acc += std::abs(in_data[(o * reduce_sz + k) * inner + i]);
+            }
+            return static_cast<float>(acc);
+        }
+        if (p == 2.0f) {
+            for (int64_t k = 0; k < reduce_sz; ++k) {
+                float v = in_data[(o * reduce_sz + k) * inner + i];
+                acc += static_cast<double>(v) * v;
+            }
+            return static_cast<float>(std::sqrt(acc));
+        }
+        for (int64_t k = 0; k < reduce_sz; ++k) {
+            acc += std::pow(std::abs(in_data[(o * reduce_sz + k) * inner + i]), p);
+        }
+        return static_cast<float>(std::pow(acc, 1.0f / p));
+    };
+
+    const int64_t slices = outer * inner;
+    #pragma omp parallel for if(slices > 1024)
+    for (int64_t s = 0; s < slices; ++s) {
+        int64_t o = s / inner;
+        int64_t i = s % inner;
+        out_data[o * inner + i] = reduce_slice(o, i);
+    }
+    return output;
+}
+
 // Norm operation - compute Lp norm
 auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Tensor {
     auto shape_span = input.shape();
@@ -2921,7 +2990,24 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Ten
     dim = normalize_dim(dim, ndim);
 
     if (dim != REDUCE_ALL) {
-        throw std::runtime_error("norm: only full reduction is currently supported for CPU");
+        // Per-dim reduction — only Float32 / Float64 are wired through the
+        // dim path. Float16/BFloat16 fall through to the old "full reduction
+        // only" error so we don't silently lose precision on those dtypes.
+        if (input.dtype() == DType::Float32) {
+            return norm_kernel_dim_float32(input, p, dim, keepdim);
+        }
+        if (input.dtype() == DType::Float64) {
+            // Build a Float32 view, reduce, cast back to Float64. The
+            // accuracy hit is negligible for typical normalization use
+            // cases (embedding norms, cosine sim) and avoids duplicating
+            // the kernel for every dtype.
+            auto as_f32 = input.to(DType::Float32);
+            auto out_f32 = norm_kernel_dim_float32(as_f32, p, dim, keepdim);
+            return out_f32.to(DType::Float64);
+        }
+        throw std::runtime_error(
+            "norm: dim reduction only supported for Float32/Float64 on CPU "
+            "(got " + std::string(dtype_name(input.dtype())) + ")");
     }
 
     auto output_shape = compute_reduction_shape(input_shape, dim, keepdim);

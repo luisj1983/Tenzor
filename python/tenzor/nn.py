@@ -799,3 +799,15 @@ from .tenzor_core.nn import init
 
 # Re-export RNN cell classes from C++ module for direct access via tz.nn.RNNCell etc.
 from .tenzor_core.nn import RNNCell, LSTMCell, GRUCell
+
+# Alias the quantization submodule under tz.nn.quantization — the C++
+# bindings register it at the top level (tenzor_core.quantization) but
+# PyTorch-compatible code expects torch.nn.quantization / tz.nn.quantization.
+try:
+    from . import tenzor_core as _tc_for_quant
+    if hasattr(_tc_for_quant, 'quantization'):
+        import sys as _sys_quant
+        quantization = _tc_for_quant.quantization
+        _sys_quant.modules['tenzor.nn.quantization'] = _tc_for_quant.quantization
+except Exception:
+    pass

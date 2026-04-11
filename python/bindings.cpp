@@ -3282,14 +3282,15 @@ Example::
              "Enable gradient retention for non-leaf variables")
         .def_property_readonly("retains_grad", &tenzor::Variable::retains_grad,
              "Check if variable retains gradient")
-        // Shape convenience
-        .def("shape", [](const tenzor::Variable& self) {
+        // Shape / numel exposed as properties to match Tensor's API surface;
+        // callers can treat Variable.shape like Tensor.shape (a list).
+        .def_property_readonly("shape", [](const tenzor::Variable& self) {
             auto s = self.tensor().shape();
             return std::vector<int64_t>(s.begin(), s.end());
-        }, "Get the shape of the underlying tensor")
-        .def("numel", [](const tenzor::Variable& self) {
+        }, "Shape of the underlying tensor")
+        .def_property_readonly("numel", [](const tenzor::Variable& self) {
             return self.tensor().numel();
-        }, "Get the number of elements")
+        }, "Number of elements in the underlying tensor")
         .def("item", [](const tenzor::Variable& self) -> py::object {
             const auto& t = self.tensor();
             if (t.numel() != 1) {
