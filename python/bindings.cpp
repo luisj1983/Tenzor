@@ -4468,80 +4468,87 @@ Example::
 
         // ====================================================================
         // Hook system (PyTorch-compatible naming)
+        //
+        // Each register_*_hook returns a RemovableHandle (defined a few
+        // lines above where tenzor::nn::Module itself is bound) instead
+        // of a raw integer hook_id. RemovableHandle supports:
+        //   - handle.remove()     — PyTorch-style removal
+        //   - handle.id           — raw int for legacy callers
+        //   - int(handle)         — implicit conversion to int
+        //   - model.remove_hook(handle) — legacy path via __index__
         // ====================================================================
-        // Forward hooks - called after forward pass with input and output
-        .def("register_forward_hook", [](tenzor::nn::Module& self, py::object hook) {
+        .def("register_forward_hook", [](py::object self, py::object hook) -> py::object {
+            auto& mod = self.cast<tenzor::nn::Module&>();
             py::object hook_ref = hook;
-            return self.register_forward_post_hook([hook_ref](tenzor::nn::Module* m, const tenzor::Variable& input, const tenzor::Variable& output) {
-                py::gil_scoped_acquire acquire;
-                try {
+            size_t hook_id = mod.register_forward_post_hook(
+                [hook_ref](tenzor::nn::Module* m, const tenzor::Variable& input, const tenzor::Variable& output) {
+                    py::gil_scoped_acquire acquire;
                     hook_ref(m, input, output);
-                } catch (py::error_already_set&) {
-                    throw;
-                }
-            });
+                });
+            return py::module_::import("tenzor.nn").attr("RemovableHandle")(self, hook_id);
         }, py::arg("hook"),
-           "Register hook called after forward pass (PyTorch-compatible)")
-        .def("register_forward_pre_hook", [](tenzor::nn::Module& self, py::object hook) {
+           "Register hook called after forward pass (PyTorch-compatible). "
+           "Returns a RemovableHandle; call handle.remove() to detach.")
+        .def("register_forward_pre_hook", [](py::object self, py::object hook) -> py::object {
+            auto& mod = self.cast<tenzor::nn::Module&>();
             py::object hook_ref = hook;
-            return self.register_forward_pre_hook([hook_ref](tenzor::nn::Module* m, const tenzor::Variable& input) {
-                py::gil_scoped_acquire acquire;
-                try {
+            size_t hook_id = mod.register_forward_pre_hook(
+                [hook_ref](tenzor::nn::Module* m, const tenzor::Variable& input) {
+                    py::gil_scoped_acquire acquire;
                     hook_ref(m, input);
-                } catch (py::error_already_set&) {
-                    throw;
-                }
-            });
+                });
+            return py::module_::import("tenzor.nn").attr("RemovableHandle")(self, hook_id);
         }, py::arg("hook"),
-           "Register hook called before forward pass")
-        .def("register_backward_hook", [](tenzor::nn::Module& self, py::object hook) {
+           "Register hook called before forward pass. Returns a "
+           "RemovableHandle.")
+        .def("register_backward_hook", [](py::object self, py::object hook) -> py::object {
+            auto& mod = self.cast<tenzor::nn::Module&>();
             py::object hook_ref = hook;
-            return self.register_backward_post_hook([hook_ref](tenzor::nn::Module* m, const tenzor::Variable& grad_input, const tenzor::Variable& grad_output) {
-                py::gil_scoped_acquire acquire;
-                try {
+            size_t hook_id = mod.register_backward_post_hook(
+                [hook_ref](tenzor::nn::Module* m, const tenzor::Variable& grad_input, const tenzor::Variable& grad_output) {
+                    py::gil_scoped_acquire acquire;
                     hook_ref(m, grad_input, grad_output);
-                } catch (py::error_already_set&) {
-                    throw;
-                }
-            });
+                });
+            return py::module_::import("tenzor.nn").attr("RemovableHandle")(self, hook_id);
         }, py::arg("hook"),
-           "Register hook called after backward pass (PyTorch-compatible)")
-        .def("register_full_backward_hook", [](tenzor::nn::Module& self, py::object hook) {
+           "Register hook called after backward pass (PyTorch-compatible). "
+           "Returns a RemovableHandle.")
+        .def("register_full_backward_hook", [](py::object self, py::object hook) -> py::object {
+            auto& mod = self.cast<tenzor::nn::Module&>();
             py::object hook_ref = hook;
-            return self.register_backward_post_hook([hook_ref](tenzor::nn::Module* m, const tenzor::Variable& grad_input, const tenzor::Variable& grad_output) {
-                py::gil_scoped_acquire acquire;
-                try {
+            size_t hook_id = mod.register_backward_post_hook(
+                [hook_ref](tenzor::nn::Module* m, const tenzor::Variable& grad_input, const tenzor::Variable& grad_output) {
+                    py::gil_scoped_acquire acquire;
                     hook_ref(m, grad_input, grad_output);
-                } catch (py::error_already_set&) {
-                    throw;
-                }
-            });
+                });
+            return py::module_::import("tenzor.nn").attr("RemovableHandle")(self, hook_id);
         }, py::arg("hook"),
-           "Register hook called after backward pass with full gradients")
-        .def("register_full_backward_pre_hook", [](tenzor::nn::Module& self, py::object hook) {
+           "Register hook called after backward pass with full gradients. "
+           "Returns a RemovableHandle.")
+        .def("register_full_backward_pre_hook", [](py::object self, py::object hook) -> py::object {
+            auto& mod = self.cast<tenzor::nn::Module&>();
             py::object hook_ref = hook;
-            return self.register_backward_pre_hook([hook_ref](tenzor::nn::Module* m, const tenzor::Variable& grad_output) {
-                py::gil_scoped_acquire acquire;
-                try {
+            size_t hook_id = mod.register_backward_pre_hook(
+                [hook_ref](tenzor::nn::Module* m, const tenzor::Variable& grad_output) {
+                    py::gil_scoped_acquire acquire;
                     hook_ref(m, grad_output);
-                } catch (py::error_already_set&) {
-                    throw;
-                }
-            });
+                });
+            return py::module_::import("tenzor.nn").attr("RemovableHandle")(self, hook_id);
         }, py::arg("hook"),
-           "Register hook called before backward pass")
-        .def("register_forward_post_hook", [](tenzor::nn::Module& self, py::object hook) {
+           "Register hook called before backward pass. Returns a "
+           "RemovableHandle.")
+        .def("register_forward_post_hook", [](py::object self, py::object hook) -> py::object {
+            auto& mod = self.cast<tenzor::nn::Module&>();
             py::object hook_ref = hook;
-            return self.register_forward_post_hook([hook_ref](tenzor::nn::Module* m, const tenzor::Variable& input, const tenzor::Variable& output) {
-                py::gil_scoped_acquire acquire;
-                try {
+            size_t hook_id = mod.register_forward_post_hook(
+                [hook_ref](tenzor::nn::Module* m, const tenzor::Variable& input, const tenzor::Variable& output) {
+                    py::gil_scoped_acquire acquire;
                     hook_ref(m, input, output);
-                } catch (py::error_already_set&) {
-                    throw;
-                }
-            });
+                });
+            return py::module_::import("tenzor.nn").attr("RemovableHandle")(self, hook_id);
         }, py::arg("hook"),
-           "Register hook called after forward pass")
+           "Register hook called after forward pass. Returns a "
+           "RemovableHandle.")
         .def("remove_hook", &tenzor::nn::Module::remove_hook,
              py::arg("hook_id"),
              "Remove a registered hook by ID")

@@ -107,9 +107,95 @@ def test_multiple_hooks():
     model.remove_hook(id_b)
 
 
+def test_register_returns_removable_handle():
+    """Phase 2.5: register_*_hook should return a RemovableHandle, not a
+    raw int. The handle exposes .remove() (PyTorch-style) and still
+    works as an integer hook_id for legacy callers via __int__ /
+    __index__."""
+    _init()
+    model = tz.nn.Linear(4, 2)
+    handle = model.register_forward_hook(lambda m, i, o: None)
+
+    # PyTorch-compatible API
+    assert type(handle).__name__ == "RemovableHandle"
+    assert hasattr(handle, "remove")
+    assert hasattr(handle, "id")
+    assert isinstance(handle.id, int)
+
+    # Legacy int path: int(handle) and __index__ both work
+    assert int(handle) == handle.id
+    # __index__ lets the raw C++ remove_hook(size_t) accept the handle
+    model.remove_hook(handle)  # does not raise
+
+
+def test_handle_remove_detaches_hook():
+    _init()
+    model = tz.nn.Linear(4, 2)
+    calls = [0]
+    handle = model.register_forward_hook(lambda m, i, o: calls.__setitem__(0, calls[0] + 1))
+
+    x = tz.Variable(tz.randn([2, 4]), False)
+    _ = model(x)
+    assert calls[0] == 1
+
+    handle.remove()
+    _ = model(x)
+    assert calls[0] == 1, "hook should not fire after handle.remove()"
+
+
+def test_handle_remove_is_idempotent():
+    _init()
+    model = tz.nn.Linear(4, 2)
+    handle = model.register_forward_hook(lambda m, i, o: None)
+    handle.remove()
+    # Second call must not raise
+    handle.remove()
+
+
+def test_handle_preserves_legacy_int_path():
+    """Old code that captured hook_id as an int still works because
+    RemovableHandle exposes __int__."""
+    _init()
+    model = tz.nn.Linear(4, 2)
+    hid = int(model.register_forward_hook(lambda m, i, o: None))
+    assert isinstance(hid, int)
+    model.remove_hook(hid)   # takes a raw int
+
+
+def test_handle_survives_module_outliving():
+    """The handle should not keep its referenced module alive; it uses a
+    weak reference internally. Once the module is dropped, .remove()
+    is a silent no-op rather than a crash."""
+    _init()
+    import weakref
+    model = tz.nn.Linear(4, 2)
+    handle = model.register_forward_hook(lambda m, i, o: None)
+    ref = weakref.ref(model)
+    del model
+    # Module may or may not be collected immediately — pybind11 holds a
+    # strong ref until the Python-side ref drops. Either way, calling
+    # handle.remove() must not crash.
+    handle.remove()
+
+
+def test_full_backward_hook_registration():
+    """register_full_backward_hook also returns a RemovableHandle."""
+    _init()
+    model = tz.nn.Linear(4, 2)
+    handle = model.register_full_backward_hook(lambda m, gi, go: None)
+    assert type(handle).__name__ == "RemovableHandle"
+    handle.remove()
+
+
 if __name__ == "__main__":
     test_forward_hook_called()
     test_forward_pre_hook_called()
     test_hook_removal()
     test_multiple_hooks()
+    test_register_returns_removable_handle()
+    test_handle_remove_detaches_hook()
+    test_handle_remove_is_idempotent()
+    test_handle_preserves_legacy_int_path()
+    test_handle_survives_module_outliving()
+    test_full_backward_hook_registration()
     print("All hook tests passed!")

@@ -20,6 +20,7 @@ Example:
 from __future__ import annotations
 
 import threading
+import weakref
 from typing import Any, Callable, Iterator, Optional
 
 from . import tenzor_core as _core
@@ -30,6 +31,62 @@ _CppModule = _core.nn.Module
 # Re-export all nn items from the C++ module (including the original Module)
 # We'll override Module below
 from .tenzor_core.nn import *
+
+
+class RemovableHandle:
+    """Handle returned by ``Module.register_*_hook`` that supports both the
+    PyTorch-style ``handle.remove()`` API and the legacy integer hook_id
+    API via ``__int__`` / ``__index__``.
+
+    Matches torch.utils.hooks.RemovableHandle semantics: calling
+    :meth:`remove` more than once is a no-op, and the handle holds the
+    owning module via a weak reference so it doesn't keep dead modules
+    alive after the user drops them.
+    """
+
+    __slots__ = ("_module_ref", "_hook_id", "_removed")
+
+    def __init__(self, module: "Module", hook_id: int) -> None:
+        # weakref.ref — if the module is garbage-collected before the
+        # handle is removed, remove() becomes a no-op rather than
+        # dereferencing a dangling pointer on the C++ side.
+        self._module_ref = weakref.ref(module)
+        self._hook_id = int(hook_id)
+        self._removed = False
+
+    @property
+    def id(self) -> int:
+        """Underlying hook id (same value returned by the raw C++ API)."""
+        return self._hook_id
+
+    def remove(self) -> None:
+        """Remove the registered hook. Idempotent and safe after the
+        source module has been collected."""
+        if self._removed:
+            return
+        module = self._module_ref()
+        if module is not None:
+            # _CppModule.remove_hook is the raw C++ binding; going
+            # through it (rather than Module.remove_hook) keeps this
+            # method usable even if a subclass overrides remove_hook.
+            _CppModule.remove_hook(module, self._hook_id)
+        self._removed = True
+
+    # Backward compatibility: older code uses the raw int hook_id.
+    # `__int__` lets `int(handle)` succeed; `__index__` lets the handle
+    # flow through pybind11's size_t-typed `remove_hook(hook_id)` overload
+    # without an explicit cast. Existing tests that captured the return
+    # value as `hook_id = model.register_forward_hook(...)` and later
+    # called `model.remove_hook(hook_id)` continue to work unchanged.
+    def __int__(self) -> int:
+        return self._hook_id
+
+    def __index__(self) -> int:
+        return self._hook_id
+
+    def __repr__(self) -> str:
+        state = "removed" if self._removed else "active"
+        return f"RemovableHandle(id={self._hook_id}, {state})"
 
 
 class Module(_CppModule):
@@ -342,7 +399,7 @@ class Module(_CppModule):
     # Hook API (methods are inherited from C++ via pybind11 bindings)
     # ----------------------------------------------------------------
 
-    def register_forward_hook(self, hook: Callable) -> int:
+    def register_forward_hook(self, hook: Callable) -> RemovableHandle:
         """Register a forward hook on the module.
 
         The hook is called every time after :meth:`forward` computes an output.
@@ -351,29 +408,34 @@ class Module(_CppModule):
             hook: Callable with signature ``hook(module, input, output) -> None or modified output``.
 
         Returns:
-            Hook ID that can be passed to :meth:`remove_hook`.
+            :class:`RemovableHandle` — call ``handle.remove()`` to detach
+            the hook. For backward compatibility the handle also acts as
+            an integer hook id, so ``model.remove_hook(handle)`` still
+            works for callers written against the pre-PyTorch-compat API.
 
         Example::
 
             def print_output(module, input, output):
                 print(f"{module.__class__.__name__} output shape: {output.shape()}")
 
-            hook_id = model.fc1.register_forward_hook(print_output)
+            handle = model.fc1.register_forward_hook(print_output)
+            ...
+            handle.remove()
         """
-        return _CppModule.register_forward_hook(self, hook)
+        return RemovableHandle(self, _CppModule.register_forward_hook(self, hook))
 
-    def register_forward_pre_hook(self, hook: Callable) -> int:
+    def register_forward_pre_hook(self, hook: Callable) -> RemovableHandle:
         """Register a hook called before each forward call.
 
         Args:
             hook: Callable with signature ``hook(module, input) -> None or modified input``.
 
         Returns:
-            Hook ID that can be passed to :meth:`remove_hook`.
+            :class:`RemovableHandle` — call ``handle.remove()`` to detach.
         """
-        return _CppModule.register_forward_pre_hook(self, hook)
+        return RemovableHandle(self, _CppModule.register_forward_pre_hook(self, hook))
 
-    def register_backward_hook(self, hook: Callable) -> int:
+    def register_backward_hook(self, hook: Callable) -> RemovableHandle:
         """Register a backward hook on the module.
 
         .. deprecated::
@@ -384,11 +446,11 @@ class Module(_CppModule):
             hook: Callable with signature ``hook(module, grad_input, grad_output)``.
 
         Returns:
-            Hook ID that can be passed to :meth:`remove_hook`.
+            :class:`RemovableHandle` — call ``handle.remove()`` to detach.
         """
-        return _CppModule.register_backward_hook(self, hook)
+        return RemovableHandle(self, _CppModule.register_backward_hook(self, hook))
 
-    def register_full_backward_hook(self, hook: Callable) -> int:
+    def register_full_backward_hook(self, hook: Callable) -> RemovableHandle:
         """Register a backward hook on the module.
 
         The hook is called every time the gradients w.r.t. the module
@@ -398,27 +460,27 @@ class Module(_CppModule):
             hook: Callable with signature ``hook(module, grad_input, grad_output) -> None or modified grad_input``.
 
         Returns:
-            Hook ID that can be passed to :meth:`remove_hook`.
+            :class:`RemovableHandle` — call ``handle.remove()`` to detach.
 
         Example::
 
             def clip_grad(module, grad_input, grad_output):
                 return tuple(g.clamp(-1, 1) if g is not None else g for g in grad_input)
 
-            hook_id = model.fc1.register_full_backward_hook(clip_grad)
+            handle = model.fc1.register_full_backward_hook(clip_grad)
         """
-        return _CppModule.register_full_backward_hook(self, hook)
+        return RemovableHandle(self, _CppModule.register_full_backward_hook(self, hook))
 
-    def register_full_backward_pre_hook(self, hook: Callable) -> int:
+    def register_full_backward_pre_hook(self, hook: Callable) -> RemovableHandle:
         """Register a hook called before the backward pass.
 
         Args:
             hook: Callable with signature ``hook(module, grad_output) -> None or modified grad_output``.
 
         Returns:
-            Hook ID that can be passed to :meth:`remove_hook`.
+            :class:`RemovableHandle` — call ``handle.remove()`` to detach.
         """
-        return _CppModule.register_full_backward_pre_hook(self, hook)
+        return RemovableHandle(self, _CppModule.register_full_backward_pre_hook(self, hook))
 
     def remove_hook(self, hook_id: int) -> None:
         """Remove a previously registered hook.
