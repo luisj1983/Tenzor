@@ -1516,6 +1516,24 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
     int32_t device_id = input.device().index;
     int64_t numel = input.numel();
 
+    // Complex casts: there is no Vulkan compute shader for real↔complex
+    // reinterpretation, and the generic two-step-via-Float32 fallback
+    // below infinitely recurses for (Float32 ↔ Complex64) because one of
+    // the legs is a no-op that returns the same tensor back into
+    // dispatchCast. Round-trip via CPU for correctness — complex storage
+    // is interleaved (re, im) pairs of the underlying real type, so the
+    // CPU cast produces the exact bit layout Vulkan expects. This
+    // mirrors the FP8 fallback in the CUDA cast kernel.
+    auto is_complex_of = [](DType d) {
+        return d == DType::Complex64 || d == DType::Complex128;
+    };
+    if (is_complex_of(src_dtype) != is_complex_of(target_dtype) ||
+        (is_complex_of(src_dtype) && is_complex_of(target_dtype) && src_dtype != target_dtype)) {
+        Tensor cpu_input = input.to(Device::cpu());
+        Tensor cpu_result = cpu_input.to(target_dtype);
+        return cpu_result.to(input.device());
+    }
+
     // Determine shader name based on source/target dtype pair
     std::string shader_name;
     bool two_step = false;
@@ -1837,8 +1855,50 @@ auto VulkanBackend::dispatchFlatten(const Tensor& input, int64_t start_dim, int6
 
 auto VulkanBackend::dispatchBatchNorm2dUpdateRunningStats(
     std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-    auto& table = DispatchTableRegistry::get_table(Device::Type::Vulkan);
-    return table.dispatch(OpId::BatchNorm2dUpdateRunningStats, inputs, attrs);
+    // Previously this delegated to the dispatch table, but the dispatch
+    // table's entry for OpId::BatchNorm2dUpdateRunningStats calls this
+    // same function — infinite recursion that left BN-train hanging
+    // until stack overflow. Implement the EMA update directly via the
+    // existing elementwise ops:
+    //
+    //     new_running = (1 - momentum) * running + momentum * batch
+    //
+    // on both running_mean and running_var.
+    //
+    // inputs: [running_mean, running_var, batch_mean, batch_var]
+    if (inputs.size() < 4) {
+        throw std::runtime_error(
+            "BatchNorm2dUpdateRunningStats expects 4 tensors "
+            "(running_mean, running_var, batch_mean, batch_var)");
+    }
+
+    const Tensor& running_mean = inputs[0];
+    const Tensor& running_var  = inputs[1];
+    const Tensor& batch_mean   = inputs[2];
+    const Tensor& batch_var    = inputs[3];
+
+    float momentum =
+        static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.1));
+    float one_minus_m = 1.0f - momentum;
+
+    auto mix = [&](const Tensor& running, const Tensor& batch) -> Tensor {
+        // Scale running by (1 - momentum) using a broadcast with a
+        // filled 1-element tensor. dispatchBinaryOp handles broadcast
+        // across a scalar shape.
+        auto scale_r = dispatchFill(
+            Tensor({1}, running.dtype(), running.device()), one_minus_m);
+        auto scale_b = dispatchFill(
+            Tensor({1}, batch.dtype(), batch.device()), momentum);
+
+        auto r_scaled = dispatchBinaryOp("mul", running, scale_r);
+        auto b_scaled = dispatchBinaryOp("mul", batch,   scale_b);
+        return dispatchBinaryOp("add", r_scaled, b_scaled);
+    };
+
+    auto new_running_mean = mix(running_mean, batch_mean);
+    auto new_running_var  = mix(running_var,  batch_var);
+
+    return {new_running_mean, new_running_var};
 }
 
 auto VulkanBackend::dispatchFusedRMSPropStep(

@@ -182,13 +182,20 @@ void mkl_fft_1d_complex(const CType* src, CType* dst,
         check_dfti_status(DftiSetValue(desc.get(), DFTI_NUMBER_OF_TRANSFORMS, batch), "fft_1d_complex");
         check_dfti_status(DftiSetValue(desc.get(), DFTI_PLACEMENT, DFTI_NOT_INPLACE), "fft_1d_complex");
 
-        // Input stride: [0, 1] for contiguous complex data
-        // Input distance between transforms: N_in elements
+        // When N_in != N_out we build a padded (or truncated) copy
+        // below. In that case the input stride/distance refers to the
+        // PADDED buffer (N_out between batches), not the original src
+        // buffer (N_in). Previously this was hard-coded to N_in, so
+        // only batch 0 read correct data — every later batch read from
+        // an offset into the padded buffer that didn't line up with
+        // its padded row, producing garbage for batch >= 1.
         MKL_LONG input_strides[2] = {0, 1};
         MKL_LONG output_strides[2] = {0, 1};
         check_dfti_status(DftiSetValue(desc.get(), DFTI_INPUT_STRIDES, input_strides), "fft_1d_complex");
         check_dfti_status(DftiSetValue(desc.get(), DFTI_OUTPUT_STRIDES, output_strides), "fft_1d_complex");
-        check_dfti_status(DftiSetValue(desc.get(), DFTI_INPUT_DISTANCE, static_cast<MKL_LONG>(N_in)), "fft_1d_complex");
+        MKL_LONG input_distance = (N_in == N_out) ? static_cast<MKL_LONG>(N_in)
+                                                  : static_cast<MKL_LONG>(N_out);
+        check_dfti_status(DftiSetValue(desc.get(), DFTI_INPUT_DISTANCE, input_distance), "fft_1d_complex");
         check_dfti_status(DftiSetValue(desc.get(), DFTI_OUTPUT_DISTANCE, static_cast<MKL_LONG>(N_out)), "fft_1d_complex");
 
         // Set scaling

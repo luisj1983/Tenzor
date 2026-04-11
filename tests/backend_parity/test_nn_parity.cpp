@@ -239,13 +239,6 @@ TEST(NNOperationParity, BatchNorm2d_Train) {
     auto ref_output = bn.forward(Variable(input, false)).tensor();
 
     for (size_t i = 1; i < backends.size(); ++i) {
-        // Known issue: the Vulkan BN train path hangs on AMD drivers
-        // during the batch-stats dispatch (BatchNorm2dMeanVar /
-        // BatchNorm2dUpdateRunningStats). Until that's fixed in the
-        // Vulkan backend the test skips Vulkan explicitly — the eval
-        // path below still runs against it.
-        if (backends[i].type == Device::Type::Vulkan) continue;
-
         nn::BatchNorm2d bn_dev(16);
         bn_dev.train();
         auto params = bn.parameters();
@@ -276,12 +269,6 @@ TEST(NNOperationParity, BatchNorm2d_Eval) {
     auto ref_output = bn.forward(Variable(input, false)).tensor();
 
     for (size_t i = 1; i < backends.size(); ++i) {
-        // BN_Eval's setup runs a training forward on the backend to
-        // populate running stats; Vulkan's train-mode BN hangs on AMD
-        // drivers (see BatchNorm2d_Train for context), so the eval
-        // comparison skips Vulkan until that's fixed in the backend.
-        if (backends[i].type == Device::Type::Vulkan) continue;
-
         nn::BatchNorm2d bn_dev(16);
         bn_dev.train();
         auto params = bn.parameters();

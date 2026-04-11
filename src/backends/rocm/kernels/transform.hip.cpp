@@ -1103,6 +1103,40 @@ static Tensor cast_from_standard(const Tensor& input, DType target_dtype, int64_
     return result;
 }
 
+// Complex64/Complex128 conversions: the storage is interleaved
+// (re, im) pairs of float/double, so the generic cast_kernel_impl
+// doesn't apply. Handle the common Float↔Complex pairs directly.
+__global__ void cast_f32_to_c64_kernel_rocm(const float* in, float* out, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(i, n) {
+        out[2 * i]     = in[i];
+        out[2 * i + 1] = 0.0f;
+    }
+}
+__global__ void cast_f64_to_c128_kernel_rocm(const double* in, double* out, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(i, n) {
+        out[2 * i]     = in[i];
+        out[2 * i + 1] = 0.0;
+    }
+}
+__global__ void cast_c64_to_f32_kernel_rocm(const float* in, float* out, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(i, n) { out[i] = in[2 * i]; }
+}
+__global__ void cast_c128_to_f64_kernel_rocm(const double* in, double* out, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(i, n) { out[i] = in[2 * i]; }
+}
+__global__ void cast_c64_to_c128_kernel_rocm(const float* in, double* out, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(i, n) {
+        out[2 * i]     = static_cast<double>(in[2 * i]);
+        out[2 * i + 1] = static_cast<double>(in[2 * i + 1]);
+    }
+}
+__global__ void cast_c128_to_c64_kernel_rocm(const double* in, float* out, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(i, n) {
+        out[2 * i]     = static_cast<float>(in[2 * i]);
+        out[2 * i + 1] = static_cast<float>(in[2 * i + 1]);
+    }
+}
+
 auto cast_kernel(const Tensor& input, DType target_dtype, hipStream_t stream) -> Tensor {
     if (input.dtype() == target_dtype) {
         return input;
@@ -1113,6 +1147,66 @@ auto cast_kernel(const Tensor& input, DType target_dtype, hipStream_t stream) ->
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
 
     DType src_dtype = input.dtype();
+
+    // Complex conversions: short-circuit before the generic per-type
+    // dispatch. Complex64/128 storage is interleaved pairs of the
+    // underlying real type, so we can't just treat it as a single
+    // scalar and cast_kernel_impl would corrupt the layout. Same set
+    // of paths as the CUDA and OneAPI cast kernels.
+    if (src_dtype == DType::Float32 && target_dtype == DType::Complex64) {
+        Tensor result(shape, target_dtype, input.device());
+        hipLaunchKernelGGL(cast_f32_to_c64_kernel_rocm,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<float>(),
+            reinterpret_cast<float*>(const_cast<void*>(result.data_ptr())), n);
+        HIP_CHECK(hipGetLastError());
+        return result;
+    }
+    if (src_dtype == DType::Float64 && target_dtype == DType::Complex128) {
+        Tensor result(shape, target_dtype, input.device());
+        hipLaunchKernelGGL(cast_f64_to_c128_kernel_rocm,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<double>(),
+            reinterpret_cast<double*>(const_cast<void*>(result.data_ptr())), n);
+        HIP_CHECK(hipGetLastError());
+        return result;
+    }
+    if (src_dtype == DType::Complex64 && target_dtype == DType::Float32) {
+        Tensor result(shape, target_dtype, input.device());
+        hipLaunchKernelGGL(cast_c64_to_f32_kernel_rocm,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const float*>(input.data_ptr()),
+            result.data<float>(), n);
+        HIP_CHECK(hipGetLastError());
+        return result;
+    }
+    if (src_dtype == DType::Complex128 && target_dtype == DType::Float64) {
+        Tensor result(shape, target_dtype, input.device());
+        hipLaunchKernelGGL(cast_c128_to_f64_kernel_rocm,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const double*>(input.data_ptr()),
+            result.data<double>(), n);
+        HIP_CHECK(hipGetLastError());
+        return result;
+    }
+    if (src_dtype == DType::Complex64 && target_dtype == DType::Complex128) {
+        Tensor result(shape, target_dtype, input.device());
+        hipLaunchKernelGGL(cast_c64_to_c128_kernel_rocm,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const float*>(input.data_ptr()),
+            reinterpret_cast<double*>(const_cast<void*>(result.data_ptr())), n);
+        HIP_CHECK(hipGetLastError());
+        return result;
+    }
+    if (src_dtype == DType::Complex128 && target_dtype == DType::Complex64) {
+        Tensor result(shape, target_dtype, input.device());
+        hipLaunchKernelGGL(cast_c128_to_c64_kernel_rocm,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const double*>(input.data_ptr()),
+            reinterpret_cast<float*>(const_cast<void*>(result.data_ptr())), n);
+        HIP_CHECK(hipGetLastError());
+        return result;
+    }
 
     // Float16 source
     if (src_dtype == DType::Float16) {

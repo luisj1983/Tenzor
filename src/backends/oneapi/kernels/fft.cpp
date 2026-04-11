@@ -10,6 +10,7 @@
  */
 
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/ops/fft.hpp"
 #include <sycl/sycl.hpp>
 #include <stdexcept>
 #include <vector>
@@ -185,6 +186,21 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
     if (dim < 0) dim += ndim;
 
     int64_t signal_len = shape[dim];
+
+    // Zero-pad / truncate when the requested length differs from the
+    // input length along the FFT dimension. Previously this kernel
+    // silently ignored `n` and always ran a length-signal_len FFT,
+    // which means tests with zero-padding failed with both wrong
+    // values and wrong shape. Fall back to a CPU round-trip for the
+    // rare n != signal_len case — oneMKL's device-side DFT doesn't
+    // have a built-in padding/truncation mode and replicating the
+    // shape-accounting inline is a significant rewrite. Correctness
+    // over throughput.
+    if (n != signal_len) {
+        Tensor cpu_input = input.to(Device::cpu());
+        Tensor cpu_result = tenzor::fft::fft(cpu_input, n, dim, norm);
+        return cpu_result.to(input.device());
+    }
 
     int64_t batch_size = 1;
     for (int64_t i = 0; i < dim; ++i) batch_size *= shape[i];
