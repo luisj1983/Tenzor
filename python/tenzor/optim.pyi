@@ -108,6 +108,22 @@ class Adadelta(Optimizer):
 
     def step(self, closure: Optional[Callable[[], float]] = None) -> Optional[float]: ...
 
+class LBFGS(Optimizer):
+    """L-BFGS quasi-Newton optimizer. Requires a closure for line search."""
+
+    def __init__(
+        self,
+        params: Iterable[Tensor],
+        lr: float = 1.0,
+        max_iter: int = 20,
+        max_eval: int = -1,
+        tolerance_grad: float = 1e-7,
+        tolerance_change: float = 1e-9,
+        history_size: int = 100
+    ) -> None: ...
+
+    def step(self, closure: Callable[[], float]) -> float: ...
+
 class AdamaxOptimizer(Optimizer):
     """Adamax optimizer (variant of Adam based on infinity norm)."""
 

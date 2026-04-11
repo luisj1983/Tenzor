@@ -22,6 +22,7 @@
 #include <rocsparse/rocsparse.h>
 #include <hip/hip_runtime.h>
 #include "../hip_buffer.hpp"
+#include "../rocsparse_handle_pool.hpp"
 #include <climits>
 #include <cstdint>
 #include <limits>
@@ -49,16 +50,7 @@ namespace {
         }                                                                       \
     } while (0)
 
-#define ROCSPARSE_CHECK(call)                                                   \
-    do {                                                                         \
-        rocsparse_status status = (call);                                       \
-        if (status != rocsparse_status_success) {                               \
-            throw std::runtime_error(                                           \
-                std::string("rocSPARSE error at ") + __FILE__ + ":" +          \
-                std::to_string(__LINE__) + " - status " +                      \
-                std::to_string(static_cast<int>(status)));                     \
-        }                                                                       \
-    } while (0)
+// ROCSPARSE_CHECK is provided by rocsparse_handle_pool.hpp
 
 /// Convert span to vector (HIP compiler may not do implicit span->vector).
 std::vector<int64_t> to_vec(std::span<const int64_t> s) {
@@ -94,29 +86,9 @@ struct DnVecGuard {
     DnVecGuard& operator=(const DnVecGuard&) = delete;
 };
 
-/// RAII wrapper for per-thread rocSPARSE handle.
-struct RocsparseHandleRAII {
-    rocsparse_handle handle = nullptr;
-
-    RocsparseHandleRAII() {
-        ROCSPARSE_CHECK(rocsparse_create_handle(&handle));
-    }
-
-    ~RocsparseHandleRAII() noexcept {
-        if (handle && is_backend_registry_alive()) {
-            try { rocsparse_destroy_handle(handle); }
-            catch (...) { /* suppress — destructor must not throw */ }
-        }
-    }
-
-    RocsparseHandleRAII(const RocsparseHandleRAII&) = delete;
-    RocsparseHandleRAII& operator=(const RocsparseHandleRAII&) = delete;
-};
-
-/// Per-thread rocSPARSE handle.
-rocsparse_handle get_rocsparse_handle() {
-    static thread_local RocsparseHandleRAII wrapper;
-    return wrapper.handle;
+/// Per-thread rocSPARSE handle — forwards to the shared pool.
+inline rocsparse_handle get_rocsparse_handle() {
+    return RocSPARSEHandlePool::get();
 }
 
 /// Get rocSPARSE data type from DType.

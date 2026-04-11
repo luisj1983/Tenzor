@@ -122,6 +122,25 @@ private:
 };
 
 /**
+ * @brief 3D spatial dropout layer.
+ *
+ * Randomly zeros entire feature channels across all spatial dimensions.
+ * For inputs with shape (N, C, D, H, W), drops entire C x D x H x W maps.
+ * The 3D analogue of Dropout2d; use for volumetric / 3D-conv networks.
+ *
+ * Shape:
+ * - Input: (N, C, D, H, W) or (C, D, H, W)
+ * - Output: same shape
+ */
+class Dropout3d : public Module {
+public:
+    explicit Dropout3d(double p = 0.5);
+    auto forward_impl(const Variable& input) -> Variable override;
+private:
+    double p_;
+};
+
+/**
  * @brief Alpha dropout for SELU networks.
  *
  * Maintains the self-normalizing property of SELU networks by using

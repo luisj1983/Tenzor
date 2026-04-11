@@ -82,6 +82,9 @@ public:
     /** Return the number of nodes in the graph. */
     auto num_nodes() const -> size_t;
 
+    /** Read-only access to the node list (for serialization). */
+    auto nodes() const -> const std::vector<LiteNode>& { return nodes_; }
+
 private:
     std::vector<LiteNode> nodes_;
 };

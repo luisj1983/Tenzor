@@ -72,10 +72,14 @@ QuantizedLinear::QuantizedLinear(
     bias_scale_(bias_scale) {}
 
 auto QuantizedLinear::forward_impl(const Variable& input) -> Variable {
-    // Quantize input, perform computation, dequantize output
+    // QuantizedLinear is an inference-only int8 layer (analogous to
+    // torch.ao.nn.quantized.Linear). The int8 matmul is not differentiable;
+    // gradients cannot flow through. For QAT training, compose a regular
+    // Linear with a FakeQuantize module, which uses the STE backward path.
+    // Returning a Variable with requires_grad=false makes this honest.
     auto q_input = quantize_per_tensor_symmetric(input.tensor());
     Tensor output = forward_quantized(q_input);
-    return Variable(output, input.requires_grad());
+    return Variable(output, /*requires_grad=*/false);
 }
 
 auto QuantizedLinear::forward_quantized(const QuantizedTensor& input) -> Tensor {
@@ -255,9 +259,11 @@ QuantizedConv2d::QuantizedConv2d(
     bias_scale_(bias_scale) {}
 
 auto QuantizedConv2d::forward_impl(const Variable& input) -> Variable {
+    // Inference-only: see QuantizedLinear::forward_impl for rationale.
+    // Compose Conv2d + FakeQuantize for QAT training instead.
     auto q_input = quantize_per_tensor_symmetric(input.tensor());
     Tensor output = forward_quantized(q_input);
-    return Variable(output, input.requires_grad());
+    return Variable(output, /*requires_grad=*/false);
 }
 
 auto QuantizedConv2d::forward_quantized(const QuantizedTensor& input) -> Tensor {

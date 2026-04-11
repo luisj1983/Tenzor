@@ -206,4 +206,113 @@ auto Linear::reset_parameters() -> void {
     }
 }
 
+// ============================================================================
+// Bilinear
+// ============================================================================
+
+Bilinear::Bilinear(int64_t in1_features, int64_t in2_features,
+                   int64_t out_features, bool bias)
+    : in1_features_(in1_features),
+      in2_features_(in2_features),
+      out_features_(out_features),
+      has_bias_(bias) {
+    if (in1_features <= 0 || in2_features <= 0 || out_features <= 0) {
+        throw std::runtime_error("Bilinear: all feature sizes must be positive");
+    }
+
+    // PyTorch uses bound = 1/sqrt(in1_features) for both weight and bias.
+    float bound = 1.0f / std::sqrt(static_cast<float>(in1_features));
+    Variable weight(
+        rand({out_features, in1_features, in2_features}) * (2.0f * bound) - bound,
+        true);
+    register_parameter("weight", std::move(weight));
+
+    if (bias) {
+        Variable bias_var(rand({out_features}) * (2.0f * bound) - bound, true);
+        register_parameter("bias", std::move(bias_var));
+    }
+}
+
+auto Bilinear::forward_impl(const Variable& /*input*/) -> Variable {
+    throw std::runtime_error(
+        "Bilinear takes two inputs; call forward(x1, x2) instead of forward(x).");
+}
+
+auto Bilinear::forward(const Variable& input1, const Variable& input2) -> Variable {
+    // Shapes (PyTorch semantics):
+    //   input1: [B, in1], input2: [B, in2]
+    //   weight: [out, in1, in2], bias: [out]
+    // Identity:
+    //   y[b, k] = Σ_{j,l} W[k, j, l] * x1[b, j] * x2[b, l] + b[k]
+    //           = Σ_{jl} W_flat[k, jl] * (x1 ⊗ x2)[b, jl] + b[k]
+    // Implementation: build outer product then matmul with flattened weight.
+    auto x1_shape = input1.shape();
+    auto x2_shape = input2.shape();
+    if (x1_shape.empty() || x2_shape.empty()) {
+        throw std::invalid_argument("Bilinear: inputs must have ≥1 dimension");
+    }
+    if (x1_shape.back() != in1_features_ || x2_shape.back() != in2_features_) {
+        throw std::invalid_argument(
+            "Bilinear: input feature dims do not match layer configuration");
+    }
+    if (x1_shape.size() != x2_shape.size()) {
+        throw std::invalid_argument("Bilinear: inputs must have same rank");
+    }
+    // Batch dims (all except trailing feature dim) must match.
+    for (size_t i = 0; i + 1 < x1_shape.size(); ++i) {
+        if (x1_shape[i] != x2_shape[i]) {
+            throw std::invalid_argument(
+                "Bilinear: inputs must share all batch dims");
+        }
+    }
+
+    // Flatten leading dims into a single batch B.
+    int64_t B = 1;
+    for (size_t i = 0; i + 1 < x1_shape.size(); ++i) B *= x1_shape[i];
+
+    auto x1_2d = autograd::reshape(input1, {B, in1_features_});
+    auto x2_2d = autograd::reshape(input2, {B, in2_features_});
+
+    // Outer product: [B, in1, 1] * [B, 1, in2] → [B, in1, in2]
+    auto x1_3d = autograd::reshape(x1_2d, {B, in1_features_, 1});
+    auto x2_3d = autograd::reshape(x2_2d, {B, 1, in2_features_});
+    auto outer = x1_3d * x2_3d;  // broadcasts to [B, in1, in2]
+
+    // Flatten to [B, in1*in2] and multiply by weight reshaped to [out, in1*in2].
+    auto outer_flat = autograd::reshape(outer, {B, in1_features_ * in2_features_});
+
+    auto& weight = *parameters_.at("weight");
+    auto w_flat = autograd::reshape(weight, {out_features_, in1_features_ * in2_features_});
+    // [B, J*L] @ [J*L, out] = [B, out]
+    auto w_flat_t = autograd::permute(w_flat, {1, 0});
+    auto output_2d = autograd::matmul(outer_flat, w_flat_t);
+
+    if (has_bias_) {
+        auto& bias = *parameters_.at("bias");
+        output_2d = output_2d + bias;
+    }
+
+    // Restore leading dims.
+    std::vector<int64_t> output_shape(x1_shape.begin(), x1_shape.end());
+    output_shape.back() = out_features_;
+    return autograd::reshape(output_2d, output_shape);
+}
+
+auto Bilinear::reset_parameters() -> void {
+    float bound = 1.0f / std::sqrt(static_cast<float>(in1_features_));
+    auto weight_it = parameters_.find("weight");
+    if (weight_it != parameters_.end()) {
+        *weight_it->second = Variable(
+            rand({out_features_, in1_features_, in2_features_}) * (2.0f * bound) - bound,
+            true);
+    }
+    if (has_bias_) {
+        auto bias_it = parameters_.find("bias");
+        if (bias_it != parameters_.end()) {
+            *bias_it->second = Variable(
+                rand({out_features_}) * (2.0f * bound) - bound, true);
+        }
+    }
+}
+
 } // namespace tenzor::nn

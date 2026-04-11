@@ -569,6 +569,27 @@ auto elu(const Variable& input, double alpha) -> Variable {
     return output;
 }
 
+// CELU: α · ELU(x/α, 1). Pure Variable-level composition — autograd threads
+// naturally through the existing ELU backward.
+CELU::CELU(double alpha) : alpha_(alpha) {
+    if (alpha == 0.0) {
+        throw std::invalid_argument("CELU alpha must be non-zero");
+    }
+}
+
+auto CELU::forward_impl(const Variable& input) -> Variable {
+    return nn::celu(input, alpha_);
+}
+
+auto celu(const Variable& input, double alpha) -> Variable {
+    if (alpha == 0.0) {
+        throw std::invalid_argument("celu: alpha must be non-zero");
+    }
+    auto scaled = input * (1.0 / alpha);
+    auto elu_out = nn::elu(scaled, 1.0);
+    return elu_out * alpha;
+}
+
 auto SELU::forward_impl(const Variable& input) -> Variable {
     return nn::selu(input);
 }

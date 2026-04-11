@@ -786,7 +786,6 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
-    auto is_higher_order_stub() const -> bool override { return true; }
 private:
     std::optional<int64_t> dim_;
     bool keepdim_;
@@ -1362,7 +1361,6 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
-    auto is_higher_order_stub() const -> bool override { return true; }
     std::optional<int64_t> dim_;
     bool keepdim_;
 };
@@ -1470,7 +1468,6 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
-    auto is_higher_order_stub() const -> bool override { return true; }
 };
 
 /**
@@ -1530,7 +1527,6 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
-    auto is_higher_order_stub() const -> bool override { return true; }
 };
 
 class FlipBackward : public Function {
@@ -1608,7 +1604,6 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
-    auto is_higher_order_stub() const -> bool override { return true; }
     auto name() const -> std::string override { return "TopKBackward"; }
 private:
     int64_t k_;
@@ -1630,7 +1625,6 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
-    auto is_higher_order_stub() const -> bool override { return true; }
     auto name() const -> std::string override { return "SortBackward"; }
 private:
     int64_t dim_;

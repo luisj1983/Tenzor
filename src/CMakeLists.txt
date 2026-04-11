@@ -120,6 +120,7 @@ set(TENZOR_CORE_SOURCES
     nn/optim/lamb.cpp
     nn/optim/sparse_adam.cpp
     nn/optim/lion.cpp
+    nn/optim/lbfgs.cpp
     nn/optim/zero_optimizer.cpp
     nn/optim/gradient_utils.cpp
     nn/optim/scheduler.cpp

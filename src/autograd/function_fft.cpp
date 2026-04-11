@@ -135,8 +135,18 @@ auto TopKBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 }
 
 auto TopKBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // Indices and original shape are constants; scatter_add threads grad Variable
+    // back to original positions preserving the graph for create_graph=true.
+    const auto& shape_tensor = saved_tensors_[0];
+    const auto& indices = saved_tensors_[1];
+    const auto& grad_var = grad_outputs[0];
+
+    auto shape_ptr = shape_tensor.data<int64_t>();
+    auto orig_shape = std::vector<int64_t>(shape_ptr, shape_ptr + shape_tensor.numel());
+
+    auto zeros_t = zeros(orig_shape, grad_var.tensor().dtype(), grad_var.tensor().device());
+    Variable zeros_var(zeros_t, false);
+    return {tenzor::scatter_add(zeros_var, dim_, indices, grad_var)};
 }
 
 // ============================================================================
@@ -163,8 +173,18 @@ auto SortBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 }
 
 auto SortBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // Sort indices are a constant permutation; scatter threads grad Variable
+    // back through the inverse permutation preserving the graph.
+    const auto& shape_tensor = saved_tensors_[0];
+    const auto& indices = saved_tensors_[1];
+    const auto& grad_var = grad_outputs[0];
+
+    auto shape_ptr = shape_tensor.data<int64_t>();
+    auto orig_shape = std::vector<int64_t>(shape_ptr, shape_ptr + shape_tensor.numel());
+
+    auto zeros_t = zeros(orig_shape, grad_var.tensor().dtype(), grad_var.tensor().device());
+    Variable zeros_var(zeros_t, false);
+    return {tenzor::scatter(zeros_var, dim_, indices, grad_var)};
 }
 
 // ============================================================================

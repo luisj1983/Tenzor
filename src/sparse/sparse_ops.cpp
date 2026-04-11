@@ -1011,53 +1011,30 @@ auto spgemm(const SparseTensor& a, const SparseTensor& b) -> SparseTensor {
     auto a_csr = a.to_csr();
     auto b_csr = b.to_csr();
 
-#ifdef TENZOR_HAS_CUSPARSE
-    if (a.device().type == Device::Type::CUDA && b.device().type == Device::Type::CUDA) {
-        // TODO: cusparseSpGEMM implementation
-        // For now, transfer to CPU, compute, transfer back
-        auto a_cpu = a_csr.to(Device::cpu());
-        auto b_cpu = b_csr.to(Device::cpu());
-        SparseTensor result;
-        if (a.dtype() == DType::Float32) {
-            result = cpu_spgemm_typed<float>(a_cpu, b_cpu, M, K, N);
-        } else if (a.dtype() == DType::Float64) {
-            result = cpu_spgemm_typed<double>(a_cpu, b_cpu, M, K, N);
-        } else {
-            throw std::runtime_error("spgemm: unsupported dtype " +
-                std::string(dtype_name(a.dtype())));
-        }
-        return result.to(a.device());
-    }
-#endif
+    // GPU SpGEMM is not yet implemented. The top-level dispatch is CPU-only:
+    // we transfer inputs to CPU if needed and bring the result back to the
+    // original device. A proper implementation requires routing through the
+    // OpId::SparseSpMM-style dispatch table with cuSPARSE / rocSPARSE-native
+    // kernels (cusparseSpGEMM_workEstimation → cusparseSpGEMM_compute, or
+    // rocsparse_spgemm with a cached workspace). Tracked as a follow-up.
+    Device target_device = a.device();
+    SparseTensor a_compute = (target_device.type != Device::Type::CPU)
+        ? a_csr.to(Device::cpu()) : a_csr;
+    SparseTensor b_compute = (target_device.type != Device::Type::CPU)
+        ? b_csr.to(Device::cpu()) : b_csr;
 
-#ifdef TENZOR_HAS_ROCSPARSE
-    if (a.device().type == Device::Type::ROCm && b.device().type == Device::Type::ROCm) {
-        // TODO: rocsparse_spgemm implementation
-        // For now, transfer to CPU, compute, transfer back
-        auto a_cpu = a_csr.to(Device::cpu());
-        auto b_cpu = b_csr.to(Device::cpu());
-        SparseTensor result;
-        if (a.dtype() == DType::Float32) {
-            result = cpu_spgemm_typed<float>(a_cpu, b_cpu, M, K, N);
-        } else if (a.dtype() == DType::Float64) {
-            result = cpu_spgemm_typed<double>(a_cpu, b_cpu, M, K, N);
-        } else {
-            throw std::runtime_error("spgemm: unsupported dtype " +
-                std::string(dtype_name(a.dtype())));
-        }
-        return result.to(a.device());
-    }
-#endif
+    auto finish = [&](SparseTensor r) {
+        return (target_device.type != Device::Type::CPU) ? r.to(target_device) : r;
+    };
 
-    // CPU path
     if (a.dtype() == DType::Float32) {
-        return cpu_spgemm_typed<float>(a_csr, b_csr, M, K, N);
-    } else if (a.dtype() == DType::Float64) {
-        return cpu_spgemm_typed<double>(a_csr, b_csr, M, K, N);
-    } else {
-        throw std::runtime_error("spgemm: unsupported dtype " +
-            std::string(dtype_name(a.dtype())));
+        return finish(cpu_spgemm_typed<float>(a_compute, b_compute, M, K, N));
     }
+    if (a.dtype() == DType::Float64) {
+        return finish(cpu_spgemm_typed<double>(a_compute, b_compute, M, K, N));
+    }
+    throw std::runtime_error("spgemm: unsupported dtype " +
+        std::string(dtype_name(a.dtype())));
 }
 
 // ============================================================================
@@ -1194,72 +1171,42 @@ auto sparse_triangular_solve(const SparseTensor& L, const Tensor& b, bool upper)
     // Convert to CSR for row-based access
     auto L_csr = L.to_csr();
 
-#ifdef TENZOR_HAS_CUSPARSE
-    if (L.device().type == Device::Type::CUDA) {
-        // TODO: cusparseSpSV_solve implementation
-        // For now, transfer to CPU, compute, transfer back
-        auto L_cpu = L_csr.to(Device::cpu());
-        auto b_cpu = b.to(Device::cpu());
-        Tensor result;
-        if (b.ndim() == 1) {
-            if (b.dtype() == DType::Float32) {
-                result = cpu_sparse_trsv<float>(L_cpu, b_cpu, upper, N);
-            } else {
-                result = cpu_sparse_trsv<double>(L_cpu, b_cpu, upper, N);
-            }
-        } else {
-            int64_t K = b.shape()[1];
-            if (b.dtype() == DType::Float32) {
-                result = cpu_sparse_trsm<float>(L_cpu, b_cpu, upper, N, K);
-            } else {
-                result = cpu_sparse_trsm<double>(L_cpu, b_cpu, upper, N, K);
-            }
-        }
-        return result.to(b.device());
+    // GPU triangular solve is not yet implemented. The top-level dispatch is
+    // CPU-only: we transfer inputs to CPU and bring the result back. A proper
+    // implementation requires cusparseSpSV_analysis+solve or
+    // rocsparse_csrsv_analysis+solve with cached descriptors. Tracked as a
+    // follow-up.
+    Device target_device = b.device();
+    SparseTensor L_compute = L_csr;
+    Tensor b_compute = b;
+    if (target_device.type != Device::Type::CPU) {
+        L_compute = L_csr.to(Device::cpu());
+        b_compute = b.to(Device::cpu());
     }
-#endif
 
-#ifdef TENZOR_HAS_ROCSPARSE
-    if (L.device().type == Device::Type::ROCm) {
-        // TODO: rocsparse_csrsv_solve implementation
-        // For now, transfer to CPU, compute, transfer back
-        auto L_cpu = L_csr.to(Device::cpu());
-        auto b_cpu = b.to(Device::cpu());
-        Tensor result;
-        if (b.ndim() == 1) {
-            if (b.dtype() == DType::Float32) {
-                result = cpu_sparse_trsv<float>(L_cpu, b_cpu, upper, N);
-            } else {
-                result = cpu_sparse_trsv<double>(L_cpu, b_cpu, upper, N);
-            }
-        } else {
-            int64_t K = b.shape()[1];
-            if (b.dtype() == DType::Float32) {
-                result = cpu_sparse_trsm<float>(L_cpu, b_cpu, upper, N, K);
-            } else {
-                result = cpu_sparse_trsm<double>(L_cpu, b_cpu, upper, N, K);
-            }
+    auto finish = [&](Tensor result) {
+        if (target_device.type != Device::Type::CPU) {
+            result = result.to(target_device);
         }
-        return result.to(b.device());
-    }
-#endif
+        return result;
+    };
 
-    // CPU path
-    if (b.ndim() == 1) {
+    // CPU path (used whether inputs came from CPU or GPU)
+    if (b_compute.ndim() == 1) {
         if (b.dtype() == DType::Float32) {
-            return cpu_sparse_trsv<float>(L_csr, b, upper, N);
+            return finish(cpu_sparse_trsv<float>(L_compute, b_compute, upper, N));
         } else if (b.dtype() == DType::Float64) {
-            return cpu_sparse_trsv<double>(L_csr, b, upper, N);
+            return finish(cpu_sparse_trsv<double>(L_compute, b_compute, upper, N));
         } else {
             throw std::runtime_error("sparse_triangular_solve: unsupported dtype " +
                 std::string(dtype_name(b.dtype())));
         }
     } else {
-        int64_t K = b.shape()[1];
+        int64_t K = b_compute.shape()[1];
         if (b.dtype() == DType::Float32) {
-            return cpu_sparse_trsm<float>(L_csr, b, upper, N, K);
+            return finish(cpu_sparse_trsm<float>(L_compute, b_compute, upper, N, K));
         } else if (b.dtype() == DType::Float64) {
-            return cpu_sparse_trsm<double>(L_csr, b, upper, N, K);
+            return finish(cpu_sparse_trsm<double>(L_compute, b_compute, upper, N, K));
         } else {
             throw std::runtime_error("sparse_triangular_solve: unsupported dtype " +
                 std::string(dtype_name(b.dtype())));

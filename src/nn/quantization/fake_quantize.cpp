@@ -77,10 +77,33 @@ auto FakeQuantize::forward_impl(const Variable& input) -> Variable {
         }
     }
 
-    // Apply fake quantization
-    Tensor quantized = apply_fake_quantization(input.tensor());
+    // Per-tensor schemes can use the autograd-enabled straight-through
+    // estimator so QAT gradients thread through quantize→dequantize correctly.
+    // Per-channel schemes fall back to the bare Tensor path (no backward
+    // support yet for per-channel STE — tracked as a follow-up).
+    bool per_tensor = (scheme_ == QuantizationScheme::PerTensorSymmetric ||
+                       scheme_ == QuantizationScheme::PerTensorAsymmetric);
+    if (per_tensor && input.requires_grad()) {
+        Tensor scale_cpu = (qparams_->scale.device() == Device::cpu())
+            ? qparams_->scale : qparams_->scale.to(Device::cpu());
+        Tensor zp_cpu = (qparams_->zero_point.device() == Device::cpu())
+            ? qparams_->zero_point : qparams_->zero_point.to(Device::cpu());
+        float scale = scale_cpu.data<float>()[0];
+        float zero_point = static_cast<float>(zp_cpu.data<int32_t>()[0]);
 
-    // Create output variable maintaining gradient tracking
+        float quant_min = 0.0f, quant_max = 0.0f;
+        switch (dtype_) {
+            case QuantDType::INT8:  quant_min = -128.0f; quant_max = 127.0f; break;
+            case QuantDType::UINT8: quant_min =    0.0f; quant_max = 255.0f; break;
+            case QuantDType::INT4:  quant_min =   -8.0f; quant_max =   7.0f; break;
+            case QuantDType::UINT4: quant_min =    0.0f; quant_max =  15.0f; break;
+        }
+        return fake_quantize_with_grad(input, scale, zero_point, quant_min, quant_max);
+    }
+
+    // Fall-through: non-autograd path (eval calibration, per-channel,
+    // or input.requires_grad() == false).
+    Tensor quantized = apply_fake_quantization(input.tensor());
     return Variable(quantized, input.requires_grad());
 }
 

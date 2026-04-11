@@ -8196,6 +8196,31 @@ Example::
             py::arg("graph"),
             "Verify graph integrity, returns list of errors");
 
+    // CompiledModule: a callable wrapper returned by jit.trace_module(...)
+    // that lets Python users invoke a traced graph like a regular module.
+    py::class_<tenzor::jit::CompiledModule,
+               std::shared_ptr<tenzor::jit::CompiledModule>>(jit, "CompiledModule",
+        "Callable wrapper around a traced+compiled graph (torch.jit.ScriptModule analog)")
+        .def("forward",
+             py::overload_cast<const tenzor::Variable&>(&tenzor::jit::CompiledModule::forward),
+             py::arg("input"),
+             "Execute the compiled graph on a Variable input")
+        .def("__call__",
+             py::overload_cast<const tenzor::Variable&>(&tenzor::jit::CompiledModule::forward),
+             py::arg("input"),
+             "Callable alias for forward()")
+        .def("optimize_for_inference",
+             &tenzor::jit::CompiledModule::optimize_for_inference,
+             "Apply inference-only optimization passes");
+
+    // jit.trace_module: returns a callable CompiledModule (vs jit.trace which
+    // returns the bare Graph IR). This is the ergonomic torch.jit.trace analog.
+    jit.def("trace_module",
+            py::overload_cast<std::shared_ptr<tenzor::nn::Module>,
+                              const tenzor::Variable&>(&tenzor::jit::CompiledModule::trace),
+            py::arg("module"), py::arg("example_input"),
+            "Trace a module's forward pass, returning a callable CompiledModule.");
+
     // =========================================================================
     // Compile API (torch.compile equivalent)
     // =========================================================================

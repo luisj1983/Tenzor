@@ -243,6 +243,79 @@ auto Dropout2d::forward_impl(const Variable& input) -> Variable {
     return output;
 }
 
+// Channel-wise Dropout3d (volumetric analogue of Dropout2d)
+Dropout3d::Dropout3d(double p) : p_(p) {
+    if (p < 0.0 || p > 1.0) {
+        throw std::invalid_argument("Dropout3d probability must be in [0, 1]");
+    }
+}
+
+auto Dropout3d::forward_impl(const Variable& input) -> Variable {
+    if (!is_training()) {
+        return input;
+    }
+    if (p_ == 0.0) {
+        return input;
+    }
+
+    auto shape = input.tensor().shape();
+    std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+
+    if (p_ == 1.0) {
+        auto output_tensor = zeros(shape_vec, input.tensor().dtype(), input.tensor().device());
+        return Variable(output_tensor, input.requires_grad());
+    }
+
+    if (shape.size() < 3) {
+        throw std::invalid_argument(
+            "Dropout3d requires at least 3D input (C, D, H) or (N, C, D, H, W)");
+    }
+
+    // Mask shape: broadcast across spatial (D, H, W) but vary per (N, C).
+    std::vector<int64_t> mask_shape;
+    if (shape.size() == 5) {
+        mask_shape = {shape[0], shape[1], 1, 1, 1};     // [N, C, 1, 1, 1]
+    } else if (shape.size() == 4) {
+        mask_shape = {shape[0], 1, 1, 1};               // [C, 1, 1, 1]
+    } else if (shape.size() == 3) {
+        mask_shape = {shape[0], 1, 1};                  // [C, 1, 1]
+    } else {
+        throw std::invalid_argument("Dropout3d input must be 3D, 4D or 5D");
+    }
+
+    auto random_tensor = rand(mask_shape, input.tensor().dtype(), input.tensor().device());
+    auto threshold = full(mask_shape, static_cast<float>(p_),
+                         input.tensor().dtype(), input.tensor().device());
+    auto mask_bool = gt(random_tensor, threshold);
+    auto mask_ones = ones(mask_shape, input.tensor().dtype(), input.tensor().device());
+    auto mask_zeros = zeros(mask_shape, input.tensor().dtype(), input.tensor().device());
+    auto channel_mask = where(mask_bool, mask_ones, mask_zeros);
+
+    double scale = 1.0 / (1.0 - p_);
+    auto expanded_mask_final = expand(channel_mask, shape_vec);
+
+    auto scale_tensor = full(shape_vec, static_cast<float>(scale),
+                            input.tensor().dtype(), input.tensor().device());
+    auto output_tensor = mul(mul(input.tensor(), expanded_mask_final), scale_tensor);
+
+    Variable output(output_tensor, input.requires_grad());
+
+    if (input.requires_grad()) {
+        auto dropout_fn = std::make_shared<DropoutBackward>(expanded_mask_final, scale);
+        std::vector<Variable> input_vars;
+        input_vars.push_back(input);
+        dropout_fn->set_input_variables(input_vars);
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        if (input.grad_fn()) {
+            next_funcs.push_back(input.grad_fn());
+        }
+        dropout_fn->set_next_functions(next_funcs);
+        output.set_grad_fn(dropout_fn);
+    }
+
+    return output;
+}
+
 // AlphaDropout autograd function
 class AlphaDropoutBackward : public Function {
 public:

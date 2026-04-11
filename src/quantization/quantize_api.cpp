@@ -67,14 +67,27 @@ public:
             return convert_sequential_from_quantized(seq);
         }
 
-        // For quantized layers, we would need to:
-        // 1. Extract quantized weights
-        // 2. Dequantize them
-        // 3. Create new float layer with dequantized weights
-
-        // Currently quantized layers don't have reverse conversion
-        // This would require adding methods to QuantizedLinear, QuantizedConv2d
-        // For now, return as-is
+        // Reverse conversion (quantized → float) for non-Sequential modules.
+        // For QuantizedLinear/QuantizedConv2d, dequantize the weight and
+        // construct a fresh Linear/Conv2d. Non-quantized modules pass through.
+        if (auto q_linear = std::dynamic_pointer_cast<nn::quantization::QuantizedLinear>(module)) {
+            const auto& q_weight = q_linear->weight();
+            Tensor dequant_w = dequantize_tensor(q_weight);
+            if (dequant_w.dtype() != DType::Float32) {
+                dequant_w = dequant_w.to(DType::Float32);
+            }
+            auto weight_shape = dequant_w.shape();
+            int64_t out_features = weight_shape[0];
+            int64_t in_features = weight_shape[1];
+            auto linear = std::make_shared<nn::Linear>(in_features, out_features, /*bias=*/false);
+            std::unordered_map<std::string, Tensor> state;
+            state["weight"] = dequant_w;
+            linear->load_state_dict(state);
+            return linear;
+        }
+        // QuantizedConv2d reverse conversion is not yet implemented —
+        // the kernel shape / stride / padding metadata needs to be wired
+        // through the dequant path. Tracked as a follow-up.
         return module;
     }
 

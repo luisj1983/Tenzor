@@ -222,9 +222,22 @@ auto ScatterBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<
 }
 
 auto ScatterBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad()),
-            Variable(result[1], grad_outputs[0].requires_grad())};
+    // grad_input: scatter zeros over the scattered positions (Variable-level).
+    // grad_src: gather grad at the index positions (Variable-level).
+    // Both preserve the graph for create_graph=true.
+    const auto& grad_var = grad_outputs[0];
+
+    int64_t dim = saved_tensors_[0].data<int64_t>()[0];
+    const auto& index = saved_tensors_[1];
+
+    auto index_shape_vec = std::vector<int64_t>(index.shape().begin(), index.shape().end());
+    auto zeros_src_t = zeros(index_shape_vec, grad_var.tensor().dtype(), grad_var.tensor().device());
+    Variable zeros_src_var(zeros_src_t, false);
+
+    auto grad_input = tenzor::scatter(grad_var, dim, index, zeros_src_var);
+    auto grad_src = tenzor::gather(grad_var, dim, index);
+
+    return {grad_input, grad_src};
 }
 
 // ScatterAddBackward implementation
@@ -446,8 +459,38 @@ auto NarrowBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
 }
 
 auto NarrowBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result = backward({grad_outputs[0].tensor()});
-    return {Variable(result[0], grad_outputs[0].requires_grad())};
+    // Narrow is a zero-padded slice; backward is scatter into a zero tensor of
+    // the original shape. Use Variable-level scatter so grad threads through.
+    const auto& grad_var = grad_outputs[0];
+
+    int64_t dim = saved_tensors_[0].data<int64_t>()[0];
+    int64_t start = saved_tensors_[1].data<int64_t>()[0];
+    const auto& shape_tensor = saved_tensors_[2];
+    auto shape_ptr = shape_tensor.data<int64_t>();
+    auto original_shape = std::vector<int64_t>(shape_ptr, shape_ptr + shape_tensor.numel());
+
+    auto grad_shape = std::vector<int64_t>(grad_var.tensor().shape().begin(),
+                                            grad_var.tensor().shape().end());
+    int64_t narrow_len = grad_shape[dim];
+    auto index = zeros(grad_shape, DType::Int64, Device::cpu());
+    auto* idx_ptr = index.data<int64_t>();
+    int64_t total = grad_var.tensor().numel();
+    int64_t dim_stride = 1;
+    for (int64_t d = dim + 1; d < static_cast<int64_t>(grad_shape.size()); ++d) {
+        dim_stride *= grad_shape[d];
+    }
+    for (int64_t i = 0; i < total; ++i) {
+        int64_t pos_in_dim = (i / dim_stride) % narrow_len;
+        idx_ptr[i] = start + pos_in_dim;
+    }
+    if (grad_var.tensor().device() != Device::cpu()) {
+        index = index.to(grad_var.tensor().device());
+    }
+
+    auto zeros_t = zeros(original_shape, grad_var.tensor().dtype(), grad_var.tensor().device());
+    Variable zeros_var(zeros_t, false);
+    auto grad_input = tenzor::scatter(zeros_var, dim, index, grad_var);
+    return {grad_input};
 }
 
 // FlipBackward implementation

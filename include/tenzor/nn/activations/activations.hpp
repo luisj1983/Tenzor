@@ -365,6 +365,30 @@ private:
 };
 
 /**
+ * @brief Continuously differentiable Exponential Linear Unit (CELU).
+ *
+ * Applies the CELU function element-wise:
+ *
+ * \f[
+ * \text{CELU}(x, \alpha) = \max(0, x) + \min(0, \alpha(e^{x/\alpha} - 1))
+ * \f]
+ *
+ * Unlike ELU, CELU's derivative is continuous at x = 0 for any α. It satisfies
+ * the identity CELU(x, α) = α · ELU(x/α, 1), which this implementation uses to
+ * reuse the existing ELU autograd path.
+ *
+ * @see ELU
+ */
+class CELU : public Module {
+public:
+    explicit CELU(double alpha = 1.0);
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    double alpha_;
+};
+
+/**
  * @brief Scaled Exponential Linear Unit (SELU) activation
  *
  * Applies the SELU function element-wise:
@@ -581,6 +605,9 @@ auto log_softmax(const Variable& input, int64_t dim = -1) -> Variable;
 
 /** @brief Functional ELU with configurable alpha */
 auto elu(const Variable& input, double alpha = 1.0) -> Variable;
+
+/** @brief Functional CELU: Continuously differentiable ELU. Alpha controls the saturation. */
+auto celu(const Variable& input, double alpha = 1.0) -> Variable;
 
 /** @brief Functional SELU: Scaled ELU for self-normalizing networks */
 auto selu(const Variable& input) -> Variable;

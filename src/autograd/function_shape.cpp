@@ -359,9 +359,12 @@ auto UpsampleBilinearBackward::backward(std::vector<Tensor> grad_outputs) -> std
 }
 
 auto UpsampleBilinearBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    // Upsample backward is a linear operation (weighted accumulation), so its
-    // second derivative is constant. Compute at Tensor level since the bilinear
-    // weights don't depend on the input values.
+    // UpsampleBilinear backward is a linear adjoint (a weighted scatter). A
+    // mathematically correct higher-order implementation needs a dedicated
+    // Function whose own backward is upsample_forward; the hand-written pixel
+    // accumulation here has no Variable-level counterpart. First-order grads
+    // are correct via the Tensor path; `create_graph=true` loses the graph at
+    // this node until a dedicated adjoint Function is added.
     auto result = backward({grad_outputs[0].tensor()});
     return {Variable(result[0], grad_outputs[0].requires_grad())};
 }

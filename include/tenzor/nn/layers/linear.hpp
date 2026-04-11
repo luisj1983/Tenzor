@@ -119,5 +119,65 @@ private:
     auto reset_parameters() -> void;
 };
 
+/**
+ * @brief Bilinear layer: y[k] = x1^T · W[k] · x2 + b[k].
+ *
+ * Implements the bilinear transformation matching torch.nn.Bilinear.
+ *
+ * Shape transformations:
+ * - Input1: (*, in1_features), Input2: (*, in2_features)
+ * - Output: (*, out_features)
+ * - Weight: (out_features, in1_features, in2_features)
+ * - Bias:   (out_features) if enabled
+ *
+ * This implementation is a Variable-level composition that materializes the
+ * outer product of x1 and x2, then applies a reshaped linear projection. The
+ * autograd graph threads naturally through the existing matmul and elementwise
+ * backward paths — no new OpId or kernel required.
+ */
+class Bilinear : public Module {
+public:
+    Bilinear(int64_t in1_features, int64_t in2_features,
+             int64_t out_features, bool bias = true);
+
+    /**
+     * @brief Forward pass taking two input Variables.
+     *
+     * The Module base class's single-input forward(...) is not used for this
+     * layer; callers should invoke forward(x1, x2) directly.
+     */
+    auto forward(const Variable& input1, const Variable& input2) -> Variable;
+
+    /**
+     * @brief Overridden single-input forward — throws, since Bilinear needs
+     * two inputs. Use forward(x1, x2) instead.
+     */
+    auto forward_impl(const Variable& input) -> Variable override;
+
+    auto extra_repr() const -> std::string override {
+        return "in1_features=" + std::to_string(in1_features_) +
+               ", in2_features=" + std::to_string(in2_features_) +
+               ", out_features=" + std::to_string(out_features_) +
+               ", bias=" + (has_bias_ ? "True" : "False");
+    }
+
+    auto weight() const -> const std::shared_ptr<Variable>& {
+        return parameters_.at("weight");
+    }
+    auto has_bias() const -> bool { return has_bias_; }
+    auto bias() const -> std::shared_ptr<Variable> {
+        if (!has_bias_) return nullptr;
+        auto it = parameters_.find("bias");
+        return (it != parameters_.end()) ? it->second : nullptr;
+    }
+
+private:
+    int64_t in1_features_;
+    int64_t in2_features_;
+    int64_t out_features_;
+    bool has_bias_;
+    auto reset_parameters() -> void;
+};
+
 } // namespace nn
 } // namespace tenzor
