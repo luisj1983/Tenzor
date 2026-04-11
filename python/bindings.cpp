@@ -1283,6 +1283,43 @@ Returns:
              return tenzor::numpy::create_numpy_array(cpu_tensor, t.dtype());
              },
              "Convert tensor to NumPy array (zero-copy when possible)")
+        // Phase 2.4 — NumPy __array__ protocol.
+        //
+        // Enables `np.asarray(tensor)`, `np.array(tensor)`, NumPy ufunc
+        // dispatch, and matplotlib / pandas interop to work on Tenzor
+        // tensors transparently. NumPy calls `tensor.__array__()` (with
+        // an optional dtype argument for the "astype" case) whenever it
+        // needs to coerce an unknown object into an ndarray.
+        //
+        // We delegate to the existing `.numpy()` path to produce a
+        // contiguous host copy, then apply `astype(dtype)` at the end
+        // if the caller requested a specific output dtype. Copy=None
+        // is accepted for NumPy 2.0 protocol compatibility but we
+        // always copy (our storage is not owned by NumPy).
+        .def("__array__", [](const tenzor::Tensor& t,
+                             py::object dtype,
+                             py::object /*copy*/) -> py::object {
+             tenzor::Tensor cpu_tensor;
+             {
+                 py::gil_scoped_release release;
+                 cpu_tensor = tenzor::numpy::prepare_tensor_for_numpy(t);
+             }
+             py::object arr = tenzor::numpy::create_numpy_array(cpu_tensor, t.dtype());
+             if (!dtype.is_none()) {
+                 // Delegate the dtype cast to NumPy itself so we pick up
+                 // every NumPy-recognized type specifier (str, dtype
+                 // object, Python scalar type, etc.) without having to
+                 // enumerate them here.
+                 arr = arr.attr("astype")(dtype, py::arg("copy") = false);
+             }
+             return arr;
+         },
+         py::arg("dtype") = py::none(),
+         py::arg("copy") = py::none(),
+         "NumPy array protocol: called by np.asarray / np.array when "
+         "they need to coerce this Tensor into an ndarray. Accepts an "
+         "optional dtype for type promotion. Always materializes a "
+         "host copy — Tenzor storage is not NumPy-owned.")
         .def_static("from_numpy", &tenzor::numpy::numpy_to_tensor,
              py::arg("array"), py::arg("device") = tenzor::Device::cpu(),
              "Create tensor from NumPy array (zero-copy when possible)")
