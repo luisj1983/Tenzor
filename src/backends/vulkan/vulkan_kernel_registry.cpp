@@ -2242,34 +2242,32 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             return get_vulkan_backend()->dispatchCDist(inputs[0], inputs[1]);
         });
 
-    // STFT / ISTFT — TEMPORARY CPU fallback.
-    // TODO(phase4.3-vulkan-stft): Native dispatchSTFT/dispatchISTFT exist in
-    // vulkan_ops_stft.cpp and are in build, but the round-trip reconstruction
-    // diverges at ~2.0 against 1e-3 tolerance. Originally suspected as a
-    // Complex64 transpose issue (fixed) but the bug persists, implicating
-    // either Vulkan dispatchRFFT/dispatchIRFFT value correctness (the
-    // FFTParity.RFFT_1D_Basic test has unrelated dtype issues so we can't
-    // rely on it as a harness) or the overlap-add bounds. The forward alone
-    // also produces wrong-valued spectra, so the issue is in the forward
-    // pipeline (frame+window or the subsequent rfft call), not just the
-    // inverse. Both ops fall back to CPU until the value bug is isolated.
+    // STFT / ISTFT — Phase 2.3: native Vulkan implementations.
+    //
+    // Root cause of the prior reconstruction divergence was in
+    // dispatchRFFT's descriptor binding size for the unpack step:
+    // `output.numel() * 4` was used as the byte size for a Complex64
+    // buffer, which is half the actual required byte count. On
+    // permissive drivers this silently produced wrong-valued spectra
+    // (the "forward alone produces wrong-valued spectra" symptom noted
+    // in the old TODO comment), which cascaded into the STFT round
+    // trip. Fixed in vulkan_ops_fft.cpp by using complex_elem_size.
     table.register_single_output_kernel(OpId::STFT,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            auto dev = inputs[0].device();
             int64_t n_fft = attrs.get_int(AttrKey::NFft);
             int64_t hop_length = attrs.get_int(AttrKey::HopLength, -1);
             int64_t win_length = attrs.get_int(AttrKey::WinLength, -1);
             bool center = attrs.get_bool(AttrKey::Centered, true);
             bool normalized = attrs.get_bool(AttrKey::Normalized, false);
             bool onesided = attrs.get_bool(AttrKey::OnesidedAttr, true);
-            Tensor window = (inputs.size() > 1) ? inputs[1].to(Device::cpu()) : Tensor();
-            return tenzor::fft::stft(inputs[0].to(Device::cpu()), n_fft, hop_length, win_length,
-                                     window, center, normalized, onesided).to(dev);
+            Tensor window = (inputs.size() > 1) ? inputs[1] : Tensor();
+            return get_vulkan_backend()->dispatchSTFT(
+                inputs[0], n_fft, hop_length, win_length, window,
+                center, normalized, onesided);
         });
 
     table.register_single_output_kernel(OpId::ISTFT,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            auto dev = inputs[0].device();
             int64_t n_fft = attrs.get_int(AttrKey::NFft);
             int64_t hop_length = attrs.get_int(AttrKey::HopLength, -1);
             int64_t win_length = attrs.get_int(AttrKey::WinLength, -1);
@@ -2277,10 +2275,10 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             bool normalized = attrs.get_bool(AttrKey::Normalized, false);
             bool onesided = attrs.get_bool(AttrKey::OnesidedAttr, true);
             int64_t length_val = attrs.get_int(AttrKey::N, -1);
-            std::optional<int64_t> length = length_val >= 0 ? std::optional<int64_t>(length_val) : std::nullopt;
-            Tensor window = (inputs.size() > 1) ? inputs[1].to(Device::cpu()) : Tensor();
-            return tenzor::fft::istft(inputs[0].to(Device::cpu()), n_fft, hop_length, win_length,
-                                      window, center, normalized, onesided, length).to(dev);
+            Tensor window = (inputs.size() > 1) ? inputs[1] : Tensor();
+            return get_vulkan_backend()->dispatchISTFT(
+                inputs[0], n_fft, hop_length, win_length, window,
+                center, normalized, onesided, length_val);
         });
 
     // AdvancedIndex / AdvancedIndexPut — native Vulkan compute shaders

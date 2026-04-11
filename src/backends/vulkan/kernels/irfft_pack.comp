@@ -5,7 +5,8 @@
 // such that a N/2-point inverse FFT of Z gives the packed real output.
 //
 // Z[k] = X[k] + conj(X[N/2-k]) + i*W_N^{-k}*(X[k] - conj(X[N/2-k]))
-// (divided by 2, since rfft_unpack multiplied by 0.5)
+// (the trailing 0.5 factor is absorbed into the IFFT normalization on
+// the host side; do not add it here).
 
 layout(local_size_x_id = 0) in;
 

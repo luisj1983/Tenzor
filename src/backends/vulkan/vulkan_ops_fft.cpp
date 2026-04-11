@@ -1473,11 +1473,31 @@ auto VulkanBackend::dispatchRFFT(const Tensor& input, int64_t dim, int64_t n,
         } pc;
         pc.n = static_cast<uint32_t>(signal_len);
         pc.batch_size = static_cast<uint32_t>(batch_size);
-        pc.in_batch_stride = static_cast<uint32_t>(half_n * 2);
+        // rfft_unpack.comp reads `data_in[(in_base + k) * 2]`, i.e. it
+        // treats `in_base + k` as a COMPLEX-element index and multiplies
+        // by 2 internally to get the float offset. So in_batch_stride
+        // must be given in COMPLEX units = half_n, not half_n * 2.
+        //
+        // The previous value (half_n * 2) caused batch b to read batch
+        // 2*b's data, producing the "every other frame" pattern that
+        // surfaced as a 2/3 amplitude drop in STFT round-trip tests on
+        // multi-frame inputs. For batch_size == 1 (e.g. single-signal
+        // RFFT) the bug is invisible because there's only one batch.
+        //
+        // out_batch_stride is already in float units (the shader writes
+        // `data_out[out_base + k * 2] = ...`), so (half_n + 1) * 2 is
+        // correct.
+        pc.in_batch_stride = static_cast<uint32_t>(half_n);
         pc.out_batch_stride = static_cast<uint32_t>((half_n + 1) * 2);
 
         size_t in_size = batch_size * half_n * complex_elem_size;
-        size_t out_size = output.numel() * (is_f64 ? 8 : (is_f16 ? 2 : 4));
+        // Output is a Complex64/128 tensor: `output.numel()` counts complex
+        // elements, not bytes. Each complex element is `complex_elem_size`
+        // bytes (8 for Complex64, 16 for Complex128). The previous code
+        // multiplied by 4 in the Float32 branch — half the required size —
+        // which made the descriptor-bound range smaller than the shader
+        // writes and produced undefined results on permissive drivers.
+        size_t out_size = static_cast<size_t>(output.numel()) * complex_elem_size;
 
         std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, fft_result.data_ptr()}, {1, output.data_ptr()}
@@ -1728,10 +1748,24 @@ auto VulkanBackend::dispatchIRFFT(const Tensor& input, int64_t dim, int64_t n,
         } pc;
         pc.n = static_cast<uint32_t>(output_len);
         pc.batch_size = static_cast<uint32_t>(batch_size);
-        pc.in_batch_stride = static_cast<uint32_t>(freq_bins * 2);  // complex interleaved
-        pc.out_batch_stride = static_cast<uint32_t>(half_n * 2);
+        // irfft_pack.comp reads `data_in[in_base + k * 2]`, so in_base is
+        // a FLOAT index — in_batch_stride must be in float units:
+        // `freq_bins * 2`. ✓
+        pc.in_batch_stride = static_cast<uint32_t>(freq_bins * 2);
+        // irfft_pack.comp writes `data_out[(out_base + k) * 2]`, so
+        // `out_base + k` is a COMPLEX index — out_batch_stride must be
+        // in complex units: `half_n`. The previous value (half_n * 2)
+        // incorrectly used float units, causing batch b to write to
+        // batch 2*b's output slot on multi-batch inputs. Paired with
+        // the same bug in rfft_unpack, this was the root cause of the
+        // Vulkan STFT "every other frame" / 2/3-amplitude bug on
+        // multi-frame inputs.
+        pc.out_batch_stride = static_cast<uint32_t>(half_n);
 
-        size_t in_size = cont.numel() * (is_f64 ? 8 : (is_f16 ? 2 : 4));
+        // `cont` is the complex-dtype frequency-domain input. numel() counts
+        // complex elements, not bytes. Match the RFFT unpack fix: use
+        // complex_elem_size, not a phantom real-element size.
+        size_t in_size = static_cast<size_t>(cont.numel()) * complex_elem_size;
         size_t out_size = batch_size * half_n * complex_elem_size;
 
         std::vector<std::pair<uint32_t, const void*>> bindings = {
