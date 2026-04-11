@@ -45,6 +45,22 @@ def load_benchmarks(filepath: str) -> dict[str, dict]:
         for bench in data["benchmarks"]:
             key = f"{suite_name}/{bench['name']}"
             benchmarks[key] = bench
+    # Handle benchmarks/python run_benchmarks.py output: {"system_info": ...,
+    # "results": [{"name": ..., "category": ..., "device": ..., "framework": ...,
+    # "mean_ms": ...}, ...]}. mean_ms is flat (no "stats" subdict), so wrap
+    # each entry in a synthetic {"stats": {"mean_ms": ...}} so get_mean_ms()
+    # works uniformly.
+    elif "results" in data and isinstance(data["results"], list):
+        for bench in data["results"]:
+            name = bench.get("name", "")
+            category = bench.get("category", "")
+            device = bench.get("device", "")
+            framework = bench.get("framework", "")
+            key_parts = [p for p in (category, name, device, framework) if p]
+            key = "/".join(key_parts)
+            wrapped = dict(bench)
+            wrapped["stats"] = {"mean_ms": bench.get("mean_ms", 0.0)}
+            benchmarks[key] = wrapped
     # Handle flat array of results
     elif isinstance(data, list):
         for bench in data:

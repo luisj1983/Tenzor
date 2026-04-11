@@ -728,6 +728,53 @@ jobs:
         run: mypy python/tenzor/ --ignore-missing-imports
 
   # =========================================================================
+  # GPU Tests: full backend parity on a self-hosted runner. Label-gated so
+  # the runner only burns on PRs that opt in. Register a runner with
+  # `self-hosted, linux, gpu` labels via the repo Settings > Actions >
+  # Runners UI before enabling. Per CLAUDE.md testing constraints:
+  # always -j1, never parallelize ROCm tests across shells, keep scopes
+  # tight instead of running the full 15+ hour suite.
+  # =========================================================================
+  gpu-tests:
+    name: GPU Backend Parity (self-hosted)
+    runs-on: [self-hosted, linux, gpu]
+    needs: build-and-smoke
+    if: |
+      github.event_name == 'pull_request' &&
+      contains(github.event.pull_request.labels.*.name, 'gpu-ci')
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure with CUDA + ROCm backends
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DTENZOR_BUILD_CUDA=ON \
+            -DTENZOR_BUILD_ROCM=ON \
+            -DTENZOR_BUILD_VULKAN=OFF \
+            -DTENZOR_BUILD_ONEAPI=OFF \
+            -DTENZOR_BUILD_PYTHON=OFF \
+            -DTENZOR_BUILD_TESTS=ON \
+            -DTENZOR_BUILD_BENCHMARKS=OFF \
+            -DTENZOR_BUILD_EXAMPLES=OFF
+
+      - name: Build core + tests
+        run: ninja -C build -j1
+
+      - name: Run core correctness tests
+        working-directory: build
+        run: ctest -R "^test_(dtype_promotion|alias_detection|mutation_version|dispatch_interceptor_stack|view_tracking)$" --output-on-failure -j1
+
+      - name: Run CUDA backend tests
+        working-directory: build
+        run: ctest -R "cuda|Cuda" --output-on-failure -j1
+
+      - name: Run ROCm backend tests
+        working-directory: build
+        run: ctest -R "rocm|Rocm|hip|Hip" --output-on-failure -j1
+
+  # =========================================================================
   # GPU Compile Check: Verify CUDA backend compiles (no GPU needed)
   # =========================================================================
   gpu-compile-check:

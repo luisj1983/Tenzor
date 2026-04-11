@@ -480,13 +480,24 @@ void VulkanBackend::createLogicalDevices() {
         // Determine optimal 1D workgroup size from device limits
         ctx.workgroupSize = vulkan::optimalWorkgroupSize(ctx.physicalDevice);
 
-        // Store maximum workgroup counts for dispatch validation
+        // Store maximum workgroup counts for dispatch validation + classify
+        // the vendor for per-vendor workgroup tuning (Phase 2.2).
         {
             VkPhysicalDeviceProperties props;
             vkGetPhysicalDeviceProperties(ctx.physicalDevice, &props);
             ctx.maxComputeWorkGroupCount[0] = props.limits.maxComputeWorkGroupCount[0];
             ctx.maxComputeWorkGroupCount[1] = props.limits.maxComputeWorkGroupCount[1];
             ctx.maxComputeWorkGroupCount[2] = props.limits.maxComputeWorkGroupCount[2];
+
+            switch (props.vendorID) {
+                case 0x10DE: ctx.vendor = GpuVendor::Nvidia;   break;
+                case 0x1002: ctx.vendor = GpuVendor::Amd;      break;
+                case 0x8086: ctx.vendor = GpuVendor::Intel;    break;
+                case 0x106B: ctx.vendor = GpuVendor::Apple;    break;
+                case 0x13B5: ctx.vendor = GpuVendor::Arm;      break;
+                case 0x5143: ctx.vendor = GpuVendor::Qualcomm; break;
+                default:     ctx.vendor = GpuVendor::Unknown;  break;
+            }
         }
 
         // Create pipeline cache (try loading from disk)
@@ -767,6 +778,53 @@ auto VulkanBackend::synchronize_stream(StreamHandle stream) -> void {
         vulkan::checkVk(vkQueueWaitIdle(devices_[0].computeQueue),
                         "Failed to wait for compute queue idle");
     }
+}
+
+auto VulkanBackend::get_device_vendor(int32_t device_id) const -> GpuVendor {
+    if (device_id < 0 || static_cast<size_t>(device_id) >= devices_.size()) {
+        return GpuVendor::Unknown;
+    }
+    return devices_[device_id].vendor;
+}
+
+auto VulkanBackend::recommended_workgroup_2d(GpuVendor vendor, OpKind op)
+    -> std::pair<uint32_t, uint32_t> {
+    // Defaults are chosen to match each vendor's subgroup width in the
+    // inner dimension so one row of the tile fits in one warp/wave. The
+    // total product is 256 — identical to the current 16x16 baked into
+    // the compute shaders — so returning these numbers only reshapes the
+    // dispatch grid, not the per-workgroup thread count. Real
+    // per-vendor tuning (swapping shader variants with different
+    // local_size declarations) is the Phase 2.2 follow-up.
+    switch (op) {
+        case OpKind::Matmul:
+            switch (vendor) {
+                case GpuVendor::Nvidia:   return {32u, 8u};   // warp-width rows
+                case GpuVendor::Amd:      return {64u, 4u};   // wave64 rows on GCN / RDNA compute
+                case GpuVendor::Intel:    return {16u, 16u};  // SIMD8/16/32 — 16 is a safe default
+                case GpuVendor::Apple:    return {32u, 8u};   // SIMD width 32
+                case GpuVendor::Arm:      return {16u, 16u};
+                case GpuVendor::Qualcomm: return {16u, 16u};
+                case GpuVendor::Unknown:  return {16u, 16u};
+            }
+            break;
+        case OpKind::Conv:
+            switch (vendor) {
+                case GpuVendor::Nvidia:   return {32u, 8u};
+                case GpuVendor::Amd:      return {64u, 4u};
+                default:                  return {16u, 16u};
+            }
+            break;
+        case OpKind::ElementWise:
+            // Element-wise is effectively 1D; keep a flat layout.
+            switch (vendor) {
+                case GpuVendor::Nvidia:   return {256u, 1u};
+                case GpuVendor::Amd:      return {256u, 1u};
+                default:                  return {256u, 1u};
+            }
+            break;
+    }
+    return {16u, 16u};
 }
 vulkan::ComputePipeline* VulkanBackend::getPipeline(const std::string& shader_name,
                                                     int32_t device_id) {

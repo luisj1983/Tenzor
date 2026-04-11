@@ -1,0 +1,82 @@
+name: GPU Nightly
+
+# Runs the full backend-parity suite nightly on the self-hosted GPU
+# runner, plus a broader set of autograd and NN integration tests that
+# don't fit the PR-gated gpu-tests job.
+#
+# Register the runner via repo Settings > Actions > Runners with labels:
+#   self-hosted, linux, gpu
+#
+# Per CLAUDE.md testing constraints: always -j1, one shell at a time,
+# AMD driver is fragile — never parallelize ROCm tests across shells.
+
+on:
+  schedule:
+    # Every day at 02:00 UTC (tuning: runs during the user's overnight).
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: gpu-nightly
+  cancel-in-progress: false
+
+jobs:
+  gpu-full-parity:
+    name: Full Backend Parity (nightly)
+    runs-on: [self-hosted, linux, gpu]
+    timeout-minutes: 600  # 10 hours — the full suite is long
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure Release build with all tractable backends
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DTENZOR_BUILD_CUDA=ON \
+            -DTENZOR_BUILD_ROCM=ON \
+            -DTENZOR_BUILD_VULKAN=ON \
+            -DTENZOR_BUILD_ONEAPI=OFF \
+            -DTENZOR_BUILD_PYTHON=OFF \
+            -DTENZOR_BUILD_TESTS=ON
+
+      - name: Build everything
+        run: ninja -C build -j1
+
+      - name: Run core tests
+        working-directory: build
+        run: ctest -L "core" --output-on-failure -j1
+
+      - name: Run autograd tests
+        working-directory: build
+        run: ctest -L "autograd" --output-on-failure -j1
+
+      - name: Run nn tests
+        working-directory: build
+        run: ctest -L "nn" --output-on-failure -j1
+
+      - name: Run CUDA parity
+        working-directory: build
+        run: ctest -R "cuda|Cuda" --output-on-failure -j1
+
+      - name: Run ROCm parity
+        working-directory: build
+        run: ctest -R "rocm|Rocm|hip|Hip" --output-on-failure -j1
+
+      - name: Run Vulkan parity
+        working-directory: build
+        run: ctest -R "vulkan|Vulkan" --output-on-failure -j1
+
+      - name: Run cross-backend parity suite
+        working-directory: build
+        run: ctest -L "backend_parity" --output-on-failure -j1
+
+      - name: Upload failure logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-nightly-failures
+          path: |
+            build/Testing/Temporary/LastTest.log
+            build/Testing/Temporary/LastTestsFailed.log
+          if-no-files-found: ignore

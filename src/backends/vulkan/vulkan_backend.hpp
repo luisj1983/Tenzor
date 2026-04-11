@@ -80,8 +80,46 @@ public:
                  std::span<const Tensor> inputs,
                  const OpAttributes& attrs) -> std::vector<Tensor> override;
 
+    // Broad GPU vendor classification for per-vendor workgroup / tile
+    // tuning. VkPhysicalDeviceProperties::vendorID gives us the PCI
+    // vendor; we collapse it to a small enum so dispatch sites can
+    // branch without caring about the PCI numbers.
+    enum class GpuVendor : uint8_t {
+        Unknown = 0,
+        Nvidia,   // vendorID 0x10DE — wavefront 32
+        Amd,      // vendorID 0x1002 — wavefront 32/64 depending on arch
+        Intel,    // vendorID 0x8086 — EU size 8/16/32
+        Apple,    // vendorID 0x106B — SIMD width 32
+        Arm,      // vendorID 0x13B5 — Mali; tiled renderer
+        Qualcomm, // vendorID 0x5143 — Adreno
+    };
+
+    /**
+     * @brief Return a recommended 2D tile size for the given vendor and
+     *        op kind. Values are heuristic defaults chosen to match the
+     *        vendor's subgroup width without inflating thread count.
+     *
+     * Call sites use this to *adjust dispatch counts* — each workgroup
+     * still executes the tile size baked into the SPIR-V shader. A
+     * deeper per-vendor tuning effort would swap shader variants via
+     * specialization constants; until that lands, the `_x * _y` product
+     * equals each shader's compile-time `local_size_x * local_size_y`
+     * (currently 16 * 16 = 256) so the returned numbers only affect the
+     * *shape* of the dispatch grid, not its total thread count.
+     *
+     * Phase 2.2: landing the infrastructure. Real per-vendor shader
+     * variants are TODO — see plan Phase 2.2 follow-up notes.
+     */
+    enum class OpKind : uint8_t { Matmul, Conv, ElementWise };
+    static auto recommended_workgroup_2d(GpuVendor vendor, OpKind op)
+        -> std::pair<uint32_t, uint32_t>;
+
+    /// Get the detected GPU vendor for a device (used by tests / profiling).
+    auto get_device_vendor(int32_t device_id) const -> GpuVendor;
+
 private:
     // Vulkan context management
+
     struct DeviceContext {
         VkPhysicalDevice physicalDevice;
         VkDevice device;
@@ -96,6 +134,7 @@ private:
         bool hasSubgroupArithmetic = false;   // Whether GPU supports subgroup arithmetic ops
         uint32_t subgroupSize = 0;            // Subgroup (warp) size for this device
         uint32_t workgroupSize = 256;         // Optimal 1D workgroup size (power-of-2, from device limits)
+        GpuVendor vendor = GpuVendor::Unknown; // Collapsed vendor classification (Phase 2.2)
         uint32_t maxComputeWorkGroupCount[3] = {65535, 65535, 65535};  // Vulkan minimum guaranteed
         VkPipelineCache pipelineCache = VK_NULL_HANDLE;  // Persistent pipeline cache
 
