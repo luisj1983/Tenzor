@@ -62,6 +62,30 @@ public:
      */
     virtual auto device() const -> Device = 0;
 
+    /**
+     * @brief Whether this host storage has been pinned (page-locked).
+     *
+     * Only meaningful for CPU storage. Device storage (CUDA/ROCm/...)
+     * always returns false. Default implementation returns false; the
+     * concrete CPU-capable storage class overrides.
+     */
+    virtual auto is_pinned() const -> bool { return false; }
+
+    /**
+     * @brief Pin this host storage via cudaHostRegister.
+     *
+     * For CPU storage backed by a regular allocation, this calls
+     * `cudaHostRegister` to page-lock the buffer so the CUDA driver can
+     * DMA directly into/out of it. A subsequent call is a no-op. The
+     * destructor unregisters automatically.
+     *
+     * On non-CPU storage this is a no-op. On CPU storage when Tenzor
+     * was built without CUDA support, this is a no-op as well.
+     *
+     * @return true if the storage is now pinned (either from this call
+     *         or a previous one), false if pinning was skipped or failed.
+     */
+    virtual auto pin() -> bool { return false; }
 };
 
 /**
@@ -128,10 +152,16 @@ public:
     auto size_bytes() const -> size_t override { return size_; }
     auto device() const -> Device override { return device_; }
 
+    // Pinned-memory support. Only effective for CPU storage when the
+    // build has CUDA available; see storage.cpp for the implementation.
+    auto is_pinned() const -> bool override { return pinned_; }
+    auto pin() -> bool override;
+
 private:
     void* device_ptr_{nullptr};                   ///< Device memory pointer
     size_t size_{0};                              ///< Size in bytes
     Device device_;                               ///< Device specification
+    bool pinned_{false};                          ///< CPU storage has been page-locked
 };
 
 /**

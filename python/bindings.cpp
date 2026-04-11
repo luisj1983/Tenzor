@@ -1075,6 +1075,92 @@ Returns:
             }, py::arg("low") = 0.0, py::arg("high") = 1.0,
             "Fill self with samples from U[low, high) in-place. Returns self.",
             py::call_guard<py::gil_scoped_release>())
+        // ---------------------------------------------------------------
+        // Phase 2.2 — Tensor accessors matching torch.Tensor shape API.
+        // ---------------------------------------------------------------
+        .def_property_readonly("T", [](const tenzor::Tensor& self) -> tenzor::Tensor {
+                // torch.Tensor.T: 2-D transpose only. For anything else
+                // torch raises (and has soft-deprecated the ND variant);
+                // we match that here.
+                if (self.ndim() != 2) {
+                    throw py::value_error(
+                        "tensor.T expects a 2-D tensor, got ndim=" +
+                        std::to_string(self.ndim()));
+                }
+                return tenzor::transpose(self, 0, 1);
+            },
+            "2-D transpose (equivalent to t.transpose(0, 1)).")
+        .def_property_readonly("mT", [](const tenzor::Tensor& self) -> tenzor::Tensor {
+                // torch.Tensor.mT: swap the last two dims. Requires ndim>=2.
+                if (self.ndim() < 2) {
+                    throw py::value_error(
+                        "tensor.mT expects ndim>=2, got ndim=" +
+                        std::to_string(self.ndim()));
+                }
+                int64_t nd = static_cast<int64_t>(self.ndim());
+                return tenzor::transpose(self, nd - 2, nd - 1);
+            },
+            "Batched transpose: swap the last two dimensions. "
+            "Equivalent to t.transpose(-2, -1).")
+        .def_property_readonly("H", [](const tenzor::Tensor& self) -> tenzor::Tensor {
+                // torch.Tensor.H: conjugate transpose of last two dims.
+                if (self.ndim() < 2) {
+                    throw py::value_error(
+                        "tensor.H expects ndim>=2, got ndim=" +
+                        std::to_string(self.ndim()));
+                }
+                int64_t nd = static_cast<int64_t>(self.ndim());
+                return tenzor::conj(tenzor::transpose(self, nd - 2, nd - 1));
+            },
+            "Conjugate transpose of the last two dimensions. "
+            "Equivalent to t.mT.conj().")
+        .def("stride", [](const tenzor::Tensor& self) -> py::tuple {
+                // stride() with no argument returns a tuple of all strides,
+                // matching torch.Tensor.stride().
+                auto s = self.strides();
+                py::tuple out(s.size());
+                for (size_t i = 0; i < s.size(); ++i) {
+                    out[i] = static_cast<int64_t>(s[i]);
+                }
+                return out;
+            },
+            "Return the stride of every dimension as a tuple of ints.")
+        .def("stride", [](const tenzor::Tensor& self, int64_t dim) -> int64_t {
+                // stride(dim) returns the stride of a single dimension.
+                auto s = self.strides();
+                int64_t nd = static_cast<int64_t>(s.size());
+                if (dim < 0) dim += nd;
+                if (dim < 0 || dim >= nd) {
+                    throw py::index_error(
+                        "stride: dim " + std::to_string(dim) +
+                        " out of range for tensor with ndim=" + std::to_string(nd));
+                }
+                return s[dim];
+            },
+            py::arg("dim"),
+            "Return the stride of the given dimension (supports negative indices).")
+        .def("storage_offset", [](const tenzor::Tensor& self) -> int64_t {
+                return self.offset();
+            },
+            "Return the offset (in elements) into the underlying storage.")
+        .def("data_ptr", [](const tenzor::Tensor& self) -> std::intptr_t {
+                return reinterpret_cast<std::intptr_t>(self.data_ptr());
+            },
+            "Return the address of the first element as a Python int. "
+            "Matches torch.Tensor.data_ptr().")
+        .def_property_readonly("is_pinned", [](const tenzor::Tensor& self) -> bool {
+                return self.is_pinned();
+            },
+            "Whether the underlying CPU storage is page-locked. GPU "
+            "tensors and non-pinned CPU tensors return False.")
+        .def("pin_memory", [](tenzor::Tensor& self) -> tenzor::Tensor& {
+                self.pin_memory();
+                return self;
+            },
+            "Page-lock the underlying CPU storage for fast GPU transfers. "
+            "No-op on GPU tensors, on non-CUDA builds, or if the "
+            "underlying buffer cannot be registered. Returns self.",
+            py::call_guard<py::gil_scoped_release>())
         // Buffer protocol support (enables memoryview, numpy.asarray, etc.)
         .def_buffer([](tenzor::Tensor& t) -> py::buffer_info {
             if (t.device().type != tenzor::Device::Type::CPU) {

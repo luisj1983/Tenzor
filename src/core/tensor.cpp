@@ -354,6 +354,21 @@ auto Tensor::storage() const -> const intrusive_ptr<Storage>& {
     return impl_->storage;
 }
 
+auto Tensor::is_pinned() const -> bool {
+    if (!impl_ || !impl_->storage) return false;
+    return impl_->storage->is_pinned();
+}
+
+auto Tensor::pin_memory() -> Tensor& {
+    if (!impl_ || !impl_->storage) return *this;
+    // Only CPU tensors can be pinned; Storage::pin() handles the
+    // device check internally and reports failure via its bool return.
+    // We don't need to branch on the result — on non-CUDA builds it
+    // silently no-ops and is_pinned() will continue to return false.
+    impl_->storage->pin();
+    return *this;
+}
+
 auto may_alias(const Tensor& a, const Tensor& b) -> bool {
     // Uninitialized tensors never alias.
     if (!a.impl() || !b.impl()) return false;

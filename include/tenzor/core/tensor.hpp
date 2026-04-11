@@ -1230,6 +1230,33 @@ public:
     auto storage() const -> const intrusive_ptr<Storage>&;
 
     /**
+     * @brief Whether this tensor's underlying CPU storage is page-locked.
+     *
+     * Returns true only for CPU tensors whose storage has been pinned
+     * via `pin_memory()` (or allocated pinned from the start). GPU
+     * tensors always return false — the pinned-memory concept only
+     * applies to host allocations that CUDA DMA can target directly.
+     */
+    auto is_pinned() const -> bool;
+
+    /**
+     * @brief Page-lock this tensor's CPU storage for fast GPU transfers.
+     *
+     * Delegates to Storage::pin(), which calls `cudaHostRegister` on
+     * the underlying buffer when CUDA is available. On GPU tensors,
+     * on non-CUDA builds, or if the buffer cannot be registered, this
+     * is a silent no-op and the tensor is returned unchanged.
+     *
+     * Unlike `tensor.to(Device::cpu())`, this does not allocate a new
+     * buffer — the pin is in-place, shared across every view that
+     * aliases the same storage. The destructor automatically calls
+     * `cudaHostUnregister` when the last reference drops.
+     *
+     * @return Reference to self for chaining.
+     */
+    auto pin_memory() -> Tensor&;
+
+    /**
      * @brief Set the requires_grad flag.
      */
     auto set_requires_grad(bool requires_grad) -> void;
