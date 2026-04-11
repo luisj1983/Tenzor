@@ -3963,6 +3963,19 @@ Example::
               py_backward_fn_(std::move(backward_fn)),
               ctx_(std::make_shared<PyFunctionCtx>()) {}
 
+        // Destructor must acquire the GIL before releasing py::object members
+        // — Variable::backward() runs under py::gil_scoped_release, so any
+        // cleanup path that drops the last shared_ptr to a PyCustomFunction
+        // (e.g. BackwardEngine::cleanup_graph clearing its sorted vector)
+        // would otherwise destroy py::object without the GIL, corrupting
+        // CPython refcounts and terminating the process.
+        ~PyCustomFunction() override {
+            py::gil_scoped_acquire acquire;
+            py_forward_fn_.release().dec_ref();
+            py_backward_fn_.release().dec_ref();
+            ctx_.reset();
+        }
+
         auto forward(std::vector<tenzor::Variable> inputs) -> std::vector<tenzor::Variable> override {
             py::gil_scoped_acquire acquire;
             try {

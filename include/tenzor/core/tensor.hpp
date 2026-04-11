@@ -1442,8 +1442,7 @@ public:
         , names_(other.names_)
         , is_contiguous_cache_(other.is_contiguous_cache_.load(std::memory_order_relaxed))
         , memory_format_cache_(other.memory_format_cache_.load(std::memory_order_relaxed))
-        , version_counter_(other.version_counter_.load(std::memory_order_relaxed))
-        , shape_info_cache_(std::atomic_load(&other.shape_info_cache_)) {}
+        , version_counter_(other.version_counter_.load(std::memory_order_relaxed)) {}
 
     TensorImpl& operator=(const TensorImpl&) = delete;
 
@@ -1499,15 +1498,6 @@ private:
     // Mutation paths (increment_version()) use release ordering; version checks
     // in autograd use acquire ordering to observe the mutated tensor state.
     std::atomic<uint64_t> version_counter_{0};  ///< Mutation version for autograd in-place detection
-
-    /// Lazy, invalidation-on-mutation cache of an immutable ShapeInfo
-    /// snapshot. Produced on first call to Tensor::shape_info_snapshot()
-    /// and reset to nullptr by mutable_shape/strides/set_offset. Uses
-    /// plain std::shared_ptr with std::atomic_load/store free functions
-    /// for portability — std::atomic<std::shared_ptr<T>> (C++20) works
-    /// but the free functions are still supported and avoid gcc
-    /// std::atomic<shared_ptr> initializer-list quirks.
-    mutable std::shared_ptr<const ShapeInfo> shape_info_cache_;
 };
 
 /**

@@ -20,7 +20,7 @@ f32 = _core.dtype.float32
 
 def _flat(t):
     """Read a 1-D tensor as a Python list via .item() — no numpy needed."""
-    return [t[i].item() for i in range(t.numel())]
+    return [t[i].item() for i in range(t.numel)]
 
 
 def _allclose(a, b, tol=1e-5):

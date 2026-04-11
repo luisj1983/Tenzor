@@ -19,8 +19,10 @@ from operator import mul
 build_python_dir = os.path.join(os.path.dirname(__file__), "../../build/python")
 sys.path.insert(0, build_python_dir)
 
+import pytest
 import tenzor.tenzor_core as tz
 
+hypothesis = pytest.importorskip("hypothesis")
 from hypothesis import given, settings, assume, HealthCheck
 from hypothesis import strategies as st
 

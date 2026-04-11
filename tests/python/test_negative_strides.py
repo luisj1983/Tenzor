@@ -3,7 +3,8 @@
 import sys
 import os
 import unittest
-import numpy as np
+import pytest
+np = pytest.importorskip("numpy")
 
 build_python_dir = os.path.join(os.path.dirname(__file__), '../../build/python')
 sys.path.insert(0, build_python_dir)

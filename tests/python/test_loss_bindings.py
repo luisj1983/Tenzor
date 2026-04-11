@@ -11,8 +11,9 @@ import os
 build_python_dir = os.path.join(os.path.dirname(__file__), '../../build/python')
 sys.path.insert(0, build_python_dir)
 
+import pytest
 import tenzor.tenzor_core as tz
-import numpy as np
+np = pytest.importorskip("numpy")
 
 
 def test_reduction_enum():

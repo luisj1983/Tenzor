@@ -6,7 +6,7 @@ import tenzor as tz
 tz.initialize()
 
 import pytest
-import numpy as np
+np = pytest.importorskip("numpy")
 
 
 # ---------------------------------------------------------------------------

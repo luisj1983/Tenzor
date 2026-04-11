@@ -16,7 +16,7 @@ def test_custom_function_forward_exception():
         def backward(ctx, grad):
             return grad
 
-    x = tz.Variable(tz.randn([3], dtype=tz.dtype.Float32), True)
+    x = tz.Variable(tz.randn([3], dtype=tz.dtype.float32), True)
     try:
         BadForward.apply(x)
         assert False, "Should have raised"
@@ -34,7 +34,7 @@ def test_custom_function_backward_exception():
         def backward(ctx, grad):
             raise ValueError("Test error in backward")
 
-    x = tz.Variable(tz.randn([3], dtype=tz.dtype.Float32), True)
+    x = tz.Variable(tz.randn([3], dtype=tz.dtype.float32), True)
     y = BadBackward.apply(x)
     try:
         y.backward()
@@ -44,10 +44,10 @@ def test_custom_function_backward_exception():
 
 def test_gradient_shape_mismatch():
     """User-supplied gradient with wrong shape should raise error."""
-    x = tz.Variable(tz.randn([3, 4], dtype=tz.dtype.Float32), True)
+    x = tz.Variable(tz.randn([3, 4], dtype=tz.dtype.float32), True)
     y = x.sum()
     try:
-        y.backward(tz.randn([3, 4], dtype=tz.dtype.Float32))
+        y.backward(tz.randn([3, 4], dtype=tz.dtype.float32))
         assert False, "Should have raised"
     except RuntimeError as e:
         assert "shape" in str(e).lower() or "mismatch" in str(e).lower(), f"Got: {e}"

@@ -9,7 +9,7 @@ tz.initialize()
 
 def test_getitem_allows_concurrent_threads():
     """__getitem__ should release GIL, allowing other threads to run."""
-    t = tz.randn([100, 100], dtype=tz.dtype.Float32)
+    t = tz.randn([100, 100], dtype=tz.dtype.float32)
     results = []
     barrier = threading.Barrier(2)
 
@@ -29,14 +29,14 @@ def test_getitem_allows_concurrent_threads():
 
 def test_setitem_allows_concurrent_threads():
     """__setitem__ should release GIL, allowing other threads to run."""
-    t = tz.zeros([100, 100], dtype=tz.dtype.Float32)
+    t = tz.zeros([100, 100], dtype=tz.dtype.float32)
     results = []
     barrier = threading.Barrier(2)
 
     def worker(idx):
         barrier.wait()
         for i in range(10):
-            t[idx] = tz.ones([100], dtype=tz.dtype.Float32)
+            t[idx] = tz.ones([100], dtype=tz.dtype.float32)
         results.append(idx)
 
     t1 = threading.Thread(target=worker, args=(0,))
@@ -49,8 +49,8 @@ def test_setitem_allows_concurrent_threads():
 
 def test_matmul_concurrent():
     """Tensor matmul should release GIL."""
-    a = tz.randn([50, 50], dtype=tz.dtype.Float32)
-    b = tz.randn([50, 50], dtype=tz.dtype.Float32)
+    a = tz.randn([50, 50], dtype=tz.dtype.float32)
+    b = tz.randn([50, 50], dtype=tz.dtype.float32)
     results = []
     barrier = threading.Barrier(2)
 

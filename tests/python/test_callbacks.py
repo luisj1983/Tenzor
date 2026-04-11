@@ -7,16 +7,18 @@ import unittest
 import sys
 import os
 import tempfile
+import pytest
 
 # Add the build directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../build/python'))
 
 try:
-    import tenzor_core as tz
+    import tenzor.tenzor_core as tz
 except ImportError as e:
-    print(f"Error importing tenzor_core: {e}")
-    print("Make sure the library is built first with: cmake --build build")
-    sys.exit(1)
+    pytest.skip(
+        f"tenzor_core not importable ({e}); build the Python module first",
+        allow_module_level=True,
+    )
 
 
 class TestCallbacks(unittest.TestCase):

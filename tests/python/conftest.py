@@ -3,7 +3,17 @@
 import sys
 import os
 import pytest
-import numpy as np
+
+# numpy is optional at the conftest level — individual tests that need it
+# should use ``pytest.importorskip("numpy")``. Making this import
+# unconditional would block pytest collection on environments where numpy
+# isn't installed even though many of the tenzor tests don't touch it.
+try:
+    import numpy as np
+    _HAS_NUMPY = True
+except ModuleNotFoundError:
+    np = None  # type: ignore[assignment]
+    _HAS_NUMPY = False
 
 # Ensure the build directory's Python package is on the path
 _build_python = os.path.join(os.path.dirname(__file__), '..', '..', 'build', 'python')
