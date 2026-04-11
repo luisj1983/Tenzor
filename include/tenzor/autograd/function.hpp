@@ -275,6 +275,15 @@ public:
      */
     void reload_saved_tensors() const;
 
+private:
+    /// Lockless implementation body for reload_saved_tensors(). Caller
+    /// must hold offload_mutex_. Separated out so that saved_tensors(),
+    /// which already holds the mutex, can reload without recursively
+    /// locking the same non-recursive std::mutex.
+    void reload_saved_tensors_locked() const;
+
+public:
+
     /**
      * @brief Release saved tensors to free memory.
      *

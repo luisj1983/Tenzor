@@ -125,22 +125,12 @@ auto Function::input_variables() -> std::vector<Variable>& {
 }
 
 auto Function::save_for_backward(std::vector<Tensor> tensors) -> void {
-    // Record version counters for in-place modification detection
-    saved_versions_.clear();
-    saved_versions_.reserve(tensors.size());
-    saved_view_base_versions_.clear();
-    saved_view_base_versions_.reserve(tensors.size());
-    for (const auto& t : tensors) {
-        saved_versions_.push_back(t.version());
-        // Also track view base version for view safety detection
-        if (t.is_view() && t._view_base()) {
-            saved_view_base_versions_.push_back(t._view_base()->version());
-        } else {
-            saved_view_base_versions_.push_back(0);
-        }
-    }
-
-    // Per-tensor offload check (respects per-function policy + size threshold)
+    // Per-tensor offload check first (respects per-function policy +
+    // size threshold). When a tensor is offloaded we lose access to the
+    // original GPU tensor, so version tracking on the POST-offload CPU
+    // copy is what we actually store. For non-offloaded tensors, the
+    // version recorded below is the live one and the existing in-place
+    // detection still applies.
     if (!tensors.empty()) {
         bool any_offloaded = false;
         for (auto& t : tensors) {
@@ -156,17 +146,42 @@ auto Function::save_for_backward(std::vector<Tensor> tensors) -> void {
             tensors_offloaded_.store(true, std::memory_order_release);
         }
     }
+
+    // Record version counters for in-place modification detection.
+    // For offloaded tensors these are versions of private CPU copies
+    // the Function owns — no external code has a reference, so the
+    // version should never change until we reload.
+    saved_versions_.clear();
+    saved_versions_.reserve(tensors.size());
+    saved_view_base_versions_.clear();
+    saved_view_base_versions_.reserve(tensors.size());
+    for (const auto& t : tensors) {
+        saved_versions_.push_back(t.version());
+        // Also track view base version for view safety detection.
+        // Offloaded tensors are fresh copies with no view base, so this
+        // stays 0 for them — which is the correct "not a view" marker.
+        if (t.is_view() && t._view_base()) {
+            saved_view_base_versions_.push_back(t._view_base()->version());
+        } else {
+            saved_view_base_versions_.push_back(0);
+        }
+    }
+
     saved_tensors_ = std::move(tensors);
 }
 
 auto Function::saved_tensors() const -> const std::vector<Tensor>& {
     if (tensors_offloaded_.load(std::memory_order_acquire)) {
+        // Take the offload mutex, re-check under the lock (a concurrent
+        // reload may already have completed), and reload without taking
+        // the mutex again — reload_saved_tensors_locked does the work
+        // assuming the caller holds offload_mutex_. Previously this
+        // called the public reload_saved_tensors() which took the same
+        // std::mutex a second time and deadlocked on the same thread.
         std::lock_guard lock(offload_mutex_);
         if (tensors_offloaded_.load(std::memory_order_relaxed)) {
-            reload_saved_tensors();
+            reload_saved_tensors_locked();
         }
-        // Check and return while still holding the lock to prevent
-        // concurrent offload from modifying saved_tensors_ under us
         validate_saved_tensors();
         return saved_tensors_;
     }
@@ -227,8 +242,22 @@ void Function::reload_saved_tensors() const {
     if (!tensors_offloaded_.load(std::memory_order_acquire)) return;
     std::lock_guard lock(offload_mutex_);
     if (!tensors_offloaded_.load(std::memory_order_relaxed)) return;
-    for (auto& t : saved_tensors_) {
-        t = t.to(offloaded_device_);
+    reload_saved_tensors_locked();
+}
+
+void Function::reload_saved_tensors_locked() const {
+    // Caller must hold offload_mutex_. Refresh saved_versions_ after
+    // the move back so that validate_saved_tensors doesn't falsely
+    // report an in-place modification — .to() produces a new Tensor
+    // with a fresh version counter each time, so the version the
+    // original save_for_backward() recorded is no longer meaningful
+    // after the offload/reload round trip. We record the *current*
+    // post-reload version as the new baseline.
+    for (size_t i = 0; i < saved_tensors_.size(); ++i) {
+        saved_tensors_[i] = saved_tensors_[i].to(offloaded_device_);
+        if (i < saved_versions_.size()) {
+            saved_versions_[i] = saved_tensors_[i].version();
+        }
     }
     tensors_offloaded_.store(false, std::memory_order_release);
 }

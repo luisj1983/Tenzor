@@ -3346,6 +3346,79 @@ Example::
           "Check if inference mode is currently active");
 
     // ========================================================================
+    // Activation offloading (Phase 1.6) — when enabled, save_for_backward
+    // moves saved GPU tensors to CPU so they don't sit in device memory
+    // for the duration of the forward pass. The autograd engine reloads
+    // them to the original device before invoking each backward kernel.
+    // ========================================================================
+    m.def("set_activation_offload", &tenzor::set_activation_offload,
+          "Enable/disable activation offloading for saved tensors.\n\n"
+          "When enabled, Function::save_for_backward() moves GPU tensors\n"
+          "to CPU, reducing peak device memory usage during the forward\n"
+          "pass. The autograd engine reloads them to the source device\n"
+          "before invoking each backward kernel.",
+          py::arg("enabled"));
+
+    m.def("is_activation_offload_enabled", &tenzor::activation_offload_enabled,
+          "Return whether activation offloading is currently enabled.");
+
+    struct PyOffloadActivationsContext {
+        bool prev_state_ = false;
+
+        void enter() {
+            prev_state_ = tenzor::activation_offload_enabled();
+            tenzor::set_activation_offload(true);
+        }
+
+        void exit() {
+            tenzor::set_activation_offload(prev_state_);
+        }
+    };
+
+    py::class_<PyOffloadActivationsContext>(m, "offload_activations",
+        "Context manager and decorator that enables activation offloading\n"
+        "for the duration of a forward + backward pass.\n\n"
+        "Usage as context manager:\n"
+        "    with tz.offload_activations():\n"
+        "        y = model(x)\n"
+        "        loss = y.sum()\n"
+        "        loss.backward()\n\n"
+        "Usage as decorator:\n"
+        "    @tz.offload_activations()\n"
+        "    def train_step(x):\n"
+        "        ...")
+        .def(py::init<>())
+        .def("__enter__", [](PyOffloadActivationsContext& self) -> PyOffloadActivationsContext& {
+            self.enter();
+            return self;
+        })
+        .def("__exit__", [](PyOffloadActivationsContext& self, py::object, py::object, py::object) {
+            self.exit();
+            return false;
+        })
+        .def("__call__", [](PyOffloadActivationsContext&, py::function func) -> py::object {
+            auto wrapper = py::cpp_function([func](py::args args, py::kwargs kwargs) -> py::object {
+                const bool prev = tenzor::activation_offload_enabled();
+                tenzor::set_activation_offload(true);
+                try {
+                    py::object result = func(*args, **kwargs);
+                    tenzor::set_activation_offload(prev);
+                    return result;
+                } catch (...) {
+                    tenzor::set_activation_offload(prev);
+                    throw;
+                }
+            });
+            try {
+                py::module_ functools = py::module_::import("functools");
+                functools.attr("update_wrapper")(wrapper, func);
+            } catch (py::error_already_set&) {
+                PyErr_Clear();
+            }
+            return wrapper;
+        }, py::arg("func"));
+
+    // ========================================================================
     // Anomaly detection (NaN/Inf checking in backward)
     // ========================================================================
     m.def("set_anomaly_detection", &tenzor::set_anomaly_detection,
