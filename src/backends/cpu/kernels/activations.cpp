@@ -382,9 +382,44 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
         double* grad_in_data = grad_input.data<double>();
         size_t n = input.numel();
 
+#ifdef TENZOR_HAS_AVX512
+        const size_t simd_width = 8; // AVX-512: 8 doubles
+        const size_t simd_end = (n / simd_width) * simd_width;
+        __m512d zero_d = _mm512_setzero_pd();
+
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < simd_end; i += simd_width) {
+            __m512d x = _mm512_loadu_pd(in_data + i);
+            __m512d grad = _mm512_loadu_pd(grad_out_data + i);
+            __mmask8 mask = _mm512_cmp_pd_mask(x, zero_d, _CMP_GT_OQ);
+            __m512d result = _mm512_maskz_mov_pd(mask, grad);
+            _mm512_storeu_pd(grad_in_data + i, result);
+        }
+        for (size_t i = simd_end; i < n; ++i) {
+            grad_in_data[i] = grad_out_data[i] * (in_data[i] > 0.0 ? 1.0 : 0.0);
+        }
+#elif defined(TENZOR_HAS_AVX2)
+        const size_t simd_width = 4; // AVX2: 4 doubles
+        const size_t simd_end = (n / simd_width) * simd_width;
+        __m256d zero_d = _mm256_setzero_pd();
+
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < simd_end; i += simd_width) {
+            __m256d x = _mm256_loadu_pd(in_data + i);
+            __m256d grad = _mm256_loadu_pd(grad_out_data + i);
+            __m256d mask = _mm256_cmp_pd(x, zero_d, _CMP_GT_OQ);
+            __m256d result = _mm256_and_pd(mask, grad);
+            _mm256_storeu_pd(grad_in_data + i, result);
+        }
+        for (size_t i = simd_end; i < n; ++i) {
+            grad_in_data[i] = grad_out_data[i] * (in_data[i] > 0.0 ? 1.0 : 0.0);
+        }
+#else
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             grad_in_data[i] = grad_out_data[i] * (in_data[i] > 0.0 ? 1.0 : 0.0);
         }
+#endif
     } else if (input.dtype() == DType::Float16) {
         const Float16* grad_out_data = grad_output.data<Float16>();
         const Float16* in_data = input.data<Float16>();
@@ -600,6 +635,7 @@ auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input) -> 
         double* grad_in_data = grad_input.data<double>();
         size_t n = input.numel();
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             double sigmoid_x = 1.0 / (1.0 + std::exp(-in_data[i]));
             grad_in_data[i] = grad_out_data[i] * sigmoid_x * (1.0 - sigmoid_x);
@@ -1276,10 +1312,50 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
         size_t n = input.numel();
         double alpha_d = static_cast<double>(alpha);
 
+#ifdef TENZOR_HAS_AVX512
+        const size_t simd_width = 8;
+        const size_t simd_end = (n / simd_width) * simd_width;
+        __m512d zero_d = _mm512_setzero_pd();
+        __m512d one_d = _mm512_set1_pd(1.0);
+        __m512d vslope_d = _mm512_set1_pd(alpha_d);
+
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < simd_end; i += simd_width) {
+            __m512d x = _mm512_loadu_pd(in_data + i);
+            __m512d grad = _mm512_loadu_pd(grad_out_data + i);
+            __mmask8 mask = _mm512_cmp_pd_mask(x, zero_d, _CMP_GT_OQ);
+            __m512d multiplier = _mm512_mask_blend_pd(mask, vslope_d, one_d);
+            __m512d result = _mm512_mul_pd(grad, multiplier);
+            _mm512_storeu_pd(grad_in_data + i, result);
+        }
+        for (size_t i = simd_end; i < n; ++i) {
+            grad_in_data[i] = grad_out_data[i] * (in_data[i] > 0.0 ? 1.0 : alpha_d);
+        }
+#elif defined(TENZOR_HAS_AVX2)
+        const size_t simd_width = 4;
+        const size_t simd_end = (n / simd_width) * simd_width;
+        __m256d zero_d = _mm256_setzero_pd();
+        __m256d one_d = _mm256_set1_pd(1.0);
+        __m256d vslope_d = _mm256_set1_pd(alpha_d);
+
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < simd_end; i += simd_width) {
+            __m256d x = _mm256_loadu_pd(in_data + i);
+            __m256d grad = _mm256_loadu_pd(grad_out_data + i);
+            __m256d mask = _mm256_cmp_pd(x, zero_d, _CMP_GT_OQ);
+            __m256d multiplier = _mm256_blendv_pd(vslope_d, one_d, mask);
+            __m256d result = _mm256_mul_pd(grad, multiplier);
+            _mm256_storeu_pd(grad_in_data + i, result);
+        }
+        for (size_t i = simd_end; i < n; ++i) {
+            grad_in_data[i] = grad_out_data[i] * (in_data[i] > 0.0 ? 1.0 : alpha_d);
+        }
+#else
         #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             grad_in_data[i] = grad_out_data[i] * (in_data[i] > 0.0 ? 1.0 : alpha_d);
         }
+#endif
     } else if (input.dtype() == DType::Float16) {
         const Float16* grad_out_data = grad_output.data<Float16>();
         const Float16* in_data = input.data<Float16>();

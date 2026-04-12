@@ -1,0 +1,323 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Special math unary operations for Float16 (packed 2 per 32-bit word).
+// Unpacks to float32, computes using the same approximations as the f32 shader,
+// then repacks to float16. Avoids the host-side promote/demote round-trip.
+//
+//   0=gamma, 1=lgamma, 2=digamma, 3=bessel_j0, 4=bessel_j1,
+//   5=bessel_y0, 6=bessel_y1, 7=bessel_i0, 8=bessel_i1, 9=erfinv,
+//   10=sinc, 11=polygamma (n via push_constant param_int)
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };
+layout(binding = 1) buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;        // Number of elements
+    uint op;       // Operation opcode
+    int param_int; // Polygamma order (only used by op=11)
+} params;
+
+const float PI = 3.14159265358979f;
+
+float16_t readF16(uint packed, uint offset) {
+    uint bits = (packed >> (offset * 16)) & 0xFFFFu;
+    return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
+}
+
+uint packF16Pair(float16_t v0, float16_t v1) {
+    uint bits0 = packHalf2x16(vec2(float(v0), 0.0)).x & 0xFFFFu;
+    uint bits1 = packHalf2x16(vec2(float(v1), 0.0)).x & 0xFFFFu;
+    return bits0 | (bits1 << 16);
+}
+
+// ----- Lanczos lgamma -----
+float lgamma_lanczos(float x) {
+    float coef[9];
+    coef[0] = 0.99999999999980993f;
+    coef[1] = 676.5203681218851f;
+    coef[2] = -1259.1392167224028f;
+    coef[3] = 771.32342877765313f;
+    coef[4] = -176.61502916214059f;
+    coef[5] = 12.507343278686905f;
+    coef[6] = -0.13857109526572012f;
+    coef[7] = 9.9843695780195716e-6f;
+    coef[8] = 1.5056327351493116e-7f;
+
+    float g = 7.0f;
+    float xm1 = x - 1.0f;
+    float a = coef[0];
+    float t = xm1 + g + 0.5f;
+    for (int i = 1; i < 9; ++i) {
+        a += coef[i] / (xm1 + float(i));
+    }
+    return 0.5f * log(2.0f * PI) + (xm1 + 0.5f) * log(t) - t + log(a);
+}
+float lgamma_impl(float x) {
+    if (x < 0.5f) {
+        return log(PI / abs(sin(PI * x))) - lgamma_lanczos(1.0f - x);
+    }
+    return lgamma_lanczos(x);
+}
+float tgamma_impl(float x) {
+    return exp(lgamma_impl(x));
+}
+
+// ----- Digamma -----
+float digamma_impl(float x) {
+    float result = 0.0f;
+    if (x < 0.5f) {
+        float y = 1.0f - x;
+        float r = 0.0f;
+        for (int i = 0; i < 100; ++i) {
+            if (y >= 7.0f) break;
+            r -= 1.0f / y;
+            y += 1.0f;
+        }
+        float y2 = 1.0f / (y * y);
+        r += log(y) - 0.5f / y
+            - y2 * (0.0833333333f - y2 * (0.00833333333f - y2 * (0.00396825397f
+            - y2 * (0.00416666667f - y2 * 0.00757575758f))));
+        return r - PI / tan(PI * x);
+    }
+    for (int i = 0; i < 100; ++i) {
+        if (x >= 7.0f) break;
+        result -= 1.0f / x;
+        x += 1.0f;
+    }
+    float x2 = 1.0f / (x * x);
+    result += log(x) - 0.5f / x
+            - x2 * (0.0833333333f - x2 * (0.00833333333f - x2 * (0.00396825397f
+            - x2 * (0.00416666667f - x2 * 0.00757575758f))));
+    return result;
+}
+
+// ----- Bessel J0 -----
+float bessel_j0_impl(float x_in) {
+    float ax = abs(x_in);
+    if (ax < 8.0f) {
+        float y = x_in * x_in;
+        float r1 = 57568490574.0f + y * (-13362590354.0f
+                 + y * (651619640.7f + y * (-11214424.18f
+                 + y * (77392.33017f + y * (-184.9052456f)))));
+        float r2 = 57568490411.0f + y * (1029532985.0f
+                 + y * (9494680.718f + y * (59272.64853f
+                 + y * (267.8532712f + y * 1.0f))));
+        return r1 / r2;
+    }
+    float z = 8.0f / ax;
+    float y = z * z;
+    float r1 = 1.0f + y * (-0.1098628627e-2f + y * (0.2734510407e-4f
+             + y * (-0.2073370639e-5f + y * 0.2093887211e-6f)));
+    float r2 = -0.1562499995e-1f + y * (0.1430488765e-3f
+             + y * (-0.6911147651e-5f + y * (0.7621095161e-6f
+             + y * (-0.934935152e-7f))));
+    return sqrt(0.636619772f / ax)
+         * (cos(ax - 0.785398164f) * r1 - z * sin(ax - 0.785398164f) * r2);
+}
+
+// ----- Bessel J1 -----
+float bessel_j1_impl(float x_in) {
+    float ax = abs(x_in);
+    float result;
+    if (ax < 8.0f) {
+        float y = x_in * x_in;
+        float r1 = x_in * (72362614232.0f + y * (-7895059235.0f
+                 + y * (242396853.1f + y * (-2972611.439f
+                 + y * (15704.48260f + y * (-30.16036606f))))));
+        float r2 = 144725228442.0f + y * (2300535178.0f
+                 + y * (18583304.74f + y * (99447.43394f
+                 + y * (376.9991397f + y * 1.0f))));
+        result = r1 / r2;
+    } else {
+        float z = 8.0f / ax;
+        float y = z * z;
+        float r1 = 1.0f + y * (0.183105e-2f + y * (-0.3516396496e-4f
+                 + y * (0.2457520174e-5f + y * (-0.240337019e-6f))));
+        float r2 = 0.04687499995f + y * (-0.2002690873e-3f
+                 + y * (0.8449199096e-5f + y * (-0.88228987e-6f
+                 + y * 0.105787412e-6f)));
+        float ans = sqrt(0.636619772f / ax)
+                  * (cos(ax - 2.356194491f) * r1 - z * sin(ax - 2.356194491f) * r2);
+        result = (x_in < 0.0f) ? -ans : ans;
+        return result;
+    }
+    return result;
+}
+
+// ----- Bessel Y0 -----
+float bessel_y0_impl(float x) {
+    if (x <= 0.0f) return -1.0e38f;
+    if (x < 8.0f) {
+        float y = x * x;
+        float r1 = -2957821389.0f + y * (7062834065.0f
+                 + y * (-512359803.6f + y * (10879881.29f
+                 + y * (-86327.92757f + y * 228.4622733f))));
+        float r2 = 40076544269.0f + y * (745249964.8f
+                 + y * (7189466.438f + y * (47447.26470f
+                 + y * (226.1030244f + y * 1.0f))));
+        return (r1 / r2) + 0.636619772f * bessel_j0_impl(x) * log(x);
+    }
+    float z = 8.0f / x;
+    float y = z * z;
+    float r1 = 1.0f + y * (-0.1098628627e-2f + y * (0.2734510407e-4f
+             + y * (-0.2073370639e-5f + y * 0.2093887211e-6f)));
+    float r2 = -0.1562499995e-1f + y * (0.1430488765e-3f
+             + y * (-0.6911147651e-5f + y * (0.7621095161e-6f
+             + y * (-0.934935152e-7f))));
+    return sqrt(0.636619772f / x)
+         * (sin(x - 0.785398164f) * r1 + z * cos(x - 0.785398164f) * r2);
+}
+
+// ----- Bessel Y1 -----
+float bessel_y1_impl(float x) {
+    if (x <= 0.0f) return -1.0e38f;
+    if (x < 8.0f) {
+        float y = x * x;
+        float r1 = x * (-4.900604943e13f + y * (1.275274390e13f
+                 + y * (-5.153438139e11f + y * (7.349264551e9f
+                 + y * (-4.237922726e7f + y * 8.511937935e4f)))));
+        float r2 = 2.499580570e14f + y * (4.244419664e12f
+                 + y * (3.733650367e10f + y * (2.245904002e8f
+                 + y * (1.020426050e6f + y * (3.549632885e3f + y)))));
+        return (r1 / r2) + 0.636619772f * (bessel_j1_impl(x) * log(x) - 1.0f / x);
+    }
+    float z = 8.0f / x;
+    float y = z * z;
+    float r1 = 1.0f + y * (0.183105e-2f + y * (-0.3516396496e-4f
+             + y * (0.2457520174e-5f + y * (-0.240337019e-6f))));
+    float r2 = 0.04687499995f + y * (-0.2002690873e-3f
+             + y * (0.8449199096e-5f + y * (-0.88228987e-6f
+             + y * 0.105787412e-6f)));
+    return sqrt(0.636619772f / x)
+         * (sin(x - 2.356194491f) * r1 + z * cos(x - 2.356194491f) * r2);
+}
+
+// ----- Modified Bessel I0 -----
+float bessel_i0_impl(float x_in) {
+    float ax = abs(x_in);
+    if (ax < 3.75f) {
+        float t = x_in / 3.75f;
+        t = t * t;
+        return 1.0f + t * (3.5156229f + t * (3.0899424f + t * (1.2067492f
+               + t * (0.2659732f + t * (0.0360768f + t * 0.0045813f)))));
+    }
+    float t = 3.75f / ax;
+    return (exp(ax) / sqrt(ax)) * (0.39894228f + t * (0.01328592f
+           + t * (0.00225319f - t * (0.00157565f - t * (0.00916281f
+           - t * (0.02057706f - t * (0.02635537f - t * (0.01647633f
+           - t * 0.00392377f))))))));
+}
+
+// ----- Modified Bessel I1 -----
+float bessel_i1_impl(float x_in) {
+    float ax = abs(x_in);
+    float result;
+    if (ax < 3.75f) {
+        float t = x_in / 3.75f;
+        t = t * t;
+        result = ax * (0.5f + t * (0.87890594f + t * (0.51498869f + t * (0.15084934f
+                 + t * (0.02658733f + t * (0.00301532f + t * 0.00032411f))))));
+    } else {
+        float t = 3.75f / ax;
+        result = (exp(ax) / sqrt(ax)) * (0.39894228f - t * (0.03988024f
+                 - t * (0.00362018f + t * (0.00163801f - t * (0.01031555f
+                 - t * (0.02282967f - t * (0.02895312f - t * (0.01787654f
+                 - t * 0.00420059f))))))));
+    }
+    return (x_in < 0.0f) ? -result : result;
+}
+
+// ----- ErfInv -----
+float erf_impl(float x) {
+    float sgn = (x < 0.0f) ? -1.0f : 1.0f;
+    x = abs(x);
+    float a1 =  0.254829592f;
+    float a2 = -0.284496736f;
+    float a3 =  1.421413741f;
+    float a4 = -1.453152027f;
+    float a5 =  1.061405429f;
+    float p_  =  0.3275911f;
+    float t = 1.0f / (1.0f + p_ * x);
+    float y = 1.0f - ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * exp(-x * x);
+    return sgn * y;
+}
+float erfinv_impl(float x) {
+    if (x <= -1.0f) return -1.0e38f;
+    if (x >= 1.0f) return 1.0e38f;
+    if (x == 0.0f) return 0.0f;
+    float a = 0.147f;
+    float ln1mx2 = log(1.0f - x * x);
+    float t1 = 2.0f / (PI * a) + 0.5f * ln1mx2;
+    float t2 = ln1mx2 / a;
+    float sgn = (x > 0.0f) ? 1.0f : -1.0f;
+    float r = sgn * sqrt(sqrt(t1 * t1 - t2) - t1);
+    for (int i = 0; i < 2; ++i) {
+        float err = erf_impl(r) - x;
+        float deriv = 2.0f / sqrt(PI) * exp(-r * r);
+        r -= err / deriv;
+    }
+    return r;
+}
+
+// ----- Sinc -----
+float sinc_impl(float x) {
+    if (x == 0.0f) return 1.0f;
+    float px = PI * x;
+    return sin(px) / px;
+}
+
+// ----- Polygamma -----
+float polygamma_impl(int n, float x) {
+    if (n == 0) return digamma_impl(x);
+    float fact_n = 1.0f;
+    for (int k = 1; k <= n; ++k) fact_n *= float(k);
+    float sgn = ((n + 1) % 2 == 0) ? 1.0f : -1.0f;
+    float sum = 0.0f;
+    for (int k = 0; k < 100; ++k) {
+        float term = pow(x + float(k), -float(n + 1));
+        sum += term;
+        if (term < 1.0e-12f * abs(sum)) break;
+    }
+    return sgn * fact_n * sum;
+}
+
+float compute_special(float x) {
+    switch (params.op) {
+        case 0:  return tgamma_impl(x);
+        case 1:  return lgamma_impl(x);
+        case 2:  return digamma_impl(x);
+        case 3:  return bessel_j0_impl(x);
+        case 4:  return bessel_j1_impl(x);
+        case 5:  return bessel_y0_impl(x);
+        case 6:  return bessel_y1_impl(x);
+        case 7:  return bessel_i0_impl(x);
+        case 8:  return bessel_i1_impl(x);
+        case 9:  return erfinv_impl(x);
+        case 10: return sinc_impl(x);
+        case 11: return polygamma_impl(params.param_int, x);
+        default: return 0.0f;
+    }
+}
+
+void main() {
+    uint pair_idx = gl_GlobalInvocationID.x;
+    uint idx0 = pair_idx * 2;
+
+    if (idx0 >= params.n) return;
+
+    uint packed = input_data[pair_idx];
+    float v0 = float(readF16(packed, 0));
+    float v1 = float(readF16(packed, 1));
+
+    float16_t res0 = float16_t(compute_special(v0));
+    float16_t res1 = float16_t(0.0);
+
+    if (idx0 + 1 < params.n) {
+        res1 = float16_t(compute_special(v1));
+    }
+
+    output_data[pair_idx] = packF16Pair(res0, res1);
+}

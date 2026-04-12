@@ -56,25 +56,33 @@ auto VulkanBackend::dispatchSpecialMathUnary(const Tensor& input, uint32_t opcod
         return Tensor(shape, orig_dtype, input.device());
     }
 
-    // Promote to f32 (no-op if already f32). The promoted tensor is on-device.
-    Tensor f32_input = maybe_promote(input, orig_dtype, this);
+    // Select native dtype shader to avoid host-side promote/demote round-trips.
+    // Float16 and BFloat16 shaders unpack pairs, compute in f32, and repack.
+    // Float64 shader uses double-precision polynomial approximations.
+    std::string shader_name = "special_math_unary";
+    if (orig_dtype == DType::Float16) {
+        shader_name = "special_math_unary_f16";
+    } else if (orig_dtype == DType::BFloat16) {
+        shader_name = "special_math_unary_bf16";
+    } else if (orig_dtype == DType::Float64) {
+        shader_name = "special_math_unary_f64";
+    }
 
-    // Allocate f32 output
-    std::vector<int64_t> shape(f32_input.shape().begin(), f32_input.shape().end());
-    Tensor f32_output(shape, DType::Float32, f32_input.device());
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor output(shape, orig_dtype, input.device());
 
-    int32_t device_id = f32_input.device().index;
-    auto* pipeline = getPipeline("special_math_unary", device_id);
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline(shader_name, device_id);
 
     UnaryPushConstants pc{};
-    pc.n = static_cast<uint32_t>(f32_input.numel());
+    pc.n = static_cast<uint32_t>(input.numel());
     pc.op = opcode;
     pc.param_int = param_int;
 
-    const void* buffer_in = f32_input.data_ptr();
-    const void* buffer_out = f32_output.data_ptr();
-    size_t buffer_size_in  = f32_input.numel()  * sizeof(float);
-    size_t buffer_size_out = f32_output.numel() * sizeof(float);
+    const void* buffer_in = input.data_ptr();
+    const void* buffer_out = output.data_ptr();
+    size_t buffer_size_in  = input.numel()  * input.dtype_size();
+    size_t buffer_size_out = output.numel() * output.dtype_size();
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_in},
@@ -92,14 +100,17 @@ auto VulkanBackend::dispatchSpecialMathUnary(const Tensor& input, uint32_t opcod
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(UnaryPushConstants), &pc);
 
-    uint32_t workgroups = div_wg(static_cast<uint32_t>(f32_input.numel()),
-                                  devices_[device_id].workgroupSize);
+    // For packed f16/bf16 shaders, each invocation processes 2 elements
+    uint32_t num_work_items = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16)
+        ? (static_cast<uint32_t>(input.numel()) + 1) / 2
+        : static_cast<uint32_t>(input.numel());
+    uint32_t workgroups = div_wg(num_work_items, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
     synchronize(device_id);
 
-    return maybe_demote(f32_output, orig_dtype, this);
+    return output;
 }
 
 auto VulkanBackend::dispatchSpecialMathBinary(const Tensor& a, const Tensor& b, uint32_t opcode) -> Tensor {

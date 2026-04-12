@@ -56,6 +56,7 @@ constexpr size_t NUM_SIZE_CLASSES = 16;  // Log2-based size buckets
 constexpr size_t MIN_BUFFER_SIZE = 1024; // 1KB minimum
 constexpr size_t MAX_BUFFER_SIZE = 256 * 1024 * 1024; // 256MB maximum
 constexpr size_t MAX_CACHED_BUFFERS = 4; // Max buffers per size class
+constexpr size_t MAX_CACHED_PER_CLASS = 32; // Max raw pointers cached per bucket
 
 // ============================================================================
 // Aligned Buffer Wrapper
@@ -155,7 +156,7 @@ inline size_t get_class_size(size_t class_idx) {
 class BufferPool {
 public:
     BufferPool() = default;
-    ~BufferPool() = default;
+    ~BufferPool() { clear(); }
 
     // Non-copyable, non-movable (thread-local singleton)
     BufferPool(const BufferPool&) = delete;
@@ -178,11 +179,12 @@ public:
         size_t class_idx = get_size_class(size);
         auto& bucket = buckets_[class_idx];
 
-        // Try to reuse an existing buffer
+        // Try to reuse a cached buffer
         if (!bucket.empty()) {
-            void* ptr = bucket.back().data();
-            buffer_sizes_[ptr] = bucket.back().size();
+            void* ptr = bucket.back();
             bucket.pop_back();
+            // buffer_sizes_ already has this pointer's allocated size from
+            // the original acquire or from release caching it back
             return ptr;
         }
 
@@ -198,12 +200,7 @@ public:
     }
 
     /**
-     * @brief Return a buffer to the pool
-     *
-     * Note: Due to AlignedBuffer's RAII design, we cannot safely transfer
-     * ownership of raw pointers into it. For now, we just free immediately.
-     * This means the pool doesn't actually cache, but is at least correct.
-     * TODO: Refactor to use raw pointer storage for caching.
+     * @brief Return a buffer to the pool for reuse
      */
     void release(void* ptr) {
         if (!ptr) return;
@@ -215,11 +212,18 @@ public:
             return;
         }
 
-        buffer_sizes_.erase(it);
+        size_t alloc_size = it->second;
+        size_t class_idx = get_size_class(alloc_size);
+        auto& bucket = buckets_[class_idx];
 
-        // For now, just free the buffer directly
-        // The previous caching code had a double-free bug
-        ALIGNED_FREE(ptr);
+        if (bucket.size() < MAX_CACHED_PER_CLASS) {
+            // Cache the buffer for reuse — keep the buffer_sizes_ entry
+            bucket.push_back(ptr);
+        } else {
+            // Bucket full, actually free
+            buffer_sizes_.erase(it);
+            ALIGNED_FREE(ptr);
+        }
     }
 
     /**
@@ -227,9 +231,13 @@ public:
      */
     void clear() {
         for (auto& bucket : buckets_) {
+            for (void* ptr : bucket) {
+                ALIGNED_FREE(ptr);
+                buffer_sizes_.erase(ptr);
+            }
             bucket.clear();
         }
-        // Note: Outstanding buffers will leak if not returned
+        // Note: Outstanding buffers (not yet released) will leak if not returned
         buffer_sizes_.clear();
     }
 
@@ -245,7 +253,7 @@ public:
     }
 
 private:
-    std::array<std::vector<AlignedBuffer>, NUM_SIZE_CLASSES> buckets_;
+    std::array<std::vector<void*>, NUM_SIZE_CLASSES> buckets_;
     std::unordered_map<void*, size_t> buffer_sizes_;
 };
 

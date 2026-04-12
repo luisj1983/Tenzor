@@ -128,48 +128,50 @@ void col2im_cpu(
     int64_t out_h,
     int64_t out_w
 ) {
-    // Zero initialize output
+    // Zero initialize output — required since we accumulate from kernel positions
     int64_t output_size = batch * channels * height * width;
     std::memset(output, 0, output_size * sizeof(T));
 
-    // Process each output element and accumulate from all contributing col positions
-    // This avoids race conditions compared to the col-centric approach
-    #pragma omp parallel for collapse(4) if(output_size > OmpThresholds::medium())
+    // Iterate over (b, c) in outer loops, then (kh, kw) kernel positions,
+    // then directly over valid (oh, ow) output positions. This eliminates
+    // the per-element modulo/division that the previous approach required
+    // to reverse-map (ih, iw) back to (oh, ow).
+    #pragma omp parallel for collapse(2) if(output_size > OmpThresholds::medium())
     for (int64_t b = 0; b < batch; ++b) {
         for (int64_t c = 0; c < channels; ++c) {
-            for (int64_t ih = 0; ih < height; ++ih) {
-                for (int64_t iw = 0; iw < width; ++iw) {
-                    // Accumulate from all kernel positions that contribute to this output
-                    T sum = T(0.0f);
+            T* out_slice = output + b * (channels * height * width) + c * (height * width);
 
-                    for (int64_t kh = 0; kh < kernel_h; ++kh) {
-                        for (int64_t kw = 0; kw < kernel_w; ++kw) {
-                            // Reverse the mapping: given (ih, iw) and (kh, kw), find (oh, ow)
-                            int64_t ih_shifted = ih + padding - kh * dilation;
-                            int64_t iw_shifted = iw + padding - kw * dilation;
+            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                    // Precompute valid oh range for this kernel row position.
+                    // Constraint: 0 <= oh * stride - padding + kh * dilation < height
+                    // => oh >= ceil((padding - kh * dilation) / stride)  [if numerator > 0]
+                    // => oh <  ceil((height + padding - kh * dilation) / stride)
+                    int64_t offset_h = padding - kh * dilation;
+                    int64_t oh_start = std::max<int64_t>(0,
+                        (offset_h > 0) ? (offset_h + stride - 1) / stride : -((-offset_h) / stride));
+                    int64_t oh_end = std::min(out_h,
+                        (height + offset_h + stride - 1) / stride);
 
-                            // Check if this maps to a valid output position
-                            if (ih_shifted % stride == 0 && iw_shifted % stride == 0) {
-                                int64_t oh = ih_shifted / stride;
-                                int64_t ow = iw_shifted / stride;
+                    int64_t offset_w = padding - kw * dilation;
+                    int64_t ow_start = std::max<int64_t>(0,
+                        (offset_w > 0) ? (offset_w + stride - 1) / stride : -((-offset_w) / stride));
+                    int64_t ow_end = std::min(out_w,
+                        (width + offset_w + stride - 1) / stride);
 
-                                if (oh >= 0 && oh < out_h && ow >= 0 && ow < out_w) {
-                                    // This kernel position contributes to our output
-                                    int64_t col_row = b * out_h * out_w + oh * out_w + ow;
-                                    int64_t col_col = c * kernel_h * kernel_w + kh * kernel_w + kw;
-                                    int64_t col_idx = col_row * (channels * kernel_h * kernel_w) + col_col;
+                    int64_t col_col = c * kernel_h * kernel_w + kh * kernel_w + kw;
+                    int64_t col_row_base = b * out_h * out_w;
+                    int64_t col_stride = channels * kernel_h * kernel_w;
 
-                                    sum += col[col_idx];
-                                }
-                            }
+                    for (int64_t oh = oh_start; oh < oh_end; ++oh) {
+                        int64_t ih = oh * stride - offset_h;
+                        int64_t col_row_oh = (col_row_base + oh * out_w) * col_stride + col_col;
+
+                        for (int64_t ow = ow_start; ow < ow_end; ++ow) {
+                            int64_t iw = ow * stride - offset_w;
+                            out_slice[ih * width + iw] += col[col_row_oh + ow * col_stride];
                         }
                     }
-
-                    // Write accumulated value
-                    int64_t output_idx = b * (channels * height * width) +
-                                        c * (height * width) +
-                                        ih * width + iw;
-                    output[output_idx] = sum;
                 }
             }
         }

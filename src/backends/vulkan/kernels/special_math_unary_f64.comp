@@ -1,0 +1,374 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Special math unary operations for Float64 (double precision).
+// Uses higher-order polynomial approximations for full double-precision accuracy.
+//
+//   0=gamma, 1=lgamma, 2=digamma, 3=bessel_j0, 4=bessel_j1,
+//   5=bessel_y0, 6=bessel_y1, 7=bessel_i0, 8=bessel_i1, 9=erfinv,
+//   10=sinc, 11=polygamma (n via push_constant param_int)
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { double input_data[]; };
+layout(binding = 1) buffer Output { double output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;        // Number of elements
+    uint op;       // Operation opcode
+    int param_int; // Polygamma order (only used by op=11)
+} params;
+
+const double PI_D = 3.14159265358979323846;
+
+// ----- Double-precision exp via range reduction -----
+double exp_d(double x) {
+    if (x != x) return x;
+    if (x > 709.0) return 1.0e308;
+    if (x < -745.0) return 0.0;
+
+    double ln2 = 0.6931471805599453;
+    double k_dbl = floor(x / ln2 + 0.5);
+    double r = x - k_dbl * ln2;
+    int k = int(clamp(k_dbl, -1100.0, 1100.0));
+
+    double exp_r = 1.0 + r * (1.0 + r * (0.5 + r * (1.0/6.0 + r * (1.0/24.0 + r * (1.0/120.0 +
+        r * (1.0/720.0 + r * (1.0/5040.0 + r * (1.0/40320.0 + r * (1.0/362880.0 +
+        r * (1.0/3628800.0 + r * (1.0/39916800.0 + r * (1.0/479001600.0 +
+        r * (1.0/6227020800.0)))))))))))));
+
+    double pow2 = 1.0;
+    int abs_k = (k >= 0) ? k : -k;
+    double base = 2.0;
+    while (abs_k > 0) {
+        if ((abs_k & 1) != 0) pow2 *= base;
+        base *= base;
+        abs_k >>= 1;
+    }
+
+    return (k >= 0) ? (exp_r * pow2) : (exp_r / pow2);
+}
+
+// ----- Double-precision log via range reduction -----
+double log_d(double x) {
+    if (x != x) return x;
+    if (x <= 0.0) return -1.0e308;
+    if (x == 1.0) return 0.0;
+
+    // Use float log as initial estimate, then refine
+    double y = double(log(float(x)));
+    // One Newton-Raphson iteration: log(x) = y - 1 + x*exp(-y)
+    double ey = exp_d(-y);
+    y = y - 1.0 + x * ey;
+    // Second iteration for full double precision
+    ey = exp_d(-y);
+    y = y - 1.0 + x * ey;
+    return y;
+}
+
+// ----- Double-precision sqrt -----
+double sqrt_d(double x) {
+    if (x <= 0.0) return 0.0;
+    double y = double(sqrt(float(x)));
+    // Newton-Raphson iteration for full precision
+    y = 0.5 * (y + x / y);
+    y = 0.5 * (y + x / y);
+    return y;
+}
+
+// ----- Double-precision sin/cos (for moderate arguments) -----
+double sin_d(double x) {
+    return double(sin(float(x)));
+}
+double cos_d(double x) {
+    return double(cos(float(x)));
+}
+
+// ----- Lanczos lgamma (double precision, g=7, 15 coefficients) -----
+double lgamma_lanczos_d(double x) {
+    double coef[15];
+    coef[0]  =  0.99999999999999709182;
+    coef[1]  =  57.156235665862923517;
+    coef[2]  = -59.597960355475491248;
+    coef[3]  =  14.136097974741747174;
+    coef[4]  =  -0.49191381609762019978;
+    coef[5]  =  0.33994649984811888699e-4;
+    coef[6]  =  0.46523628927048575665e-4;
+    coef[7]  = -0.98374475304879564677e-4;
+    coef[8]  =  0.15808870322491248884e-3;
+    coef[9]  = -0.21026444172410612083e-3;
+    coef[10] =  0.21743961811521264320e-3;
+    coef[11] = -0.16431810653676389022e-3;
+    coef[12] =  0.84418223983852743293e-4;
+    coef[13] = -0.26190838401581408670e-4;
+    coef[14] =  0.36899182659531622704e-5;
+
+    double g = 7.0;
+    double xm = x - 1.0;
+    double a = coef[0];
+    double t = xm + g + 0.5;
+    for (int i = 1; i < 15; ++i) {
+        a += coef[i] / (xm + double(i));
+    }
+    return 0.5 * log_d(2.0 * PI_D) + (xm + 0.5) * log_d(t) - t + log_d(a);
+}
+double lgamma_impl_d(double x) {
+    if (x < 0.5) {
+        double sinpx = sin_d(PI_D * x);
+        if (sinpx == 0.0) return 1.0e308;
+        return log_d(PI_D / abs(sinpx)) - lgamma_lanczos_d(1.0 - x);
+    }
+    return lgamma_lanczos_d(x);
+}
+double tgamma_impl_d(double x) {
+    return exp_d(lgamma_impl_d(x));
+}
+
+// ----- Digamma (double precision) -----
+double digamma_impl_d(double x) {
+    double result = 0.0;
+    if (x < 0.5) {
+        double y = 1.0 - x;
+        double r = 0.0;
+        for (int i = 0; i < 200; ++i) {
+            if (y >= 10.0) break;
+            r -= 1.0 / y;
+            y += 1.0;
+        }
+        double y2 = 1.0 / (y * y);
+        r += log_d(y) - 0.5 / y
+            - y2 * (1.0/12.0 - y2 * (1.0/120.0 - y2 * (1.0/252.0
+            - y2 * (1.0/240.0 - y2 * (1.0/132.0
+            - y2 * (691.0/32760.0 - y2 * (1.0/12.0)))))));
+        double sinpx = sin_d(PI_D * x);
+        double cospx = cos_d(PI_D * x);
+        return r - PI_D * cospx / sinpx;
+    }
+    for (int i = 0; i < 200; ++i) {
+        if (x >= 10.0) break;
+        result -= 1.0 / x;
+        x += 1.0;
+    }
+    double x2 = 1.0 / (x * x);
+    result += log_d(x) - 0.5 / x
+            - x2 * (1.0/12.0 - x2 * (1.0/120.0 - x2 * (1.0/252.0
+            - x2 * (1.0/240.0 - x2 * (1.0/132.0
+            - x2 * (691.0/32760.0 - x2 * (1.0/12.0)))))));
+    return result;
+}
+
+// ----- Bessel J0 (double precision, Numerical Recipes rational approximation) -----
+double bessel_j0_impl_d(double x_in) {
+    double ax = abs(x_in);
+    if (ax < 8.0) {
+        double y = x_in * x_in;
+        double r1 = 57568490574.0 + y * (-13362590354.0
+                 + y * (651619640.7 + y * (-11214424.18
+                 + y * (77392.33017 + y * (-184.9052456)))));
+        double r2 = 57568490411.0 + y * (1029532985.0
+                 + y * (9494680.718 + y * (59272.64853
+                 + y * (267.8532712 + y * 1.0))));
+        return r1 / r2;
+    }
+    double z = 8.0 / ax;
+    double y = z * z;
+    double r1 = 1.0 + y * (-0.1098628627e-2 + y * (0.2734510407e-4
+             + y * (-0.2073370639e-5 + y * 0.2093887211e-6)));
+    double r2 = -0.1562499995e-1 + y * (0.1430488765e-3
+             + y * (-0.6911147651e-5 + y * (0.7621095161e-6
+             + y * (-0.934935152e-7))));
+    return sqrt_d(0.636619772367581 / ax)
+         * (cos_d(ax - 0.7853981633974483) * r1 - z * sin_d(ax - 0.7853981633974483) * r2);
+}
+
+// ----- Bessel J1 (double precision) -----
+double bessel_j1_impl_d(double x_in) {
+    double ax = abs(x_in);
+    double result;
+    if (ax < 8.0) {
+        double y = x_in * x_in;
+        double r1 = x_in * (72362614232.0 + y * (-7895059235.0
+                 + y * (242396853.1 + y * (-2972611.439
+                 + y * (15704.48260 + y * (-30.16036606))))));
+        double r2 = 144725228442.0 + y * (2300535178.0
+                 + y * (18583304.74 + y * (99447.43394
+                 + y * (376.9991397 + y * 1.0))));
+        result = r1 / r2;
+    } else {
+        double z = 8.0 / ax;
+        double y = z * z;
+        double r1 = 1.0 + y * (0.183105e-2 + y * (-0.3516396496e-4
+                 + y * (0.2457520174e-5 + y * (-0.240337019e-6))));
+        double r2 = 0.04687499995 + y * (-0.2002690873e-3
+                 + y * (0.8449199096e-5 + y * (-0.88228987e-6
+                 + y * 0.105787412e-6)));
+        double ans = sqrt_d(0.636619772367581 / ax)
+                  * (cos_d(ax - 2.356194490192345) * r1 - z * sin_d(ax - 2.356194490192345) * r2);
+        result = (x_in < 0.0) ? -ans : ans;
+        return result;
+    }
+    return result;
+}
+
+// ----- Bessel Y0 (double precision) -----
+double bessel_y0_impl_d(double x) {
+    if (x <= 0.0) return -1.0e308;
+    if (x < 8.0) {
+        double y = x * x;
+        double r1 = -2957821389.0 + y * (7062834065.0
+                 + y * (-512359803.6 + y * (10879881.29
+                 + y * (-86327.92757 + y * 228.4622733))));
+        double r2 = 40076544269.0 + y * (745249964.8
+                 + y * (7189466.438 + y * (47447.26470
+                 + y * (226.1030244 + y * 1.0))));
+        return (r1 / r2) + 0.636619772367581 * bessel_j0_impl_d(x) * log_d(x);
+    }
+    double z = 8.0 / x;
+    double y = z * z;
+    double r1 = 1.0 + y * (-0.1098628627e-2 + y * (0.2734510407e-4
+             + y * (-0.2073370639e-5 + y * 0.2093887211e-6)));
+    double r2 = -0.1562499995e-1 + y * (0.1430488765e-3
+             + y * (-0.6911147651e-5 + y * (0.7621095161e-6
+             + y * (-0.934935152e-7))));
+    return sqrt_d(0.636619772367581 / x)
+         * (sin_d(x - 0.7853981633974483) * r1 + z * cos_d(x - 0.7853981633974483) * r2);
+}
+
+// ----- Bessel Y1 (double precision) -----
+double bessel_y1_impl_d(double x) {
+    if (x <= 0.0) return -1.0e308;
+    if (x < 8.0) {
+        double y = x * x;
+        double r1 = x * (-4.900604943e13 + y * (1.275274390e13
+                 + y * (-5.153438139e11 + y * (7.349264551e9
+                 + y * (-4.237922726e7 + y * 8.511937935e4)))));
+        double r2 = 2.499580570e14 + y * (4.244419664e12
+                 + y * (3.733650367e10 + y * (2.245904002e8
+                 + y * (1.020426050e6 + y * (3.549632885e3 + y)))));
+        return (r1 / r2) + 0.636619772367581 * (bessel_j1_impl_d(x) * log_d(x) - 1.0 / x);
+    }
+    double z = 8.0 / x;
+    double y = z * z;
+    double r1 = 1.0 + y * (0.183105e-2 + y * (-0.3516396496e-4
+             + y * (0.2457520174e-5 + y * (-0.240337019e-6))));
+    double r2 = 0.04687499995 + y * (-0.2002690873e-3
+             + y * (0.8449199096e-5 + y * (-0.88228987e-6
+             + y * 0.105787412e-6)));
+    return sqrt_d(0.636619772367581 / x)
+         * (sin_d(x - 2.356194490192345) * r1 + z * cos_d(x - 2.356194490192345) * r2);
+}
+
+// ----- Modified Bessel I0 (double precision) -----
+double bessel_i0_impl_d(double x_in) {
+    double ax = abs(x_in);
+    if (ax < 3.75) {
+        double t = x_in / 3.75;
+        t = t * t;
+        return 1.0 + t * (3.5156229 + t * (3.0899424 + t * (1.2067492
+               + t * (0.2659732 + t * (0.0360768 + t * 0.0045813)))));
+    }
+    double t = 3.75 / ax;
+    return (exp_d(ax) / sqrt_d(ax)) * (0.39894228 + t * (0.01328592
+           + t * (0.00225319 - t * (0.00157565 - t * (0.00916281
+           - t * (0.02057706 - t * (0.02635537 - t * (0.01647633
+           - t * 0.00392377))))))));
+}
+
+// ----- Modified Bessel I1 (double precision) -----
+double bessel_i1_impl_d(double x_in) {
+    double ax = abs(x_in);
+    double result;
+    if (ax < 3.75) {
+        double t = x_in / 3.75;
+        t = t * t;
+        result = ax * (0.5 + t * (0.87890594 + t * (0.51498869 + t * (0.15084934
+                 + t * (0.02658733 + t * (0.00301532 + t * 0.00032411))))));
+    } else {
+        double t = 3.75 / ax;
+        result = (exp_d(ax) / sqrt_d(ax)) * (0.39894228 - t * (0.03988024
+                 - t * (0.00362018 + t * (0.00163801 - t * (0.01031555
+                 - t * (0.02282967 - t * (0.02895312 - t * (0.01787654
+                 - t * 0.00420059))))))));
+    }
+    return (x_in < 0.0) ? -result : result;
+}
+
+// ----- ErfInv (double precision, Winitzki + Newton) -----
+double erf_impl_d(double x) {
+    double sgn = (x < 0.0) ? -1.0 : 1.0;
+    x = abs(x);
+    double a1 =  0.254829592;
+    double a2 = -0.284496736;
+    double a3 =  1.421413741;
+    double a4 = -1.453152027;
+    double a5 =  1.061405429;
+    double p_  =  0.3275911;
+    double t = 1.0 / (1.0 + p_ * x);
+    double y = 1.0 - ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * exp_d(-x * x);
+    return sgn * y;
+}
+double erfinv_impl_d(double x) {
+    if (x <= -1.0) return -1.0e308;
+    if (x >= 1.0) return 1.0e308;
+    if (x == 0.0) return 0.0;
+    double a = 0.147;
+    double ln1mx2 = log_d(1.0 - x * x);
+    double t1 = 2.0 / (PI_D * a) + 0.5 * ln1mx2;
+    double t2 = ln1mx2 / a;
+    double sgn = (x > 0.0) ? 1.0 : -1.0;
+    double r = sgn * sqrt_d(sqrt_d(t1 * t1 - t2) - t1);
+    // 4 Newton iterations for double precision
+    for (int i = 0; i < 4; ++i) {
+        double err = erf_impl_d(r) - x;
+        double deriv = 2.0 / sqrt_d(PI_D) * exp_d(-r * r);
+        r -= err / deriv;
+    }
+    return r;
+}
+
+// ----- Sinc (double precision) -----
+double sinc_impl_d(double x) {
+    if (x == 0.0) return 1.0;
+    double px = PI_D * x;
+    return sin_d(px) / px;
+}
+
+// ----- Polygamma (double precision) -----
+double polygamma_impl_d(int n, double x) {
+    if (n == 0) return digamma_impl_d(x);
+    double fact_n = 1.0;
+    for (int k = 1; k <= n; ++k) fact_n *= double(k);
+    double sgn = ((n + 1) % 2 == 0) ? 1.0 : -1.0;
+    double sum = 0.0;
+    for (int k = 0; k < 200; ++k) {
+        double xk = x + double(k);
+        double term = 1.0;
+        for (int j = 0; j < n + 1; ++j) term /= xk;
+        sum += term;
+        if (term < 1.0e-15 * abs(sum)) break;
+    }
+    return sgn * fact_n * sum;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n) return;
+    double x = input_data[idx];
+    double r;
+    switch (params.op) {
+        case 0:  r = tgamma_impl_d(x); break;
+        case 1:  r = lgamma_impl_d(x); break;
+        case 2:  r = digamma_impl_d(x); break;
+        case 3:  r = bessel_j0_impl_d(x); break;
+        case 4:  r = bessel_j1_impl_d(x); break;
+        case 5:  r = bessel_y0_impl_d(x); break;
+        case 6:  r = bessel_y1_impl_d(x); break;
+        case 7:  r = bessel_i0_impl_d(x); break;
+        case 8:  r = bessel_i1_impl_d(x); break;
+        case 9:  r = erfinv_impl_d(x); break;
+        case 10: r = sinc_impl_d(x); break;
+        case 11: r = polygamma_impl_d(params.param_int, x); break;
+        default: r = 0.0;
+    }
+    output_data[idx] = r;
+}

@@ -42,13 +42,10 @@ void batchnorm_normalize_f32(const float*, float*, const float*, const float*, f
 
 #ifdef __AVX2__
 // SIMD-optimized mean/variance computation for Float32
-// Uses single-pass algorithm: computes sum and sum-of-squares simultaneously,
-// then derives variance as E[X^2] - E[X]^2. This halves memory bandwidth
-// compared to a two-pass approach (one pass for mean, one for variance).
-//
-// Numerical stability: for typical BatchNorm inputs (post-affine, small range),
-// this is safe. The two-pass approach is only needed when |mean| >> stddev,
-// which doesn't occur in properly initialized networks.
+// Uses Welford's online algorithm for numerically stable variance computation.
+// Each of the 8 AVX2 lanes maintains independent (mean, m2) accumulators,
+// which are merged at the end using the parallel Welford combination formula.
+// This avoids the catastrophic cancellation of E[X^2]-E[X]^2 when |mean| >> stddev.
 static void batchnorm_mean_var_simd_f32(
     const float* __restrict input,
     float* __restrict mean,
@@ -57,7 +54,6 @@ static void batchnorm_mean_var_simd_f32(
 {
     int64_t spatial_size = H * W;
     int64_t total_elements = N * spatial_size;
-    float inv_total = 1.0f / static_cast<float>(total_elements);
 
     // Cap threads: each thread should have enough work to amortize overhead.
     constexpr int MIN_CHANNELS_PER_THREAD = 4;
@@ -71,57 +67,71 @@ static void batchnorm_mean_var_simd_f32(
 
     #pragma omp parallel for num_threads(final_threads) if(C > 1)
     for (int64_t c = 0; c < C; c++) {
-        // Single pass: accumulate sum and sum-of-squares simultaneously
-        __m256 vsum = _mm256_setzero_ps();
-        __m256 vsum_sq = _mm256_setzero_ps();
+        // Welford accumulators: each SIMD lane tracks its own (mean, m2, count).
+        // All 8 lanes share the same count since they advance in lockstep.
+        __m256 vmean = _mm256_setzero_ps();
+        __m256 vm2 = _mm256_setzero_ps();
+        int64_t lane_count = 0;
 
         for (int64_t n = 0; n < N; n++) {
             const float* ch_ptr = input + (n * C + c) * spatial_size;
             int64_t i = 0;
 
-            // Process 8 floats at a time
+            // Process 8 consecutive floats at a time with Welford's update
             for (; i + 8 <= spatial_size; i += 8) {
                 __m256 v = _mm256_loadu_ps(ch_ptr + i);
-                vsum = _mm256_add_ps(vsum, v);
-                vsum_sq = _mm256_fmadd_ps(v, v, vsum_sq);
+                lane_count++;
+                __m256 vcount = _mm256_set1_ps(static_cast<float>(lane_count));
+                __m256 delta = _mm256_sub_ps(v, vmean);
+                vmean = _mm256_add_ps(vmean, _mm256_div_ps(delta, vcount));
+                __m256 delta2 = _mm256_sub_ps(v, vmean);
+                vm2 = _mm256_fmadd_ps(delta, delta2, vm2);
             }
-            // Handle remainder with scalar accumulators
-            float scalar_remainder_sum = 0.0f;
-            float scalar_remainder_sum_sq = 0.0f;
-            for (; i < spatial_size; i++) {
-                float val = ch_ptr[i];
-                scalar_remainder_sum += val;
-                scalar_remainder_sum_sq += val * val;
-            }
-            // Add scalar remainders to lane 0
-            __m256 rem_sum = _mm256_setzero_ps();
-            __m256 rem_sq = _mm256_setzero_ps();
-            rem_sum = _mm256_blend_ps(rem_sum, _mm256_set1_ps(scalar_remainder_sum), 0x01);
-            rem_sq = _mm256_blend_ps(rem_sq, _mm256_set1_ps(scalar_remainder_sum_sq), 0x01);
-            vsum = _mm256_add_ps(vsum, rem_sum);
-            vsum_sq = _mm256_add_ps(vsum_sq, rem_sq);
+
+            // Scalar remainder: accumulate into a separate scalar Welford state
+            // that will be merged after all batches are processed. We handle
+            // remainder per-batch by folding into per-lane results below.
         }
 
-        // Horizontal sum of vsum
-        __m128 hi = _mm256_extractf128_ps(vsum, 1);
-        __m128 lo = _mm256_castps256_ps128(vsum);
-        __m128 sum128 = _mm_add_ps(hi, lo);
-        sum128 = _mm_hadd_ps(sum128, sum128);
-        sum128 = _mm_hadd_ps(sum128, sum128);
-        float channel_sum = _mm_cvtss_f32(sum128);
-        float channel_mean = channel_sum * inv_total;
-        mean[c] = channel_mean;
+        // Horizontally merge the 8 SIMD lanes using the parallel merge formula:
+        //   combined_mean = (mean_a * n_a + mean_b * n_b) / (n_a + n_b)
+        //   combined_m2 = m2_a + m2_b + delta^2 * n_a * n_b / (n_a + n_b)
+        // All lanes have the same count (lane_count).
+        alignas(32) float lane_means[8];
+        alignas(32) float lane_m2s[8];
+        _mm256_store_ps(lane_means, vmean);
+        _mm256_store_ps(lane_m2s, vm2);
 
-        // Horizontal sum of vsum_sq
-        hi = _mm256_extractf128_ps(vsum_sq, 1);
-        lo = _mm256_castps256_ps128(vsum_sq);
-        __m128 sq128 = _mm_add_ps(hi, lo);
-        sq128 = _mm_hadd_ps(sq128, sq128);
-        sq128 = _mm_hadd_ps(sq128, sq128);
-        float channel_sum_sq = _mm_cvtss_f32(sq128);
+        float combined_mean = lane_means[0];
+        float combined_m2 = lane_m2s[0];
+        float combined_n = static_cast<float>(lane_count);
 
-        // Var = E[X^2] - E[X]^2
-        variance[c] = channel_sum_sq * inv_total - channel_mean * channel_mean;
+        for (int lane = 1; lane < 8; lane++) {
+            float n_b = static_cast<float>(lane_count);
+            float total_n = combined_n + n_b;
+            if (total_n == 0.0f) continue;
+            float delta = lane_means[lane] - combined_mean;
+            combined_mean = (combined_mean * combined_n + lane_means[lane] * n_b) / total_n;
+            combined_m2 = combined_m2 + lane_m2s[lane] + delta * delta * combined_n * n_b / total_n;
+            combined_n = total_n;
+        }
+
+        // Now fold in scalar remainder elements (those not covered by the SIMD loop)
+        int64_t simd_covered = (spatial_size / 8) * 8;
+        for (int64_t n = 0; n < N; n++) {
+            const float* ch_ptr = input + (n * C + c) * spatial_size;
+            for (int64_t i = simd_covered; i < spatial_size; i++) {
+                combined_n += 1.0f;
+                float delta = ch_ptr[i] - combined_mean;
+                combined_mean += delta / combined_n;
+                float delta2 = ch_ptr[i] - combined_mean;
+                combined_m2 += delta * delta2;
+            }
+        }
+
+        mean[c] = combined_mean;
+        // BatchNorm uses population variance (divide by N, not N-1)
+        variance[c] = (total_elements > 0) ? combined_m2 / static_cast<float>(total_elements) : 0.0f;
     }
 }
 #endif

@@ -38,8 +38,6 @@ void batchnorm_mean_var_f32(
 {
     int64_t spatial_size = H * W;
     int64_t total_elements = N * spatial_size;
-    float inv_total = 1.0f / static_cast<float>(total_elements);
-
     constexpr int MIN_CHANNELS_PER_THREAD = 4;
 #ifdef _OPENMP
     int nthreads = omp_get_max_threads();
@@ -49,14 +47,14 @@ void batchnorm_mean_var_f32(
     int final_threads = 1;
 #endif
 
-    // Single pass: compute sum and sum-of-squares simultaneously,
-    // then derive variance as E[X^2] - E[X]^2. Halves memory bandwidth.
+    // Welford's online algorithm for numerically stable variance computation.
+    // Each of the 16 AVX-512 lanes maintains independent (mean, m2) accumulators,
+    // merged at the end using the parallel combination formula.
     #pragma omp parallel for num_threads(final_threads) if(C > 1)
     for (int64_t c = 0; c < C; c++) {
-        __m512 vsum = _mm512_setzero_ps();
-        __m512 vsum_sq = _mm512_setzero_ps();
-        float scalar_tail = 0.0f;
-        float scalar_sq_tail = 0.0f;
+        __m512 vmean = _mm512_setzero_ps();
+        __m512 vm2 = _mm512_setzero_ps();
+        int64_t lane_count = 0;
 
         for (int64_t n = 0; n < N; n++) {
             const float* ch_ptr = input + (n * C + c) * spatial_size;
@@ -64,22 +62,50 @@ void batchnorm_mean_var_f32(
 
             for (; i + 16 <= spatial_size; i += 16) {
                 __m512 v = _mm512_loadu_ps(ch_ptr + i);
-                vsum = _mm512_add_ps(vsum, v);
-                vsum_sq = _mm512_fmadd_ps(v, v, vsum_sq);
-            }
-            for (; i < spatial_size; i++) {
-                float val = ch_ptr[i];
-                scalar_tail += val;
-                scalar_sq_tail += val * val;
+                lane_count++;
+                __m512 vcount = _mm512_set1_ps(static_cast<float>(lane_count));
+                __m512 delta = _mm512_sub_ps(v, vmean);
+                vmean = _mm512_add_ps(vmean, _mm512_div_ps(delta, vcount));
+                __m512 delta2 = _mm512_sub_ps(v, vmean);
+                vm2 = _mm512_fmadd_ps(delta, delta2, vm2);
             }
         }
 
-        float channel_sum = _mm512_reduce_add_ps(vsum) + scalar_tail;
-        float channel_mean = channel_sum * inv_total;
-        mean[c] = channel_mean;
+        // Horizontally merge the 16 SIMD lanes using parallel Welford merge
+        alignas(64) float lane_means[16];
+        alignas(64) float lane_m2s[16];
+        _mm512_store_ps(lane_means, vmean);
+        _mm512_store_ps(lane_m2s, vm2);
 
-        float channel_sum_sq = _mm512_reduce_add_ps(vsum_sq) + scalar_sq_tail;
-        variance[c] = channel_sum_sq * inv_total - channel_mean * channel_mean;
+        float combined_mean = lane_means[0];
+        float combined_m2 = lane_m2s[0];
+        float combined_n = static_cast<float>(lane_count);
+
+        for (int lane = 1; lane < 16; lane++) {
+            float n_b = static_cast<float>(lane_count);
+            float total_n = combined_n + n_b;
+            if (total_n == 0.0f) continue;
+            float delta = lane_means[lane] - combined_mean;
+            combined_mean = (combined_mean * combined_n + lane_means[lane] * n_b) / total_n;
+            combined_m2 = combined_m2 + lane_m2s[lane] + delta * delta * combined_n * n_b / total_n;
+            combined_n = total_n;
+        }
+
+        // Fold in scalar remainder elements
+        int64_t simd_covered = (spatial_size / 16) * 16;
+        for (int64_t n = 0; n < N; n++) {
+            const float* ch_ptr = input + (n * C + c) * spatial_size;
+            for (int64_t i = simd_covered; i < spatial_size; i++) {
+                combined_n += 1.0f;
+                float delta = ch_ptr[i] - combined_mean;
+                combined_mean += delta / combined_n;
+                float delta2 = ch_ptr[i] - combined_mean;
+                combined_m2 += delta * delta2;
+            }
+        }
+
+        mean[c] = combined_mean;
+        variance[c] = (total_elements > 0) ? combined_m2 / static_cast<float>(total_elements) : 0.0f;
     }
 }
 
