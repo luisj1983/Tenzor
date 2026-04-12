@@ -8,11 +8,43 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "tenzor/core/dtype.hpp"
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace tenzor {
+
+/**
+ * @brief Dtype- and device-aware scalar extraction from a 1-element tensor.
+ *
+ * Used by `*_with_param` autograd Backward functions (EluBackward,
+ * LeakyReluBackward, SoftplusBackward, PowBackward, ...) whose param
+ * tensor is stored in save_for_backward and allocated with the same
+ * dtype AND device as the input. The param tensor may therefore be a
+ * GPU tensor (CUDA/ROCm/Vulkan/OneAPI/MPS) — reading `.data<T>()[0]`
+ * directly would dereference a device pointer from CPU code and
+ * segfault. Move to CPU first, then read.
+ *
+ * Returns the scalar as double so callers promote from narrower float
+ * types losslessly.
+ */
+inline auto extract_scalar_param(const Tensor& t) -> double {
+    // Move to CPU and make contiguous. Cheap because these scalar
+    // params are always 1-element tensors.
+    auto cpu = (t.device().type == Device::Type::CPU) ? t : t.to(Device::cpu());
+    cpu = cpu.contiguous();
+    switch (cpu.dtype()) {
+        case DType::Float32:  return static_cast<double>(cpu.data<float>()[0]);
+        case DType::Float64:  return cpu.data<double>()[0];
+        case DType::Float16:  return static_cast<double>(static_cast<float>(cpu.data<Float16>()[0]));
+        case DType::BFloat16: return static_cast<double>(static_cast<float>(cpu.data<BFloat16>()[0]));
+        default:
+            throw std::runtime_error(
+                "extract_scalar_param: unsupported dtype " +
+                std::string(dtype_name(cpu.dtype())));
+    }
+}
 
 // Reduce gradient Variable along broadcasted dimensions (for create_graph)
 inline auto reduce_grad_var_for_broadcasting(const Variable& grad, const std::vector<int64_t>& target_shape) -> Variable {

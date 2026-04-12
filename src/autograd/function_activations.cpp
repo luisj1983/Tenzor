@@ -1,4 +1,5 @@
 #include "tenzor/autograd/function.hpp"
+#include "function_helpers.hpp"
 #include <cassert>
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/sparse/sparse_ops.hpp"
@@ -173,8 +174,8 @@ auto EluBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     const auto& alpha_tensor = saved_tensors_[1];  // scalar tensor holding alpha
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
 
-    // Extract alpha value
-    float alpha_val = alpha_tensor.data<float>()[0];
+    // Extract alpha value (dtype-aware; previously hard-coded Float32).
+    double alpha_val = extract_scalar_param(alpha_tensor);
 
     // mask = input > 0
     auto zero_tensor = zeros(shape_vec, input.dtype(), input.device());
@@ -184,7 +185,7 @@ auto EluBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     auto ones_tensor = ones(shape_vec, input.dtype(), input.device());
 
     // negative path: gradient is alpha * exp(input)
-    auto neg_grad = mul(exp(input), static_cast<double>(alpha_val));
+    auto neg_grad = mul(exp(input), alpha_val);
 
     // where(input > 0, 1, alpha * exp(input))
     auto grad_factor = where(mask, ones_tensor, neg_grad);
@@ -197,7 +198,7 @@ auto EluBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     // The mask is non-differentiable; compute it at Tensor level
     const auto& input = saved_tensors_[0];
     const auto& alpha_tensor = saved_tensors_[1];
-    float alpha_val = alpha_tensor.data<float>()[0];
+    double alpha_val = extract_scalar_param(alpha_tensor);
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
 
     auto zero_tensor = zeros(shape_vec, input.dtype(), input.device());
@@ -207,7 +208,7 @@ auto EluBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
 
     // For the negative branch, use Variable ops so exp(input) is tracked
     Variable input_var(input, false);
-    auto neg_grad = tenzor::exp(input_var) * static_cast<double>(alpha_val);
+    auto neg_grad = tenzor::exp(input_var) * alpha_val;
 
     // where with non-differentiable mask: wrap Tensor constants as Variables
     Variable mask_var(mask, false);
@@ -341,13 +342,16 @@ auto LeakyReluBackward::backward(std::vector<Tensor> grad_outputs) -> std::vecto
     const auto& slope_tensor = saved_tensors_[1];  // scalar tensor holding negative_slope
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
 
-    float slope_val = slope_tensor.data<float>()[0];
+    // Dtype-aware scalar extraction. Previously hard-coded Float32 and
+    // crashed on Float64 inputs with a cryptic "expected float64" error
+    // from .data<float>().
+    double slope_val = extract_scalar_param(slope_tensor);
 
     auto zero_tensor = zeros(shape_vec, input.dtype(), input.device());
     auto mask = gt(input, zero_tensor);
 
     auto ones_tensor = ones(shape_vec, input.dtype(), input.device());
-    auto slope_full = full(shape_vec, static_cast<double>(slope_val), input.dtype(), input.device());
+    auto slope_full = full(shape_vec, slope_val, input.dtype(), input.device());
 
     auto grad_factor = where(mask, ones_tensor, slope_full);
     return {mul(grad, grad_factor)};
@@ -358,14 +362,14 @@ auto LeakyReluBackward::backward_with_variables(std::vector<Variable> grad_outpu
     // The mask is non-differentiable, compute at Tensor level
     const auto& input = saved_tensors_[0];
     const auto& slope_tensor = saved_tensors_[1];
-    float slope_val = slope_tensor.data<float>()[0];
+    double slope_val = extract_scalar_param(slope_tensor);
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
 
     auto zero_tensor = zeros(shape_vec, input.dtype(), input.device());
     auto mask = gt(input, zero_tensor);
 
     auto ones_tensor = ones(shape_vec, input.dtype(), input.device());
-    auto slope_full = full(shape_vec, static_cast<double>(slope_val), input.dtype(), input.device());
+    auto slope_full = full(shape_vec, slope_val, input.dtype(), input.device());
 
     // Mask-based selection is non-differentiable, so Tensor-level where is fine
     auto grad_factor = where(mask, ones_tensor, slope_full);
@@ -382,12 +386,12 @@ auto SoftplusBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 auto SoftplusBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     const auto& grad = grad_outputs[0];
     const auto& input = saved_tensors_[0];
-    const auto& beta_tensor = saved_tensors_[1];  // scalar tensor holding beta
+    const auto& beta_tensor = saved_tensors_[1];
 
-    float beta_val = beta_tensor.data<float>()[0];
+    double beta_val = extract_scalar_param(beta_tensor);
 
     // sigmoid(beta * input)
-    auto beta_x = mul(input, static_cast<double>(beta_val));
+    auto beta_x = mul(input, beta_val);
     auto sig = sigmoid(beta_x);
 
     return {mul(grad, sig)};
@@ -396,9 +400,9 @@ auto SoftplusBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector
 auto SoftplusBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // Softplus backward: grad * sigmoid(beta * input)
     Variable input_var(saved_tensors_[0], false);
-    float beta_val = saved_tensors_[1].data<float>()[0];
+    double beta_val = extract_scalar_param(saved_tensors_[1]);
 
-    auto beta_x = input_var * static_cast<double>(beta_val);
+    auto beta_x = input_var * beta_val;
     auto sig = tenzor::sigmoid(beta_x);
 
     return {grad_outputs[0] * sig};

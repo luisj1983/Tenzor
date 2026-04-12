@@ -843,10 +843,16 @@ auto gelu(const Variable& input) -> Variable {
 }
 
 auto elu(const Variable& input, float alpha) -> Variable {
+    // Forward must pass alpha as an attribute so backend kernels use the
+    // requested scale — previously the dispatch was called with no attrs
+    // and Elu fell back to its default alpha=1.0, producing silently
+    // wrong outputs when callers asked for a non-unit alpha.
     return unary_autograd_with_param<EluBackward>(input, alpha,
-        [](const Tensor& t) {
+        [alpha](const Tensor& t) {
             std::vector<Tensor> inputs = {t};
-            return dispatch(OpId::Elu, inputs)[0];
+            OpAttributes attrs;
+            attrs.set(AttrKey::Alpha, static_cast<double>(alpha));
+            return dispatch(OpId::Elu, inputs, attrs)[0];
         });
 }
 
@@ -877,10 +883,13 @@ auto leaky_relu(const Variable& input, float negative_slope) -> Variable {
 }
 
 auto softplus(const Variable& input, float beta) -> Variable {
+    // Same story as elu above: forward must pass beta through OpAttributes.
     return unary_autograd_with_param<SoftplusBackward>(input, beta,
-        [](const Tensor& t) {
+        [beta](const Tensor& t) {
             std::vector<Tensor> inputs = {t};
-            return dispatch(OpId::Softplus, inputs)[0];
+            OpAttributes attrs;
+            attrs.set(AttrKey::Beta, static_cast<double>(beta));
+            return dispatch(OpId::Softplus, inputs, attrs)[0];
         });
 }
 

@@ -88,6 +88,7 @@ tenzor_add_test(NAME test_view_tracking SOURCE test_view_tracking.cpp LABELS cor
 tenzor_add_test(NAME test_dtype_promotion SOURCE test_dtype_promotion.cpp LABELS core)
 tenzor_add_test(NAME test_alias_detection SOURCE test_alias_detection.cpp LABELS core)
 tenzor_add_test(NAME test_from_blob_overflow SOURCE test_from_blob_overflow.cpp LABELS core)
+tenzor_add_test(NAME test_dtype_capability_queries SOURCE test_dtype_capability_queries.cpp LABELS core)
 tenzor_add_test(NAME test_mutation_version SOURCE test_mutation_version.cpp LABELS core)
 tenzor_add_test(NAME test_dispatch_interceptor_stack SOURCE test_dispatch_interceptor_stack.cpp LABELS core)
 tenzor_add_test(NAME test_dispatch_coverage SOURCE test_dispatch_coverage.cpp LABELS core)

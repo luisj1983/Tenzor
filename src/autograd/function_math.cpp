@@ -63,15 +63,18 @@ auto PowBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     const auto& input = saved_tensors_[0];
     const auto& exp_tensor = saved_tensors_[1];  // scalar tensor holding exponent
 
-    float exp_val = exp_tensor.data<float>()[0];
+    // Dtype-aware scalar extraction (the param tensor is allocated with
+    // the input's dtype — Float32/Float64/Float16/BFloat16 — and hard-
+    // coding Float32 crashes on any other dtype).
+    double exp_val = extract_scalar_param(exp_tensor);
 
     // Special cases for numerical safety
-    if (exp_val == 0.0f) {
+    if (exp_val == 0.0) {
         // d/dx(x^0) = 0
         return {zeros(std::vector<int64_t>(grad.shape().begin(), grad.shape().end()),
                        grad.dtype(), grad.device())};
     }
-    if (exp_val == 1.0f) {
+    if (exp_val == 1.0) {
         // d/dx(x^1) = 1
         return {grad};
     }
@@ -81,8 +84,8 @@ auto PowBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     auto eps = full(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                     detail::dtype_epsilon(input.dtype()), input.dtype(), input.device());
     auto safe_input = add(abs(input), eps);
-    auto pow_term = pow(safe_input, exp_val - 1.0f);
-    auto scaled = mul(pow_term, static_cast<double>(exp_val));
+    auto pow_term = pow(safe_input, static_cast<float>(exp_val - 1.0));
+    auto scaled = mul(pow_term, exp_val);
     // Restore sign: d/dx(|x|^n) * sign(x) for odd integer exponents
     auto result = mul(grad, mul(scaled, sign(input)));
     return {result};
@@ -91,14 +94,14 @@ auto PowBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
 auto PowBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // pow backward: grad * exponent * pow(input, exponent - 1)
     const auto& input = saved_tensors_[0];
-    float exp_val = saved_tensors_[1].data<float>()[0];
+    double exp_val = extract_scalar_param(saved_tensors_[1]);
 
-    if (exp_val == 0.0f) {
+    if (exp_val == 0.0) {
         // d/dx(x^0) = 0
         return {Variable(zeros(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                                input.dtype(), input.device()), false)};
     }
-    if (exp_val == 1.0f) {
+    if (exp_val == 1.0) {
         // d/dx(x^1) = 1
         return {grad_outputs[0]};
     }
@@ -110,8 +113,8 @@ auto PowBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
                            detail::dtype_epsilon(input.dtype()), input.dtype(), input.device());
     Variable eps_var(eps_tensor, false);
     auto safe_input = tenzor::abs(input_var) + eps_var;
-    auto pow_term = tenzor::pow(safe_input, exp_val - 1.0f);
-    auto scaled = pow_term * static_cast<double>(exp_val);
+    auto pow_term = tenzor::pow(safe_input, static_cast<float>(exp_val - 1.0));
+    auto scaled = pow_term * exp_val;
     auto sign_tensor = sign(input);
     Variable sign_var(sign_tensor, false);
     return {grad_outputs[0] * scaled * sign_var};
