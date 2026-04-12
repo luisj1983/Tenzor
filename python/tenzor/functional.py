@@ -1229,6 +1229,88 @@ def embedding(input: Variable, weight: Variable, padding_idx: int = -1) -> Varia
     return _nn.functional_embedding(input, weight, padding_idx)
 
 
+def one_hot(input, num_classes: int = -1):
+    """Create a one-hot encoded tensor from class indices.
+
+    Parameters
+    ----------
+    input : Tensor
+        Tensor of class indices (integer dtype).
+    num_classes : int, optional
+        Total number of classes. If ``-1``, inferred as ``max(input) + 1``.
+        Default: ``-1``.
+
+    Returns
+    -------
+    Tensor
+        One-hot tensor of shape ``(*input.shape, num_classes)``.
+
+    Example
+    -------
+    >>> labels = tz.tensor([0, 2, 1, 3], dtype=tz.dtype.int64)
+    >>> oh = F.one_hot(labels, num_classes=4)
+    """
+    return _core.one_hot(input, num_classes)
+
+
+def unfold(input, kernel_size: int, dilation: int = 1, padding: int = 0, stride: int = 1):
+    """Extract sliding local blocks from a batched input tensor (im2col).
+
+    Parameters
+    ----------
+    input : Tensor
+        Input tensor of shape ``(N, C, H, W)``.
+    kernel_size : int
+        Size of the sliding blocks.
+    dilation : int, optional
+        Spacing between kernel elements. Default: ``1``.
+    padding : int, optional
+        Zero-padding added to both sides. Default: ``0``.
+    stride : int, optional
+        Stride of the sliding blocks. Default: ``1``.
+
+    Returns
+    -------
+    Tensor
+        Unfolded tensor of shape ``(N, C * kernel_size * kernel_size, L)``.
+
+    Example
+    -------
+    >>> blocks = F.unfold(x, kernel_size=3, padding=1)
+    """
+    return _core.vision.unfold(input, kernel_size, stride, padding, dilation)
+
+
+def fold(input, output_size, kernel_size: int, dilation: int = 1, padding: int = 0, stride: int = 1):
+    """Combine an array of sliding local blocks into a large tensor (col2im).
+
+    Parameters
+    ----------
+    input : Tensor
+        Input tensor of shape ``(N, C * kernel_size * kernel_size, L)``.
+    output_size : tuple of int
+        Spatial dimensions ``(H, W)`` of the output.
+    kernel_size : int
+        Size of the sliding blocks.
+    dilation : int, optional
+        Spacing between kernel elements. Default: ``1``.
+    padding : int, optional
+        Zero-padding that was used in :func:`unfold`. Default: ``0``.
+    stride : int, optional
+        Stride of the sliding blocks. Default: ``1``.
+
+    Returns
+    -------
+    Tensor
+        Folded tensor of shape ``(N, C, H, W)``.
+
+    Example
+    -------
+    >>> img = F.fold(blocks, output_size=(32, 32), kernel_size=3, padding=1)
+    """
+    return _core.vision.fold(input, list(output_size), kernel_size, stride, padding, dilation)
+
+
 def binary_cross_entropy_with_logits(input: Variable, target: Variable, reduction: str = "mean") -> Variable:
     """Compute binary cross-entropy loss from logits.
 
@@ -1501,6 +1583,10 @@ __all__ = [
     "scaled_dot_product_attention",
     "normalize",
     "pad",
+    # Indexing / vision
+    "one_hot",
+    "unfold",
+    "fold",
     # Gradient clipping
     "clip_grad_norm_",
     "clip_grad_value_",

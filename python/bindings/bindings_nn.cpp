@@ -994,6 +994,23 @@ void register_nn(py::module_& m) {
             return "ChannelShuffle()";
         });
 
+    // Unfold / Fold (im2col / col2im)
+    py::class_<tenzor::nn::Unfold, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::Unfold>>(nn, "Unfold",
+        "Extracts sliding local blocks from a batched input tensor (im2col).")
+        .def(py::init<int64_t, int64_t, int64_t, int64_t>(),
+             py::arg("kernel_size"), py::arg("dilation") = 1,
+             py::arg("padding") = 0, py::arg("stride") = 1)
+        .def("__repr__", [](const tenzor::nn::Unfold&) { return "Unfold()"; });
+
+    py::class_<tenzor::nn::Fold, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::Fold>>(nn, "Fold",
+        "Combines sliding local blocks into a tensor (col2im).")
+        .def(py::init<std::vector<int64_t>, int64_t, int64_t, int64_t, int64_t>(),
+             py::arg("output_size"), py::arg("kernel_size"),
+             py::arg("dilation") = 1, py::arg("padding") = 0, py::arg("stride") = 1)
+        .def("__repr__", [](const tenzor::nn::Fold&) { return "Fold()"; });
+
     // Padding layers
     py::class_<tenzor::nn::ConstantPad1d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::ConstantPad1d>>(nn, "ConstantPad1d")

@@ -751,6 +751,19 @@ public:
                             int64_t M, int64_t K) -> Tensor;
     auto dispatchDenseToSparse(const Tensor& dense) -> std::vector<Tensor>;
 
+    // Sparse SpGEMM, Trsv, Trsm
+    auto dispatchSparseSpGEMM(const Tensor& a_crow, const Tensor& a_col,
+                               const Tensor& a_vals,
+                               const Tensor& b_crow, const Tensor& b_col,
+                               const Tensor& b_vals,
+                               int64_t M, int64_t K, int64_t N) -> std::vector<Tensor>;
+    auto dispatchSparseTrsv(const Tensor& crow_indices, const Tensor& col_indices,
+                             const Tensor& values, const Tensor& b,
+                             int64_t N, bool upper) -> Tensor;
+    auto dispatchSparseTrsm(const Tensor& crow_indices, const Tensor& col_indices,
+                             const Tensor& values, const Tensor& B,
+                             int64_t N, int64_t K_rhs, bool upper) -> Tensor;
+
     // Flash Attention — composed from existing matmul + softmax shaders (not a single fused kernel)
     auto dispatchFlashAttention(const Tensor& Q, const Tensor& K, const Tensor& V,
                                  float scale, bool causal) -> Tensor;

@@ -1,0 +1,123 @@
+#version 450
+
+// SpGEMM Pass 3: Fill C = A * B (ESC: Expand, Sort, Compress)
+// A is CSR (M x K), B is CSR (K x N), C is CSR with pre-computed row_offsets.
+// One workgroup per row of C. For each row, we expand all A[i,k]*B[k,:]
+// products, accumulate into a dense temporary (uint-encoded floats in shared
+// memory for atomic CAS), then compact into C's CSR arrays.
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer A_RowOffsets { int a_row_offsets[]; };
+layout(set = 0, binding = 1) readonly buffer A_ColIndices { int a_col_indices[]; };
+layout(set = 0, binding = 2) readonly buffer A_Values     { float a_values[];    };
+layout(set = 0, binding = 3) readonly buffer B_RowOffsets { int b_row_offsets[]; };
+layout(set = 0, binding = 4) readonly buffer B_ColIndices { int b_col_indices[]; };
+layout(set = 0, binding = 5) readonly buffer B_Values     { float b_values[];    };
+layout(set = 0, binding = 6) readonly buffer C_RowOffsets { int c_row_offsets[]; };
+layout(set = 0, binding = 7) buffer C_ColIndices          { int c_col_indices[]; };
+layout(set = 0, binding = 8) buffer C_Values              { float c_values[];    };
+
+layout(push_constant) uniform PushConstants {
+    uint m;
+    uint k;
+    uint n_cols;
+};
+
+// Dense accumulator stored as uint for atomic CAS (max 16384 entries = 64KB)
+shared uint acc_bits[16384];
+shared uint col_flag[512]; // bitfield: 512 * 32 = 16384 bits
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (row >= m) return;
+
+    uint c_start = uint(c_row_offsets[row]);
+
+    bool use_dense = (n_cols <= 16384u);
+
+    if (use_dense) {
+        // Clear accumulator and bitfield
+        for (uint i = tid; i < n_cols; i += 256u) {
+            acc_bits[i] = 0u; // 0u == floatBitsToUint(0.0)
+        }
+        uint n_words = (n_cols + 31u) / 32u;
+        for (uint w = tid; w < n_words; w += 256u) {
+            col_flag[w] = 0u;
+        }
+        barrier();
+
+        // Expand and accumulate
+        uint a_start = uint(a_row_offsets[row]);
+        uint a_end = uint(a_row_offsets[row + 1]);
+        for (uint a = a_start + tid; a < a_end; a += 256u) {
+            uint a_col = uint(a_col_indices[a]);
+            float a_val = a_values[a];
+            uint b_start = uint(b_row_offsets[a_col]);
+            uint b_end = uint(b_row_offsets[a_col + 1]);
+            for (uint b = b_start; b < b_end; b++) {
+                uint c_col = uint(b_col_indices[b]);
+                float product = a_val * b_values[b];
+
+                // Mark column as present
+                atomicOr(col_flag[c_col / 32u], 1u << (c_col % 32u));
+
+                // Atomic float add via CAS loop on shared uint array
+                uint old_val = acc_bits[c_col];
+                uint new_val;
+                while (true) {
+                    float old_f = uintBitsToFloat(old_val);
+                    new_val = floatBitsToUint(old_f + product);
+                    uint prev = atomicCompSwap(acc_bits[c_col], old_val, new_val);
+                    if (prev == old_val) break;
+                    old_val = prev;
+                }
+            }
+        }
+        barrier();
+
+        // Compact: thread 0 scans columns in order and writes to C
+        if (tid == 0u) {
+            uint write_pos = c_start;
+            for (uint col = 0u; col < n_cols; col++) {
+                bool present = (col_flag[col / 32u] & (1u << (col % 32u))) != 0u;
+                if (present) {
+                    float val = uintBitsToFloat(acc_bits[col]);
+                    if (val != 0.0) {
+                        c_col_indices[write_pos] = int(col);
+                        c_values[write_pos] = val;
+                        write_pos++;
+                    }
+                }
+            }
+        }
+    } else {
+        // For very large N, fall back to sequential per-thread processing.
+        if (tid == 0u) {
+            uint a_start = uint(a_row_offsets[row]);
+            uint a_end = uint(a_row_offsets[row + 1]);
+            uint write_pos = c_start;
+
+            for (uint col = 0u; col < n_cols; col++) {
+                float sum = 0.0;
+                for (uint a = a_start; a < a_end; a++) {
+                    uint a_col = uint(a_col_indices[a]);
+                    float a_val = a_values[a];
+                    uint b_start = uint(b_row_offsets[a_col]);
+                    uint b_end = uint(b_row_offsets[a_col + 1]);
+                    for (uint b = b_start; b < b_end; b++) {
+                        if (uint(b_col_indices[b]) == col) {
+                            sum += a_val * b_values[b];
+                        }
+                    }
+                }
+                if (sum != 0.0) {
+                    c_col_indices[write_pos] = int(col);
+                    c_values[write_pos] = sum;
+                    write_pos++;
+                }
+            }
+        }
+    }
+}

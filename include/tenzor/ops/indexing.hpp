@@ -184,6 +184,23 @@ using IndexElement = std::variant<Tensor, Ellipsis, NewAxis, std::nullopt_t>;
 auto index_extended(const Tensor& input,
                     const std::vector<IndexElement>& indices) -> Tensor;
 
+/**
+ * @brief Create a one-hot encoded tensor.
+ *
+ * Converts a tensor of class indices to a one-hot encoded tensor.
+ * The input is expected to contain integer class indices in [0, num_classes).
+ *
+ * @param input   Tensor of class indices (any integer dtype)
+ * @param num_classes Total number of classes. If -1, inferred as max(input)+1.
+ * @return One-hot tensor of shape (*input.shape(), num_classes) with dtype Float32
+ *
+ * @code
+ * Tensor labels({4}, DType::Int64, Device::cpu());  // e.g. [0, 2, 1, 3]
+ * Tensor oh = one_hot(labels, 4);  // shape (4, 4), identity-like
+ * @endcode
+ */
+auto one_hot(const Tensor& input, int64_t num_classes = -1) -> Tensor;
+
 /** @} */ // end of tensor_indexing group
 
 } // namespace tenzor
@@ -202,5 +219,6 @@ using tenzor::where;
 using tenzor::slice;
 using tenzor::index;
 using tenzor::index_put;
+using tenzor::one_hot;
 } // namespace ops
 } // namespace tenzor

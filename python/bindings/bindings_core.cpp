@@ -2918,6 +2918,9 @@ Example::
          py::arg("input"), py::arg("index"));
     m.def("put", &tenzor::put, "Put elements into flattened tensor",
          py::arg("input"), py::arg("index"), py::arg("source"));
+    m.def("one_hot", &tenzor::one_hot, "One-hot encode class indices",
+         py::arg("input"), py::arg("num_classes") = -1,
+         py::call_guard<py::gil_scoped_release>());
 
     // Broadcast/expansion operations
     m.def("expand", [](const tenzor::Tensor& input, std::vector<int64_t> shape) {

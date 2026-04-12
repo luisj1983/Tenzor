@@ -1,0 +1,64 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+// SpGEMM Pass 3: Fill C = A * B -- Float64 variant.
+// Same algorithm as sparse_spgemm_fill.comp but with double precision.
+// Dense accumulator uses two uint slots per double (64-bit CAS via two 32-bit words).
+// For simplicity in f64 mode, we use the sequential fallback for all N values,
+// since shared memory is limited and doubles take 2x the space.
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer A_RowOffsets { int a_row_offsets[]; };
+layout(set = 0, binding = 1) readonly buffer A_ColIndices { int a_col_indices[]; };
+layout(set = 0, binding = 2) readonly buffer A_Values     { float64_t a_values[]; };
+layout(set = 0, binding = 3) readonly buffer B_RowOffsets { int b_row_offsets[]; };
+layout(set = 0, binding = 4) readonly buffer B_ColIndices { int b_col_indices[]; };
+layout(set = 0, binding = 5) readonly buffer B_Values     { float64_t b_values[]; };
+layout(set = 0, binding = 6) readonly buffer C_RowOffsets { int c_row_offsets[]; };
+layout(set = 0, binding = 7) buffer C_ColIndices          { int c_col_indices[]; };
+layout(set = 0, binding = 8) buffer C_Values              { float64_t c_values[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint m;
+    uint k;
+    uint n_cols;
+};
+
+// For f64, shared memory atomics are not practical (no 64-bit atomicCompSwap
+// in shared memory). Use the thread-0-per-workgroup sequential approach,
+// which is still parallel across rows.
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (row >= m) return;
+
+    // Only thread 0 processes (sequential within row, parallel across rows)
+    if (tid != 0u) return;
+
+    uint c_start = uint(c_row_offsets[row]);
+    uint a_start = uint(a_row_offsets[row]);
+    uint a_end = uint(a_row_offsets[row + 1]);
+    uint write_pos = c_start;
+
+    for (uint col = 0u; col < n_cols; col++) {
+        float64_t sum = 0.0lf;
+        for (uint a = a_start; a < a_end; a++) {
+            uint a_col = uint(a_col_indices[a]);
+            float64_t a_val = a_values[a];
+            uint b_start = uint(b_row_offsets[a_col]);
+            uint b_end = uint(b_row_offsets[a_col + 1]);
+            for (uint b = b_start; b < b_end; b++) {
+                if (uint(b_col_indices[b]) == col) {
+                    sum += a_val * b_values[b];
+                }
+            }
+        }
+        if (sum != 0.0lf) {
+            c_col_indices[write_pos] = int(col);
+            c_values[write_pos] = sum;
+            write_pos++;
+        }
+    }
+}

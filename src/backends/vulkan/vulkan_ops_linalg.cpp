@@ -3016,5 +3016,275 @@ auto VulkanBackend::dispatchLinalgLUSolve(const Tensor& LU_data, const Tensor& p
     return output;
 }
 
+// ============================================================================
+// Sparse SpGEMM: C = A * B (CSR x CSR -> CSR)
+// ============================================================================
+
+auto VulkanBackend::dispatchSparseSpGEMM(const Tensor& a_crow, const Tensor& a_col,
+                                          const Tensor& a_vals,
+                                          const Tensor& b_crow, const Tensor& b_col,
+                                          const Tensor& b_vals,
+                                          int64_t M, int64_t K, int64_t N) -> std::vector<Tensor> {
+    if (a_vals.dtype() != DType::Float32 && a_vals.dtype() != DType::Float64) {
+        throw std::runtime_error("Vulkan SpGEMM only supports Float32/Float64, got " +
+            std::string(dtype_name(a_vals.dtype())));
+    }
+    int32_t device_id = a_vals.device().index;
+    bool is_f64 = (a_vals.dtype() == DType::Float64);
+    DType dtype = a_vals.dtype();
+
+    // Convert Int64 indices to Int32 for shader compatibility
+    auto a_crow_i32 = (a_crow.dtype() == DType::Int32) ? a_crow : a_crow.to(DType::Int32);
+    auto a_col_i32 = (a_col.dtype() == DType::Int32) ? a_col : a_col.to(DType::Int32);
+    auto b_crow_i32 = (b_crow.dtype() == DType::Int32) ? b_crow : b_crow.to(DType::Int32);
+    auto b_col_i32 = (b_col.dtype() == DType::Int32) ? b_col : b_col.to(DType::Int32);
+
+    // --- Pass 1: Count nnz per row ---
+    auto* count_pipeline = getPipeline("sparse_spgemm_count", device_id);
+    Tensor row_nnz = dispatchZeros({M}, DType::Int32, a_vals.device());
+
+    {
+        size_t a_crow_size = a_crow_i32.numel() * sizeof(int32_t);
+        size_t a_col_size = a_col_i32.numel() * sizeof(int32_t);
+        size_t b_crow_size = b_crow_i32.numel() * sizeof(int32_t);
+        size_t b_col_size = b_col_i32.numel() * sizeof(int32_t);
+        size_t row_nnz_size = row_nnz.numel() * sizeof(int32_t);
+
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, a_crow_i32.data_ptr()}, {1, a_col_i32.data_ptr()},
+            {2, b_crow_i32.data_ptr()}, {3, b_col_i32.data_ptr()},
+            {4, row_nnz.data_ptr()},
+        };
+        std::vector<size_t> sizes = {a_crow_size, a_col_size, b_crow_size, b_col_size, row_nnz_size};
+
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, count_pipeline, bindings, sizes);
+
+        struct { uint32_t m; uint32_t k; uint32_t n_cols; } pc;
+        pc.m = static_cast<uint32_t>(M);
+        pc.k = static_cast<uint32_t>(K);
+        pc.n_cols = static_cast<uint32_t>(N);
+
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, count_pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               count_pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, count_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, static_cast<uint32_t>(M), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+    }
+
+    // --- Pass 2: Prefix sum on row_nnz -> c_crow_indices ---
+    Tensor c_crow = dispatchZeros({M + 1}, DType::Int32, a_vals.device());
+    {
+        auto* ps_pipeline = getPipeline("csr_prefix_sum", device_id);
+        size_t rc_size = row_nnz.numel() * sizeof(int32_t);
+        size_t ci_size = c_crow.numel() * sizeof(int32_t);
+        std::vector<std::pair<uint32_t, const void*>> ps_bindings = {
+            {0, row_nnz.data_ptr()}, {1, c_crow.data_ptr()},
+        };
+        std::vector<size_t> ps_sizes = {rc_size, ci_size};
+        VkDescriptorSet ps_ds = allocateAndWriteDescriptorSet(device_id, ps_pipeline, ps_bindings, ps_sizes);
+
+        struct { uint32_t n_rows; } ps_pc;
+        ps_pc.n_rows = static_cast<uint32_t>(M);
+
+        VkCommandBuffer ps_cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(ps_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ps_pipeline->pipeline());
+        vkCmdBindDescriptorSets(ps_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               ps_pipeline->layout(), 0, 1, &ps_ds, 0, nullptr);
+        vkCmdPushConstants(ps_cmd, ps_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(ps_pc), &ps_pc);
+        vkCmdDispatch(ps_cmd, 1, 1, 1);
+        insertComputeOnlyBarrier(ps_cmd);
+        endSingleTimeCommands(ps_cmd, device_id);
+    }
+    synchronize(device_id);
+
+    // Read total nnz from c_crow[M]
+    Tensor nnz_scalar = c_crow.slice(0, M, M + 1).to(Device::cpu());
+    int64_t total_nnz = static_cast<int64_t>(nnz_scalar.data<int32_t>()[0]);
+
+    if (total_nnz == 0) {
+        Tensor crow_out = c_crow.to(DType::Int64);
+        Tensor col_out({0}, DType::Int64, a_vals.device());
+        Tensor val_out({0}, dtype, a_vals.device());
+        return {crow_out, col_out, val_out};
+    }
+
+    // --- Pass 3: Fill col_indices and values ---
+    std::string fill_shader = is_f64 ? "sparse_spgemm_fill_f64" : "sparse_spgemm_fill";
+    auto* fill_pipeline = getPipeline(fill_shader, device_id);
+
+    // Zero-initialize in case some rows produce fewer nnz than counted
+    Tensor c_col_gpu = dispatchZeros({total_nnz}, DType::Int32, a_vals.device());
+    Tensor c_vals_gpu = dispatchZeros({total_nnz}, dtype, a_vals.device());
+
+    {
+        size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
+        size_t a_crow_size = a_crow_i32.numel() * sizeof(int32_t);
+        size_t a_col_size = a_col_i32.numel() * sizeof(int32_t);
+        size_t a_vals_size = a_vals.numel() * elem_size;
+        size_t b_crow_size = b_crow_i32.numel() * sizeof(int32_t);
+        size_t b_col_size = b_col_i32.numel() * sizeof(int32_t);
+        size_t b_vals_size = b_vals.numel() * elem_size;
+        size_t c_crow_size = c_crow.numel() * sizeof(int32_t);
+        size_t c_col_size = c_col_gpu.numel() * sizeof(int32_t);
+        size_t c_vals_size = c_vals_gpu.numel() * elem_size;
+
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, a_crow_i32.data_ptr()}, {1, a_col_i32.data_ptr()}, {2, a_vals.data_ptr()},
+            {3, b_crow_i32.data_ptr()}, {4, b_col_i32.data_ptr()}, {5, b_vals.data_ptr()},
+            {6, c_crow.data_ptr()}, {7, c_col_gpu.data_ptr()}, {8, c_vals_gpu.data_ptr()},
+        };
+        std::vector<size_t> sizes = {
+            a_crow_size, a_col_size, a_vals_size,
+            b_crow_size, b_col_size, b_vals_size,
+            c_crow_size, c_col_size, c_vals_size,
+        };
+
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, fill_pipeline, bindings, sizes);
+
+        struct { uint32_t m; uint32_t k; uint32_t n_cols; } pc;
+        pc.m = static_cast<uint32_t>(M);
+        pc.k = static_cast<uint32_t>(K);
+        pc.n_cols = static_cast<uint32_t>(N);
+
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fill_pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               fill_pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, fill_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, static_cast<uint32_t>(M), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+    }
+
+    Tensor crow_out = c_crow.to(DType::Int64);
+    Tensor col_out = c_col_gpu.to(DType::Int64);
+    return {crow_out, col_out, c_vals_gpu};
+}
+
+// ============================================================================
+// Sparse Triangular Solve: L*x = b (SparseTrsv)
+// ============================================================================
+
+auto VulkanBackend::dispatchSparseTrsv(const Tensor& crow_indices, const Tensor& col_indices,
+                                        const Tensor& values, const Tensor& b,
+                                        int64_t N, bool upper) -> Tensor {
+    if (values.dtype() != DType::Float32 && values.dtype() != DType::Float64) {
+        throw std::runtime_error("Vulkan SparseTrsv only supports Float32/Float64, got " +
+            std::string(dtype_name(values.dtype())));
+    }
+    int32_t device_id = values.device().index;
+    bool is_f64 = (values.dtype() == DType::Float64);
+    std::string shader_name = is_f64 ? "sparse_trsv_f64" : "sparse_trsv";
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    auto crow_i32 = (crow_indices.dtype() == DType::Int32) ? crow_indices : crow_indices.to(DType::Int32);
+    auto col_i32 = (col_indices.dtype() == DType::Int32) ? col_indices : col_indices.to(DType::Int32);
+
+    // Output: x of shape [N]
+    Tensor output = dispatchZeros({N}, values.dtype(), values.device());
+
+    // Solved flags: one int per row, zero-initialized
+    Tensor solved = dispatchZeros({N}, DType::Int32, values.device());
+
+    size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
+    size_t crow_size = crow_i32.numel() * sizeof(int32_t);
+    size_t col_size = col_i32.numel() * sizeof(int32_t);
+    size_t values_size = values.numel() * elem_size;
+    size_t b_size = b.numel() * elem_size;
+    size_t output_size = output.numel() * elem_size;
+    size_t solved_size = solved.numel() * sizeof(int32_t);
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, crow_i32.data_ptr()}, {1, col_i32.data_ptr()}, {2, values.data_ptr()},
+        {3, b.data_ptr()}, {4, output.data_ptr()}, {5, solved.data_ptr()},
+    };
+    std::vector<size_t> sizes = {crow_size, col_size, values_size, b_size, output_size, solved_size};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    struct { uint32_t n; uint32_t upper; } pc;
+    pc.n = static_cast<uint32_t>(N);
+    pc.upper = upper ? 1u : 0u;
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(pc), &pc);
+    // One thread per row
+    vkCmdDispatch(cmd, static_cast<uint32_t>(N), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return output;
+}
+
+// ============================================================================
+// Sparse Triangular Solve Multi-RHS: L*X = B (SparseTrsm)
+// ============================================================================
+
+auto VulkanBackend::dispatchSparseTrsm(const Tensor& crow_indices, const Tensor& col_indices,
+                                        const Tensor& values, const Tensor& B,
+                                        int64_t N, int64_t K_rhs, bool upper) -> Tensor {
+    if (values.dtype() != DType::Float32 && values.dtype() != DType::Float64) {
+        throw std::runtime_error("Vulkan SparseTrsm only supports Float32/Float64, got " +
+            std::string(dtype_name(values.dtype())));
+    }
+    int32_t device_id = values.device().index;
+    bool is_f64 = (values.dtype() == DType::Float64);
+    std::string shader_name = is_f64 ? "sparse_trsm_f64" : "sparse_trsm";
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    auto crow_i32 = (crow_indices.dtype() == DType::Int32) ? crow_indices : crow_indices.to(DType::Int32);
+    auto col_i32 = (col_indices.dtype() == DType::Int32) ? col_indices : col_indices.to(DType::Int32);
+
+    // Output: X of shape [N, K_rhs]
+    Tensor output = dispatchZeros({N, K_rhs}, values.dtype(), values.device());
+
+    // Solved flags: one int per row, zero-initialized
+    Tensor solved = dispatchZeros({N}, DType::Int32, values.device());
+
+    size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
+    size_t crow_size = crow_i32.numel() * sizeof(int32_t);
+    size_t col_size = col_i32.numel() * sizeof(int32_t);
+    size_t values_size = values.numel() * elem_size;
+    size_t B_size = B.numel() * elem_size;
+    size_t output_size = output.numel() * elem_size;
+    size_t solved_size = solved.numel() * sizeof(int32_t);
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, crow_i32.data_ptr()}, {1, col_i32.data_ptr()}, {2, values.data_ptr()},
+        {3, B.data_ptr()}, {4, output.data_ptr()}, {5, solved.data_ptr()},
+    };
+    std::vector<size_t> sizes = {crow_size, col_size, values_size, B_size, output_size, solved_size};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    struct { uint32_t n; uint32_t k_rhs; uint32_t upper; } pc;
+    pc.n = static_cast<uint32_t>(N);
+    pc.k_rhs = static_cast<uint32_t>(K_rhs);
+    pc.upper = upper ? 1u : 0u;
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(pc), &pc);
+    // One workgroup per row
+    vkCmdDispatch(cmd, static_cast<uint32_t>(N), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return output;
+}
+
 
 } // namespace tenzor

@@ -11,6 +11,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/vision.hpp"
 #include "tenzor/backend/registry.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
@@ -467,6 +468,131 @@ auto create_shifted_window_mask(int64_t H, int64_t W,
 
     // Convert to target dtype and device
     return attn_mask.to(dtype).to(device);
+}
+
+// =============================================================================
+// Unfold (im2col) module
+// =============================================================================
+
+class UnfoldBackward : public Function {
+public:
+    UnfoldBackward(std::vector<int64_t> input_shape,
+                   int64_t kernel_size, int64_t dilation,
+                   int64_t padding, int64_t stride)
+        : input_shape_(std::move(input_shape)),
+          kernel_size_(kernel_size), dilation_(dilation),
+          padding_(padding), stride_(stride) {}
+
+    auto forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> override {
+        throw std::runtime_error("UnfoldBackward::forward should not be called");
+    }
+
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        if (grad_outputs.size() != 1) {
+            throw std::invalid_argument("UnfoldBackward expects 1 gradient output");
+        }
+        // Backward of unfold is fold
+        std::vector<int64_t> output_size = {input_shape_[2], input_shape_[3]};
+        return {tenzor::ops::fold(grad_outputs[0], output_size,
+                                  kernel_size_, stride_, padding_, dilation_)};
+    }
+
+private:
+    std::vector<int64_t> input_shape_;
+    int64_t kernel_size_;
+    int64_t dilation_;
+    int64_t padding_;
+    int64_t stride_;
+};
+
+Unfold::Unfold(int64_t kernel_size, int64_t dilation, int64_t padding, int64_t stride)
+    : kernel_size_(kernel_size), dilation_(dilation), padding_(padding), stride_(stride) {}
+
+auto Unfold::forward_impl(const Variable& input) -> Variable {
+    auto result_tensor = tenzor::ops::unfold(
+        input.tensor(), kernel_size_, stride_, padding_, dilation_);
+
+    Variable output(result_tensor, input.requires_grad());
+
+    if (input.requires_grad()) {
+        auto input_shape = input.tensor().shape();
+        std::vector<int64_t> shape_vec(input_shape.begin(), input_shape.end());
+
+        auto unfold_fn = std::make_shared<UnfoldBackward>(
+            shape_vec, kernel_size_, dilation_, padding_, stride_);
+
+        std::vector<Variable> input_vars = {input};
+        unfold_fn->set_input_variables(input_vars);
+
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        if (input.grad_fn()) {
+            next_funcs.push_back(input.grad_fn());
+        }
+        unfold_fn->set_next_functions(next_funcs);
+        output.set_grad_fn(unfold_fn);
+    }
+
+    return output;
+}
+
+// =============================================================================
+// Fold (col2im) module
+// =============================================================================
+
+class FoldBackward : public Function {
+public:
+    FoldBackward(int64_t kernel_size, int64_t dilation,
+                 int64_t padding, int64_t stride)
+        : kernel_size_(kernel_size), dilation_(dilation),
+          padding_(padding), stride_(stride) {}
+
+    auto forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> override {
+        throw std::runtime_error("FoldBackward::forward should not be called");
+    }
+
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        if (grad_outputs.size() != 1) {
+            throw std::invalid_argument("FoldBackward expects 1 gradient output");
+        }
+        // Backward of fold is unfold
+        return {tenzor::ops::unfold(grad_outputs[0],
+                                    kernel_size_, stride_, padding_, dilation_)};
+    }
+
+private:
+    int64_t kernel_size_;
+    int64_t dilation_;
+    int64_t padding_;
+    int64_t stride_;
+};
+
+Fold::Fold(std::vector<int64_t> output_size, int64_t kernel_size,
+           int64_t dilation, int64_t padding, int64_t stride)
+    : output_size_(std::move(output_size)), kernel_size_(kernel_size),
+      dilation_(dilation), padding_(padding), stride_(stride) {}
+
+auto Fold::forward_impl(const Variable& input) -> Variable {
+    auto result_tensor = tenzor::ops::fold(
+        input.tensor(), output_size_, kernel_size_, stride_, padding_, dilation_);
+
+    Variable output(result_tensor, input.requires_grad());
+
+    if (input.requires_grad()) {
+        auto fold_fn = std::make_shared<FoldBackward>(
+            kernel_size_, dilation_, padding_, stride_);
+
+        std::vector<Variable> input_vars = {input};
+        fold_fn->set_input_variables(input_vars);
+
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        if (input.grad_fn()) {
+            next_funcs.push_back(input.grad_fn());
+        }
+        fold_fn->set_next_functions(next_funcs);
+        output.set_grad_fn(fold_fn);
+    }
+
+    return output;
 }
 
 } // namespace tenzor::nn

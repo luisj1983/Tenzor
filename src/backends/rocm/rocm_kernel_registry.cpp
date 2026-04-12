@@ -668,6 +668,7 @@ namespace rocm {
     // Sparse operations (sparse.hip.cpp) — available with or without rocSPARSE
     auto rocm_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) -> Tensor;
     auto rocm_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) -> Tensor;
+    auto rocm_sparse_add_kernel(const SparseTensor& sparse, const Tensor& dense) -> Tensor;
 #ifdef TENZOR_HAS_ROCSPARSE
     // SpGEMM / triangular solve are only defined in the rocSPARSE path —
     // the HIP fallback at the bottom of sparse.hip.cpp intentionally
@@ -2351,10 +2352,16 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             return {sp.crow_indices(), sp.col_indices(), sp.values()};
         });
 
-    // NOTE: SparseAdd on ROCm intentionally has no dedicated lambda —
-    // see the matching comment in cuda_kernel_registry.cpp. The previous
-    // implementation recursed through sparse::add and the dispatch table,
-    // blowing the stack on GPU inputs.
+    // SparseAdd: dedicated HIP kernel that operates directly on CSR data,
+    // avoiding the recursive dispatch through sparse::add that previously
+    // caused a stack overflow on GPU inputs.
+    table.register_single_output_kernel(OpId::SparseAdd,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            return rocm::rocm_sparse_add_kernel(sp, inputs[3]);
+        });
 
     // =========================================================================
     // Single-output kernel registrations

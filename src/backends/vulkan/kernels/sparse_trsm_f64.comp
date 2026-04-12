@@ -1,0 +1,64 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Sparse triangular solve: L*X = B (lower) or U*X = B (upper) -- Float64
+// Same algorithm as sparse_trsm.comp but with double precision.
+
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer RowOffsets { int row_offsets[]; };
+layout(set = 0, binding = 1) readonly buffer ColIndices { int col_indices[]; };
+layout(set = 0, binding = 2) readonly buffer Values     { float64_t values[]; };
+layout(set = 0, binding = 3) readonly buffer RHS        { float64_t B[];      };
+layout(set = 0, binding = 4) buffer Output              { float64_t X[];      };
+layout(set = 0, binding = 5) buffer SolvedCounter        { int solved[];       };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint k_rhs;
+    uint upper;
+};
+
+void main() {
+    uint wg = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (wg >= n) return;
+
+    uint row = (upper != 0u) ? (n - 1u - wg) : wg;
+
+    if (wg > 0u) {
+        uint rs = uint(row_offsets[row]);
+        uint re = uint(row_offsets[row + 1]);
+        for (uint i = rs; i < re; i++) {
+            uint col = uint(col_indices[i]);
+            bool is_dep = (upper == 0u) ? (col < row) : (col > row);
+            if (is_dep) {
+                while (atomicOr(solved[col], 0) == 0) { }
+            }
+        }
+    }
+
+    uint rs = uint(row_offsets[row]);
+    uint re = uint(row_offsets[row + 1]);
+
+    for (uint c = tid; c < k_rhs; c += 256) {
+        float64_t rhs = B[row * k_rhs + c];
+        float64_t diag = 1.0lf;
+
+        for (uint i = rs; i < re; i++) {
+            uint col = uint(col_indices[i]);
+            if (col == row) {
+                diag = values[i];
+            } else {
+                rhs -= values[i] * X[col * k_rhs + c];
+            }
+        }
+
+        X[row * k_rhs + c] = rhs / diag;
+    }
+
+    barrier();
+    if (tid == 0u) {
+        atomicExchange(solved[row], 1);
+    }
+}

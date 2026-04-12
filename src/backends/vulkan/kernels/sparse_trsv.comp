@@ -1,0 +1,100 @@
+#version 450
+
+// Sparse triangular solve: L*x = b (lower) or U*x = b (upper)
+// L/U is a CSR sparse matrix (N x N), b and x are dense vectors (N).
+//
+// Strategy: Level-set forward/back substitution. Each invocation handles one
+// row. Rows are processed sequentially via a global counter -- row i waits
+// until all its dependency rows are solved, reading them from the output
+// buffer. A shared "done" counter is atomically incremented to signal
+// completion.
+//
+// For lower triangular: process rows 0, 1, ..., N-1.
+// For upper triangular: process rows N-1, N-2, ..., 0.
+//
+// Because Vulkan compute shaders cannot synchronize between workgroups,
+// we use a single workgroup with threads cooperating via shared memory
+// and a spin-wait pattern using atomicLoad on the "solved" counter.
+
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer RowOffsets { int row_offsets[]; };
+layout(set = 0, binding = 1) readonly buffer ColIndices { int col_indices[]; };
+layout(set = 0, binding = 2) readonly buffer Values     { float values[];     };
+layout(set = 0, binding = 3) readonly buffer RHS        { float b[];          };
+layout(set = 0, binding = 4) buffer Output              { float x[];          };
+layout(set = 0, binding = 5) buffer SolvedCounter        { int solved[];       };
+
+layout(push_constant) uniform PushConstants {
+    uint n;       // matrix dimension
+    uint upper;   // 0 = lower triangular, 1 = upper triangular
+};
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    if (tid >= n) return;
+
+    // Map thread id to row: for lower, row = tid; for upper, row = n-1-tid
+    uint row = (upper != 0u) ? (n - 1u - tid) : tid;
+
+    // Spin-wait until all dependency rows are solved.
+    // For lower triangular, row `row` depends on rows 0..row-1.
+    // For upper triangular, row `row` depends on rows row+1..n-1.
+    // The solved[] counter at index 0 tracks how many rows have been solved
+    // in order of processing (tid order).
+    // We wait until solved[0] >= tid (i.e., all rows before us in processing
+    // order are done).
+    if (tid > 0u) {
+        // Busy-wait. This works because all threads are in a single workgroup
+        // or because the GPU schedules them in order within a single SM.
+        // Actually, since we dispatch N workgroups of size 1, this requires
+        // careful handling. We use per-row flags instead.
+        // Wait until all rows we depend on have their flags set.
+        if (upper == 0u) {
+            // Lower: row depends on cols 0..row-1
+            uint rs = uint(row_offsets[row]);
+            uint re = uint(row_offsets[row + 1]);
+            for (uint i = rs; i < re; i++) {
+                uint col = uint(col_indices[i]);
+                if (col < row) {
+                    // Spin until this dependency row is done
+                    while (atomicOr(solved[col], 0) == 0) {
+                        // spin
+                    }
+                }
+            }
+        } else {
+            // Upper: row depends on cols row+1..n-1
+            uint rs = uint(row_offsets[row]);
+            uint re = uint(row_offsets[row + 1]);
+            for (uint i = rs; i < re; i++) {
+                uint col = uint(col_indices[i]);
+                if (col > row) {
+                    while (atomicOr(solved[col], 0) == 0) {
+                        // spin
+                    }
+                }
+            }
+        }
+    }
+
+    // Now compute x[row] = (b[row] - sum(L[row,j]*x[j] for j != row)) / L[row,row]
+    float rhs = b[row];
+    float diag = 1.0;
+    uint rs = uint(row_offsets[row]);
+    uint re = uint(row_offsets[row + 1]);
+
+    for (uint i = rs; i < re; i++) {
+        uint col = uint(col_indices[i]);
+        if (col == row) {
+            diag = values[i];
+        } else {
+            rhs -= values[i] * x[col];
+        }
+    }
+
+    x[row] = rhs / diag;
+
+    // Signal that this row is done
+    atomicExchange(solved[row], 1);
+}

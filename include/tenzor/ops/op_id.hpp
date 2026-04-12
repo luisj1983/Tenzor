@@ -476,9 +476,9 @@ enum class OpId : uint16_t {
     //   SparseToDense yes  yes   yes   yes     yes
     //   DenseToSparse yes  yes   yes   —       yes
     //   SparseAdd     yes  —*    —*    yes     yes
-    //   SparseSpGEMM  yes  yes   yes   —       —
-    //   SparseTrsv    yes  yes   yes   —       —
-    //   SparseTrsm    yes  —     yes   —       —
+    //   SparseSpGEMM  yes  yes   yes   —       yes
+    //   SparseTrsv    yes  yes   yes   —       yes
+    //   SparseTrsm    yes  —     yes   —       yes
     //
     // * CUDA/ROCm intentionally omit SparseAdd registration — the dispatcher
     //   falls through to sparse::add() which round-trips through CPU. See

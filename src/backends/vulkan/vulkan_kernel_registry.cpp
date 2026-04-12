@@ -2244,6 +2244,35 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return get_vulkan_backend()->dispatchDenseToSparse(inputs[0]);
     });
 
+    // Sparse SpGEMM, Trsv, Trsm (OpIds 465-467)
+    table.register_kernel(OpId::SparseSpGEMM,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            int64_t N = attrs.get_int(AttrKey::N);
+            return get_vulkan_backend()->dispatchSparseSpGEMM(
+                inputs[0], inputs[1], inputs[2],
+                inputs[3], inputs[4], inputs[5],
+                M, K, N);
+        });
+
+    table.register_single_output_kernel(OpId::SparseTrsv,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t N = attrs.get_int(AttrKey::N);
+            bool upper = attrs.get_bool(AttrKey::Upper, false);
+            return get_vulkan_backend()->dispatchSparseTrsv(
+                inputs[0], inputs[1], inputs[2], inputs[3], N, upper);
+        });
+
+    table.register_single_output_kernel(OpId::SparseTrsm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t N = attrs.get_int(AttrKey::N);
+            bool upper = attrs.get_bool(AttrKey::Upper, false);
+            int64_t K_rhs = inputs[3].shape().size() > 1 ? inputs[3].shape()[1] : 1;
+            return get_vulkan_backend()->dispatchSparseTrsm(
+                inputs[0], inputs[1], inputs[2], inputs[3], N, K_rhs, upper);
+        });
+
     // ========================================================================
     // Sampling / Statistics — native Vulkan compute shaders
     // ========================================================================

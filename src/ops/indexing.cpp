@@ -397,4 +397,37 @@ auto index_extended(const Tensor& input,
     return result;
 }
 
+auto one_hot(const Tensor& input, int64_t num_classes) -> Tensor {
+    if (num_classes < 0) {
+        // Infer from max value — need to compute on CPU
+        auto input_cpu = input.to(Device::cpu()).contiguous();
+        int64_t max_val = 0;
+        auto numel = input_cpu.numel();
+        switch (input_cpu.dtype()) {
+            case DType::Int64: {
+                auto* ptr = static_cast<const int64_t*>(input_cpu.data_ptr());
+                for (int64_t i = 0; i < numel; ++i) max_val = std::max(max_val, ptr[i]);
+                break;
+            }
+            case DType::Int32: {
+                auto* ptr = static_cast<const int32_t*>(input_cpu.data_ptr());
+                for (int64_t i = 0; i < numel; ++i) max_val = std::max(max_val, static_cast<int64_t>(ptr[i]));
+                break;
+            }
+            default: {
+                auto converted = input.to(DType::Int64).to(Device::cpu()).contiguous();
+                auto* ptr = static_cast<const int64_t*>(converted.data_ptr());
+                for (int64_t i = 0; i < numel; ++i) max_val = std::max(max_val, ptr[i]);
+                break;
+            }
+        }
+        num_classes = max_val + 1;
+    }
+
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::NumClasses, num_classes);
+    std::vector<Tensor> inputs = {input};
+    return dispatch(OpId::OneHot, inputs, attrs)[0];
+}
+
 } // namespace tenzor

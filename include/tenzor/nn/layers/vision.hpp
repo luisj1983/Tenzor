@@ -326,5 +326,61 @@ auto create_shifted_window_mask(int64_t H, int64_t W,
                                  Device device = Device::cpu(),
                                  DType dtype = DType::Float32) -> Tensor;
 
+/**
+ * @brief Extracts sliding local blocks from a batched input tensor (im2col).
+ *
+ * Module wrapper around the unfold operation. Extracts sliding local blocks
+ * from a 4D input tensor, producing a 3D output of shape
+ * (N, C * kernel_size * kernel_size, L).
+ *
+ * @code
+ * Unfold unfold(3, 1, 1, 1);  // kernel=3, dilation=1, padding=1, stride=1
+ * Variable x({batch, 64, 32, 32}, DType::Float32, Device::cpu(), true);
+ * Variable blocks = unfold.forward(x);  // {batch, 576, 1024}
+ * @endcode
+ *
+ * @see Fold for the inverse operation
+ */
+class Unfold : public Module {
+public:
+    explicit Unfold(int64_t kernel_size, int64_t dilation = 1,
+                    int64_t padding = 0, int64_t stride = 1);
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    int64_t kernel_size_;
+    int64_t dilation_;
+    int64_t padding_;
+    int64_t stride_;
+};
+
+/**
+ * @brief Combines an array of sliding local blocks into a tensor (col2im).
+ *
+ * Module wrapper around the fold operation. The inverse of Unfold, it
+ * reconstructs a 4D tensor from unfolded blocks.
+ *
+ * @code
+ * Fold fold({32, 32}, 3, 1, 1, 1);  // output_size, kernel, dilation, padding, stride
+ * Variable blocks({batch, 576, 1024}, DType::Float32, Device::cpu(), true);
+ * Variable img = fold.forward(blocks);  // {batch, 64, 32, 32}
+ * @endcode
+ *
+ * @see Unfold for the forward extraction operation
+ */
+class Fold : public Module {
+public:
+    explicit Fold(std::vector<int64_t> output_size, int64_t kernel_size,
+                  int64_t dilation = 1, int64_t padding = 0, int64_t stride = 1);
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    std::vector<int64_t> output_size_;
+    int64_t kernel_size_;
+    int64_t dilation_;
+    int64_t padding_;
+    int64_t stride_;
+};
+
 } // namespace nn
 } // namespace tenzor

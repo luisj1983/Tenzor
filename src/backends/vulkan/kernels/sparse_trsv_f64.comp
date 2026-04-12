@@ -1,0 +1,65 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Sparse triangular solve: L*x = b (lower) or U*x = b (upper) -- Float64
+// Same algorithm as sparse_trsv.comp but with double precision.
+
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer RowOffsets { int row_offsets[]; };
+layout(set = 0, binding = 1) readonly buffer ColIndices { int col_indices[]; };
+layout(set = 0, binding = 2) readonly buffer Values     { float64_t values[]; };
+layout(set = 0, binding = 3) readonly buffer RHS        { float64_t b[];      };
+layout(set = 0, binding = 4) buffer Output              { float64_t x[];      };
+layout(set = 0, binding = 5) buffer SolvedCounter        { int solved[];       };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint upper;
+};
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    if (tid >= n) return;
+
+    uint row = (upper != 0u) ? (n - 1u - tid) : tid;
+
+    if (tid > 0u) {
+        if (upper == 0u) {
+            uint rs = uint(row_offsets[row]);
+            uint re = uint(row_offsets[row + 1]);
+            for (uint i = rs; i < re; i++) {
+                uint col = uint(col_indices[i]);
+                if (col < row) {
+                    while (atomicOr(solved[col], 0) == 0) { }
+                }
+            }
+        } else {
+            uint rs = uint(row_offsets[row]);
+            uint re = uint(row_offsets[row + 1]);
+            for (uint i = rs; i < re; i++) {
+                uint col = uint(col_indices[i]);
+                if (col > row) {
+                    while (atomicOr(solved[col], 0) == 0) { }
+                }
+            }
+        }
+    }
+
+    float64_t rhs = b[row];
+    float64_t diag = 1.0lf;
+    uint rs = uint(row_offsets[row]);
+    uint re = uint(row_offsets[row + 1]);
+
+    for (uint i = rs; i < re; i++) {
+        uint col = uint(col_indices[i]);
+        if (col == row) {
+            diag = values[i];
+        } else {
+            rhs -= values[i] * x[col];
+        }
+    }
+
+    x[row] = rhs / diag;
+    atomicExchange(solved[row], 1);
+}

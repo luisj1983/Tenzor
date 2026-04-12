@@ -1,0 +1,95 @@
+#version 450
+
+// SpGEMM Pass 1: Count nonzeros per row of C = A * B
+// A is CSR (M x K), B is CSR (K x N).
+// One workgroup per row of A. For each row i of A, we compute the set of
+// unique column indices in C[i,:] by expanding A[i,k]*B[k,:] products
+// and counting unique column indices.
+//
+// Uses a bitfield in shared memory to track which columns have been seen.
+// For N > shared memory capacity, falls back to a conservative upper bound.
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer A_RowOffsets { int a_row_offsets[]; };
+layout(set = 0, binding = 1) readonly buffer A_ColIndices { int a_col_indices[]; };
+layout(set = 0, binding = 2) readonly buffer B_RowOffsets { int b_row_offsets[]; };
+layout(set = 0, binding = 3) readonly buffer B_ColIndices { int b_col_indices[]; };
+layout(set = 0, binding = 4) buffer RowNnz                { int row_nnz[];       };
+
+layout(push_constant) uniform PushConstants {
+    uint m;       // rows of A
+    uint k;       // cols of A / rows of B
+    uint n_cols;  // cols of B (and C)
+};
+
+// Shared memory bitfield: 8192 bytes = 65536 bits, enough for N <= 65536
+shared uint col_bits[2048];
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (row >= m) return;
+
+    bool use_bitfield = (n_cols <= 65536u);
+
+    // Clear bitfield
+    if (use_bitfield) {
+        uint n_words = (n_cols + 31u) / 32u;
+        for (uint w = tid; w < n_words; w += 256u) {
+            col_bits[w] = 0u;
+        }
+        barrier();
+    }
+
+    uint a_start = uint(a_row_offsets[row]);
+    uint a_end = uint(a_row_offsets[row + 1]);
+    uint count = 0u;
+
+    if (use_bitfield) {
+        // Each thread handles a subset of A's nonzeros for this row
+        for (uint a = a_start + tid; a < a_end; a += 256u) {
+            uint a_col = uint(a_col_indices[a]);
+            uint b_start = uint(b_row_offsets[a_col]);
+            uint b_end = uint(b_row_offsets[a_col + 1]);
+            for (uint b = b_start; b < b_end; b++) {
+                uint c_col = uint(b_col_indices[b]);
+                atomicOr(col_bits[c_col / 32u], 1u << (c_col % 32u));
+            }
+        }
+        barrier();
+
+        // Count set bits
+        uint n_words = (n_cols + 31u) / 32u;
+        uint local_count = 0u;
+        for (uint w = tid; w < n_words; w += 256u) {
+            local_count += bitCount(col_bits[w]);
+        }
+
+        // Reduction: use atomicAdd on shared memory
+        // Simple atomic approach
+        if (tid == 0u) row_nnz[row] = 0;
+        barrier();
+        if (local_count > 0u) {
+            atomicAdd(row_nnz[row], int(local_count));
+        }
+    } else {
+        // Fallback for very wide matrices: conservative upper bound
+        // Sum of nnz in all B rows that A touches
+        uint total = 0u;
+        for (uint a = a_start + tid; a < a_end; a += 256u) {
+            uint a_col = uint(a_col_indices[a]);
+            total += uint(b_row_offsets[a_col + 1]) - uint(b_row_offsets[a_col]);
+        }
+        if (tid == 0u) row_nnz[row] = 0;
+        barrier();
+        if (total > 0u) {
+            atomicAdd(row_nnz[row], int(total));
+        }
+        barrier();
+        // Cap at n_cols (can't have more nonzeros than columns)
+        if (tid == 0u && uint(row_nnz[row]) > n_cols) {
+            row_nnz[row] = int(n_cols);
+        }
+    }
+}
