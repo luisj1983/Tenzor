@@ -4333,6 +4333,43 @@ auto cudnn_conv_transpose3d_backward(
     return std::make_tuple(grad_input, grad_weight, grad_bias);
 }
 
+// ABI-safe wrappers that avoid returning std::tuple across nvcc/g++ boundary.
+// The tuple return type can cause parameter misalignment between .cu (nvcc) and
+// .cpp (g++) translation units on some toolchain combinations.
+
+Tensor cudnn_conv_transpose3d_backward_input(
+    const Tensor& grad_output, const Tensor& input, const Tensor& weight,
+    int64_t stride, int64_t padding, int64_t output_padding,
+    int64_t dilation, int64_t groups, cudaStream_t stream)
+{
+    auto result = cudnn_conv_transpose3d_backward(
+        grad_output, input, weight, stride, padding, output_padding,
+        dilation, groups, true, false, false, stream);
+    return std::get<0>(result);
+}
+
+Tensor cudnn_conv_transpose3d_backward_weight(
+    const Tensor& grad_output, const Tensor& input, const Tensor& weight,
+    int64_t stride, int64_t padding, int64_t output_padding,
+    int64_t dilation, int64_t groups, cudaStream_t stream)
+{
+    auto result = cudnn_conv_transpose3d_backward(
+        grad_output, input, weight, stride, padding, output_padding,
+        dilation, groups, false, true, false, stream);
+    return std::get<1>(result);
+}
+
+Tensor cudnn_conv_transpose3d_backward_bias(
+    const Tensor& grad_output, const Tensor& input, const Tensor& weight,
+    int64_t stride, int64_t padding, int64_t output_padding,
+    int64_t dilation, int64_t groups, cudaStream_t stream)
+{
+    auto result = cudnn_conv_transpose3d_backward(
+        grad_output, input, weight, stride, padding, output_padding,
+        dilation, groups, false, false, true, stream);
+    return std::get<2>(result);
+}
+
 } // namespace cuda
 } // namespace tenzor
 

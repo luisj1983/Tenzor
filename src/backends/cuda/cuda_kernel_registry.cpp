@@ -481,6 +481,10 @@ namespace cuda {
     // ConvTranspose3d (cuDNN Nd)
     auto cudnn_conv_transpose3d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
     auto cudnn_conv_transpose3d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& weight, int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation, int64_t groups, bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
+    // ABI-safe wrappers (single Tensor return avoids tuple across nvcc/g++ boundary)
+    auto cudnn_conv_transpose3d_backward_input(const Tensor& grad_output, const Tensor& input, const Tensor& weight, int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
+    auto cudnn_conv_transpose3d_backward_weight(const Tensor& grad_output, const Tensor& input, const Tensor& weight, int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
+    auto cudnn_conv_transpose3d_backward_bias(const Tensor& grad_output, const Tensor& input, const Tensor& weight, int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
 #endif
 
     // Dropout operations
@@ -2000,35 +2004,34 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return cuda::cudnn_conv_transpose3d_forward(inputs[0], inputs[1], bias, stride, padding, output_padding, dilation, groups, get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::ConvTranspose3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+    // ConvTranspose3dBackward: use ABI-safe wrappers that return single Tensor
+    // instead of std::tuple, avoiding potential nvcc/g++ tuple ABI mismatch.
+    table.register_single_output_kernel(OpId::ConvTranspose3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t stride = attrs.get_int(AttrKey::Stride, 1);
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-        auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv_transpose3d_backward(
-            inputs[0], inputs[1], inputs[2], stride, padding, output_padding, dilation, groups, true, false, false, get_cuda_stream(attrs));
-        return {grad_input};
+        return cuda::cudnn_conv_transpose3d_backward_input(
+            inputs[0], inputs[1], inputs[2], stride, padding, output_padding, dilation, groups, get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::ConvTranspose3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+    table.register_single_output_kernel(OpId::ConvTranspose3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t stride = attrs.get_int(AttrKey::Stride, 1);
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-        auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv_transpose3d_backward(
-            inputs[0], inputs[1], inputs[2], stride, padding, output_padding, dilation, groups, false, true, false, get_cuda_stream(attrs));
-        return {grad_weight};
+        return cuda::cudnn_conv_transpose3d_backward_weight(
+            inputs[0], inputs[1], inputs[2], stride, padding, output_padding, dilation, groups, get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::ConvTranspose3dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+    table.register_single_output_kernel(OpId::ConvTranspose3dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t stride = attrs.get_int(AttrKey::Stride, 1);
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-        auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv_transpose3d_backward(
-            inputs[0], inputs[1], inputs[2], stride, padding, output_padding, dilation, groups, false, false, true, get_cuda_stream(attrs));
-        return {grad_bias};
+        return cuda::cudnn_conv_transpose3d_backward_bias(
+            inputs[0], inputs[1], inputs[2], stride, padding, output_padding, dilation, groups, get_cuda_stream(attrs));
     });
 #endif // TENZOR_HAS_CUDNN (Conv3d/ConvTranspose3d)
 

@@ -978,15 +978,19 @@ public:
         common_attrs.set(AttrKey::Dilation, dilation_);
         common_attrs.set(AttrKey::Groups, groups_);
 
+        // Keep shape strings alive until after dispatch (string_view must not dangle)
+        std::string input_shape_str = shape_to_str(input.shape());
+        std::string weight_shape_str = shape_to_str(weight.shape());
+
         // Backward input: inputs = {grad_output, input, weight}
         NewOpAttributes bi_attrs = common_attrs;
-        bi_attrs.set(AttrKey::InputShape, std::string_view(shape_to_str(input.shape())));
+        bi_attrs.set(AttrKey::InputShape, std::string_view(input_shape_str));
         std::vector<Tensor> bi_inputs = {grad_output, input, weight};
         auto grad_input = dispatch<OpId::Conv3dBackwardInput>(bi_inputs, bi_attrs)[0];
 
         // Backward weight: inputs = {grad_output, input, weight}
         NewOpAttributes bw_attrs = common_attrs;
-        bw_attrs.set(AttrKey::WeightShape, std::string_view(shape_to_str(weight.shape())));
+        bw_attrs.set(AttrKey::WeightShape, std::string_view(weight_shape_str));
         std::vector<Tensor> bw_inputs = {grad_output, input, weight};
         auto grad_weight = dispatch<OpId::Conv3dBackwardWeight>(bw_inputs, bw_attrs)[0];
 
@@ -1032,12 +1036,14 @@ public:
             return r;
         };
 
+        std::string ws_str = shape_to_str(weight_var.tensor().shape());
+
         NewOpAttributes bw_attrs;
         bw_attrs.set(AttrKey::Stride, stride_);
         bw_attrs.set(AttrKey::Padding, padding_);
         bw_attrs.set(AttrKey::Dilation, dilation_);
         bw_attrs.set(AttrKey::Groups, groups_);
-        bw_attrs.set(AttrKey::WeightShape, std::string_view(shape_to_str(weight_var.tensor().shape())));
+        bw_attrs.set(AttrKey::WeightShape, std::string_view(ws_str));
 
         std::vector<Tensor> bw_inputs = {grad_out_var.tensor(), input_var.tensor(), weight_var.tensor()};
         auto grad_weight_t = dispatch<OpId::Conv3dBackwardWeight>(bw_inputs, bw_attrs)[0];
@@ -1222,9 +1228,10 @@ public:
 
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
         Tensor grad_output = grad_outputs[0];
-        Tensor input = saved_tensors_[0];
-        Tensor weight = saved_tensors_[1];
-        bool has_bias = saved_tensors_.size() > 2;
+        auto saved = saved_tensors();
+        Tensor input = saved[0];
+        Tensor weight = saved[1];
+        bool has_bias = saved.size() > 2;
 
         // Float16: upcast to Float32 for cuDNN backend compatibility.
         DType orig_dtype = grad_output.dtype();
@@ -1252,14 +1259,18 @@ public:
         common_attrs.set(AttrKey::Groups, groups_);
 
         // Backward input: cuDNN needs {grad_output, input, weight}
+        // Keep shape strings alive until after dispatch (string_view must not dangle)
+        std::string input_shape_str = shape_to_str(input.shape());
+        std::string weight_shape_str = shape_to_str(weight.shape());
+
         NewOpAttributes bi_attrs = common_attrs;
-        bi_attrs.set(AttrKey::InputShape, std::string_view(shape_to_str(input.shape())));
+        bi_attrs.set(AttrKey::InputShape, std::string_view(input_shape_str));
         std::vector<Tensor> bi_inputs = {grad_output, input, weight};
         auto grad_input = dispatch<OpId::ConvTranspose3dBackwardInput>(bi_inputs, bi_attrs)[0];
 
         // Backward weight: cuDNN needs {grad_output, input, weight}
         NewOpAttributes bw_attrs = common_attrs;
-        bw_attrs.set(AttrKey::WeightShape, std::string_view(shape_to_str(weight.shape())));
+        bw_attrs.set(AttrKey::WeightShape, std::string_view(weight_shape_str));
         std::vector<Tensor> bw_inputs = {grad_output, input, weight};
         auto grad_weight = dispatch<OpId::ConvTranspose3dBackwardWeight>(bw_inputs, bw_attrs)[0];
 
