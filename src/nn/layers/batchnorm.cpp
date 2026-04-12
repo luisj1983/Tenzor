@@ -863,19 +863,94 @@ public:
     }
 
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
-        // Complex batch normalization backward -- delegate to tensor backward and wrap results
-        std::vector<Tensor> tensor_grads;
-        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
-        auto results = backward(std::move(tensor_grads));
-        std::vector<Variable> var_results;
-        for (auto& t : results) var_results.emplace_back(t, grad_outputs[0].requires_grad());
-        return var_results;
+        // Higher-order gradient support for BatchNorm1d (adapted from BatchNorm2dBackward).
+        auto& grad_out = grad_outputs[0];
+
+        Variable input_var, mean_var, invstd_var, weight_var;
+        if (has_saved_variables()) {
+            const auto& sv = saved_variables();
+            input_var = sv[0];
+            mean_var = sv[1];
+            invstd_var = sv[2];
+            weight_var = sv[3];
+        } else {
+            auto saved = saved_tensors();
+            input_var = Variable(saved[0], false);
+            mean_var = Variable(saved[1], false);
+            invstd_var = Variable(saved[2], false);
+            weight_var = Variable(saved[3], false);
+        }
+
+        auto shape = input_var.shape();
+        int64_t N = shape[0];
+        int64_t C = shape[1];
+        bool is_3d = shape.size() == 3;
+        int64_t L = is_3d ? shape[2] : 1;
+        int64_t batch_size = N * L;
+
+        // Broadcast mean and invstd: [C] -> [1,C] or [1,C,1]
+        Variable mean_bc, invstd_bc, weight_bc;
+        if (is_3d) {
+            mean_bc = unsqueeze(unsqueeze(mean_var, 0), 2);
+            invstd_bc = unsqueeze(unsqueeze(invstd_var, 0), 2);
+            weight_bc = unsqueeze(unsqueeze(weight_var, 0), 2);
+        } else {
+            mean_bc = unsqueeze(mean_var, 0);
+            invstd_bc = unsqueeze(invstd_var, 0);
+            weight_bc = unsqueeze(weight_var, 0);
+        }
+
+        auto x_hat = (input_var - mean_bc) * invstd_bc;
+        auto grad_x_hat = grad_out * weight_bc;
+
+        // Reduce over batch (and spatial if 3D)
+        Variable grad_x_hat_r, x_hat_r;
+        if (is_3d) {
+            grad_x_hat_r = reshape(grad_x_hat, {N, C, L});
+            x_hat_r = reshape(x_hat, {N, C, L});
+        } else {
+            grad_x_hat_r = grad_x_hat;
+            x_hat_r = x_hat;
+        }
+
+        Variable sum_grad, sum_grad_xhat;
+        if (is_3d) {
+            sum_grad = sum(sum(grad_x_hat_r, 0, true), 2, true);
+            sum_grad_xhat = sum(sum(grad_x_hat_r * x_hat_r, 0, true), 2, true);
+        } else {
+            sum_grad = sum(grad_x_hat_r, 0, true);
+            sum_grad_xhat = sum(grad_x_hat_r * x_hat_r, 0, true);
+        }
+        auto mean_gxh = sum_grad / static_cast<float>(batch_size);
+        auto mean_gxh_xh = sum_grad_xhat / static_cast<float>(batch_size);
+
+        Variable invstd_r;
+        if (is_3d) {
+            invstd_r = unsqueeze(unsqueeze(invstd_var, 0), -1);
+        } else {
+            invstd_r = unsqueeze(invstd_var, 0);
+        }
+
+        auto grad_input_r = (grad_x_hat_r - mean_gxh - x_hat_r * mean_gxh_xh) * invstd_r;
+        Variable grad_input = is_3d ? reshape(grad_input_r, {N, C, L}) : grad_input_r;
+
+        // grad_gamma and grad_beta
+        Variable grad_gamma, grad_beta;
+        if (is_3d) {
+            auto go_xhat = reshape(grad_out * x_hat, {N, C, L});
+            grad_gamma = sum(sum(go_xhat, 0, false), 1, false);
+            auto go_r = reshape(grad_out, {N, C, L});
+            grad_beta = sum(sum(go_r, 0, false), 1, false);
+        } else {
+            grad_gamma = sum(grad_out * x_hat, 0, false);
+            grad_beta = sum(grad_out, 0, false);
+        }
+
+        return {grad_input, grad_gamma, grad_beta};
     }
 
-    // P4.2d: passthrough returns Variables without grad_fn; flag as
-    // stub so engine's disconnection counter reports accurately.
     auto supports_higher_order() const -> bool override { return true; }
-    auto is_higher_order_stub() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return false; }
 
 private:
     bool affine_;

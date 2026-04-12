@@ -284,6 +284,10 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::ConvTranspose3dBackwardInput)] = "conv_transpose3d_backward_input";
     names[static_cast<size_t>(OpId::ConvTranspose3dBackwardWeight)] = "conv_transpose3d_backward_weight";
     names[static_cast<size_t>(OpId::ConvTranspose3dBackwardBias)] = "conv_transpose3d_backward_bias";
+    names[static_cast<size_t>(OpId::Conv1dForward)] = "conv1d_forward";
+    names[static_cast<size_t>(OpId::Conv1dBackwardInput)] = "conv1d_backward_input";
+    names[static_cast<size_t>(OpId::Conv1dBackwardWeight)] = "conv1d_backward_weight";
+    names[static_cast<size_t>(OpId::Conv1dBackwardBias)] = "conv1d_backward_bias";
 
     // Type Conversion
     names[static_cast<size_t>(OpId::Cast)] = "cast";
@@ -426,7 +430,7 @@ constexpr size_t count_named_ops() {
 
 // Count of actual OpId enum values (excluding gap slots).
 // Update this when adding new OpIds to catch missing name entries at compile time.
-inline constexpr size_t EXPECTED_NAMED_OPS = 318;
+inline constexpr size_t EXPECTED_NAMED_OPS = 322;
 
 // If this fires, a new OpId was added without a corresponding name in op_names above
 static_assert(count_named_ops() == EXPECTED_NAMED_OPS,

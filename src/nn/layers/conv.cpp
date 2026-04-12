@@ -459,21 +459,54 @@ public:
     }
 
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
-        // Delegate to tensor backward and wrap results
-        std::vector<Tensor> tensor_grads;
-        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
-        auto results = backward(std::move(tensor_grads));
-        std::vector<Variable> var_results;
-        for (auto& t : results) var_results.emplace_back(t, grad_outputs[0].requires_grad());
-        return var_results;
+        // Higher-order gradient support for Conv1d (mirrors Conv2dBackward pattern).
+        Variable grad_out_var = grad_outputs[0];
+
+        Variable input_var, weight_var;
+        if (has_saved_variables() && saved_variables_.size() >= 2) {
+            input_var = saved_variables_[0];
+            weight_var = saved_variables_[1];
+        } else {
+            input_var = Variable(saved_tensors_[0], false);
+            weight_var = Variable(saved_tensors_[1], false);
+        }
+        bool has_bias = saved_tensors_.size() > 2;
+
+        // grad_input via conv_transpose1d (preserves computation graph)
+        auto grad_input = ::tenzor::nn::functional::conv_transpose1d(
+            grad_out_var, weight_var,
+            std::nullopt,
+            {stride_}, {padding_}, {0}, groups_, {dilation_});
+
+        // grad_weight via dispatch (unsqueeze to 4D, use Conv2dBackwardWeight)
+        Tensor grad_4d = grad_out_var.tensor().unsqueeze(2);
+        Tensor input_padded = input_var.tensor();
+        if (padding_ > 0) {
+            input_padded = pad_1d(input_padded, padding_);
+        }
+        Tensor input_4d = input_padded.unsqueeze(2);
+        Tensor weight_4d = weight_var.tensor().unsqueeze(2);
+
+        OpAttributes backward_attrs;
+        backward_attrs.set(AttrKey::Stride, stride_);
+        backward_attrs.set(AttrKey::Padding, static_cast<int64_t>(0));
+        backward_attrs.set(AttrKey::Dilation, dilation_);
+        backward_attrs.set(AttrKey::Groups, groups_);
+
+        std::vector<Tensor> gw_inputs = {grad_4d, input_4d, weight_4d};
+        auto grad_weight_t = dispatch(OpId::Conv2dBackwardWeight, gw_inputs, backward_attrs)[0];
+        Variable grad_weight(grad_weight_t.squeeze(2), grad_out_var.requires_grad());
+
+        if (has_bias) {
+            auto gb = ::tenzor::sum(grad_out_var, 0, false);  // sum over batch
+            gb = ::tenzor::sum(gb, 1, false);                  // sum over L
+            return {grad_input, grad_weight, gb};
+        }
+        return {grad_input, grad_weight};
     }
 
-    // P4.2d: passthrough returns Variables without grad_fn on the
-    // convolution's internal structure, so higher-order gradients are
-    // structurally zero through this op. Declare as stub so the engine's
-    // disconnection counter and strict-mode error are honest about it.
     auto supports_higher_order() const -> bool override { return true; }
-    auto is_higher_order_stub() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return false; }
 
 private:
     int64_t stride_;
@@ -570,14 +603,16 @@ auto Conv1d::forward_impl(const Variable& input) -> Variable {
         }
     }
 
-    // Manually pad in the length dimension, then use padding=0 for conv2d
-    // This avoids the symmetric padding issue where padding also affects height
+    // Manually pad in the length dimension, then unsqueeze to 4D for Conv2d dispatch.
+    // Conv1dForward OpId is registered for all backends but the NN layer still uses
+    // the proven Conv2d path (unsqueeze + Conv2dForward + squeeze) to avoid asymmetric
+    // padding issues. A future native Conv1d kernel can be activated by switching
+    // this dispatch to OpId::Conv1dForward.
     Tensor input_tensor = input.tensor();
     if (padding_ > 0) {
         input_tensor = pad_1d(input_tensor, padding_);
     }
 
-    // Add height dimension of 1: [N, C, L] -> [N, C, 1, L]
     auto input_4d = input_tensor.unsqueeze(2);
     auto weight_4d = weight_matched.unsqueeze(2);
 
@@ -586,7 +621,6 @@ auto Conv1d::forward_impl(const Variable& input) -> Variable {
         inputs_vec.push_back(*bias_ptr);
     }
 
-    // Use padding=0 since we already padded the input manually
     NewOpAttributes forward_attrs;
     forward_attrs.set(AttrKey::Stride, stride_);
     forward_attrs.set(AttrKey::Padding, static_cast<int64_t>(0));
@@ -597,10 +631,7 @@ auto Conv1d::forward_impl(const Variable& input) -> Variable {
     auto output_result = dispatch(OpId::Conv2dForward,
         std::span<const Tensor>(inputs_vec),
         forward_attrs);
-    Tensor output_4d = output_result[0];
-
-    // Remove height dimension: [N, C_out, 1, L_out] -> [N, C_out, L_out]
-    Tensor output = output_4d.squeeze(2);
+    Tensor output = output_result[0].squeeze(2);
     if (output.dtype() != original_dtype) {
         output = output.to(original_dtype);
     }
@@ -949,21 +980,63 @@ public:
     }
 
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
-        // Delegate to tensor backward and wrap results
-        std::vector<Tensor> tensor_grads;
-        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
-        auto results = backward(std::move(tensor_grads));
-        std::vector<Variable> var_results;
-        for (auto& t : results) var_results.emplace_back(t, grad_outputs[0].requires_grad());
-        return var_results;
+        // Higher-order gradient support for Conv3d (mirrors Conv2dBackward pattern).
+        Variable grad_out_var = grad_outputs[0];
+
+        Variable input_var, weight_var;
+        if (has_saved_variables() && saved_variables_.size() >= 2) {
+            input_var = saved_variables_[0];
+            weight_var = saved_variables_[1];
+        } else {
+            input_var = Variable(saved_tensors_[0], false);
+            weight_var = Variable(saved_tensors_[1], false);
+        }
+        bool has_bias = saved_tensors_.size() > 2;
+
+        // grad_input via conv_transpose3d (preserves computation graph)
+        auto grad_input = ::tenzor::nn::functional::conv_transpose3d(
+            grad_out_var, weight_var,
+            std::nullopt,
+            {stride_, stride_, stride_},
+            {padding_, padding_, padding_},
+            {0, 0, 0},
+            groups_,
+            {dilation_, dilation_, dilation_});
+
+        // grad_weight via dispatch
+        auto shape_to_str = [](std::span<const int64_t> s) {
+            std::string r;
+            for (size_t i = 0; i < s.size(); ++i) {
+                if (i > 0) r += ",";
+                r += std::to_string(s[i]);
+            }
+            return r;
+        };
+
+        NewOpAttributes bw_attrs;
+        bw_attrs.set(AttrKey::Stride, stride_);
+        bw_attrs.set(AttrKey::Padding, padding_);
+        bw_attrs.set(AttrKey::Dilation, dilation_);
+        bw_attrs.set(AttrKey::Groups, groups_);
+        bw_attrs.set(AttrKey::WeightShape, std::string_view(shape_to_str(weight_var.tensor().shape())));
+
+        std::vector<Tensor> bw_inputs = {grad_out_var.tensor(), input_var.tensor(), weight_var.tensor()};
+        auto grad_weight_t = dispatch<OpId::Conv3dBackwardWeight>(bw_inputs, bw_attrs)[0];
+        Variable grad_weight(grad_weight_t, grad_out_var.requires_grad());
+
+        if (has_bias) {
+            // grad_bias = sum over batch and spatial dims [0,2,3,4]
+            auto gb = ::tenzor::sum(grad_out_var, 0, false);  // batch
+            gb = ::tenzor::sum(gb, 1, false);                  // D
+            gb = ::tenzor::sum(gb, 1, false);                  // H
+            gb = ::tenzor::sum(gb, 1, false);                  // W
+            return {grad_input, grad_weight, gb};
+        }
+        return {grad_input, grad_weight};
     }
 
-    // P4.2d: passthrough returns Variables without grad_fn on the
-    // convolution's internal structure, so higher-order gradients are
-    // structurally zero through this op. Declare as stub so the engine's
-    // disconnection counter and strict-mode error are honest about it.
     auto supports_higher_order() const -> bool override { return true; }
-    auto is_higher_order_stub() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return false; }
 
 private:
     int64_t stride_;

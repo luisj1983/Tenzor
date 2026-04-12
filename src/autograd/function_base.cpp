@@ -198,11 +198,19 @@ void Function::validate_saved_tensors() const {
             std::to_string(saved_versions_.size()) + " versions in " + name());
     }
     for (size_t i = 0; i < saved_tensors_.size(); ++i) {
+        // Skip version check for saved tensors the backward function doesn't
+        // actually need.  This enables in-place modification of those tensors
+        // between forward and backward (matching PyTorch's behavior).
+        if (!needs_saved_tensor(i)) {
+            continue;
+        }
         if (saved_tensors_[i].version() != saved_versions_[i]) {
             throw std::runtime_error(
-                "one of the variables needed for gradient computation has been modified by an "
-                "in-place operation after the forward pass. Use .clone() before in-place ops "
-                "on tensors used in autograd computation.");
+                std::string("one of the variables needed for gradient computation has been "
+                "modified by an in-place operation: saved tensor ") + std::to_string(i) +
+                " in " + name() + ". Use .clone() before in-place ops on tensors used in "
+                "autograd computation, or check that the backward function overrides "
+                "needs_saved_tensor() for inputs it doesn't read.");
         }
         // Check if view base was modified (in-place op on the base invalidates the view)
         if (i < saved_view_base_versions_.size() && saved_view_base_versions_[i] != 0) {

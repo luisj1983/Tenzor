@@ -14,12 +14,34 @@
 #include <limits>
 #include <stdexcept>
 #include <typeinfo>
+#include <cassert>
 
 #ifdef __GNUC__
 #include <cxxabi.h>
 #endif
 
 namespace tenzor {
+
+// Debug-mode guard to verify the single-lock invariant: the backward engine
+// must never hold two grad_mutex_ locks simultaneously.  This makes deadlock
+// structurally impossible (see engine.hpp thread-safety documentation).
+#ifndef NDEBUG
+namespace {
+thread_local int grad_mutex_hold_count_ = 0;
+
+struct GradMutexDebugGuard {
+    GradMutexDebugGuard() {
+        assert(grad_mutex_hold_count_ == 0 &&
+               "BackwardEngine: holding >1 grad_mutex_ simultaneously — "
+               "this violates the single-lock invariant and risks deadlock");
+        ++grad_mutex_hold_count_;
+    }
+    ~GradMutexDebugGuard() { --grad_mutex_hold_count_; }
+    GradMutexDebugGuard(const GradMutexDebugGuard&) = delete;
+    GradMutexDebugGuard& operator=(const GradMutexDebugGuard&) = delete;
+};
+} // anonymous namespace
+#endif
 
 // RAII scope guard for exception-safe cleanup
 namespace {
@@ -448,6 +470,9 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                     };
 
                     if (var.impl_) {
+#ifndef NDEBUG
+                        GradMutexDebugGuard single_lock_check;
+#endif
                         std::lock_guard lock(*var.impl_->grad_mutex_);
                         accumulate_unlocked();
                     } else {
@@ -751,6 +776,9 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                     };
 
                     if (var.impl_) {
+#ifndef NDEBUG
+                        GradMutexDebugGuard single_lock_check;
+#endif
                         std::lock_guard lock(*var.impl_->grad_mutex_);
                         accumulate_unlocked();
                     } else {

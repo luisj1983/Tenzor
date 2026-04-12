@@ -148,6 +148,85 @@ TEST(SparseParity, SparseAddSparseDense) {
     EXPECT_LT(max_err, 1e-6f) << "Sparse + Dense should match dense addition";
 }
 
+// ============================================================================
+// CUDA SparseAdd Tests — verifies on-device kernel matches CPU reference
+// ============================================================================
+
+TEST(SparseParity, SparseAddCUDA_Float32) {
+    if (!has_cuda()) GTEST_SKIP() << "CUDA not available";
+
+    auto sparse = make_test_csr();
+    auto dense = randn({3, 3}, DType::Float32, Device::cpu());
+
+    // CPU reference
+    auto cpu_result = sparse::add(sparse, dense);
+
+    // CUDA: move both to GPU, compute, bring back
+    auto sparse_gpu = sparse.to(Device::cuda());
+    auto dense_gpu = dense.to(Device::cuda());
+    auto cuda_result = sparse::add(sparse_gpu, dense_gpu).to(Device::cpu());
+
+    auto max_err = tenzor::max(tenzor::abs(sub(cuda_result, cpu_result))).data<float>()[0];
+    EXPECT_LT(max_err, 1e-5f) << "CUDA SparseAdd Float32 should match CPU";
+}
+
+TEST(SparseParity, SparseAddCUDA_Float64) {
+    if (!has_cuda()) GTEST_SKIP() << "CUDA not available";
+
+    // Larger matrix to exercise more threads
+    auto identity = eye(32, 32, DType::Float64, Device::cpu());
+    auto sparse = SparseTensor::from_dense(identity);
+    auto dense = randn({32, 32}, DType::Float64, Device::cpu());
+
+    auto cpu_result = sparse::add(sparse, dense);
+
+    auto sparse_gpu = sparse.to(Device::cuda());
+    auto dense_gpu = dense.to(Device::cuda());
+    auto cuda_result = sparse::add(sparse_gpu, dense_gpu).to(Device::cpu());
+
+    auto max_err = tenzor::max(tenzor::abs(sub(cuda_result, cpu_result))).data<double>()[0];
+    EXPECT_LT(max_err, 1e-12) << "CUDA SparseAdd Float64 should match CPU";
+}
+
+TEST(SparseParity, SparseAddCUDA_EmptySparse) {
+    if (!has_cuda()) GTEST_SKIP() << "CUDA not available";
+
+    // Empty sparse (all zeros) + dense should return dense unchanged
+    auto zero_matrix = zeros({4, 4}, DType::Float32, Device::cpu());
+    auto sparse = SparseTensor::from_dense(zero_matrix);
+    auto dense = randn({4, 4}, DType::Float32, Device::cpu());
+
+    auto sparse_gpu = sparse.to(Device::cuda());
+    auto dense_gpu = dense.to(Device::cuda());
+    auto cuda_result = sparse::add(sparse_gpu, dense_gpu).to(Device::cpu());
+
+    auto max_err = tenzor::max(tenzor::abs(sub(cuda_result, dense))).data<float>()[0];
+    EXPECT_LT(max_err, 1e-6f) << "SparseAdd with empty sparse should return dense unchanged";
+}
+
+TEST(SparseParity, SparseAddCUDA_FullRank) {
+    if (!has_cuda()) GTEST_SKIP() << "CUDA not available";
+
+    // Fully dense sparse matrix (every element nonzero) + dense
+    auto full = randn({8, 8}, DType::Float32, Device::cpu());
+    // Make sure there are no exact zeros
+    auto full_data = full.data<float>();
+    for (int i = 0; i < 64; ++i) {
+        if (full_data[i] == 0.0f) full_data[i] = 0.1f;
+    }
+    auto sparse = SparseTensor::from_dense(full);
+    auto dense = randn({8, 8}, DType::Float32, Device::cpu());
+
+    auto cpu_result = sparse::add(sparse, dense);
+
+    auto sparse_gpu = sparse.to(Device::cuda());
+    auto dense_gpu = dense.to(Device::cuda());
+    auto cuda_result = sparse::add(sparse_gpu, dense_gpu).to(Device::cpu());
+
+    auto max_err = tenzor::max(tenzor::abs(sub(cuda_result, cpu_result))).data<float>()[0];
+    EXPECT_LT(max_err, 1e-5f) << "CUDA SparseAdd with full-rank sparse should match CPU";
+}
+
 TEST(SparseParity, FormatConversion_COO_CSR) {
     auto original = eye(4, 4, DType::Float32, Device::cpu());
     auto sparse_coo = SparseTensor::from_dense(original, SparseLayout::COO);

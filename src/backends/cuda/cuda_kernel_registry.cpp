@@ -721,6 +721,7 @@ namespace cuda {
     // unconditional.
     auto cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) -> Tensor;
     auto cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) -> Tensor;
+    auto cuda_sparse_add_kernel(const SparseTensor& sparse, const Tensor& dense) -> Tensor;
 #ifdef TENZOR_HAS_CUSPARSE
     // SpGEMM and triangular solve are only defined when cuSPARSE is
     // available — the hand-rolled fallback intentionally doesn't cover
@@ -1891,6 +1892,42 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return {grad_bias};
     });
 #endif
+
+    // Conv1d: wraps Conv2d by unsqueezing height dimension [N,C,L] -> [N,C,1,L]
+    table.register_kernel(OpId::Conv1dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto input_4d = inputs[0].unsqueeze(2);
+        auto weight_4d = inputs[1].unsqueeze(2);
+        std::vector<Tensor> conv2d_inputs = inputs.size() > 2
+            ? std::vector<Tensor>{input_4d, weight_4d, inputs[2]}
+            : std::vector<Tensor>{input_4d, weight_4d};
+        auto result = tenzor::dispatch(OpId::Conv2dForward, conv2d_inputs, attrs);
+        return {result[0].squeeze(2)};
+    });
+
+    table.register_kernel(OpId::Conv1dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto grad_4d = inputs[0].unsqueeze(2);
+        auto input_4d = inputs[1].unsqueeze(2);
+        auto weight_4d = inputs[2].unsqueeze(2);
+        std::vector<Tensor> conv2d_inputs = {grad_4d, input_4d, weight_4d};
+        auto result = tenzor::dispatch(OpId::Conv2dBackwardInput, conv2d_inputs, attrs);
+        return {result[0].squeeze(2)};
+    });
+
+    table.register_kernel(OpId::Conv1dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto grad_4d = inputs[0].unsqueeze(2);
+        auto input_4d = inputs[1].unsqueeze(2);
+        auto weight_4d = inputs[2].unsqueeze(2);
+        std::vector<Tensor> conv2d_inputs = {grad_4d, input_4d, weight_4d};
+        auto result = tenzor::dispatch(OpId::Conv2dBackwardWeight, conv2d_inputs, attrs);
+        return {result[0].squeeze(2)};
+    });
+
+    table.register_kernel(OpId::Conv1dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+        auto grad_4d = inputs[0].unsqueeze(2);
+        std::vector<Tensor> conv2d_inputs = {grad_4d};
+        auto result = tenzor::dispatch(OpId::Conv2dBackwardBias, conv2d_inputs, {});
+        return {result[0]};
+    });
 
     table.register_single_output_kernel(OpId::ConvTranspose2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t stride = attrs.get_int(AttrKey::Stride, 1);
@@ -3295,14 +3332,17 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             return {sp.crow_indices(), sp.col_indices(), sp.values()};
         });
 
-    // NOTE: SparseAdd on CUDA intentionally has no dedicated lambda. The
-    // previous implementation called `sparse::add(sp, inputs[3])` which
-    // recursed back into tenzor_core's sparse::add → dispatch_gpu_add →
-    // this lambda → ..., overflowing the stack. There is no cusparse
-    // primitive for (sparse + dense) → dense; the op is cheap enough
-    // that sparse::add's CPU fallback (which now round-trips operands
-    // through CPU) is an acceptable implementation until a real
-    // on-device kernel lands.
+    // SparseAdd: sparse(M,K) + dense(M,K) -> dense(M,K)
+    // Uses a dedicated CUDA kernel (csr_sparse_add_kernel) that clones
+    // the dense operand and adds CSR non-zeros directly.  Does NOT call
+    // sparse::add() to avoid recursive dispatch.
+    table.register_single_output_kernel(OpId::SparseAdd,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            return cuda::cuda_sparse_add_kernel(sp, inputs[3]);
+        });
 }
 
 } // namespace tenzor

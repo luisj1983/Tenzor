@@ -3,6 +3,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/autograd/function.hpp"
+#include "tenzor/autograd/ops.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/backend/op_attributes.hpp"
@@ -572,18 +573,69 @@ public:
     }
 
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
-        // Complex normalization backward -- delegate to tensor backward and wrap results
-        std::vector<Tensor> tensor_grads;
-        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
-        auto results = backward(std::move(tensor_grads));
-        std::vector<Variable> var_results;
-        for (auto& t : results) var_results.emplace_back(t, false);
-        return var_results;
+        // Higher-order gradient support for LayerNorm.
+        // LayerNorm normalizes over the last dimension(s) of size normalized_size_.
+        auto& grad_out = grad_outputs[0];
+
+        Variable input_var, mean_var, rstd_var, weight_var;
+        if (has_saved_variables()) {
+            const auto& sv = saved_variables();
+            input_var = sv[0];
+            mean_var = sv[1];
+            rstd_var = sv[2];
+            weight_var = sv[3];
+        } else {
+            auto saved = saved_tensors();
+            input_var = Variable(saved[0], false);
+            mean_var = Variable(saved[1], false);
+            rstd_var = Variable(saved[2], false);
+            weight_var = Variable(saved[3], false);
+        }
+
+        int64_t norm_size = normalized_size_;
+
+        // Expand mean and rstd to match input shape (add trailing dim)
+        // mean/rstd shape: input_shape[:-1], need to unsqueeze last dim
+        auto mean_bc = unsqueeze(mean_var, -1);    // [..., 1]
+        auto rstd_bc = unsqueeze(rstd_var, -1);    // [..., 1]
+
+        // x_hat = (input - mean) * rstd
+        auto x_hat = (input_var - mean_bc) * rstd_bc;
+
+        // grad_x_hat = grad_output * weight
+        auto grad_x_hat = grad_out * weight_var;
+
+        // mean(grad_x_hat) over last dim
+        auto mean_gxh = sum(grad_x_hat, -1, true) / static_cast<float>(norm_size);
+
+        // mean(grad_x_hat * x_hat) over last dim
+        auto mean_gxh_xh = sum(grad_x_hat * x_hat, -1, true) / static_cast<float>(norm_size);
+
+        // grad_input = (grad_x_hat - mean_gxh - x_hat * mean_gxh_xh) * rstd
+        auto grad_input = (grad_x_hat - mean_gxh - x_hat * mean_gxh_xh) * rstd_bc;
+
+        // grad_weight = sum(grad_output * x_hat, dims except last)
+        // Flatten batch dims and sum over all except last
+        auto go_xhat = grad_out * x_hat;
+        // Sum over all dims except the last (normalized dim)
+        auto grad_weight_var = go_xhat;
+        auto gw_shape = grad_weight_var.shape();
+        for (int d = static_cast<int>(gw_shape.size()) - 2; d >= 0; --d) {
+            grad_weight_var = sum(grad_weight_var, d, false);
+        }
+
+        // grad_bias = sum(grad_output, dims except last)
+        auto grad_bias_var = grad_out;
+        auto gb_shape = grad_bias_var.shape();
+        for (int d = static_cast<int>(gb_shape.size()) - 2; d >= 0; --d) {
+            grad_bias_var = sum(grad_bias_var, d, false);
+        }
+
+        return {grad_input, grad_weight_var, grad_bias_var};
     }
 
-    // P4.2d: passthrough backward; second derivatives are zero.
     auto supports_higher_order() const -> bool override { return true; }
-    auto is_higher_order_stub() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return false; }
 
 private:
     bool elementwise_affine_;

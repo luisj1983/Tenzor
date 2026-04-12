@@ -42,6 +42,25 @@ namespace tenzor {
  * from gradient checkpointing) are safe because execute() saves and
  * restores grad_accumulators_ around each invocation.
  *
+ * ## Lock ordering and shared parameters
+ *
+ * Gradient accumulation to leaf Variables uses per-variable grad_mutex_
+ * (see VariableImpl::grad_mutex_). The engine acquires at most ONE
+ * grad_mutex_ at any point during backward traversal -- it locks, writes,
+ * and releases before moving to the next variable. This single-lock-at-a-
+ * time design makes deadlock structurally impossible regardless of graph
+ * topology or parameter sharing patterns.
+ *
+ * When multiple threads perform backward() concurrently and share
+ * parameters (e.g., data-parallel training), the per-variable grad_mutex_
+ * serializes their gradient accumulations. Because each thread holds only
+ * one mutex at a time, no lock ordering is required.
+ *
+ * The hooks_mutex_ on each Variable is a shared_mutex used only for
+ * reading the hook map (shared_lock). It is never held simultaneously
+ * with another Variable's hooks_mutex_ or grad_mutex_, so it does not
+ * participate in any lock ordering.
+ *
  * @code
  * // Indirect usage through Variable
  * Variable x(Tensor({3, 4}, DType::Float32, Device::cpu()), true);

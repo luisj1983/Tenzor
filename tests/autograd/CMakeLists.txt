@@ -209,3 +209,8 @@ tenzor_discover_tests(test_activation_offload_multidtype LABELS "autograd" DISCO
 add_executable(test_autograd_features test_autograd_features.cpp)
 target_link_libraries(test_autograd_features PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_autograd_features LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Thread safety tests for concurrent backward with shared parameters
+add_executable(test_autograd_thread_safety test_autograd_thread_safety.cpp)
+target_link_libraries(test_autograd_thread_safety PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_autograd_thread_safety LABELS "autograd" DISCOVERY_TIMEOUT 120 DISCOVERY_MODE PRE_TEST)

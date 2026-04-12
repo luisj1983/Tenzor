@@ -282,6 +282,27 @@ public:
     virtual auto is_higher_order_stub() const -> bool { return false; }
 
     /**
+     * @brief Query whether a saved tensor at the given index is actually
+     *        needed for backward computation.
+     *
+     * Returns true by default (conservative: assume all saved tensors are
+     * needed). Subclasses may override to return false for specific indices
+     * whose saved tensors are not read during backward(), enabling in-place
+     * modification of those tensors between forward and backward without
+     * triggering a version check error.
+     *
+     * For example, ReLUBackward saves the output but doesn't need the input,
+     * so it overrides this for index 0 to return false.
+     *
+     * @param index Index into the saved_tensors vector
+     * @return true if the tensor at this index must not be modified in-place
+     */
+    virtual auto needs_saved_tensor(size_t index) const -> bool {
+        (void)index;
+        return true;
+    }
+
+    /**
      * @brief Shared passthrough used by `is_higher_order_stub()`-style
      *        subclasses whose second derivative is structurally zero.
      *

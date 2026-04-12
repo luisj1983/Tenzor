@@ -211,6 +211,10 @@ enum class OpId : uint16_t {
     ConvTranspose3dBackwardInput,
     ConvTranspose3dBackwardWeight,
     ConvTranspose3dBackwardBias,
+    Conv1dForward = 180,             // 1D convolution forward pass
+    Conv1dBackwardInput,             // 1D convolution gradient w.r.t. input
+    Conv1dBackwardWeight,            // 1D convolution gradient w.r.t. weight
+    Conv1dBackwardBias,              // 1D convolution gradient w.r.t. bias
 
     // =========================================================================
     // Pooling Operations (190-209)

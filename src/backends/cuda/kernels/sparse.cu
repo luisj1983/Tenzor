@@ -1056,6 +1056,78 @@ SparseTensor cuda_coo_to_csc(const SparseTensor& sparse) {
                                     std::vector<int64_t>{nrows, ncols});
 }
 
+// ============================================================================
+// SparseAdd: sparse(M,K) + dense(M,K) -> dense(M,K)
+// One thread per row; each thread iterates its CSR non-zeros and adds them
+// directly into the cloned dense output.  No atomicAdd needed because CSR
+// row ranges are disjoint across threads.
+// ============================================================================
+template <typename T>
+__global__ void csr_sparse_add_kernel(
+    const int64_t* __restrict__ crow_ptr,
+    const int64_t* __restrict__ col_ptr,
+    const T* __restrict__ val_ptr,
+    T* __restrict__ out_ptr,
+    int64_t nrows, int64_t ncols)
+{
+    int64_t row = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (row >= nrows) return;
+
+    int64_t row_start = crow_ptr[row];
+    int64_t row_end = crow_ptr[row + 1];
+    for (int64_t j = row_start; j < row_end; ++j) {
+        out_ptr[row * ncols + col_ptr[j]] += val_ptr[j];
+    }
+}
+
+Tensor cuda_sparse_add_kernel(const SparseTensor& sparse, const Tensor& dense) {
+    auto sp_shape = sparse.shape();
+    if (sp_shape.size() != 2 || dense.ndim() != 2) {
+        throw std::runtime_error("cuda_sparse_add: both inputs must be 2D");
+    }
+
+    int64_t M = sp_shape[0];
+    int64_t K = sp_shape[1];
+    if (M != dense.shape()[0] || K != dense.shape()[1]) {
+        throw std::runtime_error("cuda_sparse_add: shape mismatch ("
+            + std::to_string(M) + "x" + std::to_string(K) + " vs "
+            + std::to_string(dense.shape()[0]) + "x" + std::to_string(dense.shape()[1]) + ")");
+    }
+
+    DType dtype = dense.dtype();
+    auto csr = ensure_csr_on_gpu(sparse);
+
+    auto dense_gpu = (dense.device().type != Device::Type::CUDA)
+                     ? dense.to(Device::cuda()).contiguous()
+                     : dense.contiguous();
+
+    // Clone dense as output; CSR non-zeros are added in-place.
+    auto result = dense_gpu.clone();
+
+    auto crow = csr.crow_indices().contiguous();
+    auto col = csr.col_indices().contiguous();
+    auto vals = csr.values().contiguous();
+
+    int threads = 256;
+    int blocks = static_cast<int>((M + threads - 1) / threads);
+
+    if (dtype == DType::Float32) {
+        csr_sparse_add_kernel<float><<<blocks, threads>>>(
+            crow.data<int64_t>(), col.data<int64_t>(), vals.data<float>(),
+            result.data<float>(), M, K);
+    } else if (dtype == DType::Float64) {
+        csr_sparse_add_kernel<double><<<blocks, threads>>>(
+            crow.data<int64_t>(), col.data<int64_t>(), vals.data<double>(),
+            result.data<double>(), M, K);
+    } else {
+        throw std::runtime_error("cuda_sparse_add: only Float32 and Float64 supported, got "
+            + std::string(dtype_name(dtype)));
+    }
+    CUDA_CHECK_SPARSE(cudaGetLastError());
+
+    return result;
+}
+
 } // namespace cuda
 } // namespace tenzor
 
@@ -1237,6 +1309,84 @@ Tensor cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
             vec_gpu.data<double>(), result.data<double>(), M);
     } else {
         throw std::runtime_error("cuda_spmv: only Float32 and Float64 supported, got "
+            + std::string(dtype_name(dtype)));
+    }
+    CUDA_CHECK_SPARSE_FALLBACK(cudaGetLastError());
+
+    return result;
+}
+
+// ============================================================================
+// SparseAdd: sparse(M,K) + dense(M,K) -> dense(M,K)
+// One thread per row; each thread iterates its CSR non-zeros and adds them
+// directly into the cloned dense output.  No atomicAdd needed because CSR
+// row ranges are disjoint across threads.
+// ============================================================================
+template <typename T>
+__global__ void csr_sparse_add_kernel(
+    const int64_t* __restrict__ crow_ptr,
+    const int64_t* __restrict__ col_ptr,
+    const T* __restrict__ val_ptr,
+    T* __restrict__ out_ptr,
+    int64_t nrows, int64_t ncols)
+{
+    int64_t row = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (row >= nrows) return;
+
+    int64_t row_start = crow_ptr[row];
+    int64_t row_end = crow_ptr[row + 1];
+    for (int64_t j = row_start; j < row_end; ++j) {
+        out_ptr[row * ncols + col_ptr[j]] += val_ptr[j];
+    }
+}
+
+Tensor cuda_sparse_add_kernel(const SparseTensor& sparse, const Tensor& dense) {
+    auto sp_shape = sparse.shape();
+    if (sp_shape.size() != 2 || dense.ndim() != 2) {
+        throw std::runtime_error("cuda_sparse_add: both inputs must be 2D");
+    }
+
+    int64_t M = sp_shape[0];
+    int64_t K = sp_shape[1];
+    if (M != dense.shape()[0] || K != dense.shape()[1]) {
+        throw std::runtime_error("cuda_sparse_add: shape mismatch ("
+            + std::to_string(M) + "x" + std::to_string(K) + " vs "
+            + std::to_string(dense.shape()[0]) + "x" + std::to_string(dense.shape()[1]) + ")");
+    }
+
+    DType dtype = dense.dtype();
+
+    // The dispatch table always passes CSR components, so we expect CSR.
+    auto csr = (sparse.device().type != Device::Type::CUDA)
+               ? sparse.to(Device::cuda())
+               : sparse;
+    if (csr.layout() != SparseLayout::CSR) {
+        throw std::runtime_error("cuda_sparse_add (fallback): expected CSR layout");
+    }
+
+    auto dense_gpu = (dense.device().type != Device::Type::CUDA)
+                     ? dense.to(Device::cuda()).contiguous()
+                     : dense.contiguous();
+
+    auto result = dense_gpu.clone();
+
+    auto crow = csr.crow_indices().contiguous();
+    auto col = csr.col_indices().contiguous();
+    auto vals = csr.values().contiguous();
+
+    int threads = 256;
+    int blocks = static_cast<int>((M + threads - 1) / threads);
+
+    if (dtype == DType::Float32) {
+        csr_sparse_add_kernel<float><<<blocks, threads>>>(
+            crow.data<int64_t>(), col.data<int64_t>(), vals.data<float>(),
+            result.data<float>(), M, K);
+    } else if (dtype == DType::Float64) {
+        csr_sparse_add_kernel<double><<<blocks, threads>>>(
+            crow.data<int64_t>(), col.data<int64_t>(), vals.data<double>(),
+            result.data<double>(), M, K);
+    } else {
+        throw std::runtime_error("cuda_sparse_add: only Float32 and Float64 supported, got "
             + std::string(dtype_name(dtype)));
     }
     CUDA_CHECK_SPARSE_FALLBACK(cudaGetLastError());

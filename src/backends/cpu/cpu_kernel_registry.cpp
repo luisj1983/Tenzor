@@ -1059,6 +1059,57 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{cpu::conv2d_backward_bias_kernel(inputs[0])};
     });
 
+    // Conv1d: wraps Conv2d by unsqueezing [N,C,L] -> [N,C,1,L] and delegating.
+    // The NN layer handles manual 1D padding before dispatching, so the kernel
+    // receives pre-padded input with padding=0 in attrs.
+    table.register_kernel(OpId::Conv1dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        auto input_4d = inputs[0].unsqueeze(2);
+        auto weight_4d = inputs[1].unsqueeze(2);
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        auto result_4d = cpu::conv2d_forward_kernel(input_4d, weight_4d, bias, stride, padding, dilation, groups);
+        return std::vector<Tensor>{result_4d.squeeze(2)};
+    });
+
+    // Conv1dBackwardInput: inputs = {grad_output, input, weight}
+    // Delegates to conv2d_backward_input_kernel(grad, weight, input_shape, ...)
+    table.register_kernel(OpId::Conv1dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        auto grad_4d = inputs[0].unsqueeze(2);
+        auto weight_4d = inputs[2].unsqueeze(2);
+        // Build 4D input shape from 3D: [N,C,L] -> [N,C,1,L]
+        auto in_shape = inputs[1].shape();
+        std::vector<int64_t> input_shape_4d = {in_shape[0], in_shape[1], 1, in_shape[2]};
+        auto result_4d = cpu::conv2d_backward_input_kernel(grad_4d, weight_4d, input_shape_4d, stride, padding, dilation, groups);
+        return std::vector<Tensor>{result_4d.squeeze(2)};
+    });
+
+    // Conv1dBackwardWeight: inputs = {grad_output, input, weight}
+    // Delegates to conv2d_backward_weight_kernel(grad, input, weight_shape, ...)
+    table.register_kernel(OpId::Conv1dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        auto grad_4d = inputs[0].unsqueeze(2);
+        auto input_4d = inputs[1].unsqueeze(2);
+        // Build 4D weight shape from 3D: [out,in/g,kL] -> [out,in/g,1,kL]
+        auto wt_shape = inputs[2].shape();
+        std::vector<int64_t> weight_shape_4d = {wt_shape[0], wt_shape[1], 1, wt_shape[2]};
+        auto result_4d = cpu::conv2d_backward_weight_kernel(grad_4d, input_4d, weight_shape_4d, stride, padding, dilation, groups);
+        return std::vector<Tensor>{result_4d.squeeze(2)};
+    });
+
+    table.register_kernel(OpId::Conv1dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{cpu::conv2d_backward_bias_kernel(inputs[0].unsqueeze(2))};
+    });
+
     // Conv3d
     table.register_kernel(OpId::Conv3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t stride = attrs.get_int(AttrKey::Stride, 1);
