@@ -544,6 +544,28 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     mps_roundtrip_single(OpId::MaxPool3dForward);
     mps_roundtrip_single(OpId::AvgPool3dForward);
 
+    // New Phase 4 ops — CPU roundtrip (native Metal candidates for future)
+    mps_roundtrip_single(OpId::Frac);
+    mps_roundtrip_single(OpId::Heaviside);
+    mps_roundtrip_single(OpId::NanToNum);
+    mps_roundtrip_single(OpId::LogSigmoid);
+    mps_roundtrip_single(OpId::LogSigmoidBackward);
+    mps_roundtrip_single(OpId::RReLU);
+    mps_roundtrip_single(OpId::RReLUBackward);
+    mps_roundtrip_single(OpId::BitwiseAnd);
+    mps_roundtrip_single(OpId::BitwiseOr);
+    mps_roundtrip_single(OpId::BitwiseXor);
+    mps_roundtrip_single(OpId::BitwiseNot);
+    mps_roundtrip_single(OpId::BitwiseLeftShift);
+    mps_roundtrip_single(OpId::BitwiseRightShift);
+    mps_roundtrip_single(OpId::CountNonzero);
+    mps_roundtrip_single(OpId::Nansum);
+    mps_roundtrip_single(OpId::Nanmean);
+    mps_roundtrip_multi(OpId::Aminmax);
+    mps_roundtrip_single(OpId::IndexAdd);
+    mps_roundtrip_single(OpId::IndexCopy);
+    mps_roundtrip_single(OpId::IndexFill);
+
     // ================================================================
     // Tier 3 expansion: CPU-roundtrip for ALL remaining ops
     // ================================================================

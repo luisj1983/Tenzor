@@ -1,0 +1,16 @@
+#version 450
+
+// Bitwise AND (int32)
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer InputA { int data[]; } a_buf;
+layout(set = 0, binding = 1) readonly buffer InputB { int data[]; } b_buf;
+layout(set = 0, binding = 2) writeonly buffer OutputBuffer { int data[]; } output_buf;
+
+layout(push_constant) uniform PushConstants { uint num_elements; } pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.num_elements) return;
+    output_buf.data[idx] = a_buf.data[idx] & b_buf.data[idx];
+}

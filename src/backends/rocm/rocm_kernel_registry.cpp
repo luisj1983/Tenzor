@@ -754,6 +754,18 @@ namespace rocm {
     // Trunc (math.hip.cpp)
     auto trunc_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
 
+    // New Phase 4 ops (math.hip.cpp)
+    auto frac_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto heaviside_kernel(const Tensor& input, const Tensor& values, hipStream_t stream) -> Tensor;
+    auto nan_to_num_kernel(const Tensor& input, double nan_v, double posinf_v, double neginf_v, hipStream_t stream) -> Tensor;
+    auto log_sigmoid_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto bitwise_and_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor;
+    auto bitwise_or_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor;
+    auto bitwise_xor_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor;
+    auto bitwise_not_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto bitwise_left_shift_kernel(const Tensor& input, const Tensor& shift, hipStream_t stream) -> Tensor;
+    auto bitwise_right_shift_kernel(const Tensor& input, const Tensor& shift, hipStream_t stream) -> Tensor;
+
     // OneHot, Nonzero (indexing.hip.cpp)
     auto one_hot_kernel(const Tensor& indices, int64_t num_classes,
                         hipStream_t stream) -> Tensor;
@@ -3173,6 +3185,37 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             std::vector<Tensor> indices(inputs.begin() + 2, inputs.begin() + 2 + num_indices);
             return rocm::advanced_index_put_rocm_kernel(inputs[0], indices, values, num_indices, get_hip_stream(attrs));
         });
+
+    // ========================================================================
+    // New Phase 4 ops
+    // ========================================================================
+    ROCM_SINGLE_UNARY_NATIVE(Frac, frac_kernel);
+    ROCM_SINGLE_UNARY_NATIVE(LogSigmoid, log_sigmoid_kernel);
+
+    table.register_single_output_kernel(OpId::Heaviside,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            return rocm::heaviside_kernel(inputs[0], inputs[1], get_hip_stream(attrs));
+        });
+    table.register_single_output_kernel(OpId::NanToNum,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double nan_v = attrs.get_float(AttrKey::NanValue, 0.0);
+            double posinf = attrs.get_float(AttrKey::PosInfValue, std::numeric_limits<double>::max());
+            double neginf = attrs.get_float(AttrKey::NegInfValue, std::numeric_limits<double>::lowest());
+            return rocm::nan_to_num_kernel(inputs[0], nan_v, posinf, neginf, get_hip_stream(attrs));
+        });
+
+    // Bitwise ops
+    table.register_single_output_kernel(OpId::BitwiseAnd, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return rocm::bitwise_and_kernel(inputs[0], inputs[1], get_hip_stream(attrs)); });
+    table.register_single_output_kernel(OpId::BitwiseOr, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return rocm::bitwise_or_kernel(inputs[0], inputs[1], get_hip_stream(attrs)); });
+    table.register_single_output_kernel(OpId::BitwiseXor, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return rocm::bitwise_xor_kernel(inputs[0], inputs[1], get_hip_stream(attrs)); });
+    ROCM_SINGLE_UNARY_NATIVE(BitwiseNot, bitwise_not_kernel);
+    table.register_single_output_kernel(OpId::BitwiseLeftShift, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return rocm::bitwise_left_shift_kernel(inputs[0], inputs[1], get_hip_stream(attrs)); });
+    table.register_single_output_kernel(OpId::BitwiseRightShift, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return rocm::bitwise_right_shift_kernel(inputs[0], inputs[1], get_hip_stream(attrs)); });
 
     std::cout << "ROCm dispatch table initialized with O(1) lookup" << std::endl;
 }

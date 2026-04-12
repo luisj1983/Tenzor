@@ -592,6 +592,16 @@ namespace cuda {
     Tensor ceil_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor round_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor trunc_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor frac_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor heaviside_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor nan_to_num_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor log_sigmoid_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor bitwise_and_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor bitwise_or_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor bitwise_xor_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor bitwise_not_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor bitwise_left_shift_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor bitwise_right_shift_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
 
     // Trigonometric operations
     Tensor sin_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
@@ -3347,6 +3357,20 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
             return cuda::cuda_sparse_add_kernel(sp, inputs[3]);
         });
+
+    // ========================================================================
+    // New Phase 4 ops
+    // ========================================================================
+    table.register_single_output_kernel(OpId::Frac, cuda::frac_dispatch);
+    table.register_single_output_kernel(OpId::Heaviside, cuda::heaviside_dispatch);
+    table.register_single_output_kernel(OpId::NanToNum, cuda::nan_to_num_dispatch);
+    table.register_single_output_kernel(OpId::LogSigmoid, cuda::log_sigmoid_dispatch);
+    table.register_single_output_kernel(OpId::BitwiseAnd, cuda::bitwise_and_dispatch);
+    table.register_single_output_kernel(OpId::BitwiseOr, cuda::bitwise_or_dispatch);
+    table.register_single_output_kernel(OpId::BitwiseXor, cuda::bitwise_xor_dispatch);
+    table.register_single_output_kernel(OpId::BitwiseNot, cuda::bitwise_not_dispatch);
+    table.register_single_output_kernel(OpId::BitwiseLeftShift, cuda::bitwise_left_shift_dispatch);
+    table.register_single_output_kernel(OpId::BitwiseRightShift, cuda::bitwise_right_shift_dispatch);
 }
 
 } // namespace tenzor

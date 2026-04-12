@@ -3850,6 +3850,32 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
                 inputs[0], indices, values, num_indices, get_q(inputs));
         });
 
+    // ========================================================================
+    // New Phase 4 ops
+    // ========================================================================
+    ONEAPI_REGISTER_UNARY_SPECIAL(Frac, frac_kernel);
+    ONEAPI_REGISTER_UNARY_SPECIAL(LogSigmoid, log_sigmoid_kernel);
+    table.register_kernel(OpId::Heaviside, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{oneapi::heaviside_kernel(inputs[0], inputs[1], get_q(inputs))};
+    });
+    table.register_kernel(OpId::NanToNum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        double nan_v = attrs.get_float(AttrKey::NanValue, 0.0);
+        double posinf = attrs.get_float(AttrKey::PosInfValue, std::numeric_limits<double>::max());
+        double neginf = attrs.get_float(AttrKey::NegInfValue, std::numeric_limits<double>::lowest());
+        return std::vector<Tensor>{oneapi::nan_to_num_kernel(inputs[0], nan_v, posinf, neginf, get_q(inputs))};
+    });
+    table.register_kernel(OpId::BitwiseAnd, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{oneapi::bitwise_and_kernel(inputs[0], inputs[1], get_q(inputs))}; });
+    table.register_kernel(OpId::BitwiseOr, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{oneapi::bitwise_or_kernel(inputs[0], inputs[1], get_q(inputs))}; });
+    table.register_kernel(OpId::BitwiseXor, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{oneapi::bitwise_xor_kernel(inputs[0], inputs[1], get_q(inputs))}; });
+    ONEAPI_REGISTER_UNARY_SPECIAL(BitwiseNot, bitwise_not_kernel);
+    table.register_kernel(OpId::BitwiseLeftShift, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{oneapi::bitwise_left_shift_kernel(inputs[0], inputs[1], get_q(inputs))}; });
+    table.register_kernel(OpId::BitwiseRightShift, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{oneapi::bitwise_right_shift_kernel(inputs[0], inputs[1], get_q(inputs))}; });
+
 } // register_oneapi_kernels
 
 } // namespace tenzor

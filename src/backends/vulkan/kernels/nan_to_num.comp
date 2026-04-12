@@ -1,0 +1,24 @@
+#version 450
+
+// Replace NaN, +Inf, -Inf with specified values
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuffer { float data[]; } input_buf;
+layout(set = 0, binding = 1) writeonly buffer OutputBuffer { float data[]; } output_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+    float nan_val;
+    float posinf_val;
+    float neginf_val;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.num_elements) return;
+    float x = input_buf.data[idx];
+    if (isnan(x)) output_buf.data[idx] = pc.nan_val;
+    else if (isinf(x) && x > 0.0) output_buf.data[idx] = pc.posinf_val;
+    else if (isinf(x) && x < 0.0) output_buf.data[idx] = pc.neginf_val;
+    else output_buf.data[idx] = x;
+}

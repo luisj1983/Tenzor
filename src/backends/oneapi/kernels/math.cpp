@@ -4863,5 +4863,183 @@ auto cross_kernel(const Tensor& a, const Tensor& b, int64_t dim, sycl::queue& qu
     return output;
 }
 
+// ============================================================================
+// New Phase 4 ops: Frac, Heaviside, NanToNum, LogSigmoid, Bitwise
+// ============================================================================
+
+struct FracKernelF32 {};
+struct FracKernelF64 {};
+
+auto frac_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto f32 = input.to(DType::Float32);
+        return frac_kernel(f32, queue).to(input.dtype());
+    }
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    int64_t n = input.numel();
+    if (n == 0) return result;
+
+    if (input.dtype() == DType::Float32) {
+        const float* in = input.data<float>(); float* out = result.data<float>();
+        queue.parallel_for<FracKernelF32>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            float x = in[idx]; out[idx] = x - sycl::floor(x);
+        }).wait();
+    } else if (input.dtype() == DType::Float64) {
+        const double* in = input.data<double>(); double* out = result.data<double>();
+        queue.parallel_for<FracKernelF64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            double x = in[idx]; out[idx] = x - sycl::floor(x);
+        }).wait();
+    } else { throw std::runtime_error("frac: unsupported dtype"); }
+    return result;
+}
+
+struct HeavisideKernelF32 {};
+
+auto heaviside_kernel(const Tensor& input, const Tensor& values, sycl::queue& queue) -> Tensor {
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto f32_in = input.to(DType::Float32); auto f32_val = values.to(DType::Float32);
+        return heaviside_kernel(f32_in, f32_val, queue).to(input.dtype());
+    }
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    int64_t n = input.numel();
+    if (n == 0) return result;
+
+    if (input.dtype() == DType::Float32) {
+        const float* in = input.data<float>(); const float* val = values.data<float>(); float* out = result.data<float>();
+        queue.parallel_for<HeavisideKernelF32>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            float x = in[idx];
+            out[idx] = (x < 0.0f) ? 0.0f : (x == 0.0f ? val[idx] : 1.0f);
+        }).wait();
+    } else { throw std::runtime_error("heaviside: unsupported dtype (use Float32)"); }
+    return result;
+}
+
+struct NanToNumKernelF32 {};
+
+auto nan_to_num_kernel(const Tensor& input, double nan_v, double posinf_v, double neginf_v, sycl::queue& queue) -> Tensor {
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto f32 = input.to(DType::Float32);
+        return nan_to_num_kernel(f32, nan_v, posinf_v, neginf_v, queue).to(input.dtype());
+    }
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    int64_t n = input.numel();
+    if (n == 0) return result;
+
+    if (input.dtype() == DType::Float32) {
+        const float* in = input.data<float>(); float* out = result.data<float>();
+        float nv = static_cast<float>(nan_v);
+        float pv = (posinf_v >= static_cast<double>(std::numeric_limits<float>::max())) ? std::numeric_limits<float>::max() : static_cast<float>(posinf_v);
+        float nf = (neginf_v <= static_cast<double>(std::numeric_limits<float>::lowest())) ? std::numeric_limits<float>::lowest() : static_cast<float>(neginf_v);
+        queue.parallel_for<NanToNumKernelF32>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            float x = in[idx];
+            if (sycl::isnan(x)) out[idx] = nv;
+            else if (sycl::isinf(x) && x > 0) out[idx] = pv;
+            else if (sycl::isinf(x) && x < 0) out[idx] = nf;
+            else out[idx] = x;
+        }).wait();
+    } else { throw std::runtime_error("nan_to_num: unsupported dtype"); }
+    return result;
+}
+
+struct LogSigmoidKernelF32 {};
+struct LogSigmoidKernelF64 {};
+
+auto log_sigmoid_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto f32 = input.to(DType::Float32);
+        return log_sigmoid_kernel(f32, queue).to(input.dtype());
+    }
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    int64_t n = input.numel();
+    if (n == 0) return result;
+
+    if (input.dtype() == DType::Float32) {
+        const float* in = input.data<float>(); float* out = result.data<float>();
+        queue.parallel_for<LogSigmoidKernelF32>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            float x = in[idx];
+            out[idx] = (x >= 0.0f) ? -sycl::log1p(sycl::exp(-x)) : x - sycl::log1p(sycl::exp(x));
+        }).wait();
+    } else if (input.dtype() == DType::Float64) {
+        const double* in = input.data<double>(); double* out = result.data<double>();
+        queue.parallel_for<LogSigmoidKernelF64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            double x = in[idx];
+            out[idx] = (x >= 0.0) ? -sycl::log1p(sycl::exp(-x)) : x - sycl::log1p(sycl::exp(x));
+        }).wait();
+    } else { throw std::runtime_error("log_sigmoid: unsupported dtype"); }
+    return result;
+}
+
+struct BitwiseAndI32 {};
+struct BitwiseOrI32 {};
+struct BitwiseXorI32 {};
+struct BitwiseNotI32 {};
+struct BitwiseLShiftI32 {};
+struct BitwiseRShiftI32 {};
+
+auto bitwise_and_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, a.dtype(), a.device()); int64_t n = a.numel();
+    if (n == 0) return result;
+    if (a.dtype() == DType::Int32) {
+        const int32_t* ad = a.data<int32_t>(); const int32_t* bd = b.data<int32_t>(); int32_t* od = result.data<int32_t>();
+        queue.parallel_for<BitwiseAndI32>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] & bd[i]; }).wait();
+    } else { throw std::runtime_error("bitwise_and: use Int32"); }
+    return result;
+}
+auto bitwise_or_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, a.dtype(), a.device()); int64_t n = a.numel();
+    if (n == 0) return result;
+    if (a.dtype() == DType::Int32) {
+        const int32_t* ad = a.data<int32_t>(); const int32_t* bd = b.data<int32_t>(); int32_t* od = result.data<int32_t>();
+        queue.parallel_for<BitwiseOrI32>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] | bd[i]; }).wait();
+    } else { throw std::runtime_error("bitwise_or: use Int32"); }
+    return result;
+}
+auto bitwise_xor_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, a.dtype(), a.device()); int64_t n = a.numel();
+    if (n == 0) return result;
+    if (a.dtype() == DType::Int32) {
+        const int32_t* ad = a.data<int32_t>(); const int32_t* bd = b.data<int32_t>(); int32_t* od = result.data<int32_t>();
+        queue.parallel_for<BitwiseXorI32>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ad[i] ^ bd[i]; }).wait();
+    } else { throw std::runtime_error("bitwise_xor: use Int32"); }
+    return result;
+}
+auto bitwise_not_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device()); int64_t n = input.numel();
+    if (n == 0) return result;
+    if (input.dtype() == DType::Int32) {
+        const int32_t* id = input.data<int32_t>(); int32_t* od = result.data<int32_t>();
+        queue.parallel_for<BitwiseNotI32>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = ~id[i]; }).wait();
+    } else { throw std::runtime_error("bitwise_not: use Int32"); }
+    return result;
+}
+auto bitwise_left_shift_kernel(const Tensor& input, const Tensor& shift, sycl::queue& queue) -> Tensor {
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device()); int64_t n = input.numel();
+    if (n == 0) return result;
+    if (input.dtype() == DType::Int32) {
+        const int32_t* id = input.data<int32_t>(); const int32_t* sd = shift.data<int32_t>(); int32_t* od = result.data<int32_t>();
+        queue.parallel_for<BitwiseLShiftI32>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = id[i] << sd[i]; }).wait();
+    } else { throw std::runtime_error("bitwise_left_shift: use Int32"); }
+    return result;
+}
+auto bitwise_right_shift_kernel(const Tensor& input, const Tensor& shift, sycl::queue& queue) -> Tensor {
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device()); int64_t n = input.numel();
+    if (n == 0) return result;
+    if (input.dtype() == DType::Int32) {
+        const int32_t* id = input.data<int32_t>(); const int32_t* sd = shift.data<int32_t>(); int32_t* od = result.data<int32_t>();
+        queue.parallel_for<BitwiseRShiftI32>(sycl::range<1>(n), [=](sycl::id<1> i) { od[i] = id[i] >> sd[i]; }).wait();
+    } else { throw std::runtime_error("bitwise_right_shift: use Int32"); }
+    return result;
+}
+
 } // namespace oneapi
 } // namespace tenzor

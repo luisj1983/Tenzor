@@ -1,0 +1,19 @@
+#version 450
+
+// Heaviside step function: 0 if x<0, values if x==0, 1 if x>0
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuffer { float data[]; } input_buf;
+layout(set = 0, binding = 1) readonly buffer ValuesBuffer { float data[]; } values_buf;
+layout(set = 0, binding = 2) writeonly buffer OutputBuffer { float data[]; } output_buf;
+
+layout(push_constant) uniform PushConstants { uint num_elements; } pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.num_elements) return;
+    float x = input_buf.data[idx];
+    if (x < 0.0) output_buf.data[idx] = 0.0;
+    else if (x == 0.0) output_buf.data[idx] = values_buf.data[idx];
+    else output_buf.data[idx] = 1.0;
+}

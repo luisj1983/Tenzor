@@ -2376,6 +2376,39 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             return get_vulkan_backend()->dispatchLinalgLUSolve(inputs[0], inputs[1], inputs[2]);
         });
 
+    // ========================================================================
+    // New Phase 4 ops
+    // ========================================================================
+    table.register_kernel(OpId::Frac, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchUnaryOp("frac", inputs[0])};
+    });
+    table.register_kernel(OpId::Heaviside, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchBinaryOp("heaviside", inputs[0], inputs[1])};
+    });
+    table.register_kernel(OpId::LogSigmoid, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchUnaryOp("log_sigmoid", inputs[0])};
+    });
+    table.register_kernel(OpId::NanToNum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float nan_v = static_cast<float>(attrs.get_float(AttrKey::NanValue, 0.0));
+        float posinf = static_cast<float>(attrs.get_float(AttrKey::PosInfValue, std::numeric_limits<double>::max()));
+        float neginf = static_cast<float>(attrs.get_float(AttrKey::NegInfValue, std::numeric_limits<double>::lowest()));
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchNanToNum(inputs[0], nan_v, posinf, neginf)};
+    });
+
+    // Bitwise ops (int32 only on Vulkan)
+    table.register_kernel(OpId::BitwiseAnd, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchBinaryOp("bitwise_and", inputs[0], inputs[1])};
+    });
+    table.register_kernel(OpId::BitwiseOr, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchBinaryOp("bitwise_or", inputs[0], inputs[1])};
+    });
+    table.register_kernel(OpId::BitwiseXor, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchBinaryOp("bitwise_xor", inputs[0], inputs[1])};
+    });
+    table.register_kernel(OpId::BitwiseNot, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchUnaryOp("bitwise_not", inputs[0])};
+    });
+
     std::cout << "Vulkan dispatch table initialized with O(1) lookup" << std::endl;
 }
 

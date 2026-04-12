@@ -52,6 +52,26 @@ namespace cpu {
     auto ceil_kernel(const Tensor& input) -> Tensor;
     auto round_kernel(const Tensor& input) -> Tensor;
     auto trunc_kernel(const Tensor& input) -> Tensor;
+    auto frac_kernel(const Tensor& input) -> Tensor;
+    auto heaviside_kernel(const Tensor& input, const Tensor& values) -> Tensor;
+    auto nan_to_num_kernel(const Tensor& input, double nan_val, double posinf_val, double neginf_val) -> Tensor;
+    auto log_sigmoid_kernel(const Tensor& input) -> Tensor;
+    auto log_sigmoid_backward_kernel(const Tensor& grad, const Tensor& input) -> Tensor;
+    auto rrelu_kernel(const Tensor& input, float lower, float upper, bool training) -> Tensor;
+    auto rrelu_backward_kernel(const Tensor& grad, const Tensor& input, float lower, float upper) -> Tensor;
+    auto bitwise_and_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto bitwise_or_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto bitwise_xor_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto bitwise_not_kernel(const Tensor& input) -> Tensor;
+    auto bitwise_left_shift_kernel(const Tensor& input, const Tensor& shift) -> Tensor;
+    auto bitwise_right_shift_kernel(const Tensor& input, const Tensor& shift) -> Tensor;
+    auto count_nonzero_kernel(const Tensor& input, int64_t dim) -> Tensor;
+    auto nansum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
+    auto nanmean_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
+    auto aminmax_kernel(const Tensor& input, int64_t dim, bool keepdim) -> std::pair<Tensor, Tensor>;
+    auto index_add_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& source) -> Tensor;
+    auto index_copy_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& source) -> Tensor;
+    auto index_fill_kernel(const Tensor& input, int64_t dim, const Tensor& index, double value) -> Tensor;
 
     // Trigonometric
     auto sin_kernel(const Tensor& input) -> Tensor;
@@ -660,6 +680,94 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Ceil, cpu::ceil_kernel);
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Round, cpu::round_kernel);
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Trunc, cpu::trunc_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Frac, cpu::frac_kernel);
+
+    table.register_single_output_kernel(OpId::Heaviside,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return cpu::heaviside_kernel(inputs[0], inputs[1]);
+        });
+
+    table.register_single_output_kernel(OpId::NanToNum,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double nan_val = attrs.get_float(AttrKey::NanValue, 0.0);
+            double posinf = attrs.get_float(AttrKey::PosInfValue, std::numeric_limits<double>::max());
+            double neginf = attrs.get_float(AttrKey::NegInfValue, std::numeric_limits<double>::lowest());
+            return cpu::nan_to_num_kernel(inputs[0], nan_val, posinf, neginf);
+        });
+
+    // LogSigmoid activation
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, LogSigmoid, cpu::log_sigmoid_kernel);
+    table.register_single_output_kernel(OpId::LogSigmoidBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return cpu::log_sigmoid_backward_kernel(inputs[0], inputs[1]);
+        });
+
+    // RReLU activation
+    table.register_single_output_kernel(OpId::RReLU,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            float lower = static_cast<float>(attrs.get_float(AttrKey::Lower, 0.125));
+            float upper = static_cast<float>(attrs.get_float(AttrKey::Upper, 0.333));
+            bool training = attrs.get_bool(AttrKey::Training, false);
+            return cpu::rrelu_kernel(inputs[0], lower, upper, training);
+        });
+    table.register_single_output_kernel(OpId::RReLUBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            float lower = static_cast<float>(attrs.get_float(AttrKey::Lower, 0.125));
+            float upper = static_cast<float>(attrs.get_float(AttrKey::Upper, 0.333));
+            return cpu::rrelu_backward_kernel(inputs[0], inputs[1], lower, upper);
+        });
+
+    // Bitwise operations
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, BitwiseAnd, cpu::bitwise_and_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, BitwiseOr, cpu::bitwise_or_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, BitwiseXor, cpu::bitwise_xor_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, BitwiseNot, cpu::bitwise_not_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, BitwiseLeftShift, cpu::bitwise_left_shift_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, BitwiseRightShift, cpu::bitwise_right_shift_kernel);
+
+    // NaN-aware reductions
+    table.register_single_output_kernel(OpId::CountNonzero,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            return cpu::count_nonzero_kernel(inputs[0], dim);
+        });
+    table.register_single_output_kernel(OpId::Nansum,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::KeepDim, false);
+            return cpu::nansum_kernel(inputs[0], dim, keepdim);
+        });
+    table.register_single_output_kernel(OpId::Nanmean,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::KeepDim, false);
+            return cpu::nanmean_kernel(inputs[0], dim, keepdim);
+        });
+    table.register_kernel(OpId::Aminmax,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::KeepDim, false);
+            auto [mn, mx] = cpu::aminmax_kernel(inputs[0], dim, keepdim);
+            return {mn, mx};
+        });
+
+    // Scatter variants: IndexAdd, IndexCopy, IndexFill
+    table.register_single_output_kernel(OpId::IndexAdd,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            return cpu::index_add_kernel(inputs[0], dim, inputs[1], inputs[2]);
+        });
+    table.register_single_output_kernel(OpId::IndexCopy,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            return cpu::index_copy_kernel(inputs[0], dim, inputs[1], inputs[2]);
+        });
+    table.register_single_output_kernel(OpId::IndexFill,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            double value = attrs.get_float(AttrKey::Value, 0.0);
+            return cpu::index_fill_kernel(inputs[0], dim, inputs[1], value);
+        });
 
     table.register_single_output_kernel(OpId::Cast, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         if (!attrs.has(AttrKey::TargetDtype)) {

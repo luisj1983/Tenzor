@@ -5652,5 +5652,162 @@ auto betainc_kernel(const Tensor& a, const Tensor& b, const Tensor& x, hipStream
     return result;
 }
 
+// ============================================================================
+// New Phase 4 ops
+// ============================================================================
+
+DEFINE_ROCM_SPECIAL_UNARY(frac, x - floorf(x), x - floor(x))
+
+DEFINE_ROCM_SPECIAL_UNARY(log_sigmoid,
+    (x >= 0.0f) ? -log1pf(expf(-x)) : x - log1pf(expf(x)),
+    (x >= 0.0) ? -log1p(exp(-x)) : x - log1p(exp(x)))
+
+__global__ void heaviside_kernel_f32(const float* input, const float* values, float* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float x = input[idx];
+        out[idx] = (x < 0.0f) ? 0.0f : (x == 0.0f ? values[idx] : 1.0f);
+    }
+}
+__global__ void heaviside_kernel_f64(const double* input, const double* values, double* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        double x = input[idx];
+        out[idx] = (x < 0.0) ? 0.0 : (x == 0.0 ? values[idx] : 1.0);
+    }
+}
+auto heaviside_kernel(const Tensor& input, const Tensor& values, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(heaviside_kernel_f32, grid, block, 0, stream, input.data<float>(), values.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(heaviside_kernel_f64, grid, block, 0, stream, input.data<double>(), values.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        auto f32_in = input.to(DType::Float32); auto f32_val = values.to(DType::Float32);
+        return heaviside_kernel(f32_in, f32_val, stream).to(DType::Float16);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto f32_in = input.to(DType::Float32); auto f32_val = values.to(DType::Float32);
+        return heaviside_kernel(f32_in, f32_val, stream).to(DType::BFloat16);
+    } else { throw std::runtime_error("heaviside: unsupported dtype"); }
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+__global__ void nan_to_num_kernel_f32(const float* input, float* out, int64_t n, float nan_val, float posinf_val, float neginf_val) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float x = input[idx];
+        if (isnan(x)) out[idx] = nan_val;
+        else if (isinf(x) && x > 0) out[idx] = posinf_val;
+        else if (isinf(x) && x < 0) out[idx] = neginf_val;
+        else out[idx] = x;
+    }
+}
+__global__ void nan_to_num_kernel_f64(const double* input, double* out, int64_t n, double nan_val, double posinf_val, double neginf_val) {
+    HIP_KERNEL_LOOP(idx, n) {
+        double x = input[idx];
+        if (isnan(x)) out[idx] = nan_val;
+        else if (isinf(x) && x > 0) out[idx] = posinf_val;
+        else if (isinf(x) && x < 0) out[idx] = neginf_val;
+        else out[idx] = x;
+    }
+}
+auto nan_to_num_kernel(const Tensor& input, double nan_v, double posinf_v, double neginf_v, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (input.dtype() == DType::Float32) {
+        float pf = (posinf_v >= static_cast<double>(std::numeric_limits<float>::max())) ? std::numeric_limits<float>::max() : static_cast<float>(posinf_v);
+        float nf = (neginf_v <= static_cast<double>(std::numeric_limits<float>::lowest())) ? std::numeric_limits<float>::lowest() : static_cast<float>(neginf_v);
+        hipLaunchKernelGGL(nan_to_num_kernel_f32, grid, block, 0, stream, input.data<float>(), result.data<float>(), n, static_cast<float>(nan_v), pf, nf);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(nan_to_num_kernel_f64, grid, block, 0, stream, input.data<double>(), result.data<double>(), n, nan_v, posinf_v, neginf_v);
+    } else if (input.dtype() == DType::Float16) {
+        auto f32 = input.to(DType::Float32);
+        return nan_to_num_kernel(f32, nan_v, posinf_v, neginf_v, stream).to(DType::Float16);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto f32 = input.to(DType::Float32);
+        return nan_to_num_kernel(f32, nan_v, posinf_v, neginf_v, stream).to(DType::BFloat16);
+    } else { throw std::runtime_error("nan_to_num: unsupported dtype"); }
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// Bitwise ops
+__global__ void bitwise_and_i32(const int32_t* a, const int32_t* b, int32_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] & b[idx]; } }
+__global__ void bitwise_and_i64(const int64_t* a, const int64_t* b, int64_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] & b[idx]; } }
+auto bitwise_and_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
+    int64_t n = a.numel(); std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, a.dtype(), a.device()); if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (a.dtype() == DType::Int32) { hipLaunchKernelGGL(bitwise_and_i32, grid, block, 0, stream, a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n); }
+    else if (a.dtype() == DType::Int64) { hipLaunchKernelGGL(bitwise_and_i64, grid, block, 0, stream, a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n); }
+    else { throw std::runtime_error("bitwise_and: unsupported dtype"); }
+    HIP_CHECK(hipGetLastError()); return result;
+}
+
+__global__ void bitwise_or_i32(const int32_t* a, const int32_t* b, int32_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] | b[idx]; } }
+__global__ void bitwise_or_i64(const int64_t* a, const int64_t* b, int64_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] | b[idx]; } }
+auto bitwise_or_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
+    int64_t n = a.numel(); std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, a.dtype(), a.device()); if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (a.dtype() == DType::Int32) { hipLaunchKernelGGL(bitwise_or_i32, grid, block, 0, stream, a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n); }
+    else if (a.dtype() == DType::Int64) { hipLaunchKernelGGL(bitwise_or_i64, grid, block, 0, stream, a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n); }
+    else { throw std::runtime_error("bitwise_or: unsupported dtype"); }
+    HIP_CHECK(hipGetLastError()); return result;
+}
+
+__global__ void bitwise_xor_i32(const int32_t* a, const int32_t* b, int32_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] ^ b[idx]; } }
+__global__ void bitwise_xor_i64(const int64_t* a, const int64_t* b, int64_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = a[idx] ^ b[idx]; } }
+auto bitwise_xor_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
+    int64_t n = a.numel(); std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, a.dtype(), a.device()); if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (a.dtype() == DType::Int32) { hipLaunchKernelGGL(bitwise_xor_i32, grid, block, 0, stream, a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n); }
+    else if (a.dtype() == DType::Int64) { hipLaunchKernelGGL(bitwise_xor_i64, grid, block, 0, stream, a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n); }
+    else { throw std::runtime_error("bitwise_xor: unsupported dtype"); }
+    HIP_CHECK(hipGetLastError()); return result;
+}
+
+__global__ void bitwise_not_i32(const int32_t* in, int32_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = ~in[idx]; } }
+__global__ void bitwise_not_i64(const int64_t* in, int64_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = ~in[idx]; } }
+auto bitwise_not_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel(); std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device()); if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (input.dtype() == DType::Int32) { hipLaunchKernelGGL(bitwise_not_i32, grid, block, 0, stream, input.data<int32_t>(), result.data<int32_t>(), n); }
+    else if (input.dtype() == DType::Int64) { hipLaunchKernelGGL(bitwise_not_i64, grid, block, 0, stream, input.data<int64_t>(), result.data<int64_t>(), n); }
+    else { throw std::runtime_error("bitwise_not: unsupported dtype"); }
+    HIP_CHECK(hipGetLastError()); return result;
+}
+
+__global__ void bitwise_lshift_i32(const int32_t* in, const int32_t* sh, int32_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] << sh[idx]; } }
+__global__ void bitwise_lshift_i64(const int64_t* in, const int64_t* sh, int64_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] << sh[idx]; } }
+auto bitwise_left_shift_kernel(const Tensor& input, const Tensor& shift, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel(); std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device()); if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (input.dtype() == DType::Int32) { hipLaunchKernelGGL(bitwise_lshift_i32, grid, block, 0, stream, input.data<int32_t>(), shift.data<int32_t>(), result.data<int32_t>(), n); }
+    else if (input.dtype() == DType::Int64) { hipLaunchKernelGGL(bitwise_lshift_i64, grid, block, 0, stream, input.data<int64_t>(), shift.data<int64_t>(), result.data<int64_t>(), n); }
+    else { throw std::runtime_error("bitwise_left_shift: unsupported dtype"); }
+    HIP_CHECK(hipGetLastError()); return result;
+}
+
+__global__ void bitwise_rshift_i32(const int32_t* in, const int32_t* sh, int32_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] >> sh[idx]; } }
+__global__ void bitwise_rshift_i64(const int64_t* in, const int64_t* sh, int64_t* out, int64_t n) { HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] >> sh[idx]; } }
+auto bitwise_right_shift_kernel(const Tensor& input, const Tensor& shift, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel(); std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device()); if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (input.dtype() == DType::Int32) { hipLaunchKernelGGL(bitwise_rshift_i32, grid, block, 0, stream, input.data<int32_t>(), shift.data<int32_t>(), result.data<int32_t>(), n); }
+    else if (input.dtype() == DType::Int64) { hipLaunchKernelGGL(bitwise_rshift_i64, grid, block, 0, stream, input.data<int64_t>(), shift.data<int64_t>(), result.data<int64_t>(), n); }
+    else { throw std::runtime_error("bitwise_right_shift: unsupported dtype"); }
+    HIP_CHECK(hipGetLastError()); return result;
+}
+
 } // namespace rocm
 } // namespace tenzor
