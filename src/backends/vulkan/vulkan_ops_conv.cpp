@@ -1,4 +1,5 @@
 #include "vulkan_ops_common.hpp"
+#include "tenzor/ops/creation.hpp"
 
 namespace tenzor {
 
@@ -40,8 +41,9 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
     int64_t kernel_h = weight_shape[2];
     int64_t kernel_w = weight_shape[3];
 
+    // Route to Winograd F(2,3) for 3x3 convolutions with stride=1, dilation=1, Float32.
     // Route to Winograd F(2,3) for 3x3 convolutions with stride=1, dilation=1, Float32
-    // Winograd is significantly faster for these common configurations.
+    // Uses a fused batched matmul shader for deterministic accumulation.
     if (kernel_h == 3 && kernel_w == 3 && stride == 1 && dilation == 1
         && input.dtype() == DType::Float32) {
         return dispatchConv2dWinograd(input, weight, bias, padding, groups);
@@ -338,53 +340,55 @@ auto VulkanBackend::dispatchConv2dWinograd(const Tensor& input, const Tensor& we
     // pointwise multiplies M[i][j][k][n_tile] = sum_c U[i][j][k][c] * V[i][j][c][n_tile]
     // which is a batched matmul. We can use the existing matmul dispatch for each point.
     uint32_t N_tiles = static_cast<uint32_t>(batch * tiles_h * tiles_w);
-    Tensor M({16 * static_cast<int64_t>(out_channels) * static_cast<int64_t>(N_tiles)},
-             input.dtype(), input.device());
+
+    // Step 3: Fused batched matmul in Winograd domain.
+    // For each of the 16 Winograd points p:
+    //   M[p][n][k][tile] = sum_c U[p][k*C+c] * V[p][(n*C+c)*num_tiles+tile]
+    // Single dispatch with sequential accumulation over C for deterministic results.
+    int64_t m_total = 16 * batch * out_channels * static_cast<int64_t>(N_tiles);
+    Tensor M({m_total}, input.dtype(), input.device());
 
     {
-        // For each of the 16 Winograd domain points, compute:
-        //   M_p = U_p (K, C) @ V_p (C, N*TH*TW) = (K, N*TH*TW)
-        // The input transform stores V as [16][tile_stride] where
-        // tile_stride = N*C*TH*TW indexed as (n*C+c)*TH*TW + th*TW + tw.
-        // So V_p naturally has layout (N, C, TH, TW) which we permute to (C, N*TH*TW).
+        auto* bm_pipeline = getPipeline("winograd_batched_matmul", device_id);
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, U.data_ptr()}, {1, V.data_ptr()}, {2, M.data_ptr()}
+        };
+        std::vector<size_t> sizes = {
+            static_cast<size_t>(U.numel() * U.dtype_size()),
+            static_cast<size_t>(V.numel() * V.dtype_size()),
+            static_cast<size_t>(M.numel() * M.dtype_size())
+        };
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, bm_pipeline, bindings, sizes);
 
-        std::vector<Tensor> M_parts;
-        M_parts.reserve(16);
+        struct {
+            uint32_t K, C, N, num_tiles;
+        } bm_pc;
+        bm_pc.K = static_cast<uint32_t>(out_channels);
+        bm_pc.C = static_cast<uint32_t>(in_channels);
+        bm_pc.N = static_cast<uint32_t>(batch);
+        bm_pc.num_tiles = N_tiles;
 
-        for (int p = 0; p < 16; p++) {
-            int64_t u_offset = static_cast<int64_t>(p) * out_channels * in_channels;
-            int64_t v_offset = static_cast<int64_t>(p) * batch * in_channels * tiles_h * tiles_w;
-
-            Tensor U_p = U.slice(0, u_offset, u_offset + out_channels * in_channels)
-                           .reshape({out_channels, in_channels});
-
-            // V_p: (N, C, TH*TW) -> permute -> (C, N, TH*TW) -> reshape -> (C, N_tiles)
-            Tensor V_p = V.slice(0, v_offset, v_offset + batch * in_channels * tiles_h * tiles_w)
-                           .reshape({batch, in_channels, tiles_h * tiles_w})
-                           .permute({1, 0, 2})
-                           .contiguous()
-                           .reshape({in_channels, static_cast<int64_t>(N_tiles)});
-
-            // M_p = U_p @ V_p -> (K, N_tiles)
-            M_parts.push_back(dispatchMatmul(U_p, V_p));
-        }
-
-        // Stack into M: [16, K, N_tiles]
-        std::span<const Tensor> parts_span(M_parts);
-        M = dispatchStack(parts_span, 0);
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, bm_pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               bm_pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, bm_pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(bm_pc), &bm_pc);
+        uint32_t wg = static_cast<uint32_t>(div_wg(static_cast<uint64_t>(m_total),
+                                                     devices_[device_id].workgroupSize));
+        vkCmdDispatch(cmd, wg, 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
     }
 
     // Step 4: Output transform  A^T * M * A -> Y [N, K, out_h, out_w]
+    // M layout from fused shader: [16][N][K][num_tiles] = [16][N][K][TH*TW]
+    // which matches the output transform's expected [alpha*4+beta][N][K][TH][TW].
     std::vector<int64_t> output_shape = {batch, out_channels, out_height, out_width};
     Tensor output(output_shape, input.dtype(), input.device());
 
     {
-        // M from stack is [16, K, N_tiles] where N_tiles = N*TH*TW.
-        // The output transform shader expects [16][N][K][tiles_h][tiles_w].
-        // Rearrange: [16, K, N*TH*TW] -> [16, K, N, TH, TW] -> [16, N, K, TH, TW]
-        Tensor M_reordered = M.reshape({16, out_channels, batch, tiles_h, tiles_w})
-                               .permute({0, 2, 1, 3, 4})
-                               .contiguous();
+        Tensor M_reordered = M;  // Already in correct layout
 
         auto* output_pipeline = getPipeline("winograd_output_transform", device_id);
         uint32_t total_out_tiles = static_cast<uint32_t>(batch * out_channels * tiles_h * tiles_w);

@@ -887,7 +887,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::ConvTranspose3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchConvTranspose3dBackwardInput(
-            inputs[0], inputs[1], attrs)};
+            inputs[0], inputs[2], attrs)};
     });
 
     table.register_kernel(OpId::ConvTranspose3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {

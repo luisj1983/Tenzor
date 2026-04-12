@@ -1157,6 +1157,7 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{cpu::conv_transpose3d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, output_padding, dilation, groups)};
     });
 
+    // ConvTranspose3dBackwardInput: inputs = {grad_output, input, weight}
     table.register_kernel(OpId::ConvTranspose3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t stride = attrs.get_int(AttrKey::Stride, 1);
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
@@ -1164,9 +1165,11 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
-        return std::vector<Tensor>{cpu::conv_transpose3d_backward_input_kernel(inputs[0], inputs[1], input_shape, stride, padding, output_padding, dilation, groups)};
+        // inputs[0]=grad_output, inputs[2]=weight
+        return std::vector<Tensor>{cpu::conv_transpose3d_backward_input_kernel(inputs[0], inputs[2], input_shape, stride, padding, output_padding, dilation, groups)};
     });
 
+    // ConvTranspose3dBackwardWeight: inputs = {grad_output, input, weight}
     table.register_kernel(OpId::ConvTranspose3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t stride = attrs.get_int(AttrKey::Stride, 1);
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
@@ -1174,6 +1177,7 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
+        // inputs[0]=grad_output, inputs[1]=input
         return std::vector<Tensor>{cpu::conv_transpose3d_backward_weight_kernel(inputs[0], inputs[1], weight_shape, stride, padding, output_padding, dilation, groups)};
     });
 

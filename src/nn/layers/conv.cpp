@@ -429,9 +429,28 @@ public:
 
         OpAttributes backward_attrs;
         backward_attrs.set(AttrKey::Stride, stride_);
-        backward_attrs.set(AttrKey::Padding, 0);
+        backward_attrs.set(AttrKey::Padding, static_cast<int64_t>(0));
         backward_attrs.set(AttrKey::Dilation, dilation_);
         backward_attrs.set(AttrKey::Groups, groups_);
+
+        // Set 4D shape strings required by backward kernels
+        {
+            auto is = input_4d.shape();
+            std::string is_str;
+            for (size_t i = 0; i < is.size(); ++i) {
+                if (i > 0) is_str += ',';
+                is_str += std::to_string(is[i]);
+            }
+            backward_attrs.set(AttrKey::InputShape, is_str);
+
+            auto ws = weight_4d.shape();
+            std::string ws_str;
+            for (size_t i = 0; i < ws.size(); ++i) {
+                if (i > 0) ws_str += ',';
+                ws_str += std::to_string(ws[i]);
+            }
+            backward_attrs.set(AttrKey::WeightShape, ws_str);
+        }
 
         std::vector<Tensor> backward_inputs = {grad_4d, input_4d, weight_4d};
 
@@ -1223,16 +1242,16 @@ public:
         common_attrs.set(AttrKey::Dilation, dilation_);
         common_attrs.set(AttrKey::Groups, groups_);
 
-        // Backward input
+        // Backward input: cuDNN needs {grad_output, input, weight}
         NewOpAttributes bi_attrs = common_attrs;
         bi_attrs.set(AttrKey::InputShape, std::string_view(shape_to_str(input.shape())));
-        std::vector<Tensor> bi_inputs = {grad_output, weight};
+        std::vector<Tensor> bi_inputs = {grad_output, input, weight};
         auto grad_input = dispatch<OpId::ConvTranspose3dBackwardInput>(bi_inputs, bi_attrs)[0];
 
-        // Backward weight
+        // Backward weight: cuDNN needs {grad_output, input, weight}
         NewOpAttributes bw_attrs = common_attrs;
         bw_attrs.set(AttrKey::WeightShape, std::string_view(shape_to_str(weight.shape())));
-        std::vector<Tensor> bw_inputs = {grad_output, input};
+        std::vector<Tensor> bw_inputs = {grad_output, input, weight};
         auto grad_weight = dispatch<OpId::ConvTranspose3dBackwardWeight>(bw_inputs, bw_attrs)[0];
 
         if (has_bias) {

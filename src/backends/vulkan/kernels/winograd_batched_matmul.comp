@@ -1,0 +1,60 @@
+#version 450
+
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint LOCAL_SIZE_X = 256;
+
+// Fused batched matmul for Winograd F(2,3) domain.
+//
+// For each of the 16 Winograd domain points p:
+//   M[p][n][k][tile] = sum_c( U[p][k*C + c] * V[p][(n*C + c)*num_tiles + tile] )
+//
+// Input U: [16][K * C]        (filter transform)
+// Input V: [16][N * C * TH * TW]  (input transform)
+// Output M: [16][N][K][TH * TW]   (ready for output transform)
+//
+// Each thread computes one output element, accumulating over C sequentially
+// for deterministic results.
+
+layout(binding = 0) buffer readonly UBuffer { float data[]; } u_buf;
+layout(binding = 1) buffer readonly VBuffer { float data[]; } v_buf;
+layout(binding = 2) buffer writeonly MBuffer { float data[]; } m_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint K;          // out_channels
+    uint C;          // in_channels
+    uint N;          // batch
+    uint num_tiles;  // tiles_h * tiles_w
+} params;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+
+    // Total output elements: 16 * N * K * num_tiles
+    uint total = 16u * params.N * params.K * params.num_tiles;
+    if (gid >= total) return;
+
+    // Decode: gid -> (p, n, k, tile)
+    uint tmp = gid;
+    uint tile = tmp % params.num_tiles; tmp /= params.num_tiles;
+    uint k    = tmp % params.K;         tmp /= params.K;
+    uint n    = tmp % params.N;         tmp /= params.N;
+    uint p    = tmp;  // 0..15
+
+    // U layout: [16][K * C] -> U[p][k * C + c]
+    uint u_base = p * params.K * params.C + k * params.C;
+
+    // V layout: [16][N * C * num_tiles] -> V[p][(n * C + c) * num_tiles + tile]
+    uint v_point_base = p * params.N * params.C * params.num_tiles;
+
+    // Sequential accumulation over C for deterministic results
+    float sum = 0.0;
+    for (uint c = 0u; c < params.C; c++) {
+        float u_val = u_buf.data[u_base + c];
+        float v_val = v_buf.data[v_point_base + (n * params.C + c) * params.num_tiles + tile];
+        sum += u_val * v_val;
+    }
+
+    // M layout: [16][N][K][num_tiles]
+    uint m_idx = ((p * params.N + n) * params.K + k) * params.num_tiles + tile;
+    m_buf.data[m_idx] = sum;
+}

@@ -1171,7 +1171,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         auto dilation = attrs.get_int_list(AttrKey::Dilation);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
-        return std::vector<Tensor>{rocm::conv_transpose3d_backward_input_hip(inputs[0], inputs[1], input_shape,
+        return std::vector<Tensor>{rocm::conv_transpose3d_backward_input_hip(inputs[0], inputs[2], input_shape,
             stride, padding, dilation, groups, get_hip_stream(attrs))};
     });
 

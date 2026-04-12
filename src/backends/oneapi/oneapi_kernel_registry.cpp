@@ -1784,7 +1784,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             auto dilation = attrs.get_int_list(AttrKey::Dilation);
             int64_t groups = attrs.get_int(AttrKey::Groups, 1);
             auto input_shape = attrs.get_int_list(AttrKey::InputShape);
-            return {oneapi::conv_transpose3d_backward_input(inputs[0], inputs[1], input_shape,
+            return {oneapi::conv_transpose3d_backward_input(inputs[0], inputs[2], input_shape,
                                                              stride, padding, dilation,
                                                              groups, get_q(inputs))};
         });
