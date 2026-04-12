@@ -2079,6 +2079,17 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             }
             break;
         }
+
+        // Quantized and sparse ops — handled by specialized codegen, not
+        // interpreted here.  Fall through with no outputs so the executor
+        // raises a clear error if these reach the interpreter path.
+        case OpType::QuantizedLinear:
+        case OpType::QuantizedConv2d:
+        case OpType::Dequantize:
+        case OpType::Quantize:
+        case OpType::SparseMatMul:
+        case OpType::DenseToSparse:
+            break;
     }
 
     // Store outputs in value map

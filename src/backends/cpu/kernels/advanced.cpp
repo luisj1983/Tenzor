@@ -19,10 +19,84 @@
     #include <omp.h>
 #endif
 
+#if defined(__x86_64__) || defined(_M_X64)
+    #include <immintrin.h>
+#endif
+
 namespace tenzor {
 namespace cpu {
 
 namespace {
+
+// ============================================================================
+// SIMD-optimized CumSum for Float32 when inner_size >= SIMD width.
+// Processes multiple independent prefix sums in parallel across the inner
+// dimension using AVX2 (8 lanes) or AVX-512 (16 lanes).
+// ============================================================================
+
+#if defined(__AVX512F__)
+static void cumsum_f32_avx512(const float* data, float* output, int64_t dim_size,
+                               int64_t outer_size, int64_t inner_size) {
+    constexpr int64_t VEC = 16;
+    #pragma omp parallel for if(outer_size > 64)
+    for (int64_t outer = 0; outer < outer_size; ++outer) {
+        const float* base_in = data + outer * dim_size * inner_size;
+        float* base_out = output + outer * dim_size * inner_size;
+
+        // Vectorized prefix sum across inner dimension
+        int64_t inner = 0;
+        for (; inner + VEC <= inner_size; inner += VEC) {
+            __m512 running = _mm512_setzero_ps();
+            for (int64_t d = 0; d < dim_size; ++d) {
+                int64_t off = d * inner_size + inner;
+                __m512 val = _mm512_loadu_ps(base_in + off);
+                running = _mm512_add_ps(running, val);
+                _mm512_storeu_ps(base_out + off, running);
+            }
+        }
+        // Scalar tail
+        for (; inner < inner_size; ++inner) {
+            float running = 0.0f;
+            for (int64_t d = 0; d < dim_size; ++d) {
+                int64_t idx = d * inner_size + inner;
+                running += base_in[idx];
+                base_out[idx] = running;
+            }
+        }
+    }
+}
+#endif
+
+#if defined(__AVX2__)
+static void cumsum_f32_avx2(const float* data, float* output, int64_t dim_size,
+                             int64_t outer_size, int64_t inner_size) {
+    constexpr int64_t VEC = 8;
+    #pragma omp parallel for if(outer_size > 64)
+    for (int64_t outer = 0; outer < outer_size; ++outer) {
+        const float* base_in = data + outer * dim_size * inner_size;
+        float* base_out = output + outer * dim_size * inner_size;
+
+        int64_t inner = 0;
+        for (; inner + VEC <= inner_size; inner += VEC) {
+            __m256 running = _mm256_setzero_ps();
+            for (int64_t d = 0; d < dim_size; ++d) {
+                int64_t off = d * inner_size + inner;
+                __m256 val = _mm256_loadu_ps(base_in + off);
+                running = _mm256_add_ps(running, val);
+                _mm256_storeu_ps(base_out + off, running);
+            }
+        }
+        for (; inner < inner_size; ++inner) {
+            float running = 0.0f;
+            for (int64_t d = 0; d < dim_size; ++d) {
+                int64_t idx = d * inner_size + inner;
+                running += base_in[idx];
+                base_out[idx] = running;
+            }
+        }
+    }
+}
+#endif
 
 template<typename T>
 auto topk_impl(const T* data, [[maybe_unused]] int64_t numel, int64_t dim_size,
@@ -102,6 +176,23 @@ auto sort_impl(const T* data, int64_t dim_size,
 template<typename T>
 auto cumsum_impl(const T* data, T* output, int64_t dim_size,
                  int64_t outer_size, int64_t inner_size) -> void {
+    // Use SIMD-optimized paths for Float32 when inner_size is large enough
+    if constexpr (std::is_same_v<T, float>) {
+#if defined(__AVX512F__)
+        if (inner_size >= 16) {
+            cumsum_f32_avx512(data, output, dim_size, outer_size, inner_size);
+            return;
+        }
+#endif
+#if defined(__AVX2__)
+        if (inner_size >= 8) {
+            cumsum_f32_avx2(data, output, dim_size, outer_size, inner_size);
+            return;
+        }
+#endif
+    }
+
+    // Scalar fallback for all types and small inner sizes
     #pragma omp parallel for if(outer_size * inner_size > 4096)
     for (int64_t outer = 0; outer < outer_size; ++outer) {
         for (int64_t inner = 0; inner < inner_size; ++inner) {
@@ -118,6 +209,67 @@ auto cumsum_impl(const T* data, T* output, int64_t dim_size,
 template<typename T>
 auto cumprod_impl(const T* data, T* output, int64_t dim_size,
                   int64_t outer_size, int64_t inner_size) -> void {
+    // SIMD-optimized paths for Float32: vectorize across inner dimension
+    if constexpr (std::is_same_v<T, float>) {
+#if defined(__AVX512F__)
+        if (inner_size >= 16) {
+            constexpr int64_t VEC = 16;
+            #pragma omp parallel for if(outer_size > 64)
+            for (int64_t outer = 0; outer < outer_size; ++outer) {
+                const float* base_in = data + outer * dim_size * inner_size;
+                float* base_out = output + outer * dim_size * inner_size;
+                int64_t inner = 0;
+                for (; inner + VEC <= inner_size; inner += VEC) {
+                    __m512 running = _mm512_set1_ps(1.0f);
+                    for (int64_t d = 0; d < dim_size; ++d) {
+                        int64_t off = d * inner_size + inner;
+                        running = _mm512_mul_ps(running, _mm512_loadu_ps(base_in + off));
+                        _mm512_storeu_ps(base_out + off, running);
+                    }
+                }
+                for (; inner < inner_size; ++inner) {
+                    float running = 1.0f;
+                    for (int64_t d = 0; d < dim_size; ++d) {
+                        int64_t idx = d * inner_size + inner;
+                        running *= base_in[idx];
+                        base_out[idx] = running;
+                    }
+                }
+            }
+            return;
+        }
+#endif
+#if defined(__AVX2__)
+        if (inner_size >= 8) {
+            constexpr int64_t VEC = 8;
+            #pragma omp parallel for if(outer_size > 64)
+            for (int64_t outer = 0; outer < outer_size; ++outer) {
+                const float* base_in = data + outer * dim_size * inner_size;
+                float* base_out = output + outer * dim_size * inner_size;
+                int64_t inner = 0;
+                for (; inner + VEC <= inner_size; inner += VEC) {
+                    __m256 running = _mm256_set1_ps(1.0f);
+                    for (int64_t d = 0; d < dim_size; ++d) {
+                        int64_t off = d * inner_size + inner;
+                        running = _mm256_mul_ps(running, _mm256_loadu_ps(base_in + off));
+                        _mm256_storeu_ps(base_out + off, running);
+                    }
+                }
+                for (; inner < inner_size; ++inner) {
+                    float running = 1.0f;
+                    for (int64_t d = 0; d < dim_size; ++d) {
+                        int64_t idx = d * inner_size + inner;
+                        running *= base_in[idx];
+                        base_out[idx] = running;
+                    }
+                }
+            }
+            return;
+        }
+#endif
+    }
+
+    // Scalar fallback
     #pragma omp parallel for if(outer_size * inner_size > 4096)
     for (int64_t outer = 0; outer < outer_size; ++outer) {
         for (int64_t inner = 0; inner < inner_size; ++inner) {

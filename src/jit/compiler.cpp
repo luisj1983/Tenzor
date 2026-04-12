@@ -2075,6 +2075,183 @@ auto Compiler::run_passes(Graph& graph) -> int {
 }
 
 // ============================================================================
+// QuantizationPass — Post-training INT8 quantization
+// ============================================================================
+
+auto QuantizationPass::compute_scale_and_zero(const Tensor& weight)
+    -> std::pair<float, int64_t> {
+    // Symmetric quantization: scale = max(|weight|) / 127
+    auto abs_weight = tenzor::abs(weight).to(DType::Float32);
+    float max_val = tenzor::max(abs_weight).data<float>()[0];
+    if (max_val == 0.0f) max_val = 1.0f;  // avoid division by zero
+    float scale = max_val / 127.0f;
+    return {scale, 0};  // symmetric quantization: zero_point = 0
+}
+
+auto QuantizationPass::quantize_linear(std::shared_ptr<Node> node, Graph& graph) -> bool {
+    // Check if this node has a weight tensor attribute
+    if (!node->has_attr("weight")) return false;
+
+    auto weight = node->get_tensor_attr("weight");
+    auto [scale, zero_point] = compute_scale_and_zero(weight);
+
+    // Create the quantized replacement node
+    auto qnode = graph.create_node(OpType::QuantizedLinear, "quantized_" + node->name());
+
+    // Copy inputs from original node
+    for (auto& input : node->inputs()) {
+        qnode->add_input(input);
+    }
+
+    // Copy outputs
+    for (auto& output : node->outputs()) {
+        qnode->add_output(output);
+    }
+
+    // Set quantization parameters
+    qnode->set_tensor_attr("weight", weight);
+    qnode->set_attr("scale", scale);
+    qnode->set_int_attr("zero_point", zero_point);
+    qnode->set_bool_attr("quantized", true);
+    if (node->has_attr("bias")) {
+        qnode->set_tensor_attr("bias", node->get_tensor_attr("bias"));
+    }
+
+    // Replace the original node
+    graph.replace_node(node, qnode);
+    return true;
+}
+
+auto QuantizationPass::quantize_conv2d(std::shared_ptr<Node> node, Graph& graph) -> bool {
+    if (!node->has_attr("weight")) return false;
+
+    auto weight = node->get_tensor_attr("weight");
+    auto [scale, zero_point] = compute_scale_and_zero(weight);
+
+    auto qnode = graph.create_node(OpType::QuantizedConv2d, "quantized_" + node->name());
+
+    for (auto& input : node->inputs()) {
+        qnode->add_input(input);
+    }
+    for (auto& output : node->outputs()) {
+        qnode->add_output(output);
+    }
+
+    qnode->set_tensor_attr("weight", weight);
+    qnode->set_attr("scale", scale);
+    qnode->set_int_attr("zero_point", zero_point);
+    qnode->set_bool_attr("quantized", true);
+
+    // Copy conv attributes
+    if (node->has_attr("stride")) qnode->set_int_attr("stride", node->get_int_attr("stride"));
+    if (node->has_attr("padding")) qnode->set_int_attr("padding", node->get_int_attr("padding"));
+    if (node->has_attr("dilation")) qnode->set_int_attr("dilation", node->get_int_attr("dilation"));
+    if (node->has_attr("groups")) qnode->set_int_attr("groups", node->get_int_attr("groups"));
+    if (node->has_attr("bias")) {
+        qnode->set_tensor_attr("bias", node->get_tensor_attr("bias"));
+    }
+
+    graph.replace_node(node, qnode);
+    return true;
+}
+
+auto QuantizationPass::run(Graph& graph) -> bool {
+    bool modified = false;
+
+    // Collect nodes to quantize (can't modify graph while iterating)
+    std::vector<std::shared_ptr<Node>> linear_nodes;
+    std::vector<std::shared_ptr<Node>> conv_nodes;
+
+    for (auto& node : graph.nodes()) {
+        if (node->op_type() == OpType::Linear && !node->get_bool_attr("quantized")) {
+            linear_nodes.push_back(node);
+        } else if (node->op_type() == OpType::Conv2d && !node->get_bool_attr("quantized")) {
+            conv_nodes.push_back(node);
+        }
+    }
+
+    for (auto& node : linear_nodes) {
+        if (quantize_linear(node, graph)) modified = true;
+    }
+    for (auto& node : conv_nodes) {
+        if (quantize_conv2d(node, graph)) modified = true;
+    }
+
+    return modified;
+}
+
+// ============================================================================
+// SparsePass — Sparse weight optimization
+// ============================================================================
+
+auto SparsePass::compute_sparsity(const Tensor& weight) -> float {
+    auto w_f32 = weight.to(DType::Float32);
+    int64_t total = w_f32.numel();
+    if (total == 0) return 0.0f;
+
+    // Count zeros
+    const float* data = w_f32.data<float>();
+    int64_t zero_count = 0;
+    for (int64_t i = 0; i < total; ++i) {
+        if (data[i] == 0.0f) ++zero_count;
+    }
+    return static_cast<float>(zero_count) / static_cast<float>(total);
+}
+
+auto SparsePass::convert_to_sparse(std::shared_ptr<Node> node, Graph& graph) -> bool {
+    if (!node->has_attr("weight")) return false;
+
+    auto weight = node->get_tensor_attr("weight");
+    float sparsity = compute_sparsity(weight);
+
+    if (sparsity < threshold_) return false;
+
+    // For Linear: replace with SparseMatMul
+    // The weight is transposed for Linear (out_features x in_features),
+    // so SpMM(sparse_weight, input^T)^T = input @ weight^T
+    auto sparse_node = graph.create_node(OpType::SparseMatMul, "sparse_" + node->name());
+
+    for (auto& input : node->inputs()) {
+        sparse_node->add_input(input);
+    }
+    for (auto& output : node->outputs()) {
+        sparse_node->add_output(output);
+    }
+
+    // Store sparse metadata
+    sparse_node->set_tensor_attr("weight", weight);
+    sparse_node->set_attr("sparsity", sparsity);
+    sparse_node->set_bool_attr("is_sparse", true);
+    if (node->has_attr("bias")) {
+        sparse_node->set_tensor_attr("bias", node->get_tensor_attr("bias"));
+    }
+
+    graph.replace_node(node, sparse_node);
+    return true;
+}
+
+auto SparsePass::run(Graph& graph) -> bool {
+    bool modified = false;
+
+    // Collect candidate nodes
+    std::vector<std::shared_ptr<Node>> candidates;
+    for (auto& node : graph.nodes()) {
+        // Only target Linear and MatMul nodes (SpMM replacement)
+        if ((node->op_type() == OpType::Linear || node->op_type() == OpType::MatMul) &&
+            !node->get_bool_attr("is_sparse") &&
+            node->has_attr("weight")) {
+            candidates.push_back(node);
+        }
+    }
+
+    for (auto& node : candidates) {
+        if (convert_to_sparse(node, graph)) modified = true;
+    }
+
+    return modified;
+}
+
+// ============================================================================
 // Convenience Function
 // ============================================================================
 

@@ -329,10 +329,95 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     mps_roundtrip_single(OpId::MaxPool3dForward);
     mps_roundtrip_single(OpId::AvgPool3dForward);
 
-    // Note: LSTM/GRU/RNN are complex multi-input ops; their Tier-3
-    // roundtrip registrations should be added alongside a real macOS
-    // test to verify the dispatch shape matches. Deferred until a
-    // macOS CI target exists.
+    // ================================================================
+    // Tier 3 expansion: CPU-roundtrip for ALL remaining ops
+    // ================================================================
+    // Generated from CPU backend's registered ops minus the MPS ops
+    // already registered above. This ensures no "unsupported operation"
+    // crashes for any model that runs on CPU.
+
+    // --- Single-output ops ---
+    for (auto op : {
+        OpId::AdaptiveAvgPool1d, OpId::AdaptiveAvgPool1dBackward,
+        OpId::AdaptiveAvgPool2d, OpId::AdaptiveAvgPool2dBackward,
+        OpId::AdaptiveAvgPool3d, OpId::AdaptiveAvgPool3dBackward,
+        OpId::AdaptiveMaxPool1dBackward, OpId::AdaptiveMaxPool2dBackward,
+        OpId::AdaptiveMaxPool3dBackward,
+        OpId::AdvancedIndex, OpId::AdvancedIndexPut,
+        OpId::AffineGrid, OpId::ArgSort,
+        OpId::AvgPool1dBackward, OpId::AvgPool1dForward,
+        OpId::AvgPool2dBackward, OpId::AvgPool2dForward, OpId::AvgPool3dBackward,
+        OpId::BatchNorm2dForward,
+        OpId::Bernoulli, OpId::BoxIoU, OpId::Bucketize,
+        OpId::Cat, OpId::ClampMax, OpId::ClampMin, OpId::Cross,
+        OpId::CumProd, OpId::CumSum, OpId::Diag,
+        OpId::DropoutBackward, OpId::Elu, OpId::EluBackward,
+        OpId::EmbeddingBagBackward, OpId::EmbeddingBagForward,
+        OpId::Expand, OpId::FFT2, OpId::Fill, OpId::Flatten, OpId::Flip, OpId::Fold,
+        OpId::FusedBatchNormReLU, OpId::FusedConv2dBnReLU,
+        OpId::FusedConv2dReLU, OpId::FusedConv2dSigmoid,
+        OpId::FusedConv2dSwish, OpId::FusedConv2dTanh, OpId::FusedLinearReLU,
+        OpId::Gather, OpId::GridSample, OpId::GumbelSoftmax,
+        OpId::IFFT2, OpId::IndexSelect, OpId::Interpolate,
+        OpId::LeakyReLU, OpId::LeakyReLUBackward,
+        OpId::LogSoftmax, OpId::LogSoftmaxBackward,
+        OpId::MaskedFill, OpId::MaxPool1dBackward, OpId::MaxPool2dBackward,
+        OpId::MaxPool3dBackward,
+        OpId::Multinomial, OpId::Nonzero, OpId::Norm, OpId::OneHot,
+        OpId::Permute, OpId::Polygamma, OpId::Pow, OpId::Put,
+        OpId::QuantizedConv2d, OpId::QuantizedLinear,
+        OpId::Repeat, OpId::Roll, OpId::Scatter, OpId::ScatterAdd,
+        OpId::SearchSorted, OpId::Slice, OpId::SoftmaxBackward,
+        OpId::Softplus, OpId::SoftplusBackward,
+        OpId::SparseTrsm, OpId::SparseTrsv,
+        OpId::Squeeze, OpId::Stack, OpId::Std,
+        OpId::Take, OpId::Tile, OpId::ToMemoryFormat,
+        OpId::Trace, OpId::Tril, OpId::Triu, OpId::Unfold,
+        OpId::Unsqueeze, OpId::Var
+    }) {
+        mps_roundtrip_single(op);
+    }
+
+    // --- Multi-output ops ---
+    for (auto op : {
+        OpId::AdaptiveMaxPool1d, OpId::AdaptiveMaxPool2d, OpId::AdaptiveMaxPool3d,
+        OpId::Arange, OpId::BatchNorm2dBackward,
+        OpId::BatchNorm2dFusedTraining, OpId::BatchNorm2dMeanVar,
+        OpId::BatchNorm2dUpdateRunningStats,
+        OpId::BetaInc, OpId::BiLSTMForward, OpId::Chunk,
+        OpId::Conv1dForward, OpId::Conv1dBackwardInput,
+        OpId::Conv1dBackwardWeight, OpId::Conv1dBackwardBias,
+        OpId::Conv2dBackwardBias, OpId::Conv2dBackwardInput, OpId::Conv2dBackwardWeight,
+        OpId::Conv3dBackwardBias, OpId::Conv3dBackwardInput, OpId::Conv3dBackwardWeight,
+        OpId::ConvTranspose2dForward, OpId::ConvTranspose3dForward,
+        OpId::ConvTranspose3dBackwardBias, OpId::ConvTranspose3dBackwardInput,
+        OpId::ConvTranspose3dBackwardWeight,
+        OpId::DepthwiseConv2d, OpId::Dropout,
+        OpId::EmbeddingBackward, OpId::Eye,
+        OpId::FlashAttention, OpId::FlashAttentionBackward,
+        OpId::Full, OpId::FusedAdadeltaStep, OpId::FusedAdagradStep,
+        OpId::FusedAdamAtan2Step, OpId::FusedAttention,
+        OpId::FusedLayerNormBackward, OpId::FusedRMSNorm, OpId::FusedRMSPropStep,
+        OpId::FusedSoftmaxCrossEntropy, OpId::GatherRelativePositionBias,
+        OpId::GroupNorm, OpId::GroupNormBackward,
+        OpId::GRUCellBackward, OpId::GRUCellForward,
+        OpId::GRUForward, OpId::GRUMultiLayerForward,
+        OpId::Histogram, OpId::InstanceNorm, OpId::InstanceNormBackward,
+        OpId::LayerNorm, OpId::LayerNormBackward,
+        OpId::Lerp, OpId::LinalgEig, OpId::LinearBackward,
+        OpId::Linspace,
+        OpId::LSTMCellBackward, OpId::LSTMCellForward,
+        OpId::LSTMForward, OpId::LSTMMultiLayerForward,
+        OpId::MaxPool1dForward, OpId::MaxPool2dForward,
+        OpId::Median, OpId::Mode,
+        OpId::NMS, OpId::Ones, OpId::Rand, OpId::Randint, OpId::Randn,
+        OpId::RMSNorm, OpId::RMSNormBackward,
+        OpId::ROIAlignBackward, OpId::ROIAlignForward,
+        OpId::Sort, OpId::SparseSpGEMM, OpId::Split,
+        OpId::TopK, OpId::Unique, OpId::Zeros
+    }) {
+        mps_roundtrip_multi(op);
+    }
 }
 
 } // namespace tenzor::mps

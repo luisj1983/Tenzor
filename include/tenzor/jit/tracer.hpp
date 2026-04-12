@@ -123,6 +123,16 @@ enum class OpType {
     SwapOut,          ///< GPU -> CPU async transfer for memory pressure relief
     SwapIn,           ///< CPU -> GPU async prefetch before reuse
 
+    // Quantized operations
+    QuantizedLinear,  ///< INT8 quantized linear layer
+    QuantizedConv2d,  ///< INT8 quantized 2D convolution
+    Dequantize,       ///< INT8 -> Float32 dequantization
+    Quantize,         ///< Float32 -> INT8 quantization
+
+    // Sparse operations
+    SparseMatMul,     ///< Sparse-dense matrix multiplication (SpMM)
+    DenseToSparse,    ///< Convert dense weight to sparse format
+
     // Control flow
     If,     ///< Conditional branch: cond → then_branch / else_branch subgraphs
     Loop    ///< Loop: (max_iter, cond, carried...) → body subgraph → (carried...)

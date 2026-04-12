@@ -768,6 +768,69 @@ private:
 };
 
 /**
+ * @brief Post-training quantization pass.
+ *
+ * Identifies Linear and Conv2d nodes with quantizable weights and
+ * replaces them with quantized variants (QuantizedLinear, QuantizedConv2d).
+ * Inserts quantize/dequantize nodes at graph boundaries.
+ *
+ * Supports INT8 symmetric quantization with per-tensor or per-channel scales.
+ * Optionally runs a calibration phase to determine activation ranges.
+ *
+ * Typical speedup: 1.5-4x depending on hardware INT8 support.
+ */
+class QuantizationPass : public Pass {
+public:
+    enum class Mode {
+        Dynamic,   ///< Quantize weights statically, activations dynamically at runtime
+        Static     ///< Both weights and activations quantized using calibration data
+    };
+
+    explicit QuantizationPass(Mode mode = Mode::Dynamic) : mode_(mode) {}
+
+    auto run(Graph& graph) -> bool override;
+    auto name() const -> std::string override { return "Quantization"; }
+
+    /// Set the target dtype for quantized operations (default: Int8)
+    auto set_target_dtype(DType dtype) -> void { target_dtype_ = dtype; }
+
+private:
+    Mode mode_;
+    DType target_dtype_{DType::Int8};
+
+    auto quantize_linear(std::shared_ptr<Node> node, Graph& graph) -> bool;
+    auto quantize_conv2d(std::shared_ptr<Node> node, Graph& graph) -> bool;
+    auto compute_scale_and_zero(const Tensor& weight) -> std::pair<float, int64_t>;
+};
+
+/**
+ * @brief Sparse tensor optimization pass.
+ *
+ * Identifies nodes where weight tensors have high sparsity (>threshold)
+ * and replaces dense operations with sparse equivalents (SparseSpMM).
+ * Inserts DenseToSparse conversion nodes for sparse weights.
+ *
+ * Most effective for large language models with pruned weights.
+ */
+class SparsePass : public Pass {
+public:
+    explicit SparsePass(float sparsity_threshold = 0.9f)
+        : threshold_(sparsity_threshold) {}
+
+    auto run(Graph& graph) -> bool override;
+    auto name() const -> std::string override { return "SparseOptimization"; }
+
+    /// Set minimum sparsity ratio to trigger sparse conversion (0.0 - 1.0)
+    auto set_threshold(float threshold) -> void { threshold_ = threshold; }
+
+private:
+    float threshold_;
+
+    auto compute_sparsity(const Tensor& weight) -> float;
+    auto convert_to_sparse(std::shared_ptr<Node> node, Graph& graph) -> bool;
+};
+
+/**
  * @brief Compiler that applies optimization passes.
  *
  * The compiler runs a sequence of passes to transform and optimize

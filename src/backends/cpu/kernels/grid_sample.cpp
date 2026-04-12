@@ -11,6 +11,14 @@
 #include <string>
 #include <stdexcept>
 
+#if defined(__x86_64__) || defined(_M_X64)
+    #include <immintrin.h>
+#endif
+
+#ifdef _OPENMP
+    #include <omp.h>
+#endif
+
 namespace tenzor {
 namespace cpu {
 
@@ -82,81 +90,154 @@ auto grid_sample_kernel(const Tensor& input, const Tensor& grid,
     Tensor output_f32({N, C, H_out, W_out}, DType::Float32, input.device());
     float* out_data = output_f32.data<float>();
 
+    int64_t spatial_size = H_in * W_in;
+
+    #pragma omp parallel for collapse(2) if(N * H_out * W_out > 4096)
     for (int64_t n = 0; n < N; ++n) {
-        for (int64_t h = 0; h < H_out; ++h) {
-            for (int64_t w = 0; w < W_out; ++w) {
-                // Grid coordinates: (x, y) at grid[n, h, w, :]
-                int64_t grid_idx = ((n * H_out + h) * W_out + w) * 2;
-                float gx = grid_data[grid_idx];      // x coordinate
-                float gy = grid_data[grid_idx + 1];   // y coordinate
+        for (int64_t hw = 0; hw < H_out * W_out; ++hw) {
+            int64_t h = hw / W_out;
+            int64_t w = hw % W_out;
 
-                // Denormalize from [-1, 1] to pixel coordinates
-                float ix = denormalize(gx, W_in, align_corners);
-                float iy = denormalize(gy, H_in, align_corners);
+            // Grid coordinates: (x, y) at grid[n, h, w, :]
+            int64_t grid_idx = ((n * H_out + h) * W_out + w) * 2;
+            float gx = grid_data[grid_idx];
+            float gy = grid_data[grid_idx + 1];
 
-                for (int64_t c = 0; c < C; ++c) {
-                    float val = 0.0f;
+            float ix = denormalize(gx, W_in, align_corners);
+            float iy = denormalize(gy, H_in, align_corners);
 
-                    if (mode == "nearest") {
-                        int64_t nx = static_cast<int64_t>(std::round(
-                            apply_padding(ix, W_in, padding_mode)));
-                        int64_t ny = static_cast<int64_t>(std::round(
-                            apply_padding(iy, H_in, padding_mode)));
+            if (mode == "bilinear") {
+                float px = apply_padding(ix, W_in, padding_mode);
+                float py = apply_padding(iy, H_in, padding_mode);
 
-                        if (is_in_bounds(static_cast<float>(ny), static_cast<float>(nx), H_in, W_in)) {
-                            val = in_data[((n * C + c) * H_in + ny) * W_in + nx];
-                        }
-                    } else if (mode == "bilinear") {
-                        float px = apply_padding(ix, W_in, padding_mode);
-                        float py = apply_padding(iy, H_in, padding_mode);
+                int64_t x0 = static_cast<int64_t>(std::floor(px));
+                int64_t y0 = static_cast<int64_t>(std::floor(py));
+                int64_t x1 = x0 + 1;
+                int64_t y1 = y0 + 1;
 
-                        int64_t x0 = static_cast<int64_t>(std::floor(px));
-                        int64_t y0 = static_cast<int64_t>(std::floor(py));
-                        int64_t x1 = x0 + 1;
-                        int64_t y1 = y0 + 1;
+                float wx1 = px - static_cast<float>(x0);
+                float wy1 = py - static_cast<float>(y0);
+                float wx0 = 1.0f - wx1;
+                float wy0 = 1.0f - wy1;
 
-                        float wx1 = px - static_cast<float>(x0);
-                        float wy1 = py - static_cast<float>(y0);
-                        float wx0 = 1.0f - wx1;
-                        float wy0 = 1.0f - wy1;
+                // Compute the four corner weights once, reuse across all channels
+                float w00 = wy0 * wx0;
+                float w01 = wy0 * wx1;
+                float w10 = wy1 * wx0;
+                float w11 = wy1 * wx1;
 
-                        auto safe_get = [&](int64_t y, int64_t x) -> float {
-                            if (y >= 0 && y < H_in && x >= 0 && x < W_in) {
-                                return in_data[((n * C + c) * H_in + y) * W_in + x];
-                            }
-                            return 0.0f;  // zeros padding
-                        };
+                // Bounds check (shared across all channels)
+                bool b00 = (y0 >= 0 && y0 < H_in && x0 >= 0 && x0 < W_in);
+                bool b01 = (y0 >= 0 && y0 < H_in && x1 >= 0 && x1 < W_in);
+                bool b10 = (y1 >= 0 && y1 < H_in && x0 >= 0 && x0 < W_in);
+                bool b11 = (y1 >= 0 && y1 < H_in && x1 >= 0 && x1 < W_in);
 
-                        val = wy0 * wx0 * safe_get(y0, x0) +
-                              wy0 * wx1 * safe_get(y0, x1) +
-                              wy1 * wx0 * safe_get(y1, x0) +
-                              wy1 * wx1 * safe_get(y1, x1);
-                    } else {
-                        // bicubic - simplified: use bilinear for now, can extend later
-                        // Full bicubic requires 16-point interpolation with cubic weights
-                        float px = apply_padding(ix, W_in, padding_mode);
-                        float py = apply_padding(iy, H_in, padding_mode);
+                // Pixel offsets within a single channel plane (stride = spatial_size per channel)
+                int64_t off00 = y0 * W_in + x0;
+                int64_t off01 = y0 * W_in + x1;
+                int64_t off10 = y1 * W_in + x0;
+                int64_t off11 = y1 * W_in + x1;
 
-                        int64_t x0 = static_cast<int64_t>(std::floor(px));
-                        int64_t y0 = static_cast<int64_t>(std::floor(py));
+                int64_t c = 0;
 
-                        float wx1 = px - static_cast<float>(x0);
-                        float wy1 = py - static_cast<float>(y0);
-                        float wx0 = 1.0f - wx1;
-                        float wy0 = 1.0f - wy1;
+#if defined(__AVX2__)
+                // Vectorize across channels: process 8 channels at a time
+                __m256 vw00 = _mm256_set1_ps(w00);
+                __m256 vw01 = _mm256_set1_ps(w01);
+                __m256 vw10 = _mm256_set1_ps(w10);
+                __m256 vw11 = _mm256_set1_ps(w11);
+                __m256 vzero = _mm256_setzero_ps();
 
-                        auto safe_get = [&](int64_t y, int64_t x) -> float {
-                            y = std::clamp(y, int64_t(0), H_in - 1);
-                            x = std::clamp(x, int64_t(0), W_in - 1);
-                            return in_data[((n * C + c) * H_in + y) * W_in + x];
-                        };
+                for (; c + 8 <= C; c += 8) {
+                    // Load 4 corner values for 8 consecutive channels
+                    // Channel c data starts at in_data[n*C*spatial + c*spatial]
+                    const float* base = in_data + n * C * spatial_size + c * spatial_size;
+                    float* out_base = out_data + n * C * H_out * W_out + c * H_out * W_out;
 
-                        val = wy0 * wx0 * safe_get(y0, x0) +
-                              wy0 * wx1 * safe_get(y0, x0 + 1) +
-                              wy1 * wx0 * safe_get(y0 + 1, x0) +
-                              wy1 * wx1 * safe_get(y0 + 1, x0 + 1);
+                    // Gather from 8 channels at the same spatial offset
+                    // Channels are contiguous blocks of spatial_size floats
+                    __m256 v00 = vzero, v01 = vzero, v10 = vzero, v11 = vzero;
+                    if (b00) {
+                        // Load base[0*spatial+off00], base[1*spatial+off00], ..., base[7*spatial+off00]
+                        alignas(32) float tmp[8];
+                        for (int k = 0; k < 8; ++k) tmp[k] = base[k * spatial_size + off00];
+                        v00 = _mm256_load_ps(tmp);
+                    }
+                    if (b01) {
+                        alignas(32) float tmp[8];
+                        for (int k = 0; k < 8; ++k) tmp[k] = base[k * spatial_size + off01];
+                        v01 = _mm256_load_ps(tmp);
+                    }
+                    if (b10) {
+                        alignas(32) float tmp[8];
+                        for (int k = 0; k < 8; ++k) tmp[k] = base[k * spatial_size + off10];
+                        v10 = _mm256_load_ps(tmp);
+                    }
+                    if (b11) {
+                        alignas(32) float tmp[8];
+                        for (int k = 0; k < 8; ++k) tmp[k] = base[k * spatial_size + off11];
+                        v11 = _mm256_load_ps(tmp);
                     }
 
+                    // Bilinear interpolation: w00*v00 + w01*v01 + w10*v10 + w11*v11
+                    __m256 result = _mm256_add_ps(
+                        _mm256_add_ps(_mm256_mul_ps(vw00, v00), _mm256_mul_ps(vw01, v01)),
+                        _mm256_add_ps(_mm256_mul_ps(vw10, v10), _mm256_mul_ps(vw11, v11)));
+
+                    // Store 8 channels of output
+                    alignas(32) float out_tmp[8];
+                    _mm256_store_ps(out_tmp, result);
+                    int64_t out_hw = h * W_out + w;
+                    for (int k = 0; k < 8; ++k) {
+                        out_base[k * H_out * W_out + out_hw] = out_tmp[k];
+                    }
+                }
+#endif
+                // Scalar tail for remaining channels
+                for (; c < C; ++c) {
+                    float val = 0.0f;
+                    const float* ch_data = in_data + (n * C + c) * spatial_size;
+                    if (b00) val += w00 * ch_data[off00];
+                    if (b01) val += w01 * ch_data[off01];
+                    if (b10) val += w10 * ch_data[off10];
+                    if (b11) val += w11 * ch_data[off11];
+                    out_data[((n * C + c) * H_out + h) * W_out + w] = val;
+                }
+            } else if (mode == "nearest") {
+                int64_t nx = static_cast<int64_t>(std::round(
+                    apply_padding(ix, W_in, padding_mode)));
+                int64_t ny = static_cast<int64_t>(std::round(
+                    apply_padding(iy, H_in, padding_mode)));
+
+                bool in_bounds = is_in_bounds(static_cast<float>(ny), static_cast<float>(nx), H_in, W_in);
+                for (int64_t c = 0; c < C; ++c) {
+                    float val = 0.0f;
+                    if (in_bounds) {
+                        val = in_data[((n * C + c) * H_in + ny) * W_in + nx];
+                    }
+                    out_data[((n * C + c) * H_out + h) * W_out + w] = val;
+                }
+            } else {
+                // bicubic fallback (simplified as bilinear)
+                float px = apply_padding(ix, W_in, padding_mode);
+                float py = apply_padding(iy, H_in, padding_mode);
+                int64_t x0 = static_cast<int64_t>(std::floor(px));
+                int64_t y0 = static_cast<int64_t>(std::floor(py));
+                float wx1 = px - static_cast<float>(x0);
+                float wy1 = py - static_cast<float>(y0);
+                float wx0 = 1.0f - wx1;
+                float wy0 = 1.0f - wy1;
+
+                for (int64_t c = 0; c < C; ++c) {
+                    auto safe_get = [&](int64_t y, int64_t x) -> float {
+                        y = std::clamp(y, int64_t(0), H_in - 1);
+                        x = std::clamp(x, int64_t(0), W_in - 1);
+                        return in_data[((n * C + c) * H_in + y) * W_in + x];
+                    };
+                    float val = wy0 * wx0 * safe_get(y0, x0) +
+                                wy0 * wx1 * safe_get(y0, x0 + 1) +
+                                wy1 * wx0 * safe_get(y0 + 1, x0) +
+                                wy1 * wx1 * safe_get(y0 + 1, x0 + 1);
                     out_data[((n * C + c) * H_out + h) * W_out + w] = val;
                 }
             }
