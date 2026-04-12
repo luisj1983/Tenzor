@@ -584,6 +584,13 @@ public:
         return var_results;
     }
 
+    // P4.2d: passthrough returns Variables without grad_fn on the
+    // convolution's internal structure, so higher-order gradients are
+    // structurally zero through this op. Declare as stub so the engine's
+    // disconnection counter and strict-mode error are honest about it.
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
+
 private:
     int64_t stride_;
     int64_t padding_;
@@ -854,6 +861,13 @@ public:
         return var_results;
     }
 
+    // P4.2d: passthrough returns Variables without grad_fn on the
+    // convolution's internal structure, so higher-order gradients are
+    // structurally zero through this op. Declare as stub so the engine's
+    // disconnection counter and strict-mode error are honest about it.
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
+
 private:
     int64_t stride_;
     int64_t padding_;
@@ -1067,6 +1081,13 @@ public:
         for (auto& t : results) var_results.emplace_back(t, grad_outputs[0].requires_grad());
         return var_results;
     }
+
+    // P4.2d: passthrough returns Variables without grad_fn on the
+    // convolution's internal structure, so higher-order gradients are
+    // structurally zero through this op. Declare as stub so the engine's
+    // disconnection counter and strict-mode error are honest about it.
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
 
 private:
     int64_t stride_;
@@ -1282,6 +1303,13 @@ public:
         for (auto& t : results) var_results.emplace_back(t, grad_outputs[0].requires_grad());
         return var_results;
     }
+
+    // P4.2d: passthrough returns Variables without grad_fn on the
+    // convolution's internal structure, so higher-order gradients are
+    // structurally zero through this op. Declare as stub so the engine's
+    // disconnection counter and strict-mode error are honest about it.
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
 
 private:
     int64_t stride_;
@@ -1516,6 +1544,13 @@ public:
         for (auto& t : results) var_results.emplace_back(t, grad_outputs[0].requires_grad());
         return var_results;
     }
+
+    // P4.2d: passthrough returns Variables without grad_fn on the
+    // convolution's internal structure, so higher-order gradients are
+    // structurally zero through this op. Declare as stub so the engine's
+    // disconnection counter and strict-mode error are honest about it.
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
 
 private:
     int64_t stride_;

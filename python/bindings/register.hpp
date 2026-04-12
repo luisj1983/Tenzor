@@ -30,4 +30,30 @@ void register_fft(pybind11::module_& m);
 // Creates m.vision, m.detection, m.async_ops, m.fused with their ops.
 void register_vision_detection(pybind11::module_& m);
 
+// Self-contained distributed submodule. Creates m.distributed and binds
+// process groups, DDP, FSDP, gradient compression, and RPC.
+void register_distributed(pybind11::module_& m);
+
+// Self-contained jit submodule. Creates m.jit and m.compile; binds OpType,
+// Value, Node, Graph, Tracer, TracingGuard, Compiler, CompiledModule, and
+// the torch.compile-equivalent jit.compile function.
+void register_jit(pybind11::module_& m);
+
+// Self-contained quantization submodule. Creates m.quantization and binds
+// quant schemes, QuantDType, QuantizationParams/Tensor, observers, FakeQuantize
+// (QAT), QConfig mapping, quantized layers, QATHelper, and helper functions.
+void register_quantization(pybind11::module_& m);
+
+// Self-contained optim submodule. Creates m.optim and m.optim.lr_scheduler;
+// binds ClipMode/ClipConfig/ParamGroup, Optimizer base, SGD, Adam, AdamW,
+// RMSprop, Adagrad, Adadelta, RAdam, NAdam, Adamax, LAMB, SparseAdam,
+// and all learning rate schedulers.
+void register_optim(pybind11::module_& m);
+
+// Self-contained autograd + func submodules. Creates m.autograd (grad,
+// make_dot, optimize_graph) and m.func (grad, vmap, jacrev, jacfwd,
+// hessian, jvp). Note: PyCustomFunction registration stays in
+// bindings.cpp since the trampoline class is defined there.
+void register_autograd(pybind11::module_& m);
+
 } // namespace tenzor::python

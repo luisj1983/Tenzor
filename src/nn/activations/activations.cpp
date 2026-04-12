@@ -503,34 +503,20 @@ auto Swish::forward_impl(const Variable& input) -> Variable {
 }
 
 auto swish(const Variable& input) -> Variable {
+    // P4.2c: express swish as a Variable-level composition —
+    // swish(x) = x * sigmoid(x). Both operand factors are autograd-
+    // aware (nn::sigmoid already delegates to the tenzor:: _AG path),
+    // so higher-order gradients flow naturally through the chain rule
+    // without needing a custom SwishBackward_AG.
+    //
+    // For inference (no grad), fall back to the fused kernel dispatch
+    // which is faster than two separate element-wise ops.
     if (!input.requires_grad() || !is_grad_enabled()) {
         std::vector<Tensor> inputs = {input.tensor()};
         auto result = dispatch(OpId::Swish, inputs)[0];
         return Variable(result, false);
     }
-
-    // Compute forward
-    std::vector<Tensor> inputs_vec = {input.tensor()};
-    auto result_tensor = dispatch(OpId::Swish, inputs_vec)[0];
-
-    // Set up autograd
-    auto grad_fn = std::make_shared<SwishBackward>();
-    grad_fn->save_for_backward({input.tensor()});  // Save input for backward
-
-    std::vector<std::shared_ptr<Function>> next_funcs;
-    if (input.grad_fn()) {
-        next_funcs.push_back(input.grad_fn());
-    }
-    grad_fn->set_next_functions(next_funcs);
-
-    // Track input variable for gradient accumulation
-    std::vector<Variable> input_vars;
-    input_vars.push_back(input);
-    grad_fn->set_input_variables(input_vars);
-
-    Variable output(result_tensor, true);
-    output.set_grad_fn(grad_fn);
-    return output;
+    return input * nn::sigmoid(input);
 }
 
 auto Mish::forward_impl(const Variable& input) -> Variable {
@@ -717,62 +703,40 @@ auto Hardsigmoid::forward_impl(const Variable& input) -> Variable {
 }
 
 // Functional Hardswish
+//
+// P4.2c: Hardswish(x) = x * clamp(x + 3, 0, 6) / 6 is piecewise linear
+// on the input outside the [-3, 3] transition region, and piecewise-
+// quadratic inside. The second derivative is zero a.e. for most ops
+// but has a delta at the clamp boundaries — PyTorch treats it as zero
+// for higher-order purposes. We express the forward as a pure
+// Variable-level composition so create_graph=true threads through
+// existing autograd-aware clamp / mul / add chain; no custom
+// HardswishBackward needed.
 auto hardswish(const Variable& input) -> Variable {
-    // Hardswish(x) = x * clamp(x + 3, 0, 6) / 6
-    // Compute forward at tensor level for efficiency
-    auto x_plus_3_t = input.tensor() + 3.0f;
-    auto clamped_t = tenzor::clamp(x_plus_3_t, 0.0f, 6.0f);
-    auto result_tensor = input.tensor() * clamped_t / 6.0f;
-
     if (!input.requires_grad() || !is_grad_enabled()) {
-        return Variable(result_tensor, false);
+        auto x_plus_3_t = input.tensor() + 3.0f;
+        auto clamped_t = tenzor::clamp(x_plus_3_t, 0.0f, 6.0f);
+        return Variable(input.tensor() * clamped_t / 6.0f, false);
     }
-
-    auto grad_fn = std::make_shared<HardswishBackward>();
-    grad_fn->save_for_backward({input.tensor()});
-
-    std::vector<std::shared_ptr<Function>> next_funcs;
-    if (input.grad_fn()) {
-        next_funcs.push_back(input.grad_fn());
-    }
-    grad_fn->set_next_functions(next_funcs);
-
-    std::vector<Variable> input_vars;
-    input_vars.push_back(input);
-    grad_fn->set_input_variables(input_vars);
-
-    Variable output(result_tensor, true);
-    output.set_grad_fn(grad_fn);
-    return output;
+    // Variable-level composition: autograd threads naturally.
+    auto shifted = input + 3.0;
+    auto clamped = tenzor::clamp(shifted, 0.0, 6.0);
+    return input * clamped * (1.0 / 6.0);
 }
 
 // Functional Hardsigmoid
+//
+// Same story: piecewise linear, Variable-level composition carries
+// create_graph=true through without a custom backward.
 auto hardsigmoid(const Variable& input) -> Variable {
-    // Hardsigmoid(x) = clamp(x + 3, 0, 6) / 6
-    auto x_plus_3_t = input.tensor() + 3.0f;
-    auto clamped_t = tenzor::clamp(x_plus_3_t, 0.0f, 6.0f);
-    auto result_tensor = clamped_t / 6.0f;
-
     if (!input.requires_grad() || !is_grad_enabled()) {
-        return Variable(result_tensor, false);
+        auto x_plus_3_t = input.tensor() + 3.0f;
+        auto clamped_t = tenzor::clamp(x_plus_3_t, 0.0f, 6.0f);
+        return Variable(clamped_t / 6.0f, false);
     }
-
-    auto grad_fn = std::make_shared<HardsigmoidBackward>();
-    grad_fn->save_for_backward({input.tensor()});
-
-    std::vector<std::shared_ptr<Function>> next_funcs;
-    if (input.grad_fn()) {
-        next_funcs.push_back(input.grad_fn());
-    }
-    grad_fn->set_next_functions(next_funcs);
-
-    std::vector<Variable> input_vars;
-    input_vars.push_back(input);
-    grad_fn->set_input_variables(input_vars);
-
-    Variable output(result_tensor, true);
-    output.set_grad_fn(grad_fn);
-    return output;
+    auto shifted = input + 3.0;
+    auto clamped = tenzor::clamp(shifted, 0.0, 6.0);
+    return clamped * (1.0 / 6.0);
 }
 
 // GLU module
@@ -860,13 +824,31 @@ auto Hardshrink::forward_impl(const Variable& input) -> Variable {
 }
 
 auto hardshrink(const Variable& input, double lambda) -> Variable {
+    // P2.6b: hardshrink(x) = x if |x| > lambda else 0
+    //
+    // Expressed as a composition over Variable-level `where` so
+    // create_graph=true threads through naturally. The step at
+    // |x| == lambda is a measure-zero non-differentiability; autograd
+    // conventions (matching PyTorch) treat it as zero subgradient
+    // there, which falls out of the where-based construction.
     if (lambda < 0.0) {
         throw std::invalid_argument("hardshrink: lambda must be non-negative");
     }
-    throw std::runtime_error(
-        "nn::hardshrink: not yet implemented. Needs a where()-style op or "
-        "a custom Function to thread the step-gradient mask through autograd. "
-        "Use softshrink() as a smooth approximation for now.");
+    const auto dtype = input.tensor().dtype();
+    const auto device = input.tensor().device();
+    const auto shape = std::vector<int64_t>(
+        input.tensor().shape().begin(), input.tensor().shape().end());
+
+    // mask = |x| > lambda, computed at the Tensor level (non-differentiable).
+    auto abs_t = tenzor::abs(input.tensor());
+    auto lambda_t = tenzor::full(shape, lambda, dtype, device);
+    auto mask_t = tenzor::gt(abs_t, lambda_t);
+
+    // Variable-level where threads gradients through `x` on the pass-
+    // through branch; the zero branch contributes no gradient.
+    auto zero = Variable(tenzor::zeros(shape, dtype, device), false);
+    auto mask_var = Variable(mask_t, false);
+    return tenzor::where(mask_var, input, zero);
 }
 
 auto Threshold::forward_impl(const Variable& input) -> Variable {
@@ -874,10 +856,20 @@ auto Threshold::forward_impl(const Variable& input) -> Variable {
 }
 
 auto threshold(const Variable& input, double t, double value) -> Variable {
-    throw std::runtime_error(
-        "nn::threshold: not yet implemented. Needs a where()-style op "
-        "to select between x and `value` based on the x > t mask. "
-        "t=" + std::to_string(t) + " value=" + std::to_string(value));
+    // P2.6b: threshold(x, t, value) = x if x > t else value
+    // Variable-level where preserves the gradient through the pass-
+    // through branch.
+    const auto dtype = input.tensor().dtype();
+    const auto device = input.tensor().device();
+    const auto shape = std::vector<int64_t>(
+        input.tensor().shape().begin(), input.tensor().shape().end());
+
+    auto t_t = tenzor::full(shape, t, dtype, device);
+    auto mask_t = tenzor::gt(input.tensor(), t_t);
+
+    auto value_var = Variable(tenzor::full(shape, value, dtype, device), false);
+    auto mask_var = Variable(mask_t, false);
+    return tenzor::where(mask_var, input, value_var);
 }
 
 } // namespace tenzor::nn

@@ -163,6 +163,11 @@ public:
         return var_results;
     }
 
+    // P4.2d: passthrough returns Variables without grad_fn; flag as
+    // stub so engine's disconnection counter reports accurately.
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
+
 private:
     bool affine_;
     double eps_;
@@ -772,6 +777,11 @@ public:
         for (auto& t : results) var_results.emplace_back(t, grad_outputs[0].requires_grad());
         return var_results;
     }
+
+    // P4.2d: passthrough returns Variables without grad_fn; flag as
+    // stub so engine's disconnection counter reports accurately.
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
 
 private:
     bool affine_;

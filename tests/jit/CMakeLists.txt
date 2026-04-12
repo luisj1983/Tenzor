@@ -40,3 +40,8 @@ tenzor_discover_tests(test_jit_lowlevel LABELS "jit" DISCOVERY_TIMEOUT 60)
 add_executable(test_jit_strict_mode test_jit_strict_mode.cpp)
 target_link_libraries(test_jit_strict_mode PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_jit_strict_mode LABELS "jit" DISCOVERY_TIMEOUT 60)
+
+# P4.1b: control_flow.hpp ↔ Tracer integration test
+add_executable(test_control_flow_hook_integration test_control_flow_hook_integration.cpp)
+target_link_libraries(test_control_flow_hook_integration PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_control_flow_hook_integration LABELS "jit" DISCOVERY_TIMEOUT 60)

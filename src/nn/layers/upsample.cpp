@@ -35,6 +35,11 @@ public:
         return {Variable(grad_tensor, true)};
     }
 
+    // P4.2d: upsample is linear (fixed interpolation weights); second
+    // derivative is structurally zero.
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
+
 private:
     std::vector<int64_t> input_spatial_size_;
     std::string mode_;

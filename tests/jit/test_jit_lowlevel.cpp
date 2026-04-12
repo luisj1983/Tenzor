@@ -236,15 +236,13 @@ TEST_F(JITTracerTest, StartAndEndTraceLifecycle) {
     EXPECT_FALSE(tracer.is_tracing());
 }
 
-TEST_F(JITTracerTest, ClearOnlyResetsRecordedOps) {
+TEST_F(JITTracerTest, ClearResetsRecordedOpsAndStopsTracing) {
     auto& tracer = Tracer::get_instance();
-    // clear() resets recorded ops/tensor map but does NOT stop tracing
+    // clear() is the tracer's full reset — it purges recorded state AND
+    // stops tracing, so back-to-back TracingGuards don't bleed state.
     tracer.start_trace();
     EXPECT_TRUE(tracer.is_tracing());
     tracer.clear();
-    // Tracing should still be active after clear(); only end_trace() stops it
-    EXPECT_TRUE(tracer.is_tracing());
-    tracer.end_trace({}, {});
     EXPECT_FALSE(tracer.is_tracing());
 }
 

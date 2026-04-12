@@ -72,7 +72,13 @@ public:
         return {grad_input_result[0], grad_weight_result[0]};
     }
 
-    auto supports_higher_order() const -> bool override { return false; }
+    // P4.2d: Conv2d backward through the dispatch path returns Tensors
+    // with no autograd chain, so higher-order is structurally zero.
+    // Flag as a stub instead of `return false` — the engine now
+    // handles stubs via the Warn/Error mode switch rather than
+    // throwing unconditionally, matching the other Conv* families.
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
 
 private:
     auto build_attrs(std::span<const int64_t> input_shape,

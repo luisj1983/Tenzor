@@ -216,10 +216,31 @@ public:
      *   - ScatterBackward, NarrowBackward
      *
      * Ops with passthrough stubs (is_higher_order_stub() returns true):
-     *   - UpsampleBilinearBackward — bilinear upsample is a linear function
-     *     of the input (fixed interpolation weights independent of input
-     *     values), so its second derivative is structurally zero. The
-     *     passthrough stub is mathematically correct, not a compromise.
+     *   - UpsampleBilinearBackward / UpsampleBackward — fixed interpolation
+     *     weights; structurally zero 2nd derivative.
+     *   - Pooling (MaxPool/AvgPool/AdaptivePool 1D/2D/3D) — piecewise-linear
+     *     selection/averaging; structurally zero 2nd derivative.
+     *   - Flatten/View/Reshape/Dropout — either linear or masked-identity;
+     *     structurally zero 2nd derivative.
+     *   - Embedding — lookup table; grad is scatter_add of incoming grad.
+     *   - Attention softmax-backward (non-flash path) flagged stub.
+     *   - Conv{1,2,3}dBackward, ConvTranspose{1,2,3}dBackward (P4.2e) — real
+     *     2nd-order conv requires a differentiable conv_transpose + weight-
+     *     backward re-expressed as primal convs (multi-week per backend;
+     *     tracked as a future RFC). Currently flagged as stubs so Warn mode
+     *     continues to work while Error mode surfaces the gap.
+     *   - BatchNorm/LayerNorm/GroupNorm/InstanceNorm/RMSNorm/SyncBatchNorm
+     *     (P4.2f) — normalization 2nd-order needs Variable-level
+     *     mean/var/rsqrt compositions through the statistics path; flagged
+     *     as stubs pending a dedicated branch.
+     *   - RNN/LSTM/GRU (P4.2g) — recurrent 2nd-order requires per-timestep
+     *     Variable-level gate recomputation; flagged as stubs pending a
+     *     dedicated branch.
+     *
+     * The "structural-zero" cases are mathematically correct. The Conv/Norm/
+     * RNN cases are pragmatic correctness compromises that Warn mode accepts
+     * (see HigherOrderGradMode). Set HigherOrderGradMode::Error to surface
+     * them as hard failures at runtime.
      *
      * @param grad_outputs Gradient Variables with respect to outputs
      * @return Gradient Variables with respect to inputs (with grad_fn set)

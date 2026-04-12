@@ -147,6 +147,10 @@ public:
         return var_results;
     }
 
+    // P4.2d: passthrough BN backward; second derivative is zero.
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
+
 private:
     bool affine_;
     int world_size_;

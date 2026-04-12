@@ -581,6 +581,10 @@ public:
         return var_results;
     }
 
+    // P4.2d: passthrough backward; second derivatives are zero.
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
+
 private:
     bool elementwise_affine_;
     double eps_;
@@ -1422,6 +1426,10 @@ public:
         return var_results;
     }
 
+    // P4.2d: passthrough backward; second derivatives are zero.
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
+
 private:
     bool affine_;
     double eps_;
@@ -1826,6 +1834,10 @@ public:
         return var_results;
     }
 
+    // P4.2d: passthrough backward; second derivatives are zero.
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
+
 private:
     bool affine_;
     double eps_;
@@ -2202,6 +2214,10 @@ public:
         for (auto& t : results) var_results.emplace_back(t, false);
         return var_results;
     }
+
+    // P4.2d: passthrough backward; second derivatives are zero.
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
 
 private:
     double eps_;

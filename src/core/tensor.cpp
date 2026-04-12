@@ -18,6 +18,7 @@
 #include <numeric>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_set>
@@ -820,38 +821,26 @@ auto Tensor::to(DType dtype) const -> Tensor {
     const bool was_on_gpu = impl_->device.type != Device::Type::CPU;
 
     if (was_on_gpu) {
-        // Warn once per (device, src_dtype, dst_dtype) tuple that we're taking
-        // the CPU round-trip path. Silent round-trips are a massive perf
-        // footgun — users should either register a GPU Cast kernel or avoid
-        // dtype conversion inside a hot loop. Gated by TENZOR_WARN_CPU_ROUNDTRIP
-        // so CI and benchmark runs don't spam stderr by default.
+        // Warn once per process that we're taking the CPU round-trip path.
+        // Silent round-trips are a massive perf footgun — users should either
+        // register a GPU Cast kernel or avoid dtype conversion inside a hot
+        // loop. Gated by TENZOR_WARN_CPU_ROUNDTRIP so CI doesn't spam stderr.
         static const bool warn_enabled = [] {
             const char* env = std::getenv("TENZOR_WARN_CPU_ROUNDTRIP");
             return env != nullptr && env[0] != '\0' && env[0] != '0';
         }();
         if (warn_enabled) {
-            static std::mutex warned_mu;
-            // Pack (device_type, src_dtype, dst_dtype) into a single uint32_t
-            // for use as a set key; all three are small enums.
-            const uint32_t key =
-                (static_cast<uint32_t>(impl_->device.type) << 16) |
-                (static_cast<uint32_t>(impl_->dtype) << 8) |
-                 static_cast<uint32_t>(dtype);
-            static std::unordered_set<uint32_t> warned;
-            bool first = false;
-            {
-                std::lock_guard<std::mutex> lk(warned_mu);
-                first = warned.insert(key).second;
-            }
-            if (first) {
-                std::string dst_name{tenzor::dtype_name(dtype)};
-                std::string src_name{tenzor::dtype_name(impl_->dtype)};
-                std::string dev_name = impl_->device.to_string();
+            static std::atomic<bool> warned{false};
+            if (!warned.exchange(true, std::memory_order_relaxed)) {
+                std::string src_dtype_str{tenzor::dtype_name(impl_->dtype)};
+                std::string dst_dtype_str{tenzor::dtype_name(dtype)};
+                std::string device_str = impl_->device.to_string();
                 fprintf(stderr,
-                    "[tenzor] warning: Tensor::to(%s) on %s falls back via CPU "
-                    "round-trip — source dtype %s has no on-device Cast kernel. "
-                    "Register a GPU Cast kernel to avoid this.\n",
-                    dst_name.c_str(), dev_name.c_str(), src_name.c_str());
+                    "[tenzor] warning: Cast fallback via CPU for %s->%s on "
+                    "device %s — register a native Cast kernel to avoid "
+                    "round-trip overhead\n",
+                    src_dtype_str.c_str(), dst_dtype_str.c_str(),
+                    device_str.c_str());
             }
         }
     }

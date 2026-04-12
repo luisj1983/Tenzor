@@ -157,6 +157,13 @@ public:
         return var_results;
     }
 
+    // P4.2d: the passthrough above returns Variables without grad_fn,
+    // so higher-order gradients through this op are structurally zero.
+    // Declare that honestly so the engine's disconnection counter
+    // reports accurately in Warn mode and throws in Error mode.
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
+
 private:
     int64_t kernel_size_;
     int64_t stride_;
@@ -570,6 +577,13 @@ public:
         return var_results;
     }
 
+    // P4.2d: the passthrough above returns Variables without grad_fn,
+    // so higher-order gradients through this op are structurally zero.
+    // Declare that honestly so the engine's disconnection counter
+    // reports accurately in Warn mode and throws in Error mode.
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
+
 private:
     int64_t kernel_size_;
     int64_t stride_;
@@ -892,6 +906,13 @@ public:
         return var_results;
     }
 
+    // P4.2d: the passthrough above returns Variables without grad_fn,
+    // so higher-order gradients through this op are structurally zero.
+    // Declare that honestly so the engine's disconnection counter
+    // reports accurately in Warn mode and throws in Error mode.
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
+
 private:
     int64_t H_in_;
     int64_t W_in_;
@@ -1159,6 +1180,13 @@ public:
         return var_results;
     }
 
+    // P4.2d: the passthrough above returns Variables without grad_fn,
+    // so higher-order gradients through this op are structurally zero.
+    // Declare that honestly so the engine's disconnection counter
+    // reports accurately in Warn mode and throws in Error mode.
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
+
 private:
     std::vector<int64_t> input_shape_;
     int64_t kernel_size_;
@@ -1195,6 +1223,13 @@ public:
         for (auto& t : results) var_results.emplace_back(t, false);
         return var_results;
     }
+
+    // P4.2d: the passthrough above returns Variables without grad_fn,
+    // so higher-order gradients through this op are structurally zero.
+    // Declare that honestly so the engine's disconnection counter
+    // reports accurately in Warn mode and throws in Error mode.
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
 
 private:
     std::vector<int64_t> input_shape_;

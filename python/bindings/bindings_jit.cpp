@@ -1,0 +1,217 @@
+// tenzor.jit Python bindings. Extracted from python/bindings.cpp as
+// part of P3.4 (incremental split of the ~10k-line monolith).
+//
+// Covers: IR types (OpType/Value/Node/Graph), Tracer/TracingGuard,
+// Compiler, free-function trace/optimize/save/load helpers, CompiledModule,
+// and the tenzor.jit.compile + tenzor.compile torch.compile-equivalent.
+
+#include "register.hpp"
+
+#include <pybind11/functional.h>
+#include <pybind11/stl.h>
+
+#include <tenzor/autograd/variable.hpp>
+#include <tenzor/jit/compile.hpp>
+#include <tenzor/jit/compiler.hpp>
+#include <tenzor/jit/graph.hpp>
+#include <tenzor/jit/serialization.hpp>
+#include <tenzor/jit/tracer.hpp>
+#include <tenzor/nn/module.hpp>
+
+namespace py = pybind11;
+
+namespace tenzor::python {
+
+void register_jit(py::module_& m) {
+    auto jit = m.def_submodule("jit", "JIT compilation and tracing");
+
+    py::enum_<tenzor::jit::OpType>(jit, "OpType")
+        .value("Add", tenzor::jit::OpType::Add)
+        .value("Sub", tenzor::jit::OpType::Sub)
+        .value("Mul", tenzor::jit::OpType::Mul)
+        .value("Div", tenzor::jit::OpType::Div)
+        .value("MatMul", tenzor::jit::OpType::MatMul)
+        .value("ReLU", tenzor::jit::OpType::ReLU)
+        .value("Sigmoid", tenzor::jit::OpType::Sigmoid)
+        .value("Tanh", tenzor::jit::OpType::Tanh)
+        .value("Softmax", tenzor::jit::OpType::Softmax)
+        .value("Conv2d", tenzor::jit::OpType::Conv2d)
+        .value("BatchNorm2d", tenzor::jit::OpType::BatchNorm2d)
+        .value("LayerNorm", tenzor::jit::OpType::LayerNorm)
+        .value("MaxPool2d", tenzor::jit::OpType::MaxPool2d)
+        .value("AvgPool2d", tenzor::jit::OpType::AvgPool2d)
+        .value("Reshape", tenzor::jit::OpType::Reshape)
+        .value("Transpose", tenzor::jit::OpType::Transpose)
+        .value("Flatten", tenzor::jit::OpType::Flatten)
+        .value("Linear", tenzor::jit::OpType::Linear)
+        .value("Constant", tenzor::jit::OpType::Constant)
+        .value("Input", tenzor::jit::OpType::Input)
+        .value("Output", tenzor::jit::OpType::Output);
+
+    py::class_<tenzor::jit::Value, std::shared_ptr<tenzor::jit::Value>>(jit, "Value",
+        "Represents a tensor value in the IR graph")
+        .def_property_readonly("id", &tenzor::jit::Value::id)
+        .def_property_readonly("shape", &tenzor::jit::Value::shape)
+        .def_property_readonly("dtype", &tenzor::jit::Value::dtype)
+        .def_property_readonly("device", &tenzor::jit::Value::device);
+
+    py::class_<tenzor::jit::Node, std::shared_ptr<tenzor::jit::Node>>(jit, "Node",
+        "Represents an operation node in the IR graph")
+        .def_property_readonly("op_type", &tenzor::jit::Node::op_type)
+        .def_property_readonly("name", &tenzor::jit::Node::name)
+        .def("set_name", &tenzor::jit::Node::set_name)
+        .def("get_attr", &tenzor::jit::Node::get_attr)
+        .def("get_int_attr", &tenzor::jit::Node::get_int_attr)
+        .def("get_vec_attr", &tenzor::jit::Node::get_vec_attr)
+        .def("get_bool_attr", &tenzor::jit::Node::get_bool_attr)
+        .def("has_attr", &tenzor::jit::Node::has_attr);
+
+    py::class_<tenzor::jit::Graph, std::shared_ptr<tenzor::jit::Graph>>(jit, "Graph",
+        "IR graph representing a complete computation")
+        .def(py::init<>())
+        .def("num_nodes", &tenzor::jit::Graph::num_nodes)
+        .def("num_values", &tenzor::jit::Graph::num_values)
+        .def("forward", &tenzor::jit::Graph::forward,
+             py::arg("inputs"),
+             "Execute graph with runtime inputs",
+             py::call_guard<py::gil_scoped_release>())
+        .def("save", &tenzor::jit::Graph::save,
+             py::arg("path"),
+             "Save graph to file")
+        .def_static("load", &tenzor::jit::Graph::load,
+             py::arg("path"),
+             "Load graph from file")
+        .def("to_string", &tenzor::jit::Graph::to_string,
+             "Get string representation of graph")
+        .def("topological_sort", &tenzor::jit::Graph::topological_sort)
+        .def("infer_types", &tenzor::jit::Graph::infer_types)
+        .def("__repr__", &tenzor::jit::Graph::to_string);
+
+    py::class_<tenzor::jit::Tracer>(jit, "Tracer",
+        "Tracing context for recording operations")
+        .def(py::init<>())
+        .def("start_trace", &tenzor::jit::Tracer::start_trace,
+             "Start recording operations")
+        .def("end_trace", &tenzor::jit::Tracer::end_trace,
+             py::arg("inputs"), py::arg("outputs"),
+             "Stop recording and build IR graph")
+        .def("is_tracing", &tenzor::jit::Tracer::is_tracing,
+             "Check if tracing is active")
+        .def("clear", &tenzor::jit::Tracer::clear,
+             "Clear all recorded operations")
+        .def_static("get_instance", &tenzor::jit::Tracer::get_instance,
+             py::return_value_policy::reference,
+             "Get thread-local tracer instance");
+
+    py::class_<tenzor::jit::TracingGuard>(jit, "TracingGuard",
+        "RAII guard for tracing scope")
+        .def(py::init<>())
+        .def("get_graph", &tenzor::jit::TracingGuard::get_graph,
+             py::arg("inputs"), py::arg("outputs"),
+             "Get traced graph");
+
+    py::class_<tenzor::jit::Compiler>(jit, "Compiler",
+        "Graph optimization compiler")
+        .def(py::init<bool>(),
+             py::arg("enable_default_passes") = true,
+             "Create compiler with optional default passes")
+        .def("optimize", &tenzor::jit::Compiler::optimize,
+             py::arg("graph"), py::arg("max_iterations") = 10,
+             "Optimize graph with all passes")
+        .def("set_verbose", &tenzor::jit::Compiler::set_verbose,
+             py::arg("enable"),
+             "Enable verbose logging")
+        .def("clear_stats", &tenzor::jit::Compiler::clear_stats);
+
+    jit.def("trace", py::overload_cast<std::shared_ptr<tenzor::nn::Module>,
+            const tenzor::Variable&>(&tenzor::jit::trace),
+            py::arg("module"), py::arg("dummy_input"),
+            "Trace a module's forward pass");
+
+    jit.def("optimize_graph", &tenzor::jit::optimize_graph,
+            py::arg("graph"),
+            "Apply standard optimizations to graph");
+
+    jit.def("save_graph", &tenzor::jit::save_graph,
+            py::arg("graph"), py::arg("path"),
+            "Save graph to file");
+
+    jit.def("load_graph", &tenzor::jit::load_graph,
+            py::arg("path"),
+            "Load graph from file");
+
+    jit.def("export_graph_text", &tenzor::jit::export_graph_text,
+            py::arg("graph"), py::arg("path"),
+            "Export graph as text for debugging");
+
+    jit.def("export_graph_dot", &tenzor::jit::export_graph_dot,
+            py::arg("graph"), py::arg("path"),
+            "Export graph as DOT file for visualization");
+
+    jit.def("get_graph_stats", &tenzor::jit::get_graph_stats,
+            py::arg("graph"),
+            "Get graph statistics");
+
+    jit.def("verify_graph", &tenzor::jit::verify_graph,
+            py::arg("graph"),
+            "Verify graph integrity, returns list of errors");
+
+    py::class_<tenzor::jit::CompiledModule,
+               std::shared_ptr<tenzor::jit::CompiledModule>>(jit, "CompiledModule",
+        "Callable wrapper around a traced+compiled graph (torch.jit.ScriptModule analog)")
+        .def("forward",
+             py::overload_cast<const tenzor::Variable&>(&tenzor::jit::CompiledModule::forward),
+             py::arg("input"),
+             "Execute the compiled graph on a Variable input")
+        .def("__call__",
+             py::overload_cast<const tenzor::Variable&>(&tenzor::jit::CompiledModule::forward),
+             py::arg("input"),
+             "Callable alias for forward()")
+        .def("optimize_for_inference",
+             &tenzor::jit::CompiledModule::optimize_for_inference,
+             "Apply inference-only optimization passes");
+
+    jit.def("trace_module",
+            py::overload_cast<std::shared_ptr<tenzor::nn::Module>,
+                              const tenzor::Variable&>(&tenzor::jit::CompiledModule::trace),
+            py::arg("module"), py::arg("example_input"),
+            "Trace a module's forward pass, returning a callable CompiledModule.");
+
+    // Compile API (torch.compile equivalent)
+    jit.def("compile", [](py::function fn, bool fullgraph, std::string mode) {
+        auto cpp_fn = [fn](const tenzor::Variable& input) -> tenzor::Variable {
+            py::gil_scoped_acquire acquire;
+            auto result = fn(input);
+            return result.cast<tenzor::Variable>();
+        };
+
+        tenzor::jit::CompileConfig config;
+        config.fullgraph = fullgraph;
+        config.mode = std::move(mode);
+
+        auto compiled = std::make_shared<tenzor::jit::CompiledFunction>(
+            std::move(cpp_fn), std::move(config));
+
+        return py::cpp_function([compiled](const tenzor::Variable& input) {
+            py::gil_scoped_release release;
+            return (*compiled)(input);
+        });
+    },
+    py::arg("fn"),
+    py::arg("fullgraph") = false,
+    py::arg("mode") = "default",
+    "Compile a function for automatic graph capture and optimization.\n"
+    "First call traces and compiles; subsequent calls use cached compiled graph.\n"
+    "Shape mismatches trigger recompilation (up to 8 shapes cached).");
+
+    // tenzor.compile alias
+    m.def("compile", [jit](py::function fn, bool fullgraph, std::string mode) {
+        return jit.attr("compile")(fn, fullgraph, mode);
+    },
+    py::arg("fn"),
+    py::arg("fullgraph") = false,
+    py::arg("mode") = "default",
+    "Compile a function for automatic graph capture (alias for jit.compile).");
+}
+
+} // namespace tenzor::python

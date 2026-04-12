@@ -368,6 +368,11 @@ public:
         return var_results;
     }
 
+    // P4.2d: Embedding is a scatter by non-differentiable indices —
+    // the second derivative through it is structurally zero.
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
+
 private:
     Tensor indices_;
     int64_t num_embeddings_;
@@ -587,6 +592,11 @@ public:
         for (auto& t : results) var_results.emplace_back(t, false);
         return var_results;
     }
+
+    // P4.2d: EmbeddingBag is scatter+reduce on non-differentiable
+    // indices — second derivative is zero.
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
 
 private:
     Tensor offsets_;

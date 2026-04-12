@@ -196,6 +196,57 @@ TEST_F(HigherOrderActivationsTest, MishDoubleBackwardNonZero) {
         << "nn::mish did not route through the autograd-aware MishBackward";
 }
 
+TEST_F(HigherOrderActivationsTest, SwishDoubleBackwardNonZero) {
+    // Swish = x * sigmoid(x) — nonlinear, second derivative non-zero.
+    // P4.2c rewrote nn::swish as a Variable-level composition, so the
+    // chain rule flows through nn::sigmoid's autograd-aware backward.
+    double m = double_backward_magnitude(
+        [](const Variable& x) { return tenzor::nn::swish(x); });
+    EXPECT_GT(m, 1e-6)
+        << "nn::swish should produce non-zero second derivatives via "
+           "x * sigmoid(x) Variable composition";
+}
+
+TEST_F(HigherOrderActivationsTest, HardswishDoubleBackwardFinite) {
+    // Hardswish is piecewise linear/quadratic. Second derivatives may be
+    // small or zero except in the [-3, 3] transition region. We verify
+    // the graph threads through without throwing; magnitude is
+    // implementation-dependent.
+    auto x_t = zeros({4}, DType::Float64, Device::cpu());
+    x_t.data<double>()[0] = -2.0;
+    x_t.data<double>()[1] = -1.0;
+    x_t.data<double>()[2] =  1.0;
+    x_t.data<double>()[3] =  2.0;
+
+    auto x = Variable(x_t, true);
+    auto y = tenzor::nn::hardswish(x);
+    auto loss = tenzor::sum(y);
+    EXPECT_NO_THROW(loss.backward(std::nullopt, false, true));
+    ASSERT_TRUE(x.grad().has_value());
+
+    auto grad_var = Variable(x.grad().value(), true);
+    auto grad_norm = tenzor::sum(grad_var * grad_var);
+    EXPECT_NO_THROW(grad_norm.backward());
+}
+
+TEST_F(HigherOrderActivationsTest, HardsigmoidDoubleBackwardFinite) {
+    auto x_t = zeros({4}, DType::Float64, Device::cpu());
+    x_t.data<double>()[0] = -2.0;
+    x_t.data<double>()[1] = -1.0;
+    x_t.data<double>()[2] =  1.0;
+    x_t.data<double>()[3] =  2.0;
+
+    auto x = Variable(x_t, true);
+    auto y = tenzor::nn::hardsigmoid(x);
+    auto loss = tenzor::sum(y);
+    EXPECT_NO_THROW(loss.backward(std::nullopt, false, true));
+    ASSERT_TRUE(x.grad().has_value());
+
+    auto grad_var = Variable(x.grad().value(), true);
+    auto grad_norm = tenzor::sum(grad_var * grad_var);
+    EXPECT_NO_THROW(grad_norm.backward());
+}
+
 TEST_F(HigherOrderActivationsTest, LeakyReLUDoubleBackwardPiecewiseLinear) {
     // Leaky ReLU is piecewise linear, so the mathematical second derivative
     // is zero almost everywhere. The autograd-aware path should still

@@ -19,6 +19,11 @@ add_executable(test_higher_order_activations test_higher_order_activations.cpp)
 target_link_libraries(test_higher_order_activations PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_higher_order_activations LABELS "autograd" DISCOVERY_TIMEOUT 60)
 
+# Hardshrink / Threshold implementations (P2.6b)
+add_executable(test_hardshrink_threshold test_hardshrink_threshold.cpp)
+target_link_libraries(test_hardshrink_threshold PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_hardshrink_threshold LABELS "autograd" DISCOVERY_TIMEOUT 60)
+
 # Gradient checking tests
 add_executable(test_gradcheck test_gradcheck.cpp)
 target_link_libraries(test_gradcheck PRIVATE tenzor_core GTest::gtest_main)

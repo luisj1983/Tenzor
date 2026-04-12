@@ -239,6 +239,11 @@ if(TENZOR_BUILD_PYTHON)
             python/bindings/bindings_linalg.cpp
             python/bindings/bindings_fft.cpp
             python/bindings/bindings_vision_detection.cpp
+            python/bindings/bindings_distributed.cpp
+            python/bindings/bindings_jit.cpp
+            python/bindings/bindings_quantization.cpp
+            python/bindings/bindings_optim.cpp
+            python/bindings/bindings_autograd.cpp
         )
 
         target_link_libraries(tenzor_python PRIVATE tenzor_core tenzor_backend_cpu)

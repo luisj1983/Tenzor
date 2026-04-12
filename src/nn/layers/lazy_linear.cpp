@@ -42,6 +42,10 @@ public:
         }
         return {grad};
     }
+
+    // P4.2d: type cast is linear; second derivative is zero.
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
 };
 
 // Helper function to cast a Variable to a new dtype with autograd support

@@ -1213,9 +1213,16 @@ auto where(const Variable& condition, const Variable& x, const Variable& y) -> V
     }
     auto result = tenzor::where(condition.tensor(), x.tensor(), y.tensor());
     auto grad_fn = std::make_shared<WhereBackward>();
+    // Condition is non-differentiable; only x and y carry gradients.
+    // WhereBackward::backward returns {grad_x, grad_y} in that order, so
+    // input_variables / next_functions must match — previously this
+    // passed `{condition, x, y}` which misaligned the engine's index-
+    // based gradient accumulation and pushed grad_y into x (and dropped
+    // y's gradient entirely). The condition tensor is still kept in
+    // saved_tensors_ so the backward can read it.
     grad_fn->save_for_backward({condition.tensor()});
-    grad_fn->set_next_functions({nullptr, x.grad_fn(), y.grad_fn()});
-    grad_fn->set_input_variables({condition, x, y});
+    grad_fn->set_next_functions({x.grad_fn(), y.grad_fn()});
+    grad_fn->set_input_variables({x, y});
     Variable output(result, true);
     output.set_grad_fn(grad_fn);
     return output;
