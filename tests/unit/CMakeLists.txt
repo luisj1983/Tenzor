@@ -548,6 +548,14 @@ target_link_libraries(test_fft PRIVATE tenzor_core GTest::gtest_main)
 add_executable(test_linalg test_linalg.cpp)
 target_link_libraries(test_linalg PRIVATE tenzor_core GTest::gtest_main)
 
+# Linear Algebra — advanced routines (lstsq, pinv, matrix_exp)
+add_executable(test_linalg_lstsq_pinv_matexp test_linalg_lstsq_pinv_matexp.cpp)
+target_link_libraries(test_linalg_lstsq_pinv_matexp PRIVATE tenzor_core GTest::gtest_main)
+
+# FFT — fftshift / hfft / ihfft
+add_executable(test_fft_shift_hfft test_fft_shift_hfft.cpp)
+target_link_libraries(test_fft_shift_hfft PRIVATE tenzor_core GTest::gtest_main)
+
 # Empty Tensor Operations Tests (systematic coverage)
 add_executable(test_empty_tensor_ops test_empty_tensor_ops.cpp)
 target_link_libraries(test_empty_tensor_ops PRIVATE tenzor_core GTest::gtest_main)
@@ -698,6 +706,8 @@ tenzor_discover_tests(test_sparse_autograd DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_complex_arithmetic DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_fft DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_linalg DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_linalg_lstsq_pinv_matexp DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_fft_shift_hfft DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_empty_tensor_ops DISCOVERY_TIMEOUT 60)
 
 if(TENZOR_BUILD_CUDA)

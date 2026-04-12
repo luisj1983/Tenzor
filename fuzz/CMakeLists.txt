@@ -41,3 +41,6 @@ add_fuzz_target(fuzz_matmul_shapes fuzz_matmul_shapes.cpp)
 
 # Fuzz type promotion in binary operations
 add_fuzz_target(fuzz_type_promotion fuzz_type_promotion.cpp)
+
+# Fuzz the ONNX importer (hand-rolled protobuf parser — high-value target)
+add_fuzz_target(fuzz_onnx_importer fuzz_onnx_importer.cpp)

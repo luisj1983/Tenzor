@@ -4,6 +4,7 @@
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
+#include "tenzor/ops/transform.hpp"
 #include <stdexcept>
 
 namespace tenzor {
@@ -297,6 +298,85 @@ auto griffin_lim(const Tensor& magnitude,
     auto final_real = magnitude * cos_phase;
     return istft(final_real, n_fft, hop_length, win_length,
                 window, true, false, true, std::nullopt);
+}
+
+// ============================================================================
+// fftshift / ifftshift — frequency-domain index rolling
+// ============================================================================
+
+namespace {
+
+// Normalize a possibly-negative dim into [0, ndim).
+int64_t resolve_dim(int64_t dim, int64_t ndim, const char* op_name) {
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::invalid_argument(std::string(op_name) + ": dim out of range");
+    }
+    return dim;
+}
+
+} // anonymous namespace
+
+auto fftshift(const Tensor& input, std::vector<int64_t> dims) -> Tensor {
+    const auto shape = input.shape();
+    const int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dims.empty()) {
+        dims.reserve(ndim);
+        for (int64_t i = 0; i < ndim; ++i) dims.push_back(i);
+    }
+
+    Tensor out = input;
+    for (int64_t d : dims) {
+        int64_t rd = resolve_dim(d, ndim, "fftshift");
+        int64_t size = shape[rd];
+        int64_t shift = size / 2;
+        if (shift == 0) continue;
+        out = tenzor::roll(out, shift, rd);
+    }
+    return out;
+}
+
+auto ifftshift(const Tensor& input, std::vector<int64_t> dims) -> Tensor {
+    const auto shape = input.shape();
+    const int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dims.empty()) {
+        dims.reserve(ndim);
+        for (int64_t i = 0; i < ndim; ++i) dims.push_back(i);
+    }
+
+    Tensor out = input;
+    for (int64_t d : dims) {
+        int64_t rd = resolve_dim(d, ndim, "ifftshift");
+        int64_t size = shape[rd];
+        // For odd size, ifftshift shifts by (size + 1) / 2 to exactly invert
+        // fftshift's shift of size / 2. For even sizes the two are equal.
+        int64_t shift = (size + 1) / 2;
+        if (shift == 0) continue;
+        out = tenzor::roll(out, shift, rd);
+    }
+    return out;
+}
+
+// ============================================================================
+// hfft / ihfft — Hermitian-symmetric transforms
+// ============================================================================
+
+auto hfft(const Tensor& input,
+          std::optional<int64_t> n,
+          int64_t dim,
+          const std::string& norm) -> Tensor {
+    // hfft(x) == irfft(conj(x))
+    auto conj_x = tenzor::conj(input);
+    return irfft(conj_x, n, dim, norm);
+}
+
+auto ihfft(const Tensor& input,
+           std::optional<int64_t> n,
+           int64_t dim,
+           const std::string& norm) -> Tensor {
+    // ihfft(x) == conj(rfft(x))
+    auto r = rfft(input, n, dim, norm);
+    return tenzor::conj(r);
 }
 
 } // namespace fft

@@ -987,6 +987,25 @@ public:
     auto detach() const -> Tensor;
 
     /**
+     * @brief Construct a zero-filled tensor with the same dtype+device as `this`.
+     *
+     * Matches PyTorch's Tensor.new_zeros: the resulting tensor has the
+     * requested `shape` but inherits `dtype()` and `device()` from the
+     * receiver. Useful in model code where you want a fresh buffer that
+     * follows the parameter's placement.
+     */
+    auto new_zeros(std::vector<int64_t> shape) const -> Tensor;
+
+    /** @brief Ones-filled tensor with the same dtype+device as `this`. */
+    auto new_ones(std::vector<int64_t> shape) const -> Tensor;
+
+    /** @brief Uninitialized tensor with the same dtype+device as `this`. */
+    auto new_empty(std::vector<int64_t> shape) const -> Tensor;
+
+    /** @brief Scalar-filled tensor with the same dtype+device as `this`. */
+    auto new_full(std::vector<int64_t> shape, double fill_value) const -> Tensor;
+
+    /**
      * @brief Return contiguous copy if needed.
      *
      * If tensor is already contiguous, returns this tensor.

@@ -567,6 +567,74 @@ private:
     int64_t dim_;
 };
 
+// ----------------------------------------------------------------------------
+// Additional activation modules — thin wrappers over the existing primitives
+// for the PyTorch-compat surface.
+// ----------------------------------------------------------------------------
+
+/**
+ * @brief Softmin — softmax(-x, dim). Opposite polarity of softmax.
+ */
+class Softmin : public Module {
+public:
+    explicit Softmin(int64_t dim = -1) : dim_(dim) {}
+    auto forward_impl(const Variable& input) -> Variable override;
+private:
+    int64_t dim_;
+};
+
+/**
+ * @brief Tanhshrink — x - tanh(x). Saturates to x-1 / x+1 at ±∞.
+ */
+class Tanhshrink : public Module {
+public:
+    Tanhshrink() = default;
+    auto forward_impl(const Variable& input) -> Variable override;
+};
+
+/**
+ * @brief Softshrink — sign(x) * max(|x| - lambda, 0). Soft thresholding.
+ */
+class Softshrink : public Module {
+public:
+    explicit Softshrink(double lambda = 0.5) : lambda_(lambda) {}
+    auto forward_impl(const Variable& input) -> Variable override;
+private:
+    double lambda_;
+};
+
+/**
+ * @brief Hardshrink — x if |x| > lambda else 0. Hard thresholding.
+ */
+class Hardshrink : public Module {
+public:
+    explicit Hardshrink(double lambda = 0.5) : lambda_(lambda) {}
+    auto forward_impl(const Variable& input) -> Variable override;
+private:
+    double lambda_;
+};
+
+/**
+ * @brief Softsign — x / (1 + |x|). Smooth saturation without exp.
+ */
+class Softsign : public Module {
+public:
+    Softsign() = default;
+    auto forward_impl(const Variable& input) -> Variable override;
+};
+
+/**
+ * @brief Threshold — x if x > threshold else value.
+ */
+class Threshold : public Module {
+public:
+    Threshold(double threshold, double value) : threshold_(threshold), value_(value) {}
+    auto forward_impl(const Variable& input) -> Variable override;
+private:
+    double threshold_;
+    double value_;
+};
+
 /**
  * @defgroup functional_activations Functional Activation Functions
  * @brief Stateless activation functions for flexible use
@@ -626,6 +694,24 @@ auto hardsigmoid(const Variable& input) -> Variable;
 
 /** @brief Functional GLU: a * sigmoid(b) where input is split along dim */
 auto glu(const Variable& input, int64_t dim = -1) -> Variable;
+
+/** @brief Functional softmin: softmax(-x, dim) */
+auto softmin(const Variable& input, int64_t dim = -1) -> Variable;
+
+/** @brief Functional tanhshrink: x - tanh(x) */
+auto tanhshrink(const Variable& input) -> Variable;
+
+/** @brief Functional softshrink: sign(x) * max(|x| - lambda, 0) */
+auto softshrink(const Variable& input, double lambda = 0.5) -> Variable;
+
+/** @brief Functional hardshrink: x if |x| > lambda else 0 */
+auto hardshrink(const Variable& input, double lambda = 0.5) -> Variable;
+
+/** @brief Functional softsign: x / (1 + |x|) */
+auto softsign(const Variable& input) -> Variable;
+
+/** @brief Functional threshold: x if x > threshold else value */
+auto threshold(const Variable& input, double threshold, double value) -> Variable;
 
 /** @} */ // end of functional_activations group
 

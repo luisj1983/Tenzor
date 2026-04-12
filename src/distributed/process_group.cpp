@@ -11,6 +11,8 @@
 #include "tenzor/distributed/distributed.hpp"
 #include "tenzor/distributed/gloo_backend.hpp"
 #include <stdexcept>
+#include <memory>
+#include <cstdlib>
 
 #if defined(TENZOR_HAS_NCCL)
     #ifdef TENZOR_USE_ROCM
@@ -238,98 +240,139 @@ NCCLProcessGroup::~NCCLProcessGroup() {
 #endif
 }
 
+#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
+namespace {
+
+// RAII wrapper for a POSIX fd. close() on destruction; release() gives up
+// ownership. Used so any throw path (including future ones) cleans up the
+// socket without repeating `::close(fd); delete id_ptr;` at every call site.
+class FdGuard {
+public:
+    FdGuard() = default;
+    explicit FdGuard(int fd) : fd_(fd) {}
+    FdGuard(const FdGuard&) = delete;
+    FdGuard& operator=(const FdGuard&) = delete;
+    FdGuard(FdGuard&& other) noexcept : fd_(other.fd_) { other.fd_ = -1; }
+    FdGuard& operator=(FdGuard&& other) noexcept {
+        if (this != &other) {
+            reset();
+            fd_ = other.fd_;
+            other.fd_ = -1;
+        }
+        return *this;
+    }
+    ~FdGuard() { reset(); }
+
+    [[nodiscard]] int get() const noexcept { return fd_; }
+    [[nodiscard]] bool valid() const noexcept { return fd_ >= 0; }
+    void reset(int new_fd = -1) noexcept {
+        if (fd_ >= 0) ::close(fd_);
+        fd_ = new_fd;
+    }
+
+private:
+    int fd_{-1};
+};
+
+// Read TENZOR_NCCL_BOOTSTRAP_TIMEOUT_SEC (default 30) for socket timeouts.
+int bootstrap_timeout_seconds() {
+    const char* env = std::getenv("TENZOR_NCCL_BOOTSTRAP_TIMEOUT_SEC");
+    if (env == nullptr || env[0] == '\0') return 30;
+    int seconds = std::atoi(env);
+    if (seconds <= 0) return 30;
+    return seconds;
+}
+
+// Apply SO_RCVTIMEO + SO_SNDTIMEO so a dead peer does not deadlock
+// bootstrap. Called once per socket, right after creation.
+void apply_socket_timeouts(int fd) {
+    struct timeval tv;
+    tv.tv_sec = bootstrap_timeout_seconds();
+    tv.tv_usec = 0;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+}
+
+} // anonymous namespace
+#endif
+
 auto NCCLProcessGroup::bootstrap_unique_id(
     const std::string& master_addr,
     int master_port
 ) -> void {
 #if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
-    // Allocate a heap ncclUniqueId that we'll temporarily stash in comm_
-    auto* id_ptr = new ncclUniqueId{};
+    // Port validation: htons() of an out-of-range value silently truncates,
+    // which used to route rank 0 to the wrong port. Fail fast instead.
+    if (master_port < 1 || master_port > 65535) {
+        throw std::invalid_argument(
+            "NCCLProcessGroup: master_port must be in [1, 65535], got " +
+            std::to_string(master_port));
+    }
+
+    // Heap-allocate the ncclUniqueId through a unique_ptr so every error
+    // path (including future additions) cleans up automatically. We only
+    // call .release() at the very end, on success.
+    auto id = std::make_unique<ncclUniqueId>();
 
     if (rank_ == 0) {
-        // Rank 0: generate the unique ID
-        NCCL_PG_CHECK(ncclGetUniqueId(id_ptr));
+        NCCL_PG_CHECK(ncclGetUniqueId(id.get()));
 
-        // Create server socket to send the ID to all other ranks
-        int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (server_fd < 0) {
-            delete id_ptr;
+        FdGuard server(socket(AF_INET, SOCK_STREAM, 0));
+        if (!server.valid()) {
             throw std::runtime_error(
-                "NCCLProcessGroup: failed to create bootstrap socket"
-            );
+                "NCCLProcessGroup: failed to create bootstrap socket");
         }
+        apply_socket_timeouts(server.get());
 
         int opt = 1;
-        setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        setsockopt(server.get(), SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = INADDR_ANY;
         addr.sin_port = htons(static_cast<uint16_t>(master_port));
 
-        if (bind(server_fd, reinterpret_cast<struct sockaddr*>(&addr),
+        if (bind(server.get(), reinterpret_cast<struct sockaddr*>(&addr),
                  sizeof(addr)) < 0) {
-            ::close(server_fd);
-            delete id_ptr;
             throw std::runtime_error(
                 "NCCLProcessGroup: failed to bind bootstrap socket on port " +
-                std::to_string(master_port)
-            );
+                std::to_string(master_port));
         }
 
-        if (listen(server_fd, world_size_) < 0) {
-            ::close(server_fd);
-            delete id_ptr;
+        if (listen(server.get(), world_size_) < 0) {
             throw std::runtime_error(
-                "NCCLProcessGroup: failed to listen on bootstrap socket"
-            );
+                "NCCLProcessGroup: failed to listen on bootstrap socket");
         }
 
-        // Accept connections from all other ranks and send the unique ID
         for (int i = 1; i < world_size_; ++i) {
-            int client_fd = accept(server_fd, nullptr, nullptr);
-            if (client_fd < 0) {
-                ::close(server_fd);
-                delete id_ptr;
+            FdGuard client(accept(server.get(), nullptr, nullptr));
+            if (!client.valid()) {
                 throw std::runtime_error(
                     "NCCLProcessGroup: failed to accept connection from rank " +
-                    std::to_string(i)
-                );
+                    std::to_string(i));
             }
+            apply_socket_timeouts(client.get());
 
-            ssize_t sent = send(client_fd, id_ptr, sizeof(ncclUniqueId), 0);
-            ::close(client_fd);
-
+            ssize_t sent = send(client.get(), id.get(), sizeof(ncclUniqueId), 0);
             if (sent != static_cast<ssize_t>(sizeof(ncclUniqueId))) {
-                ::close(server_fd);
-                delete id_ptr;
                 throw std::runtime_error(
                     "NCCLProcessGroup: failed to send unique ID to rank " +
-                    std::to_string(i)
-                );
+                    std::to_string(i));
             }
         }
-
-        ::close(server_fd);
-
     } else {
-        // Non-zero ranks: connect to rank 0 and receive the unique ID
-        int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-        if (sockfd < 0) {
-            delete id_ptr;
+        FdGuard sock(socket(AF_INET, SOCK_STREAM, 0));
+        if (!sock.valid()) {
             throw std::runtime_error(
-                "NCCLProcessGroup: failed to create client socket"
-            );
+                "NCCLProcessGroup: failed to create client socket");
         }
+        apply_socket_timeouts(sock.get());
 
         struct hostent* server = gethostbyname(master_addr.c_str());
         if (!server) {
-            ::close(sockfd);
-            delete id_ptr;
             throw std::runtime_error(
                 "NCCLProcessGroup: failed to resolve master address: " +
-                master_addr
-            );
+                master_addr);
         }
 
         struct sockaddr_in addr{};
@@ -338,43 +381,36 @@ auto NCCLProcessGroup::bootstrap_unique_id(
                      static_cast<size_t>(server->h_length));
         addr.sin_port = htons(static_cast<uint16_t>(master_port));
 
-        // Retry connection with exponential backoff
         constexpr int max_retries = 10;
         bool connected = false;
         for (int attempt = 0; attempt < max_retries; ++attempt) {
-            if (connect(sockfd, reinterpret_cast<struct sockaddr*>(&addr),
+            if (connect(sock.get(), reinterpret_cast<struct sockaddr*>(&addr),
                         sizeof(addr)) == 0) {
                 connected = true;
                 break;
             }
-            // Exponential backoff: 100ms, 200ms, 400ms, ...
             usleep(static_cast<useconds_t>(100000) << attempt);
         }
 
         if (!connected) {
-            ::close(sockfd);
-            delete id_ptr;
             throw std::runtime_error(
                 "NCCLProcessGroup: failed to connect to master at " +
                 master_addr + ":" + std::to_string(master_port) +
-                " after " + std::to_string(max_retries) + " retries"
-            );
+                " after " + std::to_string(max_retries) + " retries");
         }
 
-        ssize_t received = recv(sockfd, id_ptr, sizeof(ncclUniqueId),
+        ssize_t received = recv(sock.get(), id.get(), sizeof(ncclUniqueId),
                                 MSG_WAITALL);
-        ::close(sockfd);
-
         if (received != static_cast<ssize_t>(sizeof(ncclUniqueId))) {
-            delete id_ptr;
             throw std::runtime_error(
-                "NCCLProcessGroup: failed to receive unique ID from master"
-            );
+                "NCCLProcessGroup: failed to receive unique ID from master");
         }
     }
 
-    // Stash the unique ID pointer in comm_ for the constructor to retrieve
-    comm_ = static_cast<void*>(id_ptr);
+    // Success: hand the heap-allocated id off to the constructor via comm_.
+    // The constructor is responsible for the sole matching `delete` — see
+    // the site around line 210 in this file.
+    comm_ = static_cast<void*>(id.release());
 #else
     (void)master_addr;
     (void)master_port;

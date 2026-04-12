@@ -457,13 +457,28 @@ enum class OpId : uint16_t {
     // =========================================================================
     // Sparse Tensor Operations (460-469)
     //
-    // These OpIds ARE registered in the dispatch tables for CPU, CUDA, ROCm,
-    // and OneAPI backends. The wrapper kernels reconstruct a SparseTensor from
-    // CSR components (crow_indices, col_indices, values) passed as plain
-    // Tensors, then delegate to the existing sparse:: functions in
-    // src/sparse/sparse_ops.cpp. SpMM/SpMV on GPU are guarded by
-    // TENZOR_HAS_CUSPARSE / TENZOR_HAS_ROCSPARSE / TENZOR_HAS_ONEMKL.
+    // These OpIds are registered via wrapper kernels that reconstruct a
+    // SparseTensor from CSR components (crow_indices, col_indices, values)
+    // passed as plain Tensors, then delegate to the existing sparse::
+    // functions in src/sparse/sparse_ops.cpp. SpMM/SpMV on GPU are guarded
+    // by TENZOR_HAS_CUSPARSE / TENZOR_HAS_ROCSPARSE / TENZOR_HAS_ONEMKL.
     // Vulkan uses its own native dispatch (registered separately).
+    //
+    // Per-backend coverage matrix (as of the P0 fix pass):
+    //
+    //                 CPU  CUDA  ROCm  Vulkan  OneAPI
+    //   SparseSpMM    yes  yes   yes   yes     yes
+    //   SparseSpMV    yes  yes   yes   yes     yes
+    //   SparseToDense yes  yes   yes   yes     yes
+    //   DenseToSparse yes  yes   yes   —       yes
+    //   SparseAdd     yes  —*    —*    yes     yes
+    //   SparseSpGEMM  yes  yes   yes   —       —
+    //   SparseTrsv    yes  yes   yes   —       —
+    //   SparseTrsm    yes  —     yes   —       —
+    //
+    // * CUDA/ROCm intentionally omit SparseAdd registration — the dispatcher
+    //   falls through to sparse::add() which round-trips through CPU. See
+    //   cuda_kernel_registry.cpp:3298-3305 for rationale.
     // =========================================================================
     SparseSpMM = 460,          // Sparse-Dense matrix multiplication
     SparseSpMV,                // Sparse-Dense matrix-vector multiplication

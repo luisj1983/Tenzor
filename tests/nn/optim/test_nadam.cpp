@@ -1,0 +1,107 @@
+// Tests for the NAdam (Nesterov-Adam) optimizer.
+// CPU-only. Verifies convergence on a small quadratic, lr get/set,
+// and state_dict round-trip. Follows the pattern of test_lion.cpp.
+
+#include <gtest/gtest.h>
+
+#include <tenzor/tenzor.hpp>
+#include <tenzor/autograd/variable.hpp>
+#include <tenzor/nn/optim/nadam.hpp>
+#include <tenzor/ops/creation.hpp>
+
+namespace tenzor {
+namespace {
+
+class NAdamTest : public ::testing::Test {
+protected:
+    void SetUp() override { tenzor::initialize(); }
+
+    std::vector<std::shared_ptr<Variable>> make_params() {
+        auto t = tenzor::ones({4, 4}, DType::Float32, Device::cpu());
+        auto param = std::make_shared<Variable>(t, /*requires_grad=*/true);
+        return {param};
+    }
+
+    float step_with_unit_grad(std::vector<std::shared_ptr<Variable>>& params,
+                              optim::Optimizer& opt) {
+        float sum = 0.0f;
+        for (auto& p : params) {
+            auto cpu_t = p->tensor().to(Device::cpu());
+            const auto* d = cpu_t.data<float>();
+            for (int64_t i = 0; i < cpu_t.numel(); ++i) sum += std::abs(d[i]);
+        }
+        for (auto& p : params) {
+            auto shape = p->tensor().shape();
+            p->set_grad(tenzor::ones({shape.begin(), shape.end()},
+                                     p->tensor().dtype(), Device::cpu()));
+        }
+        opt.step();
+        return sum;
+    }
+};
+
+TEST_F(NAdamTest, BasicStepReducesLoss) {
+    auto params = make_params();
+    optim::NAdam opt(params, /*lr=*/1e-2);
+
+    float before = step_with_unit_grad(params, opt);
+    float after  = step_with_unit_grad(params, opt);
+
+    EXPECT_LT(after, before)
+        << "NAdam should reduce |param| sum when gradient is constant positive";
+}
+
+TEST_F(NAdamTest, ConvergesOnQuadratic) {
+    // Minimize f(x) = ||x||^2 from x0 = ones. Gradient is 2*x.
+    // After 200 steps with lr=1e-2, |x| should be substantially smaller.
+    auto params = make_params();
+    optim::NAdam opt(params, /*lr=*/1e-2);
+
+    for (int step = 0; step < 200; ++step) {
+        auto& p = params[0];
+        auto grad = p->tensor() * full({1}, 2.0, p->tensor().dtype(), p->tensor().device());
+        p->set_grad(grad);
+        opt.step();
+    }
+
+    auto final = params[0]->tensor().to(Device::cpu());
+    const auto* d = final.data<float>();
+    float norm = 0.0f;
+    for (int64_t i = 0; i < final.numel(); ++i) norm += d[i] * d[i];
+    EXPECT_LT(norm, 0.5f)
+        << "NAdam on a quadratic should drive ||x||^2 well below the initial 16";
+}
+
+TEST_F(NAdamTest, LrGetSet) {
+    auto params = make_params();
+    optim::NAdam opt(params, /*lr=*/2e-3);
+
+    EXPECT_DOUBLE_EQ(opt.get_lr(), 2e-3);
+    opt.set_lr(5e-3);
+    EXPECT_DOUBLE_EQ(opt.get_lr(), 5e-3);
+}
+
+TEST_F(NAdamTest, StateDictRoundtrip) {
+    auto params = make_params();
+    optim::NAdam opt(params, /*lr=*/2e-3);
+
+    for (int i = 0; i < 3; ++i) step_with_unit_grad(params, opt);
+
+    auto state = opt.state_dict();
+    EXPECT_EQ(state.count("step_count"), 1u);
+    EXPECT_EQ(state.count("lr"), 1u);
+    EXPECT_EQ(state.count("beta1"), 1u);
+    EXPECT_EQ(state.count("beta2"), 1u);
+    EXPECT_EQ(state.count("momentum_decay"), 1u);
+    EXPECT_EQ(state.count("mu_product"), 1u);
+    EXPECT_EQ(state.count("exp_avg_0"), 1u);
+    EXPECT_EQ(state.count("exp_avg_sq_0"), 1u);
+
+    auto params2 = make_params();
+    optim::NAdam opt2(params2, /*lr=*/1e-5);
+    opt2.load_state_dict(state);
+    EXPECT_DOUBLE_EQ(opt2.get_lr(), 2e-3) << "lr should come from loaded state";
+}
+
+} // namespace
+} // namespace tenzor

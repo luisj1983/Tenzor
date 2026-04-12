@@ -95,6 +95,55 @@ TEST_F(QuantizedDTypeTest, IntRepr) {
     EXPECT_EQ(idata[2], -10);  // -1.0 / 0.1 = -10
 }
 
+TEST_F(QuantizedDTypeTest, IntReprIsZeroCopyView) {
+    // int_repr() must share storage with the quantized parent: writes through
+    // the int view must be visible via the quantized tensor's raw bytes.
+    auto input = zeros({4}, DType::Float32, Device::cpu());
+    float* data = input.data<float>();
+    data[0] = 0.0f;
+    data[1] = 1.0f;
+    data[2] = 2.0f;
+    data[3] = -1.0f;
+    auto quantized = quantize_per_tensor(input, 0.1, 0, DType::QInt8);
+
+    auto view = quantized.int_repr();
+    EXPECT_EQ(view.data_ptr(), quantized.data_ptr());
+    EXPECT_EQ(view.dtype(), DType::Int8);
+
+    // Mutate via the view and confirm dequantize() observes the change.
+    int8_t* vdata = view.data<int8_t>();
+    vdata[1] = 42;  // overwrite the quantized byte for element 1
+    auto deq = quantized.dequantize();
+    const float* fdata = deq.data<float>();
+    EXPECT_NEAR(fdata[1], 42 * 0.1f, 1e-6f);
+}
+
+TEST_F(QuantizedDTypeTest, IntReprUInt8) {
+    auto input = randn({5}, DType::Float32, Device::cpu());
+    auto quantized = quantize_per_tensor(input, 0.05, 128, DType::QUInt8);
+    auto view = quantized.int_repr();
+    EXPECT_EQ(view.dtype(), DType::UInt8);
+    EXPECT_EQ(view.data_ptr(), quantized.data_ptr());
+}
+
+TEST_F(QuantizedDTypeTest, ToQuantizedDtypeThrows) {
+    // .to() cannot produce a quantized tensor because scale/zero_point are
+    // not supplied — the old silent zero fall-through is now an explicit
+    // throw pointing the user at quantize_per_tensor.
+    auto x = randn({4}, DType::Float32, Device::cpu());
+    EXPECT_THROW(x.to(DType::QInt8), std::runtime_error);
+    EXPECT_THROW(x.to(DType::QUInt8), std::runtime_error);
+    EXPECT_THROW(x.to(DType::QInt4x2), std::runtime_error);
+}
+
+TEST_F(QuantizedDTypeTest, ToFromQuantizedThrows) {
+    // Casting a quantized tensor back to float requires dequantize() since
+    // the bare bytes have no meaning without scale/zero_point.
+    auto x = randn({4}, DType::Float32, Device::cpu());
+    auto q = quantize_per_tensor(x, 0.1, 0, DType::QInt8);
+    EXPECT_THROW(q.to(DType::Float32), std::runtime_error);
+}
+
 TEST_F(QuantizedDTypeTest, NonQuantizedThrows) {
     auto t = randn({5}, DType::Float32, Device::cpu());
     EXPECT_FALSE(t.is_quantized());

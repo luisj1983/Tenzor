@@ -118,11 +118,44 @@ struct alignas(64) BackendDispatchTable {
     /// Set to true after all kernels are registered; dispatch checks this
     std::atomic<bool> ready{false};
 
+    // ------------------------------------------------------------------
+    // Thread-safety contract for kernel registration
+    // ------------------------------------------------------------------
+    //
+    // register_kernel / register_single_output_kernel / register_inplace_kernel
+    // are SINGLE-WRITER: they must all complete on a single thread BEFORE
+    // any other thread calls dispatch() on the same table.
+    //
+    // The invariant is enforced by the atomic `ready` flag:
+    //   - Register phase: `ready == false`. Each register_*() throws if it
+    //     finds `ready == true`. The plain array writes to
+    //     kernels[]/single_output_kernels[]/inplace_kernels[] happen without
+    //     a lock — they are safe only because there is at most one writer.
+    //   - Publication: DispatchTableRegistry::mark_ready() performs a
+    //     release-store on `ready`. Any subsequent acquire-load by a
+    //     dispatcher happens-after every register_*() call on that thread,
+    //     so readers see fully-initialized arrays.
+    //   - Dispatch phase: hot-path dispatch() does one acquire-load of
+    //     `ready` plus an unsynchronized array index. No lock on reads.
+    //
+    // The startup sequence enforces the invariant: backend loaders in
+    // src/core/init.cpp call register_backend() → dlsym("register_kernels")
+    // → (serialized) register_*() calls → mark_ready(), all on the main
+    // thread, before any worker thread is allowed to run ops. Do NOT add a
+    // hot-registration code path that calls register_*() after a ready
+    // table; add a new table and swap via DispatchTableRegistry instead.
+    //
+    // ------------------------------------------------------------------
+
     /**
      * @brief Register a kernel for an operation.
      *
+     * Caller must hold the single-writer invariant described above: this
+     * runs during startup, on one thread, before mark_ready() is called.
+     *
      * @param op Operation identifier
      * @param fn Kernel function pointer
+     * @throws std::runtime_error if called after mark_ready().
      */
     void register_kernel(OpId op, KernelFn fn) {
         if (ready.load(std::memory_order_relaxed)) {

@@ -131,10 +131,21 @@ auto Tensor::from_blob(void* data,
                        DType dtype,
                        Device device,
                        std::function<void(void*)> deleter) -> Tensor {
-    // Compute element count and validate
+    // Validate dims and compute element count with overflow checking
+    // (mirrors TensorImpl::numel() at lines 79-89 and the size_bytes guard
+    // in the allocating ctor at lines 40-46).
     auto strides = compute_strides(shape);
     int64_t n = 1;
     for (auto dim : shape) {
+        if (dim < 0) {
+            throw std::invalid_argument("from_blob: shape dimensions must be non-negative");
+        }
+        if (dim != 0 &&
+            detail::safe_abs(n) > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) /
+                                      detail::safe_abs(dim)) {
+            throw std::overflow_error(
+                "from_blob: shape produces more than INT64_MAX elements");
+        }
         n *= dim;
     }
 
@@ -142,7 +153,11 @@ auto Tensor::from_blob(void* data,
         throw std::runtime_error("from_blob: data must not be null for non-empty tensor");
     }
 
-    size_t size_bytes = static_cast<size_t>(n) * tenzor::dtype_size(dtype);
+    size_t elem_sz = tenzor::dtype_size(dtype);
+    if (n > 0 && static_cast<size_t>(n) > std::numeric_limits<size_t>::max() / elem_sz) {
+        throw std::overflow_error("from_blob: byte size overflow");
+    }
+    size_t size_bytes = static_cast<size_t>(n) * elem_sz;
 
     // Create ExternalStorage (does NOT take ownership unless deleter is provided)
     auto storage = make_intrusive<ExternalStorage>(
@@ -246,15 +261,32 @@ auto Tensor::int_repr() const -> Tensor {
     if (!is_quantized()) {
         throw std::runtime_error("int_repr() called on non-quantized tensor");
     }
-    // Return a view of the same storage interpreted as Int8 or UInt8
-    DType int_dtype = (impl_->dtype == DType::QUInt8) ? DType::UInt8 : DType::Int8;
-    Tensor result(std::vector<int64_t>(impl_->shape), int_dtype, impl_->device);
-    // Copy data bytes (same underlying representation)
-    auto* backend = backend_registry().get_backend(impl_->device.type);
-    if (backend) {
-        backend->copy(result.data_ptr(), data_ptr(),
-                      numel() * tenzor::dtype_size(int_dtype), CopyKind::DeviceToDevice);
+    DType int_dtype;
+    if (impl_->dtype == DType::QUInt8) {
+        int_dtype = DType::UInt8;
+    } else if (impl_->dtype == DType::QInt8) {
+        int_dtype = DType::Int8;
+    } else {
+        // QInt4x2 packs two int4 values per byte; the packed layout is not a
+        // drop-in Int8 view. Dequantize first for that case.
+        throw std::runtime_error(
+            "int_repr(): unsupported quantized dtype — QInt4x2 packed layout "
+            "is not exposed via int_repr; use dequantize() then requantize if needed");
     }
+    // Zero-copy view: share Storage, reinterpret the dtype. QInt8/QUInt8 and
+    // Int8/UInt8 share the same 1-byte element size, so element-unit strides
+    // and offset carry over unchanged. view_base_ points at the quantized
+    // parent so in-place mutations on either side are observed by autograd's
+    // saved-tensor version check.
+    Tensor result;
+    result.impl_ = make_intrusive<TensorImpl>(
+        impl_->storage,
+        std::vector<int64_t>(impl_->shape),
+        std::vector<int64_t>(impl_->strides),
+        int_dtype,
+        impl_->device);
+    result.impl_->offset = impl_->offset;
+    result.impl_->view_base_ = impl_->view_base_ ? impl_->view_base_ : impl_;
     return result;
 }
 
@@ -749,6 +781,21 @@ auto Tensor::to(DType dtype) const -> Tensor {
         return *this;
     }
 
+    // Casting to a quantized dtype is not meaningful: quantized tensors carry
+    // scale/zero_point metadata that plain .to() cannot supply. Force the
+    // caller to use the explicit quantize API instead of silently returning a
+    // zero-initialized tensor (which is what the old fall-through did).
+    if (tenzor::is_quantized(dtype)) {
+        throw std::runtime_error(
+            ".to(quantized dtype) is not supported — use tenzor::quantize_per_tensor("
+            "x, scale, zero_point, dtype) or quantize_per_channel() to build a quantized tensor");
+    }
+    if (tenzor::is_quantized(impl_->dtype)) {
+        throw std::runtime_error(
+            ".to(dtype) on a quantized tensor is not supported — call dequantize() first, "
+            "then cast the resulting float tensor");
+    }
+
     // Try GPU-side Cast kernel to avoid costly CPU round-trip (GPU -> CPU -> cast -> GPU).
     // If a Cast kernel is registered for the current device, dispatch directly on-device.
     if (impl_->device.type != Device::Type::CPU &&
@@ -764,6 +811,44 @@ auto Tensor::to(DType dtype) const -> Tensor {
 
     // Fallback: convert on CPU (for CPU tensors or backends without Cast kernel)
     const bool was_on_gpu = impl_->device.type != Device::Type::CPU;
+
+    if (was_on_gpu) {
+        // Warn once per (device, src_dtype, dst_dtype) tuple that we're taking
+        // the CPU round-trip path. Silent round-trips are a massive perf
+        // footgun — users should either register a GPU Cast kernel or avoid
+        // dtype conversion inside a hot loop. Gated by TENZOR_WARN_CPU_ROUNDTRIP
+        // so CI and benchmark runs don't spam stderr by default.
+        static const bool warn_enabled = [] {
+            const char* env = std::getenv("TENZOR_WARN_CPU_ROUNDTRIP");
+            return env != nullptr && env[0] != '\0' && env[0] != '0';
+        }();
+        if (warn_enabled) {
+            static std::mutex warned_mu;
+            // Pack (device_type, src_dtype, dst_dtype) into a single uint32_t
+            // for use as a set key; all three are small enums.
+            const uint32_t key =
+                (static_cast<uint32_t>(impl_->device.type) << 16) |
+                (static_cast<uint32_t>(impl_->dtype) << 8) |
+                 static_cast<uint32_t>(dtype);
+            static std::unordered_set<uint32_t> warned;
+            bool first = false;
+            {
+                std::lock_guard<std::mutex> lk(warned_mu);
+                first = warned.insert(key).second;
+            }
+            if (first) {
+                std::string dst_name{tenzor::dtype_name(dtype)};
+                std::string src_name{tenzor::dtype_name(impl_->dtype)};
+                std::string dev_name = impl_->device.to_string();
+                fprintf(stderr,
+                    "[tenzor] warning: Tensor::to(%s) on %s falls back via CPU "
+                    "round-trip — source dtype %s has no on-device Cast kernel. "
+                    "Register a GPU Cast kernel to avoid this.\n",
+                    dst_name.c_str(), dev_name.c_str(), src_name.c_str());
+            }
+        }
+    }
+
     Tensor cpu_tensor = was_on_gpu ? cpu() : *this;
 
     // Ensure contiguous layout for efficient conversion
@@ -900,10 +985,9 @@ auto Tensor::to(DType dtype) const -> Tensor {
         DISPATCH_SRC_DTYPE(DType::Complex128, std::complex<double>)
         DISPATCH_SRC_DTYPE(DType::FP8_E4M3, FP8_E4M3)
         DISPATCH_SRC_DTYPE(DType::FP8_E5M2, FP8_E5M2)
-        // Quantized types: use dequantize() first, then cast
-        case DType::QInt8:
-        case DType::QUInt8:
-        case DType::QInt4x2:
+        // Quantized source/dest pairs are rejected at the top of Tensor::to(DType)
+        // so no case for QInt8/QUInt8/QInt4x2 is reachable here.
+        default:
             break;
     }
 
@@ -986,6 +1070,34 @@ auto Tensor::contiguous() const -> Tensor {
     // This properly handles both CPU and CUDA tensors
     std::array<Tensor, 1> inputs = {*this};
     return dispatch(OpId::Contiguous, inputs)[0];
+}
+
+auto Tensor::new_zeros(std::vector<int64_t> shape) const -> Tensor {
+    if (!impl_) {
+        throw std::runtime_error("new_zeros called on uninitialized tensor");
+    }
+    return tenzor::zeros(std::move(shape), impl_->dtype, impl_->device);
+}
+
+auto Tensor::new_ones(std::vector<int64_t> shape) const -> Tensor {
+    if (!impl_) {
+        throw std::runtime_error("new_ones called on uninitialized tensor");
+    }
+    return tenzor::ones(std::move(shape), impl_->dtype, impl_->device);
+}
+
+auto Tensor::new_empty(std::vector<int64_t> shape) const -> Tensor {
+    if (!impl_) {
+        throw std::runtime_error("new_empty called on uninitialized tensor");
+    }
+    return Tensor::empty_uninitialized(std::move(shape), impl_->dtype, impl_->device);
+}
+
+auto Tensor::new_full(std::vector<int64_t> shape, double fill_value) const -> Tensor {
+    if (!impl_) {
+        throw std::runtime_error("new_full called on uninitialized tensor");
+    }
+    return tenzor::full(std::move(shape), fill_value, impl_->dtype, impl_->device);
 }
 
 // Arithmetic operators

@@ -2782,6 +2782,46 @@ void register_cpu_kernels(BackendDispatchTable& table) {
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
             return sparse::add(sp, inputs[3]);
         });
+
+    // SparseSpGEMM: sparse(M,K) × sparse(K,N) -> sparse(M,N) in CSR.
+    // inputs: [0..2] = A's {crow, col, values}, [3..5] = B's {crow, col, values}
+    // attrs: M, K, N. Returns three tensors (crow, col, values) of result.
+    // The public sparse::spgemm() skips the dispatch-table path when both
+    // operands are on CPU, so dispatching this kernel does not recurse.
+    // Underlying CPU implementation is cpu_spgemm_typed<float/double> in
+    // src/sparse/sparse_ops.cpp (already exists for Float32 and Float64).
+    table.register_kernel(OpId::SparseSpGEMM,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t M = attrs.get_int(AttrKey::M);
+            int64_t K = attrs.get_int(AttrKey::K);
+            int64_t N = attrs.get_int(AttrKey::N);
+            auto a = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+            auto b = SparseTensor::sparse_csr(inputs[3], inputs[4], inputs[5], {K, N});
+            auto c = sparse::spgemm(a, b);
+            return {c.crow_indices(), c.col_indices(), c.values()};
+        });
+
+    // SparseTrsv: solve L @ x = b (1D RHS), L is lower or upper triangular
+    // stored in CSR. inputs: [0..2] = L's {crow, col, values}, [3] = b (N,).
+    // attrs: N, Upper. Returns x (N,).
+    table.register_single_output_kernel(OpId::SparseTrsv,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t N = attrs.get_int(AttrKey::N);
+            bool upper = attrs.get_bool(AttrKey::Upper, false);
+            auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N});
+            return sparse::sparse_triangular_solve(L, inputs[3], upper);
+        });
+
+    // SparseTrsm: solve L @ X = B (2D RHS), same semantics as Trsv but b is
+    // (N, K). Dispatches into the same public entry point which forwards to
+    // cpu_sparse_trsm for 2D b.
+    table.register_single_output_kernel(OpId::SparseTrsm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t N = attrs.get_int(AttrKey::N);
+            bool upper = attrs.get_bool(AttrKey::Upper, false);
+            auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N});
+            return sparse::sparse_triangular_solve(L, inputs[3], upper);
+        });
 }
 
 } // namespace tenzor

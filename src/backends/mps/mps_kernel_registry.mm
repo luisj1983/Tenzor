@@ -142,16 +142,6 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     // by routing through CPU. Native Metal shaders can replace these
     // incrementally for better performance.
 
-#define MPS_UNARY_FALLBACK(OP_ID, FN) \
-    table.register_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes&) { \
-        return std::vector<Tensor>{tenzor::FN(inputs[0].to(Device::cpu())).to(inputs[0].device())}; \
-    })
-
-#define MPS_BINARY_FALLBACK(OP_ID, FN) \
-    table.register_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes&) { \
-        return std::vector<Tensor>{tenzor::FN(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu())).to(inputs[0].device())}; \
-    })
-
     // Reductions (needed by backward pass: sum for gradient accumulation, mean for losses)
     table.register_kernel(OpId::Sum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto dev = inputs[0].device();
@@ -199,8 +189,8 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
         });
 
     // Phase 3.2: native Metal unary / binary kernels (previously CPU
-    // fallbacks). These replace MPS_UNARY_FALLBACK for Tanh/Sqrt/Abs
-    // and the hand-coded CPU lambdas for Pow/Clamp.
+    // fallbacks) for Tanh/Sqrt/Abs and hand-coded CPU lambdas for
+    // Pow/Clamp.
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Tanh, mps_tanh_kernel);
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Sqrt, mps_sqrt_kernel);
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Abs,  mps_abs_kernel);
@@ -217,31 +207,22 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
             return mps_clamp_kernel(inputs[0], min_val, max_val);
         });
 
-    // GreaterThan stays on the CPU fallback for now: the native
-    // gt_kernel would write Float32 0/1 but the rest of Tenzor expects
-    // a Bool output tensor, and `dispatch_binary` creates the output
-    // with the input dtype. Making GT native needs a dedicated
-    // comparison dispatcher that allocates a Bool output. Leaving as
-    // CPU fallback until that helper lands.
-    table.register_kernel(OpId::GreaterThan, [](std::span<const Tensor> inputs, const OpAttributes&) {
+    // Gt stays on the CPU fallback for now: the native gt_kernel would
+    // write Float32 0/1 but the rest of Tenzor expects a Bool output
+    // tensor, and `dispatch_binary` creates the output with the input
+    // dtype. Making GT native needs a dedicated comparison dispatcher
+    // that allocates a Bool output. Leaving as CPU fallback until that
+    // helper lands.
+    table.register_kernel(OpId::Gt, [](std::span<const Tensor> inputs, const OpAttributes&) {
         auto dev = inputs[0].device();
         return std::vector<Tensor>{tenzor::gt(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu())).to(dev)};
     });
 
-    // Creation ops (needed for backward: zeros_like, ones_like for gradient init)
-    table.register_single_output_kernel(OpId::ZerosLike,
-        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
-            auto dev = inputs[0].device();
-            auto shape = std::vector<int64_t>(inputs[0].shape().begin(), inputs[0].shape().end());
-            return zeros(shape, inputs[0].dtype(), dev);
-        });
-
-    table.register_single_output_kernel(OpId::OnesLike,
-        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
-            auto dev = inputs[0].device();
-            auto shape = std::vector<int64_t>(inputs[0].shape().begin(), inputs[0].shape().end());
-            return ones(shape, inputs[0].dtype(), dev);
-        });
+    // Note: zeros_like / ones_like are library-level free functions in
+    // tenzor::ops, not dispatch-level OpIds. Autograd code that needs
+    // gradient-init scratch tensors should call tenzor::zeros_like(x) /
+    // tenzor::ones_like(x), which internally dispatches zeros()/ones()
+    // for the tensor's device. No MPS-specific registration is needed.
 
     // Fused optimizer steps (SGD, Adam) via CPU roundtrip
     table.register_kernel(OpId::FusedSGDStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -272,9 +253,6 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
             auto result = dispatch(OpId::Cast, std::vector<Tensor>{cpu_in}, attrs);
             return result[0].to(dev);
         });
-
-#undef MPS_UNARY_FALLBACK
-#undef MPS_BINARY_FALLBACK
 
     // TODO: Tier 3 (completeness) - RNN, 3D ops, FFT, sparse, linalg
 }

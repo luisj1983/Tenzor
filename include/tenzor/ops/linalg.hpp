@@ -170,5 +170,60 @@ auto lu(const Tensor& A) -> std::tuple<Tensor, Tensor, Tensor>;
 auto lu_solve(const Tensor& LU_data, const Tensor& pivots,
               const Tensor& B) -> Tensor;
 
+/**
+ * @brief Solve a (possibly over- or under-determined) least-squares problem.
+ *
+ * Computes argmin_X ||A @ X - B||_2 using LAPACKE_?gels (QR/LQ based).
+ * For overdetermined A (M >= N), X is the least-squares solution. For
+ * underdetermined A (M < N), X is the minimum-norm solution.
+ *
+ * @param A Coefficient matrix (M, N). Supports Float32/Float64.
+ * @param B Right-hand side; either (M,) for a single RHS or (M, K) for
+ *          multiple RHS. Must have the same dtype as A.
+ * @return Tuple (solution, residuals) where:
+ *         - solution: (N,) or (N, K) least-squares / minimum-norm solution.
+ *         - residuals: Sum of squared residuals per RHS. Shape is (K,) for
+ *           2D B, (,) for 1D B. Only populated when M > N and A has full
+ *           column rank; otherwise empty.
+ *
+ * @throws std::invalid_argument if shapes are inconsistent.
+ */
+auto lstsq(const Tensor& A, const Tensor& B) -> std::tuple<Tensor, Tensor>;
+
+/**
+ * @brief Compute the Moore-Penrose pseudoinverse of A.
+ *
+ * Uses SVD under the hood: given A = U @ diag(s) @ Vh, returns
+ * pinv(A) = V @ diag(s_inv) @ U^H, where s_inv[i] = 1/s[i] for
+ * singular values larger than `rcond * max(s)`, and 0 otherwise.
+ * Small singular values are thresholded out so a rank-deficient A
+ * still yields a stable pseudoinverse.
+ *
+ * @param A Input matrix (M, N). Supports Float32/Float64.
+ * @param rcond Cutoff for small singular values, relative to max(s).
+ *              Default 1e-15 matches numpy.linalg.pinv.
+ * @return Pseudoinverse (N, M).
+ */
+auto pinv(const Tensor& A, double rcond = 1e-15) -> Tensor;
+
+/**
+ * @brief Compute the matrix exponential exp(A).
+ *
+ * Uses Higham's scaling-and-squaring algorithm with the Padé-13
+ * approximation (Higham, "The Scaling and Squaring Method for the
+ * Matrix Exponential Revisited", 2005). This matches SciPy's
+ * scipy.linalg.expm and torch.linalg.matrix_exp behaviour for
+ * Float32/Float64 square matrices.
+ *
+ * Cost: O(N^3) matrix operations, with the scaling parameter chosen
+ * so that ||A|| / 2^s lies in the Padé-13 region of convergence.
+ *
+ * @param A Square matrix (N, N). Supports Float32/Float64.
+ * @return exp(A) as an (N, N) tensor with the same dtype as A.
+ *
+ * @throws std::invalid_argument if A is not square.
+ */
+auto matrix_exp(const Tensor& A) -> Tensor;
+
 } // namespace linalg
 } // namespace tenzor

@@ -952,4 +952,85 @@ auto glu(const Variable& input, int64_t dim) -> Variable {
     return a * nn::sigmoid(b);
 }
 
+// ----------------------------------------------------------------------------
+// Additional activations: compositions over existing autograd-aware primitives.
+// These use the existing Variable operator overloads so they thread the
+// gradient graph without custom Function classes.
+//
+// Softmin / Tanhshrink / Softshrink / Softsign compose cleanly from existing
+// primitives. Hardshrink and Threshold have discontinuous-derivative points
+// that require either a `where` op or a custom Function; they are provided
+// as modules that throw at runtime with a pointer to the follow-up work.
+// ----------------------------------------------------------------------------
+
+auto Softmin::forward_impl(const Variable& input) -> Variable {
+    return softmin(input, dim_);
+}
+
+auto softmin(const Variable& input, int64_t dim) -> Variable {
+    // softmin(x, dim) = softmax(-x, dim)
+    auto neg_input = input * -1.0;
+    return nn::softmax(neg_input, dim);
+}
+
+auto Tanhshrink::forward_impl(const Variable& input) -> Variable {
+    return tanhshrink(input);
+}
+
+auto tanhshrink(const Variable& input) -> Variable {
+    // x - tanh(x)
+    return input - nn::tanh(input);
+}
+
+auto Softshrink::forward_impl(const Variable& input) -> Variable {
+    return softshrink(input, lambda_);
+}
+
+auto softshrink(const Variable& input, double lambda) -> Variable {
+    if (lambda < 0.0) {
+        throw std::invalid_argument("softshrink: lambda must be non-negative");
+    }
+    // sign(x) * max(|x| - lambda, 0)
+    //   = relu(x - lambda) - relu(-x - lambda)
+    auto pos = nn::relu(input - lambda);
+    auto neg = nn::relu((input * -1.0) - lambda);
+    return pos - neg;
+}
+
+auto Softsign::forward_impl(const Variable& input) -> Variable {
+    return softsign(input);
+}
+
+auto softsign(const Variable& input) -> Variable {
+    // x / (1 + |x|). abs() is non-differentiable at 0 but subgradient is 0.
+    auto abs_input = tenzor::abs(input.tensor());
+    auto denom = Variable(abs_input + 1.0, false);
+    return input / denom;
+}
+
+auto Hardshrink::forward_impl(const Variable& input) -> Variable {
+    return hardshrink(input, lambda_);
+}
+
+auto hardshrink(const Variable& input, double lambda) -> Variable {
+    if (lambda < 0.0) {
+        throw std::invalid_argument("hardshrink: lambda must be non-negative");
+    }
+    throw std::runtime_error(
+        "nn::hardshrink: not yet implemented. Needs a where()-style op or "
+        "a custom Function to thread the step-gradient mask through autograd. "
+        "Use softshrink() as a smooth approximation for now.");
+}
+
+auto Threshold::forward_impl(const Variable& input) -> Variable {
+    return threshold(input, threshold_, value_);
+}
+
+auto threshold(const Variable& input, double t, double value) -> Variable {
+    throw std::runtime_error(
+        "nn::threshold: not yet implemented. Needs a where()-style op "
+        "to select between x and `value` based on the x > t mask. "
+        "t=" + std::to_string(t) + " value=" + std::to_string(value));
+}
+
 } // namespace tenzor::nn

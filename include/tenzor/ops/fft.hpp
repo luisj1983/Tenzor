@@ -164,5 +164,41 @@ auto griffin_lim(const Tensor& magnitude,
                 int64_t n_iter = 32,
                 double momentum = 0.99) -> Tensor;
 
+/**
+ * @brief Shift the zero-frequency component to the center of the spectrum.
+ *
+ * Applies `roll` along each of `dims` (default: all dims) by `size // 2`.
+ * Matches numpy.fft.fftshift / torch.fft.fftshift.
+ */
+auto fftshift(const Tensor& input, std::vector<int64_t> dims = {}) -> Tensor;
+
+/**
+ * @brief Inverse of fftshift — undoes the circular shift.
+ *
+ * For an even-length axis this is identical to fftshift. For odd-length
+ * axes it differs by one, which is why a separate function exists.
+ */
+auto ifftshift(const Tensor& input, std::vector<int64_t> dims = {}) -> Tensor;
+
+/**
+ * @brief Hermitian FFT: real output from Hermitian-symmetric complex input.
+ *
+ * `hfft(x)` = `irfft(conj(x))`. Matches torch.fft.hfft.
+ */
+auto hfft(const Tensor& input,
+          std::optional<int64_t> n = std::nullopt,
+          int64_t dim = -1,
+          const std::string& norm = "backward") -> Tensor;
+
+/**
+ * @brief Inverse Hermitian FFT: Hermitian-symmetric output from real input.
+ *
+ * `ihfft(x)` = `conj(rfft(x))`. Matches torch.fft.ihfft.
+ */
+auto ihfft(const Tensor& input,
+           std::optional<int64_t> n = std::nullopt,
+           int64_t dim = -1,
+           const std::string& norm = "backward") -> Tensor;
+
 } // namespace fft
 } // namespace tenzor

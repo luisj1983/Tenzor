@@ -124,14 +124,15 @@ class LBFGS(Optimizer):
 
     def step(self, closure: Callable[[], float]) -> float: ...
 
-class AdamaxOptimizer(Optimizer):
+class Adamax(Optimizer):
     """Adamax optimizer (variant of Adam based on infinity norm)."""
 
     def __init__(
         self,
         params: Iterable[Tensor],
         lr: float = 2e-3,
-        betas: Tuple[float, float] = (0.9, 0.999),
+        beta1: float = 0.9,
+        beta2: float = 0.999,
         eps: float = 1e-8,
         weight_decay: float = 0.0
     ) -> None: ...
@@ -145,7 +146,8 @@ class NAdam(Optimizer):
         self,
         params: Iterable[Tensor],
         lr: float = 2e-3,
-        betas: Tuple[float, float] = (0.9, 0.999),
+        beta1: float = 0.9,
+        beta2: float = 0.999,
         eps: float = 1e-8,
         weight_decay: float = 0.0,
         momentum_decay: float = 4e-3
@@ -160,29 +162,13 @@ class RAdam(Optimizer):
         self,
         params: Iterable[Tensor],
         lr: float = 1e-3,
-        betas: Tuple[float, float] = (0.9, 0.999),
+        beta1: float = 0.9,
+        beta2: float = 0.999,
         eps: float = 1e-8,
         weight_decay: float = 0.0
     ) -> None: ...
 
     def step(self, closure: Optional[Callable[[], float]] = None) -> Optional[float]: ...
-
-class LBFGS(Optimizer):
-    """L-BFGS optimizer."""
-
-    def __init__(
-        self,
-        params: Iterable[Tensor],
-        lr: float = 1.0,
-        max_iter: int = 20,
-        max_eval: Optional[int] = None,
-        tolerance_grad: float = 1e-7,
-        tolerance_change: float = 1e-9,
-        history_size: int = 100,
-        line_search_fn: Optional[str] = None
-    ) -> None: ...
-
-    def step(self, closure: Callable[[], float]) -> float: ...
 
 # Learning rate schedulers
 class LRScheduler:

@@ -181,11 +181,14 @@ public:
      *
      * Ops with full backward_with_variables using Variable-level scatter_add:
      *   - GatherBackward, IndexSelectBackward, IndexBackward, ScatterAddBackward
-     *
-     * Ops with passthrough stubs (second derivative is zero or non-differentiable):
-     *   - MaxBackward, MinBackward (non-differentiable mask)
+     *   - MaxBackward, MinBackward, TopKBackward, SortBackward
      *   - ScatterBackward, NarrowBackward
-     *   - TopKBackward, SortBackward, UpsampleBilinearBackward
+     *
+     * Ops with passthrough stubs (is_higher_order_stub() returns true):
+     *   - UpsampleBilinearBackward — bilinear upsample is a linear function
+     *     of the input (fixed interpolation weights independent of input
+     *     values), so its second derivative is structurally zero. The
+     *     passthrough stub is mathematically correct, not a compromise.
      *
      * @param grad_outputs Gradient Variables with respect to outputs
      * @return Gradient Variables with respect to inputs (with grad_fn set)
@@ -214,9 +217,11 @@ public:
      * backward() and wraps results without building a gradient graph. This
      * means higher-order gradients through this operation will be zero.
      *
-     * Operations where this returns true include non-differentiable mask ops
-     * (MaxBackward, MinBackward) and ops where the second derivative is
-     * structurally zero (ScatterBackward, TopKBackward, SortBackward, etc.).
+     * As of the current coverage pass, the only remaining stub is
+     * UpsampleBilinearBackward. Bilinear upsample is a linear function of
+     * its input (fixed interpolation weights), so its second derivative is
+     * structurally zero and the passthrough produces the mathematically
+     * correct result.
      *
      * @return true if backward_with_variables() is a passthrough stub
      */

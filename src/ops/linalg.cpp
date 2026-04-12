@@ -1097,4 +1097,373 @@ auto lu_solve(const Tensor& LU_data, const Tensor& pivots,
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
 }
 
+// ============================================================================
+// lstsq / pinv / matrix_exp — higher-level linalg routines composed on top of
+// the primitives above. These are CPU-only today; they fall back through the
+// LAPACKE path and do not currently dispatch to GPU backends.
+// ============================================================================
+
+auto lstsq(const Tensor& A, const Tensor& B) -> std::tuple<Tensor, Tensor> {
+#if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
+    throw_no_lapack("lstsq");
+#else
+    auto a_shape = A.shape();
+    auto b_shape = B.shape();
+    if (a_shape.size() != 2) {
+        throw std::invalid_argument("linalg::lstsq: A must be 2D (got ndim=" +
+            std::to_string(a_shape.size()) + ")");
+    }
+    if (b_shape.size() != 1 && b_shape.size() != 2) {
+        throw std::invalid_argument("linalg::lstsq: B must be 1D or 2D");
+    }
+    const int64_t m = a_shape[0];
+    const int64_t n = a_shape[1];
+    if (b_shape[0] != m) {
+        throw std::invalid_argument("linalg::lstsq: A rows (" + std::to_string(m) +
+            ") must match B rows (" + std::to_string(b_shape[0]) + ")");
+    }
+
+    // LAPACKE_?gels overwrites B in-place with the solution (top n rows) and
+    // residuals (remaining max(m, n) - n rows, squared sum per column).
+    // We need a workspace the size of max(m, n) rows × nrhs cols.
+    const int64_t nrhs = (b_shape.size() == 2) ? b_shape[1] : 1;
+    const int64_t ldb  = std::max(m, n);
+
+    auto original_dtype = A.dtype();
+    auto work_a = prepare_matrix(A);
+
+    // Build B work buffer of shape [ldb, nrhs], copy B into the first m rows.
+    const std::vector<int64_t> b_work_shape =
+        (b_shape.size() == 2) ? std::vector<int64_t>{ldb, nrhs}
+                              : std::vector<int64_t>{ldb};
+    auto work_b = zeros(b_work_shape, work_a.dtype(), Device::cpu());
+    auto src_b = B;
+    if (needs_upcast(src_b.dtype())) src_b = src_b.to(DType::Float32);
+    src_b = src_b.contiguous();
+
+    auto copy_b = [&](auto src_type, auto dst_type) {
+        using SrcT [[maybe_unused]] = decltype(src_type);
+        using DstT [[maybe_unused]] = decltype(dst_type);
+    };
+    (void)copy_b;
+
+    auto ln   = static_cast<lapack_int>(n);
+    auto lm   = static_cast<lapack_int>(m);
+    auto lnrhs = static_cast<lapack_int>(nrhs);
+    // In LAPACK_ROW_MAJOR, the "leading dimension" is the row stride, which
+    // for a shape-(rows, cols) buffer equals `cols`. So ldb_lapack == nrhs
+    // even though our physical buffer has `ldb = max(m, n)` rows. This is
+    // the same convention used by linalg::solve at LAPACKE_sgesv above.
+    auto lldb_lapack = static_cast<lapack_int>(nrhs);
+
+    if (work_a.dtype() == DType::Float32) {
+        float* a_data = work_a.data<float>();
+        float* b_data = work_b.data<float>();
+        const float* src_ptr = src_b.data<float>();
+        // Fill first m rows of work_b with B's contents (col-for-col).
+        for (int64_t i = 0; i < m; ++i) {
+            for (int64_t j = 0; j < nrhs; ++j) {
+                b_data[i * nrhs + j] = src_ptr[i * nrhs + j];
+            }
+        }
+        lapack_int info = LAPACKE_sgels(LAPACK_ROW_MAJOR, 'N', lm, ln, lnrhs,
+            a_data, ln, b_data, lldb_lapack);
+        if (info < 0) {
+            throw std::runtime_error("linalg::lstsq: invalid LAPACKE argument");
+        }
+        if (info > 0) {
+            throw std::runtime_error(
+                "linalg::lstsq: A does not have full rank — the least-squares "
+                "solution could not be computed (info=" + std::to_string(info) + ")");
+        }
+    } else {
+        double* a_data = work_a.data<double>();
+        double* b_data = work_b.data<double>();
+        const double* src_ptr = src_b.data<double>();
+        for (int64_t i = 0; i < m; ++i) {
+            for (int64_t j = 0; j < nrhs; ++j) {
+                b_data[i * nrhs + j] = src_ptr[i * nrhs + j];
+            }
+        }
+        lapack_int info = LAPACKE_dgels(LAPACK_ROW_MAJOR, 'N', lm, ln, lnrhs,
+            a_data, ln, b_data, lldb_lapack);
+        if (info < 0) {
+            throw std::runtime_error("linalg::lstsq: invalid LAPACKE argument");
+        }
+        if (info > 0) {
+            throw std::runtime_error(
+                "linalg::lstsq: A does not have full rank — the least-squares "
+                "solution could not be computed (info=" + std::to_string(info) + ")");
+        }
+    }
+
+    // Extract solution (first n rows) and residuals (rows n..m when m > n).
+    std::vector<int64_t> sol_shape;
+    sol_shape.push_back(n);
+    if (b_shape.size() == 2) sol_shape.push_back(nrhs);
+    auto solution = zeros(sol_shape, work_a.dtype(), Device::cpu());
+
+    // Residuals: for 2D B, shape (nrhs,); for 1D B, shape (1,) with a single
+    // scalar value. Empty tensor if m <= n (underdetermined, no residuals).
+    std::vector<int64_t> res_shape;
+    if (m > n) {
+        res_shape.push_back(nrhs);
+    }
+    auto residuals = res_shape.empty()
+        ? zeros({0}, work_a.dtype(), Device::cpu())
+        : zeros(res_shape, work_a.dtype(), Device::cpu());
+
+    if (work_a.dtype() == DType::Float32) {
+        const float* b_data = work_b.data<float>();
+        float* sol = solution.data<float>();
+        for (int64_t i = 0; i < n; ++i) {
+            for (int64_t j = 0; j < nrhs; ++j) {
+                sol[i * nrhs + j] = b_data[i * nrhs + j];
+            }
+        }
+        if (m > n) {
+            float* res = residuals.data<float>();
+            for (int64_t j = 0; j < nrhs; ++j) {
+                float sum = 0.0f;
+                for (int64_t i = n; i < m; ++i) {
+                    float v = b_data[i * nrhs + j];
+                    sum += v * v;
+                }
+                res[j] = sum;
+            }
+        }
+    } else {
+        const double* b_data = work_b.data<double>();
+        double* sol = solution.data<double>();
+        for (int64_t i = 0; i < n; ++i) {
+            for (int64_t j = 0; j < nrhs; ++j) {
+                sol[i * nrhs + j] = b_data[i * nrhs + j];
+            }
+        }
+        if (m > n) {
+            double* res = residuals.data<double>();
+            for (int64_t j = 0; j < nrhs; ++j) {
+                double sum = 0.0;
+                for (int64_t i = n; i < m; ++i) {
+                    double v = b_data[i * nrhs + j];
+                    sum += v * v;
+                }
+                res[j] = sum;
+            }
+        }
+    }
+
+    return {maybe_downcast(solution, original_dtype),
+            maybe_downcast(residuals, original_dtype)};
+#endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
+}
+
+auto pinv(const Tensor& A, double rcond) -> Tensor {
+    // pinv(A) = V @ diag(s_inv) @ U^T, where s_inv[i] = 1/s[i] when
+    // s[i] > rcond * max(s), else 0. Built on top of the existing svd().
+    auto a_shape = A.shape();
+    if (a_shape.size() != 2) {
+        throw std::invalid_argument("linalg::pinv: A must be 2D (got ndim=" +
+            std::to_string(a_shape.size()) + ")");
+    }
+
+    auto original_dtype = A.dtype();
+    // Use reduced SVD (full_matrices=false): U is (M, K), S is (K,), Vt is (K, N).
+    auto [U, S, Vt] = svd(A, /*full_matrices=*/false);
+
+    const int64_t k = S.numel();
+    if (k == 0) {
+        // Degenerate case: return a zero (N, M) pseudoinverse.
+        return zeros({a_shape[1], a_shape[0]}, original_dtype, Device::cpu());
+    }
+
+    // Build a diagonal scaling vector: s_inv[i] = 1/s[i] if s[i] > cutoff, else 0.
+    auto compute_dtype = S.dtype();  // Float32 or Float64 (maybe upcast from F16).
+
+    // Extract max(s) to compute cutoff.
+    auto s_contig = S.contiguous();
+    double max_s = 0.0;
+    if (compute_dtype == DType::Float32) {
+        const float* sp = s_contig.data<float>();
+        for (int64_t i = 0; i < k; ++i) {
+            if (static_cast<double>(sp[i]) > max_s) max_s = sp[i];
+        }
+    } else {
+        const double* sp = s_contig.data<double>();
+        for (int64_t i = 0; i < k; ++i) {
+            if (sp[i] > max_s) max_s = sp[i];
+        }
+    }
+    const double cutoff = rcond * max_s;
+
+    // Build s_inv as a (k,) vector.
+    auto s_inv = zeros({k}, compute_dtype, Device::cpu());
+    if (compute_dtype == DType::Float32) {
+        const float* sp = s_contig.data<float>();
+        float* sip = s_inv.data<float>();
+        for (int64_t i = 0; i < k; ++i) {
+            sip[i] = (static_cast<double>(sp[i]) > cutoff) ? (1.0f / sp[i]) : 0.0f;
+        }
+    } else {
+        const double* sp = s_contig.data<double>();
+        double* sip = s_inv.data<double>();
+        for (int64_t i = 0; i < k; ++i) {
+            sip[i] = (sp[i] > cutoff) ? (1.0 / sp[i]) : 0.0;
+        }
+    }
+
+    // pinv = Vt^T @ diag(s_inv) @ U^T
+    // Compute V = Vt^T (shape (N, K)) and scale its columns by s_inv.
+    // Vt.transpose(-2, -1) gives (N, K); then element-wise multiply by s_inv
+    // broadcast along rows; then matmul with U^T (K, M).
+    auto Vt_contig = Vt.contiguous();
+    const int64_t n_cols = a_shape[1];
+    const int64_t m_rows = a_shape[0];
+
+    auto V = zeros({n_cols, k}, compute_dtype, Device::cpu());
+    if (compute_dtype == DType::Float32) {
+        const float* vt = Vt_contig.data<float>();
+        float* v = V.data<float>();
+        const float* sip = s_inv.data<float>();
+        for (int64_t i = 0; i < n_cols; ++i) {
+            for (int64_t j = 0; j < k; ++j) {
+                v[i * k + j] = vt[j * n_cols + i] * sip[j];
+            }
+        }
+    } else {
+        const double* vt = Vt_contig.data<double>();
+        double* v = V.data<double>();
+        const double* sip = s_inv.data<double>();
+        for (int64_t i = 0; i < n_cols; ++i) {
+            for (int64_t j = 0; j < k; ++j) {
+                v[i * k + j] = vt[j * n_cols + i] * sip[j];
+            }
+        }
+    }
+
+    // UT = U^T, shape (K, M).
+    auto U_contig = U.contiguous();
+    auto UT = zeros({k, m_rows}, compute_dtype, Device::cpu());
+    if (compute_dtype == DType::Float32) {
+        const float* u = U_contig.data<float>();
+        float* ut = UT.data<float>();
+        for (int64_t i = 0; i < k; ++i) {
+            for (int64_t j = 0; j < m_rows; ++j) {
+                ut[i * m_rows + j] = u[j * k + i];
+            }
+        }
+    } else {
+        const double* u = U_contig.data<double>();
+        double* ut = UT.data<double>();
+        for (int64_t i = 0; i < k; ++i) {
+            for (int64_t j = 0; j < m_rows; ++j) {
+                ut[i * m_rows + j] = u[j * k + i];
+            }
+        }
+    }
+
+    // Final: V @ UT  (N, K) @ (K, M) = (N, M).
+    auto result = matmul(V, UT);
+    return maybe_downcast(result, original_dtype);
+}
+
+auto matrix_exp(const Tensor& A) -> Tensor {
+    // Scaling-and-squaring with Padé-13 approximation (Higham 2005).
+    // Thresholds chosen to match scipy.linalg.expm; see table on p.16 of the
+    // paper for the justification of theta_13 ≈ 5.37.
+    auto shape = A.shape();
+    if (shape.size() != 2 || shape[0] != shape[1]) {
+        throw std::invalid_argument("linalg::matrix_exp: A must be a square matrix");
+    }
+    const int64_t n = shape[0];
+
+    auto original_dtype = A.dtype();
+    auto work = prepare_matrix(A);
+    auto compute_dtype = work.dtype();
+
+    // Compute ||A||_1 for the scaling choice.
+    // One-norm is the max absolute column sum.
+    double one_norm = 0.0;
+    if (compute_dtype == DType::Float32) {
+        const float* a = work.data<float>();
+        for (int64_t j = 0; j < n; ++j) {
+            double col_sum = 0.0;
+            for (int64_t i = 0; i < n; ++i) {
+                col_sum += std::abs(static_cast<double>(a[i * n + j]));
+            }
+            if (col_sum > one_norm) one_norm = col_sum;
+        }
+    } else {
+        const double* a = work.data<double>();
+        for (int64_t j = 0; j < n; ++j) {
+            double col_sum = 0.0;
+            for (int64_t i = 0; i < n; ++i) {
+                col_sum += std::abs(a[i * n + j]);
+            }
+            if (col_sum > one_norm) one_norm = col_sum;
+        }
+    }
+
+    // Choose scaling factor s such that ||A / 2^s||_1 <= theta_13.
+    constexpr double theta_13 = 5.371920351148152;
+    int s = 0;
+    if (one_norm > theta_13) {
+        s = static_cast<int>(std::ceil(std::log2(one_norm / theta_13)));
+        if (s < 0) s = 0;
+    }
+    const double scale = std::ldexp(1.0, -s);
+
+    // Padé-13 coefficients.
+    static const double b[] = {
+        64764752532480000.0, 32382376266240000.0, 7771770303897600.0,
+        1187353796428800.0,  129060195264000.0,   10559470521600.0,
+        670442572800.0,      33522128640.0,       1323241920.0,
+        40840800.0,          960960.0,            16380.0,
+        182.0,               1.0
+    };
+
+    // Build A_scaled = A * scale, identity I.
+    auto A_scaled = mul(work, full({1}, scale, compute_dtype, Device::cpu()));
+    auto I = zeros({n, n}, compute_dtype, Device::cpu());
+    if (compute_dtype == DType::Float32) {
+        float* ip = I.data<float>();
+        for (int64_t i = 0; i < n; ++i) ip[i * n + i] = 1.0f;
+    } else {
+        double* ip = I.data<double>();
+        for (int64_t i = 0; i < n; ++i) ip[i * n + i] = 1.0;
+    }
+
+    // Power series: compute A^2, A^4, A^6 once.
+    auto A2 = matmul(A_scaled, A_scaled);
+    auto A4 = matmul(A2, A2);
+    auto A6 = matmul(A4, A2);
+
+    auto scalar_ct = [&](double v) {
+        return full({1}, v, compute_dtype, Device::cpu());
+    };
+
+    // U = A * (A6*(b13 A6 + b11 A4 + b9 A2) + b7 A6 + b5 A4 + b3 A2 + b1 I)
+    auto inner_u = A6 * scalar_ct(b[13]) + A4 * scalar_ct(b[11]) + A2 * scalar_ct(b[9]);
+    auto outer_u = matmul(A6, inner_u) + A6 * scalar_ct(b[7]) + A4 * scalar_ct(b[5]) +
+                   A2 * scalar_ct(b[3]) + I * scalar_ct(b[1]);
+    auto U = matmul(A_scaled, outer_u);
+
+    // V = A6*(b12 A6 + b10 A4 + b8 A2) + b6 A6 + b4 A4 + b2 A2 + b0 I
+    auto inner_v = A6 * scalar_ct(b[12]) + A4 * scalar_ct(b[10]) + A2 * scalar_ct(b[8]);
+    auto V = matmul(A6, inner_v) + A6 * scalar_ct(b[6]) + A4 * scalar_ct(b[4]) +
+             A2 * scalar_ct(b[2]) + I * scalar_ct(b[0]);
+
+    // R = (V - U)^{-1} @ (V + U)
+    auto P = V + U;
+    auto Q = V - U;
+    auto R = solve(Q, P);
+
+    // Square s times: R = R @ R.
+    for (int i = 0; i < s; ++i) {
+        R = matmul(R, R);
+    }
+
+    return maybe_downcast(R, original_dtype);
+}
+
 } // namespace tenzor::linalg

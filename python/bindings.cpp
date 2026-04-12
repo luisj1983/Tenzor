@@ -34,6 +34,8 @@
 #include <tenzor/nn/optim/adagrad.hpp>
 #include <tenzor/nn/optim/adadelta.hpp>
 #include <tenzor/nn/optim/radam.hpp>
+#include <tenzor/nn/optim/nadam.hpp>
+#include <tenzor/nn/optim/adamax.hpp>
 #include <tenzor/nn/optim/lamb.hpp>
 #include <tenzor/nn/optim/sparse_adam.hpp>
 #include <tenzor/nn/init.hpp>
@@ -4353,6 +4355,18 @@ Example::
     }, py::arg("f"),
     "Return a function that computes the Hessian of a scalar-valued f.");
 
+    func_mod.def("jvp", [](py::function f, const tenzor::Variable& x,
+                           const tenzor::Tensor& tangent) {
+        py::gil_scoped_acquire gil;
+        auto cpp_fn = [&f](const tenzor::Variable& input) -> tenzor::Variable {
+            py::object result = f(input);
+            return result.cast<tenzor::Variable>();
+        };
+        auto [out, tangent_out] = tenzor::jvp(cpp_fn, x, tangent);
+        return py::make_tuple(out, tangent_out);
+    }, py::arg("f"), py::arg("x"), py::arg("tangent"),
+    "Forward-mode Jacobian-vector product. Returns (output, J_f(x) @ tangent).");
+
     // Neural network
     auto nn = m.def_submodule("nn", "Neural network components");
 
@@ -6669,6 +6683,39 @@ Example::
         .def("get_lr", &tenzor::optim::RAdam::get_lr)
         .def("state_dict", &tenzor::optim::RAdam::state_dict)
         .def("load_state_dict", &tenzor::optim::RAdam::load_state_dict, py::arg("state"));
+
+    py::class_<tenzor::optim::NAdam, tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::NAdam>>(optim, "NAdam",
+        "NAdam (Nesterov-accelerated Adam) optimizer")
+        .def(py::init<std::vector<std::shared_ptr<tenzor::Variable>>, double, double, double, double, double, double>(),
+             py::arg("params"), py::arg("lr") = 2e-3,
+             py::arg("beta1") = 0.9, py::arg("beta2") = 0.999,
+             py::arg("eps") = 1e-8, py::arg("weight_decay") = 0.0,
+             py::arg("momentum_decay") = 4e-3)
+        .def("step", [](tenzor::optim::NAdam& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
+            if (closure) return py::cast(self.step(*closure));
+            self.step(); return py::none();
+        }, py::arg("closure") = py::none())
+        .def("zero_grad", &tenzor::optim::NAdam::zero_grad)
+        .def("set_lr", &tenzor::optim::NAdam::set_lr, py::arg("lr"))
+        .def("get_lr", &tenzor::optim::NAdam::get_lr)
+        .def("state_dict", &tenzor::optim::NAdam::state_dict)
+        .def("load_state_dict", &tenzor::optim::NAdam::load_state_dict, py::arg("state"));
+
+    py::class_<tenzor::optim::Adamax, tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::Adamax>>(optim, "Adamax",
+        "Adamax optimizer (Adam variant based on infinity norm)")
+        .def(py::init<std::vector<std::shared_ptr<tenzor::Variable>>, double, double, double, double, double>(),
+             py::arg("params"), py::arg("lr") = 2e-3,
+             py::arg("beta1") = 0.9, py::arg("beta2") = 0.999,
+             py::arg("eps") = 1e-8, py::arg("weight_decay") = 0.0)
+        .def("step", [](tenzor::optim::Adamax& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
+            if (closure) return py::cast(self.step(*closure));
+            self.step(); return py::none();
+        }, py::arg("closure") = py::none())
+        .def("zero_grad", &tenzor::optim::Adamax::zero_grad)
+        .def("set_lr", &tenzor::optim::Adamax::set_lr, py::arg("lr"))
+        .def("get_lr", &tenzor::optim::Adamax::get_lr)
+        .def("state_dict", &tenzor::optim::Adamax::state_dict)
+        .def("load_state_dict", &tenzor::optim::Adamax::load_state_dict, py::arg("state"));
 
     py::class_<tenzor::optim::LAMB, tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::LAMB>>(optim, "LAMB",
         "LAMB optimizer for large-batch training")

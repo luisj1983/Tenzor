@@ -50,6 +50,14 @@ target_link_libraries(test_lion PRIVATE tenzor_core GTest::gtest_main)
 add_executable(test_lbfgs optim/test_lbfgs.cpp)
 target_link_libraries(test_lbfgs PRIVATE tenzor_core GTest::gtest_main)
 
+# NAdam optimizer (Nesterov-accelerated Adam)
+add_executable(test_nadam optim/test_nadam.cpp)
+target_link_libraries(test_nadam PRIVATE tenzor_core GTest::gtest_main)
+
+# Adamax optimizer (Adam with infinity-norm denominator)
+add_executable(test_adamax optim/test_adamax.cpp)
+target_link_libraries(test_adamax PRIVATE tenzor_core GTest::gtest_main)
+
 # ZeRO Stage 2 Optimizer tests (Phase 5 - Gradient Partitioning)
 add_executable(test_zero_stage2 optim/test_zero_stage2.cpp)
 target_link_libraries(test_zero_stage2 PRIVATE tenzor_core GTest::gtest_main)
@@ -130,6 +138,8 @@ tenzor_discover_tests(test_zero_stage1_distributed LABELS "nn" DISCOVERY_TIMEOUT
 tenzor_discover_tests(test_gradient_utils LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_lion LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_lbfgs LABELS "nn" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_nadam LABELS "nn" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_adamax LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_zero_stage2 LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_zero_stage2_integration LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_zero_stage3 LABELS "nn" DISCOVERY_TIMEOUT 60)

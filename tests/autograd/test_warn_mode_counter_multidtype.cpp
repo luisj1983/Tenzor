@@ -17,6 +17,7 @@
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
+#include "tenzor/nn/layers/segmentation.hpp"
 #include "../backend_test_fixture.hpp"
 
 using namespace tenzor;
@@ -44,19 +45,26 @@ TEST_P(WarnModeCounterMultiDTypeTest, CounterStartsAtZero) {
     EXPECT_EQ(higher_order_disconnection_count(), 0u);
 }
 
+// Helper: build a tiny graph ending in upsample_bilinear — the only
+// remaining passthrough stub (mul → upsample). Mirrors the single-dtype
+// sibling at tests/autograd/test_warn_mode_counter.cpp.
+// Note: upsample_bilinear requires CPU Float32 (the kernel is CPU-only),
+// so the resulting test body does not vary by the parameterized `device`.
+static Variable make_multidtype_stub_graph() {
+    auto x = Variable(randn({1, 1, 4, 4}, DType::Float32, Device::cpu()), true);
+    auto y = x * x;
+    return tenzor::nn::upsample_bilinear(y, 8, 8);
+}
+
 // Warn mode increments the counter when an op with a passthrough stub
 // is encountered during create_graph=true backward
 TEST_P(WarnModeCounterMultiDTypeTest, WarnModeIncrements) {
     set_higher_order_grad_mode(HigherOrderGradMode::Warn);
 
-    // Build a graph that includes max (a stub op) with create_graph=true
-    auto x = Variable(randn({3, 4}, DType::Float32, device), true);
-    auto y = x * x;  // MulBackward — has full higher-order support
-    auto z = tenzor::max(y, 1);  // MaxBackward — is_higher_order_stub()
-
+    auto z = make_multidtype_stub_graph();
     auto loss = tenzor::sum(z);
 
-    // backward with create_graph=true triggers the Warn fallback for MaxBackward
+    // backward with create_graph=true triggers the Warn fallback for UpsampleBilinearBackward
     loss.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
 
     EXPECT_GE(higher_order_disconnection_count(), 1u)
@@ -67,10 +75,8 @@ TEST_P(WarnModeCounterMultiDTypeTest, WarnModeIncrements) {
 TEST_P(WarnModeCounterMultiDTypeTest, WarnModeLogsEveryDisconnection) {
     set_higher_order_grad_mode(HigherOrderGradMode::Warn);
 
-    // Trigger two separate backward passes that each hit a stub op
     for (int i = 0; i < 2; ++i) {
-        auto x = Variable(randn({3, 4}, DType::Float32, device), true);
-        auto z = tenzor::max(x * x, 1);
+        auto z = make_multidtype_stub_graph();
         auto loss = tenzor::sum(z);
 
         ::testing::internal::CaptureStderr();
@@ -90,8 +96,7 @@ TEST_P(WarnModeCounterMultiDTypeTest, WarnModeLogsEveryDisconnection) {
 TEST_P(WarnModeCounterMultiDTypeTest, ErrorModeThrows) {
     set_higher_order_grad_mode(HigherOrderGradMode::Error);
 
-    auto x = Variable(randn({3, 4}, DType::Float32, device), true);
-    auto z = tenzor::max(x * x, 1);
+    auto z = make_multidtype_stub_graph();
     auto loss = tenzor::sum(z);
 
     EXPECT_THROW(
@@ -107,8 +112,7 @@ TEST_P(WarnModeCounterMultiDTypeTest, ErrorModeThrows) {
 TEST_P(WarnModeCounterMultiDTypeTest, ResetClearsCounter) {
     set_higher_order_grad_mode(HigherOrderGradMode::Warn);
 
-    auto x = Variable(randn({3, 4}, DType::Float32, device), true);
-    auto z = tenzor::max(x * x, 1);
+    auto z = make_multidtype_stub_graph();
     auto loss = tenzor::sum(z);
     loss.backward(std::nullopt, false, true);
 
@@ -131,20 +135,23 @@ TEST_P(WarnModeCounterMultiDTypeTest, FullSupportDoesNotIncrement) {
         << "Ops with full higher-order support should not trigger disconnection";
 }
 
-// is_higher_order_stub() returns true for known stub classes
+// is_higher_order_stub() distinguishes stub classes from full-support classes.
+// Max/Min/TopK/Sort/Scatter/Narrow were upgraded to full higher-order support;
+// UpsampleBilinearBackward remains the only passthrough stub (see
+// tests/autograd/test_warn_mode_counter.cpp for the sibling single-dtype check).
 TEST_P(WarnModeCounterMultiDTypeTest, IsHigherOrderStubIntrospection) {
-    // MaxBackward is a known stub
+    // MaxBackward is now full support (no longer a stub)
     auto max_fn = std::make_shared<MaxBackward>(std::optional<int64_t>(1), false);
-    EXPECT_TRUE(max_fn->is_higher_order_stub());
-    EXPECT_TRUE(max_fn->supports_higher_order());  // still claims support
+    EXPECT_FALSE(max_fn->is_higher_order_stub());
+    EXPECT_TRUE(max_fn->supports_higher_order());
 
-    // TopKBackward is a known stub
+    // TopKBackward is now full support
     auto topk_fn = std::make_shared<TopKBackward>(5, 0);
-    EXPECT_TRUE(topk_fn->is_higher_order_stub());
+    EXPECT_FALSE(topk_fn->is_higher_order_stub());
 
-    // SortBackward is a known stub
+    // SortBackward is now full support
     auto sort_fn = std::make_shared<SortBackward>(0);
-    EXPECT_TRUE(sort_fn->is_higher_order_stub());
+    EXPECT_FALSE(sort_fn->is_higher_order_stub());
 }
 
 INSTANTIATE_BACKEND_TESTS(WarnModeCounterMultiDTypeTest);
