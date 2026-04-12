@@ -2,6 +2,7 @@
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
 #include <pybind11/functional.h>
+#include "bindings/register.hpp"  // split-out submodule registrars
 #include <iostream>
 #include <sstream>
 #include <tenzor/tenzor.hpp>
@@ -8470,51 +8471,10 @@ Example::
     // =========================================================================
     // Linear Algebra (linalg) submodule
     // =========================================================================
-    auto linalg_mod = m.def_submodule("linalg", "Linear algebra operations");
-
-    linalg_mod.def("det", &tenzor::linalg::det, "Compute matrix determinant",
-                   py::arg("A"),
-                   py::call_guard<py::gil_scoped_release>());
-    linalg_mod.def("inv", &tenzor::linalg::inv, "Compute matrix inverse",
-                   py::arg("A"),
-                   py::call_guard<py::gil_scoped_release>());
-    linalg_mod.def("solve", &tenzor::linalg::solve, "Solve linear system AX = B",
-                   py::arg("A"), py::arg("B"),
-                   py::call_guard<py::gil_scoped_release>());
-    linalg_mod.def("cholesky", &tenzor::linalg::cholesky, "Cholesky decomposition",
-                   py::arg("A"), py::arg("upper") = false,
-                   py::call_guard<py::gil_scoped_release>());
-    linalg_mod.def("norm", &tenzor::linalg::norm, "Matrix norm",
-                   py::arg("A"), py::arg("ord") = "fro",
-                   py::call_guard<py::gil_scoped_release>());
-    linalg_mod.def("slogdet", [](const tenzor::Tensor& A) {
-        auto [sign, logabsdet] = tenzor::linalg::slogdet(A);
-        return py::make_tuple(sign, logabsdet);
-    }, "Sign and log of absolute determinant", py::arg("A"),
-       py::call_guard<py::gil_scoped_release>());
-    linalg_mod.def("svd", [](const tenzor::Tensor& A, bool full_matrices) {
-        auto [U, S, Vh] = tenzor::linalg::svd(A, full_matrices);
-        return py::make_tuple(U, S, Vh);
-    }, "Singular Value Decomposition", py::arg("A"), py::arg("full_matrices") = true,
-       py::call_guard<py::gil_scoped_release>());
-    linalg_mod.def("qr", [](const tenzor::Tensor& A) {
-        auto [Q, R] = tenzor::linalg::qr(A);
-        return py::make_tuple(Q, R);
-    }, "QR decomposition", py::arg("A"),
-       py::call_guard<py::gil_scoped_release>());
-    linalg_mod.def("eigh", [](const tenzor::Tensor& A) {
-        auto [eigenvalues, eigenvectors] = tenzor::linalg::eigh(A);
-        return py::make_tuple(eigenvalues, eigenvectors);
-    }, "Eigendecomposition of symmetric matrix", py::arg("A"),
-       py::call_guard<py::gil_scoped_release>());
-    linalg_mod.def("eigvalsh", &tenzor::linalg::eigvalsh,
-                   "Eigenvalues of symmetric matrix", py::arg("A"),
-                   py::call_guard<py::gil_scoped_release>());
-
-    linalg_mod.def("matrix_power", &tenzor::linalg::matrix_power,
-                   "Matrix power via binary exponentiation",
-                   py::arg("A"), py::arg("n"),
-                   py::call_guard<py::gil_scoped_release>());
+    // tenzor.linalg submodule (extracted to python/bindings/bindings_linalg.cpp
+    // as part of P3.4). The new TU also binds the P2.1 additions
+    // lstsq / pinv / matrix_exp which were previously C++-only.
+    tenzor::python::register_linalg(m);
 
     // =========================================================================
     // Advanced Operations
@@ -8570,79 +8530,11 @@ Example::
        py::call_guard<py::gil_scoped_release>());
 
     // =========================================================================
-    // FFT submodule
+    // FFT submodule (extracted to python/bindings/bindings_fft.cpp as part
+    // of P3.4). The new TU also binds the P2.7 additions fftshift /
+    // ifftshift / hfft / ihfft which were previously C++-only.
     // =========================================================================
-    auto fft_mod = m.def_submodule("fft", "Fast Fourier Transform operations");
-
-    fft_mod.def("fft", [](const tenzor::Tensor& input, std::optional<int64_t> n,
-                           int64_t dim, const std::string& norm) {
-        return tenzor::fft::fft(input, n, dim, norm);
-    }, "1-D complex-to-complex FFT",
-       py::arg("input"), py::arg("n") = py::none(), py::arg("dim") = -1,
-       py::arg("norm") = "backward",
-       py::call_guard<py::gil_scoped_release>());
-
-    fft_mod.def("ifft", [](const tenzor::Tensor& input, std::optional<int64_t> n,
-                            int64_t dim, const std::string& norm) {
-        return tenzor::fft::ifft(input, n, dim, norm);
-    }, "1-D inverse complex-to-complex FFT",
-       py::arg("input"), py::arg("n") = py::none(), py::arg("dim") = -1,
-       py::arg("norm") = "backward",
-       py::call_guard<py::gil_scoped_release>());
-
-    fft_mod.def("rfft", [](const tenzor::Tensor& input, std::optional<int64_t> n,
-                            int64_t dim, const std::string& norm) {
-        return tenzor::fft::rfft(input, n, dim, norm);
-    }, "1-D real-to-complex FFT",
-       py::arg("input"), py::arg("n") = py::none(), py::arg("dim") = -1,
-       py::arg("norm") = "backward",
-       py::call_guard<py::gil_scoped_release>());
-
-    fft_mod.def("irfft", [](const tenzor::Tensor& input, std::optional<int64_t> n,
-                             int64_t dim, const std::string& norm) {
-        return tenzor::fft::irfft(input, n, dim, norm);
-    }, "1-D complex-to-real inverse FFT",
-       py::arg("input"), py::arg("n") = py::none(), py::arg("dim") = -1,
-       py::arg("norm") = "backward",
-       py::call_guard<py::gil_scoped_release>());
-
-    fft_mod.def("fft2", [](const tenzor::Tensor& input,
-                            std::optional<std::vector<int64_t>> s,
-                            std::vector<int64_t> dim, const std::string& norm) {
-        return tenzor::fft::fft2(input, s, dim, norm);
-    }, "2-D complex-to-complex FFT",
-       py::arg("input"), py::arg("s") = py::none(),
-       py::arg("dim") = std::vector<int64_t>{-2, -1},
-       py::arg("norm") = "backward",
-       py::call_guard<py::gil_scoped_release>());
-
-    fft_mod.def("ifft2", [](const tenzor::Tensor& input,
-                             std::optional<std::vector<int64_t>> s,
-                             std::vector<int64_t> dim, const std::string& norm) {
-        return tenzor::fft::ifft2(input, s, dim, norm);
-    }, "2-D inverse complex-to-complex FFT",
-       py::arg("input"), py::arg("s") = py::none(),
-       py::arg("dim") = std::vector<int64_t>{-2, -1},
-       py::arg("norm") = "backward",
-       py::call_guard<py::gil_scoped_release>());
-
-    fft_mod.def("fftn", [](const tenzor::Tensor& input,
-                            std::optional<std::vector<int64_t>> s,
-                            std::optional<std::vector<int64_t>> dim, const std::string& norm) {
-        return tenzor::fft::fftn(input, s, dim, norm);
-    }, "N-D complex-to-complex FFT",
-       py::arg("input"), py::arg("s") = py::none(), py::arg("dim") = py::none(),
-       py::arg("norm") = "backward",
-       py::call_guard<py::gil_scoped_release>());
-
-    fft_mod.def("ifftn", [](const tenzor::Tensor& input,
-                             std::optional<std::vector<int64_t>> s,
-                             std::optional<std::vector<int64_t>> dim, const std::string& norm) {
-        return tenzor::fft::ifftn(input, s, dim, norm);
-    }, "N-D inverse complex-to-complex FFT",
-       py::arg("input"), py::arg("s") = py::none(), py::arg("dim") = py::none(),
-       py::arg("norm") = "backward",
-       py::call_guard<py::gil_scoped_release>());
+    tenzor::python::register_fft(m);
 
     // =========================================================================
     // JIT Module - Tracing, Compilation, and Graph Optimization
@@ -8856,168 +8748,9 @@ Example::
     // =========================================================================
     // Vision Operations
     // =========================================================================
-    auto vision = m.def_submodule("vision", "Vision operations");
-
-    vision.def("unfold", &tenzor::ops::unfold,
-               py::arg("input"),
-               py::arg("kernel_size"),
-               py::arg("stride") = 1,
-               py::arg("padding") = 0,
-               py::arg("dilation") = 1,
-               "Extract sliding local blocks (im2col)");
-
-    vision.def("fold", &tenzor::ops::fold,
-               py::arg("input"),
-               py::arg("output_size"),
-               py::arg("kernel_size"),
-               py::arg("stride") = 1,
-               py::arg("padding") = 0,
-               py::arg("dilation") = 1,
-               "Fold tensor back to spatial dimensions (col2im)");
-
-    vision.def("interpolate", &tenzor::ops::interpolate,
-               py::arg("input"),
-               py::arg("size"),
-               py::arg("mode") = "bilinear",
-               py::arg("align_corners") = false,
-               "Resize tensor using interpolation");
-
-    vision.def("grid_sample", &tenzor::ops::grid_sample,
-               py::arg("input"),
-               py::arg("grid"),
-               py::arg("mode") = "bilinear",
-               py::arg("padding_mode") = "zeros",
-               py::arg("align_corners") = false,
-               "Sample from input using grid coordinates (spatial transformer)");
-
-    vision.def("affine_grid", &tenzor::ops::affine_grid,
-               py::arg("theta"),
-               py::arg("size"),
-               py::arg("align_corners") = false,
-               "Generate 2D affine grid for grid_sample");
-
-    // =========================================================================
-    // Detection Operations
-    // =========================================================================
-    auto detection = m.def_submodule("detection", "Object detection operations");
-
-    py::enum_<tenzor::ops::IoUType>(detection, "IoUType")
-        .value("IoU", tenzor::ops::IoUType::IoU)
-        .value("GIoU", tenzor::ops::IoUType::GIoU)
-        .value("DIoU", tenzor::ops::IoUType::DIoU)
-        .value("CIoU", tenzor::ops::IoUType::CIoU);
-
-    detection.def("box_iou", &tenzor::ops::box_iou,
-                  py::arg("boxes1"), py::arg("boxes2"),
-                  py::arg("iou_type") = tenzor::ops::IoUType::IoU,
-                  "Compute IoU between box sets");
-
-    detection.def("nms", &tenzor::ops::nms,
-                  py::arg("boxes"), py::arg("scores"),
-                  py::arg("iou_threshold") = 0.5,
-                  "Non-Maximum Suppression");
-
-    detection.def("batched_nms", &tenzor::ops::batched_nms,
-                  py::arg("boxes"), py::arg("scores"),
-                  py::arg("iou_threshold") = 0.5,
-                  py::arg("score_threshold") = 0.05,
-                  py::arg("max_output_boxes") = 100,
-                  "Batched NMS for multiple classes");
-
-    detection.def("encode_boxes", &tenzor::ops::encode_boxes,
-                  py::arg("boxes"), py::arg("anchors"),
-                  py::arg("weights") = std::vector<double>{1.0, 1.0, 1.0, 1.0},
-                  "Encode boxes relative to anchors");
-
-    detection.def("decode_boxes", &tenzor::ops::decode_boxes,
-                  py::arg("deltas"), py::arg("anchors"),
-                  py::arg("weights") = std::vector<double>{1.0, 1.0, 1.0, 1.0},
-                  "Decode boxes from deltas and anchors");
-
-    detection.def("clip_boxes_to_image", &tenzor::ops::clip_boxes_to_image,
-                  py::arg("boxes"), py::arg("height"), py::arg("width"),
-                  "Clip boxes to image boundaries");
-
-    detection.def("remove_small_boxes", &tenzor::ops::remove_small_boxes,
-                  py::arg("boxes"), py::arg("scores"), py::arg("min_size"),
-                  "Remove boxes smaller than min_size");
-
-    // =========================================================================
-    // Async Operations
-    // =========================================================================
-    auto async_ops = m.def_submodule("async_ops", "Asynchronous tensor operations");
-
-    async_ops.def("async_matmul", &tenzor::async_matmul,
-                  py::arg("a"), py::arg("b"),
-                  "Asynchronous matrix multiplication");
-
-    async_ops.def("async_add", &tenzor::async_add,
-                  py::arg("a"), py::arg("b"),
-                  "Asynchronous element-wise addition");
-
-    async_ops.def("async_mul", &tenzor::async_mul,
-                  py::arg("a"), py::arg("b"),
-                  "Asynchronous element-wise multiplication");
-
-    async_ops.def("async_sub", &tenzor::async_sub,
-                  py::arg("a"), py::arg("b"),
-                  "Asynchronous element-wise subtraction");
-
-    async_ops.def("async_div", &tenzor::async_div,
-                  py::arg("a"), py::arg("b"),
-                  "Asynchronous element-wise division");
-
-    async_ops.def("async_relu", &tenzor::async_relu,
-                  py::arg("input"),
-                  "Asynchronous ReLU activation");
-
-    async_ops.def("async_sigmoid", &tenzor::async_sigmoid,
-                  py::arg("input"),
-                  "Asynchronous sigmoid activation");
-
-    async_ops.def("async_tanh", &tenzor::async_tanh,
-                  py::arg("input"),
-                  "Asynchronous tanh activation");
-
-    async_ops.def("async_softmax", &tenzor::async_softmax,
-                  py::arg("input"), py::arg("dim") = -1,
-                  "Asynchronous softmax");
-
-    // =========================================================================
-    // Fused Operations
-    // =========================================================================
-    auto fused = m.def_submodule("fused", "Fused kernel operations");
-
-    fused.def("fused_linear_relu", &tenzor::ops::fused_linear_relu,
-              py::arg("input"), py::arg("weight"), py::arg("bias") = nullptr,
-              "Fused linear + ReLU (1.5-2x faster)");
-
-    fused.def("fused_conv2d_relu", &tenzor::ops::fused_conv2d_relu,
-              py::arg("input"), py::arg("weight"), py::arg("bias") = nullptr,
-              py::arg("stride") = 1, py::arg("padding") = 0,
-              "Fused conv2d + ReLU (1.8-2.5x faster)");
-
-    fused.def("fused_batchnorm_relu", &tenzor::ops::fused_batchnorm_relu,
-              py::arg("input"), py::arg("running_mean"), py::arg("running_var"),
-              py::arg("weight"), py::arg("bias"), py::arg("eps") = 1e-5f,
-              "Fused batchnorm + ReLU (1.6-2.2x faster)");
-
-    fused.def("fused_softmax_cross_entropy", &tenzor::ops::fused_softmax_cross_entropy,
-              py::arg("logits"), py::arg("targets"), py::arg("reduction") = "mean",
-              "Fused softmax + cross-entropy (2-3x faster, 50% less memory)");
-
-    fused.def("fused_add_relu", &tenzor::ops::fused_add_relu,
-              py::arg("a"), py::arg("b"),
-              "Fused add + ReLU for residual connections");
-
-    fused.def("fused_gelu", &tenzor::ops::fused_gelu,
-              py::arg("input"),
-              "Fused GELU activation (1.5x faster)");
-
-    fused.def("fused_layer_norm", &tenzor::ops::fused_layer_norm,
-              py::arg("input"), py::arg("normalized_shape"),
-              py::arg("weight"), py::arg("bias"), py::arg("eps") = 1e-5f,
-              "Fused layer normalization (1.4-2x faster)");
+    // tenzor.vision / detection / async_ops / fused submodules, extracted
+    // to python/bindings/bindings_vision_detection.cpp as part of P3.4.
+    tenzor::python::register_vision_detection(m);
 
     // =========================================================================
     // Data Transforms

@@ -292,6 +292,46 @@ target_link_libraries(tenzor_core PUBLIC
     ${CMAKE_DL_LIBS}
 )
 
+# ============================================================================
+# ONNX protobuf bindings
+# ============================================================================
+# The ONNX importer / exporter used to hand-roll protobuf wire-format
+# decoding, which was non-canonical (incompatible with onnxruntime /
+# netron) and a security risk on untrusted inputs. We now generate real
+# protobuf bindings from proto/onnx.proto and link libprotobuf. If
+# protobuf isn't found, the ONNX module falls back to a non-functional
+# stub so the core library still builds.
+find_package(Protobuf QUIET)
+if(Protobuf_FOUND)
+    find_program(TENZOR_PROTOC protoc REQUIRED)
+
+    set(ONNX_PROTO_SRC_DIR ${CMAKE_SOURCE_DIR}/proto)
+    set(ONNX_PROTO_GEN_DIR ${CMAKE_BINARY_DIR}/generated/onnx_proto)
+    file(MAKE_DIRECTORY ${ONNX_PROTO_GEN_DIR})
+
+    set(ONNX_PROTO_FILE ${ONNX_PROTO_SRC_DIR}/onnx.proto)
+    set(ONNX_PROTO_GEN_SRCS ${ONNX_PROTO_GEN_DIR}/onnx.pb.cc)
+    set(ONNX_PROTO_GEN_HDRS ${ONNX_PROTO_GEN_DIR}/onnx.pb.h)
+
+    add_custom_command(
+        OUTPUT ${ONNX_PROTO_GEN_SRCS} ${ONNX_PROTO_GEN_HDRS}
+        COMMAND ${TENZOR_PROTOC}
+            --proto_path=${ONNX_PROTO_SRC_DIR}
+            --cpp_out=${ONNX_PROTO_GEN_DIR}
+            ${ONNX_PROTO_FILE}
+        DEPENDS ${ONNX_PROTO_FILE}
+        COMMENT "Generating ONNX protobuf bindings from proto/onnx.proto"
+    )
+
+    target_sources(tenzor_core PRIVATE ${ONNX_PROTO_GEN_SRCS})
+    target_include_directories(tenzor_core PRIVATE ${ONNX_PROTO_GEN_DIR})
+    target_link_libraries(tenzor_core PRIVATE protobuf::libprotobuf)
+    target_compile_definitions(tenzor_core PRIVATE TENZOR_HAS_ONNX_PROTOBUF)
+    message(STATUS "ONNX: Using generated protobuf bindings (libprotobuf ${Protobuf_VERSION})")
+else()
+    message(WARNING "ONNX: protobuf not found; ONNX import/export will throw at runtime. Install libprotobuf-dev to enable.")
+endif()
+
 # Optional ModelHub dependencies (CURL + OpenSSL)
 if(TENZOR_BUILD_MODEL_HUB)
     find_package(CURL REQUIRED)

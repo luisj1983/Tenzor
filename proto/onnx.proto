@@ -1,0 +1,144 @@
+// Minimal canonical ONNX schema — field-number-compatible subset of the
+// upstream onnx.proto (github.com/onnx/onnx, revision compatible with IR 8).
+//
+// Only the messages and fields that Tenzor's importer/exporter actually
+// read or write are declared here. The field numbers match canonical ONNX
+// exactly, so output produced by Tenzor is consumable by onnxruntime /
+// netron / onnx-checker, and inputs produced by those tools are consumable
+// by Tenzor. Unknown fields (anything not declared below) are tolerated on
+// parse and preserved on serialize per standard protobuf wire semantics.
+//
+// If you need to extend Tenzor's ONNX coverage, add the field here first,
+// regenerate onnx.pb.{h,cc} via protoc, then wire it into importer.cpp /
+// exporter.cpp. Do NOT invent new field numbers — they must match upstream.
+//
+// Reference: https://github.com/onnx/onnx/blob/main/onnx/onnx.proto
+
+syntax = "proto3";
+
+package tenzor_onnx;
+
+message TensorShapeProto {
+  message Dimension {
+    // Exactly one of dim_value / dim_param is set.
+    int64 dim_value = 1;
+    string dim_param = 2;
+  }
+  repeated Dimension dim = 1;
+}
+
+message TypeProto {
+  message Tensor {
+    int32 elem_type = 1;            // ONNX DataType enum as int32
+    TensorShapeProto shape = 2;
+  }
+  // ONNX's TypeProto is a oneof over Tensor / Sequence / Map / ... . We only
+  // need the tensor branch for NN models; the rest fall through as unknown
+  // fields on parse.
+  Tensor tensor_type = 1;
+}
+
+message TensorProto {
+  enum DataType {
+    UNDEFINED = 0;
+    FLOAT = 1;
+    UINT8 = 2;
+    INT8 = 3;
+    UINT16 = 4;
+    INT16 = 5;
+    INT32 = 6;
+    INT64 = 7;
+    STRING = 8;
+    BOOL = 9;
+    FLOAT16 = 10;
+    DOUBLE = 11;
+    UINT32 = 12;
+    UINT64 = 13;
+    COMPLEX64 = 14;
+    COMPLEX128 = 15;
+    BFLOAT16 = 16;
+  }
+  repeated int64 dims = 1;             // shape
+  int32 data_type = 2;                 // DataType
+  string name = 8;
+  bytes raw_data = 9;                  // little-endian packed
+  // Typed data fields are declared so we can round-trip tensors that some
+  // ONNX producers emit without raw_data. The importer currently reads
+  // raw_data only; these fields are preserved as unknowns otherwise.
+  repeated float float_data = 4 [packed = true];
+  repeated int32 int32_data = 5 [packed = true];
+  repeated int64 int64_data = 7 [packed = true];
+  repeated double double_data = 10 [packed = true];
+}
+
+message AttributeProto {
+  enum AttributeType {
+    UNDEFINED = 0;
+    FLOAT = 1;
+    INT = 2;
+    STRING = 3;
+    TENSOR = 4;
+    GRAPH = 5;
+    SPARSE_TENSOR = 11;
+    TYPE_PROTO = 13;
+    FLOATS = 6;
+    INTS = 7;
+    STRINGS = 8;
+    TENSORS = 9;
+    GRAPHS = 10;
+    SPARSE_TENSORS = 12;
+    TYPE_PROTOS = 14;
+  }
+
+  string name = 1;
+  float f = 2;                          // single float
+  int64 i = 3;                          // single int
+  bytes s = 4;                          // single string / bytes
+  TensorProto t = 5;                    // single tensor
+  // Field 6 (g, GraphProto) is intentionally omitted — Tenzor does not
+  // read or write sub-graph attributes.
+  repeated float floats = 7;
+  repeated int64 ints = 8;
+  repeated bytes strings = 9;
+  // Field 10 (tensors) omitted.
+  AttributeType type = 20;              // tag for which payload is set
+}
+
+message ValueInfoProto {
+  string name = 1;
+  TypeProto type = 2;
+}
+
+message NodeProto {
+  repeated string input = 1;
+  repeated string output = 2;
+  string name = 3;
+  string op_type = 4;
+  repeated AttributeProto attribute = 5;
+  string domain = 7;                    // usually empty string = ai.onnx
+}
+
+message GraphProto {
+  repeated NodeProto node = 1;
+  string name = 2;
+  repeated TensorProto initializer = 5;
+  repeated ValueInfoProto input = 11;
+  repeated ValueInfoProto output = 12;
+  repeated ValueInfoProto value_info = 13;
+}
+
+message OperatorSetIdProto {
+  string domain = 1;
+  int64 version = 2;
+}
+
+message ModelProto {
+  int64 ir_version = 1;
+  repeated OperatorSetIdProto opset_import = 8;  // NOTE: canonical is 8
+  string producer_name = 2;
+  string producer_version = 3;
+  string domain = 4;
+  int64 model_version = 5;
+  string doc_string = 6;
+  GraphProto graph = 7;
+}

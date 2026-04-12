@@ -1,6 +1,12 @@
 /**
  * @file exporter.cpp
  * @brief Implementation of ONNX model export functionality
+ *
+ * As of the P3 pass, this exporter uses generated protobuf bindings from
+ * proto/onnx.proto (via onnx.pb.h) instead of a hand-rolled wire-format
+ * encoder. The output is now field-number-compatible with canonical
+ * upstream ONNX (IR version 8), so models exported from Tenzor can be
+ * loaded by onnxruntime / netron / onnx-checker without modification.
  */
 
 #include "../../include/tenzor/onnx/exporter.hpp"
@@ -13,6 +19,10 @@
 #include <algorithm>
 #include <cmath>
 #include <unordered_set>
+
+#ifdef TENZOR_HAS_ONNX_PROTOBUF
+#include "onnx.pb.h"
+#endif
 
 namespace tenzor {
 namespace onnx {
@@ -30,111 +40,6 @@ auto trace_custom_module(ONNXExporter& exporter,
                         const Variable& output,
                         const std::string& input_name,
                         const std::string& output_name) -> void;
-
-/**
- * @brief Write varint encoding (Protocol Buffers format)
- */
-auto write_varint(std::vector<uint8_t>& buffer, uint64_t value) -> void {
-    while (value >= 0x80) {
-        buffer.push_back(static_cast<uint8_t>((value & 0x7F) | 0x80));
-        value >>= 7;
-    }
-    buffer.push_back(static_cast<uint8_t>(value));
-}
-
-/**
- * @brief Write fixed32 (little-endian)
- */
-auto write_fixed32(std::vector<uint8_t>& buffer, uint32_t value) -> void {
-    buffer.push_back(static_cast<uint8_t>(value & 0xFF));
-    buffer.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
-    buffer.push_back(static_cast<uint8_t>((value >> 16) & 0xFF));
-    buffer.push_back(static_cast<uint8_t>((value >> 24) & 0xFF));
-}
-
-/**
- * @brief Write fixed64 (little-endian)
- */
-auto write_fixed64(std::vector<uint8_t>& buffer, uint64_t value) -> void {
-    for (int i = 0; i < 8; ++i) {
-        buffer.push_back(static_cast<uint8_t>((value >> (i * 8)) & 0xFF));
-    }
-}
-
-/**
- * @brief Write protobuf tag (field number + wire type)
- */
-auto write_tag(std::vector<uint8_t>& buffer, uint32_t field_number, uint32_t wire_type) -> void {
-    write_varint(buffer, (field_number << 3) | wire_type);
-}
-
-/**
- * @brief Write length-delimited field
- */
-auto write_length_delimited(std::vector<uint8_t>& buffer, uint32_t field_number,
-                            const std::vector<uint8_t>& data) -> void {
-    write_tag(buffer, field_number, 2); // Wire type 2 = length-delimited
-    write_varint(buffer, data.size());
-    buffer.insert(buffer.end(), data.begin(), data.end());
-}
-
-/**
- * @brief Write string field
- */
-auto write_string(std::vector<uint8_t>& buffer, uint32_t field_number,
-                 const std::string& value) -> void {
-    write_tag(buffer, field_number, 2);
-    write_varint(buffer, value.size());
-    buffer.insert(buffer.end(), value.begin(), value.end());
-}
-
-/**
- * @brief Write int64 field
- */
-auto write_int64(std::vector<uint8_t>& buffer, uint32_t field_number, int64_t value) -> void {
-    write_tag(buffer, field_number, 0); // Wire type 0 = varint
-    write_varint(buffer, static_cast<uint64_t>(value));
-}
-
-/**
- * @brief Write float field
- */
-auto write_float(std::vector<uint8_t>& buffer, uint32_t field_number, float value) -> void {
-    write_tag(buffer, field_number, 5); // Wire type 5 = fixed32
-    uint32_t bits;
-    std::memcpy(&bits, &value, sizeof(float));
-    write_fixed32(buffer, bits);
-}
-
-/**
- * @brief Serialize repeated int64 field (packed)
- */
-auto write_packed_int64(std::vector<uint8_t>& buffer, uint32_t field_number,
-                       const std::vector<int64_t>& values) -> void {
-    if (values.empty()) return;
-
-    std::vector<uint8_t> packed;
-    for (int64_t val : values) {
-        write_varint(packed, static_cast<uint64_t>(val));
-    }
-    write_length_delimited(buffer, field_number, packed);
-}
-
-/**
- * @brief Serialize repeated float field (packed)
- */
-auto write_packed_float(std::vector<uint8_t>& buffer, uint32_t field_number,
-                       const std::vector<float>& values) -> void {
-    if (values.empty()) return;
-
-    write_tag(buffer, field_number, 2);
-    write_varint(buffer, values.size() * sizeof(float));
-    for (float val : values) {
-        uint32_t bits;
-        std::memcpy(&bits, &val, sizeof(float));
-        write_fixed32(buffer, bits);
-    }
-}
 
 } // anonymous namespace
 
@@ -2448,168 +2353,123 @@ auto ONNXExporter::validate() const -> ValidationResult {
 // Export Functions
 
 auto ONNXExporter::serialize_model() -> std::vector<uint8_t> {
-    std::vector<uint8_t> buffer;
-
-    // This is a simplified ONNX protobuf serialization
-    // In production, you would use the official ONNX library (onnx.proto3)
-    // For now, we create a valid but simplified ONNX format
-
-    // ModelProto fields:
-    // 1: ir_version (int64)
-    // 2: opset_import (repeated OperatorSetIdProto)
-    // 7: graph (GraphProto)
-    // 8: producer_name (string)
-    // 9: producer_version (string)
-    // 10: domain (string)
-    // 11: model_version (int64)
-    // 12: doc_string (string)
-
-    // IR version (field 1)
-    write_int64(buffer, 1, 8); // ONNX IR version 8
-
-    // Opset import (field 2)
-    std::vector<uint8_t> opset_data;
-    write_int64(opset_data, 2, opset_version_); // version field
-    write_length_delimited(buffer, 2, opset_data);
-
-    // Producer name (field 8)
-    write_string(buffer, 8, producer_name_);
-
-    // Model version (field 11)
-    write_int64(buffer, 11, model_version_);
-
-    // Doc string (field 12)
+#ifdef TENZOR_HAS_ONNX_PROTOBUF
+    // Build a canonical ModelProto using the generated protobuf types.
+    // Field numbers match upstream onnx.proto (see proto/onnx.proto).
+    tenzor_onnx::ModelProto model;
+    model.set_ir_version(8);                           // canonical IR version 8
+    model.set_producer_name(producer_name_);
+    model.set_model_version(model_version_);
     if (!description_.empty()) {
-        write_string(buffer, 12, description_);
+        model.set_doc_string(description_);
     }
 
-    // Graph (field 7) - simplified
-    std::vector<uint8_t> graph_data;
+    auto* opset = model.add_opset_import();
+    opset->set_domain("");                             // ai.onnx (default)
+    opset->set_version(opset_version_);
 
-    // Graph name (field 2 in GraphProto)
-    write_string(graph_data, 2, graph_.name);
+    auto* graph_proto = model.mutable_graph();
+    graph_proto->set_name(graph_.name);
 
-    // Serialize nodes (field 1 in GraphProto)
+    // Build one NodeProto per ONNXExportNode.
     for (const auto& node : graph_.nodes) {
-        std::vector<uint8_t> node_data;
+        auto* n = graph_proto->add_node();
+        for (const auto& input  : node.inputs)  n->add_input(input);
+        for (const auto& output : node.outputs) n->add_output(output);
+        n->set_name(node.name);
+        n->set_op_type(node.op_type);
 
-        // Inputs (field 1)
-        for (const auto& input : node.inputs) {
-            write_string(node_data, 1, input);
-        }
+        auto set_attr_name_and_type = [](tenzor_onnx::AttributeProto* a,
+                                         const std::string& name,
+                                         tenzor_onnx::AttributeProto_AttributeType t) {
+            a->set_name(name);
+            a->set_type(t);
+        };
 
-        // Outputs (field 2)
-        for (const auto& output : node.outputs) {
-            write_string(node_data, 2, output);
-        }
-
-        // Name (field 3)
-        write_string(node_data, 3, node.name);
-
-        // Op type (field 4)
-        write_string(node_data, 4, node.op_type);
-
-        // Attributes (field 5) - simplified
         for (const auto& [key, val] : node.int_attrs) {
-            std::vector<uint8_t> attr_data;
-            write_string(attr_data, 1, key); // name
-            write_int64(attr_data, 2, 2); // type = INT
-            write_int64(attr_data, 3, val); // i
-            write_length_delimited(node_data, 5, attr_data);
+            auto* a = n->add_attribute();
+            set_attr_name_and_type(a, key, tenzor_onnx::AttributeProto_AttributeType_INT);
+            a->set_i(val);
         }
-
         for (const auto& [key, val] : node.float_attrs) {
-            std::vector<uint8_t> attr_data;
-            write_string(attr_data, 1, key); // name
-            write_int64(attr_data, 2, 1); // type = FLOAT
-            write_float(attr_data, 3, val); // f
-            write_length_delimited(node_data, 5, attr_data);
+            auto* a = n->add_attribute();
+            set_attr_name_and_type(a, key, tenzor_onnx::AttributeProto_AttributeType_FLOAT);
+            a->set_f(val);
         }
-
+        for (const auto& [key, val] : node.string_attrs) {
+            auto* a = n->add_attribute();
+            set_attr_name_and_type(a, key, tenzor_onnx::AttributeProto_AttributeType_STRING);
+            a->set_s(val);
+        }
         for (const auto& [key, vals] : node.ints_attrs) {
-            std::vector<uint8_t> attr_data;
-            write_string(attr_data, 1, key); // name
-            write_int64(attr_data, 2, 7); // type = INTS
-            write_packed_int64(attr_data, 4, vals); // ints
-            write_length_delimited(node_data, 5, attr_data);
+            auto* a = n->add_attribute();
+            set_attr_name_and_type(a, key, tenzor_onnx::AttributeProto_AttributeType_INTS);
+            for (auto v : vals) a->add_ints(v);
         }
-
-        write_length_delimited(graph_data, 1, node_data);
-    }
-
-    // Serialize initializers (field 5 in GraphProto)
-    for (const auto& tensor : graph_.initializers) {
-        std::vector<uint8_t> tensor_data;
-
-        // Dims (field 1)
-        write_packed_int64(tensor_data, 1, tensor.dims);
-
-        // Data type (field 2)
-        write_int64(tensor_data, 2, static_cast<int64_t>(tensor.dtype));
-
-        // Name (field 8)
-        write_string(tensor_data, 8, tensor.name);
-
-        // Raw data (field 9)
-        write_length_delimited(tensor_data, 9, tensor.raw_data);
-
-        write_length_delimited(graph_data, 5, tensor_data);
-    }
-
-    // Helper lambda to serialize a ValueInfo with dim_param support
-    auto serialize_value_info = [](const ONNXExportValueInfo& vi) -> std::vector<uint8_t> {
-        std::vector<uint8_t> value_info_data;
-
-        // Name (field 1)
-        write_string(value_info_data, 1, vi.name);
-
-        // Type (field 2) - tensor type
-        std::vector<uint8_t> type_data;
-        std::vector<uint8_t> tensor_type_data;
-
-        // Elem type (field 1)
-        write_int64(tensor_type_data, 1, static_cast<int64_t>(vi.dtype));
-
-        // Shape (field 2)
-        std::vector<uint8_t> shape_data;
-        for (int64_t i = 0; i < static_cast<int64_t>(vi.shape.size()); ++i) {
-            std::vector<uint8_t> dim_data;
-            auto param_it = vi.dim_params.find(i);
-            if (vi.shape[i] < 0 && param_it != vi.dim_params.end()) {
-                // Emit symbolic dim_param string for dynamic dimensions
-                write_string(dim_data, 2, param_it->second);
-            } else if (vi.shape[i] < 0) {
-                // Dynamic dim without explicit name: use generic param
-                write_string(dim_data, 2, "dynamic_" + std::to_string(i));
-            } else {
-                write_int64(dim_data, 1, vi.shape[i]); // dim_value
+        for (const auto& [key, vals] : node.floats_attrs) {
+            auto* a = n->add_attribute();
+            set_attr_name_and_type(a, key, tenzor_onnx::AttributeProto_AttributeType_FLOATS);
+            for (auto v : vals) a->add_floats(v);
+        }
+        for (const auto& [key, t] : node.tensor_attrs) {
+            auto* a = n->add_attribute();
+            set_attr_name_and_type(a, key, tenzor_onnx::AttributeProto_AttributeType_TENSOR);
+            auto* tp = a->mutable_t();
+            tp->set_name(t.name);
+            tp->set_data_type(static_cast<int32_t>(t.dtype));
+            for (auto d : t.dims) tp->add_dims(d);
+            if (!t.raw_data.empty()) {
+                tp->set_raw_data(std::string(t.raw_data.begin(), t.raw_data.end()));
             }
-            write_length_delimited(shape_data, 1, dim_data);
         }
-        write_length_delimited(tensor_type_data, 2, shape_data);
+    }
 
-        write_length_delimited(type_data, 1, tensor_type_data);
-        write_length_delimited(value_info_data, 2, type_data);
+    // Initializers.
+    for (const auto& tensor : graph_.initializers) {
+        auto* t = graph_proto->add_initializer();
+        t->set_name(tensor.name);
+        t->set_data_type(static_cast<int32_t>(tensor.dtype));
+        for (auto d : tensor.dims) t->add_dims(d);
+        if (!tensor.raw_data.empty()) {
+            t->set_raw_data(std::string(tensor.raw_data.begin(), tensor.raw_data.end()));
+        }
+    }
 
-        return value_info_data;
+    // ValueInfoProto builder with dim_param support.
+    auto build_value_info = [](tenzor_onnx::ValueInfoProto* vi,
+                               const ONNXExportValueInfo& src) {
+        vi->set_name(src.name);
+        auto* type = vi->mutable_type();
+        auto* tensor_type = type->mutable_tensor_type();
+        tensor_type->set_elem_type(static_cast<int32_t>(src.dtype));
+        auto* shape = tensor_type->mutable_shape();
+        for (int64_t i = 0; i < static_cast<int64_t>(src.shape.size()); ++i) {
+            auto* d = shape->add_dim();
+            auto param_it = src.dim_params.find(i);
+            if (src.shape[i] < 0 && param_it != src.dim_params.end()) {
+                d->set_dim_param(param_it->second);
+            } else if (src.shape[i] < 0) {
+                d->set_dim_param("dynamic_" + std::to_string(i));
+            } else {
+                d->set_dim_value(src.shape[i]);
+            }
+        }
     };
 
-    // Serialize inputs (field 11 in GraphProto)
     for (const auto& input : graph_.inputs) {
-        auto value_info_data = serialize_value_info(input);
-        write_length_delimited(graph_data, 11, value_info_data);
+        build_value_info(graph_proto->add_input(), input);
     }
-
-    // Serialize outputs (field 12 in GraphProto)
     for (const auto& output : graph_.outputs) {
-        auto value_info_data = serialize_value_info(output);
-        write_length_delimited(graph_data, 12, value_info_data);
+        build_value_info(graph_proto->add_output(), output);
     }
 
-    // Add graph to model
-    write_length_delimited(buffer, 7, graph_data);
-
-    return buffer;
+    const std::string out = model.SerializeAsString();
+    return std::vector<uint8_t>(out.begin(), out.end());
+#else
+    throw std::runtime_error(
+        "ONNXExporter::serialize_model: built without protobuf support. "
+        "Reconfigure with libprotobuf-dev installed and rebuild tenzor_core.");
+#endif
 }
 
 auto ONNXExporter::export_to_file(const std::string& filepath) -> void {

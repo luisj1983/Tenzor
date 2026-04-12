@@ -1,6 +1,13 @@
 /**
  * @file importer.cpp
  * @brief Implementation of ONNX model import functionality
+ *
+ * As of the P3 pass, this importer uses generated protobuf bindings from
+ * proto/onnx.proto (via onnx.pb.h) instead of a hand-rolled wire-format
+ * decoder. The hand-rolled version used non-canonical field numbers and
+ * could not interoperate with onnxruntime / netron; this path targets the
+ * canonical ONNX schema, so Tenzor-emitted and externally-produced models
+ * are bidirectionally compatible.
  */
 
 #include "../../include/tenzor/onnx/importer.hpp"
@@ -23,455 +30,152 @@
 #include <iostream>
 #include <fstream>
 
+#ifdef TENZOR_HAS_ONNX_PROTOBUF
+#include "onnx.pb.h"
+#endif
+
 namespace tenzor {
 namespace onnx {
 
 // ============================================================================
-// Helper Functions for Protobuf Parsing
+// Protobuf → Internal IR conversion
 // ============================================================================
 
 namespace {
 
-/**
- * @brief Read varint from buffer
- */
-auto read_varint(const uint8_t*& ptr, const uint8_t* end) -> uint64_t {
-    uint64_t value = 0;
-    int shift = 0;
-    while (ptr < end) {
-        uint8_t byte = *ptr++;
-        value |= static_cast<uint64_t>(byte & 0x7F) << shift;
-        if ((byte & 0x80) == 0) {
-            return value;
-        }
-        shift += 7;
-    }
-    throw std::runtime_error("Incomplete varint in protobuf");
-}
+#ifdef TENZOR_HAS_ONNX_PROTOBUF
 
-/**
- * @brief Read fixed32 from buffer
- */
-auto read_fixed32(const uint8_t*& ptr, const uint8_t* end) -> uint32_t {
-    if (ptr + 4 > end) {
-        throw std::runtime_error("Incomplete fixed32 in protobuf");
-    }
-    uint32_t value = 0;
-    for (int i = 0; i < 4; ++i) {
-        value |= static_cast<uint32_t>(*ptr++) << (i * 8);
-    }
-    return value;
-}
+// Canonical ONNX AttributeType enum values (from proto/onnx.proto). Kept
+// as plain integers here so the compile-time cost of including the full
+// generated header in every translation unit is avoided.
+constexpr int32_t kAttrTypeFloat  = 1;
+constexpr int32_t kAttrTypeInt    = 2;
+constexpr int32_t kAttrTypeString = 3;
+constexpr int32_t kAttrTypeTensor = 4;
+constexpr int32_t kAttrTypeFloats = 6;
+constexpr int32_t kAttrTypeInts   = 7;
 
-/**
- * @brief Read fixed64 from buffer
- */
-auto read_fixed64(const uint8_t*& ptr, const uint8_t* end) -> uint64_t {
-    if (ptr + 8 > end) {
-        throw std::runtime_error("Incomplete fixed64 in protobuf");
-    }
-    uint64_t value = 0;
-    for (int i = 0; i < 8; ++i) {
-        value |= static_cast<uint64_t>(*ptr++) << (i * 8);
-    }
-    return value;
-}
-
-/**
- * @brief Read length-delimited field
- */
-auto read_length_delimited(const uint8_t*& ptr, const uint8_t* end) -> std::vector<uint8_t> {
-    uint64_t length = read_varint(ptr, end);
-    if (ptr + length > end) {
-        throw std::runtime_error("Incomplete length-delimited field in protobuf");
-    }
-    std::vector<uint8_t> data(ptr, ptr + length);
-    ptr += length;
-    return data;
-}
-
-/**
- * @brief Read string field
- */
-auto read_string(const uint8_t*& ptr, const uint8_t* end) -> std::string {
-    auto data = read_length_delimited(ptr, end);
-    return std::string(data.begin(), data.end());
-}
-
-/**
- * @brief Parse ONNX TensorProto
- */
-auto parse_tensor(const std::vector<uint8_t>& data) -> ONNXTensorData {
+auto proto_to_ir_tensor(const tenzor_onnx::TensorProto& t) -> ONNXTensorData {
     ONNXTensorData tensor;
-    const uint8_t* ptr = data.data();
-    const uint8_t* end = ptr + data.size();
+    tensor.name = t.name();
+    tensor.dtype = static_cast<ONNXDataType>(t.data_type());
+    tensor.shape.assign(t.dims().begin(), t.dims().end());
 
-    while (ptr < end) {
-        uint64_t tag = read_varint(ptr, end);
-        uint32_t field_number = tag >> 3;
-        uint32_t wire_type = tag & 0x7;
-
-        switch (field_number) {
-            case 1: { // dims (repeated int64)
-                if (wire_type == 2) { // packed
-                    auto dims_data = read_length_delimited(ptr, end);
-                    const uint8_t* dims_ptr = dims_data.data();
-                    const uint8_t* dims_end = dims_ptr + dims_data.size();
-                    while (dims_ptr < dims_end) {
-                        tensor.shape.push_back(static_cast<int64_t>(read_varint(dims_ptr, dims_end)));
-                    }
-                } else { // individual varints
-                    tensor.shape.push_back(static_cast<int64_t>(read_varint(ptr, end)));
-                }
-                break;
-            }
-            case 2: { // data_type (int32)
-                tensor.dtype = static_cast<ONNXDataType>(read_varint(ptr, end));
-                break;
-            }
-            case 8: { // name (string)
-                tensor.name = read_string(ptr, end);
-                break;
-            }
-            case 9: { // raw_data (bytes)
-                tensor.raw_data = read_length_delimited(ptr, end);
-                break;
-            }
-            default:
-                // Skip unknown fields
-                if (wire_type == 0) {
-                    read_varint(ptr, end);
-                } else if (wire_type == 1) {
-                    read_fixed64(ptr, end);
-                } else if (wire_type == 2) {
-                    read_length_delimited(ptr, end);
-                } else if (wire_type == 5) {
-                    read_fixed32(ptr, end);
-                }
-                break;
-        }
+    if (!t.raw_data().empty()) {
+        const std::string& raw = t.raw_data();
+        tensor.raw_data.assign(raw.begin(), raw.end());
+    } else if (!t.float_data().empty()) {
+        // Producer used typed data instead of raw_data. Pack into raw_data
+        // for the existing ONNXTensorData::to_tensor path (little-endian).
+        tensor.raw_data.resize(static_cast<size_t>(t.float_data_size()) * sizeof(float));
+        std::memcpy(tensor.raw_data.data(), t.float_data().data(),
+                    tensor.raw_data.size());
+    } else if (!t.int32_data().empty()) {
+        tensor.raw_data.resize(static_cast<size_t>(t.int32_data_size()) * sizeof(int32_t));
+        std::memcpy(tensor.raw_data.data(), t.int32_data().data(),
+                    tensor.raw_data.size());
+    } else if (!t.int64_data().empty()) {
+        tensor.raw_data.resize(static_cast<size_t>(t.int64_data_size()) * sizeof(int64_t));
+        std::memcpy(tensor.raw_data.data(), t.int64_data().data(),
+                    tensor.raw_data.size());
+    } else if (!t.double_data().empty()) {
+        tensor.raw_data.resize(static_cast<size_t>(t.double_data_size()) * sizeof(double));
+        std::memcpy(tensor.raw_data.data(), t.double_data().data(),
+                    tensor.raw_data.size());
     }
-
     return tensor;
 }
 
-/**
- * @brief Parse ONNX AttributeProto
- */
-auto parse_attribute(const std::vector<uint8_t>& data) -> ONNXAttribute {
+auto proto_to_ir_attribute(const tenzor_onnx::AttributeProto& a) -> ONNXAttribute {
     ONNXAttribute attr;
-    const uint8_t* ptr = data.data();
-    const uint8_t* end = ptr + data.size();
+    attr.name = a.name();
+    const int32_t type = static_cast<int32_t>(a.type());
 
-    int32_t attr_type = 0;
-
-    while (ptr < end) {
-        uint64_t tag = read_varint(ptr, end);
-        uint32_t field_number = tag >> 3;
-        uint32_t wire_type = tag & 0x7;
-
-        switch (field_number) {
-            case 1: { // name (string)
-                attr.name = read_string(ptr, end);
-                break;
-            }
-            case 2: { // type (int32)
-                attr_type = static_cast<int32_t>(read_varint(ptr, end));
-                break;
-            }
-            case 3: { // i (int64)
-                attr.i = static_cast<int64_t>(read_varint(ptr, end));
-                break;
-            }
-            case 4: { // f (float)
-                uint32_t bits = read_fixed32(ptr, end);
-                float value;
-                std::memcpy(&value, &bits, sizeof(float));
-                attr.f = value;
-                break;
-            }
-            case 5: { // s (bytes/string)
-                attr.s = read_string(ptr, end);
-                break;
-            }
-            case 6: { // t (TensorProto)
-                auto tensor_data = read_length_delimited(ptr, end);
-                attr.tensor = parse_tensor(tensor_data);
-                break;
-            }
-            case 7: { // ints (repeated int64)
-                if (wire_type == 2) { // packed
-                    auto ints_data = read_length_delimited(ptr, end);
-                    const uint8_t* ints_ptr = ints_data.data();
-                    const uint8_t* ints_end = ints_ptr + ints_data.size();
-                    std::vector<int64_t> ints;
-                    while (ints_ptr < ints_end) {
-                        ints.push_back(static_cast<int64_t>(read_varint(ints_ptr, ints_end)));
-                    }
-                    attr.ints = ints;
-                }
-                break;
-            }
-            case 8: { // floats (repeated float)
-                if (wire_type == 2) { // packed
-                    auto floats_data = read_length_delimited(ptr, end);
-                    const uint8_t* floats_ptr = floats_data.data();
-                    std::vector<float> floats;
-                    while (floats_ptr < floats_data.data() + floats_data.size()) {
-                        uint32_t bits = read_fixed32(floats_ptr, floats_data.data() + floats_data.size());
-                        float value;
-                        std::memcpy(&value, &bits, sizeof(float));
-                        floats.push_back(value);
-                    }
-                    attr.floats = floats;
-                }
-                break;
-            }
-            default:
-                // Skip unknown fields
-                if (wire_type == 0) {
-                    read_varint(ptr, end);
-                } else if (wire_type == 1) {
-                    read_fixed64(ptr, end);
-                } else if (wire_type == 2) {
-                    read_length_delimited(ptr, end);
-                } else if (wire_type == 5) {
-                    read_fixed32(ptr, end);
-                }
-                break;
-        }
+    // Canonical ONNX marks the payload via `type`. We honour that, but also
+    // fall back to whichever typed field is populated for producers that
+    // leave `type` at UNDEFINED.
+    if (type == kAttrTypeInt || (a.i() != 0 && type == 0)) {
+        attr.i = static_cast<int64_t>(a.i());
     }
-
+    if (type == kAttrTypeFloat || (a.f() != 0.0f && type == 0)) {
+        attr.f = a.f();
+    }
+    if (type == kAttrTypeString || (!a.s().empty() && type == 0)) {
+        attr.s = a.s();
+    }
+    if (type == kAttrTypeTensor && a.has_t()) {
+        attr.tensor = proto_to_ir_tensor(a.t());
+    }
+    if (type == kAttrTypeInts || (!a.ints().empty() && type == 0)) {
+        std::vector<int64_t> ints(a.ints().begin(), a.ints().end());
+        attr.ints = std::move(ints);
+    }
+    if (type == kAttrTypeFloats || (!a.floats().empty() && type == 0)) {
+        std::vector<float> floats(a.floats().begin(), a.floats().end());
+        attr.floats = std::move(floats);
+    }
     return attr;
 }
 
-/**
- * @brief Parse ONNX NodeProto
- */
-auto parse_node(const std::vector<uint8_t>& data) -> ONNXImportNode {
+auto proto_to_ir_node(const tenzor_onnx::NodeProto& n) -> ONNXImportNode {
     ONNXImportNode node;
-    const uint8_t* ptr = data.data();
-    const uint8_t* end = ptr + data.size();
-
-    while (ptr < end) {
-        uint64_t tag = read_varint(ptr, end);
-        uint32_t field_number = tag >> 3;
-        uint32_t wire_type = tag & 0x7;
-
-        switch (field_number) {
-            case 1: { // input (repeated string)
-                node.inputs.push_back(read_string(ptr, end));
-                break;
-            }
-            case 2: { // output (repeated string)
-                node.outputs.push_back(read_string(ptr, end));
-                break;
-            }
-            case 3: { // name (string)
-                node.name = read_string(ptr, end);
-                break;
-            }
-            case 4: { // op_type (string)
-                node.op_type = read_string(ptr, end);
-                break;
-            }
-            case 5: { // attribute (repeated AttributeProto)
-                auto attr_data = read_length_delimited(ptr, end);
-                auto attr = parse_attribute(attr_data);
-                node.attributes[attr.name] = attr;
-                break;
-            }
-            default:
-                if (wire_type == 0) {
-                    read_varint(ptr, end);
-                } else if (wire_type == 1) {
-                    read_fixed64(ptr, end);
-                } else if (wire_type == 2) {
-                    read_length_delimited(ptr, end);
-                } else if (wire_type == 5) {
-                    read_fixed32(ptr, end);
-                }
-                break;
-        }
+    node.op_type = n.op_type();
+    node.name    = n.name();
+    node.inputs.assign(n.input().begin(), n.input().end());
+    node.outputs.assign(n.output().begin(), n.output().end());
+    for (const auto& a : n.attribute()) {
+        auto attr = proto_to_ir_attribute(a);
+        node.attributes[attr.name] = std::move(attr);
     }
-
     return node;
 }
 
-/**
- * @brief Parse ONNX ValueInfoProto
- */
-auto parse_value_info(const std::vector<uint8_t>& data) -> ONNXImportValueInfo {
-    ONNXImportValueInfo value_info;
-    const uint8_t* ptr = data.data();
-    const uint8_t* end = ptr + data.size();
-
-    while (ptr < end) {
-        uint64_t tag = read_varint(ptr, end);
-        uint32_t field_number = tag >> 3;
-        uint32_t wire_type = tag & 0x7;
-
-        switch (field_number) {
-            case 1: { // name (string)
-                value_info.name = read_string(ptr, end);
-                break;
-            }
-            case 2: { // type (TypeProto) - simplified parsing
-                auto type_data = read_length_delimited(ptr, end);
-                const uint8_t* type_ptr = type_data.data();
-                const uint8_t* type_end = type_ptr + type_data.size();
-
-                while (type_ptr < type_end) {
-                    uint64_t type_tag = read_varint(type_ptr, type_end);
-                    uint32_t type_field = type_tag >> 3;
-                    uint32_t type_wire = type_tag & 0x7;
-
-                    if (type_field == 1 && type_wire == 2) { // tensor_type
-                        auto tensor_type_data = read_length_delimited(type_ptr, type_end);
-                        const uint8_t* tt_ptr = tensor_type_data.data();
-                        const uint8_t* tt_end = tt_ptr + tensor_type_data.size();
-
-                        while (tt_ptr < tt_end) {
-                            uint64_t tt_tag = read_varint(tt_ptr, tt_end);
-                            uint32_t tt_field = tt_tag >> 3;
-                            uint32_t tt_wire = tt_tag & 0x7;
-
-                            if (tt_field == 1 && tt_wire == 0) { // elem_type
-                                value_info.dtype = static_cast<ONNXDataType>(read_varint(tt_ptr, tt_end));
-                            } else if (tt_field == 2 && tt_wire == 2) { // shape
-                                auto shape_data = read_length_delimited(tt_ptr, tt_end);
-                                const uint8_t* shape_ptr = shape_data.data();
-                                const uint8_t* shape_end = shape_ptr + shape_data.size();
-
-                                while (shape_ptr < shape_end) {
-                                    uint64_t shape_tag = read_varint(shape_ptr, shape_end);
-                                    uint32_t shape_field = shape_tag >> 3;
-                                    uint32_t shape_wire = shape_tag & 0x7;
-
-                                    if (shape_field == 1 && shape_wire == 2) { // dim
-                                        auto dim_data = read_length_delimited(shape_ptr, shape_end);
-                                        const uint8_t* dim_ptr = dim_data.data();
-                                        const uint8_t* dim_end = dim_ptr + dim_data.size();
-
-                                        int64_t dim_value = -1;
-                                        while (dim_ptr < dim_end) {
-                                            uint64_t dim_tag = read_varint(dim_ptr, dim_end);
-                                            uint32_t dim_field = dim_tag >> 3;
-                                            if (dim_field == 1) { // dim_value
-                                                dim_value = static_cast<int64_t>(read_varint(dim_ptr, dim_end));
-                                            } else {
-                                                // Skip dim_param (dynamic dimension)
-                                                if ((dim_tag & 0x7) == 2) {
-                                                    read_length_delimited(dim_ptr, dim_end);
-                                                } else if ((dim_tag & 0x7) == 0) {
-                                                    read_varint(dim_ptr, dim_end);
-                                                }
-                                            }
-                                        }
-                                        value_info.shape.push_back(dim_value);
-                                    } else {
-                                        // Skip unknown fields
-                                        if (shape_wire == 0) {
-                                            read_varint(shape_ptr, shape_end);
-                                        } else if (shape_wire == 2) {
-                                            read_length_delimited(shape_ptr, shape_end);
-                                        }
-                                    }
-                                }
-                            } else {
-                                // Skip unknown fields
-                                if (tt_wire == 0) {
-                                    read_varint(tt_ptr, tt_end);
-                                } else if (tt_wire == 2) {
-                                    read_length_delimited(tt_ptr, tt_end);
-                                }
-                            }
-                        }
-                    } else {
-                        // Skip unknown type fields
-                        if (type_wire == 0) {
-                            read_varint(type_ptr, type_end);
-                        } else if (type_wire == 2) {
-                            read_length_delimited(type_ptr, type_end);
-                        }
-                    }
+auto proto_to_ir_value_info(const tenzor_onnx::ValueInfoProto& vi) -> ONNXImportValueInfo {
+    ONNXImportValueInfo info;
+    info.name = vi.name();
+    if (vi.has_type()) {
+        const auto& type = vi.type();
+        // Only tensor_type is supported (see comment on TypeProto in
+        // proto/onnx.proto). Other branches silently fall through.
+        if (type.has_tensor_type()) {
+            const auto& tt = type.tensor_type();
+            info.dtype = static_cast<ONNXDataType>(tt.elem_type());
+            if (tt.has_shape()) {
+                for (const auto& d : tt.shape().dim()) {
+                    // Unknown / dynamic dimensions are signalled as -1.
+                    info.shape.push_back(
+                        d.dim_value() != 0 ? static_cast<int64_t>(d.dim_value()) : -1);
                 }
-                break;
             }
-            default:
-                if (wire_type == 0) {
-                    read_varint(ptr, end);
-                } else if (wire_type == 2) {
-                    read_length_delimited(ptr, end);
-                }
-                break;
         }
     }
-
-    return value_info;
+    return info;
 }
 
-/**
- * @brief Parse ONNX GraphProto
- */
-auto parse_graph(const std::vector<uint8_t>& data) -> ONNXGraphData {
+auto proto_to_ir_graph(const tenzor_onnx::GraphProto& g) -> ONNXGraphData {
     ONNXGraphData graph;
-    const uint8_t* ptr = data.data();
-    const uint8_t* end = ptr + data.size();
-
-    while (ptr < end) {
-        uint64_t tag = read_varint(ptr, end);
-        uint32_t field_number = tag >> 3;
-        uint32_t wire_type = tag & 0x7;
-
-        switch (field_number) {
-            case 1: { // node (repeated NodeProto)
-                auto node_data = read_length_delimited(ptr, end);
-                graph.nodes.push_back(parse_node(node_data));
-                break;
-            }
-            case 2: { // name (string)
-                graph.name = read_string(ptr, end);
-                break;
-            }
-            case 5: { // initializer (repeated TensorProto)
-                auto tensor_data = read_length_delimited(ptr, end);
-                auto tensor = parse_tensor(tensor_data);
-                graph.initializers[tensor.name] = tensor;
-                break;
-            }
-            case 11: { // input (repeated ValueInfoProto)
-                auto input_data = read_length_delimited(ptr, end);
-                graph.inputs.push_back(parse_value_info(input_data));
-                break;
-            }
-            case 12: { // output (repeated ValueInfoProto)
-                auto output_data = read_length_delimited(ptr, end);
-                graph.outputs.push_back(parse_value_info(output_data));
-                break;
-            }
-            case 13: { // value_info (repeated ValueInfoProto)
-                auto vi_data = read_length_delimited(ptr, end);
-                auto vi = parse_value_info(vi_data);
-                graph.value_info[vi.name] = vi;
-                break;
-            }
-            default:
-                if (wire_type == 0) {
-                    read_varint(ptr, end);
-                } else if (wire_type == 1) {
-                    read_fixed64(ptr, end);
-                } else if (wire_type == 2) {
-                    read_length_delimited(ptr, end);
-                } else if (wire_type == 5) {
-                    read_fixed32(ptr, end);
-                }
-                break;
-        }
+    graph.name = g.name();
+    for (const auto& n : g.node()) {
+        graph.nodes.push_back(proto_to_ir_node(n));
     }
-
+    for (const auto& init : g.initializer()) {
+        auto tensor = proto_to_ir_tensor(init);
+        graph.initializers[tensor.name] = std::move(tensor);
+    }
+    for (const auto& i : g.input()) {
+        graph.inputs.push_back(proto_to_ir_value_info(i));
+    }
+    for (const auto& o : g.output()) {
+        graph.outputs.push_back(proto_to_ir_value_info(o));
+    }
+    for (const auto& vi : g.value_info()) {
+        auto info = proto_to_ir_value_info(vi);
+        graph.value_info[info.name] = std::move(info);
+    }
     return graph;
 }
+
+#endif // TENZOR_HAS_ONNX_PROTOBUF
 
 auto shape_to_string(const std::vector<int64_t>& shape) -> std::string {
     std::ostringstream oss;
@@ -678,74 +382,40 @@ auto ONNXImporter::get_model_data() const -> const ONNXModelData& {
 }
 
 auto ONNXImporter::parse_model(const std::vector<uint8_t>& bytes) -> ONNXModelData {
+#ifdef TENZOR_HAS_ONNX_PROTOBUF
+    tenzor_onnx::ModelProto proto;
+    if (!proto.ParseFromArray(bytes.data(), static_cast<int>(bytes.size()))) {
+        throw std::runtime_error(
+            "ONNXImporter::parse_model: failed to deserialize ModelProto — "
+            "input is not a valid ONNX/protobuf message");
+    }
+
     ONNXModelData model;
-    const uint8_t* ptr = bytes.data();
-    const uint8_t* end = ptr + bytes.size();
+    model.ir_version     = static_cast<int64_t>(proto.ir_version());
+    model.model_version  = static_cast<int64_t>(proto.model_version());
+    model.producer_name  = proto.producer_name();
+    model.doc_string     = proto.doc_string();
 
-    while (ptr < end) {
-        uint64_t tag = read_varint(ptr, end);
-        uint32_t field_number = tag >> 3;
-        uint32_t wire_type = tag & 0x7;
-
-        switch (field_number) {
-            case 1: { // ir_version (int64)
-                model.ir_version = static_cast<int64_t>(read_varint(ptr, end));
-                break;
-            }
-            case 2: { // opset_import (repeated OperatorSetIdProto)
-                auto opset_data = read_length_delimited(ptr, end);
-                const uint8_t* opset_ptr = opset_data.data();
-                const uint8_t* opset_end = opset_ptr + opset_data.size();
-
-                while (opset_ptr < opset_end) {
-                    uint64_t opset_tag = read_varint(opset_ptr, opset_end);
-                    uint32_t opset_field = opset_tag >> 3;
-                    if (opset_field == 2) { // version
-                        model.opset_version = static_cast<int64_t>(read_varint(opset_ptr, opset_end));
-                    } else {
-                        // Skip other fields
-                        if ((opset_tag & 0x7) == 0) {
-                            read_varint(opset_ptr, opset_end);
-                        } else if ((opset_tag & 0x7) == 2) {
-                            read_length_delimited(opset_ptr, opset_end);
-                        }
-                    }
-                }
-                break;
-            }
-            case 7: { // graph (GraphProto)
-                auto graph_data = read_length_delimited(ptr, end);
-                model.graph = parse_graph(graph_data);
-                break;
-            }
-            case 8: { // producer_name (string)
-                model.producer_name = read_string(ptr, end);
-                break;
-            }
-            case 11: { // model_version (int64)
-                model.model_version = static_cast<int64_t>(read_varint(ptr, end));
-                break;
-            }
-            case 12: { // doc_string (string)
-                model.doc_string = read_string(ptr, end);
-                break;
-            }
-            default:
-                // Skip unknown fields
-                if (wire_type == 0) {
-                    read_varint(ptr, end);
-                } else if (wire_type == 1) {
-                    read_fixed64(ptr, end);
-                } else if (wire_type == 2) {
-                    read_length_delimited(ptr, end);
-                } else if (wire_type == 5) {
-                    read_fixed32(ptr, end);
-                }
-                break;
+    // opset_version: pick the first (and usually only) ai.onnx opset entry.
+    // Multi-domain opsets are collapsed to a single int, matching the
+    // pre-migration behaviour.
+    for (const auto& opset : proto.opset_import()) {
+        if (opset.domain().empty() || opset.domain() == "ai.onnx") {
+            model.opset_version = static_cast<int64_t>(opset.version());
+            break;
         }
     }
 
+    if (proto.has_graph()) {
+        model.graph = proto_to_ir_graph(proto.graph());
+    }
     return model;
+#else
+    (void)bytes;
+    throw std::runtime_error(
+        "ONNXImporter::parse_model: built without protobuf support. "
+        "Reconfigure with libprotobuf-dev installed and rebuild tenzor_core.");
+#endif
 }
 
 auto ONNXImporter::validate_model(const ONNXModelData& model) -> void {
@@ -1008,42 +678,56 @@ auto ONNXImporter::convert_matmul(const ONNXImportNode& node) -> void {
 auto ONNXImporter::convert_gemm(const ONNXImportNode& node) -> std::shared_ptr<nn::Module> {
     // ONNX Gemm: Y = alpha * A @ B^T + beta * C
     // Tenzor Linear: Y = X @ W^T + b
-    // For standard Linear layer: alpha=1, beta=1, transB=1
+    //
+    // Tenzor exports Linear(in_features, out_features) as Gemm with
+    // alpha=beta=1, transB=1, weight stored as (out, in) on the wire (the
+    // native Tenzor layout). ONNX Gemm with transB=1 takes B of shape
+    // (N, K) and transposes it to (K, N) before the multiply; for our
+    // case N=out, K=in, so X[M, in] @ B^T[in, out] → [M, out]. The wire
+    // shape therefore matches Tenzor's (out, in) directly.
+    //
+    // For transB=0 the stored layout is (in, out) and we must transpose
+    // to get Tenzor's (out, in) convention.
 
-    auto weight = get_input(node.inputs[1]); // Weight matrix
+    auto weight = get_input(node.inputs[1]);
     std::optional<Tensor> bias;
     if (node.inputs.size() > 2) {
         bias = get_input(node.inputs[2]);
     }
 
-    // Get attributes
-    float alpha = node.get_attr("alpha").value_or(ONNXAttribute{}).get_float(1.0f);
-    float beta = node.get_attr("beta").value_or(ONNXAttribute{}).get_float(1.0f);
+    float alpha    = node.get_attr("alpha").value_or(ONNXAttribute{}).get_float(1.0f);
+    float beta     = node.get_attr("beta").value_or(ONNXAttribute{}).get_float(1.0f);
     int64_t transB = node.get_attr("transB").value_or(ONNXAttribute{}).get_int(0);
 
-    // Validate standard Linear layer configuration
     if (alpha != 1.0f || beta != 1.0f) {
         throw std::runtime_error("ONNX Gemm with alpha!=1 or beta!=1 not supported");
     }
 
-    auto weight_shape = weight.shape();
-    int64_t in_features = weight_shape[1];
-    int64_t out_features = weight_shape[0];
-
-    if (transB == 1) {
-        // Weight is already transposed in ONNX (matches Tenzor Linear)
-        std::swap(in_features, out_features);
+    const auto weight_shape = weight.shape();
+    if (weight_shape.size() != 2) {
+        throw std::runtime_error(
+            "ONNX Gemm: weight must be 2D, got ndim=" +
+            std::to_string(weight_shape.size()));
     }
 
-    // Create Linear layer
-    auto linear = std::make_shared<nn::Linear>(in_features, out_features, bias.has_value());
+    int64_t out_features;
+    int64_t in_features;
+    Tensor tenzor_weight;
+    if (transB == 1) {
+        out_features = weight_shape[0];
+        in_features  = weight_shape[1];
+        tenzor_weight = weight;
+    } else {
+        in_features  = weight_shape[0];
+        out_features = weight_shape[1];
+        tenzor_weight = weight.transpose(0, 1);
+    }
 
-    // Set weights
-    linear->weight()->tensor() = transB == 1 ? weight : weight.transpose(0, 1);
+    auto linear = std::make_shared<nn::Linear>(in_features, out_features, bias.has_value());
+    linear->weight()->tensor() = tenzor_weight;
     if (bias.has_value()) {
         linear->bias()->tensor() = bias.value();
     }
-
     return linear;
 }
 
