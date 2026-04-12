@@ -10,6 +10,33 @@
  * // Use fp8_tensor for compute...
  * Tensor output = dequantize_from_fp8(fp8_tensor, params.scale);
  * @endcode
+ *
+ * # Backend support matrix
+ *
+ *   Backend   | FP8 cast | FP8 matmul | Notes
+ *   ----------|----------|------------|------------------------------------
+ *   CPU       | native   | emulated   | Bit-level emulation, widens to F32
+ *   CUDA      | native   | hardware   | Hopper (SM 9.0+) tensor cores via cublasLt
+ *   ROCm      | fallback | fallback   | MI300 hardware path not yet wired;
+ *                                       falls back via CPU roundtrip. Enable
+ *                                       TENZOR_WARN_CPU_ROUNDTRIP=1 to detect.
+ *   OneAPI    | native   | emulated   | No Intel GPU FP8 hardware support
+ *   Vulkan    | fallback | fallback   | No portable FP8 compute-shader
+ *                                       intrinsics; falls back via CPU. Enable
+ *                                       TENZOR_WARN_CPU_ROUNDTRIP=1 to detect.
+ *   MPS       | fallback | fallback   | macOS only; same CPU-roundtrip story.
+ *
+ * `native` means the backend has a registered Cast kernel for the FP8
+ * dtype and computes quantize/dequantize on-device. `emulated` means
+ * the backend widens to Float32 for compute but uses local hardware
+ * for the FP32 work. `fallback` means tensors are moved CPU → cast
+ * → back to the device, which incurs a PCIe/memory-bus round-trip per
+ * FP8 op and is too slow for training loops — acceptable for ad-hoc
+ * inference or experimentation.
+ *
+ * Native Vulkan and ROCm FP8 paths are tracked as follow-up work and
+ * require hardware access (Vulkan FP8 intrinsics + MI300 MFMA instructions)
+ * that the project CI currently does not have.
  */
 
 #pragma once
@@ -20,6 +47,20 @@
 #include <utility>
 
 namespace tenzor {
+
+/**
+ * @brief Query whether a backend has a native FP8 Cast kernel.
+ *
+ * When this returns `false`, calls to `quantize_to_fp8(x)` with `x`
+ * on the given device still work but route through CPU for the FP8
+ * conversion step. Enable `TENZOR_WARN_CPU_ROUNDTRIP=1` to get a
+ * per-tuple warning the first time each GPU→CPU round-trip happens.
+ *
+ * @param device_type The backend device type to query.
+ * @return true if the backend has a registered Cast kernel that
+ *         understands FP8_E4M3 / FP8_E5M2; false otherwise.
+ */
+auto fp8_is_native(Device::Type device_type) -> bool;
 
 /**
  * @brief Per-tensor scaling parameters for FP8 quantization.

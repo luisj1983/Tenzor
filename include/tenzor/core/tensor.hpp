@@ -1534,4 +1534,30 @@ private:
 auto quantize_per_tensor(const Tensor& input, double scale, int64_t zero_point,
                          DType dtype = DType::QInt8) -> Tensor;
 
+/**
+ * @brief Query whether a backend has native int4 packed quantization support.
+ *
+ * Int4 packs two 4-bit values per byte (QInt4x2). Unlike FP8, int4 is a
+ * pure software format — any backend that can shuffle bits in a compute
+ * kernel can implement it. As of the current pass, only CPU has an int4
+ * quantized-linear path (src/backends/cpu/kernels/quantization/
+ * quantized_linear_int4.cpp). CUDA and ROCm support int4 via standard
+ * quantized ops; Vulkan, OneAPI, and MPS do not.
+ *
+ * When this returns `false`, int4 quantized tensors on the given device
+ * must be unpacked to int8 / float on CPU before compute. There is no
+ * transparent fallback today (unlike FP8, which uses `.to()` to route
+ * through CPU automatically).
+ *
+ * Backend matrix:
+ *   CPU    → native (ARM + x86 SIMD paths)
+ *   CUDA   → native via src/backends/cuda/kernels/quantization
+ *   ROCm   → native via src/backends/rocm/kernels/quantization
+ *   OneAPI → NOT supported
+ *   Vulkan → NOT supported (int8 shaders exist; int4 would require
+ *            bit-unpack compute shaders that haven't been written)
+ *   MPS    → NOT supported
+ */
+auto int4_is_native(Device::Type device_type) -> bool;
+
 } // namespace tenzor

@@ -49,6 +49,34 @@ namespace tenzor {
  * @see Backend for backend interface
  * @see backend_registry() for global singleton access
  */
+/**
+ * # Plugin backend story (P4.6)
+ *
+ * `BackendLoader` supports dlopen-ing shared libraries that register
+ * backends at runtime. That is **NOT** a full plugin story: the
+ * `Device::Type` enum in `include/tenzor/core/device.hpp` is a closed
+ * `uint8_t` with a `COUNT` sentinel, and dispatch tables are
+ * `std::array<BackendDispatchTable, DEVICE_TYPE_COUNT>` (see
+ * `include/tenzor/backend/dispatch_table.hpp:570`). A dynamically-loaded
+ * backend therefore cannot allocate a new `Device::Type` at runtime —
+ * it must re-use one of the seven built-in values (CPU, CUDA, ROCm,
+ * Vulkan, OneAPI, MPS, plus the reserved sentinel).
+ *
+ * `load_backend()` is useful today for:
+ *   - Splitting the build so `tenzor_core` doesn't hard-link every
+ *     backend at compile time (each backend becomes its own
+ *     `tenzor_backend_<name>.so`, loaded by `core/init.cpp`).
+ *   - Out-of-tree forks that mirror an existing `Device::Type` (e.g.
+ *     a fork that re-implements the ROCm path against HIP 6.2).
+ *
+ * It is **not** useful for:
+ *   - Adding a genuinely new accelerator type without rebuilding
+ *     `tenzor_core`. That requires re-opening the `Device::Type` enum
+ *     and the fixed dispatch-table array — a strategic change tracked
+ *     as a future RFC. Until then, `load_backend()` expects every
+ *     plugin to claim one of the known `Device::Type` slots.
+ */
+
 class BackendLoader {
 public:
     BackendLoader() = default;
@@ -66,6 +94,11 @@ public:
      *
      * Loads a backend plugin from a shared library file. The library must
      * export a "create_backend" symbol returning BackendFactory.
+     *
+     * @note The loaded backend MUST return a `Device::Type` that is
+     *       already defined in `include/tenzor/core/device.hpp`. See
+     *       the class-level comment above for the plugin-backend
+     *       limitations.
      *
      * @param library_path Path to shared library (.so/.dll/.dylib)
      * @return Backend on success, error message on failure

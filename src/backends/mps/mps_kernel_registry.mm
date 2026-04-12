@@ -254,7 +254,85 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
             return result[0].to(dev);
         });
 
-    // TODO: Tier 3 (completeness) - RNN, 3D ops, FFT, sparse, linalg
+    // ================================================================
+    // Tier 3: CPU-roundtrip fallbacks for completeness
+    // ================================================================
+    // These enable MPS models that touch RNN / linalg / FFT / sparse /
+    // signal-processing ops to load and run on macOS without crashing
+    // with "no kernel registered". They're slow (GPU→CPU→GPU per op)
+    // but unblock the Tier-1 scaffold. Native Metal shaders can
+    // replace these incrementally as demand warrants.
+    //
+    // Two helper lambdas capture the shared forward/scatter pattern
+    // so each op only has to name its OpId.
+    auto mps_roundtrip_multi = [&](OpId op) {
+        table.register_kernel(op, [op](std::span<const Tensor> inputs,
+                                        const OpAttributes& attrs) {
+            auto dev = inputs[0].device();
+            std::vector<Tensor> cpu_inputs;
+            cpu_inputs.reserve(inputs.size());
+            for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
+            auto cpu_result = dispatch(op, cpu_inputs, attrs);
+            std::vector<Tensor> gpu_result;
+            gpu_result.reserve(cpu_result.size());
+            for (auto& t : cpu_result) gpu_result.push_back(t.to(dev));
+            return gpu_result;
+        });
+    };
+    auto mps_roundtrip_single = [&](OpId op) {
+        table.register_single_output_kernel(op,
+            [op](std::span<const Tensor> inputs,
+                 const OpAttributes& attrs) -> Tensor {
+                auto dev = inputs[0].device();
+                std::vector<Tensor> cpu_inputs;
+                cpu_inputs.reserve(inputs.size());
+                for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
+                auto cpu_result = dispatch(op, cpu_inputs, attrs);
+                return cpu_result[0].to(dev);
+            });
+    };
+
+    // FFT family (1-D and N-D; 2-D uses FFTN internally in Tenzor)
+    mps_roundtrip_single(OpId::FFT);
+    mps_roundtrip_single(OpId::IFFT);
+    mps_roundtrip_single(OpId::RFFT);
+    mps_roundtrip_single(OpId::IRFFT);
+    mps_roundtrip_single(OpId::FFTN);
+    mps_roundtrip_single(OpId::IFFTN);
+
+    // Linalg family — multi-output ops first
+    mps_roundtrip_multi(OpId::LinalgSVD);
+    mps_roundtrip_multi(OpId::LinalgQR);
+    mps_roundtrip_multi(OpId::LinalgEigh);
+    mps_roundtrip_multi(OpId::LinalgLU);
+    // Single-output linalg
+    mps_roundtrip_single(OpId::LinalgDet);
+    mps_roundtrip_single(OpId::LinalgInv);
+    mps_roundtrip_single(OpId::LinalgSolve);
+    mps_roundtrip_single(OpId::LinalgCholesky);
+    mps_roundtrip_single(OpId::LinalgLUSolve);
+
+    // Sparse family
+    mps_roundtrip_single(OpId::SparseSpMM);
+    mps_roundtrip_single(OpId::SparseSpMV);
+    mps_roundtrip_single(OpId::SparseToDense);
+    mps_roundtrip_multi(OpId::DenseToSparse);
+    mps_roundtrip_single(OpId::SparseAdd);
+
+    // Signal processing
+    mps_roundtrip_single(OpId::STFT);
+    mps_roundtrip_single(OpId::ISTFT);
+    mps_roundtrip_single(OpId::CDist);
+
+    // 3D / extended conv variants (most common ones needed for video models)
+    mps_roundtrip_single(OpId::Conv3dForward);
+    mps_roundtrip_single(OpId::MaxPool3dForward);
+    mps_roundtrip_single(OpId::AvgPool3dForward);
+
+    // Note: LSTM/GRU/RNN are complex multi-input ops; their Tier-3
+    // roundtrip registrations should be added alongside a real macOS
+    // test to verify the dispatch shape matches. Deferred until a
+    // macOS CI target exists.
 }
 
 } // namespace tenzor::mps

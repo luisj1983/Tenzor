@@ -399,87 +399,35 @@ auto tanh(const Variable& input) -> Variable {
 }
 
 auto leaky_relu(const Variable& input, double negative_slope) -> Variable {
-    NewOpAttributes attrs;
-    attrs.set(AttrKey::Alpha, static_cast<double>(negative_slope));
-    std::vector<Tensor> inputs = {input.tensor()};
-    auto result = dispatch(OpId::LeakyReLU, inputs, attrs)[0];
-
-    if (!input.requires_grad() || !is_grad_enabled()) {
-        return Variable(result, false);
-    }
-
-    // Set up autograd
-    auto grad_fn = std::make_shared<LeakyReLUBackward>(negative_slope);
-    grad_fn->save_for_backward({input.tensor()});
-
-    std::vector<std::shared_ptr<Function>> next_funcs;
-    if (input.grad_fn()) {
-        next_funcs.push_back(input.grad_fn());
-    }
-    grad_fn->set_next_functions(next_funcs);
-
-    std::vector<Variable> input_vars;
-    input_vars.push_back(input);
-    grad_fn->set_input_variables(input_vars);
-
-    Variable output(result, true);
-    output.set_grad_fn(grad_fn);
-    return output;
+    // P4.2: delegate to the tenzor-level op which uses LeakyReluBackward
+    // (a real backward_with_variables that threads through Variable-level
+    // ops) so higher-order gradients work. Previously this path used the
+    // local LeakyReLUBackward stub.
+    return ::tenzor::leaky_relu(input, static_cast<float>(negative_slope));
 }
 
 auto gelu(const Variable& input, const std::string& approximate) -> Variable {
-    // Tanh approximation: GELU(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
+    // P4.2: delegate to the tenzor-level op for higher-order support via
+    // GeluBackward in function_activations.cpp. The tanh approximation
+    // path (when approximate == "tanh") composes existing Variable ops
+    // which already support higher-order naturally.
     if (approximate == "tanh") {
-        // Compute using existing ops for autograd support
         auto x = input;
         auto x_cubed = x * x * x;
-        // Scale factors as scalar tensors
         Tensor coef_t = full({1}, 0.044715f, input.tensor().dtype(), input.tensor().device());
         Tensor sqrt_2_pi_t = full({1}, static_cast<float>(std::sqrt(2.0 / M_PI)),
                                   input.tensor().dtype(), input.tensor().device());
         Tensor half_t = full({1}, 0.5f, input.tensor().dtype(), input.tensor().device());
         Tensor one_t = full({1}, 1.0f, input.tensor().dtype(), input.tensor().device());
-
         Variable coef(coef_t, false);
         Variable sqrt_2_pi(sqrt_2_pi_t, false);
         Variable half(half_t, false);
         Variable one(one_t, false);
-
         auto inner = sqrt_2_pi * (x + coef * x_cubed);
-        auto tanh_val = nn::tanh(inner);
+        auto tanh_val = nn::tanh(inner);  // nn::tanh already routes to the _AG path
         return half * x * (one + tanh_val);
     }
-
-    // Exact GELU via erf dispatch
-    if (!input.requires_grad() || !is_grad_enabled()) {
-        std::vector<Tensor> inputs = {input.tensor()};
-        auto result = dispatch(OpId::Gelu, inputs)[0];
-        return Variable(result, false);
-    }
-
-    // Compute forward
-    std::vector<Tensor> inputs_vec = {input.tensor()};
-    auto result_tensor = dispatch(OpId::Gelu, inputs_vec)[0];
-
-    // Set up autograd
-    auto grad_fn = std::make_shared<GeLUBackward>();
-    // Only save input — backward dispatches to GeluBackward kernel which only needs input
-    grad_fn->save_for_backward({input.tensor()});
-
-    std::vector<std::shared_ptr<Function>> next_funcs;
-    if (input.grad_fn()) {
-        next_funcs.push_back(input.grad_fn());
-    }
-    grad_fn->set_next_functions(next_funcs);
-
-    // Track input variable for gradient accumulation
-    std::vector<Variable> input_vars;
-    input_vars.push_back(input);
-    grad_fn->set_input_variables(input_vars);
-
-    Variable output(result_tensor, true);
-    output.set_grad_fn(grad_fn);
-    return output;
+    return ::tenzor::gelu(input);
 }
 
 auto softmax(const Variable& input, int64_t dim) -> Variable {
@@ -515,38 +463,9 @@ auto ELU::forward_impl(const Variable& input) -> Variable {
 ELU::ELU(double alpha) : alpha_(alpha) {}
 
 auto elu(const Variable& input, double alpha) -> Variable {
-    if (!input.requires_grad() || !is_grad_enabled()) {
-        NewOpAttributes attrs;
-        attrs.set(AttrKey::Alpha, static_cast<double>(alpha));
-        std::vector<Tensor> inputs = {input.tensor()};
-        auto result = dispatch(OpId::Elu, inputs, attrs)[0];
-        return Variable(result, false);
-    }
-
-    // Compute forward
-    NewOpAttributes attrs;
-    attrs.set(AttrKey::Alpha, static_cast<double>(alpha));
-    std::vector<Tensor> inputs_vec = {input.tensor()};
-    auto result_tensor = dispatch(OpId::Elu, inputs_vec, attrs)[0];
-
-    // Set up autograd
-    auto grad_fn = std::make_shared<ELUBackward>(alpha);
-    grad_fn->save_for_backward({result_tensor});  // Save output for backward
-
-    std::vector<std::shared_ptr<Function>> next_funcs;
-    if (input.grad_fn()) {
-        next_funcs.push_back(input.grad_fn());
-    }
-    grad_fn->set_next_functions(next_funcs);
-
-    // Track input variable for gradient accumulation
-    std::vector<Variable> input_vars;
-    input_vars.push_back(input);
-    grad_fn->set_input_variables(input_vars);
-
-    Variable output(result_tensor, true);
-    output.set_grad_fn(grad_fn);
-    return output;
+    // P4.2: delegate to the tenzor-level op which uses EluBackward (real
+    // backward_with_variables).
+    return ::tenzor::elu(input, static_cast<float>(alpha));
 }
 
 // CELU: α · ELU(x/α, 1). Pure Variable-level composition — autograd threads
@@ -575,34 +494,8 @@ auto SELU::forward_impl(const Variable& input) -> Variable {
 }
 
 auto selu(const Variable& input) -> Variable {
-    if (!input.requires_grad() || !is_grad_enabled()) {
-        std::vector<Tensor> inputs = {input.tensor()};
-        auto result = dispatch(OpId::Selu, inputs)[0];
-        return Variable(result, false);
-    }
-
-    // Compute forward
-    std::vector<Tensor> inputs_vec = {input.tensor()};
-    auto result_tensor = dispatch(OpId::Selu, inputs_vec)[0];
-
-    // Set up autograd
-    auto grad_fn = std::make_shared<SELUBackward>();
-    grad_fn->save_for_backward({result_tensor});  // Save output for backward
-
-    std::vector<std::shared_ptr<Function>> next_funcs;
-    if (input.grad_fn()) {
-        next_funcs.push_back(input.grad_fn());
-    }
-    grad_fn->set_next_functions(next_funcs);
-
-    // Track input variable for gradient accumulation
-    std::vector<Variable> input_vars;
-    input_vars.push_back(input);
-    grad_fn->set_input_variables(input_vars);
-
-    Variable output(result_tensor, true);
-    output.set_grad_fn(grad_fn);
-    return output;
+    // P4.2: delegate for higher-order support via SeluBackward.
+    return ::tenzor::selu(input);
 }
 
 auto Swish::forward_impl(const Variable& input) -> Variable {
@@ -645,34 +538,8 @@ auto Mish::forward_impl(const Variable& input) -> Variable {
 }
 
 auto mish(const Variable& input) -> Variable {
-    if (!input.requires_grad() || !is_grad_enabled()) {
-        std::vector<Tensor> inputs = {input.tensor()};
-        auto result = dispatch(OpId::Mish, inputs)[0];
-        return Variable(result, false);
-    }
-
-    // Compute forward
-    std::vector<Tensor> inputs_vec = {input.tensor()};
-    auto result_tensor = dispatch(OpId::Mish, inputs_vec)[0];
-
-    // Set up autograd
-    auto grad_fn = std::make_shared<MishBackward>();
-    grad_fn->save_for_backward({input.tensor()});  // Save input for backward
-
-    std::vector<std::shared_ptr<Function>> next_funcs;
-    if (input.grad_fn()) {
-        next_funcs.push_back(input.grad_fn());
-    }
-    grad_fn->set_next_functions(next_funcs);
-
-    // Track input variable for gradient accumulation
-    std::vector<Variable> input_vars;
-    input_vars.push_back(input);
-    grad_fn->set_input_variables(input_vars);
-
-    Variable output(result_tensor, true);
-    output.set_grad_fn(grad_fn);
-    return output;
+    // P4.2: delegate for higher-order support via MishBackward.
+    return ::tenzor::mish(input);
 }
 
 // In-place activation functions

@@ -2103,4 +2103,22 @@ auto quantize_per_tensor(const Tensor& input, double scale, int64_t zero_point,
     return result.to(input.device());
 }
 
+auto int4_is_native(Device::Type device_type) -> bool {
+    // See tenzor.hpp for the full matrix. CPU/CUDA/ROCm have int4
+    // quantized kernels; Vulkan/OneAPI/MPS do not and would need a
+    // software bit-unpack compute shader that hasn't been written yet.
+    switch (device_type) {
+        case Device::Type::CPU:
+        case Device::Type::CUDA:
+        case Device::Type::ROCm:
+            return true;
+        case Device::Type::OneAPI:
+        case Device::Type::Vulkan:
+        case Device::Type::MPS:
+            return false;
+        default:
+            return false;
+    }
+}
+
 } // namespace tenzor
