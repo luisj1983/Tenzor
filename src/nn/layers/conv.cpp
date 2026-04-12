@@ -1221,10 +1221,19 @@ public:
     }
 
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        const Tensor& grad_output = grad_outputs[0];
-        const Tensor& input = saved_tensors_[0];
-        const Tensor& weight = saved_tensors_[1];
+        Tensor grad_output = grad_outputs[0];
+        Tensor input = saved_tensors_[0];
+        Tensor weight = saved_tensors_[1];
         bool has_bias = saved_tensors_.size() > 2;
+
+        // Float16: upcast to Float32 for cuDNN backend compatibility.
+        DType orig_dtype = grad_output.dtype();
+        bool needs_upcast = (orig_dtype == DType::Float16);
+        if (needs_upcast) {
+            grad_output = grad_output.to(DType::Float32);
+            input = input.to(DType::Float32);
+            weight = weight.to(DType::Float32);
+        }
 
         auto shape_to_str = [](std::span<const int64_t> s) {
             std::string r;
@@ -1254,10 +1263,15 @@ public:
         std::vector<Tensor> bw_inputs = {grad_output, input, weight};
         auto grad_weight = dispatch<OpId::ConvTranspose3dBackwardWeight>(bw_inputs, bw_attrs)[0];
 
+        if (needs_upcast) {
+            grad_input = grad_input.to(orig_dtype);
+            grad_weight = grad_weight.to(orig_dtype);
+        }
+
         if (has_bias) {
-            // grad_bias = sum(grad_output, dims=[0,2,3,4])
             std::vector<Tensor> bb_inputs = {grad_output};
             auto grad_bias = dispatch<OpId::ConvTranspose3dBackwardBias>(bb_inputs)[0];
+            if (needs_upcast) grad_bias = grad_bias.to(orig_dtype);
             return {grad_input, grad_weight, grad_bias};
         }
         return {grad_input, grad_weight};

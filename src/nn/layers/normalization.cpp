@@ -1374,10 +1374,25 @@ public:
             auto rs = rstd_orig.contiguous();
             auto wt = weight_orig.contiguous();
 
+            // Upcast Float16/Float64 to Float32 for backend kernels that
+            // only support Float32 internally (ROCm GroupNorm, etc.)
+            bool needs_cast = (original_dtype != DType::Float32);
+            if (needs_cast) {
+                go = go.to(DType::Float32);
+                inp = inp.to(DType::Float32);
+                mn = mn.to(DType::Float32);
+                rs = rs.to(DType::Float32);
+                wt = wt.to(DType::Float32);
+            }
+
             OpAttributes attrs;
             attrs.set(AttrKey::NumGroups, num_groups_);
             std::vector<Tensor> inputs_vec = {go, inp, mn, rs, wt};
             auto results = dispatch<OpId::GroupNormBackward>(inputs_vec, attrs);
+
+            if (needs_cast) {
+                for (auto& r : results) r = r.to(original_dtype);
+            }
             return results;
         }
 

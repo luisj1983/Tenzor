@@ -444,6 +444,11 @@ auto SparseTensor::to_csr() const -> SparseTensor {
         throw std::runtime_error("to_csr: only 2D sparse tensors supported");
     }
 
+    // CSC and BSR: convert to COO first, then COO→CSR below.
+    if (layout_ == SparseLayout::CSC || layout_ == SparseLayout::BSR) {
+        return to_coo().to_csr();
+    }
+
     // GPU-native path: use cusparseXcoo2csr / rocsparse_coo2csr directly
     // on the device, avoiding expensive GPU->CPU->GPU round-trips.
 #ifdef TENZOR_HAS_CUSPARSE
@@ -457,7 +462,7 @@ auto SparseTensor::to_csr() const -> SparseTensor {
     }
 #endif
 
-    // CPU path: stage indices and values to host, run histogram + prefix-sum
+    // CPU COO path: stage indices and values to host, run histogram + prefix-sum
     // + col fill, then transfer the resulting CSR back to the source device.
     const auto orig_device = values_.device();
     auto coo = coalesce();

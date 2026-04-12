@@ -78,15 +78,31 @@ public:
         if (input.device().type != Device::Type::CPU &&
             is_op_supported(OpId::BatchNorm2dBackward, input.device().type) &&
             (input.dtype() == DType::Float32 || input.dtype() == DType::Float16 || input.dtype() == DType::Float64)) {
-            // Dispatch to backend kernel for BatchNorm backward
-            // inputs: [grad_output, input, gamma, saved_mean, saved_inv_var]
+            // For Float16: upcast to Float32 before dispatch. BatchNorm
+            // statistics (mean, invstd) are computed in Float32 even for F16
+            // inputs, so the saved tensors may already be F32. Upcasting all
+            // inputs avoids dtype mismatches inside the backend kernel.
+            DType fast_orig_dtype = input.dtype();
+            bool fast_upcast = (fast_orig_dtype == DType::Float16);
+            if (fast_upcast) {
+                grad_output = grad_output.to(DType::Float32);
+                input = input.to(DType::Float32);
+                weight = weight.to(DType::Float32);
+                mean = mean.to(DType::Float32);
+                invstd = invstd.to(DType::Float32);
+            }
+
             OpAttributes backward_attrs;
             backward_attrs.set(AttrKey::Eps, static_cast<float>(eps_));
 
             std::vector<Tensor> backward_inputs = {grad_output, input, weight, mean, invstd};
             std::vector<Tensor> backward_results = dispatch(OpId::BatchNorm2dBackward, backward_inputs, backward_attrs);
 
-            // Return gradients in the order of input_vars: [input, weight, bias]
+            if (fast_upcast) {
+                return {backward_results[0].to(fast_orig_dtype),
+                        backward_results[1].to(fast_orig_dtype),
+                        backward_results[2].to(fast_orig_dtype)};
+            }
             return {backward_results[0], backward_results[1], backward_results[2]};
         }
 

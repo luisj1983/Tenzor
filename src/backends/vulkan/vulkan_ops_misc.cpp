@@ -1937,11 +1937,10 @@ auto VulkanBackend::dispatchFusedAdagradStep(
  * @brief Strided fill — fill non-contiguous tensor with a value.
  */
 auto VulkanBackend::dispatchStridedFill(Tensor& input, float value) -> void {
-    if (input.is_contiguous()) {
-        // Contiguous path: just use regular fill
-        input = dispatchFill(input, value);
-        return;
-    }
+    // Always use the strided fill shader to write into the existing buffer.
+    // The previous contiguous fast-path called dispatchFill() which creates a
+    // NEW tensor, replacing input's impl_ and losing the version counter.
+    // For in-place fill, we must write to the existing allocation.
 
     int32_t device_id = input.device().index;
     bool is_f64 = (input.dtype() == DType::Float64);
