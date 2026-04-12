@@ -4,6 +4,26 @@
 #include <numeric>
 #include <stdexcept>
 
+// Forward declarations for GPU-native sparse format conversions.
+// These symbols live in the backend shared objects (tenzor_backend_cuda.so,
+// tenzor_backend_rocm.so) loaded via dlopen. Guarded by compile-time flags
+// so the linker doesn't complain when a backend is absent.
+#ifdef TENZOR_HAS_CUSPARSE
+namespace tenzor::cuda {
+SparseTensor cuda_coo_to_csr(const SparseTensor& sparse);
+SparseTensor cuda_coalesce(const SparseTensor& sparse);
+SparseTensor cuda_coo_to_csc(const SparseTensor& sparse);
+} // namespace tenzor::cuda
+#endif
+
+#ifdef TENZOR_HAS_ROCSPARSE
+namespace tenzor::rocm {
+SparseTensor rocm_coo_to_csr(const SparseTensor& sparse);
+SparseTensor rocm_coalesce(const SparseTensor& sparse);
+SparseTensor rocm_coo_to_csc(const SparseTensor& sparse);
+} // namespace tenzor::rocm
+#endif
+
 namespace tenzor {
 
 auto SparseTensor::sparse_coo(const Tensor& indices, const Tensor& values,
@@ -424,10 +444,21 @@ auto SparseTensor::to_csr() const -> SparseTensor {
         throw std::runtime_error("to_csr: only 2D sparse tensors supported");
     }
 
-    // Same host-vs-device pointer hazard as coalesce/to_sparse: the
-    // histogram + prefix-sum + col fill loop runs on the host, so we
-    // stage indices and values to CPU and transfer the resulting CSR
-    // back to the source device at the end.
+    // GPU-native path: use cusparseXcoo2csr / rocsparse_coo2csr directly
+    // on the device, avoiding expensive GPU->CPU->GPU round-trips.
+#ifdef TENZOR_HAS_CUSPARSE
+    if (values_.device().type == Device::Type::CUDA) {
+        return cuda::cuda_coo_to_csr(*this);
+    }
+#endif
+#ifdef TENZOR_HAS_ROCSPARSE
+    if (values_.device().type == Device::Type::ROCm) {
+        return rocm::rocm_coo_to_csr(*this);
+    }
+#endif
+
+    // CPU path: stage indices and values to host, run histogram + prefix-sum
+    // + col fill, then transfer the resulting CSR back to the source device.
     const auto orig_device = values_.device();
     auto coo = coalesce();
     auto idx = coo.indices_.to(Device::cpu()).contiguous();
@@ -519,11 +550,24 @@ auto SparseTensor::coalesce() const -> SparseTensor {
         return result;
     }
 
-    // Coalesce runs on the host — the sort/merge is a pure-CPU loop over
-    // idx_ptr[...] and vp[...]. If the sparse tensor is on a GPU the
-    // contiguous() call just returns a device-resident tensor, and then
-    // .data<T>() yields a device pointer that host code can't deref
-    // (segfault). Stage indices and values to CPU, do the work there,
+    // GPU-native path: sort + reduce_by_key entirely on device using
+    // thrust, avoiding the GPU->CPU->GPU round-trip.
+#ifdef TENZOR_HAS_CUSPARSE
+    if (indices_.device().type == Device::Type::CUDA) {
+        auto result = cuda::cuda_coalesce(*this);
+        result.coalesced_ = true;
+        return result;
+    }
+#endif
+#ifdef TENZOR_HAS_ROCSPARSE
+    if (indices_.device().type == Device::Type::ROCm) {
+        auto result = rocm::rocm_coalesce(*this);
+        result.coalesced_ = true;
+        return result;
+    }
+#endif
+
+    // CPU path: stage indices and values to host, sort/merge there,
     // then transfer the result back to the source device at the end.
     const auto orig_device = indices_.device();
     auto idx = indices_.to(Device::cpu()).contiguous();
@@ -779,7 +823,20 @@ auto SparseTensor::to_csc() const -> SparseTensor {
         throw std::runtime_error("to_csc: only 2D sparse tensors supported");
     }
 
-    // Convert to COO first, then build CSC
+    // GPU-native path: sort by (col, row) and build ccol_indices entirely
+    // on device using thrust, avoiding GPU->CPU->GPU round-trips.
+#ifdef TENZOR_HAS_CUSPARSE
+    if (values_.device().type == Device::Type::CUDA) {
+        return cuda::cuda_coo_to_csc(*this);
+    }
+#endif
+#ifdef TENZOR_HAS_ROCSPARSE
+    if (values_.device().type == Device::Type::ROCm) {
+        return rocm::rocm_coo_to_csc(*this);
+    }
+#endif
+
+    // CPU path: convert to COO first, then build CSC
     auto coo = to_coo();
     auto idx = coo.indices_.contiguous();
     auto vals = coo.values_.contiguous();

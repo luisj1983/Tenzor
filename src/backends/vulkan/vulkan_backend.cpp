@@ -791,11 +791,10 @@ auto VulkanBackend::recommended_workgroup_2d(GpuVendor vendor, OpKind op)
     -> std::pair<uint32_t, uint32_t> {
     // Defaults are chosen to match each vendor's subgroup width in the
     // inner dimension so one row of the tile fits in one warp/wave. The
-    // total product is 256 — identical to the current 16x16 baked into
-    // the compute shaders — so returning these numbers only reshapes the
-    // dispatch grid, not the per-workgroup thread count. Real
-    // per-vendor tuning (swapping shader variants with different
-    // local_size declarations) is the Phase 2.2 follow-up.
+    // total product is 256, matching the baked-in thread count. Matmul
+    // shaders receive these values via specialization constants
+    // (TILE_X / TILE_Y), which set both local_size and shared-memory
+    // tile dimensions at pipeline creation time.
     switch (op) {
         case OpKind::Matmul:
             switch (vendor) {

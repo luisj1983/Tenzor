@@ -429,5 +429,305 @@ auto sparse_add_kernel(const SparseTensor& A, const Tensor& B, sycl::queue& queu
     return result;
 }
 
+// ============================================================================
+// SpGEMM: C = A * B  (CSR sparse A, CSR sparse B -> CSR sparse C)
+// ============================================================================
+
+auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
+                   sycl::queue& queue) -> SparseTensor {
+#ifdef TENZOR_HAS_ONEMKL
+    if (A.layout() != SparseLayout::CSR || B.layout() != SparseLayout::CSR) {
+        throw std::runtime_error("oneapi spgemm_kernel requires CSR format for both inputs");
+    }
+
+    const auto& a_shape = A.shape();
+    const auto& b_shape = B.shape();
+    int64_t M = a_shape[0];
+    int64_t K = a_shape[1];
+    int64_t N = b_shape[1];
+
+    if (K != b_shape[0]) {
+        throw std::runtime_error("oneapi spgemm_kernel: inner dimensions must match");
+    }
+    if (A.dtype() != B.dtype()) {
+        throw std::runtime_error("oneapi spgemm_kernel: dtype mismatch");
+    }
+
+    auto a_crow = A.crow_indices();
+    auto a_col  = A.col_indices();
+    auto a_vals = A.values();
+
+    auto b_crow = B.crow_indices();
+    auto b_col  = B.col_indices();
+    auto b_vals = B.values();
+
+    DType dtype = a_vals.dtype();
+
+    // oneMKL sparse::gemm for sparse-sparse multiply requires setting up
+    // two matrix handles (A, B) and calling gemm with a dense output.
+    // The oneMKL sparse::gemm signature operates on sparse A * dense B,
+    // so for true SpGEMM we convert B to dense, compute, then sparsify.
+    // This is the standard approach when the vendor library doesn't expose
+    // a native sparse-sparse multiply with sparse output.
+    //
+    // Step 1: Convert B to dense
+    Tensor B_dense = sparse_to_dense_kernel(B, queue);
+
+    // Step 2: Use SpMM (sparse A * dense B) to get dense C
+    Tensor C_dense = spmm_kernel(A, B_dense, queue);
+
+    // Step 3: Convert dense C back to sparse CSR
+    // Build CSR from dense: scan for nonzeros
+    if (dtype == DType::Float32) {
+        // Transfer to host for CSR construction
+        std::vector<float> host_data(static_cast<size_t>(M * N));
+        queue.memcpy(host_data.data(), C_dense.data<float>(),
+                     static_cast<size_t>(M * N) * sizeof(float)).wait();
+
+        std::vector<std::int32_t> crow(static_cast<size_t>(M + 1), 0);
+        std::vector<std::int32_t> cols;
+        std::vector<float> vals;
+
+        for (int64_t i = 0; i < M; ++i) {
+            crow[static_cast<size_t>(i + 1)] = crow[static_cast<size_t>(i)];
+            for (int64_t j = 0; j < N; ++j) {
+                float v = host_data[static_cast<size_t>(i * N + j)];
+                if (v != 0.0f) {
+                    cols.push_back(static_cast<std::int32_t>(j));
+                    vals.push_back(v);
+                    crow[static_cast<size_t>(i + 1)]++;
+                }
+            }
+        }
+
+        int64_t nnz = static_cast<int64_t>(vals.size());
+        Tensor c_crow({M + 1}, DType::Int32, C_dense.device());
+        Tensor c_col({nnz}, DType::Int32, C_dense.device());
+        Tensor c_vals({nnz}, dtype, C_dense.device());
+
+        queue.memcpy(c_crow.data<std::int32_t>(), crow.data(),
+                     static_cast<size_t>(M + 1) * sizeof(std::int32_t)).wait();
+        queue.memcpy(c_col.data<std::int32_t>(), cols.data(),
+                     static_cast<size_t>(nnz) * sizeof(std::int32_t)).wait();
+        queue.memcpy(c_vals.data<float>(), vals.data(),
+                     static_cast<size_t>(nnz) * sizeof(float)).wait();
+
+        return SparseTensor::sparse_csr(c_crow, c_col, c_vals, {M, N});
+    } else if (dtype == DType::Float64) {
+        std::vector<double> host_data(static_cast<size_t>(M * N));
+        queue.memcpy(host_data.data(), C_dense.data<double>(),
+                     static_cast<size_t>(M * N) * sizeof(double)).wait();
+
+        std::vector<std::int32_t> crow(static_cast<size_t>(M + 1), 0);
+        std::vector<std::int32_t> cols;
+        std::vector<double> vals;
+
+        for (int64_t i = 0; i < M; ++i) {
+            crow[static_cast<size_t>(i + 1)] = crow[static_cast<size_t>(i)];
+            for (int64_t j = 0; j < N; ++j) {
+                double v = host_data[static_cast<size_t>(i * N + j)];
+                if (v != 0.0) {
+                    cols.push_back(static_cast<std::int32_t>(j));
+                    vals.push_back(v);
+                    crow[static_cast<size_t>(i + 1)]++;
+                }
+            }
+        }
+
+        int64_t nnz = static_cast<int64_t>(vals.size());
+        Tensor c_crow({M + 1}, DType::Int32, C_dense.device());
+        Tensor c_col({nnz}, DType::Int32, C_dense.device());
+        Tensor c_vals({nnz}, dtype, C_dense.device());
+
+        queue.memcpy(c_crow.data<std::int32_t>(), crow.data(),
+                     static_cast<size_t>(M + 1) * sizeof(std::int32_t)).wait();
+        queue.memcpy(c_col.data<std::int32_t>(), cols.data(),
+                     static_cast<size_t>(nnz) * sizeof(std::int32_t)).wait();
+        queue.memcpy(c_vals.data<double>(), vals.data(),
+                     static_cast<size_t>(nnz) * sizeof(double)).wait();
+
+        return SparseTensor::sparse_csr(c_crow, c_col, c_vals, {M, N});
+    } else {
+        throw std::runtime_error("oneapi spgemm_kernel: unsupported dtype (requires Float32 or Float64)");
+    }
+#else
+    throw std::runtime_error("oneapi spgemm_kernel requires oneMKL (TENZOR_HAS_ONEMKL not defined)");
+#endif
+}
+
+// ============================================================================
+// SparseTrsv: solve L*x = b  (or U*x = b) for a single RHS vector
+// ============================================================================
+
+auto sparse_trsv_kernel(const SparseTensor& L, const Tensor& b, bool upper,
+                        sycl::queue& queue) -> Tensor {
+#ifdef TENZOR_HAS_ONEMKL
+    if (L.layout() != SparseLayout::CSR) {
+        throw std::runtime_error("oneapi sparse_trsv_kernel requires CSR format");
+    }
+
+    const auto& shape = L.shape();
+    int64_t N = shape[0];
+    if (shape[1] != N) {
+        throw std::runtime_error("oneapi sparse_trsv_kernel: L must be square");
+    }
+    if (b.shape()[0] != N || b.ndim() != 1) {
+        throw std::runtime_error("oneapi sparse_trsv_kernel: b must be 1D with length N");
+    }
+
+    auto crow = L.crow_indices();
+    auto col  = L.col_indices();
+    auto vals = L.values();
+    DType dtype = vals.dtype();
+
+    Tensor x({N}, dtype, vals.device());
+
+    ::oneapi::mkl::sparse::matrix_handle_t handle = nullptr;
+
+    auto uplo = upper ? ::oneapi::mkl::uplo::upper : ::oneapi::mkl::uplo::lower;
+
+    if (dtype == DType::Float32) {
+        ::oneapi::mkl::sparse::init_matrix_handle(&handle);
+        ::oneapi::mkl::sparse::set_csr_data(
+            queue, handle,
+            static_cast<std::int64_t>(N),
+            static_cast<std::int64_t>(N),
+            ::oneapi::mkl::index_base::zero,
+            crow.data<std::int32_t>(),
+            col.data<std::int32_t>(),
+            vals.data<float>()).wait();
+
+        ::oneapi::mkl::sparse::trsv(
+            queue, uplo,
+            ::oneapi::mkl::transpose::nontrans,
+            ::oneapi::mkl::diag::nonunit,
+            1.0f, handle,
+            b.data<float>(),
+            x.data<float>()).wait();
+
+        ::oneapi::mkl::sparse::release_matrix_handle(queue, &handle).wait();
+    } else if (dtype == DType::Float64) {
+        ::oneapi::mkl::sparse::init_matrix_handle(&handle);
+        ::oneapi::mkl::sparse::set_csr_data(
+            queue, handle,
+            static_cast<std::int64_t>(N),
+            static_cast<std::int64_t>(N),
+            ::oneapi::mkl::index_base::zero,
+            crow.data<std::int32_t>(),
+            col.data<std::int32_t>(),
+            vals.data<double>()).wait();
+
+        ::oneapi::mkl::sparse::trsv(
+            queue, uplo,
+            ::oneapi::mkl::transpose::nontrans,
+            ::oneapi::mkl::diag::nonunit,
+            1.0, handle,
+            b.data<double>(),
+            x.data<double>()).wait();
+
+        ::oneapi::mkl::sparse::release_matrix_handle(queue, &handle).wait();
+    } else {
+        throw std::runtime_error("oneapi sparse_trsv_kernel: unsupported dtype (requires Float32 or Float64)");
+    }
+
+    return x;
+#else
+    throw std::runtime_error("oneapi sparse_trsv_kernel requires oneMKL (TENZOR_HAS_ONEMKL not defined)");
+#endif
+}
+
+// ============================================================================
+// SparseTrsm: solve L*X = B  (or U*X = B) for multiple RHS columns
+// ============================================================================
+
+auto sparse_trsm_kernel(const SparseTensor& L, const Tensor& B, bool upper,
+                        sycl::queue& queue) -> Tensor {
+#ifdef TENZOR_HAS_ONEMKL
+    if (L.layout() != SparseLayout::CSR) {
+        throw std::runtime_error("oneapi sparse_trsm_kernel requires CSR format");
+    }
+
+    const auto& shape = L.shape();
+    int64_t N = shape[0];
+    if (shape[1] != N) {
+        throw std::runtime_error("oneapi sparse_trsm_kernel: L must be square");
+    }
+    if (B.ndim() != 2 || B.shape()[0] != N) {
+        throw std::runtime_error("oneapi sparse_trsm_kernel: B must be 2D with first dim N");
+    }
+
+    int64_t K = B.shape()[1];  // number of RHS columns
+
+    auto crow = L.crow_indices();
+    auto col  = L.col_indices();
+    auto vals = L.values();
+    DType dtype = vals.dtype();
+
+    Tensor X({N, K}, dtype, vals.device());
+
+    ::oneapi::mkl::sparse::matrix_handle_t handle = nullptr;
+
+    auto uplo = upper ? ::oneapi::mkl::uplo::upper : ::oneapi::mkl::uplo::lower;
+
+    if (dtype == DType::Float32) {
+        ::oneapi::mkl::sparse::init_matrix_handle(&handle);
+        ::oneapi::mkl::sparse::set_csr_data(
+            queue, handle,
+            static_cast<std::int64_t>(N),
+            static_cast<std::int64_t>(N),
+            ::oneapi::mkl::index_base::zero,
+            crow.data<std::int32_t>(),
+            col.data<std::int32_t>(),
+            vals.data<float>()).wait();
+
+        ::oneapi::mkl::sparse::trsm(
+            queue, ::oneapi::mkl::layout::row_major,
+            ::oneapi::mkl::transpose::nontrans,
+            ::oneapi::mkl::transpose::nontrans,
+            uplo,
+            ::oneapi::mkl::diag::nonunit,
+            1.0f, handle,
+            B.data<float>(),
+            static_cast<std::int64_t>(K),   // columns in B
+            static_cast<std::int64_t>(K),   // ldx (row-major leading dim of B)
+            X.data<float>(),
+            static_cast<std::int64_t>(K)).wait();  // ldy
+
+        ::oneapi::mkl::sparse::release_matrix_handle(queue, &handle).wait();
+    } else if (dtype == DType::Float64) {
+        ::oneapi::mkl::sparse::init_matrix_handle(&handle);
+        ::oneapi::mkl::sparse::set_csr_data(
+            queue, handle,
+            static_cast<std::int64_t>(N),
+            static_cast<std::int64_t>(N),
+            ::oneapi::mkl::index_base::zero,
+            crow.data<std::int32_t>(),
+            col.data<std::int32_t>(),
+            vals.data<double>()).wait();
+
+        ::oneapi::mkl::sparse::trsm(
+            queue, ::oneapi::mkl::layout::row_major,
+            ::oneapi::mkl::transpose::nontrans,
+            ::oneapi::mkl::transpose::nontrans,
+            uplo,
+            ::oneapi::mkl::diag::nonunit,
+            1.0, handle,
+            B.data<double>(),
+            static_cast<std::int64_t>(K),
+            static_cast<std::int64_t>(K),
+            X.data<double>(),
+            static_cast<std::int64_t>(K)).wait();
+
+        ::oneapi::mkl::sparse::release_matrix_handle(queue, &handle).wait();
+    } else {
+        throw std::runtime_error("oneapi sparse_trsm_kernel: unsupported dtype (requires Float32 or Float64)");
+    }
+
+    return X;
+#else
+    throw std::runtime_error("oneapi sparse_trsm_kernel requires oneMKL (TENZOR_HAS_ONEMKL not defined)");
+#endif
+}
+
 } // namespace oneapi
 } // namespace tenzor

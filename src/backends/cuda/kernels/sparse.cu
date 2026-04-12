@@ -25,6 +25,16 @@
 #include <string>
 #include <vector>
 
+#include <thrust/device_ptr.h>
+#include <thrust/sort.h>
+#include <thrust/sequence.h>
+#include <thrust/gather.h>
+#include <thrust/transform.h>
+#include <thrust/reduce.h>
+#include <thrust/execution_policy.h>
+#include <thrust/iterator/counting_iterator.h>
+#include <thrust/binary_search.h>
+
 #include "tenzor/ops/creation.hpp"
 
 namespace tenzor {
@@ -780,6 +790,275 @@ Tensor cuda_sparse_trsm_kernel(const SparseTensor& L, const Tensor& B,
 
     CUDA_CHECK_SPARSE(cudaStreamSynchronize(stream));
     return X;
+}
+
+// ============================================================================
+// GPU-native sparse format conversions (called from SparseTensor methods)
+// ============================================================================
+
+SparseTensor cuda_coo_to_csr(const SparseTensor& sparse) {
+    return ensure_csr_on_gpu(sparse);
+}
+
+SparseTensor cuda_coalesce(const SparseTensor& sparse) {
+    // Coalesce COO on GPU using thrust sort + scan.
+    // The sparse tensor must already be on CUDA.
+    if (sparse.layout() != SparseLayout::COO) return sparse;
+    if (sparse.nnz() == 0) {
+        SparseTensor result = sparse;
+        // Can't set coalesced_ directly, but returning a zero-nnz tensor
+        // that was already coalesced is fine.
+        return result;
+    }
+
+    auto sp_shape = sparse.shape();
+    int64_t sparse_dim = static_cast<int64_t>(sp_shape.size());
+    int64_t nnz = sparse.nnz();
+
+    Tensor indices = sparse.indices().contiguous();
+    Tensor values = sparse.values().contiguous();
+
+    // Compute linearized keys on GPU: key[i] = row[i] * ncols + col[i] (2D)
+    // For general sparse_dim, key = sum(idx[d,i] * stride[d])
+    // We do this with a simple kernel.
+    // For 2D (the common case), key = idx[0,i] * shape[1] + idx[1,i]
+    const int64_t* idx_ptr = indices.data<int64_t>();
+
+    // Compute strides
+    std::vector<int64_t> h_strides(sparse_dim);
+    if (sparse_dim > 0) {
+        h_strides[sparse_dim - 1] = 1;
+        for (int64_t d = sparse_dim - 2; d >= 0; --d) {
+            h_strides[d] = h_strides[d + 1] * sp_shape[d + 1];
+        }
+    }
+
+    // Allocate keys on GPU
+    Tensor keys_t = zeros({nnz}, DType::Int64, Device::cuda());
+    int64_t* keys_ptr = keys_t.data<int64_t>();
+
+    // Build keys: for each dimension, add idx[d,i] * stride[d] to keys[i]
+    // Use cudaMemcpy to move strides to device, then a simple kernel
+    for (int64_t d = 0; d < sparse_dim; ++d) {
+        if (h_strides[d] == 0) continue;
+        // keys[i] += idx_ptr[d * nnz + i] * stride
+        // Simple approach: launch a kernel per dimension
+        // We reuse cast kernels pattern — define an inline lambda via thrust
+        const int64_t* dim_idx = idx_ptr + d * nnz;
+        int64_t stride = h_strides[d];
+        auto keys_dptr = thrust::device_pointer_cast(keys_ptr);
+        auto dim_dptr = thrust::device_pointer_cast(dim_idx);
+        thrust::transform(thrust::cuda::par,
+                          keys_dptr, keys_dptr + nnz,
+                          dim_dptr,
+                          keys_dptr,
+                          [stride] __device__ (int64_t k, int64_t idx_val) {
+                              return k + idx_val * stride;
+                          });
+    }
+
+    // Sort by key: create a permutation array and sort keys + perm together
+    Tensor perm_t = zeros({nnz}, DType::Int64, Device::cuda());
+    int64_t* perm_ptr = perm_t.data<int64_t>();
+    thrust::sequence(thrust::cuda::par, thrust::device_pointer_cast(perm_ptr),
+                     thrust::device_pointer_cast(perm_ptr + nnz));
+    thrust::sort_by_key(thrust::cuda::par,
+                        thrust::device_pointer_cast(keys_ptr),
+                        thrust::device_pointer_cast(keys_ptr + nnz),
+                        thrust::device_pointer_cast(perm_ptr));
+
+    // Gather sorted indices and values using the permutation
+    Tensor sorted_indices = zeros({sparse_dim, nnz}, DType::Int64, Device::cuda());
+    int64_t* si_ptr = sorted_indices.data<int64_t>();
+    for (int64_t d = 0; d < sparse_dim; ++d) {
+        thrust::gather(thrust::cuda::par,
+                       thrust::device_pointer_cast(perm_ptr),
+                       thrust::device_pointer_cast(perm_ptr + nnz),
+                       thrust::device_pointer_cast(idx_ptr + d * nnz),
+                       thrust::device_pointer_cast(si_ptr + d * nnz));
+    }
+
+    // Gather values
+    Tensor sorted_vals = zeros({nnz}, values.dtype(), Device::cuda());
+    if (values.dtype() == DType::Float32) {
+        thrust::gather(thrust::cuda::par,
+                       thrust::device_pointer_cast(perm_ptr),
+                       thrust::device_pointer_cast(perm_ptr + nnz),
+                       thrust::device_pointer_cast(values.data<float>()),
+                       thrust::device_pointer_cast(sorted_vals.data<float>()));
+    } else if (values.dtype() == DType::Float64) {
+        thrust::gather(thrust::cuda::par,
+                       thrust::device_pointer_cast(perm_ptr),
+                       thrust::device_pointer_cast(perm_ptr + nnz),
+                       thrust::device_pointer_cast(values.data<double>()),
+                       thrust::device_pointer_cast(sorted_vals.data<double>()));
+    }
+
+    // Detect unique keys and sum duplicates using thrust::reduce_by_key
+    Tensor out_keys = zeros({nnz}, DType::Int64, Device::cuda());
+    int64_t* ok_ptr = out_keys.data<int64_t>();
+
+    // For values: reduce_by_key with sum
+    Tensor out_vals = zeros({nnz}, values.dtype(), Device::cuda());
+    int64_t new_nnz = 0;
+
+    if (values.dtype() == DType::Float32) {
+        auto end = thrust::reduce_by_key(
+            thrust::cuda::par,
+            thrust::device_pointer_cast(keys_ptr),
+            thrust::device_pointer_cast(keys_ptr + nnz),
+            thrust::device_pointer_cast(sorted_vals.data<float>()),
+            thrust::device_pointer_cast(ok_ptr),
+            thrust::device_pointer_cast(out_vals.data<float>()));
+        new_nnz = end.first - thrust::device_pointer_cast(ok_ptr);
+    } else if (values.dtype() == DType::Float64) {
+        auto end = thrust::reduce_by_key(
+            thrust::cuda::par,
+            thrust::device_pointer_cast(keys_ptr),
+            thrust::device_pointer_cast(keys_ptr + nnz),
+            thrust::device_pointer_cast(sorted_vals.data<double>()),
+            thrust::device_pointer_cast(ok_ptr),
+            thrust::device_pointer_cast(out_vals.data<double>()));
+        new_nnz = end.first - thrust::device_pointer_cast(ok_ptr);
+    }
+
+    // Reconstruct unique indices from unique keys
+    // key = sum(idx[d] * stride[d]) — decode back to multi-dim indices
+    Tensor new_indices = zeros({sparse_dim, new_nnz}, DType::Int64, Device::cuda());
+    int64_t* ni_ptr = new_indices.data<int64_t>();
+    for (int64_t d = 0; d < sparse_dim; ++d) {
+        int64_t stride = h_strides[d];
+        auto ok_dptr = thrust::device_pointer_cast(ok_ptr);
+        auto ni_dptr = thrust::device_pointer_cast(ni_ptr + d * new_nnz);
+        if (d < sparse_dim - 1) {
+            int64_t next_stride = h_strides[d + 1];
+            thrust::transform(thrust::cuda::par,
+                              ok_dptr, ok_dptr + new_nnz,
+                              ni_dptr,
+                              [stride, next_stride] __device__ (int64_t key) {
+                                  return (key / stride) % (stride / next_stride);
+                              });
+        } else {
+            thrust::transform(thrust::cuda::par,
+                              ok_dptr, ok_dptr + new_nnz,
+                              ni_dptr,
+                              [stride] __device__ (int64_t key) {
+                                  return key % stride;  // stride == 1 for last dim
+                              });
+        }
+    }
+
+    // Trim output values to new_nnz
+    // We need to slice — simplest is to copy
+    Tensor final_vals = zeros({new_nnz}, values.dtype(), Device::cuda());
+    if (values.dtype() == DType::Float32) {
+        CUDA_CHECK_SPARSE(cudaMemcpy(final_vals.data<float>(), out_vals.data<float>(),
+                                     new_nnz * sizeof(float), cudaMemcpyDeviceToDevice));
+    } else if (values.dtype() == DType::Float64) {
+        CUDA_CHECK_SPARSE(cudaMemcpy(final_vals.data<double>(), out_vals.data<double>(),
+                                     new_nnz * sizeof(double), cudaMemcpyDeviceToDevice));
+    }
+
+    return SparseTensor::sparse_coo(new_indices, final_vals,
+                                    std::vector<int64_t>(sp_shape.begin(), sp_shape.end()));
+}
+
+SparseTensor cuda_coo_to_csc(const SparseTensor& sparse) {
+    if (sparse.layout() == SparseLayout::CSC) return sparse;
+
+    auto sp_shape = sparse.shape();
+    int64_t nrows = sp_shape[0];
+    int64_t ncols = sp_shape[1];
+
+    // First coalesce on GPU, then convert COO -> CSC
+    auto coo = cuda_coalesce(sparse);
+    int64_t nnz = coo.nnz();
+
+    Tensor indices = coo.indices().contiguous();
+    Tensor values = coo.values().contiguous();
+    const int64_t* idx_ptr = indices.data<int64_t>();
+    const int64_t* row_ptr_src = idx_ptr;
+    const int64_t* col_ptr_src = idx_ptr + nnz;
+
+    // Sort by (col, row) — create compound keys: col * nrows + row
+    Tensor sort_keys = zeros({nnz}, DType::Int64, Device::cuda());
+    int64_t* sk_ptr = sort_keys.data<int64_t>();
+    {
+        auto sk_dptr = thrust::device_pointer_cast(sk_ptr);
+        auto col_dptr = thrust::device_pointer_cast(col_ptr_src);
+        auto row_dptr = thrust::device_pointer_cast(row_ptr_src);
+        thrust::transform(thrust::cuda::par,
+                          col_dptr, col_dptr + nnz,
+                          row_dptr,
+                          sk_dptr,
+                          [nrows] __device__ (int64_t c, int64_t r) {
+                              return c * nrows + r;
+                          });
+    }
+
+    // Create permutation and sort
+    Tensor perm_t = zeros({nnz}, DType::Int64, Device::cuda());
+    int64_t* perm_ptr = perm_t.data<int64_t>();
+    thrust::sequence(thrust::cuda::par, thrust::device_pointer_cast(perm_ptr),
+                     thrust::device_pointer_cast(perm_ptr + nnz));
+    thrust::sort_by_key(thrust::cuda::par,
+                        thrust::device_pointer_cast(sk_ptr),
+                        thrust::device_pointer_cast(sk_ptr + nnz),
+                        thrust::device_pointer_cast(perm_ptr));
+
+    // Gather sorted row indices
+    Tensor sorted_rows = zeros({nnz}, DType::Int64, Device::cuda());
+    thrust::gather(thrust::cuda::par,
+                   thrust::device_pointer_cast(perm_ptr),
+                   thrust::device_pointer_cast(perm_ptr + nnz),
+                   thrust::device_pointer_cast(row_ptr_src),
+                   thrust::device_pointer_cast(sorted_rows.data<int64_t>()));
+
+    // Gather sorted col indices (for building ccol_indices)
+    Tensor sorted_cols = zeros({nnz}, DType::Int64, Device::cuda());
+    thrust::gather(thrust::cuda::par,
+                   thrust::device_pointer_cast(perm_ptr),
+                   thrust::device_pointer_cast(perm_ptr + nnz),
+                   thrust::device_pointer_cast(col_ptr_src),
+                   thrust::device_pointer_cast(sorted_cols.data<int64_t>()));
+
+    // Build ccol_indices using histogram + prefix sum
+    // Count elements per column using thrust
+    Tensor ccol = zeros({ncols + 1}, DType::Int64, Device::cuda());
+    int64_t* ccol_ptr = ccol.data<int64_t>();
+    // Use sorted_cols to compute histogram: ccol[col+1]++
+    // Simplest: use thrust::upper_bound to find boundaries
+    Tensor boundaries = zeros({ncols}, DType::Int64, Device::cuda());
+    int64_t* bounds_ptr = boundaries.data<int64_t>();
+    thrust::upper_bound(thrust::cuda::par,
+                        thrust::device_pointer_cast(sorted_cols.data<int64_t>()),
+                        thrust::device_pointer_cast(sorted_cols.data<int64_t>() + nnz),
+                        thrust::counting_iterator<int64_t>(0),
+                        thrust::counting_iterator<int64_t>(ncols),
+                        thrust::device_pointer_cast(bounds_ptr));
+    // ccol[0] = 0, ccol[i+1] = upper_bound result for column i
+    CUDA_CHECK_SPARSE(cudaMemset(ccol_ptr, 0, sizeof(int64_t)));
+    CUDA_CHECK_SPARSE(cudaMemcpy(ccol_ptr + 1, bounds_ptr,
+                                 ncols * sizeof(int64_t), cudaMemcpyDeviceToDevice));
+
+    // Gather sorted values
+    Tensor sorted_vals = zeros({nnz}, values.dtype(), Device::cuda());
+    if (values.dtype() == DType::Float32) {
+        thrust::gather(thrust::cuda::par,
+                       thrust::device_pointer_cast(perm_ptr),
+                       thrust::device_pointer_cast(perm_ptr + nnz),
+                       thrust::device_pointer_cast(values.data<float>()),
+                       thrust::device_pointer_cast(sorted_vals.data<float>()));
+    } else if (values.dtype() == DType::Float64) {
+        thrust::gather(thrust::cuda::par,
+                       thrust::device_pointer_cast(perm_ptr),
+                       thrust::device_pointer_cast(perm_ptr + nnz),
+                       thrust::device_pointer_cast(values.data<double>()),
+                       thrust::device_pointer_cast(sorted_vals.data<double>()));
+    }
+
+    return SparseTensor::sparse_csc(ccol, sorted_rows, sorted_vals,
+                                    std::vector<int64_t>{nrows, ncols});
 }
 
 } // namespace cuda

@@ -8,7 +8,14 @@
 // 3. Loop unrolling for better ILP
 // 4. Coalesced memory access patterns
 
-layout(local_size_x = 16, local_size_y = 16) in;
+// Accept specialization constants so that getPipelineSpecialized() can pass
+// vendor-tuned values without triggering undefined behaviour on strict drivers.
+// The workgroup shape can vary (e.g. 32x8 on Nvidia) but total threads stays 256,
+// and 256 threads still cover the 32x32 output tile via 2x2 register blocking.
+layout(local_size_x_id = 0, local_size_y_id = 1) in;
+
+layout(constant_id = 0) const uint TILE_X = 16;  // default fallback
+layout(constant_id = 1) const uint TILE_Y = 16;  // default fallback
 
 layout(binding = 0) buffer MatrixA { double a[]; };
 layout(binding = 1) buffer MatrixB { double b[]; };
@@ -21,7 +28,8 @@ layout(push_constant) uniform PushConstants {
 } params;
 
 // Tile size: 32x32 = 8KB per tile, 16KB total for A and B
-// With 16x16 threads each computing 2x2, we cover 32x32 output
+// With 256 threads (TILE_X * TILE_Y) each computing elements from a 2x2 block,
+// we cover 32x32 output. The thread-to-output mapping uses linear IDs below.
 #define TILE_K 32
 #define BLOCK_ROWS 2
 #define BLOCK_COLS 2
@@ -33,11 +41,16 @@ shared double tileB[TILE_K][32 + 1];
 void main() {
     uint thread_row = gl_LocalInvocationID.y;
     uint thread_col = gl_LocalInvocationID.x;
-    uint tid = thread_row * 16 + thread_col;  // Linear thread ID (0-255)
+    uint tid = thread_row * TILE_X + thread_col;  // Linear thread ID (0..TILE_X*TILE_Y-1)
+
+    // Map linear thread ID to a 16x16 logical grid for 2x2 register blocking.
+    // This decouples the output mapping from the physical workgroup shape.
+    uint logical_row = tid / 16;   // 0..15
+    uint logical_col = tid % 16;   // 0..15
 
     // Global output position (top-left of 2x2 block this thread computes)
-    uint row_base = gl_WorkGroupID.y * 32 + thread_row * BLOCK_ROWS;
-    uint col_base = gl_WorkGroupID.x * 32 + thread_col * BLOCK_COLS;
+    uint row_base = gl_WorkGroupID.y * 32 + logical_row * BLOCK_ROWS;
+    uint col_base = gl_WorkGroupID.x * 32 + logical_col * BLOCK_COLS;
 
     // Accumulators for 2x2 output block (in registers)
     double acc00 = 0.0, acc01 = 0.0;
@@ -83,47 +96,48 @@ void main() {
         barrier();
 
         // Compute 2x2 output block - unrolled by 4 for ILP
+        // Use logical_row/logical_col for 16x16 output mapping (independent of workgroup shape)
         uint k = 0;
         for (; k + 3 < TILE_K; k += 4) {
             // Iteration 0
-            double a0_0 = tileA[thread_row * 2][k];
-            double a1_0 = tileA[thread_row * 2 + 1][k];
-            double b0_0 = tileB[k][thread_col * 2];
-            double b1_0 = tileB[k][thread_col * 2 + 1];
+            double a0_0 = tileA[logical_row * 2][k];
+            double a1_0 = tileA[logical_row * 2 + 1][k];
+            double b0_0 = tileB[k][logical_col * 2];
+            double b1_0 = tileB[k][logical_col * 2 + 1];
             acc00 += a0_0 * b0_0; acc01 += a0_0 * b1_0;
             acc10 += a1_0 * b0_0; acc11 += a1_0 * b1_0;
 
             // Iteration 1
-            double a0_1 = tileA[thread_row * 2][k + 1];
-            double a1_1 = tileA[thread_row * 2 + 1][k + 1];
-            double b0_1 = tileB[k + 1][thread_col * 2];
-            double b1_1 = tileB[k + 1][thread_col * 2 + 1];
+            double a0_1 = tileA[logical_row * 2][k + 1];
+            double a1_1 = tileA[logical_row * 2 + 1][k + 1];
+            double b0_1 = tileB[k + 1][logical_col * 2];
+            double b1_1 = tileB[k + 1][logical_col * 2 + 1];
             acc00 += a0_1 * b0_1; acc01 += a0_1 * b1_1;
             acc10 += a1_1 * b0_1; acc11 += a1_1 * b1_1;
 
             // Iteration 2
-            double a0_2 = tileA[thread_row * 2][k + 2];
-            double a1_2 = tileA[thread_row * 2 + 1][k + 2];
-            double b0_2 = tileB[k + 2][thread_col * 2];
-            double b1_2 = tileB[k + 2][thread_col * 2 + 1];
+            double a0_2 = tileA[logical_row * 2][k + 2];
+            double a1_2 = tileA[logical_row * 2 + 1][k + 2];
+            double b0_2 = tileB[k + 2][logical_col * 2];
+            double b1_2 = tileB[k + 2][logical_col * 2 + 1];
             acc00 += a0_2 * b0_2; acc01 += a0_2 * b1_2;
             acc10 += a1_2 * b0_2; acc11 += a1_2 * b1_2;
 
             // Iteration 3
-            double a0_3 = tileA[thread_row * 2][k + 3];
-            double a1_3 = tileA[thread_row * 2 + 1][k + 3];
-            double b0_3 = tileB[k + 3][thread_col * 2];
-            double b1_3 = tileB[k + 3][thread_col * 2 + 1];
+            double a0_3 = tileA[logical_row * 2][k + 3];
+            double a1_3 = tileA[logical_row * 2 + 1][k + 3];
+            double b0_3 = tileB[k + 3][logical_col * 2];
+            double b1_3 = tileB[k + 3][logical_col * 2 + 1];
             acc00 += a0_3 * b0_3; acc01 += a0_3 * b1_3;
             acc10 += a1_3 * b0_3; acc11 += a1_3 * b1_3;
         }
 
         // Handle remaining iterations
         for (; k < TILE_K; k++) {
-            double a0 = tileA[thread_row * 2][k];
-            double a1 = tileA[thread_row * 2 + 1][k];
-            double b0 = tileB[k][thread_col * 2];
-            double b1 = tileB[k][thread_col * 2 + 1];
+            double a0 = tileA[logical_row * 2][k];
+            double a1 = tileA[logical_row * 2 + 1][k];
+            double b0 = tileB[k][logical_col * 2];
+            double b1 = tileB[k][logical_col * 2 + 1];
             acc00 += a0 * b0; acc01 += a0 * b1;
             acc10 += a1 * b0; acc11 += a1 * b1;
         }

@@ -1395,7 +1395,23 @@ auto VulkanBackend::dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor {
             shader_name = b_is_transposed ? "matmul_bt" : "matmul";
         }
     }
-    auto* pipeline = getPipeline(shader_name, device_id);
+
+    // Use vendor-specific workgroup tile sizes via specialization constants.
+    // The shader declares layout(local_size_x_id=0, local_size_y_id=1) and
+    // constant_id 0/1 for TILE_X/TILE_Y respectively.
+    auto& ctx = devices_[device_id];
+    auto [tile_x, tile_y] = recommended_workgroup_2d(ctx.vendor, OpKind::Matmul);
+
+    VkSpecializationMapEntry specEntries[2] = {
+        {0, 0,                    sizeof(uint32_t)},  // constant_id=0 -> TILE_X
+        {1, sizeof(uint32_t),     sizeof(uint32_t)},  // constant_id=1 -> TILE_Y
+    };
+    uint32_t specData[2] = {tile_x, tile_y};
+
+    auto* pipeline = getPipelineSpecialized(
+        shader_name, device_id,
+        {specEntries, specEntries + 2},
+        specData, sizeof(specData));
 
     std::vector<int64_t> out_shape = {a_shape[0], b_shape[1]};
     Tensor output(out_shape, a_contig.dtype(), a_contig.device());
@@ -1445,23 +1461,24 @@ auto VulkanBackend::dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor {
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    // Tile-based dispatch
-    // - Standard shaders: 16x16 workgroups, 16x16 output tiles
-    // - Optimized Float64: 16x16 workgroups, 32x32 output tiles (2x2 per thread)
-    // - Float16: each thread processes 2 columns
+    // Tile-based dispatch using vendor-specific tile sizes.
+    // - Standard shaders: output tile covers TILE_X cols x TILE_Y rows
+    // - Optimized Float64: fixed 32x32 output tiles (2x2 per thread, own tiling)
+    // - Non-transposed Float16/BFloat16: each thread processes 2 columns (TILE_X*2 wide)
+    // - Transposed (_bt) Float16/BFloat16: one element per thread, same as standard
     uint32_t workgroups_x, workgroups_y;
     if (use_optimized_f64) {
-        // Optimized F64: 32x32 output tiles
+        // Optimized F64: 32x32 output tiles (its own tiling, not vendor-specialised yet)
         workgroups_x = (push_constants.N + 31) / 32;
         workgroups_y = (push_constants.M + 31) / 32;
-    } else if (is_float16) {
-        // Each thread handles 2 adjacent columns
-        workgroups_x = ((push_constants.N + 1) / 2 + 15) / 16;
-        workgroups_y = (push_constants.M + 15) / 16;
+    } else if ((is_float16 || a_contig.dtype() == DType::BFloat16) && !b_is_transposed) {
+        // Non-transposed F16/BF16: each thread handles 2 adjacent columns
+        workgroups_x = ((push_constants.N + 1) / 2 + tile_x - 1) / tile_x;
+        workgroups_y = (push_constants.M + tile_y - 1) / tile_y;
     } else {
-        // Standard 16x16 tiles
-        workgroups_x = (push_constants.N + 15) / 16;
-        workgroups_y = (push_constants.M + 15) / 16;
+        // Standard / tiled / _bt matmul: output tile is TILE_X cols x TILE_Y rows
+        workgroups_x = (push_constants.N + tile_x - 1) / tile_x;
+        workgroups_y = (push_constants.M + tile_y - 1) / tile_y;
     }
     vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, 1);
 

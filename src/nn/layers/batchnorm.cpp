@@ -3,6 +3,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/autograd/function.hpp"
+#include "tenzor/autograd/ops.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/backend/op_attributes.hpp"
@@ -154,19 +155,78 @@ public:
     }
 
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
-        // Complex batch normalization backward -- delegate to tensor backward and wrap results
-        std::vector<Tensor> tensor_grads;
-        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
-        auto results = backward(std::move(tensor_grads));
-        std::vector<Variable> var_results;
-        for (auto& t : results) var_results.emplace_back(t, grad_outputs[0].requires_grad());
-        return var_results;
+        auto& grad_out = grad_outputs[0];
+
+        // Retrieve saved variables (with fallback to wrapped tensors)
+        Variable input_var, mean_var, invstd_var, weight_var;
+        if (has_saved_variables()) {
+            const auto& sv = saved_variables();
+            input_var = sv[0];
+            mean_var = sv[1];
+            invstd_var = sv[2];
+            weight_var = sv[3];
+        } else {
+            auto saved = saved_tensors();
+            input_var = Variable(saved[0], false);
+            mean_var = Variable(saved[1], false);
+            invstd_var = Variable(saved[2], false);
+            weight_var = Variable(saved[3], false);
+        }
+
+        // Get dimensions from input shape: [N, C, H, W]
+        auto shape = input_var.shape();
+        int64_t N = shape[0];
+        int64_t C = shape[1];
+        int64_t H = shape[2];
+        int64_t W = shape[3];
+        int64_t spatial_size = H * W;
+        int64_t batch_size = N * spatial_size;
+
+        // Broadcast mean and invstd from [C] to [1, C, 1, 1] using Variable ops
+        auto mean_bc = unsqueeze(unsqueeze(unsqueeze(mean_var, 0), 2), 3);     // [1,C,1,1]
+        auto invstd_bc = unsqueeze(unsqueeze(unsqueeze(invstd_var, 0), 2), 3); // [1,C,1,1]
+
+        // x_hat = (input - mean) * invstd  — all Variable-level
+        auto x_hat = (input_var - mean_bc) * invstd_bc;
+
+        // Broadcast weight from [C] to [1, C, 1, 1]
+        auto weight_bc = unsqueeze(unsqueeze(unsqueeze(weight_var, 0), 2), 3); // [1,C,1,1]
+
+        // grad_x_hat = grad_output * weight (broadcasted)
+        auto grad_x_hat = grad_out * weight_bc;
+
+        // Reshape to [N, C, spatial] for reduction over dims 0 and 2
+        auto grad_x_hat_r = reshape(grad_x_hat, {N, C, spatial_size});
+        auto x_hat_r = reshape(x_hat, {N, C, spatial_size});
+
+        // mean_grad_x_hat = mean over batch & spatial dims (dims 0 and 2, keep dims)
+        // sum over dim 0 (keepdim), then sum over dim 2 (keepdim), divide by batch_size
+        auto sum_grad = sum(sum(grad_x_hat_r, 0, true), 2, true);             // [1, C, 1]
+        auto mean_gxh = sum_grad / static_cast<float>(batch_size);
+
+        // mean(grad_x_hat * x_hat) over batch & spatial dims
+        auto sum_grad_xhat = sum(sum(grad_x_hat_r * x_hat_r, 0, true), 2, true); // [1, C, 1]
+        auto mean_gxh_xh = sum_grad_xhat / static_cast<float>(batch_size);
+
+        // grad_input = (grad_x_hat - mean(grad_x_hat) - x_hat * mean(grad_x_hat * x_hat)) * invstd
+        auto invstd_r = unsqueeze(unsqueeze(invstd_var, 0), -1);              // [1, C, 1]
+        auto grad_input_r = (grad_x_hat_r - mean_gxh - x_hat_r * mean_gxh_xh) * invstd_r;
+        auto grad_input = reshape(grad_input_r, {N, C, H, W});
+
+        // grad_gamma = sum(grad_output * x_hat, dims=[0,2,3])
+        // Reshape to [N, C, spatial], sum dim 0 (no keepdim), sum dim 1 (spatial, no keepdim) -> [C]
+        auto go_xhat = reshape(grad_out * x_hat, {N, C, spatial_size});
+        auto grad_gamma = sum(sum(go_xhat, 0, false), 1, false);              // [C]
+
+        // grad_beta = sum(grad_output, dims=[0,2,3])
+        auto go_r = reshape(grad_out, {N, C, spatial_size});
+        auto grad_beta = sum(sum(go_r, 0, false), 1, false);                  // [C]
+
+        return {grad_input, grad_gamma, grad_beta};
     }
 
-    // P4.2d: passthrough returns Variables without grad_fn; flag as
-    // stub so engine's disconnection counter reports accurately.
     auto supports_higher_order() const -> bool override { return true; }
-    auto is_higher_order_stub() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return false; }
 
 private:
     bool affine_;
@@ -427,6 +487,17 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
                 auto grad_fn = std::make_shared<BatchNorm2dBackward>(
                     affine_, eps_, std::move(tensors_to_save)
                 );
+
+                // Save Variables for higher-order gradients when create_graph is active
+                if (is_creating_graph()) {
+                    grad_fn->save_variables_for_backward({
+                        input,
+                        Variable(batch_mean.contiguous(), false),
+                        Variable(batch_var.contiguous(), false),  // inv_std from cuDNN
+                        Variable(weight.contiguous(), true)
+                    });
+                }
+
                 result.set_grad_fn(grad_fn);
 
                 // Track input variables for gradient accumulation
@@ -618,6 +689,29 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
         auto grad_fn = std::make_shared<BatchNorm2dBackward>(
             affine_, eps_, std::move(tensors_to_save)
         );
+
+        // Save Variables for higher-order gradients when create_graph is active
+        if (is_creating_graph()) {
+            Variable weight_variable;
+            if (affine_ && cached_weight_) {
+                weight_variable = *cached_weight_;
+                // Ensure device/dtype match
+                if (weight_variable.tensor().device() != original_device) {
+                    weight_variable = Variable(weight_variable.tensor().to(original_device), weight_variable.requires_grad());
+                }
+                if (weight_variable.tensor().dtype() != input_dtype) {
+                    weight_variable = Variable(weight_variable.tensor().to(input_dtype), weight_variable.requires_grad());
+                }
+            } else {
+                weight_variable = Variable(ones({C}, input_dtype, original_device), false);
+            }
+            grad_fn->save_variables_for_backward({
+                input,
+                Variable(batch_mean_final, false),
+                Variable(invstd_final, false),
+                weight_variable
+            });
+        }
 
         result.set_grad_fn(grad_fn);
 

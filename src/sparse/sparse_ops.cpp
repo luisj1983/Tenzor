@@ -145,12 +145,9 @@ DType compute_dtype_for(DType dtype) {
 }
 
 /// Extract a SparseTensor as CSR components (crow_indices, col_indices, values)
-/// for dispatch-table routing. SparseTensor::to_csr() is CPU-only because its
-/// coalesce() step dereferences the indices buffer directly, so any GPU COO
-/// input must be round-tripped through CPU for the structural conversion.
-/// Values stay on their original device after the round-trip. This is a
-/// one-time cost per sparse matrix structure and acceptable while a proper
-/// device-aware coalesce() is outstanding.
+/// for dispatch-table routing. SparseTensor::to_csr() dispatches to GPU-native
+/// conversion (cusparseXcoo2csr / rocsparse_coo2csr) when on CUDA/ROCm, and
+/// falls back to the CPU histogram + prefix-sum path otherwise.
 struct CsrComponents {
     Tensor crow;
     Tensor col;
@@ -158,33 +155,11 @@ struct CsrComponents {
 };
 
 [[maybe_unused]] CsrComponents extract_csr_on_device(const SparseTensor& sparse) {
-    const Device orig_device = sparse.device();
-    // Choose the CSR source without a default-constructed SparseTensor
-    // (SparseTensor has no public default ctor).
-    auto build_csr = [&]() -> SparseTensor {
-        if (sparse.layout() == SparseLayout::CSR) {
-            // Already CSR — return as-is regardless of device. Its
-            // components are plain tensors on the same device.
-            return sparse;
-        }
-        if (orig_device.type == Device::Type::CPU) {
-            return sparse.to_csr();
-        }
-        // COO-on-GPU: round-trip to CPU for the coalesce/convert step.
-        // The caller moves the resulting components back to the original
-        // device below.
-        return sparse.to(Device::cpu()).to_csr();
-    };
-    const SparseTensor csr = build_csr();
-    auto crow = csr.crow_indices();
-    auto col  = csr.col_indices();
-    auto vals = csr.values();
-    if (orig_device.type != Device::Type::CPU && csr.device() != orig_device) {
-        crow = crow.to(orig_device);
-        col  = col.to(orig_device);
-        vals = vals.to(orig_device);
-    }
-    return {crow, col, vals};
+    // SparseTensor::to_csr() now dispatches to GPU-native conversions when
+    // the tensor is on CUDA/ROCm, so we can call it directly for all devices
+    // without forcing a CPU round-trip.
+    const SparseTensor csr = sparse.to_csr();
+    return {csr.crow_indices(), csr.col_indices(), csr.values()};
 }
 
 /// Return true if sparse/dense are on OneAPI/SYCL and oneMKL sparse is available.

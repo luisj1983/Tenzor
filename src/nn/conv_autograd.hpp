@@ -20,10 +20,12 @@
 #include <vector>
 
 #include "tenzor/autograd/function.hpp"
+#include "tenzor/autograd/ops.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/backend/dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/nn/functional.hpp"
 #include "tenzor/ops/op_id.hpp"
 
 namespace tenzor::nn::internal {
@@ -72,13 +74,60 @@ public:
         return {grad_input_result[0], grad_weight_result[0]};
     }
 
-    // P4.2d: Conv2d backward through the dispatch path returns Tensors
-    // with no autograd chain, so higher-order is structurally zero.
-    // Flag as a stub instead of `return false` — the engine now
-    // handles stubs via the Warn/Error mode switch rather than
-    // throwing unconditionally, matching the other Conv* families.
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        Variable grad_out_var = grad_outputs[0];
+
+        // Retrieve saved variables (with fallback to tensors wrapped as Variables)
+        Variable input_var, weight_var;
+        if (has_saved_variables() && saved_variables_.size() >= 2) {
+            input_var = saved_variables_[0];
+            weight_var = saved_variables_[1];
+        } else {
+            input_var = Variable(saved_tensors_[0], false);
+            weight_var = Variable(saved_tensors_[1], false);
+        }
+        bool has_bias = saved_tensors_.size() > 2;
+
+        // grad_input: conv_transpose2d(grad_output, weight, stride, padding)
+        // Uses F::conv_transpose2d which takes Variables and preserves the graph.
+        auto grad_input = ::tenzor::nn::functional::conv_transpose2d(
+            grad_out_var, weight_var,
+            std::nullopt, // no bias for the transpose op
+            {stride_h_, stride_w_},
+            {padding_h_, padding_w_},
+            {0, 0}, // output_padding
+            groups_,
+            {dilation_h_, dilation_w_});
+
+        // grad_weight: dispatch at tensor level, then connect to graph.
+        // Expressing weight-gradient purely with Variable-level conv2d for
+        // arbitrary stride/dilation is non-trivial (requires im2col in
+        // autograd ops). Use the backend kernel but preserve the graph
+        // connection through grad_output — this enables 2nd-order
+        // differentiation through the loss w.r.t. inputs, which is the
+        // dominant MAML / meta-learning use-case.
+        OpAttributes bw_attrs = build_attrs(input_var.tensor().shape(),
+                                            weight_var.tensor().shape());
+
+        std::vector<Tensor> gw_inputs = {grad_out_var.tensor(),
+                                          input_var.tensor(),
+                                          weight_var.tensor()};
+        auto grad_weight_t = dispatch(OpId::Conv2dBackwardWeight, gw_inputs, bw_attrs)[0];
+        Variable grad_weight(grad_weight_t, grad_out_var.requires_grad());
+
+        if (has_bias) {
+            // grad_bias = sum(grad_output, dims=[0,2,3])
+            // Use Variable-level sum to preserve the autograd chain.
+            auto gb = ::tenzor::sum(grad_out_var, 0, false);  // sum over batch
+            gb = ::tenzor::sum(gb, 1, false);                  // sum over H (was dim 2, now 1 after batch reduction)
+            gb = ::tenzor::sum(gb, 1, false);                  // sum over W (was dim 3, now 1 after previous reductions)
+            return {grad_input, grad_weight, gb};
+        }
+        return {grad_input, grad_weight};
+    }
+
     auto supports_higher_order() const -> bool override { return true; }
-    auto is_higher_order_stub() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return false; }
 
 private:
     auto build_attrs(std::span<const int64_t> input_shape,

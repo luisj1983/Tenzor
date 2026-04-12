@@ -107,8 +107,10 @@ public:
      * (currently 16 * 16 = 256) so the returned numbers only affect the
      * *shape* of the dispatch grid, not its total thread count.
      *
-     * Phase 2.2: landing the infrastructure. Real per-vendor shader
-     * variants are TODO — see plan Phase 2.2 follow-up notes.
+     * Phase 2.2: matmul shaders now use specialization constants
+     * (constant_id 0/1 for TILE_X/TILE_Y) to receive vendor-specific
+     * workgroup dimensions at pipeline creation time. Conv and other
+     * ops can follow the same pattern as a follow-up.
      */
     enum class OpKind : uint8_t { Matmul, Conv, ElementWise };
     static auto recommended_workgroup_2d(GpuVendor vendor, OpKind op)

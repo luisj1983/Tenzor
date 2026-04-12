@@ -80,6 +80,13 @@ auto conv2d(const Variable& input, const Variable& weight,
             groups,
             std::move(tensors_to_save));
 
+        // Save Variables for higher-order gradient support (create_graph=true)
+        if (::tenzor::is_creating_graph()) {
+            std::vector<Variable> vars_to_save = {input, weight};
+            if (bias.has_value()) vars_to_save.push_back(*bias);
+            grad_fn->save_variables_for_backward(std::move(vars_to_save));
+        }
+
         std::vector<Variable> input_vars = {input, weight};
         if (bias.has_value()) input_vars.push_back(*bias);
         grad_fn->set_input_variables(input_vars);
