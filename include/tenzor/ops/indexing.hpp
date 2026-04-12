@@ -57,6 +57,15 @@ auto scatter_add(const Tensor& input,
                 const Tensor& index,
                 const Tensor& src) -> Tensor;
 
+/** @brief Accumulate source into self at index positions: self[index[i]] += source[i] along dim. */
+auto index_add(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& source) -> Tensor;
+
+/** @brief Copy source into self at index positions: self[index[i]] = source[i] along dim. */
+auto index_copy(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& source) -> Tensor;
+
+/** @brief Fill self at index positions with a scalar value along dim. */
+auto index_fill(const Tensor& input, int64_t dim, const Tensor& index, float value) -> Tensor;
+
 /** @brief Select elements where mask is true. */
 auto masked_select(const Tensor& input, const Tensor& mask) -> Tensor;
 

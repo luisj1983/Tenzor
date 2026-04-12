@@ -892,4 +892,43 @@ auto flip(const Tensor& input, std::vector<int64_t> dims) -> Tensor {
     return result;
 }
 
+auto movedim(const Tensor& input, std::vector<int64_t> source, std::vector<int64_t> destination) -> Tensor {
+    int64_t ndim = input.ndim();
+    if (source.size() != destination.size()) {
+        throw std::invalid_argument("movedim: source and destination must have the same length");
+    }
+
+    // Normalize negative dims
+    for (auto& s : source) { if (s < 0) s += ndim; }
+    for (auto& d : destination) { if (d < 0) d += ndim; }
+
+    // Build the permutation
+    // Start with all dims not in source, then place source dims at destination positions
+    std::vector<int64_t> perm(ndim, -1);
+    std::vector<bool> used_src(ndim, false);
+    std::vector<bool> used_dst(ndim, false);
+
+    // Place source[i] at destination[i]
+    for (size_t i = 0; i < source.size(); ++i) {
+        perm[destination[i]] = source[i];
+        used_src[source[i]] = true;
+        used_dst[destination[i]] = true;
+    }
+
+    // Fill remaining positions with remaining dims in order
+    int64_t src_idx = 0;
+    for (int64_t i = 0; i < ndim; ++i) {
+        if (!used_dst[i]) {
+            while (src_idx < ndim && used_src[src_idx]) ++src_idx;
+            perm[i] = src_idx++;
+        }
+    }
+
+    return tenzor::permute(input, perm);
+}
+
+auto swapaxes(const Tensor& input, int64_t dim0, int64_t dim1) -> Tensor {
+    return tenzor::transpose(input, dim0, dim1);
+}
+
 } // namespace tenzor

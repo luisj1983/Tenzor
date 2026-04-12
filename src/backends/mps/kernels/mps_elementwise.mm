@@ -544,4 +544,429 @@ Tensor mps_conv2d_kernel(const Tensor& input, const Tensor& weight,
     return output;
 }
 
+// ============================================================================
+// Reduction operations (Sum, Mean, Max, Min)
+// ============================================================================
+
+// Helper: dispatch a 1D reduce-per-row kernel (each thread reduces one row)
+static Tensor dispatch_reduce_per_row(const std::string& shader_name,
+                                       const Tensor& input,
+                                       int64_t num_rows,
+                                       int64_t reduce_size,
+                                       DType out_dtype) {
+    ensure_initialized();
+    Tensor output({num_rows}, out_dtype, input.device());
+    uint32_t rsize = static_cast<uint32_t>(reduce_size);
+
+    auto pipeline = get_pipeline(shader_name_for_dtype(shader_name, input.dtype()));
+    id<MTLBuffer> buf_in = get_buffer(input);
+    id<MTLBuffer> buf_out = get_buffer(output);
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:buf_in offset:0 atIndex:0];
+    [encoder setBuffer:buf_out offset:0 atIndex:1];
+    [encoder setBytes:&rsize length:sizeof(rsize) atIndex:2];
+
+    MTLSize grid = MTLSizeMake(num_rows, 1, 1);
+    NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
+                             static_cast<NSUInteger>(num_rows));
+    [encoder dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+    [encoder endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+    return output;
+}
+
+// Helper: dispatch a full-tensor single-output reduce (1 thread)
+static Tensor dispatch_reduce_all(const std::string& shader_name,
+                                   const Tensor& input) {
+    ensure_initialized();
+    Tensor output({1}, input.dtype(), input.device());
+    uint32_t numel = static_cast<uint32_t>(input.numel());
+
+    auto pipeline = get_pipeline(shader_name_for_dtype(shader_name, input.dtype()));
+    id<MTLBuffer> buf_in = get_buffer(input);
+    id<MTLBuffer> buf_out = get_buffer(output);
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:buf_in offset:0 atIndex:0];
+    [encoder setBuffer:buf_out offset:0 atIndex:1];
+    [encoder setBytes:&numel length:sizeof(numel) atIndex:2];
+
+    [encoder dispatchThreads:MTLSizeMake(1, 1, 1)
+       threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    [encoder endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+    return output;
+}
+
+Tensor mps_sum_kernel(const Tensor& input, int64_t dim, bool keepdim) {
+    if (!input.is_contiguous()) {
+        // Non-contiguous: fall back to CPU for correctness
+        auto dev = input.device();
+        auto cpu_in = input.to(Device::cpu());
+        Tensor result;
+        if (dim >= 0) result = tenzor::sum(cpu_in, dim, keepdim);
+        else          result = tenzor::sum(cpu_in);
+        return result.to(dev);
+    }
+
+    auto shape = input.shape();
+    int64_t ndim = shape.size();
+
+    // Full reduction (no dim specified)
+    if (dim < 0) {
+        return dispatch_reduce_all("sum_all_kernel", input);
+    }
+
+    // Dimensional reduction: must be contiguous and reduce along last dim
+    // for the per-row shader to work. If not last dim, fall back to CPU.
+    if (dim != ndim - 1) {
+        auto dev = input.device();
+        auto cpu_in = input.to(Device::cpu());
+        return tenzor::sum(cpu_in, dim, keepdim).to(dev);
+    }
+
+    int64_t reduce_size = shape[ndim - 1];
+    int64_t num_rows = input.numel() / reduce_size;
+    auto result = dispatch_reduce_per_row("sum_reduce_kernel", input, num_rows, reduce_size, input.dtype());
+
+    if (keepdim) {
+        std::vector<int64_t> out_shape(shape.begin(), shape.end());
+        out_shape[ndim - 1] = 1;
+        result = result.reshape(out_shape);
+    } else {
+        std::vector<int64_t> out_shape(shape.begin(), shape.end() - 1);
+        if (out_shape.empty()) out_shape.push_back(1);
+        result = result.reshape(out_shape);
+    }
+    return result;
+}
+
+Tensor mps_mean_kernel(const Tensor& input, int64_t dim, bool keepdim) {
+    if (!input.is_contiguous()) {
+        auto dev = input.device();
+        auto cpu_in = input.to(Device::cpu());
+        Tensor result;
+        if (dim >= 0) result = tenzor::mean(cpu_in, dim, keepdim);
+        else          result = tenzor::mean(cpu_in);
+        return result.to(dev);
+    }
+
+    auto shape = input.shape();
+    int64_t ndim = shape.size();
+
+    if (dim < 0) {
+        return dispatch_reduce_all("mean_all_kernel", input);
+    }
+
+    if (dim != ndim - 1) {
+        auto dev = input.device();
+        auto cpu_in = input.to(Device::cpu());
+        return tenzor::mean(cpu_in, dim, keepdim).to(dev);
+    }
+
+    int64_t reduce_size = shape[ndim - 1];
+    int64_t num_rows = input.numel() / reduce_size;
+    auto result = dispatch_reduce_per_row("mean_reduce_kernel", input, num_rows, reduce_size, input.dtype());
+
+    if (keepdim) {
+        std::vector<int64_t> out_shape(shape.begin(), shape.end());
+        out_shape[ndim - 1] = 1;
+        result = result.reshape(out_shape);
+    } else {
+        std::vector<int64_t> out_shape(shape.begin(), shape.end() - 1);
+        if (out_shape.empty()) out_shape.push_back(1);
+        result = result.reshape(out_shape);
+    }
+    return result;
+}
+
+Tensor mps_max_kernel(const Tensor& input, int64_t dim, bool keepdim,
+                      Tensor& out_indices) {
+    if (!input.is_contiguous() || dim != static_cast<int64_t>(input.shape().size()) - 1) {
+        auto dev = input.device();
+        auto cpu_in = input.to(Device::cpu());
+        auto [vals, idxs] = tenzor::max(cpu_in, dim, keepdim);
+        out_indices = idxs.to(dev);
+        return vals.to(dev);
+    }
+
+    ensure_initialized();
+    auto shape = input.shape();
+    int64_t ndim = shape.size();
+    int64_t reduce_size = shape[ndim - 1];
+    int64_t num_rows = input.numel() / reduce_size;
+    uint32_t rsize = static_cast<uint32_t>(reduce_size);
+
+    Tensor values({num_rows}, input.dtype(), input.device());
+    Tensor indices({num_rows}, DType::Int32, input.device());
+
+    auto pipeline = get_pipeline("max_reduce_kernel");
+    id<MTLBuffer> buf_in = get_buffer(input);
+    id<MTLBuffer> buf_vals = get_buffer(values);
+    id<MTLBuffer> buf_idxs = get_buffer(indices);
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:buf_in offset:0 atIndex:0];
+    [encoder setBuffer:buf_vals offset:0 atIndex:1];
+    [encoder setBuffer:buf_idxs offset:0 atIndex:2];
+    [encoder setBytes:&rsize length:sizeof(rsize) atIndex:3];
+
+    MTLSize grid = MTLSizeMake(num_rows, 1, 1);
+    NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
+                             static_cast<NSUInteger>(num_rows));
+    [encoder dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+    [encoder endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+
+    if (keepdim) {
+        std::vector<int64_t> out_shape(shape.begin(), shape.end());
+        out_shape[ndim - 1] = 1;
+        values = values.reshape(out_shape);
+        indices = indices.reshape(out_shape);
+    } else {
+        std::vector<int64_t> out_shape(shape.begin(), shape.end() - 1);
+        if (out_shape.empty()) out_shape.push_back(1);
+        values = values.reshape(out_shape);
+        indices = indices.reshape(out_shape);
+    }
+
+    out_indices = indices;
+    return values;
+}
+
+// ============================================================================
+// Comparison operations (Bool output)
+// ============================================================================
+
+static Tensor dispatch_comparison(const std::string& shader_name,
+                                   const Tensor& a, const Tensor& b) {
+    ensure_initialized();
+    auto shape = a.shape();
+    std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+    Tensor output(shape_vec, DType::Bool, a.device());
+    size_t numel = a.numel();
+
+    auto pipeline = get_pipeline(shader_name_for_dtype(shader_name, a.dtype()));
+    id<MTLBuffer> buf_a = get_buffer(a);
+    id<MTLBuffer> buf_b = get_buffer(b);
+    id<MTLBuffer> buf_out = get_buffer(output);
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:buf_a offset:0 atIndex:0];
+    [encoder setBuffer:buf_b offset:0 atIndex:1];
+    [encoder setBuffer:buf_out offset:0 atIndex:2];
+
+    MTLSize grid = MTLSizeMake(numel, 1, 1);
+    NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
+                             static_cast<NSUInteger>(numel));
+    [encoder dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+    [encoder endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+    return output;
+}
+
+Tensor mps_gt_kernel(const Tensor& a, const Tensor& b) { return dispatch_comparison("gt_kernel", a, b); }
+Tensor mps_eq_kernel(const Tensor& a, const Tensor& b) { return dispatch_comparison("eq_kernel", a, b); }
+Tensor mps_ne_kernel(const Tensor& a, const Tensor& b) { return dispatch_comparison("ne_kernel", a, b); }
+Tensor mps_lt_kernel(const Tensor& a, const Tensor& b) { return dispatch_comparison("lt_kernel", a, b); }
+Tensor mps_le_kernel(const Tensor& a, const Tensor& b) { return dispatch_comparison("le_kernel", a, b); }
+Tensor mps_ge_kernel(const Tensor& a, const Tensor& b) { return dispatch_comparison("ge_kernel", a, b); }
+
+// ============================================================================
+// Backward activation kernels
+// ============================================================================
+
+Tensor mps_relu_backward_kernel(const Tensor& grad, const Tensor& input) {
+    return dispatch_binary("relu_backward_kernel", grad, input);
+}
+
+Tensor mps_sigmoid_backward_kernel(const Tensor& grad, const Tensor& sigmoid_out) {
+    return dispatch_binary("sigmoid_backward_kernel", grad, sigmoid_out);
+}
+
+Tensor mps_tanh_backward_kernel(const Tensor& grad, const Tensor& tanh_out) {
+    return dispatch_binary("tanh_backward_kernel", grad, tanh_out);
+}
+
+// ============================================================================
+// In-place element-wise operations
+// ============================================================================
+
+static void dispatch_inplace_binary(const std::string& shader_name,
+                                     Tensor& a, const Tensor& b) {
+    ensure_initialized();
+    size_t numel = a.numel();
+
+    auto pipeline = get_pipeline(shader_name_for_dtype(shader_name, a.dtype()));
+    id<MTLBuffer> buf_a = get_buffer(a);
+    id<MTLBuffer> buf_b = get_buffer(b);
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:buf_a offset:0 atIndex:0];
+    [encoder setBuffer:buf_b offset:0 atIndex:1];
+
+    MTLSize grid = MTLSizeMake(numel, 1, 1);
+    NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
+                             static_cast<NSUInteger>(numel));
+    [encoder dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+    [encoder endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+}
+
+Tensor mps_add_inplace_kernel(Tensor& a, const Tensor& b) { dispatch_inplace_binary("add_inplace_kernel", a, b); return a; }
+Tensor mps_sub_inplace_kernel(Tensor& a, const Tensor& b) { dispatch_inplace_binary("sub_inplace_kernel", a, b); return a; }
+Tensor mps_mul_inplace_kernel(Tensor& a, const Tensor& b) { dispatch_inplace_binary("mul_inplace_kernel", a, b); return a; }
+Tensor mps_div_inplace_kernel(Tensor& a, const Tensor& b) { dispatch_inplace_binary("div_inplace_kernel", a, b); return a; }
+
+// ============================================================================
+// Cast (dtype conversion)
+// ============================================================================
+
+Tensor mps_cast_kernel(const Tensor& input, DType target_dtype) {
+    DType src = input.dtype();
+
+    // Same type — no-op
+    if (src == target_dtype) return input;
+
+    // Determine shader name for common pairs
+    std::string shader_name;
+    if (src == DType::Float32 && target_dtype == DType::Float16) shader_name = "cast_f32_to_f16_kernel";
+    else if (src == DType::Float16 && target_dtype == DType::Float32) shader_name = "cast_f16_to_f32_kernel";
+    else if (src == DType::Float32 && target_dtype == DType::Int32) shader_name = "cast_f32_to_i32_kernel";
+    else if (src == DType::Int32 && target_dtype == DType::Float32) shader_name = "cast_i32_to_f32_kernel";
+    else {
+        // Exotic pair — CPU roundtrip
+        auto dev = input.device();
+        auto cpu_in = input.to(Device::cpu());
+        auto cpu_result = dispatch(OpId::Cast, std::vector<Tensor>{cpu_in},
+            OpAttributes().set(AttrKey::DType, static_cast<int64_t>(target_dtype)));
+        return cpu_result[0].to(dev);
+    }
+
+    ensure_initialized();
+    auto shape = input.shape();
+    std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+    Tensor output(shape_vec, target_dtype, input.device());
+    size_t numel = input.numel();
+
+    auto pipeline = get_pipeline(shader_name);
+    id<MTLBuffer> buf_in = get_buffer(input);
+    id<MTLBuffer> buf_out = get_buffer(output);
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:buf_in offset:0 atIndex:0];
+    [encoder setBuffer:buf_out offset:0 atIndex:1];
+
+    MTLSize grid = MTLSizeMake(numel, 1, 1);
+    NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
+                             static_cast<NSUInteger>(numel));
+    [encoder dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+    [encoder endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+    return output;
+}
+
+// ============================================================================
+// Fused optimizer steps
+// ============================================================================
+
+std::vector<Tensor> mps_fused_sgd_step(const Tensor& param, const Tensor& grad,
+                                         const Tensor& momentum_buf,
+                                         float lr, float momentum, float weight_decay) {
+    ensure_initialized();
+
+    // Clone param and momentum_buf (updated in-place by the kernel)
+    Tensor out_param = param;  // shared storage, kernel writes in-place
+    Tensor out_momentum = momentum_buf;
+    size_t numel = param.numel();
+
+    auto pipeline = get_pipeline("fused_sgd_step_kernel");
+    id<MTLBuffer> buf_param = get_buffer(out_param);
+    id<MTLBuffer> buf_grad = get_buffer(grad);
+    id<MTLBuffer> buf_momentum = get_buffer(out_momentum);
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:buf_param offset:0 atIndex:0];
+    [encoder setBuffer:buf_grad offset:0 atIndex:1];
+    [encoder setBuffer:buf_momentum offset:0 atIndex:2];
+    [encoder setBytes:&lr length:sizeof(float) atIndex:3];
+    [encoder setBytes:&momentum length:sizeof(float) atIndex:4];
+    [encoder setBytes:&weight_decay length:sizeof(float) atIndex:5];
+
+    MTLSize grid = MTLSizeMake(numel, 1, 1);
+    NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
+                             static_cast<NSUInteger>(numel));
+    [encoder dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+    [encoder endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+
+    return {out_param, out_momentum};
+}
+
+std::vector<Tensor> mps_fused_adam_step(const Tensor& param, const Tensor& grad,
+                                         const Tensor& exp_avg, const Tensor& exp_avg_sq,
+                                         float lr, float beta1, float beta2,
+                                         float eps, float bc1, float bc2,
+                                         float weight_decay) {
+    ensure_initialized();
+
+    Tensor out_param = param;
+    Tensor out_m = exp_avg;
+    Tensor out_v = exp_avg_sq;
+    size_t numel = param.numel();
+
+    auto pipeline = get_pipeline("fused_adam_step_kernel");
+    id<MTLBuffer> buf_param = get_buffer(out_param);
+    id<MTLBuffer> buf_grad = get_buffer(grad);
+    id<MTLBuffer> buf_m = get_buffer(out_m);
+    id<MTLBuffer> buf_v = get_buffer(out_v);
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:buf_param offset:0 atIndex:0];
+    [encoder setBuffer:buf_grad offset:0 atIndex:1];
+    [encoder setBuffer:buf_m offset:0 atIndex:2];
+    [encoder setBuffer:buf_v offset:0 atIndex:3];
+    [encoder setBytes:&lr length:sizeof(float) atIndex:4];
+    [encoder setBytes:&beta1 length:sizeof(float) atIndex:5];
+    [encoder setBytes:&beta2 length:sizeof(float) atIndex:6];
+    [encoder setBytes:&eps length:sizeof(float) atIndex:7];
+    [encoder setBytes:&bc1 length:sizeof(float) atIndex:8];
+    [encoder setBytes:&bc2 length:sizeof(float) atIndex:9];
+    [encoder setBytes:&weight_decay length:sizeof(float) atIndex:10];
+
+    MTLSize grid = MTLSizeMake(numel, 1, 1);
+    NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
+                             static_cast<NSUInteger>(numel));
+    [encoder dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+    [encoder endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+
+    return {out_param, out_m, out_v};
+}
+
 } // namespace tenzor::mps

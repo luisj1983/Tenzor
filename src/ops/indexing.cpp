@@ -430,4 +430,26 @@ auto one_hot(const Tensor& input, int64_t num_classes) -> Tensor {
     return dispatch(OpId::OneHot, inputs, attrs)[0];
 }
 
+auto index_add(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& source) -> Tensor {
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    std::vector<Tensor> inputs = {input.contiguous(), index.contiguous(), source.contiguous()};
+    return dispatch(OpId::IndexAdd, inputs, attrs)[0];
+}
+
+auto index_copy(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& source) -> Tensor {
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    std::vector<Tensor> inputs = {input.contiguous(), index.contiguous(), source.contiguous()};
+    return dispatch(OpId::IndexCopy, inputs, attrs)[0];
+}
+
+auto index_fill(const Tensor& input, int64_t dim, const Tensor& index, float value) -> Tensor {
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    attrs.set(AttrKey::Value, static_cast<double>(value));
+    std::vector<Tensor> inputs = {input.contiguous(), index.contiguous()};
+    return dispatch(OpId::IndexFill, inputs, attrs)[0];
+}
+
 } // namespace tenzor

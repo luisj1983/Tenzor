@@ -593,4 +593,65 @@ auto cdist(const Tensor& x1, const Tensor& x2, double p) -> Tensor {
     return dispatch<OpId::CDist>(inputs, attrs)[0];
 }
 
+auto frac(const Tensor& input) -> Tensor {
+    return detail::unary_op<OpId::Frac>(input);
+}
+
+auto heaviside(const Tensor& input, const Tensor& values) -> Tensor {
+    return detail::binary_op_promoted<OpId::Heaviside>("heaviside", input, values);
+}
+
+auto nan_to_num(const Tensor& input, double nan, double posinf, double neginf) -> Tensor {
+    std::array<Tensor, 1> inputs = {input.contiguous()};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::NanValue, nan);
+    attrs.set(AttrKey::PosInfValue, posinf);
+    attrs.set(AttrKey::NegInfValue, neginf);
+    return dispatch<OpId::NanToNum>(inputs, attrs)[0];
+}
+
+auto bitwise_and(const Tensor& a, const Tensor& b) -> Tensor {
+    return detail::binary_op_promoted<OpId::BitwiseAnd>("bitwise_and", a, b);
+}
+
+auto bitwise_or(const Tensor& a, const Tensor& b) -> Tensor {
+    return detail::binary_op_promoted<OpId::BitwiseOr>("bitwise_or", a, b);
+}
+
+auto bitwise_xor(const Tensor& a, const Tensor& b) -> Tensor {
+    return detail::binary_op_promoted<OpId::BitwiseXor>("bitwise_xor", a, b);
+}
+
+auto bitwise_not(const Tensor& input) -> Tensor {
+    return detail::unary_op<OpId::BitwiseNot>(input);
+}
+
+auto bitwise_left_shift(const Tensor& input, const Tensor& shift) -> Tensor {
+    return detail::binary_op_promoted<OpId::BitwiseLeftShift>("bitwise_left_shift", input, shift);
+}
+
+auto bitwise_right_shift(const Tensor& input, const Tensor& shift) -> Tensor {
+    return detail::binary_op_promoted<OpId::BitwiseRightShift>("bitwise_right_shift", input, shift);
+}
+
+auto isclose(const Tensor& a, const Tensor& b, double rtol, double atol) -> Tensor {
+    auto diff = tenzor::abs(tenzor::sub(a, b));
+    auto tol = tenzor::add(
+        tenzor::full({1}, static_cast<float>(atol), a.dtype(), a.device()),
+        tenzor::mul(
+            tenzor::full({1}, static_cast<float>(rtol), a.dtype(), a.device()),
+            tenzor::abs(b)));
+    return tenzor::le(diff, tol);
+}
+
+auto allclose(const Tensor& a, const Tensor& b, double rtol, double atol) -> bool {
+    auto close = isclose(a, b, rtol, atol);
+    auto all_result = dispatch<OpId::All>({close})[0];
+    auto cpu_result = all_result.to(Device::cpu());
+    if (cpu_result.dtype() == DType::Bool) {
+        return *cpu_result.data<bool>();
+    }
+    return *cpu_result.data<float>() != 0.0f;
+}
+
 } // namespace tenzor

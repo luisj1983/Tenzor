@@ -337,6 +337,35 @@ auto fmod(const Tensor& a, const Tensor& b) -> Tensor;
 auto remainder(const Tensor& a, const Tensor& b) -> Tensor;
 auto lerp(const Tensor& start, const Tensor& end, const Tensor& weight) -> Tensor;
 auto lerp(const Tensor& start, const Tensor& end, double weight) -> Tensor;
+
+/** @brief Fractional part: x - floor(x) */
+auto frac(const Tensor& input) -> Tensor;
+
+/** @brief Heaviside step function. Returns 0 where x<0, values where x==0, 1 where x>0. */
+auto heaviside(const Tensor& input, const Tensor& values) -> Tensor;
+
+/**
+ * @brief Replace NaN, positive infinity, and negative infinity with specified values.
+ * @param input Input tensor
+ * @param nan Replacement for NaN (default: 0.0)
+ * @param posinf Replacement for +Inf (default: largest finite value of dtype)
+ * @param neginf Replacement for -Inf (default: smallest finite value of dtype)
+ */
+auto nan_to_num(const Tensor& input, double nan = 0.0,
+                double posinf = std::numeric_limits<double>::max(),
+                double neginf = std::numeric_limits<double>::lowest()) -> Tensor;
+
+/// @}
+
+/// @name Bitwise Operations (integer types)
+/// @{
+auto bitwise_and(const Tensor& a, const Tensor& b) -> Tensor;
+auto bitwise_or(const Tensor& a, const Tensor& b) -> Tensor;
+auto bitwise_xor(const Tensor& a, const Tensor& b) -> Tensor;
+auto bitwise_not(const Tensor& input) -> Tensor;
+auto bitwise_left_shift(const Tensor& input, const Tensor& shift) -> Tensor;
+auto bitwise_right_shift(const Tensor& input, const Tensor& shift) -> Tensor;
+
 /// @}
 
 /// @name Logical Operations (return Bool tensors)
@@ -412,6 +441,38 @@ auto polar(const Tensor& abs, const Tensor& angle) -> Tensor;
  * @return Distance tensor (B, P, R) or (P, R)
  */
 auto cdist(const Tensor& x1, const Tensor& x2, double p = 2.0) -> Tensor;
+
+/// @name Comparison Utilities
+/// @{
+
+/**
+ * @brief Element-wise check if two tensors are close within tolerance.
+ *
+ * Returns a Bool tensor where each element is true if:
+ *   |a - b| <= atol + rtol * |b|
+ *
+ * @param a First tensor
+ * @param b Second tensor
+ * @param rtol Relative tolerance (default: 1e-5)
+ * @param atol Absolute tolerance (default: 1e-8)
+ * @return Bool tensor of same shape
+ */
+auto isclose(const Tensor& a, const Tensor& b, double rtol = 1e-5, double atol = 1e-8) -> Tensor;
+
+/**
+ * @brief Check if all elements of two tensors are close within tolerance.
+ *
+ * Returns true if isclose(a, b, rtol, atol) is true for all elements.
+ *
+ * @param a First tensor
+ * @param b Second tensor
+ * @param rtol Relative tolerance (default: 1e-5)
+ * @param atol Absolute tolerance (default: 1e-8)
+ * @return true if all elements are close
+ */
+auto allclose(const Tensor& a, const Tensor& b, double rtol = 1e-5, double atol = 1e-8) -> bool;
+
+/// @}
 
 /** @} */ // end of tensor_math group
 

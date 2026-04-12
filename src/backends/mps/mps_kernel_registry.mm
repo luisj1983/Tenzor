@@ -18,8 +18,136 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/core/shape.hpp"
 
 namespace tenzor::mps {
+
+// ============================================================================
+// Zero-copy shape operations (metadata-only, no Metal dispatch needed)
+// ============================================================================
+
+static auto mps_reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape) -> Tensor {
+    if (!input.is_contiguous()) {
+        // Non-contiguous: must materialize via CPU (rare path)
+        auto cpu_input = input.to(Device::cpu());
+        auto cpu_result = cpu_input.reshape(new_shape);
+        return cpu_result.to(input.device());
+    }
+    Tensor result;
+    TensorAccessor::get_impl_mutable(result) = make_intrusive<TensorImpl>(*TensorAccessor::get_impl(input));
+    result.mutable_shape() = new_shape;
+    result.mutable_strides() = compute_strides(new_shape);
+    return result;
+}
+
+static auto mps_transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1) -> Tensor {
+    const int64_t ndim = input.ndim();
+    if (dim0 < 0) dim0 += ndim;
+    if (dim1 < 0) dim1 += ndim;
+    Tensor result;
+    TensorAccessor::get_impl_mutable(result) = make_intrusive<TensorImpl>(*TensorAccessor::get_impl(input));
+    auto& r_shape = result.mutable_shape();
+    auto& r_strides = result.mutable_strides();
+    std::swap(r_shape[dim0], r_shape[dim1]);
+    std::swap(r_strides[dim0], r_strides[dim1]);
+    return result;
+}
+
+static auto mps_permute_kernel(const Tensor& input, const std::vector<int64_t>& dims) -> Tensor {
+    const int64_t ndim = input.ndim();
+    Tensor result;
+    TensorAccessor::get_impl_mutable(result) = make_intrusive<TensorImpl>(*TensorAccessor::get_impl(input));
+    std::vector<int64_t> new_shape(ndim);
+    std::vector<int64_t> new_strides(ndim);
+    for (int64_t i = 0; i < ndim; ++i) {
+        new_shape[i] = input.shape()[dims[i]];
+        new_strides[i] = input.strides()[dims[i]];
+    }
+    result.mutable_shape() = std::move(new_shape);
+    result.mutable_strides() = std::move(new_strides);
+    return result;
+}
+
+static auto mps_squeeze_kernel(const Tensor& input, int64_t dim) -> Tensor {
+    Tensor result;
+    TensorAccessor::get_impl_mutable(result) = make_intrusive<TensorImpl>(*TensorAccessor::get_impl(input));
+    if (dim >= 0) {
+        auto& r_shape = result.mutable_shape();
+        auto& r_strides = result.mutable_strides();
+        r_shape.erase(r_shape.begin() + dim);
+        r_strides.erase(r_strides.begin() + dim);
+    } else {
+        std::vector<int64_t> new_shape;
+        std::vector<int64_t> new_strides;
+        for (int64_t i = 0; i < input.ndim(); ++i) {
+            if (input.shape()[i] != 1) {
+                new_shape.push_back(input.shape()[i]);
+                new_strides.push_back(input.strides()[i]);
+            }
+        }
+        if (new_shape.empty()) {
+            new_shape.push_back(1);
+            new_strides.push_back(1);
+        }
+        result.mutable_shape() = std::move(new_shape);
+        result.mutable_strides() = std::move(new_strides);
+    }
+    return result;
+}
+
+static auto mps_unsqueeze_kernel(const Tensor& input, int64_t dim) -> Tensor {
+    Tensor result;
+    TensorAccessor::get_impl_mutable(result) = make_intrusive<TensorImpl>(*TensorAccessor::get_impl(input));
+    auto& r_shape = result.mutable_shape();
+    auto& r_strides = result.mutable_strides();
+    r_shape.insert(r_shape.begin() + dim, 1);
+    int64_t new_stride = (dim < input.ndim()) ? input.strides()[dim] : 1;
+    r_strides.insert(r_strides.begin() + dim, new_stride);
+    return result;
+}
+
+static auto mps_flatten_kernel(const Tensor& input, int64_t start_dim, int64_t end_dim) -> Tensor {
+    auto shape = input.shape();
+    int64_t ndim = shape.size();
+    if (start_dim < 0) start_dim += ndim;
+    if (end_dim < 0) end_dim += ndim;
+    int64_t flat_size = 1;
+    for (int64_t d = start_dim; d <= end_dim; ++d) {
+        flat_size *= shape[d];
+    }
+    std::vector<int64_t> new_shape;
+    for (int64_t d = 0; d < start_dim; ++d) new_shape.push_back(shape[d]);
+    new_shape.push_back(flat_size);
+    for (int64_t d = end_dim + 1; d < ndim; ++d) new_shape.push_back(shape[d]);
+    return mps_reshape_kernel(input, new_shape);
+}
+
+static auto mps_expand_kernel(const Tensor& input, const std::vector<int64_t>& target_shape) -> Tensor {
+    const auto& in_shape = input.shape();
+    const auto& in_strides = input.strides();
+    int64_t ndim_out = static_cast<int64_t>(target_shape.size());
+    int64_t ndim_in = input.ndim();
+    int64_t dim_diff = ndim_out - ndim_in;
+
+    std::vector<int64_t> new_strides(ndim_out, 0);
+    for (int64_t i = ndim_out - 1; i >= 0; --i) {
+        int64_t in_idx = i - dim_diff;
+        if (in_idx >= 0) {
+            if (in_shape[in_idx] == target_shape[i]) {
+                new_strides[i] = in_strides[in_idx];
+            } else if (in_shape[in_idx] == 1) {
+                new_strides[i] = 0;  // Broadcast
+            } else {
+                throw std::runtime_error("expand: incompatible shapes");
+            }
+        }
+    }
+    Tensor result;
+    TensorAccessor::get_impl_mutable(result) = make_intrusive<TensorImpl>(*TensorAccessor::get_impl(input));
+    result.mutable_shape() = target_shape;
+    result.mutable_strides() = new_strides;
+    return result;
+}
 
 // Forward declarations of kernel functions (defined in kernels/mps_elementwise.mm)
 Tensor mps_add_kernel(const Tensor& a, const Tensor& b);
@@ -49,6 +177,37 @@ Tensor mps_layer_norm_kernel(const Tensor& input, const Tensor& weight,
 Tensor mps_conv2d_kernel(const Tensor& input, const Tensor& weight,
                           int64_t stride_h, int64_t stride_w,
                           int64_t pad_h, int64_t pad_w, int64_t groups);
+// Native reduction kernels
+Tensor mps_sum_kernel(const Tensor& input, int64_t dim, bool keepdim);
+Tensor mps_mean_kernel(const Tensor& input, int64_t dim, bool keepdim);
+Tensor mps_max_kernel(const Tensor& input, int64_t dim, bool keepdim, Tensor& out_indices);
+// Native comparison kernels (Bool output)
+Tensor mps_gt_kernel(const Tensor& a, const Tensor& b);
+Tensor mps_eq_kernel(const Tensor& a, const Tensor& b);
+Tensor mps_ne_kernel(const Tensor& a, const Tensor& b);
+Tensor mps_lt_kernel(const Tensor& a, const Tensor& b);
+Tensor mps_le_kernel(const Tensor& a, const Tensor& b);
+Tensor mps_ge_kernel(const Tensor& a, const Tensor& b);
+// Native backward activation kernels
+Tensor mps_relu_backward_kernel(const Tensor& grad, const Tensor& input);
+Tensor mps_sigmoid_backward_kernel(const Tensor& grad, const Tensor& sigmoid_out);
+Tensor mps_tanh_backward_kernel(const Tensor& grad, const Tensor& tanh_out);
+// Native in-place element-wise kernels
+Tensor mps_add_inplace_kernel(Tensor& a, const Tensor& b);
+Tensor mps_sub_inplace_kernel(Tensor& a, const Tensor& b);
+Tensor mps_mul_inplace_kernel(Tensor& a, const Tensor& b);
+Tensor mps_div_inplace_kernel(Tensor& a, const Tensor& b);
+// Native Cast kernel
+Tensor mps_cast_kernel(const Tensor& input, DType target_dtype);
+// Native fused optimizer kernels
+std::vector<Tensor> mps_fused_sgd_step(const Tensor& param, const Tensor& grad,
+                                         const Tensor& momentum_buf,
+                                         float lr, float momentum, float weight_decay);
+std::vector<Tensor> mps_fused_adam_step(const Tensor& param, const Tensor& grad,
+                                         const Tensor& exp_avg, const Tensor& exp_avg_sq,
+                                         float lr, float beta1, float beta2,
+                                         float eps, float bc1, float bc2,
+                                         float weight_decay);
 
 auto register_mps_kernels(BackendDispatchTable& table) -> void {
     // ================================================================
@@ -142,50 +301,39 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     // by routing through CPU. Native Metal shaders can replace these
     // incrementally for better performance.
 
-    // Reductions (needed by backward pass: sum for gradient accumulation, mean for losses)
+    // Reductions — native Metal kernels (no CPU roundtrip for contiguous last-dim reductions)
     table.register_kernel(OpId::Sum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto dev = inputs[0].device();
-        auto cpu_in = inputs[0].to(Device::cpu());
         int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         bool keepdim = attrs.get_bool(AttrKey::KeepDim, false);
-        if (dim >= 0) {
-            return std::vector<Tensor>{tenzor::sum(cpu_in, dim, keepdim).to(dev)};
-        }
-        return std::vector<Tensor>{tenzor::sum(cpu_in).to(dev)};
+        return std::vector<Tensor>{mps_sum_kernel(inputs[0], dim, keepdim)};
     });
 
     table.register_kernel(OpId::Mean, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto dev = inputs[0].device();
-        auto cpu_in = inputs[0].to(Device::cpu());
         int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         bool keepdim = attrs.get_bool(AttrKey::KeepDim, false);
-        if (dim >= 0) {
-            return std::vector<Tensor>{tenzor::mean(cpu_in, dim, keepdim).to(dev)};
-        }
-        return std::vector<Tensor>{tenzor::mean(cpu_in).to(dev)};
+        return std::vector<Tensor>{mps_mean_kernel(inputs[0], dim, keepdim)};
     });
 
     table.register_kernel(OpId::Max, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto dev = inputs[0].device();
-        auto cpu_in = inputs[0].to(Device::cpu());
         int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         bool keepdim = attrs.get_bool(AttrKey::KeepDim, false);
-        auto [values, indices] = tenzor::max(cpu_in, dim, keepdim);
-        return std::vector<Tensor>{values.to(dev), indices.to(dev)};
+        Tensor indices;
+        auto values = mps_max_kernel(inputs[0], dim, keepdim, indices);
+        return std::vector<Tensor>{values, indices};
     });
 
-    // Shape operations (needed by backward: reshape for gradient matching)
+    // Shape operations — zero-copy metadata ops (no GPU→CPU→GPU roundtrip)
     table.register_single_output_kernel(OpId::Reshape,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            // Reshape is a metadata-only op — just do it
-            return inputs[0].to(Device::cpu()).reshape(
-                std::vector<int64_t>(inputs[0].shape().begin(), inputs[0].shape().end())).to(inputs[0].device());
+            auto shape = attrs.get_int_list(AttrKey::Shape);
+            return mps_reshape_kernel(inputs[0], shape);
         });
 
     table.register_single_output_kernel(OpId::Transpose,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            auto dev = inputs[0].device();
-            return inputs[0].to(Device::cpu()).transpose().to(dev);
+            int64_t dim0 = attrs.get_int(AttrKey::Dim0, 0);
+            int64_t dim1 = attrs.get_int(AttrKey::Dim1, 1);
+            return mps_transpose_kernel(inputs[0], dim0, dim1);
         });
 
     // Phase 3.2: native Metal unary / binary kernels (previously CPU
@@ -207,15 +355,85 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
             return mps_clamp_kernel(inputs[0], min_val, max_val);
         });
 
-    // Gt stays on the CPU fallback for now: the native gt_kernel would
-    // write Float32 0/1 but the rest of Tenzor expects a Bool output
-    // tensor, and `dispatch_binary` creates the output with the input
-    // dtype. Making GT native needs a dedicated comparison dispatcher
-    // that allocates a Bool output. Leaving as CPU fallback until that
-    // helper lands.
+    // Permute, Squeeze, Unsqueeze, Flatten, Expand — zero-copy metadata ops
+    table.register_single_output_kernel(OpId::Permute,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto dims = attrs.get_int_list(AttrKey::Dims);
+            return mps_permute_kernel(inputs[0], dims);
+        });
+
+    table.register_single_output_kernel(OpId::Squeeze,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            return mps_squeeze_kernel(inputs[0], dim);
+        });
+
+    table.register_single_output_kernel(OpId::Unsqueeze,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            return mps_unsqueeze_kernel(inputs[0], dim);
+        });
+
+    table.register_single_output_kernel(OpId::Flatten,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t start_dim = attrs.get_int(AttrKey::StartDim, 0);
+            int64_t end_dim = attrs.get_int(AttrKey::EndDim, -1);
+            return mps_flatten_kernel(inputs[0], start_dim, end_dim);
+        });
+
+    table.register_single_output_kernel(OpId::Expand,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto shape = attrs.get_int_list(AttrKey::Shape);
+            return mps_expand_kernel(inputs[0], shape);
+        });
+
+    // Comparison ops — native Metal kernels with dedicated Bool-output dispatcher
     table.register_kernel(OpId::Gt, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        auto dev = inputs[0].device();
-        return std::vector<Tensor>{tenzor::gt(inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu())).to(dev)};
+        return std::vector<Tensor>{mps_gt_kernel(inputs[0], inputs[1])};
+    });
+    table.register_kernel(OpId::Eq, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{mps_eq_kernel(inputs[0], inputs[1])};
+    });
+    table.register_kernel(OpId::Ne, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{mps_ne_kernel(inputs[0], inputs[1])};
+    });
+    table.register_kernel(OpId::Lt, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{mps_lt_kernel(inputs[0], inputs[1])};
+    });
+    table.register_kernel(OpId::Le, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{mps_le_kernel(inputs[0], inputs[1])};
+    });
+    table.register_kernel(OpId::Ge, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{mps_ge_kernel(inputs[0], inputs[1])};
+    });
+
+    // Backward activation kernels — native Metal
+    table.register_kernel(OpId::ReLUBackward, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{mps_relu_backward_kernel(inputs[0], inputs[1])};
+    });
+    table.register_kernel(OpId::SigmoidBackward, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{mps_sigmoid_backward_kernel(inputs[0], inputs[1])};
+    });
+    table.register_kernel(OpId::TanhBackward, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{mps_tanh_backward_kernel(inputs[0], inputs[1])};
+    });
+
+    // In-place arithmetic — native Metal
+    table.register_kernel(OpId::AddInplace, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        Tensor a = inputs[0];  // copy handle (shared storage — kernel writes in-place)
+        return std::vector<Tensor>{mps_add_inplace_kernel(a, inputs[1])};
+    });
+    table.register_kernel(OpId::SubInplace, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        Tensor a = inputs[0];
+        return std::vector<Tensor>{mps_sub_inplace_kernel(a, inputs[1])};
+    });
+    table.register_kernel(OpId::MulInplace, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        Tensor a = inputs[0];
+        return std::vector<Tensor>{mps_mul_inplace_kernel(a, inputs[1])};
+    });
+    table.register_kernel(OpId::DivInplace, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        Tensor a = inputs[0];
+        return std::vector<Tensor>{mps_div_inplace_kernel(a, inputs[1])};
     });
 
     // Note: zeros_like / ones_like are library-level free functions in
@@ -224,34 +442,31 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     // tenzor::ones_like(x), which internally dispatches zeros()/ones()
     // for the tensor's device. No MPS-specific registration is needed.
 
-    // Fused optimizer steps (SGD, Adam) via CPU roundtrip
+    // Fused optimizer steps — native Metal kernels (no CPU roundtrip)
     table.register_kernel(OpId::FusedSGDStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto dev = inputs[0].device();
-        std::vector<Tensor> cpu_inputs;
-        for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
-        auto result = dispatch(OpId::FusedSGDStep, cpu_inputs, attrs);
-        std::vector<Tensor> gpu_result;
-        for (const auto& t : result) gpu_result.push_back(t.to(dev));
-        return gpu_result;
+        float lr = static_cast<float>(attrs.get_float(AttrKey::LearningRate, 0.01));
+        float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.0));
+        float wd = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
+        return mps_fused_sgd_step(inputs[0], inputs[1], inputs[2], lr, momentum, wd);
     });
 
     table.register_kernel(OpId::FusedAdamStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto dev = inputs[0].device();
-        std::vector<Tensor> cpu_inputs;
-        for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
-        auto result = dispatch(OpId::FusedAdamStep, cpu_inputs, attrs);
-        std::vector<Tensor> gpu_result;
-        for (const auto& t : result) gpu_result.push_back(t.to(dev));
-        return gpu_result;
+        float lr = static_cast<float>(attrs.get_float(AttrKey::LearningRate, 0.001));
+        float beta1 = static_cast<float>(attrs.get_float(AttrKey::Beta1, 0.9));
+        float beta2 = static_cast<float>(attrs.get_float(AttrKey::Beta2, 0.999));
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-8));
+        float bc1 = static_cast<float>(attrs.get_float(AttrKey::BiasCorrection1, 1.0));
+        float bc2 = static_cast<float>(attrs.get_float(AttrKey::BiasCorrection2, 1.0));
+        float wd = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
+        return mps_fused_adam_step(inputs[0], inputs[1], inputs[2], inputs[3],
+                                    lr, beta1, beta2, eps, bc1, bc2, wd);
     });
 
-    // Cast (dtype conversion needed during training)
+    // Cast — native Metal for common pairs, CPU roundtrip for exotic dtypes
     table.register_single_output_kernel(OpId::Cast,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            auto dev = inputs[0].device();
-            auto cpu_in = inputs[0].to(Device::cpu());
-            auto result = dispatch(OpId::Cast, std::vector<Tensor>{cpu_in}, attrs);
-            return result[0].to(dev);
+            auto target = static_cast<DType>(attrs.get_int(AttrKey::DType, 0));
+            return mps_cast_kernel(inputs[0], target);
         });
 
     // ================================================================
@@ -353,7 +568,7 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
         OpId::CumProd, OpId::CumSum, OpId::Diag,
         OpId::DropoutBackward, OpId::Elu, OpId::EluBackward,
         OpId::EmbeddingBagBackward, OpId::EmbeddingBagForward,
-        OpId::Expand, OpId::FFT2, OpId::Fill, OpId::Flatten, OpId::Flip, OpId::Fold,
+        OpId::FFT2, OpId::Fill, OpId::Flip, OpId::Fold,
         OpId::FusedBatchNormReLU, OpId::FusedConv2dBnReLU,
         OpId::FusedConv2dReLU, OpId::FusedConv2dSigmoid,
         OpId::FusedConv2dSwish, OpId::FusedConv2dTanh, OpId::FusedLinearReLU,
@@ -364,16 +579,16 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
         OpId::MaskedFill, OpId::MaxPool1dBackward, OpId::MaxPool2dBackward,
         OpId::MaxPool3dBackward,
         OpId::Multinomial, OpId::Nonzero, OpId::Norm, OpId::OneHot,
-        OpId::Permute, OpId::Polygamma, OpId::Pow, OpId::Put,
+        OpId::Polygamma, OpId::Pow, OpId::Put,
         OpId::QuantizedConv2d, OpId::QuantizedLinear,
         OpId::Repeat, OpId::Roll, OpId::Scatter, OpId::ScatterAdd,
         OpId::SearchSorted, OpId::Slice, OpId::SoftmaxBackward,
         OpId::Softplus, OpId::SoftplusBackward,
         OpId::SparseTrsm, OpId::SparseTrsv,
-        OpId::Squeeze, OpId::Stack, OpId::Std,
+        OpId::Stack, OpId::Std,
         OpId::Take, OpId::Tile, OpId::ToMemoryFormat,
         OpId::Trace, OpId::Tril, OpId::Triu, OpId::Unfold,
-        OpId::Unsqueeze, OpId::Var
+        OpId::Var
     }) {
         mps_roundtrip_single(op);
     }

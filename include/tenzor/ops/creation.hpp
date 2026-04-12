@@ -218,6 +218,24 @@ auto linspace(float start, float end, int64_t steps,
              Device device = Device::cpu()) -> Tensor;
 
 /**
+ * @brief Create a 1-D tensor of logarithmically spaced values.
+ *
+ * Generates `steps` values logarithmically spaced between base^start and base^end.
+ * Equivalent to pow(base, linspace(start, end, steps)).
+ *
+ * @param start Exponent of the start value
+ * @param end Exponent of the end value
+ * @param steps Number of values to generate
+ * @param base Base of the logarithm (default: 10.0)
+ * @param dtype Element data type (default: Float32)
+ * @param device Target device (default: CPU)
+ * @return 1-D tensor of size `steps`
+ */
+auto logspace(float start, float end, int64_t steps, double base = 10.0,
+              DType dtype = DType::Float32,
+              Device device = Device::cpu()) -> Tensor;
+
+/**
  * @brief Create identity matrix.
  *
  * @param n Number of rows

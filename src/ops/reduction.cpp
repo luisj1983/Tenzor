@@ -208,4 +208,36 @@ auto histogram(const Tensor& input, int64_t bins, double min_val, double max_val
     return {results[0], results[1]};
 }
 
+auto count_nonzero(const Tensor& input, std::optional<int64_t> dim) -> Tensor {
+    std::array<Tensor, 1> inputs = {input.contiguous()};
+    NewOpAttributes attrs;
+    if (dim.has_value()) attrs.set(AttrKey::Dim, dim.value());
+    return dispatch<OpId::CountNonzero>(inputs, attrs)[0];
+}
+
+auto nansum(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tensor {
+    std::array<Tensor, 1> inputs = {input.contiguous()};
+    NewOpAttributes attrs;
+    if (dim.has_value()) attrs.set(AttrKey::Dim, dim.value());
+    attrs.set(AttrKey::KeepDim, keepdim);
+    return dispatch<OpId::Nansum>(inputs, attrs)[0];
+}
+
+auto nanmean(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tensor {
+    std::array<Tensor, 1> inputs = {input.contiguous()};
+    NewOpAttributes attrs;
+    if (dim.has_value()) attrs.set(AttrKey::Dim, dim.value());
+    attrs.set(AttrKey::KeepDim, keepdim);
+    return dispatch<OpId::Nanmean>(inputs, attrs)[0];
+}
+
+auto aminmax(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> std::pair<Tensor, Tensor> {
+    std::array<Tensor, 1> inputs = {input.contiguous()};
+    NewOpAttributes attrs;
+    if (dim.has_value()) attrs.set(AttrKey::Dim, dim.value());
+    attrs.set(AttrKey::KeepDim, keepdim);
+    auto results = dispatch<OpId::Aminmax>(inputs, attrs);
+    return {results[0], results[1]};
+}
+
 } // namespace tenzor

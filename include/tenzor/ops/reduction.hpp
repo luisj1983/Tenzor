@@ -153,6 +153,25 @@ auto has_inf_nan(const Tensor& input) -> Tensor;
 auto histogram(const Tensor& input, int64_t bins = 10, double min = 0.0, double max = 0.0)
     -> std::pair<Tensor, Tensor>;
 
+/** @brief Count nonzero elements along a dimension or globally. */
+auto count_nonzero(const Tensor& input,
+                   std::optional<int64_t> dim = std::nullopt) -> Tensor;
+
+/** @brief Sum of tensor elements, treating NaN as zero. */
+auto nansum(const Tensor& input,
+            std::optional<int64_t> dim = std::nullopt,
+            bool keepdim = false) -> Tensor;
+
+/** @brief Mean of tensor elements, ignoring NaN values. */
+auto nanmean(const Tensor& input,
+             std::optional<int64_t> dim = std::nullopt,
+             bool keepdim = false) -> Tensor;
+
+/** @brief Simultaneous min and max in a single pass. Returns (min_values, max_values). */
+auto aminmax(const Tensor& input,
+             std::optional<int64_t> dim = std::nullopt,
+             bool keepdim = false) -> std::pair<Tensor, Tensor>;
+
 /** @} */ // end of tensor_reduction group
 
 } // namespace tenzor

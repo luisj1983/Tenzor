@@ -148,6 +148,23 @@ auto trace(const Tensor& input) -> Tensor;
  */
 auto flip(const Tensor& input, std::vector<int64_t> dims) -> Tensor;
 
+/**
+ * @brief Move dimensions of a tensor to new positions.
+ *
+ * Computes a permutation that moves source[i] to destination[i] and calls permute().
+ *
+ * @param input Input tensor
+ * @param source Source dimension(s)
+ * @param destination Target position(s)
+ * @return Permuted tensor (view, no copy)
+ */
+auto movedim(const Tensor& input, std::vector<int64_t> source, std::vector<int64_t> destination) -> Tensor;
+
+/**
+ * @brief Swap two dimensions of a tensor. Alias for transpose(input, dim0, dim1).
+ */
+auto swapaxes(const Tensor& input, int64_t dim0, int64_t dim1) -> Tensor;
+
 /// @}
 
 /** @} */ // end of tensor_transform group

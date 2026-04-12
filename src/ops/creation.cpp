@@ -928,4 +928,11 @@ auto bernoulli(const Tensor& probs) -> Tensor {
     return dispatch<OpId::Bernoulli>(inputs)[0];
 }
 
+auto logspace(float start, float end, int64_t steps, double base,
+              DType dtype, Device device) -> Tensor {
+    auto exponents = tenzor::linspace(start, end, steps, dtype, device);
+    auto base_tensor = tenzor::full({1}, static_cast<float>(base), dtype, device);
+    return tenzor::pow(base_tensor, exponents);
+}
+
 } // namespace tenzor

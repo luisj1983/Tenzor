@@ -1602,16 +1602,16 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
                (target_dtype == DType::Int32 || target_dtype == DType::Int8 || target_dtype == DType::Bool)) {
         // Two-step via Float32: Float64/Float16 -> Float32 -> target
         two_step = true;
+    } else if (src_dtype == DType::Float32 && target_dtype == DType::Int64) {
+        shader_name = "cast_f32_i64";
+    } else if (src_dtype == DType::Int64 && target_dtype == DType::Float32) {
+        shader_name = "cast_i64_f32";
     } else if (src_dtype != DType::Float32 && target_dtype != DType::Float32) {
         // Generic two-step via Float32 for any remaining dtype pair
         two_step = true;
     } else {
-        // No direct shader and no two-step path (e.g. Int64↔Float32 has
-        // no Vulkan cast kernel). The old fallback called dispatchCast
-        // recursively with the same src/target, which infinite-looped
-        // until stack exhaustion. Instead, do one CPU round-trip — Tensor
-        // storage is plain bytes so the CPU cast produces the bit layout
-        // Vulkan will read back correctly. This is the same "unsupported
+        // No direct shader and no two-step path. CPU round-trip for
+        // exotic pairs (e.g. FP8). This is the same "unsupported
         // kernel → CPU fallback" pattern used for FP8 in the CUDA cast.
         Tensor cpu_input = input.to(Device::cpu());
         Tensor cpu_result = cpu_input.to(target_dtype);

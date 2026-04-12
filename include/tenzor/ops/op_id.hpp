@@ -65,6 +65,10 @@ enum class OpId : uint16_t {
     All,     // = 23, Boolean all reduction
     Median,  // = 24
     Mode,    // = 25
+    CountNonzero,  // = 26
+    Nansum,        // = 27
+    Nanmean,       // = 28
+    Aminmax,       // = 29, simultaneous min+max in single pass (returns tuple)
 
     // =========================================================================
     // Element-wise Math (30-49)
@@ -84,6 +88,9 @@ enum class OpId : uint16_t {
     Ceil,
     Round,
     Trunc,
+    Frac,                // = 38, fractional part: x - floor(x)
+    Heaviside,           // = 39, step function: 0 if x<0, val if x==0, 1 if x>0
+    NanToNum,            // = 40, replace NaN/Inf with specified values
 
     // =========================================================================
     // Trigonometric Operations (50-64)
@@ -131,6 +138,10 @@ enum class OpId : uint16_t {
     TanhInplace,
     LeakyReLUInplace,
     GeluInplace,
+    LogSigmoid,          // = 94, log(sigmoid(x)) = -softplus(-x), numerically stable
+    LogSigmoidBackward,  // = 95
+    RReLU,               // = 96, randomized leaky ReLU
+    RReLUBackward,       // = 97
 
     // =========================================================================
     // Shape/View Operations (100-119)
@@ -418,6 +429,9 @@ enum class OpId : uint16_t {
     // Indexing Operations (410-419)
     // =========================================================================
     ScatterAdd = 410,
+    IndexAdd,            // = 411, self[index] += source along dim
+    IndexCopy,           // = 412, self[index] = source along dim
+    IndexFill,           // = 413, self[index] = value along dim
 
     // =========================================================================
     // Linear Algebra Operations (420-439)
@@ -468,21 +482,17 @@ enum class OpId : uint16_t {
     // by TENZOR_HAS_CUSPARSE / TENZOR_HAS_ROCSPARSE / TENZOR_HAS_ONEMKL.
     // Vulkan uses its own native dispatch (registered separately).
     //
-    // Per-backend coverage matrix (as of the P0 fix pass):
+    // Per-backend coverage matrix:
     //
     //                 CPU  CUDA  ROCm  Vulkan  OneAPI
     //   SparseSpMM    yes  yes   yes   yes     yes
     //   SparseSpMV    yes  yes   yes   yes     yes
     //   SparseToDense yes  yes   yes   yes     yes
-    //   DenseToSparse yes  yes   yes   —       yes
-    //   SparseAdd     yes  —*    —*    yes     yes
-    //   SparseSpGEMM  yes  yes   yes   —       yes
-    //   SparseTrsv    yes  yes   yes   —       yes
-    //   SparseTrsm    yes  —     yes   —       yes
-    //
-    // * CUDA/ROCm intentionally omit SparseAdd registration — the dispatcher
-    //   falls through to sparse::add() which round-trips through CPU. See
-    //   cuda_kernel_registry.cpp:3298-3305 for rationale.
+    //   DenseToSparse yes  yes   yes   yes     yes
+    //   SparseAdd     yes  yes   yes   yes     yes
+    //   SparseSpGEMM  yes  yes   yes   yes     yes
+    //   SparseTrsv    yes  yes   yes   yes     yes
+    //   SparseTrsm    yes  yes   yes   yes     yes
     // =========================================================================
     SparseSpMM = 460,          // Sparse-Dense matrix multiplication
     SparseSpMV,                // Sparse-Dense matrix-vector multiplication
@@ -532,6 +542,16 @@ enum class OpId : uint16_t {
     // =========================================================================
     LinalgLU = 510,            // LU factorization with partial pivoting
     LinalgLUSolve,             // Solve via pre-computed LU factors
+
+    // =========================================================================
+    // Bitwise Operations (520-529)
+    // =========================================================================
+    BitwiseAnd = 520,          // Element-wise bitwise AND (integer types)
+    BitwiseOr,                 // Element-wise bitwise OR
+    BitwiseXor,                // Element-wise bitwise XOR
+    BitwiseNot,                // Element-wise bitwise NOT (unary)
+    BitwiseLeftShift,          // Element-wise left shift
+    BitwiseRightShift,         // Element-wise right shift
 
     // =========================================================================
     // Sentinel (MUST BE LAST)
