@@ -109,7 +109,7 @@ RegionProposalNetwork::RegionProposalNetwork(
     register_module("head_bbox_pred", head_->bbox_pred_);
 }
 
-auto RegionProposalNetwork::forward_impl(const Variable& input) -> Variable {
+auto RegionProposalNetwork::forward_impl([[maybe_unused]] const Variable& input) -> Variable {
     throw std::runtime_error(
         "RegionProposalNetwork requires image_shapes. "
         "Use forward_proposals() instead."

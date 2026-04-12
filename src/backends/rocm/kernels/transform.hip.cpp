@@ -41,7 +41,7 @@ public:
 // RAII guard for HIP device memory allocations
 struct HipMemGuard {
     void* ptr = nullptr;
-    ~HipMemGuard() { if (ptr) hipFree(ptr); }
+    ~HipMemGuard() { if (ptr) (void)hipFree(ptr); }
     HipMemGuard() = default;
     HipMemGuard(const HipMemGuard&) = delete;
     HipMemGuard& operator=(const HipMemGuard&) = delete;

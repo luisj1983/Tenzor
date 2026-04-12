@@ -93,8 +93,8 @@ TEST(ROCmKernelsTest, Add_Float32_LargeArray) {
         host_b[i] = static_cast<float>((i + 50) % 100);
     }
 
-    hipMemcpy(a_data, host_a.data(), size * sizeof(float), hipMemcpyHostToDevice);
-    hipMemcpy(b_data, host_b.data(), size * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(a_data, host_a.data(), size * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
+    ASSERT_EQ(hipMemcpy(b_data, host_b.data(), size * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     auto c = add(a, b);
 
@@ -127,8 +127,8 @@ TEST(ROCmKernelsTest, Add_Float64_Precision) {
         host_b[i] = static_cast<double>(i) * 0.2;
     }
 
-    hipMemcpy(a_data, host_a.data(), size * sizeof(double), hipMemcpyHostToDevice);
-    hipMemcpy(b_data, host_b.data(), size * sizeof(double), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(a_data, host_a.data(), size * sizeof(double), hipMemcpyHostToDevice), hipSuccess);
+    ASSERT_EQ(hipMemcpy(b_data, host_b.data(), size * sizeof(double), hipMemcpyHostToDevice), hipSuccess);
 
     auto c = add(a, b);
 
@@ -153,7 +153,7 @@ TEST(ROCmKernelsTest, Sub_Float32_Basic) {
 
     auto a_data = a.data<float>();
     std::vector<float> host_a(256 * 256, 5.0f);
-    hipMemcpy(a_data, host_a.data(), 256 * 256 * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(a_data, host_a.data(), 256 * 256 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     auto c = sub(a, b);
 
@@ -175,8 +175,8 @@ TEST(ROCmKernelsTest, Mul_Float32_Basic) {
     std::vector<float> host_a(512 * 512, 3.0f);
     std::vector<float> host_b(512 * 512, 4.0f);
 
-    hipMemcpy(a_data, host_a.data(), 512 * 512 * sizeof(float), hipMemcpyHostToDevice);
-    hipMemcpy(b_data, host_b.data(), 512 * 512 * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(a_data, host_a.data(), 512 * 512 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
+    ASSERT_EQ(hipMemcpy(b_data, host_b.data(), 512 * 512 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     auto c = mul(a, b);
 
@@ -198,8 +198,8 @@ TEST(ROCmKernelsTest, Div_Float32_Basic) {
     std::vector<float> host_a(128 * 128, 12.0f);
     std::vector<float> host_b(128 * 128, 4.0f);
 
-    hipMemcpy(a_data, host_a.data(), 128 * 128 * sizeof(float), hipMemcpyHostToDevice);
-    hipMemcpy(b_data, host_b.data(), 128 * 128 * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(a_data, host_a.data(), 128 * 128 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
+    ASSERT_EQ(hipMemcpy(b_data, host_b.data(), 128 * 128 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     auto c = div(a, b);
 
@@ -219,7 +219,7 @@ TEST(ROCmKernelsTest, Neg_Float32_Basic) {
     for (int i = 0; i < 1024; i++) {
         host_a[i] = static_cast<float>(i);
     }
-    hipMemcpy(a_data, host_a.data(), 1024 * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(a_data, host_a.data(), 1024 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     auto c = neg(a);
 
@@ -239,7 +239,7 @@ TEST(ROCmKernelsTest, Abs_Float32_Basic) {
     for (int i = 0; i < 2048; i++) {
         host_a[i] = (i % 2 == 0) ? static_cast<float>(i) : -static_cast<float>(i);
     }
-    hipMemcpy(a_data, host_a.data(), 2048 * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(a_data, host_a.data(), 2048 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     auto c = abs(a);
 
@@ -259,7 +259,7 @@ TEST(ROCmKernelsTest, Sqrt_Float32_Basic) {
     for (int i = 0; i < 1000; i++) {
         host_a[i] = static_cast<float>((i + 1) * (i + 1));
     }
-    hipMemcpy(a_data, host_a.data(), 1000 * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(a_data, host_a.data(), 1000 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     auto c = sqrt(a);
 
@@ -279,7 +279,7 @@ TEST(ROCmKernelsTest, Exp_Float32_Basic) {
     for (int i = 0; i < 500; i++) {
         host_a[i] = static_cast<float>(i) * 0.01f;
     }
-    hipMemcpy(a_data, host_a.data(), 500 * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(a_data, host_a.data(), 500 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     auto c = exp(a);
 
@@ -300,7 +300,7 @@ TEST(ROCmKernelsTest, Log_Float32_Basic) {
     for (int i = 0; i < 500; i++) {
         host_a[i] = static_cast<float>(i + 1);
     }
-    hipMemcpy(a_data, host_a.data(), 500 * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(a_data, host_a.data(), 500 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     auto c = log(a);
 
@@ -321,7 +321,7 @@ TEST(ROCmKernelsTest, Pow_Float32_Basic) {
     for (int i = 0; i < 1000; i++) {
         host_a[i] = static_cast<float>(i % 10 + 1);
     }
-    hipMemcpy(a_data, host_a.data(), 1000 * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(a_data, host_a.data(), 1000 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     auto c = pow(a, 2.0f);
 
@@ -342,7 +342,7 @@ TEST(ROCmKernelsTest, Clamp_Float32_Basic) {
     for (int i = 0; i < 1000; i++) {
         host_a[i] = static_cast<float>(i - 500);
     }
-    hipMemcpy(a_data, host_a.data(), 1000 * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(a_data, host_a.data(), 1000 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     auto c = clamp(a, -100.0f, 100.0f);
 
@@ -368,7 +368,7 @@ TEST(ROCmKernelsTest, Sum_Float32_FullReduction) {
     for (int i = 0; i < 1000; i++) {
         host_a[i] = static_cast<float>(i + 1);
     }
-    hipMemcpy(a_data, host_a.data(), 1000 * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(a_data, host_a.data(), 1000 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     auto result = sum(a);
 
@@ -399,7 +399,7 @@ TEST(ROCmKernelsTest, Sum_Float32_DimReduction) {
     for (int i = 0; i < 1000; i++) {
         host_a[i] = static_cast<float>(i % 10 + 1);
     }
-    hipMemcpy(a_data, host_a.data(), 1000 * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(a_data, host_a.data(), 1000 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     // Sum along dimension 1 (columns)
     auto result = sum(a, 1);
@@ -421,7 +421,7 @@ TEST(ROCmKernelsTest, Mean_Float32_Basic) {
 
     auto a_data = a.data<float>();
     std::vector<float> host_a(1000, 5.0f);
-    hipMemcpy(a_data, host_a.data(), 1000 * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(a_data, host_a.data(), 1000 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     auto result = mean(a);
 
@@ -439,7 +439,7 @@ TEST(ROCmKernelsTest, Max_Float32_Basic) {
     for (int i = 0; i < 10000; i++) {
         host_a[i] = static_cast<float>(i);
     }
-    hipMemcpy(a_data, host_a.data(), 10000 * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(a_data, host_a.data(), 10000 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     auto result = max(a);
 
@@ -457,7 +457,7 @@ TEST(ROCmKernelsTest, Min_Float32_Basic) {
     for (int i = 0; i < 10000; i++) {
         host_a[i] = static_cast<float>(10000 - i);
     }
-    hipMemcpy(a_data, host_a.data(), 10000 * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(a_data, host_a.data(), 10000 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     auto result = min(a);
 
@@ -479,7 +479,7 @@ TEST(ROCmKernelsTest, ReLU_Forward_Float32) {
     for (int i = 0; i < 1000; i++) {
         host_input[i] = static_cast<float>(i - 500);
     }
-    hipMemcpy(input_data, host_input.data(), 1000 * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(input_data, host_input.data(), 1000 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     auto output = nn::relu(Variable(input));
 
@@ -500,7 +500,7 @@ TEST(ROCmKernelsTest, ReLU_Backward_Float32) {
     for (int i = 0; i < 1000; i++) {
         host_input[i] = static_cast<float>(i - 500);
     }
-    hipMemcpy(input_data, host_input.data(), 1000 * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(input_data, host_input.data(), 1000 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     // Forward pass
     auto output = nn::relu(Variable(input));
@@ -529,7 +529,7 @@ TEST(ROCmKernelsTest, Sigmoid_Forward_Float32) {
     for (int i = 0; i < 1000; i++) {
         host_input[i] = static_cast<float>((i - 500) * 0.01f);
     }
-    hipMemcpy(input_data, host_input.data(), 1000 * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(input_data, host_input.data(), 1000 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     auto output = nn::sigmoid(Variable(input));
 
@@ -551,7 +551,7 @@ TEST(ROCmKernelsTest, Tanh_Forward_Float32) {
     for (int i = 0; i < 1000; i++) {
         host_input[i] = static_cast<float>((i - 500) * 0.01f);
     }
-    hipMemcpy(input_data, host_input.data(), 1000 * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(input_data, host_input.data(), 1000 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     auto output = tanh(input);
 
@@ -573,7 +573,7 @@ TEST(ROCmKernelsTest, LeakyReLU_Forward_Float32) {
     for (int i = 0; i < 1000; i++) {
         host_input[i] = static_cast<float>(i - 500);
     }
-    hipMemcpy(input_data, host_input.data(), 1000 * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(input_data, host_input.data(), 1000 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     const float alpha = 0.01f;
     auto output = nn::leaky_relu(Variable(input), alpha);
@@ -598,7 +598,7 @@ TEST(ROCmKernelsTest, Softmax_Forward_2D) {
             host_input[i * 10 + j] = static_cast<float>(j);
         }
     }
-    hipMemcpy(input_data, host_input.data(), 32 * 10 * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(input_data, host_input.data(), 32 * 10 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     auto output = nn::softmax(Variable(input), 1);
 
@@ -627,7 +627,7 @@ TEST(ROCmKernelsTest, LogSoftmax_Forward_2D) {
             host_input[i * 20 + j] = static_cast<float>(j) * 0.1f;
         }
     }
-    hipMemcpy(input_data, host_input.data(), 64 * 20 * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(input_data, host_input.data(), 64 * 20 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     auto output = nn::log_softmax(Variable(input), 1);
 
@@ -660,8 +660,8 @@ TEST(ROCmKernelsTest, MatMul_Float32_2x3_3x2) {
     std::vector<float> host_a = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
     std::vector<float> host_b = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
 
-    hipMemcpy(a_data, host_a.data(), 6 * sizeof(float), hipMemcpyHostToDevice);
-    hipMemcpy(b_data, host_b.data(), 6 * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(a_data, host_a.data(), 6 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
+    ASSERT_EQ(hipMemcpy(b_data, host_b.data(), 6 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     auto c = matmul(a, b);
 
@@ -713,8 +713,8 @@ TEST(ROCmKernelsTest, MatMul_Float64_Precision) {
         host_b[i] = static_cast<double>(i) * 0.1;
     }
 
-    hipMemcpy(a_data, host_a.data(), 100 * sizeof(double), hipMemcpyHostToDevice);
-    hipMemcpy(b_data, host_b.data(), 100 * sizeof(double), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(a_data, host_a.data(), 100 * sizeof(double), hipMemcpyHostToDevice), hipSuccess);
+    ASSERT_EQ(hipMemcpy(b_data, host_b.data(), 100 * sizeof(double), hipMemcpyHostToDevice), hipSuccess);
 
     auto c = matmul(a, b);
 
@@ -742,7 +742,7 @@ TEST(ROCmKernelsTest, Transpose_Float32) {
     for (int i = 0; i < 20; i++) {
         host_a[i] = static_cast<float>(i);
     }
-    hipMemcpy(a_data, host_a.data(), 20 * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(a_data, host_a.data(), 20 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     auto b = transpose(a, 0, 1);
 
@@ -768,7 +768,7 @@ TEST(ROCmKernelsTest, Reshape_Float32) {
     for (int i = 0; i < 24; i++) {
         host_a[i] = static_cast<float>(i);
     }
-    hipMemcpy(a_data, host_a.data(), 24 * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(a_data, host_a.data(), 24 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     auto b = reshape(a, {4, 6});
 
@@ -802,8 +802,8 @@ TEST(ROCmKernelsTest, BatchNorm2d_Forward) {
     for (size_t i = 0; i < host_input.size(); i++) {
         host_input[i] = dist(gen);
     }
-    hipMemcpy(input_data, host_input.data(), host_input.size() * sizeof(float),
-              hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(input_data, host_input.data(), host_input.size() * sizeof(float),
+              hipMemcpyHostToDevice), hipSuccess);
 
     // Create batch norm layer
     auto bn = nn::BatchNorm2d(4);
@@ -833,8 +833,8 @@ TEST(ROCmKernelsTest, LayerNorm_Forward) {
     for (size_t i = 0; i < host_input.size(); i++) {
         host_input[i] = dist(gen);
     }
-    hipMemcpy(input_data, host_input.data(), host_input.size() * sizeof(float),
-              hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(input_data, host_input.data(), host_input.size() * sizeof(float),
+              hipMemcpyHostToDevice), hipSuccess);
 
     // Create layer norm
     auto ln = nn::LayerNorm({128});
@@ -886,8 +886,8 @@ TEST(ROCmKernelsTest, MaxPool2d_Forward) {
     for (size_t i = 0; i < host_input.size(); i++) {
         host_input[i] = static_cast<float>(i % 64);
     }
-    hipMemcpy(input_data, host_input.data(), host_input.size() * sizeof(float),
-              hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(input_data, host_input.data(), host_input.size() * sizeof(float),
+              hipMemcpyHostToDevice), hipSuccess);
 
     // Create MaxPool2d layer with kernel_size=2, stride=2
     auto pool = nn::MaxPool2d(2, 2);
@@ -916,8 +916,8 @@ TEST(ROCmKernelsTest, AvgPool2d_Forward) {
     for (size_t i = 0; i < host_input.size(); i++) {
         host_input[i] = static_cast<float>((i % 4) + 1);
     }
-    hipMemcpy(input_data, host_input.data(), host_input.size() * sizeof(float),
-              hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(input_data, host_input.data(), host_input.size() * sizeof(float),
+              hipMemcpyHostToDevice), hipSuccess);
 
     // Create AvgPool2d layer with kernel_size=2, stride=2
     auto pool = nn::AvgPool2d(2, 2);
@@ -946,8 +946,8 @@ TEST(ROCmKernelsTest, Conv2d_Forward_Basic) {
 
     auto input_data = input.data<float>();
     std::vector<float> host_input(1 * 3 * 8 * 8, 1.0f);
-    hipMemcpy(input_data, host_input.data(), host_input.size() * sizeof(float),
-              hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(input_data, host_input.data(), host_input.size() * sizeof(float),
+              hipMemcpyHostToDevice), hipSuccess);
 
     // Create Conv2d layer: in_channels=3, out_channels=16, kernel_size=3
     auto conv = nn::Conv2d(3, 16, 3, 1, 1); // stride=1, padding=1
@@ -972,8 +972,8 @@ TEST(ROCmKernelsTest, Conv2d_Forward_NoPadding) {
 
     auto input_data = input.data<float>();
     std::vector<float> host_input(2 * 3 * 10 * 10, 1.0f);
-    hipMemcpy(input_data, host_input.data(), host_input.size() * sizeof(float),
-              hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(input_data, host_input.data(), host_input.size() * sizeof(float),
+              hipMemcpyHostToDevice), hipSuccess);
 
     // Create Conv2d layer: in_channels=3, out_channels=8, kernel_size=3, padding=0
     auto conv = nn::Conv2d(3, 8, 3, 1, 0); // stride=1, padding=0
@@ -998,8 +998,8 @@ TEST(ROCmKernelsTest, Conv2d_Forward_Stride2) {
 
     auto input_data = input.data<float>();
     std::vector<float> host_input(1 * 3 * 16 * 16, 1.0f);
-    hipMemcpy(input_data, host_input.data(), host_input.size() * sizeof(float),
-              hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(input_data, host_input.data(), host_input.size() * sizeof(float),
+              hipMemcpyHostToDevice), hipSuccess);
 
     // Create Conv2d layer: in_channels=3, out_channels=32, kernel_size=3, stride=2, padding=1
     auto conv = nn::Conv2d(3, 32, 3, 2, 1); // stride=2, padding=1
@@ -1041,8 +1041,8 @@ TEST(ROCmKernelsTest, SingleElement_AllOps) {
     float val_a = 10.0f;
     float val_b = 2.0f;
 
-    hipMemcpy(a_data, &val_a, sizeof(float), hipMemcpyHostToDevice);
-    hipMemcpy(b_data, &val_b, sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(a_data, &val_a, sizeof(float), hipMemcpyHostToDevice), hipSuccess);
+    ASSERT_EQ(hipMemcpy(b_data, &val_b, sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     // Test all operations
     auto add_result = add(a, b);
@@ -1072,7 +1072,7 @@ TEST(ROCmKernelsTest, NumericalStability_Softmax) {
         host_input[i] = static_cast<float>((i % 100) * 10);
     }
 
-    hipMemcpy(input_data, host_input.data(), 1000 * sizeof(float), hipMemcpyHostToDevice);
+    ASSERT_EQ(hipMemcpy(input_data, host_input.data(), 1000 * sizeof(float), hipMemcpyHostToDevice), hipSuccess);
 
     auto output = nn::softmax(Variable(input), 1);
 
@@ -1115,22 +1115,22 @@ TEST(ROCmKernelsTest, Performance_LargeAdd) {
 
     // Warmup
     auto c = add(a, b);
-    hipDeviceSynchronize();
+    ASSERT_EQ(hipDeviceSynchronize(), hipSuccess);
 
     // Measure
     hipEvent_t start, stop;
-    hipEventCreate(&start);
-    hipEventCreate(&stop);
+    ASSERT_EQ(hipEventCreate(&start), hipSuccess);
+    ASSERT_EQ(hipEventCreate(&stop), hipSuccess);
 
-    hipEventRecord(start);
+    ASSERT_EQ(hipEventRecord(start), hipSuccess);
     for (int i = 0; i < 10; i++) {
         c = add(a, b);
     }
-    hipEventRecord(stop);
-    hipEventSynchronize(stop);
+    ASSERT_EQ(hipEventRecord(stop), hipSuccess);
+    ASSERT_EQ(hipEventSynchronize(stop), hipSuccess);
 
     float milliseconds = 0;
-    hipEventElapsedTime(&milliseconds, start, stop);
+    ASSERT_EQ(hipEventElapsedTime(&milliseconds, start, stop), hipSuccess);
 
     float avg_time = milliseconds / 10.0f;
     std::cout << "Average add time for " << size << " elements: "
@@ -1139,8 +1139,8 @@ TEST(ROCmKernelsTest, Performance_LargeAdd) {
     // Should be reasonably fast (< 10ms per operation)
     EXPECT_LT(avg_time, 10.0f);
 
-    hipEventDestroy(start);
-    hipEventDestroy(stop);
+    ASSERT_EQ(hipEventDestroy(start), hipSuccess);
+    ASSERT_EQ(hipEventDestroy(stop), hipSuccess);
 }
 
 TEST(ROCmKernelsTest, Performance_LargeMatMul) {
@@ -1153,20 +1153,20 @@ TEST(ROCmKernelsTest, Performance_LargeMatMul) {
 
     // Warmup
     auto c = matmul(a, b);
-    hipDeviceSynchronize();
+    ASSERT_EQ(hipDeviceSynchronize(), hipSuccess);
 
     // Measure
     hipEvent_t start, stop;
-    hipEventCreate(&start);
-    hipEventCreate(&stop);
+    ASSERT_EQ(hipEventCreate(&start), hipSuccess);
+    ASSERT_EQ(hipEventCreate(&stop), hipSuccess);
 
-    hipEventRecord(start);
+    ASSERT_EQ(hipEventRecord(start), hipSuccess);
     c = matmul(a, b);
-    hipEventRecord(stop);
-    hipEventSynchronize(stop);
+    ASSERT_EQ(hipEventRecord(stop), hipSuccess);
+    ASSERT_EQ(hipEventSynchronize(stop), hipSuccess);
 
     float milliseconds = 0;
-    hipEventElapsedTime(&milliseconds, start, stop);
+    ASSERT_EQ(hipEventElapsedTime(&milliseconds, start, stop), hipSuccess);
 
     std::cout << "MatMul time for " << M << "x" << K << " @ " << K << "x" << N
               << ": " << milliseconds << " ms" << std::endl;
@@ -1174,8 +1174,8 @@ TEST(ROCmKernelsTest, Performance_LargeMatMul) {
     // Should complete in reasonable time (< 1000ms)
     EXPECT_LT(milliseconds, 1000.0f);
 
-    hipEventDestroy(start);
-    hipEventDestroy(stop);
+    ASSERT_EQ(hipEventDestroy(start), hipSuccess);
+    ASSERT_EQ(hipEventDestroy(stop), hipSuccess);
 }
 
 // ============================================================================
@@ -1261,9 +1261,9 @@ TEST(ROCmKernelsTest, CNN_ForwardPass) {
 TEST(ROCmKernelsTest, MultiStream_Execution) {
     // Create multiple streams
     hipStream_t stream1, stream2, stream3;
-    hipStreamCreate(&stream1);
-    hipStreamCreate(&stream2);
-    hipStreamCreate(&stream3);
+    ASSERT_EQ(hipStreamCreate(&stream1), hipSuccess);
+    ASSERT_EQ(hipStreamCreate(&stream2), hipSuccess);
+    ASSERT_EQ(hipStreamCreate(&stream3), hipSuccess);
 
     const int64_t size = 1000000;
 
@@ -1284,9 +1284,9 @@ TEST(ROCmKernelsTest, MultiStream_Execution) {
     auto c3 = sub(a3, b3);
 
     // Synchronize all streams
-    hipStreamSynchronize(stream1);
-    hipStreamSynchronize(stream2);
-    hipStreamSynchronize(stream3);
+    ASSERT_EQ(hipStreamSynchronize(stream1), hipSuccess);
+    ASSERT_EQ(hipStreamSynchronize(stream2), hipSuccess);
+    ASSERT_EQ(hipStreamSynchronize(stream3), hipSuccess);
 
     // Verify results
     EXPECT_EQ(c1.numel(), size);
@@ -1294,9 +1294,9 @@ TEST(ROCmKernelsTest, MultiStream_Execution) {
     EXPECT_EQ(c3.numel(), size);
 
     // Cleanup
-    hipStreamDestroy(stream1);
-    hipStreamDestroy(stream2);
-    hipStreamDestroy(stream3);
+    ASSERT_EQ(hipStreamDestroy(stream1), hipSuccess);
+    ASSERT_EQ(hipStreamDestroy(stream2), hipSuccess);
+    ASSERT_EQ(hipStreamDestroy(stream3), hipSuccess);
 }
 
 // ============================================================================

@@ -8,6 +8,7 @@
 #endif
 #include <hipcub/hipcub.hpp>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <algorithm>
 #include <vector>
@@ -278,7 +279,7 @@ struct DivOp {
     template<typename T>
     __device__ T operator()(T a, T b) const {
         if (b == T(0)) {
-            return T(INFINITY);
+            return T(__builtin_huge_valf());
         }
         return a / b;
     }
@@ -315,7 +316,7 @@ __global__ void div_kernel_device(const T* a, const T* b, T* c, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
         T divisor = b[idx];
         if (divisor == T(0)) {
-            c[idx] = INFINITY;  // Handle division by zero
+            c[idx] = __builtin_huge_valf();  // Handle division by zero
         } else {
             c[idx] = a[idx] / divisor;
         }
@@ -330,7 +331,7 @@ __global__ void div_kernel_f16(const __half* a, const __half* b, __half* c, int6
     HIP_KERNEL_LOOP(idx, n) {
         float divisor = __half2float(b[idx]);
         if (divisor == 0.0f) {
-            c[idx] = __float2half(INFINITY);
+            c[idx] = __float2half(__builtin_huge_valf());
         } else {
             float result = __half2float(a[idx]) / divisor;
             c[idx] = __float2half(result);
@@ -362,7 +363,7 @@ __global__ void broadcast_div_kernel_f16(
 
         float divisor = __half2float(b[idx_b]);
         if (divisor == 0.0f) {
-            c[out_idx] = __float2half(INFINITY);
+            c[out_idx] = __float2half(__builtin_huge_valf());
         } else {
             float result = __half2float(a[idx_a]) / divisor;
             c[out_idx] = __float2half(result);
@@ -378,7 +379,7 @@ __global__ void div_kernel_bf16(const hip_bfloat16* a, const hip_bfloat16* b, hi
     HIP_KERNEL_LOOP(idx, n) {
         float divisor = static_cast<float>(b[idx]);
         if (divisor == 0.0f) {
-            c[idx] = hip_bfloat16(INFINITY);
+            c[idx] = hip_bfloat16(__builtin_huge_valf());
         } else {
             float result = static_cast<float>(a[idx]) / divisor;
             c[idx] = hip_bfloat16(result);
@@ -408,7 +409,7 @@ __global__ void broadcast_div_kernel_bf16(
 
         float divisor = static_cast<float>(b[idx_b]);
         if (divisor == 0.0f) {
-            c[out_idx] = hip_bfloat16(INFINITY);
+            c[out_idx] = hip_bfloat16(__builtin_huge_valf());
         } else {
             float result = static_cast<float>(a[idx_a]) / divisor;
             c[out_idx] = hip_bfloat16(result);
@@ -3592,11 +3593,11 @@ static void cumsum_slice_hipcub(const T* d_in, T* d_out, int64_t n, hipStream_t 
 {
     void* d_temp = nullptr;
     size_t temp_bytes = 0;
-    hipcub::DeviceScan::InclusiveSum(d_temp, temp_bytes, d_in, d_out,
-                                     static_cast<int>(n), stream);
+    HIP_CHECK(hipcub::DeviceScan::InclusiveSum(d_temp, temp_bytes, d_in, d_out,
+                                     static_cast<int>(n), stream));
     HIP_CHECK(hipMalloc(&d_temp, temp_bytes));
-    hipcub::DeviceScan::InclusiveSum(d_temp, temp_bytes, d_in, d_out,
-                                     static_cast<int>(n), stream);
+    HIP_CHECK(hipcub::DeviceScan::InclusiveSum(d_temp, temp_bytes, d_in, d_out,
+                                     static_cast<int>(n), stream));
     HIP_CHECK(hipFree(d_temp));
 }
 
@@ -3676,11 +3677,11 @@ static void cumprod_slice_hipcub(const T* d_in, T* d_out, int64_t n, hipStream_t
 {
     void* d_temp = nullptr;
     size_t temp_bytes = 0;
-    hipcub::DeviceScan::InclusiveScan(d_temp, temp_bytes, d_in, d_out,
-                                      HipMultOp(), static_cast<int>(n), stream);
+    HIP_CHECK(hipcub::DeviceScan::InclusiveScan(d_temp, temp_bytes, d_in, d_out,
+                                      HipMultOp(), static_cast<int>(n), stream));
     HIP_CHECK(hipMalloc(&d_temp, temp_bytes));
-    hipcub::DeviceScan::InclusiveScan(d_temp, temp_bytes, d_in, d_out,
-                                      HipMultOp(), static_cast<int>(n), stream);
+    HIP_CHECK(hipcub::DeviceScan::InclusiveScan(d_temp, temp_bytes, d_in, d_out,
+                                      HipMultOp(), static_cast<int>(n), stream));
     HIP_CHECK(hipFree(d_temp));
 }
 
@@ -3753,19 +3754,25 @@ auto cumprod_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Ten
 template<typename T>
 __global__ void check_inf_nan_kernel(const T* data, int64_t n, int* result) {
     HIP_KERNEL_LOOP(idx, n) {
-        T val = data[idx];
-        if (isinf(static_cast<float>(val)) || isnan(static_cast<float>(val))) {
+        float fval = static_cast<float>(data[idx]);
+        uint32_t bits;
+        memcpy(&bits, &fval, sizeof(bits));
+        bool inf_or_nan = ((bits & 0x7F800000u) == 0x7F800000u);
+        if (inf_or_nan) {
             atomicExch(result, 1);
         }
     }
 }
 
-// Float64 specialization — use double-precision isinf/isnan
+// Float64 specialization — use double-precision bitwise inf/nan check
 template<>
 __global__ void check_inf_nan_kernel<double>(const double* data, int64_t n, int* result) {
     HIP_KERNEL_LOOP(idx, n) {
         double val = data[idx];
-        if (isinf(val) || isnan(val)) {
+        uint64_t bits;
+        memcpy(&bits, &val, sizeof(bits));
+        bool inf_or_nan = ((bits & 0x7FF0000000000000ull) == 0x7FF0000000000000ull);
+        if (inf_or_nan) {
             atomicExch(result, 1);
         }
     }
@@ -3965,58 +3972,67 @@ __global__ void erfc_kernel_f16(const __half* input, __half* output, int64_t n) 
 
 __global__ void isnan_kernel_f32(const float* input, uint8_t* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = static_cast<uint8_t>(isnan(input[idx]) ? 1 : 0);
+        uint32_t bits; memcpy(&bits, &input[idx], sizeof(bits));
+        output[idx] = static_cast<uint8_t>(((bits & 0x7F800000u) == 0x7F800000u) && ((bits & 0x007FFFFFu) != 0) ? 1 : 0);
     }
 }
 
 __global__ void isnan_kernel_f64(const double* input, uint8_t* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = static_cast<uint8_t>(isnan(input[idx]) ? 1 : 0);
+        uint64_t bits; memcpy(&bits, &input[idx], sizeof(bits));
+        output[idx] = static_cast<uint8_t>(((bits & 0x7FF0000000000000ull) == 0x7FF0000000000000ull) && ((bits & 0x000FFFFFFFFFFFFFull) != 0) ? 1 : 0);
     }
 }
 
 __global__ void isnan_kernel_f16(const __half* input, uint8_t* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
         float val = __half2float(input[idx]);
-        output[idx] = static_cast<uint8_t>(isnan(val) ? 1 : 0);
+        uint32_t bits; memcpy(&bits, &val, sizeof(bits));
+        output[idx] = static_cast<uint8_t>(((bits & 0x7F800000u) == 0x7F800000u) && ((bits & 0x007FFFFFu) != 0) ? 1 : 0);
     }
 }
 
 __global__ void isinf_kernel_f32(const float* input, uint8_t* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = static_cast<uint8_t>(isinf(input[idx]) ? 1 : 0);
+        uint32_t bits; memcpy(&bits, &input[idx], sizeof(bits));
+        output[idx] = static_cast<uint8_t>(((bits & 0x7FFFFFFFu) == 0x7F800000u) ? 1 : 0);
     }
 }
 
 __global__ void isinf_kernel_f64(const double* input, uint8_t* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = static_cast<uint8_t>(isinf(input[idx]) ? 1 : 0);
+        uint64_t bits; memcpy(&bits, &input[idx], sizeof(bits));
+        output[idx] = static_cast<uint8_t>(((bits & 0x7FFFFFFFFFFFFFFFull) == 0x7FF0000000000000ull) ? 1 : 0);
     }
 }
 
 __global__ void isinf_kernel_f16(const __half* input, uint8_t* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
         float val = __half2float(input[idx]);
-        output[idx] = static_cast<uint8_t>(isinf(val) ? 1 : 0);
+        uint32_t bits; memcpy(&bits, &val, sizeof(bits));
+        output[idx] = static_cast<uint8_t>(((bits & 0x7FFFFFFFu) == 0x7F800000u) ? 1 : 0);
     }
 }
 
 __global__ void isfinite_kernel_f32(const float* input, uint8_t* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = static_cast<uint8_t>(isfinite(input[idx]) ? 1 : 0);
+        uint32_t bits; memcpy(&bits, &input[idx], sizeof(bits));
+        output[idx] = static_cast<uint8_t>(((bits & 0x7F800000u) != 0x7F800000u) ? 1 : 0);
     }
 }
 
 __global__ void isfinite_kernel_f64(const double* input, uint8_t* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = static_cast<uint8_t>(isfinite(input[idx]) ? 1 : 0);
+        uint64_t bits; memcpy(&bits, &input[idx], sizeof(bits));
+        output[idx] = static_cast<uint8_t>(((bits & 0x7FF0000000000000ull) != 0x7FF0000000000000ull) ? 1 : 0);
     }
 }
 
 __global__ void isfinite_kernel_f16(const __half* input, uint8_t* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
         float val = __half2float(input[idx]);
-        output[idx] = static_cast<uint8_t>(isfinite(val) ? 1 : 0);
+        uint32_t bits; memcpy(&bits, &val, sizeof(bits));
+        output[idx] = static_cast<uint8_t>(((bits & 0x7F800000u) != 0x7F800000u) ? 1 : 0);
     }
 }
 
@@ -4946,8 +4962,8 @@ auto conj_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     }
     // For real dtypes, conjugate is identity
     Tensor result(shape, input.dtype(), input.device());
-    hipMemcpyAsync(result.data_ptr(), input.data_ptr(),
-                   n * dtype_size(input.dtype()), hipMemcpyDeviceToDevice, stream);
+    HIP_CHECK(hipMemcpyAsync(result.data_ptr(), input.data_ptr(),
+                   n * dtype_size(input.dtype()), hipMemcpyDeviceToDevice, stream));
     return result;
 }
 
@@ -4988,8 +5004,8 @@ auto real_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     }
     // For real dtypes, real() is identity
     Tensor result(shape, input.dtype(), input.device());
-    hipMemcpyAsync(result.data_ptr(), input.data_ptr(),
-                   n * dtype_size(input.dtype()), hipMemcpyDeviceToDevice, stream);
+    HIP_CHECK(hipMemcpyAsync(result.data_ptr(), input.data_ptr(),
+                   n * dtype_size(input.dtype()), hipMemcpyDeviceToDevice, stream));
     return result;
 }
 
@@ -5030,7 +5046,7 @@ auto imag_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     }
     // For real dtypes, imaginary part is zero
     Tensor result(shape, input.dtype(), input.device());
-    hipMemsetAsync(result.data_ptr(), 0, n * dtype_size(input.dtype()), stream);
+    HIP_CHECK(hipMemsetAsync(result.data_ptr(), 0, n * dtype_size(input.dtype()), stream));
     return result;
 }
 

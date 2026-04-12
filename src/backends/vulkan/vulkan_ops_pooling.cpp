@@ -546,10 +546,10 @@ auto VulkanBackend::dispatchAdaptiveAvgPool2dBackward(const Tensor& grad_output,
     return grad_input;
 }
 
-auto VulkanBackend::dispatchMaxPool2dBackward(const Tensor& grad_out, const Tensor& input,
-                                               const Tensor& indices, int64_t kernel_h, int64_t kernel_w,
-                                               int64_t stride_h, int64_t stride_w,
-                                               int64_t padding_h, int64_t padding_w) -> Tensor {
+auto VulkanBackend::dispatchMaxPool2dBackward([[maybe_unused]] const Tensor& grad_out, const Tensor& input,
+                                               [[maybe_unused]] const Tensor& indices, [[maybe_unused]] int64_t kernel_h, [[maybe_unused]] int64_t kernel_w,
+                                               [[maybe_unused]] int64_t stride_h, [[maybe_unused]] int64_t stride_w,
+                                               [[maybe_unused]] int64_t padding_h, [[maybe_unused]] int64_t padding_w) -> Tensor {
     auto input_shape = input.shape();
     int32_t device_id = input.device().index;
     bool is_f64 = (input.dtype() == DType::Float64);

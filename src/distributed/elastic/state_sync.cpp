@@ -36,7 +36,7 @@ auto StateSync::save_checkpoint(const nn::Module& module,
     std::cerr << "[StateSync] Checkpoint saved to " << path << std::endl;
 }
 
-auto StateSync::load_checkpoint(nn::Module& module,
+auto StateSync::load_checkpoint([[maybe_unused]] nn::Module& module,
                                  const std::string& checkpoint_dir,
                                  int rank) -> void {
     // Try to load from the exact rank first

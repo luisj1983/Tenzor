@@ -1051,7 +1051,7 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
         auto grad_weight = zeros({num_embeddings, embedding_dim},
                                  grad_output.dtype(), grad_output.device());
 
-        auto scatter_add = [&](auto* gw_data, const auto* go_data, const auto* emb_data) {
+        auto scatter_add = [&](auto* gw_data, const auto* go_data, [[maybe_unused]] const auto* emb_data) {
             for (int64_t bag = 0; bag < num_bags; ++bag) {
                 int64_t start = offsets_ptr[bag];
                 int64_t end = (bag + 1 < num_bags + (include_last_offset ? 1 : 0))

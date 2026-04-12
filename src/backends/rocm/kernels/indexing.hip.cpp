@@ -2624,13 +2624,13 @@ auto nonzero_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 
     void* d_temp = nullptr;
     size_t temp_bytes = 0;
-    hipcub::DeviceSelect::Flagged(d_temp, temp_bytes,
+    HIP_CHECK(hipcub::DeviceSelect::Flagged(d_temp, temp_bytes,
         iota, d_flags, d_flat_indices, d_num_selected,
-        static_cast<int>(n), stream);
+        static_cast<int>(n), stream));
     HIP_CHECK(hipMalloc(&d_temp, temp_bytes));
-    hipcub::DeviceSelect::Flagged(d_temp, temp_bytes,
+    HIP_CHECK(hipcub::DeviceSelect::Flagged(d_temp, temp_bytes,
         iota, d_flags, d_flat_indices, d_num_selected,
-        static_cast<int>(n), stream);
+        static_cast<int>(n), stream));
 
     // D2H sync to get count
     int total_nonzero;

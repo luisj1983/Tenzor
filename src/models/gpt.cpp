@@ -44,7 +44,6 @@ GPTEmbeddings::GPTEmbeddings(const GPT2Config& config)
 }
 
 auto GPTEmbeddings::forward(const Variable& input_ids, const Variable& position_ids) -> Variable {
-    auto batch_size = input_ids.tensor().shape()[0];
     auto seq_len = input_ids.tensor().shape()[1];
 
     // Get token embeddings
@@ -130,7 +129,7 @@ auto GPTDecoderLayer::apply_activation(const Variable& x) const -> Variable {
 
 auto GPTDecoderLayer::forward(const Variable& hidden_states,
                               const Tensor& attention_mask,
-                              bool use_cache) -> Variable {
+                              [[maybe_unused]] bool use_cache) -> Variable {
     // Self-attention with pre-norm (GPT-2 style)
     auto residual = hidden_states;
     auto x = ln_1_->forward(hidden_states);

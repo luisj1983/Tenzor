@@ -559,7 +559,6 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, cudaStream_t stream)
 
             // Row-major A[m][n] => column-major A^T[n][m]
             // gesvd(A^T) => V^T * S * U^T where U,Vt are swapped
-            int lda = m;  // leading dim in col-major = number of rows of col-major = m
             int ldu = full_matrices ? m : m;
             int ldvt = full_matrices ? n_cols : k;
 

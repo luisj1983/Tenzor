@@ -740,9 +740,6 @@ auto FusionOptimizer::validate_fusion(
         }
     }
 
-    // Check for backend support
-    const auto& first_node = graph.get_node(fusion.node_ids[0]);
-
     // Additional validation could be added here:
     // - Check tensor shapes are compatible
     // - Check data types are supported
@@ -842,7 +839,7 @@ auto FusionOptimizer::get_supported_patterns() const -> std::vector<std::string>
 // ==============================================================================
 
 auto build_fusion_graph_from_autograd(
-    const ComputationGraph& comp_graph,
+    [[maybe_unused]] const ComputationGraph& comp_graph,
     const std::shared_ptr<GraphNode>& root
 ) -> FusionGraph {
     FusionGraph fusion_graph;

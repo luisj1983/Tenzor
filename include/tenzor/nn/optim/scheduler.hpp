@@ -622,8 +622,8 @@ private:
     double div_factor_;
     double final_div_factor_;
     int64_t total_steps_;
-    int64_t step_count_;
     std::string anneal_strategy_;
+    int64_t step_count_;
     double last_lr_;
 
     auto compute_lr() -> double;
@@ -720,10 +720,10 @@ private:
     OptimizerPtr optimizer_;
     OptimizerType optimizer_type_;
     int64_t T_0_;
-    int64_t T_i_;
     int64_t T_mult_;
-    int64_t T_cur_;
     double eta_min_;
+    int64_t T_i_;
+    int64_t T_cur_;
     double base_lr_;
     int64_t step_count_;
     double last_lr_;

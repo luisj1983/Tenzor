@@ -507,7 +507,7 @@ auto YOLOv3::postprocess(const Tensor& boxes, const Tensor& scores)
     return results;
 }
 
-auto YOLOv3::load_pretrained(const std::string& path) -> void {
+auto YOLOv3::load_pretrained([[maybe_unused]] const std::string& path) -> void {
     // Load pretrained weights
     // Implementation would use model serialization
     throw std::runtime_error("Pretrained weights loading not yet implemented");
@@ -519,7 +519,7 @@ auto YOLOv3::load_pretrained(const std::string& path) -> void {
 
 // CSPBottleneck
 CSPBottleneck::CSPBottleneck(int64_t in_channels, int64_t out_channels,
-                             int64_t num_blocks, bool shortcut) {
+                             int64_t num_blocks, [[maybe_unused]] bool shortcut) {
 
     int64_t hidden_channels = out_channels / 2;
 
@@ -1095,7 +1095,7 @@ auto YOLOv5::postprocess(const Tensor& boxes, const Tensor& scores)
     return results;
 }
 
-auto YOLOv5::load_pretrained(const std::string& path) -> void {
+auto YOLOv5::load_pretrained([[maybe_unused]] const std::string& path) -> void {
     throw std::runtime_error("Pretrained weights loading not yet implemented");
 }
 

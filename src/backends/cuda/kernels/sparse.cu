@@ -54,11 +54,6 @@ namespace {
     } while (0)
 #endif
 
-/// Convert span to vector (nvcc doesn't support implicit span->vector conversion).
-std::vector<int64_t> to_vec(std::span<const int64_t> s) {
-    return {s.begin(), s.end()};
-}
-
 /// RAII wrapper for CUDA device memory (exception-safe cudaMalloc/cudaFree).
 struct CudaBuffer {
     void* ptr = nullptr;

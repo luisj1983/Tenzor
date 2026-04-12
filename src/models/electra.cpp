@@ -273,7 +273,7 @@ auto ElectraForPreTraining::forward_impl(const Variable& input) -> Variable {
 auto ElectraForPreTraining::compute_loss(const Variable& gen_logits,
                                          const Variable& disc_logits,
                                          const Tensor& is_replaced,
-                                         const Tensor& masked_positions,
+                                         [[maybe_unused]] const Tensor& masked_positions,
                                          const Tensor& original_tokens) -> Variable {
     int64_t batch_size = gen_logits.shape()[0];
     int64_t seq_len = gen_logits.shape()[1];

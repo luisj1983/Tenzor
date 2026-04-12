@@ -165,7 +165,7 @@ public:
     auto forward(const Variable& input, const Variable& skip) -> Variable;
 
     // Override base forward for Module interface
-    auto forward_impl(const Variable& input) -> Variable override {
+    auto forward_impl([[maybe_unused]] const Variable& input) -> Variable override {
         throw std::runtime_error("Up layer requires skip connection. Use forward(input, skip)");
     }
 

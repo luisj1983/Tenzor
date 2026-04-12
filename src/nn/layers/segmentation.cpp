@@ -190,8 +190,6 @@ auto upsample_bilinear(const Variable& input, int64_t target_h, int64_t target_w
         throw std::runtime_error("upsample_bilinear expects 4D input (N, C, H, W)");
     }
 
-    int64_t N = shape[0];
-    int64_t C = shape[1];
     int64_t H_in = shape[2];
     int64_t W_in = shape[3];
 

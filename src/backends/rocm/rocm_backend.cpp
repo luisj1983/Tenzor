@@ -246,6 +246,8 @@ auto ROCmBackend::copy(void* dst, const void* src, size_t bytes, CopyKind kind) 
         case CopyKind::DeviceToDevice:
             hip_kind = hipMemcpyDeviceToDevice;
             break;
+        default:
+            throw std::runtime_error("Unknown CopyKind in ROCm copy");
     }
 
     // Use async copy on the default stream for non-blocking transfers
@@ -327,9 +329,9 @@ auto ROCmBackend::memset(void* ptr, int value, size_t bytes, int32_t device_id) 
     check_hip_error(hipMemset(ptr, value, bytes), "hipMemset");
 }
 
-auto ROCmBackend::dispatch(const std::string& op_name,
-                           std::span<const Tensor> inputs,
-                           const OpAttributes& attrs) -> std::vector<Tensor> {
+auto ROCmBackend::dispatch([[maybe_unused]] const std::string& op_name,
+                           [[maybe_unused]] std::span<const Tensor> inputs,
+                           [[maybe_unused]] const OpAttributes& attrs) -> std::vector<Tensor> {
     throw std::runtime_error("ROCmBackend::dispatch(string): operation '" + op_name +
         "' not available via legacy string dispatch. Use OpId-based dispatch instead.");
 }
@@ -360,8 +362,8 @@ auto ROCmBackend::create_hip_graph(int32_t device_id) -> std::unique_ptr<rocm::H
 
 // Factory function for backend creation
 extern "C" {
-    auto create_backend() -> std::unique_ptr<Backend> {
-        return std::make_unique<ROCmBackend>();
+    Backend* create_backend() {
+        return new ROCmBackend();
     }
 }
 

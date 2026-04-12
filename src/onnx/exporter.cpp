@@ -1167,7 +1167,7 @@ auto ONNXExporter::export_lstm(const Tensor& input,
                                 const Tensor& weight_ih, const Tensor& weight_hh,
                                 const std::optional<Tensor>& bias_ih,
                                 const std::optional<Tensor>& bias_hh,
-                                int64_t hidden_size, int64_t num_layers,
+                                int64_t hidden_size, [[maybe_unused]] int64_t num_layers,
                                 bool bidirectional,
                                 const Tensor& output,
                                 const std::string& output_name) -> void {
@@ -1307,7 +1307,7 @@ auto ONNXExporter::export_gru(const Tensor& input,
                                const Tensor& weight_ih, const Tensor& weight_hh,
                                const std::optional<Tensor>& bias_ih,
                                const std::optional<Tensor>& bias_hh,
-                               int64_t hidden_size, int64_t num_layers,
+                               int64_t hidden_size, [[maybe_unused]] int64_t num_layers,
                                bool bidirectional,
                                const Tensor& output,
                                const std::string& output_name) -> void {
@@ -3399,7 +3399,7 @@ auto ONNXExporter::export_roll(const Tensor& input, int64_t shift, int64_t axis,
 // --- Group 5: Layer ops ---
 
 auto ONNXExporter::export_embedding_bag(const Tensor& weight, const Tensor& indices,
-                                         const Tensor& offsets, int64_t mode,
+                                         [[maybe_unused]] const Tensor& offsets, int64_t mode,
                                          const Tensor& output,
                                          const std::string& output_name) -> void {
     // EmbeddingBag = Gather embeddings + ReduceSum/ReduceMean per bag
@@ -3800,7 +3800,7 @@ auto trace_custom_module(ONNXExporter& exporter,
                         std::shared_ptr<nn::Module> module,
                         const Variable& input,
                         const Variable& output,
-                        const std::string& input_name,
+                        [[maybe_unused]] const std::string& input_name,
                         const std::string& output_name) -> void {
     // For custom modules, we attempt to infer structure from parameters
     // This is a simplified approach that works for basic feed-forward networks

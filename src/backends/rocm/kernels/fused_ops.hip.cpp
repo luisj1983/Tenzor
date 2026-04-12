@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <cmath>
 #include <algorithm>
+#include <limits>
 #include <tuple>
 #include <vector>
 #include <span>
@@ -302,7 +303,7 @@ __global__ void fused_softmax_cross_entropy_kernel(
     __shared__ T shared_data[BLOCK_SIZE];
 
     // Find max (for numerical stability)
-    T max_val = -INFINITY;
+    T max_val = std::numeric_limits<T>::lowest();
     for (int64_t i = threadIdx.x; i < num_classes; i += blockDim.x) {
         max_val = fmaxf(max_val, row[i]);
     }
@@ -1050,7 +1051,7 @@ __global__ void fused_attention_kernel(
     const T* q_row = Q + (batch * seq_len + row) * d_k;
 
     // Compute attention scores and find max
-    T max_score = -INFINITY;
+    T max_score = std::numeric_limits<T>::lowest();
     for (int64_t col = threadIdx.x; col < seq_len; col += blockDim.x) {
         const T* k_row = K + (batch * seq_len + col) * d_k;
         T score = 0;
@@ -1140,7 +1141,7 @@ __global__ void compute_attention_lse_kernel(
     const T* k_base = K + batch * seq_len * d_k;
 
     // Find max score
-    T thread_max = -INFINITY;
+    T thread_max = std::numeric_limits<T>::lowest();
     for (int64_t col = threadIdx.x; col < seq_len; col += blockDim.x) {
         const T* k_row = k_base + col * d_k;
         T score = 0;
@@ -1520,7 +1521,7 @@ __global__ void flash_attention_backward_kernel_hip(
             D_tile[row] = d_sum;
         }
         for (int row = tid + actual_Br; row < Br; row += BLOCK_SIZE) {
-            l_tile[row] = -INFINITY;
+            l_tile[row] = -__builtin_huge_valf();
             D_tile[row] = 0.0f;
         }
         __syncthreads();
@@ -1541,7 +1542,7 @@ __global__ void flash_attention_backward_kernel_hip(
             int i = idx / Bc;
             int j = idx % Bc;
             if (i >= actual_Br || j >= actual_Bc) {
-                S_tile[idx] = -INFINITY;
+                S_tile[idx] = -__builtin_huge_valf();
             }
         }
         __syncthreads();

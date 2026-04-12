@@ -584,6 +584,8 @@ Returns:
                 case tenzor::Device::Type::OneAPI: return "oneapi";
                 case tenzor::Device::Type::Vulkan: return "vulkan";
                 case tenzor::Device::Type::MPS:    return "mps";
+                case tenzor::Device::Type::COUNT:
+                    throw std::runtime_error("Device::Type::COUNT is a sentinel value, not a real device type");
             }
             return "unknown";
         })

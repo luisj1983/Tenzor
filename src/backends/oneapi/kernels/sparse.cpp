@@ -45,12 +45,15 @@ auto spmv_kernel(const SparseTensor& A, const Tensor& x, sycl::queue& queue) -> 
 
     ::oneapi::mkl::sparse::matrix_handle_t handle = nullptr;
 
+    const auto nnz = static_cast<std::int64_t>(A.nnz());
+
     if (vals.dtype() == DType::Float32) {
         ::oneapi::mkl::sparse::init_matrix_handle(&handle);
         ::oneapi::mkl::sparse::set_csr_data(
             queue, handle,
             static_cast<std::int64_t>(m),
             static_cast<std::int64_t>(k),
+            nnz,
             ::oneapi::mkl::index_base::zero,
             crow.data<std::int32_t>(),
             col.data<std::int32_t>(),
@@ -70,6 +73,7 @@ auto spmv_kernel(const SparseTensor& A, const Tensor& x, sycl::queue& queue) -> 
             queue, handle,
             static_cast<std::int64_t>(m),
             static_cast<std::int64_t>(k),
+            nnz,
             ::oneapi::mkl::index_base::zero,
             crow.data<std::int32_t>(),
             col.data<std::int32_t>(),
@@ -166,12 +170,15 @@ auto spmm_kernel(const SparseTensor& A, const Tensor& B, sycl::queue& queue) -> 
 
     ::oneapi::mkl::sparse::matrix_handle_t handle = nullptr;
 
+    const auto nnz = static_cast<std::int64_t>(A.nnz());
+
     if (vals.dtype() == DType::Float32) {
         ::oneapi::mkl::sparse::init_matrix_handle(&handle);
         ::oneapi::mkl::sparse::set_csr_data(
             queue, handle,
             static_cast<std::int64_t>(m),
             static_cast<std::int64_t>(k),
+            nnz,
             ::oneapi::mkl::index_base::zero,
             crow.data<std::int32_t>(),
             col.data<std::int32_t>(),
@@ -195,6 +202,7 @@ auto spmm_kernel(const SparseTensor& A, const Tensor& B, sycl::queue& queue) -> 
             queue, handle,
             static_cast<std::int64_t>(m),
             static_cast<std::int64_t>(k),
+            nnz,
             ::oneapi::mkl::index_base::zero,
             crow.data<std::int32_t>(),
             col.data<std::int32_t>(),
@@ -586,12 +594,15 @@ auto sparse_trsv_kernel(const SparseTensor& L, const Tensor& b, bool upper,
 
     auto uplo = upper ? ::oneapi::mkl::uplo::upper : ::oneapi::mkl::uplo::lower;
 
+    const auto nnz = static_cast<std::int64_t>(L.nnz());
+
     if (dtype == DType::Float32) {
         ::oneapi::mkl::sparse::init_matrix_handle(&handle);
         ::oneapi::mkl::sparse::set_csr_data(
             queue, handle,
             static_cast<std::int64_t>(N),
             static_cast<std::int64_t>(N),
+            nnz,
             ::oneapi::mkl::index_base::zero,
             crow.data<std::int32_t>(),
             col.data<std::int32_t>(),
@@ -612,6 +623,7 @@ auto sparse_trsv_kernel(const SparseTensor& L, const Tensor& b, bool upper,
             queue, handle,
             static_cast<std::int64_t>(N),
             static_cast<std::int64_t>(N),
+            nnz,
             ::oneapi::mkl::index_base::zero,
             crow.data<std::int32_t>(),
             col.data<std::int32_t>(),
@@ -669,12 +681,15 @@ auto sparse_trsm_kernel(const SparseTensor& L, const Tensor& B, bool upper,
 
     auto uplo = upper ? ::oneapi::mkl::uplo::upper : ::oneapi::mkl::uplo::lower;
 
+    const auto nnz = static_cast<std::int64_t>(L.nnz());
+
     if (dtype == DType::Float32) {
         ::oneapi::mkl::sparse::init_matrix_handle(&handle);
         ::oneapi::mkl::sparse::set_csr_data(
             queue, handle,
             static_cast<std::int64_t>(N),
             static_cast<std::int64_t>(N),
+            nnz,
             ::oneapi::mkl::index_base::zero,
             crow.data<std::int32_t>(),
             col.data<std::int32_t>(),
@@ -700,6 +715,7 @@ auto sparse_trsm_kernel(const SparseTensor& L, const Tensor& B, bool upper,
             queue, handle,
             static_cast<std::int64_t>(N),
             static_cast<std::int64_t>(N),
+            nnz,
             ::oneapi::mkl::index_base::zero,
             crow.data<std::int32_t>(),
             col.data<std::int32_t>(),

@@ -154,6 +154,19 @@ auto attr_key_name(AttrKey key) -> std::string_view {
         case AttrKey::Low: return "low";
         case AttrKey::High: return "high";
         case AttrKey::NumIndices: return "num_indices";
+        case AttrKey::DistP: return "dist_p";
+        case AttrKey::HopLength: return "hop_length";
+        case AttrKey::IgnoreAliasCheck: return "ignore_alias_check";
+        case AttrKey::NFft: return "nfft";
+        case AttrKey::Normalized: return "normalized";
+        case AttrKey::NumBins: return "num_bins";
+        case AttrKey::NumSamples: return "num_samples";
+        case AttrKey::OnesidedAttr: return "onesided";
+        case AttrKey::Order: return "order";
+        case AttrKey::PaddingMode: return "padding_mode";
+        case AttrKey::Replacement: return "replacement";
+        case AttrKey::ReturnComplex: return "return_complex";
+        case AttrKey::WinLength: return "win_length";
         case AttrKey::_Count: return "_count";
     }
     return "unknown";

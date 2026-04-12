@@ -330,7 +330,7 @@ auto faster_rcnn_resnet101(
 
 auto faster_rcnn_custom(
     std::shared_ptr<nn::Module> backbone,
-    int64_t backbone_out_channels,
+    [[maybe_unused]] int64_t backbone_out_channels,
     int64_t num_classes)
     -> std::shared_ptr<FasterRCNN> {
 

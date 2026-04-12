@@ -588,7 +588,7 @@ auto GlooBackend::finalize() -> void {
     initialized_ = false;
 }
 
-auto GlooBackend::supports_device(Device::Type device_type) const -> bool {
+auto GlooBackend::supports_device([[maybe_unused]] Device::Type device_type) const -> bool {
     // Gloo works with CPU and can handle GPU tensors by copying to CPU
     return true;
 }
@@ -998,6 +998,10 @@ auto GlooBackend::ring_all_reduce(Tensor& tensor, ReduceOp op) -> void {
                         case ReduceOp::MAX:
                             data_ptr[recv_start + j] = std::max(data_ptr[recv_start + j], recv_data[j]);
                             break;
+                        case ReduceOp::BAND:
+                        case ReduceOp::BOR:
+                        case ReduceOp::BXOR:
+                            throw std::runtime_error("Gloo backend does not support bitwise reduction ops (BAND/BOR/BXOR)");
                     }
                 }
             }
@@ -1057,7 +1061,7 @@ auto GlooBackend::get_cpu_buffer(const Tensor& tensor) -> Tensor {
     return tensor.to(Device::cpu());
 }
 
-auto GlooBackend::validate_cpu_accessible(const Tensor& tensor) -> void {
+auto GlooBackend::validate_cpu_accessible([[maybe_unused]] const Tensor& tensor) -> void {
     // Gloo can handle any tensor by copying to CPU if needed
     // No validation needed
 }

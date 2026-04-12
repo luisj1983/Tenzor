@@ -280,7 +280,7 @@ auto SvdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     // For simplicity, compute on CPU
     auto s_data = S.contiguous();
     auto f_shape = std::vector<int64_t>(S.shape().begin(), S.shape().end());
-    f_shape.back() = K;
+    f_shape[f_shape.size() - 1] = K;
     f_shape.push_back(K);
 
     // Create F as zeros

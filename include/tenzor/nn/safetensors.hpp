@@ -86,10 +86,10 @@ private:
         const std::vector<size_t>& offsets) -> std::string;
 
     struct TensorMeta {
-        DType dtype;
+        DType dtype{};
         std::vector<int64_t> shape;
-        size_t data_start;
-        size_t data_end;
+        size_t data_start{};
+        size_t data_end{};
     };
 
     static auto parse_header_json(const std::string& json)

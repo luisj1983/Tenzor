@@ -480,7 +480,7 @@ auto QuantizedBatchNorm2d::forward_quantized(const QuantizedTensor& input) -> Qu
     return quantize_per_tensor_symmetric(output);
 }
 
-auto QuantizedBatchNorm2d::from_float(const Module& fp_bn, const QConfig& qconfig)
+auto QuantizedBatchNorm2d::from_float(const Module& fp_bn, [[maybe_unused]] const QConfig& qconfig)
     -> std::shared_ptr<QuantizedBatchNorm2d> {
     // Extract BatchNorm parameters from state_dict
     auto state_dict = fp_bn.state_dict();
@@ -1030,7 +1030,7 @@ auto QuantizedEmbedding::set_weight(const QuantizedTensor& weights) -> void {
 }
 
 auto QuantizedEmbedding::from_float(Module& fp_embedding,
-                                     const QConfig& qconfig)
+                                     [[maybe_unused]] const QConfig& qconfig)
     -> std::shared_ptr<QuantizedEmbedding> {
     // Extract weight from the embedding module
     auto params = fp_embedding.named_parameters();
@@ -1189,7 +1189,7 @@ auto QuantizedLSTM::forward_with_state(const Variable& input,
     return {Variable(output, false), Variable(h_n, false), Variable(c_n, false)};
 }
 
-auto QuantizedLSTM::from_float(Module& fp_lstm, const QConfig& qconfig)
+auto QuantizedLSTM::from_float(Module& fp_lstm, [[maybe_unused]] const QConfig& qconfig)
     -> std::shared_ptr<QuantizedLSTM> {
     // Extract parameters from fp_lstm and quantize weights
     auto params = fp_lstm.named_parameters();
@@ -1365,7 +1365,7 @@ auto QuantizedConv3d::set_bias(const Tensor& bias) -> void {
     bias_ = bias;
 }
 
-auto QuantizedConv3d::from_float(Module& fp_conv3d, const QConfig& qconfig)
+auto QuantizedConv3d::from_float(Module& fp_conv3d, [[maybe_unused]] const QConfig& qconfig)
     -> std::shared_ptr<QuantizedConv3d> {
     auto params = fp_conv3d.named_parameters();
 
@@ -1419,7 +1419,7 @@ QuantizedMultiheadAttention::QuantizedMultiheadAttention(
     int64_t embed_dim,
     int64_t num_heads,
     QuantizationParams weight_qparams,
-    bool bias,
+    [[maybe_unused]] bool bias,
     float dropout
 ) : embed_dim_(embed_dim),
     num_heads_(num_heads),
@@ -1490,7 +1490,7 @@ auto QuantizedMultiheadAttention::forward_qkv(
 }
 
 auto QuantizedMultiheadAttention::from_float(Module& fp_mha,
-                                              const QConfig& qconfig)
+                                              [[maybe_unused]] const QConfig& qconfig)
     -> std::shared_ptr<QuantizedMultiheadAttention> {
     auto params = fp_mha.named_parameters();
 
@@ -1552,7 +1552,7 @@ QuantizedGRU::QuantizedGRU(
     bool bias,
     bool batch_first,
     bool bidirectional,
-    QuantizationParams weight_qparams
+    [[maybe_unused]] QuantizationParams weight_qparams
 ) : input_size_(input_size),
     hidden_size_(hidden_size),
     num_layers_(num_layers),
@@ -1676,7 +1676,7 @@ auto QuantizedGRU::forward_with_state(const Variable& input, const Variable& h0)
     return {Variable(output, false), Variable(h_n, false)};
 }
 
-auto QuantizedGRU::from_float(Module& fp_gru, const QConfig& qconfig)
+auto QuantizedGRU::from_float(Module& fp_gru, [[maybe_unused]] const QConfig& qconfig)
     -> std::shared_ptr<QuantizedGRU> {
     auto params = fp_gru.named_parameters();
 
@@ -2105,7 +2105,7 @@ auto QuantizedLSTMCell::forward_cell(const Variable& input,
     return {Variable(h_new, false), Variable(c_new, false)};
 }
 
-auto QuantizedLSTMCell::from_float(Module& fp_lstm_cell, const QConfig& qconfig)
+auto QuantizedLSTMCell::from_float(Module& fp_lstm_cell, [[maybe_unused]] const QConfig& qconfig)
     -> std::shared_ptr<QuantizedLSTMCell> {
     auto params = fp_lstm_cell.named_parameters();
 

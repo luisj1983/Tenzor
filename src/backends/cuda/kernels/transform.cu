@@ -917,7 +917,6 @@ __global__ void triu_kernel_impl(
 ) {
     int64_t total = batch_size * rows * cols;
     TENZOR_CUDA_KERNEL_LOOP(idx, total) {
-        int64_t b = idx / (rows * cols);
         int64_t rem = idx % (rows * cols);
         int64_t i = rem / cols;
         int64_t j = rem % cols;

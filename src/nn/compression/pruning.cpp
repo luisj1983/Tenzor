@@ -666,7 +666,7 @@ auto finalize_pruning(
 }
 
 auto remove_pruning(
-    std::shared_ptr<Module> module,
+    [[maybe_unused]] std::shared_ptr<Module> module,
     PruningConfig& config
 ) -> void {
     // Clear all masks
@@ -776,7 +776,7 @@ auto compute_compression_ratio(
 
 auto estimate_flops_reduction(
     const std::shared_ptr<Module>& module,
-    const std::vector<int64_t>& input_shape
+    [[maybe_unused]] const std::vector<int64_t>& input_shape
 ) -> float {
     // Simplified FLOP estimation
     float sparsity = compute_sparsity(module);
@@ -837,7 +837,7 @@ auto sensitivity_analysis(
 
 auto find_lottery_ticket(
     std::shared_ptr<Module> module,
-    const std::unordered_map<std::string, Tensor>& initial_weights,
+    [[maybe_unused]] const std::unordered_map<std::string, Tensor>& initial_weights,
     float target_sparsity,
     int num_rounds
 ) -> PruningConfig {

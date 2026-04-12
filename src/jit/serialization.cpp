@@ -156,7 +156,7 @@ auto GraphWriter::write_nodes(const Graph& graph) -> void {
     }
 }
 
-auto GraphWriter::write_tensors(const Graph& graph) -> void {
+auto GraphWriter::write_tensors([[maybe_unused]] const Graph& graph) -> void {
     // Tensors are written inline with nodes
     // This section is reserved for future extensions
 }

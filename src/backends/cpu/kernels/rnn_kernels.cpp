@@ -1002,8 +1002,6 @@ auto lstm_multilayer_forward_kernel(
     std::vector<Tensor> h_states, c_states;
 
     for (int64_t l = 0; l < num_layers; ++l) {
-        int64_t layer_input_size = (l == 0) ? input_size : hidden;
-
         // Get initial states for this layer
         Tensor h0_layer = h0_contig.slice(0, l, l + 1).reshape({batch, hidden}).contiguous();
         Tensor c0_layer = c0_contig.slice(0, l, l + 1).reshape({batch, hidden}).contiguous();
@@ -1129,8 +1127,6 @@ auto gru_multilayer_forward_kernel(
     std::vector<Tensor> h_states;
 
     for (int64_t l = 0; l < num_layers; ++l) {
-        int64_t layer_input_size = (l == 0) ? input_size : hidden;
-
         // Get initial state for this layer
         Tensor h0_layer = h0_contig.slice(0, l, l + 1).reshape({batch, hidden}).contiguous();
 

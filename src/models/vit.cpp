@@ -517,8 +517,8 @@ auto ViTModelHub::download_pretrained(const std::string& model_name) -> std::str
         "Please download the model from a model hub (e.g., Hugging Face) to: " + model_dir);
 }
 
-auto ViTModelHub::load_pretrained_weights(nn::Module& model,
-                                         const std::string& checkpoint_path) -> void {
+auto ViTModelHub::load_pretrained_weights([[maybe_unused]] nn::Module& model,
+                                         [[maybe_unused]] const std::string& checkpoint_path) -> void {
     // In a real implementation, this would:
     // 1. Load PyTorch checkpoint file
     // 2. Map parameter names (e.g., "vit.encoder.layer.0" -> "vit.encoder.layers.0")

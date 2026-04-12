@@ -533,7 +533,7 @@ auto Tracer::trace_if(const Tensor& condition,
 // ============================================================================
 
 auto Tracer::trace_loop(int64_t max_iter,
-                        std::function<Tensor(const std::vector<Variable>&)> cond_fn,
+                        [[maybe_unused]] std::function<Tensor(const std::vector<Variable>&)> cond_fn,
                         std::function<std::vector<Variable>(const std::vector<Variable>&)> body_fn,
                         const std::vector<Variable>& carried) -> std::vector<Variable> {
 

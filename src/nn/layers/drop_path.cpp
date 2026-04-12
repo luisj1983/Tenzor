@@ -11,7 +11,7 @@ class DropPathBackward : public Function {
 public:
     DropPathBackward(Tensor mask, double scale) : mask_(std::move(mask)), scale_(scale) {}
 
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("DropPathBackward::forward should not be called");
     }
 

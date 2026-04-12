@@ -383,14 +383,14 @@ public:
  * Function pointer type for creating backend instances.
  * Used by plugin system for dynamic backend loading.
  *
- * @return Unique pointer to newly created backend
+ * @return Raw pointer to newly created backend (caller takes ownership)
  *
  * @code
- * extern "C" auto create_backend() -> std::unique_ptr<Backend> {
- *     return std::make_unique<MyCUDABackend>();
+ * extern "C" Backend* create_backend() {
+ *     return new MyCUDABackend();
  * }
  * @endcode
  */
-using BackendFactory = std::unique_ptr<Backend>(*)();
+using BackendFactory = Backend*(*)();
 
 } // namespace tenzor

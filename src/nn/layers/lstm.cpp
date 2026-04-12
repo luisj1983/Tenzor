@@ -300,7 +300,6 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
     // Special fast path for single-layer bidirectional LSTM
     if (can_use_fused && bidirectional_ && num_layers_ == 1) {
         Tensor layer_input = x.tensor().contiguous();
-        int64_t kernel_batch = layer_input.shape()[1];
 
         // Get forward direction weights
         auto& fwd_cell = forward_cells_[0];

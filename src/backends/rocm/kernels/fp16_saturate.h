@@ -18,7 +18,7 @@
 namespace tenzor {
 namespace rocm {
 
-__global__ inline void fp16_saturate_kernel(__half* data, int64_t n) {
+static __global__ void fp16_saturate_kernel(__half* data, int64_t n) {
     constexpr float kHalfMax = 65504.0f;
     for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n;
          idx += blockDim.x * gridDim.x) {

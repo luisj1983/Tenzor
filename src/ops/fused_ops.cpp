@@ -316,7 +316,7 @@ auto fused_layer_norm(
     float eps
 ) -> Tensor {
     // Validate inputs
-    if (input.ndim() < normalized_shape.size()) {
+    if (input.ndim() < static_cast<int64_t>(normalized_shape.size())) {
         throw std::runtime_error(
             "fused_layer_norm: input ndim must be >= normalized_shape size"
         );

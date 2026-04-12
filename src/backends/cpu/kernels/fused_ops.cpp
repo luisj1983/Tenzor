@@ -877,7 +877,6 @@ auto fused_rms_norm_kernel(const Tensor& input, const Tensor& weight, float eps)
     -> std::tuple<Tensor, Tensor> {
     // RMSNorm: output = input * weight / sqrt(mean(input^2) + eps)
     const auto& shape = input.shape();
-    const int64_t ndim = input.ndim();
 
     // Normalized shape is the last dimension (weight.shape)
     const int64_t norm_size = weight.numel();

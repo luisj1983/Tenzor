@@ -8,7 +8,6 @@
 #include <algorithm>
 #include <numeric>
 #include <stdexcept>
-#include <cstring>
 
 namespace tenzor {
 namespace optim {
@@ -44,39 +43,6 @@ void validate_tensors_for_flattening(const std::vector<Tensor>& tensors) {
             );
         }
     }
-}
-
-/**
- * @brief Calculate total number of elements across tensors
- */
-size_t calculate_total_elements(const std::vector<Tensor>& tensors) {
-    size_t total = 0;
-    for (const auto& t : tensors) {
-        total += t.numel();
-    }
-    return total;
-}
-
-/**
- * @brief Copy tensor data into a flat buffer
- */
-void copy_tensor_data(const Tensor& src, void* dst, size_t offset_bytes) {
-    const size_t bytes = src.numel() * dtype_size(src.dtype());
-    const void* src_ptr = src.data_ptr();
-
-    auto* dst_ptr = static_cast<char*>(dst) + offset_bytes;
-    std::memcpy(dst_ptr, src_ptr, bytes);
-}
-
-/**
- * @brief Copy data from flat buffer into tensor
- */
-void copy_from_flat(const void* src, Tensor& dst, size_t offset_bytes) {
-    const size_t bytes = dst.numel() * dtype_size(dst.dtype());
-    void* dst_ptr = dst.data_ptr();
-
-    const auto* src_ptr = static_cast<const char*>(src) + offset_bytes;
-    std::memcpy(dst_ptr, src_ptr, bytes);
 }
 
 } // anonymous namespace

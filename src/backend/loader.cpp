@@ -157,8 +157,10 @@ auto BackendLoader::load_backend(const std::filesystem::path& library_path,
         if (pid == 0) {
             // Child: try calling the factory. Exit 0 on success, 1 on failure.
             try {
-                auto test_backend = factory();
-                _exit(test_backend ? 0 : 1);
+                Backend* test_backend = factory();
+                bool ok = test_backend != nullptr;
+                delete test_backend;
+                _exit(ok ? 0 : 1);
             } catch (...) {
                 _exit(1);
             }
@@ -211,7 +213,7 @@ auto BackendLoader::load_backend(const std::filesystem::path& library_path,
     // Create backend (safe — probe confirmed it doesn't hang)
     std::unique_ptr<Backend> backend;
     try {
-        backend = factory();
+        backend.reset(factory());
     } catch (const std::exception& e) {
         unload_library(handle);
         return std::unexpected(std::string("Backend initialization failed: ") + e.what());

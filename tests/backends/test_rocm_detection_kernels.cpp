@@ -138,7 +138,7 @@ TEST_F(ROCmDetectionKernelsTest, DeviceSynchronization) {
         auto scores = rand({100}, DType::Float32, device);
 
         // Test synchronization
-        hipDeviceSynchronize();
+        ASSERT_EQ(hipDeviceSynchronize(), hipSuccess);
 
         // Copy to CPU to verify data exists
         auto boxes_cpu = boxes.to(Device::cpu());

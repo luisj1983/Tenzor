@@ -97,7 +97,6 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
             -fno-math-errno
             -fno-trapping-math
             -fno-finite-math-only  # Preserves NaN/Inf handling for IEEE 754 compliance
-            -Wno-unused-parameter
         )
 
         target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_PORTABLE)
@@ -154,7 +153,6 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
             -fno-math-errno
             -fno-trapping-math
             -fno-finite-math-only  # Preserves NaN/Inf handling for IEEE 754 compliance
-            -Wno-unused-parameter
         )
 
         # AVX-512 translation units always get -mavx512f so that even on

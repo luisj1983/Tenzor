@@ -218,11 +218,8 @@ __global__ void batchnorm_normalize_kernel(const T* input,
     int64_t total_size = N * C * spatial_size;
 
     TENZOR_CUDA_KERNEL_LOOP(idx, total_size) {
-        // Decode NCHW index
-        int64_t w = idx % W;
-        int64_t h = (idx / W) % H;
+        // Decode NCHW index - only channel index needed for normalization
         int64_t c = (idx / (W * H)) % C;
-        int64_t n = idx / (C * W * H);
 
         T channel_mean = mean[c];
         T channel_var = variance[c];

@@ -486,7 +486,6 @@ auto QLearningACT::compute_q_values(const Variable& state)
 
     // Split into Q_halt and Q_continue
     auto q_tensor = q_values.tensor();
-    auto batch_size = q_tensor.shape()[0];
 
     // Extract Q_halt (index 0) and Q_continue (index 1)
     auto q_halt = tenzor::select(q_tensor, -1, 0);      // (batch,)

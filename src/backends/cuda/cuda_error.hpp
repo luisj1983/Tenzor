@@ -50,6 +50,7 @@
 
 #ifdef TENZOR_HAS_CUDNN
 #include <cudnn.h>
+#ifndef CUDNN_CHECK
 #define CUDNN_CHECK(call)                                                      \
     do {                                                                        \
         cudnnStatus_t status = (call);                                         \
@@ -59,4 +60,5 @@
                 std::to_string(__LINE__) + " - " + cudnnGetErrorString(status));\
         }                                                                      \
     } while (0)
+#endif
 #endif

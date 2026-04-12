@@ -976,7 +976,7 @@ namespace {
 /// Both inputs must be in CSR format. Returns CSR result.
 template<typename T>
 SparseTensor cpu_spgemm_typed(const SparseTensor& a, const SparseTensor& b,
-                               int64_t M, int64_t K, int64_t N) {
+                               int64_t M, [[maybe_unused]] int64_t K, int64_t N) {
     auto a_crow = a.crow_indices().contiguous();
     auto a_col = a.col_indices().contiguous();
     auto a_vals = a.values().contiguous();
@@ -1338,7 +1338,7 @@ auto cpu_sddmm_csr(const Tensor& mask_row_ptr,
                    const Tensor& A,
                    const Tensor& B,
                    int64_t M,
-                   int64_t N,
+                   [[maybe_unused]] int64_t N,
                    int64_t K) -> Tensor {
     const auto nnz = mask_col_ind.numel();
     Tensor values({nnz}, A.dtype(), A.device());

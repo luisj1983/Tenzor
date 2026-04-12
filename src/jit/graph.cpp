@@ -662,6 +662,54 @@ auto Graph::infer_types() -> void {
                     output_shapes.push_back(input_shapes[i]);
                 }
                 break;
+
+            // ================================================================
+            // Fused operations
+            // ================================================================
+            case OpType::FlashAttention:
+                // Q: (B, H, S, D), K: (B, H, S, D), V: (B, H, S, D) -> (B, H, S, D)
+                if (!input_shapes.empty()) {
+                    output_shapes.push_back(input_shapes[0]);
+                }
+                break;
+
+            case OpType::FusedFFN:
+                // input: (*, in) -> (*, out) -- output shape depends on second linear weight
+                if (input_shapes.size() >= 3) {
+                    // inputs[0]=input, inputs[1]=weight1, inputs[2]=weight2
+                    auto out_shape = input_shapes[0];
+                    if (!input_shapes[2].empty()) {
+                        out_shape.back() = input_shapes[2][0];
+                    }
+                    output_shapes.push_back(out_shape);
+                } else if (!input_shapes.empty()) {
+                    output_shapes.push_back(input_shapes[0]);
+                }
+                break;
+
+            case OpType::ResidualAdd:
+                // x + sublayer(x) -> same shape as input
+                if (!input_shapes.empty()) {
+                    output_shapes.push_back(input_shapes[0]);
+                }
+                break;
+
+            // ================================================================
+            // Guard / memory management pseudo-ops (no shape transformation)
+            // ================================================================
+            case OpType::ShapeGuard:
+            case OpType::GuardNode:
+                if (!input_shapes.empty()) {
+                    output_shapes.push_back(input_shapes[0]);
+                }
+                break;
+
+            case OpType::SwapOut:
+            case OpType::SwapIn:
+                if (!input_shapes.empty()) {
+                    output_shapes.push_back(input_shapes[0]);
+                }
+                break;
         }
 
         // Update output shapes
@@ -1214,6 +1262,53 @@ auto Graph::infer_symbolic_types() -> void {
                 // Loop-carried values preserve shapes
                 for (size_t i = 2; i < input_sym_shapes.size(); ++i) {
                     output_sym_shapes.push_back(input_sym_shapes[i]);
+                }
+                break;
+
+            // ================================================================
+            // Fused operations
+            // ================================================================
+            case OpType::FlashAttention:
+                // Q: (B, H, S, D) -> same shape as Q
+                if (!input_sym_shapes.empty()) {
+                    output_sym_shapes.push_back(input_sym_shapes[0]);
+                }
+                break;
+
+            case OpType::FusedFFN:
+                // input: (*, in) -> (*, out) via second linear weight
+                if (input_sym_shapes.size() >= 3) {
+                    auto out_shape = input_sym_shapes[0];
+                    if (input_sym_shapes[2].rank() > 0) {
+                        out_shape[out_shape.rank() - 1] = input_sym_shapes[2][0];
+                    }
+                    output_sym_shapes.push_back(std::move(out_shape));
+                } else if (!input_sym_shapes.empty()) {
+                    output_sym_shapes.push_back(input_sym_shapes[0]);
+                }
+                break;
+
+            case OpType::ResidualAdd:
+                // x + sublayer(x) -> same shape
+                if (!input_sym_shapes.empty()) {
+                    output_sym_shapes.push_back(input_sym_shapes[0]);
+                }
+                break;
+
+            // ================================================================
+            // Guard / memory management pseudo-ops (no shape transformation)
+            // ================================================================
+            case OpType::ShapeGuard:
+            case OpType::GuardNode:
+                if (!input_sym_shapes.empty()) {
+                    output_sym_shapes.push_back(input_sym_shapes[0]);
+                }
+                break;
+
+            case OpType::SwapOut:
+            case OpType::SwapIn:
+                if (!input_sym_shapes.empty()) {
+                    output_sym_shapes.push_back(input_sym_shapes[0]);
                 }
                 break;
         }

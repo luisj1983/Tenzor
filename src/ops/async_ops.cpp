@@ -139,7 +139,7 @@ StreamManager::~StreamManager() {
 
 auto async_matmul(const Tensor& a, const Tensor& b) -> Future<Tensor> {
     // Check if tensors are on GPU
-    Device device = a.device();
+    [[maybe_unused]] Device device = a.device();
 
 #ifdef TENZOR_CUDA_ENABLED
     if (device.type == Device::Type::CUDA) {
@@ -160,18 +160,17 @@ auto async_matmul(const Tensor& a, const Tensor& b) -> Future<Tensor> {
 auto async_conv2d(
     const Tensor& input,
     const Tensor& weight,
-    const std::optional<Tensor>& bias,
+    [[maybe_unused]] const std::optional<Tensor>& bias,
     int64_t stride,
     int64_t padding,
     int64_t dilation,
-    int64_t groups
+    [[maybe_unused]] int64_t groups
 ) -> Future<Tensor> {
     Device device = input.device();
 
     // Create output tensor with proper shape calculation
     // Conv2d output: (N, out_channels, H_out, W_out)
     auto batch_size = input.shape()[0];
-    auto in_channels = input.shape()[1];
     auto in_height = input.shape()[2];
     auto in_width = input.shape()[3];
     auto out_channels = weight.shape()[0];
@@ -199,7 +198,7 @@ auto async_conv2d(
 }
 
 auto async_add(const Tensor& a, const Tensor& b) -> Future<Tensor> {
-    Device device = a.device();
+    [[maybe_unused]] Device device = a.device();
 
 #ifdef TENZOR_CUDA_ENABLED
     if (device.type == Device::Type::CUDA) {
@@ -215,7 +214,7 @@ auto async_add(const Tensor& a, const Tensor& b) -> Future<Tensor> {
 }
 
 auto async_mul(const Tensor& a, const Tensor& b) -> Future<Tensor> {
-    Device device = a.device();
+    [[maybe_unused]] Device device = a.device();
 
 #ifdef TENZOR_CUDA_ENABLED
     if (device.type == Device::Type::CUDA) {
@@ -231,7 +230,7 @@ auto async_mul(const Tensor& a, const Tensor& b) -> Future<Tensor> {
 }
 
 auto async_sub(const Tensor& a, const Tensor& b) -> Future<Tensor> {
-    Device device = a.device();
+    [[maybe_unused]] Device device = a.device();
 
 #ifdef TENZOR_CUDA_ENABLED
     if (device.type == Device::Type::CUDA) {
@@ -247,7 +246,7 @@ auto async_sub(const Tensor& a, const Tensor& b) -> Future<Tensor> {
 }
 
 auto async_div(const Tensor& a, const Tensor& b) -> Future<Tensor> {
-    Device device = a.device();
+    [[maybe_unused]] Device device = a.device();
 
 #ifdef TENZOR_CUDA_ENABLED
     if (device.type == Device::Type::CUDA) {
@@ -263,7 +262,7 @@ auto async_div(const Tensor& a, const Tensor& b) -> Future<Tensor> {
 }
 
 auto async_relu(const Tensor& input) -> Future<Tensor> {
-    Device device = input.device();
+    [[maybe_unused]] Device device = input.device();
 
 #ifdef TENZOR_CUDA_ENABLED
     if (device.type == Device::Type::CUDA) {
@@ -279,7 +278,7 @@ auto async_relu(const Tensor& input) -> Future<Tensor> {
 }
 
 auto async_sigmoid(const Tensor& input) -> Future<Tensor> {
-    Device device = input.device();
+    [[maybe_unused]] Device device = input.device();
 
 #ifdef TENZOR_CUDA_ENABLED
     if (device.type == Device::Type::CUDA) {
@@ -295,7 +294,7 @@ auto async_sigmoid(const Tensor& input) -> Future<Tensor> {
 }
 
 auto async_tanh(const Tensor& input) -> Future<Tensor> {
-    Device device = input.device();
+    [[maybe_unused]] Device device = input.device();
 
 #ifdef TENZOR_CUDA_ENABLED
     if (device.type == Device::Type::CUDA) {
@@ -311,7 +310,7 @@ auto async_tanh(const Tensor& input) -> Future<Tensor> {
 }
 
 auto async_softmax(const Tensor& input, int64_t dim) -> Future<Tensor> {
-    Device device = input.device();
+    [[maybe_unused]] Device device = input.device();
 
 #ifdef TENZOR_CUDA_ENABLED
     if (device.type == Device::Type::CUDA) {

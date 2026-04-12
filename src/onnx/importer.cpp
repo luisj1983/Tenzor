@@ -856,7 +856,6 @@ auto ONNXImporter::convert_conv(const ONNXImportNode& node) -> std::shared_ptr<n
         // Conv2d
         // Convert padding format from [top, left, bottom, right] to [h, w]
         int64_t pad_h = pads[0];
-        int64_t pad_w = pads[1];
 
         // Assume square kernel if both dims are same, otherwise use first dimension
         int64_t kernel_size = kernel_shape[0]; // Assuming square kernels
@@ -1040,7 +1039,7 @@ auto ONNXImporter::convert_avgpool(const ONNXImportNode& node) -> std::shared_pt
     }
 }
 
-auto ONNXImporter::convert_global_avgpool(const ONNXImportNode& node) -> std::shared_ptr<nn::Module> {
+auto ONNXImporter::convert_global_avgpool([[maybe_unused]] const ONNXImportNode& node) -> std::shared_ptr<nn::Module> {
     // GlobalAveragePool is AdaptiveAvgPool with output_size=(1, 1)
     auto pool = std::make_shared<nn::AdaptiveAvgPool2d>(1, 1);
     return pool;

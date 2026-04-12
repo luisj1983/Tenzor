@@ -247,7 +247,6 @@ target_compile_options(tenzor_backend_cuda PRIVATE
         --ftz=false
         --generate-line-info
     >
-    $<$<COMPILE_LANGUAGE:CXX>:-Wno-unused-parameter>
 )
 
 # Set compute capability definitions

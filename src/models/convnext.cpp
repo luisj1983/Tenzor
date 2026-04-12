@@ -76,9 +76,6 @@ auto ConvNeXtBlock::forward_impl(const Variable& input) -> Variable {
 
     // LayerNorm
     // Need to permute from NCHW to NHWC for LayerNorm, then back
-    auto shape = x.tensor().shape();
-    int64_t N = shape[0], C = shape[1], H = shape[2], W = shape[3];
-
     // Permute NCHW → NHWC
     x = x.permute({0, 2, 3, 1});  // [N, H, W, C]
 
@@ -149,7 +146,6 @@ ConvNeXt::ConvNeXt(int64_t in_channels,
     int64_t total_depth = 0;
     for (auto d : depths) total_depth += d;
 
-    double dp_rate = 0.0;
     int64_t block_idx = 0;
 
     // Stage 1

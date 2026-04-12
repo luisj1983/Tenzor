@@ -564,7 +564,7 @@ public:
 
         // Device type
         info.is_integrated = !dev.device.is_gpu() ||
-            (dev.device.get_info<sycl::info::device::host_unified_memory>());
+            (dev.device.has(sycl::aspect::usm_system_allocations));
         info.is_discrete = dev.device.is_gpu() && !info.is_integrated;
 
         return info;
@@ -912,8 +912,8 @@ static void early_configure_opencl_cpu_target() {
 }
 
 extern "C" {
-    auto create_backend() -> std::unique_ptr<Backend> {
-        return std::make_unique<OneAPIBackend>();
+    Backend* create_backend() {
+        return new OneAPIBackend();
     }
 }
 

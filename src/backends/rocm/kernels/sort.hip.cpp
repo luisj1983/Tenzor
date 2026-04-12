@@ -474,17 +474,17 @@ static void launch_argsort(const T* d_input, int64_t* d_output, int64_t n,
     size_t temp_storage_bytes = 0;
 
     if (descending) {
-        hipcub::DeviceRadixSort::SortPairsDescending(d_temp_storage, temp_storage_bytes,
-            d_input, d_keys_out, d_indices_in, d_output, static_cast<int>(n), 0, sizeof(T) * 8, stream);
+        HIP_CHECK(hipcub::DeviceRadixSort::SortPairsDescending(d_temp_storage, temp_storage_bytes,
+            d_input, d_keys_out, d_indices_in, d_output, static_cast<int>(n), 0, sizeof(T) * 8, stream));
         HIP_CHECK(hipMalloc(&d_temp_storage, temp_storage_bytes));
-        hipcub::DeviceRadixSort::SortPairsDescending(d_temp_storage, temp_storage_bytes,
-            d_input, d_keys_out, d_indices_in, d_output, static_cast<int>(n), 0, sizeof(T) * 8, stream);
+        HIP_CHECK(hipcub::DeviceRadixSort::SortPairsDescending(d_temp_storage, temp_storage_bytes,
+            d_input, d_keys_out, d_indices_in, d_output, static_cast<int>(n), 0, sizeof(T) * 8, stream));
     } else {
-        hipcub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,
-            d_input, d_keys_out, d_indices_in, d_output, static_cast<int>(n), 0, sizeof(T) * 8, stream);
+        HIP_CHECK(hipcub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,
+            d_input, d_keys_out, d_indices_in, d_output, static_cast<int>(n), 0, sizeof(T) * 8, stream));
         HIP_CHECK(hipMalloc(&d_temp_storage, temp_storage_bytes));
-        hipcub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,
-            d_input, d_keys_out, d_indices_in, d_output, static_cast<int>(n), 0, sizeof(T) * 8, stream);
+        HIP_CHECK(hipcub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,
+            d_input, d_keys_out, d_indices_in, d_output, static_cast<int>(n), 0, sizeof(T) * 8, stream));
     }
 
     HIP_CHECK(hipFree(d_temp_storage));
@@ -595,13 +595,13 @@ static auto unique_thrust(const Tensor& input, bool sorted_output,
 
     void* d_temp = nullptr;
     size_t temp_bytes = 0;
-    hipcub::DeviceRunLengthEncode::Encode(
+    HIP_CHECK(hipcub::DeviceRunLengthEncode::Encode(
         d_temp, temp_bytes, d_sorted, d_unique, d_counts, d_num_runs,
-        static_cast<int>(numel), stream);
+        static_cast<int>(numel), stream));
     HIP_CHECK(hipMalloc(&d_temp, temp_bytes));
-    hipcub::DeviceRunLengthEncode::Encode(
+    HIP_CHECK(hipcub::DeviceRunLengthEncode::Encode(
         d_temp, temp_bytes, d_sorted, d_unique, d_counts, d_num_runs,
-        static_cast<int>(numel), stream);
+        static_cast<int>(numel), stream));
     HIP_CHECK(hipFree(d_temp));
 
     // Get num_unique on host
@@ -632,11 +632,11 @@ static auto unique_thrust(const Tensor& input, bool sorted_output,
 
         void* d_scan_temp = nullptr;
         size_t scan_temp_bytes = 0;
-        hipcub::DeviceScan::ExclusiveSum(d_scan_temp, scan_temp_bytes, d_counts, d_offsets,
-                                         static_cast<int>(num_unique), stream);
+        HIP_CHECK(hipcub::DeviceScan::ExclusiveSum(d_scan_temp, scan_temp_bytes, d_counts, d_offsets,
+                                         static_cast<int>(num_unique), stream));
         HIP_CHECK(hipMalloc(&d_scan_temp, scan_temp_bytes));
-        hipcub::DeviceScan::ExclusiveSum(d_scan_temp, scan_temp_bytes, d_counts, d_offsets,
-                                         static_cast<int>(num_unique), stream);
+        HIP_CHECK(hipcub::DeviceScan::ExclusiveSum(d_scan_temp, scan_temp_bytes, d_counts, d_offsets,
+                                         static_cast<int>(num_unique), stream));
         HIP_CHECK(hipFree(d_scan_temp));
 
         int block = 256;

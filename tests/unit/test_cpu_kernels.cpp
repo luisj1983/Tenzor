@@ -688,9 +688,9 @@ TEST(CPUKernelsTest, MulFloat32_Overflow) {
     auto c = mul(a, b);
     auto c_data = c.data<float>();
 
-    // This will overflow to infinity, which is valid IEEE 754 behavior
+    // 1e20f * 1e20f overflows float range — result must be infinity per IEEE 754
     for (int i = 0; i < 4; i++) {
-        EXPECT_TRUE(std::isinf(c_data[i]) || c_data[i] == 1e40f) << "Expected overflow at index " << i;
+        EXPECT_TRUE(std::isinf(c_data[i])) << "Expected overflow at index " << i;
     }
 }
 

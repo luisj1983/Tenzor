@@ -67,6 +67,14 @@ auto dtype_to_numpy_format(DType dtype) -> std::string {
         case DType::Bool: return py::format_descriptor<bool>::format();
         case DType::Complex64: return py::format_descriptor<std::complex<float>>::format();
         case DType::Complex128: return py::format_descriptor<std::complex<double>>::format();
+        case DType::FP8_E4M3:
+        case DType::FP8_E5M2:
+        case DType::QInt4x2:
+        case DType::QInt8:
+        case DType::QUInt8:
+            throw std::runtime_error("Quantized dtype " +
+                std::string(dtype_name(dtype)) +
+                " has no NumPy equivalent; dequantize the tensor first");
     }
     throw std::runtime_error("Unsupported dtype for NumPy conversion: " +
                            std::string(dtype_name(dtype)));

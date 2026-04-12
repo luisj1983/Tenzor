@@ -47,7 +47,7 @@ public:
         save_for_backward(std::move(tensors_to_save));
     }
 
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         // Not used - forward is handled by BatchNorm2d::forward
         throw std::runtime_error("BatchNorm2dBackward::forward should not be called");
     }
@@ -765,7 +765,7 @@ public:
         save_for_backward(std::move(tensors_to_save));
     }
 
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("BatchNorm1dBackward::forward should not be called");
     }
 

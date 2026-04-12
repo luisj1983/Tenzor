@@ -645,8 +645,8 @@ private:
 };
 
 extern "C" {
-    auto create_backend() -> std::unique_ptr<Backend> {
-        return std::make_unique<CUDABackend>();
+    Backend* create_backend() {
+        return new CUDABackend();
     }
 }
 

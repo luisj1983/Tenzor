@@ -243,9 +243,6 @@ auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index) 
         outer_size *= in_shape[d];
     }
 
-    // Size of one element along the selected dimension
-    const int64_t elem_size = inner_size * dtype_size(input.dtype());
-
     // Perform the selection based on dtype using template helper
     // Macro to reduce repetition for pure-copy index_select dispatch
     #define INDEX_SELECT_DISPATCH(DTYPE_ENUM, CPP_TYPE) \

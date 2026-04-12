@@ -206,13 +206,6 @@ auto VulkanBackend::dispatchArgmin(const Tensor& input, int64_t dim, bool keepdi
 }
 
 auto VulkanBackend::dispatchVariance(const Tensor& input, int64_t dim, bool unbiased, bool keepdim) -> Tensor {
-    int32_t device_id = input.device().index;
-    bool is_float64 = (input.dtype() == DType::Float64);
-    std::string shader_name = "variance_std";
-    if (is_float64) shader_name = "variance_std_f64";
-    else if (input.dtype() == DType::Float16) shader_name = "variance_std_f16";
-    auto* pipeline = getPipeline(shader_name, device_id);
-
     std::vector<int64_t> out_shape;
     auto input_shape = input.shape();
 

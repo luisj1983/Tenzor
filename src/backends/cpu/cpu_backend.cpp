@@ -281,7 +281,7 @@ public:
         return info;
     }
 
-    auto allocate(size_t bytes, int32_t device_id) -> void* override {
+    auto allocate(size_t bytes, [[maybe_unused]] int32_t device_id) -> void* override {
         // Use caching allocator for efficient memory reuse
         return cpu::CPUCachingAllocator::instance().allocate(bytes);
     }
@@ -291,23 +291,23 @@ public:
         cpu::CPUCachingAllocator::instance().deallocate(ptr);
     }
 
-    auto copy(void* dst, const void* src, size_t bytes, CopyKind kind) -> void override {
+    auto copy(void* dst, const void* src, size_t bytes, [[maybe_unused]] CopyKind kind) -> void override {
         std::memcpy(dst, src, bytes);
     }
 
-    auto synchronize(int32_t device_id) -> void override {
+    auto synchronize([[maybe_unused]] int32_t device_id) -> void override {
         // CPU is always synchronized
     }
 
-    auto create_stream(int32_t device_id) -> StreamHandle override {
+    auto create_stream([[maybe_unused]] int32_t device_id) -> StreamHandle override {
         return nullptr;
     }
 
-    auto destroy_stream(StreamHandle stream) -> void override {
+    auto destroy_stream([[maybe_unused]] StreamHandle stream) -> void override {
         // No-op for CPU
     }
 
-    auto synchronize_stream(StreamHandle stream) -> void override {
+    auto synchronize_stream([[maybe_unused]] StreamHandle stream) -> void override {
         // No-op for CPU
     }
 
@@ -1172,7 +1172,7 @@ void register_cpu_kernels(BackendDispatchTable& table);
 
 // Export factory function
 extern "C" {
-    auto create_backend() -> std::unique_ptr<Backend> {
+    Backend* create_backend() {
         // Configure OpenMP to use all available hardware threads by default
         // Users can override with OMP_NUM_THREADS environment variable
 #ifdef _OPENMP
@@ -1192,7 +1192,7 @@ extern "C" {
                 std::thread::hardware_concurrency());
         }
 #endif
-        return std::make_unique<CPUBackend>();
+        return new CPUBackend();
     }
 
     // Export kernel registration function for dispatch table initialization

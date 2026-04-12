@@ -1317,7 +1317,7 @@ auto ZeROStage2Optimizer::reduce_scatter_gradients(GradientBucket& bucket) -> vo
     }
 }
 
-auto ZeROStage2Optimizer::gradient_hook(size_t bucket_idx, size_t param_idx) -> void {
+auto ZeROStage2Optimizer::gradient_hook(size_t bucket_idx, [[maybe_unused]] size_t param_idx) -> void {
     if (bucket_idx >= gradient_buckets_.size()) {
         return;
     }
@@ -1976,7 +1976,7 @@ auto ZeROStage3Optimizer::gather_parameter_impl(ParameterInfo& state) -> void {
     }
 }
 
-auto ZeROStage3Optimizer::forward_pre_hook(Module* module, const std::vector<Tensor>& inputs) -> void {
+auto ZeROStage3Optimizer::forward_pre_hook(Module* module, [[maybe_unused]] const std::vector<Tensor>& inputs) -> void {
     // Find parameters for this module
     auto params = module->parameters();
 
@@ -1999,7 +1999,7 @@ auto ZeROStage3Optimizer::forward_pre_hook(Module* module, const std::vector<Ten
     }
 }
 
-auto ZeROStage3Optimizer::backward_post_hook(Module* module, const std::vector<Tensor>& inputs, const std::vector<Tensor>& grad_outputs) -> void {
+auto ZeROStage3Optimizer::backward_post_hook(Module* module, [[maybe_unused]] const std::vector<Tensor>& inputs, [[maybe_unused]] const std::vector<Tensor>& grad_outputs) -> void {
     // Find parameters for this module
     auto params = module->parameters();
 
@@ -2113,7 +2113,7 @@ auto ZeROStage3Optimizer::scatter_parameter_gradient(Tensor* param) -> void {
     param_var->set_grad(local_grad);
 }
 
-auto ZeROStage3Optimizer::prefetch_next_parameters(Module* current_module) -> void {
+auto ZeROStage3Optimizer::prefetch_next_parameters([[maybe_unused]] Module* current_module) -> void {
     if (!prefetch_scheduler_ || !registered_model_) {
         return;
     }
@@ -2369,18 +2369,18 @@ auto ZeROStage3Optimizer::should_partition_parameter(const Tensor& param) const 
     return param_bytes >= stage3_config_.partition_threshold;
 }
 
-auto ZeROStage3Optimizer::free_gathered_parameter_impl(ParameterInfo& state) -> void {
+auto ZeROStage3Optimizer::free_gathered_parameter_impl([[maybe_unused]] ParameterInfo& state) -> void {
     // Internal implementation for freeing gathered parameters
     // This is already handled in free_gathered_parameter()
 }
 
-auto ZeROStage3Optimizer::get_next_module_in_execution_order(Module* current_module) -> Module* {
+auto ZeROStage3Optimizer::get_next_module_in_execution_order([[maybe_unused]] Module* current_module) -> Module* {
     // Without a modules() method, we can't traverse the execution graph
     // Return nullptr for now
     return nullptr;
 }
 
-auto ZeROStage3Optimizer::get_next_parameters_in_execution_order(const ParameterInfo& state)
+auto ZeROStage3Optimizer::get_next_parameters_in_execution_order([[maybe_unused]] const ParameterInfo& state)
     -> std::vector<Tensor*> {
     // Without a modules() method, we can't traverse the execution graph
     // Return empty vector for now

@@ -456,7 +456,7 @@ auto VulkanBackend::dispatchSort(const Tensor& input, int64_t dim, bool descendi
  * @brief TopK — sort then take first K elements.
  */
 auto VulkanBackend::dispatchTopK(const Tensor& input, int64_t k, int64_t dim,
-                                   bool largest, bool sorted) -> std::pair<Tensor, Tensor> {
+                                   bool largest, [[maybe_unused]] bool sorted) -> std::pair<Tensor, Tensor> {
     auto input_shape = input.shape();
     const int ndim = static_cast<int>(input_shape.size());
     if (dim < 0) dim += ndim;

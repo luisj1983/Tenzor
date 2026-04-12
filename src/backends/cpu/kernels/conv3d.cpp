@@ -559,7 +559,7 @@ template<typename T>
 static void conv_transpose3d_forward_impl(
     const Tensor& input, const Tensor& weight, const Tensor* bias,
     Tensor& output,
-    int64_t stride, int64_t padding, int64_t output_padding,
+    int64_t stride, int64_t padding, [[maybe_unused]] int64_t output_padding,
     int64_t dilation, int64_t groups)
 {
     auto in_shape = input.shape();
@@ -653,7 +653,7 @@ template<typename T>
 static void conv_transpose3d_backward_input_impl(
     const Tensor& grad_output, const Tensor& weight,
     Tensor& grad_input,
-    int64_t stride, int64_t padding, int64_t output_padding,
+    int64_t stride, int64_t padding, [[maybe_unused]] int64_t output_padding,
     int64_t dilation, int64_t groups)
 {
     auto go_shape = grad_output.shape();
@@ -732,7 +732,7 @@ template<typename T>
 static void conv_transpose3d_backward_weight_impl(
     const Tensor& grad_output, const Tensor& input,
     Tensor& grad_weight,
-    int64_t stride, int64_t padding, int64_t output_padding,
+    int64_t stride, int64_t padding, [[maybe_unused]] int64_t output_padding,
     int64_t dilation, int64_t groups)
 {
     auto go_shape = grad_output.shape();

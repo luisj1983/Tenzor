@@ -139,7 +139,7 @@ void register_autograd(py::module_& m) {
     }, py::arg("f"),
     "Return a function that computes the gradient of f.");
 
-    func_mod.def("vmap", [](py::function f, int64_t in_dim, int64_t out_dim) {
+    func_mod.def("vmap", [](py::function f, int64_t in_dim, [[maybe_unused]] int64_t out_dim) {
         return py::cpp_function([f, in_dim](const tenzor::Variable& batched_input) -> tenzor::Variable {
             py::gil_scoped_acquire gil;
             auto cpp_fn = [&f](const tenzor::Variable& x) -> tenzor::Variable {

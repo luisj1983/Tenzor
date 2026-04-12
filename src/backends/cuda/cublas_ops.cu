@@ -142,9 +142,6 @@ void cublas_gemm_ex(
     // To compute C = A @ B in row-major, we compute C^T = B^T @ A^T
     // Which is: C (col-major) = B (col-major) @ A (col-major)
 
-    cublasOperation_t op_A = transpose_a ? CUBLAS_OP_T : CUBLAS_OP_N;
-    cublasOperation_t op_B = transpose_b ? CUBLAS_OP_T : CUBLAS_OP_N;
-
     // Leading dimensions
     int64_t lda = transpose_a ? M : K;
     int64_t ldb = transpose_b ? K : N;
@@ -961,7 +958,6 @@ auto linear_backward_kernel(
     if (input_c.dtype() == DType::Float32) {
         const float alpha = 1.0f;
         const float beta = 0.0f;
-        const float beta_acc = 1.0f;  // For accumulation
 
         // grad_input = grad_output @ weight
         // [batch, in_features] = [batch, out_features] @ [out_features, in_features]

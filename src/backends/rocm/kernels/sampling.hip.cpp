@@ -11,6 +11,7 @@
 #include <hip/hip_runtime.h>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -224,8 +225,8 @@ __global__ void min_max_reduce_kernel(const float* input, float* min_max_out, in
     float* smax = smem + blockDim.x;
 
     int tid = threadIdx.x;
-    float lmin = (tid < n) ? input[tid] : INFINITY;
-    float lmax = (tid < n) ? input[tid] : -INFINITY;
+    float lmin = (tid < n) ? input[tid] : std::numeric_limits<float>::max();
+    float lmax = (tid < n) ? input[tid] : std::numeric_limits<float>::lowest();
     for (int64_t i = tid + blockDim.x; i < n; i += blockDim.x) {
         float v = input[i];
         lmin = (v < lmin) ? v : lmin;

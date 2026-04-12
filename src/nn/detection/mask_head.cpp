@@ -186,8 +186,6 @@ auto process_masks(const Tensor& mask_logits,
     // class_labels: (num_detections,)
 
     auto num_detections = mask_logits.shape()[0];
-    auto mask_h = mask_logits.shape()[2];
-    auto mask_w = mask_logits.shape()[3];
 
     if (num_detections == 0) {
         // No detections, return empty 4D masks: [0, 1, H, W]

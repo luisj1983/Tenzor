@@ -12,7 +12,7 @@ auto Logger::instance() -> Logger& {
 }
 
 auto Logger::log(LogLevel level, std::string_view message,
-                const std::source_location& location) -> void {
+                [[maybe_unused]] const std::source_location& location) -> void {
     if (level < level_) return;
 
     auto now = std::chrono::system_clock::now();

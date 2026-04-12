@@ -44,9 +44,6 @@ inline void compute_launch_config_2d(int64_t rows, int64_t cols, dim3& grid, dim
 }
 
 
-// FP16 saturating conversion: use float2half_sat() from cuda_common.cuh
-using tenzor::cuda::float2half_sat;
-
 // ============================================================================
 // Helper Functions
 // ============================================================================
@@ -1159,11 +1156,8 @@ auto conv2d_backward_f16(
             );
 
             // We need: grad_col = grad_output @ weight
-            // grad_output is (N, M), weight is (M, K)
-            // Result is (N, K) where N = col_rows, M = out_channels_per_group, K = col_cols
-            int64_t M = col_rows;
-            int64_t N = col_cols;
-            int64_t K = out_channels_per_group;
+            // grad_output is (col_rows, out_channels_per_group), weight is (out_channels_per_group, col_cols)
+            // Result is (col_rows, col_cols)
 
             // Compute: grad_col^T = weight^T @ grad_output^T
             // This gives us (K, N) which is what we want transposed

@@ -85,7 +85,7 @@ auto FusedLinearReLUBackward::backward_with_variables(std::vector<Variable> grad
 // Custom Op backward implementation
 // ============================================================================
 
-auto CustomOpBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+auto CustomOpBackward::forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> {
     // CustomOpBackward is only used as a grad_fn — forward() is never called
     // through this class. The actual forward is dispatched via CustomOpRegistry.
     throw std::runtime_error("CustomOpBackward::forward() should not be called directly");

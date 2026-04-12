@@ -240,8 +240,6 @@ auto MBConvBlock::forward_impl(const Variable& input) -> Variable {
             // Apply stochastic depth during training
             // This drops the entire residual path with probability drop_connect_rate
             // Implementation: scale by survival probability and apply bernoulli mask
-            double keep_prob = 1.0 - drop_connect_rate_;
-
             // Create random mask (simplified - in practice use proper random generation)
             // For now, we'll skip the stochastic depth and just use the connection
             // A full implementation would use:

@@ -56,7 +56,7 @@ CheckpointFunction::CheckpointFunction(
     estimated_activation_memory_(0),
     has_cached_outputs_(false) {}
 
-auto CheckpointFunction::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+auto CheckpointFunction::forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> {
     // NOTE: This function is NOT used by the checkpoint() free function.
     // It's here for completeness but should not be called directly because
     // `inputs` are passed by value, making input_variables_ pointers invalid.
@@ -521,7 +521,7 @@ auto AutoCheckpointPolicy::apply(nn::Module& module) -> void {
             // Register a forward pre-hook that wraps the submodule's forward
             // with checkpointing by enabling the checkpoint context
             auto hook_id = submodule->register_forward_pre_hook(
-                [](nn::Module*, const Variable& input) {
+                [](nn::Module*, [[maybe_unused]] const Variable& input) {
                     set_checkpoint_enabled(true);
                 }
             );

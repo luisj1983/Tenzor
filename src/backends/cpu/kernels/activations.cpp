@@ -180,62 +180,6 @@ static bool onednn_eltwise_forward(
     }
 }
 
-// Helper: Execute oneDNN eltwise backward operation with caching
-static bool onednn_eltwise_backward(
-    const float* diff_dst, const float* src, float* diff_src, size_t n,
-    dnnl::algorithm alg, float alpha = 0.0f, float beta = 0.0f) {
-
-    if (n < ONEDNN_ACTIVATION_THRESHOLD) {
-        return false;
-    }
-
-    try {
-        auto& engine = get_onednn_engine();
-        auto& stream = get_onednn_stream();
-
-        // Create cache key (is_backward = true)
-        EltwiseCacheKey cache_key{alg, n, alpha, beta, true, DType::Float32};
-
-        auto cached = g_eltwise_cache.get(cache_key);
-
-        if (!cached) {
-            cached = std::make_shared<EltwiseCachedPrimitive>();
-            cached->is_backward = true;
-
-            dnnl::memory::dims dims = {static_cast<dnnl::memory::dim>(n)};
-            cached->data_md = dnnl::memory::desc(dims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::a);
-
-            // Forward hint for backward
-            auto fwd_pd = dnnl::eltwise_forward::primitive_desc(
-                engine, dnnl::prop_kind::forward_training, alg,
-                cached->data_md, cached->data_md, alpha, beta);
-
-            // Backward descriptor
-            auto bwd_pd = dnnl::eltwise_backward::primitive_desc(
-                engine, alg, cached->data_md, cached->data_md,
-                fwd_pd.dst_desc(), alpha, beta, fwd_pd);
-            cached->bwd_prim = dnnl::eltwise_backward(bwd_pd);
-
-            g_eltwise_cache.put(cache_key, cached);
-        }
-
-        auto src_mem = dnnl::memory(cached->data_md, engine, const_cast<float*>(src));
-        auto diff_dst_mem = dnnl::memory(cached->data_md, engine, const_cast<float*>(diff_dst));
-        auto diff_src_mem = dnnl::memory(cached->data_md, engine, diff_src);
-
-        cached->bwd_prim.execute(stream, {
-            {DNNL_ARG_SRC, src_mem},
-            {DNNL_ARG_DIFF_DST, diff_dst_mem},
-            {DNNL_ARG_DIFF_SRC, diff_src_mem}
-        });
-        stream.wait();
-
-        return true;
-    } catch (const dnnl::error&) {
-        return false;
-    }
-}
-
 // Helper: Execute oneDNN softmax forward with caching
 static bool onednn_softmax_forward(
     const float* input, float* output,
@@ -590,7 +534,6 @@ auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input) -> 
         size_t n = input.numel();
 
 #ifdef TENZOR_HAS_AVX512
-        size_t i = 0;
         __m512 one = _mm512_set1_ps(1.0f);
         #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t ii = 0; ii < n / 16; ++ii) {

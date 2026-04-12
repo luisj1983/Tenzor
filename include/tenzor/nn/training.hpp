@@ -69,7 +69,6 @@ public:
 
         auto operator*() const -> std::pair<Tensor, Tensor> {
             size_t start = index_ * loader_->batch_size_;
-            size_t end = std::min(start + loader_->batch_size_, loader_->data_.size());
 
             // For simplicity, return first sample in batch
             // In production, you'd concatenate all samples in the batch

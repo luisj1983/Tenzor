@@ -12,11 +12,15 @@
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
     #if defined(__AVX512F__)
         #include <immintrin.h>
+        #ifndef TENZOR_HAS_AVX512
         #define TENZOR_HAS_AVX512
+        #endif
     #endif
     #if defined(__AVX2__)
         #include <immintrin.h>
+        #ifndef TENZOR_HAS_AVX2
         #define TENZOR_HAS_AVX2
+        #endif
     #endif
 #endif
 

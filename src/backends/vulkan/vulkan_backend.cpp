@@ -761,14 +761,14 @@ auto VulkanBackend::get_device_info(int32_t device_id) const -> DeviceInfo {
 
     return info;
 }
-auto VulkanBackend::create_stream(int32_t device_id) -> StreamHandle {
+auto VulkanBackend::create_stream([[maybe_unused]] int32_t device_id) -> StreamHandle {
     // Vulkan doesn't have explicit streams like CUDA
     // We could use command buffers for async execution
     // For now, return nullptr (default stream)
     return nullptr;
 }
 
-auto VulkanBackend::destroy_stream(StreamHandle stream) -> void {
+auto VulkanBackend::destroy_stream([[maybe_unused]] StreamHandle stream) -> void {
     // No-op for default stream
 }
 
@@ -1191,8 +1191,8 @@ VkDescriptorSet VulkanBackend::allocateAndWriteDescriptorSet(
 
 // Factory function
 extern "C" {
-    auto create_backend() -> std::unique_ptr<Backend> {
-        return std::make_unique<VulkanBackend>();
+    Backend* create_backend() {
+        return new VulkanBackend();
     }
 }
 

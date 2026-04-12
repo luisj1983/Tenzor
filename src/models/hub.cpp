@@ -2,7 +2,7 @@
 #include "tenzor/nn/module.hpp"
 #include "tenzor/nn/serialize.hpp"
 #include <curl/curl.h>
-#include <openssl/sha.h>
+#include <openssl/evp.h>
 #include <fstream>
 #include <sstream>
 #include <iomanip>
@@ -71,7 +71,7 @@ public:
     };
 
     static int progress_callback(void* clientp, curl_off_t dltotal, curl_off_t dlnow,
-                                 curl_off_t ultotal, curl_off_t ulnow) {
+                                 [[maybe_unused]] curl_off_t ultotal, [[maybe_unused]] curl_off_t ulnow) {
         auto* data = static_cast<ProgressData*>(clientp);
 
         if (dltotal == 0 && dlnow == 0) return 0;
@@ -218,19 +218,24 @@ public:
             throw std::runtime_error("Failed to open file for checksum: " + file_path);
         }
 
-        SHA256_CTX sha256;
-        SHA256_Init(&sha256);
+        EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+        if (!ctx) {
+            throw std::runtime_error("Failed to create EVP_MD_CTX for SHA256");
+        }
+        EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr);
 
         char buffer[8192];
         while (file.read(buffer, sizeof(buffer)) || file.gcount() > 0) {
-            SHA256_Update(&sha256, buffer, file.gcount());
+            EVP_DigestUpdate(ctx, buffer, file.gcount());
         }
 
-        unsigned char hash[SHA256_DIGEST_LENGTH];
-        SHA256_Final(hash, &sha256);
+        unsigned char hash[EVP_MAX_MD_SIZE];
+        unsigned int hash_len = 0;
+        EVP_DigestFinal_ex(ctx, hash, &hash_len);
+        EVP_MD_CTX_free(ctx);
 
         std::ostringstream oss;
-        for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
+        for (unsigned int i = 0; i < hash_len; i++) {
             oss << std::hex << std::setw(2) << std::setfill('0') << (int)hash[i];
         }
 

@@ -43,7 +43,7 @@ public:
         save_for_backward(std::move(tensors_to_save));
     }
 
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("MaxPool2dBackward::forward should not be called");
     }
 
@@ -417,7 +417,7 @@ public:
         save_for_backward(std::move(tensors_to_save));
     }
 
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("AvgPool2dBackward::forward should not be called");
     }
 
@@ -773,7 +773,7 @@ public:
         save_for_backward(std::move(tensors_to_save));
     }
 
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("AdaptiveAvgPool2dBackward::forward should not be called");
     }
 

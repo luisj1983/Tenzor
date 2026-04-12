@@ -121,6 +121,9 @@ template<> inline Float16 MulOp::scalar<Float16>(Float16 a, Float16 b) {
 template<> inline BFloat16 MulOp::scalar<BFloat16>(BFloat16 a, BFloat16 b) {
     return BFloat16(static_cast<float>(a) * static_cast<float>(b));
 }
+template<> inline bool MulOp::scalar<bool>(bool a, bool b) {
+    return a && b;
+}
 
 struct DivOp {
     template<typename T>

@@ -22,7 +22,7 @@ struct HipBuffer {
     }
 
     ~HipBuffer() noexcept {
-        if (ptr) hipFree(ptr);
+        if (ptr) (void)hipFree(ptr);
     }
 
     HipBuffer(const HipBuffer&) = delete;
@@ -34,7 +34,7 @@ struct HipBuffer {
 
     HipBuffer& operator=(HipBuffer&& other) noexcept {
         if (this != &other) {
-            if (ptr) hipFree(ptr);
+            if (ptr) (void)hipFree(ptr);
             ptr = other.ptr;
             other.ptr = nullptr;
         }

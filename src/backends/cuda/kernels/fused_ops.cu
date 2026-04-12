@@ -313,9 +313,7 @@ __global__ void fused_batchnorm_relu_kernel(
     int64_t stride = blockDim.x * gridDim.x;
 
     for (int64_t idx = tid; idx < total_elements; idx += stride) {
-        int64_t s = idx % spatial_size;
         int64_t c = (idx / spatial_size) % num_features;
-        int64_t n = idx / (spatial_size * num_features);
 
         T normalized = (input[idx] - mean[c]) * device_rsqrt(var[c] + eps);
         T scaled = normalized * gamma[c] + beta[c];
@@ -1141,7 +1139,6 @@ __global__ void fused_rms_norm_kernel(
     // Use vectorized loads when possible (float4 = 4 floats at once)
     const int vec_size = 4;
     int64_t vec_norm_size = norm_size / vec_size;
-    int64_t remainder = norm_size % vec_size;
 
     // Compute sum of squares with vectorized loads
     T sum_sq = 0;

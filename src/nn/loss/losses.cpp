@@ -33,6 +33,8 @@ auto MSELoss::forward(const Variable& input, const Variable& target) -> Variable
             return mean(squared);
         case Reduction::Sum:
             return sum(squared);
+        case Reduction::BatchMean:
+            return sum(squared) / static_cast<float>(squared.tensor().shape()[0]);
     }
     return squared;
 }
@@ -66,6 +68,8 @@ auto BCELoss::forward(const Variable& input, const Variable& target) -> Variable
             return mean(loss);
         case Reduction::Sum:
             return sum(loss);
+        case Reduction::BatchMean:
+            return sum(loss) / static_cast<float>(loss.tensor().shape()[0]);
     }
     return loss;
 }
@@ -97,6 +101,8 @@ auto BCEWithLogitsLoss::forward(const Variable& input, const Variable& target) -
             return mean(loss_unreduced);
         case Reduction::Sum:
             return sum(loss_unreduced);
+        case Reduction::BatchMean:
+            return sum(loss_unreduced) / static_cast<float>(loss_unreduced.tensor().shape()[0]);
     }
     return loss_unreduced;
 }
@@ -128,7 +134,6 @@ auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> V
         }
     } else {
         // Target contains class indices (Int64), need to create one-hot encoding
-        auto batch_size = input.tensor().shape()[0];
 
         // Use backend dispatch for one-hot encoding (avoids GPU→CPU→GPU round-trip)
         NewOpAttributes oh_attrs;
@@ -173,6 +178,8 @@ auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> V
             return mean(neg_selected);
         case Reduction::Sum:
             return sum(neg_selected);
+        case Reduction::BatchMean:
+            return sum(neg_selected) / static_cast<float>(neg_selected.tensor().shape()[0]);
     }
     return neg_selected;
 }
@@ -197,6 +204,8 @@ auto NLLLoss::forward(const Variable& input, const Tensor& target) -> Variable {
             return mean(neg_loss);
         case Reduction::Sum:
             return sum(neg_loss);
+        case Reduction::BatchMean:
+            return sum(neg_loss) / static_cast<float>(neg_loss.tensor().shape()[0]);
     }
     return neg_loss;
 }
@@ -215,6 +224,8 @@ auto L1Loss::forward(const Variable& input, const Variable& target) -> Variable 
             return mean(abs_diff);
         case Reduction::Sum:
             return sum(abs_diff);
+        case Reduction::BatchMean:
+            return sum(abs_diff) / static_cast<float>(abs_diff.tensor().shape()[0]);
     }
     return abs_diff;
 }
@@ -246,6 +257,8 @@ auto SmoothL1Loss::forward(const Variable& input, const Variable& target) -> Var
             return mean(loss_unreduced);
         case Reduction::Sum:
             return sum(loss_unreduced);
+        case Reduction::BatchMean:
+            return sum(loss_unreduced) / static_cast<float>(loss_unreduced.tensor().shape()[0]);
     }
     return loss_unreduced;
 }
@@ -299,6 +312,8 @@ auto MarginRankingLoss::forward(const Variable& input1, const Variable& input2,
             return mean(loss);
         case Reduction::Sum:
             return sum(loss);
+        case Reduction::BatchMean:
+            return sum(loss) / static_cast<float>(loss.tensor().shape()[0]);
     }
     return loss;
 }

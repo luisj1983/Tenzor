@@ -3,8 +3,8 @@
 namespace tenzor {
 
 // Normalization operations implementation
-auto VulkanBackend::dispatchBatchNorm2d(const Tensor& input, const Tensor& mean, const Tensor& var,
-                                        const Tensor* gamma, const Tensor* beta, float epsilon) -> Tensor {
+auto VulkanBackend::dispatchBatchNorm2d(const Tensor& input, [[maybe_unused]] const Tensor& mean, [[maybe_unused]] const Tensor& var,
+                                        [[maybe_unused]] const Tensor* gamma, [[maybe_unused]] const Tensor* beta, [[maybe_unused]] float epsilon) -> Tensor {
     auto input_shape = input.shape();
     int32_t device_id = input.device().index;
     auto* pipeline = getPipeline("batch_norm2d", device_id);

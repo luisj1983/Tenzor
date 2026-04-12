@@ -288,10 +288,8 @@ __global__ void col2im_kernel_nchw(
         // Accumulate from all kernel positions that contribute to this output
         T sum = T(0);
 
-        // Unroll small kernels for better instruction-level parallelism
-        #pragma unroll
+        // Accumulate from all kernel positions
         for (int64_t kh = 0; kh < kernel_h; ++kh) {
-            #pragma unroll
             for (int64_t kw_iter = 0; kw_iter < kernel_w; ++kw_iter) {
                 // Reverse the im2col mapping: given output (ih, iw) and kernel (kh, kw), find col (oh, ow)
                 int64_t ih_shifted = ih + padding - kh * dilation;
@@ -350,9 +348,7 @@ __global__ void col2im_kernel_nhwc(
 
         T sum = T(0);
 
-        #pragma unroll
         for (int64_t kh = 0; kh < kernel_h; ++kh) {
-            #pragma unroll
             for (int64_t kw_iter = 0; kw_iter < kernel_w; ++kw_iter) {
                 int64_t ih_shifted = ih + padding - kh * dilation;
                 int64_t iw_shifted = iw + padding - kw_iter * dilation;

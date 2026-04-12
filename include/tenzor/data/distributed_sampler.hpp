@@ -37,8 +37,9 @@ public:
 private:
     size_t dataset_size_;
     int num_replicas_, rank_;
-    bool shuffle_, drop_last_;
+    bool shuffle_;
     int64_t seed_;
+    bool drop_last_;
 };
 
 } // namespace data

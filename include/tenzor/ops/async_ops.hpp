@@ -9,8 +9,8 @@
 #pragma once
 
 #include "../core/tensor.hpp"
-#include "../parallel/future.hpp"
-#include "../parallel/threadpool.hpp"
+#include "../utils/threading/future.hpp"
+#include "../utils/threading/threadpool.hpp"
 #include "../backend/backend.hpp"
 #include <memory>
 #include <vector>

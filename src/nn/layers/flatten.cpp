@@ -11,7 +11,7 @@ public:
     FlattenBackward(std::vector<int64_t> input_shape)
         : input_shape_(std::move(input_shape)) {}
 
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("FlattenBackward::forward should not be called");
     }
 
@@ -116,7 +116,7 @@ public:
     UnflattenBackward(std::vector<int64_t> input_shape)
         : input_shape_(std::move(input_shape)) {}
 
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("UnflattenBackward::forward should not be called");
     }
 

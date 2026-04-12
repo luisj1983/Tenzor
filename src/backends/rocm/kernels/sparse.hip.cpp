@@ -96,6 +96,15 @@ struct DnVecGuard {
     DnVecGuard& operator=(const DnVecGuard&) = delete;
 };
 
+/// RAII guard for rocSPARSE SpMV descriptor (v2 API).
+struct SpMVDescrGuard {
+    rocsparse_spmv_descr desc = nullptr;
+    explicit SpMVDescrGuard(rocsparse_spmv_descr d) : desc(d) {}
+    ~SpMVDescrGuard() { if (desc) rocsparse_destroy_spmv_descr(desc); }
+    SpMVDescrGuard(const SpMVDescrGuard&) = delete;
+    SpMVDescrGuard& operator=(const SpMVDescrGuard&) = delete;
+};
+
 /// Per-thread rocSPARSE handle — forwards to the shared pool.
 inline rocsparse_handle get_rocsparse_handle() {
     return RocSPARSEHandlePool::get();
@@ -420,44 +429,50 @@ Tensor rocm_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
     ));
     DnVecGuard vec_y_guard(vec_y);
 
-    // Determine buffer size
-    size_t buffer_size = 0;
+    // Set up v2 SpMV descriptor
     float alpha_f = 1.0f, beta_f = 0.0f;
     double alpha_d = 1.0, beta_d = 0.0;
     void* alpha_ptr = (dtype == DType::Float32) ? static_cast<void*>(&alpha_f) : static_cast<void*>(&alpha_d);
     void* beta_ptr = (dtype == DType::Float32) ? static_cast<void*>(&beta_f) : static_cast<void*>(&beta_d);
 
-    ROCSPARSE_CHECK(rocsparse_spmv(
-        handle,
-        rocsparse_operation_none,
-        alpha_ptr,
-        mat_sparse,
-        vec_x,
-        beta_ptr,
-        vec_y,
-        roc_dtype,
-        rocsparse_spmv_alg_default,
-        rocsparse_spmv_stage_buffer_size,
-        &buffer_size,
-        nullptr
-    ));
+    rocsparse_spmv_descr spmv_descr;
+    ROCSPARSE_CHECK(rocsparse_create_spmv_descr(&spmv_descr));
+    SpMVDescrGuard spmv_guard(spmv_descr);
 
-    HipBuffer workspace(buffer_size);
+    rocsparse_operation op = rocsparse_operation_none;
+    rocsparse_spmv_alg alg = rocsparse_spmv_alg_default;
+    ROCSPARSE_CHECK(rocsparse_spmv_set_input(handle, spmv_descr,
+        rocsparse_spmv_input_operation, &op, sizeof(op), nullptr));
+    ROCSPARSE_CHECK(rocsparse_spmv_set_input(handle, spmv_descr,
+        rocsparse_spmv_input_alg, &alg, sizeof(alg), nullptr));
+    ROCSPARSE_CHECK(rocsparse_spmv_set_input(handle, spmv_descr,
+        rocsparse_spmv_input_scalar_datatype, &roc_dtype, sizeof(roc_dtype), nullptr));
+    ROCSPARSE_CHECK(rocsparse_spmv_set_input(handle, spmv_descr,
+        rocsparse_spmv_input_compute_datatype, &roc_dtype, sizeof(roc_dtype), nullptr));
 
-    ROCSPARSE_CHECK(rocsparse_spmv(
-        handle,
-        rocsparse_operation_none,
-        alpha_ptr,
-        mat_sparse,
-        vec_x,
-        beta_ptr,
-        vec_y,
-        roc_dtype,
-        rocsparse_spmv_alg_default,
-        rocsparse_spmv_stage_compute,
-        &buffer_size,
-        workspace.ptr
-    ));
+    // Analysis stage: get buffer size and run analysis
+    size_t analysis_buffer_size = 0;
+    ROCSPARSE_CHECK(rocsparse_v2_spmv_buffer_size(
+        handle, spmv_descr, mat_sparse, vec_x, vec_y,
+        rocsparse_v2_spmv_stage_analysis, &analysis_buffer_size, nullptr));
+
+    HipBuffer analysis_workspace(analysis_buffer_size);
+
+    ROCSPARSE_CHECK(rocsparse_v2_spmv(
+        handle, spmv_descr, alpha_ptr, mat_sparse, vec_x, beta_ptr, vec_y,
+        rocsparse_v2_spmv_stage_analysis, analysis_buffer_size, analysis_workspace.ptr, nullptr));
+
+    // Compute stage: get buffer size and run compute
+    size_t compute_buffer_size = 0;
+    ROCSPARSE_CHECK(rocsparse_v2_spmv_buffer_size(
+        handle, spmv_descr, mat_sparse, vec_x, vec_y,
+        rocsparse_v2_spmv_stage_compute, &compute_buffer_size, nullptr));
+
+    HipBuffer compute_workspace(compute_buffer_size);
+
+    ROCSPARSE_CHECK(rocsparse_v2_spmv(
+        handle, spmv_descr, alpha_ptr, mat_sparse, vec_x, beta_ptr, vec_y,
+        rocsparse_v2_spmv_stage_compute, compute_buffer_size, compute_workspace.ptr, nullptr));
 
     return result;
 }

@@ -188,7 +188,7 @@ auto conv3d(const Variable& input, const Variable& weight,
 
 auto conv_transpose1d(const Variable& input, const Variable& weight,
                       const std::optional<Variable>& bias,
-                      int64_t stride, int64_t padding, int64_t output_padding,
+                      int64_t stride, int64_t padding, [[maybe_unused]] int64_t output_padding,
                       int64_t groups, int64_t dilation) -> Variable {
     if (input.shape().size() != 3) {
         throw std::invalid_argument(
@@ -229,7 +229,7 @@ auto conv_transpose2d(const Variable& input, const Variable& weight,
                       const std::optional<Variable>& bias,
                       std::pair<int64_t, int64_t> stride,
                       std::pair<int64_t, int64_t> padding,
-                      std::pair<int64_t, int64_t> output_padding,
+                      [[maybe_unused]] std::pair<int64_t, int64_t> output_padding,
                       int64_t groups,
                       std::pair<int64_t, int64_t> dilation) -> Variable {
     if (input.shape().size() != 4) {
@@ -265,7 +265,7 @@ auto conv_transpose3d(const Variable& input, const Variable& weight,
                       const std::optional<Variable>& bias,
                       std::tuple<int64_t, int64_t, int64_t> stride,
                       std::tuple<int64_t, int64_t, int64_t> padding,
-                      std::tuple<int64_t, int64_t, int64_t> output_padding,
+                      [[maybe_unused]] std::tuple<int64_t, int64_t, int64_t> output_padding,
                       int64_t groups,
                       std::tuple<int64_t, int64_t, int64_t> dilation) -> Variable {
     if (input.shape().size() != 5) {
@@ -399,7 +399,7 @@ auto batch_norm(const Variable& input,
                 const std::optional<Variable>& weight,
                 const std::optional<Variable>& bias,
                 bool training,
-                double momentum,
+                [[maybe_unused]] double momentum,
                 double eps) -> Variable {
     if (training) {
         // Training mode: compute batch statistics using dispatch
@@ -519,12 +519,12 @@ auto group_norm(const Variable& input, int64_t num_groups,
 // ============================================================================
 
 auto instance_norm(const Variable& input,
-                   const std::optional<Tensor>& running_mean,
-                   const std::optional<Tensor>& running_var,
+                   [[maybe_unused]] const std::optional<Tensor>& running_mean,
+                   [[maybe_unused]] const std::optional<Tensor>& running_var,
                    const std::optional<Variable>& weight,
                    const std::optional<Variable>& bias,
-                   bool training,
-                   double momentum,
+                   [[maybe_unused]] bool training,
+                   [[maybe_unused]] double momentum,
                    double eps) -> Variable {
     std::vector<Tensor> inputs_vec = {input.tensor()};
     if (weight.has_value()) inputs_vec.push_back(weight->tensor());

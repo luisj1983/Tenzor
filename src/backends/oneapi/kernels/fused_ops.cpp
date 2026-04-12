@@ -2231,7 +2231,7 @@ auto flash_attention_impl(
                 if (query_idx >= slq) return;
 
                 // Local memory pointers
-                ComputeT* lmem = local_mem.get_pointer();
+                ComputeT* lmem = local_mem.template get_multi_ptr<sycl::access::decorated::no>().get();
                 ComputeT* K_tile = lmem;                     // [Bc][ks]
                 ComputeT* V_tile = lmem + Bc * ks;           // [Bc][ks]
                 ComputeT* scores  = lmem + 2 * Bc * ks;      // [Bc]

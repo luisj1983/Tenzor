@@ -416,7 +416,7 @@ __global__ void maxpool2d_forward_kernel(
         h_start = max(h_start, (int64_t)0);
         w_start = max(w_start, (int64_t)0);
 
-        T max_val = -INFINITY;
+        T max_val = std::numeric_limits<T>::lowest();
         int64_t max_idx = -1;
 
         for (int64_t h = h_start; h < h_end; ++h) {
@@ -471,7 +471,7 @@ __global__ void maxpool2d_forward_kernel_fp16(
         h_start = max(h_start, (int64_t)0);
         w_start = max(w_start, (int64_t)0);
 
-        float max_val = -INFINITY;
+        float max_val = std::numeric_limits<float>::lowest();
         int64_t max_idx = -1;
 
         for (int64_t h = h_start; h < h_end; ++h) {
@@ -1203,7 +1203,7 @@ __global__ void adaptive_maxpool2d_kernel(
         int64_t w_start = (ow * input_w) / output_w;
         int64_t w_end = ((ow + 1) * input_w) / output_w;
 
-        T max_val = -INFINITY;
+        T max_val = std::numeric_limits<T>::lowest();
         int64_t max_idx = -1;
 
         for (int64_t h = h_start; h < h_end; ++h) {

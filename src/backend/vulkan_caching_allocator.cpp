@@ -1042,7 +1042,7 @@ VulkanCachingAllocator::StagingBuffer* VulkanCachingAllocator::acquire_staging_b
     return new_staging;
 }
 
-void VulkanCachingAllocator::release_staging_buffer(StagingBuffer* staging, int device) {
+void VulkanCachingAllocator::release_staging_buffer(StagingBuffer* staging, [[maybe_unused]] int device) {
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (!staging) return;

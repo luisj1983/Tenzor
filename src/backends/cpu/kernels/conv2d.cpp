@@ -803,10 +803,6 @@ void conv2d_forward_impl(
             }
         }
 
-        // Padded input height/width for tile extraction
-        int64_t padded_h = height + 2 * padding;
-        int64_t padded_w = width + 2 * padding;
-
         // Process each batch
         #pragma omp parallel if(batch * num_tiles > 64)
         {
@@ -1551,7 +1547,7 @@ void conv_transpose2d_forward_impl(
     Tensor& output,               // (batch, out_channels, out_h, out_w)
     int64_t stride,
     int64_t padding,
-    int64_t output_padding,
+    [[maybe_unused]] int64_t output_padding,
     int64_t dilation,
     int64_t groups
 ) {

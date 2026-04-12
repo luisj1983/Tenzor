@@ -114,15 +114,6 @@ __global__ void gru_cell_fused_kernel(
 // W is (out, in), W^T is (in, out), x is (batch, in), result is (batch, out)
 // ============================================================================
 
-static Tensor matmul_weight_t(const Tensor& x, const Tensor& W, cudaStream_t /*stream*/) {
-    // W is (out_features, in_features)
-    // We need x @ W^T = x @ W.transpose(0,1)
-    // cublas_matmul(a, b) computes a @ b
-    // So we need to transpose W first
-    Tensor W_t = W.transpose(0, 1).contiguous();
-    return cublas_matmul(x, W_t);
-}
-
 // ============================================================================
 // LSTM Forward (single layer, full sequence)
 // ============================================================================

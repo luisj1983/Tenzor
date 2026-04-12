@@ -276,7 +276,7 @@ auto DataLoader::collate_samples(const std::vector<std::pair<Tensor, Tensor>>& s
 }
 
 // Worker thread function
-void DataLoader::worker_thread(size_t worker_id) {
+void DataLoader::worker_thread([[maybe_unused]] size_t worker_id) {
     try {
         while (!stop_workers_) {
             // Get next batch index to process

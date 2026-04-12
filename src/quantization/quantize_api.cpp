@@ -118,7 +118,7 @@ private:
 auto convert_module_to_quantized_recursive(
     std::shared_ptr<nn::Module> module,
     const QConfig& qconfig,
-    const std::string& prefix = ""
+    [[maybe_unused]] const std::string& prefix = ""
 ) -> std::shared_ptr<nn::Module> {
     ModuleConverter converter(qconfig);
     return converter.to_quantized(module);
@@ -127,7 +127,7 @@ auto convert_module_to_quantized_recursive(
 auto prepare_module_for_qat_recursive(
     std::shared_ptr<nn::Module> module,
     const QConfig& qconfig,
-    const std::string& prefix = ""
+    [[maybe_unused]] const std::string& prefix = ""
 ) -> std::shared_ptr<nn::Module> {
     ModuleConverter converter(qconfig);
     return converter.prepare_for_qat(module);
@@ -138,7 +138,7 @@ auto prepare_module_for_qat_recursive(
 auto quantize_dynamic(
     std::shared_ptr<nn::Module> model,
     QuantDType weight_dtype,
-    QuantDType activation_dtype
+    [[maybe_unused]] QuantDType activation_dtype
 ) -> std::shared_ptr<nn::Module> {
     if (!model) {
         throw std::runtime_error("Cannot quantize null model");

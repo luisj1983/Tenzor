@@ -45,141 +45,6 @@ auto pad_1d(const Tensor& input, int64_t padding) -> Tensor {
     return cat({left_pad, input, right_pad}, 2);
 }
 
-// CPU fallback for im2col - only used when CUDA is not available
-auto im2col_cpu(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
-                int64_t stride_h, int64_t stride_w, int64_t padding_h, int64_t padding_w,
-                int64_t dilation) -> Tensor {
-    auto shape = input.shape();
-    int64_t batch = shape[0];
-    int64_t channels = shape[1];
-    int64_t height = shape[2];
-    int64_t width = shape[3];
-
-    int64_t out_h = calculate_output_size(height, kernel_h, stride_h, padding_h, dilation);
-    int64_t out_w = calculate_output_size(width, kernel_w, stride_w, padding_w, dilation);
-
-    // Only upcast Float16/BFloat16 to Float32; preserve Float32/Float64 natively
-    bool needs_upcast = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
-    DType work_dtype = needs_upcast ? DType::Float32 : input.dtype();
-    Tensor input_work = needs_upcast ? input.to(DType::Float32) : input;
-    auto col = zeros({batch, channels * kernel_h * kernel_w, out_h * out_w}, work_dtype, input.device());
-
-    // Use typed lambda to handle both float and double paths
-    auto do_im2col = [&](auto* input_data, auto* col_data) {
-        using T = std::remove_pointer_t<decltype(input_data)>;
-        const bool parallelize = batch * out_h * out_w > 4096;
-
-        // Restructured loop order: batch x out_h are the two outermost loops
-        // so they can be parallelized with collapse(2).  The inner loops over
-        // channels/kernel elements write to non-overlapping col_idx positions
-        // for each (b, oh) pair, so no synchronization is needed.
-        #pragma omp parallel for collapse(2) if(parallelize) schedule(static)
-        for (int64_t b = 0; b < batch; ++b) {
-            for (int64_t oh = 0; oh < out_h; ++oh) {
-                for (int64_t c = 0; c < channels; ++c) {
-                    for (int64_t kh = 0; kh < kernel_h; ++kh) {
-                        for (int64_t kw = 0; kw < kernel_w; ++kw) {
-                            int64_t col_c = c * kernel_h * kernel_w + kh * kernel_w + kw;
-
-                            for (int64_t ow = 0; ow < out_w; ++ow) {
-                                int64_t ih = oh * stride_h - padding_h + kh * dilation;
-                                int64_t iw = ow * stride_w - padding_w + kw * dilation;
-
-                                int64_t col_idx = b * (channels * kernel_h * kernel_w * out_h * out_w) +
-                                                col_c * (out_h * out_w) +
-                                                oh * out_w + ow;
-
-                                if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
-                                    int64_t input_idx = b * (channels * height * width) +
-                                                       c * (height * width) +
-                                                       ih * width + iw;
-                                    col_data[col_idx] = input_data[input_idx];
-                                } else {
-                                    col_data[col_idx] = T(0);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    };
-
-    if (work_dtype == DType::Float64) {
-        do_im2col(input_work.data<double>(), col.data<double>());
-    } else {
-        do_im2col(input_work.data<float>(), col.data<float>());
-    }
-
-    // Convert back only if we upcasted
-    return needs_upcast ? col.to(input.dtype()) : col;
-}
-
-auto im2col_cpu(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
-                int64_t stride, int64_t padding, int64_t dilation) -> Tensor {
-    return im2col_cpu(input, kernel_h, kernel_w, stride, stride, padding, padding, dilation);
-}
-
-// CPU fallback for col2im - only used when CUDA is not available
-auto col2im_cpu(const Tensor& col, int64_t channels, int64_t height, int64_t width,
-                int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
-                int64_t padding_h, int64_t padding_w, int64_t dilation) -> Tensor {
-    auto col_shape = col.shape();
-    int64_t batch = col_shape[0];
-    int64_t out_h = calculate_output_size(height, kernel_h, stride_h, padding_h, dilation);
-    int64_t out_w = calculate_output_size(width, kernel_w, stride_w, padding_w, dilation);
-
-    // Only upcast Float16/BFloat16 to Float32; preserve Float32/Float64 natively
-    bool needs_upcast = (col.dtype() == DType::Float16 || col.dtype() == DType::BFloat16);
-    DType work_dtype = needs_upcast ? DType::Float32 : col.dtype();
-    Tensor col_work = needs_upcast ? col.to(DType::Float32) : col;
-    auto output = zeros({batch, channels, height, width}, work_dtype, col.device());
-
-    auto do_col2im = [&](const auto* col_data, auto* output_data) {
-        for (int64_t b = 0; b < batch; ++b) {
-            for (int64_t c = 0; c < channels; ++c) {
-                for (int64_t kh = 0; kh < kernel_h; ++kh) {
-                    for (int64_t kw = 0; kw < kernel_w; ++kw) {
-                        int64_t col_c = c * kernel_h * kernel_w + kh * kernel_w + kw;
-
-                        for (int64_t oh = 0; oh < out_h; ++oh) {
-                            for (int64_t ow = 0; ow < out_w; ++ow) {
-                                int64_t ih = oh * stride_h - padding_h + kh * dilation;
-                                int64_t iw = ow * stride_w - padding_w + kw * dilation;
-
-                                if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
-                                    int64_t col_idx = b * (channels * kernel_h * kernel_w * out_h * out_w) +
-                                                    col_c * (out_h * out_w) +
-                                                    oh * out_w + ow;
-                                    int64_t output_idx = b * (channels * height * width) +
-                                                        c * (height * width) +
-                                                        ih * width + iw;
-                                    output_data[output_idx] += col_data[col_idx];
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    };
-
-    if (work_dtype == DType::Float64) {
-        do_col2im(col_work.data<double>(), output.data<double>());
-    } else {
-        do_col2im(col_work.data<float>(), output.data<float>());
-    }
-
-    return needs_upcast ? output.to(col.dtype()) : output;
-}
-
-auto col2im_cpu(const Tensor& col, int64_t channels, int64_t height, int64_t width,
-                int64_t kernel_h, int64_t kernel_w, int64_t stride,
-                int64_t padding, int64_t dilation) -> Tensor {
-    return col2im_cpu(col, channels, height, width, kernel_h, kernel_w,
-                      stride, stride, padding, padding, dilation);
-}
-
 } // anonymous namespace
 
 // ============================================================================
@@ -200,7 +65,7 @@ public:
         save_for_backward(std::move(tensors_to_save));
     }
 
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("Conv2dBackward::forward should not be called");
     }
 
@@ -404,7 +269,6 @@ auto Conv2d::forward_impl(const Variable& input) -> Variable {
         throw std::invalid_argument("Conv2d expects 4D input [batch, channels, height, width]");
     }
 
-    int64_t batch = input_shape[0];
     int64_t in_channels = input_shape[1];
     int64_t height = input_shape[2];
     int64_t width = input_shape[3];
@@ -541,7 +405,7 @@ public:
         save_for_backward(std::move(tensors_to_save));
     }
 
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("Conv1dBackward::forward should not be called");
     }
 
@@ -654,7 +518,6 @@ auto Conv1d::forward_impl(const Variable& input) -> Variable {
         throw std::invalid_argument("Conv1d expects 3D input [batch, channels, length]");
     }
 
-    int64_t batch = input_shape[0];
     int64_t in_channels = input_shape[1];
     int64_t length = input_shape[2];
 
@@ -788,7 +651,7 @@ public:
         save_for_backward(std::move(tensors_to_save));
     }
 
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("ConvTranspose2dBackward::forward should not be called");
     }
 
@@ -804,15 +667,8 @@ public:
 
         bool has_bias = saved_tensors_.size() > 2;
 
-        auto grad_output_shape = grad_output.shape();
         auto input_shape = input.shape();
         auto weight_shape = weight.shape();
-
-        int64_t batch = input_shape[0];
-        int64_t in_channels = input_shape[1];
-        int64_t out_channels = weight_shape[1] * groups_;
-        int64_t kernel_h = weight_shape[2];
-        int64_t kernel_w = weight_shape[3];
 
         // grad_input: Use regular conv2d forward with grad_output as input
         // The backward of ConvTranspose2d w.r.t. input is a regular Conv2d:
@@ -1046,7 +902,7 @@ public:
         save_for_backward(std::move(tensors_to_save));
     }
 
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("Conv3dBackward::forward should not be called");
     }
 
@@ -1268,7 +1124,7 @@ public:
         save_for_backward(std::move(tensors_to_save));
     }
 
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("ConvTranspose3dBackward::forward should not be called");
     }
 
@@ -1490,7 +1346,7 @@ public:
         save_for_backward(std::move(tensors_to_save));
     }
 
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("ConvTranspose1dBackward::forward should not be called");
     }
 

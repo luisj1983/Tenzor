@@ -139,9 +139,8 @@ __global__ void quantized_linear_wmma_kernel(
     const int N = 32;
     const int K = 16;
 
-    // Warp and thread indices
+    // Warp index
     int warp_id = (threadIdx.x + blockIdx.x * blockDim.x) / 32;
-    int lane_id = threadIdx.x % 32;
 
     // Compute which output tile this warp handles
     int batch_tile = warp_id / ((out_features + N - 1) / N);

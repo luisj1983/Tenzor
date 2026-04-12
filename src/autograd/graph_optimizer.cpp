@@ -361,7 +361,7 @@ auto GraphOptimizer::eliminate_dead_code(ComputationGraph& graph) -> size_t {
 
 auto GraphOptimizer::match_pattern(std::shared_ptr<GraphNode> start,
                                    const OpPattern& pattern,
-                                   const ComputationGraph& graph) const
+                                   [[maybe_unused]] const ComputationGraph& graph) const
     -> std::vector<std::shared_ptr<GraphNode>> {
 
     std::vector<std::shared_ptr<GraphNode>> matched;

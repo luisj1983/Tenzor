@@ -586,7 +586,7 @@ auto T5Decoder::forward(const Variable& decoder_input_ids,
     return hidden_states;
 }
 
-auto T5Decoder::forward_impl(const Variable& input) -> Variable {
+auto T5Decoder::forward_impl([[maybe_unused]] const Variable& input) -> Variable {
     // Decoder requires encoder outputs - use forward_with_encoder() instead
     throw std::runtime_error("T5Decoder::forward(input) requires encoder_hidden_states");
 }
@@ -668,7 +668,7 @@ auto T5ForConditionalGeneration::forward(const Variable& input_ids,
     return logits;
 }
 
-auto T5ForConditionalGeneration::forward_impl(const Variable& input) -> Variable {
+auto T5ForConditionalGeneration::forward_impl([[maybe_unused]] const Variable& input) -> Variable {
     throw std::runtime_error("T5ForConditionalGeneration::forward requires decoder_input_ids");
 }
 

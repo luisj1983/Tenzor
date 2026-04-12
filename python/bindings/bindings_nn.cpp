@@ -934,7 +934,7 @@ void register_nn(py::module_& m) {
                std::shared_ptr<tenzor::nn::PReLU>>(nn, "PReLU")
         .def(py::init<int64_t, double>(),
              py::arg("num_parameters") = 1, py::arg("init") = 0.25)
-        .def("__repr__", [](const tenzor::nn::PReLU& self) {
+        .def("__repr__", []([[maybe_unused]] const tenzor::nn::PReLU& self) {
             return "PReLU()";
         });
 
@@ -990,7 +990,7 @@ void register_nn(py::module_& m) {
         "Rearranges channels by splitting into groups, transposing, and\n"
         "flattening back. Used in ShuffleNet architectures.")
         .def(py::init<int64_t>(), py::arg("groups"))
-        .def("__repr__", [](const tenzor::nn::ChannelShuffle& self) {
+        .def("__repr__", []([[maybe_unused]] const tenzor::nn::ChannelShuffle& self) {
             return "ChannelShuffle()";
         });
 

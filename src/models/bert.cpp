@@ -161,7 +161,6 @@ auto BertEncoder::prepare_attention_mask(const Tensor& mask, int64_t seq_len, DT
     // Convert to [batch, 1, 1, seq_len] float mask with 0.0 for attended, -1e9 for masked
 
     auto batch_size = mask.shape()[0];
-    auto device = mask.device();
 
     // Convert mask to the model's compute dtype to avoid dtype mismatches during backward
     auto float_mask = mask.to(compute_dtype);
@@ -637,7 +636,7 @@ auto BertModelHub::map_parameter_name(const std::string& hf_name) -> std::string
     return name;
 }
 
-auto BertModelHub::load_pytorch_checkpoint(const std::string& checkpoint_path)
+auto BertModelHub::load_pytorch_checkpoint([[maybe_unused]] const std::string& checkpoint_path)
     -> std::unordered_map<std::string, Tensor> {
     // In a real implementation, this would use a PyTorch checkpoint loader
     // or a custom binary format reader

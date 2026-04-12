@@ -48,7 +48,7 @@ public:
      * @brief Called at the beginning of each epoch
      * @param epoch Current epoch number (0-indexed)
      */
-    virtual auto on_epoch_begin(int epoch) -> void {}
+    virtual auto on_epoch_begin([[maybe_unused]] int epoch) -> void {}
 
     /**
      * @brief Called at the end of each epoch
@@ -56,20 +56,20 @@ public:
      * @param train_loss Average training loss for the epoch
      * @param val_loss Average validation loss for the epoch
      */
-    virtual auto on_epoch_end(int epoch, float train_loss, float val_loss) -> void {}
+    virtual auto on_epoch_end([[maybe_unused]] int epoch, [[maybe_unused]] float train_loss, [[maybe_unused]] float val_loss) -> void {}
 
     /**
      * @brief Called at the beginning of each batch
      * @param batch_idx Current batch index within epoch
      */
-    virtual auto on_batch_begin(int batch_idx) -> void {}
+    virtual auto on_batch_begin([[maybe_unused]] int batch_idx) -> void {}
 
     /**
      * @brief Called at the end of each batch
      * @param batch_idx Current batch index within epoch
      * @param loss Loss value for this batch
      */
-    virtual auto on_batch_end(int batch_idx, float loss) -> void {}
+    virtual auto on_batch_end([[maybe_unused]] int batch_idx, [[maybe_unused]] float loss) -> void {}
 
     /**
      * @brief Called at the beginning of training

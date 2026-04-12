@@ -406,7 +406,7 @@ public:
         save_for_backward(std::move(tensors_to_save));
     }
 
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("LayerNormBackward::forward should not be called");
     }
 
@@ -649,8 +649,6 @@ auto LayerNorm::forward_impl(const Variable& input) -> Variable {
     // NOTE: For inference (input doesn't require grad), use fast path regardless of
     // whether weights require grad - weight gradients only matter during training
     const bool needs_input_grad = is_grad_enabled() && input.requires_grad();
-    const bool needs_grad = needs_input_grad ||
-        (is_grad_enabled() && elementwise_affine_ && cached_weight_ && cached_weight_->requires_grad());
 
     // ============================================================================
     // CUDA FAST PATH: Use fused LayerNorm kernel via dispatch (single kernel launch!)
@@ -1300,7 +1298,7 @@ public:
         save_for_backward(std::move(tensors_to_save));
     }
 
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("GroupNormBackward::forward should not be called");
     }
 
@@ -1779,7 +1777,7 @@ public:
         save_for_backward(std::move(tensors_to_save));
     }
 
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("InstanceNormBackwardFn::forward should not be called");
     }
 
@@ -2099,7 +2097,7 @@ public:
         save_for_backward(std::move(tensors_to_save));
     }
 
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("RMSNormBackward::forward should not be called");
     }
 

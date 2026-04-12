@@ -1016,7 +1016,7 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return cpu::instance_norm_kernel_with_stats(inputs[0], inputs[1], inputs[2], eps);
     });
 
-    table.register_kernel(OpId::InstanceNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_kernel(OpId::InstanceNormBackward, [](std::span<const Tensor> inputs, [[maybe_unused]] const OpAttributes& attrs) {
         // inputs: [grad_output, input, weight, mean, rstd]
         return cpu::instance_norm_backward_kernel(inputs[0], inputs[1], inputs[3], inputs[4], inputs[2]);
     });
@@ -2166,7 +2166,7 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     // =========================================================================
     // Creation Operations
     // =========================================================================
-    table.register_kernel(OpId::Zeros, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_kernel(OpId::Zeros, []([[maybe_unused]] std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto shape = attrs.get_int_list(AttrKey::Shape);
         int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int64_t>(DType::Float32)));
         DType dtype = static_cast<DType>(dtype_int);
@@ -2174,7 +2174,7 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{cpu::zeros_kernel(shape, dtype, device)};
     });
 
-    table.register_kernel(OpId::Ones, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_kernel(OpId::Ones, []([[maybe_unused]] std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto shape = attrs.get_int_list(AttrKey::Shape);
         int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int64_t>(DType::Float32)));
         DType dtype = static_cast<DType>(dtype_int);
@@ -2182,7 +2182,7 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{cpu::ones_kernel(shape, dtype, device)};
     });
 
-    table.register_kernel(OpId::Full, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_kernel(OpId::Full, []([[maybe_unused]] std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto shape = attrs.get_int_list(AttrKey::Shape);
         float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
         int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int64_t>(DType::Float32)));
@@ -2191,7 +2191,7 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{cpu::full_kernel(shape, value, dtype, device)};
     });
 
-    table.register_kernel(OpId::Rand, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_kernel(OpId::Rand, []([[maybe_unused]] std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto shape = attrs.get_int_list(AttrKey::Shape);
         int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int64_t>(DType::Float32)));
         DType dtype = static_cast<DType>(dtype_int);
@@ -2199,7 +2199,7 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{cpu::rand_kernel(shape, dtype, device)};
     });
 
-    table.register_kernel(OpId::Randn, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_kernel(OpId::Randn, []([[maybe_unused]] std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto shape = attrs.get_int_list(AttrKey::Shape);
         int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int64_t>(DType::Float32)));
         DType dtype = static_cast<DType>(dtype_int);
@@ -2207,7 +2207,7 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{cpu::randn_kernel(shape, dtype, device)};
     });
 
-    table.register_kernel(OpId::Randint, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_kernel(OpId::Randint, []([[maybe_unused]] std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t low = attrs.get_int(AttrKey::Start, 0);
         int64_t high = attrs.get_int(AttrKey::End, 0);
         auto shape = attrs.get_int_list(AttrKey::Shape);
@@ -2217,7 +2217,7 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{cpu::randint_kernel(low, high, shape, dtype, device)};
     });
 
-    table.register_kernel(OpId::Arange, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_kernel(OpId::Arange, []([[maybe_unused]] std::span<const Tensor> inputs, const OpAttributes& attrs) {
         float start = static_cast<float>(attrs.get_float(AttrKey::Start, 0.0));
         float end = static_cast<float>(attrs.get_float(AttrKey::End, 0.0));
         float step = static_cast<float>(attrs.get_float(AttrKey::Step, 1.0));
@@ -2227,7 +2227,7 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{cpu::arange_kernel(start, end, step, dtype, device)};
     });
 
-    table.register_kernel(OpId::Linspace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_kernel(OpId::Linspace, []([[maybe_unused]] std::span<const Tensor> inputs, const OpAttributes& attrs) {
         float start = static_cast<float>(attrs.get_float(AttrKey::Start, 0.0));
         float end = static_cast<float>(attrs.get_float(AttrKey::End, 1.0));
         int64_t steps = attrs.get_int(AttrKey::Steps, 100);
@@ -2237,7 +2237,7 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{cpu::linspace_kernel(start, end, steps, dtype, device)};
     });
 
-    table.register_kernel(OpId::Eye, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_kernel(OpId::Eye, []([[maybe_unused]] std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t n = attrs.get_int(AttrKey::N, 0);
         int64_t m = attrs.get_int(AttrKey::M, -1);
         int dtype_int = static_cast<int>(attrs.get_int(AttrKey::Dtype, static_cast<int64_t>(DType::Float32)));
@@ -2460,7 +2460,7 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return cpu::multinomial_kernel(inputs[0], num_samples, replacement);
     });
 
-    table.register_single_output_kernel(OpId::Bernoulli, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+    table.register_single_output_kernel(OpId::Bernoulli, [](std::span<const Tensor> inputs, [[maybe_unused]] const OpAttributes& attrs) -> Tensor {
         return cpu::bernoulli_kernel(inputs[0]);
     });
 

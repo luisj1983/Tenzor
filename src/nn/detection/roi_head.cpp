@@ -127,7 +127,7 @@ RoIHead::RoIHead(int64_t in_channels,
     register_module("box_head", box_head_);
 }
 
-auto RoIHead::forward_impl(const Variable& input) -> Variable {
+auto RoIHead::forward_impl([[maybe_unused]] const Variable& input) -> Variable {
     throw std::runtime_error(
         "RoIHead requires proposals and image_shapes. "
         "Use forward_detections() instead."

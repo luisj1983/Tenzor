@@ -118,8 +118,6 @@ inline __m256 exp_avx2(__m256 x) {
 
     // Polynomial approximation: exp(r) ≈ 1 + r + r²/2 + r³/6 + ...
     // Using Horner's method for efficiency
-    __m256 r2 = _mm256_mul_ps(r, r);
-
 #ifdef TENZOR_FAST_MATH_FMA
     __m256 p = _mm256_fmadd_ps(c6, r, c5);
     p = _mm256_fmadd_ps(p, r, c4);

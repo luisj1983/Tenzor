@@ -182,8 +182,7 @@ add_custom_command(
         -std=c++20 -fPIC
         ${ROCM_CXX_FLAGS_LIST} ${ROCM_CXX_FLAGS_BUILD_LIST}
         -Wall -Wextra -pedantic
-        -Wno-unused-parameter -Wno-unused-variable
-        -fopenmp
+                -fopenmp
         -I${CMAKE_SOURCE_DIR}/include
         -isystem ${ROCM_PATH}/include
         -DTENZOR_HAS_MIOPEN
@@ -223,8 +222,7 @@ add_custom_command(
         -std=c++20 -fPIC
         ${ROCM_CXX_FLAGS_LIST} ${ROCM_CXX_FLAGS_BUILD_LIST}
         -Wall -Wextra -pedantic
-        -Wno-unused-parameter -Wno-unused-variable
-        -fopenmp
+                -fopenmp
         -I${CMAKE_SOURCE_DIR}/include
         -isystem ${ROCM_PATH}/include
         -DTENZOR_HAS_MIOPEN

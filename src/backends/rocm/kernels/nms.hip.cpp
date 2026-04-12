@@ -150,7 +150,7 @@ __global__ void nms_greedy_suppression_kernel(
 struct HipDevicePtr {
     void* ptr = nullptr;
     HipDevicePtr() = default;
-    ~HipDevicePtr() { if (ptr) hipFree(ptr); }
+    ~HipDevicePtr() { if (ptr) (void)hipFree(ptr); }
     HipDevicePtr(const HipDevicePtr&) = delete;
     HipDevicePtr& operator=(const HipDevicePtr&) = delete;
 };
@@ -264,16 +264,16 @@ static void nms_gpu_argsort_descending(const float* d_scores, int64_t* d_indices
 
         // Query temp storage size
         size_t temp_bytes = 0;
-        hipcub::DeviceRadixSort::SortPairsDescending(
+        NMS_HIP_CHECK(hipcub::DeviceRadixSort::SortPairsDescending(
             nullptr, temp_bytes, d_scores_in, d_scores_out,
-            d_indices, d_indices_out, num_boxes, 0, sizeof(float) * 8, stream);
+            d_indices, d_indices_out, num_boxes, 0, sizeof(float) * 8, stream));
 
         NMS_HIP_CHECK(hipMalloc(&d_temp_guard.ptr, temp_bytes));
 
         // Execute sort
-        hipcub::DeviceRadixSort::SortPairsDescending(
+        NMS_HIP_CHECK(hipcub::DeviceRadixSort::SortPairsDescending(
             d_temp_guard.ptr, temp_bytes, d_scores_in, d_scores_out,
-            d_indices, d_indices_out, num_boxes, 0, sizeof(float) * 8, stream);
+            d_indices, d_indices_out, num_boxes, 0, sizeof(float) * 8, stream));
 
         NMS_HIP_CHECK(hipStreamSynchronize(stream));
 

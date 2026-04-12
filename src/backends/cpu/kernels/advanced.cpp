@@ -25,7 +25,7 @@ namespace cpu {
 namespace {
 
 template<typename T>
-auto topk_impl(const T* data, int64_t numel, int64_t dim_size,
+auto topk_impl(const T* data, [[maybe_unused]] int64_t numel, int64_t dim_size,
                int64_t outer_size, int64_t inner_size,
                int64_t k, bool largest, bool sorted,
                T* out_values, int64_t* out_indices) -> void {

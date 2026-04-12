@@ -13,7 +13,7 @@ constexpr int64_t kRecordBytes = 1 + kImageBytes;
 constexpr int64_t kSamplesPerBatch = 10000;
 
 auto load_cifar_batch(const std::string& path, std::vector<uint8_t>& images,
-                      std::vector<uint8_t>& labels, int label_offset = 0) -> void {
+                      std::vector<uint8_t>& labels, [[maybe_unused]] int label_offset = 0) -> void {
     std::ifstream file(path, std::ios::binary);
     if (!file.is_open()) {
         throw std::runtime_error("CIFAR: cannot open " + path);
@@ -96,7 +96,6 @@ CIFAR100::CIFAR100(const std::string& root_dir, bool train, bool normalize) {
     }
 
     // CIFAR-100 format: 1 byte coarse label + 1 byte fine label + 3072 bytes image
-    constexpr int64_t record_size = 2 + kImageBytes;
     num_samples_ = train ? 50000 : 10000;
 
     std::vector<uint8_t> img_data;

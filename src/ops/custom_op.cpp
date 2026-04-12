@@ -127,7 +127,7 @@ auto register_custom_op(const std::string& name,
     auto& registry = CustomOpRegistry::instance();
     auto id = registry.register_op(name);
     for (auto& [device_type, kernel] : kernels) {
-        registry.register_kernel(id, device_type, std::move(kernel));
+        registry.register_kernel(id, device_type, kernel);
     }
     return id;
 }
@@ -164,7 +164,7 @@ auto register_custom_op_with_backward(
     auto& registry = CustomOpRegistry::instance();
     auto id = registry.register_op(name);
     for (auto& [device_type, kernel] : kernels) {
-        registry.register_kernel(id, device_type, std::move(kernel));
+        registry.register_kernel(id, device_type, kernel);
     }
     registry.register_backward(id, std::move(backward_fn), std::move(save_fn));
     return id;

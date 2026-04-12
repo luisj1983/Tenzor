@@ -242,10 +242,10 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
             dft::descriptor<dft::precision::SINGLE, dft::domain::COMPLEX> desc(signal_len);
             desc.set_value(dft::config_param::NUMBER_OF_TRANSFORMS, batch_size);
-            std::int64_t fwd_strides[2] = {0, 1};
+            std::vector<std::int64_t> fwd_strides = {0, 1};
             desc.set_value(dft::config_param::FWD_STRIDES, fwd_strides);
             desc.set_value(dft::config_param::FWD_DISTANCE, signal_len);
-            desc.set_value(dft::config_param::PLACEMENT, DFTI_INPLACE);
+            desc.set_value(dft::config_param::PLACEMENT, dft::config_value::INPLACE);
             desc.commit(queue);
 
             dft::compute_forward(desc, reinterpret_cast<std::complex<float>*>(complex_buf));
@@ -266,10 +266,10 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
             dft::descriptor<dft::precision::SINGLE, dft::domain::COMPLEX> desc(signal_len);
             desc.set_value(dft::config_param::NUMBER_OF_TRANSFORMS, total_transforms);
-            std::int64_t fwd_strides[2] = {0, 1};
+            std::vector<std::int64_t> fwd_strides = {0, 1};
             desc.set_value(dft::config_param::FWD_STRIDES, fwd_strides);
             desc.set_value(dft::config_param::FWD_DISTANCE, signal_len);
-            desc.set_value(dft::config_param::PLACEMENT, DFTI_INPLACE);
+            desc.set_value(dft::config_param::PLACEMENT, dft::config_value::INPLACE);
             desc.commit(queue);
 
             dft::compute_forward(desc, reinterpret_cast<std::complex<float>*>(complex_buf));
@@ -319,10 +319,10 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
             dft::descriptor<dft::precision::DOUBLE, dft::domain::COMPLEX> desc(signal_len);
             desc.set_value(dft::config_param::NUMBER_OF_TRANSFORMS, batch_size);
-            std::int64_t fwd_strides[2] = {0, 1};
+            std::vector<std::int64_t> fwd_strides = {0, 1};
             desc.set_value(dft::config_param::FWD_STRIDES, fwd_strides);
             desc.set_value(dft::config_param::FWD_DISTANCE, signal_len);
-            desc.set_value(dft::config_param::PLACEMENT, DFTI_INPLACE);
+            desc.set_value(dft::config_param::PLACEMENT, dft::config_value::INPLACE);
             desc.commit(queue);
 
             dft::compute_forward(desc, reinterpret_cast<std::complex<double>*>(complex_buf));
@@ -341,10 +341,10 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
             dft::descriptor<dft::precision::DOUBLE, dft::domain::COMPLEX> desc(signal_len);
             desc.set_value(dft::config_param::NUMBER_OF_TRANSFORMS, total_transforms);
-            std::int64_t fwd_strides[2] = {0, 1};
+            std::vector<std::int64_t> fwd_strides = {0, 1};
             desc.set_value(dft::config_param::FWD_STRIDES, fwd_strides);
             desc.set_value(dft::config_param::FWD_DISTANCE, signal_len);
-            desc.set_value(dft::config_param::PLACEMENT, DFTI_INPLACE);
+            desc.set_value(dft::config_param::PLACEMENT, dft::config_value::INPLACE);
             desc.commit(queue);
 
             dft::compute_forward(desc, reinterpret_cast<std::complex<double>*>(complex_buf));
@@ -444,10 +444,10 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
         // Run inverse DFT
         dft::descriptor<dft::precision::SINGLE, dft::domain::COMPLEX> desc(signal_len);
         desc.set_value(dft::config_param::NUMBER_OF_TRANSFORMS, total_transforms);
-        std::int64_t bwd_strides[2] = {0, 1};
+        std::vector<std::int64_t> bwd_strides = {0, 1};
         desc.set_value(dft::config_param::BWD_STRIDES, bwd_strides);
         desc.set_value(dft::config_param::BWD_DISTANCE, signal_len);
-        desc.set_value(dft::config_param::PLACEMENT, DFTI_INPLACE);
+        desc.set_value(dft::config_param::PLACEMENT, dft::config_value::INPLACE);
         desc.commit(queue);
 
         dft::compute_backward(desc, reinterpret_cast<std::complex<float>*>(complex_buf));
@@ -506,10 +506,10 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
         dft::descriptor<dft::precision::DOUBLE, dft::domain::COMPLEX> desc(signal_len);
         desc.set_value(dft::config_param::NUMBER_OF_TRANSFORMS, total_transforms);
-        std::int64_t bwd_strides[2] = {0, 1};
+        std::vector<std::int64_t> bwd_strides = {0, 1};
         desc.set_value(dft::config_param::BWD_STRIDES, bwd_strides);
         desc.set_value(dft::config_param::BWD_DISTANCE, signal_len);
-        desc.set_value(dft::config_param::PLACEMENT, DFTI_INPLACE);
+        desc.set_value(dft::config_param::PLACEMENT, dft::config_value::INPLACE);
         desc.commit(queue);
 
         dft::compute_backward(desc, reinterpret_cast<std::complex<double>*>(complex_buf));
@@ -618,16 +618,16 @@ auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
         // We need to set strides for both forward (real) and backward (complex) domains.
         dft::descriptor<dft::precision::SINGLE, dft::domain::REAL> desc(signal_len);
         desc.set_value(dft::config_param::NUMBER_OF_TRANSFORMS, total_transforms);
-        desc.set_value(dft::config_param::PLACEMENT, DFTI_NOT_INPLACE);
+        desc.set_value(dft::config_param::PLACEMENT, dft::config_value::NOT_INPLACE);
 
         // Forward (real) strides: contiguous reals
-        std::int64_t fwd_strides[2] = {0, 1};
+        std::vector<std::int64_t> fwd_strides = {0, 1};
         desc.set_value(dft::config_param::FWD_STRIDES, fwd_strides);
         desc.set_value(dft::config_param::FWD_DISTANCE, signal_len);
 
         // Backward (complex) strides: contiguous complex values
         // For R2C out-of-place, the output has out_len complex elements per transform
-        std::int64_t bwd_strides[2] = {0, 1};
+        std::vector<std::int64_t> bwd_strides = {0, 1};
         desc.set_value(dft::config_param::BWD_STRIDES, bwd_strides);
         desc.set_value(dft::config_param::BWD_DISTANCE, out_len);
 
@@ -695,13 +695,13 @@ auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
         dft::descriptor<dft::precision::DOUBLE, dft::domain::REAL> desc(signal_len);
         desc.set_value(dft::config_param::NUMBER_OF_TRANSFORMS, total_transforms);
-        desc.set_value(dft::config_param::PLACEMENT, DFTI_NOT_INPLACE);
+        desc.set_value(dft::config_param::PLACEMENT, dft::config_value::NOT_INPLACE);
 
-        std::int64_t fwd_strides[2] = {0, 1};
+        std::vector<std::int64_t> fwd_strides = {0, 1};
         desc.set_value(dft::config_param::FWD_STRIDES, fwd_strides);
         desc.set_value(dft::config_param::FWD_DISTANCE, signal_len);
 
-        std::int64_t bwd_strides[2] = {0, 1};
+        std::vector<std::int64_t> bwd_strides = {0, 1};
         desc.set_value(dft::config_param::BWD_STRIDES, bwd_strides);
         desc.set_value(dft::config_param::BWD_DISTANCE, out_len);
 
@@ -841,15 +841,15 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
         // and the complex input has output_len/2+1 elements.
         dft::descriptor<dft::precision::SINGLE, dft::domain::REAL> desc(output_len);
         desc.set_value(dft::config_param::NUMBER_OF_TRANSFORMS, total_transforms);
-        desc.set_value(dft::config_param::PLACEMENT, DFTI_NOT_INPLACE);
+        desc.set_value(dft::config_param::PLACEMENT, dft::config_value::NOT_INPLACE);
 
         // Forward (real) strides — for the real output side
-        std::int64_t fwd_strides[2] = {0, 1};
+        std::vector<std::int64_t> fwd_strides = {0, 1};
         desc.set_value(dft::config_param::FWD_STRIDES, fwd_strides);
         desc.set_value(dft::config_param::FWD_DISTANCE, output_len);
 
         // Backward (complex) strides — for the complex input side
-        std::int64_t bwd_strides[2] = {0, 1};
+        std::vector<std::int64_t> bwd_strides = {0, 1};
         desc.set_value(dft::config_param::BWD_STRIDES, bwd_strides);
         desc.set_value(dft::config_param::BWD_DISTANCE, complex_len);
 
@@ -917,13 +917,13 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
         dft::descriptor<dft::precision::DOUBLE, dft::domain::REAL> desc(output_len);
         desc.set_value(dft::config_param::NUMBER_OF_TRANSFORMS, total_transforms);
-        desc.set_value(dft::config_param::PLACEMENT, DFTI_NOT_INPLACE);
+        desc.set_value(dft::config_param::PLACEMENT, dft::config_value::NOT_INPLACE);
 
-        std::int64_t fwd_strides[2] = {0, 1};
+        std::vector<std::int64_t> fwd_strides = {0, 1};
         desc.set_value(dft::config_param::FWD_STRIDES, fwd_strides);
         desc.set_value(dft::config_param::FWD_DISTANCE, output_len);
 
-        std::int64_t bwd_strides[2] = {0, 1};
+        std::vector<std::int64_t> bwd_strides = {0, 1};
         desc.set_value(dft::config_param::BWD_STRIDES, bwd_strides);
         desc.set_value(dft::config_param::BWD_DISTANCE, complex_len);
 

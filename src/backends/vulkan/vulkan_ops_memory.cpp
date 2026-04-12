@@ -998,7 +998,7 @@ auto VulkanBackend::dispatchClamp(const Tensor& input, float min_value, float ma
  * @brief Dispatch forward activation operations (element-wise)
  * Operations: 0=relu, 1=sigmoid, 2=tanh, 3=gelu, 4=leaky_relu, 5=swish
  */
-auto VulkanBackend::dispatchActivation(const std::string& op_name,
+auto VulkanBackend::dispatchActivation([[maybe_unused]] const std::string& op_name,
                                         const Tensor& input,
                                         uint32_t opcode,
                                         float param) -> Tensor {
@@ -1123,7 +1123,7 @@ auto VulkanBackend::dispatchActivation(const std::string& op_name,
  * @brief Dispatch backward activation operations (element-wise)
  * Operations: 0=relu, 1=sigmoid, 2=tanh, 3=leaky_relu, 4=gelu
  */
-auto VulkanBackend::dispatchActivationBackward(const std::string& op_name,
+auto VulkanBackend::dispatchActivationBackward([[maybe_unused]] const std::string& op_name,
                                                 const Tensor& grad_output,
                                                 const Tensor& input_or_output,
                                                 uint32_t opcode,

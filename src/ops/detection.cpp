@@ -586,7 +586,6 @@ auto batched_nms(const Tensor& boxes, const Tensor& scores,
         throw std::invalid_argument("Number of boxes and scores must match");
     }
 
-    const int64_t num_boxes = boxes.shape()[0];
     const int64_t num_classes = scores.shape()[1];
 
     std::vector<Tensor> all_boxes_tensors;
@@ -752,7 +751,7 @@ auto clip_boxes_to_image(const Tensor& boxes, int64_t height, int64_t width) -> 
     return tenzor::cat({x1, y1, x2, y2}, 1);
 }
 
-auto remove_small_boxes(const Tensor& boxes, const Tensor& scores,
+auto remove_small_boxes(const Tensor& boxes, [[maybe_unused]] const Tensor& scores,
                         double min_size) -> Tensor {
     auto widths = boxes.slice(1, 2, 3) - boxes.slice(1, 0, 1);
     auto heights = boxes.slice(1, 3, 4) - boxes.slice(1, 1, 2);

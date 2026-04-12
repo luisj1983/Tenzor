@@ -2961,7 +2961,6 @@ auto VulkanBackend::dispatchLinalgLUSolve(const Tensor& LU_data, const Tensor& p
     }
 
     bool is_f64 = (work_dtype == DType::Float64);
-    bool is_f16 = false;
 
     int64_t batch_size = 1;
     for (int64_t i = 0; i < lu_ndim - 2; ++i) batch_size *= lu_shape[i];

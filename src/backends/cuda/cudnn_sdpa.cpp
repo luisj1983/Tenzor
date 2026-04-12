@@ -24,6 +24,7 @@
 namespace fe = cudnn_frontend;
 
 // cuDNN error checking macro
+#ifndef CUDNN_CHECK
 #define CUDNN_CHECK(call) do { \
     cudnnStatus_t status = call; \
     if (status != CUDNN_STATUS_SUCCESS) { \
@@ -33,6 +34,7 @@ namespace fe = cudnn_frontend;
         ); \
     } \
 } while(0)
+#endif
 
 namespace tenzor {
 namespace cuda {
@@ -280,7 +282,7 @@ auto create_sdpa_graph(
     // Configure SDPA attributes
     auto sdpa_options = fe::graph::SDPA_attributes()
         .set_name("flash_attention")
-        .set_is_inference(true)
+        .set_generate_stats(false)
         .set_attn_scale(attn_scale);
 
     // Create SDPA operation

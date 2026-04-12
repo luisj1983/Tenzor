@@ -263,9 +263,6 @@ if(TENZOR_BUILD_PYTHON)
         endif()
         target_compile_options(tenzor_python PRIVATE ${TENZOR_WARNING_FLAGS})
 
-        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-            target_compile_options(tenzor_python PRIVATE -Wno-unused-parameter)
-        endif()
 
         set_target_properties(tenzor_python PROPERTIES
             OUTPUT_NAME "tenzor_core"

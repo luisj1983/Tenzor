@@ -35,19 +35,12 @@ __device__ inline void dev_store(__nv_bfloat16* p, int64_t i, float v) { p[i] = 
 // Launch config helpers
 // ============================================================================
 
-static inline int clamp_grid(int64_t blocks) {
-    int64_t clamped = std::min(blocks, static_cast<int64_t>(2147483647));  // 2^31-1
-    return static_cast<int>(clamped > 0 ? clamped : 1);
-}
-
 static inline Tensor create_zeros_cuda(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream = nullptr) {
     Tensor t(shape, dtype, device);
     size_t bytes = t.numel() * dtype_size(dtype);
     cudaMemsetAsync(t.data_ptr(), 0, bytes, stream);
     return t;
 }
-
-constexpr int POOL_BLOCK = 256;
 
 // ============================================================================
 // MaxPool2d Forward Kernel

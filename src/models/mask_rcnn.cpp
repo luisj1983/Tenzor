@@ -30,33 +30,6 @@ namespace models {
 namespace {
 
 /**
- * @brief Compute Smooth L1 loss for bounding box regression.
- *
- * Smooth L1 = 0.5 * (x - y)^2 / beta    if |x - y| < beta
- *           = |x - y| - 0.5 * beta      otherwise
- */
-auto smooth_l1_loss(const Tensor& input, const Tensor& target, float beta = 1.0f) -> Tensor {
-    auto diff = input - target;
-    auto abs_diff = tenzor::abs(diff);
-
-    // Create mask for elements where |diff| < beta
-    auto beta_tensor = tenzor::ones_like(abs_diff) * beta;
-    auto mask = abs_diff < beta_tensor;
-
-    // Compute l2_loss = 0.5 * diff^2 / beta
-    auto diff_sq = diff * diff;
-    auto l2_loss = diff_sq * (0.5f / beta);
-
-    // Compute l1_loss = |diff| - 0.5 * beta
-    auto l1_loss = abs_diff - (beta * 0.5f);
-
-    // Select based on mask: use l2 where |diff| < beta, else l1
-    auto loss = tenzor::where(mask, l2_loss, l1_loss);
-
-    return loss;
-}
-
-/**
  * @brief Encode boxes relative to anchors for regression targets.
  *
  * Converts (x1, y1, x2, y2) to (dx, dy, dw, dh) relative to anchors.
@@ -64,9 +37,6 @@ auto smooth_l1_loss(const Tensor& input, const Tensor& target, float beta = 1.0f
 auto encode_boxes(const Tensor& boxes, const Tensor& anchors) -> Tensor {
     // boxes: (N, 4) as (x1, y1, x2, y2)
     // anchors: (N, 4) as (x1, y1, x2, y2)
-
-    auto N = boxes.shape()[0];
-    auto device = boxes.device();
 
     // Extract box coordinates
     auto boxes_x1 = tenzor::select(boxes, 1, 0);
@@ -116,8 +86,6 @@ auto encode_boxes(const Tensor& boxes, const Tensor& anchors) -> Tensor {
 auto decode_boxes(const Tensor& deltas, const Tensor& anchors) -> Tensor {
     // deltas: (N, 4) as (dx, dy, dw, dh)
     // anchors: (N, 4) as (x1, y1, x2, y2)
-
-    auto N = deltas.shape()[0];
 
     // Extract deltas
     auto dx = tenzor::select(deltas, 1, 0);
@@ -639,8 +607,9 @@ auto MaskRCNN::forward_test(const Variable& images)
     auto scores = tenzor::max(cls_probs, 1);
     auto labels = tenzor::argmax(cls_probs, 1);
 
-    // Decode boxes (simplified - would normally use decode_boxes)
-    auto boxes = proposals.slice(1, 1, 5);  // Remove batch index
+    // Decode predicted box deltas relative to proposal anchors
+    auto proposal_boxes = proposals.slice(1, 1, 5);  // Remove batch index
+    auto boxes = decode_boxes(bbox_deltas.tensor(), proposal_boxes);
 
     // 6. ROI Align for masks (only for detected objects)
     auto roi_features_mask = roi_align_mask_->forward(features, proposals);
@@ -674,7 +643,6 @@ auto compute_rpn_loss(
     // anchors: (num_anchors*H*W, 4)
 
     auto batch_size = objectness_logits.shape()[0];
-    auto num_anchors = objectness_logits.shape()[1];
     auto device = objectness_logits.device();
 
     // Collect losses for all images in batch (keep as Variables for gradient tracking)
@@ -843,7 +811,6 @@ auto compute_roi_head_loss(
     // targets: vector containing {labels, target_boxes} for sampled ROIs
 
     auto num_rois = class_logits.shape()[0];
-    auto num_classes = class_logits.shape()[1];
     auto device = class_logits.device();
 
     if (num_rois == 0 || targets.empty()) {
@@ -983,7 +950,6 @@ auto MaskRCNN::generate_proposals(const Variable& features) -> Tensor {
 
     auto H = features.tensor().shape()[2];
     auto W = features.tensor().shape()[3];
-    auto batch_size = features.tensor().shape()[0];
 
     // Generate anchor boxes on the same device as features
     auto anchors = anchor_generator_->generate(H, W, 16, features.tensor().device());
@@ -1008,8 +974,8 @@ auto MaskRCNN::generate_proposals(const Variable& features) -> Tensor {
 }
 
 auto MaskRCNN::select_training_samples(const Tensor& proposals,
-                                        const Tensor& gt_boxes,
-                                        const Tensor& gt_labels) -> Tensor {
+                                        [[maybe_unused]] const Tensor& gt_boxes,
+                                        [[maybe_unused]] const Tensor& gt_labels) -> Tensor {
     // Select positive and negative training samples
     // This is a simplified version - production would implement proper sampling
 
@@ -1017,7 +983,7 @@ auto MaskRCNN::select_training_samples(const Tensor& proposals,
     return proposals;
 }
 
-void MaskRCNN::load_pretrained(const std::string& path, bool strict) {
+void MaskRCNN::load_pretrained([[maybe_unused]] const std::string& path, [[maybe_unused]] bool strict) {
     // Load pretrained weights
     // This would integrate with Tenzor's serialization system
     throw std::runtime_error("Pretrained weight loading not yet implemented");

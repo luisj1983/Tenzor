@@ -52,13 +52,6 @@ void write_uint32_le(std::vector<uint8_t>& buffer, uint32_t value) {
     }
 }
 
-// Write little-endian float
-void write_float_le(std::vector<uint8_t>& buffer, float value) {
-    uint32_t bits;
-    std::memcpy(&bits, &value, sizeof(float));
-    write_uint32_le(buffer, bits);
-}
-
 // Write string with length prefix
 void write_string(std::vector<uint8_t>& buffer, std::string_view str) {
     // Varint encoding for length
@@ -201,7 +194,7 @@ auto SummaryWriter::add_histogram(std::string_view tag,
 auto SummaryWriter::add_image(std::string_view tag,
                              const Tensor& tensor,
                              int64_t step,
-                             std::string_view dataformats) -> void {
+                             [[maybe_unused]] std::string_view dataformats) -> void {
     if (!impl_->is_open) {
         throw TensorBoardException("SummaryWriter is closed");
     }

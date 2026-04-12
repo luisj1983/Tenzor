@@ -12,6 +12,7 @@
 #include <hip/hip_fp16.h>
 #include <cfloat>
 #include <cmath>
+#include <limits>
 #include <cstdint>
 #include <climits>
 #include <algorithm>
@@ -3195,9 +3196,13 @@ __global__ void logsumexp_sum_exp_kernel(
 
     Acc m = max_vals[out_idx];
     // Handle inf: if max is +/-inf, result should be the same inf
-    if (isinf(float(m))) {
-        output[out_idx] = T(m);
-        return;
+    {
+        float fm = float(m);
+        uint32_t mbits; memcpy(&mbits, &fm, sizeof(mbits));
+        if ((mbits & 0x7FFFFFFFu) == 0x7F800000u) {
+            output[out_idx] = T(m);
+            return;
+        }
     }
 
     Acc sum = Acc(0);
@@ -3253,9 +3258,13 @@ __global__ void logsumexp_full_kernel(
     __syncthreads();
 
     // Handle inf
-    if (isinf(float(m))) {
-        if (tid == 0) output[0] = T(m);
-        return;
+    {
+        float fm = float(m);
+        uint32_t mbits; memcpy(&mbits, &fm, sizeof(mbits));
+        if ((mbits & 0x7FFFFFFFu) == 0x7F800000u) {
+            if (tid == 0) output[0] = T(m);
+            return;
+        }
     }
 
     // Step 2: Sum exp(x - max) using shared memory reduction

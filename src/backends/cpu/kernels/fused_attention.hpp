@@ -276,7 +276,7 @@ inline void topk(
     int64_t* indices,
     int64_t n,
     int64_t k,
-    bool sorted = true
+    [[maybe_unused]] bool sorted = true
 ) {
     // Create index array
     std::vector<int64_t> idx(n);

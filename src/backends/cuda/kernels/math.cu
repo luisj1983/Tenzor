@@ -4987,46 +4987,46 @@ Tensor cast_from_standard(const Tensor& input, DType target_dtype, int64_t n,
 
     switch (target_dtype) {
         case DType::Float32:
-            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<float>(), n); break;
-            CUDA_CHECK(cudaGetLastError());
+            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<float>(), n);
+            CUDA_CHECK(cudaGetLastError()); break;
         case DType::Float64:
-            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<double>(), n); break;
-            CUDA_CHECK(cudaGetLastError());
+            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<double>(), n);
+            CUDA_CHECK(cudaGetLastError()); break;
         case DType::Float16:
             cast_to_f16_kernel<<<grid, block, 0, stream>>>(src,
-                reinterpret_cast<__half*>(result.data<Float16>()), n); break;
-            CUDA_CHECK(cudaGetLastError());
+                reinterpret_cast<__half*>(result.data<Float16>()), n);
+            CUDA_CHECK(cudaGetLastError()); break;
         case DType::BFloat16:
             cast_to_bf16_kernel<<<grid, block, 0, stream>>>(src,
-                reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n); break;
-            CUDA_CHECK(cudaGetLastError());
+                reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
+            CUDA_CHECK(cudaGetLastError()); break;
         case DType::Int8:
-            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<int8_t>(), n); break;
-            CUDA_CHECK(cudaGetLastError());
+            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<int8_t>(), n);
+            CUDA_CHECK(cudaGetLastError()); break;
         case DType::Int16:
-            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<int16_t>(), n); break;
-            CUDA_CHECK(cudaGetLastError());
+            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<int16_t>(), n);
+            CUDA_CHECK(cudaGetLastError()); break;
         case DType::Int32:
-            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<int32_t>(), n); break;
-            CUDA_CHECK(cudaGetLastError());
+            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<int32_t>(), n);
+            CUDA_CHECK(cudaGetLastError()); break;
         case DType::Int64:
-            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<int64_t>(), n); break;
-            CUDA_CHECK(cudaGetLastError());
+            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<int64_t>(), n);
+            CUDA_CHECK(cudaGetLastError()); break;
         case DType::UInt8:
-            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<uint8_t>(), n); break;
-            CUDA_CHECK(cudaGetLastError());
+            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<uint8_t>(), n);
+            CUDA_CHECK(cudaGetLastError()); break;
         case DType::UInt16:
-            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<uint16_t>(), n); break;
-            CUDA_CHECK(cudaGetLastError());
+            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<uint16_t>(), n);
+            CUDA_CHECK(cudaGetLastError()); break;
         case DType::UInt32:
-            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<uint32_t>(), n); break;
-            CUDA_CHECK(cudaGetLastError());
+            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<uint32_t>(), n);
+            CUDA_CHECK(cudaGetLastError()); break;
         case DType::UInt64:
-            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<uint64_t>(), n); break;
-            CUDA_CHECK(cudaGetLastError());
+            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<uint64_t>(), n);
+            CUDA_CHECK(cudaGetLastError()); break;
         case DType::Bool:
-            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<bool>(), n); break;
-            CUDA_CHECK(cudaGetLastError());
+            cast_element_kernel<<<grid, block, 0, stream>>>(src, result.data<bool>(), n);
+            CUDA_CHECK(cudaGetLastError()); break;
         default:
             throw std::runtime_error("cast: unsupported target dtype");
     }
@@ -5133,46 +5133,46 @@ auto cuda_cast_kernel(const Tensor& input, DType target_dtype, cudaStream_t stre
         const __half* src = reinterpret_cast<const __half*>(input.data<Float16>());
         switch (target_dtype) {
             case DType::Float32:
-                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<float>(), n); break;
-                CUDA_CHECK(cudaGetLastError());
+                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<float>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             case DType::Float64:
-                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<double>(), n); break;
-                CUDA_CHECK(cudaGetLastError());
+                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<double>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             case DType::Float16:
                 cast_f16_to_f16_kernel<<<grid, block, 0, stream>>>(src,
-                    reinterpret_cast<__half*>(result.data<Float16>()), n); break;
-                CUDA_CHECK(cudaGetLastError());
+                    reinterpret_cast<__half*>(result.data<Float16>()), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             case DType::BFloat16:
                 cast_f16_to_bf16_kernel<<<grid, block, 0, stream>>>(src,
-                    reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n); break;
-                CUDA_CHECK(cudaGetLastError());
+                    reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             case DType::Int8:
-                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<int8_t>(), n); break;
-                CUDA_CHECK(cudaGetLastError());
+                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<int8_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             case DType::Int16:
-                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<int16_t>(), n); break;
-                CUDA_CHECK(cudaGetLastError());
+                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<int16_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             case DType::Int32:
-                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<int32_t>(), n); break;
-                CUDA_CHECK(cudaGetLastError());
+                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<int32_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             case DType::Int64:
-                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<int64_t>(), n); break;
-                CUDA_CHECK(cudaGetLastError());
+                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<int64_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             case DType::UInt8:
-                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<uint8_t>(), n); break;
-                CUDA_CHECK(cudaGetLastError());
+                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<uint8_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             case DType::UInt16:
-                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<uint16_t>(), n); break;
-                CUDA_CHECK(cudaGetLastError());
+                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<uint16_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             case DType::UInt32:
-                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<uint32_t>(), n); break;
-                CUDA_CHECK(cudaGetLastError());
+                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<uint32_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             case DType::UInt64:
-                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<uint64_t>(), n); break;
-                CUDA_CHECK(cudaGetLastError());
+                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<uint64_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             case DType::Bool:
-                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<bool>(), n); break;
-                CUDA_CHECK(cudaGetLastError());
+                cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<bool>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             case DType::FP8_E4M3:
             case DType::FP8_E5M2: {
                 // FP8 conversion via CPU (host-only bit manipulation)
@@ -5190,46 +5190,46 @@ auto cuda_cast_kernel(const Tensor& input, DType target_dtype, cudaStream_t stre
         const __nv_bfloat16* src = reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>());
         switch (target_dtype) {
             case DType::Float32:
-                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<float>(), n); break;
-                CUDA_CHECK(cudaGetLastError());
+                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<float>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             case DType::Float64:
-                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<double>(), n); break;
-                CUDA_CHECK(cudaGetLastError());
+                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<double>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             case DType::Float16:
                 cast_bf16_to_f16_kernel<<<grid, block, 0, stream>>>(src,
-                    reinterpret_cast<__half*>(result.data<Float16>()), n); break;
-                CUDA_CHECK(cudaGetLastError());
+                    reinterpret_cast<__half*>(result.data<Float16>()), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             case DType::BFloat16:
                 cast_bf16_to_bf16_kernel<<<grid, block, 0, stream>>>(src,
-                    reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n); break;
-                CUDA_CHECK(cudaGetLastError());
+                    reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             case DType::Int8:
-                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<int8_t>(), n); break;
-                CUDA_CHECK(cudaGetLastError());
+                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<int8_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             case DType::Int16:
-                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<int16_t>(), n); break;
-                CUDA_CHECK(cudaGetLastError());
+                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<int16_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             case DType::Int32:
-                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<int32_t>(), n); break;
-                CUDA_CHECK(cudaGetLastError());
+                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<int32_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             case DType::Int64:
-                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<int64_t>(), n); break;
-                CUDA_CHECK(cudaGetLastError());
+                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<int64_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             case DType::UInt8:
-                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<uint8_t>(), n); break;
-                CUDA_CHECK(cudaGetLastError());
+                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<uint8_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             case DType::UInt16:
-                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<uint16_t>(), n); break;
-                CUDA_CHECK(cudaGetLastError());
+                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<uint16_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             case DType::UInt32:
-                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<uint32_t>(), n); break;
-                CUDA_CHECK(cudaGetLastError());
+                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<uint32_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             case DType::UInt64:
-                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<uint64_t>(), n); break;
-                CUDA_CHECK(cudaGetLastError());
+                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<uint64_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             case DType::Bool:
-                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<bool>(), n); break;
-                CUDA_CHECK(cudaGetLastError());
+                cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<bool>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             case DType::FP8_E4M3:
             case DType::FP8_E5M2: {
                 // FP8 conversion via CPU (host-only bit manipulation)

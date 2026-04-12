@@ -758,7 +758,7 @@ auto ComputeContext::synchronize() -> void {
 // Global Functions
 // ============================================================================
 
-auto offload_param(Tensor& param, OffloadPriority priority) -> void {
+auto offload_param([[maybe_unused]] Tensor& param, [[maybe_unused]] OffloadPriority priority) -> void {
     auto* ctx = get_global_offload_context();
     if (!ctx) {
         std::cerr << "Warning: offload_param called but no global offload context set\n";

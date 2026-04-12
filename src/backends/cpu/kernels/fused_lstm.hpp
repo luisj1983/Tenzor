@@ -346,7 +346,6 @@ inline void lstm_cell_fused(
     for (int64_t b = 0; b < batch; ++b) {
         const float* g_ih = gates_ih + b * gate_size;
         const float* g_hh = workspace + b * gate_size;
-        const float* h_prev = h + b * hidden;
         const float* c_prev = c + b * hidden;
         float* h_new = h_out + b * hidden;
         float* c_new = c_out + b * hidden;

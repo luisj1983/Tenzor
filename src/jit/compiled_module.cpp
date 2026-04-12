@@ -15,6 +15,7 @@
 
 #ifdef TENZOR_HAS_ROCM
 #include "../backends/rocm/hip_graph.hpp"
+#include "../backends/rocm/rocm_error.hpp"
 #include <hip/hip_runtime.h>
 #endif
 
@@ -243,7 +244,7 @@ namespace {
 class ROCmGraphAdapter : public CUDAGraph {
 public:
     explicit ROCmGraphAdapter(int32_t device_id) : device_id_(device_id) {
-        hipSetDevice(device_id_);
+        HIP_CHECK(hipSetDevice(device_id_));
         auto err = hipStreamCreate(&stream_);
         if (err != hipSuccess) {
             throw std::runtime_error(
@@ -256,16 +257,16 @@ public:
         if (hip_graph_.is_capturing()) {
             // Abort capture to leave stream in valid state
             hipGraph_t dummy = nullptr;
-            hipStreamEndCapture(stream_, &dummy);
-            if (dummy) hipGraphDestroy(dummy);
+            (void)hipStreamEndCapture(stream_, &dummy);
+            if (dummy) (void)hipGraphDestroy(dummy);
         }
         if (stream_) {
-            hipStreamDestroy(stream_);
+            (void)hipStreamDestroy(stream_);
         }
     }
 
     void begin_capture() override {
-        hipSetDevice(device_id_);
+        HIP_CHECK(hipSetDevice(device_id_));
         hip_graph_.begin_capture(stream_);
     }
 
@@ -274,7 +275,7 @@ public:
     }
 
     void replay() override {
-        hipSetDevice(device_id_);
+        HIP_CHECK(hipSetDevice(device_id_));
         hip_graph_.replay(stream_);
     }
 
@@ -315,7 +316,7 @@ auto CompiledModule::capture_cuda_graph(std::vector<Tensor> sample_inputs) -> vo
 #ifdef TENZOR_HAS_ROCM
     if (device_type == Device::Type::ROCm) {
         int hip_count = 0;
-        hipGetDeviceCount(&hip_count);
+        HIP_CHECK(hipGetDeviceCount(&hip_count));
         if (hip_count == 0 || device_id >= hip_count) {
             throw std::runtime_error(
                 "ROCm is not available; cannot capture HIP graph");

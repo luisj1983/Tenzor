@@ -172,15 +172,6 @@ void apply_normalization_real(Tensor& output, double scale, bool is_float32, cud
     TENZOR_CUDA_CHECK(cudaGetLastError());
 }
 
-/// Compute batch size: product of all dimensions except the FFT dimension(s).
-int64_t compute_batch_size(const std::vector<int64_t>& shape, int64_t fft_dim) {
-    int64_t batch = 1;
-    for (int64_t i = 0; i < static_cast<int64_t>(shape.size()); ++i) {
-        if (i != fft_dim) batch *= shape[i];
-    }
-    return batch;
-}
-
 /// Check if data is contiguous along the FFT dimension (i.e., FFT dim is the last dim).
 /// cuFFT works most naturally on the innermost dimension. If the FFT dimension is not
 /// the last, we need to use advanced data layout (istride/ostride/idist/odist).

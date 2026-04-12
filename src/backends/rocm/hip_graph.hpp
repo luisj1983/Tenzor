@@ -92,7 +92,7 @@ public:
 
         err = hipGraphInstantiate(&graph_exec_, graph_, nullptr, nullptr, 0);
         if (err != hipSuccess) {
-            hipGraphDestroy(graph_);
+            (void)hipGraphDestroy(graph_);
             graph_ = nullptr;
             throw std::runtime_error(
                 std::string("HIPGraph: graph instantiation failed: ") +
@@ -128,11 +128,11 @@ private:
 
     void cleanup() {
         if (graph_exec_) {
-            hipGraphExecDestroy(graph_exec_);
+            (void)hipGraphExecDestroy(graph_exec_);
             graph_exec_ = nullptr;
         }
         if (graph_) {
-            hipGraphDestroy(graph_);
+            (void)hipGraphDestroy(graph_);
             graph_ = nullptr;
         }
     }

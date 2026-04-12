@@ -90,105 +90,6 @@ constexpr size_t BLOCK_SIZE_K = 256;  // Reduction block (fits A panel in L2)
 constexpr size_t PREFETCH_A = 64;
 constexpr size_t PREFETCH_B = 128;
 
-// Micro-kernel for small block multiplication (Float32)
-// Uses AVX-512 if available for maximum performance
-// Now with software prefetching for better cache utilization
-#ifdef TENZOR_HAS_AVX512
-__attribute__((target("avx512f")))
-#endif
-static void matmul_microkernel_float32(
-    const float* A, const float* B, float* C,
-    int64_t M, int64_t N, int64_t K,
-    int64_t lda, int64_t ldb, int64_t ldc) {
-
-#ifdef TENZOR_HAS_AVX512
-    // AVX-512: Process 16 floats at a time with prefetching
-    constexpr int64_t simd_width = 16;
-
-    for (int64_t i = 0; i < M; ++i) {
-        for (int64_t j = 0; j < N; j += simd_width) {
-            int64_t width = std::min(simd_width, N - j);
-
-            if (width == simd_width) {
-                __m512 c_vec = _mm512_loadu_ps(&C[i * ldc + j]);
-
-                for (int64_t k = 0; k < K; ++k) {
-                    // Prefetch next A and B values
-                    if (k + PREFETCH_A < K) {
-                        _mm_prefetch(reinterpret_cast<const char*>(&A[i * lda + k + PREFETCH_A]), _MM_HINT_T0);
-                    }
-                    if (k + PREFETCH_B < K) {
-                        _mm_prefetch(reinterpret_cast<const char*>(&B[(k + PREFETCH_B) * ldb + j]), _MM_HINT_T0);
-                    }
-
-                    __m512 a_vec = _mm512_set1_ps(A[i * lda + k]);
-                    __m512 b_vec = _mm512_loadu_ps(&B[k * ldb + j]);
-                    c_vec = _mm512_fmadd_ps(a_vec, b_vec, c_vec);
-                }
-
-                _mm512_storeu_ps(&C[i * ldc + j], c_vec);
-            } else {
-                for (int64_t jj = j; jj < j + width; ++jj) {
-                    float sum = C[i * ldc + jj];
-                    for (int64_t k = 0; k < K; ++k) {
-                        sum += A[i * lda + k] * B[k * ldb + jj];
-                    }
-                    C[i * ldc + jj] = sum;
-                }
-            }
-        }
-    }
-#elif defined(TENZOR_HAS_AVX2)
-    // AVX2: Process 8 floats at a time with prefetching
-    constexpr int64_t simd_width = 8;
-
-    for (int64_t i = 0; i < M; ++i) {
-        for (int64_t j = 0; j < N; j += simd_width) {
-            int64_t width = std::min(simd_width, N - j);
-
-            if (width == simd_width) {
-                __m256 c_vec = _mm256_loadu_ps(&C[i * ldc + j]);
-
-                for (int64_t k = 0; k < K; ++k) {
-                    // Prefetch for cache optimization
-                    if (k + PREFETCH_A < K) {
-                        _mm_prefetch(reinterpret_cast<const char*>(&A[i * lda + k + PREFETCH_A]), _MM_HINT_T0);
-                    }
-                    if (k + PREFETCH_B < K) {
-                        _mm_prefetch(reinterpret_cast<const char*>(&B[(k + PREFETCH_B) * ldb + j]), _MM_HINT_T0);
-                    }
-
-                    __m256 a_vec = _mm256_set1_ps(A[i * lda + k]);
-                    __m256 b_vec = _mm256_loadu_ps(&B[k * ldb + j]);
-                    c_vec = _mm256_fmadd_ps(a_vec, b_vec, c_vec);
-                }
-
-                _mm256_storeu_ps(&C[i * ldc + j], c_vec);
-            } else {
-                for (int64_t jj = j; jj < j + width; ++jj) {
-                    float sum = C[i * ldc + jj];
-                    for (int64_t k = 0; k < K; ++k) {
-                        sum += A[i * lda + k] * B[k * ldb + jj];
-                    }
-                    C[i * ldc + jj] = sum;
-                }
-            }
-        }
-    }
-#else
-    // Scalar fallback
-    for (int64_t i = 0; i < M; ++i) {
-        for (int64_t j = 0; j < N; ++j) {
-            float sum = C[i * ldc + j];
-            for (int64_t k = 0; k < K; ++k) {
-                sum += A[i * lda + k] * B[k * ldb + j];
-            }
-            C[i * ldc + j] = sum;
-        }
-    }
-#endif
-}
-
 // Micro-kernel for small block multiplication (Float64)
 #ifdef TENZOR_HAS_AVX512
 __attribute__((target("avx512f")))
@@ -320,7 +221,8 @@ using MatMulPrimitiveCache = OneDNNPrimitiveCache<MatMulCacheKey, MatMulCachedPr
 
 static thread_local MatMulPrimitiveCache g_matmul_cache;
 
-// oneDNN matmul for Float32 with primitive caching
+#ifndef TENZOR_USE_MKL
+// oneDNN matmul for Float32 with primitive caching (only used when MKL is unavailable)
 static bool onednn_matmul_f32(
     const float* A, const float* B, float* C,
     int64_t M, int64_t N, int64_t K) {
@@ -381,7 +283,8 @@ static bool onednn_matmul_f32(
         return false;  // Fall back to MKL/custom GEMM
     }
 }
-#endif
+#endif // !TENZOR_USE_MKL
+#endif // TENZOR_USE_ONEDNN
 
 // High-performance matrix multiplication (Float32)
 // Uses oneDNN or MKL SGEMM when available (5-10x faster), falls back to optimized GEMM
@@ -4613,7 +4516,7 @@ auto binary_math_kernel(const Tensor& a, const Tensor& b, F32Fn f32_fn, F64Fn f6
             const scalar_t* ad = a.data<scalar_t>();
             const scalar_t* bd = b.data<scalar_t>();
             scalar_t* od = result.data<scalar_t>();
-            _Pragma("omp parallel for if(n > OMP_THRESHOLD_SIMPLE)")
+            _Pragma("omp parallel for if(n > static_cast<int64_t>(OMP_THRESHOLD_SIMPLE))")
             for (int64_t i = 0; i < n; ++i) {
                 int64_t a_idx = 0, b_idx = 0, idx = i;
                 for (int64_t d = ndim - 1; d >= 0; --d) {

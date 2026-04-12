@@ -28,7 +28,7 @@
 namespace tenzor {
 
 // ReshapeBackward implementation
-auto ReshapeBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+auto ReshapeBackward::forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> {
     throw std::runtime_error("ReshapeBackward::forward should not be called");
 }
 
@@ -44,7 +44,7 @@ auto ReshapeBackward::backward_with_variables(std::vector<Variable> grad_outputs
 }
 
 // PermuteBackward implementation
-auto PermuteBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+auto PermuteBackward::forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> {
     throw std::runtime_error("PermuteBackward::forward should not be called");
 }
 
@@ -60,7 +60,7 @@ auto PermuteBackward::backward_with_variables(std::vector<Variable> grad_outputs
 }
 
 // TransposeBackward implementation
-auto TransposeBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+auto TransposeBackward::forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> {
     throw std::runtime_error("TransposeBackward::forward should not be called");
 }
 
@@ -75,7 +75,7 @@ auto TransposeBackward::backward_with_variables(std::vector<Variable> grad_outpu
 }
 
 // RollBackward implementation
-auto RollBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+auto RollBackward::forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> {
     throw std::runtime_error("RollBackward::forward should not be called");
 }
 
@@ -90,7 +90,7 @@ auto RollBackward::backward_with_variables(std::vector<Variable> grad_outputs) -
 }
 
 // SqueezeBackward implementation
-auto SqueezeBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+auto SqueezeBackward::forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> {
     throw std::runtime_error("SqueezeBackward::forward should not be called");
 }
 

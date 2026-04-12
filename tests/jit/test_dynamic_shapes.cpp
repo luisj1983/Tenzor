@@ -243,7 +243,7 @@ TEST_F(DynamicShapesTest, CanResolveExpr) {
 TEST_F(DynamicShapesTest, ExprNameThrows) {
     auto batch = SymbolicDim::symbolic("batch");
     auto expr = batch + SymbolicDim::concrete(32);
-    EXPECT_THROW(expr.name(), std::runtime_error);
+    EXPECT_THROW((void)expr.name(), std::runtime_error);
 }
 
 TEST_F(DynamicShapesTest, BackwardCompatStringConstruction) {

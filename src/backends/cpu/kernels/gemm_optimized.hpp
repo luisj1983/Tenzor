@@ -131,10 +131,10 @@ inline void microkernel_6x16_avx2(
     // Process K dimension with software prefetching
     for (int64_t k = 0; k < K; ++k) {
         // Prefetch next A and B values
-        if (k + PREFETCH_DISTANCE_A < K) {
+        if (k + static_cast<int64_t>(PREFETCH_DISTANCE_A) < K) {
             _mm_prefetch(reinterpret_cast<const char*>(A + (k + PREFETCH_DISTANCE_A) * MR_AVX2), _MM_HINT_T0);
         }
-        if (k + PREFETCH_DISTANCE_B < K) {
+        if (k + static_cast<int64_t>(PREFETCH_DISTANCE_B) < K) {
             _mm_prefetch(reinterpret_cast<const char*>(B + (k + PREFETCH_DISTANCE_B) * NR_AVX2), _MM_HINT_T0);
         }
 
@@ -275,10 +275,10 @@ inline void microkernel_6x32_avx512(
 
     for (int64_t k = 0; k < K; ++k) {
         // Prefetch
-        if (k + PREFETCH_DISTANCE_A < K) {
+        if (k + static_cast<int64_t>(PREFETCH_DISTANCE_A) < K) {
             _mm_prefetch(reinterpret_cast<const char*>(A + (k + PREFETCH_DISTANCE_A) * MR_AVX512), _MM_HINT_T0);
         }
-        if (k + PREFETCH_DISTANCE_B < K) {
+        if (k + static_cast<int64_t>(PREFETCH_DISTANCE_B) < K) {
             _mm_prefetch(reinterpret_cast<const char*>(B + (k + PREFETCH_DISTANCE_B) * NR_AVX512), _MM_HINT_T0);
         }
 
@@ -413,7 +413,7 @@ inline void microkernel_scalar(
 // ============================================================================
 
 // Adaptive OpenMP thresholds based on operation type
-constexpr size_t OMP_THRESHOLD_GEMM = 4096;  // M*N threshold for parallelization
+constexpr int64_t OMP_THRESHOLD_GEMM = 4096;  // M*N threshold for parallelization
 
 /**
  * @brief Optimized GEMM: C = alpha * A * B + beta * C
@@ -636,7 +636,7 @@ inline void gemm_transB_optimized(
     std::memset(C, 0, M * N * sizeof(float));
 
 #ifdef TENZOR_GEMM_AVX2
-    constexpr size_t VEC_SIZE = 8;
+    constexpr int64_t VEC_SIZE = 8;
 
     #pragma omp parallel for if(M * N > OMP_THRESHOLD_GEMM)
     for (int64_t i = 0; i < M; ++i) {

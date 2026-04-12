@@ -15,7 +15,7 @@ namespace tenzor::nn {
 // Backward function for ReLU
 class ReLUBackward : public Function {
 public:
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("ReLUBackward::forward should not be called");
     }
 
@@ -46,7 +46,7 @@ public:
 // Backward function for Sigmoid
 class SigmoidBackward : public Function {
 public:
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("SigmoidBackward::forward should not be called");
     }
 
@@ -67,7 +67,7 @@ public:
 // Backward function for Tanh
 class TanhBackward : public Function {
 public:
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("TanhBackward::forward should not be called");
     }
 
@@ -91,7 +91,7 @@ class LeakyReLUBackward : public Function {
 public:
     LeakyReLUBackward(double negative_slope) : negative_slope_(negative_slope) {}
 
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("LeakyReLUBackward::forward should not be called");
     }
 
@@ -132,7 +132,7 @@ private:
 // Backward function for GELU
 class GeLUBackward : public Function {
 public:
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("GeLUBackward::forward should not be called");
     }
 
@@ -156,7 +156,7 @@ public:
 // Backward function for Swish
 class SwishBackward : public Function {
 public:
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("SwishBackward::forward should not be called");
     }
 
@@ -191,7 +191,7 @@ class ELUBackward : public Function {
 public:
     ELUBackward(double alpha) : alpha_(alpha) {}
 
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("ELUBackward::forward should not be called");
     }
 
@@ -223,7 +223,7 @@ private:
 // Backward function for SELU
 class SELUBackward : public Function {
 public:
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("SELUBackward::forward should not be called");
     }
 
@@ -256,7 +256,7 @@ public:
 // Backward function for Mish
 class MishBackward : public Function {
 public:
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("MishBackward::forward should not be called");
     }
 
@@ -586,7 +586,7 @@ auto gelu_(Tensor& input) -> Tensor& {
 // d(Hardswish)/dx = 0 if x <= -3, (2x + 3) / 6 if -3 < x < 3, 1 if x >= 3
 class HardswishBackward : public Function {
 public:
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("HardswishBackward::forward should not be called");
     }
 
@@ -636,7 +636,7 @@ public:
 // d(Hardsigmoid)/dx = 0 if x <= -3, 1/6 if -3 < x < 3, 0 if x >= 3
 class HardsigmoidBackward : public Function {
 public:
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("HardsigmoidBackward::forward should not be called");
     }
 

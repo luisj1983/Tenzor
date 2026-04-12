@@ -1047,7 +1047,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return get_vulkan_backend()->dispatchInstanceNorm(inputs[0], weight, bias, eps);
     });
 
-    table.register_kernel(OpId::InstanceNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_kernel(OpId::InstanceNormBackward, [](std::span<const Tensor> inputs, [[maybe_unused]] const OpAttributes& attrs) {
         // inputs: [grad_output, input, weight, mean, rstd]
         Tensor weight = inputs.size() > 2 ? inputs[2] : Tensor();
         auto [gi, gw, gb] = get_vulkan_backend()->dispatchInstanceNormBackward(
@@ -1687,7 +1687,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // ========================================================================
     // Fused Softmax + Cross Entropy
     // ========================================================================
-    table.register_kernel(OpId::FusedSoftmaxCrossEntropy, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_kernel(OpId::FusedSoftmaxCrossEntropy, [](std::span<const Tensor> inputs, [[maybe_unused]] const OpAttributes& attrs) {
         // Compose: softmax -> cross_entropy
         auto vk = get_vulkan_backend();
         int64_t dim = -1; // Softmax over last dim (class dim)
@@ -1847,7 +1847,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
                 input, weight, bias, stride, padding,
                 input_scale, weight_scale, input_zp, weight_zp);
         });
-    table.register_kernel(OpId::LSTMCellForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs)
+    table.register_kernel(OpId::LSTMCellForward, [](std::span<const Tensor> inputs, [[maybe_unused]] const OpAttributes& attrs)
         -> std::vector<Tensor> {
         // inputs: [input, hx, cx, weight_ih, weight_hh, bias_ih, bias_hh]
         return get_vulkan_backend()->dispatchLSTMCellForward(
@@ -1861,7 +1861,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
             batch_size, hidden_size);
     });
-    table.register_kernel(OpId::GRUCellForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs)
+    table.register_kernel(OpId::GRUCellForward, [](std::span<const Tensor> inputs, [[maybe_unused]] const OpAttributes& attrs)
         -> std::vector<Tensor> {
         // inputs: [input, hx, weight_ih, weight_hh, bias_ih, bias_hh]
         return std::vector<Tensor>{get_vulkan_backend()->dispatchGRUCellForward(

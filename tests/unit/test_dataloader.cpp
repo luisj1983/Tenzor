@@ -426,20 +426,20 @@ TEST_F(DataLoaderTest, TransformComposition) {
 // Test with MNIST-like data shape
 TEST_F(DataLoaderTest, MNISTLikeData) {
     // Create MNIST-like dataset: 1000 samples of 28x28 images
-    size_t num_samples = 1000;
-    size_t height = 28;
-    size_t width = 28;
+    int64_t num_samples = 1000;
+    int64_t height = 28;
+    int64_t width = 28;
 
-    std::vector<float> image_data(num_samples * height * width);
-    std::vector<int64_t> label_data(num_samples);
+    std::vector<float> image_data(static_cast<size_t>(num_samples * height * width));
+    std::vector<int64_t> label_data(static_cast<size_t>(num_samples));
 
-    for (size_t i = 0; i < num_samples; ++i) {
+    for (int64_t i = 0; i < num_samples; ++i) {
         // Random image data
-        for (size_t j = 0; j < height * width; ++j) {
-            image_data[i * height * width + j] = static_cast<float>(rand()) / RAND_MAX;
+        for (int64_t j = 0; j < height * width; ++j) {
+            image_data[static_cast<size_t>(i * height * width + j)] = static_cast<float>(rand()) / RAND_MAX;
         }
         // Label is class index
-        label_data[i] = static_cast<int64_t>(i % 10);
+        label_data[static_cast<size_t>(i)] = i % 10;
     }
 
     auto images = from_data(image_data.data(), {num_samples, height, width});

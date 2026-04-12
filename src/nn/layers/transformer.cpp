@@ -236,7 +236,7 @@ auto TransformerEncoderLayer::forward(const Variable& src,
     return output;
 }
 
-auto TransformerEncoderLayer::forward_impl(const Variable& input) -> Variable {
+auto TransformerEncoderLayer::forward_impl([[maybe_unused]] const Variable& input) -> Variable {
     throw std::runtime_error(
         "TransformerEncoderLayer requires source sequence input. "
         "Use forward(src, src_mask, src_key_padding_mask) instead.");
@@ -300,7 +300,7 @@ auto TransformerEncoder::forward(const Variable& src,
     return output;
 }
 
-auto TransformerEncoder::forward_impl(const Variable& input) -> Variable {
+auto TransformerEncoder::forward_impl([[maybe_unused]] const Variable& input) -> Variable {
     throw std::runtime_error(
         "TransformerEncoder requires source sequence input. "
         "Use forward(src, mask, src_key_padding_mask) instead.");
@@ -456,7 +456,7 @@ auto TransformerDecoderLayer::forward(const Variable& tgt,
     return output;
 }
 
-auto TransformerDecoderLayer::forward_impl(const Variable& input) -> Variable {
+auto TransformerDecoderLayer::forward_impl([[maybe_unused]] const Variable& input) -> Variable {
     throw std::runtime_error(
         "TransformerDecoderLayer requires both target and memory inputs. "
         "Use forward(tgt, memory, ...) instead.");
@@ -525,7 +525,7 @@ auto TransformerDecoder::forward(const Variable& tgt,
     return output;
 }
 
-auto TransformerDecoder::forward_impl(const Variable& input) -> Variable {
+auto TransformerDecoder::forward_impl([[maybe_unused]] const Variable& input) -> Variable {
     throw std::runtime_error(
         "TransformerDecoder requires both target and memory inputs. "
         "Use forward(tgt, memory, ...) instead.");
@@ -587,7 +587,7 @@ auto Transformer::forward(const Variable& src,
     return output;
 }
 
-auto Transformer::forward_impl(const Variable& input) -> Variable {
+auto Transformer::forward_impl([[maybe_unused]] const Variable& input) -> Variable {
     throw std::runtime_error(
         "Transformer requires both source and target inputs. "
         "Use forward(src, tgt, ...) instead.");

@@ -606,8 +606,7 @@ auto conv3d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tens
     return grad_bias;
 }
 
-#else // !TENZOR_HAS_ONEDNN - Fallback implementation using im3col + SYCL GEMM
-#pragma message("WARNING: Building without oneDNN — using slower Conv3d fallback")
+#else // !TENZOR_HAS_ONEDNN - Fallback implementation using im3col + SYCL GEMM (slower)
 
 // ============================================================================
 // Conv3d Forward (im3col + GEMM fallback)

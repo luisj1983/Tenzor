@@ -56,14 +56,7 @@ namespace {
         }                                                                      \
     } while (0)
 
-#define HIP_CHECK(call)                                                        \
-    do {                                                                       \
-        hipError_t err = (call);                                               \
-        if (err != hipSuccess) {                                               \
-            throw std::runtime_error(                                          \
-                std::string("HIP error: ") + hipGetErrorString(err));          \
-        }                                                                      \
-    } while (0)
+// HIP_CHECK is provided by rocm_error.hpp (via hip_buffer.hpp)
 
 // ============================================================================
 // RAII wrappers for rocFFT objects

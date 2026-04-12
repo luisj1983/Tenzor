@@ -100,15 +100,10 @@ auto jvp_gelu(const DualTensor& x) -> DualTensor {
     // GELU(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
     // d(GELU)/dx = 0.5 * (1 + erf(x/sqrt(2))) + x * exp(-x^2/2) / sqrt(2*pi)
     // We compute primal via the dispatch and tangent via the derivative formula.
-    const double sqrt_2 = 1.4142135623730951;
-    const double inv_sqrt_2pi = 0.3989422804014327;
-
     auto p = x.primal();
-    auto scaled = tenzor::mul(p, 1.0 / sqrt_2);
 
     // Primal: 0.5 * x * (1 + erf(x/sqrt(2)))
     // Use the existing ops to build it
-    auto erf_val = tenzor::sigmoid(p); // placeholder - we need erf
     // Actually compute properly using the identity:
     // GELU(x) = x * sigmoid(1.702 * x)  (approximate)
     // But for correctness let's use the exact formula via existing ops

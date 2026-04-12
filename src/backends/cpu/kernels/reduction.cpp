@@ -2306,7 +2306,7 @@ auto argsort_impl(const T* data, int64_t n, bool descending) -> std::vector<int6
 template<typename T>
 void argsort_along_dim(const T* input_data, int64_t* output_data,
                       const std::vector<int64_t>& shape,
-                      const std::vector<int64_t>& strides,
+                      [[maybe_unused]] const std::vector<int64_t>& strides,
                       int64_t dim, bool descending) {
     const int64_t ndim = shape.size();
     const int64_t dim_size = shape[dim];

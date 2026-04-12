@@ -269,17 +269,18 @@ if(TENZOR_ENABLE_PROFILING)
 endif()
 
 # Pre-compiled headers for faster compilation
-target_precompile_headers(tenzor_core PRIVATE
-    <vector>
-    <memory>
-    <string>
-    <unordered_map>
-    <cstdint>
-    <stdexcept>
-    <algorithm>
-    <functional>
-    <optional>
-)
+# NOTE: CMake's target_precompile_headers injects #pragma clang system_header
+# into the generated PCH wrapper, which produces -Wunknown-pragmas on GCC.
+# Use GCC's native -include mechanism instead to get the same effect cleanly.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(tenzor_core PRIVATE
+        "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/pch.hpp"
+    )
+else()
+    target_precompile_headers(tenzor_core PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/pch.hpp
+    )
+endif()
 
 # Include directories
 target_include_directories(tenzor_core PUBLIC
@@ -409,10 +410,7 @@ if(OpenMP_CXX_FOUND)
     target_link_libraries(tenzor_core PUBLIC OpenMP::OpenMP_CXX)
 endif()
 
-# Suppress unused parameter warnings for interface/callback functions
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(tenzor_core PRIVATE -Wno-unused-parameter)
-endif()
+# Unused parameter warnings are not suppressed — fix them with [[maybe_unused]] where needed
 
 # Add compiler definitions
 target_compile_definitions(tenzor_core PRIVATE

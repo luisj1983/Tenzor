@@ -23,7 +23,7 @@ public:
 
     LazyLinearTypeCastBackward() = default;
 
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("LazyLinearTypeCastBackward::forward should not be called");
     }
 

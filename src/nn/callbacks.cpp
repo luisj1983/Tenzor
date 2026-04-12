@@ -112,7 +112,7 @@ EarlyStoppingCallback::EarlyStoppingCallback(
     }
 }
 
-auto EarlyStoppingCallback::on_epoch_end(int epoch, float train_loss, float val_loss) -> void {
+auto EarlyStoppingCallback::on_epoch_end([[maybe_unused]] int epoch, float train_loss, float val_loss) -> void {
     // Select metric to monitor
     float current_loss = (monitor_ == "train_loss") ? train_loss : val_loss;
 
@@ -306,7 +306,7 @@ auto LRSchedulerCallback::update_lr(float new_lr) -> void {
     }
 }
 
-auto LRSchedulerCallback::on_epoch_end(int epoch, float train_loss, float val_loss) -> void {
+auto LRSchedulerCallback::on_epoch_end(int epoch, [[maybe_unused]] float train_loss, float val_loss) -> void {
     float new_lr = current_lr_;
 
     if (schedule_type_ == "step") {

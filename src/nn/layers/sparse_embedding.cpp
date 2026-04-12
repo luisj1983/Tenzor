@@ -18,7 +18,7 @@ public:
         : num_embeddings_(num_embeddings), embedding_dim_(embedding_dim),
           indices_(std::move(indices)), padding_idx_(padding_idx) {}
 
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("SparseEmbeddingBackward::forward should not be called");
     }
 
