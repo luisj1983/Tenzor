@@ -236,6 +236,7 @@ if(TENZOR_BUILD_PYTHON)
             python/numpy_interop.cpp
             # Incremental split of the ~10k-line bindings.cpp monolith
             # (P3.4). New submodule TUs live under python/bindings/.
+            python/bindings/bindings_core.cpp
             python/bindings/bindings_linalg.cpp
             python/bindings/bindings_fft.cpp
             python/bindings/bindings_vision_detection.cpp
@@ -244,6 +245,7 @@ if(TENZOR_BUILD_PYTHON)
             python/bindings/bindings_quantization.cpp
             python/bindings/bindings_optim.cpp
             python/bindings/bindings_autograd.cpp
+            python/bindings/bindings_nn.cpp
         )
 
         target_link_libraries(tenzor_python PRIVATE tenzor_core tenzor_backend_cpu)

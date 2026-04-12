@@ -16,6 +16,12 @@
 
 namespace tenzor::python {
 
+// Core bindings: DType enum, Device class, Tensor class (all methods,
+// operators, factory functions), Variable class, context managers
+// (no_grad, enable_grad, inference_mode, detect_anomaly), CUDA Graph,
+// Event, device availability, and backend introspection.
+void register_core(pybind11::module_& m);
+
 // Self-contained linalg submodule. Creates m.linalg and binds det/inv/
 // solve/cholesky/norm/slogdet/svd/qr/eigh/eigvalsh/matrix_power plus the
 // P2.1 additions (lstsq/pinv/matrix_exp).
@@ -55,5 +61,12 @@ void register_optim(pybind11::module_& m);
 // hessian, jvp). Note: PyCustomFunction registration stays in
 // bindings.cpp since the trampoline class is defined there.
 void register_autograd(pybind11::module_& m);
+
+// Self-contained nn submodule.  Creates m.nn and binds Module (with
+// PyModule trampoline), ModuleList, ModuleDict, Sequential, all layers,
+// activations, loss functions, functional API, gradient clipping,
+// PackedSequence / RNN utilities, training callbacks, checkpointing,
+// and the NeuralNetwork high-level wrapper.
+void register_nn(pybind11::module_& m);
 
 } // namespace tenzor::python
