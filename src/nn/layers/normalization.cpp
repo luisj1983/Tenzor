@@ -1553,23 +1553,36 @@ auto GroupNorm::forward_impl(const Variable& input) -> Variable {
 
     // GPU fast path: dispatch to backend kernel (CUDA, Vulkan, ROCm, etc.)
     if (original_device.type != Device::Type::CPU) {
-        // Ensure weight and bias are on the same device and dtype as input
+        // Float16: upcast to Float32 for precision in mean/variance computation.
+        // GroupNorm statistics (mean, variance) accumulate over group_size * spatial_size
+        // elements; Float16's limited mantissa causes significant rounding errors.
+        DType compute_dtype = original_dtype;
+        bool needs_upcast = (original_dtype == DType::Float16);
+        if (needs_upcast) compute_dtype = DType::Float32;
+
+        Tensor input_compute = needs_upcast ? input.tensor().to(DType::Float32) : input.tensor();
+
         Tensor weight_tensor = affine_
-            ? parameters_["weight"]->tensor().to(original_dtype).to(original_device)
-            : ones({C}, input.tensor().dtype(), input.tensor().device());
+            ? parameters_["weight"]->tensor().to(compute_dtype).to(original_device)
+            : ones({C}, compute_dtype, original_device);
         Tensor bias_tensor = affine_
-            ? parameters_["bias"]->tensor().to(original_dtype).to(original_device)
-            : zeros({C}, input.tensor().dtype(), input.tensor().device());
+            ? parameters_["bias"]->tensor().to(compute_dtype).to(original_device)
+            : zeros({C}, compute_dtype, original_device);
 
         OpAttributes attrs;
         attrs.set(AttrKey::NumGroups, num_groups_);
         attrs.set(AttrKey::Eps, eps_);
-        std::vector<Tensor> inputs_vec = {input.tensor(), weight_tensor, bias_tensor};
+        std::vector<Tensor> inputs_vec = {input_compute, weight_tensor, bias_tensor};
         auto results = dispatch<OpId::GroupNorm>(inputs_vec, attrs);
 
         Tensor output = results[0];
         Tensor saved_mean = results[1];
         Tensor saved_rstd = results[2];
+
+        // Downcast output back to original dtype if we upcast for computation
+        if (needs_upcast) {
+            output = output.to(original_dtype);
+        }
 
         if (input.requires_grad() || (affine_ && parameters_["weight"]->requires_grad())) {
             auto result = Variable(output, true);
