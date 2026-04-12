@@ -357,58 +357,38 @@ auto relu(const Variable& input) -> Variable {
 }
 
 auto sigmoid(const Variable& input) -> Variable {
+    // Delegate to the tenzor:: level op which uses SigmoidBackward_AG
+    // (a proper backward_with_variables that threads through Variable
+    // ops) so higher-order gradients work — previously this path
+    // instantiated the local SigmoidBackward stub and silently produced
+    // zero second derivatives. P4.2: higher-order coverage completion.
+    return ::tenzor::sigmoid(input);
+}
+
+auto tanh(const Variable& input) -> Variable {
+    // Same rationale as sigmoid — delegate to the _AG path for proper
+    // higher-order support via TanhBackward_AG.
+    return ::tenzor::tanh(input);
+}
+
+// Legacy stub body — intentionally unused. Keeps the old dispatch
+// pattern around for reference / fallback during the P4.2 migration.
+// Can be removed once the full higher-order audit is complete.
+[[maybe_unused]] static auto sigmoid_stub_legacy(const Variable& input) -> Variable {
     if (!input.requires_grad() || !is_grad_enabled()) {
         std::vector<Tensor> inputs = {input.tensor()};
         auto result = dispatch(OpId::Sigmoid, inputs)[0];
         return Variable(result, false);
     }
-
-    // Compute forward
     std::vector<Tensor> inputs_vec = {input.tensor()};
     auto result_tensor = dispatch(OpId::Sigmoid, inputs_vec)[0];
-
-    // Set up autograd
     auto grad_fn = std::make_shared<SigmoidBackward>();
-    grad_fn->save_for_backward({result_tensor});  // Save output for backward
-
+    grad_fn->save_for_backward({result_tensor});
     std::vector<std::shared_ptr<Function>> next_funcs;
     if (input.grad_fn()) {
         next_funcs.push_back(input.grad_fn());
     }
     grad_fn->set_next_functions(next_funcs);
-
-    // Track input variable for gradient accumulation
-    std::vector<Variable> input_vars;
-    input_vars.push_back(input);
-    grad_fn->set_input_variables(input_vars);
-
-    Variable output(result_tensor, true);
-    output.set_grad_fn(grad_fn);
-    return output;
-}
-
-auto tanh(const Variable& input) -> Variable {
-    if (!input.requires_grad() || !is_grad_enabled()) {
-        std::vector<Tensor> inputs = {input.tensor()};
-        auto result = dispatch(OpId::Tanh, inputs)[0];
-        return Variable(result, false);
-    }
-
-    // Compute forward
-    std::vector<Tensor> inputs_vec = {input.tensor()};
-    auto result_tensor = dispatch(OpId::Tanh, inputs_vec)[0];
-
-    // Set up autograd
-    auto grad_fn = std::make_shared<TanhBackward>();
-    grad_fn->save_for_backward({result_tensor});  // Save output for backward
-
-    std::vector<std::shared_ptr<Function>> next_funcs;
-    if (input.grad_fn()) {
-        next_funcs.push_back(input.grad_fn());
-    }
-    grad_fn->set_next_functions(next_funcs);
-
-    // Track input variable for gradient accumulation
     std::vector<Variable> input_vars;
     input_vars.push_back(input);
     grad_fn->set_input_variables(input_vars);

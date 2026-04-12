@@ -57,6 +57,37 @@ void set_activation_offload(bool enabled);
 bool activation_offload_enabled();
 
 /**
+ * @brief Inject the three-method higher-order stub into a Function subclass.
+ *
+ * Pastes `backward_with_variables()`, `supports_higher_order()`, and
+ * `is_higher_order_stub()` overrides that forward to
+ * `Function::passthrough_stub_backward()`. Use from inside a Function
+ * subclass whose forward is linear or piecewise-linear (and therefore
+ * whose second derivative is structurally zero) — pooling, dropout,
+ * flatten, embedding, type-cast, bilinear upsample, ReLU, LeakyReLU.
+ *
+ * Example:
+ * @code
+ * class AvgPool2dBackward : public Function {
+ * public:
+ *     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+ *     TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
+ * };
+ * @endcode
+ *
+ * Do NOT use for genuinely non-linear ops (sigmoid, tanh, GeLU, conv,
+ * batch/layer norm) — those need a real `backward_with_variables`
+ * implementation that builds a gradient graph via Variable ops.
+ */
+#define TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()                               \
+    auto backward_with_variables(std::vector<Variable> grad_outputs)             \
+        -> std::vector<Variable> override {                                      \
+        return passthrough_stub_backward(std::move(grad_outputs));               \
+    }                                                                            \
+    auto supports_higher_order() const -> bool override { return true; }         \
+    auto is_higher_order_stub() const -> bool override { return true; }
+
+/**
  * @brief Per-function offload policy for activation offloading.
  *
  * Controls whether a specific Function offloads saved tensors to CPU,
@@ -217,15 +248,33 @@ public:
      * backward() and wraps results without building a gradient graph. This
      * means higher-order gradients through this operation will be zero.
      *
-     * As of the current coverage pass, the only remaining stub is
-     * UpsampleBilinearBackward. Bilinear upsample is a linear function of
-     * its input (fixed interpolation weights), so its second derivative is
-     * structurally zero and the passthrough produces the mathematically
-     * correct result.
+     * Stubs are appropriate for operations whose forward is linear or
+     * piecewise-linear (pooling, dropout, flatten, embedding, type-cast,
+     * bilinear upsample, ReLU/LeakyReLU), because the mathematical second
+     * derivative is structurally zero and the passthrough produces the
+     * correct result. Ops with genuinely non-linear forwards (sigmoid,
+     * tanh, GeLU, conv, normalization, ...) need real backward_with_variables
+     * implementations, not stubs.
      *
      * @return true if backward_with_variables() is a passthrough stub
      */
     virtual auto is_higher_order_stub() const -> bool { return false; }
+
+    /**
+     * @brief Shared passthrough used by `is_higher_order_stub()`-style
+     *        subclasses whose second derivative is structurally zero.
+     *
+     * Unwraps the incoming Variables to their tensors, calls the
+     * subclass's raw `backward()`, and returns Variables that carry
+     * no grad_fn. Autograd treats the resulting gradient graph as
+     * disconnected at this op (higher-order gradients become zero).
+     *
+     * Intended to be called from a subclass's `backward_with_variables`
+     * override; normally paired with the
+     * `TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()` helper macro below.
+     */
+    auto passthrough_stub_backward(std::vector<Variable> grad_outputs)
+        -> std::vector<Variable>;
 
     /**
      * @brief Get readable name for this backward function.

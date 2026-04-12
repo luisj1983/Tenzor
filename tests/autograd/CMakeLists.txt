@@ -14,6 +14,11 @@ target_link_libraries(test_higher_order_gradients PRIVATE tenzor_core GTest::gte
 add_executable(test_higher_order_nn test_higher_order_nn.cpp)
 target_link_libraries(test_higher_order_nn PRIVATE tenzor_core GTest::gtest_main)
 
+# Higher-order through nonlinear activations (sigmoid, tanh) — P4.2
+add_executable(test_higher_order_activations test_higher_order_activations.cpp)
+target_link_libraries(test_higher_order_activations PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_higher_order_activations LABELS "autograd" DISCOVERY_TIMEOUT 60)
+
 # Gradient checking tests
 add_executable(test_gradcheck test_gradcheck.cpp)
 target_link_libraries(test_gradcheck PRIVATE tenzor_core GTest::gtest_main)

@@ -270,6 +270,27 @@ auto Function::saved_variables() const -> const std::vector<Variable>& {
     return saved_variables_;
 }
 
+auto Function::passthrough_stub_backward(std::vector<Variable> grad_outputs)
+    -> std::vector<Variable> {
+    // Strip the Variable wrappers, call the subclass's raw backward(),
+    // and return Variables without grad_fn. Used by Function subclasses
+    // whose 2nd derivative is structurally zero (linear or piecewise-
+    // linear forwards); pair with is_higher_order_stub() = true so the
+    // engine's Warn-mode counter reflects the disconnection.
+    std::vector<Tensor> tensor_grads;
+    tensor_grads.reserve(grad_outputs.size());
+    for (auto& var : grad_outputs) {
+        tensor_grads.push_back(var.tensor());
+    }
+    auto result_tensors = backward(std::move(tensor_grads));
+    std::vector<Variable> result_vars;
+    result_vars.reserve(result_tensors.size());
+    for (auto& t : result_tensors) {
+        result_vars.emplace_back(std::move(t), /*requires_grad=*/false);
+    }
+    return result_vars;
+}
+
 auto Function::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // Check if any grad_output requires grad (i.e., create_graph=true was used)
     bool any_requires_grad = false;
