@@ -831,6 +831,61 @@ private:
 };
 
 /**
+ * @brief Layout optimization pass (NCHW -> NHWC).
+ *
+ * Automatically converts convolution and batch normalization nodes to
+ * channels-last memory format on GPU devices that benefit from it
+ * (e.g., Tensor Core utilization on NVIDIA/AMD GPUs).
+ *
+ * Inserts LayoutConvert pseudo-nodes at format boundaries to maintain
+ * correctness when transitioning between channels-last and contiguous ops.
+ */
+class LayoutOptimizationPass : public Pass {
+public:
+    auto run(Graph& graph) -> bool override;
+    auto name() const -> std::string override { return "LayoutOptimization"; }
+
+private:
+    /// Check if a node benefits from channels-last format
+    auto benefits_from_channels_last(OpType op) const -> bool;
+
+    /// Check if a node is format-agnostic (element-wise, activation, etc.)
+    auto is_format_agnostic(OpType op) const -> bool;
+};
+
+/**
+ * @brief DType auto-optimization pass (compile-time AMP).
+ *
+ * Automatically inserts Cast nodes to use lower-precision types
+ * (Float16/BFloat16) for compute-heavy operations while keeping
+ * precision-sensitive operations in Float32.
+ *
+ * Only active on GPU-device graphs. Must be explicitly enabled
+ * or triggered via "max-autotune" compilation mode.
+ */
+class DTypeOptimizationPass : public Pass {
+public:
+    auto run(Graph& graph) -> bool override;
+    auto name() const -> std::string override { return "DTypeOptimization"; }
+
+    /// Set target low-precision dtype (default: Float16)
+    auto set_target_dtype(DType dtype) -> void { target_dtype_ = dtype; }
+
+    /// Enable or disable the pass
+    auto set_enabled(bool enabled) -> void { enabled_ = enabled; }
+
+private:
+    DType target_dtype_{DType::Float16};
+    bool enabled_{true};
+
+    /// Check if an op is compute-heavy (benefits from lower precision)
+    auto is_compute_heavy(OpType op) const -> bool;
+
+    /// Check if an op is stability-critical (must stay in Float32)
+    auto is_stability_critical(OpType op) const -> bool;
+};
+
+/**
  * @brief Compiler that applies optimization passes.
  *
  * The compiler runs a sequence of passes to transform and optimize

@@ -710,6 +710,14 @@ auto Graph::infer_types() -> void {
                     output_shapes.push_back(input_shapes[0]);
                 }
                 break;
+
+            case OpType::LayoutConvert:
+            case OpType::Cast:
+                // Shape-preserving: output has same shape as input
+                if (!input_shapes.empty()) {
+                    output_shapes.push_back(input_shapes[0]);
+                }
+                break;
         }
 
         // Update output shapes
@@ -1307,6 +1315,14 @@ auto Graph::infer_symbolic_types() -> void {
 
             case OpType::SwapOut:
             case OpType::SwapIn:
+                if (!input_sym_shapes.empty()) {
+                    output_sym_shapes.push_back(input_sym_shapes[0]);
+                }
+                break;
+
+            case OpType::LayoutConvert:
+            case OpType::Cast:
+                // Shape-preserving: output has same shape as input
                 if (!input_sym_shapes.empty()) {
                     output_sym_shapes.push_back(input_sym_shapes[0]);
                 }
@@ -2080,6 +2096,28 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             break;
         }
 
+        case OpType::LayoutConvert: {
+            // Convert memory format
+            if (!input_vars.empty()) {
+                int64_t fmt = node->get_int_attr("target_format");
+                auto mem_fmt = (fmt == 1) ? MemoryFormat::ChannelsLast
+                             : (fmt == 2) ? MemoryFormat::ChannelsLast3d
+                             : MemoryFormat::Contiguous;
+                outputs.push_back(Variable(input_vars[0].tensor().to(mem_fmt), false));
+            }
+            break;
+        }
+
+        case OpType::Cast: {
+            // Convert dtype
+            if (!input_vars.empty()) {
+                int64_t target_dtype_int = node->get_int_attr("target_dtype");
+                auto target_dtype = static_cast<DType>(target_dtype_int);
+                outputs.push_back(Variable(input_vars[0].tensor().to(target_dtype), false));
+            }
+            break;
+        }
+
         // Quantized and sparse ops — handled by specialized codegen, not
         // interpreted here.  Fall through with no outputs so the executor
         // raises a clear error if these reach the interpreter path.
@@ -2184,6 +2222,66 @@ auto Graph::symbolic_input_shapes() const -> std::vector<SymbolicShape> {
         }
     }
     return result;
+}
+
+auto Graph::partition_at(const std::vector<size_t>& break_indices)
+    -> std::vector<std::shared_ptr<Graph>> {
+
+    if (break_indices.empty()) {
+        // No breaks - return empty (caller should just use the original graph)
+        return {};
+    }
+
+    std::vector<std::shared_ptr<Graph>> partitions;
+    auto& all_nodes = nodes();
+    size_t total = all_nodes.size();
+
+    // Create sorted, deduplicated break points
+    std::vector<size_t> breaks(break_indices.begin(), break_indices.end());
+    std::sort(breaks.begin(), breaks.end());
+    breaks.erase(std::unique(breaks.begin(), breaks.end()), breaks.end());
+
+    // Build partition ranges: [start, end) excluding break nodes
+    std::vector<std::pair<size_t, size_t>> ranges;
+    size_t start = 0;
+    for (size_t bp : breaks) {
+        if (bp > start) {
+            ranges.push_back({start, bp});
+        }
+        // Skip the break node itself
+        start = bp + 1;
+    }
+    if (start < total) {
+        ranges.push_back({start, total});
+    }
+
+    // Track which values are produced by which partition
+    std::unordered_map<std::string, size_t> value_to_partition;
+
+    for (size_t p = 0; p < ranges.size(); ++p) {
+        auto sub_graph = std::make_shared<Graph>();
+        auto [range_start, range_end] = ranges[p];
+
+        // Collect all value IDs produced by nodes in this range
+        std::unordered_set<std::string> local_values;
+
+        for (size_t i = range_start; i < range_end; ++i) {
+            auto& node = all_nodes[i];
+
+            // Copy the node to the sub-graph
+            sub_graph->add_node(node);
+
+            // Track outputs
+            for (auto& output : node->outputs()) {
+                local_values.insert(output->id());
+                value_to_partition[output->id()] = p;
+            }
+        }
+
+        partitions.push_back(sub_graph);
+    }
+
+    return partitions;
 }
 
 } // namespace jit

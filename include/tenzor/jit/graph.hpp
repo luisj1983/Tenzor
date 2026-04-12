@@ -77,6 +77,13 @@ public:
     auto dtype() const -> DType { return dtype_; }
 
     /**
+     * @brief Set data type (for dtype optimization pass).
+     *
+     * @param d New data type
+     */
+    auto set_dtype(DType d) -> void { dtype_ = d; }
+
+    /**
      * @brief Get device.
      *
      * @return Device reference
@@ -734,6 +741,19 @@ public:
      * @return Value count
      */
     auto num_values() const -> size_t { return values_.size(); }
+
+    /**
+     * @brief Partition graph at specified node indices.
+     *
+     * Splits the graph into sub-graphs at the given break points.
+     * Each sub-graph is a contiguous sequence of nodes that can be
+     * compiled independently.
+     *
+     * @param break_indices Node indices where breaks occur
+     * @return Vector of sub-graphs (one per partition)
+     */
+    auto partition_at(const std::vector<size_t>& break_indices)
+        -> std::vector<std::shared_ptr<Graph>>;
 
     /**
      * @brief Find all nodes matching a given operation type name.

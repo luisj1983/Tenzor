@@ -1978,6 +1978,327 @@ auto SymbolicTracePass::run(Graph& graph) -> bool {
 }
 
 // ============================================================================
+// Layout Optimization Pass
+// ============================================================================
+
+auto LayoutOptimizationPass::benefits_from_channels_last(OpType op) const -> bool {
+    return op == OpType::Conv2d || op == OpType::BatchNorm2d;
+}
+
+auto LayoutOptimizationPass::is_format_agnostic(OpType op) const -> bool {
+    switch (op) {
+        case OpType::ReLU:
+        case OpType::Sigmoid:
+        case OpType::Tanh:
+        case OpType::GELU:
+        case OpType::Add:
+        case OpType::Sub:
+        case OpType::Mul:
+        case OpType::Div:
+        case OpType::Exp:
+        case OpType::Log:
+        case OpType::Sqrt:
+        case OpType::Abs:
+        case OpType::Neg:
+        case OpType::Clamp:
+        case OpType::Dropout:
+        case OpType::ResidualAdd:
+            return true;
+        default:
+            return false;
+    }
+}
+
+auto LayoutOptimizationPass::run(Graph& graph) -> bool {
+    bool changed = false;
+
+    // Only optimize for GPU devices
+    auto& inputs = graph.inputs();
+    if (inputs.empty()) return false;
+
+    auto device = inputs[0]->device();
+    if (device.type == Device::Type::CPU) return false;
+
+    // Phase 1: Identify nodes that benefit from channels-last and mark them.
+    // Also propagate through format-agnostic ops connected to marked nodes.
+    std::unordered_set<Node*> channels_last_nodes;
+
+    for (auto& node : graph.nodes()) {
+        if (benefits_from_channels_last(node->op_type())) {
+            // Check that inputs are 4D (NCHW)
+            auto& node_inputs = node->inputs();
+            if (!node_inputs.empty() && node_inputs[0]->shape().size() == 4) {
+                channels_last_nodes.insert(node.get());
+            }
+        }
+    }
+
+    if (channels_last_nodes.empty()) return false;
+
+    // Phase 2: Propagate channels-last format through format-agnostic ops
+    // that sit between two channels-last ops (avoid unnecessary conversions).
+    bool propagated = true;
+    while (propagated) {
+        propagated = false;
+        for (auto& node : graph.nodes()) {
+            if (channels_last_nodes.count(node.get()) > 0) continue;
+            if (!is_format_agnostic(node->op_type())) continue;
+
+            // Check if any input comes from a channels-last node
+            bool has_cl_input = false;
+            for (auto& input : node->inputs()) {
+                auto producer = input->node();
+                if (producer && channels_last_nodes.count(producer.get()) > 0) {
+                    has_cl_input = true;
+                    break;
+                }
+            }
+
+            // Check if any consumer is a channels-last node
+            bool has_cl_consumer = false;
+            for (auto& output : node->outputs()) {
+                for (auto& use_wp : output->uses()) {
+                    auto use = use_wp.lock();
+                    if (use && channels_last_nodes.count(use.get()) > 0) {
+                        has_cl_consumer = true;
+                        break;
+                    }
+                }
+                if (has_cl_consumer) break;
+            }
+
+            if (has_cl_input && has_cl_consumer) {
+                channels_last_nodes.insert(node.get());
+                propagated = true;
+            }
+        }
+    }
+
+    // Phase 3: Annotate all channels-last nodes
+    for (auto& node : graph.nodes()) {
+        if (channels_last_nodes.count(node.get()) > 0) {
+            // 1 = ChannelsLast (matches MemoryFormat enum)
+            node->set_int_attr("memory_format", 1);
+            changed = true;
+        }
+    }
+
+    // Phase 4: Insert LayoutConvert nodes at format boundaries.
+    // A boundary exists where a non-channels-last node consumes output
+    // from a channels-last node, or vice versa.
+    //
+    // We collect insertions first, then apply them to avoid iterator
+    // invalidation.
+    struct ConvertInsertion {
+        std::shared_ptr<Value> value;       // Value crossing the boundary
+        std::shared_ptr<Node> consumer;     // Node consuming the value
+        size_t input_index;                 // Which input of consumer
+        int64_t target_format;              // 0=Contiguous, 1=ChannelsLast
+    };
+    std::vector<ConvertInsertion> insertions;
+
+    for (auto& node : graph.nodes()) {
+        bool node_is_cl = channels_last_nodes.count(node.get()) > 0;
+
+        for (size_t i = 0; i < node->inputs().size(); ++i) {
+            auto& input_val = node->inputs()[i];
+            auto producer = input_val->node();
+
+            if (!producer) continue;  // Graph input, no conversion needed
+            if (input_val->shape().size() != 4) continue;  // Only 4D tensors
+
+            bool producer_is_cl = channels_last_nodes.count(producer.get()) > 0;
+
+            if (producer_is_cl && !node_is_cl) {
+                // channels-last -> contiguous boundary
+                insertions.push_back({input_val, node, i, 0});
+            } else if (!producer_is_cl && node_is_cl) {
+                // contiguous -> channels-last boundary
+                insertions.push_back({input_val, node, i, 1});
+            }
+        }
+    }
+
+    // Apply insertions
+    for (auto& ins : insertions) {
+        // Create a new LayoutConvert node
+        auto convert_output = std::make_shared<Value>(
+            ins.value->id() + "_fmt",
+            ins.value->shape(),
+            ins.value->dtype(),
+            ins.value->device());
+
+        auto convert_node = std::make_shared<Node>(OpType::LayoutConvert);
+        convert_node->add_input(ins.value);
+        convert_node->add_output(convert_output);
+        convert_node->set_int_attr("target_format", ins.target_format);
+        convert_output->set_node(convert_node);
+
+        // Replace the input on the consumer
+        ins.consumer->replace_input(ins.input_index, convert_output);
+        convert_output->add_use(ins.consumer);
+
+        // Add the convert node to the graph
+        graph.add_node(convert_node);
+        changed = true;
+    }
+
+    if (changed) {
+        graph.topological_sort();
+    }
+
+    return changed;
+}
+
+// ============================================================================
+// DType Optimization Pass
+// ============================================================================
+
+auto DTypeOptimizationPass::is_compute_heavy(OpType op) const -> bool {
+    return op == OpType::MatMul || op == OpType::Linear ||
+           op == OpType::Conv2d || op == OpType::Bmm;
+}
+
+auto DTypeOptimizationPass::is_stability_critical(OpType op) const -> bool {
+    switch (op) {
+        case OpType::Softmax:
+        case OpType::LogSoftmax:
+        case OpType::LayerNorm:
+        case OpType::BatchNorm2d:
+        case OpType::Sum:
+        case OpType::Mean:
+        case OpType::Log:
+        case OpType::Exp:
+        case OpType::Pow:
+        case OpType::Norm:
+            return true;
+        default:
+            return false;
+    }
+}
+
+auto DTypeOptimizationPass::run(Graph& graph) -> bool {
+    if (!enabled_) return false;
+
+    // Only optimize for GPU devices
+    auto& inputs = graph.inputs();
+    if (inputs.empty()) return false;
+
+    auto device = inputs[0]->device();
+    if (device.type == Device::Type::CPU) return false;
+
+    // Only optimize Float32 graphs
+    bool has_fp32 = false;
+    for (auto& input : inputs) {
+        if (input->dtype() == DType::Float32) {
+            has_fp32 = true;
+            break;
+        }
+    }
+    if (!has_fp32) return false;
+
+    bool changed = false;
+
+    // Track which values have been downcast
+    std::unordered_set<std::string> downcast_values;
+
+    // Collect cast insertions to avoid modifying graph during iteration
+    struct CastInsertion {
+        std::shared_ptr<Value> value;
+        std::shared_ptr<Node> consumer;
+        size_t input_index;
+        DType target_dtype;
+    };
+    std::vector<CastInsertion> insertions;
+
+    for (auto& node : graph.nodes()) {
+        auto op = node->op_type();
+
+        if (is_compute_heavy(op)) {
+            // Downcast inputs to target_dtype for compute-heavy ops
+            for (size_t i = 0; i < node->inputs().size(); ++i) {
+                auto& input_val = node->inputs()[i];
+                if (input_val->dtype() == DType::Float32 &&
+                    downcast_values.count(input_val->id()) == 0) {
+                    insertions.push_back({input_val, node, i, target_dtype_});
+                }
+            }
+            // Mark outputs as downcast
+            for (auto& output : node->outputs()) {
+                output->set_dtype(target_dtype_);
+                downcast_values.insert(output->id());
+            }
+            changed = true;
+        } else if (is_stability_critical(op)) {
+            // Upcast any downcast inputs back to Float32
+            for (size_t i = 0; i < node->inputs().size(); ++i) {
+                auto& input_val = node->inputs()[i];
+                if (downcast_values.count(input_val->id()) > 0) {
+                    insertions.push_back({input_val, node, i, DType::Float32});
+                }
+            }
+            // Outputs remain Float32
+            for (auto& output : node->outputs()) {
+                downcast_values.erase(output->id());
+            }
+        } else {
+            // Neutral ops: inherit dtype from primary input
+            if (!node->inputs().empty()) {
+                auto& primary_input = node->inputs()[0];
+                if (downcast_values.count(primary_input->id()) > 0) {
+                    for (auto& output : node->outputs()) {
+                        output->set_dtype(target_dtype_);
+                        downcast_values.insert(output->id());
+                    }
+                }
+            }
+        }
+    }
+
+    // Insert Cast nodes at graph outputs to ensure Float32 output
+    for (auto& output : graph.outputs()) {
+        if (downcast_values.count(output->id()) > 0) {
+            // Find the output node and add a cast
+            auto producer = output->node();
+            if (producer) {
+                // We'll handle this by inserting a cast before the Output node
+                // For simplicity, just mark the output - the execution engine
+                // will handle the final cast
+                insertions.push_back({output, nullptr, 0, DType::Float32});
+            }
+        }
+    }
+
+    // Apply cast insertions (same pattern as LayoutOptimizationPass)
+    for (auto& ins : insertions) {
+        if (!ins.consumer) continue;  // Skip output-only casts for now
+
+        auto cast_output = std::make_shared<Value>(
+            ins.value->id() + "_cast",
+            ins.value->shape(),
+            ins.target_dtype,
+            ins.value->device());
+
+        auto cast_node = std::make_shared<Node>(OpType::Cast);
+        cast_node->add_input(ins.value);
+        cast_node->add_output(cast_output);
+        cast_node->set_int_attr("target_dtype", static_cast<int64_t>(ins.target_dtype));
+        cast_output->set_node(cast_node);
+
+        ins.consumer->replace_input(ins.input_index, cast_output);
+        cast_output->add_use(ins.consumer);
+
+        graph.add_node(cast_node);
+    }
+
+    if (changed) {
+        graph.topological_sort();
+    }
+
+    return changed;
+}
+
+// ============================================================================
 // Compiler Implementation
 // ============================================================================
 

@@ -135,7 +135,11 @@ enum class OpType {
 
     // Control flow
     If,     ///< Conditional branch: cond → then_branch / else_branch subgraphs
-    Loop    ///< Loop: (max_iter, cond, carried...) → body subgraph → (carried...)
+    Loop,   ///< Loop: (max_iter, cond, carried...) → body subgraph → (carried...)
+
+    // Layout and type conversion (inserted by optimization passes)
+    LayoutConvert, ///< Convert memory format (e.g., NCHW -> NHWC)
+    Cast           ///< Convert dtype (e.g., Float32 -> Float16)
 };
 
 /**

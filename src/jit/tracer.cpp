@@ -85,6 +85,8 @@ auto op_type_to_string(OpType type) -> std::string {
         case OpType::Output: return "Output";
         case OpType::If: return "If";
         case OpType::Loop: return "Loop";
+        case OpType::LayoutConvert: return "LayoutConvert";
+        case OpType::Cast: return "Cast";
         default: return "Unknown";
     }
 }
@@ -151,7 +153,9 @@ auto string_to_op_type(const std::string& str) -> OpType {
         {"Input", OpType::Input},
         {"Output", OpType::Output},
         {"If", OpType::If},
-        {"Loop", OpType::Loop}
+        {"Loop", OpType::Loop},
+        {"LayoutConvert", OpType::LayoutConvert},
+        {"Cast", OpType::Cast}
     };
 
     auto it = string_to_type.find(str);
@@ -358,6 +362,7 @@ auto Tracer::clear() -> void {
     tensor_id_map_.clear();
     tensor_storage_.clear();
     next_tensor_id_ = 0;
+    graph_break_count_ = 0;
     // clear() is the tracer's full reset — it stops tracing too, so
     // TracingGuard's destructor leaves the global tracer in a clean
     // state for the next guard. The Tracer API contract is:
