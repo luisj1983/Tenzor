@@ -4,6 +4,7 @@ set(TENZOR_CORE_SOURCES
     core/storage.cpp
     core/device.cpp
     core/dtype.cpp
+    core/jit_hooks.cpp
     core/dlpack.cpp
     core/shape.cpp
     core/init.cpp

@@ -1,5 +1,6 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/shape.hpp"
+#include "tenzor/core/jit_hooks.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/backend/loader.hpp"
@@ -641,6 +642,12 @@ auto Tensor::item() const -> T {
             std::string(dtype_name(dtype())) + " but item<" +
             std::string(dtype_name(expected)) + ">() was called");
     }
+    // If a JIT trace is active, .item() is a graph break: the scalar
+    // gets baked into the trace as a constant, and any downstream
+    // Python `if` / `while` on this value silently freezes the taken
+    // branch. Notify the tracer so it can warn (default) or throw
+    // (TENZOR_JIT_STRICT=1). Free when no trace is active.
+    tenzor::detail::notify_graph_break("scalar extraction (.item()) on a traced tensor");
     if (device().type != Device::Type::CPU) {
         // Single-element transfer: copy just sizeof(T) bytes instead of entire tensor
         T value;

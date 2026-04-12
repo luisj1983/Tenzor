@@ -279,6 +279,52 @@ public:
     auto is_tracing() const -> bool { return tracing_; }
 
     /**
+     * @brief Enable or disable strict mode for the current tracer.
+     *
+     * When strict mode is ON, any un-traceable operation encountered
+     * during a trace (scalar extraction via `.item()`, data-dependent
+     * `if`/`while`, any op that isn't representable in the IR) throws
+     * a `std::runtime_error` with a pointer to `tenzor::jit::cond` /
+     * `while_loop` as the replacement.
+     *
+     * When OFF (default), un-traceable ops record a warning and
+     * increment `graph_break_count()` but tracing continues; the
+     * compiled graph bakes in whichever branch was taken and becomes
+     * brittle for inputs that would take a different branch.
+     *
+     * Strict mode defaults to the value of the `TENZOR_JIT_STRICT`
+     * environment variable read at `start_trace()` time. Set the env
+     * var to any non-empty, non-"0" value to enable.
+     */
+    auto set_strict_mode(bool strict) -> void { strict_mode_ = strict; }
+
+    /**
+     * @brief Query the current strict-mode setting.
+     */
+    [[nodiscard]] auto is_strict_mode() const -> bool { return strict_mode_; }
+
+    /**
+     * @brief Number of graph breaks recorded during the current trace.
+     *
+     * Useful after `end_trace()` to surface a diagnostic count without
+     * inspecting logs. Reset by `start_trace()`/`clear()`.
+     */
+    [[nodiscard]] auto graph_break_count() const -> int64_t { return graph_break_count_; }
+
+    /**
+     * @brief Report a graph-break during tracing.
+     *
+     * Called by the scalar-extraction hook, by data-dependent control
+     * flow, and by any other leaf operation that cannot be cleanly
+     * represented in the IR. In strict mode this throws; otherwise it
+     * logs to stderr and increments `graph_break_count()`.
+     *
+     * @param reason Human-readable description of what broke. Used in
+     *               the strict-mode exception message and stderr log.
+     */
+    auto record_graph_break(const std::string& reason) -> void;
+
+    /**
      * @brief Trace a conditional branch (if/else).
      *
      * Records both branches as subgraphs in the IR. At execution time,
@@ -326,6 +372,8 @@ public:
 
 private:
     bool tracing_{false};                                       ///< Tracing active flag
+    bool strict_mode_{false};                                   ///< Throw on graph breaks
+    int64_t graph_break_count_{0};                              ///< Diagnostic counter
     std::vector<TracedOp> ops_;                                 ///< Recorded operations
     std::unordered_map<std::string, TensorInfo> tensor_info_;   ///< Tensor metadata
     std::unordered_map<void*, std::string> tensor_id_map_;      ///< Pointer to ID mapping

@@ -7,6 +7,10 @@
 #include "../../include/tenzor/jit/compiler.hpp"
 #include "../../include/tenzor/jit/tracing_interceptor.hpp"
 #include "../../include/tenzor/backend/dispatch_interceptor.hpp"
+#include "../../include/tenzor/core/jit_hooks.hpp"
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <sstream>
 #include <iomanip>
 #include <stdexcept>
@@ -161,9 +165,49 @@ auto string_to_op_type(const std::string& str) -> OpType {
 // Tracer implementation
 // ============================================================================
 
+namespace {
+// Read TENZOR_JIT_STRICT from the environment. Accepts any non-empty
+// string that is not "0" / "false" as "enabled".
+bool read_strict_mode_from_env() {
+    const char* env = std::getenv("TENZOR_JIT_STRICT");
+    if (env == nullptr) return false;
+    if (env[0] == '\0') return false;
+    if (std::strcmp(env, "0") == 0) return false;
+    if (std::strcmp(env, "false") == 0) return false;
+    if (std::strcmp(env, "False") == 0) return false;
+    if (std::strcmp(env, "FALSE") == 0) return false;
+    return true;
+}
+} // anonymous namespace
+
 auto Tracer::start_trace() -> void {
     clear();
     tracing_ = true;
+    // Default strict mode from environment — can be overridden after
+    // start_trace() via set_strict_mode().
+    strict_mode_ = read_strict_mode_from_env();
+    graph_break_count_ = 0;
+}
+
+auto Tracer::record_graph_break(const std::string& reason) -> void {
+    if (!tracing_) return;
+    ++graph_break_count_;
+
+    const std::string msg =
+        std::string("tenzor::jit tracer graph break: ") + reason +
+        ". The captured graph bakes in whichever branch/value was taken "
+        "at trace time and will be incorrect for inputs that would take a "
+        "different path. Replace with tenzor::jit::cond / jit::while_loop "
+        "to record both sides of the branch, or keep the op outside the "
+        "traced region.";
+
+    if (strict_mode_) {
+        // Turn tracing off so the thrown exception unwinds cleanly
+        // through the tracing guard.
+        tracing_ = false;
+        throw std::runtime_error(msg);
+    }
+    std::fprintf(stderr, "[tenzor.jit] warning: %s\n", msg.c_str());
 }
 
 auto Tracer::end_trace(const std::vector<Variable>& inputs,
@@ -352,9 +396,22 @@ TracingGuard::TracingGuard() : tracer_(Tracer::get_instance()) {
         tracer_, /*on_graph_break=*/nullptr);
     DispatchInterceptorStack::push(std::move(interceptor));
     interceptor_installed_ = true;
+
+    // Install a graph-break hook so that leaf operations in tenzor_core
+    // (notably Tensor::item(), but also any future data-dependent path)
+    // can notify the tracer without a cyclic include. See
+    // include/tenzor/core/jit_hooks.hpp.
+    tenzor::detail::set_graph_break_hook(
+        [this](const std::string& reason) {
+            tracer_.record_graph_break(reason);
+        });
 }
 
 TracingGuard::~TracingGuard() {
+    // Tear down the graph-break hook so subsequent non-traced calls to
+    // .item() don't walk into a stale Tracer reference.
+    tenzor::detail::set_graph_break_hook(nullptr);
+
     if (interceptor_installed_) {
         DispatchInterceptorStack::pop();
     }
