@@ -554,6 +554,29 @@ enum class OpId : uint16_t {
     BitwiseRightShift,         // Element-wise right shift
 
     // =========================================================================
+    // Scatter-Reduce Operations (530-539)
+    // =========================================================================
+    ScatterReduce = 530,       // Scatter with reduction (sum/prod/mean/amax/amin)
+
+    // =========================================================================
+    // Fused GEMM Operations (540-549)
+    // =========================================================================
+    Addmm = 540,               // beta*input + alpha*(mat1 @ mat2)
+    Addmv = 541,               // beta*input + alpha*(mat @ vec)
+    Baddbmm = 542,             // Batched: beta*input + alpha*(batch1 @ batch2)
+
+    // =========================================================================
+    // Repeat/Interleave Operations (550-559)
+    // =========================================================================
+    RepeatInterleave = 550,    // Repeat each element along a dimension
+
+    // =========================================================================
+    // Cumulative Scan Operations (560-569)
+    // =========================================================================
+    Logcumsumexp = 560,        // Log-cumulative-sum-exp along a dimension
+    Bincount = 561,            // Count occurrences of each value in integer tensor
+
+    // =========================================================================
     // Sentinel (MUST BE LAST)
     // =========================================================================
     OP_COUNT

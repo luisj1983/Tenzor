@@ -1,0 +1,54 @@
+#version 450
+
+// Nansum: sum all elements, skipping NaN values.
+// Uses Kahan compensated summation for accuracy.
+// Dispatched as a single workgroup for full reduction.
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer Input  { float input_data[]; };
+layout(binding = 1) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+} params;
+
+shared float sdata[WORKGROUP_SIZE];
+shared float scomp[WORKGROUP_SIZE];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+
+    // Each thread accumulates over a stride of WORKGROUP_SIZE
+    float accum = 0.0;
+    float comp  = 0.0;
+    for (uint i = tid; i < params.num_elements; i += WORKGROUP_SIZE) {
+        float val = input_data[i];
+        if (!isnan(val)) {
+            float y = val - comp;
+            float t = accum + y;
+            comp = (t - accum) - y;
+            accum = t;
+        }
+    }
+
+    sdata[tid] = accum;
+    scomp[tid] = comp;
+    barrier();
+
+    // Tree reduction in shared memory
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            float c = scomp[tid] + scomp[tid + s];
+            float y = sdata[tid + s] - c;
+            float t = sdata[tid] + y;
+            scomp[tid] = (t - sdata[tid]) - y;
+            sdata[tid] = t;
+        }
+        barrier();
+    }
+
+    if (tid == 0) {
+        output_data[0] = sdata[0];
+    }
+}

@@ -167,6 +167,11 @@ auto attr_key_name(AttrKey key) -> std::string_view {
         case AttrKey::Replacement: return "replacement";
         case AttrKey::ReturnComplex: return "return_complex";
         case AttrKey::WinLength: return "win_length";
+        case AttrKey::Lower: return "lower";
+        case AttrKey::IncludeSelf: return "include_self";
+        case AttrKey::NanValue: return "nan_value";
+        case AttrKey::PosInfValue: return "pos_inf_value";
+        case AttrKey::NegInfValue: return "neg_inf_value";
         case AttrKey::_Count: return "_count";
     }
     return "unknown";

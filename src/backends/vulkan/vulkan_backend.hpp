@@ -287,6 +287,9 @@ public:
     auto dispatchBinaryOp(const std::string& op_name, const Tensor& a, const Tensor& b) -> Tensor;
     auto dispatchUnaryOp(const std::string& op_name, const Tensor& input) -> Tensor;
     auto dispatchUnaryOpWithParam(const std::string& op_name, const Tensor& input, float param) -> Tensor;
+    // NanToNum and bitwise shift dispatchers (vulkan_ops_misc.cpp). Replace previous CPU fallbacks.
+    auto dispatchNanToNum(const Tensor& input, float nan_val, float posinf_val, float neginf_val) -> Tensor;
+    auto dispatchBitwiseBinaryOp(const std::string& shader_name, const Tensor& a, const Tensor& b) -> Tensor;
     // Special-math dispatchers (vulkan_ops_special_math.cpp). Replace previous CPU fallbacks.
     auto dispatchSpecialMathUnary(const Tensor& input, uint32_t opcode, int32_t param_int = 0) -> Tensor;
     auto dispatchSpecialMathBinary(const Tensor& a, const Tensor& b, uint32_t opcode) -> Tensor;
@@ -475,6 +478,10 @@ public:
     auto dispatchFlip(const Tensor& input, int64_t dim) -> Tensor;
     auto dispatchRoll(const Tensor& input, int64_t shift, int64_t dim) -> Tensor;
     auto dispatchTrace(const Tensor& input) -> Tensor;
+    auto dispatchCountNonzero(const Tensor& input) -> Tensor;
+    auto dispatchNansum(const Tensor& input) -> Tensor;
+    auto dispatchNanmean(const Tensor& input) -> Tensor;
+    auto dispatchAminmax(const Tensor& input) -> std::pair<Tensor, Tensor>;
 
     // Indexing operations
     auto dispatchEmbedding(const Tensor& weight, const Tensor& indices,
@@ -484,11 +491,22 @@ public:
                         const Tensor& values, int64_t reduction) -> Tensor;
     auto dispatchScatterAdd(const Tensor& self, int64_t dim,
                             const Tensor& index, const Tensor& src) -> Tensor;
+    auto dispatchScatterReduce(const Tensor& self, int64_t dim,
+                               const Tensor& index, const Tensor& src,
+                               const std::string& reduce, bool include_self) -> Tensor;
+    auto dispatchIndexAdd(const Tensor& self, int64_t dim,
+                          const Tensor& index, const Tensor& src) -> Tensor;
+    auto dispatchIndexCopy(const Tensor& self, int64_t dim,
+                           const Tensor& index, const Tensor& src) -> Tensor;
+    auto dispatchIndexFill(const Tensor& self, int64_t dim,
+                           const Tensor& index, float value) -> Tensor;
     auto dispatchIndexSelect(const Tensor& input, int64_t dim, const Tensor& indices) -> Tensor;
     auto dispatchMaskedSelect(const Tensor& input, const Tensor& mask) -> Tensor;
     auto dispatchMaskedFill(const Tensor& input, const Tensor& mask, float value) -> Tensor;
     auto dispatchWhere(const Tensor& condition, const Tensor& x, const Tensor& y) -> Tensor;
     auto dispatchRepeat(const Tensor& input, const std::vector<int64_t>& repeats) -> Tensor;
+    auto dispatchRepeatInterleave(const Tensor& input, int64_t repeats, int64_t dim) -> Tensor;
+    auto dispatchRepeatInterleaveTensor(const Tensor& input, const Tensor& repeats, int64_t dim) -> Tensor;
 
     // Vision operations
     auto dispatchGatherRelativePositionBias(const Tensor& table, const Tensor& indices,
@@ -623,6 +641,9 @@ public:
                                      uint32_t opcode,
                                      float param) -> Tensor;
     auto dispatchSwishBackward(const Tensor& grad_output, const Tensor& input) -> Tensor;
+    auto dispatchRReLU(const Tensor& input, float lower, float upper, bool training) -> Tensor;
+    auto dispatchRReLUBackward(const Tensor& grad_output, const Tensor& input, float slope) -> Tensor;
+    auto dispatchLogSigmoidBackward(const Tensor& grad_output, const Tensor& input) -> Tensor;
     auto dispatchSoftmaxBackward(const Tensor& grad_output, const Tensor& output, int64_t dim) -> Tensor;
     auto dispatchLogSoftmaxBackward(const Tensor& grad_output, const Tensor& output, int64_t dim) -> Tensor;
 

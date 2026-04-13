@@ -1,6 +1,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
 #include <sycl/sycl.hpp>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <random>
@@ -90,6 +91,19 @@ class SwishKernelBFloat16;
 class SwishBackwardKernelBFloat16;
 class LogSoftmaxKernelBFloat16;
 class LogSoftmaxBackwardKernelBFloat16;
+class RReLUKernelFloat32;
+class RReLUKernelFloat64;
+class RReLUKernelFloat16;
+class RReLUKernelBFloat16;
+class RReLUTrainKernelFloat32;
+class RReLUBackwardKernelFloat32;
+class RReLUBackwardKernelFloat64;
+class RReLUBackwardKernelFloat16;
+class RReLUBackwardKernelBFloat16;
+class LogSigmoidBackwardKernelFloat32;
+class LogSigmoidBackwardKernelFloat64;
+class LogSigmoidBackwardKernelFloat16;
+class LogSigmoidBackwardKernelBFloat16;
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -2987,6 +3001,208 @@ auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& inpu
     }
 
     return {grad_input, grad_weight, grad_bias};
+}
+
+// RReLU forward (eval mode: deterministic midpoint slope; train mode: per-element random slope)
+auto rrelu_kernel(const Tensor& input, float lower, float upper, bool training, sycl::queue& queue) -> Tensor {
+    Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                  input.dtype(), input.device());
+
+    const int64_t numel = input.numel();
+    if (numel == 0) return output;
+
+    const float mid = (lower + upper) / 2.0f;
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(input);
+        float* out_ptr = get_data_ptr<float>(output);
+
+        if (training) {
+            // Use a seed from host clock for per-element random slopes
+            uint64_t seed = static_cast<uint64_t>(
+                std::chrono::high_resolution_clock::now().time_since_epoch().count());
+
+            queue.parallel_for<RReLUTrainKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+                float x = in_ptr[idx];
+                if (x >= 0.0f) {
+                    out_ptr[idx] = x;
+                } else {
+                    // LCG-based per-element random uniform in [lower, upper]
+                    uint64_t state = seed + static_cast<uint64_t>(idx[0]) * 6364136223846793005ULL;
+                    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+                    float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+                    float slope = lower + u * (upper - lower);
+                    out_ptr[idx] = slope * x;
+                }
+            });
+        } else {
+            queue.parallel_for<RReLUKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+                float x = in_ptr[idx];
+                out_ptr[idx] = (x >= 0.0f) ? x : mid * x;
+            });
+        }
+    }
+    else if (input.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(input);
+        double* out_ptr = get_data_ptr<double>(output);
+        const double mid_d = static_cast<double>(mid);
+
+        queue.parallel_for<RReLUKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double x = in_ptr[idx];
+            out_ptr[idx] = (x >= 0.0) ? x : mid_d * x;
+        });
+    }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<RReLUKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = static_cast<float>(in_ptr[idx]);
+            out_ptr[idx] = sycl::half((x >= 0.0f) ? x : mid * x);
+        });
+    }
+    else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+
+        queue.parallel_for<RReLUKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = bf16_to_f32(in_ptr[idx]);
+            out_ptr[idx] = f32_to_bf16((x >= 0.0f) ? x : mid * x);
+        });
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for rrelu");
+    }
+
+    return output;
+}
+
+// RReLU backward: grad * (input >= 0 ? 1 : slope) where slope = (lower+upper)/2
+auto rrelu_backward_kernel(const Tensor& grad_output, const Tensor& input,
+                           float lower, float upper, sycl::queue& queue) -> Tensor {
+    Tensor grad_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                      input.dtype(), input.device());
+
+    const int64_t numel = input.numel();
+    if (numel == 0) return grad_input;
+
+    const float mid = (lower + upper) / 2.0f;
+
+    if (input.dtype() == DType::Float32) {
+        const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
+        const float* in_ptr = get_data_ptr<const float>(input);
+        float* grad_in_ptr = get_data_ptr<float>(grad_input);
+
+        queue.parallel_for<RReLUBackwardKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            grad_in_ptr[idx] = (in_ptr[idx] >= 0.0f) ? grad_out_ptr[idx] : mid * grad_out_ptr[idx];
+        });
+    }
+    else if (input.dtype() == DType::Float64) {
+        const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
+        const double* in_ptr = get_data_ptr<const double>(input);
+        double* grad_in_ptr = get_data_ptr<double>(grad_input);
+        const double mid_d = static_cast<double>(mid);
+
+        queue.parallel_for<RReLUBackwardKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            grad_in_ptr[idx] = (in_ptr[idx] >= 0.0) ? grad_out_ptr[idx] : mid_d * grad_out_ptr[idx];
+        });
+    }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* grad_in_ptr = get_data_ptr<sycl::half>(grad_input);
+
+        queue.parallel_for<RReLUBackwardKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float in_val = static_cast<float>(in_ptr[idx]);
+            float g_out = static_cast<float>(grad_out_ptr[idx]);
+            grad_in_ptr[idx] = sycl::half((in_val >= 0.0f) ? g_out : mid * g_out);
+        });
+    }
+    else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        uint16_t* grad_in_ptr = get_data_ptr<uint16_t>(grad_input);
+
+        queue.parallel_for<RReLUBackwardKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float in_val = bf16_to_f32(in_ptr[idx]);
+            float g_out = bf16_to_f32(grad_out_ptr[idx]);
+            grad_in_ptr[idx] = f32_to_bf16((in_val >= 0.0f) ? g_out : mid * g_out);
+        });
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for rrelu_backward");
+    }
+
+    return grad_input;
+}
+
+// LogSigmoid backward: grad * sigmoid(-x)
+// sig(-x) = (x >= 0) ? exp(-x)/(1+exp(-x)) : 1/(1+exp(x))
+auto log_sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input,
+                                 sycl::queue& queue) -> Tensor {
+    Tensor grad_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                      input.dtype(), input.device());
+
+    const int64_t numel = input.numel();
+    if (numel == 0) return grad_input;
+
+    if (input.dtype() == DType::Float32) {
+        const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
+        const float* in_ptr = get_data_ptr<const float>(input);
+        float* grad_in_ptr = get_data_ptr<float>(grad_input);
+
+        queue.parallel_for<LogSigmoidBackwardKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = in_ptr[idx];
+            float sig_neg_x = (x >= 0.0f)
+                ? sycl::exp(-x) / (1.0f + sycl::exp(-x))
+                : 1.0f / (1.0f + sycl::exp(x));
+            grad_in_ptr[idx] = grad_out_ptr[idx] * sig_neg_x;
+        });
+    }
+    else if (input.dtype() == DType::Float64) {
+        const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
+        const double* in_ptr = get_data_ptr<const double>(input);
+        double* grad_in_ptr = get_data_ptr<double>(grad_input);
+
+        queue.parallel_for<LogSigmoidBackwardKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double x = in_ptr[idx];
+            double sig_neg_x = (x >= 0.0)
+                ? sycl::exp(-x) / (1.0 + sycl::exp(-x))
+                : 1.0 / (1.0 + sycl::exp(x));
+            grad_in_ptr[idx] = grad_out_ptr[idx] * sig_neg_x;
+        });
+    }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* grad_in_ptr = get_data_ptr<sycl::half>(grad_input);
+
+        queue.parallel_for<LogSigmoidBackwardKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = static_cast<float>(in_ptr[idx]);
+            float sig_neg_x = (x >= 0.0f)
+                ? sycl::exp(-x) / (1.0f + sycl::exp(-x))
+                : 1.0f / (1.0f + sycl::exp(x));
+            grad_in_ptr[idx] = sycl::half(static_cast<float>(grad_out_ptr[idx]) * sig_neg_x);
+        });
+    }
+    else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        uint16_t* grad_in_ptr = get_data_ptr<uint16_t>(grad_input);
+
+        queue.parallel_for<LogSigmoidBackwardKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = bf16_to_f32(in_ptr[idx]);
+            float sig_neg_x = (x >= 0.0f)
+                ? sycl::exp(-x) / (1.0f + sycl::exp(-x))
+                : 1.0f / (1.0f + sycl::exp(x));
+            grad_in_ptr[idx] = f32_to_bf16(bf16_to_f32(grad_out_ptr[idx]) * sig_neg_x);
+        });
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for log_sigmoid_backward");
+    }
+
+    return grad_input;
 }
 
 } // namespace oneapi

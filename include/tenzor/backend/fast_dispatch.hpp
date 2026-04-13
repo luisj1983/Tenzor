@@ -61,6 +61,9 @@ inline bool is_autocast_compute_heavy(OpId op) {
         case OpId::FusedConv2dBnReLU:
         case OpId::FusedAttention:
         case OpId::FlashAttention:
+        case OpId::Addmm:
+        case OpId::Addmv:
+        case OpId::Baddbmm:
             return true;
         default:
             return false;

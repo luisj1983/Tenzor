@@ -1,0 +1,42 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// CountNonzero for Float64 inputs.
+// Dispatched as a single workgroup for full reduction.
+// Output: float64 containing the count.
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer Input  { float64_t input_data[]; };
+layout(binding = 1) buffer Output { float64_t output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+} params;
+
+shared uint sdata[WORKGROUP_SIZE];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+
+    uint count = 0;
+    for (uint i = tid; i < params.num_elements; i += WORKGROUP_SIZE) {
+        if (input_data[i] != float64_t(0.0)) {
+            count += 1;
+        }
+    }
+
+    sdata[tid] = count;
+    barrier();
+
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        barrier();
+    }
+
+    if (tid == 0) {
+        output_data[0] = float64_t(sdata[0]);
+    }
+}

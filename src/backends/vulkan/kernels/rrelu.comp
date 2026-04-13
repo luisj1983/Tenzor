@@ -1,0 +1,46 @@
+#version 450
+
+// RReLU (Randomized Leaky ReLU)
+// Eval mode:  output = (x >= 0) ? x : slope * x   where slope = (lower + upper) / 2
+// Train mode: output = (x >= 0) ? x : random_slope * x   (PCG random per element)
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuffer { float data[]; } input_buf;
+layout(set = 0, binding = 1) writeonly buffer OutputBuffer { float data[]; } output_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+    float lower;
+    float upper;
+    uint training;   // 0 = eval, 1 = train
+    uint seed;       // RNG seed (only used in training mode)
+} pc;
+
+// PCG-style random number generator (single step, good enough for slope sampling)
+float pcg_random(uint state) {
+    // PCG XSH-RR: single iteration
+    uint s = state * 747796405u + 2891336453u;
+    uint word = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+    word = (word >> 22u) ^ word;
+    return float(word) / 4294967295.0; // normalize to [0, 1]
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.num_elements) return;
+
+    float x = input_buf.data[idx];
+
+    if (x >= 0.0) {
+        output_buf.data[idx] = x;
+    } else {
+        float slope;
+        if (pc.training != 0u) {
+            float u = pcg_random(pc.seed + idx);
+            slope = pc.lower + u * (pc.upper - pc.lower);
+        } else {
+            slope = (pc.lower + pc.upper) * 0.5;
+        }
+        output_buf.data[idx] = slope * x;
+    }
+}

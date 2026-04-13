@@ -3961,5 +3961,74 @@ auto histogram_kernel(const Tensor& input, int64_t bins, double min_val, double 
     return {counts, edges};
 }
 
+// ============================================================================
+// logcumsumexp — Log-Cumulative-Sum-Exp (numerically stable)
+// ============================================================================
+
+auto logcumsumexp_kernel(const Tensor& input, int64_t dim) -> Tensor {
+    const auto dtype = input.dtype();
+    const auto& device = input.device();
+    const auto& shape = input.shape();
+    const int64_t ndim = static_cast<int64_t>(shape.size());
+
+    if (dtype != DType::Float32 && dtype != DType::Float64) {
+        throw std::runtime_error("logcumsumexp_kernel: only Float32 and Float64 supported");
+    }
+
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("logcumsumexp_kernel: dimension out of range");
+    }
+
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    Tensor output(std::vector<int64_t>(shape.begin(), shape.end()), dtype, device);
+
+    const int64_t dim_size = shape[dim];
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
+
+    auto process = [&]<typename T>(T*) {
+        const T* in = input_cont.data<T>();
+        T* out = output.data<T>();
+
+        #ifdef _OPENMP
+        #pragma omp parallel for if (outer_size * inner_size > 64)
+        #endif
+        for (int64_t oi = 0; oi < outer_size * inner_size; ++oi) {
+            int64_t outer = oi / inner_size;
+            int64_t inner = oi % inner_size;
+
+            T running_max = -std::numeric_limits<T>::infinity();
+            T running_lse = -std::numeric_limits<T>::infinity();
+
+            for (int64_t i = 0; i < dim_size; ++i) {
+                int64_t offset = outer * dim_size * inner_size + i * inner_size + inner;
+                T x = in[offset];
+                T new_max = std::max(running_max, x);
+
+                if (std::isinf(new_max) && new_max < T(0)) {
+                    running_lse = -std::numeric_limits<T>::infinity();
+                } else {
+                    running_lse = new_max + std::log(
+                        std::exp(running_lse - new_max) + std::exp(x - new_max));
+                }
+                running_max = new_max;
+                out[offset] = running_lse;
+            }
+        }
+    };
+
+    if (dtype == DType::Float32) {
+        process(static_cast<float*>(nullptr));
+    } else {
+        process(static_cast<double*>(nullptr));
+    }
+
+    return output;
+}
+
 } // namespace cpu
 } // namespace tenzor

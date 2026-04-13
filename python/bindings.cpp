@@ -1312,6 +1312,33 @@ PYBIND11_MODULE(tenzor_core, m) {
        py::arg("input"), py::arg("dim"),
        py::call_guard<py::gil_scoped_release>());
 
+    m.def("logcumsumexp", [](const tenzor::Tensor& input, int64_t dim) {
+        return tenzor::logcumsumexp(input, dim);
+    }, "Log-cumulative-sum-exp along dimension (numerically stable)",
+       py::arg("input"), py::arg("dim"),
+       py::call_guard<py::gil_scoped_release>());
+
+    m.def("bincount", [](const tenzor::Tensor& input,
+                         std::optional<tenzor::Tensor> weights,
+                         int64_t minlength) {
+        return tenzor::bincount(input, weights, minlength);
+    }, "Count occurrences of each value in an integer tensor",
+       py::arg("input"), py::arg("weights") = py::none(),
+       py::arg("minlength") = 0,
+       py::call_guard<py::gil_scoped_release>());
+
+    m.def("index_reduce", [](const tenzor::Tensor& input, int64_t dim,
+                              const tenzor::Tensor& index,
+                              const tenzor::Tensor& source,
+                              const std::string& reduce,
+                              bool include_self) {
+        return tenzor::index_reduce(input, dim, index, source, reduce, include_self);
+    }, "Reduce source into input at specified indices along a dimension",
+       py::arg("input"), py::arg("dim"), py::arg("index"),
+       py::arg("source"), py::arg("reduce"),
+       py::arg("include_self") = true,
+       py::call_guard<py::gil_scoped_release>());
+
     m.def("median", [](const tenzor::Tensor& input, int64_t dim, bool keepdim) {
         return tenzor::median(input, dim, keepdim);
     }, "Median along dimension",

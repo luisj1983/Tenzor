@@ -1,0 +1,50 @@
+#version 450
+
+// IndexAdd: atomically accumulates source values into output along a dimension.
+// output[(o * dim_size + index[k]) * inner + j] += source[(o * idx_n + k) * inner + j]
+// Uses CAS-loop atomics for thread-safe float addition (no GL_EXT_shader_atomic_float required).
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Output { uint out_data[]; };       // Output (uint for CAS atomics)
+layout(binding = 1) buffer Source { float src_data[]; };       // Source values to add
+layout(binding = 2) buffer Index { int idx_data[]; };          // 1-D index tensor
+
+layout(push_constant) uniform PushConstants {
+    uint outer;         // Product of dims before target dim
+    uint dim_size;      // Size of target dim in output
+    uint idx_n;         // Number of indices
+    uint inner;         // Product of dims after target dim
+} params;
+
+// Atomic add for float using compare-and-swap loop (bounded to prevent hangs)
+void atomicAddFloat(uint pos, float val) {
+    uint old_bits = out_data[pos];
+    uint new_bits;
+    for (int attempt = 0; attempt < 1024; ++attempt) {
+        float old_val = uintBitsToFloat(old_bits);
+        new_bits = floatBitsToUint(old_val + val);
+        uint result = atomicCompSwap(out_data[pos], old_bits, new_bits);
+        if (result == old_bits) return;
+        old_bits = result;
+    }
+    // Last-resort direct write
+    out_data[pos] = new_bits;
+}
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint total = params.outer * params.idx_n * params.inner;
+    if (tid >= total) return;
+
+    uint j = tid % params.inner;
+    uint k = (tid / params.inner) % params.idx_n;
+    uint o = tid / (params.inner * params.idx_n);
+
+    int dest_idx = idx_data[k];
+    if (dest_idx < 0 || dest_idx >= int(params.dim_size)) return;
+
+    uint out_pos = (o * params.dim_size + uint(dest_idx)) * params.inner + j;
+    uint src_pos = (o * params.idx_n + k) * params.inner + j;
+
+    atomicAddFloat(out_pos, src_data[src_pos]);
+}

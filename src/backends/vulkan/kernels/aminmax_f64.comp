@@ -1,0 +1,48 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Aminmax for Float64 inputs.
+// Dispatched as a single workgroup for full reduction.
+// Output buffer: [0] = min, [1] = max
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer Input  { float64_t input_data[]; };
+layout(binding = 1) buffer Output { float64_t output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+} params;
+
+shared float64_t s_min[WORKGROUP_SIZE];
+shared float64_t s_max[WORKGROUP_SIZE];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+
+    float64_t local_min =  float64_t(1.0 / 0.0);
+    float64_t local_max = float64_t(-1.0 / 0.0);
+
+    for (uint i = tid; i < params.num_elements; i += WORKGROUP_SIZE) {
+        float64_t val = input_data[i];
+        local_min = min(local_min, val);
+        local_max = max(local_max, val);
+    }
+
+    s_min[tid] = local_min;
+    s_max[tid] = local_max;
+    barrier();
+
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            s_min[tid] = min(s_min[tid], s_min[tid + s]);
+            s_max[tid] = max(s_max[tid], s_max[tid + s]);
+        }
+        barrier();
+    }
+
+    if (tid == 0) {
+        output_data[0] = s_min[0];
+        output_data[1] = s_max[0];
+    }
+}

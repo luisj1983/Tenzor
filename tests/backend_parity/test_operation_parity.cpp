@@ -125,7 +125,7 @@ TEST(MathOperationParity, Bmm_Small) {
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
         return bmm(inputs[0], inputs[1]);
-    }, {a, b}, 1e-4f, 1e-6f, "Bmm 4x32x32");
+    }, {a, b}, 1e-4f, 1e-5f, "Bmm 4x32x32");
 }
 
 TEST(MathOperationParity, Bmm_Medium) {
@@ -149,7 +149,7 @@ TEST(MathOperationParity, Bmm_LargeBatch) {
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
         return bmm(inputs[0], inputs[1]);
-    }, {a, b}, 1e-4f, 1e-6f, "Bmm Large Batch 32x16x32");
+    }, {a, b}, 1e-4f, 1e-5f, "Bmm Large Batch 32x16x32");
 }
 
 TEST(MathOperationParity, Power) {

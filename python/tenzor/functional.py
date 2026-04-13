@@ -1533,6 +1533,98 @@ def pad(input: Variable, pad: Sequence[int], mode: str = "constant",
     return _nn.functional_pad(input, list(pad), mode, value)
 
 
+# ---------------------------------------------------------------------------
+# Composed tensor operations
+# ---------------------------------------------------------------------------
+
+def diff(input, n=1, dim=-1):
+    """Compute the n-th finite difference along the given dimension.
+
+    Parameters
+    ----------
+    input : Tensor
+        Input tensor.
+    n : int, optional
+        Number of times to recursively compute differences (default: 1).
+    dim : int, optional
+        Dimension along which to compute differences (default: -1).
+
+    Returns
+    -------
+    Tensor
+        Tensor with size reduced by *n* along *dim*.
+    """
+    return _core.diff(input, n, dim)
+
+
+def logaddexp(a, b):
+    """Numerically stable ``log(exp(a) + exp(b))``.
+
+    Parameters
+    ----------
+    a, b : Tensor
+        Input tensors (must be broadcastable).
+
+    Returns
+    -------
+    Tensor
+    """
+    return _core.logaddexp(a, b)
+
+
+def logaddexp2(a, b):
+    """Numerically stable ``log2(2**a + 2**b)``.
+
+    Parameters
+    ----------
+    a, b : Tensor
+        Input tensors (must be broadcastable).
+
+    Returns
+    -------
+    Tensor
+    """
+    return _core.logaddexp2(a, b)
+
+
+def xlogy(x, y):
+    """Compute ``x * log(y)`` with the convention ``0 * log(y) = 0``.
+
+    Parameters
+    ----------
+    x, y : Tensor
+        Input tensors (must be broadcastable).
+
+    Returns
+    -------
+    Tensor
+    """
+    return _core.xlogy(x, y)
+
+
+def tensordot(a, b, dims=2):
+    """Generalized tensor contraction (like ``numpy.tensordot``).
+
+    Parameters
+    ----------
+    a, b : Tensor
+        Input tensors.
+    dims : int or tuple of (list[int], list[int])
+        If an int, contract the last *dims* dimensions of *a* with the first
+        *dims* dimensions of *b*. If a tuple of two lists, contract the
+        specified dimensions.
+
+    Returns
+    -------
+    Tensor
+    """
+    if isinstance(dims, int):
+        return _core.tensordot(a, b, dims)
+    else:
+        dims_a, dims_b = dims
+        return _core.tensordot(a, b, list(dims_a), list(dims_b))
+
+
 __all__ = [
     # Activations
     "relu",
@@ -1590,4 +1682,10 @@ __all__ = [
     # Gradient clipping
     "clip_grad_norm_",
     "clip_grad_value_",
+    # Composed tensor operations
+    "diff",
+    "logaddexp",
+    "logaddexp2",
+    "xlogy",
+    "tensordot",
 ]

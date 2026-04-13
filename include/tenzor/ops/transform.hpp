@@ -166,6 +166,38 @@ auto movedim(const Tensor& input, std::vector<int64_t> source, std::vector<int64
 auto swapaxes(const Tensor& input, int64_t dim0, int64_t dim1) -> Tensor;
 
 /// @}
+/// @name Repeat Interleave
+/// @{
+
+/**
+ * @brief Repeat each element of the tensor a given number of times along a dimension.
+ *
+ * If dim is not specified, the input is flattened first, then repeated along dim 0.
+ * Each element is repeated `repeats` times consecutively.
+ *
+ * @param input Input tensor
+ * @param repeats Number of times to repeat each element
+ * @param dim Dimension along which to repeat (nullopt = flatten first)
+ * @return Tensor with repeated elements
+ */
+auto repeat_interleave(const Tensor& input, int64_t repeats,
+                       std::optional<int64_t> dim = std::nullopt) -> Tensor;
+
+/**
+ * @brief Repeat each element of the tensor by a per-element repeat count.
+ *
+ * If dim is not specified, the input is flattened first, then repeated along dim 0.
+ * Element i is repeated repeats[i] times.
+ *
+ * @param input Input tensor
+ * @param repeats 1D tensor of per-element repeat counts
+ * @param dim Dimension along which to repeat (nullopt = flatten first)
+ * @return Tensor with repeated elements
+ */
+auto repeat_interleave(const Tensor& input, const Tensor& repeats,
+                       std::optional<int64_t> dim = std::nullopt) -> Tensor;
+
+/// @}
 
 /** @} */ // end of tensor_transform group
 

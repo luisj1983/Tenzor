@@ -22,6 +22,7 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/fft.hpp"
 #include "tenzor/ops/advanced.hpp"
+#include "tenzor/ops/indexing.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/sparse/sparse_tensor.hpp"
 #include "tenzor/sparse/sparse_ops.hpp"
@@ -171,6 +172,18 @@ namespace oneapi {
     auto polar_kernel(const Tensor& abs_t, const Tensor& angle_t, sycl::queue& queue) -> Tensor;
     auto cross_kernel(const Tensor& a, const Tensor& b, int64_t dim, sycl::queue& queue) -> Tensor;
 
+    // Phase 4 math ops (native SYCL kernels in kernels/math.cpp)
+    auto frac_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto heaviside_kernel(const Tensor& input, const Tensor& values, sycl::queue& queue) -> Tensor;
+    auto nan_to_num_kernel(const Tensor& input, double nan_v, double posinf_v, double neginf_v, sycl::queue& queue) -> Tensor;
+    auto log_sigmoid_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto bitwise_and_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto bitwise_or_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto bitwise_xor_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto bitwise_not_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto bitwise_left_shift_kernel(const Tensor& input, const Tensor& shift, sycl::queue& queue) -> Tensor;
+    auto bitwise_right_shift_kernel(const Tensor& input, const Tensor& shift, sycl::queue& queue) -> Tensor;
+
     // Additional math
     auto clamp_min_kernel(const Tensor& input, float min_val, sycl::queue& queue) -> Tensor;
     auto clamp_max_kernel(const Tensor& input, float max_val, sycl::queue& queue) -> Tensor;
@@ -200,6 +213,9 @@ namespace oneapi {
     auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha, sycl::queue& queue) -> Tensor;
     auto swish_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
     auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto rrelu_kernel(const Tensor& input, float lower, float upper, bool training, sycl::queue& queue) -> Tensor;
+    auto rrelu_backward_kernel(const Tensor& grad_output, const Tensor& input, float lower, float upper, sycl::queue& queue) -> Tensor;
+    auto log_sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::queue& queue) -> Tensor;
 
     // Additional activations
     auto elu_kernel(const Tensor& input, float alpha, sycl::queue& queue) -> Tensor;
@@ -245,6 +261,10 @@ namespace oneapi {
     auto logsumexp_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
     auto median_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> std::vector<Tensor>;
     auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> std::vector<Tensor>;
+    auto count_nonzero_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor;
+    auto nansum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
+    auto nanmean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
+    auto aminmax_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> std::vector<Tensor>;
 
     // ---- Statistical operations (kernels/statistical.cpp) ----
     auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
@@ -279,6 +299,8 @@ namespace oneapi {
                       int64_t kernel_size, int64_t stride, int64_t padding,
                       int64_t dilation, sycl::queue& queue) -> Tensor;
     auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim, sycl::queue& queue) -> Tensor;
+    auto repeat_interleave_scalar_kernel(const Tensor& input, int64_t repeats, int64_t dim, sycl::queue& queue) -> Tensor;
+    auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats, int64_t dim, sycl::queue& queue) -> Tensor;
     auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, sycl::queue& queue) -> Tensor;
     auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, sycl::queue& queue) -> Tensor;
     auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, Device device, sycl::queue& queue) -> Tensor;
@@ -314,6 +336,10 @@ namespace oneapi {
     auto nonzero_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
     auto one_hot_kernel(const Tensor& indices, int64_t num_classes, DType output_dtype, sycl::queue& queue) -> Tensor;
     auto argsort_kernel(const Tensor& input, int64_t dim, bool descending, sycl::queue& queue) -> Tensor;
+    auto index_add_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& source, sycl::queue& queue) -> Tensor;
+    auto index_copy_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& source, sycl::queue& queue) -> Tensor;
+    auto index_fill_kernel(const Tensor& input, int64_t dim, const Tensor& index, float value, sycl::queue& queue) -> Tensor;
+    auto scatter_reduce_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& source, const std::string& reduce, bool include_self, sycl::queue& queue) -> Tensor;
 
     // ---- Batch normalization (kernels/batchnorm.cpp) ----
     auto batchnorm2d_mean_var(const Tensor& input, sycl::queue& queue) -> std::vector<Tensor>;
@@ -3017,6 +3043,18 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return oneapi::roll_kernel(inputs[0], shift, dim, get_q(inputs));
         });
 
+    table.register_single_output_kernel(OpId::RepeatInterleave,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            int64_t num_repeats = attrs.get_int(AttrKey::NumRepeats, 1);
+            auto& q = get_q(inputs);
+            if (num_repeats >= 0) {
+                return oneapi::repeat_interleave_scalar_kernel(inputs[0], num_repeats, dim, q);
+            } else {
+                return oneapi::repeat_interleave_tensor_kernel(inputs[0], inputs[1], dim, q);
+            }
+        });
+
     // =========================================================================
     // Triu / Tril / Diag / Trace / Flip
     // =========================================================================
@@ -3851,59 +3889,214 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         });
 
     // ========================================================================
-    // New Phase 4 ops — CPU roundtrip for all (SYCL kernels in math.cpp
-    // exist but need forward declarations for direct dispatch; will be
-    // wired up in a follow-up when the OneAPI forward-declaration header
-    // is extended).
+    // Phase 4 ops — native SYCL dispatch (kernels in kernels/math.cpp)
     // ========================================================================
-#define ONEAPI_CPU_RT(OP_ID) \
-    table.register_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> { \
-        auto dev = inputs[0].device(); \
-        std::vector<Tensor> cpu_inputs; \
-        for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu())); \
-        auto results = dispatch(OpId::OP_ID, cpu_inputs, attrs); \
-        std::vector<Tensor> gpu_results; \
-        for (auto& r : results) gpu_results.push_back(r.to(dev)); \
-        return gpu_results; \
-    })
+    table.register_single_output_kernel(OpId::Frac,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return oneapi::frac_kernel(inputs[0], get_q(inputs));
+        });
+    table.register_single_output_kernel(OpId::LogSigmoid,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return oneapi::log_sigmoid_kernel(inputs[0], get_q(inputs));
+        });
+    table.register_single_output_kernel(OpId::Heaviside,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return oneapi::heaviside_kernel(inputs[0], inputs[1], get_q(inputs));
+        });
+    table.register_single_output_kernel(OpId::NanToNum,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double nan_v = attrs.get_float(AttrKey::NanValue, 0.0);
+            double posinf = attrs.get_float(AttrKey::PosInfValue, std::numeric_limits<double>::max());
+            double neginf = attrs.get_float(AttrKey::NegInfValue, std::numeric_limits<double>::lowest());
+            return oneapi::nan_to_num_kernel(inputs[0], nan_v, posinf, neginf, get_q(inputs));
+        });
+    table.register_single_output_kernel(OpId::BitwiseAnd,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return oneapi::bitwise_and_kernel(inputs[0], inputs[1], get_q(inputs));
+        });
+    table.register_single_output_kernel(OpId::BitwiseOr,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return oneapi::bitwise_or_kernel(inputs[0], inputs[1], get_q(inputs));
+        });
+    table.register_single_output_kernel(OpId::BitwiseXor,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return oneapi::bitwise_xor_kernel(inputs[0], inputs[1], get_q(inputs));
+        });
+    table.register_single_output_kernel(OpId::BitwiseNot,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return oneapi::bitwise_not_kernel(inputs[0], get_q(inputs));
+        });
+    table.register_single_output_kernel(OpId::BitwiseLeftShift,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return oneapi::bitwise_left_shift_kernel(inputs[0], inputs[1], get_q(inputs));
+        });
+    table.register_single_output_kernel(OpId::BitwiseRightShift,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return oneapi::bitwise_right_shift_kernel(inputs[0], inputs[1], get_q(inputs));
+        });
 
-    ONEAPI_CPU_RT(Frac);
-    ONEAPI_CPU_RT(LogSigmoid);
-    ONEAPI_CPU_RT(Heaviside);
-    ONEAPI_CPU_RT(NanToNum);
-    ONEAPI_CPU_RT(BitwiseAnd);
-    ONEAPI_CPU_RT(BitwiseOr);
-    ONEAPI_CPU_RT(BitwiseXor);
-    ONEAPI_CPU_RT(BitwiseNot);
-    ONEAPI_CPU_RT(BitwiseLeftShift);
-    ONEAPI_CPU_RT(BitwiseRightShift);
-#undef ONEAPI_CPU_RT
+    // Native SYCL kernels for RReLU, RReLUBackward, LogSigmoidBackward
+    table.register_kernel(OpId::RReLU,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            float lower = static_cast<float>(attrs.get_float(AttrKey::Lower, 0.125));
+            float upper = static_cast<float>(attrs.get_float(AttrKey::High, 0.333));
+            bool training = attrs.get_bool(AttrKey::Training, false);
+            return {oneapi::rrelu_kernel(inputs[0], lower, upper, training, get_q(inputs))};
+        });
 
-    // RReLU, LogSigmoidBackward, NaN reductions, scatter variants — CPU dispatch
-#define ONEAPI_CPU_ROUNDTRIP(OP_ID) \
-    table.register_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> { \
-        auto dev = inputs[0].device(); \
-        std::vector<Tensor> cpu_inputs; \
-        for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu())); \
-        auto results = dispatch(OpId::OP_ID, cpu_inputs, attrs); \
-        std::vector<Tensor> gpu_results; \
-        for (auto& r : results) gpu_results.push_back(r.to(dev)); \
-        return gpu_results; \
-    })
+    table.register_kernel(OpId::RReLUBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            float lower = static_cast<float>(attrs.get_float(AttrKey::Lower, 0.125));
+            float upper = static_cast<float>(attrs.get_float(AttrKey::High, 0.333));
+            return {oneapi::rrelu_backward_kernel(inputs[0], inputs[1], lower, upper, get_q(inputs))};
+        });
 
-    ONEAPI_CPU_ROUNDTRIP(RReLU);
-    ONEAPI_CPU_ROUNDTRIP(RReLUBackward);
-    ONEAPI_CPU_ROUNDTRIP(LogSigmoidBackward);
-    ONEAPI_CPU_ROUNDTRIP(CountNonzero);
-    ONEAPI_CPU_ROUNDTRIP(Nansum);
-    ONEAPI_CPU_ROUNDTRIP(Nanmean);
-    ONEAPI_CPU_ROUNDTRIP(Aminmax);
-    ONEAPI_CPU_ROUNDTRIP(IndexAdd);
-    ONEAPI_CPU_ROUNDTRIP(IndexCopy);
-    ONEAPI_CPU_ROUNDTRIP(IndexFill);
-    ONEAPI_CPU_ROUNDTRIP(BitwiseLeftShift);
-    ONEAPI_CPU_ROUNDTRIP(BitwiseRightShift);
-#undef ONEAPI_CPU_ROUNDTRIP
+    table.register_kernel(OpId::LogSigmoidBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::log_sigmoid_backward_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    // NaN reductions — native SYCL kernels
+    table.register_kernel(OpId::CountNonzero,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            return {oneapi::count_nonzero_kernel(inputs[0], dim, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Nansum,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return {oneapi::nansum_kernel(inputs[0], dim, keepdim, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Nanmean,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return {oneapi::nanmean_kernel(inputs[0], dim, keepdim, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Aminmax,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return oneapi::aminmax_kernel(inputs[0], dim, keepdim, get_q(inputs));
+        });
+    table.register_kernel(OpId::IndexAdd,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            return {oneapi::index_add_kernel(inputs[0], dim, inputs[1], inputs[2], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::IndexCopy,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            return {oneapi::index_copy_kernel(inputs[0], dim, inputs[1], inputs[2], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::IndexFill,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            float value = attrs.get_float(AttrKey::Value, 0.0f);
+            return {oneapi::index_fill_kernel(inputs[0], dim, inputs[1], value, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::ScatterReduce,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            std::string reduce = std::string(attrs.get_string(AttrKey::Reduction, "sum"));
+            bool include_self = attrs.get_bool(AttrKey::IncludeSelf, true);
+            return {oneapi::scatter_reduce_kernel(inputs[0], dim, inputs[1], inputs[2], reduce, include_self, get_q(inputs))};
+        });
+
+    // =========================================================================
+    // Fused GEMM Operations (composed from existing OneAPI ops)
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Addmm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double alpha = attrs.get_float(AttrKey::Alpha, 1.0);
+            double beta = attrs.get_float(AttrKey::Beta, 1.0);
+            auto& q = get_q(inputs);
+            auto mm = oneapi::matmul_kernel(inputs[1], inputs[2], q);
+            if (alpha != 1.0) {
+                auto alpha_t = tenzor::full({1}, alpha, mm.dtype(), mm.device());
+                mm = oneapi::mul_kernel(mm, alpha_t, q);
+            }
+            if (beta == 0.0) return mm;
+            Tensor inp = inputs[0];
+            if (beta != 1.0) {
+                auto beta_t = tenzor::full({1}, beta, inp.dtype(), inp.device());
+                inp = oneapi::mul_kernel(inp, beta_t, q);
+            }
+            return oneapi::add_kernel(inp, mm, q);
+        });
+
+    table.register_single_output_kernel(OpId::Addmv,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double alpha = attrs.get_float(AttrKey::Alpha, 1.0);
+            double beta = attrs.get_float(AttrKey::Beta, 1.0);
+            auto& q = get_q(inputs);
+            auto vec_col = inputs[2].reshape({inputs[2].shape()[0], 1});
+            auto mv = oneapi::matmul_kernel(inputs[1], vec_col, q);
+            mv = mv.reshape({inputs[1].shape()[0]});
+            if (alpha != 1.0) {
+                auto alpha_t = tenzor::full({1}, alpha, mv.dtype(), mv.device());
+                mv = oneapi::mul_kernel(mv, alpha_t, q);
+            }
+            if (beta == 0.0) return mv;
+            Tensor inp = inputs[0];
+            if (beta != 1.0) {
+                auto beta_t = tenzor::full({1}, beta, inp.dtype(), inp.device());
+                inp = oneapi::mul_kernel(inp, beta_t, q);
+            }
+            return oneapi::add_kernel(inp, mv, q);
+        });
+
+    table.register_single_output_kernel(OpId::Baddbmm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double alpha = attrs.get_float(AttrKey::Alpha, 1.0);
+            double beta = attrs.get_float(AttrKey::Beta, 1.0);
+            auto& q = get_q(inputs);
+            auto bmm = oneapi::bmm_kernel(inputs[1], inputs[2], q);
+            if (alpha != 1.0) {
+                auto alpha_t = tenzor::full({1}, alpha, bmm.dtype(), bmm.device());
+                bmm = oneapi::mul_kernel(bmm, alpha_t, q);
+            }
+            if (beta == 0.0) return bmm;
+            Tensor inp = inputs[0];
+            if (beta != 1.0) {
+                auto beta_t = tenzor::full({1}, beta, inp.dtype(), inp.device());
+                inp = oneapi::mul_kernel(inp, beta_t, q);
+            }
+            return oneapi::add_kernel(inp, bmm, q);
+        });
+
+    // =========================================================================
+    // Log-Cumulative-Sum-Exp (CPU fallback)
+    // =========================================================================
+    table.register_kernel(OpId::Logcumsumexp,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            auto cpu_input = inputs[0].to(Device::cpu());
+            auto cpu_result = tenzor::logcumsumexp(cpu_input, dim);
+            return {cpu_result.to(inputs[0].device())};
+        });
+
+    // =========================================================================
+    // Bincount (CPU fallback)
+    // =========================================================================
+    table.register_kernel(OpId::Bincount,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t minlength = attrs.get_int(AttrKey::Minlength, 0);
+            auto cpu_input = inputs[0].to(Device::cpu());
+            std::optional<Tensor> cpu_weights;
+            if (inputs.size() > 1) {
+                cpu_weights = inputs[1].to(Device::cpu());
+            }
+            auto cpu_result = tenzor::bincount(cpu_input, cpu_weights, minlength);
+            return {cpu_result.to(inputs[0].device())};
+        });
 
 } // register_oneapi_kernels
 

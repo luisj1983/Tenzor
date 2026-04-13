@@ -142,3 +142,13 @@ tenzor_discover_tests(test_untested_ops_multidtype LABELS "ops" DISCOVERY_TIMEOU
 add_executable(test_dispatch_ops_multidtype test_dispatch_ops_multidtype.cpp)
 target_link_libraries(test_dispatch_ops_multidtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_dispatch_ops_multidtype LABELS "ops" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# ScatterReduce (sum, prod, mean, amax, amin)
+add_executable(test_scatter_reduce test_scatter_reduce.cpp)
+target_link_libraries(test_scatter_reduce PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_scatter_reduce LABELS "ops" DISCOVERY_TIMEOUT 60)
+
+# Logcumsumexp, bincount, index_reduce
+add_executable(test_logcumsumexp_bincount_index_reduce test_logcumsumexp_bincount_index_reduce.cpp)
+target_link_libraries(test_logcumsumexp_bincount_index_reduce PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_logcumsumexp_bincount_index_reduce LABELS "ops" DISCOVERY_TIMEOUT 60)

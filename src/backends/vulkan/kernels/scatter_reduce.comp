@@ -1,0 +1,104 @@
+#version 450
+
+// ScatterReduce: scatter source values into output along a dimension with reduction.
+// Modes (push constant): 0=sum, 1=prod, 2=mean(sum pass), 3=amax, 4=amin
+// Uses CAS-loop atomics for thread-safe float operations.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Output { uint out_data[]; };       // Output (uint for CAS atomics)
+layout(binding = 1) buffer Source { float src_data[]; };       // Source values
+layout(binding = 2) buffer Index  { int idx_data[]; };         // 1-D index tensor (int32)
+layout(binding = 3) buffer Counts { int count_data[]; };       // Count buffer (for mean mode)
+
+layout(push_constant) uniform PushConstants {
+    uint outer;         // Product of dims before target dim
+    uint dim_size;      // Size of target dim in output
+    uint idx_n;         // Number of indices
+    uint inner;         // Product of dims after target dim
+    uint mode;          // 0=sum, 1=prod, 2=mean, 3=amax, 4=amin
+} params;
+
+// Atomic add for float using compare-and-swap loop
+void atomicAddFloat(uint pos, float val) {
+    uint old_bits = out_data[pos];
+    uint new_bits;
+    for (int attempt = 0; attempt < 1024; ++attempt) {
+        float old_val = uintBitsToFloat(old_bits);
+        new_bits = floatBitsToUint(old_val + val);
+        uint result = atomicCompSwap(out_data[pos], old_bits, new_bits);
+        if (result == old_bits) return;
+        old_bits = result;
+    }
+    out_data[pos] = new_bits;
+}
+
+// Atomic mul for float using compare-and-swap loop
+void atomicMulFloat(uint pos, float val) {
+    uint old_bits = out_data[pos];
+    uint new_bits;
+    for (int attempt = 0; attempt < 1024; ++attempt) {
+        float old_val = uintBitsToFloat(old_bits);
+        new_bits = floatBitsToUint(old_val * val);
+        uint result = atomicCompSwap(out_data[pos], old_bits, new_bits);
+        if (result == old_bits) return;
+        old_bits = result;
+    }
+    out_data[pos] = new_bits;
+}
+
+// Atomic max for float using compare-and-swap loop
+void atomicMaxFloat(uint pos, float val) {
+    uint old_bits = out_data[pos];
+    for (int attempt = 0; attempt < 1024; ++attempt) {
+        float old_val = uintBitsToFloat(old_bits);
+        if (val <= old_val) return;
+        uint new_bits = floatBitsToUint(val);
+        uint result = atomicCompSwap(out_data[pos], old_bits, new_bits);
+        if (result == old_bits) return;
+        old_bits = result;
+    }
+}
+
+// Atomic min for float using compare-and-swap loop
+void atomicMinFloat(uint pos, float val) {
+    uint old_bits = out_data[pos];
+    for (int attempt = 0; attempt < 1024; ++attempt) {
+        float old_val = uintBitsToFloat(old_bits);
+        if (val >= old_val) return;
+        uint new_bits = floatBitsToUint(val);
+        uint result = atomicCompSwap(out_data[pos], old_bits, new_bits);
+        if (result == old_bits) return;
+        old_bits = result;
+    }
+}
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint total = params.outer * params.idx_n * params.inner;
+    if (tid >= total) return;
+
+    uint j = tid % params.inner;
+    uint k = (tid / params.inner) % params.idx_n;
+    uint o = tid / (params.inner * params.idx_n);
+
+    int dest_idx = idx_data[k];
+    if (dest_idx < 0 || dest_idx >= int(params.dim_size)) return;
+
+    uint out_pos = (o * params.dim_size + uint(dest_idx)) * params.inner + j;
+    uint src_pos = (o * params.idx_n + k) * params.inner + j;
+    float val = src_data[src_pos];
+
+    if (params.mode == 0u || params.mode == 2u) {
+        // sum / mean (sum pass)
+        atomicAddFloat(out_pos, val);
+        if (params.mode == 2u) {
+            atomicAdd(count_data[out_pos], 1);
+        }
+    } else if (params.mode == 1u) {
+        atomicMulFloat(out_pos, val);
+    } else if (params.mode == 3u) {
+        atomicMaxFloat(out_pos, val);
+    } else if (params.mode == 4u) {
+        atomicMinFloat(out_pos, val);
+    }
+}

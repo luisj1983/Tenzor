@@ -1,0 +1,52 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Nansum for Float64 inputs.
+// Dispatched as a single workgroup for full reduction.
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer Input  { float64_t input_data[]; };
+layout(binding = 1) buffer Output { float64_t output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+} params;
+
+shared float64_t sdata[WORKGROUP_SIZE];
+shared float64_t scomp[WORKGROUP_SIZE];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+
+    float64_t accum = float64_t(0.0);
+    float64_t comp  = float64_t(0.0);
+    for (uint i = tid; i < params.num_elements; i += WORKGROUP_SIZE) {
+        float64_t val = input_data[i];
+        if (!isnan(val)) {
+            float64_t y = val - comp;
+            float64_t t = accum + y;
+            comp = (t - accum) - y;
+            accum = t;
+        }
+    }
+
+    sdata[tid] = accum;
+    scomp[tid] = comp;
+    barrier();
+
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            float64_t c = scomp[tid] + scomp[tid + s];
+            float64_t y = sdata[tid + s] - c;
+            float64_t t = sdata[tid] + y;
+            scomp[tid] = (t - sdata[tid]) - y;
+            sdata[tid] = t;
+        }
+        barrier();
+    }
+
+    if (tid == 0) {
+        output_data[0] = sdata[0];
+    }
+}

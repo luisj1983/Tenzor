@@ -1080,6 +1080,305 @@ auto VulkanBackend::dispatchRoll(const Tensor& input, int64_t shift, int64_t dim
     return output;
 }
 
+auto VulkanBackend::dispatchRepeatInterleave(const Tensor& input, int64_t repeats, int64_t dim) -> Tensor {
+    // Scalar repeat_interleave: use the roll-like shader pattern with division indexing
+    auto input_shape = input.shape();
+
+    if (input.numel() == 0) {
+        std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
+        out_shape[dim] = 0;
+        return Tensor(out_shape, input.dtype(), input.device());
+    }
+
+    // CPU fallback: move to CPU, compute, move back
+    Tensor cpu_input = input.to(Device::cpu());
+    tenzor::NewOpAttributes cpu_attrs;
+    cpu_attrs.set(AttrKey::Dim, dim);
+    cpu_attrs.set(AttrKey::NumRepeats, repeats);
+    std::vector<Tensor> cpu_inputs = {cpu_input};
+    auto cpu_result = tenzor::dispatch(OpId::RepeatInterleave, std::span<const Tensor>(cpu_inputs), cpu_attrs)[0];
+    return cpu_result.to(input.device());
+}
+
+auto VulkanBackend::dispatchRepeatInterleaveTensor(const Tensor& input, const Tensor& repeats, int64_t dim) -> Tensor {
+    // Tensor repeat_interleave: CPU fallback
+    Tensor cpu_input = input.to(Device::cpu());
+    Tensor cpu_repeats = repeats.to(Device::cpu());
+
+    tenzor::NewOpAttributes cpu_attrs;
+    cpu_attrs.set(AttrKey::Dim, dim);
+    cpu_attrs.set(AttrKey::NumRepeats, static_cast<int64_t>(-1));
+    std::vector<Tensor> cpu_inputs = {cpu_input, cpu_repeats};
+    auto cpu_result = tenzor::dispatch(OpId::RepeatInterleave, std::span<const Tensor>(cpu_inputs), cpu_attrs)[0];
+    return cpu_result.to(input.device());
+}
+
+auto VulkanBackend::dispatchCountNonzero(const Tensor& input) -> Tensor {
+    // Handle empty tensors
+    if (input.numel() == 0) {
+        return dispatchFull({1}, 0.0f, DType::Int64);
+    }
+
+    // BFloat16/Float16: upcast to Float32 (shader uses float buffer)
+    if (input.dtype() == DType::BFloat16 || input.dtype() == DType::Float16) {
+        return dispatchCountNonzero(input.to(DType::Float32));
+    }
+
+    int32_t device_id = input.device().index;
+
+    // Shader outputs the count as a float (or float64), which we then convert to Int64
+    bool is_f64 = (input.dtype() == DType::Float64);
+    std::string shader_name = is_f64 ? "count_nonzero_f64" : "count_nonzero";
+    DType out_dtype = is_f64 ? DType::Float64 : DType::Float32;
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    Tensor output({1}, out_dtype, input.device());
+
+    const void* buffer_in  = input.data_ptr();
+    const void* buffer_out = output.data_ptr();
+
+    size_t buffer_size_in  = input.numel() * input.dtype_size();
+    size_t buffer_size_out = output.numel() * output.dtype_size();
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, buffer_in},
+        {1, buffer_out}
+    };
+    std::vector<size_t> sizes = {buffer_size_in, buffer_size_out};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    struct {
+        uint32_t num_elements;
+    } pushConstants;
+    pushConstants.num_elements = static_cast<uint32_t>(input.numel());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+
+    // Single workgroup dispatch
+    vkCmdDispatch(cmdBuffer, 1, 1, 1);
+
+    insertComputeOnlyBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+    synchronize(device_id);
+
+    // Convert float -> Int64; keep shape {1} to match CPU backend
+    return output.to(DType::Int64);
+}
+
+auto VulkanBackend::dispatchNansum(const Tensor& input) -> Tensor {
+    // Handle empty tensors
+    if (input.numel() == 0) {
+        return dispatchFull({1}, 0.0f, input.dtype());
+    }
+
+    // BFloat16/Float16: upcast to Float32
+    DType orig_dtype = input.dtype();
+    Tensor work_input = input;
+    if (orig_dtype == DType::BFloat16 || orig_dtype == DType::Float16) {
+        work_input = input.to(DType::Float32);
+    }
+
+    int32_t device_id = work_input.device().index;
+
+    std::string shader_name = (work_input.dtype() == DType::Float64)
+        ? "nansum_f64" : "nansum";
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    Tensor output({1}, work_input.dtype(), work_input.device());
+
+    const void* buffer_in  = work_input.data_ptr();
+    const void* buffer_out = output.data_ptr();
+
+    size_t buffer_size_in  = work_input.numel() * work_input.dtype_size();
+    size_t buffer_size_out = output.numel() * output.dtype_size();
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, buffer_in},
+        {1, buffer_out}
+    };
+    std::vector<size_t> sizes = {buffer_size_in, buffer_size_out};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    struct {
+        uint32_t num_elements;
+    } pushConstants;
+    pushConstants.num_elements = static_cast<uint32_t>(work_input.numel());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+
+    vkCmdDispatch(cmdBuffer, 1, 1, 1);
+
+    insertComputeOnlyBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+    synchronize(device_id);
+
+    // Convert back to original dtype if needed; keep shape {1}
+    if (orig_dtype != work_input.dtype()) {
+        return output.to(orig_dtype);
+    }
+    return output;
+}
+
+auto VulkanBackend::dispatchNanmean(const Tensor& input) -> Tensor {
+    // Handle empty tensors: NaN for empty (no non-NaN elements)
+    if (input.numel() == 0) {
+        return dispatchFull({1}, std::numeric_limits<float>::quiet_NaN(), input.dtype());
+    }
+
+    // BFloat16/Float16: upcast to Float32
+    DType orig_dtype = input.dtype();
+    Tensor work_input = input;
+    if (orig_dtype == DType::BFloat16 || orig_dtype == DType::Float16) {
+        work_input = input.to(DType::Float32);
+    }
+
+    int32_t device_id = work_input.device().index;
+
+    std::string shader_name = (work_input.dtype() == DType::Float64)
+        ? "nanmean_f64" : "nanmean";
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    // Output: single element (the shader computes mean directly)
+    Tensor output({1}, work_input.dtype(), work_input.device());
+
+    const void* buffer_in  = work_input.data_ptr();
+    const void* buffer_out = output.data_ptr();
+
+    size_t buffer_size_in  = work_input.numel() * work_input.dtype_size();
+    size_t buffer_size_out = output.numel() * output.dtype_size();
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, buffer_in},
+        {1, buffer_out}
+    };
+    std::vector<size_t> sizes = {buffer_size_in, buffer_size_out};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    struct {
+        uint32_t num_elements;
+    } pushConstants;
+    pushConstants.num_elements = static_cast<uint32_t>(work_input.numel());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+
+    vkCmdDispatch(cmdBuffer, 1, 1, 1);
+
+    insertComputeOnlyBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+    synchronize(device_id);
+
+    // Convert back to original dtype if needed; keep shape {1}
+    if (orig_dtype != work_input.dtype()) {
+        return output.to(orig_dtype);
+    }
+    return output;
+}
+
+auto VulkanBackend::dispatchAminmax(const Tensor& input) -> std::pair<Tensor, Tensor> {
+    // Handle empty tensors
+    if (input.numel() == 0) {
+        throw std::invalid_argument("aminmax: cannot compute min/max of empty tensor");
+    }
+
+    // BFloat16/Float16: upcast to Float32
+    DType orig_dtype = input.dtype();
+    Tensor work_input = input;
+    if (orig_dtype == DType::BFloat16 || orig_dtype == DType::Float16) {
+        work_input = input.to(DType::Float32);
+    }
+
+    int32_t device_id = work_input.device().index;
+
+    std::string shader_name = (work_input.dtype() == DType::Float64)
+        ? "aminmax_f64" : "aminmax";
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    // Output: 2 elements [min, max]
+    Tensor output({2}, work_input.dtype(), work_input.device());
+
+    const void* buffer_in  = work_input.data_ptr();
+    const void* buffer_out = output.data_ptr();
+
+    size_t buffer_size_in  = work_input.numel() * work_input.dtype_size();
+    size_t buffer_size_out = 2 * work_input.dtype_size();
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, buffer_in},
+        {1, buffer_out}
+    };
+    std::vector<size_t> sizes = {buffer_size_in, buffer_size_out};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    struct {
+        uint32_t num_elements;
+    } pushConstants;
+    pushConstants.num_elements = static_cast<uint32_t>(work_input.numel());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+
+    vkCmdDispatch(cmdBuffer, 1, 1, 1);
+
+    insertComputeOnlyBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+    synchronize(device_id);
+
+    // Split the 2-element output [min, max] into two {1}-shaped tensors.
+    // Move to CPU for the split, then back to the original device.
+    Device orig_device = work_input.device();
+    Tensor output_cpu = output.to(Device::cpu());
+
+    Tensor min_tensor({1}, work_input.dtype(), Device::cpu());
+    Tensor max_tensor({1}, work_input.dtype(), Device::cpu());
+
+    size_t elem_size = work_input.dtype_size();
+    std::memcpy(min_tensor.data_ptr(),
+                static_cast<const char*>(output_cpu.data_ptr()),
+                elem_size);
+    std::memcpy(max_tensor.data_ptr(),
+                static_cast<const char*>(output_cpu.data_ptr()) + elem_size,
+                elem_size);
+
+    // Move back to original device
+    min_tensor = min_tensor.to(orig_device);
+    max_tensor = max_tensor.to(orig_device);
+
+    // Convert back to original dtype if needed
+    if (orig_dtype != work_input.dtype()) {
+        min_tensor = min_tensor.to(orig_dtype);
+        max_tensor = max_tensor.to(orig_dtype);
+    }
+
+    return {min_tensor, max_tensor};
+}
+
 auto VulkanBackend::dispatchTrace(const Tensor& input) -> Tensor {
     auto input_shape = input.shape();
     if (input_shape.size() != 2) {

@@ -4906,6 +4906,291 @@ Tensor ge_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
 }
 
 // ============================================================================
+// FP8 device conversion functions
+// ============================================================================
+
+/// Convert a float32 value to FP8 E4M3 (1 sign, 4 exponent, 3 mantissa, bias=7, no inf)
+__device__ __forceinline__ uint8_t float_to_fp8_e4m3(float f) {
+    uint32_t f_bits = __float_as_uint(f);
+    uint32_t sign = (f_bits >> 31) & 0x1;
+    uint32_t exp = (f_bits >> 23) & 0xFF;
+    uint32_t mantissa = f_bits & 0x7FFFFF;
+
+    uint8_t h_exp, h_mantissa;
+
+    if (exp == 0xFF) {
+        // Inf/NaN -> E4M3 NaN (no infinity in E4M3)
+        h_exp = 0xF;
+        h_mantissa = 0x7;
+    } else if (exp == 0) {
+        h_exp = 0;
+        h_mantissa = 0;
+    } else {
+        int32_t new_exp = static_cast<int32_t>(exp) - 127 + 7;
+        if (new_exp >= 0xF) {
+            // Clamp to max finite (exp=0xE, mantissa=0x7 = 448)
+            h_exp = 0xE;
+            h_mantissa = 0x7;
+        } else if (new_exp <= 0) {
+            if (new_exp >= -3) {
+                uint32_t m = (mantissa | 0x800000) >> (1 - new_exp);
+                h_mantissa = static_cast<uint8_t>((m >> 20) & 0x7);
+                h_exp = 0;
+            } else {
+                h_exp = 0;
+                h_mantissa = 0;
+            }
+        } else {
+            h_exp = static_cast<uint8_t>(new_exp);
+            h_mantissa = static_cast<uint8_t>((mantissa >> 20) & 0x7);
+        }
+    }
+    return static_cast<uint8_t>((sign << 7) | (h_exp << 3) | h_mantissa);
+}
+
+/// Convert an FP8 E4M3 byte to float32
+__device__ __forceinline__ float fp8_e4m3_to_float(uint8_t bits) {
+    uint32_t sign = (bits >> 7) & 0x1;
+    uint32_t exp = (bits >> 3) & 0xF;
+    uint32_t mantissa = bits & 0x7;
+
+    uint32_t f_exp, f_mantissa;
+
+    if (exp == 0) {
+        if (mantissa == 0) {
+            f_exp = 0;
+            f_mantissa = 0;
+        } else {
+            // Denormalized: normalize
+            int e = -1;
+            uint32_t m = mantissa;
+            do { e++; m <<= 1; } while ((m & 0x8) == 0);
+            f_exp = 127 - 7 - e;
+            f_mantissa = (m & 0x7) << 20;
+        }
+    } else if (exp == 0xF && mantissa != 0) {
+        // NaN
+        f_exp = 0xFF;
+        f_mantissa = mantissa << 20;
+    } else {
+        // Normalized (exp=0xF with mantissa=0 is max finite, not inf)
+        f_exp = exp - 7 + 127;
+        f_mantissa = mantissa << 20;
+    }
+
+    uint32_t f_bits = (sign << 31) | (f_exp << 23) | f_mantissa;
+    return __uint_as_float(f_bits);
+}
+
+/// Convert a float32 value to FP8 E5M2 (1 sign, 5 exponent, 2 mantissa, bias=15, has inf)
+__device__ __forceinline__ uint8_t float_to_fp8_e5m2(float f) {
+    uint32_t f_bits = __float_as_uint(f);
+    uint32_t sign = (f_bits >> 31) & 0x1;
+    uint32_t exp = (f_bits >> 23) & 0xFF;
+    uint32_t mantissa = f_bits & 0x7FFFFF;
+
+    uint8_t h_exp, h_mantissa;
+
+    if (exp == 0xFF) {
+        h_exp = 0x1F;
+        h_mantissa = mantissa ? 0x3 : 0;  // NaN vs Inf
+    } else if (exp == 0) {
+        h_exp = 0;
+        h_mantissa = 0;
+    } else {
+        int32_t new_exp = static_cast<int32_t>(exp) - 127 + 15;
+        if (new_exp >= 0x1F) {
+            // Overflow to infinity
+            h_exp = 0x1F;
+            h_mantissa = 0;
+        } else if (new_exp <= 0) {
+            if (new_exp >= -2) {
+                uint32_t m = (mantissa | 0x800000) >> (1 - new_exp);
+                h_mantissa = static_cast<uint8_t>((m >> 21) & 0x3);
+                h_exp = 0;
+            } else {
+                h_exp = 0;
+                h_mantissa = 0;
+            }
+        } else {
+            h_exp = static_cast<uint8_t>(new_exp);
+            h_mantissa = static_cast<uint8_t>((mantissa >> 21) & 0x3);
+        }
+    }
+    return static_cast<uint8_t>((sign << 7) | (h_exp << 2) | h_mantissa);
+}
+
+/// Convert an FP8 E5M2 byte to float32
+__device__ __forceinline__ float fp8_e5m2_to_float(uint8_t bits) {
+    uint32_t sign = (bits >> 7) & 0x1;
+    uint32_t exp = (bits >> 2) & 0x1F;
+    uint32_t mantissa = bits & 0x3;
+
+    uint32_t f_exp, f_mantissa;
+
+    if (exp == 0) {
+        if (mantissa == 0) {
+            f_exp = 0;
+            f_mantissa = 0;
+        } else {
+            int e = -1;
+            uint32_t m = mantissa;
+            do { e++; m <<= 1; } while ((m & 0x4) == 0);
+            f_exp = 127 - 15 - e;
+            f_mantissa = (m & 0x3) << 21;
+        }
+    } else if (exp == 0x1F) {
+        // Inf or NaN
+        f_exp = 0xFF;
+        f_mantissa = mantissa << 21;
+    } else {
+        f_exp = exp - 15 + 127;
+        f_mantissa = mantissa << 21;
+    }
+
+    uint32_t f_bits = (sign << 31) | (f_exp << 23) | f_mantissa;
+    return __uint_as_float(f_bits);
+}
+
+// ---- FP8 cast kernels ----
+
+// Float32 -> FP8
+__global__ void cast_f32_to_fp8_e4m3_kernel(const float* input, uint8_t* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = float_to_fp8_e4m3(input[idx]);
+    }
+}
+__global__ void cast_f32_to_fp8_e5m2_kernel(const float* input, uint8_t* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = float_to_fp8_e5m2(input[idx]);
+    }
+}
+
+// FP8 -> Float32
+__global__ void cast_fp8_e4m3_to_f32_kernel(const uint8_t* input, float* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = fp8_e4m3_to_float(input[idx]);
+    }
+}
+__global__ void cast_fp8_e5m2_to_f32_kernel(const uint8_t* input, float* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = fp8_e5m2_to_float(input[idx]);
+    }
+}
+
+// Float16 -> FP8 (via Float32 intermediate)
+__global__ void cast_f16_to_fp8_e4m3_kernel(const __half* input, uint8_t* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = float_to_fp8_e4m3(__half2float(input[idx]));
+    }
+}
+__global__ void cast_f16_to_fp8_e5m2_kernel(const __half* input, uint8_t* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = float_to_fp8_e5m2(__half2float(input[idx]));
+    }
+}
+
+// BFloat16 -> FP8 (via Float32 intermediate)
+__global__ void cast_bf16_to_fp8_e4m3_kernel(const __nv_bfloat16* input, uint8_t* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = float_to_fp8_e4m3(__bfloat162float(input[idx]));
+    }
+}
+__global__ void cast_bf16_to_fp8_e5m2_kernel(const __nv_bfloat16* input, uint8_t* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = float_to_fp8_e5m2(__bfloat162float(input[idx]));
+    }
+}
+
+// FP8 -> Float16
+__global__ void cast_fp8_e4m3_to_f16_kernel(const uint8_t* input, __half* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = __float2half(fp8_e4m3_to_float(input[idx]));
+    }
+}
+__global__ void cast_fp8_e5m2_to_f16_kernel(const uint8_t* input, __half* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = __float2half(fp8_e5m2_to_float(input[idx]));
+    }
+}
+
+// FP8 -> BFloat16
+__global__ void cast_fp8_e4m3_to_bf16_kernel(const uint8_t* input, __nv_bfloat16* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = __float2bfloat16(fp8_e4m3_to_float(input[idx]));
+    }
+}
+__global__ void cast_fp8_e5m2_to_bf16_kernel(const uint8_t* input, __nv_bfloat16* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = __float2bfloat16(fp8_e5m2_to_float(input[idx]));
+    }
+}
+
+// FP8 -> integer/bool types (via Float32 intermediate)
+template<typename To>
+__global__ void cast_fp8_e4m3_to_kernel(const uint8_t* input, To* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = static_cast<To>(fp8_e4m3_to_float(input[idx]));
+    }
+}
+template<typename To>
+__global__ void cast_fp8_e5m2_to_kernel(const uint8_t* input, To* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = static_cast<To>(fp8_e5m2_to_float(input[idx]));
+    }
+}
+
+// Integer/bool types -> FP8 (via Float32 intermediate)
+template<typename From>
+__global__ void cast_to_fp8_e4m3_kernel(const From* input, uint8_t* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = float_to_fp8_e4m3(static_cast<float>(input[idx]));
+    }
+}
+template<typename From>
+__global__ void cast_to_fp8_e5m2_kernel(const From* input, uint8_t* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = float_to_fp8_e5m2(static_cast<float>(input[idx]));
+    }
+}
+
+// FP8 <-> FP8 cross-format
+__global__ void cast_fp8_e4m3_to_e5m2_kernel(const uint8_t* input, uint8_t* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = float_to_fp8_e5m2(fp8_e4m3_to_float(input[idx]));
+    }
+}
+__global__ void cast_fp8_e5m2_to_e4m3_kernel(const uint8_t* input, uint8_t* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = float_to_fp8_e4m3(fp8_e5m2_to_float(input[idx]));
+    }
+}
+
+// FP8 -> Float64 (via Float32 intermediate)
+__global__ void cast_fp8_e4m3_to_f64_kernel(const uint8_t* input, double* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = static_cast<double>(fp8_e4m3_to_float(input[idx]));
+    }
+}
+__global__ void cast_fp8_e5m2_to_f64_kernel(const uint8_t* input, double* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = static_cast<double>(fp8_e5m2_to_float(input[idx]));
+    }
+}
+
+// Float64 -> FP8 (via Float32 intermediate)
+__global__ void cast_f64_to_fp8_e4m3_kernel(const double* input, uint8_t* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = float_to_fp8_e4m3(static_cast<float>(input[idx]));
+    }
+}
+__global__ void cast_f64_to_fp8_e5m2_kernel(const double* input, uint8_t* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = float_to_fp8_e5m2(static_cast<float>(input[idx]));
+    }
+}
+
+// ============================================================================
 // Cast (dtype conversion) Kernels
 // ============================================================================
 
@@ -5174,13 +5459,13 @@ auto cuda_cast_kernel(const Tensor& input, DType target_dtype, cudaStream_t stre
                 cast_from_f16_kernel<<<grid, block, 0, stream>>>(src, result.data<bool>(), n);
                 CUDA_CHECK(cudaGetLastError()); break;
             case DType::FP8_E4M3:
-            case DType::FP8_E5M2: {
-                // FP8 conversion via CPU (host-only bit manipulation)
-                Tensor cpu_input = input.to(Device::cpu());
-                Tensor cpu_result = cpu_input.to(target_dtype);
-                result = cpu_result.to(input.device());
-                break;
-            }
+                cast_f16_to_fp8_e4m3_kernel<<<grid, block, 0, stream>>>(src,
+                    result.data<uint8_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::FP8_E5M2:
+                cast_f16_to_fp8_e5m2_kernel<<<grid, block, 0, stream>>>(src,
+                    result.data<uint8_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             default:
                 throw std::runtime_error("cast: unsupported target dtype for Float16 source");
         }
@@ -5231,32 +5516,208 @@ auto cuda_cast_kernel(const Tensor& input, DType target_dtype, cudaStream_t stre
                 cast_from_bf16_kernel<<<grid, block, 0, stream>>>(src, result.data<bool>(), n);
                 CUDA_CHECK(cudaGetLastError()); break;
             case DType::FP8_E4M3:
-            case DType::FP8_E5M2: {
-                // FP8 conversion via CPU (host-only bit manipulation)
-                Tensor cpu_input = input.to(Device::cpu());
-                Tensor cpu_result = cpu_input.to(target_dtype);
-                result = cpu_result.to(input.device());
-                break;
-            }
+                cast_bf16_to_fp8_e4m3_kernel<<<grid, block, 0, stream>>>(src,
+                    result.data<uint8_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::FP8_E5M2:
+                cast_bf16_to_fp8_e5m2_kernel<<<grid, block, 0, stream>>>(src,
+                    result.data<uint8_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
             default:
                 throw std::runtime_error("cast: unsupported target dtype for BFloat16 source");
         }
     }
-    // ---- FP8 source or target: use CPU roundtrip ----
-    // FP8 conversion operators are host-only (complex bit manipulation).
-    // Move to CPU, convert, move back.  FP8 tensors are typically small
-    // (quantized weights/activations) so the overhead is negligible.
-    else if (src_dtype == DType::FP8_E4M3 || src_dtype == DType::FP8_E5M2) {
-        Tensor cpu_input = input.to(Device::cpu());
-        Tensor cpu_result = cpu_input.to(target_dtype);
-        result = cpu_result.to(input.device());
+    // ---- FP8 source ----
+    else if (src_dtype == DType::FP8_E4M3) {
+        const uint8_t* src = input.data<uint8_t>();
+        switch (target_dtype) {
+            case DType::Float32:
+                cast_fp8_e4m3_to_f32_kernel<<<grid, block, 0, stream>>>(src, result.data<float>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::Float64:
+                cast_fp8_e4m3_to_f64_kernel<<<grid, block, 0, stream>>>(src, result.data<double>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::Float16:
+                cast_fp8_e4m3_to_f16_kernel<<<grid, block, 0, stream>>>(src,
+                    reinterpret_cast<__half*>(result.data<Float16>()), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::BFloat16:
+                cast_fp8_e4m3_to_bf16_kernel<<<grid, block, 0, stream>>>(src,
+                    reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::FP8_E4M3:
+                // Same type, already handled above
+                break;
+            case DType::FP8_E5M2:
+                cast_fp8_e4m3_to_e5m2_kernel<<<grid, block, 0, stream>>>(src,
+                    result.data<uint8_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::Int8:
+                cast_fp8_e4m3_to_kernel<<<grid, block, 0, stream>>>(src, result.data<int8_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::Int16:
+                cast_fp8_e4m3_to_kernel<<<grid, block, 0, stream>>>(src, result.data<int16_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::Int32:
+                cast_fp8_e4m3_to_kernel<<<grid, block, 0, stream>>>(src, result.data<int32_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::Int64:
+                cast_fp8_e4m3_to_kernel<<<grid, block, 0, stream>>>(src, result.data<int64_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::UInt8:
+                cast_fp8_e4m3_to_kernel<<<grid, block, 0, stream>>>(src, result.data<uint8_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::UInt16:
+                cast_fp8_e4m3_to_kernel<<<grid, block, 0, stream>>>(src, result.data<uint16_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::UInt32:
+                cast_fp8_e4m3_to_kernel<<<grid, block, 0, stream>>>(src, result.data<uint32_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::UInt64:
+                cast_fp8_e4m3_to_kernel<<<grid, block, 0, stream>>>(src, result.data<uint64_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::Bool:
+                cast_fp8_e4m3_to_kernel<<<grid, block, 0, stream>>>(src, result.data<bool>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            default:
+                throw std::runtime_error("cast: unsupported target dtype for FP8_E4M3 source");
+        }
     }
-    // ---- Standard source types (non-half) ----
+    else if (src_dtype == DType::FP8_E5M2) {
+        const uint8_t* src = input.data<uint8_t>();
+        switch (target_dtype) {
+            case DType::Float32:
+                cast_fp8_e5m2_to_f32_kernel<<<grid, block, 0, stream>>>(src, result.data<float>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::Float64:
+                cast_fp8_e5m2_to_f64_kernel<<<grid, block, 0, stream>>>(src, result.data<double>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::Float16:
+                cast_fp8_e5m2_to_f16_kernel<<<grid, block, 0, stream>>>(src,
+                    reinterpret_cast<__half*>(result.data<Float16>()), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::BFloat16:
+                cast_fp8_e5m2_to_bf16_kernel<<<grid, block, 0, stream>>>(src,
+                    reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::FP8_E4M3:
+                cast_fp8_e5m2_to_e4m3_kernel<<<grid, block, 0, stream>>>(src,
+                    result.data<uint8_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::FP8_E5M2:
+                // Same type, already handled above
+                break;
+            case DType::Int8:
+                cast_fp8_e5m2_to_kernel<<<grid, block, 0, stream>>>(src, result.data<int8_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::Int16:
+                cast_fp8_e5m2_to_kernel<<<grid, block, 0, stream>>>(src, result.data<int16_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::Int32:
+                cast_fp8_e5m2_to_kernel<<<grid, block, 0, stream>>>(src, result.data<int32_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::Int64:
+                cast_fp8_e5m2_to_kernel<<<grid, block, 0, stream>>>(src, result.data<int64_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::UInt8:
+                cast_fp8_e5m2_to_kernel<<<grid, block, 0, stream>>>(src, result.data<uint8_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::UInt16:
+                cast_fp8_e5m2_to_kernel<<<grid, block, 0, stream>>>(src, result.data<uint16_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::UInt32:
+                cast_fp8_e5m2_to_kernel<<<grid, block, 0, stream>>>(src, result.data<uint32_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::UInt64:
+                cast_fp8_e5m2_to_kernel<<<grid, block, 0, stream>>>(src, result.data<uint64_t>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            case DType::Bool:
+                cast_fp8_e5m2_to_kernel<<<grid, block, 0, stream>>>(src, result.data<bool>(), n);
+                CUDA_CHECK(cudaGetLastError()); break;
+            default:
+                throw std::runtime_error("cast: unsupported target dtype for FP8_E5M2 source");
+        }
+    }
+    // ---- Standard source types (non-half, non-FP8) ----
     else {
-        if (target_dtype == DType::FP8_E4M3 || target_dtype == DType::FP8_E5M2) {
-            Tensor cpu_input = input.to(Device::cpu());
-            Tensor cpu_result = cpu_input.to(target_dtype);
-            result = cpu_result.to(input.device());
+        if (target_dtype == DType::FP8_E4M3) {
+            uint8_t* dst = result.data<uint8_t>();
+            switch (src_dtype) {
+                case DType::Float32:
+                    cast_f32_to_fp8_e4m3_kernel<<<grid, block, 0, stream>>>(input.data<float>(), dst, n);
+                    CUDA_CHECK(cudaGetLastError()); break;
+                case DType::Float64:
+                    cast_f64_to_fp8_e4m3_kernel<<<grid, block, 0, stream>>>(input.data<double>(), dst, n);
+                    CUDA_CHECK(cudaGetLastError()); break;
+                case DType::Int8:
+                    cast_to_fp8_e4m3_kernel<<<grid, block, 0, stream>>>(input.data<int8_t>(), dst, n);
+                    CUDA_CHECK(cudaGetLastError()); break;
+                case DType::Int16:
+                    cast_to_fp8_e4m3_kernel<<<grid, block, 0, stream>>>(input.data<int16_t>(), dst, n);
+                    CUDA_CHECK(cudaGetLastError()); break;
+                case DType::Int32:
+                    cast_to_fp8_e4m3_kernel<<<grid, block, 0, stream>>>(input.data<int32_t>(), dst, n);
+                    CUDA_CHECK(cudaGetLastError()); break;
+                case DType::Int64:
+                    cast_to_fp8_e4m3_kernel<<<grid, block, 0, stream>>>(input.data<int64_t>(), dst, n);
+                    CUDA_CHECK(cudaGetLastError()); break;
+                case DType::UInt8:
+                    cast_to_fp8_e4m3_kernel<<<grid, block, 0, stream>>>(input.data<uint8_t>(), dst, n);
+                    CUDA_CHECK(cudaGetLastError()); break;
+                case DType::UInt16:
+                    cast_to_fp8_e4m3_kernel<<<grid, block, 0, stream>>>(input.data<uint16_t>(), dst, n);
+                    CUDA_CHECK(cudaGetLastError()); break;
+                case DType::UInt32:
+                    cast_to_fp8_e4m3_kernel<<<grid, block, 0, stream>>>(input.data<uint32_t>(), dst, n);
+                    CUDA_CHECK(cudaGetLastError()); break;
+                case DType::UInt64:
+                    cast_to_fp8_e4m3_kernel<<<grid, block, 0, stream>>>(input.data<uint64_t>(), dst, n);
+                    CUDA_CHECK(cudaGetLastError()); break;
+                case DType::Bool:
+                    cast_to_fp8_e4m3_kernel<<<grid, block, 0, stream>>>(input.data<bool>(), dst, n);
+                    CUDA_CHECK(cudaGetLastError()); break;
+                default:
+                    throw std::runtime_error("cast: unsupported source dtype for FP8_E4M3 target");
+            }
+        } else if (target_dtype == DType::FP8_E5M2) {
+            uint8_t* dst = result.data<uint8_t>();
+            switch (src_dtype) {
+                case DType::Float32:
+                    cast_f32_to_fp8_e5m2_kernel<<<grid, block, 0, stream>>>(input.data<float>(), dst, n);
+                    CUDA_CHECK(cudaGetLastError()); break;
+                case DType::Float64:
+                    cast_f64_to_fp8_e5m2_kernel<<<grid, block, 0, stream>>>(input.data<double>(), dst, n);
+                    CUDA_CHECK(cudaGetLastError()); break;
+                case DType::Int8:
+                    cast_to_fp8_e5m2_kernel<<<grid, block, 0, stream>>>(input.data<int8_t>(), dst, n);
+                    CUDA_CHECK(cudaGetLastError()); break;
+                case DType::Int16:
+                    cast_to_fp8_e5m2_kernel<<<grid, block, 0, stream>>>(input.data<int16_t>(), dst, n);
+                    CUDA_CHECK(cudaGetLastError()); break;
+                case DType::Int32:
+                    cast_to_fp8_e5m2_kernel<<<grid, block, 0, stream>>>(input.data<int32_t>(), dst, n);
+                    CUDA_CHECK(cudaGetLastError()); break;
+                case DType::Int64:
+                    cast_to_fp8_e5m2_kernel<<<grid, block, 0, stream>>>(input.data<int64_t>(), dst, n);
+                    CUDA_CHECK(cudaGetLastError()); break;
+                case DType::UInt8:
+                    cast_to_fp8_e5m2_kernel<<<grid, block, 0, stream>>>(input.data<uint8_t>(), dst, n);
+                    CUDA_CHECK(cudaGetLastError()); break;
+                case DType::UInt16:
+                    cast_to_fp8_e5m2_kernel<<<grid, block, 0, stream>>>(input.data<uint16_t>(), dst, n);
+                    CUDA_CHECK(cudaGetLastError()); break;
+                case DType::UInt32:
+                    cast_to_fp8_e5m2_kernel<<<grid, block, 0, stream>>>(input.data<uint32_t>(), dst, n);
+                    CUDA_CHECK(cudaGetLastError()); break;
+                case DType::UInt64:
+                    cast_to_fp8_e5m2_kernel<<<grid, block, 0, stream>>>(input.data<uint64_t>(), dst, n);
+                    CUDA_CHECK(cudaGetLastError()); break;
+                case DType::Bool:
+                    cast_to_fp8_e5m2_kernel<<<grid, block, 0, stream>>>(input.data<bool>(), dst, n);
+                    CUDA_CHECK(cudaGetLastError()); break;
+                default:
+                    throw std::runtime_error("cast: unsupported source dtype for FP8_E5M2 target");
+            }
         } else {
         switch (src_dtype) {
             case DType::Float32:

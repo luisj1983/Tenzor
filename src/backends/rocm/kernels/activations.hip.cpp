@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <chrono>
 #include "fp16_saturate.h"
 
 namespace tenzor {
@@ -2586,6 +2587,445 @@ void gelu_inplace_kernel(Tensor& target, hipStream_t stream) {
         throw std::runtime_error("Gelu in-place: unsupported dtype");
     }
     HIP_CHECK(hipGetLastError());
+}
+
+// ============================================================================
+// RReLU: Randomized Leaky ReLU
+// ============================================================================
+
+// Eval mode: slope = (lower + upper) / 2
+template<typename T>
+__global__ void rrelu_eval_kernel(const T* input, T* output, int64_t n, T slope) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        T x = input[idx];
+        output[idx] = (x >= T(0)) ? x : slope * x;
+    }
+}
+
+// Train mode: per-element random slope via PCG
+__global__ void rrelu_train_kernel_f32(const float* input, float* output, int64_t n,
+                                       float lower, float upper, unsigned long long seed) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        float x = input[idx];
+        if (x >= 0.0f) {
+            output[idx] = x;
+        } else {
+            unsigned long long state = seed + static_cast<unsigned long long>(idx) * 6364136223846793005ULL;
+            state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+            float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+            float slope = lower + u * (upper - lower);
+            output[idx] = slope * x;
+        }
+    }
+}
+
+// RReLU backward
+template<typename T>
+__global__ void rrelu_backward_kernel_impl(const T* grad, const T* input, T* output,
+                                           int64_t n, T slope) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        output[idx] = (input[idx] >= T(0)) ? grad[idx] : slope * grad[idx];
+    }
+}
+
+// LogSigmoid backward: grad * sigmoid(-x)
+template<typename T>
+__global__ void log_sigmoid_backward_kernel_impl(const T* grad, const T* input, T* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        T x = input[idx];
+        T sig_neg_x = (x >= T(0)) ? exp(-x) / (T(1) + exp(-x)) : T(1) / (T(1) + exp(x));
+        output[idx] = grad[idx] * sig_neg_x;
+    }
+}
+
+// Float32 specialisation for LogSigmoid backward (use expf)
+__global__ void log_sigmoid_backward_kernel_f32(const float* grad, const float* input,
+                                                 float* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        float x = input[idx];
+        float sig_neg_x = (x >= 0.0f) ? expf(-x) / (1.0f + expf(-x)) : 1.0f / (1.0f + expf(x));
+        output[idx] = grad[idx] * sig_neg_x;
+    }
+}
+
+// ---- dispatch wrappers ----
+
+auto rrelu_kernel(const Tensor& input, float lower, float upper, bool training, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    if (n == 0) return result;
+
+    float mid = (lower + upper) / 2.0f;
+    int num_blocks = get_num_blocks(n);
+
+    if (input.dtype() == DType::Float32) {
+        if (training) {
+            unsigned long long seed = static_cast<unsigned long long>(
+                std::chrono::high_resolution_clock::now().time_since_epoch().count());
+            hipLaunchKernelGGL(rrelu_train_kernel_f32, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                              input.data<float>(), result.data<float>(), n, lower, upper, seed);
+        } else {
+            hipLaunchKernelGGL(rrelu_eval_kernel<float>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                              input.data<float>(), result.data<float>(), n, mid);
+        }
+    } else if (input.dtype() == DType::Float64) {
+        if (training) {
+            // For Float64 in training, use eval-mode midpoint (no Float64 PCG kernel)
+            double mid_d = static_cast<double>(mid);
+            hipLaunchKernelGGL(rrelu_eval_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                              input.data<double>(), result.data<double>(), n, mid_d);
+        } else {
+            double mid_d = static_cast<double>(mid);
+            hipLaunchKernelGGL(rrelu_eval_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                              input.data<double>(), result.data<double>(), n, mid_d);
+        }
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = rrelu_kernel(input_f32, lower, upper, training, stream);
+        return result_f32.to(input.dtype());
+    } else {
+        throw std::runtime_error("RReLU only supports Float32, Float64, Float16, and BFloat16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto rrelu_backward_kernel(const Tensor& grad_output, const Tensor& input,
+                           float lower, float upper, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    if (n == 0) return result;
+
+    float mid = (lower + upper) / 2.0f;
+    int num_blocks = get_num_blocks(n);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(rrelu_backward_kernel_impl<float>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          grad_output.data<float>(), input.data<float>(), result.data<float>(), n, mid);
+    } else if (input.dtype() == DType::Float64) {
+        double mid_d = static_cast<double>(mid);
+        hipLaunchKernelGGL(rrelu_backward_kernel_impl<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          grad_output.data<double>(), input.data<double>(), result.data<double>(), n, mid_d);
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto grad_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = rrelu_backward_kernel(grad_f32, input_f32, lower, upper, stream);
+        return result_f32.to(input.dtype());
+    } else {
+        throw std::runtime_error("RReLU backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto log_sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    if (n == 0) return result;
+
+    int num_blocks = get_num_blocks(n);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(log_sigmoid_backward_kernel_f32, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          grad_output.data<float>(), input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(log_sigmoid_backward_kernel_impl<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          grad_output.data<double>(), input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto grad_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = log_sigmoid_backward_kernel(grad_f32, input_f32, stream);
+        return result_f32.to(input.dtype());
+    } else {
+        throw std::runtime_error("LogSigmoid backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ============================================================================
+// IndexAdd, IndexCopy, IndexFill HIP kernels
+// ============================================================================
+
+__global__ void index_add_f32_kernel(float* output, const float* source, const int64_t* index,
+                                     int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = outer * idx_n * inner;
+    if (tid >= total) return;
+    int64_t j = tid % inner;
+    int64_t k = (tid / inner) % idx_n;
+    int64_t o = tid / (inner * idx_n);
+    atomicAdd(&output[(o * dim_size + index[k]) * inner + j],
+              source[(o * idx_n + k) * inner + j]);
+}
+
+__global__ void index_copy_f32_kernel(float* output, const float* source, const int64_t* index,
+                                      int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = outer * idx_n * inner;
+    if (tid >= total) return;
+    int64_t j = tid % inner;
+    int64_t k = (tid / inner) % idx_n;
+    int64_t o = tid / (inner * idx_n);
+    output[(o * dim_size + index[k]) * inner + j] = source[(o * idx_n + k) * inner + j];
+}
+
+__global__ void index_fill_f32_kernel(float* output, const int64_t* index, float value,
+                                      int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = outer * idx_n * inner;
+    if (tid >= total) return;
+    int64_t j = tid % inner;
+    int64_t k = (tid / inner) % idx_n;
+    int64_t o = tid / (inner * idx_n);
+    output[(o * dim_size + index[k]) * inner + j] = value;
+}
+
+auto index_add_kernel(const Tensor& self, const Tensor& index, const Tensor& source,
+                      int64_t dim, hipStream_t stream) -> Tensor {
+    auto output = self.clone();
+    auto shape = output.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+
+    int64_t dim_size = shape[dim];
+    int64_t idx_n = index.numel();
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < dim; d++) outer *= shape[d];
+    for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
+    int64_t total = outer * idx_n * inner;
+
+    if (total == 0) return output;
+
+    if (output.dtype() == DType::Float32) {
+        int num_blocks = get_num_blocks(total);
+        hipLaunchKernelGGL(index_add_f32_kernel, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          output.data<float>(), source.data<float>(), index.data<int64_t>(),
+                          outer, dim_size, idx_n, inner);
+    } else {
+        auto f32_self = self.to(DType::Float32);
+        auto f32_src = source.to(DType::Float32);
+        auto result = index_add_kernel(f32_self, index, f32_src, dim, stream);
+        return result.to(self.dtype());
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return output;
+}
+
+auto index_copy_kernel(const Tensor& self, const Tensor& index, const Tensor& source,
+                       int64_t dim, hipStream_t stream) -> Tensor {
+    auto output = self.clone();
+    auto shape = output.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+
+    int64_t dim_size = shape[dim];
+    int64_t idx_n = index.numel();
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < dim; d++) outer *= shape[d];
+    for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
+    int64_t total = outer * idx_n * inner;
+
+    if (total == 0) return output;
+
+    if (output.dtype() == DType::Float32) {
+        int num_blocks = get_num_blocks(total);
+        hipLaunchKernelGGL(index_copy_f32_kernel, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          output.data<float>(), source.data<float>(), index.data<int64_t>(),
+                          outer, dim_size, idx_n, inner);
+    } else {
+        auto f32_self = self.to(DType::Float32);
+        auto f32_src = source.to(DType::Float32);
+        auto result = index_copy_kernel(f32_self, index, f32_src, dim, stream);
+        return result.to(self.dtype());
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return output;
+}
+
+auto index_fill_kernel(const Tensor& self, const Tensor& index,
+                       int64_t dim, double value, hipStream_t stream) -> Tensor {
+    auto output = self.clone();
+    auto shape = output.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+
+    int64_t dim_size = shape[dim];
+    int64_t idx_n = index.numel();
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < dim; d++) outer *= shape[d];
+    for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
+    int64_t total = outer * idx_n * inner;
+
+    if (total == 0) return output;
+
+    if (output.dtype() == DType::Float32) {
+        int num_blocks = get_num_blocks(total);
+        hipLaunchKernelGGL(index_fill_f32_kernel, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          output.data<float>(), index.data<int64_t>(), static_cast<float>(value),
+                          outer, dim_size, idx_n, inner);
+    } else {
+        auto f32_self = self.to(DType::Float32);
+        auto result = index_fill_kernel(f32_self, index, dim, value, stream);
+        return result.to(self.dtype());
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return output;
+}
+
+// ============================================================================
+// ScatterReduce HIP kernels
+// ============================================================================
+
+// Scatter-reduce modes: 0=sum, 1=prod, 2=mean, 3=amax, 4=amin
+__global__ void scatter_reduce_f32_kernel(float* output, const float* source, const int64_t* index,
+                                           int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner,
+                                           int mode, int* counts) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = outer * idx_n * inner;
+    if (tid >= total) return;
+    int64_t j = tid % inner;
+    int64_t k = (tid / inner) % idx_n;
+    int64_t o = tid / (inner * idx_n);
+    int64_t out_pos = (o * dim_size + index[k]) * inner + j;
+    int64_t src_pos = (o * idx_n + k) * inner + j;
+    float val = source[src_pos];
+
+    if (mode == 0 || mode == 2) {
+        atomicAdd(&output[out_pos], val);
+        if (mode == 2 && counts) atomicAdd(&counts[out_pos], 1);
+    } else if (mode == 1) {
+        // prod: CAS loop
+        unsigned int* addr = reinterpret_cast<unsigned int*>(&output[out_pos]);
+        unsigned int old_bits = __atomic_load_n(addr, __ATOMIC_RELAXED), new_bits;
+        do {
+            float old_val = __uint_as_float(old_bits);
+            new_bits = __float_as_uint(old_val * val);
+        } while (!__atomic_compare_exchange_n(addr, &old_bits, new_bits, true, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+    } else if (mode == 3) {
+        // amax: CAS loop
+        unsigned int* addr = reinterpret_cast<unsigned int*>(&output[out_pos]);
+        unsigned int old_bits = __atomic_load_n(addr, __ATOMIC_RELAXED), new_bits;
+        do {
+            float old_val = __uint_as_float(old_bits);
+            if (val <= old_val) break;
+            new_bits = __float_as_uint(val);
+        } while (!__atomic_compare_exchange_n(addr, &old_bits, new_bits, true, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+    } else if (mode == 4) {
+        // amin: CAS loop
+        unsigned int* addr = reinterpret_cast<unsigned int*>(&output[out_pos]);
+        unsigned int old_bits = __atomic_load_n(addr, __ATOMIC_RELAXED), new_bits;
+        do {
+            float old_val = __uint_as_float(old_bits);
+            if (val >= old_val) break;
+            new_bits = __float_as_uint(val);
+        } while (!__atomic_compare_exchange_n(addr, &old_bits, new_bits, true, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+    }
+}
+
+__global__ void scatter_reduce_init_f32_kernel(float* output, const int64_t* index,
+                                                int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner,
+                                                int mode) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = outer * idx_n * inner;
+    if (tid >= total) return;
+    int64_t j = tid % inner;
+    int64_t k = (tid / inner) % idx_n;
+    int64_t o = tid / (inner * idx_n);
+    int64_t out_pos = (o * dim_size + index[k]) * inner + j;
+
+    float identity;
+    if (mode == 0 || mode == 2) identity = 0.0f;
+    else if (mode == 1) identity = 1.0f;
+    else if (mode == 3) identity = -3.402823466e+38f;
+    else identity = 3.402823466e+38f;
+
+    output[out_pos] = identity;
+}
+
+__global__ void scatter_reduce_mean_div_f32_kernel(float* output, const int* counts, int64_t numel, int include_self) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= numel) return;
+    int c = counts[tid];
+    int base = include_self ? 1 : 0;
+    if (c > base) {
+        output[tid] /= static_cast<float>(c);
+    }
+}
+
+auto scatter_reduce_kernel(const Tensor& self, const Tensor& index, const Tensor& source,
+                           int64_t dim, const std::string& reduce, bool include_self,
+                           hipStream_t stream) -> Tensor {
+    // Non-Float32: convert to Float32 and recurse
+    if (self.dtype() != DType::Float32) {
+        auto f32_self = self.to(DType::Float32);
+        auto f32_src = source.to(DType::Float32);
+        auto r = scatter_reduce_kernel(f32_self, index, f32_src, dim, reduce, include_self, stream);
+        return r.to(self.dtype());
+    }
+
+    auto output = self.clone();
+    auto shape = output.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+
+    int64_t dim_size = shape[dim];
+    int64_t idx_n = index.numel();
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < dim; d++) outer *= shape[d];
+    for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
+    int64_t total = outer * idx_n * inner;
+
+    if (total == 0) return output;
+
+    int mode;
+    if (reduce == "sum") mode = 0;
+    else if (reduce == "prod") mode = 1;
+    else if (reduce == "mean") mode = 2;
+    else if (reduce == "amax") mode = 3;
+    else if (reduce == "amin") mode = 4;
+    else throw std::invalid_argument("scatter_reduce: unknown reduce mode '" + reduce + "'");
+
+    int num_blocks = get_num_blocks(total);
+
+    if (!include_self) {
+        hipLaunchKernelGGL(scatter_reduce_init_f32_kernel, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          output.data<float>(), index.data<int64_t>(),
+                          outer, dim_size, idx_n, inner, mode);
+    }
+
+    // Allocate count tensor for mean mode
+    Tensor count_tensor;
+    int* count_ptr = nullptr;
+    if (mode == 2) {
+        int64_t out_numel = output.numel();
+        count_tensor = Tensor({out_numel}, DType::Int32, output.device());
+        HIP_CHECK(hipMemsetAsync(count_tensor.data<int>(), 0, out_numel * sizeof(int), stream));
+        count_ptr = count_tensor.data<int>();
+    }
+
+    hipLaunchKernelGGL(scatter_reduce_f32_kernel, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                      output.data<float>(), source.data<float>(), index.data<int64_t>(),
+                      outer, dim_size, idx_n, inner, mode, count_ptr);
+
+    if (mode == 2) {
+        int64_t out_numel = output.numel();
+        int div_blocks = get_num_blocks(out_numel);
+        hipLaunchKernelGGL(scatter_reduce_mean_div_f32_kernel, dim3(div_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          output.data<float>(), count_ptr, out_numel, include_self ? 1 : 0);
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return output;
 }
 
 } // namespace rocm

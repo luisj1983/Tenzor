@@ -1,0 +1,25 @@
+#version 450
+
+// RReLU backward pass
+// output = (input >= 0) ? grad : slope * grad
+// where slope = (lower + upper) / 2
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer GradOutput { float data[]; } grad_buf;
+layout(set = 0, binding = 1) readonly buffer InputBuffer { float data[]; } input_buf;
+layout(set = 0, binding = 2) writeonly buffer GradInput { float data[]; } grad_input_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+    float slope;      // (lower + upper) / 2
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.num_elements) return;
+
+    float g = grad_buf.data[idx];
+    float x = input_buf.data[idx];
+
+    grad_input_buf.data[idx] = (x >= 0.0) ? g : pc.slope * g;
+}

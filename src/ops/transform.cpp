@@ -931,4 +931,84 @@ auto swapaxes(const Tensor& input, int64_t dim0, int64_t dim1) -> Tensor {
     return tenzor::transpose(input, dim0, dim1);
 }
 
+// =========================================================================
+// Repeat Interleave
+// =========================================================================
+
+auto repeat_interleave(const Tensor& input, int64_t repeats,
+                       std::optional<int64_t> dim) -> Tensor {
+    if (repeats < 0) {
+        throw std::invalid_argument("repeat_interleave: repeats must be non-negative");
+    }
+
+    // If dim not specified, flatten input first
+    Tensor src = dim.has_value() ? input : tenzor::flatten(input);
+    int64_t actual_dim = dim.value_or(0);
+
+    // Normalize negative dim
+    int64_t ndim = src.ndim();
+    if (actual_dim < 0) {
+        actual_dim += ndim;
+    }
+    if (actual_dim < 0 || actual_dim >= ndim) {
+        throw std::runtime_error("repeat_interleave: dimension out of range");
+    }
+
+    auto shape = src.shape();
+    int64_t dim_size = shape[actual_dim];
+
+    // Build output shape
+    std::vector<int64_t> out_shape(shape.begin(), shape.end());
+    out_shape[actual_dim] = dim_size * repeats;
+
+    if (out_shape[actual_dim] == 0) {
+        return zeros(out_shape, src.dtype(), src.device());
+    }
+
+    // Dispatch to backend
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, actual_dim);
+    attrs.set(AttrKey::NumRepeats, repeats);
+
+    std::vector<Tensor> inputs = {src};
+    return dispatch(OpId::RepeatInterleave, std::span<const Tensor>(inputs), attrs)[0];
+}
+
+auto repeat_interleave(const Tensor& input, const Tensor& repeats,
+                       std::optional<int64_t> dim) -> Tensor {
+    if (repeats.ndim() != 1) {
+        throw std::invalid_argument("repeat_interleave: repeats tensor must be 1D");
+    }
+
+    // If dim not specified, flatten input first
+    Tensor src = dim.has_value() ? input : tenzor::flatten(input);
+    int64_t actual_dim = dim.value_or(0);
+
+    // Normalize negative dim
+    int64_t ndim = src.ndim();
+    if (actual_dim < 0) {
+        actual_dim += ndim;
+    }
+    if (actual_dim < 0 || actual_dim >= ndim) {
+        throw std::runtime_error("repeat_interleave: dimension out of range");
+    }
+
+    auto shape = src.shape();
+    int64_t dim_size = shape[actual_dim];
+
+    if (repeats.shape()[0] != dim_size) {
+        throw std::invalid_argument(
+            "repeat_interleave: repeats tensor size (" + std::to_string(repeats.shape()[0]) +
+            ") must match dimension size (" + std::to_string(dim_size) + ")");
+    }
+
+    // Dispatch to backend — pass repeats tensor as second input, NumRepeats = -1 signals tensor mode
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, actual_dim);
+    attrs.set(AttrKey::NumRepeats, static_cast<int64_t>(-1));
+
+    std::vector<Tensor> inputs = {src, repeats};
+    return dispatch(OpId::RepeatInterleave, std::span<const Tensor>(inputs), attrs)[0];
+}
+
 } // namespace tenzor

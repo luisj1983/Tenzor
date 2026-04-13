@@ -273,6 +273,99 @@ auto dot(const Tensor& a, const Tensor& b) -> Tensor {
     return dispatch<OpId::Dot>(inputs)[0];
 }
 
+auto addmm(const Tensor& input, const Tensor& mat1, const Tensor& mat2,
+           double beta, double alpha) -> Tensor {
+    TENZOR_PROFILE_RANGE("addmm");
+    // Promote mat1/mat2 dtypes, then promote input to match
+    auto [m1p, m2p] = promote_inputs(mat1, mat2);
+    Tensor inp = (input.dtype() != m1p.dtype()) ? input.to(m1p.dtype()) : input;
+
+    // Validate dimensions
+    if (m1p.ndim() != 2 || m2p.ndim() != 2) {
+        throw std::runtime_error("addmm: mat1 and mat2 must be 2D tensors");
+    }
+    if (m1p.shape()[1] != m2p.shape()[0]) {
+        throw std::runtime_error(
+            "addmm: mat1 (" + std::to_string(m1p.shape()[0]) + "x" +
+            std::to_string(m1p.shape()[1]) + ") and mat2 (" +
+            std::to_string(m2p.shape()[0]) + "x" + std::to_string(m2p.shape()[1]) +
+            ") inner dimensions don't match");
+    }
+
+    auto ic = inp.is_contiguous() ? inp : inp.contiguous();
+    auto m1c = m1p.is_contiguous() ? m1p : m1p.contiguous();
+    auto m2c = m2p.is_contiguous() ? m2p : m2p.contiguous();
+
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Alpha, alpha);
+    attrs.set(AttrKey::Beta, beta);
+
+    std::array<Tensor, 3> inputs = {ic, m1c, m2c};
+    return dispatch_single(OpId::Addmm, inputs, attrs);
+}
+
+auto addmv(const Tensor& input, const Tensor& mat, const Tensor& vec,
+           double beta, double alpha) -> Tensor {
+    TENZOR_PROFILE_RANGE("addmv");
+    auto [mp, vp] = promote_inputs(mat, vec);
+    Tensor inp = (input.dtype() != mp.dtype()) ? input.to(mp.dtype()) : input;
+
+    if (mp.ndim() != 2) {
+        throw std::runtime_error("addmv: mat must be a 2D tensor");
+    }
+    if (vp.ndim() != 1) {
+        throw std::runtime_error("addmv: vec must be a 1D tensor");
+    }
+    if (mp.shape()[1] != vp.shape()[0]) {
+        throw std::runtime_error(
+            "addmv: mat (" + std::to_string(mp.shape()[0]) + "x" +
+            std::to_string(mp.shape()[1]) + ") and vec (" +
+            std::to_string(vp.shape()[0]) + ") inner dimensions don't match");
+    }
+
+    auto ic = inp.is_contiguous() ? inp : inp.contiguous();
+    auto mc = mp.is_contiguous() ? mp : mp.contiguous();
+    auto vc = vp.is_contiguous() ? vp : vp.contiguous();
+
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Alpha, alpha);
+    attrs.set(AttrKey::Beta, beta);
+
+    std::array<Tensor, 3> inputs = {ic, mc, vc};
+    return dispatch_single(OpId::Addmv, inputs, attrs);
+}
+
+auto baddbmm(const Tensor& input, const Tensor& batch1, const Tensor& batch2,
+             double beta, double alpha) -> Tensor {
+    TENZOR_PROFILE_RANGE("baddbmm");
+    auto [b1p, b2p] = promote_inputs(batch1, batch2);
+    Tensor inp = (input.dtype() != b1p.dtype()) ? input.to(b1p.dtype()) : input;
+
+    if (b1p.ndim() != 3 || b2p.ndim() != 3) {
+        throw std::runtime_error("baddbmm: batch1 and batch2 must be 3D tensors");
+    }
+    if (b1p.shape()[0] != b2p.shape()[0]) {
+        throw std::runtime_error("baddbmm: batch sizes must match");
+    }
+    if (b1p.shape()[2] != b2p.shape()[1]) {
+        throw std::runtime_error(
+            "baddbmm: inner dimensions don't match (" +
+            std::to_string(b1p.shape()[2]) + " vs " +
+            std::to_string(b2p.shape()[1]) + ")");
+    }
+
+    auto ic = inp.is_contiguous() ? inp : inp.contiguous();
+    auto b1c = b1p.is_contiguous() ? b1p : b1p.contiguous();
+    auto b2c = b2p.is_contiguous() ? b2p : b2p.contiguous();
+
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Alpha, alpha);
+    attrs.set(AttrKey::Beta, beta);
+
+    std::array<Tensor, 3> inputs = {ic, b1c, b2c};
+    return dispatch_single(OpId::Baddbmm, inputs, attrs);
+}
+
 auto pow(const Tensor& input, float exponent) -> Tensor {
     NewOpAttributes attrs;
     attrs.set(AttrKey::Exponent, static_cast<double>(exponent));
@@ -632,6 +725,64 @@ auto bitwise_left_shift(const Tensor& input, const Tensor& shift) -> Tensor {
 
 auto bitwise_right_shift(const Tensor& input, const Tensor& shift) -> Tensor {
     return detail::binary_op_promoted<OpId::BitwiseRightShift>("bitwise_right_shift", input, shift);
+}
+
+// ---------------------------------------------------------------------------
+// Composed math operations (no new backend kernels needed)
+// ---------------------------------------------------------------------------
+
+auto diff(const Tensor& input, int64_t n, int64_t dim) -> Tensor {
+    if (n < 1) {
+        throw std::runtime_error("diff: n must be >= 1, got " + std::to_string(n));
+    }
+
+    const int64_t ndim = input.ndim();
+    if (ndim == 0) {
+        throw std::runtime_error("diff: input must have at least 1 dimension");
+    }
+
+    // Normalize dim
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("diff: dimension out of range");
+    }
+
+    Tensor result = input;
+    for (int64_t i = 0; i < n; ++i) {
+        int64_t dim_size = result.shape()[dim];
+        if (dim_size < 2) {
+            throw std::runtime_error("diff: dimension size must be >= 2 for each application, got " +
+                                     std::to_string(dim_size));
+        }
+        auto front = narrow(result, dim, 1, dim_size - 1);
+        auto back = narrow(result, dim, 0, dim_size - 1);
+        result = tenzor::sub(front, back);
+    }
+    return result;
+}
+
+auto logaddexp(const Tensor& a, const Tensor& b) -> Tensor {
+    // max(a, b) + log1p(exp(-abs(a - b)))
+    auto m = tenzor::maximum(a, b);
+    auto d = tenzor::abs(tenzor::sub(a, b));
+    return tenzor::add(m, tenzor::log1p(tenzor::exp(tenzor::neg(d))));
+}
+
+auto logaddexp2(const Tensor& a, const Tensor& b) -> Tensor {
+    // max(a, b) + log2(1 + exp2(-abs(a - b)))
+    auto m = tenzor::maximum(a, b);
+    auto d = tenzor::abs(tenzor::sub(a, b));
+    auto one = tenzor::full({1}, 1.0f, a.dtype(), a.device());
+    return tenzor::add(m, tenzor::log2(tenzor::add(one, tenzor::exp2(tenzor::neg(d)))));
+}
+
+auto xlogy(const Tensor& x, const Tensor& y) -> Tensor {
+    // where(x == 0, zeros_like(x), x * log(y))
+    auto zero_scalar = tenzor::full({1}, 0.0f, x.dtype(), x.device());
+    auto condition = tenzor::eq(x, zero_scalar);
+    auto z = tenzor::zeros_like(x);
+    auto x_log_y = tenzor::mul(x, tenzor::log(y));
+    return where(condition, z, x_log_y);
 }
 
 auto isclose(const Tensor& a, const Tensor& b, double rtol, double atol) -> Tensor {

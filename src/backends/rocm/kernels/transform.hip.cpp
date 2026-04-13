@@ -2003,5 +2003,227 @@ auto trace_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     return result;
 }
 
+// ============================================================================
+// repeat_interleave — repeat each element along a dimension
+// ============================================================================
+
+template<typename T>
+__global__ void repeat_interleave_scalar_kernel_impl(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    int64_t total_elements,
+    int64_t in_dim_size,
+    int64_t out_dim_size,
+    int64_t repeats,
+    int64_t inner_size
+) {
+    HIP_GRID_STRIDE_LOOP(i, total_elements) {
+        int64_t inner_idx = i % inner_size;
+        int64_t out_dim_idx = (i / inner_size) % out_dim_size;
+        int64_t outer_idx = i / (inner_size * out_dim_size);
+
+        int64_t src_dim_idx = out_dim_idx / repeats;
+        int64_t src_idx = (outer_idx * in_dim_size + src_dim_idx) * inner_size + inner_idx;
+
+        output[i] = input[src_idx];
+    }
+}
+
+template<typename T>
+__global__ void repeat_interleave_tensor_kernel_impl(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    const int64_t* __restrict__ prefix,
+    int64_t total_elements,
+    int64_t in_dim_size,
+    int64_t out_dim_size,
+    int64_t inner_size
+) {
+    HIP_GRID_STRIDE_LOOP(i, total_elements) {
+        int64_t inner_idx = i % inner_size;
+        int64_t out_dim_idx = (i / inner_size) % out_dim_size;
+        int64_t outer_idx = i / (inner_size * out_dim_size);
+
+        // Binary search in prefix array
+        int64_t lo = 0, hi = in_dim_size;
+        while (lo < hi) {
+            int64_t mid = lo + (hi - lo) / 2;
+            if (prefix[mid + 1] <= out_dim_idx) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        int64_t src_dim_idx = lo;
+        int64_t src_idx = (outer_idx * in_dim_size + src_dim_idx) * inner_size + inner_idx;
+
+        output[i] = input[src_idx];
+    }
+}
+
+auto repeat_interleave_scalar_kernel(const Tensor& input, int64_t repeats, int64_t dim,
+                                     hipStream_t stream) -> Tensor {
+    auto shape = input.shape();
+    auto cont = input.is_contiguous() ? input : input.contiguous();
+
+    int64_t ndim = shape.size();
+    int64_t in_dim_size = shape[dim];
+    int64_t out_dim_size = in_dim_size * repeats;
+
+    std::vector<int64_t> out_shape(shape.begin(), shape.end());
+    out_shape[dim] = out_dim_size;
+
+    auto output = Tensor::empty_uninitialized(out_shape, input.dtype(), input.device());
+
+    int64_t total = 1;
+    for (auto s : out_shape) total *= s;
+    if (total == 0) return output;
+
+    int64_t inner_size = 1;
+    for (int64_t d = dim + 1; d < ndim; ++d) inner_size *= shape[d];
+
+    constexpr int BLOCK = 256;
+    int64_t num_blocks = (total + BLOCK - 1) / BLOCK;
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(repeat_interleave_scalar_kernel_impl<float>,
+            dim3(num_blocks), dim3(BLOCK), 0, stream,
+            cont.data<float>(), output.data<float>(),
+            total, in_dim_size, out_dim_size, repeats, inner_size);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(repeat_interleave_scalar_kernel_impl<double>,
+            dim3(num_blocks), dim3(BLOCK), 0, stream,
+            cont.data<double>(), output.data<double>(),
+            total, in_dim_size, out_dim_size, repeats, inner_size);
+    } else if (input.dtype() == DType::Int32) {
+        hipLaunchKernelGGL(repeat_interleave_scalar_kernel_impl<int32_t>,
+            dim3(num_blocks), dim3(BLOCK), 0, stream,
+            cont.data<int32_t>(), output.data<int32_t>(),
+            total, in_dim_size, out_dim_size, repeats, inner_size);
+    } else if (input.dtype() == DType::Int64) {
+        hipLaunchKernelGGL(repeat_interleave_scalar_kernel_impl<int64_t>,
+            dim3(num_blocks), dim3(BLOCK), 0, stream,
+            cont.data<int64_t>(), output.data<int64_t>(),
+            total, in_dim_size, out_dim_size, repeats, inner_size);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(repeat_interleave_scalar_kernel_impl<__half>,
+            dim3(num_blocks), dim3(BLOCK), 0, stream,
+            reinterpret_cast<const __half*>(cont.data<Float16>()),
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            total, in_dim_size, out_dim_size, repeats, inner_size);
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(repeat_interleave_scalar_kernel_impl<uint16_t>,
+            dim3(num_blocks), dim3(BLOCK), 0, stream,
+            reinterpret_cast<const uint16_t*>(cont.data<BFloat16>()),
+            reinterpret_cast<uint16_t*>(output.data<BFloat16>()),
+            total, in_dim_size, out_dim_size, repeats, inner_size);
+    } else {
+        throw std::runtime_error("repeat_interleave_scalar_kernel: unsupported dtype");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return output;
+}
+
+auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_tensor,
+                                     int64_t dim, hipStream_t stream) -> Tensor {
+    auto shape = input.shape();
+    auto cont = input.is_contiguous() ? input : input.contiguous();
+
+    int64_t ndim = shape.size();
+    int64_t in_dim_size = shape[dim];
+
+    // Read repeats to host to compute prefix sum
+    auto repeats_host = repeats_tensor.to(Device::cpu()).contiguous();
+    std::vector<int64_t> host_prefix(in_dim_size + 1);
+    host_prefix[0] = 0;
+
+    if (repeats_host.dtype() == DType::Int64) {
+        const int64_t* rp = repeats_host.data<int64_t>();
+        for (int64_t i = 0; i < in_dim_size; ++i)
+            host_prefix[i + 1] = host_prefix[i] + rp[i];
+    } else if (repeats_host.dtype() == DType::Int32) {
+        const int32_t* rp = repeats_host.data<int32_t>();
+        for (int64_t i = 0; i < in_dim_size; ++i)
+            host_prefix[i + 1] = host_prefix[i] + rp[i];
+    } else if (repeats_host.dtype() == DType::Float32) {
+        const float* rp = repeats_host.data<float>();
+        for (int64_t i = 0; i < in_dim_size; ++i)
+            host_prefix[i + 1] = host_prefix[i] + static_cast<int64_t>(rp[i]);
+    } else if (repeats_host.dtype() == DType::Float64) {
+        const double* rp = repeats_host.data<double>();
+        for (int64_t i = 0; i < in_dim_size; ++i)
+            host_prefix[i + 1] = host_prefix[i] + static_cast<int64_t>(rp[i]);
+    } else {
+        throw std::runtime_error("repeat_interleave: unsupported repeats dtype");
+    }
+
+    int64_t out_dim_size = host_prefix[in_dim_size];
+
+    std::vector<int64_t> out_shape(shape.begin(), shape.end());
+    out_shape[dim] = out_dim_size;
+
+    auto output = Tensor::empty_uninitialized(out_shape, input.dtype(), input.device());
+
+    int64_t total = 1;
+    for (auto s : out_shape) total *= s;
+    if (total == 0) return output;
+
+    int64_t inner_size = 1;
+    for (int64_t d = dim + 1; d < ndim; ++d) inner_size *= shape[d];
+
+    // Upload prefix sum to device
+    int64_t* d_prefix = nullptr;
+    HIP_CHECK(hipMalloc(&d_prefix, (in_dim_size + 1) * sizeof(int64_t)));
+    HIP_CHECK(hipMemcpyAsync(d_prefix, host_prefix.data(),
+                             (in_dim_size + 1) * sizeof(int64_t),
+                             hipMemcpyHostToDevice, stream));
+
+    constexpr int BLOCK = 256;
+    int64_t num_blocks = (total + BLOCK - 1) / BLOCK;
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(repeat_interleave_tensor_kernel_impl<float>,
+            dim3(num_blocks), dim3(BLOCK), 0, stream,
+            cont.data<float>(), output.data<float>(), d_prefix,
+            total, in_dim_size, out_dim_size, inner_size);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(repeat_interleave_tensor_kernel_impl<double>,
+            dim3(num_blocks), dim3(BLOCK), 0, stream,
+            cont.data<double>(), output.data<double>(), d_prefix,
+            total, in_dim_size, out_dim_size, inner_size);
+    } else if (input.dtype() == DType::Int32) {
+        hipLaunchKernelGGL(repeat_interleave_tensor_kernel_impl<int32_t>,
+            dim3(num_blocks), dim3(BLOCK), 0, stream,
+            cont.data<int32_t>(), output.data<int32_t>(), d_prefix,
+            total, in_dim_size, out_dim_size, inner_size);
+    } else if (input.dtype() == DType::Int64) {
+        hipLaunchKernelGGL(repeat_interleave_tensor_kernel_impl<int64_t>,
+            dim3(num_blocks), dim3(BLOCK), 0, stream,
+            cont.data<int64_t>(), output.data<int64_t>(), d_prefix,
+            total, in_dim_size, out_dim_size, inner_size);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(repeat_interleave_tensor_kernel_impl<__half>,
+            dim3(num_blocks), dim3(BLOCK), 0, stream,
+            reinterpret_cast<const __half*>(cont.data<Float16>()),
+            reinterpret_cast<__half*>(output.data<Float16>()), d_prefix,
+            total, in_dim_size, out_dim_size, inner_size);
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(repeat_interleave_tensor_kernel_impl<uint16_t>,
+            dim3(num_blocks), dim3(BLOCK), 0, stream,
+            reinterpret_cast<const uint16_t*>(cont.data<BFloat16>()),
+            reinterpret_cast<uint16_t*>(output.data<BFloat16>()), d_prefix,
+            total, in_dim_size, out_dim_size, inner_size);
+    } else {
+        hipFree(d_prefix);
+        throw std::runtime_error("repeat_interleave_tensor_kernel: unsupported dtype");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    HIP_CHECK(hipStreamSynchronize(stream));
+    hipFree(d_prefix);
+    return output;
+}
+
 } // namespace rocm
 } // namespace tenzor

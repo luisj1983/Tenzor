@@ -6305,5 +6305,390 @@ auto index_fill_kernel(const Tensor& input, int64_t dim, const Tensor& index, do
     return output;
 }
 
+// =========================================================================
+// Fused GEMM Operations: addmm, addmv, baddbmm
+// =========================================================================
+
+auto addmm_kernel(const Tensor& input, const Tensor& mat1, const Tensor& mat2,
+                  double alpha, double beta) -> Tensor {
+    // input: (M, N) or broadcastable, mat1: (M, K), mat2: (K, N)
+    int64_t M = mat1.shape()[0];
+    int64_t K = mat1.shape()[1];
+    int64_t N = mat2.shape()[1];
+
+    Tensor a_cont = mat1.is_contiguous() ? mat1 : mat1.contiguous();
+    Tensor b_cont = mat2.is_contiguous() ? mat2 : mat2.contiguous();
+
+    // Create output as a copy of input (broadcast-expanded to (M, N))
+    // For beta=0, we skip the copy and just zero-init
+    Tensor output = Tensor::empty_uninitialized({M, N}, mat1.dtype(), Device::cpu());
+
+    if (mat1.dtype() == DType::Float32) {
+        float* out_data = output.data<float>();
+
+        // Initialize output with input data (broadcast if needed)
+        if (beta != 0.0) {
+            const Tensor inp_cont = input.is_contiguous() ? input : input.contiguous();
+            const float* inp_data = inp_cont.data<float>();
+            auto inp_shape = inp_cont.shape();
+
+            if (inp_cont.ndim() == 2 && inp_shape[0] == M && inp_shape[1] == N) {
+                // Direct copy
+                std::memcpy(out_data, inp_data, M * N * sizeof(float));
+            } else if (inp_cont.ndim() == 1 && inp_shape[0] == N) {
+                // Broadcast (N,) -> (M, N): replicate row
+                for (int64_t i = 0; i < M; ++i) {
+                    std::memcpy(out_data + i * N, inp_data, N * sizeof(float));
+                }
+            } else if (inp_cont.numel() == 1) {
+                // Scalar broadcast
+                float val = inp_data[0];
+                std::fill_n(out_data, M * N, val);
+            } else {
+                // General broadcast: expand input to (M, N) first
+                auto expanded = input.expand({M, N}).contiguous();
+                std::memcpy(out_data, expanded.data<float>(), M * N * sizeof(float));
+            }
+        } else {
+            std::memset(out_data, 0, M * N * sizeof(float));
+        }
+
+        float alpha_f = static_cast<float>(alpha);
+        float beta_f = static_cast<float>(beta);
+
+#ifdef TENZOR_USE_MKL
+        cblas_sgemm(
+            CblasRowMajor, CblasNoTrans, CblasNoTrans,
+            static_cast<MKL_INT>(M), static_cast<MKL_INT>(N), static_cast<MKL_INT>(K),
+            alpha_f,
+            a_cont.data<float>(), static_cast<MKL_INT>(K),
+            b_cont.data<float>(), static_cast<MKL_INT>(N),
+            beta_f,
+            out_data, static_cast<MKL_INT>(N)
+        );
+#else
+        gemm::gemm_optimized(a_cont.data<float>(), b_cont.data<float>(),
+                             out_data, M, N, K, alpha_f, beta_f);
+#endif
+    } else if (mat1.dtype() == DType::Float64) {
+        double* out_data = output.data<double>();
+
+        if (beta != 0.0) {
+            const Tensor inp_cont = input.is_contiguous() ? input : input.contiguous();
+            const double* inp_data = inp_cont.data<double>();
+            auto inp_shape = inp_cont.shape();
+
+            if (inp_cont.ndim() == 2 && inp_shape[0] == M && inp_shape[1] == N) {
+                std::memcpy(out_data, inp_data, M * N * sizeof(double));
+            } else if (inp_cont.ndim() == 1 && inp_shape[0] == N) {
+                for (int64_t i = 0; i < M; ++i) {
+                    std::memcpy(out_data + i * N, inp_data, N * sizeof(double));
+                }
+            } else if (inp_cont.numel() == 1) {
+                double val = inp_data[0];
+                std::fill_n(out_data, M * N, val);
+            } else {
+                auto expanded = input.expand({M, N}).contiguous();
+                std::memcpy(out_data, expanded.data<double>(), M * N * sizeof(double));
+            }
+        } else {
+            std::memset(out_data, 0, M * N * sizeof(double));
+        }
+
+#ifdef TENZOR_USE_MKL
+        cblas_dgemm(
+            CblasRowMajor, CblasNoTrans, CblasNoTrans,
+            static_cast<MKL_INT>(M), static_cast<MKL_INT>(N), static_cast<MKL_INT>(K),
+            alpha,
+            a_cont.data<double>(), static_cast<MKL_INT>(K),
+            b_cont.data<double>(), static_cast<MKL_INT>(N),
+            beta,
+            out_data, static_cast<MKL_INT>(N)
+        );
+#else
+        // Fallback: manual GEMM for Float64
+        // C = beta * C + alpha * A @ B
+        // beta scaling already handled if we're here; gemm_optimized only supports float
+        if (beta != 1.0 && beta != 0.0) {
+            for (int64_t i = 0; i < M * N; ++i) out_data[i] *= beta;
+        }
+        // alpha * A @ B + (already scaled) C
+        for (int64_t i = 0; i < M; ++i) {
+            for (int64_t k = 0; k < K; ++k) {
+                double a_val = alpha * a_cont.data<double>()[i * K + k];
+                for (int64_t j = 0; j < N; ++j) {
+                    out_data[i * N + j] += a_val * b_cont.data<double>()[k * N + j];
+                }
+            }
+        }
+#endif
+    } else if (mat1.dtype() == DType::Float16 || mat1.dtype() == DType::BFloat16) {
+        // Upcast to Float32, compute, downcast
+        DType orig = mat1.dtype();
+        auto result = addmm_kernel(input.to(DType::Float32),
+                                   mat1.to(DType::Float32),
+                                   mat2.to(DType::Float32),
+                                   alpha, beta);
+        return result.to(orig);
+    } else {
+        throw std::runtime_error(
+            "addmm: unsupported dtype: " + std::string(dtype_name(mat1.dtype())));
+    }
+
+    return output;
+}
+
+auto addmv_kernel(const Tensor& input, const Tensor& mat, const Tensor& vec,
+                  double alpha, double beta) -> Tensor {
+    // input: (M,) or broadcastable, mat: (M, K), vec: (K,)
+    int64_t M = mat.shape()[0];
+    int64_t K = mat.shape()[1];
+
+    Tensor m_cont = mat.is_contiguous() ? mat : mat.contiguous();
+    Tensor v_cont = vec.is_contiguous() ? vec : vec.contiguous();
+
+    Tensor output = Tensor::empty_uninitialized({M}, mat.dtype(), Device::cpu());
+
+    if (mat.dtype() == DType::Float32) {
+        float* out_data = output.data<float>();
+
+        if (beta != 0.0) {
+            const Tensor inp_cont = input.is_contiguous() ? input : input.contiguous();
+            const float* inp_data = inp_cont.data<float>();
+            if (inp_cont.ndim() == 1 && inp_cont.shape()[0] == M) {
+                std::memcpy(out_data, inp_data, M * sizeof(float));
+            } else if (inp_cont.numel() == 1) {
+                std::fill_n(out_data, M, inp_data[0]);
+            } else {
+                auto expanded = input.expand({M}).contiguous();
+                std::memcpy(out_data, expanded.data<float>(), M * sizeof(float));
+            }
+        } else {
+            std::memset(out_data, 0, M * sizeof(float));
+        }
+
+        float alpha_f = static_cast<float>(alpha);
+        float beta_f = static_cast<float>(beta);
+
+#ifdef TENZOR_USE_MKL
+        cblas_sgemv(
+            CblasRowMajor, CblasNoTrans,
+            static_cast<MKL_INT>(M), static_cast<MKL_INT>(K),
+            alpha_f,
+            m_cont.data<float>(), static_cast<MKL_INT>(K),
+            v_cont.data<float>(), 1,
+            beta_f,
+            out_data, 1
+        );
+#else
+        // Fallback: manual GEMV
+        if (beta_f != 1.0f && beta_f != 0.0f) {
+            for (int64_t i = 0; i < M; ++i) out_data[i] *= beta_f;
+        }
+        const float* m_data = m_cont.data<float>();
+        const float* v_data = v_cont.data<float>();
+        for (int64_t i = 0; i < M; ++i) {
+            float sum = 0.0f;
+            for (int64_t j = 0; j < K; ++j) {
+                sum += m_data[i * K + j] * v_data[j];
+            }
+            out_data[i] += alpha_f * sum;
+        }
+#endif
+    } else if (mat.dtype() == DType::Float64) {
+        double* out_data = output.data<double>();
+
+        if (beta != 0.0) {
+            const Tensor inp_cont = input.is_contiguous() ? input : input.contiguous();
+            const double* inp_data = inp_cont.data<double>();
+            if (inp_cont.ndim() == 1 && inp_cont.shape()[0] == M) {
+                std::memcpy(out_data, inp_data, M * sizeof(double));
+            } else if (inp_cont.numel() == 1) {
+                std::fill_n(out_data, M, inp_data[0]);
+            } else {
+                auto expanded = input.expand({M}).contiguous();
+                std::memcpy(out_data, expanded.data<double>(), M * sizeof(double));
+            }
+        } else {
+            std::memset(out_data, 0, M * sizeof(double));
+        }
+
+#ifdef TENZOR_USE_MKL
+        cblas_dgemv(
+            CblasRowMajor, CblasNoTrans,
+            static_cast<MKL_INT>(M), static_cast<MKL_INT>(K),
+            alpha,
+            m_cont.data<double>(), static_cast<MKL_INT>(K),
+            v_cont.data<double>(), 1,
+            beta,
+            out_data, 1
+        );
+#else
+        if (beta != 1.0 && beta != 0.0) {
+            for (int64_t i = 0; i < M; ++i) out_data[i] *= beta;
+        }
+        const double* m_data = m_cont.data<double>();
+        const double* v_data = v_cont.data<double>();
+        for (int64_t i = 0; i < M; ++i) {
+            double sum = 0.0;
+            for (int64_t j = 0; j < K; ++j) {
+                sum += m_data[i * K + j] * v_data[j];
+            }
+            out_data[i] += alpha * sum;
+        }
+#endif
+    } else if (mat.dtype() == DType::Float16 || mat.dtype() == DType::BFloat16) {
+        DType orig = mat.dtype();
+        auto result = addmv_kernel(input.to(DType::Float32),
+                                   mat.to(DType::Float32),
+                                   vec.to(DType::Float32),
+                                   alpha, beta);
+        return result.to(orig);
+    } else {
+        throw std::runtime_error(
+            "addmv: unsupported dtype: " + std::string(dtype_name(mat.dtype())));
+    }
+
+    return output;
+}
+
+auto baddbmm_kernel(const Tensor& input, const Tensor& batch1, const Tensor& batch2,
+                    double alpha, double beta) -> Tensor {
+    // input: (B, M, N) or broadcastable, batch1: (B, M, K), batch2: (B, K, N)
+    int64_t B = batch1.shape()[0];
+    int64_t M = batch1.shape()[1];
+    int64_t K = batch1.shape()[2];
+    int64_t N = batch2.shape()[2];
+
+    Tensor b1_cont = batch1.is_contiguous() ? batch1 : batch1.contiguous();
+    Tensor b2_cont = batch2.is_contiguous() ? batch2 : batch2.contiguous();
+
+    Tensor output = Tensor::empty_uninitialized({B, M, N}, batch1.dtype(), Device::cpu());
+
+    int64_t a_stride = M * K;
+    int64_t b_stride = K * N;
+    int64_t c_stride = M * N;
+
+    if (batch1.dtype() == DType::Float32) {
+        float* out_data = output.data<float>();
+
+        // Initialize output with input data (broadcast if needed)
+        if (beta != 0.0) {
+            const Tensor inp_cont = input.is_contiguous() ? input : input.contiguous();
+            const float* inp_data = inp_cont.data<float>();
+            auto inp_shape = inp_cont.shape();
+
+            if (inp_cont.ndim() == 3 && inp_shape[0] == B && inp_shape[1] == M && inp_shape[2] == N) {
+                std::memcpy(out_data, inp_data, B * M * N * sizeof(float));
+            } else if (inp_cont.ndim() == 2 && inp_shape[0] == M && inp_shape[1] == N) {
+                // Broadcast (M, N) -> (B, M, N)
+                for (int64_t b = 0; b < B; ++b) {
+                    std::memcpy(out_data + b * c_stride, inp_data, M * N * sizeof(float));
+                }
+            } else if (inp_cont.numel() == 1) {
+                std::fill_n(out_data, B * M * N, inp_data[0]);
+            } else {
+                auto expanded = input.expand({B, M, N}).contiguous();
+                std::memcpy(out_data, expanded.data<float>(), B * M * N * sizeof(float));
+            }
+        } else {
+            std::memset(out_data, 0, B * M * N * sizeof(float));
+        }
+
+        float alpha_f = static_cast<float>(alpha);
+        float beta_f = static_cast<float>(beta);
+
+#ifdef TENZOR_USE_MKL
+        cblas_sgemm_batch_strided(
+            CblasRowMajor, CblasNoTrans, CblasNoTrans,
+            static_cast<MKL_INT>(M), static_cast<MKL_INT>(N), static_cast<MKL_INT>(K),
+            alpha_f,
+            b1_cont.data<float>(), static_cast<MKL_INT>(K), a_stride,
+            b2_cont.data<float>(), static_cast<MKL_INT>(N), b_stride,
+            beta_f,
+            out_data, static_cast<MKL_INT>(N), c_stride,
+            static_cast<MKL_INT>(B)
+        );
+#else
+        #pragma omp parallel for if(B > 1)
+        for (int64_t batch = 0; batch < B; ++batch) {
+            gemm::gemm_optimized(
+                b1_cont.data<float>() + batch * a_stride,
+                b2_cont.data<float>() + batch * b_stride,
+                out_data + batch * c_stride,
+                M, N, K, alpha_f, beta_f);
+        }
+#endif
+    } else if (batch1.dtype() == DType::Float64) {
+        double* out_data = output.data<double>();
+
+        if (beta != 0.0) {
+            const Tensor inp_cont = input.is_contiguous() ? input : input.contiguous();
+            const double* inp_data = inp_cont.data<double>();
+            auto inp_shape = inp_cont.shape();
+
+            if (inp_cont.ndim() == 3 && inp_shape[0] == B && inp_shape[1] == M && inp_shape[2] == N) {
+                std::memcpy(out_data, inp_data, B * M * N * sizeof(double));
+            } else if (inp_cont.ndim() == 2 && inp_shape[0] == M && inp_shape[1] == N) {
+                for (int64_t b = 0; b < B; ++b) {
+                    std::memcpy(out_data + b * c_stride, inp_data, M * N * sizeof(double));
+                }
+            } else if (inp_cont.numel() == 1) {
+                std::fill_n(out_data, B * M * N, inp_data[0]);
+            } else {
+                auto expanded = input.expand({B, M, N}).contiguous();
+                std::memcpy(out_data, expanded.data<double>(), B * M * N * sizeof(double));
+            }
+        } else {
+            std::memset(out_data, 0, B * M * N * sizeof(double));
+        }
+
+#ifdef TENZOR_USE_MKL
+        cblas_dgemm_batch_strided(
+            CblasRowMajor, CblasNoTrans, CblasNoTrans,
+            static_cast<MKL_INT>(M), static_cast<MKL_INT>(N), static_cast<MKL_INT>(K),
+            alpha,
+            b1_cont.data<double>(), static_cast<MKL_INT>(K), a_stride,
+            b2_cont.data<double>(), static_cast<MKL_INT>(N), b_stride,
+            beta,
+            out_data, static_cast<MKL_INT>(N), c_stride,
+            static_cast<MKL_INT>(B)
+        );
+#else
+        #pragma omp parallel for if(B > 1)
+        for (int64_t batch = 0; batch < B; ++batch) {
+            // Manual DGEMM for each batch element
+            double* c_batch = out_data + batch * c_stride;
+            const double* a_batch = b1_cont.data<double>() + batch * a_stride;
+            const double* b_batch = b2_cont.data<double>() + batch * b_stride;
+
+            if (beta != 1.0 && beta != 0.0) {
+                for (int64_t i = 0; i < M * N; ++i) c_batch[i] *= beta;
+            }
+            for (int64_t i = 0; i < M; ++i) {
+                for (int64_t k = 0; k < K; ++k) {
+                    double a_val = alpha * a_batch[i * K + k];
+                    for (int64_t j = 0; j < N; ++j) {
+                        c_batch[i * N + j] += a_val * b_batch[k * N + j];
+                    }
+                }
+            }
+        }
+#endif
+    } else if (batch1.dtype() == DType::Float16 || batch1.dtype() == DType::BFloat16) {
+        DType orig = batch1.dtype();
+        auto result = baddbmm_kernel(input.to(DType::Float32),
+                                     batch1.to(DType::Float32),
+                                     batch2.to(DType::Float32),
+                                     alpha, beta);
+        return result.to(orig);
+    } else {
+        throw std::runtime_error(
+            "baddbmm: unsupported dtype: " + std::string(dtype_name(batch1.dtype())));
+    }
+
+    return output;
+}
+
 } // namespace cpu
 } // namespace tenzor

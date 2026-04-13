@@ -61,6 +61,52 @@ auto bmm(const Tensor& a, const Tensor& b) -> Tensor;
 /** @brief Dot product (1D tensors) or matrix-vector product. */
 auto dot(const Tensor& a, const Tensor& b) -> Tensor;
 
+/**
+ * @brief Fused multiply-add for matrices: beta * input + alpha * (mat1 @ mat2).
+ *
+ * Uses a single BLAS GEMM call with alpha/beta parameters for optimal performance.
+ * Avoids separate matmul, scale, and add operations.
+ *
+ * @param input Bias tensor (M, N) or broadcastable
+ * @param mat1 Left matrix (M, K)
+ * @param mat2 Right matrix (K, N)
+ * @param beta Scalar multiplier for input (default: 1.0)
+ * @param alpha Scalar multiplier for mat1 @ mat2 (default: 1.0)
+ * @return Result tensor (M, N)
+ */
+auto addmm(const Tensor& input, const Tensor& mat1, const Tensor& mat2,
+           double beta = 1.0, double alpha = 1.0) -> Tensor;
+
+/**
+ * @brief Fused matrix-vector multiply-add: beta * input + alpha * (mat @ vec).
+ *
+ * Uses a single BLAS GEMV call with alpha/beta parameters for optimal performance.
+ *
+ * @param input Bias vector (M,) or broadcastable
+ * @param mat Matrix (M, K)
+ * @param vec Vector (K,)
+ * @param beta Scalar multiplier for input (default: 1.0)
+ * @param alpha Scalar multiplier for mat @ vec (default: 1.0)
+ * @return Result vector (M,)
+ */
+auto addmv(const Tensor& input, const Tensor& mat, const Tensor& vec,
+           double beta = 1.0, double alpha = 1.0) -> Tensor;
+
+/**
+ * @brief Batched fused multiply-add: beta * input + alpha * (batch1 @ batch2).
+ *
+ * Uses batched BLAS GEMM with alpha/beta parameters for optimal performance.
+ *
+ * @param input Bias tensor (B, M, N) or broadcastable
+ * @param batch1 Left batch of matrices (B, M, K)
+ * @param batch2 Right batch of matrices (B, K, N)
+ * @param beta Scalar multiplier for input (default: 1.0)
+ * @param alpha Scalar multiplier for batch1 @ batch2 (default: 1.0)
+ * @return Result tensor (B, M, N)
+ */
+auto baddbmm(const Tensor& input, const Tensor& batch1, const Tensor& batch2,
+             double beta = 1.0, double alpha = 1.0) -> Tensor;
+
 /// @}
 
 /// @name Power and Exponential
@@ -441,6 +487,58 @@ auto polar(const Tensor& abs, const Tensor& angle) -> Tensor;
  * @return Distance tensor (B, P, R) or (P, R)
  */
 auto cdist(const Tensor& x1, const Tensor& x2, double p = 2.0) -> Tensor;
+
+/// @name Composed Math Operations
+/// @{
+
+/**
+ * @brief Finite differences along a dimension (like numpy.diff).
+ *
+ * Computes the n-th discrete difference along the given dimension.
+ * For n=1: output[i] = input[i+1] - input[i] along dim.
+ *
+ * @param input Input tensor
+ * @param n Number of times to recursively compute differences (default: 1)
+ * @param dim Dimension along which to compute differences (default: -1)
+ * @return Tensor with size reduced by n along dim
+ */
+auto diff(const Tensor& input, int64_t n = 1, int64_t dim = -1) -> Tensor;
+
+/**
+ * @brief Numerically stable log(exp(a) + exp(b)).
+ *
+ * Computed as max(a, b) + log1p(exp(-abs(a - b))).
+ *
+ * @param a First tensor
+ * @param b Second tensor (must be broadcastable with a)
+ * @return Element-wise logaddexp result
+ */
+auto logaddexp(const Tensor& a, const Tensor& b) -> Tensor;
+
+/**
+ * @brief Numerically stable log2(2^a + 2^b).
+ *
+ * Computed as max(a, b) + log2(1 + exp2(-abs(a - b))).
+ *
+ * @param a First tensor
+ * @param b Second tensor (must be broadcastable with a)
+ * @return Element-wise logaddexp2 result
+ */
+auto logaddexp2(const Tensor& a, const Tensor& b) -> Tensor;
+
+/**
+ * @brief Compute x * log(y) with the convention that 0 * log(y) = 0.
+ *
+ * Handles the case where x == 0 correctly, even if y is NaN or 0.
+ * Implementation: where(x == 0, zeros_like(x), x * log(y)).
+ *
+ * @param x First tensor
+ * @param y Second tensor (must be broadcastable with x)
+ * @return Element-wise xlogy result
+ */
+auto xlogy(const Tensor& x, const Tensor& y) -> Tensor;
+
+/// @}
 
 /// @name Comparison Utilities
 /// @{

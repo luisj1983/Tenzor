@@ -185,6 +185,9 @@ __all__ = [
     # Arithmetic operations
     "matmul",
     "bmm",
+    "addmm",
+    "addmv",
+    "baddbmm",
     "add",
     "sub",
     "mul",
@@ -285,6 +288,7 @@ __all__ = [
     "gather",
     "scatter",
     "scatter_add",
+    "scatter_reduce",
     "index_select",
     "masked_select",
     "masked_fill",
@@ -295,6 +299,20 @@ __all__ = [
     # Cumulative operations
     "cumsum",
     "cumprod",
+    "logcumsumexp",
+
+    # Histogram / counting
+    "bincount",
+
+    # Index reduce
+    "index_reduce",
+
+    # Composed math operations
+    "diff",
+    "logaddexp",
+    "logaddexp2",
+    "xlogy",
+    "tensordot",
 
     # Search/sampling operations
     "searchsorted",

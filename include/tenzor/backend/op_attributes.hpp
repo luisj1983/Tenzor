@@ -255,6 +255,15 @@ enum class AttrKey : uint16_t {
     // Activation parameters
     Lower,             // RReLU lower bound (upper uses High)
 
+    // Scatter-reduce
+    IncludeSelf,       // scatter_reduce: include self values in reduction
+
+    // Repeat interleave
+    NumRepeats,        // repeat_interleave: scalar repeat count
+
+    // Bincount
+    Minlength,         // bincount: minimum output size
+
     // Sentinel
     _Count
 };

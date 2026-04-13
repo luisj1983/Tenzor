@@ -769,5 +769,152 @@ auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim) -> Tensor {
     return output;
 }
 
+// ============================================================================
+// repeat_interleave — repeat each element along a dimension
+// ============================================================================
+
+auto repeat_interleave_scalar_kernel(const Tensor& input, int64_t repeats, int64_t dim) -> Tensor {
+    auto shape = input.shape();
+    auto cont = input.is_contiguous() ? input : contiguous_kernel(input);
+
+    int64_t ndim = shape.size();
+    int64_t dim_size = shape[dim];
+
+    std::vector<int64_t> out_shape(shape.begin(), shape.end());
+    out_shape[dim] = dim_size * repeats;
+
+    Tensor output(out_shape, input.dtype(), input.device());
+
+    int64_t total_out = 1;
+    for (auto s : out_shape) total_out *= s;
+    if (total_out == 0) return output;
+
+    // inner_size = product of dims after 'dim'
+    int64_t inner_size = 1;
+    for (int64_t d = dim + 1; d < ndim; ++d) {
+        inner_size *= shape[d];
+    }
+
+    const size_t elem_size = dtype_size(input.dtype());
+    const auto* src = static_cast<const uint8_t*>(cont.storage()->data());
+    auto* dst = static_cast<uint8_t*>(output.storage()->data());
+
+    // For each output element: map back to input
+    // output[outer, d_out, inner] = input[outer, d_out / repeats, inner]
+    #pragma omp parallel for if(total_out > 65536)
+    for (int64_t i = 0; i < total_out; ++i) {
+        int64_t inner_idx = i % inner_size;
+        int64_t out_dim_idx = (i / inner_size) % out_shape[dim];
+        int64_t outer_idx = i / (inner_size * out_shape[dim]);
+
+        int64_t src_dim_idx = out_dim_idx / repeats;
+        int64_t src_idx = (outer_idx * dim_size + src_dim_idx) * inner_size + inner_idx;
+
+        std::memcpy(dst + i * elem_size, src + src_idx * elem_size, elem_size);
+    }
+
+    return output;
+}
+
+auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_tensor, int64_t dim) -> Tensor {
+    auto shape = input.shape();
+    auto cont = input.is_contiguous() ? input : contiguous_kernel(input);
+
+    int64_t ndim = shape.size();
+    int64_t dim_size = shape[dim];
+
+    // Compute total output size along dim from repeats tensor
+    // repeats must be on CPU and Int64 or Int32
+    auto repeats_cont = repeats_tensor.is_contiguous() ? repeats_tensor : repeats_tensor.contiguous();
+
+    // Read repeats into a vector and compute prefix sums
+    std::vector<int64_t> reps(dim_size);
+    int64_t total_repeats = 0;
+    if (repeats_cont.dtype() == DType::Int64) {
+        const int64_t* rp = repeats_cont.data<int64_t>();
+        for (int64_t i = 0; i < dim_size; ++i) {
+            if (rp[i] < 0) throw std::invalid_argument("repeat_interleave: negative repeat count");
+            reps[i] = rp[i];
+            total_repeats += rp[i];
+        }
+    } else if (repeats_cont.dtype() == DType::Int32) {
+        const int32_t* rp = repeats_cont.data<int32_t>();
+        for (int64_t i = 0; i < dim_size; ++i) {
+            if (rp[i] < 0) throw std::invalid_argument("repeat_interleave: negative repeat count");
+            reps[i] = rp[i];
+            total_repeats += rp[i];
+        }
+    } else if (repeats_cont.dtype() == DType::Float32) {
+        const float* rp = repeats_cont.data<float>();
+        for (int64_t i = 0; i < dim_size; ++i) {
+            int64_t r = static_cast<int64_t>(rp[i]);
+            if (r < 0) throw std::invalid_argument("repeat_interleave: negative repeat count");
+            reps[i] = r;
+            total_repeats += r;
+        }
+    } else if (repeats_cont.dtype() == DType::Float64) {
+        const double* rp = repeats_cont.data<double>();
+        for (int64_t i = 0; i < dim_size; ++i) {
+            int64_t r = static_cast<int64_t>(rp[i]);
+            if (r < 0) throw std::invalid_argument("repeat_interleave: negative repeat count");
+            reps[i] = r;
+            total_repeats += r;
+        }
+    } else {
+        throw std::runtime_error("repeat_interleave: unsupported repeats dtype");
+    }
+
+    // Build exclusive prefix sum for mapping output index -> input index
+    std::vector<int64_t> prefix(dim_size + 1);
+    prefix[0] = 0;
+    for (int64_t i = 0; i < dim_size; ++i) {
+        prefix[i + 1] = prefix[i] + reps[i];
+    }
+
+    std::vector<int64_t> out_shape(shape.begin(), shape.end());
+    out_shape[dim] = total_repeats;
+
+    Tensor output(out_shape, input.dtype(), input.device());
+
+    int64_t total_out = 1;
+    for (auto s : out_shape) total_out *= s;
+    if (total_out == 0) return output;
+
+    int64_t inner_size = 1;
+    for (int64_t d = dim + 1; d < ndim; ++d) {
+        inner_size *= shape[d];
+    }
+
+    const size_t elem_size = dtype_size(input.dtype());
+    const auto* src = static_cast<const uint8_t*>(cont.storage()->data());
+    auto* dst = static_cast<uint8_t*>(output.storage()->data());
+
+    // Binary search to find which input element owns a given output dim index
+    #pragma omp parallel for if(total_out > 65536)
+    for (int64_t i = 0; i < total_out; ++i) {
+        int64_t inner_idx = i % inner_size;
+        int64_t out_dim_idx = (i / inner_size) % total_repeats;
+        int64_t outer_idx = i / (inner_size * total_repeats);
+
+        // Binary search in prefix array: find largest k such that prefix[k] <= out_dim_idx
+        int64_t lo = 0, hi = dim_size;
+        while (lo < hi) {
+            int64_t mid = lo + (hi - lo) / 2;
+            if (prefix[mid + 1] <= out_dim_idx) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        int64_t src_dim_idx = lo;
+
+        int64_t src_idx = (outer_idx * dim_size + src_dim_idx) * inner_size + inner_idx;
+
+        std::memcpy(dst + i * elem_size, src + src_idx * elem_size, elem_size);
+    }
+
+    return output;
+}
+
 } // namespace cpu
 } // namespace tenzor

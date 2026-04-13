@@ -68,6 +68,12 @@ namespace cuda {
     auto div_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
     auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
     auto dot_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
+    auto addmm_kernel(const Tensor& input, const Tensor& mat1, const Tensor& mat2,
+                      double alpha, double beta, cudaStream_t stream) -> Tensor;
+    auto addmv_kernel(const Tensor& input, const Tensor& mat, const Tensor& vec,
+                      double alpha, double beta, cudaStream_t stream) -> Tensor;
+    auto baddbmm_kernel(const Tensor& input, const Tensor& batch1, const Tensor& batch2,
+                        double alpha, double beta, cudaStream_t stream) -> Tensor;
 
     // In-place operations
     auto add_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream) -> Tensor;
@@ -168,6 +174,8 @@ namespace cuda {
     auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, cudaStream_t stream) -> Tensor;
     auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, cudaStream_t stream) -> Tensor;
     auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim, cudaStream_t stream) -> Tensor;
+    auto repeat_interleave_scalar_kernel(const Tensor& input, int64_t repeats, int64_t dim, cudaStream_t stream) -> Tensor;
+    auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats, int64_t dim, cudaStream_t stream) -> Tensor;
 
     // Triangular / diagonal / flip operations
     auto triu_kernel(const Tensor& input, int64_t diagonal, cudaStream_t stream) -> Tensor;
@@ -296,6 +304,8 @@ namespace cuda {
     auto unique_kernel(const Tensor& input, bool sorted_output, bool return_inverse, bool return_counts, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
     auto median_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> std::vector<Tensor>;
     auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> std::vector<Tensor>;
+    auto logcumsumexp_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tensor;
+    auto bincount_kernel(const Tensor& input, const Tensor* weights, int64_t minlength, cudaStream_t stream) -> Tensor;
 
     // Sampling / statistics operations
     auto bernoulli_kernel(const Tensor& probs, cudaStream_t stream) -> Tensor;
@@ -610,9 +620,11 @@ namespace cuda {
     Tensor count_nonzero_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor nansum_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor nanmean_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    std::vector<Tensor> aminmax_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor index_add_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor index_copy_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor index_fill_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor scatter_reduce_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
 
     // Trigonometric operations
     Tensor sin_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
@@ -1174,6 +1186,17 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         int64_t shift = attrs.get_int(AttrKey::Shift, 0);
         int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         return cuda::roll_kernel(inputs[0], shift, dim, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::RepeatInterleave, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        int64_t num_repeats = attrs.get_int(AttrKey::NumRepeats, 1);
+        auto stream = get_cuda_stream(attrs);
+        if (num_repeats >= 0) {
+            return cuda::repeat_interleave_scalar_kernel(inputs[0], num_repeats, dim, stream);
+        } else {
+            return cuda::repeat_interleave_tensor_kernel(inputs[0], inputs[1], dim, stream);
+        }
     });
 
     // =========================================================================
@@ -3392,18 +3415,57 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::CountNonzero, cuda::count_nonzero_dispatch);
     table.register_single_output_kernel(OpId::Nansum, cuda::nansum_dispatch);
     table.register_single_output_kernel(OpId::Nanmean, cuda::nanmean_dispatch);
-    // Aminmax: multi-output, route through CPU for now
-    table.register_kernel(OpId::Aminmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        auto dev = inputs[0].device();
-        auto cpu_in = inputs[0].to(Device::cpu());
-        auto results = dispatch(OpId::Aminmax, std::vector<Tensor>{cpu_in}, attrs);
-        return {results[0].to(dev), results[1].to(dev)};
-    });
+    // Aminmax: native GPU dual min/max reduction
+    table.register_kernel(OpId::Aminmax, cuda::aminmax_dispatch);
 
     // Scatter variants
     table.register_single_output_kernel(OpId::IndexAdd, cuda::index_add_dispatch);
     table.register_single_output_kernel(OpId::IndexCopy, cuda::index_copy_dispatch);
     table.register_single_output_kernel(OpId::IndexFill, cuda::index_fill_dispatch);
+    table.register_single_output_kernel(OpId::ScatterReduce, cuda::scatter_reduce_dispatch);
+
+    // =========================================================================
+    // Fused GEMM Operations
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Addmm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double alpha = attrs.get_float(AttrKey::Alpha, 1.0);
+            double beta = attrs.get_float(AttrKey::Beta, 1.0);
+            return cuda::addmm_kernel(inputs[0], inputs[1], inputs[2], alpha, beta, get_cuda_stream(attrs));
+        });
+
+    table.register_single_output_kernel(OpId::Addmv,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double alpha = attrs.get_float(AttrKey::Alpha, 1.0);
+            double beta = attrs.get_float(AttrKey::Beta, 1.0);
+            return cuda::addmv_kernel(inputs[0], inputs[1], inputs[2], alpha, beta, get_cuda_stream(attrs));
+        });
+
+    table.register_single_output_kernel(OpId::Baddbmm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double alpha = attrs.get_float(AttrKey::Alpha, 1.0);
+            double beta = attrs.get_float(AttrKey::Beta, 1.0);
+            return cuda::baddbmm_kernel(inputs[0], inputs[1], inputs[2], alpha, beta, get_cuda_stream(attrs));
+        });
+
+    // =========================================================================
+    // Log-Cumulative-Sum-Exp
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Logcumsumexp,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            return cuda::logcumsumexp_kernel(inputs[0], dim, get_cuda_stream(attrs));
+        });
+
+    // =========================================================================
+    // Bincount
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Bincount,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t minlength = attrs.get_int(AttrKey::Minlength, 0);
+            const Tensor* weights = (inputs.size() > 1) ? &inputs[1] : nullptr;
+            return cuda::bincount_kernel(inputs[0], weights, minlength, get_cuda_stream(attrs));
+        });
 }
 
 } // namespace tenzor

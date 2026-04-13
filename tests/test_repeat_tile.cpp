@@ -164,6 +164,176 @@ TEST(RepeatTileTest, RepeatPartialDimensions) {
     ASSERT_EQ(output.shape()[1], 6);  // 3 * 2
 }
 
+// =========================================================================
+// repeat_interleave tests
+// =========================================================================
+
+TEST(RepeatInterleaveTest, Scalar1D) {
+    // [1, 2, 3] with repeats=2 -> [1, 1, 2, 2, 3, 3]
+    auto input = from_data<float>(std::vector<float>{1.0f, 2.0f, 3.0f}.data(), {3});
+    auto output = repeat_interleave(input, 2);
+
+    print_tensor<float>(output, "repeat_interleave scalar 1D");
+
+    ASSERT_EQ(output.ndim(), 1);
+    ASSERT_EQ(output.shape()[0], 6);
+
+    const float* data = output.data<float>();
+    EXPECT_FLOAT_EQ(data[0], 1.0f);
+    EXPECT_FLOAT_EQ(data[1], 1.0f);
+    EXPECT_FLOAT_EQ(data[2], 2.0f);
+    EXPECT_FLOAT_EQ(data[3], 2.0f);
+    EXPECT_FLOAT_EQ(data[4], 3.0f);
+    EXPECT_FLOAT_EQ(data[5], 3.0f);
+}
+
+TEST(RepeatInterleaveTest, Scalar1DWithDim) {
+    // Same as above but with explicit dim=0
+    auto input = from_data<float>(std::vector<float>{1.0f, 2.0f, 3.0f}.data(), {3});
+    auto output = repeat_interleave(input, 3, 0);
+
+    print_tensor<float>(output, "repeat_interleave scalar 1D dim=0");
+
+    ASSERT_EQ(output.ndim(), 1);
+    ASSERT_EQ(output.shape()[0], 9);
+
+    const float* data = output.data<float>();
+    EXPECT_FLOAT_EQ(data[0], 1.0f);
+    EXPECT_FLOAT_EQ(data[1], 1.0f);
+    EXPECT_FLOAT_EQ(data[2], 1.0f);
+    EXPECT_FLOAT_EQ(data[3], 2.0f);
+    EXPECT_FLOAT_EQ(data[4], 2.0f);
+    EXPECT_FLOAT_EQ(data[5], 2.0f);
+    EXPECT_FLOAT_EQ(data[6], 3.0f);
+    EXPECT_FLOAT_EQ(data[7], 3.0f);
+    EXPECT_FLOAT_EQ(data[8], 3.0f);
+}
+
+TEST(RepeatInterleaveTest, Scalar2D_Dim0) {
+    // [[1, 2], [3, 4]] with repeats=2, dim=0 -> [[1,2],[1,2],[3,4],[3,4]]
+    std::vector<float> data_vec = {1.0f, 2.0f, 3.0f, 4.0f};
+    auto input = from_data<float>(data_vec.data(), {2, 2});
+    auto output = repeat_interleave(input, 2, 0);
+
+    print_tensor<float>(output, "repeat_interleave scalar 2D dim=0");
+
+    ASSERT_EQ(output.shape()[0], 4);
+    ASSERT_EQ(output.shape()[1], 2);
+
+    const float* data = output.data<float>();
+    // Row 0: [1, 2] (original row 0)
+    EXPECT_FLOAT_EQ(data[0], 1.0f);
+    EXPECT_FLOAT_EQ(data[1], 2.0f);
+    // Row 1: [1, 2] (repeated row 0)
+    EXPECT_FLOAT_EQ(data[2], 1.0f);
+    EXPECT_FLOAT_EQ(data[3], 2.0f);
+    // Row 2: [3, 4] (original row 1)
+    EXPECT_FLOAT_EQ(data[4], 3.0f);
+    EXPECT_FLOAT_EQ(data[5], 4.0f);
+    // Row 3: [3, 4] (repeated row 1)
+    EXPECT_FLOAT_EQ(data[6], 3.0f);
+    EXPECT_FLOAT_EQ(data[7], 4.0f);
+}
+
+TEST(RepeatInterleaveTest, Scalar2D_Dim1) {
+    // [[1, 2], [3, 4]] with repeats=2, dim=1 -> [[1,1,2,2],[3,3,4,4]]
+    std::vector<float> data_vec = {1.0f, 2.0f, 3.0f, 4.0f};
+    auto input = from_data<float>(data_vec.data(), {2, 2});
+    auto output = repeat_interleave(input, 2, 1);
+
+    print_tensor<float>(output, "repeat_interleave scalar 2D dim=1");
+
+    ASSERT_EQ(output.shape()[0], 2);
+    ASSERT_EQ(output.shape()[1], 4);
+
+    const float* data = output.data<float>();
+    EXPECT_FLOAT_EQ(data[0], 1.0f);
+    EXPECT_FLOAT_EQ(data[1], 1.0f);
+    EXPECT_FLOAT_EQ(data[2], 2.0f);
+    EXPECT_FLOAT_EQ(data[3], 2.0f);
+    EXPECT_FLOAT_EQ(data[4], 3.0f);
+    EXPECT_FLOAT_EQ(data[5], 3.0f);
+    EXPECT_FLOAT_EQ(data[6], 4.0f);
+    EXPECT_FLOAT_EQ(data[7], 4.0f);
+}
+
+TEST(RepeatInterleaveTest, Tensor1D) {
+    // [1, 2, 3] with repeats=[1, 2, 3] -> [1, 2, 2, 3, 3, 3]
+    auto input = from_data<float>(std::vector<float>{1.0f, 2.0f, 3.0f}.data(), {3});
+    auto repeats = from_data<int64_t>(std::vector<int64_t>{1, 2, 3}.data(), {3});
+    auto output = repeat_interleave(input, repeats);
+
+    print_tensor<float>(output, "repeat_interleave tensor 1D");
+
+    ASSERT_EQ(output.ndim(), 1);
+    ASSERT_EQ(output.shape()[0], 6);
+
+    const float* data = output.data<float>();
+    EXPECT_FLOAT_EQ(data[0], 1.0f);
+    EXPECT_FLOAT_EQ(data[1], 2.0f);
+    EXPECT_FLOAT_EQ(data[2], 2.0f);
+    EXPECT_FLOAT_EQ(data[3], 3.0f);
+    EXPECT_FLOAT_EQ(data[4], 3.0f);
+    EXPECT_FLOAT_EQ(data[5], 3.0f);
+}
+
+TEST(RepeatInterleaveTest, Tensor2D_Dim0) {
+    // [[1, 2], [3, 4]] with repeats=[1, 3], dim=0
+    // -> [[1,2], [3,4], [3,4], [3,4]]
+    std::vector<float> data_vec = {1.0f, 2.0f, 3.0f, 4.0f};
+    auto input = from_data<float>(data_vec.data(), {2, 2});
+    auto repeats = from_data<int64_t>(std::vector<int64_t>{1, 3}.data(), {2});
+    auto output = repeat_interleave(input, repeats, 0);
+
+    print_tensor<float>(output, "repeat_interleave tensor 2D dim=0");
+
+    ASSERT_EQ(output.shape()[0], 4);
+    ASSERT_EQ(output.shape()[1], 2);
+
+    const float* data = output.data<float>();
+    EXPECT_FLOAT_EQ(data[0], 1.0f);
+    EXPECT_FLOAT_EQ(data[1], 2.0f);
+    EXPECT_FLOAT_EQ(data[2], 3.0f);
+    EXPECT_FLOAT_EQ(data[3], 4.0f);
+    EXPECT_FLOAT_EQ(data[4], 3.0f);
+    EXPECT_FLOAT_EQ(data[5], 4.0f);
+    EXPECT_FLOAT_EQ(data[6], 3.0f);
+    EXPECT_FLOAT_EQ(data[7], 4.0f);
+}
+
+TEST(RepeatInterleaveTest, FlattenNoDim) {
+    // [[1, 2], [3, 4]] with repeats=2, no dim -> flatten first then repeat
+    // flatten: [1, 2, 3, 4] -> [1, 1, 2, 2, 3, 3, 4, 4]
+    std::vector<float> data_vec = {1.0f, 2.0f, 3.0f, 4.0f};
+    auto input = from_data<float>(data_vec.data(), {2, 2});
+    auto output = repeat_interleave(input, 2);
+
+    print_tensor<float>(output, "repeat_interleave flatten (no dim)");
+
+    ASSERT_EQ(output.ndim(), 1);
+    ASSERT_EQ(output.shape()[0], 8);
+
+    const float* data = output.data<float>();
+    EXPECT_FLOAT_EQ(data[0], 1.0f);
+    EXPECT_FLOAT_EQ(data[1], 1.0f);
+    EXPECT_FLOAT_EQ(data[2], 2.0f);
+    EXPECT_FLOAT_EQ(data[3], 2.0f);
+    EXPECT_FLOAT_EQ(data[4], 3.0f);
+    EXPECT_FLOAT_EQ(data[5], 3.0f);
+    EXPECT_FLOAT_EQ(data[6], 4.0f);
+    EXPECT_FLOAT_EQ(data[7], 4.0f);
+}
+
+TEST(RepeatInterleaveTest, ZeroRepeats) {
+    // [1, 2, 3] with repeats=0 -> empty tensor
+    auto input = from_data<float>(std::vector<float>{1.0f, 2.0f, 3.0f}.data(), {3});
+    auto output = repeat_interleave(input, 0);
+
+    ASSERT_EQ(output.ndim(), 1);
+    ASSERT_EQ(output.shape()[0], 0);
+    ASSERT_EQ(output.numel(), 0);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

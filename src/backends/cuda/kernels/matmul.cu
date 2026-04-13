@@ -2163,5 +2163,267 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Ten
     );
 }
 
+// =========================================================================
+// Fused GEMM Operations: addmm, addmv, baddbmm
+// =========================================================================
+
+auto addmm_kernel(const Tensor& input, const Tensor& mat1, const Tensor& mat2,
+                  double alpha, double beta, cudaStream_t stream) -> Tensor {
+    int64_t M = mat1.shape()[0];
+    int64_t K = mat1.shape()[1];
+    int64_t N = mat2.shape()[1];
+
+    Tensor a_cont = mat1.is_contiguous() ? mat1 : mat1.contiguous();
+    Tensor b_cont = mat2.is_contiguous() ? mat2 : mat2.contiguous();
+
+    // Create output tensor initialized from input (broadcast-expanded)
+    Tensor output({M, N}, mat1.dtype(), mat1.device());
+
+    if (beta != 0.0) {
+        // Copy input to output with broadcasting
+        auto inp_shape = input.shape();
+        if (input.ndim() == 2 && inp_shape[0] == M && inp_shape[1] == N) {
+            Tensor inp_cont = input.is_contiguous() ? input : input.contiguous();
+            cudaMemcpyAsync(output.data_ptr(), inp_cont.data_ptr(),
+                            M * N * dtype_size(mat1.dtype()),
+                            cudaMemcpyDeviceToDevice, stream);
+        } else {
+            // General broadcast: expand and copy
+            auto expanded = input.expand({M, N}).contiguous();
+            cudaMemcpyAsync(output.data_ptr(), expanded.data_ptr(),
+                            M * N * dtype_size(mat1.dtype()),
+                            cudaMemcpyDeviceToDevice, stream);
+        }
+    } else {
+        cudaMemsetAsync(output.data_ptr(), 0, M * N * dtype_size(mat1.dtype()), stream);
+    }
+
+#ifdef TENZOR_HAS_CUBLAS
+    cublasHandle_t handle = CuBLASHandlePool::get(stream);
+
+    if (mat1.dtype() == DType::Float32) {
+        float alpha_f = static_cast<float>(alpha);
+        float beta_f = static_cast<float>(beta);
+        cublasStatus_t status = cublasGemmEx(
+            handle,
+            CUBLAS_OP_N, CUBLAS_OP_N,
+            N, M, K,
+            &alpha_f,
+            b_cont.data<float>(), CUDA_R_32F, N,
+            a_cont.data<float>(), CUDA_R_32F, K,
+            &beta_f,
+            output.data<float>(), CUDA_R_32F, N,
+            matmul::g_allow_tf32 ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F,
+            CUBLAS_GEMM_DEFAULT
+        );
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            throw std::runtime_error("cuBLAS addmm GemmEx failed: " + std::to_string(status));
+        }
+    } else if (mat1.dtype() == DType::Float64) {
+        double alpha_d = alpha;
+        double beta_d = beta;
+        cublasStatus_t status = cublasDgemm(
+            handle, CUBLAS_OP_N, CUBLAS_OP_N,
+            N, M, K, &alpha_d,
+            b_cont.data<double>(), N,
+            a_cont.data<double>(), K,
+            &beta_d,
+            output.data<double>(), N
+        );
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            throw std::runtime_error("cuBLAS addmm DGEMM failed");
+        }
+    } else if (mat1.dtype() == DType::Float16) {
+        // Upcast to Float32
+        auto result = addmm_kernel(input.to(DType::Float32),
+                                   mat1.to(DType::Float32),
+                                   mat2.to(DType::Float32),
+                                   alpha, beta, stream);
+        return result.to(DType::Float16);
+    } else if (mat1.dtype() == DType::BFloat16) {
+        auto result = addmm_kernel(input.to(DType::Float32),
+                                   mat1.to(DType::Float32),
+                                   mat2.to(DType::Float32),
+                                   alpha, beta, stream);
+        return result.to(DType::BFloat16);
+    } else {
+        throw std::runtime_error("addmm: unsupported dtype on CUDA");
+    }
+#else
+    throw std::runtime_error("addmm on CUDA requires cuBLAS");
+#endif
+
+    return output;
+}
+
+auto addmv_kernel(const Tensor& input, const Tensor& mat, const Tensor& vec,
+                  double alpha, double beta, cudaStream_t stream) -> Tensor {
+    int64_t M = mat.shape()[0];
+    int64_t K = mat.shape()[1];
+
+    Tensor m_cont = mat.is_contiguous() ? mat : mat.contiguous();
+    Tensor v_cont = vec.is_contiguous() ? vec : vec.contiguous();
+
+    Tensor output({M}, mat.dtype(), mat.device());
+
+    if (beta != 0.0) {
+        auto inp_shape = input.shape();
+        if (input.ndim() == 1 && inp_shape[0] == M) {
+            Tensor inp_cont = input.is_contiguous() ? input : input.contiguous();
+            cudaMemcpyAsync(output.data_ptr(), inp_cont.data_ptr(),
+                            M * dtype_size(mat.dtype()),
+                            cudaMemcpyDeviceToDevice, stream);
+        } else {
+            auto expanded = input.expand({M}).contiguous();
+            cudaMemcpyAsync(output.data_ptr(), expanded.data_ptr(),
+                            M * dtype_size(mat.dtype()),
+                            cudaMemcpyDeviceToDevice, stream);
+        }
+    } else {
+        cudaMemsetAsync(output.data_ptr(), 0, M * dtype_size(mat.dtype()), stream);
+    }
+
+#ifdef TENZOR_HAS_CUBLAS
+    cublasHandle_t handle = CuBLASHandlePool::get(stream);
+
+    if (mat.dtype() == DType::Float32) {
+        float alpha_f = static_cast<float>(alpha);
+        float beta_f = static_cast<float>(beta);
+        // cuBLAS is column-major, so for row-major mat (M, K), we use Trans
+        // y = alpha * op(A) * x + beta * y
+        // For row-major A(M,K): column-major sees A^T(K,M), so op=Trans gives A(M,K)
+        cublasStatus_t status = cublasSgemv(
+            handle, CUBLAS_OP_T,
+            K, M,
+            &alpha_f,
+            m_cont.data<float>(), K,
+            v_cont.data<float>(), 1,
+            &beta_f,
+            output.data<float>(), 1
+        );
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            throw std::runtime_error("cuBLAS addmv SGEMV failed");
+        }
+    } else if (mat.dtype() == DType::Float64) {
+        double alpha_d = alpha;
+        double beta_d = beta;
+        cublasStatus_t status = cublasDgemv(
+            handle, CUBLAS_OP_T,
+            K, M,
+            &alpha_d,
+            m_cont.data<double>(), K,
+            v_cont.data<double>(), 1,
+            &beta_d,
+            output.data<double>(), 1
+        );
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            throw std::runtime_error("cuBLAS addmv DGEMV failed");
+        }
+    } else if (mat.dtype() == DType::Float16 || mat.dtype() == DType::BFloat16) {
+        DType orig = mat.dtype();
+        auto result = addmv_kernel(input.to(DType::Float32),
+                                   mat.to(DType::Float32),
+                                   vec.to(DType::Float32),
+                                   alpha, beta, stream);
+        return result.to(orig);
+    } else {
+        throw std::runtime_error("addmv: unsupported dtype on CUDA");
+    }
+#else
+    throw std::runtime_error("addmv on CUDA requires cuBLAS");
+#endif
+
+    return output;
+}
+
+auto baddbmm_kernel(const Tensor& input, const Tensor& batch1, const Tensor& batch2,
+                    double alpha, double beta, cudaStream_t stream) -> Tensor {
+    int64_t B = batch1.shape()[0];
+    int64_t M = batch1.shape()[1];
+    int64_t K = batch1.shape()[2];
+    int64_t N = batch2.shape()[2];
+
+    Tensor b1_cont = batch1.is_contiguous() ? batch1 : batch1.contiguous();
+    Tensor b2_cont = batch2.is_contiguous() ? batch2 : batch2.contiguous();
+
+    Tensor output({B, M, N}, batch1.dtype(), batch1.device());
+
+    if (beta != 0.0) {
+        auto inp_shape = input.shape();
+        if (input.ndim() == 3 && inp_shape[0] == B && inp_shape[1] == M && inp_shape[2] == N) {
+            Tensor inp_cont = input.is_contiguous() ? input : input.contiguous();
+            cudaMemcpyAsync(output.data_ptr(), inp_cont.data_ptr(),
+                            B * M * N * dtype_size(batch1.dtype()),
+                            cudaMemcpyDeviceToDevice, stream);
+        } else {
+            auto expanded = input.expand({B, M, N}).contiguous();
+            cudaMemcpyAsync(output.data_ptr(), expanded.data_ptr(),
+                            B * M * N * dtype_size(batch1.dtype()),
+                            cudaMemcpyDeviceToDevice, stream);
+        }
+    } else {
+        cudaMemsetAsync(output.data_ptr(), 0, B * M * N * dtype_size(batch1.dtype()), stream);
+    }
+
+    int64_t stride_a = M * K;
+    int64_t stride_b = K * N;
+    int64_t stride_c = M * N;
+
+#ifdef TENZOR_HAS_CUBLAS
+    cublasHandle_t handle = CuBLASHandlePool::get(stream);
+
+    if (batch1.dtype() == DType::Float32) {
+        float alpha_f = static_cast<float>(alpha);
+        float beta_f = static_cast<float>(beta);
+        cublasStatus_t status = cublasGemmStridedBatchedEx(
+            handle,
+            CUBLAS_OP_N, CUBLAS_OP_N,
+            N, M, K,
+            &alpha_f,
+            b2_cont.data<float>(), CUDA_R_32F, N, stride_b,
+            b1_cont.data<float>(), CUDA_R_32F, K, stride_a,
+            &beta_f,
+            output.data<float>(), CUDA_R_32F, N, stride_c,
+            B,
+            matmul::g_allow_tf32 ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F,
+            CUBLAS_GEMM_DEFAULT
+        );
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            throw std::runtime_error("cuBLAS baddbmm batched GemmEx failed: " + std::to_string(status));
+        }
+    } else if (batch1.dtype() == DType::Float64) {
+        double alpha_d = alpha;
+        double beta_d = beta;
+        cublasStatus_t status = cublasDgemmStridedBatched(
+            handle,
+            CUBLAS_OP_N, CUBLAS_OP_N,
+            N, M, K,
+            &alpha_d,
+            b2_cont.data<double>(), N, stride_b,
+            b1_cont.data<double>(), K, stride_a,
+            &beta_d,
+            output.data<double>(), N, stride_c,
+            B
+        );
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            throw std::runtime_error("cuBLAS baddbmm batched DGEMM failed");
+        }
+    } else if (batch1.dtype() == DType::Float16 || batch1.dtype() == DType::BFloat16) {
+        DType orig = batch1.dtype();
+        auto result = baddbmm_kernel(input.to(DType::Float32),
+                                     batch1.to(DType::Float32),
+                                     batch2.to(DType::Float32),
+                                     alpha, beta, stream);
+        return result.to(orig);
+    } else {
+        throw std::runtime_error("baddbmm: unsupported dtype on CUDA");
+    }
+#else
+    throw std::runtime_error("baddbmm on CUDA requires cuBLAS");
+#endif
+
+    return output;
+}
+
 } // namespace cuda
 } // namespace tenzor

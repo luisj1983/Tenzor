@@ -735,4 +735,197 @@ TEST(CPUKernelsTest, ShapePreservation) {
     }
 }
 
+// ===========================================================================
+// Fused GEMM Operations: addmm, addmv, baddbmm
+// ===========================================================================
+
+TEST(CPUKernelsTest, AddmmFloat32_Basic) {
+    // addmm: beta * input + alpha * (mat1 @ mat2)
+    // mat1 = [[1, 2], [3, 4]]  (2x2)
+    // mat2 = [[5, 6], [7, 8]]  (2x2)
+    // mat1 @ mat2 = [[19, 22], [43, 50]]
+    // input = [[1, 1], [1, 1]]
+    // With beta=1, alpha=1: result = [[20, 23], [44, 51]]
+    auto mat1 = ones({2, 2}, DType::Float32);
+    auto mat1_data = mat1.data<float>();
+    mat1_data[0] = 1; mat1_data[1] = 2; mat1_data[2] = 3; mat1_data[3] = 4;
+
+    auto mat2 = ones({2, 2}, DType::Float32);
+    auto mat2_data = mat2.data<float>();
+    mat2_data[0] = 5; mat2_data[1] = 6; mat2_data[2] = 7; mat2_data[3] = 8;
+
+    auto input = ones({2, 2}, DType::Float32);
+
+    auto result = addmm(input, mat1, mat2);
+    auto r = result.data<float>();
+
+    EXPECT_NEAR(r[0], 20.0f, 1e-5f);
+    EXPECT_NEAR(r[1], 23.0f, 1e-5f);
+    EXPECT_NEAR(r[2], 44.0f, 1e-5f);
+    EXPECT_NEAR(r[3], 51.0f, 1e-5f);
+}
+
+TEST(CPUKernelsTest, AddmmFloat32_AlphaBeta) {
+    // With beta=2.0, alpha=0.5:
+    // result = 2*input + 0.5*(mat1 @ mat2)
+    auto mat1 = ones({2, 2}, DType::Float32);
+    auto mat1_data = mat1.data<float>();
+    mat1_data[0] = 1; mat1_data[1] = 2; mat1_data[2] = 3; mat1_data[3] = 4;
+
+    auto mat2 = ones({2, 2}, DType::Float32);
+    auto mat2_data = mat2.data<float>();
+    mat2_data[0] = 5; mat2_data[1] = 6; mat2_data[2] = 7; mat2_data[3] = 8;
+
+    auto input = full({2, 2}, 10.0f);
+
+    auto result = addmm(input, mat1, mat2, 2.0, 0.5);
+    auto r = result.data<float>();
+
+    // mat1 @ mat2 = [[19, 22], [43, 50]]
+    // 2*10 + 0.5*19 = 29.5, 2*10 + 0.5*22 = 31.0
+    // 2*10 + 0.5*43 = 41.5, 2*10 + 0.5*50 = 45.0
+    EXPECT_NEAR(r[0], 29.5f, 1e-4f);
+    EXPECT_NEAR(r[1], 31.0f, 1e-4f);
+    EXPECT_NEAR(r[2], 41.5f, 1e-4f);
+    EXPECT_NEAR(r[3], 45.0f, 1e-4f);
+}
+
+TEST(CPUKernelsTest, AddmmFloat32_BetaZero) {
+    // beta=0: result = alpha * (mat1 @ mat2), input is ignored
+    auto mat1 = ones({2, 3}, DType::Float32);
+    auto mat2 = ones({3, 2}, DType::Float32);
+    auto input = full({2, 2}, 999.0f); // Should be ignored
+
+    auto result = addmm(input, mat1, mat2, 0.0, 2.0);
+    auto r = result.data<float>();
+
+    // ones(2,3) @ ones(3,2) = full(2,2, 3.0)
+    // 0*999 + 2*3 = 6.0
+    EXPECT_NEAR(r[0], 6.0f, 1e-5f);
+    EXPECT_NEAR(r[1], 6.0f, 1e-5f);
+    EXPECT_NEAR(r[2], 6.0f, 1e-5f);
+    EXPECT_NEAR(r[3], 6.0f, 1e-5f);
+}
+
+TEST(CPUKernelsTest, AddmmFloat64_Basic) {
+    auto mat1 = ones({3, 4}, DType::Float64);
+    auto mat2 = ones({4, 2}, DType::Float64);
+    auto input = full({3, 2}, 1.0, DType::Float64, Device::cpu());
+
+    auto result = addmm(input, mat1, mat2);
+    auto r = result.data<double>();
+
+    // ones @ ones = full(3,2, 4.0), + 1.0 = 5.0
+    for (int i = 0; i < 6; ++i) {
+        EXPECT_NEAR(r[i], 5.0, 1e-10);
+    }
+}
+
+TEST(CPUKernelsTest, AddmmFloat32_BroadcastBias) {
+    // input is (N,) = (2,), should broadcast to (3, 2)
+    auto mat1 = ones({3, 4}, DType::Float32);
+    auto mat2 = ones({4, 2}, DType::Float32);
+    auto input = full({2}, 10.0f);
+
+    auto result = addmm(input, mat1, mat2);
+    EXPECT_EQ(result.shape()[0], 3);
+    EXPECT_EQ(result.shape()[1], 2);
+
+    auto r = result.data<float>();
+    // ones @ ones = 4.0, + 10.0 = 14.0
+    for (int i = 0; i < 6; ++i) {
+        EXPECT_NEAR(r[i], 14.0f, 1e-5f);
+    }
+}
+
+TEST(CPUKernelsTest, AddmvFloat32_Basic) {
+    // addmv: beta * input + alpha * (mat @ vec)
+    // mat = [[1, 2], [3, 4]]  (2x2)
+    // vec = [5, 6]  (2,)
+    // mat @ vec = [17, 39]
+    // input = [1, 1]
+    // result = [18, 40]
+    auto mat = ones({2, 2}, DType::Float32);
+    auto mat_data = mat.data<float>();
+    mat_data[0] = 1; mat_data[1] = 2; mat_data[2] = 3; mat_data[3] = 4;
+
+    auto vec = ones({2}, DType::Float32);
+    auto vec_data = vec.data<float>();
+    vec_data[0] = 5; vec_data[1] = 6;
+
+    auto input = ones({2}, DType::Float32);
+
+    auto result = addmv(input, mat, vec);
+    EXPECT_EQ(result.ndim(), 1);
+    EXPECT_EQ(result.shape()[0], 2);
+
+    auto r = result.data<float>();
+    EXPECT_NEAR(r[0], 18.0f, 1e-5f);
+    EXPECT_NEAR(r[1], 40.0f, 1e-5f);
+}
+
+TEST(CPUKernelsTest, AddmvFloat32_AlphaBeta) {
+    auto mat = ones({3, 4}, DType::Float32);
+    auto vec = ones({4}, DType::Float32);
+    auto input = full({3}, 5.0f);
+
+    // beta=2, alpha=3: 2*5 + 3*(ones(3,4) @ ones(4)) = 10 + 3*4 = 22
+    auto result = addmv(input, mat, vec, 2.0, 3.0);
+    auto r = result.data<float>();
+
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_NEAR(r[i], 22.0f, 1e-5f);
+    }
+}
+
+TEST(CPUKernelsTest, BaddbmmFloat32_Basic) {
+    // baddbmm: beta * input + alpha * (batch1 @ batch2)
+    int64_t B = 2, M = 2, K = 3, N = 2;
+    auto batch1 = ones({B, M, K}, DType::Float32);
+    auto batch2 = ones({B, K, N}, DType::Float32);
+    auto input = ones({B, M, N}, DType::Float32);
+
+    auto result = baddbmm(input, batch1, batch2);
+    EXPECT_EQ(result.ndim(), 3);
+    EXPECT_EQ(result.shape()[0], B);
+    EXPECT_EQ(result.shape()[1], M);
+    EXPECT_EQ(result.shape()[2], N);
+
+    auto r = result.data<float>();
+    // ones @ ones = K = 3, + 1 = 4
+    for (int i = 0; i < B * M * N; ++i) {
+        EXPECT_NEAR(r[i], 4.0f, 1e-5f);
+    }
+}
+
+TEST(CPUKernelsTest, BaddbmmFloat32_AlphaBeta) {
+    int64_t B = 3, M = 2, K = 4, N = 2;
+    auto batch1 = ones({B, M, K}, DType::Float32);
+    auto batch2 = ones({B, K, N}, DType::Float32);
+    auto input = full({B, M, N}, 10.0f);
+
+    // beta=0.5, alpha=2.0: 0.5*10 + 2.0*4 = 5 + 8 = 13
+    auto result = baddbmm(input, batch1, batch2, 0.5, 2.0);
+    auto r = result.data<float>();
+
+    for (int i = 0; i < B * M * N; ++i) {
+        EXPECT_NEAR(r[i], 13.0f, 1e-5f);
+    }
+}
+
+TEST(CPUKernelsTest, BaddbmmFloat32_BetaZero) {
+    int64_t B = 2, M = 3, K = 2, N = 3;
+    auto batch1 = ones({B, M, K}, DType::Float32);
+    auto batch2 = ones({B, K, N}, DType::Float32);
+    auto input = full({B, M, N}, 999.0f); // Should be ignored
+
+    auto result = baddbmm(input, batch1, batch2, 0.0, 1.0);
+    auto r = result.data<float>();
+
+    // 0*999 + 1*(ones @ ones) = K = 2
+    for (int i = 0; i < B * M * N; ++i) {
+        EXPECT_NEAR(r[i], 2.0f, 1e-5f);
+    }
+}
+
 

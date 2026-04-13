@@ -547,6 +547,105 @@ auto cumprod(const Tensor& input, int64_t dim) -> Tensor {
     return output;
 }
 
+auto logcumsumexp(const Tensor& input, int64_t dim) -> Tensor {
+    const int64_t ndim = input.ndim();
+
+    if (ndim == 0) {
+        throw std::runtime_error("logcumsumexp not supported for 0-dimensional tensors");
+    }
+
+    // Normalize dimension
+    if (dim < 0) {
+        dim += ndim;
+    }
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("Dimension out of range for logcumsumexp");
+    }
+
+    // For non-CPU tensors, dispatch to backend kernel
+    if (input.device().type != Device::Type::CPU) {
+        NewOpAttributes attrs;
+        attrs.set(AttrKey::Dim, dim);
+        std::vector<Tensor> inputs = {input};
+        return dispatch<OpId::Logcumsumexp>(inputs, attrs)[0];
+    }
+
+    // Upcast half types to Float32 for computation
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto f32_result = logcumsumexp(input.to(DType::Float32), dim);
+        return f32_result.to(input.dtype());
+    }
+
+    if (input.dtype() != DType::Float32 && input.dtype() != DType::Float64) {
+        throw std::runtime_error("logcumsumexp only supports floating-point dtypes");
+    }
+
+    // Get contiguous input
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+
+    // Create output tensor (same shape as input)
+    Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                  input.dtype(), input.device());
+
+    const int64_t dim_size = input.shape()[dim];
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) {
+        outer_size *= input.shape()[i];
+    }
+
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) {
+        inner_size *= input.shape()[i];
+    }
+
+    // Numerically stable log-cumsum-exp using running max
+    auto process_lcse = [&]<typename T>(T*) {
+        const T* input_data = input_cont.data<T>();
+        T* output_data = output.data<T>();
+
+        #ifdef _OPENMP
+        #pragma omp parallel for if (outer_size * inner_size > 64)
+        #endif
+        for (int64_t oi = 0; oi < outer_size * inner_size; ++oi) {
+            int64_t outer = oi / inner_size;
+            int64_t inner = oi % inner_size;
+
+            T running_max = -std::numeric_limits<T>::infinity();
+            T running_lse = -std::numeric_limits<T>::infinity();
+
+            for (int64_t i = 0; i < dim_size; ++i) {
+                int64_t offset = outer * dim_size * inner_size + i * inner_size + inner;
+                T x = input_data[offset];
+                T new_max = std::max(running_max, x);
+
+                if (std::isinf(new_max) && new_max < T(0)) {
+                    // Both -inf, result stays -inf
+                    running_lse = -std::numeric_limits<T>::infinity();
+                } else {
+                    running_lse = new_max + std::log(
+                        std::exp(running_lse - new_max) + std::exp(x - new_max));
+                }
+                running_max = new_max;
+                output_data[offset] = running_lse;
+            }
+        }
+    };
+
+    switch (input.dtype()) {
+        case DType::Float32:
+            process_lcse(static_cast<float*>(nullptr));
+            break;
+        case DType::Float64:
+            process_lcse(static_cast<double*>(nullptr));
+            break;
+        default:
+            throw std::runtime_error("logcumsumexp: unsupported dtype");
+    }
+
+    return output;
+}
+
 // ============================================================================
 // einsum — Einstein summation convention
 // ============================================================================
@@ -997,6 +1096,123 @@ auto combinations(const Tensor& input, int64_t r, bool with_replacement) -> Tens
         return result_cpu.to(input.device());
     }
     return result_cpu;
+}
+
+// ---------------------------------------------------------------------------
+// tensordot — generalized tensor contraction
+// ---------------------------------------------------------------------------
+
+auto tensordot(const Tensor& a, const Tensor& b,
+               std::vector<int64_t> dims_a,
+               std::vector<int64_t> dims_b) -> Tensor {
+    if (dims_a.size() != dims_b.size()) {
+        throw std::runtime_error(
+            "tensordot: dims_a and dims_b must have the same length");
+    }
+
+    const int64_t ndim_a = a.ndim();
+    const int64_t ndim_b = b.ndim();
+    const int64_t n_contract = static_cast<int64_t>(dims_a.size());
+
+    // Normalize negative dims
+    for (auto& d : dims_a) {
+        if (d < 0) d += ndim_a;
+        if (d < 0 || d >= ndim_a) {
+            throw std::runtime_error("tensordot: dim out of range for tensor a");
+        }
+    }
+    for (auto& d : dims_b) {
+        if (d < 0) d += ndim_b;
+        if (d < 0 || d >= ndim_b) {
+            throw std::runtime_error("tensordot: dim out of range for tensor b");
+        }
+    }
+
+    // Validate contracted dimensions match in size
+    for (int64_t i = 0; i < n_contract; ++i) {
+        if (a.shape()[dims_a[i]] != b.shape()[dims_b[i]]) {
+            throw std::runtime_error(
+                "tensordot: contracted dimensions must match, got " +
+                std::to_string(a.shape()[dims_a[i]]) + " vs " +
+                std::to_string(b.shape()[dims_b[i]]));
+        }
+    }
+
+    // Build permutation for a: free dims first, then contracted dims
+    std::vector<bool> a_contracted(ndim_a, false);
+    for (auto d : dims_a) a_contracted[d] = true;
+
+    std::vector<int64_t> perm_a;
+    std::vector<int64_t> free_shape_a;
+    for (int64_t i = 0; i < ndim_a; ++i) {
+        if (!a_contracted[i]) {
+            perm_a.push_back(i);
+            free_shape_a.push_back(a.shape()[i]);
+        }
+    }
+    for (auto d : dims_a) perm_a.push_back(d);
+
+    // Build permutation for b: contracted dims first, then free dims
+    std::vector<bool> b_contracted(ndim_b, false);
+    for (auto d : dims_b) b_contracted[d] = true;
+
+    std::vector<int64_t> perm_b;
+    std::vector<int64_t> free_shape_b;
+    for (auto d : dims_b) perm_b.push_back(d);
+    for (int64_t i = 0; i < ndim_b; ++i) {
+        if (!b_contracted[i]) {
+            perm_b.push_back(i);
+            free_shape_b.push_back(b.shape()[i]);
+        }
+    }
+
+    // Compute product of free and contracted dimensions
+    int64_t free_size_a = 1;
+    for (auto s : free_shape_a) free_size_a *= s;
+    int64_t free_size_b = 1;
+    for (auto s : free_shape_b) free_size_b *= s;
+    int64_t contract_size = 1;
+    for (auto d : dims_a) contract_size *= a.shape()[d];
+
+    // Permute -> reshape to 2D -> matmul -> reshape back
+    auto a_perm = a.permute(perm_a).contiguous().reshape({free_size_a, contract_size});
+    auto b_perm = b.permute(perm_b).contiguous().reshape({contract_size, free_size_b});
+
+    auto result_2d = tenzor::matmul(a_perm, b_perm);
+
+    // Build output shape: free_shape_a + free_shape_b
+    std::vector<int64_t> out_shape;
+    out_shape.insert(out_shape.end(), free_shape_a.begin(), free_shape_a.end());
+    out_shape.insert(out_shape.end(), free_shape_b.begin(), free_shape_b.end());
+
+    if (out_shape.empty()) {
+        // Scalar result
+        return result_2d.reshape({});
+    }
+    return result_2d.reshape(out_shape);
+}
+
+auto tensordot(const Tensor& a, const Tensor& b, int64_t dims) -> Tensor {
+    if (dims < 0) {
+        throw std::runtime_error("tensordot: dims must be >= 0");
+    }
+
+    const int64_t ndim_a = a.ndim();
+    const int64_t ndim_b = b.ndim();
+
+    if (dims > ndim_a || dims > ndim_b) {
+        throw std::runtime_error(
+            "tensordot: dims cannot exceed number of dimensions of either tensor");
+    }
+
+    // Contract last `dims` of a with first `dims` of b
+    std::vector<int64_t> dims_a, dims_b;
+    for (int64_t i = 0; i < dims; ++i) {
+        dims_a.push_back(ndim_a - dims + i);
+        dims_b.push_back(i);
+    }
+
+    return tensordot(a, b, std::move(dims_a), std::move(dims_b));
 }
 
 } // namespace tenzor

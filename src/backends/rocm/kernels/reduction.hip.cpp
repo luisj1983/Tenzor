@@ -17,6 +17,7 @@
 #include <climits>
 #include <algorithm>
 #include <stdexcept>
+#include <utility>
 #include "fp16_saturate.h"
 #include "reduction_utils.hip.h"
 #include "../rocm_arch_detect.hpp"
@@ -3766,6 +3767,299 @@ auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t str
     }
 
     return {values, indices};
+}
+
+// ============================================================================
+// CountNonzero — full reduction kernel
+// ============================================================================
+
+__global__ void count_nonzero_all_f32(const float* __restrict__ input,
+                                      int64_t* __restrict__ output, int64_t n) {
+    __shared__ int64_t scount;
+    if (threadIdx.x == 0) scount = 0;
+    __syncthreads();
+
+    int64_t local_count = 0;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+    for (int64_t i = idx; i < n; i += grid_size) {
+        if (input[i] != 0.0f) local_count++;
+    }
+    atomicAdd(reinterpret_cast<unsigned long long*>(&scount),
+              static_cast<unsigned long long>(local_count));
+    __syncthreads();
+    if (threadIdx.x == 0) output[0] = scount;
+}
+
+auto count_nonzero_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    Tensor in = input;
+    if (in.dtype() != DType::Float32) {
+        in = in.to(DType::Float32);
+    }
+    int64_t n = in.numel();
+    Tensor result({1}, DType::Int64, in.device());
+    // Single block — shared memory reduction requires all threads in same block
+    hipLaunchKernelGGL(count_nonzero_all_f32,
+                       dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                       in.data<float>(), result.data<int64_t>(), n);
+    HIP_CHECK(hipGetLastError());
+    HIP_CHECK(hipStreamSynchronize(stream));
+    return result;
+}
+
+// ============================================================================
+// Nansum — full reduction kernel (sum skipping NaN)
+// ============================================================================
+
+__global__ void nansum_all_f32(const float* __restrict__ input,
+                               float* __restrict__ output, int64_t n) {
+    __shared__ float ssum;
+    if (threadIdx.x == 0) ssum = 0.0f;
+    __syncthreads();
+
+    float local_sum = 0.0f;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+    for (int64_t i = idx; i < n; i += grid_size) {
+        float v = input[i];
+        if (!isnan(v)) local_sum += v;
+    }
+    atomicAdd(&ssum, local_sum);
+    __syncthreads();
+    if (threadIdx.x == 0) output[0] = ssum;
+}
+
+__global__ void nansum_all_f64(const double* __restrict__ input,
+                               double* __restrict__ output, int64_t n) {
+    __shared__ double ssum;
+    if (threadIdx.x == 0) ssum = 0.0;
+    __syncthreads();
+
+    double local_sum = 0.0;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+    for (int64_t i = idx; i < n; i += grid_size) {
+        double v = input[i];
+        if (!isnan(v)) local_sum += v;
+    }
+    // HIP supports atomicAdd for double
+    atomicAdd(&ssum, local_sum);
+    __syncthreads();
+    if (threadIdx.x == 0) output[0] = ssum;
+}
+
+auto nansum_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    DType orig_dtype = input.dtype();
+    int64_t n = input.numel();
+
+    if (orig_dtype == DType::Float64) {
+        Tensor result({1}, DType::Float64, input.device());
+        // Single block — shared memory reduction requires all threads in same block
+        hipLaunchKernelGGL(nansum_all_f64,
+                           dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                           input.data<double>(), result.data<double>(), n);
+        HIP_CHECK(hipGetLastError());
+        HIP_CHECK(hipStreamSynchronize(stream));
+        return result;
+    }
+
+    // All other dtypes: upcast to Float32
+    Tensor in = input;
+    if (orig_dtype != DType::Float32) {
+        in = in.to(DType::Float32);
+    }
+    Tensor result({1}, DType::Float32, in.device());
+    // Single block — shared memory reduction requires all threads in same block
+    hipLaunchKernelGGL(nansum_all_f32,
+                       dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                       in.data<float>(), result.data<float>(), n);
+    HIP_CHECK(hipGetLastError());
+    HIP_CHECK(hipStreamSynchronize(stream));
+    return (orig_dtype != DType::Float32 && orig_dtype != DType::Float64)
+               ? result.to(orig_dtype) : result;
+}
+
+// ============================================================================
+// Nanmean — nansum / count_non_nan
+// ============================================================================
+
+__global__ void count_non_nan_all_f32(const float* __restrict__ input,
+                                      int64_t* __restrict__ output, int64_t n) {
+    __shared__ int64_t scount;
+    if (threadIdx.x == 0) scount = 0;
+    __syncthreads();
+
+    int64_t local_count = 0;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+    for (int64_t i = idx; i < n; i += grid_size) {
+        if (!isnan(input[i])) local_count++;
+    }
+    atomicAdd(reinterpret_cast<unsigned long long*>(&scount),
+              static_cast<unsigned long long>(local_count));
+    __syncthreads();
+    if (threadIdx.x == 0) output[0] = scount;
+}
+
+__global__ void nanmean_div_f32(const float* __restrict__ sum,
+                                const int64_t* __restrict__ count,
+                                float* __restrict__ output) {
+    if (threadIdx.x == 0) {
+        int64_t c = count[0];
+        output[0] = (c > 0) ? sum[0] / static_cast<float>(c) : 0.0f;
+    }
+}
+
+auto nanmean_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    DType orig_dtype = input.dtype();
+    Tensor in = input;
+    if (in.dtype() != DType::Float32) {
+        in = in.to(DType::Float32);
+    }
+    int64_t n = in.numel();
+
+    // Compute nansum on GPU (single block)
+    Tensor sum_result({1}, DType::Float32, in.device());
+    hipLaunchKernelGGL(nansum_all_f32,
+                       dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                       in.data<float>(), sum_result.data<float>(), n);
+
+    // Count non-NaN elements on GPU (single block)
+    Tensor count_result({1}, DType::Int64, in.device());
+    hipLaunchKernelGGL(count_non_nan_all_f32,
+                       dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                       in.data<float>(), count_result.data<int64_t>(), n);
+
+    // Divide sum by count on GPU
+    Tensor result({1}, DType::Float32, in.device());
+    hipLaunchKernelGGL(nanmean_div_f32,
+                       dim3(1), dim3(1), 0, stream,
+                       sum_result.data<float>(), count_result.data<int64_t>(),
+                       result.data<float>());
+    HIP_CHECK(hipGetLastError());
+    HIP_CHECK(hipStreamSynchronize(stream));
+
+    return (orig_dtype != DType::Float32) ? result.to(orig_dtype) : result;
+}
+
+// ============================================================================
+// Aminmax — compute min and max in a single pass
+// ============================================================================
+
+__global__ void aminmax_all_f32(const float* __restrict__ input,
+                                float* __restrict__ out_min,
+                                float* __restrict__ out_max,
+                                int64_t n) {
+    __shared__ float smin[REDUCTION_BLOCK_SIZE];
+    __shared__ float smax[REDUCTION_BLOCK_SIZE];
+
+    float local_min = __int_as_float(0x7f800000);   // +Inf
+    float local_max = __int_as_float(0xff800000);   // -Inf
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+    for (int64_t i = idx; i < n; i += grid_size) {
+        float v = input[i];
+        if (v < local_min) local_min = v;
+        if (v > local_max) local_max = v;
+    }
+
+    smin[threadIdx.x] = local_min;
+    smax[threadIdx.x] = local_max;
+    __syncthreads();
+
+    // Block-level tree reduction
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (static_cast<int>(threadIdx.x) < stride) {
+            if (smin[threadIdx.x + stride] < smin[threadIdx.x])
+                smin[threadIdx.x] = smin[threadIdx.x + stride];
+            if (smax[threadIdx.x + stride] > smax[threadIdx.x])
+                smax[threadIdx.x] = smax[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+        out_min[0] = smin[0];
+        out_max[0] = smax[0];
+    }
+}
+
+__global__ void aminmax_all_f64(const double* __restrict__ input,
+                                double* __restrict__ out_min,
+                                double* __restrict__ out_max,
+                                int64_t n) {
+    __shared__ double smin[REDUCTION_BLOCK_SIZE];
+    __shared__ double smax[REDUCTION_BLOCK_SIZE];
+
+    double local_min = __longlong_as_double(0x7ff0000000000000LL);   // +Inf
+    double local_max = __longlong_as_double(0xfff0000000000000LL);   // -Inf
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+    for (int64_t i = idx; i < n; i += grid_size) {
+        double v = input[i];
+        if (v < local_min) local_min = v;
+        if (v > local_max) local_max = v;
+    }
+
+    smin[threadIdx.x] = local_min;
+    smax[threadIdx.x] = local_max;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (static_cast<int>(threadIdx.x) < stride) {
+            if (smin[threadIdx.x + stride] < smin[threadIdx.x])
+                smin[threadIdx.x] = smin[threadIdx.x + stride];
+            if (smax[threadIdx.x + stride] > smax[threadIdx.x])
+                smax[threadIdx.x] = smax[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+        out_min[0] = smin[0];
+        out_max[0] = smax[0];
+    }
+}
+
+auto aminmax_kernel(const Tensor& input, hipStream_t stream)
+    -> std::pair<Tensor, Tensor> {
+    DType orig_dtype = input.dtype();
+    int64_t n = input.numel();
+    int num_blocks = 1; // Single block — shared-memory reduction
+
+    if (orig_dtype == DType::Float64) {
+        Tensor min_result({1}, DType::Float64, input.device());
+        Tensor max_result({1}, DType::Float64, input.device());
+        hipLaunchKernelGGL(aminmax_all_f64,
+                           dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                           input.data<double>(), min_result.data<double>(),
+                           max_result.data<double>(), n);
+        HIP_CHECK(hipGetLastError());
+        HIP_CHECK(hipStreamSynchronize(stream));
+        return {min_result, max_result};
+    }
+
+    // All other dtypes: upcast to Float32
+    Tensor in = input;
+    if (orig_dtype != DType::Float32) {
+        in = in.to(DType::Float32);
+    }
+    Tensor min_result({1}, DType::Float32, in.device());
+    Tensor max_result({1}, DType::Float32, in.device());
+    hipLaunchKernelGGL(aminmax_all_f32,
+                       dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                       in.data<float>(), min_result.data<float>(),
+                       max_result.data<float>(), n);
+    HIP_CHECK(hipGetLastError());
+    HIP_CHECK(hipStreamSynchronize(stream));
+
+    if (orig_dtype != DType::Float32 && orig_dtype != DType::Float64) {
+        min_result = min_result.to(orig_dtype);
+        max_result = max_result.to(orig_dtype);
+    }
+    return {min_result, max_result};
 }
 
 } // namespace rocm

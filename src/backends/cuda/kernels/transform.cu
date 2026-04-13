@@ -1895,5 +1895,188 @@ auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim, cudaStream_t s
     return output;
 }
 
+// ============================================================================
+// repeat_interleave — repeat each element along a dimension
+// ============================================================================
+
+// Scalar repeats: output[idx] = input[idx with dim_idx / repeats]
+template<typename T>
+__global__ void repeat_interleave_scalar_kernel_impl(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    int64_t total_elements,
+    int64_t in_dim_size,
+    int64_t out_dim_size,
+    int64_t repeats,
+    int64_t inner_size
+) {
+    TENZOR_CUDA_KERNEL_LOOP(i, total_elements) {
+        int64_t inner_idx = i % inner_size;
+        int64_t out_dim_idx = (i / inner_size) % out_dim_size;
+        int64_t outer_idx = i / (inner_size * out_dim_size);
+
+        int64_t src_dim_idx = out_dim_idx / repeats;
+        int64_t src_idx = (outer_idx * in_dim_size + src_dim_idx) * inner_size + inner_idx;
+
+        output[i] = input[src_idx];
+    }
+}
+
+// Tensor repeats: uses prefix sum array to map output dim index -> input dim index
+template<typename T>
+__global__ void repeat_interleave_tensor_kernel_impl(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    const int64_t* __restrict__ prefix,
+    int64_t total_elements,
+    int64_t in_dim_size,
+    int64_t out_dim_size,
+    int64_t inner_size
+) {
+    TENZOR_CUDA_KERNEL_LOOP(i, total_elements) {
+        int64_t inner_idx = i % inner_size;
+        int64_t out_dim_idx = (i / inner_size) % out_dim_size;
+        int64_t outer_idx = i / (inner_size * out_dim_size);
+
+        // Binary search in prefix array
+        int64_t lo = 0, hi = in_dim_size;
+        while (lo < hi) {
+            int64_t mid = lo + (hi - lo) / 2;
+            if (prefix[mid + 1] <= out_dim_idx) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        int64_t src_dim_idx = lo;
+        int64_t src_idx = (outer_idx * in_dim_size + src_dim_idx) * inner_size + inner_idx;
+
+        output[i] = input[src_idx];
+    }
+}
+
+auto repeat_interleave_scalar_kernel(const Tensor& input, int64_t repeats, int64_t dim,
+                                     cudaStream_t stream) -> Tensor {
+    auto shape = input.shape();
+    auto cont = input.is_contiguous() ? input : contiguous_kernel(input, stream);
+
+    int64_t ndim = shape.size();
+    int64_t in_dim_size = shape[dim];
+    int64_t out_dim_size = in_dim_size * repeats;
+
+    std::vector<int64_t> out_shape(shape.begin(), shape.end());
+    out_shape[dim] = out_dim_size;
+
+    auto output = Tensor::empty_uninitialized(out_shape, input.dtype(), input.device());
+
+    int64_t total = 1;
+    for (auto s : out_shape) total *= s;
+    if (total == 0) return output;
+
+    int64_t inner_size = 1;
+    for (int64_t d = dim + 1; d < ndim; ++d) inner_size *= shape[d];
+
+    #define LAUNCH_SCALAR_RI(T) { \
+        auto [grid, block] = optimal_launch_config(repeat_interleave_scalar_kernel_impl<T>, total); \
+        repeat_interleave_scalar_kernel_impl<<<grid, block, 0, stream>>>( \
+            cont.data<T>(), output.data<T>(), \
+            total, in_dim_size, out_dim_size, repeats, inner_size); \
+    }
+
+    switch (input.dtype()) {
+        case DType::Float32: LAUNCH_SCALAR_RI(float); break;
+        case DType::Float64: LAUNCH_SCALAR_RI(double); break;
+        case DType::Int32:   LAUNCH_SCALAR_RI(int32_t); break;
+        case DType::Int64:   LAUNCH_SCALAR_RI(int64_t); break;
+        case DType::Float16: LAUNCH_SCALAR_RI(Float16); break;
+        case DType::BFloat16: LAUNCH_SCALAR_RI(BFloat16); break;
+        default:
+            throw std::runtime_error("repeat_interleave_scalar_kernel: unsupported dtype");
+    }
+    #undef LAUNCH_SCALAR_RI
+
+    CUDA_CHECK(cudaGetLastError());
+    return output;
+}
+
+auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_tensor,
+                                     int64_t dim, cudaStream_t stream) -> Tensor {
+    auto shape = input.shape();
+    auto cont = input.is_contiguous() ? input : contiguous_kernel(input, stream);
+
+    int64_t ndim = shape.size();
+    int64_t in_dim_size = shape[dim];
+
+    // Read repeats to host to compute prefix sum and total
+    auto repeats_host = repeats_tensor.to(Device::cpu()).contiguous();
+    std::vector<int64_t> host_prefix(in_dim_size + 1);
+    host_prefix[0] = 0;
+
+    if (repeats_host.dtype() == DType::Int64) {
+        const int64_t* rp = repeats_host.data<int64_t>();
+        for (int64_t i = 0; i < in_dim_size; ++i)
+            host_prefix[i + 1] = host_prefix[i] + rp[i];
+    } else if (repeats_host.dtype() == DType::Int32) {
+        const int32_t* rp = repeats_host.data<int32_t>();
+        for (int64_t i = 0; i < in_dim_size; ++i)
+            host_prefix[i + 1] = host_prefix[i] + rp[i];
+    } else if (repeats_host.dtype() == DType::Float32) {
+        const float* rp = repeats_host.data<float>();
+        for (int64_t i = 0; i < in_dim_size; ++i)
+            host_prefix[i + 1] = host_prefix[i] + static_cast<int64_t>(rp[i]);
+    } else if (repeats_host.dtype() == DType::Float64) {
+        const double* rp = repeats_host.data<double>();
+        for (int64_t i = 0; i < in_dim_size; ++i)
+            host_prefix[i + 1] = host_prefix[i] + static_cast<int64_t>(rp[i]);
+    } else {
+        throw std::runtime_error("repeat_interleave: unsupported repeats dtype");
+    }
+
+    int64_t out_dim_size = host_prefix[in_dim_size];
+
+    std::vector<int64_t> out_shape(shape.begin(), shape.end());
+    out_shape[dim] = out_dim_size;
+
+    auto output = Tensor::empty_uninitialized(out_shape, input.dtype(), input.device());
+
+    int64_t total = 1;
+    for (auto s : out_shape) total *= s;
+    if (total == 0) return output;
+
+    int64_t inner_size = 1;
+    for (int64_t d = dim + 1; d < ndim; ++d) inner_size *= shape[d];
+
+    // Upload prefix sum to device
+    int64_t* d_prefix = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&d_prefix, (in_dim_size + 1) * sizeof(int64_t), stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_prefix, host_prefix.data(),
+                               (in_dim_size + 1) * sizeof(int64_t),
+                               cudaMemcpyHostToDevice, stream));
+
+    #define LAUNCH_TENSOR_RI(T) { \
+        auto [grid, block] = optimal_launch_config(repeat_interleave_tensor_kernel_impl<T>, total); \
+        repeat_interleave_tensor_kernel_impl<<<grid, block, 0, stream>>>( \
+            cont.data<T>(), output.data<T>(), d_prefix, \
+            total, in_dim_size, out_dim_size, inner_size); \
+    }
+
+    switch (input.dtype()) {
+        case DType::Float32: LAUNCH_TENSOR_RI(float); break;
+        case DType::Float64: LAUNCH_TENSOR_RI(double); break;
+        case DType::Int32:   LAUNCH_TENSOR_RI(int32_t); break;
+        case DType::Int64:   LAUNCH_TENSOR_RI(int64_t); break;
+        case DType::Float16: LAUNCH_TENSOR_RI(Float16); break;
+        case DType::BFloat16: LAUNCH_TENSOR_RI(BFloat16); break;
+        default:
+            CUDA_CHECK(cudaFreeAsync(d_prefix, stream));
+            throw std::runtime_error("repeat_interleave_tensor_kernel: unsupported dtype");
+    }
+    #undef LAUNCH_TENSOR_RI
+
+    CUDA_CHECK(cudaFreeAsync(d_prefix, stream));
+    CUDA_CHECK(cudaGetLastError());
+    return output;
+}
+
 } // namespace cuda
 } // namespace tenzor

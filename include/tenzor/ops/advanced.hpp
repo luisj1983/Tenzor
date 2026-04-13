@@ -119,6 +119,23 @@ auto cumsum(const Tensor& input, int64_t dim) -> Tensor;
 auto cumprod(const Tensor& input, int64_t dim) -> Tensor;
 
 /**
+ * @brief Log-cumulative-sum-exp along a dimension (numerically stable).
+ *
+ * Computes: output[i] = log(sum(exp(input[0:i+1]))) using a running
+ * max to maintain numerical stability.
+ *
+ * @param input Input tensor (float types only)
+ * @param dim Dimension along which to compute
+ * @return Tensor with log-cumulative-sum-exp values
+ *
+ * @code
+ * auto t = Tensor({5}, DType::Float32, Device::cpu());
+ * auto lcse = logcumsumexp(t, 0);
+ * @endcode
+ */
+auto logcumsumexp(const Tensor& input, int64_t dim) -> Tensor;
+
+/**
  * @brief Einstein summation convention.
  *
  * Performs tensor contractions, permutations, and reductions specified by
@@ -231,6 +248,39 @@ auto combinations(const Tensor& input, int64_t r, bool with_replacement = false)
 
 /// @}
 
+/**
+ * @brief Generalized tensor contraction (like numpy.tensordot).
+ *
+ * Contracts tensors a and b over the specified dimensions.
+ * Implementation: permute + reshape to 2D + matmul + reshape back.
+ *
+ * @param a First tensor
+ * @param b Second tensor
+ * @param dims_a Dimensions of a to contract over
+ * @param dims_b Dimensions of b to contract over
+ * @return Contracted result tensor
+ *
+ * @code
+ * // Matrix multiply via tensordot
+ * auto c = tensordot(a, b, {1}, {0});  // contract dim 1 of a with dim 0 of b
+ * @endcode
+ */
+auto tensordot(const Tensor& a, const Tensor& b,
+               std::vector<int64_t> dims_a,
+               std::vector<int64_t> dims_b) -> Tensor;
+
+/**
+ * @brief Generalized tensor contraction with integer dims.
+ *
+ * Contracts the last N dims of a with the first N dims of b.
+ *
+ * @param a First tensor
+ * @param b Second tensor
+ * @param dims Number of dimensions to contract (default: 2)
+ * @return Contracted result tensor
+ */
+auto tensordot(const Tensor& a, const Tensor& b, int64_t dims = 2) -> Tensor;
+
 /** @} */ // end of tensor_advanced group
 
 } // namespace tenzor
@@ -239,5 +289,6 @@ namespace tenzor {
 namespace ops {
 using tenzor::cumsum;
 using tenzor::cumprod;
+using tenzor::logcumsumexp;
 } // namespace ops
 } // namespace tenzor

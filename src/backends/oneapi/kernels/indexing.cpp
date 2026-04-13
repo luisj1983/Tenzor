@@ -36,6 +36,15 @@ class GatherKernelBFloat16;
 class ScatterKernelBFloat16;
 class IndexSelectKernelBFloat16;
 class MaskedFillKernelBFloat16;
+class IndexAddKernelF32;
+class IndexCopyKernelF32;
+class IndexFillKernelF32;
+class ScatterReduceSumKernelF32;
+class ScatterReduceProdKernelF32;
+class ScatterReduceAmaxKernelF32;
+class ScatterReduceAminKernelF32;
+class ScatterReduceInitKernelF32;
+class ScatterReduceMeanDivKernelF32;
 
 // Kernel names for device-side masked_select and nonzero
 class MaskedSelectPrefixSumUpSweep;
@@ -1512,6 +1521,291 @@ auto searchsorted_kernel(const Tensor& sorted_sequence, const Tensor& values,
     }
 
     return result;
+}
+
+// ============================================================================
+// IndexAdd - atomically adds source into output at indexed positions
+// ============================================================================
+auto index_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
+                      const Tensor& source, sycl::queue& queue) -> Tensor {
+    // Non-Float32: convert to Float32 and recurse
+    if (input.dtype() != DType::Float32) {
+        auto f32_in = input.to(DType::Float32);
+        auto f32_src = source.to(DType::Float32);
+        auto r = index_add_kernel(f32_in, dim, index, f32_src, queue);
+        return r.to(input.dtype());
+    }
+
+    auto output = input.clone();
+    int64_t ndim = output.shape().size();
+    if (dim < 0) dim += ndim;
+    auto shape = output.shape();
+    int64_t dim_size = shape[dim];
+    int64_t idx_n = index.numel();
+
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < dim; d++) outer *= shape[d];
+    for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
+
+    int64_t total = outer * idx_n * inner;
+    if (total == 0) return output;
+
+    float* out_ptr = get_data_ptr<float>(output);
+    const float* src_ptr = get_data_ptr<const float>(source);
+    const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
+
+    queue.parallel_for<IndexAddKernelF32>(sycl::range<1>(total), [=](sycl::id<1> tid) {
+        int64_t id = static_cast<int64_t>(tid);
+        int64_t o = id / (idx_n * inner);
+        int64_t k = (id / inner) % idx_n;
+        int64_t j = id % inner;
+        int64_t dst_offset = (o * dim_size + idx_ptr[k]) * inner + j;
+        int64_t src_offset = (o * idx_n + k) * inner + j;
+        sycl::atomic_ref<float, sycl::memory_order::relaxed,
+                         sycl::memory_scope::device,
+                         sycl::access::address_space::global_space> ref(out_ptr[dst_offset]);
+        ref.fetch_add(src_ptr[src_offset]);
+    }).wait();
+
+    return output;
+}
+
+// ============================================================================
+// IndexCopy - copies source into output at indexed positions
+// ============================================================================
+auto index_copy_kernel(const Tensor& input, int64_t dim, const Tensor& index,
+                       const Tensor& source, sycl::queue& queue) -> Tensor {
+    // Non-Float32: convert to Float32 and recurse
+    if (input.dtype() != DType::Float32) {
+        auto f32_in = input.to(DType::Float32);
+        auto f32_src = source.to(DType::Float32);
+        auto r = index_copy_kernel(f32_in, dim, index, f32_src, queue);
+        return r.to(input.dtype());
+    }
+
+    auto output = input.clone();
+    int64_t ndim = output.shape().size();
+    if (dim < 0) dim += ndim;
+    auto shape = output.shape();
+    int64_t dim_size = shape[dim];
+    int64_t idx_n = index.numel();
+
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < dim; d++) outer *= shape[d];
+    for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
+
+    int64_t total = outer * idx_n * inner;
+    if (total == 0) return output;
+
+    float* out_ptr = get_data_ptr<float>(output);
+    const float* src_ptr = get_data_ptr<const float>(source);
+    const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
+
+    queue.parallel_for<IndexCopyKernelF32>(sycl::range<1>(total), [=](sycl::id<1> tid) {
+        int64_t id = static_cast<int64_t>(tid);
+        int64_t o = id / (idx_n * inner);
+        int64_t k = (id / inner) % idx_n;
+        int64_t j = id % inner;
+        out_ptr[(o * dim_size + idx_ptr[k]) * inner + j] =
+            src_ptr[(o * idx_n + k) * inner + j];
+    }).wait();
+
+    return output;
+}
+
+// ============================================================================
+// IndexFill - fills output at indexed positions with a scalar value
+// ============================================================================
+auto index_fill_kernel(const Tensor& input, int64_t dim, const Tensor& index,
+                       float value, sycl::queue& queue) -> Tensor {
+    // Non-Float32: convert to Float32 and recurse
+    if (input.dtype() != DType::Float32) {
+        auto f32_in = input.to(DType::Float32);
+        auto r = index_fill_kernel(f32_in, dim, index, value, queue);
+        return r.to(input.dtype());
+    }
+
+    auto output = input.clone();
+    int64_t ndim = output.shape().size();
+    if (dim < 0) dim += ndim;
+    auto shape = output.shape();
+    int64_t dim_size = shape[dim];
+    int64_t idx_n = index.numel();
+
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < dim; d++) outer *= shape[d];
+    for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
+
+    int64_t total = outer * idx_n * inner;
+    if (total == 0) return output;
+
+    float* out_ptr = get_data_ptr<float>(output);
+    const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
+    float fill_val = value;
+
+    queue.parallel_for<IndexFillKernelF32>(sycl::range<1>(total), [=](sycl::id<1> tid) {
+        int64_t id = static_cast<int64_t>(tid);
+        int64_t o = id / (idx_n * inner);
+        int64_t k = (id / inner) % idx_n;
+        int64_t j = id % inner;
+        out_ptr[(o * dim_size + idx_ptr[k]) * inner + j] = fill_val;
+    }).wait();
+
+    return output;
+}
+
+// ============================================================================
+// ScatterReduce - scatter with configurable reduction (sum/prod/mean/amax/amin)
+// ============================================================================
+auto scatter_reduce_kernel(const Tensor& input, int64_t dim, const Tensor& index,
+                           const Tensor& source, const std::string& reduce,
+                           bool include_self, sycl::queue& queue) -> Tensor {
+    // Non-Float32: convert to Float32 and recurse
+    if (input.dtype() != DType::Float32) {
+        auto f32_in = input.to(DType::Float32);
+        auto f32_src = source.to(DType::Float32);
+        auto r = scatter_reduce_kernel(f32_in, dim, index, f32_src, reduce, include_self, queue);
+        return r.to(input.dtype());
+    }
+
+    auto output = input.clone();
+    int64_t ndim = output.shape().size();
+    if (dim < 0) dim += ndim;
+    auto shape = output.shape();
+    int64_t dim_size = shape[dim];
+    int64_t idx_n = index.numel();
+
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < dim; d++) outer *= shape[d];
+    for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
+
+    int64_t total = outer * idx_n * inner;
+    if (total == 0) return output;
+
+    float* out_ptr = get_data_ptr<float>(output);
+    const float* src_ptr = get_data_ptr<const float>(source);
+    const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
+
+    // If !include_self, initialize touched positions to identity
+    if (!include_self) {
+        float identity;
+        if (reduce == "sum" || reduce == "mean") identity = 0.0f;
+        else if (reduce == "prod") identity = 1.0f;
+        else if (reduce == "amax") identity = -3.402823466e+38f;
+        else if (reduce == "amin") identity = 3.402823466e+38f;
+        else throw std::invalid_argument("scatter_reduce: unknown reduce mode '" + reduce + "'");
+
+        queue.parallel_for<ScatterReduceInitKernelF32>(sycl::range<1>(total), [=](sycl::id<1> tid) {
+            int64_t id = static_cast<int64_t>(tid);
+            int64_t o = id / (idx_n * inner);
+            int64_t k = (id / inner) % idx_n;
+            int64_t j = id % inner;
+            int64_t dst_offset = (o * dim_size + idx_ptr[k]) * inner + j;
+            out_ptr[dst_offset] = identity;
+        }).wait();
+    }
+
+    // Allocate count buffer for mean mode
+    int* count_ptr = nullptr;
+    int64_t out_numel = output.numel();
+    float* count_buf = nullptr;
+    int* count_alloc = nullptr;
+    if (reduce == "mean") {
+        count_alloc = sycl::malloc_device<int>(out_numel, queue);
+        queue.memset(count_alloc, 0, out_numel * sizeof(int)).wait();
+        count_ptr = count_alloc;
+    }
+
+    if (reduce == "sum" || reduce == "mean") {
+        int* cnt_ptr = count_ptr;
+        bool is_mean = (reduce == "mean");
+        queue.parallel_for<ScatterReduceSumKernelF32>(sycl::range<1>(total), [=](sycl::id<1> tid) {
+            int64_t id = static_cast<int64_t>(tid);
+            int64_t o = id / (idx_n * inner);
+            int64_t k = (id / inner) % idx_n;
+            int64_t j = id % inner;
+            int64_t dst_offset = (o * dim_size + idx_ptr[k]) * inner + j;
+            int64_t src_offset = (o * idx_n + k) * inner + j;
+            sycl::atomic_ref<float, sycl::memory_order::relaxed,
+                             sycl::memory_scope::device,
+                             sycl::access::address_space::global_space> ref(out_ptr[dst_offset]);
+            ref.fetch_add(src_ptr[src_offset]);
+            if (is_mean && cnt_ptr) {
+                sycl::atomic_ref<int, sycl::memory_order::relaxed,
+                                 sycl::memory_scope::device,
+                                 sycl::access::address_space::global_space> cnt_ref(cnt_ptr[dst_offset]);
+                cnt_ref.fetch_add(1);
+            }
+        }).wait();
+    } else if (reduce == "prod") {
+        queue.parallel_for<ScatterReduceProdKernelF32>(sycl::range<1>(total), [=](sycl::id<1> tid) {
+            int64_t id = static_cast<int64_t>(tid);
+            int64_t o = id / (idx_n * inner);
+            int64_t k = (id / inner) % idx_n;
+            int64_t j = id % inner;
+            int64_t dst_offset = (o * dim_size + idx_ptr[k]) * inner + j;
+            int64_t src_offset = (o * idx_n + k) * inner + j;
+            float val = src_ptr[src_offset];
+            sycl::atomic_ref<float, sycl::memory_order::relaxed,
+                             sycl::memory_scope::device,
+                             sycl::access::address_space::global_space> ref(out_ptr[dst_offset]);
+            float expected = ref.load();
+            while (!ref.compare_exchange_weak(expected, expected * val)) {}
+        }).wait();
+    } else if (reduce == "amax") {
+        queue.parallel_for<ScatterReduceAmaxKernelF32>(sycl::range<1>(total), [=](sycl::id<1> tid) {
+            int64_t id = static_cast<int64_t>(tid);
+            int64_t o = id / (idx_n * inner);
+            int64_t k = (id / inner) % idx_n;
+            int64_t j = id % inner;
+            int64_t dst_offset = (o * dim_size + idx_ptr[k]) * inner + j;
+            int64_t src_offset = (o * idx_n + k) * inner + j;
+            float val = src_ptr[src_offset];
+            sycl::atomic_ref<float, sycl::memory_order::relaxed,
+                             sycl::memory_scope::device,
+                             sycl::access::address_space::global_space> ref(out_ptr[dst_offset]);
+            float expected = ref.load();
+            while (val > expected) {
+                if (ref.compare_exchange_weak(expected, val)) break;
+            }
+        }).wait();
+    } else if (reduce == "amin") {
+        queue.parallel_for<ScatterReduceAminKernelF32>(sycl::range<1>(total), [=](sycl::id<1> tid) {
+            int64_t id = static_cast<int64_t>(tid);
+            int64_t o = id / (idx_n * inner);
+            int64_t k = (id / inner) % idx_n;
+            int64_t j = id % inner;
+            int64_t dst_offset = (o * dim_size + idx_ptr[k]) * inner + j;
+            int64_t src_offset = (o * idx_n + k) * inner + j;
+            float val = src_ptr[src_offset];
+            sycl::atomic_ref<float, sycl::memory_order::relaxed,
+                             sycl::memory_scope::device,
+                             sycl::access::address_space::global_space> ref(out_ptr[dst_offset]);
+            float expected = ref.load();
+            while (val < expected) {
+                if (ref.compare_exchange_weak(expected, val)) break;
+            }
+        }).wait();
+    } else {
+        if (count_alloc) sycl::free(count_alloc, queue);
+        throw std::invalid_argument("scatter_reduce: unknown reduce mode '" + reduce + "'");
+    }
+
+    // For mean mode: divide by counts
+    if (reduce == "mean" && count_alloc) {
+        int incl = include_self ? 1 : 0;
+        queue.parallel_for<ScatterReduceMeanDivKernelF32>(sycl::range<1>(out_numel), [=](sycl::id<1> tid) {
+            int64_t i = static_cast<int64_t>(tid);
+            int c = count_alloc[i];
+            int base = incl;
+            if (c > base) {
+                out_ptr[i] /= static_cast<float>(c);
+            }
+        }).wait();
+        sycl::free(count_alloc, queue);
+    }
+
+    return output;
 }
 
 } // namespace oneapi

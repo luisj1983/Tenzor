@@ -36,6 +36,12 @@ namespace cpu {
     auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor;
     auto bmm_kernel(const Tensor& a, const Tensor& b) -> Tensor;
     auto dot_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto addmm_kernel(const Tensor& input, const Tensor& mat1, const Tensor& mat2,
+                      double alpha, double beta) -> Tensor;
+    auto addmv_kernel(const Tensor& input, const Tensor& mat, const Tensor& vec,
+                      double alpha, double beta) -> Tensor;
+    auto baddbmm_kernel(const Tensor& input, const Tensor& batch1, const Tensor& batch2,
+                        double alpha, double beta) -> Tensor;
 
     auto sqrt_kernel(const Tensor& input) -> Tensor;
     auto neg_kernel(const Tensor& input) -> Tensor;
@@ -72,6 +78,7 @@ namespace cpu {
     auto index_add_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& source) -> Tensor;
     auto index_copy_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& source) -> Tensor;
     auto index_fill_kernel(const Tensor& input, int64_t dim, const Tensor& index, double value) -> Tensor;
+    auto bincount_kernel(const Tensor& input, const Tensor* weights, int64_t minlength) -> Tensor;
 
     // Trigonometric
     auto sin_kernel(const Tensor& input) -> Tensor;
@@ -206,12 +213,15 @@ namespace cpu {
     auto clone_kernel(const Tensor& input) -> Tensor;
     auto fill_kernel(const Tensor& input, float value) -> Tensor;
     auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim) -> Tensor;
+    auto repeat_interleave_scalar_kernel(const Tensor& input, int64_t repeats, int64_t dim) -> Tensor;
+    auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats, int64_t dim) -> Tensor;
 
     // Indexing
     auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index) -> Tensor;
     auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index) -> Tensor;
     auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src) -> Tensor;
     auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src) -> Tensor;
+    auto scatter_reduce_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src, const std::string& reduce, bool include_self) -> Tensor;
     auto masked_select_kernel(const Tensor& input, const Tensor& mask) -> Tensor;
     auto masked_fill_kernel(const Tensor& input, const Tensor& mask, float value) -> Tensor;
     auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y) -> Tensor;
@@ -411,6 +421,7 @@ namespace cpu {
                      bool descending) -> std::pair<Tensor, Tensor>;
     auto cumsum_kernel(const Tensor& input, int64_t dim) -> Tensor;
     auto cumprod_kernel(const Tensor& input, int64_t dim) -> Tensor;
+    auto logcumsumexp_kernel(const Tensor& input, int64_t dim) -> Tensor;
     auto unique_kernel(const Tensor& input, bool sorted_output,
                        bool return_inverse, bool return_counts)
         -> std::tuple<Tensor, Tensor, Tensor>;
@@ -1013,6 +1024,13 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return cpu::scatter_add_kernel(inputs[0], dim, inputs[1], inputs[2]);
     });
 
+    table.register_single_output_kernel(OpId::ScatterReduce, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        std::string reduce = std::string(attrs.get_string(AttrKey::Reduction, "sum"));
+        bool include_self = attrs.get_bool(AttrKey::IncludeSelf, true);
+        return cpu::scatter_reduce_kernel(inputs[0], dim, inputs[1], inputs[2], reduce, include_self);
+    });
+
     TENZOR_REGISTER_BINARY_KERNEL(table, MaskedSelect, cpu::masked_select_kernel);
 
     table.register_single_output_kernel(OpId::MaskedFill, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -1051,6 +1069,18 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         int64_t shift = attrs.get_int(AttrKey::Shift, 0);
         int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         return cpu::roll_kernel(inputs[0], shift, dim);
+    });
+
+    table.register_single_output_kernel(OpId::RepeatInterleave, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        int64_t num_repeats = attrs.get_int(AttrKey::NumRepeats, 1);
+        if (num_repeats >= 0) {
+            // Scalar repeats mode
+            return cpu::repeat_interleave_scalar_kernel(inputs[0], num_repeats, dim);
+        } else {
+            // Tensor repeats mode — repeats tensor is inputs[1]
+            return cpu::repeat_interleave_tensor_kernel(inputs[0], inputs[1], dim);
+        }
     });
 
     // =========================================================================
@@ -2985,6 +3015,47 @@ void register_cpu_kernels(BackendDispatchTable& table) {
             auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N});
             return sparse::sparse_triangular_solve(L, inputs[3], upper);
         });
+
+    // =========================================================================
+    // Fused GEMM Operations
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Addmm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double alpha = attrs.get_float(AttrKey::Alpha, 1.0);
+            double beta = attrs.get_float(AttrKey::Beta, 1.0);
+            return cpu::addmm_kernel(inputs[0], inputs[1], inputs[2], alpha, beta);
+        });
+
+    table.register_single_output_kernel(OpId::Addmv,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double alpha = attrs.get_float(AttrKey::Alpha, 1.0);
+            double beta = attrs.get_float(AttrKey::Beta, 1.0);
+            return cpu::addmv_kernel(inputs[0], inputs[1], inputs[2], alpha, beta);
+        });
+
+    table.register_single_output_kernel(OpId::Baddbmm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double alpha = attrs.get_float(AttrKey::Alpha, 1.0);
+            double beta = attrs.get_float(AttrKey::Beta, 1.0);
+            return cpu::baddbmm_kernel(inputs[0], inputs[1], inputs[2], alpha, beta);
+        });
+
+    // =========================================================================
+    // Log-Cumulative-Sum-Exp
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Logcumsumexp, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        return cpu::logcumsumexp_kernel(inputs[0], dim);
+    });
+
+    // =========================================================================
+    // Bincount
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Bincount, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t minlength = attrs.get_int(AttrKey::Minlength, 0);
+        const Tensor* weights = (inputs.size() > 1) ? &inputs[1] : nullptr;
+        return cpu::bincount_kernel(inputs[0], weights, minlength);
+    });
 }
 
 } // namespace tenzor

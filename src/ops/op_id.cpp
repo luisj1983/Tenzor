@@ -438,6 +438,21 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::BitwiseLeftShift)] = "bitwise_left_shift";
     names[static_cast<size_t>(OpId::BitwiseRightShift)] = "bitwise_right_shift";
 
+    // Scatter-reduce
+    names[static_cast<size_t>(OpId::ScatterReduce)] = "scatter_reduce";
+
+    // Fused GEMM operations
+    names[static_cast<size_t>(OpId::Addmm)] = "addmm";
+    names[static_cast<size_t>(OpId::Addmv)] = "addmv";
+    names[static_cast<size_t>(OpId::Baddbmm)] = "baddbmm";
+
+    // Repeat interleave
+    names[static_cast<size_t>(OpId::RepeatInterleave)] = "repeat_interleave";
+
+    // Cumulative scan / histogram
+    names[static_cast<size_t>(OpId::Logcumsumexp)] = "logcumsumexp";
+    names[static_cast<size_t>(OpId::Bincount)] = "bincount";
+
     return names;
 }();
 
@@ -452,7 +467,7 @@ constexpr size_t count_named_ops() {
 
 // Count of actual OpId enum values (excluding gap slots).
 // Update this when adding new OpIds to catch missing name entries at compile time.
-inline constexpr size_t EXPECTED_NAMED_OPS = 342;
+inline constexpr size_t EXPECTED_NAMED_OPS = 349;
 
 // If this fires, a new OpId was added without a corresponding name in op_names above
 static_assert(count_named_ops() == EXPECTED_NAMED_OPS,

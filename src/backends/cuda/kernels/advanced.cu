@@ -2237,5 +2237,241 @@ auto istft_cuda_kernel(const Tensor& input, int64_t n_fft,
     return tenzor::reshape(result, out_shape);
 }
 
+// ============================================================================
+// logcumsumexp — CUDA kernel
+// ============================================================================
+
+// Each thread handles one "slice" (one combination of outer/inner indices).
+// Sequential scan along the dim dimension within each thread.
+__global__ void logcumsumexp_kernel_f32(
+    const float* __restrict__ input, float* __restrict__ output,
+    int64_t dim_size, int64_t inner_size, int64_t total_slices)
+{
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= total_slices) return;
+
+    int64_t outer = idx / inner_size;
+    int64_t inner = idx % inner_size;
+
+    const float NEG_INF_F = __int_as_float(0xff800000);
+    float running_max = NEG_INF_F;
+    float running_lse = NEG_INF_F;
+
+    for (int64_t i = 0; i < dim_size; ++i) {
+        int64_t offset = outer * dim_size * inner_size + i * inner_size + inner;
+        float x = input[offset];
+        float new_max = fmaxf(running_max, x);
+
+        if (::isinf(new_max) && new_max < 0.0f) {
+            running_lse = NEG_INF_F;
+        } else {
+            running_lse = new_max + logf(expf(running_lse - new_max) + expf(x - new_max));
+        }
+        running_max = new_max;
+        output[offset] = running_lse;
+    }
+}
+
+__global__ void logcumsumexp_kernel_f64(
+    const double* __restrict__ input, double* __restrict__ output,
+    int64_t dim_size, int64_t inner_size, int64_t total_slices)
+{
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= total_slices) return;
+
+    int64_t outer = idx / inner_size;
+    int64_t inner = idx % inner_size;
+
+    const double NEG_INF_D = -1.0 / 0.0;
+    double running_max = NEG_INF_D;
+    double running_lse = NEG_INF_D;
+
+    for (int64_t i = 0; i < dim_size; ++i) {
+        int64_t offset = outer * dim_size * inner_size + i * inner_size + inner;
+        double x = input[offset];
+        double new_max = ::fmax(running_max, x);
+
+        if (::isinf(new_max) && new_max < 0.0) {
+            running_lse = NEG_INF_D;
+        } else {
+            running_lse = new_max + ::log(::exp(running_lse - new_max) + ::exp(x - new_max));
+        }
+        running_max = new_max;
+        output[offset] = running_lse;
+    }
+}
+
+auto logcumsumexp_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tensor
+{
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    const auto& shape = input_cont.shape();
+    const int64_t ndim = input.ndim();
+    const auto dtype = input.dtype();
+    const auto device = input.device();
+
+    if (dim < 0) dim += ndim;
+
+    Tensor output(std::vector<int64_t>(shape.begin(), shape.end()), dtype, device);
+
+    int64_t dim_size = shape[dim];
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
+
+    int64_t total_slices = outer_size * inner_size;
+    if (total_slices == 0 || dim_size == 0) return output;
+
+    int block = 256;
+    int grid = static_cast<int>((total_slices + block - 1) / block);
+
+    // Half types: upcast to Float32
+    if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        auto f32_input = input_cont.to(DType::Float32);
+        auto f32_result = logcumsumexp_kernel(f32_input, dim, stream);
+        return f32_result.to(dtype);
+    }
+
+    if (dtype == DType::Float32) {
+        logcumsumexp_kernel_f32<<<grid, block, 0, stream>>>(
+            input_cont.data<float>(), output.data<float>(),
+            dim_size, inner_size, total_slices);
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+    } else if (dtype == DType::Float64) {
+        logcumsumexp_kernel_f64<<<grid, block, 0, stream>>>(
+            input_cont.data<double>(), output.data<double>(),
+            dim_size, inner_size, total_slices);
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+    } else {
+        throw std::runtime_error("logcumsumexp_kernel: unsupported dtype");
+    }
+
+    return output;
+}
+
+// ============================================================================
+// bincount — CUDA kernel
+// ============================================================================
+
+__global__ void bincount_no_weights_kernel(
+    const int64_t* __restrict__ input, int64_t* __restrict__ output, int64_t n)
+{
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    atomicAdd(reinterpret_cast<unsigned long long*>(&output[input[idx]]), 1ULL);
+}
+
+__global__ void bincount_weights_f32_kernel(
+    const int64_t* __restrict__ input, const float* __restrict__ weights,
+    double* __restrict__ output, int64_t n)
+{
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    atomicAdd(&output[input[idx]], static_cast<double>(weights[idx]));
+}
+
+__global__ void bincount_weights_f64_kernel(
+    const int64_t* __restrict__ input, const double* __restrict__ weights,
+    double* __restrict__ output, int64_t n)
+{
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    atomicAdd(&output[input[idx]], weights[idx]);
+}
+
+__global__ void bincount_find_max_kernel(
+    const int64_t* __restrict__ input, int64_t* __restrict__ max_val, int64_t n)
+{
+    __shared__ int64_t smax;
+    if (threadIdx.x == 0) smax = -1;
+    __syncthreads();
+
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        atomicMax(reinterpret_cast<long long*>(&smax),
+                  static_cast<long long>(input[idx]));
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        atomicMax(reinterpret_cast<long long*>(max_val),
+                  static_cast<long long>(smax));
+    }
+}
+
+auto bincount_kernel(const Tensor& input, const Tensor* weights,
+                     int64_t minlength, cudaStream_t stream) -> Tensor
+{
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    Tensor input_i64 = (input_cont.dtype() == DType::Int64)
+        ? input_cont : input_cont.to(DType::Int64);
+
+    int64_t n = input_i64.numel();
+    auto device = input.device();
+
+    // Find max value on GPU
+    Tensor max_tensor({1}, DType::Int64, device);
+    cudaMemsetAsync(max_tensor.data<int64_t>(), 0xFF, sizeof(int64_t), stream); // set to -1
+    // Actually set to -1 properly
+    int64_t neg_one = -1;
+    cudaMemcpyAsync(max_tensor.data<int64_t>(), &neg_one, sizeof(int64_t),
+                    cudaMemcpyHostToDevice, stream);
+
+    if (n > 0) {
+        int block = 256;
+        int grid = static_cast<int>((n + block - 1) / block);
+        bincount_find_max_kernel<<<grid, block, 0, stream>>>(
+            input_i64.data<int64_t>(), max_tensor.data<int64_t>(), n);
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+    }
+
+    // Copy max back to host
+    int64_t max_val = -1;
+    cudaMemcpyAsync(&max_val, max_tensor.data<int64_t>(), sizeof(int64_t),
+                    cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+
+    int64_t output_size = std::max(max_val + 1, minlength);
+
+    bool has_weights = (weights != nullptr);
+
+    if (has_weights) {
+        Tensor output({output_size}, DType::Float64, device);
+        cudaMemsetAsync(output.data<double>(), 0,
+                        static_cast<size_t>(output_size) * sizeof(double), stream);
+
+        if (n > 0) {
+            int block = 256;
+            int grid = static_cast<int>((n + block - 1) / block);
+            Tensor w_cont = weights->is_contiguous() ? *weights : weights->contiguous();
+
+            if (w_cont.dtype() == DType::Float64) {
+                bincount_weights_f64_kernel<<<grid, block, 0, stream>>>(
+                    input_i64.data<int64_t>(), w_cont.data<double>(),
+                    output.data<double>(), n);
+            } else {
+                Tensor w_f32 = (w_cont.dtype() == DType::Float32) ? w_cont : w_cont.to(DType::Float32);
+                bincount_weights_f32_kernel<<<grid, block, 0, stream>>>(
+                    input_i64.data<int64_t>(), w_f32.data<float>(),
+                    output.data<double>(), n);
+            }
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
+        }
+        return output;
+    } else {
+        Tensor output({output_size}, DType::Int64, device);
+        cudaMemsetAsync(output.data<int64_t>(), 0,
+                        static_cast<size_t>(output_size) * sizeof(int64_t), stream);
+
+        if (n > 0) {
+            int block = 256;
+            int grid = static_cast<int>((n + block - 1) / block);
+            bincount_no_weights_kernel<<<grid, block, 0, stream>>>(
+                input_i64.data<int64_t>(), output.data<int64_t>(), n);
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
+        }
+        return output;
+    }
+}
+
 } // namespace cuda
 } // namespace tenzor

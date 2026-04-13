@@ -57,6 +57,27 @@ auto scatter_add(const Tensor& input,
                 const Tensor& index,
                 const Tensor& src) -> Tensor;
 
+/**
+ * @brief Scatter with reduction: scatter source into input at index positions with a reduction.
+ *
+ * For each element in src, the value is reduced into the output (a clone of input) at the
+ * position determined by the index tensor along the given dimension. Supported reductions:
+ * "sum", "prod", "mean", "amax", "amin".
+ *
+ * @param input Destination tensor (cloned before modification)
+ * @param dim Dimension along which to scatter
+ * @param index Int64 tensor of indices (same shape as src)
+ * @param src Source tensor
+ * @param reduce Reduction operation: "sum", "prod", "mean", "amax", "amin"
+ * @param include_self If true (default), include the existing values in input in the reduction.
+ *                     If false, positions that receive scattered values are initialized to the
+ *                     reduction identity before applying the reduction.
+ * @return New tensor with scattered reductions applied
+ */
+auto scatter_reduce(const Tensor& input, int64_t dim, const Tensor& index,
+                    const Tensor& src, const std::string& reduce,
+                    bool include_self = true) -> Tensor;
+
 /** @brief Accumulate source into self at index positions: self[index[i]] += source[i] along dim. */
 auto index_add(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& source) -> Tensor;
 
@@ -210,6 +231,42 @@ auto index_extended(const Tensor& input,
  */
 auto one_hot(const Tensor& input, int64_t num_classes = -1) -> Tensor;
 
+/**
+ * @brief Count occurrences of each value in an integer tensor.
+ *
+ * @param input 1D tensor of non-negative integers
+ * @param weights Optional same-length float tensor of weights
+ * @param minlength Minimum output size (default 0)
+ * @return 1D tensor of size max(max(input)+1, minlength)
+ *
+ * @code
+ * auto idx = Tensor({6}, DType::Int64, Device::cpu());
+ * auto counts = bincount(idx);
+ * @endcode
+ */
+auto bincount(const Tensor& input,
+              const std::optional<Tensor>& weights = std::nullopt,
+              int64_t minlength = 0) -> Tensor;
+
+/**
+ * @brief Reduce source into input at specified indices along a dimension.
+ *
+ * For each element in source, reduces into output (a clone of input) at
+ * the position given by index along dim. This is a convenience wrapper
+ * around scatter_reduce with PyTorch index_reduce_ semantics.
+ *
+ * @param input Destination tensor (cloned before modification)
+ * @param dim Dimension along which to index
+ * @param index 1D Int64 index tensor
+ * @param source Source tensor (same shape as input except along dim)
+ * @param reduce Reduction: "sum", "prod", "mean", "amax", "amin"
+ * @param include_self Include existing input values in reduction (default true)
+ * @return New tensor with reductions applied
+ */
+auto index_reduce(const Tensor& input, int64_t dim, const Tensor& index,
+                  const Tensor& source, const std::string& reduce,
+                  bool include_self = true) -> Tensor;
+
 /** @} */ // end of tensor_indexing group
 
 } // namespace tenzor
@@ -222,6 +279,7 @@ using tenzor::index_select;
 using tenzor::select;
 using tenzor::gather;
 using tenzor::scatter;
+using tenzor::scatter_reduce;
 using tenzor::masked_select;
 using tenzor::masked_fill;
 using tenzor::where;
@@ -229,5 +287,7 @@ using tenzor::slice;
 using tenzor::index;
 using tenzor::index_put;
 using tenzor::one_hot;
+using tenzor::bincount;
+using tenzor::index_reduce;
 } // namespace ops
 } // namespace tenzor

@@ -2830,5 +2830,565 @@ auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
     return {values, indices};
 }
 
+// ============================================================================
+// CountNonzero kernel — full and dimensional reduction
+// ============================================================================
+class CountNonzeroKernelFloat32;
+class CountNonzeroKernelFloat64;
+class CountNonzeroKernelFloat16;
+class CountNonzeroKernelBFloat16;
+class CountNonzeroKernelInt32;
+class CountNonzeroKernelInt64;
+class CountNonzeroDimFloat32;
+class CountNonzeroDimFloat64;
+class CountNonzeroDimFloat16;
+class CountNonzeroDimBFloat16;
+class CountNonzeroDimInt32;
+class CountNonzeroDimInt64;
+
+auto count_nonzero_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor {
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    auto shape = in_cont.shape();
+    const int64_t ndim = static_cast<int64_t>(shape.size());
+    const int64_t total = in_cont.numel();
+
+    // Full reduction (dim < 0 or not specified)
+    if (dim < 0) {
+        auto count_buf = sycl::malloc_shared<int64_t>(1, queue);
+        count_buf[0] = 0;
+
+        auto launch_full = [&]<typename T, typename KernelName>() {
+            const T* in_ptr = get_data_ptr<const T>(in_cont);
+            queue.parallel_for<KernelName>(sycl::range<1>(total),
+                sycl::reduction(count_buf, sycl::plus<int64_t>()),
+                [=](sycl::id<1> idx, auto& cnt) {
+                    if (in_ptr[idx] != static_cast<T>(0)) cnt.combine(int64_t(1));
+                }).wait();
+        };
+
+        auto launch_full_bf16 = [&]() {
+            const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+            queue.parallel_for<CountNonzeroKernelBFloat16>(sycl::range<1>(total),
+                sycl::reduction(count_buf, sycl::plus<int64_t>()),
+                [=](sycl::id<1> idx, auto& cnt) {
+                    if (bf16_to_f32(in_ptr[idx]) != 0.0f) cnt.combine(int64_t(1));
+                }).wait();
+        };
+
+        auto launch_full_fp16 = [&]() {
+            const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
+            queue.parallel_for<CountNonzeroKernelFloat16>(sycl::range<1>(total),
+                sycl::reduction(count_buf, sycl::plus<int64_t>()),
+                [=](sycl::id<1> idx, auto& cnt) {
+                    if (static_cast<float>(in_ptr[idx]) != 0.0f) cnt.combine(int64_t(1));
+                }).wait();
+        };
+
+        switch (in_cont.dtype()) {
+            case DType::Float32: launch_full.template operator()<float, CountNonzeroKernelFloat32>(); break;
+            case DType::Float64: launch_full.template operator()<double, CountNonzeroKernelFloat64>(); break;
+            case DType::Float16: launch_full_fp16(); break;
+            case DType::BFloat16: launch_full_bf16(); break;
+            case DType::Int32: launch_full.template operator()<int32_t, CountNonzeroKernelInt32>(); break;
+            case DType::Int64: launch_full.template operator()<int64_t, CountNonzeroKernelInt64>(); break;
+            default: throw std::runtime_error("count_nonzero_kernel: unsupported dtype");
+        }
+
+        Tensor result({1}, DType::Int64, in_cont.device());
+        int64_t* out_ptr = get_data_ptr<int64_t>(result);
+        queue.single_task([=]() { out_ptr[0] = count_buf[0]; }).wait();
+        sycl::free(count_buf, queue);
+        return result;
+    }
+
+    // Dimensional reduction
+    int64_t norm_dim = dim < 0 ? dim + ndim : dim;
+    if (norm_dim < 0 || norm_dim >= ndim) {
+        throw std::runtime_error("count_nonzero: dim out of range");
+    }
+
+    int64_t reduce_size = shape[norm_dim];
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < norm_dim; d++) outer *= shape[d];
+    for (int64_t d = norm_dim + 1; d < ndim; d++) inner *= shape[d];
+    int64_t out_n = outer * inner;
+
+    std::vector<int64_t> out_shape;
+    for (int64_t d = 0; d < ndim; d++) {
+        if (d != norm_dim) out_shape.push_back(shape[d]);
+    }
+    if (out_shape.empty()) out_shape.push_back(1);
+
+    Tensor result(out_shape, DType::Int64, in_cont.device());
+    int64_t* out_ptr = get_data_ptr<int64_t>(result);
+
+    auto launch_dim = [&]<typename T, typename KernelName>() {
+        const T* in_ptr = get_data_ptr<const T>(in_cont);
+        queue.parallel_for<KernelName>(sycl::range<1>(out_n),
+            [=](sycl::id<1> id) {
+                int64_t idx = id[0];
+                int64_t o = idx / inner;
+                int64_t i_inner = idx % inner;
+                int64_t count = 0;
+                for (int64_t r = 0; r < reduce_size; r++) {
+                    int64_t src = (o * reduce_size + r) * inner + i_inner;
+                    if (in_ptr[src] != static_cast<T>(0)) count++;
+                }
+                out_ptr[idx] = count;
+            }).wait();
+    };
+
+    auto launch_dim_bf16 = [&]() {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+        queue.parallel_for<CountNonzeroDimBFloat16>(sycl::range<1>(out_n),
+            [=](sycl::id<1> id) {
+                int64_t idx = id[0];
+                int64_t o = idx / inner;
+                int64_t i_inner = idx % inner;
+                int64_t count = 0;
+                for (int64_t r = 0; r < reduce_size; r++) {
+                    int64_t src = (o * reduce_size + r) * inner + i_inner;
+                    if (bf16_to_f32(in_ptr[src]) != 0.0f) count++;
+                }
+                out_ptr[idx] = count;
+            }).wait();
+    };
+
+    auto launch_dim_fp16 = [&]() {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
+        queue.parallel_for<CountNonzeroDimFloat16>(sycl::range<1>(out_n),
+            [=](sycl::id<1> id) {
+                int64_t idx = id[0];
+                int64_t o = idx / inner;
+                int64_t i_inner = idx % inner;
+                int64_t count = 0;
+                for (int64_t r = 0; r < reduce_size; r++) {
+                    int64_t src = (o * reduce_size + r) * inner + i_inner;
+                    if (static_cast<float>(in_ptr[src]) != 0.0f) count++;
+                }
+                out_ptr[idx] = count;
+            }).wait();
+    };
+
+    switch (in_cont.dtype()) {
+        case DType::Float32: launch_dim.template operator()<float, CountNonzeroDimFloat32>(); break;
+        case DType::Float64: launch_dim.template operator()<double, CountNonzeroDimFloat64>(); break;
+        case DType::Float16: launch_dim_fp16(); break;
+        case DType::BFloat16: launch_dim_bf16(); break;
+        case DType::Int32: launch_dim.template operator()<int32_t, CountNonzeroDimInt32>(); break;
+        case DType::Int64: launch_dim.template operator()<int64_t, CountNonzeroDimInt64>(); break;
+        default: throw std::runtime_error("count_nonzero_kernel: unsupported dtype");
+    }
+
+    return result;
+}
+
+// ============================================================================
+// Nansum kernel — sum skipping NaN, full and dimensional reduction
+// ============================================================================
+class NansumKernelFloat32;
+class NansumKernelFloat64;
+class NansumKernelFloat16;
+class NansumKernelBFloat16;
+class NansumDimFloat32;
+class NansumDimFloat64;
+class NansumDimFloat16;
+class NansumDimBFloat16;
+
+auto nansum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor {
+    // Upcast Float16/BFloat16 to Float32 for computation, then downcast
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto f32 = cast_kernel(input, DType::Float32, queue);
+        auto result = nansum_kernel(f32, dim, keepdim, queue);
+        return cast_kernel(result, input.dtype(), queue);
+    }
+
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    auto shape = in_cont.shape();
+    const int64_t ndim = static_cast<int64_t>(shape.size());
+    const int64_t total = in_cont.numel();
+
+    bool is_full = (dim < 0);
+
+    if (is_full) {
+        Tensor output({1}, in_cont.dtype(), in_cont.device());
+
+        if (in_cont.dtype() == DType::Float32) {
+            const float* in_ptr = get_data_ptr<const float>(in_cont);
+            float* out_ptr = get_data_ptr<float>(output);
+            auto acc_buf = sycl::malloc_shared<float>(1, queue);
+            acc_buf[0] = 0.0f;
+            queue.parallel_for<NansumKernelFloat32>(sycl::range<1>(total),
+                sycl::reduction(acc_buf, sycl::plus<float>()),
+                [=](sycl::id<1> idx, auto& sum) {
+                    float v = in_ptr[idx];
+                    if (!sycl::isnan(v)) sum.combine(v);
+                }).wait();
+            out_ptr[0] = acc_buf[0];
+            sycl::free(acc_buf, queue);
+        } else if (in_cont.dtype() == DType::Float64) {
+            const double* in_ptr = get_data_ptr<const double>(in_cont);
+            double* out_ptr = get_data_ptr<double>(output);
+            auto acc_buf = sycl::malloc_shared<double>(1, queue);
+            acc_buf[0] = 0.0;
+            queue.parallel_for<NansumKernelFloat64>(sycl::range<1>(total),
+                sycl::reduction(acc_buf, sycl::plus<double>()),
+                [=](sycl::id<1> idx, auto& sum) {
+                    double v = in_ptr[idx];
+                    if (!sycl::isnan(v)) sum.combine(v);
+                }).wait();
+            out_ptr[0] = acc_buf[0];
+            sycl::free(acc_buf, queue);
+        } else {
+            throw std::runtime_error("nansum_kernel: unsupported dtype (expected floating type)");
+        }
+
+        return output;
+    }
+
+    // Dimensional reduction
+    int64_t norm_dim = dim < 0 ? dim + ndim : dim;
+    if (norm_dim < 0 || norm_dim >= ndim) {
+        throw std::runtime_error("nansum: dim out of range");
+    }
+
+    int64_t reduce_size = shape[norm_dim];
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < norm_dim; d++) outer *= shape[d];
+    for (int64_t d = norm_dim + 1; d < ndim; d++) inner *= shape[d];
+
+    auto out_shape = compute_reduction_shape(
+        std::vector<int64_t>(shape.begin(), shape.end()), norm_dim, keepdim);
+    Tensor output(out_shape, in_cont.dtype(), in_cont.device());
+    int64_t out_n = outer * inner;
+
+    if (in_cont.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for<NansumDimFloat32>(sycl::range<1>(out_n),
+            [=](sycl::id<1> id) {
+                int64_t idx = id[0];
+                int64_t o = idx / inner;
+                int64_t i_inner = idx % inner;
+                float acc = 0.0f;
+                for (int64_t r = 0; r < reduce_size; r++) {
+                    int64_t src = (o * reduce_size + r) * inner + i_inner;
+                    float v = in_ptr[src];
+                    if (!sycl::isnan(v)) acc += v;
+                }
+                out_ptr[idx] = acc;
+            }).wait();
+    } else if (in_cont.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+        queue.parallel_for<NansumDimFloat64>(sycl::range<1>(out_n),
+            [=](sycl::id<1> id) {
+                int64_t idx = id[0];
+                int64_t o = idx / inner;
+                int64_t i_inner = idx % inner;
+                double acc = 0.0;
+                for (int64_t r = 0; r < reduce_size; r++) {
+                    int64_t src = (o * reduce_size + r) * inner + i_inner;
+                    double v = in_ptr[src];
+                    if (!sycl::isnan(v)) acc += v;
+                }
+                out_ptr[idx] = acc;
+            }).wait();
+    } else {
+        throw std::runtime_error("nansum_kernel: unsupported dtype (expected floating type)");
+    }
+
+    return output;
+}
+
+// ============================================================================
+// Nanmean kernel — nansum / count_non_nan
+// ============================================================================
+class NanmeanKernelFloat32Sum;
+class NanmeanKernelFloat32Count;
+class NanmeanKernelFloat64Sum;
+class NanmeanKernelFloat64Count;
+class NanmeanDimFloat32;
+class NanmeanDimFloat64;
+
+auto nanmean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor {
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto f32 = cast_kernel(input, DType::Float32, queue);
+        auto result = nanmean_kernel(f32, dim, keepdim, queue);
+        return cast_kernel(result, input.dtype(), queue);
+    }
+
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    auto shape = in_cont.shape();
+    const int64_t ndim = static_cast<int64_t>(shape.size());
+    const int64_t total = in_cont.numel();
+
+    bool is_full = (dim < 0);
+
+    if (is_full) {
+        Tensor output({1}, in_cont.dtype(), in_cont.device());
+
+        if (in_cont.dtype() == DType::Float32) {
+            const float* in_ptr = get_data_ptr<const float>(in_cont);
+            float* out_ptr = get_data_ptr<float>(output);
+
+            auto sum_buf = sycl::malloc_shared<float>(1, queue);
+            auto cnt_buf = sycl::malloc_shared<int64_t>(1, queue);
+            sum_buf[0] = 0.0f;
+            cnt_buf[0] = 0;
+
+            queue.parallel_for<NanmeanKernelFloat32Sum>(sycl::range<1>(total),
+                sycl::reduction(sum_buf, sycl::plus<float>()),
+                [=](sycl::id<1> idx, auto& sum) {
+                    float v = in_ptr[idx];
+                    if (!sycl::isnan(v)) sum.combine(v);
+                }).wait();
+
+            queue.parallel_for<NanmeanKernelFloat32Count>(sycl::range<1>(total),
+                sycl::reduction(cnt_buf, sycl::plus<int64_t>()),
+                [=](sycl::id<1> idx, auto& cnt) {
+                    float v = in_ptr[idx];
+                    if (!sycl::isnan(v)) cnt.combine(int64_t(1));
+                }).wait();
+
+            out_ptr[0] = cnt_buf[0] > 0 ? sum_buf[0] / static_cast<float>(cnt_buf[0]) : 0.0f;
+            sycl::free(sum_buf, queue);
+            sycl::free(cnt_buf, queue);
+        } else if (in_cont.dtype() == DType::Float64) {
+            const double* in_ptr = get_data_ptr<const double>(in_cont);
+            double* out_ptr = get_data_ptr<double>(output);
+
+            auto sum_buf = sycl::malloc_shared<double>(1, queue);
+            auto cnt_buf = sycl::malloc_shared<int64_t>(1, queue);
+            sum_buf[0] = 0.0;
+            cnt_buf[0] = 0;
+
+            queue.parallel_for<NanmeanKernelFloat64Sum>(sycl::range<1>(total),
+                sycl::reduction(sum_buf, sycl::plus<double>()),
+                [=](sycl::id<1> idx, auto& sum) {
+                    double v = in_ptr[idx];
+                    if (!sycl::isnan(v)) sum.combine(v);
+                }).wait();
+
+            queue.parallel_for<NanmeanKernelFloat64Count>(sycl::range<1>(total),
+                sycl::reduction(cnt_buf, sycl::plus<int64_t>()),
+                [=](sycl::id<1> idx, auto& cnt) {
+                    double v = in_ptr[idx];
+                    if (!sycl::isnan(v)) cnt.combine(int64_t(1));
+                }).wait();
+
+            out_ptr[0] = cnt_buf[0] > 0 ? sum_buf[0] / static_cast<double>(cnt_buf[0]) : 0.0;
+            sycl::free(sum_buf, queue);
+            sycl::free(cnt_buf, queue);
+        } else {
+            throw std::runtime_error("nanmean_kernel: unsupported dtype (expected floating type)");
+        }
+
+        return output;
+    }
+
+    // Dimensional reduction
+    int64_t norm_dim = dim < 0 ? dim + ndim : dim;
+    if (norm_dim < 0 || norm_dim >= ndim) {
+        throw std::runtime_error("nanmean: dim out of range");
+    }
+
+    int64_t reduce_size = shape[norm_dim];
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < norm_dim; d++) outer *= shape[d];
+    for (int64_t d = norm_dim + 1; d < ndim; d++) inner *= shape[d];
+
+    auto out_shape = compute_reduction_shape(
+        std::vector<int64_t>(shape.begin(), shape.end()), norm_dim, keepdim);
+    Tensor output(out_shape, in_cont.dtype(), in_cont.device());
+    int64_t out_n = outer * inner;
+
+    if (in_cont.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for<NanmeanDimFloat32>(sycl::range<1>(out_n),
+            [=](sycl::id<1> id) {
+                int64_t idx = id[0];
+                int64_t o = idx / inner;
+                int64_t i_inner = idx % inner;
+                float acc = 0.0f;
+                int64_t count = 0;
+                for (int64_t r = 0; r < reduce_size; r++) {
+                    int64_t src = (o * reduce_size + r) * inner + i_inner;
+                    float v = in_ptr[src];
+                    if (!sycl::isnan(v)) { acc += v; count++; }
+                }
+                out_ptr[idx] = count > 0 ? acc / static_cast<float>(count) : 0.0f;
+            }).wait();
+    } else if (in_cont.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+        queue.parallel_for<NanmeanDimFloat64>(sycl::range<1>(out_n),
+            [=](sycl::id<1> id) {
+                int64_t idx = id[0];
+                int64_t o = idx / inner;
+                int64_t i_inner = idx % inner;
+                double acc = 0.0;
+                int64_t count = 0;
+                for (int64_t r = 0; r < reduce_size; r++) {
+                    int64_t src = (o * reduce_size + r) * inner + i_inner;
+                    double v = in_ptr[src];
+                    if (!sycl::isnan(v)) { acc += v; count++; }
+                }
+                out_ptr[idx] = count > 0 ? acc / static_cast<double>(count) : 0.0;
+            }).wait();
+    } else {
+        throw std::runtime_error("nanmean_kernel: unsupported dtype (expected floating type)");
+    }
+
+    return output;
+}
+
+// ============================================================================
+// Aminmax kernel — simultaneous min+max, returns {min, max} tensors
+// ============================================================================
+class AminmaxKernelFloat32;
+class AminmaxKernelFloat64;
+class AminmaxDimFloat32;
+class AminmaxDimFloat64;
+class AminmaxDimFloat16;
+class AminmaxDimBFloat16;
+
+auto aminmax_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue)
+    -> std::vector<Tensor> {
+    // Upcast Float16/BFloat16 for computation
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto f32 = cast_kernel(input, DType::Float32, queue);
+        auto results = aminmax_kernel(f32, dim, keepdim, queue);
+        return {cast_kernel(results[0], input.dtype(), queue),
+                cast_kernel(results[1], input.dtype(), queue)};
+    }
+
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    auto shape = in_cont.shape();
+    const int64_t ndim = static_cast<int64_t>(shape.size());
+    const int64_t total = in_cont.numel();
+
+    bool is_full = (dim < 0);
+
+    if (is_full) {
+        Tensor min_out({1}, in_cont.dtype(), in_cont.device());
+        Tensor max_out({1}, in_cont.dtype(), in_cont.device());
+
+        if (in_cont.dtype() == DType::Float32) {
+            const float* in_ptr = get_data_ptr<const float>(in_cont);
+            float* min_ptr = get_data_ptr<float>(min_out);
+            float* max_ptr = get_data_ptr<float>(max_out);
+
+            auto min_buf = sycl::malloc_shared<float>(1, queue);
+            auto max_buf = sycl::malloc_shared<float>(1, queue);
+            min_buf[0] = std::numeric_limits<float>::infinity();
+            max_buf[0] = -std::numeric_limits<float>::infinity();
+
+            queue.parallel_for<AminmaxKernelFloat32>(sycl::range<1>(total),
+                sycl::reduction(min_buf, sycl::minimum<float>()),
+                sycl::reduction(max_buf, sycl::maximum<float>()),
+                [=](sycl::id<1> idx, auto& mn, auto& mx) {
+                    float v = in_ptr[idx];
+                    mn.combine(v);
+                    mx.combine(v);
+                }).wait();
+
+            min_ptr[0] = min_buf[0];
+            max_ptr[0] = max_buf[0];
+            sycl::free(min_buf, queue);
+            sycl::free(max_buf, queue);
+        } else if (in_cont.dtype() == DType::Float64) {
+            const double* in_ptr = get_data_ptr<const double>(in_cont);
+            double* min_ptr = get_data_ptr<double>(min_out);
+            double* max_ptr = get_data_ptr<double>(max_out);
+
+            auto min_buf = sycl::malloc_shared<double>(1, queue);
+            auto max_buf = sycl::malloc_shared<double>(1, queue);
+            min_buf[0] = std::numeric_limits<double>::infinity();
+            max_buf[0] = -std::numeric_limits<double>::infinity();
+
+            queue.parallel_for<AminmaxKernelFloat64>(sycl::range<1>(total),
+                sycl::reduction(min_buf, sycl::minimum<double>()),
+                sycl::reduction(max_buf, sycl::maximum<double>()),
+                [=](sycl::id<1> idx, auto& mn, auto& mx) {
+                    double v = in_ptr[idx];
+                    mn.combine(v);
+                    mx.combine(v);
+                }).wait();
+
+            min_ptr[0] = min_buf[0];
+            max_ptr[0] = max_buf[0];
+            sycl::free(min_buf, queue);
+            sycl::free(max_buf, queue);
+        } else {
+            throw std::runtime_error("aminmax_kernel: unsupported dtype (expected floating type)");
+        }
+
+        return {min_out, max_out};
+    }
+
+    // Dimensional reduction
+    int64_t norm_dim = dim < 0 ? dim + ndim : dim;
+    if (norm_dim < 0 || norm_dim >= ndim) {
+        throw std::runtime_error("aminmax: dim out of range");
+    }
+
+    int64_t reduce_size = shape[norm_dim];
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < norm_dim; d++) outer *= shape[d];
+    for (int64_t d = norm_dim + 1; d < ndim; d++) inner *= shape[d];
+
+    auto out_shape = compute_reduction_shape(
+        std::vector<int64_t>(shape.begin(), shape.end()), norm_dim, keepdim);
+    Tensor min_out(out_shape, in_cont.dtype(), in_cont.device());
+    Tensor max_out(out_shape, in_cont.dtype(), in_cont.device());
+    int64_t out_n = outer * inner;
+
+    if (in_cont.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
+        float* min_ptr = get_data_ptr<float>(min_out);
+        float* max_ptr = get_data_ptr<float>(max_out);
+        queue.parallel_for<AminmaxDimFloat32>(sycl::range<1>(out_n),
+            [=](sycl::id<1> id) {
+                int64_t idx = id[0];
+                int64_t o = idx / inner;
+                int64_t i_inner = idx % inner;
+                int64_t base = (o * reduce_size) * inner + i_inner;
+                float mn = in_ptr[base], mx = in_ptr[base];
+                for (int64_t r = 1; r < reduce_size; r++) {
+                    float v = in_ptr[base + r * inner];
+                    mn = sycl::fmin(mn, v);
+                    mx = sycl::fmax(mx, v);
+                }
+                min_ptr[idx] = mn;
+                max_ptr[idx] = mx;
+            }).wait();
+    } else if (in_cont.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
+        double* min_ptr = get_data_ptr<double>(min_out);
+        double* max_ptr = get_data_ptr<double>(max_out);
+        queue.parallel_for<AminmaxDimFloat64>(sycl::range<1>(out_n),
+            [=](sycl::id<1> id) {
+                int64_t idx = id[0];
+                int64_t o = idx / inner;
+                int64_t i_inner = idx % inner;
+                int64_t base = (o * reduce_size) * inner + i_inner;
+                double mn = in_ptr[base], mx = in_ptr[base];
+                for (int64_t r = 1; r < reduce_size; r++) {
+                    double v = in_ptr[base + r * inner];
+                    mn = sycl::fmin(mn, v);
+                    mx = sycl::fmax(mx, v);
+                }
+                min_ptr[idx] = mn;
+                max_ptr[idx] = mx;
+            }).wait();
+    } else {
+        throw std::runtime_error("aminmax_kernel: unsupported dtype (expected floating type)");
+    }
+
+    return {min_out, max_out};
+}
+
 } // namespace oneapi
 } // namespace tenzor

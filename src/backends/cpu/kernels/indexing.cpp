@@ -10,6 +10,7 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "simd_fast_math.hpp"
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <type_traits>
 #include <span>
@@ -517,6 +518,168 @@ auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index, c
     else if (input_c.dtype() == DType::UInt8) { scatter_add_impl.template operator()<uint8_t>(); }
     else {
         throw std::runtime_error("scatter_add: unsupported dtype");
+    }
+
+    return output;
+}
+
+// ============================================================================
+// Scatter-reduce: scatter with configurable reduction
+// ============================================================================
+
+auto scatter_reduce_kernel(const Tensor& input, int64_t dim, const Tensor& index,
+                           const Tensor& src, const std::string& reduce,
+                           bool include_self) -> Tensor {
+    if (index.dtype() != DType::Int64) {
+        throw std::invalid_argument("scatter_reduce: index tensor must have dtype Int64");
+    }
+
+    auto input_c = input.contiguous();
+    auto index_c = index.contiguous();
+    auto src_c = src.contiguous();
+
+    auto input_shape_span = input_c.shape();
+    auto index_shape_span = index_c.shape();
+    auto src_shape_span = src_c.shape();
+
+    std::vector<int64_t> input_shape(input_shape_span.begin(), input_shape_span.end());
+    std::vector<int64_t> index_shape(index_shape_span.begin(), index_shape_span.end());
+    std::vector<int64_t> src_shape(src_shape_span.begin(), src_shape_span.end());
+
+    if (dim < 0) dim += static_cast<int64_t>(input_shape.size());
+    if (dim < 0 || dim >= static_cast<int64_t>(input_shape.size())) {
+        throw std::invalid_argument("scatter_reduce: invalid dimension");
+    }
+    if (index_shape != src_shape) {
+        throw std::invalid_argument("scatter_reduce: index and src must have the same shape");
+    }
+    if (input_shape.size() != index_shape.size()) {
+        throw std::invalid_argument("scatter_reduce: input and index must have same number of dimensions");
+    }
+
+    // Validate reduce mode early
+    if (reduce != "sum" && reduce != "prod" && reduce != "mean" &&
+        reduce != "amax" && reduce != "amin") {
+        throw std::invalid_argument("scatter_reduce: unknown reduce mode '" + reduce + "'");
+    }
+
+    // Handle Float16/BFloat16 by upcasting
+    if (input_c.dtype() == DType::Float16 || input_c.dtype() == DType::BFloat16) {
+        DType orig_dtype = input_c.dtype();
+        auto f32_in = input_c.to(DType::Float32);
+        auto f32_src = src_c.to(DType::Float32);
+        auto result = scatter_reduce_kernel(f32_in, dim, index_c, f32_src, reduce, include_self);
+        return result.to(orig_dtype);
+    }
+
+    auto output = input_c.clone();
+
+    auto input_strides = calculate_strides(input_shape);
+    auto index_strides = calculate_strides(index_shape);
+    const int64_t numel = index_c.numel();
+    const size_t ndims = index_shape.size();
+    const int64_t* index_ptr = index_c.data<int64_t>();
+
+    // Helper: compute output flat index for a given index-space flat_idx
+    auto compute_output_idx = [&](int64_t flat_idx) -> int64_t {
+        int64_t temp = flat_idx;
+        int64_t output_idx = 0;
+        for (size_t d = 0; d < ndims; ++d) {
+            int64_t coord = temp / index_strides[d];
+            temp %= index_strides[d];
+            if (static_cast<int64_t>(d) == dim) {
+                int64_t idx_val = index_ptr[flat_idx];
+                if (idx_val < 0) idx_val += input_shape[d];
+                if (idx_val < 0 || idx_val >= input_shape[d]) {
+                    throw std::out_of_range("scatter_reduce: index " + std::to_string(index_ptr[flat_idx]) +
+                        " out of range for dimension " + std::to_string(d) +
+                        " with size " + std::to_string(input_shape[d]));
+                }
+                output_idx += idx_val * input_strides[d];
+            } else {
+                output_idx += coord * input_strides[d];
+            }
+        }
+        return output_idx;
+    };
+
+    auto do_scatter_reduce = [&]<typename T>() {
+        T* out_ptr = output.data<T>();
+        const T* src_ptr = src_c.data<T>();
+        int64_t out_numel = output.numel();
+
+        // If !include_self, we need to set touched output positions to the
+        // reduction identity value before applying the reduction.
+        // Track which positions are touched.
+        std::vector<bool> touched;
+        if (!include_self) {
+            touched.resize(out_numel, false);
+            // First pass: mark touched positions
+            for (int64_t flat_idx = 0; flat_idx < numel; ++flat_idx) {
+                int64_t oidx = compute_output_idx(flat_idx);
+                touched[oidx] = true;
+            }
+            // Set touched positions to identity values
+            T identity;
+            if (reduce == "sum" || reduce == "mean") {
+                identity = T(0);
+            } else if (reduce == "prod") {
+                identity = T(1);
+            } else if (reduce == "amax") {
+                identity = std::numeric_limits<T>::lowest();
+            } else if (reduce == "amin") {
+                identity = std::numeric_limits<T>::max();
+            } else {
+                throw std::invalid_argument("scatter_reduce: unknown reduce mode '" + reduce + "'");
+            }
+            for (int64_t i = 0; i < out_numel; ++i) {
+                if (touched[i]) out_ptr[i] = identity;
+            }
+        }
+
+        // For "mean" mode, we need to count how many values are accumulated per output position.
+        std::vector<int64_t> counts;
+        if (reduce == "mean") {
+            counts.resize(out_numel, include_self ? 1 : 0);
+        }
+
+        // Apply scatter reduction
+        for (int64_t flat_idx = 0; flat_idx < numel; ++flat_idx) {
+            int64_t oidx = compute_output_idx(flat_idx);
+            T val = src_ptr[flat_idx];
+
+            if (reduce == "sum" || reduce == "mean") {
+                out_ptr[oidx] += val;
+            } else if (reduce == "prod") {
+                out_ptr[oidx] *= val;
+            } else if (reduce == "amax") {
+                if (val > out_ptr[oidx]) out_ptr[oidx] = val;
+            } else if (reduce == "amin") {
+                if (val < out_ptr[oidx]) out_ptr[oidx] = val;
+            }
+
+            if (reduce == "mean") {
+                counts[oidx]++;
+            }
+        }
+
+        // For "mean", divide by counts
+        if (reduce == "mean") {
+            for (int64_t i = 0; i < out_numel; ++i) {
+                if (counts[i] > (include_self ? 1 : 0)) {
+                    out_ptr[i] /= static_cast<T>(counts[i]);
+                }
+            }
+        }
+    };
+
+    if (input_c.dtype() == DType::Float32) { do_scatter_reduce.template operator()<float>(); }
+    else if (input_c.dtype() == DType::Float64) { do_scatter_reduce.template operator()<double>(); }
+    else if (input_c.dtype() == DType::Int32) { do_scatter_reduce.template operator()<int32_t>(); }
+    else if (input_c.dtype() == DType::Int64) { do_scatter_reduce.template operator()<int64_t>(); }
+    else {
+        throw std::runtime_error("scatter_reduce: unsupported dtype " +
+            std::string(dtype_name(input_c.dtype())));
     }
 
     return output;
@@ -1070,6 +1233,95 @@ auto searchsorted_kernel(std::span<const Tensor> inputs, const OpAttributes& att
     }
 
     return result;
+}
+
+// ============================================================================
+// bincount — Count occurrences of each value in an integer tensor
+// ============================================================================
+
+auto bincount_kernel(const Tensor& input, const Tensor* weights, int64_t minlength) -> Tensor {
+    if (input.ndim() != 1) {
+        throw std::runtime_error("bincount: input must be 1D");
+    }
+
+    const int64_t n = input.numel();
+
+    // Determine output size: max(max(input)+1, minlength)
+    int64_t max_val = -1;
+    if (input.dtype() == DType::Int64) {
+        const auto* data = input.data<int64_t>();
+        for (int64_t i = 0; i < n; ++i) {
+            if (data[i] < 0) {
+                throw std::runtime_error("bincount: input must contain non-negative integers");
+            }
+            if (data[i] > max_val) max_val = data[i];
+        }
+    } else if (input.dtype() == DType::Int32) {
+        const auto* data = input.data<int32_t>();
+        for (int64_t i = 0; i < n; ++i) {
+            if (data[i] < 0) {
+                throw std::runtime_error("bincount: input must contain non-negative integers");
+            }
+            if (data[i] > max_val) max_val = data[i];
+        }
+    } else {
+        throw std::runtime_error("bincount: input must be Int32 or Int64");
+    }
+
+    int64_t output_size = std::max(max_val + 1, minlength);
+
+    bool has_weights = (weights != nullptr);
+    DType out_dtype = has_weights ? DType::Float64 : DType::Int64;
+
+    Tensor output({output_size}, out_dtype, input.device());
+
+    if (has_weights) {
+        auto* out = output.data<double>();
+        std::memset(out, 0, static_cast<size_t>(output_size) * sizeof(double));
+
+        // Support Float32 and Float64 weights
+        auto get_idx = [&](int64_t i) -> int64_t {
+            if (input.dtype() == DType::Int64)
+                return input.data<int64_t>()[i];
+            return static_cast<int64_t>(input.data<int32_t>()[i]);
+        };
+
+        if (weights->dtype() == DType::Float32) {
+            const auto* w = weights->data<float>();
+            for (int64_t i = 0; i < n; ++i) {
+                out[get_idx(i)] += static_cast<double>(w[i]);
+            }
+        } else if (weights->dtype() == DType::Float64) {
+            const auto* w = weights->data<double>();
+            for (int64_t i = 0; i < n; ++i) {
+                out[get_idx(i)] += w[i];
+            }
+        } else {
+            // Convert weights to Float64
+            auto w_f64 = weights->to(DType::Float64);
+            const auto* w = w_f64.data<double>();
+            for (int64_t i = 0; i < n; ++i) {
+                out[get_idx(i)] += w[i];
+            }
+        }
+    } else {
+        auto* out = output.data<int64_t>();
+        std::memset(out, 0, static_cast<size_t>(output_size) * sizeof(int64_t));
+
+        if (input.dtype() == DType::Int64) {
+            const auto* data = input.data<int64_t>();
+            for (int64_t i = 0; i < n; ++i) {
+                out[data[i]]++;
+            }
+        } else {
+            const auto* data = input.data<int32_t>();
+            for (int64_t i = 0; i < n; ++i) {
+                out[data[i]]++;
+            }
+        }
+    }
+
+    return output;
 }
 
 } // namespace cpu

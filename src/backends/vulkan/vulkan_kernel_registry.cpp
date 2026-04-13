@@ -18,6 +18,7 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/fft.hpp"
 #include "tenzor/ops/advanced.hpp"
+#include "tenzor/ops/indexing.hpp"
 #include "vulkan_backend.hpp"
 #include <cstdlib>
 #include <limits>
@@ -1820,6 +1821,19 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     // ========================================================================
+    // RepeatInterleave (CPU fallback)
+    // ========================================================================
+    table.register_single_output_kernel(OpId::RepeatInterleave, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        int64_t num_repeats = attrs.get_int(AttrKey::NumRepeats, 1);
+        if (num_repeats >= 0) {
+            return get_vulkan_backend()->dispatchRepeatInterleave(inputs[0], num_repeats, dim);
+        } else {
+            return get_vulkan_backend()->dispatchRepeatInterleaveTensor(inputs[0], inputs[1], dim);
+        }
+    });
+
+    // ========================================================================
     // Stack/Take/Tile/Put (native Vulkan shaders)
     // ========================================================================
     table.register_single_output_kernel(OpId::Stack, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -2388,15 +2402,12 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::LogSigmoid, [](std::span<const Tensor> inputs, const OpAttributes&) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchUnaryOp("log_sigmoid", inputs[0])};
     });
-    // NanToNum: CPU roundtrip (needs custom push constants not yet in dispatchUnaryOp)
+    // NanToNum: native Vulkan dispatch via nan_to_num.comp shader
     table.register_kernel(OpId::NanToNum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        auto dev = inputs[0].device();
-        std::vector<Tensor> cpu_inputs;
-        for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
-        auto results = dispatch(OpId::NanToNum, cpu_inputs, attrs);
-        std::vector<Tensor> gpu_results;
-        for (auto& r : results) gpu_results.push_back(r.to(dev));
-        return gpu_results;
+        float nan_val    = static_cast<float>(attrs.get_float(AttrKey::NanValue, 0.0));
+        float posinf_val = static_cast<float>(attrs.get_float(AttrKey::PosInfValue, static_cast<double>(std::numeric_limits<float>::max())));
+        float neginf_val = static_cast<float>(attrs.get_float(AttrKey::NegInfValue, static_cast<double>(std::numeric_limits<float>::lowest())));
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchNanToNum(inputs[0], nan_val, posinf_val, neginf_val)};
     });
 
     // Bitwise ops (int32 only on Vulkan)
@@ -2413,32 +2424,167 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchUnaryOp("bitwise_not", inputs[0])};
     });
 
-    // RReLU, LogSigmoidBackward, NaN reductions, scatter variants — CPU dispatch
-#define VK_CPU_ROUNDTRIP(OP_ID) \
-    table.register_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> { \
-        auto dev = inputs[0].device(); \
-        std::vector<Tensor> cpu_inputs; \
-        for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu())); \
-        auto results = dispatch(OpId::OP_ID, cpu_inputs, attrs); \
-        std::vector<Tensor> gpu_results; \
-        for (auto& r : results) gpu_results.push_back(r.to(dev)); \
-        return gpu_results; \
-    })
+    // Native Vulkan RReLU forward
+    table.register_kernel(OpId::RReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float lower = static_cast<float>(attrs.get_float(AttrKey::Lower, 0.125));
+        float upper = static_cast<float>(attrs.get_float(AttrKey::High, 0.333));
+        bool training = attrs.get_bool(AttrKey::Training, false);
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchRReLU(inputs[0], lower, upper, training)};
+    });
 
-    VK_CPU_ROUNDTRIP(NanToNum);
-    VK_CPU_ROUNDTRIP(RReLU);
-    VK_CPU_ROUNDTRIP(RReLUBackward);
-    VK_CPU_ROUNDTRIP(LogSigmoidBackward);
-    VK_CPU_ROUNDTRIP(CountNonzero);
-    VK_CPU_ROUNDTRIP(Nansum);
-    VK_CPU_ROUNDTRIP(Nanmean);
-    VK_CPU_ROUNDTRIP(Aminmax);
-    VK_CPU_ROUNDTRIP(IndexAdd);
-    VK_CPU_ROUNDTRIP(IndexCopy);
-    VK_CPU_ROUNDTRIP(IndexFill);
-    VK_CPU_ROUNDTRIP(BitwiseLeftShift);
-    VK_CPU_ROUNDTRIP(BitwiseRightShift);
-#undef VK_CPU_ROUNDTRIP
+    // Native Vulkan RReLU backward
+    table.register_kernel(OpId::RReLUBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float lower = static_cast<float>(attrs.get_float(AttrKey::Lower, 0.125));
+        float upper = static_cast<float>(attrs.get_float(AttrKey::High, 0.333));
+        float slope = (lower + upper) / 2.0f;
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchRReLUBackward(inputs[0], inputs[1], slope)};
+    });
+
+    // Native Vulkan LogSigmoid backward
+    table.register_kernel(OpId::LogSigmoidBackward, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchLogSigmoidBackward(inputs[0], inputs[1])};
+    });
+
+    // Native Vulkan CountNonzero
+    table.register_single_output_kernel(OpId::CountNonzero, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        return get_vulkan_backend()->dispatchCountNonzero(inputs[0]);
+    });
+
+    // Native Vulkan Nansum
+    table.register_single_output_kernel(OpId::Nansum, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        return get_vulkan_backend()->dispatchNansum(inputs[0]);
+    });
+
+    // Native Vulkan Nanmean
+    table.register_single_output_kernel(OpId::Nanmean, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        return get_vulkan_backend()->dispatchNanmean(inputs[0]);
+    });
+
+    // Native Vulkan Aminmax (returns 2 tensors: min, max)
+    table.register_kernel(OpId::Aminmax, [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+        auto [min_t, max_t] = get_vulkan_backend()->dispatchAminmax(inputs[0]);
+        return {min_t, max_t};
+    });
+    // Native Vulkan ScatterReduce
+    table.register_single_output_kernel(OpId::ScatterReduce, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        std::string reduce = std::string(attrs.get_string(AttrKey::Reduction, "sum"));
+        bool include_self = attrs.get_bool(AttrKey::IncludeSelf, true);
+        return get_vulkan_backend()->dispatchScatterReduce(inputs[0], dim, inputs[1], inputs[2], reduce, include_self);
+    });
+    // Native Vulkan IndexAdd
+    table.register_single_output_kernel(OpId::IndexAdd, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        return get_vulkan_backend()->dispatchIndexAdd(inputs[0], dim, inputs[1], inputs[2]);
+    });
+
+    // Native Vulkan IndexCopy
+    table.register_single_output_kernel(OpId::IndexCopy, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        return get_vulkan_backend()->dispatchIndexCopy(inputs[0], dim, inputs[1], inputs[2]);
+    });
+
+    // Native Vulkan IndexFill
+    table.register_single_output_kernel(OpId::IndexFill, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
+        return get_vulkan_backend()->dispatchIndexFill(inputs[0], dim, inputs[1], value);
+    });
+    // Bitwise shift ops: native Vulkan dispatch via standalone int32 shaders
+    table.register_kernel(OpId::BitwiseLeftShift, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_left_shift", inputs[0], inputs[1])};
+    });
+    table.register_kernel(OpId::BitwiseRightShift, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_right_shift", inputs[0], inputs[1])};
+    });
+
+    // =========================================================================
+    // Fused GEMM Operations (composed from existing Vulkan ops)
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Addmm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double alpha = attrs.get_float(AttrKey::Alpha, 1.0);
+            double beta = attrs.get_float(AttrKey::Beta, 1.0);
+            auto* vk = get_vulkan_backend();
+            // Compose: beta * input + alpha * (mat1 @ mat2)
+            auto mm = vk->dispatchMatmul(inputs[1], inputs[2]);
+            if (alpha != 1.0) {
+                auto alpha_t = tenzor::full({1}, alpha, mm.dtype(), mm.device());
+                mm = vk->dispatchBinaryOp("mul", mm, alpha_t);
+            }
+            if (beta == 0.0) return mm;
+            Tensor inp = inputs[0];
+            if (beta != 1.0) {
+                auto beta_t = tenzor::full({1}, beta, inp.dtype(), inp.device());
+                inp = vk->dispatchBinaryOp("mul", inp, beta_t);
+            }
+            return vk->dispatchBinaryOp("add", inp, mm);
+        });
+
+    table.register_single_output_kernel(OpId::Addmv,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double alpha = attrs.get_float(AttrKey::Alpha, 1.0);
+            double beta = attrs.get_float(AttrKey::Beta, 1.0);
+            auto* vk = get_vulkan_backend();
+            // mat @ vec via matmul with reshape
+            auto vec_col = inputs[2].reshape({inputs[2].shape()[0], 1});
+            auto mv = vk->dispatchMatmul(inputs[1], vec_col);
+            mv = mv.reshape({inputs[1].shape()[0]});
+            if (alpha != 1.0) {
+                auto alpha_t = tenzor::full({1}, alpha, mv.dtype(), mv.device());
+                mv = vk->dispatchBinaryOp("mul", mv, alpha_t);
+            }
+            if (beta == 0.0) return mv;
+            Tensor inp = inputs[0];
+            if (beta != 1.0) {
+                auto beta_t = tenzor::full({1}, beta, inp.dtype(), inp.device());
+                inp = vk->dispatchBinaryOp("mul", inp, beta_t);
+            }
+            return vk->dispatchBinaryOp("add", inp, mv);
+        });
+
+    table.register_single_output_kernel(OpId::Baddbmm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double alpha = attrs.get_float(AttrKey::Alpha, 1.0);
+            double beta = attrs.get_float(AttrKey::Beta, 1.0);
+            auto* vk = get_vulkan_backend();
+            auto bmm = vk->dispatchBmm(inputs[1], inputs[2]);
+            if (alpha != 1.0) {
+                auto alpha_t = tenzor::full({1}, alpha, bmm.dtype(), bmm.device());
+                bmm = vk->dispatchBinaryOp("mul", bmm, alpha_t);
+            }
+            if (beta == 0.0) return bmm;
+            Tensor inp = inputs[0];
+            if (beta != 1.0) {
+                auto beta_t = tenzor::full({1}, beta, inp.dtype(), inp.device());
+                inp = vk->dispatchBinaryOp("mul", inp, beta_t);
+            }
+            return vk->dispatchBinaryOp("add", inp, bmm);
+        });
+
+    // =========================================================================
+    // Log-Cumulative-Sum-Exp (CPU fallback)
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Logcumsumexp, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        auto cpu_input = inputs[0].to(Device::cpu());
+        auto cpu_result = tenzor::logcumsumexp(cpu_input, dim);
+        return cpu_result.to(inputs[0].device());
+    });
+
+    // =========================================================================
+    // Bincount (CPU fallback)
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Bincount, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t minlength = attrs.get_int(AttrKey::Minlength, 0);
+        auto cpu_input = inputs[0].to(Device::cpu());
+        std::optional<Tensor> cpu_weights;
+        if (inputs.size() > 1) {
+            cpu_weights = inputs[1].to(Device::cpu());
+        }
+        auto cpu_result = tenzor::bincount(cpu_input, cpu_weights, minlength);
+        return cpu_result.to(inputs[0].device());
+    });
 
     std::cout << "Vulkan dispatch table initialized with O(1) lookup" << std::endl;
 }

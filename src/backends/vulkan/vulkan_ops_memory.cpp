@@ -1287,6 +1287,217 @@ auto VulkanBackend::dispatchSwishBackward(const Tensor& grad_output,
 }
 
 /**
+ * @brief Dispatch RReLU (Randomized Leaky ReLU) forward
+ * Eval:  output = (x >= 0) ? x : slope * x  where slope = (lower + upper) / 2
+ * Train: output = (x >= 0) ? x : random_slope * x  with PCG random per element
+ */
+auto VulkanBackend::dispatchRReLU(const Tensor& input,
+                                   float lower, float upper,
+                                   bool training) -> Tensor {
+    // Handle empty tensors
+    if (input.numel() == 0) {
+        auto s = input.shape();
+        return Tensor(std::vector<int64_t>(s.begin(), s.end()), input.dtype(), input.device());
+    }
+
+    // Non-Float32: upcast, compute, downcast
+    if (input.dtype() != DType::Float32) {
+        auto f32 = input.to(DType::Float32);
+        auto result = dispatchRReLU(f32, lower, upper, training);
+        return result.to(input.dtype());
+    }
+
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("rrelu", device_id);
+
+    auto shape = input.shape();
+    Tensor output(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
+
+    struct PushConstants {
+        uint32_t num_elements;
+        float lower;
+        float upper;
+        uint32_t training;
+        uint32_t seed;
+    } pc;
+
+    pc.num_elements = static_cast<uint32_t>(input.numel());
+    pc.lower = lower;
+    pc.upper = upper;
+    pc.training = training ? 1u : 0u;
+    pc.seed = training ? static_cast<uint32_t>(
+        std::chrono::high_resolution_clock::now().time_since_epoch().count() & 0xFFFFFFFF) : 0u;
+
+    const void* buffer_in = input.data_ptr();
+    const void* buffer_out = output.data_ptr();
+    size_t buffer_size_in = input.numel() * input.dtype_size();
+    size_t buffer_size_out = output.numel() * output.dtype_size();
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, buffer_in},
+        {1, buffer_out}
+    };
+    std::vector<size_t> sizes = {buffer_size_in, buffer_size_out};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &pc);
+
+    uint32_t workgroups = div_wg(input.numel(), devices_[device_id].workgroupSize);
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    insertComputeOnlyBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+/**
+ * @brief Dispatch RReLU backward
+ * output = (input >= 0) ? grad : slope * grad
+ */
+auto VulkanBackend::dispatchRReLUBackward(const Tensor& grad_output,
+                                           const Tensor& input,
+                                           float slope) -> Tensor {
+    // Handle empty tensors
+    if (grad_output.numel() == 0) {
+        auto s = grad_output.shape();
+        return Tensor(std::vector<int64_t>(s.begin(), s.end()), grad_output.dtype(), grad_output.device());
+    }
+
+    // Non-Float32: upcast, compute, downcast
+    if (grad_output.dtype() != DType::Float32) {
+        auto f32_g = grad_output.to(DType::Float32);
+        auto f32_in = input.to(DType::Float32);
+        auto result = dispatchRReLUBackward(f32_g, f32_in, slope);
+        return result.to(grad_output.dtype());
+    }
+
+    int32_t device_id = grad_output.device().index;
+    auto* pipeline = getPipeline("rrelu_backward", device_id);
+
+    auto shape = grad_output.shape();
+    Tensor grad_input(std::vector<int64_t>(shape.begin(), shape.end()), grad_output.dtype(), grad_output.device());
+
+    struct PushConstants {
+        uint32_t num_elements;
+        float slope;
+    } pc;
+
+    pc.num_elements = static_cast<uint32_t>(grad_output.numel());
+    pc.slope = slope;
+
+    const void* buffer_grad_out = grad_output.data_ptr();
+    const void* buffer_input = input.data_ptr();
+    const void* buffer_grad_in = grad_input.data_ptr();
+
+    size_t buffer_size_grad_out = grad_output.numel() * grad_output.dtype_size();
+    size_t buffer_size_input = input.numel() * input.dtype_size();
+    size_t buffer_size_grad_in = grad_input.numel() * grad_input.dtype_size();
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, buffer_grad_out},
+        {1, buffer_input},
+        {2, buffer_grad_in}
+    };
+    std::vector<size_t> sizes = {buffer_size_grad_out, buffer_size_input, buffer_size_grad_in};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &pc);
+
+    uint32_t workgroups = div_wg(grad_output.numel(), devices_[device_id].workgroupSize);
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    insertComputeOnlyBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return grad_input;
+}
+
+/**
+ * @brief Dispatch LogSigmoid backward
+ * output = grad * sigmoid(-x)
+ * where sigmoid(-x) = (x >= 0) ? exp(-x)/(1+exp(-x)) : 1/(1+exp(x))
+ */
+auto VulkanBackend::dispatchLogSigmoidBackward(const Tensor& grad_output,
+                                                const Tensor& input) -> Tensor {
+    // Handle empty tensors
+    if (grad_output.numel() == 0) {
+        auto s = grad_output.shape();
+        return Tensor(std::vector<int64_t>(s.begin(), s.end()), grad_output.dtype(), grad_output.device());
+    }
+
+    // Non-Float32: upcast, compute, downcast
+    if (grad_output.dtype() != DType::Float32) {
+        auto f32_g = grad_output.to(DType::Float32);
+        auto f32_in = input.to(DType::Float32);
+        auto result = dispatchLogSigmoidBackward(f32_g, f32_in);
+        return result.to(grad_output.dtype());
+    }
+
+    int32_t device_id = grad_output.device().index;
+    auto* pipeline = getPipeline("log_sigmoid_backward", device_id);
+
+    auto shape = grad_output.shape();
+    Tensor grad_input(std::vector<int64_t>(shape.begin(), shape.end()), grad_output.dtype(), grad_output.device());
+
+    struct PushConstants {
+        uint32_t num_elements;
+    } pc;
+
+    pc.num_elements = static_cast<uint32_t>(grad_output.numel());
+
+    const void* buffer_grad_out = grad_output.data_ptr();
+    const void* buffer_input = input.data_ptr();
+    const void* buffer_grad_in = grad_input.data_ptr();
+
+    size_t buffer_size_grad_out = grad_output.numel() * grad_output.dtype_size();
+    size_t buffer_size_input = input.numel() * input.dtype_size();
+    size_t buffer_size_grad_in = grad_input.numel() * grad_input.dtype_size();
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, buffer_grad_out},
+        {1, buffer_input},
+        {2, buffer_grad_in}
+    };
+    std::vector<size_t> sizes = {buffer_size_grad_out, buffer_size_input, buffer_size_grad_in};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &pc);
+
+    uint32_t workgroups = div_wg(grad_output.numel(), devices_[device_id].workgroupSize);
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    insertComputeOnlyBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return grad_input;
+}
+
+/**
  * @brief Dispatch softmax backward operation
  * Formula: grad_input = output * (grad_output - dot(grad_output, output))
  */

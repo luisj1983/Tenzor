@@ -671,6 +671,16 @@ Returns:
              }, py::arg("repeats"),
              "Repeat tensor along each dimension",
              py::call_guard<py::gil_scoped_release>())
+        .def("repeat_interleave", [](const tenzor::Tensor& self, int64_t repeats, std::optional<int64_t> dim) {
+             return tenzor::repeat_interleave(self, repeats, dim);
+             }, py::arg("repeats"), py::arg("dim") = py::none(),
+             "Repeat each element of tensor a given number of times",
+             py::call_guard<py::gil_scoped_release>())
+        .def("repeat_interleave", [](const tenzor::Tensor& self, const tenzor::Tensor& repeats, std::optional<int64_t> dim) {
+             return tenzor::repeat_interleave(self, repeats, dim);
+             }, py::arg("repeats"), py::arg("dim") = py::none(),
+             "Repeat each element by per-element counts",
+             py::call_guard<py::gil_scoped_release>())
         .def("narrow", &tenzor::Tensor::narrow,
              py::arg("dim"), py::arg("start"), py::arg("length"),
              "Narrow (slice) tensor along a dimension",
@@ -2562,6 +2572,76 @@ Example::
          py::arg("a"), py::arg("b"),
          py::call_guard<py::gil_scoped_release>());
 
+    m.def("addmm", [](const tenzor::Tensor& input, const tenzor::Tensor& mat1,
+                       const tenzor::Tensor& mat2, double beta, double alpha) {
+         return tenzor::addmm(input, mat1, mat2, beta, alpha);
+         },
+         R"doc(Fused multiply-add: beta * input + alpha * (mat1 @ mat2).
+
+Uses a single BLAS GEMM call with alpha/beta for optimal performance.
+
+Args:
+    input: Bias tensor (M, N) or broadcastable
+    mat1: Left matrix (M, K)
+    mat2: Right matrix (K, N)
+    beta: Scalar multiplier for input (default: 1.0)
+    alpha: Scalar multiplier for mat1 @ mat2 (default: 1.0)
+
+Returns:
+    Result tensor (M, N)
+
+Example::
+
+    out = tz.addmm(bias, weight, x)  # bias + weight @ x
+)doc",
+         py::arg("input"), py::arg("mat1"), py::arg("mat2"),
+         py::arg("beta") = 1.0, py::arg("alpha") = 1.0,
+         py::call_guard<py::gil_scoped_release>());
+
+    m.def("addmv", [](const tenzor::Tensor& input, const tenzor::Tensor& mat,
+                       const tenzor::Tensor& vec, double beta, double alpha) {
+         return tenzor::addmv(input, mat, vec, beta, alpha);
+         },
+         R"doc(Fused matrix-vector multiply-add: beta * input + alpha * (mat @ vec).
+
+Uses a single BLAS GEMV call with alpha/beta for optimal performance.
+
+Args:
+    input: Bias vector (M,) or broadcastable
+    mat: Matrix (M, K)
+    vec: Vector (K,)
+    beta: Scalar multiplier for input (default: 1.0)
+    alpha: Scalar multiplier for mat @ vec (default: 1.0)
+
+Returns:
+    Result vector (M,)
+)doc",
+         py::arg("input"), py::arg("mat"), py::arg("vec"),
+         py::arg("beta") = 1.0, py::arg("alpha") = 1.0,
+         py::call_guard<py::gil_scoped_release>());
+
+    m.def("baddbmm", [](const tenzor::Tensor& input, const tenzor::Tensor& batch1,
+                         const tenzor::Tensor& batch2, double beta, double alpha) {
+         return tenzor::baddbmm(input, batch1, batch2, beta, alpha);
+         },
+         R"doc(Batched fused multiply-add: beta * input + alpha * (batch1 @ batch2).
+
+Uses batched BLAS GEMM with alpha/beta for optimal performance.
+
+Args:
+    input: Bias tensor (B, M, N) or broadcastable
+    batch1: Left batch of matrices (B, M, K)
+    batch2: Right batch of matrices (B, K, N)
+    beta: Scalar multiplier for input (default: 1.0)
+    alpha: Scalar multiplier for batch1 @ batch2 (default: 1.0)
+
+Returns:
+    Result tensor (B, M, N)
+)doc",
+         py::arg("input"), py::arg("batch1"), py::arg("batch2"),
+         py::arg("beta") = 1.0, py::arg("alpha") = 1.0,
+         py::call_guard<py::gil_scoped_release>());
+
     // Math operations - using lambda wrappers for overloaded functions
     // GIL released for compute-heavy operations
     m.def("exp", [](const tenzor::Tensor& t) { return tenzor::exp(t); },
@@ -2694,6 +2774,40 @@ Example::
          }, "Check if all elements are close",
          py::arg("a"), py::arg("b"), py::arg("rtol") = 1e-5, py::arg("atol") = 1e-8,
          py::call_guard<py::gil_scoped_release>());
+
+    // Composed math operations
+    m.def("diff", [](const tenzor::Tensor& input, int64_t n, int64_t dim) {
+         return tenzor::diff(input, n, dim);
+         }, "Finite differences along a dimension",
+         py::arg("input"), py::arg("n") = 1, py::arg("dim") = -1,
+         py::call_guard<py::gil_scoped_release>());
+    m.def("logaddexp", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
+         return tenzor::logaddexp(a, b);
+         }, "Numerically stable log(exp(a) + exp(b))",
+         py::arg("a"), py::arg("b"),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("logaddexp2", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
+         return tenzor::logaddexp2(a, b);
+         }, "Numerically stable log2(2^a + 2^b)",
+         py::arg("a"), py::arg("b"),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("xlogy", [](const tenzor::Tensor& x, const tenzor::Tensor& y) {
+         return tenzor::xlogy(x, y);
+         }, "x * log(y) with 0 * log(y) = 0",
+         py::arg("x"), py::arg("y"),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("tensordot", [](const tenzor::Tensor& a, const tenzor::Tensor& b,
+                          std::vector<int64_t> dims_a, std::vector<int64_t> dims_b) {
+         return tenzor::tensordot(a, b, std::move(dims_a), std::move(dims_b));
+         }, "Generalized tensor contraction with explicit dim lists",
+         py::arg("a"), py::arg("b"), py::arg("dims_a"), py::arg("dims_b"),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("tensordot", [](const tenzor::Tensor& a, const tenzor::Tensor& b, int64_t dims) {
+         return tenzor::tensordot(a, b, dims);
+         }, "Generalized tensor contraction (contract last N of a with first N of b)",
+         py::arg("a"), py::arg("b"), py::arg("dims") = 2,
+         py::call_guard<py::gil_scoped_release>());
+
     m.def("movedim", [](const tenzor::Tensor& t, std::vector<int64_t> src, std::vector<int64_t> dst) {
          return tenzor::movedim(t, src, dst);
          }, "Move dimensions to new positions",
@@ -2989,6 +3103,13 @@ Example::
          return tenzor::scatter_add(input, dim, index, src);
          }, "Scatter-add elements along dimension",
          py::arg("input"), py::arg("dim"), py::arg("index"), py::arg("src"));
+    m.def("scatter_reduce", [](const tenzor::Tensor& input, int64_t dim, const tenzor::Tensor& index,
+                                const tenzor::Tensor& src, const std::string& reduce, bool include_self) {
+         return tenzor::scatter_reduce(input, dim, index, src, reduce, include_self);
+         }, "Scatter with reduction (sum/prod/mean/amax/amin)",
+         py::arg("input"), py::arg("dim"), py::arg("index"), py::arg("src"),
+         py::arg("reduce"), py::arg("include_self") = true,
+         py::call_guard<py::gil_scoped_release>());
     m.def("masked_select", &tenzor::masked_select, "Select elements where mask is true",
          py::arg("input"), py::arg("mask"));
     m.def("masked_fill", &tenzor::masked_fill, "Fill elements with value where mask is true",
@@ -3020,6 +3141,16 @@ Example::
         return tenzor::tile(input, std::move(reps));
     }, "Tile tensor by repeating along each dimension",
          py::arg("input"), py::arg("reps"),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("repeat_interleave", [](const tenzor::Tensor& input, int64_t repeats, std::optional<int64_t> dim) {
+        return tenzor::repeat_interleave(input, repeats, dim);
+    }, "Repeat each element of tensor a given number of times along a dimension",
+         py::arg("input"), py::arg("repeats"), py::arg("dim") = py::none(),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("repeat_interleave", [](const tenzor::Tensor& input, const tenzor::Tensor& repeats, std::optional<int64_t> dim) {
+        return tenzor::repeat_interleave(input, repeats, dim);
+    }, "Repeat each element of tensor by per-element counts along a dimension",
+         py::arg("input"), py::arg("repeats"), py::arg("dim") = py::none(),
          py::call_guard<py::gil_scoped_release>());
     m.def("broadcast_to", [](const tenzor::Tensor& input, std::vector<int64_t> shape) {
         return tenzor::expand(input, std::move(shape));

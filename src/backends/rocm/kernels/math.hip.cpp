@@ -5863,5 +5863,188 @@ auto bitwise_right_shift_kernel(const Tensor& input, const Tensor& shift, hipStr
     HIP_CHECK(hipGetLastError()); return result;
 }
 
+// ============================================================================
+// logcumsumexp — ROCm kernel
+// ============================================================================
+
+template<typename T>
+__global__ void logcumsumexp_hip_kernel(
+    const T* __restrict__ input, T* __restrict__ output,
+    int64_t dim_size, int64_t inner_size, int64_t total_slices)
+{
+    HIP_KERNEL_LOOP(idx, total_slices) {
+        int64_t outer = idx / inner_size;
+        int64_t inner = idx % inner_size;
+
+        T running_max = -INFINITY;
+        T running_lse = -INFINITY;
+
+        for (int64_t i = 0; i < dim_size; ++i) {
+            int64_t offset = outer * dim_size * inner_size + i * inner_size + inner;
+            T x = input[offset];
+            T new_max = fmax(running_max, x);
+
+            if (isinf(new_max) && new_max < T(0)) {
+                running_lse = -INFINITY;
+            } else {
+                running_lse = new_max + log(exp(running_lse - new_max) + exp(x - new_max));
+            }
+            running_max = new_max;
+            output[offset] = running_lse;
+        }
+    }
+}
+
+auto logcumsumexp_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Tensor {
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    const auto& shape = input_cont.shape();
+    const int64_t ndim = input.ndim();
+    const auto dtype = input.dtype();
+    const auto device = input.device();
+
+    if (dim < 0) dim += ndim;
+
+    Tensor output(std::vector<int64_t>(shape.begin(), shape.end()), dtype, device);
+
+    int64_t dim_size = shape[dim];
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
+
+    int64_t total_slices = outer_size * inner_size;
+    if (total_slices == 0 || dim_size == 0) return output;
+
+    if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        auto f32_result = logcumsumexp_kernel(input_cont.to(DType::Float32), dim, stream);
+        return f32_result.to(dtype);
+    }
+
+    dim3 grid, block;
+    compute_launch_config_1d(total_slices, grid, block);
+
+    if (dtype == DType::Float32) {
+        hipLaunchKernelGGL(logcumsumexp_hip_kernel<float>, grid, block, 0, stream,
+            input_cont.data<float>(), output.data<float>(), dim_size, inner_size, total_slices);
+    } else if (dtype == DType::Float64) {
+        hipLaunchKernelGGL(logcumsumexp_hip_kernel<double>, grid, block, 0, stream,
+            input_cont.data<double>(), output.data<double>(), dim_size, inner_size, total_slices);
+    } else {
+        throw std::runtime_error("logcumsumexp: unsupported dtype");
+    }
+    HIP_CHECK(hipGetLastError());
+    return output;
+}
+
+// ============================================================================
+// bincount — ROCm kernel
+// ============================================================================
+
+__global__ void bincount_no_weights_hip(
+    const int64_t* __restrict__ input, int64_t* __restrict__ output, int64_t n)
+{
+    HIP_KERNEL_LOOP(idx, n) {
+        atomicAdd(reinterpret_cast<unsigned long long*>(&output[input[idx]]), 1ULL);
+    }
+}
+
+__global__ void bincount_weights_f32_hip(
+    const int64_t* __restrict__ input, const float* __restrict__ weights,
+    double* __restrict__ output, int64_t n)
+{
+    HIP_KERNEL_LOOP(idx, n) {
+        atomicAdd(&output[input[idx]], static_cast<double>(weights[idx]));
+    }
+}
+
+__global__ void bincount_weights_f64_hip(
+    const int64_t* __restrict__ input, const double* __restrict__ weights,
+    double* __restrict__ output, int64_t n)
+{
+    HIP_KERNEL_LOOP(idx, n) {
+        atomicAdd(&output[input[idx]], weights[idx]);
+    }
+}
+
+__global__ void bincount_find_max_hip(
+    const int64_t* __restrict__ input, int64_t* __restrict__ max_val, int64_t n)
+{
+    HIP_KERNEL_LOOP(idx, n) {
+        atomicMax(reinterpret_cast<long long*>(max_val),
+                  static_cast<long long>(input[idx]));
+    }
+}
+
+auto bincount_kernel(const Tensor& input, const Tensor* weights,
+                     int64_t minlength, hipStream_t stream) -> Tensor {
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    Tensor input_i64 = (input_cont.dtype() == DType::Int64)
+        ? input_cont : input_cont.to(DType::Int64);
+
+    int64_t n = input_i64.numel();
+    auto device = input.device();
+
+    // Find max value on GPU
+    Tensor max_tensor({1}, DType::Int64, device);
+    int64_t neg_one = -1;
+    hipMemcpyAsync(max_tensor.data<int64_t>(), &neg_one, sizeof(int64_t),
+                   hipMemcpyHostToDevice, stream);
+
+    if (n > 0) {
+        dim3 grid, block;
+        compute_launch_config_1d(n, grid, block);
+        hipLaunchKernelGGL(bincount_find_max_hip, grid, block, 0, stream,
+            input_i64.data<int64_t>(), max_tensor.data<int64_t>(), n);
+        HIP_CHECK(hipGetLastError());
+    }
+
+    int64_t max_val = -1;
+    hipMemcpyAsync(&max_val, max_tensor.data<int64_t>(), sizeof(int64_t),
+                   hipMemcpyDeviceToHost, stream);
+    hipStreamSynchronize(stream);
+
+    int64_t output_size = std::max(max_val + 1, minlength);
+
+    bool has_weights = (weights != nullptr);
+
+    if (has_weights) {
+        Tensor output({output_size}, DType::Float64, device);
+        hipMemsetAsync(output.data<double>(), 0,
+                       static_cast<size_t>(output_size) * sizeof(double), stream);
+
+        if (n > 0) {
+            dim3 grid, block;
+            compute_launch_config_1d(n, grid, block);
+            Tensor w_cont = weights->is_contiguous() ? *weights : weights->contiguous();
+
+            if (w_cont.dtype() == DType::Float64) {
+                hipLaunchKernelGGL(bincount_weights_f64_hip, grid, block, 0, stream,
+                    input_i64.data<int64_t>(), w_cont.data<double>(),
+                    output.data<double>(), n);
+            } else {
+                Tensor w_f32 = (w_cont.dtype() == DType::Float32) ? w_cont : w_cont.to(DType::Float32);
+                hipLaunchKernelGGL(bincount_weights_f32_hip, grid, block, 0, stream,
+                    input_i64.data<int64_t>(), w_f32.data<float>(),
+                    output.data<double>(), n);
+            }
+            HIP_CHECK(hipGetLastError());
+        }
+        return output;
+    } else {
+        Tensor output({output_size}, DType::Int64, device);
+        hipMemsetAsync(output.data<int64_t>(), 0,
+                       static_cast<size_t>(output_size) * sizeof(int64_t), stream);
+
+        if (n > 0) {
+            dim3 grid, block;
+            compute_launch_config_1d(n, grid, block);
+            hipLaunchKernelGGL(bincount_no_weights_hip, grid, block, 0, stream,
+                input_i64.data<int64_t>(), output.data<int64_t>(), n);
+            HIP_CHECK(hipGetLastError());
+        }
+        return output;
+    }
+}
+
 } // namespace rocm
 } // namespace tenzor

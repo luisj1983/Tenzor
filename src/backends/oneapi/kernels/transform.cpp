@@ -2479,5 +2479,202 @@ auto flip_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor
     return output;
 }
 
+// ============================================================================
+// repeat_interleave — repeat each element along a dimension
+// ============================================================================
+
+class RepeatInterleaveScalarF32;
+class RepeatInterleaveScalarF64;
+class RepeatInterleaveScalarF16;
+class RepeatInterleaveScalarBF16;
+class RepeatInterleaveScalarI32;
+class RepeatInterleaveScalarI64;
+
+auto repeat_interleave_scalar_kernel(const Tensor& input, int64_t repeats, int64_t dim,
+                                     sycl::queue& queue) -> Tensor {
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    auto shape = in_cont.shape();
+    int64_t ndim = shape.size();
+
+    int64_t in_dim_size = shape[dim];
+    int64_t out_dim_size = in_dim_size * repeats;
+
+    std::vector<int64_t> out_shape(shape.begin(), shape.end());
+    out_shape[dim] = out_dim_size;
+
+    Tensor output(out_shape, in_cont.dtype(), in_cont.device());
+
+    int64_t total = 1;
+    for (auto s : out_shape) total *= s;
+    if (total == 0) return output;
+
+    int64_t inner_size = 1;
+    for (int64_t d = dim + 1; d < ndim; ++d) inner_size *= shape[d];
+
+    if (in_cont.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for<RepeatInterleaveScalarF32>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            int64_t i = idx;
+            int64_t inner_idx = i % inner_size;
+            int64_t out_dim_idx = (i / inner_size) % out_dim_size;
+            int64_t outer_idx = i / (inner_size * out_dim_size);
+            int64_t src_dim_idx = out_dim_idx / repeats;
+            int64_t src_idx = (outer_idx * in_dim_size + src_dim_idx) * inner_size + inner_idx;
+            out_ptr[i] = in_ptr[src_idx];
+        });
+    } else if (in_cont.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+        queue.parallel_for<RepeatInterleaveScalarF64>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            int64_t i = idx;
+            int64_t inner_idx = i % inner_size;
+            int64_t out_dim_idx = (i / inner_size) % out_dim_size;
+            int64_t outer_idx = i / (inner_size * out_dim_size);
+            int64_t src_dim_idx = out_dim_idx / repeats;
+            int64_t src_idx = (outer_idx * in_dim_size + src_dim_idx) * inner_size + inner_idx;
+            out_ptr[i] = in_ptr[src_idx];
+        });
+    } else if (in_cont.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<RepeatInterleaveScalarF16>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            int64_t i = idx;
+            int64_t inner_idx = i % inner_size;
+            int64_t out_dim_idx = (i / inner_size) % out_dim_size;
+            int64_t outer_idx = i / (inner_size * out_dim_size);
+            int64_t src_dim_idx = out_dim_idx / repeats;
+            int64_t src_idx = (outer_idx * in_dim_size + src_dim_idx) * inner_size + inner_idx;
+            out_ptr[i] = in_ptr[src_idx];
+        });
+    } else if (in_cont.dtype() == DType::Int32) {
+        const int32_t* in_ptr = get_data_ptr<const int32_t>(in_cont);
+        int32_t* out_ptr = get_data_ptr<int32_t>(output);
+        queue.parallel_for<RepeatInterleaveScalarI32>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            int64_t i = idx;
+            int64_t inner_idx = i % inner_size;
+            int64_t out_dim_idx = (i / inner_size) % out_dim_size;
+            int64_t outer_idx = i / (inner_size * out_dim_size);
+            int64_t src_dim_idx = out_dim_idx / repeats;
+            int64_t src_idx = (outer_idx * in_dim_size + src_dim_idx) * inner_size + inner_idx;
+            out_ptr[i] = in_ptr[src_idx];
+        });
+    } else if (in_cont.dtype() == DType::Int64) {
+        const int64_t* in_ptr = get_data_ptr<const int64_t>(in_cont);
+        int64_t* out_ptr = get_data_ptr<int64_t>(output);
+        queue.parallel_for<RepeatInterleaveScalarI64>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            int64_t i = idx;
+            int64_t inner_idx = i % inner_size;
+            int64_t out_dim_idx = (i / inner_size) % out_dim_size;
+            int64_t outer_idx = i / (inner_size * out_dim_size);
+            int64_t src_dim_idx = out_dim_idx / repeats;
+            int64_t src_idx = (outer_idx * in_dim_size + src_dim_idx) * inner_size + inner_idx;
+            out_ptr[i] = in_ptr[src_idx];
+        });
+    } else {
+        throw std::runtime_error("repeat_interleave: unsupported dtype");
+    }
+
+    return output;
+}
+
+class RepeatInterleaveTensorF32;
+class RepeatInterleaveTensorF64;
+class RepeatInterleaveTensorI32;
+class RepeatInterleaveTensorI64;
+
+auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_tensor,
+                                     int64_t dim, sycl::queue& queue) -> Tensor {
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    auto shape = in_cont.shape();
+    int64_t ndim = shape.size();
+    int64_t in_dim_size = shape[dim];
+
+    // Read repeats to host to compute prefix sum
+    auto repeats_host = repeats_tensor.to(Device::cpu()).contiguous();
+    std::vector<int64_t> host_prefix(in_dim_size + 1);
+    host_prefix[0] = 0;
+
+    if (repeats_host.dtype() == DType::Int64) {
+        const int64_t* rp = repeats_host.data<int64_t>();
+        for (int64_t i = 0; i < in_dim_size; ++i)
+            host_prefix[i + 1] = host_prefix[i] + rp[i];
+    } else if (repeats_host.dtype() == DType::Int32) {
+        const int32_t* rp = repeats_host.data<int32_t>();
+        for (int64_t i = 0; i < in_dim_size; ++i)
+            host_prefix[i + 1] = host_prefix[i] + rp[i];
+    } else if (repeats_host.dtype() == DType::Float32) {
+        const float* rp = repeats_host.data<float>();
+        for (int64_t i = 0; i < in_dim_size; ++i)
+            host_prefix[i + 1] = host_prefix[i] + static_cast<int64_t>(rp[i]);
+    } else if (repeats_host.dtype() == DType::Float64) {
+        const double* rp = repeats_host.data<double>();
+        for (int64_t i = 0; i < in_dim_size; ++i)
+            host_prefix[i + 1] = host_prefix[i] + static_cast<int64_t>(rp[i]);
+    } else {
+        throw std::runtime_error("repeat_interleave: unsupported repeats dtype");
+    }
+
+    int64_t out_dim_size = host_prefix[in_dim_size];
+    std::vector<int64_t> out_shape(shape.begin(), shape.end());
+    out_shape[dim] = out_dim_size;
+
+    Tensor output(out_shape, in_cont.dtype(), in_cont.device());
+
+    int64_t total = 1;
+    for (auto s : out_shape) total *= s;
+    if (total == 0) return output;
+
+    int64_t inner_size = 1;
+    for (int64_t d = dim + 1; d < ndim; ++d) inner_size *= shape[d];
+
+    // Upload prefix to device
+    int64_t* d_prefix = sycl::malloc_device<int64_t>(in_dim_size + 1, queue);
+    queue.memcpy(d_prefix, host_prefix.data(), (in_dim_size + 1) * sizeof(int64_t)).wait();
+
+    auto launch_tensor_ri = [&]<typename T, typename KernelName>() {
+        const T* in_ptr = get_data_ptr<const T>(in_cont);
+        T* out_ptr = get_data_ptr<T>(output);
+        const int64_t* pfx = d_prefix;
+        queue.parallel_for<KernelName>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            int64_t i = idx;
+            int64_t inner_idx = i % inner_size;
+            int64_t out_dim_idx2 = (i / inner_size) % out_dim_size;
+            int64_t outer_idx = i / (inner_size * out_dim_size);
+
+            // Binary search
+            int64_t lo = 0, hi = in_dim_size;
+            while (lo < hi) {
+                int64_t mid = lo + (hi - lo) / 2;
+                if (pfx[mid + 1] <= out_dim_idx2) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            int64_t src_dim_idx = lo;
+            int64_t src_idx = (outer_idx * in_dim_size + src_dim_idx) * inner_size + inner_idx;
+            out_ptr[i] = in_ptr[src_idx];
+        });
+    };
+
+    if (in_cont.dtype() == DType::Float32) {
+        launch_tensor_ri.template operator()<float, RepeatInterleaveTensorF32>();
+    } else if (in_cont.dtype() == DType::Float64) {
+        launch_tensor_ri.template operator()<double, RepeatInterleaveTensorF64>();
+    } else if (in_cont.dtype() == DType::Int32) {
+        launch_tensor_ri.template operator()<int32_t, RepeatInterleaveTensorI32>();
+    } else if (in_cont.dtype() == DType::Int64) {
+        launch_tensor_ri.template operator()<int64_t, RepeatInterleaveTensorI64>();
+    } else {
+        sycl::free(d_prefix, queue);
+        throw std::runtime_error("repeat_interleave_tensor: unsupported dtype");
+    }
+
+    queue.wait();
+    sycl::free(d_prefix, queue);
+    return output;
+}
+
 } // namespace oneapi
 } // namespace tenzor

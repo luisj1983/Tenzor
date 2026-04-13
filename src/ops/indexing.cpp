@@ -44,6 +44,17 @@ auto scatter_add(const Tensor& input, int64_t dim, const Tensor& index, const Te
     return dispatch(OpId::ScatterAdd, inputs, attrs)[0];
 }
 
+auto scatter_reduce(const Tensor& input, int64_t dim, const Tensor& index,
+                    const Tensor& src, const std::string& reduce,
+                    bool include_self) -> Tensor {
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    attrs.set(AttrKey::Reduction, reduce);
+    attrs.set(AttrKey::IncludeSelf, include_self);
+    std::vector<Tensor> inputs = {input.contiguous(), index.contiguous(), src.contiguous()};
+    return dispatch(OpId::ScatterReduce, inputs, attrs)[0];
+}
+
 auto masked_select(const Tensor& input, const Tensor& mask) -> Tensor {
     std::vector<Tensor> inputs = {input, mask};
     return dispatch(OpId::MaskedSelect, inputs)[0];
@@ -450,6 +461,42 @@ auto index_fill(const Tensor& input, int64_t dim, const Tensor& index, float val
     attrs.set(AttrKey::Value, static_cast<double>(value));
     std::vector<Tensor> inputs = {input.contiguous(), index.contiguous()};
     return dispatch(OpId::IndexFill, inputs, attrs)[0];
+}
+
+auto bincount(const Tensor& input,
+              const std::optional<Tensor>& weights,
+              int64_t minlength) -> Tensor {
+    if (input.ndim() != 1) {
+        throw std::runtime_error("bincount: input must be 1-dimensional");
+    }
+    if (minlength < 0) {
+        throw std::runtime_error("bincount: minlength must be non-negative");
+    }
+
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Minlength, minlength);
+
+    std::vector<Tensor> inputs;
+    inputs.push_back(input.contiguous());
+    if (weights.has_value()) {
+        if (weights->numel() != input.numel()) {
+            throw std::runtime_error("bincount: weights must have same length as input");
+        }
+        inputs.push_back(weights->contiguous());
+    }
+
+    return dispatch(OpId::Bincount, inputs, attrs)[0];
+}
+
+auto index_reduce(const Tensor& input, int64_t dim, const Tensor& index,
+                  const Tensor& source, const std::string& reduce,
+                  bool include_self) -> Tensor {
+    // index_reduce is a thin wrapper around scatter_reduce.
+    // The difference from scatter_reduce is argument naming/ordering:
+    //   scatter_reduce(input, dim, index, src, reduce, include_self)
+    //   index_reduce(input, dim, index, source, reduce, include_self)
+    // Both use the same OpId::ScatterReduce dispatch.
+    return scatter_reduce(input, dim, index, source, reduce, include_self);
 }
 
 } // namespace tenzor

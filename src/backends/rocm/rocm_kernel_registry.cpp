@@ -29,6 +29,7 @@
 #include <limits>
 #include <climits>
 #include <tuple>
+#include <utility>
 
 namespace tenzor {
 
@@ -228,6 +229,12 @@ namespace rocm {
     auto median_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> std::vector<Tensor>;
     auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> std::vector<Tensor>;
 
+    // NaN-aware reductions and counting (native HIP kernels)
+    auto count_nonzero_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto nansum_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto nanmean_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto aminmax_kernel(const Tensor& input, hipStream_t stream) -> std::pair<Tensor, Tensor>;
+
     // Activation functions
     auto relu_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
     auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStream_t stream) -> Tensor;
@@ -249,6 +256,20 @@ namespace rocm {
     auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStream_t stream) -> Tensor;
     auto softplus_kernel(const Tensor& input, float beta, float threshold, hipStream_t stream) -> Tensor;
     auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, float beta, float threshold, hipStream_t stream) -> Tensor;
+    auto rrelu_kernel(const Tensor& input, float lower, float upper, bool training, hipStream_t stream) -> Tensor;
+    auto rrelu_backward_kernel(const Tensor& grad_output, const Tensor& input, float lower, float upper, hipStream_t stream) -> Tensor;
+    auto log_sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStream_t stream) -> Tensor;
+
+    // Index operations (native HIP kernels)
+    auto index_add_kernel(const Tensor& self, const Tensor& index, const Tensor& source,
+                          int64_t dim, hipStream_t stream) -> Tensor;
+    auto index_copy_kernel(const Tensor& self, const Tensor& index, const Tensor& source,
+                           int64_t dim, hipStream_t stream) -> Tensor;
+    auto index_fill_kernel(const Tensor& self, const Tensor& index,
+                           int64_t dim, double value, hipStream_t stream) -> Tensor;
+    auto scatter_reduce_kernel(const Tensor& self, const Tensor& index, const Tensor& source,
+                               int64_t dim, const std::string& reduce, bool include_self,
+                               hipStream_t stream) -> Tensor;
 
     // In-place activation kernels (Phase 7.1) — direct aliased-in/out launches.
     void relu_inplace_kernel(Tensor& target, hipStream_t stream);
@@ -468,6 +489,8 @@ namespace rocm {
     auto split_kernel(const Tensor& input, int64_t split_size, int64_t dim, hipStream_t stream) -> std::vector<Tensor>;
     auto expand_kernel(const Tensor& input, const std::vector<int64_t>& new_shape, void* stream_ptr) -> Tensor;
     auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim, hipStream_t stream) -> Tensor;
+    auto repeat_interleave_scalar_kernel(const Tensor& input, int64_t repeats, int64_t dim, hipStream_t stream) -> Tensor;
+    auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats, int64_t dim, hipStream_t stream) -> Tensor;
 
     // Creation operations
     auto arange_kernel(double start, double end, double step, DType dtype, Device device, hipStream_t stream) -> Tensor;
@@ -711,10 +734,12 @@ namespace rocm {
     auto diag_kernel(const Tensor& input, int64_t diagonal, hipStream_t stream) -> Tensor;
     auto trace_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
 
-    // CumSum, CumProd, HasInfNan (math.hip.cpp)
+    // CumSum, CumProd, HasInfNan, Logcumsumexp, Bincount (math.hip.cpp)
     auto cumsum_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Tensor;
     auto cumprod_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Tensor;
     auto has_inf_nan_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
+    auto logcumsumexp_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Tensor;
+    auto bincount_kernel(const Tensor& input, const Tensor* weights, int64_t minlength, hipStream_t stream) -> Tensor;
 
     // BoxIoU (vision.hip.cpp)
     auto box_iou_hip(const Tensor& boxes1, const Tensor& boxes2, int iou_type) -> Tensor;
@@ -2740,6 +2765,16 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         return rocm::roll_kernel(inputs[0], shift, dim, get_hip_stream(attrs));
     });
+    table.register_single_output_kernel(OpId::RepeatInterleave, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        int64_t num_repeats = attrs.get_int(AttrKey::NumRepeats, 1);
+        auto stream = get_hip_stream(attrs);
+        if (num_repeats >= 0) {
+            return rocm::repeat_interleave_scalar_kernel(inputs[0], num_repeats, dim, stream);
+        } else {
+            return rocm::repeat_interleave_tensor_kernel(inputs[0], inputs[1], dim, stream);
+        }
+    });
     table.register_single_output_kernel(OpId::ToMemoryFormat, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int format_int = static_cast<int>(attrs.get_int(AttrKey::MemoryFormat, 0));
         MemoryFormat format = static_cast<MemoryFormat>(format_int);
@@ -3228,28 +3263,144 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
     // RReLU, LogSigmoidBackward, NaN reductions, scatter variants — CPU dispatch
     // Each gets an explicit non-capturing dispatch function via template.
-#define ROCM_CPU_ROUNDTRIP(OP_ID) \
-    table.register_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> { \
-        auto dev = inputs[0].device(); \
-        std::vector<Tensor> cpu_inputs; \
-        for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu())); \
-        auto results = dispatch(OpId::OP_ID, cpu_inputs, attrs); \
-        std::vector<Tensor> gpu_results; \
-        for (auto& r : results) gpu_results.push_back(r.to(dev)); \
-        return gpu_results; \
-    })
+    table.register_single_output_kernel(OpId::RReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        float lower = static_cast<float>(attrs.get_float(AttrKey::Lower, 0.125));
+        float upper = static_cast<float>(attrs.get_float(AttrKey::High, 0.333));
+        bool training = attrs.get_bool(AttrKey::Training, false);
+        return rocm::rrelu_kernel(inputs[0], lower, upper, training, get_hip_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::RReLUBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        float lower = static_cast<float>(attrs.get_float(AttrKey::Lower, 0.125));
+        float upper = static_cast<float>(attrs.get_float(AttrKey::High, 0.333));
+        return rocm::rrelu_backward_kernel(inputs[0], inputs[1], lower, upper, get_hip_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::LogSigmoidBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return rocm::log_sigmoid_backward_kernel(inputs[0], inputs[1], get_hip_stream(attrs));
+    });
+    // CountNonzero: native HIP for full reduction, CPU fallback for dim-specific
+    table.register_single_output_kernel(OpId::CountNonzero, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        if (dim < 0) {
+            return rocm::count_nonzero_kernel(inputs[0], get_hip_stream(attrs));
+        }
+        // Dim-specific: CPU roundtrip
+        auto dev = inputs[0].device();
+        auto cpu_in = inputs[0].to(Device::cpu());
+        auto results = tenzor::dispatch(OpId::CountNonzero, std::vector<Tensor>{cpu_in}, attrs);
+        return results[0].to(dev);
+    });
+    // Nansum: native HIP full reduction
+    table.register_single_output_kernel(OpId::Nansum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return rocm::nansum_kernel(inputs[0], get_hip_stream(attrs));
+    });
+    // Nanmean: native HIP full reduction
+    table.register_single_output_kernel(OpId::Nanmean, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return rocm::nanmean_kernel(inputs[0], get_hip_stream(attrs));
+    });
+    // Aminmax: native HIP dual min/max reduction (returns 2 tensors)
+    table.register_kernel(OpId::Aminmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto [min_t, max_t] = rocm::aminmax_kernel(inputs[0], get_hip_stream(attrs));
+        return {min_t, max_t};
+    });
+    table.register_single_output_kernel(OpId::IndexAdd, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        return rocm::index_add_kernel(inputs[0], inputs[1], inputs[2], dim, get_hip_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::IndexCopy, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        return rocm::index_copy_kernel(inputs[0], inputs[1], inputs[2], dim, get_hip_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::IndexFill, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        double value = attrs.get_float(AttrKey::Value, 0.0);
+        return rocm::index_fill_kernel(inputs[0], inputs[1], dim, value, get_hip_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::ScatterReduce, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        std::string reduce = std::string(attrs.get_string(AttrKey::Reduction, "sum"));
+        bool include_self = attrs.get_bool(AttrKey::IncludeSelf, true);
+        return rocm::scatter_reduce_kernel(inputs[0], inputs[1], inputs[2], dim, reduce, include_self, get_hip_stream(attrs));
+    });
 
-    ROCM_CPU_ROUNDTRIP(RReLU);
-    ROCM_CPU_ROUNDTRIP(RReLUBackward);
-    ROCM_CPU_ROUNDTRIP(LogSigmoidBackward);
-    ROCM_CPU_ROUNDTRIP(CountNonzero);
-    ROCM_CPU_ROUNDTRIP(Nansum);
-    ROCM_CPU_ROUNDTRIP(Nanmean);
-    ROCM_CPU_ROUNDTRIP(Aminmax);
-    ROCM_CPU_ROUNDTRIP(IndexAdd);
-    ROCM_CPU_ROUNDTRIP(IndexCopy);
-    ROCM_CPU_ROUNDTRIP(IndexFill);
-#undef ROCM_CPU_ROUNDTRIP
+    // =========================================================================
+    // Fused GEMM Operations (composed from existing ops)
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Addmm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double alpha = attrs.get_float(AttrKey::Alpha, 1.0);
+            double beta = attrs.get_float(AttrKey::Beta, 1.0);
+            auto stream = get_hip_stream(attrs);
+            // Compose: beta * input + alpha * (mat1 @ mat2)
+            auto mm_result = rocm::matmul_kernel(inputs[1], inputs[2], stream);
+            if (alpha != 1.0) {
+                mm_result = rocm::mul_kernel(mm_result, tenzor::full({1}, alpha, mm_result.dtype(), mm_result.device()), stream);
+            }
+            if (beta == 0.0) {
+                return mm_result;
+            }
+            auto scaled_input = (beta != 1.0)
+                ? rocm::mul_kernel(inputs[0], tenzor::full({1}, beta, inputs[0].dtype(), inputs[0].device()), stream)
+                : inputs[0];
+            return rocm::add_kernel(scaled_input, mm_result, stream);
+        });
+
+    table.register_single_output_kernel(OpId::Addmv,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double alpha = attrs.get_float(AttrKey::Alpha, 1.0);
+            double beta = attrs.get_float(AttrKey::Beta, 1.0);
+            auto stream = get_hip_stream(attrs);
+            // mat @ vec via matmul (treats 1D as column vector)
+            auto mv_result = rocm::matmul_kernel(inputs[1], inputs[2].reshape({inputs[2].shape()[0], 1}), stream);
+            mv_result = mv_result.reshape({inputs[1].shape()[0]});
+            if (alpha != 1.0) {
+                mv_result = rocm::mul_kernel(mv_result, tenzor::full({1}, alpha, mv_result.dtype(), mv_result.device()), stream);
+            }
+            if (beta == 0.0) {
+                return mv_result;
+            }
+            auto scaled_input = (beta != 1.0)
+                ? rocm::mul_kernel(inputs[0], tenzor::full({1}, beta, inputs[0].dtype(), inputs[0].device()), stream)
+                : inputs[0];
+            return rocm::add_kernel(scaled_input, mv_result, stream);
+        });
+
+    table.register_single_output_kernel(OpId::Baddbmm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double alpha = attrs.get_float(AttrKey::Alpha, 1.0);
+            double beta = attrs.get_float(AttrKey::Beta, 1.0);
+            auto stream = get_hip_stream(attrs);
+            // batch1 @ batch2 via matmul (handles 3D)
+            auto bmm_result = rocm::matmul_kernel(inputs[1], inputs[2], stream);
+            if (alpha != 1.0) {
+                bmm_result = rocm::mul_kernel(bmm_result, tenzor::full({1}, alpha, bmm_result.dtype(), bmm_result.device()), stream);
+            }
+            if (beta == 0.0) {
+                return bmm_result;
+            }
+            auto scaled_input = (beta != 1.0)
+                ? rocm::mul_kernel(inputs[0], tenzor::full({1}, beta, inputs[0].dtype(), inputs[0].device()), stream)
+                : inputs[0];
+            return rocm::add_kernel(scaled_input, bmm_result, stream);
+        });
+
+    // =========================================================================
+    // Log-Cumulative-Sum-Exp
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Logcumsumexp,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            return rocm::logcumsumexp_kernel(inputs[0], dim, get_hip_stream(attrs));
+        });
+
+    // =========================================================================
+    // Bincount
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Bincount,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t minlength = attrs.get_int(AttrKey::Minlength, 0);
+            const Tensor* weights = (inputs.size() > 1) ? &inputs[1] : nullptr;
+            return rocm::bincount_kernel(inputs[0], weights, minlength, get_hip_stream(attrs));
+        });
 
     std::cout << "ROCm dispatch table initialized with O(1) lookup" << std::endl;
 }
