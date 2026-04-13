@@ -7167,7 +7167,33 @@ Tensor betainc_dispatch(std::span<const Tensor> inputs, const OpAttributes& attr
 // New element-wise ops: Frac, Heaviside, NanToNum
 // ============================================================================
 
-DEFINE_CUDA_SPECIAL_UNARY(frac, x - floorf(x), x - floor(x))
+__global__ void frac_kernel_f32(const float* in, float* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = in[idx] - floorf(in[idx]); }
+}
+__global__ void frac_kernel_f64(const double* in, double* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = in[idx] - floor(in[idx]); }
+}
+auto frac_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (input.dtype() == DType::Float32) {
+        frac_kernel_f32<<<grid, block, 0, stream>>>(input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        frac_kernel_f64<<<grid, block, 0, stream>>>(input.data<double>(), result.data<double>(), n);
+    } else {
+        auto f32 = input.to(DType::Float32);
+        return frac_kernel(f32, stream).to(input.dtype());
+    }
+    CUDA_CHECK(cudaGetLastError());
+    return result;
+}
+Tensor frac_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
+    return frac_kernel(inputs[0], stream);
+}
 
 __global__ void heaviside_kernel_f32(const float* input, const float* values, float* out, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
@@ -7257,9 +7283,39 @@ Tensor nan_to_num_dispatch(std::span<const Tensor> inputs, const OpAttributes& a
 }
 
 // LogSigmoid: log(sigmoid(x)) = -softplus(-x)
-DEFINE_CUDA_SPECIAL_UNARY(log_sigmoid,
-    (x >= 0.0f) ? -log1pf(expf(-x)) : x - log1pf(expf(x)),
-    (x >= 0.0) ? -log1p(exp(-x)) : x - log1p(exp(x)))
+__global__ void log_sigmoid_kernel_f32(const float* in, float* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        float x = in[idx];
+        out[idx] = (x >= 0.0f) ? -log1pf(expf(-x)) : x - log1pf(expf(x));
+    }
+}
+__global__ void log_sigmoid_kernel_f64(const double* in, double* out, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        double x = in[idx];
+        out[idx] = (x >= 0.0) ? -log1p(exp(-x)) : x - log1p(exp(x));
+    }
+}
+auto log_sigmoid_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (input.dtype() == DType::Float32) {
+        log_sigmoid_kernel_f32<<<grid, block, 0, stream>>>(input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        log_sigmoid_kernel_f64<<<grid, block, 0, stream>>>(input.data<double>(), result.data<double>(), n);
+    } else {
+        auto f32 = input.to(DType::Float32);
+        return log_sigmoid_kernel(f32, stream).to(input.dtype());
+    }
+    CUDA_CHECK(cudaGetLastError());
+    return result;
+}
+Tensor log_sigmoid_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    auto [stream, guard] = get_dispatch_stream(attrs, inputs[0]);
+    return log_sigmoid_kernel(inputs[0], stream);
+}
 
 // Bitwise ops
 __global__ void bitwise_and_i32(const int32_t* a, const int32_t* b, int32_t* out, int64_t n) {

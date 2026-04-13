@@ -3618,6 +3618,345 @@ auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, floa
 // ============================================================================
 // FP16 Saturation Tracking - Host Query Functions
 // ============================================================================
+// RReLU: Randomized Leaky ReLU
+// ============================================================================
+
+__global__ void rrelu_eval_f32(const float* input, float* output, int64_t n, float slope) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        float x = input[idx];
+        output[idx] = (x >= 0.0f) ? x : slope * x;
+    }
+}
+
+__global__ void rrelu_train_f32(const float* input, float* output, int64_t n,
+                                 float lower, float upper, unsigned long long seed) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        float x = input[idx];
+        if (x >= 0.0f) {
+            output[idx] = x;
+        } else {
+            unsigned long long state = seed + static_cast<unsigned long long>(idx) * 6364136223846793005ULL;
+            state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+            float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+            float slope = lower + u * (upper - lower);
+            output[idx] = slope * x;
+        }
+    }
+}
+
+__global__ void rrelu_backward_f32(const float* grad, const float* input, float* output,
+                                    int64_t n, float slope) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = (input[idx] >= 0.0f) ? grad[idx] : slope * grad[idx];
+    }
+}
+
+Tensor rrelu_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    auto stream = get_stream(attrs);
+    float lower = static_cast<float>(attrs.get_float(AttrKey::Lower, 0.125));
+    float upper = static_cast<float>(attrs.get_float(AttrKey::High, 0.333));
+    bool training = attrs.get_bool(AttrKey::Training, false);
+    float mid = (lower + upper) / 2.0f;
+
+    int64_t n = inputs[0].numel();
+    std::vector<int64_t> shape(inputs[0].shape().begin(), inputs[0].shape().end());
+    Tensor result(shape, inputs[0].dtype(), inputs[0].device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+
+    if (inputs[0].dtype() == DType::Float32) {
+        if (training) {
+            unsigned long long seed = static_cast<unsigned long long>(
+                std::chrono::high_resolution_clock::now().time_since_epoch().count());
+            rrelu_train_f32<<<grid, block, 0, stream>>>(
+                inputs[0].data<float>(), result.data<float>(), n, lower, upper, seed);
+        } else {
+            rrelu_eval_f32<<<grid, block, 0, stream>>>(
+                inputs[0].data<float>(), result.data<float>(), n, mid);
+        }
+    } else {
+        auto f32 = inputs[0].to(DType::Float32);
+        std::array<Tensor, 1> tmp = {f32};
+        auto r = rrelu_dispatch(tmp, attrs);
+        return r.to(inputs[0].dtype());
+    }
+    CUDA_CHECK(cudaGetLastError());
+    return result;
+}
+
+Tensor rrelu_backward_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    auto stream = get_stream(attrs);
+    float lower = static_cast<float>(attrs.get_float(AttrKey::Lower, 0.125));
+    float upper = static_cast<float>(attrs.get_float(AttrKey::High, 0.333));
+    float mid = (lower + upper) / 2.0f;
+
+    int64_t n = inputs[0].numel();
+    std::vector<int64_t> shape(inputs[0].shape().begin(), inputs[0].shape().end());
+    Tensor result(shape, inputs[0].dtype(), inputs[0].device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+
+    if (inputs[0].dtype() == DType::Float32) {
+        rrelu_backward_f32<<<grid, block, 0, stream>>>(
+            inputs[0].data<float>(), inputs[1].data<float>(), result.data<float>(), n, mid);
+    } else {
+        auto f32_g = inputs[0].to(DType::Float32);
+        auto f32_in = inputs[1].to(DType::Float32);
+        std::array<Tensor, 2> tmp = {f32_g, f32_in};
+        auto r = rrelu_backward_dispatch(tmp, attrs);
+        return r.to(inputs[0].dtype());
+    }
+    CUDA_CHECK(cudaGetLastError());
+    return result;
+}
+
+// LogSigmoid backward
+__global__ void log_sigmoid_backward_f32(const float* grad, const float* input, float* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        float x = input[idx];
+        float sig_neg_x = (x >= 0.0f) ? expf(-x) / (1.0f + expf(-x)) : 1.0f / (1.0f + expf(x));
+        output[idx] = grad[idx] * sig_neg_x;
+    }
+}
+
+Tensor log_sigmoid_backward_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    auto stream = get_stream(attrs);
+    int64_t n = inputs[0].numel();
+    std::vector<int64_t> shape(inputs[0].shape().begin(), inputs[0].shape().end());
+    Tensor result(shape, inputs[0].dtype(), inputs[0].device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (inputs[0].dtype() == DType::Float32) {
+        log_sigmoid_backward_f32<<<grid, block, 0, stream>>>(
+            inputs[0].data<float>(), inputs[1].data<float>(), result.data<float>(), n);
+    } else {
+        auto f32_g = inputs[0].to(DType::Float32);
+        auto f32_in = inputs[1].to(DType::Float32);
+        std::array<Tensor, 2> tmp = {f32_g, f32_in};
+        auto r = log_sigmoid_backward_dispatch(tmp, attrs);
+        return r.to(inputs[0].dtype());
+    }
+    CUDA_CHECK(cudaGetLastError());
+    return result;
+}
+
+// NaN-aware reductions
+__global__ void count_nonzero_all_f32(const float* input, int64_t* output, int64_t n) {
+    __shared__ int64_t scount;
+    if (threadIdx.x == 0) scount = 0;
+    __syncthreads();
+    int64_t local_count = 0;
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        if (input[idx] != 0.0f) local_count++;
+    }
+    atomicAdd(reinterpret_cast<unsigned long long*>(&scount), static_cast<unsigned long long>(local_count));
+    __syncthreads();
+    if (threadIdx.x == 0) output[0] = scount;
+}
+
+Tensor count_nonzero_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    auto stream = get_stream(attrs);
+    int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+    if (dim < 0 && inputs[0].dtype() == DType::Float32) {
+        int64_t n = inputs[0].numel();
+        Tensor result({1}, DType::Int64, inputs[0].device());
+        count_nonzero_all_f32<<<1, 256, 0, stream>>>(inputs[0].data<float>(), result.data<int64_t>(), n);
+        CUDA_CHECK(cudaGetLastError());
+        return result;
+    }
+    // Fallback to CPU
+    auto dev = inputs[0].device();
+    auto cpu_in = inputs[0].to(Device::cpu());
+    auto f32 = inputs[0].to(DType::Float32);
+    std::array<Tensor, 1> tmp_cnt = {f32};
+    return count_nonzero_dispatch(tmp_cnt, attrs);
+}
+
+__global__ void nansum_all_f32(const float* input, float* output, int64_t n) {
+    __shared__ float ssum;
+    if (threadIdx.x == 0) ssum = 0.0f;
+    __syncthreads();
+    float local_sum = 0.0f;
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        float v = input[idx];
+        if (!isnan(v)) local_sum += v;
+    }
+    atomicAdd(&ssum, local_sum);
+    __syncthreads();
+    if (threadIdx.x == 0) output[0] = ssum;
+}
+
+Tensor nansum_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    auto stream = get_stream(attrs);
+    int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+    if (dim < 0 && inputs[0].dtype() == DType::Float32) {
+        Tensor result({1}, DType::Float32, inputs[0].device());
+        nansum_all_f32<<<1, 256, 0, stream>>>(inputs[0].data<float>(), result.data<float>(), inputs[0].numel());
+        CUDA_CHECK(cudaGetLastError());
+        return result;
+    }
+    auto dev = inputs[0].device();
+    auto cpu_in = inputs[0].to(Device::cpu());
+    auto f32 = inputs[0].to(DType::Float32);
+    std::array<Tensor, 1> tmp_ns = {f32};
+    return nansum_dispatch(tmp_ns, attrs).to(inputs[0].dtype());
+}
+
+Tensor nanmean_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    // Compute nanmean as nansum / count_non_nan on GPU
+    auto stream = get_stream(attrs);
+    auto input = inputs[0];
+    if (input.dtype() != DType::Float32) {
+        input = input.to(DType::Float32);
+    }
+    int64_t n = input.numel();
+    Tensor sum_result({1}, DType::Float32, input.device());
+    nansum_all_f32<<<1, 256, 0, stream>>>(input.data<float>(), sum_result.data<float>(), n);
+
+    // Count non-NaN elements using count_nonzero on a mask
+    // Simpler: compute on CPU since nanmean is not perf-critical
+    auto cpu_in = inputs[0].to(Device::cpu());
+    int64_t count = 0;
+    if (cpu_in.dtype() == DType::Float32) {
+        const float* data = cpu_in.data<float>();
+        for (int64_t i = 0; i < n; i++) {
+            if (!std::isnan(data[i])) count++;
+        }
+    } else {
+        auto f32_cpu = cpu_in.to(DType::Float32);
+        const float* data = f32_cpu.data<float>();
+        for (int64_t i = 0; i < n; i++) {
+            if (!std::isnan(data[i])) count++;
+        }
+    }
+
+    // Divide sum by count on CPU
+    auto cpu_sum = sum_result.to(Device::cpu());
+    float s = *cpu_sum.data<float>();
+    float mean_val = (count > 0) ? s / static_cast<float>(count) : 0.0f;
+    Tensor result({1}, inputs[0].dtype(), inputs[0].device());
+    auto cpu_result = result.to(Device::cpu());
+    if (cpu_result.dtype() == DType::Float32) {
+        *cpu_result.data<float>() = mean_val;
+    }
+    CUDA_CHECK(cudaGetLastError());
+    return cpu_result.to(inputs[0].device());
+}
+
+// IndexAdd, IndexCopy, IndexFill CUDA kernels
+__global__ void index_add_f32(float* output, const float* source, const int64_t* index,
+                               int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = outer * idx_n * inner;
+    if (tid >= total) return;
+    int64_t j = tid % inner;
+    int64_t k = (tid / inner) % idx_n;
+    int64_t o = tid / (inner * idx_n);
+    atomicAdd(&output[(o * dim_size + index[k]) * inner + j],
+              source[(o * idx_n + k) * inner + j]);
+}
+
+__global__ void index_copy_f32(float* output, const float* source, const int64_t* index,
+                                int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = outer * idx_n * inner;
+    if (tid >= total) return;
+    int64_t j = tid % inner;
+    int64_t k = (tid / inner) % idx_n;
+    int64_t o = tid / (inner * idx_n);
+    output[(o * dim_size + index[k]) * inner + j] = source[(o * idx_n + k) * inner + j];
+}
+
+__global__ void index_fill_f32(float* output, const int64_t* index, float value,
+                                int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = outer * idx_n * inner;
+    if (tid >= total) return;
+    int64_t j = tid % inner;
+    int64_t k = (tid / inner) % idx_n;
+    int64_t o = tid / (inner * idx_n);
+    output[(o * dim_size + index[k]) * inner + j] = value;
+}
+
+Tensor index_add_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    auto stream = get_stream(attrs);
+    int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+    auto output = inputs[0].clone();
+    auto shape = output.shape();
+    int64_t ndim = shape.size();
+    if (dim < 0) dim += ndim;
+    int64_t dim_size = shape[dim], idx_n = inputs[1].numel();
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < dim; d++) outer *= shape[d];
+    for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
+    int64_t total = outer * idx_n * inner;
+    if (total > 0 && output.dtype() == DType::Float32) {
+        dim3 grid((total + 255) / 256), block(256);
+        index_add_f32<<<grid, block, 0, stream>>>(output.data<float>(), inputs[2].data<float>(), inputs[1].data<int64_t>(), outer, dim_size, idx_n, inner);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (total > 0) {
+        auto dev = output.device();
+        auto f32_out = inputs[0].to(DType::Float32);
+        auto f32_src = inputs[2].to(DType::Float32);
+        std::array<Tensor, 3> f32_inputs = {f32_out, inputs[1], f32_src};
+        return index_add_dispatch(f32_inputs, attrs).to(inputs[0].dtype());
+    }
+    return output;
+}
+
+Tensor index_copy_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    auto stream = get_stream(attrs);
+    int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+    auto output = inputs[0].clone();
+    auto shape = output.shape();
+    int64_t ndim = shape.size();
+    if (dim < 0) dim += ndim;
+    int64_t dim_size = shape[dim], idx_n = inputs[1].numel();
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < dim; d++) outer *= shape[d];
+    for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
+    int64_t total = outer * idx_n * inner;
+    if (total > 0 && output.dtype() == DType::Float32) {
+        dim3 grid((total + 255) / 256), block(256);
+        index_copy_f32<<<grid, block, 0, stream>>>(output.data<float>(), inputs[2].data<float>(), inputs[1].data<int64_t>(), outer, dim_size, idx_n, inner);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (total > 0) {
+        auto dev = output.device();
+        auto f32_out = inputs[0].to(DType::Float32);
+        auto f32_src = inputs[2].to(DType::Float32);
+        std::array<Tensor, 3> f32_inputs = {f32_out, inputs[1], f32_src};
+        return index_copy_dispatch(f32_inputs, attrs).to(inputs[0].dtype());
+    }
+    return output;
+}
+
+Tensor index_fill_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    auto stream = get_stream(attrs);
+    int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+    double value = attrs.get_float(AttrKey::Value, 0.0);
+    auto output = inputs[0].clone();
+    auto shape = output.shape();
+    int64_t ndim = shape.size();
+    if (dim < 0) dim += ndim;
+    int64_t dim_size = shape[dim], idx_n = inputs[1].numel();
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < dim; d++) outer *= shape[d];
+    for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
+    int64_t total = outer * idx_n * inner;
+    if (total > 0 && output.dtype() == DType::Float32) {
+        dim3 grid((total + 255) / 256), block(256);
+        index_fill_f32<<<grid, block, 0, stream>>>(output.data<float>(), inputs[1].data<int64_t>(), static_cast<float>(value), outer, dim_size, idx_n, inner);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (total > 0) {
+        auto dev = output.device();
+        auto f32_out = inputs[0].to(DType::Float32);
+        std::array<Tensor, 2> f32_inputs = {f32_out, inputs[1]};
+        return index_fill_dispatch(f32_inputs, attrs).to(inputs[0].dtype());
+    }
+    return output;
+}
+
+// ============================================================================
 #ifdef TENZOR_TRACK_SATURATION
 uint32_t get_and_reset_fp16_saturation_count() {
     uint32_t count = 0;

@@ -18,6 +18,7 @@
 #include <limits>
 #include <complex>
 #include <functional>
+#include <random>
 
 // SIMD intrinsics
 #if defined(__AVX512F__)
@@ -5959,7 +5960,7 @@ auto count_nonzero_kernel(const Tensor& input, int64_t dim) -> Tensor {
             const scalar_t* data = input.data<scalar_t>();
             _Pragma("omp parallel for reduction(+:count) if(n > 10000)")
             for (int64_t i = 0; i < n; i++) {
-                if (data[i] != scalar_t(0)) count++;
+                if (data[i] != static_cast<scalar_t>(0.0f)) count++;
             }
         });
         auto result = Tensor({1}, DType::Int64, input.device());
@@ -5996,7 +5997,7 @@ auto count_nonzero_kernel(const Tensor& input, int64_t dim) -> Tensor {
             int64_t count = 0;
             for (int64_t r = 0; r < reduce_size; r++) {
                 int64_t src_idx = (o * reduce_size + r) * inner + i_inner;
-                if (in_data[src_idx] != scalar_t(0)) count++;
+                if (in_data[src_idx] != static_cast<scalar_t>(0.0f)) count++;
             }
             out_data[idx] = count;
         }
@@ -6212,7 +6213,13 @@ auto index_add_kernel(const Tensor& input, int64_t dim, const Tensor& index, con
 
     const int64_t* idx_data = index.data<int64_t>();
 
-    TENZOR_DISPATCH_ALL_TYPES(output.dtype(), "index_add", [&]() {
+    if (output.dtype() == DType::Float16 || output.dtype() == DType::BFloat16) {
+        auto f32_out = output.to(DType::Float32);
+        auto f32_src = source.to(DType::Float32);
+        auto r = index_add_kernel(f32_out, dim, index, f32_src);
+        return r.to(output.dtype());
+    }
+    TENZOR_DISPATCH_FLOATING_TYPES(output.dtype(), "index_add", [&]() {
         scalar_t* out_data = output.data<scalar_t>();
         const scalar_t* src_data = source.data<scalar_t>();
         for (int64_t o = 0; o < outer; o++) {
@@ -6242,7 +6249,13 @@ auto index_copy_kernel(const Tensor& input, int64_t dim, const Tensor& index, co
 
     const int64_t* idx_data = index.data<int64_t>();
 
-    TENZOR_DISPATCH_ALL_TYPES(output.dtype(), "index_copy", [&]() {
+    if (output.dtype() == DType::Float16 || output.dtype() == DType::BFloat16) {
+        auto f32_out = output.to(DType::Float32);
+        auto f32_src = source.to(DType::Float32);
+        auto r = index_copy_kernel(f32_out, dim, index, f32_src);
+        return r.to(output.dtype());
+    }
+    TENZOR_DISPATCH_FLOATING_TYPES(output.dtype(), "index_copy", [&]() {
         scalar_t* out_data = output.data<scalar_t>();
         const scalar_t* src_data = source.data<scalar_t>();
         for (int64_t o = 0; o < outer; o++) {
@@ -6272,9 +6285,14 @@ auto index_fill_kernel(const Tensor& input, int64_t dim, const Tensor& index, do
 
     const int64_t* idx_data = index.data<int64_t>();
 
-    TENZOR_DISPATCH_ALL_TYPES(output.dtype(), "index_fill", [&]() {
+    if (output.dtype() == DType::Float16 || output.dtype() == DType::BFloat16) {
+        auto f32_out = output.to(DType::Float32);
+        auto r = index_fill_kernel(f32_out, dim, index, value);
+        return r.to(output.dtype());
+    }
+    TENZOR_DISPATCH_FLOATING_TYPES(output.dtype(), "index_fill", [&]() {
         scalar_t* out_data = output.data<scalar_t>();
-        scalar_t fill_val = static_cast<scalar_t>(value);
+        scalar_t fill_val = static_cast<scalar_t>(static_cast<float>(value));
         for (int64_t o = 0; o < outer; o++) {
             for (int64_t k = 0; k < idx_n; k++) {
                 int64_t dst_idx = idx_data[k];

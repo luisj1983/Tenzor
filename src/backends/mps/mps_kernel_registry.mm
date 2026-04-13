@@ -304,19 +304,19 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     // Reductions — native Metal kernels (no CPU roundtrip for contiguous last-dim reductions)
     table.register_kernel(OpId::Sum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t dim = attrs.get_int(AttrKey::Dim, -1);
-        bool keepdim = attrs.get_bool(AttrKey::KeepDim, false);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return std::vector<Tensor>{mps_sum_kernel(inputs[0], dim, keepdim)};
     });
 
     table.register_kernel(OpId::Mean, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t dim = attrs.get_int(AttrKey::Dim, -1);
-        bool keepdim = attrs.get_bool(AttrKey::KeepDim, false);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         return std::vector<Tensor>{mps_mean_kernel(inputs[0], dim, keepdim)};
     });
 
     table.register_kernel(OpId::Max, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t dim = attrs.get_int(AttrKey::Dim, -1);
-        bool keepdim = attrs.get_bool(AttrKey::KeepDim, false);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
         Tensor indices;
         auto values = mps_max_kernel(inputs[0], dim, keepdim, indices);
         return std::vector<Tensor>{values, indices};
@@ -444,20 +444,22 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
 
     // Fused optimizer steps — native Metal kernels (no CPU roundtrip)
     table.register_kernel(OpId::FusedSGDStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float lr = static_cast<float>(attrs.get_float(AttrKey::LearningRate, 0.01));
+        float lr = static_cast<float>(attrs.get_float(AttrKey::Lr, 0.01));
         float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.0));
         float wd = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
         return mps_fused_sgd_step(inputs[0], inputs[1], inputs[2], lr, momentum, wd);
     });
 
     table.register_kernel(OpId::FusedAdamStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float lr = static_cast<float>(attrs.get_float(AttrKey::LearningRate, 0.001));
+        float lr = static_cast<float>(attrs.get_float(AttrKey::Lr, 0.001));
         float beta1 = static_cast<float>(attrs.get_float(AttrKey::Beta1, 0.9));
         float beta2 = static_cast<float>(attrs.get_float(AttrKey::Beta2, 0.999));
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-8));
-        float bc1 = static_cast<float>(attrs.get_float(AttrKey::BiasCorrection1, 1.0));
-        float bc2 = static_cast<float>(attrs.get_float(AttrKey::BiasCorrection2, 1.0));
+        int64_t step = attrs.get_int(AttrKey::Step, 1);
         float wd = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
+        // Compute bias corrections from step count
+        float bc1 = 1.0f - std::pow(beta1, static_cast<float>(step));
+        float bc2 = 1.0f - std::pow(beta2, static_cast<float>(step));
         return mps_fused_adam_step(inputs[0], inputs[1], inputs[2], inputs[3],
                                     lr, beta1, beta2, eps, bc1, bc2, wd);
     });

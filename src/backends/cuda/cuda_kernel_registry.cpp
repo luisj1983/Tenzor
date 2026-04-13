@@ -602,6 +602,17 @@ namespace cuda {
     Tensor bitwise_not_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor bitwise_left_shift_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor bitwise_right_shift_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    // activations.cu
+    Tensor rrelu_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor rrelu_backward_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor log_sigmoid_backward_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    // Reductions + scatter (activations.cu)
+    Tensor count_nonzero_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor nansum_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor nanmean_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor index_add_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor index_copy_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor index_fill_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
 
     // Trigonometric operations
     Tensor sin_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
@@ -3371,6 +3382,28 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::BitwiseNot, cuda::bitwise_not_dispatch);
     table.register_single_output_kernel(OpId::BitwiseLeftShift, cuda::bitwise_left_shift_dispatch);
     table.register_single_output_kernel(OpId::BitwiseRightShift, cuda::bitwise_right_shift_dispatch);
+
+    // RReLU + LogSigmoid backward
+    table.register_single_output_kernel(OpId::RReLU, cuda::rrelu_dispatch);
+    table.register_single_output_kernel(OpId::RReLUBackward, cuda::rrelu_backward_dispatch);
+    table.register_single_output_kernel(OpId::LogSigmoidBackward, cuda::log_sigmoid_backward_dispatch);
+
+    // NaN-aware reductions
+    table.register_single_output_kernel(OpId::CountNonzero, cuda::count_nonzero_dispatch);
+    table.register_single_output_kernel(OpId::Nansum, cuda::nansum_dispatch);
+    table.register_single_output_kernel(OpId::Nanmean, cuda::nanmean_dispatch);
+    // Aminmax: multi-output, route through CPU for now
+    table.register_kernel(OpId::Aminmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto dev = inputs[0].device();
+        auto cpu_in = inputs[0].to(Device::cpu());
+        auto results = dispatch(OpId::Aminmax, std::vector<Tensor>{cpu_in}, attrs);
+        return {results[0].to(dev), results[1].to(dev)};
+    });
+
+    // Scatter variants
+    table.register_single_output_kernel(OpId::IndexAdd, cuda::index_add_dispatch);
+    table.register_single_output_kernel(OpId::IndexCopy, cuda::index_copy_dispatch);
+    table.register_single_output_kernel(OpId::IndexFill, cuda::index_fill_dispatch);
 }
 
 } // namespace tenzor

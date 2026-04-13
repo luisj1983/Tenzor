@@ -1,4 +1,5 @@
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/math.hpp"
 #include "tenzor/backend/dispatch.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/loader.hpp"
@@ -931,8 +932,10 @@ auto bernoulli(const Tensor& probs) -> Tensor {
 auto logspace(float start, float end, int64_t steps, double base,
               DType dtype, Device device) -> Tensor {
     auto exponents = tenzor::linspace(start, end, steps, dtype, device);
-    auto base_tensor = tenzor::full({1}, static_cast<float>(base), dtype, device);
-    return tenzor::pow(base_tensor, exponents);
+    // base^exponents = exp(log(base) * exponents)
+    float log_base = static_cast<float>(std::log(base));
+    auto scaled = tenzor::mul(exponents, tenzor::full({1}, log_base, dtype, device));
+    return tenzor::exp(scaled);
 }
 
 } // namespace tenzor

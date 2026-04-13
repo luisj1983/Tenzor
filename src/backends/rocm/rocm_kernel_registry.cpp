@@ -3189,8 +3189,14 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // ========================================================================
     // New Phase 4 ops
     // ========================================================================
-    ROCM_SINGLE_UNARY_NATIVE(Frac, frac_kernel);
-    ROCM_SINGLE_UNARY_NATIVE(LogSigmoid, log_sigmoid_kernel);
+    table.register_single_output_kernel(OpId::Frac,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            return rocm::frac_kernel(inputs[0], get_hip_stream(attrs));
+        });
+    table.register_single_output_kernel(OpId::LogSigmoid,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            return rocm::log_sigmoid_kernel(inputs[0], get_hip_stream(attrs));
+        });
 
     table.register_single_output_kernel(OpId::Heaviside,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -3211,11 +3217,39 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         return rocm::bitwise_or_kernel(inputs[0], inputs[1], get_hip_stream(attrs)); });
     table.register_single_output_kernel(OpId::BitwiseXor, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         return rocm::bitwise_xor_kernel(inputs[0], inputs[1], get_hip_stream(attrs)); });
-    ROCM_SINGLE_UNARY_NATIVE(BitwiseNot, bitwise_not_kernel);
+    table.register_single_output_kernel(OpId::BitwiseNot,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            return rocm::bitwise_not_kernel(inputs[0], get_hip_stream(attrs));
+        });
     table.register_single_output_kernel(OpId::BitwiseLeftShift, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         return rocm::bitwise_left_shift_kernel(inputs[0], inputs[1], get_hip_stream(attrs)); });
     table.register_single_output_kernel(OpId::BitwiseRightShift, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         return rocm::bitwise_right_shift_kernel(inputs[0], inputs[1], get_hip_stream(attrs)); });
+
+    // RReLU, LogSigmoidBackward, NaN reductions, scatter variants — CPU dispatch
+    // Each gets an explicit non-capturing dispatch function via template.
+#define ROCM_CPU_ROUNDTRIP(OP_ID) \
+    table.register_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> { \
+        auto dev = inputs[0].device(); \
+        std::vector<Tensor> cpu_inputs; \
+        for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu())); \
+        auto results = dispatch(OpId::OP_ID, cpu_inputs, attrs); \
+        std::vector<Tensor> gpu_results; \
+        for (auto& r : results) gpu_results.push_back(r.to(dev)); \
+        return gpu_results; \
+    })
+
+    ROCM_CPU_ROUNDTRIP(RReLU);
+    ROCM_CPU_ROUNDTRIP(RReLUBackward);
+    ROCM_CPU_ROUNDTRIP(LogSigmoidBackward);
+    ROCM_CPU_ROUNDTRIP(CountNonzero);
+    ROCM_CPU_ROUNDTRIP(Nansum);
+    ROCM_CPU_ROUNDTRIP(Nanmean);
+    ROCM_CPU_ROUNDTRIP(Aminmax);
+    ROCM_CPU_ROUNDTRIP(IndexAdd);
+    ROCM_CPU_ROUNDTRIP(IndexCopy);
+    ROCM_CPU_ROUNDTRIP(IndexFill);
+#undef ROCM_CPU_ROUNDTRIP
 
     std::cout << "ROCm dispatch table initialized with O(1) lookup" << std::endl;
 }

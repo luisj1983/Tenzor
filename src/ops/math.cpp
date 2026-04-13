@@ -646,12 +646,14 @@ auto isclose(const Tensor& a, const Tensor& b, double rtol, double atol) -> Tens
 
 auto allclose(const Tensor& a, const Tensor& b, double rtol, double atol) -> bool {
     auto close = isclose(a, b, rtol, atol);
-    auto all_result = dispatch<OpId::All>({close})[0];
+    std::array<Tensor, 1> inputs = {close};
+    auto all_result = dispatch<OpId::All>(inputs)[0];
     auto cpu_result = all_result.to(Device::cpu());
+    // Read scalar — use data_ptr to avoid template parse issues
     if (cpu_result.dtype() == DType::Bool) {
-        return *cpu_result.data<bool>();
+        return *static_cast<const bool*>(cpu_result.data_ptr());
     }
-    return *cpu_result.data<float>() != 0.0f;
+    return *static_cast<const float*>(cpu_result.data_ptr()) != 0.0f;
 }
 
 } // namespace tenzor

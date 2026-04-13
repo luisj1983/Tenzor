@@ -2388,11 +2388,15 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::LogSigmoid, [](std::span<const Tensor> inputs, const OpAttributes&) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchUnaryOp("log_sigmoid", inputs[0])};
     });
-    table.register_kernel(OpId::NanToNum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float nan_v = static_cast<float>(attrs.get_float(AttrKey::NanValue, 0.0));
-        float posinf = static_cast<float>(attrs.get_float(AttrKey::PosInfValue, std::numeric_limits<double>::max()));
-        float neginf = static_cast<float>(attrs.get_float(AttrKey::NegInfValue, std::numeric_limits<double>::lowest()));
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchNanToNum(inputs[0], nan_v, posinf, neginf)};
+    // NanToNum: CPU roundtrip (needs custom push constants not yet in dispatchUnaryOp)
+    table.register_kernel(OpId::NanToNum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto dev = inputs[0].device();
+        std::vector<Tensor> cpu_inputs;
+        for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
+        auto results = dispatch(OpId::NanToNum, cpu_inputs, attrs);
+        std::vector<Tensor> gpu_results;
+        for (auto& r : results) gpu_results.push_back(r.to(dev));
+        return gpu_results;
     });
 
     // Bitwise ops (int32 only on Vulkan)
@@ -2408,6 +2412,33 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::BitwiseNot, [](std::span<const Tensor> inputs, const OpAttributes&) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchUnaryOp("bitwise_not", inputs[0])};
     });
+
+    // RReLU, LogSigmoidBackward, NaN reductions, scatter variants — CPU dispatch
+#define VK_CPU_ROUNDTRIP(OP_ID) \
+    table.register_kernel(OpId::OP_ID, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> { \
+        auto dev = inputs[0].device(); \
+        std::vector<Tensor> cpu_inputs; \
+        for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu())); \
+        auto results = dispatch(OpId::OP_ID, cpu_inputs, attrs); \
+        std::vector<Tensor> gpu_results; \
+        for (auto& r : results) gpu_results.push_back(r.to(dev)); \
+        return gpu_results; \
+    })
+
+    VK_CPU_ROUNDTRIP(NanToNum);
+    VK_CPU_ROUNDTRIP(RReLU);
+    VK_CPU_ROUNDTRIP(RReLUBackward);
+    VK_CPU_ROUNDTRIP(LogSigmoidBackward);
+    VK_CPU_ROUNDTRIP(CountNonzero);
+    VK_CPU_ROUNDTRIP(Nansum);
+    VK_CPU_ROUNDTRIP(Nanmean);
+    VK_CPU_ROUNDTRIP(Aminmax);
+    VK_CPU_ROUNDTRIP(IndexAdd);
+    VK_CPU_ROUNDTRIP(IndexCopy);
+    VK_CPU_ROUNDTRIP(IndexFill);
+    VK_CPU_ROUNDTRIP(BitwiseLeftShift);
+    VK_CPU_ROUNDTRIP(BitwiseRightShift);
+#undef VK_CPU_ROUNDTRIP
 
     std::cout << "Vulkan dispatch table initialized with O(1) lookup" << std::endl;
 }

@@ -706,14 +706,14 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::RReLU,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             float lower = static_cast<float>(attrs.get_float(AttrKey::Lower, 0.125));
-            float upper = static_cast<float>(attrs.get_float(AttrKey::Upper, 0.333));
+            float upper = static_cast<float>(attrs.get_float(AttrKey::High, 0.333));
             bool training = attrs.get_bool(AttrKey::Training, false);
             return cpu::rrelu_kernel(inputs[0], lower, upper, training);
         });
     table.register_single_output_kernel(OpId::RReLUBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             float lower = static_cast<float>(attrs.get_float(AttrKey::Lower, 0.125));
-            float upper = static_cast<float>(attrs.get_float(AttrKey::Upper, 0.333));
+            float upper = static_cast<float>(attrs.get_float(AttrKey::High, 0.333));
             return cpu::rrelu_backward_kernel(inputs[0], inputs[1], lower, upper);
         });
 
@@ -734,19 +734,19 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::Nansum,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t dim = attrs.get_int(AttrKey::Dim, -1);
-            bool keepdim = attrs.get_bool(AttrKey::KeepDim, false);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             return cpu::nansum_kernel(inputs[0], dim, keepdim);
         });
     table.register_single_output_kernel(OpId::Nanmean,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t dim = attrs.get_int(AttrKey::Dim, -1);
-            bool keepdim = attrs.get_bool(AttrKey::KeepDim, false);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             return cpu::nanmean_kernel(inputs[0], dim, keepdim);
         });
     table.register_kernel(OpId::Aminmax,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             int64_t dim = attrs.get_int(AttrKey::Dim, -1);
-            bool keepdim = attrs.get_bool(AttrKey::KeepDim, false);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
             auto [mn, mx] = cpu::aminmax_kernel(inputs[0], dim, keepdim);
             return {mn, mx};
         });

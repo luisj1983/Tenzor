@@ -25,6 +25,7 @@
 #include <tenzor/ops/reduction.hpp>
 #include <tenzor/ops/math.hpp>
 #include <tenzor/ops/transform.hpp>
+#include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/fp8_scaling.hpp>
 #include <tenzor/backend/loader.hpp>
 #include <tenzor/backend/backend.hpp>
@@ -2669,6 +2670,88 @@ Example::
          }, "Linear interpolation",
          py::arg("start"), py::arg("end"), py::arg("weight"),
          py::call_guard<py::gil_scoped_release>());
+    // New Phase 4 ops
+    m.def("frac", [](const tenzor::Tensor& t) { return tenzor::frac(t); },
+         "Fractional part: x - floor(x)", py::call_guard<py::gil_scoped_release>());
+    m.def("heaviside", [](const tenzor::Tensor& input, const tenzor::Tensor& values) {
+         return tenzor::heaviside(input, values);
+         }, "Heaviside step function", py::arg("input"), py::arg("values"),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("nan_to_num", [](const tenzor::Tensor& t, double nan, double posinf, double neginf) {
+         return tenzor::nan_to_num(t, nan, posinf, neginf);
+         }, "Replace NaN/Inf with specified values",
+         py::arg("input"), py::arg("nan") = 0.0,
+         py::arg("posinf") = std::numeric_limits<double>::max(),
+         py::arg("neginf") = std::numeric_limits<double>::lowest(),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("isclose", [](const tenzor::Tensor& a, const tenzor::Tensor& b, double rtol, double atol) {
+         return tenzor::isclose(a, b, rtol, atol);
+         }, "Element-wise closeness check",
+         py::arg("a"), py::arg("b"), py::arg("rtol") = 1e-5, py::arg("atol") = 1e-8,
+         py::call_guard<py::gil_scoped_release>());
+    m.def("allclose", [](const tenzor::Tensor& a, const tenzor::Tensor& b, double rtol, double atol) {
+         return tenzor::allclose(a, b, rtol, atol);
+         }, "Check if all elements are close",
+         py::arg("a"), py::arg("b"), py::arg("rtol") = 1e-5, py::arg("atol") = 1e-8,
+         py::call_guard<py::gil_scoped_release>());
+    m.def("movedim", [](const tenzor::Tensor& t, std::vector<int64_t> src, std::vector<int64_t> dst) {
+         return tenzor::movedim(t, src, dst);
+         }, "Move dimensions to new positions",
+         py::arg("input"), py::arg("source"), py::arg("destination"),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("swapaxes", [](const tenzor::Tensor& t, int64_t dim0, int64_t dim1) {
+         return tenzor::swapaxes(t, dim0, dim1);
+         }, "Swap two dimensions", py::arg("input"), py::arg("dim0"), py::arg("dim1"),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("logspace", [](float start, float end, int64_t steps, double base,
+                          tenzor::DType dtype, tenzor::Device device) {
+         return tenzor::logspace(start, end, steps, base, dtype, device);
+         }, "Logarithmically spaced values",
+         py::arg("start"), py::arg("end"), py::arg("steps"), py::arg("base") = 10.0,
+         py::arg("dtype") = tenzor::DType::Float32, py::arg("device") = tenzor::Device::cpu(),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("count_nonzero", [](const tenzor::Tensor& t, std::optional<int64_t> dim) {
+         return tenzor::count_nonzero(t, dim);
+         }, "Count nonzero elements", py::arg("input"), py::arg("dim") = std::nullopt,
+         py::call_guard<py::gil_scoped_release>());
+    m.def("nansum", [](const tenzor::Tensor& t, std::optional<int64_t> dim, bool keepdim) {
+         return tenzor::nansum(t, dim, keepdim);
+         }, "Sum ignoring NaN", py::arg("input"), py::arg("dim") = std::nullopt,
+         py::arg("keepdim") = false, py::call_guard<py::gil_scoped_release>());
+    m.def("nanmean", [](const tenzor::Tensor& t, std::optional<int64_t> dim, bool keepdim) {
+         return tenzor::nanmean(t, dim, keepdim);
+         }, "Mean ignoring NaN", py::arg("input"), py::arg("dim") = std::nullopt,
+         py::arg("keepdim") = false, py::call_guard<py::gil_scoped_release>());
+    m.def("aminmax", [](const tenzor::Tensor& t, std::optional<int64_t> dim, bool keepdim) {
+         return tenzor::aminmax(t, dim, keepdim);
+         }, "Simultaneous min and max", py::arg("input"), py::arg("dim") = std::nullopt,
+         py::arg("keepdim") = false, py::call_guard<py::gil_scoped_release>());
+    m.def("index_add", [](const tenzor::Tensor& t, int64_t dim, const tenzor::Tensor& idx, const tenzor::Tensor& src) {
+         return tenzor::index_add(t, dim, idx, src);
+         }, "Accumulate at index positions", py::arg("input"), py::arg("dim"), py::arg("index"), py::arg("source"),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("index_copy", [](const tenzor::Tensor& t, int64_t dim, const tenzor::Tensor& idx, const tenzor::Tensor& src) {
+         return tenzor::index_copy(t, dim, idx, src);
+         }, "Copy at index positions", py::arg("input"), py::arg("dim"), py::arg("index"), py::arg("source"),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("index_fill", [](const tenzor::Tensor& t, int64_t dim, const tenzor::Tensor& idx, float value) {
+         return tenzor::index_fill(t, dim, idx, value);
+         }, "Fill at index positions", py::arg("input"), py::arg("dim"), py::arg("index"), py::arg("value"),
+         py::call_guard<py::gil_scoped_release>());
+    // Bitwise ops
+    m.def("bitwise_and", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::bitwise_and(a, b); },
+         "Bitwise AND", py::arg("a"), py::arg("b"), py::call_guard<py::gil_scoped_release>());
+    m.def("bitwise_or", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::bitwise_or(a, b); },
+         "Bitwise OR", py::arg("a"), py::arg("b"), py::call_guard<py::gil_scoped_release>());
+    m.def("bitwise_xor", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::bitwise_xor(a, b); },
+         "Bitwise XOR", py::arg("a"), py::arg("b"), py::call_guard<py::gil_scoped_release>());
+    m.def("bitwise_not", [](const tenzor::Tensor& t) { return tenzor::bitwise_not(t); },
+         "Bitwise NOT", py::call_guard<py::gil_scoped_release>());
+    m.def("bitwise_left_shift", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::bitwise_left_shift(a, b); },
+         "Bitwise left shift", py::arg("input"), py::arg("shift"), py::call_guard<py::gil_scoped_release>());
+    m.def("bitwise_right_shift", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::bitwise_right_shift(a, b); },
+         "Bitwise right shift", py::arg("input"), py::arg("shift"), py::call_guard<py::gil_scoped_release>());
+
     m.def("logical_and", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
          return tenzor::logical_and(a, b);
          }, "Element-wise logical AND", py::arg("a"), py::arg("b"),

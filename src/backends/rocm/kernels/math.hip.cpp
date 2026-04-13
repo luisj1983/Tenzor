@@ -5656,11 +5656,65 @@ auto betainc_kernel(const Tensor& a, const Tensor& b, const Tensor& x, hipStream
 // New Phase 4 ops
 // ============================================================================
 
-DEFINE_ROCM_SPECIAL_UNARY(frac, x - floorf(x), x - floor(x))
+__global__ void frac_kernel_f32(const float* in, float* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] - floorf(in[idx]); }
+}
+__global__ void frac_kernel_f64(const double* in, double* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] - floor(in[idx]); }
+}
+auto frac_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(frac_kernel_f32, grid, block, 0, stream, input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(frac_kernel_f64, grid, block, 0, stream, input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        auto f32 = input.to(DType::Float32);
+        return frac_kernel(f32, stream).to(DType::Float16);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto f32 = input.to(DType::Float32);
+        return frac_kernel(f32, stream).to(DType::BFloat16);
+    } else { throw std::runtime_error("frac: unsupported dtype"); }
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
 
-DEFINE_ROCM_SPECIAL_UNARY(log_sigmoid,
-    (x >= 0.0f) ? -log1pf(expf(-x)) : x - log1pf(expf(x)),
-    (x >= 0.0) ? -log1p(exp(-x)) : x - log1p(exp(x)))
+__global__ void log_sigmoid_kernel_f32(const float* in, float* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float x = in[idx];
+        out[idx] = (x >= 0.0f) ? -log1pf(expf(-x)) : x - log1pf(expf(x));
+    }
+}
+__global__ void log_sigmoid_kernel_f64(const double* in, double* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        double x = in[idx];
+        out[idx] = (x >= 0.0) ? -log1p(exp(-x)) : x - log1p(exp(x));
+    }
+}
+auto log_sigmoid_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(log_sigmoid_kernel_f32, grid, block, 0, stream, input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(log_sigmoid_kernel_f64, grid, block, 0, stream, input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        auto f32 = input.to(DType::Float32);
+        return log_sigmoid_kernel(f32, stream).to(DType::Float16);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto f32 = input.to(DType::Float32);
+        return log_sigmoid_kernel(f32, stream).to(DType::BFloat16);
+    } else { throw std::runtime_error("log_sigmoid: unsupported dtype"); }
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
 
 __global__ void heaviside_kernel_f32(const float* input, const float* values, float* out, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {

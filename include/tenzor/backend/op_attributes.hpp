@@ -247,6 +247,14 @@ enum class AttrKey : uint16_t {
     // Dispatch-level flags
     IgnoreAliasCheck,  // Allow dispatch_inplace() target to alias inputs (e.g. a.add_(a.view(...)))
 
+    // NaN handling parameters
+    NanValue,          // nan_to_num: replacement for NaN
+    PosInfValue,       // nan_to_num: replacement for +Inf
+    NegInfValue,       // nan_to_num: replacement for -Inf
+
+    // Activation parameters
+    Lower,             // RReLU lower bound (upper uses High)
+
     // Sentinel
     _Count
 };
