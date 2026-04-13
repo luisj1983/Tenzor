@@ -4,8 +4,10 @@
 #include <stdexcept>
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <numeric>
 #include <vector>
+#include "tenzor/ops/creation.hpp"
 
 #ifdef TENZOR_HAS_ONEDPL
 #include <oneapi/dpl/algorithm>
@@ -1806,6 +1808,179 @@ auto scatter_reduce_kernel(const Tensor& input, int64_t dim, const Tensor& index
     }
 
     return output;
+}
+
+// ============================================================================
+// SYCL kernel class declarations for new ops
+// ============================================================================
+class TakeAlongDimKernelF32;
+class TakeAlongDimKernelF64;
+class TakeAlongDimKernelI32;
+class TakeAlongDimKernelI64;
+class MaskedScatterKernelF32;
+class MaskedScatterKernelF64;
+
+// ============================================================================
+// take_along_dim kernel (SYCL)
+// ============================================================================
+
+auto take_along_dim_kernel(const Tensor& input, const Tensor& indices, int64_t dim,
+                           sycl::queue& queue) -> Tensor {
+    auto in_shape = input.shape();
+    auto idx_shape = indices.shape();
+    int64_t ndim = in_shape.size();
+    if (dim < 0) dim += ndim;
+
+    Tensor output(std::vector<int64_t>(idx_shape.begin(), idx_shape.end()),
+                  input.dtype(), input.device());
+    int64_t numel = indices.numel();
+    if (numel == 0) return output;
+
+    int64_t idx_dim_size = idx_shape[dim];
+    int64_t in_dim_size = in_shape[dim];
+    int64_t inner_size = 1;
+    for (int64_t d = dim + 1; d < ndim; ++d) inner_size *= idx_shape[d];
+
+    const int64_t* idx_ptr = indices.data<int64_t>();
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_ptr = input.data<float>();
+        float* out_ptr = output.data<float>();
+        queue.parallel_for<TakeAlongDimKernelF32>(sycl::range<1>(numel), [=](sycl::id<1> tid) {
+            int64_t i = static_cast<int64_t>(tid);
+            int64_t outer = i / (idx_dim_size * inner_size);
+            int64_t rem = i % (idx_dim_size * inner_size);
+            int64_t inner = rem % inner_size;
+            int64_t src_idx = idx_ptr[i];
+            if (src_idx < 0) src_idx += in_dim_size;
+            int64_t in_offset = outer * (in_dim_size * inner_size) + src_idx * inner_size + inner;
+            out_ptr[i] = in_ptr[in_offset];
+        }).wait();
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_ptr = input.data<double>();
+        double* out_ptr = output.data<double>();
+        queue.parallel_for<TakeAlongDimKernelF64>(sycl::range<1>(numel), [=](sycl::id<1> tid) {
+            int64_t i = static_cast<int64_t>(tid);
+            int64_t outer = i / (idx_dim_size * inner_size);
+            int64_t rem = i % (idx_dim_size * inner_size);
+            int64_t inner = rem % inner_size;
+            int64_t src_idx = idx_ptr[i];
+            if (src_idx < 0) src_idx += in_dim_size;
+            int64_t in_offset = outer * (in_dim_size * inner_size) + src_idx * inner_size + inner;
+            out_ptr[i] = in_ptr[in_offset];
+        }).wait();
+    } else if (input.dtype() == DType::Int32) {
+        const int32_t* in_ptr = input.data<int32_t>();
+        int32_t* out_ptr = output.data<int32_t>();
+        queue.parallel_for<TakeAlongDimKernelI32>(sycl::range<1>(numel), [=](sycl::id<1> tid) {
+            int64_t i = static_cast<int64_t>(tid);
+            int64_t outer = i / (idx_dim_size * inner_size);
+            int64_t rem = i % (idx_dim_size * inner_size);
+            int64_t inner = rem % inner_size;
+            int64_t src_idx = idx_ptr[i];
+            if (src_idx < 0) src_idx += in_dim_size;
+            int64_t in_offset = outer * (in_dim_size * inner_size) + src_idx * inner_size + inner;
+            out_ptr[i] = in_ptr[in_offset];
+        }).wait();
+    } else if (input.dtype() == DType::Int64) {
+        const int64_t* in_ptr = input.data<int64_t>();
+        int64_t* out_ptr = output.data<int64_t>();
+        queue.parallel_for<TakeAlongDimKernelI64>(sycl::range<1>(numel), [=](sycl::id<1> tid) {
+            int64_t i = static_cast<int64_t>(tid);
+            int64_t outer = i / (idx_dim_size * inner_size);
+            int64_t rem = i % (idx_dim_size * inner_size);
+            int64_t inner = rem % inner_size;
+            int64_t src_idx = idx_ptr[i];
+            if (src_idx < 0) src_idx += in_dim_size;
+            int64_t in_offset = outer * (in_dim_size * inner_size) + src_idx * inner_size + inner;
+            out_ptr[i] = in_ptr[in_offset];
+        }).wait();
+    } else {
+        throw std::runtime_error("take_along_dim OneAPI: unsupported dtype");
+    }
+
+    return output;
+}
+
+// ============================================================================
+// masked_scatter kernel — CPU fallback for simplicity
+// ============================================================================
+
+auto masked_scatter_kernel(const Tensor& input, const Tensor& mask,
+                           const Tensor& source, sycl::queue& queue) -> Tensor {
+    // CPU fallback: transfer, compute, transfer back
+    auto device = input.device();
+    auto cpu_input = input.to(Device::cpu());
+    auto cpu_mask = mask.to(Device::cpu());
+    auto cpu_source = source.to(Device::cpu());
+
+    Tensor cpu_output = cpu_input.clone();
+    int64_t numel = cpu_input.numel();
+    const bool* mask_ptr = cpu_mask.data<bool>();
+
+    auto do_scatter = [&](auto* out_ptr, const auto* src_ptr, int64_t src_numel) {
+        int64_t src_idx = 0;
+        for (int64_t i = 0; i < numel; ++i) {
+            if (mask_ptr[i]) {
+                if (src_idx >= src_numel) {
+                    throw std::runtime_error("masked_scatter: source has fewer elements than mask true count");
+                }
+                out_ptr[i] = src_ptr[src_idx++];
+            }
+        }
+    };
+
+    switch (cpu_input.dtype()) {
+        case DType::Float32: do_scatter(cpu_output.data<float>(), cpu_source.data<float>(), cpu_source.numel()); break;
+        case DType::Float64: do_scatter(cpu_output.data<double>(), cpu_source.data<double>(), cpu_source.numel()); break;
+        case DType::Int32:   do_scatter(cpu_output.data<int32_t>(), cpu_source.data<int32_t>(), cpu_source.numel()); break;
+        case DType::Int64:   do_scatter(cpu_output.data<int64_t>(), cpu_source.data<int64_t>(), cpu_source.numel()); break;
+        default: throw std::runtime_error("masked_scatter OneAPI: unsupported dtype");
+    }
+
+    return cpu_output.to(device);
+}
+
+// ============================================================================
+// tril_indices / triu_indices — CPU generation + transfer
+// ============================================================================
+
+auto tril_indices_kernel(int64_t row, int64_t col, int64_t offset, sycl::queue& queue) -> Tensor {
+    std::vector<int64_t> row_indices, col_indices;
+    for (int64_t r = 0; r < row; ++r) {
+        int64_t max_c = std::min(col, r + offset + 1);
+        for (int64_t c = 0; c < max_c; ++c) {
+            row_indices.push_back(r);
+            col_indices.push_back(c);
+        }
+    }
+    int64_t n = static_cast<int64_t>(row_indices.size());
+    if (n == 0) return tenzor::empty({2, 0}, DType::Int64, Device::oneapi(0));
+
+    Tensor cpu_out({2, n}, DType::Int64, Device::cpu());
+    int64_t* ptr = cpu_out.data<int64_t>();
+    std::memcpy(ptr, row_indices.data(), n * sizeof(int64_t));
+    std::memcpy(ptr + n, col_indices.data(), n * sizeof(int64_t));
+    return cpu_out.to(Device::oneapi(0));
+}
+
+auto triu_indices_kernel(int64_t row, int64_t col, int64_t offset, sycl::queue& queue) -> Tensor {
+    std::vector<int64_t> row_indices, col_indices;
+    for (int64_t r = 0; r < row; ++r) {
+        int64_t min_c = std::max(static_cast<int64_t>(0), r + offset);
+        for (int64_t c = min_c; c < col; ++c) {
+            row_indices.push_back(r);
+            col_indices.push_back(c);
+        }
+    }
+    int64_t n = static_cast<int64_t>(row_indices.size());
+    if (n == 0) return tenzor::empty({2, 0}, DType::Int64, Device::oneapi(0));
+
+    Tensor cpu_out({2, n}, DType::Int64, Device::cpu());
+    int64_t* ptr = cpu_out.data<int64_t>();
+    std::memcpy(ptr, row_indices.data(), n * sizeof(int64_t));
+    std::memcpy(ptr + n, col_indices.data(), n * sizeof(int64_t));
+    return cpu_out.to(Device::oneapi(0));
 }
 
 } // namespace oneapi

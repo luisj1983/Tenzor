@@ -91,6 +91,8 @@ enum class OpId : uint16_t {
     Frac,                // = 38, fractional part: x - floor(x)
     Heaviside,           // = 39, step function: 0 if x<0, val if x==0, 1 if x>0
     NanToNum,            // = 40, replace NaN/Inf with specified values
+    Rsqrt,               // = 41, reciprocal square root: 1/sqrt(x)
+    Square,              // = 42, element-wise square: x*x
 
     // =========================================================================
     // Trigonometric Operations (50-64)
@@ -104,6 +106,9 @@ enum class OpId : uint16_t {
     Sinh,
     Cosh,
     Tanh,  // Note: distinct from TanhActivation for autograd
+    Asinh,         // = 59, inverse hyperbolic sine
+    Acosh,         // = 60, inverse hyperbolic cosine
+    Atanh,         // = 61, inverse hyperbolic tangent
 
     // =========================================================================
     // Activation Functions (65-99)
@@ -370,6 +375,12 @@ enum class OpId : uint16_t {
     Fmod,        // binary: fmod(a, b)
     Remainder,   // binary: remainder(a, b)
     Lerp,        // ternary: lerp(start, end, weight)
+    Hypot,       // binary: sqrt(x*x + y*y) overflow-safe
+    Copysign,    // binary: copysign(magnitude, sign)
+    Nextafter,   // binary: next representable float
+    Gcd,         // binary: greatest common divisor (integer)
+    Lcm,         // binary: least common multiple (integer)
+    Addcmul,     // ternary: input + value * tensor1 * tensor2
 
     // =========================================================================
     // Tensor Manipulation Operations (340-349)
@@ -575,6 +586,55 @@ enum class OpId : uint16_t {
     // =========================================================================
     Logcumsumexp = 560,        // Log-cumulative-sum-exp along a dimension
     Bincount = 561,            // Count occurrences of each value in integer tensor
+
+    // =========================================================================
+    // New Element-wise Math (570-579)
+    // =========================================================================
+    Igamma = 570,              // Lower regularized incomplete gamma
+    Igammac,                   // Upper regularized incomplete gamma (1 - igamma)
+    Addcdiv,                   // ternary: input + value * tensor1 / tensor2
+
+    // =========================================================================
+    // New Reduction Operations (580-599)
+    // =========================================================================
+    CumMax = 580,              // Cumulative max (returns values, indices)
+    CumMin,                    // Cumulative min (returns values, indices)
+    Isin,                      // Set membership test
+    Kthvalue,                  // k-th smallest value along dim
+    Fmax,                      // Element-wise max, NaN-propagating per IEEE 754-2008
+    Fmin,                      // Element-wise min, NaN-propagating per IEEE 754-2008
+    Quantile,                  // Interpolated quantile along dim
+    Nanquantile,               // NaN-ignoring quantile
+    Nanmedian,                 // NaN-ignoring median
+    Histc,                     // Fixed-bin histogram
+    UniqueConsecutive,         // Deduplicate consecutive equal elements
+
+    // =========================================================================
+    // New Linear Algebra (600-609)
+    // =========================================================================
+    DiagEmbed = 600,           // Embed vector as batch diagonal
+    Diagflat,                  // Flat input to diagonal matrix
+    SolveTriangular,           // Triangular system solve
+
+    // =========================================================================
+    // New Shape/Indexing Operations (610-619)
+    // =========================================================================
+    TakeAlongDim = 610,        // Gather along specific dim
+    MaskedScatter,             // Scatter into masked positions
+    TrilIndices,               // Lower-triangular index pairs
+    TriuIndices,               // Upper-triangular index pairs
+
+    // =========================================================================
+    // New Pooling Operations (620-629)
+    // =========================================================================
+    FractionalMaxPool2dForward = 620,
+    FractionalMaxPool2dBackward,
+    FractionalMaxPool3dForward,
+    FractionalMaxPool3dBackward,
+    MaxUnpool2dForward,
+    MaxUnpool2dBackward,
+    MaxUnpool3dForward,
+    MaxUnpool3dBackward,
 
     // =========================================================================
     // Sentinel (MUST BE LAST)

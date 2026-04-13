@@ -344,6 +344,15 @@ auto rand_like(const Tensor& tensor) -> Tensor;
  */
 auto randn_like(const Tensor& tensor) -> Tensor;
 
+/// Create tensor filled with fill_value, same shape/dtype/device as input
+auto full_like(const Tensor& tensor, double fill_value) -> Tensor;
+
+/// Create uninitialized tensor with same shape/dtype/device as input
+auto empty_like(const Tensor& tensor) -> Tensor;
+
+/// Create random integer tensor with same shape/device as input
+auto randint_like(const Tensor& tensor, int64_t low, int64_t high) -> Tensor;
+
 /**
  * @brief Set the seed for random number generation.
  * @param seed Seed value for reproducible random tensors
@@ -371,6 +380,42 @@ uint64_t get_global_seed();
  */
 auto meshgrid(const std::vector<Tensor>& tensors, const std::string& indexing = "ij") -> std::vector<Tensor>;
 
+/**
+ * @brief Generate lower-triangular index pairs.
+ *
+ * Like PyTorch's torch.tril_indices. Returns a (2, N) Int64 tensor where
+ * N is the number of lower-triangular elements (including the diagonal
+ * shifted by offset).
+ *
+ * @param row Number of rows
+ * @param col Number of columns
+ * @param offset Diagonal offset (0 = main diagonal, positive = above, negative = below)
+ * @param dtype Element data type (default: Int64)
+ * @param device Target device (default: CPU)
+ * @return (2, N) tensor of (row_indices, col_indices)
+ */
+auto tril_indices(int64_t row, int64_t col, int64_t offset = 0,
+                  DType dtype = DType::Int64,
+                  Device device = Device::cpu()) -> Tensor;
+
+/**
+ * @brief Generate upper-triangular index pairs.
+ *
+ * Like PyTorch's torch.triu_indices. Returns a (2, N) Int64 tensor where
+ * N is the number of upper-triangular elements (including the diagonal
+ * shifted by offset).
+ *
+ * @param row Number of rows
+ * @param col Number of columns
+ * @param offset Diagonal offset (0 = main diagonal, positive = above, negative = below)
+ * @param dtype Element data type (default: Int64)
+ * @param device Target device (default: CPU)
+ * @return (2, N) tensor of (row_indices, col_indices)
+ */
+auto triu_indices(int64_t row, int64_t col, int64_t offset = 0,
+                  DType dtype = DType::Int64,
+                  Device device = Device::cpu()) -> Tensor;
+
 /** @} */ // end of tensor_creation group
 
 } // namespace tenzor
@@ -392,5 +437,7 @@ using tenzor::rand_like;
 using tenzor::randn_like;
 using tenzor::randperm;
 using tenzor::randint;
+using tenzor::tril_indices;
+using tenzor::triu_indices;
 } // namespace ops
 } // namespace tenzor

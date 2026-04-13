@@ -136,6 +136,12 @@ class SyclTransposeSolveBF32;
 class SyclTransposeSolveBF64;
 class SyclTransposeSolveBackF32;
 class SyclTransposeSolveBackF64;
+class SyclTransposeTriSolveAF32;
+class SyclTransposeTriSolveAF64;
+class SyclTransposeTriSolveBF32;
+class SyclTransposeTriSolveBF64;
+class SyclTransposeTriSolveBackF32;
+class SyclTransposeTriSolveBackF64;
 class SyclTransposeLuF32;
 class SyclTransposeLuF64;
 class SyclTransposeLuBackF32;
@@ -1006,6 +1012,69 @@ auto linalg_cholesky_kernel(const Tensor& input, bool upper, sycl::queue& queue)
         return output;
     } else {
         throw std::runtime_error("linalg_cholesky: only Float32 and Float64 supported");
+    }
+}
+
+// ============================================================================
+// Triangular Solve (AX = B, A triangular) — oneMKL BLAS trsm
+// ============================================================================
+
+auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
+                                     bool upper, bool unitriangular,
+                                     sycl::queue& queue) -> Tensor {
+    auto a_shape = A.shape();
+    int64_t n = a_shape[a_shape.size() - 1];
+    auto b_shape = B.shape();
+    int64_t nrhs = (b_shape.size() > 1) ? b_shape[b_shape.size() - 1] : 1;
+
+    // oneMKL trsm works in column-major. Convert row-major to col-major,
+    // solve, convert back.
+    // In column-major, row-major upper becomes lower and vice versa.
+    auto mkl_uplo = upper ? ::oneapi::mkl::uplo::lower : ::oneapi::mkl::uplo::upper;
+    auto mkl_diag = unitriangular ? ::oneapi::mkl::diag::unit : ::oneapi::mkl::diag::nonunit;
+
+    if (A.dtype() == DType::Float32) {
+        SyclDeviceBuffer<float> d_a(n * n, queue);
+        SyclDeviceBuffer<float> d_b(n * nrhs, queue);
+
+        row_to_col_major<float, SyclTransposeTriSolveAF32>(
+            d_a.get(), get_data_ptr<const float>(A), n, n, queue);
+        row_to_col_major<float, SyclTransposeTriSolveBF32>(
+            d_b.get(), get_data_ptr<const float>(B), n, nrhs, queue);
+
+        float alpha = 1.0f;
+        ::oneapi::mkl::blas::trsm(queue, ::oneapi::mkl::side::left, mkl_uplo,
+            ::oneapi::mkl::transpose::nontrans, mkl_diag,
+            n, nrhs, alpha, d_a.get(), n, d_b.get(), n).wait();
+
+        std::vector<int64_t> out_shape(b_shape.begin(), b_shape.end());
+        Tensor output(out_shape, A.dtype(), A.device());
+        col_to_row_major<float, SyclTransposeTriSolveBackF32>(
+            get_data_ptr<float>(output), d_b.get(), n, nrhs, queue);
+
+        return output;
+    } else if (A.dtype() == DType::Float64) {
+        SyclDeviceBuffer<double> d_a(n * n, queue);
+        SyclDeviceBuffer<double> d_b(n * nrhs, queue);
+
+        row_to_col_major<double, SyclTransposeTriSolveAF64>(
+            d_a.get(), get_data_ptr<const double>(A), n, n, queue);
+        row_to_col_major<double, SyclTransposeTriSolveBF64>(
+            d_b.get(), get_data_ptr<const double>(B), n, nrhs, queue);
+
+        double alpha = 1.0;
+        ::oneapi::mkl::blas::trsm(queue, ::oneapi::mkl::side::left, mkl_uplo,
+            ::oneapi::mkl::transpose::nontrans, mkl_diag,
+            n, nrhs, alpha, d_a.get(), n, d_b.get(), n).wait();
+
+        std::vector<int64_t> out_shape(b_shape.begin(), b_shape.end());
+        Tensor output(out_shape, A.dtype(), A.device());
+        col_to_row_major<double, SyclTransposeTriSolveBackF64>(
+            get_data_ptr<double>(output), d_b.get(), n, nrhs, queue);
+
+        return output;
+    } else {
+        throw std::runtime_error("linalg_solve_triangular: only Float32 and Float64 supported");
     }
 }
 
@@ -2630,6 +2699,79 @@ auto linalg_lu_solve_kernel(const Tensor& LU_data, const Tensor& pivots,
         launch(work_lu.data<float>(), work_b.data<float>());
     else
         launch(work_lu.data<double>(), work_b.data<double>());
+
+    return work_b;
+}
+
+// ============================================================================
+// Triangular Solve — native SYCL kernel fallback (no oneMKL path)
+// ============================================================================
+
+auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
+                                     bool upper, bool unitriangular,
+                                     sycl::queue& queue) -> Tensor {
+    validate_linalg_dtype(A, "solve_triangular");
+    if (A.dtype() == DType::Float16 || A.dtype() == DType::BFloat16) {
+        return linalg_solve_triangular_kernel(
+            A.to(DType::Float32), B.to(DType::Float32),
+            upper, unitriangular, queue).to(A.dtype());
+    }
+
+    auto work_a = A.contiguous();
+    auto work_b = B.contiguous().clone();
+    auto [n, ndim_a] = check_square(work_a);
+    auto b_shape = B.shape();
+    auto b_ndim = static_cast<int64_t>(b_shape.size());
+    int64_t nrhs = (b_ndim >= 2) ? b_shape[b_ndim - 1] : 1;
+    int64_t nbatch = batch_size(work_a);
+
+    // Use a single work-group per batch element, serial substitution
+    auto launch = [&](auto* a_ptr, auto* b_ptr) {
+        using T = std::remove_pointer_t<decltype(a_ptr)>;
+        int n_ = static_cast<int>(n);
+        int nrhs_ = static_cast<int>(nrhs);
+        bool upper_ = upper;
+        bool unit_ = unitriangular;
+
+        queue.submit([&](sycl::handler& h) {
+            h.parallel_for<class SyclTriSolveKernel>(
+                sycl::nd_range<1>(nbatch * 256, 256),
+                [=](sycl::nd_item<1> item) {
+                    int batch = item.get_group(0);
+                    int tid = item.get_local_id(0);
+                    int num_threads = item.get_local_range(0);
+                    const T* A_mat = a_ptr + batch * n_ * n_;
+                    T* B_mat = b_ptr + batch * n_ * nrhs_;
+
+                    if (upper_) {
+                        for (int i = n_ - 1; i >= 0; --i) {
+                            sycl::group_barrier(item.get_group());
+                            for (int j = tid; j < nrhs_; j += num_threads) {
+                                T sum = B_mat[i * nrhs_ + j];
+                                for (int k = i + 1; k < n_; ++k)
+                                    sum -= A_mat[i * n_ + k] * B_mat[k * nrhs_ + j];
+                                B_mat[i * nrhs_ + j] = unit_ ? sum : sum / A_mat[i * n_ + i];
+                            }
+                        }
+                    } else {
+                        for (int i = 0; i < n_; ++i) {
+                            sycl::group_barrier(item.get_group());
+                            for (int j = tid; j < nrhs_; j += num_threads) {
+                                T sum = B_mat[i * nrhs_ + j];
+                                for (int k = 0; k < i; ++k)
+                                    sum -= A_mat[i * n_ + k] * B_mat[k * nrhs_ + j];
+                                B_mat[i * nrhs_ + j] = unit_ ? sum : sum / A_mat[i * n_ + i];
+                            }
+                        }
+                    }
+                });
+        }).wait();
+    };
+
+    if (work_a.dtype() == DType::Float32)
+        launch(work_a.data<float>(), work_b.data<float>());
+    else
+        launch(work_a.data<double>(), work_b.data<double>());
 
     return work_b;
 }

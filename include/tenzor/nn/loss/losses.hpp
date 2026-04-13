@@ -1141,6 +1141,30 @@ auto gaussian_nll_loss(const Variable& input, const Variable& target,
                        bool full = false, double eps = 1e-6,
                        Reduction reduction = Reduction::Mean) -> Variable;
 
+/**
+ * @brief Multi-Label Margin Loss
+ *
+ * Multi-label classification hinge loss. For each sample, penalizes
+ * if a non-target class score exceeds a target class score minus margin.
+ *
+ * @param reduction How to reduce the loss (default: Mean)
+ */
+class MultiLabelMarginLoss {
+public:
+    explicit MultiLabelMarginLoss(Reduction reduction = Reduction::Mean);
+
+    auto forward(const Variable& input, const Tensor& target) -> Variable;
+    auto operator()(const Variable& input, const Tensor& target) -> Variable {
+        return forward(input, target);
+    }
+
+private:
+    Reduction reduction_;
+};
+
+auto multilabel_margin_loss(const Variable& input, const Tensor& target,
+                            Reduction reduction = Reduction::Mean) -> Variable;
+
 /** @} */ // end of functional_advanced_losses group
 
 } // namespace nn

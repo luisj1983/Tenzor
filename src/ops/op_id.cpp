@@ -453,6 +453,56 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::Logcumsumexp)] = "logcumsumexp";
     names[static_cast<size_t>(OpId::Bincount)] = "bincount";
 
+    // New element-wise math (Phase 3)
+    names[static_cast<size_t>(OpId::Rsqrt)] = "rsqrt";
+    names[static_cast<size_t>(OpId::Square)] = "square";
+    names[static_cast<size_t>(OpId::Asinh)] = "asinh";
+    names[static_cast<size_t>(OpId::Acosh)] = "acosh";
+    names[static_cast<size_t>(OpId::Atanh)] = "atanh";
+    names[static_cast<size_t>(OpId::Hypot)] = "hypot";
+    names[static_cast<size_t>(OpId::Copysign)] = "copysign";
+    names[static_cast<size_t>(OpId::Nextafter)] = "nextafter";
+    names[static_cast<size_t>(OpId::Gcd)] = "gcd";
+    names[static_cast<size_t>(OpId::Lcm)] = "lcm";
+    names[static_cast<size_t>(OpId::Addcmul)] = "addcmul";
+    names[static_cast<size_t>(OpId::Addcdiv)] = "addcdiv";
+    names[static_cast<size_t>(OpId::Igamma)] = "igamma";
+    names[static_cast<size_t>(OpId::Igammac)] = "igammac";
+
+    // New reduction operations (Phase 4)
+    names[static_cast<size_t>(OpId::CumMax)] = "cummax";
+    names[static_cast<size_t>(OpId::CumMin)] = "cummin";
+    names[static_cast<size_t>(OpId::Isin)] = "isin";
+    names[static_cast<size_t>(OpId::Kthvalue)] = "kthvalue";
+    names[static_cast<size_t>(OpId::Fmax)] = "fmax";
+    names[static_cast<size_t>(OpId::Fmin)] = "fmin";
+    names[static_cast<size_t>(OpId::Quantile)] = "quantile";
+    names[static_cast<size_t>(OpId::Nanquantile)] = "nanquantile";
+    names[static_cast<size_t>(OpId::Nanmedian)] = "nanmedian";
+    names[static_cast<size_t>(OpId::Histc)] = "histc";
+    names[static_cast<size_t>(OpId::UniqueConsecutive)] = "unique_consecutive";
+
+    // New linear algebra (Phase 5)
+    names[static_cast<size_t>(OpId::DiagEmbed)] = "diag_embed";
+    names[static_cast<size_t>(OpId::Diagflat)] = "diagflat";
+    names[static_cast<size_t>(OpId::SolveTriangular)] = "solve_triangular";
+
+    // New shape/indexing (Phase 6)
+    names[static_cast<size_t>(OpId::TakeAlongDim)] = "take_along_dim";
+    names[static_cast<size_t>(OpId::MaskedScatter)] = "masked_scatter";
+    names[static_cast<size_t>(OpId::TrilIndices)] = "tril_indices";
+    names[static_cast<size_t>(OpId::TriuIndices)] = "triu_indices";
+
+    // New pooling (Phase 9)
+    names[static_cast<size_t>(OpId::FractionalMaxPool2dForward)] = "fractional_max_pool2d_forward";
+    names[static_cast<size_t>(OpId::FractionalMaxPool2dBackward)] = "fractional_max_pool2d_backward";
+    names[static_cast<size_t>(OpId::FractionalMaxPool3dForward)] = "fractional_max_pool3d_forward";
+    names[static_cast<size_t>(OpId::FractionalMaxPool3dBackward)] = "fractional_max_pool3d_backward";
+    names[static_cast<size_t>(OpId::MaxUnpool2dForward)] = "max_unpool2d_forward";
+    names[static_cast<size_t>(OpId::MaxUnpool2dBackward)] = "max_unpool2d_backward";
+    names[static_cast<size_t>(OpId::MaxUnpool3dForward)] = "max_unpool3d_forward";
+    names[static_cast<size_t>(OpId::MaxUnpool3dBackward)] = "max_unpool3d_backward";
+
     return names;
 }();
 
@@ -467,7 +517,7 @@ constexpr size_t count_named_ops() {
 
 // Count of actual OpId enum values (excluding gap slots).
 // Update this when adding new OpIds to catch missing name entries at compile time.
-inline constexpr size_t EXPECTED_NAMED_OPS = 349;
+inline constexpr size_t EXPECTED_NAMED_OPS = 389;  // 349 original + 40 new
 
 // If this fires, a new OpId was added without a corresponding name in op_names above
 static_assert(count_named_ops() == EXPECTED_NAMED_OPS,

@@ -151,8 +151,26 @@ namespace oneapi {
     auto fmod_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
     auto remainder_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
 
+    // New unary math
+    auto rsqrt_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto square_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto asinh_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto acosh_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto atanh_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+
+    // New binary math
+    auto hypot_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto copysign_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto nextafter_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto gcd_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto lcm_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto igamma_kernel(const Tensor& a, const Tensor& x, sycl::queue& queue) -> Tensor;
+    auto igammac_kernel(const Tensor& a, const Tensor& x, sycl::queue& queue) -> Tensor;
+
     // Ternary
     auto lerp_kernel(const Tensor& start, const Tensor& end, const Tensor& weight, sycl::queue& queue) -> Tensor;
+    auto addcmul_kernel(const Tensor& input, const Tensor& tensor1, const Tensor& tensor2, float value, sycl::queue& queue) -> Tensor;
+    auto addcdiv_kernel(const Tensor& input, const Tensor& tensor1, const Tensor& tensor2, float value, sycl::queue& queue) -> Tensor;
 
     // Logical
     auto logical_and_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
@@ -340,6 +358,10 @@ namespace oneapi {
     auto index_copy_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& source, sycl::queue& queue) -> Tensor;
     auto index_fill_kernel(const Tensor& input, int64_t dim, const Tensor& index, float value, sycl::queue& queue) -> Tensor;
     auto scatter_reduce_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& source, const std::string& reduce, bool include_self, sycl::queue& queue) -> Tensor;
+    auto take_along_dim_kernel(const Tensor& input, const Tensor& indices, int64_t dim, sycl::queue& queue) -> Tensor;
+    auto masked_scatter_kernel(const Tensor& input, const Tensor& mask, const Tensor& source, sycl::queue& queue) -> Tensor;
+    auto tril_indices_kernel(int64_t row, int64_t col, int64_t offset, sycl::queue& queue) -> Tensor;
+    auto triu_indices_kernel(int64_t row, int64_t col, int64_t offset, sycl::queue& queue) -> Tensor;
 
     // ---- Batch normalization (kernels/batchnorm.cpp) ----
     auto batchnorm2d_mean_var(const Tensor& input, sycl::queue& queue) -> std::vector<Tensor>;
@@ -657,10 +679,26 @@ namespace oneapi {
     auto searchsorted_kernel(const Tensor& sorted_sequence, const Tensor& values,
                               bool right, sycl::queue& queue) -> Tensor;
 
-    // ---- HasInfNan, CumSum, CumProd (kernels/math.cpp) ----
+    // ---- HasInfNan, CumSum, CumProd, Logcumsumexp, Bincount (kernels/math.cpp) ----
     auto has_inf_nan_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
     auto cumsum_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor;
     auto cumprod_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor;
+    auto logcumsumexp_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor;
+    auto bincount_kernel(const Tensor& input, const Tensor* weights,
+                         int64_t minlength, sycl::queue& queue) -> Tensor;
+
+    // ---- New reduction operations (kernels/math.cpp) ----
+    auto cummax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> std::pair<Tensor, Tensor>;
+    auto cummin_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> std::pair<Tensor, Tensor>;
+    auto fmax_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto fmin_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto isin_kernel(const Tensor& elements, const Tensor& test_elements, sycl::queue& queue) -> Tensor;
+    auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim, bool keepdim, sycl::queue& queue) -> std::pair<Tensor, Tensor>;
+    auto quantile_kernel(const Tensor& input, double q, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
+    auto nanquantile_kernel(const Tensor& input, double q, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
+    auto nanmedian_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
+    auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_val, sycl::queue& queue) -> Tensor;
+    auto unique_consecutive_kernel(const Tensor& input, bool return_inverse, sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor>;
 
     // ---- DepthwiseConv2d (kernels/conv2d.cpp) ----
     auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
@@ -682,6 +720,9 @@ namespace oneapi {
     auto linalg_eigh_kernel(const Tensor& input, sycl::queue& queue) -> std::pair<Tensor, Tensor>;
     auto linalg_eig_kernel(const Tensor& input, sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor>;
     auto linalg_cholesky_kernel(const Tensor& input, bool upper, sycl::queue& queue) -> Tensor;
+    auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
+                                         bool upper, bool unitriangular,
+                                         sycl::queue& queue) -> Tensor;
 
     // ---- FFT operations (kernels/fft.cpp) ----
     auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
@@ -1134,6 +1175,90 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
                 weight = oneapi::expand_kernel(weight, expand_attrs, get_q(inputs));
             }
             return {oneapi::lerp_kernel(start, end, weight, get_q(inputs))};
+        });
+
+    // =========================================================================
+    // New Unary Math Operations
+    // =========================================================================
+
+    table.register_kernel(OpId::Rsqrt,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::rsqrt_kernel(inputs[0], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Square,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::square_kernel(inputs[0], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Asinh,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::asinh_kernel(inputs[0], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Acosh,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::acosh_kernel(inputs[0], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Atanh,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::atanh_kernel(inputs[0], get_q(inputs))};
+        });
+
+    // =========================================================================
+    // New Binary Math Operations
+    // =========================================================================
+
+    table.register_kernel(OpId::Hypot,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::hypot_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Copysign,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::copysign_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Nextafter,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::nextafter_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Gcd,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::gcd_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Lcm,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::lcm_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Igamma,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::igamma_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Igammac,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::igammac_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    // =========================================================================
+    // New Ternary Operations: Addcmul / Addcdiv
+    // =========================================================================
+
+    table.register_kernel(OpId::Addcmul,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            float value = static_cast<float>(attrs.get_float(AttrKey::Alpha, 1.0));
+            return {oneapi::addcmul_kernel(inputs[0], inputs[1], inputs[2], value, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Addcdiv,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            float value = static_cast<float>(attrs.get_float(AttrKey::Alpha, 1.0));
+            return {oneapi::addcdiv_kernel(inputs[0], inputs[1], inputs[2], value, get_q(inputs))};
         });
 
     // =========================================================================
@@ -3321,6 +3446,13 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return {oneapi::linalg_cholesky_kernel(inputs[0], upper, get_q(inputs))};
         });
 
+    table.register_kernel(OpId::SolveTriangular,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            bool upper = attrs.get_bool(AttrKey::Upper, true);
+            bool unitriangular = attrs.get_bool(AttrKey::UnitTriangular, false);
+            return {oneapi::linalg_solve_triangular_kernel(inputs[0], inputs[1], upper, unitriangular, get_q(inputs))};
+        });
+
     // =========================================================================
     // FFT Operations (Phase 10.7 - oneMKL DFT)
     // =========================================================================
@@ -3477,6 +3609,13 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             bool upper = attrs.get_bool(AttrKey::Upper, false);
             return {oneapi::linalg_cholesky_kernel(inputs[0], upper, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::SolveTriangular,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            bool upper = attrs.get_bool(AttrKey::Upper, true);
+            bool unitriangular = attrs.get_bool(AttrKey::UnitTriangular, false);
+            return {oneapi::linalg_solve_triangular_kernel(inputs[0], inputs[1], upper, unitriangular, get_q(inputs))};
         });
 
     // FFT ops: use SYCL-native Cooley-Tukey + Bluestein fallback (implemented in fft.cpp)
@@ -4073,30 +4212,140 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         });
 
     // =========================================================================
-    // Log-Cumulative-Sum-Exp (CPU fallback)
+    // Log-Cumulative-Sum-Exp (native SYCL kernel)
     // =========================================================================
     table.register_kernel(OpId::Logcumsumexp,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             int64_t dim = attrs.get_int(AttrKey::Dim, 0);
-            auto cpu_input = inputs[0].to(Device::cpu());
-            auto cpu_result = tenzor::logcumsumexp(cpu_input, dim);
-            return {cpu_result.to(inputs[0].device())};
+            return {oneapi::logcumsumexp_kernel(inputs[0], dim, get_q(inputs))};
         });
 
     // =========================================================================
-    // Bincount (CPU fallback)
+    // Bincount (native SYCL kernel)
     // =========================================================================
     table.register_kernel(OpId::Bincount,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             int64_t minlength = attrs.get_int(AttrKey::Minlength, 0);
-            auto cpu_input = inputs[0].to(Device::cpu());
-            std::optional<Tensor> cpu_weights;
-            if (inputs.size() > 1) {
-                cpu_weights = inputs[1].to(Device::cpu());
-            }
-            auto cpu_result = tenzor::bincount(cpu_input, cpu_weights, minlength);
-            return {cpu_result.to(inputs[0].device())};
+            const Tensor* weights_ptr = (inputs.size() > 1) ? &inputs[1] : nullptr;
+            return {oneapi::bincount_kernel(inputs[0], weights_ptr, minlength, get_q(inputs))};
         });
+
+    // =========================================================================
+    // New Reduction Operations (CumMax, CumMin, Fmax, Fmin, Isin, Kthvalue, etc.)
+    // =========================================================================
+
+    table.register_kernel(OpId::CumMax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        auto [values, indices] = oneapi::cummax_kernel(inputs[0], dim, get_q(inputs));
+        return std::vector<Tensor>{values, indices};
+    });
+
+    table.register_kernel(OpId::CumMin, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        auto [values, indices] = oneapi::cummin_kernel(inputs[0], dim, get_q(inputs));
+        return std::vector<Tensor>{values, indices};
+    });
+
+    table.register_kernel(OpId::Fmax,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return {oneapi::fmax_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Fmin,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return {oneapi::fmin_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Isin,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return {oneapi::isin_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Kthvalue, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t k = attrs.get_int(AttrKey::K, 1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        auto [values, indices] = oneapi::kthvalue_kernel(inputs[0], k, dim, keepdim, get_q(inputs));
+        return std::vector<Tensor>{values, indices};
+    });
+
+    table.register_kernel(OpId::Quantile,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            double q = attrs.get_float(AttrKey::Alpha, 0.5);
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return {oneapi::quantile_kernel(inputs[0], q, dim, keepdim, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Nanquantile,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            double q = attrs.get_float(AttrKey::Alpha, 0.5);
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return {oneapi::nanquantile_kernel(inputs[0], q, dim, keepdim, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Nanmedian,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            return {oneapi::nanmedian_kernel(inputs[0], dim, false, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Histc,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t bins = attrs.get_int(AttrKey::N, 100);
+            double min_val = attrs.get_float(AttrKey::Alpha, 0.0);
+            double max_val = attrs.get_float(AttrKey::Beta, 0.0);
+            return {oneapi::histc_kernel(inputs[0], bins, min_val, max_val, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::UniqueConsecutive, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        bool return_inverse = attrs.get_bool(AttrKey::Keepdim, false);
+        auto [unique_vals, inverse, counts] = oneapi::unique_consecutive_kernel(
+            inputs[0], return_inverse, get_q(inputs));
+        return std::vector<Tensor>{unique_vals, inverse, counts};
+    });
+
+    // =========================================================================
+    // TakeAlongDim
+    // =========================================================================
+    table.register_single_output_kernel(OpId::TakeAlongDim, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        return oneapi::take_along_dim_kernel(inputs[0], inputs[1], dim, get_q(inputs));
+    });
+
+    // =========================================================================
+    // MaskedScatter
+    // =========================================================================
+    table.register_single_output_kernel(OpId::MaskedScatter, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return oneapi::masked_scatter_kernel(inputs[0], inputs[1], inputs[2], get_q(inputs));
+    });
+
+    // =========================================================================
+    // TrilIndices — CPU generation + transfer
+    // =========================================================================
+    table.register_single_output_kernel(OpId::TrilIndices, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t row = attrs.get_int(AttrKey::M, 0);
+        int64_t col = attrs.get_int(AttrKey::N, 0);
+        int64_t offset = attrs.get_int(AttrKey::Diagonal, 0);
+        int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
+        return oneapi::tril_indices_kernel(row, col, offset, get_q_device(device_id));
+    });
+
+    // =========================================================================
+    // TriuIndices — CPU generation + transfer
+    // =========================================================================
+    table.register_single_output_kernel(OpId::TriuIndices, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t row = attrs.get_int(AttrKey::M, 0);
+        int64_t col = attrs.get_int(AttrKey::N, 0);
+        int64_t offset = attrs.get_int(AttrKey::Diagonal, 0);
+        int32_t device_id = static_cast<int32_t>(attrs.get_int(AttrKey::DeviceId, 0));
+        return oneapi::triu_indices_kernel(row, col, offset, get_q_device(device_id));
+    });
+
+    // =========================================================================
+    // Phase 9: Fractional Max Pool + Max Unpool — CPU-only for now
+    // TODO: Add native OneAPI/SYCL kernels for fractional_max_pool and max_unpool
 
 } // register_oneapi_kernels
 

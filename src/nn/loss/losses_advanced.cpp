@@ -886,4 +886,67 @@ auto gaussian_nll_loss(const Variable& input, const Variable& target,
     return loss_fn.forward(input, target, var);
 }
 
+// =========================================================================
+// MultiLabelMarginLoss
+// =========================================================================
+
+MultiLabelMarginLoss::MultiLabelMarginLoss(Reduction reduction)
+    : reduction_(reduction) {}
+
+auto MultiLabelMarginLoss::forward(const Variable& input, const Tensor& target) -> Variable {
+    // Multi-label margin loss implementation using tensor ops
+    // target is (N, C) with class indices and -1 sentinels
+    // For each sample: sum over targets y_j, sum over non-targets k:
+    //   max(0, 1 - (x[y_j] - x[k])) / C
+
+    auto input_t = input.tensor();
+    int64_t batch_size = input_t.shape()[0];
+    int64_t n_classes = input_t.shape()[1];
+
+    // Compute on CPU for correctness (this op is rarely in the hot path)
+    auto cpu_input = input_t.to(Device::cpu());
+    auto cpu_target = target.to(Device::cpu());
+    auto cpu_loss = tenzor::zeros({batch_size}, DType::Float32, Device::cpu());
+
+    const float* in_data = cpu_input.data<float>();
+    const int64_t* tgt_data = cpu_target.data<int64_t>();
+    float* loss_data = cpu_loss.data<float>();
+
+    for (int64_t b = 0; b < batch_size; b++) {
+        float sample_loss = 0.0f;
+        for (int64_t j = 0; j < n_classes; j++) {
+            int64_t y_j = tgt_data[b * n_classes + j];
+            if (y_j < 0) break;
+            float x_yj = in_data[b * n_classes + y_j];
+            for (int64_t k = 0; k < n_classes; k++) {
+                bool is_target = false;
+                for (int64_t t = 0; t < n_classes; t++) {
+                    int64_t yt = tgt_data[b * n_classes + t];
+                    if (yt < 0) break;
+                    if (yt == k) { is_target = true; break; }
+                }
+                if (is_target) continue;
+                float margin = 1.0f - (x_yj - in_data[b * n_classes + k]);
+                if (margin > 0.0f) sample_loss += margin;
+            }
+        }
+        loss_data[b] = sample_loss / static_cast<float>(n_classes);
+    }
+
+    auto result = cpu_loss.to(input_t.device());
+    auto loss_var = Variable(result, input.requires_grad());
+
+    switch (reduction_) {
+        case Reduction::Mean: return mean(loss_var);
+        case Reduction::Sum: return sum(loss_var);
+        default: return loss_var;
+    }
+}
+
+auto multilabel_margin_loss(const Variable& input, const Tensor& target,
+                            Reduction reduction) -> Variable {
+    MultiLabelMarginLoss loss_fn(reduction);
+    return loss_fn.forward(input, target);
+}
+
 } // namespace tenzor::nn

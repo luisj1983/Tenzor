@@ -20,6 +20,7 @@
 #include <string_view>
 #include <vector>
 #include <span>
+#include <tuple>
 #include <unordered_map>
 #include <mutex>
 
@@ -323,6 +324,8 @@ public:
     auto dispatchBoolPredicateOp(const std::string& op_name, const Tensor& input) -> Tensor;
     auto dispatchLogicalOp(const std::string& op_name, const Tensor& a, const Tensor& b) -> Tensor;
     auto dispatchLerp(const Tensor& start, const Tensor& end, const Tensor& weight) -> Tensor;
+    auto dispatchAddcmul(const Tensor& input, const Tensor& tensor1, const Tensor& tensor2, float value) -> Tensor;
+    auto dispatchAddcdiv(const Tensor& input, const Tensor& tensor1, const Tensor& tensor2, float value) -> Tensor;
     auto dispatchCross(const Tensor& a, const Tensor& b, int64_t dim) -> Tensor;
     auto dispatchReduction(const std::string& op_name, const Tensor& input,
                           int64_t dim, bool keepdim) -> Tensor;
@@ -536,6 +539,25 @@ public:
     auto dispatchRandint(int64_t low, int64_t high, const std::vector<int64_t>& shape,
                           DType dtype, const Device& device) -> Tensor;
 
+    // Scan operations
+    auto dispatchLogcumsumexp(const Tensor& input, int64_t dim) -> Tensor;
+
+    // New reduction operations
+    auto dispatchCumMax(const Tensor& input, int64_t dim) -> std::pair<Tensor, Tensor>;
+    auto dispatchCumMin(const Tensor& input, int64_t dim) -> std::pair<Tensor, Tensor>;
+    auto dispatchFmax(const Tensor& a, const Tensor& b) -> Tensor;
+    auto dispatchFmin(const Tensor& a, const Tensor& b) -> Tensor;
+    auto dispatchIsin(const Tensor& elements, const Tensor& test_elements) -> Tensor;
+    auto dispatchKthvalue(const Tensor& input, int64_t k, int64_t dim, bool keepdim) -> std::pair<Tensor, Tensor>;
+    auto dispatchQuantile(const Tensor& input, double q, int64_t dim, bool keepdim) -> Tensor;
+    auto dispatchNanquantile(const Tensor& input, double q, int64_t dim, bool keepdim) -> Tensor;
+    auto dispatchNanmedian(const Tensor& input, int64_t dim) -> Tensor;
+    auto dispatchHistc(const Tensor& input, int64_t bins, double min_val, double max_val) -> Tensor;
+    auto dispatchUniqueConsecutive(const Tensor& input, bool return_inverse) -> std::tuple<Tensor, Tensor, Tensor>;
+
+    // Histogram operations
+    auto dispatchBincount(const Tensor& input, const std::optional<Tensor>& weights, int64_t minlength) -> Tensor;
+
     // Type cast operations
     auto dispatchCast(const Tensor& input, DType target_dtype) -> Tensor;
 
@@ -731,6 +753,8 @@ public:
     auto dispatchLinalgLU(const Tensor& input) -> std::vector<Tensor>;
     auto dispatchLinalgLUSolve(const Tensor& LU_data, const Tensor& pivots,
                                const Tensor& B) -> Tensor;
+    auto dispatchLinalgSolveTriangular(const Tensor& A, const Tensor& B,
+                                       bool upper, bool unitriangular) -> Tensor;
 
     // Tiled blocked linalg helpers for medium matrices (33-256)
     void runBlockedLU(Tensor& A, Tensor& pivots, int64_t n,

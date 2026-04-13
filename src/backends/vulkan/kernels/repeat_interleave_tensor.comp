@@ -1,0 +1,53 @@
+#version 450
+
+// RepeatInterleave with per-element repeat counts (tensor repeats)
+// Two-phase approach:
+//   Phase 1: Compute exclusive prefix sum of repeats (done on host or separate shader)
+//   This shader is Phase 2: Each output thread binary-searches the prefix sum
+//   to find which source element it maps to.
+//
+// However, for simplicity and correctness we use a different approach:
+// The repeats tensor has been prefix-summed into offsets buffer (binding 2).
+// Each thread in the OUTPUT processes one output element.
+// We binary search the offsets to find which source element produced it.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Output { float output_data[]; };
+layout(binding = 2) buffer Offsets { int offsets_data[]; };  // Exclusive prefix sum of repeats
+
+layout(push_constant) uniform PushConstants {
+    uint total_output;    // Total number of output elements
+    uint dim_size;        // Size of the repeat dimension in input
+    uint inner_size;      // Product of dimensions after the repeat dim
+} params;
+
+void main() {
+    uint out_idx = gl_GlobalInvocationID.x;
+    if (out_idx >= params.total_output) return;
+
+    uint inner_idx = out_idx % params.inner_size;
+    uint out_dim_and_outer = out_idx / params.inner_size;
+    uint total_out_dim = uint(offsets_data[params.dim_size]);  // Total repeats
+    uint outer_idx = out_dim_and_outer / total_out_dim;
+    uint out_dim_idx = out_dim_and_outer % total_out_dim;
+
+    // Binary search: find largest i such that offsets[i] <= out_dim_idx
+    uint lo = 0;
+    uint hi = params.dim_size;
+    while (lo < hi) {
+        uint mid = (lo + hi) / 2;
+        if (uint(offsets_data[mid + 1]) <= out_dim_idx) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    uint src_dim_idx = lo;
+
+    uint src_idx = outer_idx * (params.dim_size * params.inner_size) +
+                   src_dim_idx * params.inner_size +
+                   inner_idx;
+
+    output_data[out_idx] = input_data[src_idx];
+}

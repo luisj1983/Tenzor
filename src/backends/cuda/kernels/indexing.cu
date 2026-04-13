@@ -2386,5 +2386,242 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
     return grad_weight;
 }
 
+// ============================================================================
+// take_along_dim kernel
+// ============================================================================
+
+template<typename T>
+__global__ void take_along_dim_cuda_kernel(
+    const T* __restrict__ input, const int64_t* __restrict__ indices, T* __restrict__ output,
+    int64_t numel, int64_t in_dim_size, int64_t idx_dim_size, int64_t inner_size)
+{
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= numel) return;
+
+    int64_t outer = i / (idx_dim_size * inner_size);
+    int64_t rem = i % (idx_dim_size * inner_size);
+    int64_t inner = rem % inner_size;
+
+    int64_t src_idx = indices[i];
+    if (src_idx < 0) src_idx += in_dim_size;
+
+    int64_t in_offset = outer * (in_dim_size * inner_size) + src_idx * inner_size + inner;
+    output[i] = input[in_offset];
+}
+
+auto take_along_dim_kernel(const Tensor& input, const Tensor& indices, int64_t dim,
+                           cudaStream_t stream) -> Tensor {
+    auto in_shape = input.shape();
+    auto idx_shape = indices.shape();
+    int64_t ndim = in_shape.size();
+
+    if (dim < 0) dim += ndim;
+
+    Tensor output(std::vector<int64_t>(idx_shape.begin(), idx_shape.end()),
+                  input.dtype(), input.device());
+
+    int64_t numel = indices.numel();
+    if (numel == 0) return output;
+
+    int64_t idx_dim_size = idx_shape[dim];
+    int64_t in_dim_size = in_shape[dim];
+    int64_t inner_size = 1;
+    for (int64_t d = dim + 1; d < ndim; ++d) inner_size *= idx_shape[d];
+
+    int blocks = get_num_blocks(numel);
+    const int64_t* idx_ptr = indices.data<int64_t>();
+
+    switch (input.dtype()) {
+        case DType::Float32:
+            take_along_dim_cuda_kernel<float><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                input.data<float>(), idx_ptr, output.data<float>(),
+                numel, in_dim_size, idx_dim_size, inner_size);
+            break;
+        case DType::Float64:
+            take_along_dim_cuda_kernel<double><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                input.data<double>(), idx_ptr, output.data<double>(),
+                numel, in_dim_size, idx_dim_size, inner_size);
+            break;
+        case DType::Int32:
+            take_along_dim_cuda_kernel<int32_t><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                input.data<int32_t>(), idx_ptr, output.data<int32_t>(),
+                numel, in_dim_size, idx_dim_size, inner_size);
+            break;
+        case DType::Int64:
+            take_along_dim_cuda_kernel<int64_t><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                input.data<int64_t>(), idx_ptr, output.data<int64_t>(),
+                numel, in_dim_size, idx_dim_size, inner_size);
+            break;
+        case DType::Float16:
+            take_along_dim_cuda_kernel<__half><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                reinterpret_cast<const __half*>(input.data_ptr()), idx_ptr,
+                reinterpret_cast<__half*>(output.data_ptr()),
+                numel, in_dim_size, idx_dim_size, inner_size);
+            break;
+        case DType::BFloat16:
+            take_along_dim_cuda_kernel<__nv_bfloat16><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()), idx_ptr,
+                reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+                numel, in_dim_size, idx_dim_size, inner_size);
+            break;
+        default:
+            throw std::runtime_error("take_along_dim CUDA: unsupported dtype");
+    }
+    CUDA_CHECK(cudaGetLastError());
+    return output;
+}
+
+// ============================================================================
+// masked_scatter kernel — prefix sum on mask, then parallel scatter
+// ============================================================================
+
+__global__ void masked_scatter_write_kernel_f32(
+    const float* __restrict__ input, const bool* __restrict__ mask,
+    const float* __restrict__ source, const int64_t* __restrict__ prefix_sum,
+    float* __restrict__ output, int64_t numel)
+{
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= numel) return;
+    output[i] = mask[i] ? source[prefix_sum[i]] : input[i];
+}
+
+__global__ void masked_scatter_write_kernel_f64(
+    const double* __restrict__ input, const bool* __restrict__ mask,
+    const double* __restrict__ source, const int64_t* __restrict__ prefix_sum,
+    double* __restrict__ output, int64_t numel)
+{
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= numel) return;
+    output[i] = mask[i] ? source[prefix_sum[i]] : input[i];
+}
+
+__global__ void masked_scatter_write_kernel_i32(
+    const int32_t* __restrict__ input, const bool* __restrict__ mask,
+    const int32_t* __restrict__ source, const int64_t* __restrict__ prefix_sum,
+    int32_t* __restrict__ output, int64_t numel)
+{
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= numel) return;
+    output[i] = mask[i] ? source[prefix_sum[i]] : input[i];
+}
+
+__global__ void masked_scatter_write_kernel_i64(
+    const int64_t* __restrict__ input, const bool* __restrict__ mask,
+    const int64_t* __restrict__ source, const int64_t* __restrict__ prefix_sum,
+    int64_t* __restrict__ output, int64_t numel)
+{
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= numel) return;
+    output[i] = mask[i] ? source[prefix_sum[i]] : input[i];
+}
+
+// Compute exclusive prefix sum of mask (bool -> int64)
+__global__ void mask_to_int64_kernel(const bool* __restrict__ mask, int64_t* __restrict__ out, int64_t n)
+{
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = mask[i] ? 1 : 0;
+}
+
+auto masked_scatter_kernel(const Tensor& input, const Tensor& mask,
+                           const Tensor& source, cudaStream_t stream) -> Tensor {
+    int64_t numel = input.numel();
+    Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                  input.dtype(), input.device());
+    if (numel == 0) return output;
+
+    // Build exclusive prefix sum of mask to get write positions
+    int64_t* d_int_mask = nullptr;
+    int64_t* d_prefix = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&d_int_mask, numel * sizeof(int64_t), stream));
+    CUDA_CHECK(cudaMallocAsync(&d_prefix, numel * sizeof(int64_t), stream));
+
+    int blocks = get_num_blocks(numel);
+    mask_to_int64_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(mask.data<bool>(), d_int_mask, numel);
+
+    // Simple sequential prefix sum via thrust-style scan
+    // Use CUB for exclusive scan
+    void* d_temp = nullptr;
+    size_t temp_bytes = 0;
+    cub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_int_mask, d_prefix, numel, stream);
+    CUDA_CHECK(cudaMallocAsync(&d_temp, temp_bytes, stream));
+    cub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_int_mask, d_prefix, numel, stream);
+    CUDA_CHECK(cudaFreeAsync(d_temp, stream));
+    CUDA_CHECK(cudaFreeAsync(d_int_mask, stream));
+
+    switch (input.dtype()) {
+        case DType::Float32:
+            masked_scatter_write_kernel_f32<<<blocks, BLOCK_SIZE, 0, stream>>>(
+                input.data<float>(), mask.data<bool>(), source.data<float>(),
+                d_prefix, output.data<float>(), numel);
+            break;
+        case DType::Float64:
+            masked_scatter_write_kernel_f64<<<blocks, BLOCK_SIZE, 0, stream>>>(
+                input.data<double>(), mask.data<bool>(), source.data<double>(),
+                d_prefix, output.data<double>(), numel);
+            break;
+        case DType::Int32:
+            masked_scatter_write_kernel_i32<<<blocks, BLOCK_SIZE, 0, stream>>>(
+                input.data<int32_t>(), mask.data<bool>(), source.data<int32_t>(),
+                d_prefix, output.data<int32_t>(), numel);
+            break;
+        case DType::Int64:
+            masked_scatter_write_kernel_i64<<<blocks, BLOCK_SIZE, 0, stream>>>(
+                input.data<int64_t>(), mask.data<bool>(), source.data<int64_t>(),
+                d_prefix, output.data<int64_t>(), numel);
+            break;
+        default:
+            CUDA_CHECK(cudaFreeAsync(d_prefix, stream));
+            throw std::runtime_error("masked_scatter CUDA: unsupported dtype");
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaFreeAsync(d_prefix, stream));
+    return output;
+}
+
+// ============================================================================
+// tril_indices / triu_indices — CPU generation + transfer (standard pattern)
+// ============================================================================
+
+auto tril_indices_kernel(int64_t row, int64_t col, int64_t offset,
+                         cudaStream_t stream) -> Tensor {
+    // Generate on CPU
+    std::vector<int64_t> row_indices, col_indices;
+    for (int64_t r = 0; r < row; ++r) {
+        int64_t max_c = std::min(col, r + offset + 1);
+        for (int64_t c = 0; c < max_c; ++c) {
+            row_indices.push_back(r);
+            col_indices.push_back(c);
+        }
+    }
+    int64_t n = static_cast<int64_t>(row_indices.size());
+    if (n == 0) return tenzor::empty({2, 0}, DType::Int64, Device::cuda(0));
+
+    Tensor cpu_out({2, n}, DType::Int64, Device::cpu());
+    int64_t* ptr = cpu_out.data<int64_t>();
+    std::memcpy(ptr, row_indices.data(), n * sizeof(int64_t));
+    std::memcpy(ptr + n, col_indices.data(), n * sizeof(int64_t));
+    return cpu_out.to(Device::cuda(0));
+}
+
+auto triu_indices_kernel(int64_t row, int64_t col, int64_t offset,
+                         cudaStream_t stream) -> Tensor {
+    std::vector<int64_t> row_indices, col_indices;
+    for (int64_t r = 0; r < row; ++r) {
+        int64_t min_c = std::max(static_cast<int64_t>(0), r + offset);
+        for (int64_t c = min_c; c < col; ++c) {
+            row_indices.push_back(r);
+            col_indices.push_back(c);
+        }
+    }
+    int64_t n = static_cast<int64_t>(row_indices.size());
+    if (n == 0) return tenzor::empty({2, 0}, DType::Int64, Device::cuda(0));
+
+    Tensor cpu_out({2, n}, DType::Int64, Device::cpu());
+    int64_t* ptr = cpu_out.data<int64_t>();
+    std::memcpy(ptr, row_indices.data(), n * sizeof(int64_t));
+    std::memcpy(ptr + n, col_indices.data(), n * sizeof(int64_t));
+    return cpu_out.to(Device::cuda(0));
+}
+
 } // namespace cuda
 } // namespace tenzor

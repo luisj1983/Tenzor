@@ -1564,6 +1564,65 @@ auto linalg_cholesky_kernel(const Tensor& A, bool upper, hipStream_t stream) -> 
     return work;
 }
 
+// ============================================================================
+// Triangular Solve (AX = B, A triangular) — rocBLAS trsm
+// ============================================================================
+
+auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
+                                     bool upper, bool unitriangular,
+                                     hipStream_t stream) -> Tensor {
+    validate_linalg_dtype(A, "solve_triangular");
+    if (A.dtype() == DType::Float16 || A.dtype() == DType::BFloat16) {
+        return linalg_solve_triangular_kernel(
+            A.to(DType::Float32), B.to(DType::Float32),
+            upper, unitriangular, stream).to(A.dtype());
+    }
+
+    // rocBLAS trsm operates in column-major. Transpose to column-major,
+    // solve, then transpose back.
+    auto a_cm = tenzor::transpose(A.contiguous().clone(), -2, -1).contiguous();
+    auto b_cm = tenzor::transpose(B.contiguous().clone(), -2, -1).contiguous();
+
+    auto [n, ndim_a] = check_square(a_cm);
+    auto b_shape = B.shape();
+    auto b_ndim = static_cast<int64_t>(b_shape.size());
+    int64_t nrhs = (b_ndim >= 2) ? b_shape[b_ndim - 1] : 1;
+    int64_t nbatch = batch_size(a_cm);
+
+    // In column-major, row-major upper becomes lower and vice versa
+    rocblas_fill uplo = upper ? rocblas_fill_lower : rocblas_fill_upper;
+    rocblas_diagonal diag = unitriangular ? rocblas_diagonal_unit : rocblas_diagonal_non_unit;
+
+    auto handle = RocSOLVERHandlePool::get(stream);
+
+    if (A.dtype() == DType::Float32) {
+        float alpha = 1.0f;
+        float* a_ptr = a_cm.data<float>();
+        float* b_ptr = b_cm.data<float>();
+        for (int64_t b = 0; b < nbatch; ++b) {
+            ROCBLAS_CHECK_LINALG(rocblas_strsm(handle, rocblas_side_left, uplo,
+                rocblas_operation_none, diag,
+                static_cast<rocblas_int>(n), static_cast<rocblas_int>(nrhs), &alpha,
+                a_ptr + b * n * n, static_cast<rocblas_int>(n),
+                b_ptr + b * n * nrhs, static_cast<rocblas_int>(n)));
+        }
+    } else {
+        double alpha = 1.0;
+        double* a_ptr = a_cm.data<double>();
+        double* b_ptr = b_cm.data<double>();
+        for (int64_t b = 0; b < nbatch; ++b) {
+            ROCBLAS_CHECK_LINALG(rocblas_dtrsm(handle, rocblas_side_left, uplo,
+                rocblas_operation_none, diag,
+                static_cast<rocblas_int>(n), static_cast<rocblas_int>(nrhs), &alpha,
+                a_ptr + b * n * n, static_cast<rocblas_int>(n),
+                b_ptr + b * n * nrhs, static_cast<rocblas_int>(n)));
+        }
+    }
+
+    HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
+    return tenzor::transpose(b_cm, -2, -1).contiguous();
+}
+
 } // namespace rocm
 } // namespace tenzor
 
@@ -3538,6 +3597,79 @@ auto linalg_lu_solve_kernel(const Tensor& /*LU_data*/, const Tensor& /*pivots*/,
     throw std::runtime_error(
         "linalg::lu_solve: ROCm backend requires rocSOLVER "
         "(built without TENZOR_HAS_ROCSOLVER)");
+}
+
+// ============================================================================
+// Triangular Solve (AX = B, A triangular) — native HIP kernel
+// ============================================================================
+
+template<typename T>
+__global__ void trsm_kernel(const T* __restrict__ A, T* __restrict__ B,
+                            int n, int nrhs, bool upper, bool unit_diag) {
+    int batch = blockIdx.x;
+    const T* A_mat = A + batch * n * n;
+    T* B_mat = B + batch * n * nrhs;
+    int tid = threadIdx.x;
+
+    if (upper) {
+        for (int i = n - 1; i >= 0; --i) {
+            __syncthreads();
+            for (int j = tid; j < nrhs; j += blockDim.x) {
+                T sum = B_mat[i * nrhs + j];
+                for (int k = i + 1; k < n; ++k)
+                    sum -= A_mat[i * n + k] * B_mat[k * nrhs + j];
+                B_mat[i * nrhs + j] = unit_diag ? sum : sum / A_mat[i * n + i];
+            }
+        }
+    } else {
+        for (int i = 0; i < n; ++i) {
+            __syncthreads();
+            for (int j = tid; j < nrhs; j += blockDim.x) {
+                T sum = B_mat[i * nrhs + j];
+                for (int k = 0; k < i; ++k)
+                    sum -= A_mat[i * n + k] * B_mat[k * nrhs + j];
+                B_mat[i * nrhs + j] = unit_diag ? sum : sum / A_mat[i * n + i];
+            }
+        }
+    }
+}
+
+auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
+                                     bool upper, bool unitriangular,
+                                     hipStream_t stream) -> Tensor {
+    validate_linalg_dtype(A, "solve_triangular");
+    if (A.dtype() == DType::Float16 || A.dtype() == DType::BFloat16) {
+        return linalg_solve_triangular_kernel(
+            A.to(DType::Float32), B.to(DType::Float32),
+            upper, unitriangular, stream).to(A.dtype());
+    }
+
+    auto work_a = A.contiguous();
+    auto work_b = B.contiguous().clone();
+    auto [n, ndim_a] = check_square(work_a);
+    auto b_shape = B.shape();
+    auto b_ndim = static_cast<int64_t>(b_shape.size());
+    int64_t nrhs = (b_ndim >= 2) ? b_shape[b_ndim - 1] : 1;
+    int64_t nbatch = batch_size(work_a);
+
+    int threads = std::min(std::max(static_cast<int>(nrhs), 1), 256);
+
+    if (work_a.dtype() == DType::Float32) {
+        check_size_limit<float>(n, "solve_triangular");
+        trsm_kernel<float><<<static_cast<int>(nbatch), threads, 0, stream>>>(
+            work_a.data<float>(), work_b.data<float>(),
+            static_cast<int>(n), static_cast<int>(nrhs), upper, unitriangular);
+        HIP_CHECK_LINALG(hipGetLastError());
+    } else {
+        check_size_limit<double>(n, "solve_triangular");
+        trsm_kernel<double><<<static_cast<int>(nbatch), threads, 0, stream>>>(
+            work_a.data<double>(), work_b.data<double>(),
+            static_cast<int>(n), static_cast<int>(nrhs), upper, unitriangular);
+        HIP_CHECK_LINALG(hipGetLastError());
+    }
+
+    HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
+    return work_b;
 }
 
 } // namespace rocm

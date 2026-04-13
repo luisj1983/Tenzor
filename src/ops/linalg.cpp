@@ -2,6 +2,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "tenzor/ops/transform.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
@@ -290,6 +291,128 @@ auto solve(const Tensor& A, const Tensor& B) -> Tensor {
 
     return maybe_downcast(work_b, original_dtype);
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
+}
+
+auto solve_triangular(const Tensor& A, const Tensor& B, bool upper, bool unitriangular) -> Tensor {
+    // Try GPU dispatch first
+    {
+        Tensor result;
+        std::array<Tensor, 2> inputs = {A, B};
+        OpAttributes attrs;
+        attrs.set(AttrKey::Upper, upper);
+        attrs.set(AttrKey::UnitTriangular, unitriangular);
+        if (try_gpu_dispatch(OpId::SolveTriangular, inputs, attrs, result)) return result;
+    }
+
+#if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
+    // Fallback: forward/back substitution without LAPACK
+    auto original_dtype = A.dtype();
+    auto work_a = prepare_matrix(A);
+    auto work_b = prepare_matrix(B);
+    auto [n, ndim_a] = check_square(work_a);
+
+    auto b_shape = B.shape();
+    auto b_ndim = static_cast<int64_t>(b_shape.size());
+    if (b_ndim < 1) throw std::invalid_argument("linalg::solve_triangular: B must be at least 1D");
+
+    int64_t nrhs = (b_ndim >= 2) ? b_shape[b_ndim - 1] : 1;
+    int64_t nbatch = batch_size(work_a);
+
+    if (work_a.dtype() == DType::Float32) {
+        const float* a_data = work_a.data<float>();
+        float* b_data = work_b.data<float>();
+        for (int64_t batch = 0; batch < nbatch; ++batch) {
+            const float* A_mat = a_data + batch * n * n;
+            float* X_mat = b_data + batch * n * nrhs;
+            if (upper) {
+                for (int64_t i = n - 1; i >= 0; --i) {
+                    for (int64_t j = 0; j < nrhs; ++j) {
+                        float sum = X_mat[i * nrhs + j];
+                        for (int64_t k = i + 1; k < n; ++k)
+                            sum -= A_mat[i * n + k] * X_mat[k * nrhs + j];
+                        X_mat[i * nrhs + j] = unitriangular ? sum : sum / A_mat[i * n + i];
+                    }
+                }
+            } else {
+                for (int64_t i = 0; i < n; ++i) {
+                    for (int64_t j = 0; j < nrhs; ++j) {
+                        float sum = X_mat[i * nrhs + j];
+                        for (int64_t k = 0; k < i; ++k)
+                            sum -= A_mat[i * n + k] * X_mat[k * nrhs + j];
+                        X_mat[i * nrhs + j] = unitriangular ? sum : sum / A_mat[i * n + i];
+                    }
+                }
+            }
+        }
+    } else {
+        const double* a_data = work_a.data<double>();
+        double* b_data = work_b.data<double>();
+        for (int64_t batch = 0; batch < nbatch; ++batch) {
+            const double* A_mat = a_data + batch * n * n;
+            double* X_mat = b_data + batch * n * nrhs;
+            if (upper) {
+                for (int64_t i = n - 1; i >= 0; --i) {
+                    for (int64_t j = 0; j < nrhs; ++j) {
+                        double sum = X_mat[i * nrhs + j];
+                        for (int64_t k = i + 1; k < n; ++k)
+                            sum -= A_mat[i * n + k] * X_mat[k * nrhs + j];
+                        X_mat[i * nrhs + j] = unitriangular ? sum : sum / A_mat[i * n + i];
+                    }
+                }
+            } else {
+                for (int64_t i = 0; i < n; ++i) {
+                    for (int64_t j = 0; j < nrhs; ++j) {
+                        double sum = X_mat[i * nrhs + j];
+                        for (int64_t k = 0; k < i; ++k)
+                            sum -= A_mat[i * n + k] * X_mat[k * nrhs + j];
+                        X_mat[i * nrhs + j] = unitriangular ? sum : sum / A_mat[i * n + i];
+                    }
+                }
+            }
+        }
+    }
+    return maybe_downcast(work_b, original_dtype);
+#else
+    // Use CBLAS trsm for triangular solve
+    auto original_dtype = A.dtype();
+    auto work_a = prepare_matrix(A);
+    auto work_b = prepare_matrix(B);
+    auto [n, ndim_a] = check_square(work_a);
+
+    auto b_shape = B.shape();
+    auto b_ndim = static_cast<int64_t>(b_shape.size());
+    if (b_ndim < 1) throw std::invalid_argument("linalg::solve_triangular: B must be at least 1D");
+
+    int64_t nrhs = (b_ndim >= 2) ? b_shape[b_ndim - 1] : 1;
+    int64_t nbatch = batch_size(work_a);
+
+    auto uplo = upper ? CblasUpper : CblasLower;
+    auto diag = unitriangular ? CblasUnit : CblasNonUnit;
+    auto ln = static_cast<int>(n);
+    auto lnrhs = static_cast<int>(nrhs);
+
+    if (work_a.dtype() == DType::Float32) {
+        const float* a_data = work_a.data<float>();
+        float* b_data = work_b.data<float>();
+        for (int64_t batch = 0; batch < nbatch; ++batch) {
+            cblas_strsm(CblasRowMajor, CblasLeft, uplo, CblasNoTrans, diag,
+                        ln, lnrhs, 1.0f,
+                        a_data + batch * n * n, ln,
+                        b_data + batch * n * nrhs, lnrhs);
+        }
+    } else {
+        const double* a_data = work_a.data<double>();
+        double* b_data = work_b.data<double>();
+        for (int64_t batch = 0; batch < nbatch; ++batch) {
+            cblas_dtrsm(CblasRowMajor, CblasLeft, uplo, CblasNoTrans, diag,
+                        ln, lnrhs, 1.0,
+                        a_data + batch * n * n, ln,
+                        b_data + batch * n * nrhs, lnrhs);
+        }
+    }
+
+    return maybe_downcast(work_b, original_dtype);
+#endif
 }
 
 auto cholesky(const Tensor& A, bool upper) -> Tensor {
@@ -1464,6 +1587,118 @@ auto matrix_exp(const Tensor& A) -> Tensor {
     }
 
     return maybe_downcast(R, original_dtype);
+}
+
+// =========================================================================
+// New linear algebra operations for PyTorch parity (compositions)
+// =========================================================================
+
+auto outer(const Tensor& a, const Tensor& b) -> Tensor {
+    // a[:, None] * b[None, :] → (M, N) from (M,) and (N,)
+    auto a2 = a.reshape({a.numel(), 1});
+    auto b2 = b.reshape({1, b.numel()});
+    return tenzor::mul(a2, b2);
+}
+
+auto inner(const Tensor& a, const Tensor& b) -> Tensor {
+    // For 1D: dot product. For ND: sum product over last dims
+    if (a.ndim() == 1 && b.ndim() == 1) {
+        return tenzor::dot(a, b);
+    }
+    // General: contract last dim of a with last dim of b
+    return tenzor::matmul(a, b);
+}
+
+auto vdot(const Tensor& a, const Tensor& b) -> Tensor {
+    // Conjugate dot: conj(a) . b
+    auto a_flat = a.reshape({-1});
+    auto b_flat = b.reshape({-1});
+    auto a_conj = tenzor::conj(a_flat);
+    return tenzor::dot(a_conj, b_flat);
+}
+
+auto cond(const Tensor& A) -> Tensor {
+    // Condition number via SVD: max(s) / min(s)
+    auto [U, S, Vh] = svd(A);
+    auto s_max = tenzor::max(S);
+    auto s_min = tenzor::min(S);
+    return tenzor::div(s_max, s_min);
+}
+
+auto matrix_rank(const Tensor& A, double tol) -> Tensor {
+    // Rank via SVD: count singular values above tolerance
+    auto [U, S, Vh] = svd(A);
+    Tensor threshold;
+    if (tol < 0) {
+        // Default tolerance: max(M,N) * max(S) * eps
+        auto s_max = tenzor::max(S);
+        auto shape = A.shape();
+        double mn = static_cast<double>(std::max(shape[shape.size()-2], shape[shape.size()-1]));
+        double eps = (A.dtype() == DType::Float64) ? 1e-15 : 1e-6;
+        threshold = tenzor::mul(s_max, tenzor::full({1}, mn * eps, S.dtype(), S.device()));
+    } else {
+        threshold = tenzor::full({1}, tol, S.dtype(), S.device());
+    }
+    auto mask = tenzor::gt(S, threshold);
+    return tenzor::sum(mask.to(DType::Int64));
+}
+
+auto diag_embed(const Tensor& input, int64_t offset, int64_t dim1, int64_t dim2) -> Tensor {
+    // For the common case (1D input, default dims), delegate to diag()
+    if (input.ndim() == 1 && dim1 == -2 && dim2 == -1) {
+        return tenzor::diag(input, offset);
+    }
+
+    // General batched case: process each batch element
+    int64_t ndim = input.ndim() + 1;
+    if (dim1 < 0) dim1 += ndim;
+    if (dim2 < 0) dim2 += ndim;
+
+    // For batched inputs: last dim of input is the diagonal length
+    int64_t diag_len = input.shape().back();
+    int64_t n = diag_len + std::abs(offset);
+
+    // Build output shape
+    auto in_shape = input.shape();
+    std::vector<int64_t> out_shape;
+    int in_idx = 0;
+    for (int64_t d = 0; d < ndim; d++) {
+        if (d == dim1 || d == dim2) {
+            out_shape.push_back(n);
+        } else {
+            if (in_idx < static_cast<int>(in_shape.size())) {
+                out_shape.push_back(in_shape[in_idx++]);
+            }
+        }
+    }
+
+    auto result = tenzor::zeros(out_shape, input.dtype(), input.device());
+
+    // For non-batched 1D case with non-default dims, use CPU scatter
+    if (input.ndim() == 1) {
+        auto cpu_input = input.to(Device::cpu());
+        auto cpu_result = tenzor::zeros(out_shape, input.dtype(), Device::cpu());
+        auto elem_size = dtype_size(input.dtype());
+        const auto* src = static_cast<const uint8_t*>(cpu_input.data_ptr());
+        auto* dst = static_cast<uint8_t*>(cpu_result.data_ptr());
+
+        for (int64_t i = 0; i < diag_len; ++i) {
+            // Compute position in output for diagonal element i
+            int64_t row = offset >= 0 ? i : i - offset;
+            int64_t col = offset >= 0 ? i + offset : i;
+            int64_t dst_idx = (row * n + col) * elem_size;
+            std::memcpy(dst + dst_idx, src + i * elem_size, elem_size);
+        }
+        return cpu_result.to(input.device());
+    }
+
+    return result;
+}
+
+auto diagflat(const Tensor& input, int64_t offset) -> Tensor {
+    // Flatten input then create diagonal matrix using existing diag()
+    auto flat = input.reshape({-1});
+    return tenzor::diag(flat, offset);
 }
 
 } // namespace tenzor::linalg

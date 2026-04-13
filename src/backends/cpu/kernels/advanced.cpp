@@ -9,10 +9,13 @@
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/shape.hpp"
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <limits>
 #include <numeric>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #ifdef _OPENMP
@@ -671,6 +674,714 @@ auto bucketize_kernel(const Tensor& input, const Tensor& boundaries, bool right)
     }
 
     return result;
+}
+
+// ============================================================================
+// CumMax / CumMin Kernels
+// ============================================================================
+
+template<typename T>
+auto cummax_impl(const T* data, T* out_values, int64_t* out_indices,
+                 int64_t dim_size, int64_t outer_size, int64_t inner_size) -> void {
+    #pragma omp parallel for if(outer_size * inner_size > 4096)
+    for (int64_t outer = 0; outer < outer_size; ++outer) {
+        for (int64_t inner = 0; inner < inner_size; ++inner) {
+            int64_t first_idx = (outer * dim_size + 0) * inner_size + inner;
+            T running_max = data[first_idx];
+            int64_t running_idx = 0;
+            out_values[first_idx] = running_max;
+            out_indices[first_idx] = running_idx;
+            for (int64_t d = 1; d < dim_size; ++d) {
+                int64_t idx = (outer * dim_size + d) * inner_size + inner;
+                T val = data[idx];
+                if (val > running_max) {
+                    running_max = val;
+                    running_idx = d;
+                }
+                out_values[idx] = running_max;
+                out_indices[idx] = running_idx;
+            }
+        }
+    }
+}
+
+template<typename T>
+auto cummin_impl(const T* data, T* out_values, int64_t* out_indices,
+                 int64_t dim_size, int64_t outer_size, int64_t inner_size) -> void {
+    #pragma omp parallel for if(outer_size * inner_size > 4096)
+    for (int64_t outer = 0; outer < outer_size; ++outer) {
+        for (int64_t inner = 0; inner < inner_size; ++inner) {
+            int64_t first_idx = (outer * dim_size + 0) * inner_size + inner;
+            T running_min = data[first_idx];
+            int64_t running_idx = 0;
+            out_values[first_idx] = running_min;
+            out_indices[first_idx] = running_idx;
+            for (int64_t d = 1; d < dim_size; ++d) {
+                int64_t idx = (outer * dim_size + d) * inner_size + inner;
+                T val = data[idx];
+                if (val < running_min) {
+                    running_min = val;
+                    running_idx = d;
+                }
+                out_values[idx] = running_min;
+                out_indices[idx] = running_idx;
+            }
+        }
+    }
+}
+
+auto cummax_kernel(const Tensor& input, int64_t dim) -> std::pair<Tensor, Tensor> {
+    if (dim < 0) dim += input.ndim();
+    auto [outer_size, dim_size, inner_size] = decompose_dim(input, dim);
+
+    Tensor cont = input.is_contiguous() ? input : input.contiguous();
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    Tensor values(shape_vec, input.dtype(), input.device());
+    Tensor indices(shape_vec, DType::Int64, input.device());
+
+    if (input.dtype() == DType::Float32) {
+        cummax_impl(cont.data<float>(), values.data<float>(), indices.data<int64_t>(),
+                    dim_size, outer_size, inner_size);
+    } else if (input.dtype() == DType::Float64) {
+        cummax_impl(cont.data<double>(), values.data<double>(), indices.data<int64_t>(),
+                    dim_size, outer_size, inner_size);
+    } else if (input.dtype() == DType::Int32) {
+        cummax_impl(cont.data<int32_t>(), values.data<int32_t>(), indices.data<int64_t>(),
+                    dim_size, outer_size, inner_size);
+    } else if (input.dtype() == DType::Int64) {
+        cummax_impl(cont.data<int64_t>(), values.data<int64_t>(), indices.data<int64_t>(),
+                    dim_size, outer_size, inner_size);
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        Tensor cont_f32 = cont.to(DType::Float32);
+        Tensor values_f32(shape_vec, DType::Float32, input.device());
+        cummax_impl(cont_f32.data<float>(), values_f32.data<float>(), indices.data<int64_t>(),
+                    dim_size, outer_size, inner_size);
+        values = values_f32.to(orig);
+    } else {
+        throw std::runtime_error("cummax: unsupported dtype");
+    }
+
+    return {values, indices};
+}
+
+auto cummin_kernel(const Tensor& input, int64_t dim) -> std::pair<Tensor, Tensor> {
+    if (dim < 0) dim += input.ndim();
+    auto [outer_size, dim_size, inner_size] = decompose_dim(input, dim);
+
+    Tensor cont = input.is_contiguous() ? input : input.contiguous();
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    Tensor values(shape_vec, input.dtype(), input.device());
+    Tensor indices(shape_vec, DType::Int64, input.device());
+
+    if (input.dtype() == DType::Float32) {
+        cummin_impl(cont.data<float>(), values.data<float>(), indices.data<int64_t>(),
+                    dim_size, outer_size, inner_size);
+    } else if (input.dtype() == DType::Float64) {
+        cummin_impl(cont.data<double>(), values.data<double>(), indices.data<int64_t>(),
+                    dim_size, outer_size, inner_size);
+    } else if (input.dtype() == DType::Int32) {
+        cummin_impl(cont.data<int32_t>(), values.data<int32_t>(), indices.data<int64_t>(),
+                    dim_size, outer_size, inner_size);
+    } else if (input.dtype() == DType::Int64) {
+        cummin_impl(cont.data<int64_t>(), values.data<int64_t>(), indices.data<int64_t>(),
+                    dim_size, outer_size, inner_size);
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        Tensor cont_f32 = cont.to(DType::Float32);
+        Tensor values_f32(shape_vec, DType::Float32, input.device());
+        cummin_impl(cont_f32.data<float>(), values_f32.data<float>(), indices.data<int64_t>(),
+                    dim_size, outer_size, inner_size);
+        values = values_f32.to(orig);
+    } else {
+        throw std::runtime_error("cummin: unsupported dtype");
+    }
+
+    return {values, indices};
+}
+
+// ============================================================================
+// Isin Kernel — set membership test
+// ============================================================================
+
+auto isin_kernel(const Tensor& elements, const Tensor& test_elements) -> Tensor {
+    Tensor elem_f32 = (elements.dtype() != DType::Float32) ? elements.to(DType::Float32) : elements;
+    Tensor test_f32 = (test_elements.dtype() != DType::Float32) ? test_elements.to(DType::Float32) : test_elements;
+
+    const float* elem_data = elem_f32.data<float>();
+    const float* test_data = test_f32.data<float>();
+    int64_t n_elem = elem_f32.numel();
+    int64_t n_test = test_f32.numel();
+
+    // Build hash set of test elements for O(1) lookup
+    std::unordered_set<uint32_t> test_set;
+    test_set.reserve(static_cast<size_t>(n_test));
+    for (int64_t i = 0; i < n_test; ++i) {
+        uint32_t bits;
+        std::memcpy(&bits, &test_data[i], sizeof(uint32_t));
+        test_set.insert(bits);
+    }
+
+    auto out_shape = std::vector<int64_t>(elements.shape().begin(), elements.shape().end());
+    Tensor output(out_shape, DType::Bool, elements.device());
+    bool* out_data = output.data<bool>();
+
+    #pragma omp parallel for schedule(static) if(n_elem > 65536)
+    for (int64_t i = 0; i < n_elem; ++i) {
+        uint32_t bits;
+        std::memcpy(&bits, &elem_data[i], sizeof(uint32_t));
+        out_data[i] = test_set.count(bits) > 0;
+    }
+
+    return output;
+}
+
+// ============================================================================
+// Kthvalue Kernel — k-th smallest value along dim
+// ============================================================================
+
+template<typename T>
+auto kthvalue_impl(const T* data, int64_t dim_size,
+                   int64_t outer_size, int64_t inner_size, int64_t k,
+                   T* out_values, int64_t* out_indices) -> void {
+    #pragma omp parallel for if(outer_size * inner_size > 1024)
+    for (int64_t outer = 0; outer < outer_size; ++outer) {
+        for (int64_t inner = 0; inner < inner_size; ++inner) {
+            std::vector<std::pair<T, int64_t>> pairs(dim_size);
+            for (int64_t d = 0; d < dim_size; ++d) {
+                int64_t idx = (outer * dim_size + d) * inner_size + inner;
+                pairs[d] = {data[idx], d};
+            }
+            // Partial sort so that pairs[k-1] is the k-th smallest
+            std::nth_element(pairs.begin(), pairs.begin() + (k - 1), pairs.end(),
+                [](const auto& a, const auto& b) { return a.first < b.first; });
+
+            int64_t out_idx = outer * inner_size + inner;
+            out_values[out_idx] = pairs[k - 1].first;
+            out_indices[out_idx] = pairs[k - 1].second;
+        }
+    }
+}
+
+auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim,
+                     bool keepdim) -> std::pair<Tensor, Tensor> {
+    if (dim < 0) dim += input.ndim();
+    auto [outer_size, dim_size, inner_size] = decompose_dim(input, dim);
+
+    if (k < 1 || k > dim_size) {
+        throw std::runtime_error("kthvalue: k out of range");
+    }
+
+    Tensor cont = input.is_contiguous() ? input : input.contiguous();
+
+    // Output shape: same as input but dim is reduced to 1
+    std::vector<int64_t> out_shape(input.shape().begin(), input.shape().end());
+    out_shape[dim] = 1;
+
+    Tensor values(out_shape, input.dtype(), input.device());
+    Tensor indices(out_shape, DType::Int64, input.device());
+
+    if (input.dtype() == DType::Float32) {
+        kthvalue_impl(cont.data<float>(), dim_size, outer_size, inner_size, k,
+                      values.data<float>(), indices.data<int64_t>());
+    } else if (input.dtype() == DType::Float64) {
+        kthvalue_impl(cont.data<double>(), dim_size, outer_size, inner_size, k,
+                      values.data<double>(), indices.data<int64_t>());
+    } else if (input.dtype() == DType::Int32) {
+        kthvalue_impl(cont.data<int32_t>(), dim_size, outer_size, inner_size, k,
+                      values.data<int32_t>(), indices.data<int64_t>());
+    } else if (input.dtype() == DType::Int64) {
+        kthvalue_impl(cont.data<int64_t>(), dim_size, outer_size, inner_size, k,
+                      values.data<int64_t>(), indices.data<int64_t>());
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        Tensor cont_f32 = cont.to(DType::Float32);
+        Tensor values_f32(out_shape, DType::Float32, input.device());
+        kthvalue_impl(cont_f32.data<float>(), dim_size, outer_size, inner_size, k,
+                      values_f32.data<float>(), indices.data<int64_t>());
+        values = values_f32.to(orig);
+    } else {
+        throw std::runtime_error("kthvalue: unsupported dtype");
+    }
+
+    if (!keepdim) {
+        // Squeeze the dim dimension
+        std::vector<int64_t> squeezed;
+        for (int64_t i = 0; i < static_cast<int64_t>(out_shape.size()); ++i) {
+            if (i != dim) squeezed.push_back(out_shape[i]);
+        }
+        if (squeezed.empty()) squeezed.push_back(1);
+        values = values.reshape(squeezed);
+        indices = indices.reshape(squeezed);
+    }
+
+    return {values, indices};
+}
+
+// ============================================================================
+// Fmax / Fmin Kernels — element-wise max/min ignoring NaN
+// ============================================================================
+
+template<typename T>
+auto fmax_impl(const T* a, const T* b, T* out, int64_t n) -> void {
+    #pragma omp parallel for schedule(static) if(n > 65536)
+    for (int64_t i = 0; i < n; ++i) {
+        if constexpr (std::is_floating_point_v<T>) {
+            if (std::isnan(a[i])) { out[i] = b[i]; }
+            else if (std::isnan(b[i])) { out[i] = a[i]; }
+            else { out[i] = (a[i] >= b[i]) ? a[i] : b[i]; }
+        } else {
+            out[i] = (a[i] >= b[i]) ? a[i] : b[i];
+        }
+    }
+}
+
+template<typename T>
+auto fmin_impl(const T* a, const T* b, T* out, int64_t n) -> void {
+    #pragma omp parallel for schedule(static) if(n > 65536)
+    for (int64_t i = 0; i < n; ++i) {
+        if constexpr (std::is_floating_point_v<T>) {
+            if (std::isnan(a[i])) { out[i] = b[i]; }
+            else if (std::isnan(b[i])) { out[i] = a[i]; }
+            else { out[i] = (a[i] <= b[i]) ? a[i] : b[i]; }
+        } else {
+            out[i] = (a[i] <= b[i]) ? a[i] : b[i];
+        }
+    }
+}
+
+auto fmax_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    if (a.numel() != b.numel()) {
+        throw std::runtime_error("fmax: tensors must have the same number of elements");
+    }
+    Tensor ca = a.is_contiguous() ? a : a.contiguous();
+    Tensor cb = b.is_contiguous() ? b : b.contiguous();
+    auto shape_vec = std::vector<int64_t>(a.shape().begin(), a.shape().end());
+    Tensor output(shape_vec, a.dtype(), a.device());
+    int64_t n = a.numel();
+
+    if (a.dtype() == DType::Float32) {
+        fmax_impl(ca.data<float>(), cb.data<float>(), output.data<float>(), n);
+    } else if (a.dtype() == DType::Float64) {
+        fmax_impl(ca.data<double>(), cb.data<double>(), output.data<double>(), n);
+    } else if (a.dtype() == DType::Int32) {
+        fmax_impl(ca.data<int32_t>(), cb.data<int32_t>(), output.data<int32_t>(), n);
+    } else if (a.dtype() == DType::Int64) {
+        fmax_impl(ca.data<int64_t>(), cb.data<int64_t>(), output.data<int64_t>(), n);
+    } else if (a.dtype() == DType::Float16 || a.dtype() == DType::BFloat16) {
+        DType orig = a.dtype();
+        Tensor af32 = ca.to(DType::Float32);
+        Tensor bf32 = cb.to(DType::Float32);
+        Tensor out_f32(shape_vec, DType::Float32, a.device());
+        fmax_impl(af32.data<float>(), bf32.data<float>(), out_f32.data<float>(), n);
+        output = out_f32.to(orig);
+    } else {
+        throw std::runtime_error("fmax: unsupported dtype");
+    }
+    return output;
+}
+
+auto fmin_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    if (a.numel() != b.numel()) {
+        throw std::runtime_error("fmin: tensors must have the same number of elements");
+    }
+    Tensor ca = a.is_contiguous() ? a : a.contiguous();
+    Tensor cb = b.is_contiguous() ? b : b.contiguous();
+    auto shape_vec = std::vector<int64_t>(a.shape().begin(), a.shape().end());
+    Tensor output(shape_vec, a.dtype(), a.device());
+    int64_t n = a.numel();
+
+    if (a.dtype() == DType::Float32) {
+        fmin_impl(ca.data<float>(), cb.data<float>(), output.data<float>(), n);
+    } else if (a.dtype() == DType::Float64) {
+        fmin_impl(ca.data<double>(), cb.data<double>(), output.data<double>(), n);
+    } else if (a.dtype() == DType::Int32) {
+        fmin_impl(ca.data<int32_t>(), cb.data<int32_t>(), output.data<int32_t>(), n);
+    } else if (a.dtype() == DType::Int64) {
+        fmin_impl(ca.data<int64_t>(), cb.data<int64_t>(), output.data<int64_t>(), n);
+    } else if (a.dtype() == DType::Float16 || a.dtype() == DType::BFloat16) {
+        DType orig = a.dtype();
+        Tensor af32 = ca.to(DType::Float32);
+        Tensor bf32 = cb.to(DType::Float32);
+        Tensor out_f32(shape_vec, DType::Float32, a.device());
+        fmin_impl(af32.data<float>(), bf32.data<float>(), out_f32.data<float>(), n);
+        output = out_f32.to(orig);
+    } else {
+        throw std::runtime_error("fmin: unsupported dtype");
+    }
+    return output;
+}
+
+// ============================================================================
+// Quantile / Nanquantile Kernels
+// ============================================================================
+
+template<typename T>
+auto quantile_impl(const T* data, int64_t dim_size,
+                   int64_t outer_size, int64_t inner_size,
+                   double q, T* out_values) -> void {
+    #pragma omp parallel for if(outer_size * inner_size > 1024)
+    for (int64_t outer = 0; outer < outer_size; ++outer) {
+        for (int64_t inner = 0; inner < inner_size; ++inner) {
+            std::vector<T> slice(dim_size);
+            for (int64_t d = 0; d < dim_size; ++d) {
+                slice[d] = data[(outer * dim_size + d) * inner_size + inner];
+            }
+            std::sort(slice.begin(), slice.end());
+
+            // Linear interpolation at the q-th position
+            double idx_f = q * static_cast<double>(dim_size - 1);
+            int64_t lo = static_cast<int64_t>(idx_f);
+            int64_t hi = lo + 1;
+            if (hi >= dim_size) hi = dim_size - 1;
+            double frac_part = idx_f - static_cast<double>(lo);
+
+            T result = static_cast<T>(
+                static_cast<double>(slice[lo]) * (1.0 - frac_part) +
+                static_cast<double>(slice[hi]) * frac_part);
+
+            out_values[outer * inner_size + inner] = result;
+        }
+    }
+}
+
+template<typename T>
+auto nanquantile_impl(const T* data, int64_t dim_size,
+                      int64_t outer_size, int64_t inner_size,
+                      double q, T* out_values) -> void {
+    #pragma omp parallel for if(outer_size * inner_size > 1024)
+    for (int64_t outer = 0; outer < outer_size; ++outer) {
+        for (int64_t inner = 0; inner < inner_size; ++inner) {
+            std::vector<T> slice;
+            slice.reserve(dim_size);
+            for (int64_t d = 0; d < dim_size; ++d) {
+                T val = data[(outer * dim_size + d) * inner_size + inner];
+                if constexpr (std::is_floating_point_v<T>) {
+                    if (!std::isnan(val)) slice.push_back(val);
+                } else {
+                    slice.push_back(val);
+                }
+            }
+
+            if (slice.empty()) {
+                out_values[outer * inner_size + inner] = std::numeric_limits<T>::quiet_NaN();
+                continue;
+            }
+
+            std::sort(slice.begin(), slice.end());
+            int64_t n = static_cast<int64_t>(slice.size());
+
+            double idx_f = q * static_cast<double>(n - 1);
+            int64_t lo = static_cast<int64_t>(idx_f);
+            int64_t hi = lo + 1;
+            if (hi >= n) hi = n - 1;
+            double frac_part = idx_f - static_cast<double>(lo);
+
+            T result = static_cast<T>(
+                static_cast<double>(slice[lo]) * (1.0 - frac_part) +
+                static_cast<double>(slice[hi]) * frac_part);
+
+            out_values[outer * inner_size + inner] = result;
+        }
+    }
+}
+
+auto quantile_kernel(const Tensor& input, double q, int64_t dim,
+                     bool keepdim) -> Tensor {
+    if (dim < 0) dim += input.ndim();
+    auto [outer_size, dim_size, inner_size] = decompose_dim(input, dim);
+
+    Tensor cont = input.is_contiguous() ? input : input.contiguous();
+
+    std::vector<int64_t> out_shape(input.shape().begin(), input.shape().end());
+    out_shape[dim] = 1;
+
+    Tensor output(out_shape, input.dtype(), input.device());
+
+    if (input.dtype() == DType::Float32) {
+        quantile_impl(cont.data<float>(), dim_size, outer_size, inner_size, q,
+                      output.data<float>());
+    } else if (input.dtype() == DType::Float64) {
+        quantile_impl(cont.data<double>(), dim_size, outer_size, inner_size, q,
+                      output.data<double>());
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        Tensor cont_f32 = cont.to(DType::Float32);
+        Tensor out_f32(out_shape, DType::Float32, input.device());
+        quantile_impl(cont_f32.data<float>(), dim_size, outer_size, inner_size, q,
+                      out_f32.data<float>());
+        output = out_f32.to(orig);
+    } else {
+        throw std::runtime_error("quantile: unsupported dtype (requires floating-point)");
+    }
+
+    if (!keepdim) {
+        std::vector<int64_t> squeezed;
+        for (int64_t i = 0; i < static_cast<int64_t>(out_shape.size()); ++i) {
+            if (i != dim) squeezed.push_back(out_shape[i]);
+        }
+        if (squeezed.empty()) squeezed.push_back(1);
+        output = output.reshape(squeezed);
+    }
+
+    return output;
+}
+
+auto nanquantile_kernel(const Tensor& input, double q, int64_t dim,
+                        bool keepdim) -> Tensor {
+    if (dim < 0) dim += input.ndim();
+    auto [outer_size, dim_size, inner_size] = decompose_dim(input, dim);
+
+    Tensor cont = input.is_contiguous() ? input : input.contiguous();
+
+    std::vector<int64_t> out_shape(input.shape().begin(), input.shape().end());
+    out_shape[dim] = 1;
+
+    Tensor output(out_shape, input.dtype(), input.device());
+
+    if (input.dtype() == DType::Float32) {
+        nanquantile_impl(cont.data<float>(), dim_size, outer_size, inner_size, q,
+                         output.data<float>());
+    } else if (input.dtype() == DType::Float64) {
+        nanquantile_impl(cont.data<double>(), dim_size, outer_size, inner_size, q,
+                         output.data<double>());
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        Tensor cont_f32 = cont.to(DType::Float32);
+        Tensor out_f32(out_shape, DType::Float32, input.device());
+        nanquantile_impl(cont_f32.data<float>(), dim_size, outer_size, inner_size, q,
+                         out_f32.data<float>());
+        output = out_f32.to(orig);
+    } else {
+        throw std::runtime_error("nanquantile: unsupported dtype (requires floating-point)");
+    }
+
+    if (!keepdim) {
+        std::vector<int64_t> squeezed;
+        for (int64_t i = 0; i < static_cast<int64_t>(out_shape.size()); ++i) {
+            if (i != dim) squeezed.push_back(out_shape[i]);
+        }
+        if (squeezed.empty()) squeezed.push_back(1);
+        output = output.reshape(squeezed);
+    }
+
+    return output;
+}
+
+// ============================================================================
+// Nanmedian Kernel — NaN-ignoring median
+// ============================================================================
+
+template<typename T>
+auto nanmedian_impl(const T* data, int64_t dim_size,
+                    int64_t outer_size, int64_t inner_size,
+                    T* out_values) -> void {
+    #pragma omp parallel for if(outer_size * inner_size > 1024)
+    for (int64_t outer = 0; outer < outer_size; ++outer) {
+        for (int64_t inner = 0; inner < inner_size; ++inner) {
+            std::vector<T> slice;
+            slice.reserve(dim_size);
+            for (int64_t d = 0; d < dim_size; ++d) {
+                T val = data[(outer * dim_size + d) * inner_size + inner];
+                if constexpr (std::is_floating_point_v<T>) {
+                    if (!std::isnan(val)) slice.push_back(val);
+                } else {
+                    slice.push_back(val);
+                }
+            }
+
+            if (slice.empty()) {
+                out_values[outer * inner_size + inner] = std::numeric_limits<T>::quiet_NaN();
+                continue;
+            }
+
+            std::sort(slice.begin(), slice.end());
+            int64_t n = static_cast<int64_t>(slice.size());
+            // PyTorch nanmedian returns the lower median (no interpolation)
+            out_values[outer * inner_size + inner] = slice[n / 2];
+        }
+    }
+}
+
+auto nanmedian_kernel(const Tensor& input, int64_t dim) -> Tensor {
+    if (dim < 0) dim += input.ndim();
+    auto [outer_size, dim_size, inner_size] = decompose_dim(input, dim);
+
+    Tensor cont = input.is_contiguous() ? input : input.contiguous();
+
+    std::vector<int64_t> out_shape(input.shape().begin(), input.shape().end());
+    out_shape[dim] = 1;
+
+    Tensor output(out_shape, input.dtype(), input.device());
+
+    if (input.dtype() == DType::Float32) {
+        nanmedian_impl(cont.data<float>(), dim_size, outer_size, inner_size,
+                       output.data<float>());
+    } else if (input.dtype() == DType::Float64) {
+        nanmedian_impl(cont.data<double>(), dim_size, outer_size, inner_size,
+                       output.data<double>());
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        Tensor cont_f32 = cont.to(DType::Float32);
+        Tensor out_f32(out_shape, DType::Float32, input.device());
+        nanmedian_impl(cont_f32.data<float>(), dim_size, outer_size, inner_size,
+                       out_f32.data<float>());
+        output = out_f32.to(orig);
+    } else {
+        throw std::runtime_error("nanmedian: unsupported dtype (requires floating-point)");
+    }
+
+    // Squeeze the dim dimension
+    std::vector<int64_t> squeezed;
+    for (int64_t i = 0; i < static_cast<int64_t>(out_shape.size()); ++i) {
+        if (i != dim) squeezed.push_back(out_shape[i]);
+    }
+    if (squeezed.empty()) squeezed.push_back(1);
+    output = output.reshape(squeezed);
+
+    return output;
+}
+
+// ============================================================================
+// Histc Kernel — fixed-bin histogram
+// ============================================================================
+
+auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_val) -> Tensor {
+    Tensor cont = input.is_contiguous() ? input : input.contiguous();
+    Tensor input_f32 = (cont.dtype() != DType::Float32) ? cont.to(DType::Float32) : cont;
+
+    const float* data = input_f32.data<float>();
+    int64_t n = input_f32.numel();
+
+    // Auto-detect min/max if both are zero (PyTorch convention)
+    float lo = static_cast<float>(min_val);
+    float hi = static_cast<float>(max_val);
+    if (lo == 0.0f && hi == 0.0f) {
+        lo = std::numeric_limits<float>::max();
+        hi = std::numeric_limits<float>::lowest();
+        for (int64_t i = 0; i < n; ++i) {
+            if (data[i] < lo) lo = data[i];
+            if (data[i] > hi) hi = data[i];
+        }
+    }
+
+    if (lo >= hi) {
+        // When min == max, all elements go into the first bin
+        hi = lo + 1.0f;
+    }
+
+    Tensor output({bins}, DType::Float32, input.device());
+    float* out_data = output.data<float>();
+    std::memset(out_data, 0, bins * sizeof(float));
+
+    float bin_width = (hi - lo) / static_cast<float>(bins);
+
+    for (int64_t i = 0; i < n; ++i) {
+        float val = data[i];
+        if (val < lo || val > hi) continue;
+        int64_t bin = static_cast<int64_t>((val - lo) / bin_width);
+        if (bin >= bins) bin = bins - 1;  // clamp right edge
+        out_data[bin] += 1.0f;
+    }
+
+    return output;
+}
+
+// ============================================================================
+// UniqueConsecutive Kernel
+// ============================================================================
+
+template<typename T>
+auto unique_consecutive_impl(const T* data, int64_t numel,
+                             bool return_inverse, bool return_counts)
+    -> std::tuple<std::vector<T>, std::vector<int64_t>, std::vector<int64_t>> {
+
+    std::vector<T> unique_vals;
+    std::vector<int64_t> inverse_map;
+    std::vector<int64_t> counts_vec;
+
+    if (numel == 0) {
+        return {unique_vals, inverse_map, counts_vec};
+    }
+
+    unique_vals.push_back(data[0]);
+    if (return_inverse) inverse_map.resize(numel);
+    if (return_inverse) inverse_map[0] = 0;
+    int64_t cur_count = 1;
+
+    for (int64_t i = 1; i < numel; ++i) {
+        if (data[i] != data[i - 1]) {
+            if (return_counts) counts_vec.push_back(cur_count);
+            cur_count = 1;
+            unique_vals.push_back(data[i]);
+        } else {
+            ++cur_count;
+        }
+        if (return_inverse) {
+            inverse_map[i] = static_cast<int64_t>(unique_vals.size()) - 1;
+        }
+    }
+    if (return_counts) counts_vec.push_back(cur_count);
+
+    return {unique_vals, inverse_map, counts_vec};
+}
+
+auto unique_consecutive_kernel(const Tensor& input, bool return_inverse,
+                               bool return_counts)
+    -> std::tuple<Tensor, Tensor, Tensor> {
+
+    Tensor cont = input.is_contiguous() ? input : input.contiguous();
+    int64_t numel = cont.numel();
+
+    auto do_unique = [&]<typename T>(const T* data) -> std::tuple<Tensor, Tensor, Tensor> {
+        auto [unique_vals, inverse_map, counts_vec] =
+            unique_consecutive_impl(data, numel, return_inverse, return_counts);
+
+        int64_t n_unique = static_cast<int64_t>(unique_vals.size());
+
+        Tensor unique_out({n_unique}, input.dtype(), input.device());
+        T* udata = unique_out.template data<T>();
+        std::memcpy(udata, unique_vals.data(), n_unique * sizeof(T));
+
+        Tensor inverse_out;
+        if (return_inverse && numel > 0) {
+            inverse_out = Tensor({numel}, DType::Int64, input.device());
+            std::memcpy(inverse_out.data<int64_t>(), inverse_map.data(), numel * sizeof(int64_t));
+        } else {
+            inverse_out = Tensor({0}, DType::Int64, input.device());
+        }
+
+        Tensor counts_out;
+        if (return_counts && n_unique > 0) {
+            counts_out = Tensor({n_unique}, DType::Int64, input.device());
+            std::memcpy(counts_out.data<int64_t>(), counts_vec.data(), n_unique * sizeof(int64_t));
+        } else {
+            counts_out = Tensor({0}, DType::Int64, input.device());
+        }
+
+        return {unique_out, inverse_out, counts_out};
+    };
+
+    if (input.dtype() == DType::Float32) {
+        return do_unique(cont.data<float>());
+    } else if (input.dtype() == DType::Float64) {
+        return do_unique(cont.data<double>());
+    } else if (input.dtype() == DType::Int32) {
+        return do_unique(cont.data<int32_t>());
+    } else if (input.dtype() == DType::Int64) {
+        return do_unique(cont.data<int64_t>());
+    } else if (input.dtype() == DType::Int8) {
+        return do_unique(cont.data<int8_t>());
+    } else if (input.dtype() == DType::UInt8) {
+        return do_unique(cont.data<uint8_t>());
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        Tensor cont_f32 = cont.to(DType::Float32);
+        auto [unique_f32, inverse_out, counts_out] = do_unique(cont_f32.data<float>());
+        return {unique_f32.to(orig), inverse_out, counts_out};
+    } else {
+        throw std::runtime_error("unique_consecutive: unsupported dtype");
+    }
 }
 
 } // namespace cpu

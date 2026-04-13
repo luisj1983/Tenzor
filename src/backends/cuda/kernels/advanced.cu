@@ -2473,5 +2473,957 @@ auto bincount_kernel(const Tensor& input, const Tensor* weights,
     }
 }
 
+// ============================================================================
+// CumMax kernel — cumulative maximum along a dimension (returns values + indices)
+// ============================================================================
+
+template<typename T>
+__global__ void cummax_kernel_impl(
+    const T* __restrict__ input, T* __restrict__ values, int64_t* __restrict__ indices,
+    int64_t dim_size, int64_t inner_size, int64_t total_slices)
+{
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= total_slices) return;
+
+    int64_t outer = idx / inner_size;
+    int64_t inner = idx % inner_size;
+
+    T running_max = input[outer * dim_size * inner_size + inner];
+    int64_t running_idx = 0;
+    values[outer * dim_size * inner_size + inner] = running_max;
+    indices[outer * dim_size * inner_size + inner] = 0;
+
+    for (int64_t i = 1; i < dim_size; ++i) {
+        int64_t offset = outer * dim_size * inner_size + i * inner_size + inner;
+        T val = input[offset];
+        if (val > running_max) {
+            running_max = val;
+            running_idx = i;
+        }
+        values[offset] = running_max;
+        indices[offset] = running_idx;
+    }
+}
+
+auto cummax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> std::pair<Tensor, Tensor>
+{
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    const auto& shape = input_cont.shape();
+    const int64_t ndim = input_cont.ndim();
+    const int64_t dim_size = shape[dim];
+    const auto dtype = input_cont.dtype();
+    const auto device = input_cont.device();
+
+    Tensor values(std::vector<int64_t>(shape.begin(), shape.end()), dtype, device);
+    Tensor indices_out(std::vector<int64_t>(shape.begin(), shape.end()), DType::Int64, device);
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
+
+    int64_t total_slices = outer_size * inner_size;
+    int block = 256;
+    int grid = static_cast<int>((total_slices + block - 1) / block);
+
+    switch (dtype) {
+        case DType::Float32:
+            cummax_kernel_impl<float><<<grid, block, 0, stream>>>(
+                input_cont.data<float>(), values.data<float>(), indices_out.data<int64_t>(),
+                dim_size, inner_size, total_slices);
+            break;
+        case DType::Float64:
+            cummax_kernel_impl<double><<<grid, block, 0, stream>>>(
+                input_cont.data<double>(), values.data<double>(), indices_out.data<int64_t>(),
+                dim_size, inner_size, total_slices);
+            break;
+        case DType::Int32:
+            cummax_kernel_impl<int32_t><<<grid, block, 0, stream>>>(
+                input_cont.data<int32_t>(), values.data<int32_t>(), indices_out.data<int64_t>(),
+                dim_size, inner_size, total_slices);
+            break;
+        case DType::Int64:
+            cummax_kernel_impl<int64_t><<<grid, block, 0, stream>>>(
+                input_cont.data<int64_t>(), values.data<int64_t>(), indices_out.data<int64_t>(),
+                dim_size, inner_size, total_slices);
+            break;
+        default:
+            throw std::runtime_error("cummax CUDA: unsupported dtype");
+    }
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+    return {values, indices_out};
+}
+
+// ============================================================================
+// CumMin kernel — cumulative minimum along a dimension (returns values + indices)
+// ============================================================================
+
+template<typename T>
+__global__ void cummin_kernel_impl(
+    const T* __restrict__ input, T* __restrict__ values, int64_t* __restrict__ indices,
+    int64_t dim_size, int64_t inner_size, int64_t total_slices)
+{
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= total_slices) return;
+
+    int64_t outer = idx / inner_size;
+    int64_t inner = idx % inner_size;
+
+    T running_min = input[outer * dim_size * inner_size + inner];
+    int64_t running_idx = 0;
+    values[outer * dim_size * inner_size + inner] = running_min;
+    indices[outer * dim_size * inner_size + inner] = 0;
+
+    for (int64_t i = 1; i < dim_size; ++i) {
+        int64_t offset = outer * dim_size * inner_size + i * inner_size + inner;
+        T val = input[offset];
+        if (val < running_min) {
+            running_min = val;
+            running_idx = i;
+        }
+        values[offset] = running_min;
+        indices[offset] = running_idx;
+    }
+}
+
+auto cummin_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> std::pair<Tensor, Tensor>
+{
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    const auto& shape = input_cont.shape();
+    const int64_t ndim = input_cont.ndim();
+    const int64_t dim_size = shape[dim];
+    const auto dtype = input_cont.dtype();
+    const auto device = input_cont.device();
+
+    Tensor values(std::vector<int64_t>(shape.begin(), shape.end()), dtype, device);
+    Tensor indices_out(std::vector<int64_t>(shape.begin(), shape.end()), DType::Int64, device);
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
+
+    int64_t total_slices = outer_size * inner_size;
+    int block = 256;
+    int grid = static_cast<int>((total_slices + block - 1) / block);
+
+    switch (dtype) {
+        case DType::Float32:
+            cummin_kernel_impl<float><<<grid, block, 0, stream>>>(
+                input_cont.data<float>(), values.data<float>(), indices_out.data<int64_t>(),
+                dim_size, inner_size, total_slices);
+            break;
+        case DType::Float64:
+            cummin_kernel_impl<double><<<grid, block, 0, stream>>>(
+                input_cont.data<double>(), values.data<double>(), indices_out.data<int64_t>(),
+                dim_size, inner_size, total_slices);
+            break;
+        case DType::Int32:
+            cummin_kernel_impl<int32_t><<<grid, block, 0, stream>>>(
+                input_cont.data<int32_t>(), values.data<int32_t>(), indices_out.data<int64_t>(),
+                dim_size, inner_size, total_slices);
+            break;
+        case DType::Int64:
+            cummin_kernel_impl<int64_t><<<grid, block, 0, stream>>>(
+                input_cont.data<int64_t>(), values.data<int64_t>(), indices_out.data<int64_t>(),
+                dim_size, inner_size, total_slices);
+            break;
+        default:
+            throw std::runtime_error("cummin CUDA: unsupported dtype");
+    }
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+    return {values, indices_out};
+}
+
+// ============================================================================
+// Fmax kernel — NaN-aware element-wise maximum (IEEE 754-2008: if one is NaN, return the other)
+// ============================================================================
+
+template<typename T>
+__global__ void fmax_kernel_impl(const T* __restrict__ a, const T* __restrict__ b,
+                                  T* __restrict__ out, int64_t n)
+{
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n;
+         idx += blockDim.x * gridDim.x) {
+        out[idx] = ::fmax(static_cast<double>(a[idx]), static_cast<double>(b[idx]));
+    }
+}
+
+template<>
+__global__ void fmax_kernel_impl<float>(const float* __restrict__ a, const float* __restrict__ b,
+                                         float* __restrict__ out, int64_t n)
+{
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n;
+         idx += blockDim.x * gridDim.x) {
+        out[idx] = ::fmaxf(a[idx], b[idx]);
+    }
+}
+
+template<>
+__global__ void fmax_kernel_impl<double>(const double* __restrict__ a, const double* __restrict__ b,
+                                          double* __restrict__ out, int64_t n)
+{
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n;
+         idx += blockDim.x * gridDim.x) {
+        out[idx] = ::fmax(a[idx], b[idx]);
+    }
+}
+
+auto fmax_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
+{
+    Tensor a_cont = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_cont = b.is_contiguous() ? b : b.contiguous();
+    int64_t n = a_cont.numel();
+    Tensor output(std::vector<int64_t>(a_cont.shape().begin(), a_cont.shape().end()),
+                  a_cont.dtype(), a_cont.device());
+
+    int block = 256;
+    int grid = std::min(static_cast<int>((n + block - 1) / block), 65535);
+
+    switch (a_cont.dtype()) {
+        case DType::Float32:
+            fmax_kernel_impl<float><<<grid, block, 0, stream>>>(
+                a_cont.data<float>(), b_cont.data<float>(), output.data<float>(), n);
+            break;
+        case DType::Float64:
+            fmax_kernel_impl<double><<<grid, block, 0, stream>>>(
+                a_cont.data<double>(), b_cont.data<double>(), output.data<double>(), n);
+            break;
+        case DType::Int32:
+            fmax_kernel_impl<int32_t><<<grid, block, 0, stream>>>(
+                a_cont.data<int32_t>(), b_cont.data<int32_t>(), output.data<int32_t>(), n);
+            break;
+        case DType::Int64:
+            fmax_kernel_impl<int64_t><<<grid, block, 0, stream>>>(
+                a_cont.data<int64_t>(), b_cont.data<int64_t>(), output.data<int64_t>(), n);
+            break;
+        default:
+            throw std::runtime_error("fmax CUDA: unsupported dtype");
+    }
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+    return output;
+}
+
+// ============================================================================
+// Fmin kernel — NaN-aware element-wise minimum (IEEE 754-2008: if one is NaN, return the other)
+// ============================================================================
+
+template<typename T>
+__global__ void fmin_kernel_impl(const T* __restrict__ a, const T* __restrict__ b,
+                                  T* __restrict__ out, int64_t n)
+{
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n;
+         idx += blockDim.x * gridDim.x) {
+        out[idx] = ::fmin(static_cast<double>(a[idx]), static_cast<double>(b[idx]));
+    }
+}
+
+template<>
+__global__ void fmin_kernel_impl<float>(const float* __restrict__ a, const float* __restrict__ b,
+                                         float* __restrict__ out, int64_t n)
+{
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n;
+         idx += blockDim.x * gridDim.x) {
+        out[idx] = ::fminf(a[idx], b[idx]);
+    }
+}
+
+template<>
+__global__ void fmin_kernel_impl<double>(const double* __restrict__ a, const double* __restrict__ b,
+                                          double* __restrict__ out, int64_t n)
+{
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n;
+         idx += blockDim.x * gridDim.x) {
+        out[idx] = ::fmin(a[idx], b[idx]);
+    }
+}
+
+auto fmin_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
+{
+    Tensor a_cont = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_cont = b.is_contiguous() ? b : b.contiguous();
+    int64_t n = a_cont.numel();
+    Tensor output(std::vector<int64_t>(a_cont.shape().begin(), a_cont.shape().end()),
+                  a_cont.dtype(), a_cont.device());
+
+    int block = 256;
+    int grid = std::min(static_cast<int>((n + block - 1) / block), 65535);
+
+    switch (a_cont.dtype()) {
+        case DType::Float32:
+            fmin_kernel_impl<float><<<grid, block, 0, stream>>>(
+                a_cont.data<float>(), b_cont.data<float>(), output.data<float>(), n);
+            break;
+        case DType::Float64:
+            fmin_kernel_impl<double><<<grid, block, 0, stream>>>(
+                a_cont.data<double>(), b_cont.data<double>(), output.data<double>(), n);
+            break;
+        case DType::Int32:
+            fmin_kernel_impl<int32_t><<<grid, block, 0, stream>>>(
+                a_cont.data<int32_t>(), b_cont.data<int32_t>(), output.data<int32_t>(), n);
+            break;
+        case DType::Int64:
+            fmin_kernel_impl<int64_t><<<grid, block, 0, stream>>>(
+                a_cont.data<int64_t>(), b_cont.data<int64_t>(), output.data<int64_t>(), n);
+            break;
+        default:
+            throw std::runtime_error("fmin CUDA: unsupported dtype");
+    }
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+    return output;
+}
+
+// ============================================================================
+// Isin kernel — set membership test using sorted array + binary search
+// ============================================================================
+
+template<typename T>
+__global__ void isin_kernel_impl(const T* __restrict__ elements, int64_t num_elements,
+                                  const T* __restrict__ test_sorted, int64_t num_test,
+                                  bool* __restrict__ output)
+{
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < num_elements;
+         idx += blockDim.x * gridDim.x) {
+        T val = elements[idx];
+        // Binary search in sorted test_elements
+        int64_t lo = 0, hi = num_test - 1;
+        bool found = false;
+        while (lo <= hi) {
+            int64_t mid = lo + (hi - lo) / 2;
+            T mid_val = test_sorted[mid];
+            if (mid_val == val) {
+                found = true;
+                break;
+            } else if (mid_val < val) {
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        output[idx] = found;
+    }
+}
+
+auto isin_kernel(const Tensor& elements, const Tensor& test_elements, cudaStream_t stream) -> Tensor
+{
+    Tensor elem_cont = elements.is_contiguous() ? elements : elements.contiguous();
+    Tensor test_cont = test_elements.is_contiguous() ? test_elements : test_elements.contiguous();
+
+    // Sort test_elements on GPU using thrust
+    Tensor test_sorted(std::vector<int64_t>(test_cont.shape().begin(), test_cont.shape().end()),
+                       test_cont.dtype(), test_cont.device());
+    cudaMemcpyAsync(test_sorted.data_ptr(), test_cont.data_ptr(),
+                    test_cont.numel() * test_cont.element_size(),
+                    cudaMemcpyDeviceToDevice, stream);
+
+    int64_t num_test = test_sorted.numel();
+    int64_t num_elements = elem_cont.numel();
+
+    Tensor output(std::vector<int64_t>(elem_cont.shape().begin(), elem_cont.shape().end()),
+                  DType::Bool, elem_cont.device());
+
+    int block = 256;
+    int grid_sz = std::min(static_cast<int>((num_elements + block - 1) / block), 65535);
+
+    auto exec_policy = thrust::cuda::par.on(stream);
+
+    switch (elem_cont.dtype()) {
+        case DType::Float32: {
+            thrust::sort(exec_policy, thrust::device_pointer_cast(test_sorted.data<float>()),
+                         thrust::device_pointer_cast(test_sorted.data<float>() + num_test));
+            isin_kernel_impl<float><<<grid_sz, block, 0, stream>>>(
+                elem_cont.data<float>(), num_elements, test_sorted.data<float>(), num_test,
+                reinterpret_cast<bool*>(output.data_ptr()));
+            break;
+        }
+        case DType::Float64: {
+            thrust::sort(exec_policy, thrust::device_pointer_cast(test_sorted.data<double>()),
+                         thrust::device_pointer_cast(test_sorted.data<double>() + num_test));
+            isin_kernel_impl<double><<<grid_sz, block, 0, stream>>>(
+                elem_cont.data<double>(), num_elements, test_sorted.data<double>(), num_test,
+                reinterpret_cast<bool*>(output.data_ptr()));
+            break;
+        }
+        case DType::Int32: {
+            thrust::sort(exec_policy, thrust::device_pointer_cast(test_sorted.data<int32_t>()),
+                         thrust::device_pointer_cast(test_sorted.data<int32_t>() + num_test));
+            isin_kernel_impl<int32_t><<<grid_sz, block, 0, stream>>>(
+                elem_cont.data<int32_t>(), num_elements, test_sorted.data<int32_t>(), num_test,
+                reinterpret_cast<bool*>(output.data_ptr()));
+            break;
+        }
+        case DType::Int64: {
+            thrust::sort(exec_policy, thrust::device_pointer_cast(test_sorted.data<int64_t>()),
+                         thrust::device_pointer_cast(test_sorted.data<int64_t>() + num_test));
+            isin_kernel_impl<int64_t><<<grid_sz, block, 0, stream>>>(
+                elem_cont.data<int64_t>(), num_elements, test_sorted.data<int64_t>(), num_test,
+                reinterpret_cast<bool*>(output.data_ptr()));
+            break;
+        }
+        default:
+            throw std::runtime_error("isin CUDA: unsupported dtype");
+    }
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+    return output;
+}
+
+// ============================================================================
+// Kthvalue kernel — k-th smallest value along a dimension using partial sort
+// ============================================================================
+
+template<typename T>
+__global__ void kthvalue_kernel_impl(
+    const T* __restrict__ input, T* __restrict__ values, int64_t* __restrict__ indices,
+    int64_t dim_size, int64_t inner_size, int64_t k, int64_t total_slices,
+    T* __restrict__ workspace)
+{
+    int64_t slice_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (slice_idx >= total_slices) return;
+
+    int64_t outer = slice_idx / inner_size;
+    int64_t inner = slice_idx % inner_size;
+
+    // Copy slice to workspace
+    T* ws = workspace + slice_idx * dim_size;
+    for (int64_t i = 0; i < dim_size; ++i) {
+        ws[i] = input[outer * dim_size * inner_size + i * inner_size + inner];
+    }
+
+    // Partial insertion sort to find k-th smallest
+    // For small dim_size this is efficient; for large dims a selection algorithm would be better
+    for (int64_t i = 0; i < k; ++i) {
+        int64_t min_idx = i;
+        T min_val = ws[i];
+        for (int64_t j = i + 1; j < dim_size; ++j) {
+            if (ws[j] < min_val) {
+                min_val = ws[j];
+                min_idx = j;
+            }
+        }
+        if (min_idx != i) {
+            ws[min_idx] = ws[i];
+            ws[i] = min_val;
+        }
+    }
+
+    T kth_val = ws[k - 1];
+    values[slice_idx] = kth_val;
+
+    // Find original index of k-th value
+    for (int64_t i = 0; i < dim_size; ++i) {
+        T orig = input[outer * dim_size * inner_size + i * inner_size + inner];
+        if (orig == kth_val) {
+            indices[slice_idx] = i;
+            break;
+        }
+    }
+}
+
+auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim, bool keepdim,
+                     cudaStream_t stream) -> std::pair<Tensor, Tensor>
+{
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    const auto& shape = input_cont.shape();
+    const int64_t ndim = input_cont.ndim();
+    const int64_t dim_size = shape[dim];
+    const auto dtype = input_cont.dtype();
+    const auto device = input_cont.device();
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
+
+    int64_t total_slices = outer_size * inner_size;
+
+    // Output shape: replace dim with size 1 (or remove it)
+    std::vector<int64_t> out_shape;
+    for (int64_t i = 0; i < ndim; ++i) {
+        if (i == dim) {
+            if (keepdim) out_shape.push_back(1);
+        } else {
+            out_shape.push_back(shape[i]);
+        }
+    }
+    if (out_shape.empty()) out_shape.push_back(1);
+
+    Tensor values(out_shape, dtype, device);
+    Tensor indices_out(out_shape, DType::Int64, device);
+
+    int block = 256;
+    int grid = std::min(static_cast<int>((total_slices + block - 1) / block), 65535);
+
+    // Allocate workspace for partial sort
+    size_t ws_bytes = total_slices * dim_size;
+
+    switch (dtype) {
+        case DType::Float32: {
+            backend::CachedMemoryGuard ws_guard(ws_bytes * sizeof(float));
+            kthvalue_kernel_impl<float><<<grid, block, 0, stream>>>(
+                input_cont.data<float>(), values.data<float>(), indices_out.data<int64_t>(),
+                dim_size, inner_size, k, total_slices, static_cast<float*>(ws_guard.get()));
+            break;
+        }
+        case DType::Float64: {
+            backend::CachedMemoryGuard ws_guard(ws_bytes * sizeof(double));
+            kthvalue_kernel_impl<double><<<grid, block, 0, stream>>>(
+                input_cont.data<double>(), values.data<double>(), indices_out.data<int64_t>(),
+                dim_size, inner_size, k, total_slices, static_cast<double*>(ws_guard.get()));
+            break;
+        }
+        case DType::Int32: {
+            backend::CachedMemoryGuard ws_guard(ws_bytes * sizeof(int32_t));
+            kthvalue_kernel_impl<int32_t><<<grid, block, 0, stream>>>(
+                input_cont.data<int32_t>(), values.data<int32_t>(), indices_out.data<int64_t>(),
+                dim_size, inner_size, k, total_slices, static_cast<int32_t*>(ws_guard.get()));
+            break;
+        }
+        case DType::Int64: {
+            backend::CachedMemoryGuard ws_guard(ws_bytes * sizeof(int64_t));
+            kthvalue_kernel_impl<int64_t><<<grid, block, 0, stream>>>(
+                input_cont.data<int64_t>(), values.data<int64_t>(), indices_out.data<int64_t>(),
+                dim_size, inner_size, k, total_slices, static_cast<int64_t*>(ws_guard.get()));
+            break;
+        }
+        default:
+            throw std::runtime_error("kthvalue CUDA: unsupported dtype");
+    }
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+    return {values, indices_out};
+}
+
+// ============================================================================
+// Quantile kernel — interpolated quantile along dim (sort + linear interp)
+// ============================================================================
+
+template<typename T>
+__global__ void quantile_kernel_impl(
+    const T* __restrict__ sorted_input, T* __restrict__ output,
+    double q, int64_t dim_size, int64_t inner_size, int64_t total_slices)
+{
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= total_slices) return;
+
+    // Linear interpolation index
+    double pos = q * (dim_size - 1);
+    int64_t lo = static_cast<int64_t>(pos);
+    int64_t hi = lo + 1;
+    if (hi >= dim_size) hi = dim_size - 1;
+    double frac = pos - lo;
+
+    T lo_val = sorted_input[idx * dim_size + lo];
+    T hi_val = sorted_input[idx * dim_size + hi];
+    output[idx] = static_cast<T>(static_cast<double>(lo_val) * (1.0 - frac) +
+                                  static_cast<double>(hi_val) * frac);
+}
+
+auto quantile_kernel(const Tensor& input, double q, int64_t dim, bool keepdim,
+                     cudaStream_t stream) -> Tensor
+{
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    const auto& shape = input_cont.shape();
+    const int64_t ndim = input_cont.ndim();
+    const int64_t dim_size = shape[dim];
+    const auto dtype = input_cont.dtype();
+    const auto device = input_cont.device();
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
+    int64_t total_slices = outer_size * inner_size;
+
+    // Transpose input so dim is last, reshape to (total_slices, dim_size), sort each row
+    // For simplicity, copy slices to contiguous workspace, sort, then interpolate
+    Tensor workspace({total_slices, dim_size}, dtype, device);
+
+    int block = 256;
+    int grid_extract = std::min(static_cast<int>((dim_size + block - 1) / block), 1024);
+
+    auto exec_policy = thrust::cuda::par.on(stream);
+
+    auto launch = [&]<typename T>() {
+        // Extract slices into workspace
+        for (int64_t s = 0; s < total_slices; ++s) {
+            int64_t outer = s / inner_size;
+            int64_t inner = s % inner_size;
+            extract_strided_slice<T><<<grid_extract, block, 0, stream>>>(
+                input_cont.data<T>(), workspace.data<T>() + s * dim_size,
+                dim_size, inner_size, outer, inner);
+        }
+        // Sort each slice
+        for (int64_t s = 0; s < total_slices; ++s) {
+            T* slice = workspace.data<T>() + s * dim_size;
+            thrust::sort(exec_policy, thrust::device_pointer_cast(slice),
+                         thrust::device_pointer_cast(slice + dim_size));
+        }
+    };
+
+    switch (dtype) {
+        case DType::Float32: launch.template operator()<float>(); break;
+        case DType::Float64: launch.template operator()<double>(); break;
+        default: throw std::runtime_error("quantile CUDA: unsupported dtype (need float)");
+    }
+
+    // Output shape
+    std::vector<int64_t> out_shape;
+    for (int64_t i = 0; i < ndim; ++i) {
+        if (i == dim) {
+            if (keepdim) out_shape.push_back(1);
+        } else {
+            out_shape.push_back(shape[i]);
+        }
+    }
+    if (out_shape.empty()) out_shape.push_back(1);
+
+    Tensor output(out_shape, dtype, device);
+    int grid_q = std::min(static_cast<int>((total_slices + block - 1) / block), 65535);
+
+    switch (dtype) {
+        case DType::Float32:
+            quantile_kernel_impl<float><<<grid_q, block, 0, stream>>>(
+                workspace.data<float>(), output.data<float>(), q, dim_size, inner_size, total_slices);
+            break;
+        case DType::Float64:
+            quantile_kernel_impl<double><<<grid_q, block, 0, stream>>>(
+                workspace.data<double>(), output.data<double>(), q, dim_size, inner_size, total_slices);
+            break;
+        default: break;
+    }
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+    return output;
+}
+
+// ============================================================================
+// Nanquantile kernel — NaN-ignoring quantile (filter NaN, sort, interpolate)
+// ============================================================================
+
+template<typename T>
+__global__ void nanquantile_kernel_impl(
+    const T* __restrict__ input, T* __restrict__ output,
+    double q, int64_t dim_size, int64_t inner_size, int64_t total_slices,
+    T* __restrict__ workspace, int64_t* __restrict__ valid_counts)
+{
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= total_slices) return;
+
+    int64_t outer = idx / inner_size;
+    int64_t inner = idx % inner_size;
+
+    // Collect non-NaN values
+    T* ws = workspace + idx * dim_size;
+    int64_t count = 0;
+    for (int64_t i = 0; i < dim_size; ++i) {
+        T val = input[outer * dim_size * inner_size + i * inner_size + inner];
+        if (!::isnan(float(val))) {
+            ws[count++] = val;
+        }
+    }
+    valid_counts[idx] = count;
+
+    if (count == 0) {
+        output[idx] = static_cast<T>(NAN);
+        return;
+    }
+
+    // Simple insertion sort for the non-NaN values
+    for (int64_t i = 1; i < count; ++i) {
+        T key = ws[i];
+        int64_t j = i - 1;
+        while (j >= 0 && ws[j] > key) {
+            ws[j + 1] = ws[j];
+            --j;
+        }
+        ws[j + 1] = key;
+    }
+
+    double pos = q * (count - 1);
+    int64_t lo = static_cast<int64_t>(pos);
+    int64_t hi = lo + 1;
+    if (hi >= count) hi = count - 1;
+    double frac = pos - lo;
+    output[idx] = static_cast<T>(static_cast<double>(ws[lo]) * (1.0 - frac) +
+                                  static_cast<double>(ws[hi]) * frac);
+}
+
+auto nanquantile_kernel(const Tensor& input, double q, int64_t dim, bool keepdim,
+                        cudaStream_t stream) -> Tensor
+{
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    const auto& shape = input_cont.shape();
+    const int64_t ndim = input_cont.ndim();
+    const int64_t dim_size = shape[dim];
+    const auto dtype = input_cont.dtype();
+    const auto device = input_cont.device();
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
+    int64_t total_slices = outer_size * inner_size;
+
+    std::vector<int64_t> out_shape;
+    for (int64_t i = 0; i < ndim; ++i) {
+        if (i == dim) {
+            if (keepdim) out_shape.push_back(1);
+        } else {
+            out_shape.push_back(shape[i]);
+        }
+    }
+    if (out_shape.empty()) out_shape.push_back(1);
+
+    Tensor output(out_shape, dtype, device);
+    int block = 256;
+    int grid = std::min(static_cast<int>((total_slices + block - 1) / block), 65535);
+
+    switch (dtype) {
+        case DType::Float32: {
+            backend::CachedMemoryGuard ws_guard(total_slices * dim_size * sizeof(float));
+            backend::CachedMemoryGuard vc_guard(total_slices * sizeof(int64_t));
+            nanquantile_kernel_impl<float><<<grid, block, 0, stream>>>(
+                input_cont.data<float>(), output.data<float>(), q, dim_size, inner_size,
+                total_slices, static_cast<float*>(ws_guard.get()),
+                static_cast<int64_t*>(vc_guard.get()));
+            break;
+        }
+        case DType::Float64: {
+            backend::CachedMemoryGuard ws_guard(total_slices * dim_size * sizeof(double));
+            backend::CachedMemoryGuard vc_guard(total_slices * sizeof(int64_t));
+            nanquantile_kernel_impl<double><<<grid, block, 0, stream>>>(
+                input_cont.data<double>(), output.data<double>(), q, dim_size, inner_size,
+                total_slices, static_cast<double*>(ws_guard.get()),
+                static_cast<int64_t*>(vc_guard.get()));
+            break;
+        }
+        default:
+            throw std::runtime_error("nanquantile CUDA: unsupported dtype");
+    }
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+    return output;
+}
+
+// ============================================================================
+// Nanmedian kernel — NaN-ignoring median
+// ============================================================================
+
+auto nanmedian_kernel(const Tensor& input, int64_t dim, bool keepdim,
+                      cudaStream_t stream) -> Tensor
+{
+    // nanmedian is nanquantile with q=0.5
+    return nanquantile_kernel(input, 0.5, dim, keepdim, stream);
+}
+
+// ============================================================================
+// Histc kernel — fixed-bin histogram using atomicAdd
+// ============================================================================
+
+__global__ void histc_kernel_f32(const float* __restrict__ input, float* __restrict__ output,
+                                  int64_t n, int64_t bins, float min_val, float max_val)
+{
+    float bin_width = (max_val - min_val) / static_cast<float>(bins);
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n;
+         idx += blockDim.x * gridDim.x) {
+        float val = input[idx];
+        if (val >= min_val && val <= max_val) {
+            int64_t bin = static_cast<int64_t>((val - min_val) / bin_width);
+            if (bin >= bins) bin = bins - 1;
+            atomicAdd(&output[bin], 1.0f);
+        }
+    }
+}
+
+auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_val,
+                  cudaStream_t stream) -> Tensor
+{
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    int64_t n = input_cont.numel();
+    const auto dtype = input_cont.dtype();
+    const auto device = input_cont.device();
+
+    // Auto-detect range if min_val >= max_val
+    if (min_val >= max_val) {
+        // Use thrust to find min/max
+        if (dtype == DType::Float32) {
+            auto begin = thrust::device_pointer_cast(input_cont.data<float>());
+            auto end = begin + n;
+            auto minmax = thrust::minmax_element(thrust::cuda::par.on(stream), begin, end);
+            float h_min, h_max;
+            cudaMemcpyAsync(&h_min, minmax.first.get(), sizeof(float), cudaMemcpyDeviceToHost, stream);
+            cudaMemcpyAsync(&h_max, minmax.second.get(), sizeof(float), cudaMemcpyDeviceToHost, stream);
+            cudaStreamSynchronize(stream);
+            min_val = h_min;
+            max_val = h_max;
+        } else if (dtype == DType::Float64) {
+            auto begin = thrust::device_pointer_cast(input_cont.data<double>());
+            auto end = begin + n;
+            auto minmax = thrust::minmax_element(thrust::cuda::par.on(stream), begin, end);
+            double h_min, h_max;
+            cudaMemcpyAsync(&h_min, minmax.first.get(), sizeof(double), cudaMemcpyDeviceToHost, stream);
+            cudaMemcpyAsync(&h_max, minmax.second.get(), sizeof(double), cudaMemcpyDeviceToHost, stream);
+            cudaStreamSynchronize(stream);
+            min_val = h_min;
+            max_val = h_max;
+        }
+    }
+
+    Tensor output({bins}, dtype, device);
+    cudaMemsetAsync(output.data_ptr(), 0, bins * output.element_size(), stream);
+
+    int block = 256;
+    int grid = std::min(static_cast<int>((n + block - 1) / block), 65535);
+
+    switch (dtype) {
+        case DType::Float32:
+            histc_kernel_f32<<<grid, block, 0, stream>>>(
+                input_cont.data<float>(), output.data<float>(), n, bins,
+                static_cast<float>(min_val), static_cast<float>(max_val));
+            break;
+        case DType::Float64:
+            {
+                // Convert double input to float, run float32 histogram, then convert output
+                Tensor f32_input = input_cont.to(DType::Float32);
+                Tensor f32_output({bins}, DType::Float32, device);
+                cudaMemsetAsync(f32_output.data_ptr(), 0, bins * sizeof(float), stream);
+                histc_kernel_f32<<<grid, block, 0, stream>>>(
+                    f32_input.data<float>(), f32_output.data<float>(), n, bins,
+                    static_cast<float>(min_val), static_cast<float>(max_val));
+                output = f32_output.to(DType::Float64);
+            }
+            break;
+        default:
+            throw std::runtime_error("histc CUDA: unsupported dtype (only float32/float64)");
+    }
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+    return output;
+}
+
+// ============================================================================
+// UniqueConsecutive kernel — deduplicate consecutive equal elements
+// ============================================================================
+
+template<typename T>
+__global__ void unique_consecutive_mask_kernel(const T* __restrict__ input,
+                                                int32_t* __restrict__ mask,
+                                                int64_t n)
+{
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n;
+         idx += blockDim.x * gridDim.x) {
+        if (idx == 0) {
+            mask[idx] = 1;  // First element is always unique
+        } else {
+            mask[idx] = (input[idx] != input[idx - 1]) ? 1 : 0;
+        }
+    }
+}
+
+template<typename T>
+__global__ void unique_consecutive_gather_kernel(const T* __restrict__ input,
+                                                  const int32_t* __restrict__ prefix_sum,
+                                                  const int32_t* __restrict__ mask,
+                                                  T* __restrict__ output,
+                                                  int64_t* __restrict__ inverse,
+                                                  int64_t n)
+{
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n;
+         idx += blockDim.x * gridDim.x) {
+        int32_t out_idx = prefix_sum[idx] - 1;  // prefix_sum is 1-based
+        if (mask[idx]) {
+            output[out_idx] = input[idx];
+        }
+        inverse[idx] = out_idx;
+    }
+}
+
+template<typename T>
+__global__ void unique_consecutive_counts_kernel(const int64_t* __restrict__ inverse,
+                                                  int64_t* __restrict__ counts,
+                                                  int64_t n, int64_t num_unique)
+{
+    // Zero counts
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < num_unique;
+         idx += blockDim.x * gridDim.x) {
+        counts[idx] = 0;
+    }
+    __syncthreads();
+    // Count occurrences
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n;
+         idx += blockDim.x * gridDim.x) {
+        atomicAdd(reinterpret_cast<unsigned long long*>(&counts[inverse[idx]]),
+                  static_cast<unsigned long long>(1));
+    }
+}
+
+auto unique_consecutive_kernel(const Tensor& input, bool return_inverse,
+                                cudaStream_t stream)
+    -> std::tuple<Tensor, Tensor, Tensor>
+{
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    int64_t n = input_cont.numel();
+    const auto dtype = input_cont.dtype();
+    const auto device = input_cont.device();
+
+    if (n == 0) {
+        return {Tensor({0}, dtype, device), Tensor({0}, DType::Int64, device),
+                Tensor({0}, DType::Int64, device)};
+    }
+
+    // Step 1: compute mask (1 where value differs from predecessor)
+    Tensor mask({n}, DType::Int32, device);
+    Tensor prefix({n}, DType::Int32, device);
+    Tensor inverse_out({n}, DType::Int64, device);
+
+    int block = 256;
+    int grid = std::min(static_cast<int>((n + block - 1) / block), 65535);
+
+    auto exec_policy = thrust::cuda::par.on(stream);
+
+    auto launch = [&]<typename T>() {
+        unique_consecutive_mask_kernel<T><<<grid, block, 0, stream>>>(
+            input_cont.data<T>(), mask.data<int32_t>(), n);
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+        // Step 2: inclusive prefix sum on mask
+        void* d_temp = nullptr;
+        size_t temp_bytes = 0;
+        cub::DeviceScan::InclusiveSum(d_temp, temp_bytes, mask.data<int32_t>(),
+                                       prefix.data<int32_t>(), static_cast<int>(n), stream);
+        backend::CachedMemoryGuard temp_guard(temp_bytes);
+        d_temp = temp_guard.get();
+        cub::DeviceScan::InclusiveSum(d_temp, temp_bytes, mask.data<int32_t>(),
+                                       prefix.data<int32_t>(), static_cast<int>(n), stream);
+
+        // Get total unique count from last element of prefix sum
+        int32_t num_unique_h;
+        cudaMemcpyAsync(&num_unique_h, prefix.data<int32_t>() + n - 1,
+                        sizeof(int32_t), cudaMemcpyDeviceToHost, stream);
+        cudaStreamSynchronize(stream);
+        int64_t num_unique = num_unique_h;
+
+        // Step 3: gather unique elements and compute inverse indices
+        Tensor unique_out({num_unique}, dtype, device);
+        unique_consecutive_gather_kernel<T><<<grid, block, 0, stream>>>(
+            input_cont.data<T>(), prefix.data<int32_t>(), mask.data<int32_t>(),
+            unique_out.data<T>(), inverse_out.data<int64_t>(), n);
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+        // Step 4: compute counts
+        Tensor counts({num_unique}, DType::Int64, device);
+        cudaMemsetAsync(counts.data<int64_t>(), 0, num_unique * sizeof(int64_t), stream);
+        unique_consecutive_counts_kernel<T><<<grid, block, 0, stream>>>(
+            inverse_out.data<int64_t>(), counts.data<int64_t>(), n, num_unique);
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+        return std::make_tuple(unique_out, inverse_out, counts);
+    };
+
+    switch (dtype) {
+        case DType::Float32: return launch.template operator()<float>();
+        case DType::Float64: return launch.template operator()<double>();
+        case DType::Int32:   return launch.template operator()<int32_t>();
+        case DType::Int64:   return launch.template operator()<int64_t>();
+        default: throw std::runtime_error("unique_consecutive CUDA: unsupported dtype");
+    }
+}
+
 } // namespace cuda
 } // namespace tenzor

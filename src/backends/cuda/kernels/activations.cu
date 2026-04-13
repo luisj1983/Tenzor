@@ -30,6 +30,49 @@ namespace cuda {
 // Default block size for element-wise operations (used as fallback)
 constexpr int BLOCK_SIZE = 256;
 
+// Block size for reduction operations (matches reduction.cu)
+constexpr int REDUCTION_BLOCK_SIZE = 256;
+
+// DimMeta for dim-specific reductions (matches reduction.cu)
+struct DimMeta {
+    int64_t shape[8];
+    int64_t strides[8];
+};
+
+static DimMeta make_dim_meta(const std::vector<int64_t>& shape, const std::vector<int64_t>& strides) {
+    DimMeta meta{};
+    for (size_t i = 0; i < shape.size() && i < 8; ++i) {
+        meta.shape[i] = shape[i];
+        meta.strides[i] = strides[i];
+    }
+    return meta;
+}
+
+// Accumulation type: use float for half/bfloat16 to prevent overflow
+template<typename T> struct AccumType { using type = T; };
+template<> struct AccumType<__half> { using type = float; };
+template<> struct AccumType<__nv_bfloat16> { using type = float; };
+
+static auto compute_reduction_shape(
+    const std::vector<int64_t>& input_shape,
+    int64_t dim,
+    bool keepdim
+) -> std::vector<int64_t> {
+    if (dim == INT64_MIN) {
+        if (keepdim) return std::vector<int64_t>(input_shape.size(), 1);
+        return {};
+    }
+    int64_t normalized_dim = dim;
+    if (dim < 0) normalized_dim = static_cast<int64_t>(input_shape.size()) + dim;
+    std::vector<int64_t> output_shape = input_shape;
+    if (keepdim) {
+        output_shape[normalized_dim] = 1;
+    } else {
+        output_shape.erase(output_shape.begin() + normalized_dim);
+    }
+    return output_shape;
+}
+
 // ============================================================================
 // FP16 Saturation Tracking (opt-in via TENZOR_TRACK_SATURATION)
 // ============================================================================
@@ -3755,6 +3798,136 @@ __global__ void count_nonzero_all_f32(const float* input, int64_t* output, int64
     if (threadIdx.x == 0) output[0] = scount;
 }
 
+// ============================================================================
+// Dim-specific count_nonzero reduction kernel (eliminates CPU fallback)
+// ============================================================================
+template<typename T>
+__global__ void count_nonzero_along_dim_kernel(
+    const T* input,
+    int64_t* output,
+    DimMeta meta,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= output_size) return;
+
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+    for (int64_t d = ndim - 1; d >= 0; --d) {
+        if (d == dim) {
+            indices[d] = 0;
+            continue;
+        }
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
+    }
+
+    int64_t count = 0;
+    for (int64_t i = 0; i < dim_size; i++) {
+        indices[dim] = i;
+        int64_t in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * meta.strides[d];
+        }
+        if (static_cast<float>(input[in_idx]) != 0.0f) {
+            count++;
+        }
+    }
+    output[out_idx] = count;
+}
+
+template<typename T>
+static void launch_dim_count_nonzero(
+    const T* d_input,
+    int64_t* d_output,
+    const std::vector<int64_t>& input_shape,
+    const std::vector<int64_t>& input_strides,
+    int64_t dim
+) {
+    const int64_t ndim = input_shape.size();
+    const int64_t dim_size = input_shape[dim];
+    int64_t output_size = 1;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != dim) output_size *= input_shape[i];
+    }
+    if (output_size == 0 || dim_size == 0) return;
+    DimMeta meta = make_dim_meta(input_shape, input_strides);
+    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    count_nonzero_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+        d_input, d_output, meta, ndim, dim, output_size, dim_size
+    );
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// ============================================================================
+// Dim-specific nansum reduction kernel (eliminates CPU fallback)
+// ============================================================================
+template<typename T>
+__global__ void nansum_along_dim_kernel(
+    const T* input,
+    T* output,
+    DimMeta meta,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= output_size) return;
+
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+    for (int64_t d = ndim - 1; d >= 0; --d) {
+        if (d == dim) {
+            indices[d] = 0;
+            continue;
+        }
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
+    }
+
+    using Acc = typename AccumType<T>::type;
+    Acc sum = Acc(0);
+    for (int64_t i = 0; i < dim_size; i++) {
+        indices[dim] = i;
+        int64_t in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * meta.strides[d];
+        }
+        Acc v = Acc(input[in_idx]);
+        if (!isnan(static_cast<float>(v))) {
+            sum = sum + v;
+        }
+    }
+    output[out_idx] = T(sum);
+}
+
+template<typename T>
+static void launch_dim_nansum(
+    const T* d_input,
+    T* d_output,
+    const std::vector<int64_t>& input_shape,
+    const std::vector<int64_t>& input_strides,
+    int64_t dim
+) {
+    const int64_t ndim = input_shape.size();
+    const int64_t dim_size = input_shape[dim];
+    int64_t output_size = 1;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != dim) output_size *= input_shape[i];
+    }
+    if (output_size == 0 || dim_size == 0) return;
+    DimMeta meta = make_dim_meta(input_shape, input_strides);
+    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    nansum_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+        d_input, d_output, meta, ndim, dim, output_size, dim_size
+    );
+    CUDA_CHECK(cudaGetLastError());
+}
+
 Tensor count_nonzero_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
     auto stream = get_stream(attrs);
     int64_t dim = attrs.get_int(AttrKey::Dim, -1);
@@ -3770,11 +3943,42 @@ Tensor count_nonzero_dispatch(std::span<const Tensor> inputs, const OpAttributes
         CUDA_CHECK(cudaGetLastError());
         return result;
     }
-    // Dim-specific reduction: upcast to Float32 on GPU, dispatch via CPU path
-    auto dev = inputs[0].device();
-    auto cpu_in = inputs[0].to(Device::cpu());
-    auto results = dispatch(OpId::CountNonzero, std::vector<Tensor>{cpu_in}, attrs);
-    return results[0].to(dev);
+    // Dim-specific reduction: native CUDA kernel
+    Tensor input = inputs[0];
+    const auto& input_shape = input.shape();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+    int64_t normalized_dim = dim;
+    if (dim < 0) normalized_dim = ndim + dim;
+
+    // Compute output shape (remove reduced dim)
+    std::vector<int64_t> output_shape;
+    for (int64_t d = 0; d < ndim; d++) {
+        if (d != normalized_dim) output_shape.push_back(input_shape[d]);
+    }
+    if (output_shape.empty()) output_shape.push_back(1);
+
+    Tensor result(output_shape, DType::Int64, input.device());
+
+    // Upcast to Float32 for comparison if needed
+    if (input.dtype() != DType::Float32 && input.dtype() != DType::Float64 &&
+        input.dtype() != DType::Int32 && input.dtype() != DType::Int64) {
+        input = input.to(DType::Float32);
+    }
+
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    auto strides_vec = std::vector<int64_t>(input.strides().begin(), input.strides().end());
+
+    if (input.dtype() == DType::Float32) {
+        launch_dim_count_nonzero(input.data<float>(), result.data<int64_t>(), shape_vec, strides_vec, normalized_dim);
+    } else if (input.dtype() == DType::Float64) {
+        launch_dim_count_nonzero(input.data<double>(), result.data<int64_t>(), shape_vec, strides_vec, normalized_dim);
+    } else if (input.dtype() == DType::Int32) {
+        launch_dim_count_nonzero(input.data<int32_t>(), result.data<int64_t>(), shape_vec, strides_vec, normalized_dim);
+    } else if (input.dtype() == DType::Int64) {
+        launch_dim_count_nonzero(input.data<int64_t>(), result.data<int64_t>(), shape_vec, strides_vec, normalized_dim);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    return result;
 }
 
 __global__ void nansum_all_f32(const float* input, float* output, int64_t n) {
@@ -3806,11 +4010,36 @@ Tensor nansum_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs
         CUDA_CHECK(cudaGetLastError());
         return (orig_dtype != DType::Float32) ? result.to(orig_dtype) : result;
     }
-    // Dim-specific reduction: fall back to CPU roundtrip
-    auto dev = inputs[0].device();
-    auto cpu_in = inputs[0].to(Device::cpu());
-    auto results = dispatch(OpId::Nansum, std::vector<Tensor>{cpu_in}, attrs);
-    return results[0].to(dev);
+    // Dim-specific reduction: native CUDA kernel
+    bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+    DType orig_dtype = inputs[0].dtype();
+    Tensor input = inputs[0];
+    if (input.dtype() != DType::Float32 && input.dtype() != DType::Float64) {
+        input = input.to(DType::Float32);
+    }
+
+    const auto& input_shape = input.shape();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+    int64_t normalized_dim = dim;
+    if (dim < 0) normalized_dim = ndim + dim;
+
+    auto output_shape = compute_reduction_shape(
+        std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+        normalized_dim, keepdim
+    );
+
+    Tensor result(output_shape, input.dtype(), input.device());
+
+    auto shape_vec = std::vector<int64_t>(input_shape.begin(), input_shape.end());
+    auto strides_vec = std::vector<int64_t>(input.strides().begin(), input.strides().end());
+
+    if (input.dtype() == DType::Float32) {
+        launch_dim_nansum(input.data<float>(), result.data<float>(), shape_vec, strides_vec, normalized_dim);
+    } else if (input.dtype() == DType::Float64) {
+        launch_dim_nansum(input.data<double>(), result.data<double>(), shape_vec, strides_vec, normalized_dim);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    return (orig_dtype != input.dtype()) ? result.to(orig_dtype) : result;
 }
 
 __global__ void count_non_nan_all_f32(const float* input, int64_t* output, int64_t n) {

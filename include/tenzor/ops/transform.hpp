@@ -199,6 +199,57 @@ auto repeat_interleave(const Tensor& input, const Tensor& repeats,
 
 /// @}
 
+// =========================================================================
+// New shape/transform operations for PyTorch parity
+// =========================================================================
+
+/// Flatten to 1D (alias for reshape({-1}))
+auto ravel(const Tensor& input) -> Tensor;
+
+/// Reshape a dimension into multiple dimensions (inverse of flatten)
+auto unflatten(const Tensor& input, int64_t dim, std::vector<int64_t> sizes) -> Tensor;
+
+/// Horizontal stack: cat along dim 1 (or dim 0 for 1D)
+auto hstack(const std::vector<Tensor>& tensors) -> Tensor;
+
+/// Vertical stack: cat along dim 0
+auto vstack(const std::vector<Tensor>& tensors) -> Tensor;
+
+/// Depth stack: cat along dim 2
+auto dstack(const std::vector<Tensor>& tensors) -> Tensor;
+
+/// Split tensor into sections along dim (generalized split)
+auto tensor_split(const Tensor& input, int64_t sections, int64_t dim = 0) -> std::vector<Tensor>;
+
+/// Split tensor at given indices along dim
+auto tensor_split(const Tensor& input, std::vector<int64_t> indices, int64_t dim = 0) -> std::vector<Tensor>;
+
+/// Horizontal split
+auto hsplit(const Tensor& input, int64_t sections) -> std::vector<Tensor>;
+
+/// Vertical split
+auto vsplit(const Tensor& input, int64_t sections) -> std::vector<Tensor>;
+
+/// Depth split
+auto dsplit(const Tensor& input, int64_t sections) -> std::vector<Tensor>;
+
+/// Remove a dim and return slices as a vector
+auto unbind(const Tensor& input, int64_t dim = 0) -> std::vector<Tensor>;
+
+/// Rotate 90 degrees k times in the plane (dims[0], dims[1])
+auto rot90(const Tensor& input, int64_t k = 1, std::vector<int64_t> dims = {0, 1}) -> Tensor;
+
+/// Indices where tensor is nonzero (N x ndim result)
+auto argwhere(const Tensor& input) -> Tensor;
+
+/// Flip left-right (flip along dim 1)
+auto fliplr(const Tensor& input) -> Tensor;
+
+/// Flip up-down (flip along dim 0)
+auto flipud(const Tensor& input) -> Tensor;
+
+/// @}
+
 /** @} */ // end of tensor_transform group
 
 } // namespace tenzor

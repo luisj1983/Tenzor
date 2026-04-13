@@ -379,5 +379,24 @@ auto ihfft(const Tensor& input,
     return tenzor::conj(r);
 }
 
+auto fftfreq(int64_t n, double d, DType dtype, Device device) -> Tensor {
+    // Returns: [0, 1, ..., n/2-1, -n/2, ..., -1] / (n * d)
+    auto result = tenzor::empty({n}, dtype, device);
+    int64_t half = (n - 1) / 2 + 1;  // ceil(n/2)
+    auto pos = tenzor::arange(0.0f, static_cast<float>(half), 1.0f, dtype, device);
+    auto neg = tenzor::arange(static_cast<float>(-(n / 2)), 0.0f, 1.0f, dtype, device);
+    auto freqs = tenzor::cat({pos, neg}, 0);
+    float scale = 1.0f / (static_cast<float>(n) * static_cast<float>(d));
+    return tenzor::mul(freqs, tenzor::full({1}, scale, dtype, device));
+}
+
+auto rfftfreq(int64_t n, double d, DType dtype, Device device) -> Tensor {
+    // Returns: [0, 1, ..., n/2] / (n * d)
+    int64_t half = n / 2 + 1;
+    auto freqs = tenzor::arange(0.0f, static_cast<float>(half), 1.0f, dtype, device);
+    float scale = 1.0f / (static_cast<float>(n) * static_cast<float>(d));
+    return tenzor::mul(freqs, tenzor::full({1}, scale, dtype, device));
+}
+
 } // namespace fft
 } // namespace tenzor

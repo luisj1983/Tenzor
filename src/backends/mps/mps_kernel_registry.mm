@@ -657,6 +657,20 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     }) {
         mps_roundtrip_multi(op);
     }
+
+    // Phase 9: Fractional Max Pool + Max Unpool (CPU roundtrip)
+    for (auto op : {
+        OpId::FractionalMaxPool2dForward, OpId::FractionalMaxPool3dForward
+    }) {
+        mps_roundtrip_multi(op);
+    }
+    for (auto op : {
+        OpId::FractionalMaxPool2dBackward, OpId::FractionalMaxPool3dBackward,
+        OpId::MaxUnpool2dForward, OpId::MaxUnpool2dBackward,
+        OpId::MaxUnpool3dForward, OpId::MaxUnpool3dBackward
+    }) {
+        mps_roundtrip_single(op);
+    }
 }
 
 } // namespace tenzor::mps

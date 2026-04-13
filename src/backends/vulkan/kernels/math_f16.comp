@@ -187,6 +187,34 @@ void main() {
             res0 = float16_t(max(fa0, fb0));
             res1 = float16_t(max(fa1, fb1));
             break;
+        case 28: // rsqrt (unary)
+            res0 = float16_t(inversesqrt(fa0));
+            res1 = float16_t(inversesqrt(fa1));
+            break;
+        case 29: // square (unary)
+            res0 = float16_t(fa0 * fa0);
+            res1 = float16_t(fa1 * fa1);
+            break;
+        case 30: // asinh (unary)
+            res0 = float16_t(asinh(fa0));
+            res1 = float16_t(asinh(fa1));
+            break;
+        case 31: // acosh (unary)
+            res0 = float16_t(acosh(fa0));
+            res1 = float16_t(acosh(fa1));
+            break;
+        case 32: // atanh (unary)
+            res0 = float16_t(atanh(fa0));
+            res1 = float16_t(atanh(fa1));
+            break;
+        case 33: // hypot (binary)
+            res0 = float16_t(sqrt(fa0 * fa0 + fb0 * fb0));
+            res1 = float16_t(sqrt(fa1 * fa1 + fb1 * fb1));
+            break;
+        case 34: // copysign (binary)
+            res0 = float16_t(fb0 < 0.0 ? -abs(fa0) : abs(fa0));
+            res1 = float16_t(fb1 < 0.0 ? -abs(fa1) : abs(fa1));
+            break;
         default:
             res0 = float16_t(0.0);
             res1 = float16_t(0.0);

@@ -19,6 +19,7 @@
 #include "tenzor/core/device.hpp"
 #include "tenzor/backend/caching_allocator.hpp"
 #include "../cusolver_handle_pool.hpp"
+#include "../cublas_handle_pool.hpp"
 
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
@@ -1129,6 +1130,75 @@ auto linalg_lu_solve_kernel(const Tensor& LU_data, const Tensor& pivots,
 
     CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
     // b_cm has shape (..., nrhs, n) row-major; transpose back to (..., n, nrhs).
+    return tenzor::transpose(b_cm, -2, -1).contiguous();
+}
+
+// ============================================================================
+// Triangular Solve (AX = B, A triangular) — cuBLAS trsm
+// ============================================================================
+
+auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
+                                     bool upper, bool unitriangular,
+                                     cudaStream_t stream) -> Tensor {
+    auto original_dtype = A.dtype();
+    if (original_dtype == DType::Float16 || original_dtype == DType::BFloat16) {
+        return linalg_solve_triangular_kernel(
+            A.to(DType::Float32), B.to(DType::Float32),
+            upper, unitriangular, stream).to(original_dtype);
+    }
+    if (original_dtype != DType::Float32 && original_dtype != DType::Float64) {
+        throw std::invalid_argument("linalg::solve_triangular: unsupported dtype");
+    }
+
+    // cuBLAS trsm operates in column-major. Row-major upper-triangular is
+    // column-major lower-triangular and vice versa, so flip the uplo flag.
+    // Also, row-major AX=B with left-side A becomes column-major XA=B
+    // with right-side A. We use the identity: solve row-major left-side
+    // by transposing both to column-major and using right-side trsm,
+    // but it's simpler to transpose A and B to column-major, then use
+    // left-side trsm with flipped uplo.
+    //
+    // Simpler approach: transpose to col-major, solve, transpose back.
+    auto a_cm = tenzor::transpose(A.contiguous().clone(), -2, -1).contiguous();
+    auto b_cm = tenzor::transpose(B.contiguous().clone(), -2, -1).contiguous();
+
+    auto [n, ndim_a] = check_square(a_cm);
+    auto b_shape = B.shape();
+    auto b_ndim = static_cast<int64_t>(b_shape.size());
+    int64_t nrhs = (b_ndim >= 2) ? b_shape[b_ndim - 1] : 1;
+    int64_t nbatch = batch_size(a_cm);
+
+    // In column-major, row-major upper becomes lower and vice versa
+    cublasFillMode_t uplo = upper ? CUBLAS_FILL_MODE_LOWER : CUBLAS_FILL_MODE_UPPER;
+    cublasDiagType_t diag = unitriangular ? CUBLAS_DIAG_UNIT : CUBLAS_DIAG_NON_UNIT;
+
+    auto handle = CuBLASHandlePool::get(stream);
+
+    if (original_dtype == DType::Float32) {
+        float alpha = 1.0f;
+        float* a_ptr = a_cm.data<float>();
+        float* b_ptr = b_cm.data<float>();
+        for (int64_t b = 0; b < nbatch; ++b) {
+            CUBLAS_CHECK(
+                cublasStrsm(handle, CUBLAS_SIDE_LEFT, uplo, CUBLAS_OP_N, diag,
+                            static_cast<int>(n), static_cast<int>(nrhs), &alpha,
+                            a_ptr + b * n * n, static_cast<int>(n),
+                            b_ptr + b * n * nrhs, static_cast<int>(n)));
+        }
+    } else {
+        double alpha = 1.0;
+        double* a_ptr = a_cm.data<double>();
+        double* b_ptr = b_cm.data<double>();
+        for (int64_t b = 0; b < nbatch; ++b) {
+            CUBLAS_CHECK(
+                cublasDtrsm(handle, CUBLAS_SIDE_LEFT, uplo, CUBLAS_OP_N, diag,
+                            static_cast<int>(n), static_cast<int>(nrhs), &alpha,
+                            a_ptr + b * n * n, static_cast<int>(n),
+                            b_ptr + b * n * nrhs, static_cast<int>(n)));
+        }
+    }
+
+    CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
     return tenzor::transpose(b_cm, -2, -1).contiguous();
 }
 
@@ -3089,6 +3159,82 @@ auto linalg_cholesky_kernel(const Tensor& A, bool upper, cudaStream_t stream) ->
 
     CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
     return work;
+}
+
+// ============================================================================
+// Triangular Solve (AX = B, A triangular) — native CUDA kernel
+// ============================================================================
+
+template<typename T>
+__global__ void trsm_kernel(const T* __restrict__ A, T* __restrict__ B,
+                            int n, int nrhs, bool upper, bool unit_diag) {
+    // One block per batch element. Serial substitution per row.
+    int batch = blockIdx.x;
+    const T* A_mat = A + batch * n * n;
+    T* B_mat = B + batch * n * nrhs;
+    int tid = threadIdx.x;
+
+    if (upper) {
+        // Back substitution: row n-1 down to 0
+        for (int i = n - 1; i >= 0; --i) {
+            __syncthreads();
+            for (int j = tid; j < nrhs; j += blockDim.x) {
+                T sum = B_mat[i * nrhs + j];
+                for (int k = i + 1; k < n; ++k)
+                    sum -= A_mat[i * n + k] * B_mat[k * nrhs + j];
+                B_mat[i * nrhs + j] = unit_diag ? sum : sum / A_mat[i * n + i];
+            }
+        }
+    } else {
+        // Forward substitution: row 0 up to n-1
+        for (int i = 0; i < n; ++i) {
+            __syncthreads();
+            for (int j = tid; j < nrhs; j += blockDim.x) {
+                T sum = B_mat[i * nrhs + j];
+                for (int k = 0; k < i; ++k)
+                    sum -= A_mat[i * n + k] * B_mat[k * nrhs + j];
+                B_mat[i * nrhs + j] = unit_diag ? sum : sum / A_mat[i * n + i];
+            }
+        }
+    }
+}
+
+auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
+                                     bool upper, bool unitriangular,
+                                     cudaStream_t stream) -> Tensor {
+    validate_linalg_dtype(A, "solve_triangular");
+    if (A.dtype() == DType::Float16 || A.dtype() == DType::BFloat16) {
+        return linalg_solve_triangular_kernel(
+            A.to(DType::Float32), B.to(DType::Float32),
+            upper, unitriangular, stream).to(A.dtype());
+    }
+
+    auto work_a = A.contiguous();
+    auto work_b = B.contiguous().clone();
+    auto [n, ndim_a] = check_square(work_a);
+    auto b_shape = B.shape();
+    auto b_ndim = static_cast<int64_t>(b_shape.size());
+    int64_t nrhs = (b_ndim >= 2) ? b_shape[b_ndim - 1] : 1;
+    int64_t nbatch = batch_size(work_a);
+
+    int threads = min(max(static_cast<int>(nrhs), 1), 256);
+
+    if (work_a.dtype() == DType::Float32) {
+        check_size_limit<float>(n, "solve_triangular");
+        trsm_kernel<float><<<nbatch, threads, 0, stream>>>(
+            work_a.data<float>(), work_b.data<float>(),
+            static_cast<int>(n), static_cast<int>(nrhs), upper, unitriangular);
+        CUDA_CHECK_LINALG(cudaGetLastError());
+    } else {
+        check_size_limit<double>(n, "solve_triangular");
+        trsm_kernel<double><<<nbatch, threads, 0, stream>>>(
+            work_a.data<double>(), work_b.data<double>(),
+            static_cast<int>(n), static_cast<int>(nrhs), upper, unitriangular);
+        CUDA_CHECK_LINALG(cudaGetLastError());
+    }
+
+    CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
+    return work_b;
 }
 
 } // namespace cuda

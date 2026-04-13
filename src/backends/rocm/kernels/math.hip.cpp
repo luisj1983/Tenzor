@@ -6046,5 +6046,1657 @@ auto bincount_kernel(const Tensor& input, const Tensor* weights,
     }
 }
 
+// ============================================================================
+// Rsqrt Kernels (reciprocal square root: 1/sqrt(x))
+// ============================================================================
+
+__global__ void rsqrt_kernel_f32(const float* input, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = rsqrtf(input[idx]);
+    }
+}
+
+__global__ void rsqrt_kernel_f64(const double* input, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = 1.0 / sqrt(input[idx]);
+    }
+}
+
+__global__ void rsqrt_kernel_f16(const __half* input, __half* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = __float2half(rsqrtf(__half2float(input[idx])));
+    }
+}
+
+// ============================================================================
+// Square Kernels (element-wise square: x*x)
+// ============================================================================
+
+__global__ void square_kernel_f32(const float* input, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float val = input[idx];
+        output[idx] = val * val;
+    }
+}
+
+__global__ void square_kernel_f64(const double* input, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        double val = input[idx];
+        output[idx] = val * val;
+    }
+}
+
+__global__ void square_kernel_f16(const __half* input, __half* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float val = __half2float(input[idx]);
+        output[idx] = __float2half(val * val);
+    }
+}
+
+// ============================================================================
+// Asinh / Acosh / Atanh Kernels (inverse hyperbolic functions)
+// ============================================================================
+
+__global__ void asinh_kernel_f32(const float* input, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = asinhf(input[idx]);
+    }
+}
+
+__global__ void asinh_kernel_f64(const double* input, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = asinh(input[idx]);
+    }
+}
+
+__global__ void asinh_kernel_f16(const __half* input, __half* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = __float2half(asinhf(__half2float(input[idx])));
+    }
+}
+
+__global__ void acosh_kernel_f32(const float* input, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = acoshf(input[idx]);
+    }
+}
+
+__global__ void acosh_kernel_f64(const double* input, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = acosh(input[idx]);
+    }
+}
+
+__global__ void acosh_kernel_f16(const __half* input, __half* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = __float2half(acoshf(__half2float(input[idx])));
+    }
+}
+
+__global__ void atanh_kernel_f32(const float* input, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = atanhf(input[idx]);
+    }
+}
+
+__global__ void atanh_kernel_f64(const double* input, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = atanh(input[idx]);
+    }
+}
+
+__global__ void atanh_kernel_f16(const __half* input, __half* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = __float2half(atanhf(__half2float(input[idx])));
+    }
+}
+
+// ============================================================================
+// Hypot Kernels (overflow-safe: sqrt(x*x + y*y))
+// ============================================================================
+
+__global__ void hypot_kernel_f32(const float* a, const float* b, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = hypotf(a[idx], b[idx]);
+    }
+}
+
+__global__ void hypot_kernel_f64(const double* a, const double* b, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = hypot(a[idx], b[idx]);
+    }
+}
+
+__global__ void hypot_kernel_f16(const __half* a, const __half* b, __half* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float va = __half2float(a[idx]);
+        float vb = __half2float(b[idx]);
+        output[idx] = __float2half(hypotf(va, vb));
+    }
+}
+
+// ============================================================================
+// Copysign Kernels
+// ============================================================================
+
+__global__ void copysign_kernel_f32(const float* a, const float* b, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = copysignf(a[idx], b[idx]);
+    }
+}
+
+__global__ void copysign_kernel_f64(const double* a, const double* b, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = copysign(a[idx], b[idx]);
+    }
+}
+
+__global__ void copysign_kernel_f16(const __half* a, const __half* b, __half* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float va = __half2float(a[idx]);
+        float vb = __half2float(b[idx]);
+        output[idx] = __float2half(copysignf(va, vb));
+    }
+}
+
+// ============================================================================
+// Nextafter Kernels
+// ============================================================================
+
+__global__ void nextafter_kernel_f32(const float* a, const float* b, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = nextafterf(a[idx], b[idx]);
+    }
+}
+
+__global__ void nextafter_kernel_f64(const double* a, const double* b, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = nextafter(a[idx], b[idx]);
+    }
+}
+
+__global__ void nextafter_kernel_f16(const __half* a, const __half* b, __half* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float va = __half2float(a[idx]);
+        float vb = __half2float(b[idx]);
+        output[idx] = __float2half(nextafterf(va, vb));
+    }
+}
+
+// ============================================================================
+// Gcd / Lcm Kernels (integer only)
+// ============================================================================
+
+__device__ inline int32_t device_gcd_i32(int32_t a, int32_t b) {
+    a = a < 0 ? -a : a;
+    b = b < 0 ? -b : b;
+    while (b != 0) { int32_t t = b; b = a % b; a = t; }
+    return a;
+}
+
+__device__ inline int64_t device_gcd_i64(int64_t a, int64_t b) {
+    a = a < 0 ? -a : a;
+    b = b < 0 ? -b : b;
+    while (b != 0) { int64_t t = b; b = a % b; a = t; }
+    return a;
+}
+
+__global__ void gcd_kernel_i32(const int32_t* a, const int32_t* b, int32_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = device_gcd_i32(a[idx], b[idx]);
+    }
+}
+
+__global__ void gcd_kernel_i64(const int64_t* a, const int64_t* b, int64_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = device_gcd_i64(a[idx], b[idx]);
+    }
+}
+
+__global__ void lcm_kernel_i32(const int32_t* a, const int32_t* b, int32_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        int32_t g = device_gcd_i32(a[idx], b[idx]);
+        output[idx] = g == 0 ? 0 : (a[idx] / g) * b[idx];
+    }
+}
+
+__global__ void lcm_kernel_i64(const int64_t* a, const int64_t* b, int64_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        int64_t g = device_gcd_i64(a[idx], b[idx]);
+        output[idx] = g == 0 ? 0 : (a[idx] / g) * b[idx];
+    }
+}
+
+// ============================================================================
+// Igamma / Igammac Kernels (regularized incomplete gamma functions)
+// ============================================================================
+
+__device__ inline float device_igamma_series_f32(float a, float x) {
+    // Regularized lower incomplete gamma via series expansion
+    // P(a,x) = e^(-x) * x^a * sum_{n=0}^{inf} x^n / (a*(a+1)*...*(a+n))
+    if (x <= 0.0f) return 0.0f;
+    float term = 1.0f / a;
+    float sum = term;
+    for (int n = 1; n < 200; ++n) {
+        term *= x / (a + static_cast<float>(n));
+        sum += term;
+        if (fabsf(term) < fabsf(sum) * 1e-7f) break;
+    }
+    return expf(-x + a * logf(x) - lgammaf(a)) * sum;
+}
+
+__device__ inline double device_igamma_series_f64(double a, double x) {
+    if (x <= 0.0) return 0.0;
+    double term = 1.0 / a;
+    double sum = term;
+    for (int n = 1; n < 500; ++n) {
+        term *= x / (a + static_cast<double>(n));
+        sum += term;
+        if (fabs(term) < fabs(sum) * 1e-15) break;
+    }
+    return exp(-x + a * log(x) - lgamma(a)) * sum;
+}
+
+__global__ void igamma_kernel_f32(const float* a, const float* x, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = device_igamma_series_f32(a[idx], x[idx]);
+    }
+}
+
+__global__ void igamma_kernel_f64(const double* a, const double* x, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = device_igamma_series_f64(a[idx], x[idx]);
+    }
+}
+
+__global__ void igamma_kernel_f16(const __half* a, const __half* x, __half* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = __float2half(device_igamma_series_f32(__half2float(a[idx]), __half2float(x[idx])));
+    }
+}
+
+__global__ void igammac_kernel_f32(const float* a, const float* x, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = 1.0f - device_igamma_series_f32(a[idx], x[idx]);
+    }
+}
+
+__global__ void igammac_kernel_f64(const double* a, const double* x, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = 1.0 - device_igamma_series_f64(a[idx], x[idx]);
+    }
+}
+
+__global__ void igammac_kernel_f16(const __half* a, const __half* x, __half* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = __float2half(1.0f - device_igamma_series_f32(__half2float(a[idx]), __half2float(x[idx])));
+    }
+}
+
+// ============================================================================
+// Addcmul / Addcdiv Kernels (ternary: input + value * tensor1 * tensor2,
+//                             input + value * tensor1 / tensor2)
+// ============================================================================
+
+__global__ void addcmul_kernel_f32(const float* input, const float* t1, const float* t2, float* output, float value, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = input[idx] + value * t1[idx] * t2[idx];
+    }
+}
+
+__global__ void addcmul_kernel_f64(const double* input, const double* t1, const double* t2, double* output, double value, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = input[idx] + value * t1[idx] * t2[idx];
+    }
+}
+
+__global__ void addcmul_kernel_f16(const __half* input, const __half* t1, const __half* t2, __half* output, float value, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float vi = __half2float(input[idx]);
+        float v1 = __half2float(t1[idx]);
+        float v2 = __half2float(t2[idx]);
+        output[idx] = __float2half(vi + value * v1 * v2);
+    }
+}
+
+__global__ void addcdiv_kernel_f32(const float* input, const float* t1, const float* t2, float* output, float value, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = input[idx] + value * t1[idx] / t2[idx];
+    }
+}
+
+__global__ void addcdiv_kernel_f64(const double* input, const double* t1, const double* t2, double* output, double value, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = input[idx] + value * t1[idx] / t2[idx];
+    }
+}
+
+__global__ void addcdiv_kernel_f16(const __half* input, const __half* t1, const __half* t2, __half* output, float value, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float vi = __half2float(input[idx]);
+        float v1 = __half2float(t1[idx]);
+        float v2 = __half2float(t2[idx]);
+        output[idx] = __float2half(vi + value * v1 / v2);
+    }
+}
+
+// ============================================================================
+// Host Wrappers: New Element-wise Math Operations
+// ============================================================================
+
+auto rsqrt_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(rsqrt_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(rsqrt_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(rsqrt_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else {
+        throw std::runtime_error("rsqrt operation only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto square_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(square_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(square_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(square_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else {
+        throw std::runtime_error("square operation only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto asinh_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(asinh_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(asinh_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(asinh_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else {
+        throw std::runtime_error("asinh operation only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto acosh_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(acosh_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(acosh_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(acosh_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else {
+        throw std::runtime_error("acosh operation only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto atanh_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(atanh_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(atanh_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(atanh_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else {
+        throw std::runtime_error("atanh operation only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto hypot_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
+    if (a.dtype() != b.dtype()) {
+        throw std::runtime_error("hypot: tensors must have the same dtype");
+    }
+    if (a.numel() != b.numel()) {
+        throw std::runtime_error("hypot: tensors must have the same number of elements");
+    }
+
+    int64_t n = a.numel();
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, a.dtype(), a.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (a.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(hypot_kernel_f32, grid, block, 0, stream,
+            a.data<float>(), b.data<float>(), result.data<float>(), n);
+    } else if (a.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(hypot_kernel_f64, grid, block, 0, stream,
+            a.data<double>(), b.data<double>(), result.data<double>(), n);
+    } else if (a.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(hypot_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(b.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else {
+        throw std::runtime_error("hypot operation only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto copysign_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
+    if (a.dtype() != b.dtype()) {
+        throw std::runtime_error("copysign: tensors must have the same dtype");
+    }
+    if (a.numel() != b.numel()) {
+        throw std::runtime_error("copysign: tensors must have the same number of elements");
+    }
+
+    int64_t n = a.numel();
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, a.dtype(), a.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (a.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(copysign_kernel_f32, grid, block, 0, stream,
+            a.data<float>(), b.data<float>(), result.data<float>(), n);
+    } else if (a.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(copysign_kernel_f64, grid, block, 0, stream,
+            a.data<double>(), b.data<double>(), result.data<double>(), n);
+    } else if (a.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(copysign_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(b.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else {
+        throw std::runtime_error("copysign operation only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto nextafter_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
+    if (a.dtype() != b.dtype()) {
+        throw std::runtime_error("nextafter: tensors must have the same dtype");
+    }
+    if (a.numel() != b.numel()) {
+        throw std::runtime_error("nextafter: tensors must have the same number of elements");
+    }
+
+    int64_t n = a.numel();
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, a.dtype(), a.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (a.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(nextafter_kernel_f32, grid, block, 0, stream,
+            a.data<float>(), b.data<float>(), result.data<float>(), n);
+    } else if (a.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(nextafter_kernel_f64, grid, block, 0, stream,
+            a.data<double>(), b.data<double>(), result.data<double>(), n);
+    } else if (a.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(nextafter_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(b.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else {
+        throw std::runtime_error("nextafter operation only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto gcd_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
+    if (a.dtype() != b.dtype()) {
+        throw std::runtime_error("gcd: tensors must have the same dtype");
+    }
+    if (a.numel() != b.numel()) {
+        throw std::runtime_error("gcd: tensors must have the same number of elements");
+    }
+
+    int64_t n = a.numel();
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, a.dtype(), a.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (a.dtype() == DType::Int32) {
+        hipLaunchKernelGGL(gcd_kernel_i32, grid, block, 0, stream,
+            a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n);
+    } else if (a.dtype() == DType::Int64) {
+        hipLaunchKernelGGL(gcd_kernel_i64, grid, block, 0, stream,
+            a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n);
+    } else {
+        throw std::runtime_error("gcd operation only supports Int32 and Int64 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto lcm_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
+    if (a.dtype() != b.dtype()) {
+        throw std::runtime_error("lcm: tensors must have the same dtype");
+    }
+    if (a.numel() != b.numel()) {
+        throw std::runtime_error("lcm: tensors must have the same number of elements");
+    }
+
+    int64_t n = a.numel();
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, a.dtype(), a.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (a.dtype() == DType::Int32) {
+        hipLaunchKernelGGL(lcm_kernel_i32, grid, block, 0, stream,
+            a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n);
+    } else if (a.dtype() == DType::Int64) {
+        hipLaunchKernelGGL(lcm_kernel_i64, grid, block, 0, stream,
+            a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n);
+    } else {
+        throw std::runtime_error("lcm operation only supports Int32 and Int64 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto igamma_kernel(const Tensor& a, const Tensor& x, hipStream_t stream) -> Tensor {
+    if (a.dtype() != x.dtype()) {
+        throw std::runtime_error("igamma: tensors must have the same dtype");
+    }
+    if (a.numel() != x.numel()) {
+        throw std::runtime_error("igamma: tensors must have the same number of elements");
+    }
+
+    int64_t n = a.numel();
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, a.dtype(), a.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (a.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(igamma_kernel_f32, grid, block, 0, stream,
+            a.data<float>(), x.data<float>(), result.data<float>(), n);
+    } else if (a.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(igamma_kernel_f64, grid, block, 0, stream,
+            a.data<double>(), x.data<double>(), result.data<double>(), n);
+    } else if (a.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(igamma_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(x.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else {
+        throw std::runtime_error("igamma operation only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto igammac_kernel(const Tensor& a, const Tensor& x, hipStream_t stream) -> Tensor {
+    if (a.dtype() != x.dtype()) {
+        throw std::runtime_error("igammac: tensors must have the same dtype");
+    }
+    if (a.numel() != x.numel()) {
+        throw std::runtime_error("igammac: tensors must have the same number of elements");
+    }
+
+    int64_t n = a.numel();
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, a.dtype(), a.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (a.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(igammac_kernel_f32, grid, block, 0, stream,
+            a.data<float>(), x.data<float>(), result.data<float>(), n);
+    } else if (a.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(igammac_kernel_f64, grid, block, 0, stream,
+            a.data<double>(), x.data<double>(), result.data<double>(), n);
+    } else if (a.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(igammac_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(x.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else {
+        throw std::runtime_error("igammac operation only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto addcmul_kernel(const Tensor& input, const Tensor& tensor1, const Tensor& tensor2, float value, hipStream_t stream) -> Tensor {
+    if (input.dtype() != tensor1.dtype() || input.dtype() != tensor2.dtype()) {
+        throw std::runtime_error("addcmul: all tensors must have the same dtype");
+    }
+    if (input.numel() != tensor1.numel() || input.numel() != tensor2.numel()) {
+        throw std::runtime_error("addcmul: all tensors must have the same number of elements");
+    }
+
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(addcmul_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), tensor1.data<float>(), tensor2.data<float>(),
+            result.data<float>(), value, n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(addcmul_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), tensor1.data<double>(), tensor2.data<double>(),
+            result.data<double>(), static_cast<double>(value), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(addcmul_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<const __half*>(tensor1.data<Float16>()),
+            reinterpret_cast<const __half*>(tensor2.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), value, n);
+    } else {
+        throw std::runtime_error("addcmul operation only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+auto addcdiv_kernel(const Tensor& input, const Tensor& tensor1, const Tensor& tensor2, float value, hipStream_t stream) -> Tensor {
+    if (input.dtype() != tensor1.dtype() || input.dtype() != tensor2.dtype()) {
+        throw std::runtime_error("addcdiv: all tensors must have the same dtype");
+    }
+    if (input.numel() != tensor1.numel() || input.numel() != tensor2.numel()) {
+        throw std::runtime_error("addcdiv: all tensors must have the same number of elements");
+    }
+
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) return result;
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(addcdiv_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), tensor1.data<float>(), tensor2.data<float>(),
+            result.data<float>(), value, n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(addcdiv_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), tensor1.data<double>(), tensor2.data<double>(),
+            result.data<double>(), static_cast<double>(value), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(addcdiv_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<const __half*>(tensor1.data<Float16>()),
+            reinterpret_cast<const __half*>(tensor2.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), value, n);
+    } else {
+        throw std::runtime_error("addcdiv operation only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ============================================================================
+// CumMax kernel — cumulative maximum along a dimension (returns values + indices)
+// ============================================================================
+
+template<typename T>
+__global__ void cummax_hip_kernel(
+    const T* __restrict__ input, T* __restrict__ values, int64_t* __restrict__ indices,
+    int64_t dim_size, int64_t inner_size, int64_t total_slices)
+{
+    HIP_KERNEL_LOOP(idx, total_slices) {
+        int64_t outer = idx / inner_size;
+        int64_t inner = idx % inner_size;
+
+        T running_max = input[outer * dim_size * inner_size + inner];
+        int64_t running_idx = 0;
+        values[outer * dim_size * inner_size + inner] = running_max;
+        indices[outer * dim_size * inner_size + inner] = 0;
+
+        for (int64_t i = 1; i < dim_size; ++i) {
+            int64_t offset = outer * dim_size * inner_size + i * inner_size + inner;
+            T val = input[offset];
+            if (val > running_max) {
+                running_max = val;
+                running_idx = i;
+            }
+            values[offset] = running_max;
+            indices[offset] = running_idx;
+        }
+    }
+}
+
+auto cummax_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> std::pair<Tensor, Tensor>
+{
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    const auto& shape = input_cont.shape();
+    const int64_t ndim = input_cont.ndim();
+    const int64_t dim_size = shape[dim];
+    const auto dtype = input_cont.dtype();
+    const auto device = input_cont.device();
+
+    Tensor values(std::vector<int64_t>(shape.begin(), shape.end()), dtype, device);
+    Tensor indices_out(std::vector<int64_t>(shape.begin(), shape.end()), DType::Int64, device);
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
+    int64_t total_slices = outer_size * inner_size;
+
+    dim3 grid_dim, block_dim;
+    compute_launch_config_1d(total_slices, grid_dim, block_dim);
+
+    switch (dtype) {
+        case DType::Float32:
+            hipLaunchKernelGGL(cummax_hip_kernel<float>, grid_dim, block_dim, 0, stream,
+                input_cont.data<float>(), values.data<float>(), indices_out.data<int64_t>(),
+                dim_size, inner_size, total_slices);
+            break;
+        case DType::Float64:
+            hipLaunchKernelGGL(cummax_hip_kernel<double>, grid_dim, block_dim, 0, stream,
+                input_cont.data<double>(), values.data<double>(), indices_out.data<int64_t>(),
+                dim_size, inner_size, total_slices);
+            break;
+        case DType::Int32:
+            hipLaunchKernelGGL(cummax_hip_kernel<int32_t>, grid_dim, block_dim, 0, stream,
+                input_cont.data<int32_t>(), values.data<int32_t>(), indices_out.data<int64_t>(),
+                dim_size, inner_size, total_slices);
+            break;
+        case DType::Int64:
+            hipLaunchKernelGGL(cummax_hip_kernel<int64_t>, grid_dim, block_dim, 0, stream,
+                input_cont.data<int64_t>(), values.data<int64_t>(), indices_out.data<int64_t>(),
+                dim_size, inner_size, total_slices);
+            break;
+        default:
+            throw std::runtime_error("cummax ROCm: unsupported dtype");
+    }
+    HIP_CHECK(hipGetLastError());
+    return {values, indices_out};
+}
+
+// ============================================================================
+// CumMin kernel — cumulative minimum along a dimension (returns values + indices)
+// ============================================================================
+
+template<typename T>
+__global__ void cummin_hip_kernel(
+    const T* __restrict__ input, T* __restrict__ values, int64_t* __restrict__ indices,
+    int64_t dim_size, int64_t inner_size, int64_t total_slices)
+{
+    HIP_KERNEL_LOOP(idx, total_slices) {
+        int64_t outer = idx / inner_size;
+        int64_t inner = idx % inner_size;
+
+        T running_min = input[outer * dim_size * inner_size + inner];
+        int64_t running_idx = 0;
+        values[outer * dim_size * inner_size + inner] = running_min;
+        indices[outer * dim_size * inner_size + inner] = 0;
+
+        for (int64_t i = 1; i < dim_size; ++i) {
+            int64_t offset = outer * dim_size * inner_size + i * inner_size + inner;
+            T val = input[offset];
+            if (val < running_min) {
+                running_min = val;
+                running_idx = i;
+            }
+            values[offset] = running_min;
+            indices[offset] = running_idx;
+        }
+    }
+}
+
+auto cummin_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> std::pair<Tensor, Tensor>
+{
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    const auto& shape = input_cont.shape();
+    const int64_t ndim = input_cont.ndim();
+    const int64_t dim_size = shape[dim];
+    const auto dtype = input_cont.dtype();
+    const auto device = input_cont.device();
+
+    Tensor values(std::vector<int64_t>(shape.begin(), shape.end()), dtype, device);
+    Tensor indices_out(std::vector<int64_t>(shape.begin(), shape.end()), DType::Int64, device);
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
+    int64_t total_slices = outer_size * inner_size;
+
+    dim3 grid_dim, block_dim;
+    compute_launch_config_1d(total_slices, grid_dim, block_dim);
+
+    switch (dtype) {
+        case DType::Float32:
+            hipLaunchKernelGGL(cummin_hip_kernel<float>, grid_dim, block_dim, 0, stream,
+                input_cont.data<float>(), values.data<float>(), indices_out.data<int64_t>(),
+                dim_size, inner_size, total_slices);
+            break;
+        case DType::Float64:
+            hipLaunchKernelGGL(cummin_hip_kernel<double>, grid_dim, block_dim, 0, stream,
+                input_cont.data<double>(), values.data<double>(), indices_out.data<int64_t>(),
+                dim_size, inner_size, total_slices);
+            break;
+        case DType::Int32:
+            hipLaunchKernelGGL(cummin_hip_kernel<int32_t>, grid_dim, block_dim, 0, stream,
+                input_cont.data<int32_t>(), values.data<int32_t>(), indices_out.data<int64_t>(),
+                dim_size, inner_size, total_slices);
+            break;
+        case DType::Int64:
+            hipLaunchKernelGGL(cummin_hip_kernel<int64_t>, grid_dim, block_dim, 0, stream,
+                input_cont.data<int64_t>(), values.data<int64_t>(), indices_out.data<int64_t>(),
+                dim_size, inner_size, total_slices);
+            break;
+        default:
+            throw std::runtime_error("cummin ROCm: unsupported dtype");
+    }
+    HIP_CHECK(hipGetLastError());
+    return {values, indices_out};
+}
+
+// ============================================================================
+// Fmax kernel — NaN-aware element-wise maximum (IEEE 754-2008)
+// ============================================================================
+
+__global__ void fmax_hip_f32(const float* __restrict__ a, const float* __restrict__ b,
+                              float* __restrict__ out, int64_t n)
+{
+    HIP_KERNEL_LOOP(idx, n) {
+        out[idx] = ::fmaxf(a[idx], b[idx]);
+    }
+}
+
+__global__ void fmax_hip_f64(const double* __restrict__ a, const double* __restrict__ b,
+                              double* __restrict__ out, int64_t n)
+{
+    HIP_KERNEL_LOOP(idx, n) {
+        out[idx] = ::fmax(a[idx], b[idx]);
+    }
+}
+
+__global__ void fmax_hip_i32(const int32_t* __restrict__ a, const int32_t* __restrict__ b,
+                              int32_t* __restrict__ out, int64_t n)
+{
+    HIP_KERNEL_LOOP(idx, n) {
+        out[idx] = (a[idx] > b[idx]) ? a[idx] : b[idx];
+    }
+}
+
+__global__ void fmax_hip_i64(const int64_t* __restrict__ a, const int64_t* __restrict__ b,
+                              int64_t* __restrict__ out, int64_t n)
+{
+    HIP_KERNEL_LOOP(idx, n) {
+        out[idx] = (a[idx] > b[idx]) ? a[idx] : b[idx];
+    }
+}
+
+auto fmax_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor
+{
+    Tensor a_cont = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_cont = b.is_contiguous() ? b : b.contiguous();
+    int64_t n = a_cont.numel();
+    Tensor output(std::vector<int64_t>(a_cont.shape().begin(), a_cont.shape().end()),
+                  a_cont.dtype(), a_cont.device());
+
+    dim3 grid_dim, block_dim;
+    compute_launch_config_1d(n, grid_dim, block_dim);
+
+    switch (a_cont.dtype()) {
+        case DType::Float32:
+            hipLaunchKernelGGL(fmax_hip_f32, grid_dim, block_dim, 0, stream,
+                a_cont.data<float>(), b_cont.data<float>(), output.data<float>(), n);
+            break;
+        case DType::Float64:
+            hipLaunchKernelGGL(fmax_hip_f64, grid_dim, block_dim, 0, stream,
+                a_cont.data<double>(), b_cont.data<double>(), output.data<double>(), n);
+            break;
+        case DType::Int32:
+            hipLaunchKernelGGL(fmax_hip_i32, grid_dim, block_dim, 0, stream,
+                a_cont.data<int32_t>(), b_cont.data<int32_t>(), output.data<int32_t>(), n);
+            break;
+        case DType::Int64:
+            hipLaunchKernelGGL(fmax_hip_i64, grid_dim, block_dim, 0, stream,
+                a_cont.data<int64_t>(), b_cont.data<int64_t>(), output.data<int64_t>(), n);
+            break;
+        default:
+            throw std::runtime_error("fmax ROCm: unsupported dtype");
+    }
+    HIP_CHECK(hipGetLastError());
+    return output;
+}
+
+// ============================================================================
+// Fmin kernel — NaN-aware element-wise minimum (IEEE 754-2008)
+// ============================================================================
+
+__global__ void fmin_hip_f32(const float* __restrict__ a, const float* __restrict__ b,
+                              float* __restrict__ out, int64_t n)
+{
+    HIP_KERNEL_LOOP(idx, n) {
+        out[idx] = ::fminf(a[idx], b[idx]);
+    }
+}
+
+__global__ void fmin_hip_f64(const double* __restrict__ a, const double* __restrict__ b,
+                              double* __restrict__ out, int64_t n)
+{
+    HIP_KERNEL_LOOP(idx, n) {
+        out[idx] = ::fmin(a[idx], b[idx]);
+    }
+}
+
+__global__ void fmin_hip_i32(const int32_t* __restrict__ a, const int32_t* __restrict__ b,
+                              int32_t* __restrict__ out, int64_t n)
+{
+    HIP_KERNEL_LOOP(idx, n) {
+        out[idx] = (a[idx] < b[idx]) ? a[idx] : b[idx];
+    }
+}
+
+__global__ void fmin_hip_i64(const int64_t* __restrict__ a, const int64_t* __restrict__ b,
+                              int64_t* __restrict__ out, int64_t n)
+{
+    HIP_KERNEL_LOOP(idx, n) {
+        out[idx] = (a[idx] < b[idx]) ? a[idx] : b[idx];
+    }
+}
+
+auto fmin_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor
+{
+    Tensor a_cont = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_cont = b.is_contiguous() ? b : b.contiguous();
+    int64_t n = a_cont.numel();
+    Tensor output(std::vector<int64_t>(a_cont.shape().begin(), a_cont.shape().end()),
+                  a_cont.dtype(), a_cont.device());
+
+    dim3 grid_dim, block_dim;
+    compute_launch_config_1d(n, grid_dim, block_dim);
+
+    switch (a_cont.dtype()) {
+        case DType::Float32:
+            hipLaunchKernelGGL(fmin_hip_f32, grid_dim, block_dim, 0, stream,
+                a_cont.data<float>(), b_cont.data<float>(), output.data<float>(), n);
+            break;
+        case DType::Float64:
+            hipLaunchKernelGGL(fmin_hip_f64, grid_dim, block_dim, 0, stream,
+                a_cont.data<double>(), b_cont.data<double>(), output.data<double>(), n);
+            break;
+        case DType::Int32:
+            hipLaunchKernelGGL(fmin_hip_i32, grid_dim, block_dim, 0, stream,
+                a_cont.data<int32_t>(), b_cont.data<int32_t>(), output.data<int32_t>(), n);
+            break;
+        case DType::Int64:
+            hipLaunchKernelGGL(fmin_hip_i64, grid_dim, block_dim, 0, stream,
+                a_cont.data<int64_t>(), b_cont.data<int64_t>(), output.data<int64_t>(), n);
+            break;
+        default:
+            throw std::runtime_error("fmin ROCm: unsupported dtype");
+    }
+    HIP_CHECK(hipGetLastError());
+    return output;
+}
+
+// ============================================================================
+// Isin kernel — set membership test using sorted array + binary search
+// ============================================================================
+
+template<typename T>
+__global__ void isin_hip_kernel(const T* __restrict__ elements, int64_t num_elements,
+                                 const T* __restrict__ test_sorted, int64_t num_test,
+                                 bool* __restrict__ output)
+{
+    HIP_KERNEL_LOOP(idx, num_elements) {
+        T val = elements[idx];
+        int64_t lo = 0, hi = num_test - 1;
+        bool found = false;
+        while (lo <= hi) {
+            int64_t mid = lo + (hi - lo) / 2;
+            T mid_val = test_sorted[mid];
+            if (mid_val == val) { found = true; break; }
+            else if (mid_val < val) lo = mid + 1;
+            else hi = mid - 1;
+        }
+        output[idx] = found;
+    }
+}
+
+auto isin_kernel(const Tensor& elements, const Tensor& test_elements, hipStream_t stream) -> Tensor
+{
+    Tensor elem_cont = elements.is_contiguous() ? elements : elements.contiguous();
+    Tensor test_cont = test_elements.is_contiguous() ? test_elements : test_elements.contiguous();
+
+    Tensor test_sorted(std::vector<int64_t>(test_cont.shape().begin(), test_cont.shape().end()),
+                       test_cont.dtype(), test_cont.device());
+    HIP_CHECK(hipMemcpyAsync(test_sorted.data_ptr(), test_cont.data_ptr(),
+                    test_cont.numel() * test_cont.element_size(),
+                    hipMemcpyDeviceToDevice, stream));
+
+    int64_t num_test = test_sorted.numel();
+    int64_t num_elements = elem_cont.numel();
+
+    Tensor output(std::vector<int64_t>(elem_cont.shape().begin(), elem_cont.shape().end()),
+                  DType::Bool, elem_cont.device());
+
+    dim3 grid_dim, block_dim;
+    compute_launch_config_1d(num_elements, grid_dim, block_dim);
+
+    // Sort test elements using hipcub
+    switch (elem_cont.dtype()) {
+        case DType::Float32: {
+            void* d_temp = nullptr;
+            size_t temp_bytes = 0;
+            hipcub::DeviceRadixSort::SortKeys(d_temp, temp_bytes,
+                test_sorted.data<float>(), test_sorted.data<float>(),
+                static_cast<int>(num_test), 0, sizeof(float) * 8, stream);
+            HIP_CHECK(hipMalloc(&d_temp, temp_bytes));
+            Tensor temp_buf({static_cast<int64_t>(num_test)}, DType::Float32, test_sorted.device());
+            hipcub::DeviceRadixSort::SortKeys(d_temp, temp_bytes,
+                test_sorted.data<float>(), temp_buf.data<float>(),
+                static_cast<int>(num_test), 0, sizeof(float) * 8, stream);
+            HIP_CHECK(hipFree(d_temp));
+            hipLaunchKernelGGL(isin_hip_kernel<float>, grid_dim, block_dim, 0, stream,
+                elem_cont.data<float>(), num_elements, temp_buf.data<float>(), num_test,
+                reinterpret_cast<bool*>(output.data_ptr()));
+            break;
+        }
+        case DType::Float64: {
+            void* d_temp = nullptr;
+            size_t temp_bytes = 0;
+            hipcub::DeviceRadixSort::SortKeys(d_temp, temp_bytes,
+                test_sorted.data<double>(), test_sorted.data<double>(),
+                static_cast<int>(num_test), 0, sizeof(double) * 8, stream);
+            HIP_CHECK(hipMalloc(&d_temp, temp_bytes));
+            Tensor temp_buf({static_cast<int64_t>(num_test)}, DType::Float64, test_sorted.device());
+            hipcub::DeviceRadixSort::SortKeys(d_temp, temp_bytes,
+                test_sorted.data<double>(), temp_buf.data<double>(),
+                static_cast<int>(num_test), 0, sizeof(double) * 8, stream);
+            HIP_CHECK(hipFree(d_temp));
+            hipLaunchKernelGGL(isin_hip_kernel<double>, grid_dim, block_dim, 0, stream,
+                elem_cont.data<double>(), num_elements, temp_buf.data<double>(), num_test,
+                reinterpret_cast<bool*>(output.data_ptr()));
+            break;
+        }
+        case DType::Int32: {
+            void* d_temp = nullptr;
+            size_t temp_bytes = 0;
+            hipcub::DeviceRadixSort::SortKeys(d_temp, temp_bytes,
+                test_sorted.data<int32_t>(), test_sorted.data<int32_t>(),
+                static_cast<int>(num_test), 0, sizeof(int32_t) * 8, stream);
+            HIP_CHECK(hipMalloc(&d_temp, temp_bytes));
+            Tensor temp_buf({static_cast<int64_t>(num_test)}, DType::Int32, test_sorted.device());
+            hipcub::DeviceRadixSort::SortKeys(d_temp, temp_bytes,
+                test_sorted.data<int32_t>(), temp_buf.data<int32_t>(),
+                static_cast<int>(num_test), 0, sizeof(int32_t) * 8, stream);
+            HIP_CHECK(hipFree(d_temp));
+            hipLaunchKernelGGL(isin_hip_kernel<int32_t>, grid_dim, block_dim, 0, stream,
+                elem_cont.data<int32_t>(), num_elements, temp_buf.data<int32_t>(), num_test,
+                reinterpret_cast<bool*>(output.data_ptr()));
+            break;
+        }
+        case DType::Int64: {
+            void* d_temp = nullptr;
+            size_t temp_bytes = 0;
+            hipcub::DeviceRadixSort::SortKeys(d_temp, temp_bytes,
+                test_sorted.data<int64_t>(), test_sorted.data<int64_t>(),
+                static_cast<int>(num_test), 0, sizeof(int64_t) * 8, stream);
+            HIP_CHECK(hipMalloc(&d_temp, temp_bytes));
+            Tensor temp_buf({static_cast<int64_t>(num_test)}, DType::Int64, test_sorted.device());
+            hipcub::DeviceRadixSort::SortKeys(d_temp, temp_bytes,
+                test_sorted.data<int64_t>(), temp_buf.data<int64_t>(),
+                static_cast<int>(num_test), 0, sizeof(int64_t) * 8, stream);
+            HIP_CHECK(hipFree(d_temp));
+            hipLaunchKernelGGL(isin_hip_kernel<int64_t>, grid_dim, block_dim, 0, stream,
+                elem_cont.data<int64_t>(), num_elements, temp_buf.data<int64_t>(), num_test,
+                reinterpret_cast<bool*>(output.data_ptr()));
+            break;
+        }
+        default:
+            throw std::runtime_error("isin ROCm: unsupported dtype");
+    }
+    HIP_CHECK(hipGetLastError());
+    return output;
+}
+
+// ============================================================================
+// Kthvalue kernel — k-th smallest value along a dimension
+// ============================================================================
+
+template<typename T>
+__global__ void kthvalue_hip_kernel(
+    const T* __restrict__ input, T* __restrict__ values, int64_t* __restrict__ indices,
+    int64_t dim_size, int64_t inner_size, int64_t k, int64_t total_slices,
+    T* __restrict__ workspace)
+{
+    HIP_KERNEL_LOOP(slice_idx, total_slices) {
+        int64_t outer = slice_idx / inner_size;
+        int64_t inner = slice_idx % inner_size;
+
+        T* ws = workspace + slice_idx * dim_size;
+        for (int64_t i = 0; i < dim_size; ++i)
+            ws[i] = input[outer * dim_size * inner_size + i * inner_size + inner];
+
+        // Partial selection sort to find k-th smallest
+        for (int64_t i = 0; i < k; ++i) {
+            int64_t min_idx = i;
+            T min_val = ws[i];
+            for (int64_t j = i + 1; j < dim_size; ++j) {
+                if (ws[j] < min_val) {
+                    min_val = ws[j];
+                    min_idx = j;
+                }
+            }
+            if (min_idx != i) {
+                ws[min_idx] = ws[i];
+                ws[i] = min_val;
+            }
+        }
+
+        T kth_val = ws[k - 1];
+        values[slice_idx] = kth_val;
+
+        for (int64_t i = 0; i < dim_size; ++i) {
+            T orig = input[outer * dim_size * inner_size + i * inner_size + inner];
+            if (orig == kth_val) {
+                indices[slice_idx] = i;
+                break;
+            }
+        }
+    }
+}
+
+auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim, bool keepdim,
+                     hipStream_t stream) -> std::pair<Tensor, Tensor>
+{
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    const auto& shape = input_cont.shape();
+    const int64_t ndim = input_cont.ndim();
+    const int64_t dim_size = shape[dim];
+    const auto dtype = input_cont.dtype();
+    const auto device = input_cont.device();
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
+    int64_t total_slices = outer_size * inner_size;
+
+    std::vector<int64_t> out_shape;
+    for (int64_t i = 0; i < ndim; ++i) {
+        if (i == dim) {
+            if (keepdim) out_shape.push_back(1);
+        } else {
+            out_shape.push_back(shape[i]);
+        }
+    }
+    if (out_shape.empty()) out_shape.push_back(1);
+
+    Tensor values(out_shape, dtype, device);
+    Tensor indices_out(out_shape, DType::Int64, device);
+
+    dim3 grid_dim, block_dim;
+    compute_launch_config_1d(total_slices, grid_dim, block_dim);
+
+    switch (dtype) {
+        case DType::Float32: {
+            Tensor ws({total_slices * dim_size}, DType::Float32, device);
+            hipLaunchKernelGGL(kthvalue_hip_kernel<float>, grid_dim, block_dim, 0, stream,
+                input_cont.data<float>(), values.data<float>(), indices_out.data<int64_t>(),
+                dim_size, inner_size, k, total_slices, ws.data<float>());
+            break;
+        }
+        case DType::Float64: {
+            Tensor ws({total_slices * dim_size}, DType::Float64, device);
+            hipLaunchKernelGGL(kthvalue_hip_kernel<double>, grid_dim, block_dim, 0, stream,
+                input_cont.data<double>(), values.data<double>(), indices_out.data<int64_t>(),
+                dim_size, inner_size, k, total_slices, ws.data<double>());
+            break;
+        }
+        case DType::Int32: {
+            Tensor ws({total_slices * dim_size}, DType::Int32, device);
+            hipLaunchKernelGGL(kthvalue_hip_kernel<int32_t>, grid_dim, block_dim, 0, stream,
+                input_cont.data<int32_t>(), values.data<int32_t>(), indices_out.data<int64_t>(),
+                dim_size, inner_size, k, total_slices, ws.data<int32_t>());
+            break;
+        }
+        case DType::Int64: {
+            Tensor ws({total_slices * dim_size}, DType::Int64, device);
+            hipLaunchKernelGGL(kthvalue_hip_kernel<int64_t>, grid_dim, block_dim, 0, stream,
+                input_cont.data<int64_t>(), values.data<int64_t>(), indices_out.data<int64_t>(),
+                dim_size, inner_size, k, total_slices, ws.data<int64_t>());
+            break;
+        }
+        default:
+            throw std::runtime_error("kthvalue ROCm: unsupported dtype");
+    }
+    HIP_CHECK(hipGetLastError());
+    return {values, indices_out};
+}
+
+// ============================================================================
+// Quantile/Nanquantile/Nanmedian — NaN-aware quantile kernels
+// ============================================================================
+
+template<typename T>
+__global__ void nanquantile_hip_kernel(
+    const T* __restrict__ input, T* __restrict__ output,
+    double q, int64_t dim_size, int64_t inner_size, int64_t total_slices,
+    T* __restrict__ workspace)
+{
+    HIP_KERNEL_LOOP(idx, total_slices) {
+        int64_t outer = idx / inner_size;
+        int64_t inner = idx % inner_size;
+
+        T* ws = workspace + idx * dim_size;
+        int64_t count = 0;
+        for (int64_t i = 0; i < dim_size; ++i) {
+            T val = input[outer * dim_size * inner_size + i * inner_size + inner];
+            if (!isnan(static_cast<float>(val))) {
+                ws[count++] = val;
+            }
+        }
+
+        if (count == 0) {
+            output[idx] = static_cast<T>(NAN);
+            return;
+        }
+
+        // Insertion sort
+        for (int64_t i = 1; i < count; ++i) {
+            T key = ws[i];
+            int64_t j = i - 1;
+            while (j >= 0 && ws[j] > key) {
+                ws[j + 1] = ws[j];
+                --j;
+            }
+            ws[j + 1] = key;
+        }
+
+        double pos = q * (count - 1);
+        int64_t lo = static_cast<int64_t>(pos);
+        int64_t hi = lo + 1;
+        if (hi >= count) hi = count - 1;
+        double frac = pos - lo;
+        output[idx] = static_cast<T>(static_cast<double>(ws[lo]) * (1.0 - frac) +
+                                      static_cast<double>(ws[hi]) * frac);
+    }
+}
+
+template<typename T>
+__global__ void quantile_hip_kernel(
+    const T* __restrict__ input, T* __restrict__ output,
+    double q, int64_t dim_size, int64_t inner_size, int64_t total_slices,
+    T* __restrict__ workspace)
+{
+    HIP_KERNEL_LOOP(idx, total_slices) {
+        int64_t outer = idx / inner_size;
+        int64_t inner = idx % inner_size;
+
+        T* ws = workspace + idx * dim_size;
+        for (int64_t i = 0; i < dim_size; ++i)
+            ws[i] = input[outer * dim_size * inner_size + i * inner_size + inner];
+
+        // Insertion sort
+        for (int64_t i = 1; i < dim_size; ++i) {
+            T key = ws[i];
+            int64_t j = i - 1;
+            while (j >= 0 && ws[j] > key) {
+                ws[j + 1] = ws[j];
+                --j;
+            }
+            ws[j + 1] = key;
+        }
+
+        double pos = q * (dim_size - 1);
+        int64_t lo = static_cast<int64_t>(pos);
+        int64_t hi = lo + 1;
+        if (hi >= dim_size) hi = dim_size - 1;
+        double frac = pos - lo;
+        output[idx] = static_cast<T>(static_cast<double>(ws[lo]) * (1.0 - frac) +
+                                      static_cast<double>(ws[hi]) * frac);
+    }
+}
+
+static auto quantile_nanquantile_impl(const Tensor& input, double q, int64_t dim,
+                                       bool keepdim, bool ignore_nan,
+                                       hipStream_t stream) -> Tensor
+{
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    const auto& shape = input_cont.shape();
+    const int64_t ndim = input_cont.ndim();
+    const int64_t dim_size = shape[dim];
+    const auto dtype = input_cont.dtype();
+    const auto device = input_cont.device();
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
+    int64_t total_slices = outer_size * inner_size;
+
+    std::vector<int64_t> out_shape;
+    for (int64_t i = 0; i < ndim; ++i) {
+        if (i == dim) {
+            if (keepdim) out_shape.push_back(1);
+        } else {
+            out_shape.push_back(shape[i]);
+        }
+    }
+    if (out_shape.empty()) out_shape.push_back(1);
+
+    Tensor output(out_shape, dtype, device);
+    dim3 grid_dim, block_dim;
+    compute_launch_config_1d(total_slices, grid_dim, block_dim);
+
+    switch (dtype) {
+        case DType::Float32: {
+            Tensor ws({total_slices * dim_size}, DType::Float32, device);
+            if (ignore_nan) {
+                hipLaunchKernelGGL(nanquantile_hip_kernel<float>, grid_dim, block_dim, 0, stream,
+                    input_cont.data<float>(), output.data<float>(), q, dim_size, inner_size,
+                    total_slices, ws.data<float>());
+            } else {
+                hipLaunchKernelGGL(quantile_hip_kernel<float>, grid_dim, block_dim, 0, stream,
+                    input_cont.data<float>(), output.data<float>(), q, dim_size, inner_size,
+                    total_slices, ws.data<float>());
+            }
+            break;
+        }
+        case DType::Float64: {
+            Tensor ws({total_slices * dim_size}, DType::Float64, device);
+            if (ignore_nan) {
+                hipLaunchKernelGGL(nanquantile_hip_kernel<double>, grid_dim, block_dim, 0, stream,
+                    input_cont.data<double>(), output.data<double>(), q, dim_size, inner_size,
+                    total_slices, ws.data<double>());
+            } else {
+                hipLaunchKernelGGL(quantile_hip_kernel<double>, grid_dim, block_dim, 0, stream,
+                    input_cont.data<double>(), output.data<double>(), q, dim_size, inner_size,
+                    total_slices, ws.data<double>());
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("quantile ROCm: unsupported dtype");
+    }
+    HIP_CHECK(hipGetLastError());
+    return output;
+}
+
+auto quantile_kernel(const Tensor& input, double q, int64_t dim, bool keepdim,
+                     hipStream_t stream) -> Tensor
+{
+    return quantile_nanquantile_impl(input, q, dim, keepdim, false, stream);
+}
+
+auto nanquantile_kernel(const Tensor& input, double q, int64_t dim, bool keepdim,
+                        hipStream_t stream) -> Tensor
+{
+    return quantile_nanquantile_impl(input, q, dim, keepdim, true, stream);
+}
+
+auto nanmedian_kernel(const Tensor& input, int64_t dim, bool keepdim,
+                      hipStream_t stream) -> Tensor
+{
+    return nanquantile_kernel(input, 0.5, dim, keepdim, stream);
+}
+
+// ============================================================================
+// Histc kernel — fixed-bin histogram using atomicAdd
+// ============================================================================
+
+__global__ void histc_hip_f32(const float* __restrict__ input, float* __restrict__ output,
+                               int64_t n, int64_t bins, float min_val, float max_val)
+{
+    float bin_width = (max_val - min_val) / static_cast<float>(bins);
+    HIP_KERNEL_LOOP(idx, n) {
+        float val = input[idx];
+        if (val >= min_val && val <= max_val) {
+            int64_t bin = static_cast<int64_t>((val - min_val) / bin_width);
+            if (bin >= bins) bin = bins - 1;
+            atomicAdd(&output[bin], 1.0f);
+        }
+    }
+}
+
+auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_val,
+                  hipStream_t stream) -> Tensor
+{
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    int64_t n = input_cont.numel();
+    const auto device = input_cont.device();
+
+    Tensor output({bins}, DType::Float32, device);
+    HIP_CHECK(hipMemsetAsync(output.data_ptr(), 0, bins * sizeof(float), stream));
+
+    dim3 grid_dim, block_dim;
+    compute_launch_config_1d(n, grid_dim, block_dim);
+
+    if (input_cont.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(histc_hip_f32, grid_dim, block_dim, 0, stream,
+            input_cont.data<float>(), output.data<float>(), n, bins,
+            static_cast<float>(min_val), static_cast<float>(max_val));
+    } else if (input_cont.dtype() == DType::Float64) {
+        // Convert to float32 for atomicAdd compatibility
+        Tensor f32_input = input_cont.to(DType::Float32);
+        hipLaunchKernelGGL(histc_hip_f32, grid_dim, block_dim, 0, stream,
+            f32_input.data<float>(), output.data<float>(), n, bins,
+            static_cast<float>(min_val), static_cast<float>(max_val));
+    } else {
+        throw std::runtime_error("histc ROCm: unsupported dtype");
+    }
+    HIP_CHECK(hipGetLastError());
+    return output;
+}
+
+// ============================================================================
+// UniqueConsecutive kernel — deduplicate consecutive equal elements
+// ============================================================================
+
+template<typename T>
+__global__ void unique_consecutive_mask_hip(const T* __restrict__ input,
+                                             int32_t* __restrict__ mask, int64_t n)
+{
+    HIP_KERNEL_LOOP(idx, n) {
+        mask[idx] = (idx == 0 || input[idx] != input[idx - 1]) ? 1 : 0;
+    }
+}
+
+template<typename T>
+__global__ void unique_consecutive_gather_hip(const T* __restrict__ input,
+                                               const int32_t* __restrict__ prefix_sum,
+                                               const int32_t* __restrict__ mask,
+                                               T* __restrict__ output,
+                                               int64_t* __restrict__ inverse, int64_t n)
+{
+    HIP_KERNEL_LOOP(idx, n) {
+        int32_t out_idx = prefix_sum[idx] - 1;
+        if (mask[idx]) output[out_idx] = input[idx];
+        inverse[idx] = out_idx;
+    }
+}
+
+auto unique_consecutive_kernel(const Tensor& input, bool return_inverse,
+                                hipStream_t stream)
+    -> std::tuple<Tensor, Tensor, Tensor>
+{
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    int64_t n = input_cont.numel();
+    const auto dtype = input_cont.dtype();
+    const auto device = input_cont.device();
+
+    if (n == 0) {
+        return {Tensor({0}, dtype, device), Tensor({0}, DType::Int64, device),
+                Tensor({0}, DType::Int64, device)};
+    }
+
+    Tensor mask({n}, DType::Int32, device);
+    Tensor prefix({n}, DType::Int32, device);
+    Tensor inverse_out({n}, DType::Int64, device);
+
+    dim3 grid_dim, block_dim;
+    compute_launch_config_1d(n, grid_dim, block_dim);
+
+    auto launch = [&]<typename T>() {
+        hipLaunchKernelGGL(unique_consecutive_mask_hip<T>, grid_dim, block_dim, 0, stream,
+            input_cont.data<T>(), mask.data<int32_t>(), n);
+        HIP_CHECK(hipGetLastError());
+
+        // Inclusive prefix sum
+        void* d_temp = nullptr;
+        size_t temp_bytes = 0;
+        HIP_CHECK(hipcub::DeviceScan::InclusiveSum(d_temp, temp_bytes,
+            mask.data<int32_t>(), prefix.data<int32_t>(), static_cast<int>(n), stream));
+        HIP_CHECK(hipMalloc(&d_temp, temp_bytes));
+        HIP_CHECK(hipcub::DeviceScan::InclusiveSum(d_temp, temp_bytes,
+            mask.data<int32_t>(), prefix.data<int32_t>(), static_cast<int>(n), stream));
+        HIP_CHECK(hipFree(d_temp));
+
+        int32_t num_unique_h;
+        HIP_CHECK(hipMemcpyAsync(&num_unique_h, prefix.data<int32_t>() + n - 1,
+                        sizeof(int32_t), hipMemcpyDeviceToHost, stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
+        int64_t num_unique = num_unique_h;
+
+        Tensor unique_out({num_unique}, dtype, device);
+        hipLaunchKernelGGL(unique_consecutive_gather_hip<T>, grid_dim, block_dim, 0, stream,
+            input_cont.data<T>(), prefix.data<int32_t>(), mask.data<int32_t>(),
+            unique_out.data<T>(), inverse_out.data<int64_t>(), n);
+        HIP_CHECK(hipGetLastError());
+
+        // Compute counts from inverse indices
+        Tensor counts({num_unique}, DType::Int64, device);
+        HIP_CHECK(hipMemsetAsync(counts.data<int64_t>(), 0, num_unique * sizeof(int64_t), stream));
+        // Use atomicAdd on counts via a simple kernel
+        // For now, compute on host after sync
+        HIP_CHECK(hipStreamSynchronize(stream));
+        std::vector<int64_t> inv_host(n);
+        HIP_CHECK(hipMemcpy(inv_host.data(), inverse_out.data<int64_t>(),
+                    n * sizeof(int64_t), hipMemcpyDeviceToHost));
+        std::vector<int64_t> counts_host(num_unique, 0);
+        for (int64_t i = 0; i < n; ++i) counts_host[inv_host[i]]++;
+        HIP_CHECK(hipMemcpy(counts.data<int64_t>(), counts_host.data(),
+                    num_unique * sizeof(int64_t), hipMemcpyHostToDevice));
+
+        return std::make_tuple(unique_out, inverse_out, counts);
+    };
+
+    switch (dtype) {
+        case DType::Float32: return launch.template operator()<float>();
+        case DType::Float64: return launch.template operator()<double>();
+        case DType::Int32:   return launch.template operator()<int32_t>();
+        case DType::Int64:   return launch.template operator()<int64_t>();
+        default: throw std::runtime_error("unique_consecutive ROCm: unsupported dtype");
+    }
+}
+
 } // namespace rocm
 } // namespace tenzor

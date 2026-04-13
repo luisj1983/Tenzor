@@ -26,6 +26,7 @@
 #include "../core/tensor.hpp"
 
 #include <optional>
+#include <tuple>
 #include <utility>
 
 // Forward declarations to avoid heavy includes — implementations in functional.cpp
@@ -537,5 +538,137 @@ auto normalize(const Variable& input, double p = 2.0, int64_t dim = 1,
  */
 auto pad(const Variable& input, const std::vector<int64_t>& pad,
          const std::string& mode = "constant", double value = 0.0) -> Variable;
+
+// ============================================================================
+// Phase 9: Lp Pooling (compositions — no new backend kernels)
+// ============================================================================
+
+/**
+ * @brief 1D Lp-norm pooling
+ *
+ * Computes (sum(|x|^p, kernel) / kernel_size)^(1/p) via composition of
+ * existing ops (abs, pow, avg_pool1d).
+ *
+ * @param input Input tensor [N, C, L]
+ * @param norm_type Exponent p for the Lp norm
+ * @param kernel_size Size of the pooling window
+ * @param stride Stride of the pooling window (default: kernel_size)
+ * @param ceil_mode Use ceil instead of floor to compute output size
+ */
+auto lp_pool1d(const Variable& input, double norm_type, int64_t kernel_size,
+               int64_t stride = 0, bool ceil_mode = false) -> Variable;
+
+/**
+ * @brief 2D Lp-norm pooling
+ *
+ * Computes (sum(|x|^p, kernel) / kernel_size)^(1/p) via composition of
+ * existing ops (abs, pow, avg_pool2d).
+ *
+ * @param input Input tensor [N, C, H, W]
+ * @param norm_type Exponent p for the Lp norm
+ * @param kernel_size Size of the pooling window (H, W)
+ * @param stride Stride of the pooling window (default: kernel_size)
+ * @param ceil_mode Use ceil instead of floor to compute output size
+ */
+auto lp_pool2d(const Variable& input, double norm_type,
+               std::pair<int64_t, int64_t> kernel_size,
+               std::pair<int64_t, int64_t> stride = {0, 0},
+               bool ceil_mode = false) -> Variable;
+
+// ============================================================================
+// Phase 9: Local Response Normalization (composition)
+// ============================================================================
+
+/**
+ * @brief Local response normalization (cross-channel)
+ *
+ * Normalizes across nearby channels:
+ *   output = input / (k + alpha/size * sum(input^2, neighborhood))^beta
+ *
+ * @param input Input tensor [N, C, ...] (at least 3D)
+ * @param size Number of neighboring channels to normalize across
+ * @param alpha Scaling constant
+ * @param beta Exponent
+ * @param k Additive constant
+ */
+auto local_response_norm(const Variable& input, int64_t size,
+                         double alpha = 1e-4, double beta = 0.75,
+                         double k = 1.0) -> Variable;
+
+// ============================================================================
+// Phase 9: Fractional Max Pooling (dispatch to backend kernels)
+// ============================================================================
+
+/**
+ * @brief 2D fractional max pooling
+ *
+ * Stochastic pooling where output size is specified and pool regions are
+ * randomly determined. Returns (output, indices).
+ *
+ * @param input Input tensor [N, C, H, W]
+ * @param kernel_size Pooling kernel size (H, W)
+ * @param output_size Target output spatial dimensions (H, W)
+ * @param random_samples Optional pre-generated random samples [N, C, 2]
+ */
+auto fractional_max_pool2d(const Variable& input,
+                           std::pair<int64_t, int64_t> kernel_size,
+                           std::pair<int64_t, int64_t> output_size,
+                           const std::optional<Tensor>& random_samples = std::nullopt)
+    -> std::pair<Variable, Tensor>;
+
+/**
+ * @brief 3D fractional max pooling
+ *
+ * @param input Input tensor [N, C, D, H, W]
+ * @param kernel_size Pooling kernel size (D, H, W)
+ * @param output_size Target output spatial dimensions (D, H, W)
+ * @param random_samples Optional pre-generated random samples [N, C, 3]
+ */
+auto fractional_max_pool3d(const Variable& input,
+                           std::tuple<int64_t, int64_t, int64_t> kernel_size,
+                           std::tuple<int64_t, int64_t, int64_t> output_size,
+                           const std::optional<Tensor>& random_samples = std::nullopt)
+    -> std::pair<Variable, Tensor>;
+
+// ============================================================================
+// Phase 9: Max Unpooling (dispatch to backend kernels)
+// ============================================================================
+
+/**
+ * @brief 2D max unpooling (inverse of max_pool2d)
+ *
+ * Places input values at positions indicated by indices from a prior
+ * max_pool2d. Other positions are filled with zero.
+ *
+ * @param input Pooled tensor [N, C, H_pool, W_pool]
+ * @param indices Max indices from max_pool2d [N, C, H_pool, W_pool]
+ * @param kernel_size Original pooling kernel size (H, W)
+ * @param stride Original pooling stride (default: kernel_size)
+ * @param padding Original pooling padding
+ * @param output_size Optional explicit output size [H, W]
+ */
+auto max_unpool2d(const Variable& input, const Tensor& indices,
+                  std::pair<int64_t, int64_t> kernel_size,
+                  std::pair<int64_t, int64_t> stride = {-1, -1},
+                  std::pair<int64_t, int64_t> padding = {0, 0},
+                  std::optional<std::pair<int64_t, int64_t>> output_size = std::nullopt)
+    -> Variable;
+
+/**
+ * @brief 3D max unpooling (inverse of max_pool3d)
+ *
+ * @param input Pooled tensor [N, C, D_pool, H_pool, W_pool]
+ * @param indices Max indices from max_pool3d [N, C, D_pool, H_pool, W_pool]
+ * @param kernel_size Original pooling kernel size (D, H, W)
+ * @param stride Original pooling stride (default: kernel_size)
+ * @param padding Original pooling padding
+ * @param output_size Optional explicit output size [D, H, W]
+ */
+auto max_unpool3d(const Variable& input, const Tensor& indices,
+                  std::tuple<int64_t, int64_t, int64_t> kernel_size,
+                  std::tuple<int64_t, int64_t, int64_t> stride = {-1, -1, -1},
+                  std::tuple<int64_t, int64_t, int64_t> padding = {0, 0, 0},
+                  std::optional<std::tuple<int64_t, int64_t, int64_t>> output_size = std::nullopt)
+    -> Variable;
 
 } // namespace tenzor::nn::functional

@@ -188,6 +188,34 @@ void main() {
             res0 = float(max(fa0, fb0));
             res1 = float(max(fa1, fb1));
             break;
+        case 28: // rsqrt (unary)
+            res0 = float(inversesqrt(fa0));
+            res1 = float(inversesqrt(fa1));
+            break;
+        case 29: // square (unary)
+            res0 = float(fa0 * fa0);
+            res1 = float(fa1 * fa1);
+            break;
+        case 30: // asinh (unary)
+            res0 = float(asinh(fa0));
+            res1 = float(asinh(fa1));
+            break;
+        case 31: // acosh (unary)
+            res0 = float(acosh(fa0));
+            res1 = float(acosh(fa1));
+            break;
+        case 32: // atanh (unary)
+            res0 = float(atanh(fa0));
+            res1 = float(atanh(fa1));
+            break;
+        case 33: // hypot (binary)
+            res0 = float(sqrt(fa0 * fa0 + fb0 * fb0));
+            res1 = float(sqrt(fa1 * fa1 + fb1 * fb1));
+            break;
+        case 34: // copysign (binary)
+            res0 = float(fb0 < 0.0 ? -abs(fa0) : abs(fa0));
+            res1 = float(fb1 < 0.0 ? -abs(fa1) : abs(fa1));
+            break;
         default:
             res0 = float(0.0);
             res1 = float(0.0);

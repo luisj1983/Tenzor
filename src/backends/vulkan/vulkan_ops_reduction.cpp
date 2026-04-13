@@ -1081,8 +1081,11 @@ auto VulkanBackend::dispatchRoll(const Tensor& input, int64_t shift, int64_t dim
 }
 
 auto VulkanBackend::dispatchRepeatInterleave(const Tensor& input, int64_t repeats, int64_t dim) -> Tensor {
-    // Scalar repeat_interleave: use the roll-like shader pattern with division indexing
     auto input_shape = input.shape();
+    int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    // Normalize negative dim
+    if (dim < 0) dim += ndim;
 
     if (input.numel() == 0) {
         std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
@@ -1090,27 +1093,186 @@ auto VulkanBackend::dispatchRepeatInterleave(const Tensor& input, int64_t repeat
         return Tensor(out_shape, input.dtype(), input.device());
     }
 
-    // CPU fallback: move to CPU, compute, move back
-    Tensor cpu_input = input.to(Device::cpu());
-    tenzor::NewOpAttributes cpu_attrs;
-    cpu_attrs.set(AttrKey::Dim, dim);
-    cpu_attrs.set(AttrKey::NumRepeats, repeats);
-    std::vector<Tensor> cpu_inputs = {cpu_input};
-    auto cpu_result = tenzor::dispatch(OpId::RepeatInterleave, std::span<const Tensor>(cpu_inputs), cpu_attrs)[0];
-    return cpu_result.to(input.device());
+    // Build output shape
+    std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
+    out_shape[dim] = input_shape[dim] * repeats;
+
+    int32_t device_id = input.device().index;
+
+    // Select shader based on dtype
+    bool is_f64 = (input.dtype() == DType::Float64);
+    bool is_f16 = (input.dtype() == DType::Float16);
+    bool is_bf16 = (input.dtype() == DType::BFloat16);
+    std::string shader = is_f64 ? "repeat_interleave_f64"
+                       : is_f16 ? "repeat_interleave_f16"
+                       : is_bf16 ? "repeat_interleave_bf16"
+                       : "repeat_interleave";
+
+    // Int types reinterpret as float (same 4-byte width)
+    Tensor work_input = input;
+    DType orig_dtype = input.dtype();
+    if (orig_dtype == DType::Int32) {
+        // Int32 and Float32 are both 4 bytes; reinterpret
+        shader = "repeat_interleave";
+    } else if (orig_dtype == DType::Int64) {
+        // Int64 is 8 bytes like Float64
+        shader = "repeat_interleave_f64";
+    } else if (orig_dtype == DType::Int8 || orig_dtype == DType::Bool || orig_dtype == DType::UInt8) {
+        // Upcast to Float32, repeat, then cast back
+        Tensor f32_input = dispatchCast(input, DType::Float32);
+        Tensor f32_result = dispatchRepeatInterleave(f32_input, repeats, dim);
+        return dispatchCast(f32_result, orig_dtype);
+    }
+
+    auto* pipeline = getPipeline(shader, device_id);
+
+    Tensor output(out_shape, orig_dtype, input.device());
+
+    // Compute dim decomposition
+    uint32_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; i++) {
+        inner_size *= static_cast<uint32_t>(input_shape[i]);
+    }
+    uint32_t dim_size = static_cast<uint32_t>(input_shape[dim]);
+    uint32_t total_elements = static_cast<uint32_t>(output.numel());
+
+    struct {
+        uint32_t total_elements;
+        uint32_t repeats;
+        uint32_t dim_size;
+        uint32_t inner_size;
+    } pc;
+    pc.total_elements = total_elements;
+    pc.repeats = static_cast<uint32_t>(repeats);
+    pc.dim_size = dim_size;
+    pc.inner_size = inner_size;
+
+    size_t elem = input.dtype_size();
+    size_t in_buf_size = static_cast<size_t>(input.numel()) * elem;
+    size_t out_buf_size = static_cast<size_t>(output.numel()) * elem;
+    if (is_f16 || is_bf16) {
+        in_buf_size = ((input.numel() + 1) / 2) * 4;
+        out_buf_size = ((output.numel() + 1) / 2) * 4;
+    }
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, input.data_ptr()}, {1, output.data_ptr()}
+    };
+    std::vector<size_t> sizes = {in_buf_size, out_buf_size};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(total_elements, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return output;
 }
 
 auto VulkanBackend::dispatchRepeatInterleaveTensor(const Tensor& input, const Tensor& repeats, int64_t dim) -> Tensor {
-    // Tensor repeat_interleave: CPU fallback
-    Tensor cpu_input = input.to(Device::cpu());
-    Tensor cpu_repeats = repeats.to(Device::cpu());
+    auto input_shape = input.shape();
+    int64_t ndim = static_cast<int64_t>(input_shape.size());
 
-    tenzor::NewOpAttributes cpu_attrs;
-    cpu_attrs.set(AttrKey::Dim, dim);
-    cpu_attrs.set(AttrKey::NumRepeats, static_cast<int64_t>(-1));
-    std::vector<Tensor> cpu_inputs = {cpu_input, cpu_repeats};
-    auto cpu_result = tenzor::dispatch(OpId::RepeatInterleave, std::span<const Tensor>(cpu_inputs), cpu_attrs)[0];
-    return cpu_result.to(input.device());
+    // Normalize negative dim
+    if (dim < 0) dim += ndim;
+
+    int32_t device_id = input.device().index;
+
+    // Cast repeats to Int32 if needed (shader expects int buffer)
+    Tensor int_repeats = (repeats.dtype() != DType::Int32)
+        ? dispatchCast(repeats, DType::Int32) : repeats;
+
+    // Compute exclusive prefix sum of repeats on GPU using cumsum
+    // Then read total from the last element to determine output size
+    Tensor prefix_sum = dispatchCumSum(int_repeats.to(DType::Float32), 0);
+    // We need an offsets array of size (dim_size + 1) with offsets[0] = 0
+    // The prefix sum gives us offsets[1..dim_size]
+    // Read total from GPU to determine output shape
+    Tensor total_tensor = prefix_sum.to(Device::cpu());
+    int64_t dim_size = input_shape[dim];
+    float total_f = static_cast<const float*>(total_tensor.data_ptr())[dim_size - 1];
+    int64_t total_repeats = static_cast<int64_t>(total_f);
+
+    if (total_repeats == 0 || input.numel() == 0) {
+        std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
+        out_shape[dim] = 0;
+        return Tensor(out_shape, input.dtype(), input.device());
+    }
+
+    // Build offsets buffer: [0, cumsum[0], cumsum[1], ..., cumsum[dim_size-1]]
+    // Create on CPU and upload
+    std::vector<int32_t> offsets_host(dim_size + 1);
+    offsets_host[0] = 0;
+    for (int64_t i = 0; i < dim_size; i++) {
+        offsets_host[i + 1] = static_cast<int32_t>(
+            static_cast<const float*>(total_tensor.data_ptr())[i]);
+    }
+    Tensor offsets_cpu({dim_size + 1}, DType::Int32, Device::cpu());
+    std::memcpy(const_cast<void*>(offsets_cpu.data_ptr()), offsets_host.data(),
+                offsets_host.size() * sizeof(int32_t));
+    Tensor offsets = offsets_cpu.to(input.device());
+
+    // Build output shape
+    std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
+    out_shape[dim] = total_repeats;
+
+    // For non-float types, handle via cast round-trip
+    DType orig_dtype = input.dtype();
+    if (orig_dtype == DType::Int8 || orig_dtype == DType::Bool || orig_dtype == DType::UInt8) {
+        Tensor f32_input = dispatchCast(input, DType::Float32);
+        Tensor f32_result = dispatchRepeatInterleaveTensor(f32_input, repeats, dim);
+        return dispatchCast(f32_result, orig_dtype);
+    }
+
+    // Select shader (float32 only for now; int32/int64 reinterpret as float/double)
+    std::string shader = "repeat_interleave_tensor";
+    auto* pipeline = getPipeline(shader, device_id);
+
+    Tensor output(out_shape, orig_dtype, input.device());
+
+    uint32_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; i++) {
+        inner_size *= static_cast<uint32_t>(input_shape[i]);
+    }
+
+    uint32_t total_output = static_cast<uint32_t>(output.numel());
+
+    struct {
+        uint32_t total_output;
+        uint32_t dim_size;
+        uint32_t inner_size;
+    } pc;
+    pc.total_output = total_output;
+    pc.dim_size = static_cast<uint32_t>(dim_size);
+    pc.inner_size = inner_size;
+
+    size_t elem = input.dtype_size();
+    size_t in_buf_size = static_cast<size_t>(input.numel()) * elem;
+    size_t out_buf_size = static_cast<size_t>(output.numel()) * elem;
+    size_t offsets_buf_size = static_cast<size_t>(dim_size + 1) * sizeof(int32_t);
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, input.data_ptr()}, {1, output.data_ptr()}, {2, offsets.data_ptr()}
+    };
+    std::vector<size_t> sizes_vec = {in_buf_size, out_buf_size, offsets_buf_size};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes_vec);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(total_output, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return output;
 }
 
 auto VulkanBackend::dispatchCountNonzero(const Tensor& input) -> Tensor {

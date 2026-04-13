@@ -1,0 +1,29 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Cast Complex128 (2x float64) to Complex64 (2x float32)
+// Complex types are stored as interleaved (real, imag) pairs
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuffer {
+    float64_t data[];  // 2 * num_elements doubles (re, im pairs)
+} input_buf;
+
+layout(set = 0, binding = 1) writeonly buffer OutputBuffer {
+    float data[];   // 2 * num_elements floats (re, im pairs)
+} output_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;  // Number of complex elements (not component count)
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.num_elements) return;
+
+    uint base_in = idx * 2;
+    uint base_out = idx * 2;
+
+    output_buf.data[base_out]     = float(input_buf.data[base_in]);
+    output_buf.data[base_out + 1] = float(input_buf.data[base_in + 1]);
+}

@@ -151,6 +151,7 @@ auto attr_key_name(AttrKey key) -> std::string_view {
         case AttrKey::IncludeLastOffset: return "include_last_offset";
         case AttrKey::FullMatrices: return "full_matrices";
         case AttrKey::Upper: return "upper";
+        case AttrKey::UnitTriangular: return "unitriangular";
         case AttrKey::Low: return "low";
         case AttrKey::High: return "high";
         case AttrKey::NumIndices: return "num_indices";

@@ -11,7 +11,7 @@ layout(binding = 2) buffer Output { int64_t result[]; };
 
 layout(push_constant) uniform PushConstants {
     uint n;          // Number of elements
-    uint op;         // Operation: 0=add, 1=sub, 2=mul, 3=div, 7=neg, 8=abs, 10=sign
+    uint op;         // Operation: 0=add, 1=sub, 2=mul, 3=div, 7=neg, 8=abs, 10=sign, 36=gcd, 37=lcm
     int param;       // Parameter for operations (unused for basic ops)
 } params;
 
@@ -54,6 +54,22 @@ void main() {
                 res = int64_t(0);
             }
             break;
+        case 36: { // gcd (binary)
+            int64_t ga = val_a < int64_t(0) ? -val_a : val_a;
+            int64_t gb = val_b < int64_t(0) ? -val_b : val_b;
+            while (gb != int64_t(0)) { int64_t t = gb; gb = ga - (ga / gb) * gb; ga = t; }
+            res = ga;
+            break;
+        }
+        case 37: { // lcm (binary)
+            int64_t ga = val_a < int64_t(0) ? -val_a : val_a;
+            int64_t gb = val_b < int64_t(0) ? -val_b : val_b;
+            int64_t ta = ga; int64_t tb = gb;
+            while (tb != int64_t(0)) { int64_t t = tb; tb = ta - (ta / tb) * tb; ta = t; }
+            int64_t g = ta;
+            res = (g == int64_t(0)) ? int64_t(0) : (ga / g) * gb;
+            break;
+        }
         default:
             res = int64_t(0);
             break;

@@ -209,6 +209,10 @@ namespace cuda {
     auto take_kernel(const Tensor& input, const Tensor& indices, cudaStream_t stream) -> Tensor;
     auto put_kernel(Tensor& input, const Tensor& indices, const Tensor& source,
                     bool accumulate, cudaStream_t stream) -> Tensor;
+    auto take_along_dim_kernel(const Tensor& input, const Tensor& indices, int64_t dim, cudaStream_t stream) -> Tensor;
+    auto masked_scatter_kernel(const Tensor& input, const Tensor& mask, const Tensor& source, cudaStream_t stream) -> Tensor;
+    auto tril_indices_kernel(int64_t row, int64_t col, int64_t offset, cudaStream_t stream) -> Tensor;
+    auto triu_indices_kernel(int64_t row, int64_t col, int64_t offset, cudaStream_t stream) -> Tensor;
 
     // Embedding operations
     auto embedding_kernel(const Tensor& weight, const Tensor& indices, cudaStream_t stream) -> Tensor;
@@ -228,6 +232,9 @@ namespace cuda {
     auto linalg_lu_kernel(const Tensor& A, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
     auto linalg_lu_solve_kernel(const Tensor& LU_data, const Tensor& pivots,
                                 const Tensor& B, cudaStream_t stream) -> Tensor;
+    auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
+                                         bool upper, bool unitriangular,
+                                         cudaStream_t stream) -> Tensor;
 
     // FFT operations (cuFFT or native Cooley-Tukey + Bluestein fallback)
     auto cuda_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
@@ -306,6 +313,19 @@ namespace cuda {
     auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> std::vector<Tensor>;
     auto logcumsumexp_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tensor;
     auto bincount_kernel(const Tensor& input, const Tensor* weights, int64_t minlength, cudaStream_t stream) -> Tensor;
+
+    // New reduction operations (CumMax, CumMin, Fmax, Fmin, Isin, Kthvalue, Quantile, etc.)
+    auto cummax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
+    auto cummin_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
+    auto fmax_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
+    auto fmin_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
+    auto isin_kernel(const Tensor& elements, const Tensor& test_elements, cudaStream_t stream) -> Tensor;
+    auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim, bool keepdim, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
+    auto quantile_kernel(const Tensor& input, double q, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor;
+    auto nanquantile_kernel(const Tensor& input, double q, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor;
+    auto nanmedian_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor;
+    auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_val, cudaStream_t stream) -> Tensor;
+    auto unique_consecutive_kernel(const Tensor& input, bool return_inverse, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
 
     // Sampling / statistics operations
     auto bernoulli_kernel(const Tensor& probs, cudaStream_t stream) -> Tensor;
@@ -751,6 +771,22 @@ namespace cuda {
     Tensor erfinv_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor sinc_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor zeta_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+
+    // New element-wise math ops
+    Tensor rsqrt_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor square_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor asinh_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor acosh_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor atanh_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor hypot_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor copysign_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor nextafter_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor gcd_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor lcm_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    auto addcmul_kernel(const Tensor& input, const Tensor& t1, const Tensor& t2, double alpha, cudaStream_t stream) -> Tensor;
+    auto addcdiv_kernel(const Tensor& input, const Tensor& t1, const Tensor& t2, double alpha, cudaStream_t stream) -> Tensor;
+    Tensor igamma_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor igammac_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
 
     // Sparse kernels (sparse.cu). Definitions exist in both the
     // TENZOR_HAS_CUSPARSE path (cuSPARSE-backed) and the fallback path
@@ -2842,6 +2878,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::LinalgLUSolve, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         return cuda::linalg_lu_solve_kernel(inputs[0], inputs[1], inputs[2], get_cuda_stream(attrs));
     });
+    table.register_single_output_kernel(OpId::SolveTriangular, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        bool upper = attrs.get_bool(AttrKey::Upper, true);
+        bool unitriangular = attrs.get_bool(AttrKey::UnitTriangular, false);
+        return cuda::linalg_solve_triangular_kernel(inputs[0], inputs[1], upper, unitriangular, get_cuda_stream(attrs));
+    });
 #else // !TENZOR_HAS_CUSOLVER — use native CUDA shared-memory linalg fallback
     table.register_single_output_kernel(OpId::LinalgDet, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         return cuda::linalg_det_kernel(inputs[0], get_cuda_stream(attrs));
@@ -2872,6 +2913,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::LinalgCholesky, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         bool upper = attrs.get_bool(AttrKey::Upper, false);
         return cuda::linalg_cholesky_kernel(inputs[0], upper, get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::SolveTriangular, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        bool upper = attrs.get_bool(AttrKey::Upper, true);
+        bool unitriangular = attrs.get_bool(AttrKey::UnitTriangular, false);
+        return cuda::linalg_solve_triangular_kernel(inputs[0], inputs[1], upper, unitriangular, get_cuda_stream(attrs));
     });
 #endif // TENZOR_HAS_CUSOLVER
 
@@ -3466,6 +3512,155 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             const Tensor* weights = (inputs.size() > 1) ? &inputs[1] : nullptr;
             return cuda::bincount_kernel(inputs[0], weights, minlength, get_cuda_stream(attrs));
         });
+
+    // =========================================================================
+    // New Element-wise Math Operations
+    // =========================================================================
+
+    // Unary ops
+    table.register_single_output_kernel(OpId::Rsqrt, cuda::rsqrt_dispatch);
+    table.register_single_output_kernel(OpId::Square, cuda::square_dispatch);
+    table.register_single_output_kernel(OpId::Asinh, cuda::asinh_dispatch);
+    table.register_single_output_kernel(OpId::Acosh, cuda::acosh_dispatch);
+    table.register_single_output_kernel(OpId::Atanh, cuda::atanh_dispatch);
+
+    // Binary ops
+    table.register_single_output_kernel(OpId::Hypot, cuda::hypot_dispatch);
+    table.register_single_output_kernel(OpId::Copysign, cuda::copysign_dispatch);
+    table.register_single_output_kernel(OpId::Nextafter, cuda::nextafter_dispatch);
+    table.register_single_output_kernel(OpId::Gcd, cuda::gcd_dispatch);
+    table.register_single_output_kernel(OpId::Lcm, cuda::lcm_dispatch);
+    table.register_single_output_kernel(OpId::Igamma, cuda::igamma_dispatch);
+    table.register_single_output_kernel(OpId::Igammac, cuda::igammac_dispatch);
+
+    // Ternary ops with alpha attribute
+    table.register_single_output_kernel(OpId::Addcmul,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double alpha = attrs.get_float(AttrKey::Alpha, 1.0);
+            return cuda::addcmul_kernel(inputs[0], inputs[1], inputs[2], alpha, get_cuda_stream(attrs));
+        });
+    table.register_single_output_kernel(OpId::Addcdiv,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double alpha = attrs.get_float(AttrKey::Alpha, 1.0);
+            return cuda::addcdiv_kernel(inputs[0], inputs[1], inputs[2], alpha, get_cuda_stream(attrs));
+        });
+
+    // =========================================================================
+    // New Reduction Operations (CumMax, CumMin, Fmax, Fmin, Isin, Kthvalue, etc.)
+    // =========================================================================
+
+    table.register_kernel(OpId::CumMax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        auto [values, indices] = cuda::cummax_kernel(inputs[0], dim, get_cuda_stream(attrs));
+        return std::vector<Tensor>{values, indices};
+    });
+
+    table.register_kernel(OpId::CumMin, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        auto [values, indices] = cuda::cummin_kernel(inputs[0], dim, get_cuda_stream(attrs));
+        return std::vector<Tensor>{values, indices};
+    });
+
+    table.register_single_output_kernel(OpId::Fmax,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            return cuda::fmax_kernel(inputs[0], inputs[1], get_cuda_stream(attrs));
+        });
+
+    table.register_single_output_kernel(OpId::Fmin,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            return cuda::fmin_kernel(inputs[0], inputs[1], get_cuda_stream(attrs));
+        });
+
+    table.register_single_output_kernel(OpId::Isin,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            return cuda::isin_kernel(inputs[0], inputs[1], get_cuda_stream(attrs));
+        });
+
+    table.register_kernel(OpId::Kthvalue, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t k = attrs.get_int(AttrKey::K, 1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        auto [values, indices] = cuda::kthvalue_kernel(inputs[0], k, dim, keepdim, get_cuda_stream(attrs));
+        return std::vector<Tensor>{values, indices};
+    });
+
+    table.register_single_output_kernel(OpId::Quantile,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double q = attrs.get_float(AttrKey::Alpha, 0.5);
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return cuda::quantile_kernel(inputs[0], q, dim, keepdim, get_cuda_stream(attrs));
+        });
+
+    table.register_single_output_kernel(OpId::Nanquantile,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double q = attrs.get_float(AttrKey::Alpha, 0.5);
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return cuda::nanquantile_kernel(inputs[0], q, dim, keepdim, get_cuda_stream(attrs));
+        });
+
+    table.register_single_output_kernel(OpId::Nanmedian,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            return cuda::nanmedian_kernel(inputs[0], dim, false, get_cuda_stream(attrs));
+        });
+
+    table.register_single_output_kernel(OpId::Histc,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t bins = attrs.get_int(AttrKey::N, 100);
+            double min_val = attrs.get_float(AttrKey::Alpha, 0.0);
+            double max_val = attrs.get_float(AttrKey::Beta, 0.0);
+            return cuda::histc_kernel(inputs[0], bins, min_val, max_val, get_cuda_stream(attrs));
+        });
+
+    table.register_kernel(OpId::UniqueConsecutive, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        bool return_inverse = attrs.get_bool(AttrKey::Keepdim, false);
+        auto [unique_vals, inverse, counts] = cuda::unique_consecutive_kernel(
+            inputs[0], return_inverse, get_cuda_stream(attrs));
+        return std::vector<Tensor>{unique_vals, inverse, counts};
+    });
+
+    // =========================================================================
+    // TakeAlongDim
+    // =========================================================================
+    table.register_single_output_kernel(OpId::TakeAlongDim, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        return cuda::take_along_dim_kernel(inputs[0], inputs[1], dim, get_cuda_stream(attrs));
+    });
+
+    // =========================================================================
+    // MaskedScatter
+    // =========================================================================
+    table.register_single_output_kernel(OpId::MaskedScatter, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return cuda::masked_scatter_kernel(inputs[0], inputs[1], inputs[2], get_cuda_stream(attrs));
+    });
+
+    // =========================================================================
+    // TrilIndices
+    // =========================================================================
+    table.register_single_output_kernel(OpId::TrilIndices, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t row = attrs.get_int(AttrKey::M, 0);
+        int64_t col = attrs.get_int(AttrKey::N, 0);
+        int64_t offset = attrs.get_int(AttrKey::Diagonal, 0);
+        return cuda::tril_indices_kernel(row, col, offset, get_cuda_stream(attrs));
+    });
+
+    // =========================================================================
+    // TriuIndices
+    // =========================================================================
+    table.register_single_output_kernel(OpId::TriuIndices, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t row = attrs.get_int(AttrKey::M, 0);
+        int64_t col = attrs.get_int(AttrKey::N, 0);
+        int64_t offset = attrs.get_int(AttrKey::Diagonal, 0);
+        return cuda::triu_indices_kernel(row, col, offset, get_cuda_stream(attrs));
+    });
+
+    // =========================================================================
+    // Phase 9: Fractional Max Pool + Max Unpool — not yet registered
+    // These ops are CPU-only for now; GPU dispatch will fall through to
+    // the "kernel not registered" error which is correct behavior.
+    // TODO: Add native CUDA kernels for fractional_max_pool and max_unpool
 }
 
 } // namespace tenzor

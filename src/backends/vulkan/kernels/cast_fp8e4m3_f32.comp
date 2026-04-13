@@ -1,0 +1,62 @@
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
+
+// Cast FP8 E4M3 to Float32 (1 sign, 4 exponent, 3 mantissa, bias=7)
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuffer {
+    uint8_t data[];
+} input_buf;
+
+layout(set = 0, binding = 1) writeonly buffer OutputBuffer {
+    float data[];
+} output_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.num_elements) return;
+
+    uint bits = uint(input_buf.data[idx]) & 0xFFu;
+
+    uint sign = (bits >> 7) & 0x1u;
+    uint exp = (bits >> 3) & 0xFu;
+    uint mantissa = bits & 0x7u;
+
+    uint f_sign = sign;
+    uint f_exp;
+    uint f_mantissa;
+
+    if (exp == 0u) {
+        if (mantissa == 0u) {
+            // Zero
+            f_exp = 0u;
+            f_mantissa = 0u;
+        } else {
+            // Denormalized: normalize
+            int e = -1;
+            uint m = mantissa;
+            while ((m & 0x8u) == 0u) {
+                e++;
+                m <<= 1;
+            }
+            f_exp = uint(127 - 7 - e);
+            f_mantissa = (m & 0x7u) << 20;
+        }
+    } else if (exp == 0xFu && mantissa != 0u) {
+        // NaN
+        f_exp = 0xFFu;
+        f_mantissa = mantissa << 20;
+    } else {
+        // Normalized (including exp=15 mantissa=0 which is 448, not infinity)
+        f_exp = exp - 7u + 127u;
+        f_mantissa = mantissa << 20;
+    }
+
+    uint f_bits = (f_sign << 31) | (f_exp << 23) | f_mantissa;
+    output_buf.data[idx] = uintBitsToFloat(f_bits);
+}

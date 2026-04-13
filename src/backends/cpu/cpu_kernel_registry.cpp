@@ -79,6 +79,10 @@ namespace cpu {
     auto index_copy_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& source) -> Tensor;
     auto index_fill_kernel(const Tensor& input, int64_t dim, const Tensor& index, double value) -> Tensor;
     auto bincount_kernel(const Tensor& input, const Tensor* weights, int64_t minlength) -> Tensor;
+    auto take_along_dim_kernel(const Tensor& input, const Tensor& indices, int64_t dim) -> Tensor;
+    auto masked_scatter_kernel(const Tensor& input, const Tensor& mask, const Tensor& source) -> Tensor;
+    auto tril_indices_kernel(int64_t row, int64_t col, int64_t offset) -> Tensor;
+    auto triu_indices_kernel(int64_t row, int64_t col, int64_t offset) -> Tensor;
 
     // Trigonometric
     auto sin_kernel(const Tensor& input) -> Tensor;
@@ -121,6 +125,23 @@ namespace cpu {
     auto fmod_kernel(const Tensor& a, const Tensor& b) -> Tensor;
     auto remainder_kernel(const Tensor& a, const Tensor& b) -> Tensor;
     auto lerp_kernel(std::span<const Tensor> inputs) -> Tensor;
+
+    // New element-wise math operations
+    auto rsqrt_kernel(const Tensor& input) -> Tensor;
+    auto square_kernel(const Tensor& input) -> Tensor;
+    auto asinh_kernel(const Tensor& input) -> Tensor;
+    auto acosh_kernel(const Tensor& input) -> Tensor;
+    auto atanh_kernel(const Tensor& input) -> Tensor;
+    auto hypot_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto copysign_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto nextafter_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto gcd_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto lcm_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto igamma_kernel(const Tensor& a, const Tensor& x) -> Tensor;
+    auto igammac_kernel(const Tensor& a, const Tensor& x) -> Tensor;
+    auto addcmul_kernel(const Tensor& input, const Tensor& tensor1, const Tensor& tensor2, double alpha) -> Tensor;
+    auto addcdiv_kernel(const Tensor& input, const Tensor& tensor1, const Tensor& tensor2, double alpha) -> Tensor;
+
     auto logical_and_kernel(const Tensor& a, const Tensor& b) -> Tensor;
     auto logical_or_kernel(const Tensor& a, const Tensor& b) -> Tensor;
     auto logical_not_kernel(const Tensor& input) -> Tensor;
@@ -295,6 +316,16 @@ namespace cpu {
     auto adaptive_avgpool3d_kernel(const Tensor& input, int64_t output_d, int64_t output_h, int64_t output_w) -> Tensor;
     auto adaptive_avgpool3d_backward_kernel(const Tensor& grad_output, const std::vector<int64_t>& input_shape) -> Tensor;
 
+    // Phase 9 Pooling: Fractional Max Pool + Max Unpool
+    auto fractional_maxpool2d_forward_kernel(const Tensor& input, int64_t out_h, int64_t out_w, const Tensor* random_samples) -> std::pair<Tensor, Tensor>;
+    auto fractional_maxpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape) -> Tensor;
+    auto fractional_maxpool3d_forward_kernel(const Tensor& input, int64_t out_d, int64_t out_h, int64_t out_w, const Tensor* random_samples) -> std::pair<Tensor, Tensor>;
+    auto fractional_maxpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape) -> Tensor;
+    auto max_unpool2d_forward_kernel(const Tensor& input, const Tensor& indices, int64_t out_h, int64_t out_w) -> Tensor;
+    auto max_unpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape) -> Tensor;
+    auto max_unpool3d_forward_kernel(const Tensor& input, const Tensor& indices, int64_t out_d, int64_t out_h, int64_t out_w) -> Tensor;
+    auto max_unpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape) -> Tensor;
+
     // Fused operations
     auto fused_linear_relu_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias) -> Tensor;
     auto fused_conv2d_relu_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
@@ -424,6 +455,24 @@ namespace cpu {
     auto logcumsumexp_kernel(const Tensor& input, int64_t dim) -> Tensor;
     auto unique_kernel(const Tensor& input, bool sorted_output,
                        bool return_inverse, bool return_counts)
+        -> std::tuple<Tensor, Tensor, Tensor>;
+
+    // New reduction operations
+    auto cummax_kernel(const Tensor& input, int64_t dim) -> std::pair<Tensor, Tensor>;
+    auto cummin_kernel(const Tensor& input, int64_t dim) -> std::pair<Tensor, Tensor>;
+    auto isin_kernel(const Tensor& elements, const Tensor& test_elements) -> Tensor;
+    auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim,
+                         bool keepdim) -> std::pair<Tensor, Tensor>;
+    auto fmax_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto fmin_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto quantile_kernel(const Tensor& input, double q, int64_t dim,
+                         bool keepdim) -> Tensor;
+    auto nanquantile_kernel(const Tensor& input, double q, int64_t dim,
+                            bool keepdim) -> Tensor;
+    auto nanmedian_kernel(const Tensor& input, int64_t dim) -> Tensor;
+    auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_val) -> Tensor;
+    auto unique_consecutive_kernel(const Tensor& input, bool return_inverse,
+                                   bool return_counts)
         -> std::tuple<Tensor, Tensor, Tensor>;
 
     // RMSNorm operations
@@ -862,6 +911,43 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::Lerp, [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
         return {cpu::lerp_kernel(inputs)};
     });
+
+    // =========================================================================
+    // New Element-wise Math Operations
+    // =========================================================================
+
+    // Unary ops
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Rsqrt, cpu::rsqrt_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Square, cpu::square_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Asinh, cpu::asinh_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Acosh, cpu::acosh_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Atanh, cpu::atanh_kernel);
+
+    // Binary floating-point ops
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Hypot, cpu::hypot_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Copysign, cpu::copysign_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Nextafter, cpu::nextafter_kernel);
+
+    // Binary integer ops
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Gcd, cpu::gcd_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Lcm, cpu::lcm_kernel);
+
+    // Igamma / Igammac (regularized incomplete gamma)
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Igamma, cpu::igamma_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Igammac, cpu::igammac_kernel);
+
+    // Ternary ops with alpha attribute
+    table.register_single_output_kernel(OpId::Addcmul,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double alpha = attrs.get_float(AttrKey::Alpha, 1.0);
+            return cpu::addcmul_kernel(inputs[0], inputs[1], inputs[2], alpha);
+        });
+
+    table.register_single_output_kernel(OpId::Addcdiv,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double alpha = attrs.get_float(AttrKey::Alpha, 1.0);
+            return cpu::addcdiv_kernel(inputs[0], inputs[1], inputs[2], alpha);
+        });
 
     // =========================================================================
     // Logical Operations
@@ -2154,6 +2240,71 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     });
 
     // =========================================================================
+    // New Reduction Operations (CumMax, CumMin, Isin, Kthvalue, Fmax, Fmin,
+    //                           Quantile, Nanquantile, Nanmedian, Histc,
+    //                           UniqueConsecutive)
+    // =========================================================================
+    table.register_kernel(OpId::CumMax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        auto [values, indices] = cpu::cummax_kernel(inputs[0], dim);
+        return std::vector<Tensor>{values, indices};
+    });
+
+    table.register_kernel(OpId::CumMin, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        auto [values, indices] = cpu::cummin_kernel(inputs[0], dim);
+        return std::vector<Tensor>{values, indices};
+    });
+
+    table.register_single_output_kernel(OpId::Isin, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        return cpu::isin_kernel(inputs[0], inputs[1]);
+    });
+
+    table.register_kernel(OpId::Kthvalue, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t k = attrs.get_int(AttrKey::K, 1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        auto [values, indices] = cpu::kthvalue_kernel(inputs[0], k, dim, keepdim);
+        return std::vector<Tensor>{values, indices};
+    });
+
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Fmax, cpu::fmax_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Fmin, cpu::fmin_kernel);
+
+    table.register_single_output_kernel(OpId::Quantile, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        double q = attrs.get_float(AttrKey::Alpha, 0.5);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        return cpu::quantile_kernel(inputs[0], q, dim, keepdim);
+    });
+
+    table.register_single_output_kernel(OpId::Nanquantile, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        double q = attrs.get_float(AttrKey::Alpha, 0.5);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        return cpu::nanquantile_kernel(inputs[0], q, dim, keepdim);
+    });
+
+    table.register_single_output_kernel(OpId::Nanmedian, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        return cpu::nanmedian_kernel(inputs[0], dim);
+    });
+
+    table.register_single_output_kernel(OpId::Histc, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t bins = attrs.get_int(AttrKey::N, 100);
+        double min_val = attrs.get_float(AttrKey::Alpha, 0.0);
+        double max_val = attrs.get_float(AttrKey::Beta, 0.0);
+        return cpu::histc_kernel(inputs[0], bins, min_val, max_val);
+    });
+
+    table.register_kernel(OpId::UniqueConsecutive, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        bool return_inverse = attrs.get_bool(AttrKey::Keepdim, false);  // reused for return_inverse
+        bool return_counts = true;  // always compute; caller decides whether to use
+        auto [unique_vals, inverse, counts] = cpu::unique_consecutive_kernel(inputs[0], return_inverse, return_counts);
+        return std::vector<Tensor>{unique_vals, inverse, counts};
+    });
+
+    // =========================================================================
     // RMSNorm Operations
     // =========================================================================
     table.register_kernel(OpId::RMSNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -2880,6 +3031,12 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return linalg::solve(inputs[0], inputs[1]);
     });
 
+    table.register_single_output_kernel(OpId::SolveTriangular, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        bool upper = attrs.get_bool(AttrKey::Upper, true);
+        bool unitriangular = attrs.get_bool(AttrKey::UnitTriangular, false);
+        return linalg::solve_triangular(inputs[0], inputs[1], upper, unitriangular);
+    });
+
     table.register_single_output_kernel(OpId::LinalgCholesky, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         bool upper = attrs.get_bool(AttrKey::Upper, false);
         return linalg::cholesky(inputs[0], upper);
@@ -3055,6 +3212,103 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         int64_t minlength = attrs.get_int(AttrKey::Minlength, 0);
         const Tensor* weights = (inputs.size() > 1) ? &inputs[1] : nullptr;
         return cpu::bincount_kernel(inputs[0], weights, minlength);
+    });
+
+    // =========================================================================
+    // TakeAlongDim
+    // =========================================================================
+    table.register_single_output_kernel(OpId::TakeAlongDim, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        return cpu::take_along_dim_kernel(inputs[0], inputs[1], dim);
+    });
+
+    // =========================================================================
+    // MaskedScatter
+    // =========================================================================
+    table.register_single_output_kernel(OpId::MaskedScatter, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return cpu::masked_scatter_kernel(inputs[0], inputs[1], inputs[2]);
+    });
+
+    // =========================================================================
+    // TrilIndices
+    // =========================================================================
+    table.register_single_output_kernel(OpId::TrilIndices, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t row = attrs.get_int(AttrKey::M, 0);
+        int64_t col = attrs.get_int(AttrKey::N, 0);
+        int64_t offset = attrs.get_int(AttrKey::Diagonal, 0);
+        return cpu::tril_indices_kernel(row, col, offset);
+    });
+
+    // =========================================================================
+    // TriuIndices
+    // =========================================================================
+    table.register_single_output_kernel(OpId::TriuIndices, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t row = attrs.get_int(AttrKey::M, 0);
+        int64_t col = attrs.get_int(AttrKey::N, 0);
+        int64_t offset = attrs.get_int(AttrKey::Diagonal, 0);
+        return cpu::triu_indices_kernel(row, col, offset);
+    });
+
+    // =========================================================================
+    // Phase 9: Fractional Max Pool 2D
+    // =========================================================================
+    table.register_kernel(OpId::FractionalMaxPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        const Tensor* samples = (inputs.size() > 1) ? &inputs[1] : nullptr;
+        auto [output, indices] = cpu::fractional_maxpool2d_forward_kernel(inputs[0], out_h, out_w, samples);
+        return std::vector<Tensor>{output, indices};
+    });
+
+    table.register_single_output_kernel(OpId::FractionalMaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return cpu::fractional_maxpool2d_backward_kernel(inputs[0], inputs[1], input_shape);
+    });
+
+    // =========================================================================
+    // Phase 9: Fractional Max Pool 3D
+    // =========================================================================
+    table.register_kernel(OpId::FractionalMaxPool3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t out_d = attrs.get_int(AttrKey::OutputSizeD, 1);
+        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        const Tensor* samples = (inputs.size() > 1) ? &inputs[1] : nullptr;
+        auto [output, indices] = cpu::fractional_maxpool3d_forward_kernel(inputs[0], out_d, out_h, out_w, samples);
+        return std::vector<Tensor>{output, indices};
+    });
+
+    table.register_single_output_kernel(OpId::FractionalMaxPool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return cpu::fractional_maxpool3d_backward_kernel(inputs[0], inputs[1], input_shape);
+    });
+
+    // =========================================================================
+    // Phase 9: Max Unpool 2D
+    // =========================================================================
+    table.register_single_output_kernel(OpId::MaxUnpool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        return cpu::max_unpool2d_forward_kernel(inputs[0], inputs[1], out_h, out_w);
+    });
+
+    table.register_single_output_kernel(OpId::MaxUnpool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return cpu::max_unpool2d_backward_kernel(inputs[0], inputs[1], input_shape);
+    });
+
+    // =========================================================================
+    // Phase 9: Max Unpool 3D
+    // =========================================================================
+    table.register_single_output_kernel(OpId::MaxUnpool3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t out_d = attrs.get_int(AttrKey::OutputSizeD, 1);
+        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        return cpu::max_unpool3d_forward_kernel(inputs[0], inputs[1], out_d, out_h, out_w);
+    });
+
+    table.register_single_output_kernel(OpId::MaxUnpool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return cpu::max_unpool3d_backward_kernel(inputs[0], inputs[1], input_shape);
     });
 }
 

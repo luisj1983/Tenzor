@@ -240,4 +240,123 @@ auto aminmax(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> s
     return {results[0], results[1]};
 }
 
+// =========================================================================
+// Fused reductions (compositions, no new OpIds)
+// =========================================================================
+
+auto std_mean(const Tensor& input, std::optional<int64_t> dim,
+              bool keepdim, bool unbiased) -> std::pair<Tensor, Tensor> {
+    auto m = mean(input, dim, keepdim);
+    auto s = tenzor::std(input, dim, keepdim, unbiased);
+    return {s, m};
+}
+
+auto var_mean(const Tensor& input, std::optional<int64_t> dim,
+              bool keepdim, bool unbiased) -> std::pair<Tensor, Tensor> {
+    auto m = mean(input, dim, keepdim);
+    auto v = var(input, dim, keepdim, unbiased);
+    return {v, m};
+}
+
+auto dist(const Tensor& a, const Tensor& b, float p) -> Tensor {
+    auto diff = tenzor::sub(a, b);
+    return norm(diff, p);
+}
+
+// =========================================================================
+// New reduction operations for PyTorch parity
+// =========================================================================
+
+auto cummax(const Tensor& input, int64_t dim) -> std::pair<Tensor, Tensor> {
+    std::array<Tensor, 1> inputs = {input.contiguous()};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    auto results = dispatch<OpId::CumMax>(inputs, attrs);
+    return {results[0], results[1]};
+}
+
+auto cummin(const Tensor& input, int64_t dim) -> std::pair<Tensor, Tensor> {
+    std::array<Tensor, 1> inputs = {input.contiguous()};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    auto results = dispatch<OpId::CumMin>(inputs, attrs);
+    return {results[0], results[1]};
+}
+
+auto isin(const Tensor& elements, const Tensor& test_elements) -> Tensor {
+    std::array<Tensor, 2> inputs = {elements.contiguous(), test_elements.contiguous()};
+    return dispatch<OpId::Isin>(inputs)[0];
+}
+
+auto kthvalue(const Tensor& input, int64_t k, int64_t dim, bool keepdim) -> std::pair<Tensor, Tensor> {
+    std::array<Tensor, 1> inputs = {input.contiguous()};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    attrs.set(AttrKey::Keepdim, keepdim);
+    attrs.set(AttrKey::K, k);
+    auto results = dispatch<OpId::Kthvalue>(inputs, attrs);
+    return {results[0], results[1]};
+}
+
+auto fmax(const Tensor& a, const Tensor& b) -> Tensor {
+    std::array<Tensor, 2> inputs = {a.contiguous(), b.contiguous()};
+    return dispatch<OpId::Fmax>(inputs)[0];
+}
+
+auto fmin(const Tensor& a, const Tensor& b) -> Tensor {
+    std::array<Tensor, 2> inputs = {a.contiguous(), b.contiguous()};
+    return dispatch<OpId::Fmin>(inputs)[0];
+}
+
+auto quantile(const Tensor& input, double q, std::optional<int64_t> dim,
+              bool keepdim) -> Tensor {
+    std::array<Tensor, 1> inputs = {input.contiguous()};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Alpha, q);  // reuse Alpha for the quantile value
+    if (dim.has_value()) attrs.set(AttrKey::Dim, dim.value());
+    attrs.set(AttrKey::Keepdim, keepdim);
+    return dispatch<OpId::Quantile>(inputs, attrs)[0];
+}
+
+auto nanquantile(const Tensor& input, double q, std::optional<int64_t> dim,
+                 bool keepdim) -> Tensor {
+    std::array<Tensor, 1> inputs = {input.contiguous()};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Alpha, q);
+    if (dim.has_value()) attrs.set(AttrKey::Dim, dim.value());
+    attrs.set(AttrKey::Keepdim, keepdim);
+    return dispatch<OpId::Nanquantile>(inputs, attrs)[0];
+}
+
+auto nanmedian(const Tensor& input, std::optional<int64_t> dim) -> Tensor {
+    std::array<Tensor, 1> inputs = {input.contiguous()};
+    NewOpAttributes attrs;
+    if (dim.has_value()) attrs.set(AttrKey::Dim, dim.value());
+    return dispatch<OpId::Nanmedian>(inputs, attrs)[0];
+}
+
+auto histc(const Tensor& input, int64_t bins, double min_val, double max_val) -> Tensor {
+    std::array<Tensor, 1> inputs = {input.contiguous()};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::N, bins);
+    attrs.set(AttrKey::Start, static_cast<int64_t>(0));  // reuse for min/max
+    attrs.set(AttrKey::Alpha, min_val);
+    attrs.set(AttrKey::Beta, max_val);
+    return dispatch<OpId::Histc>(inputs, attrs)[0];
+}
+
+auto unique_consecutive(const Tensor& input, bool return_inverse, bool return_counts,
+                        std::optional<int64_t> dim)
+    -> std::tuple<Tensor, Tensor, Tensor> {
+    std::array<Tensor, 1> inputs = {input.contiguous()};
+    NewOpAttributes attrs;
+    if (dim.has_value()) attrs.set(AttrKey::Dim, dim.value());
+    attrs.set(AttrKey::Keepdim, return_inverse);  // reuse for return_inverse flag
+    auto results = dispatch<OpId::UniqueConsecutive>(inputs, attrs);
+    // results[0] = unique values, results[1] = inverse indices, results[2] = counts
+    Tensor inverse = (results.size() > 1 && return_inverse) ? results[1] : Tensor();
+    Tensor counts = (results.size() > 2 && return_counts) ? results[2] : Tensor();
+    return {results[0], inverse, counts};
+}
+
 } // namespace tenzor

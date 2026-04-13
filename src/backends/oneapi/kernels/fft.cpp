@@ -12,6 +12,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/fft.hpp"
 #include <sycl/sycl.hpp>
+#include <algorithm>
 #include <stdexcept>
 #include <vector>
 #include <cmath>
@@ -187,19 +188,68 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
     int64_t signal_len = shape[dim];
 
-    // Zero-pad / truncate when the requested length differs from the
-    // input length along the FFT dimension. Previously this kernel
-    // silently ignored `n` and always ran a length-signal_len FFT,
-    // which means tests with zero-padding failed with both wrong
-    // values and wrong shape. Fall back to a CPU round-trip for the
-    // rare n != signal_len case — oneMKL's device-side DFT doesn't
-    // have a built-in padding/truncation mode and replicating the
-    // shape-accounting inline is a significant rewrite. Correctness
-    // over throughput.
+    // On-device pad/truncate when the requested length differs from the
+    // input length along the FFT dimension. We build a new tensor with
+    // size n along dim, copy the overlapping elements, and zero-fill any
+    // padding — all on-device with no CPU round-trip.
+    Tensor padded_input = input;  // default: no copy needed
     if (n != signal_len) {
-        Tensor cpu_input = input.to(Device::cpu());
-        Tensor cpu_result = tenzor::fft::fft(cpu_input, n, dim, norm);
-        return cpu_result.to(input.device());
+        std::vector<int64_t> new_shape(shape.begin(), shape.end());
+        new_shape[dim] = n;
+
+        int64_t outer = 1, inner = 1;
+        for (int64_t i = 0; i < dim; ++i) outer *= shape[i];
+        for (int64_t i = dim + 1; i < ndim; ++i) inner *= shape[i];
+
+        int64_t copy_len = std::min(signal_len, n);
+
+        padded_input = Tensor(new_shape, input.dtype(), input.device());
+        // Zero the entire buffer so padding region is 0
+        int64_t total_bytes = padded_input.numel() * padded_input.dtype_size();
+        queue.memset(const_cast<void*>(padded_input.data_ptr()), 0,
+                     static_cast<size_t>(total_bytes)).wait();
+
+        // Copy the overlapping region element-by-element.
+        // Each element is 2 floats (Complex64) or 2 doubles (Complex128).
+        if (input.dtype() == DType::Complex64) {
+            const float* src = reinterpret_cast<const float*>(input.data_ptr());
+            float* dst = reinterpret_cast<float*>(const_cast<void*>(padded_input.data_ptr()));
+            int64_t total_copies = outer * copy_len * inner;
+            int64_t old_dim = signal_len;
+            int64_t new_dim = n;
+            queue.parallel_for(sycl::range<1>(total_copies), [=](sycl::id<1> idx_) {
+                int64_t flat = idx_[0];
+                int64_t o = flat / (copy_len * inner);
+                int64_t rem = flat % (copy_len * inner);
+                int64_t d = rem / inner;
+                int64_t i = rem % inner;
+                int64_t src_idx = (o * old_dim * inner + d * inner + i) * 2;
+                int64_t dst_idx = (o * new_dim * inner + d * inner + i) * 2;
+                dst[dst_idx]     = src[src_idx];
+                dst[dst_idx + 1] = src[src_idx + 1];
+            }).wait();
+        } else if (input.dtype() == DType::Complex128) {
+            const double* src = reinterpret_cast<const double*>(input.data_ptr());
+            double* dst = reinterpret_cast<double*>(const_cast<void*>(padded_input.data_ptr()));
+            int64_t total_copies = outer * copy_len * inner;
+            int64_t old_dim = signal_len;
+            int64_t new_dim = n;
+            queue.parallel_for(sycl::range<1>(total_copies), [=](sycl::id<1> idx_) {
+                int64_t flat = idx_[0];
+                int64_t o = flat / (copy_len * inner);
+                int64_t rem = flat % (copy_len * inner);
+                int64_t d = rem / inner;
+                int64_t i = rem % inner;
+                int64_t src_idx = (o * old_dim * inner + d * inner + i) * 2;
+                int64_t dst_idx = (o * new_dim * inner + d * inner + i) * 2;
+                dst[dst_idx]     = src[src_idx];
+                dst[dst_idx + 1] = src[src_idx + 1];
+            }).wait();
+        }
+
+        // Update shape and signal_len for the rest of the function
+        shape = new_shape;
+        signal_len = n;
     }
 
     int64_t batch_size = 1;
@@ -218,7 +268,7 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
     // Complex64/Complex128 before dispatch, so we only ever see a complex
     // dtype here. The old "Float32 + trailing 2" convention has been
     // retired to match the CPU kernel's output layout.
-    if (input.dtype() == DType::Complex64) {
+    if (padded_input.dtype() == DType::Complex64) {
         // Build interleaved complex buffer: (batch_size * signal_len * inner_size) complex values
         // stored as 2*N floats. We need contiguous layout along the FFT dimension for oneMKL.
         //
@@ -234,7 +284,7 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
         float* complex_buf = complex_buf_owner.get();
 
         // Read the interleaved (re, im) float pair storage of Complex64.
-        const float* in_ptr = reinterpret_cast<const float*>(input.data_ptr());
+        const float* in_ptr = reinterpret_cast<const float*>(padded_input.data_ptr());
 
         if (dim == ndim - 1 && inner_size == 1) {
             // Fast path: FFT along last dim, contiguous complex per batch.
@@ -283,9 +333,9 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
         }
 
         // Scatter complex results back to output tensor. Output is Complex64
-        // with the same shape as input — no trailing 2 dim. The physical
+        // with the same shape as padded_input — no trailing 2 dim. The physical
         // storage is still interleaved (re, im) pairs.
-        Tensor output(out_shape, DType::Complex64, input.device());
+        Tensor output(out_shape, DType::Complex64, padded_input.device());
         float* out_ptr = reinterpret_cast<float*>(const_cast<void*>(output.data_ptr()));
 
         if (dim == ndim - 1 && inner_size == 1) {
@@ -306,13 +356,13 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
         return output;
 
-    } else if (input.dtype() == DType::Complex128) {
+    } else if (padded_input.dtype() == DType::Complex128) {
         int64_t total_transforms = batch_size * inner_size;
         int64_t complex_buf_doubles = total_transforms * signal_len * 2;
 
         SyclDevicePtr<double> complex_buf_owner(complex_buf_doubles, queue);
         double* complex_buf = complex_buf_owner.get();
-        const double* in_ptr = reinterpret_cast<const double*>(input.data_ptr());
+        const double* in_ptr = reinterpret_cast<const double*>(padded_input.data_ptr());
 
         if (dim == ndim - 1 && inner_size == 1) {
             queue.memcpy(complex_buf, in_ptr, complex_buf_doubles * sizeof(double));
@@ -355,7 +405,7 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
             apply_scale_f64(queue, complex_buf, complex_buf_doubles, norm_factor);
         }
 
-        Tensor output(out_shape, DType::Complex128, input.device());
+        Tensor output(out_shape, DType::Complex128, padded_input.device());
         double* out_ptr = reinterpret_cast<double*>(const_cast<void*>(output.data_ptr()));
 
         if (dim == ndim - 1 && inner_size == 1) {

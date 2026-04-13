@@ -1,0 +1,28 @@
+#version 450
+
+// Addcdiv: result = input + value * tensor1 / tensor2
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer InputBuf { uint input_buf[]; };
+layout(binding = 1) buffer Tensor1Buf { uint tensor1_buf[]; };
+layout(binding = 2) buffer Tensor2Buf { uint tensor2_buf[]; };
+layout(binding = 3) buffer Output { uint result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of elements
+    float value;     // Scalar multiplier
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n) {
+        return;
+    }
+
+    float inp = uintBitsToFloat(input_buf[idx]);
+    float t1 = uintBitsToFloat(tensor1_buf[idx]);
+    float t2 = uintBitsToFloat(tensor2_buf[idx]);
+
+    result[idx] = floatBitsToUint(inp + params.value * t1 / t2);
+}

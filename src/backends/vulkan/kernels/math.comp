@@ -12,8 +12,8 @@ layout(binding = 2) buffer Output { uint result[]; };
 
 layout(push_constant) uniform PushConstants {
     uint n;          // Number of elements
-    uint op;         // Operation: 0=add, 1=sub, 2=mul, 3=div, 4=sqrt, 5=exp, 6=log, 7=neg, 8=abs, 9=pow, 10=sign, 11=floor, 12=ceil, 13=round, 14=trunc, 15=reciprocal, 16=log2, 17=log10, 18=log1p, 19=exp2, 20=expm1, 21=erf, 22=erfc, 23=atan2, 24=fmod, 25=remainder, 26=minimum, 27=maximum
-    float param;     // Parameter for operations like pow (exponent)
+    uint op;         // Operation: 0=add, 1=sub, 2=mul, 3=div, 4=sqrt, 5=exp, 6=log, 7=neg, 8=abs, 9=pow, 10=sign, 11=floor, 12=ceil, 13=round, 14=trunc, 15=reciprocal, 16=log2, 17=log10, 18=log1p, 19=exp2, 20=expm1, 21=erf, 22=erfc, 23=atan2, 24=fmod, 25=remainder, 26=minimum, 27=maximum, 28=rsqrt, 29=square, 30=asinh, 31=acosh, 32=atanh, 33=hypot, 34=copysign, 35=nextafter, 36=gcd, 37=lcm, 38=igamma, 39=igammac, 40=addcmul, 41=addcdiv
+    float param;     // Parameter for operations like pow (exponent), addcmul/addcdiv (value)
 } params;
 
 void main() {
@@ -195,5 +195,103 @@ void main() {
         case 27: // maximum (binary)
             result[idx] = floatBitsToUint(max(val_a, val_b));
             break;
+        case 28: // rsqrt (unary)
+            result[idx] = floatBitsToUint(inversesqrt(val_a));
+            break;
+        case 29: // square (unary)
+            result[idx] = floatBitsToUint(val_a * val_a);
+            break;
+        case 30: // asinh (unary)
+            result[idx] = floatBitsToUint(asinh(val_a));
+            break;
+        case 31: // acosh (unary)
+            result[idx] = floatBitsToUint(acosh(val_a));
+            break;
+        case 32: // atanh (unary)
+            result[idx] = floatBitsToUint(atanh(val_a));
+            break;
+        case 33: // hypot (binary)
+            result[idx] = floatBitsToUint(sqrt(val_a * val_a + val_b * val_b));
+            break;
+        case 34: { // copysign (binary)
+            float mag = abs(val_a);
+            result[idx] = floatBitsToUint(val_b < 0.0 ? -mag : mag);
+            break;
+        }
+        case 35: { // nextafter (binary) - approximation via ULP step
+            if (val_a == val_b) {
+                result[idx] = bits_a;
+            } else {
+                uint ua = bits_a;
+                // For positive values or zero moving toward positive: increment
+                // For negative values moving toward negative: increment magnitude
+                if ((val_a >= 0.0 && val_b > val_a) || (val_a < 0.0 && val_b > val_a)) {
+                    if (val_a >= 0.0) ua = ua + 1u;
+                    else ua = ua - 1u;
+                } else {
+                    if (val_a > 0.0) ua = ua - 1u;
+                    else if (val_a < 0.0) ua = ua + 1u;
+                    else ua = 0x80000001u; // -0 -> smallest negative denorm
+                }
+                result[idx] = ua;
+            }
+            break;
+        }
+        case 36: { // gcd (integer via float encoding)
+            int ia = int(val_a);
+            int ib = int(val_b);
+            ia = ia < 0 ? -ia : ia;
+            ib = ib < 0 ? -ib : ib;
+            while (ib != 0) { int t = ib; ib = ia - (ia / ib) * ib; ia = t; }
+            result[idx] = floatBitsToUint(float(ia));
+            break;
+        }
+        case 37: { // lcm (integer via float encoding)
+            int ia = int(val_a);
+            int ib = int(val_b);
+            int oa = ia < 0 ? -ia : ia;
+            int ob = ib < 0 ? -ib : ib;
+            int ga = oa; int gb = ob;
+            while (gb != 0) { int t = gb; gb = ga - (ga / gb) * gb; ga = t; }
+            int g = ga;
+            result[idx] = floatBitsToUint(g == 0 ? 0.0 : float((oa / g) * ob));
+            break;
+        }
+        case 38: { // igamma (binary) - series expansion for lower regularized incomplete gamma
+            float a = val_a;
+            float x = val_b;
+            if (x <= 0.0) { result[idx] = floatBitsToUint(0.0); break; }
+            float term = 1.0 / a;
+            float sum = term;
+            for (int nn = 1; nn < 100; ++nn) {
+                term *= x / (a + float(nn));
+                sum += term;
+                if (abs(term) < abs(sum) * 1e-6) break;
+            }
+            float lga = log(abs(val_a));  // approximate lgamma
+            // Stirling approx for lgamma: (a-0.5)*ln(a) - a + 0.5*ln(2*pi)
+            float lg = (a - 0.5) * log(a) - a + 0.9189385;
+            float res = exp(-x + a * log(x) - lg) * sum;
+            res = clamp(res, 0.0, 1.0);
+            result[idx] = floatBitsToUint(res);
+            break;
+        }
+        case 39: { // igammac (binary) - upper regularized incomplete gamma = 1 - igamma
+            float a = val_a;
+            float x = val_b;
+            if (x <= 0.0) { result[idx] = floatBitsToUint(1.0); break; }
+            float term = 1.0 / a;
+            float sum = term;
+            for (int nn = 1; nn < 100; ++nn) {
+                term *= x / (a + float(nn));
+                sum += term;
+                if (abs(term) < abs(sum) * 1e-6) break;
+            }
+            float lg = (a - 0.5) * log(a) - a + 0.9189385;
+            float res = exp(-x + a * log(x) - lg) * sum;
+            res = clamp(res, 0.0, 1.0);
+            result[idx] = floatBitsToUint(1.0 - res);
+            break;
+        }
     }
 }

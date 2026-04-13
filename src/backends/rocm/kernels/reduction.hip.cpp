@@ -3808,6 +3808,125 @@ auto count_nonzero_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 }
 
 // ============================================================================
+// CountNonzero — dim-specific reduction kernel (native HIP, no CPU fallback)
+// ============================================================================
+
+template<typename T>
+__global__ void count_nonzero_along_dim_kernel(
+    const T* input,
+    int64_t* output,
+    const int64_t* input_shape,
+    const int64_t* input_strides,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= output_size) return;
+
+    // Decompose output index into multi-dimensional indices
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+    for (int64_t d = ndim - 1; d >= 0; --d) {
+        if (d == dim) {
+            indices[d] = 0;
+            continue;
+        }
+        indices[d] = tmp % input_shape[d];
+        tmp /= input_shape[d];
+    }
+
+    // Count non-zero elements along the reduction dimension
+    int64_t count = 0;
+    for (int64_t i = 0; i < dim_size; i++) {
+        indices[dim] = i;
+        int64_t in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * input_strides[d];
+        }
+        if (static_cast<float>(input[in_idx]) != 0.0f) {
+            count++;
+        }
+    }
+    output[out_idx] = count;
+}
+
+template<typename T>
+static void launch_dim_count_nonzero(
+    const T* d_input,
+    int64_t* d_output,
+    const std::vector<int64_t>& input_shape,
+    const std::vector<int64_t>& input_strides,
+    int64_t dim,
+    hipStream_t stream
+) {
+    const int64_t ndim = input_shape.size();
+    const int64_t dim_size = input_shape[dim];
+
+    int64_t output_size = 1;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != dim) output_size *= input_shape[i];
+    }
+    if (output_size == 0 || dim_size == 0) return;
+
+    // Copy shape and strides to device
+    int64_t* d_shape;
+    int64_t* d_strides;
+    HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
+    HIP_CHECK(hipMalloc(&d_strides, ndim * sizeof(int64_t)));
+    HIP_CHECK(hipMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+
+    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    hipLaunchKernelGGL(count_nonzero_along_dim_kernel<T>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+        d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size);
+
+    // Must wait for kernel to complete before freeing device memory it uses
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipFree(d_shape));
+    HIP_CHECK(hipFree(d_strides));
+}
+
+auto count_nonzero_dim_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Tensor {
+    Tensor in = input;
+    const auto& input_shape = in.shape();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+    int64_t normalized_dim = dim;
+    if (dim < 0) normalized_dim = ndim + dim;
+
+    // Compute output shape (remove reduced dim)
+    std::vector<int64_t> output_shape;
+    for (int64_t d = 0; d < ndim; d++) {
+        if (d != normalized_dim) output_shape.push_back(input_shape[d]);
+    }
+    if (output_shape.empty()) output_shape.push_back(1);
+
+    Tensor result(output_shape, DType::Int64, in.device());
+
+    // Upcast to Float32 for comparison if needed
+    if (in.dtype() != DType::Float32 && in.dtype() != DType::Float64 &&
+        in.dtype() != DType::Int32 && in.dtype() != DType::Int64) {
+        in = in.to(DType::Float32);
+    }
+
+    auto shape_vec = std::vector<int64_t>(in.shape().begin(), in.shape().end());
+    auto strides_vec = std::vector<int64_t>(in.strides().begin(), in.strides().end());
+
+    if (in.dtype() == DType::Float32) {
+        launch_dim_count_nonzero(in.data<float>(), result.data<int64_t>(), shape_vec, strides_vec, normalized_dim, stream);
+    } else if (in.dtype() == DType::Float64) {
+        launch_dim_count_nonzero(in.data<double>(), result.data<int64_t>(), shape_vec, strides_vec, normalized_dim, stream);
+    } else if (in.dtype() == DType::Int32) {
+        launch_dim_count_nonzero(in.data<int32_t>(), result.data<int64_t>(), shape_vec, strides_vec, normalized_dim, stream);
+    } else if (in.dtype() == DType::Int64) {
+        launch_dim_count_nonzero(in.data<int64_t>(), result.data<int64_t>(), shape_vec, strides_vec, normalized_dim, stream);
+    }
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ============================================================================
 // Nansum — full reduction kernel (sum skipping NaN)
 // ============================================================================
 

@@ -18,6 +18,7 @@
 #include <limits>
 #include <complex>
 #include <functional>
+#include <numeric>
 #include <random>
 
 // SIMD intrinsics
@@ -6688,6 +6689,352 @@ auto baddbmm_kernel(const Tensor& input, const Tensor& batch1, const Tensor& bat
     }
 
     return output;
+}
+
+// =========================================================================
+// New element-wise math operations
+// =========================================================================
+
+// --- Unary ops ---
+
+auto rsqrt_kernel(const Tensor& input) -> Tensor {
+    return unary_math_kernel(input,
+        [](float x) { return 1.0f / std::sqrt(x); },
+        [](double x) { return 1.0 / std::sqrt(x); }, "rsqrt");
+}
+
+auto square_kernel(const Tensor& input) -> Tensor {
+    return unary_math_kernel(input,
+        [](float x) { return x * x; },
+        [](double x) { return x * x; }, "square");
+}
+
+auto asinh_kernel(const Tensor& input) -> Tensor {
+    return unary_math_kernel(input,
+        [](float x) { return std::asinh(x); },
+        [](double x) { return std::asinh(x); }, "asinh");
+}
+
+auto acosh_kernel(const Tensor& input) -> Tensor {
+    return unary_math_kernel(input,
+        [](float x) { return std::acosh(x); },
+        [](double x) { return std::acosh(x); }, "acosh");
+}
+
+auto atanh_kernel(const Tensor& input) -> Tensor {
+    return unary_math_kernel(input,
+        [](float x) { return std::atanh(x); },
+        [](double x) { return std::atanh(x); }, "atanh");
+}
+
+// --- Binary floating-point ops ---
+
+auto hypot_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    return binary_math_kernel(a, b,
+        [](float x, float y) { return std::hypot(x, y); },
+        [](double x, double y) { return std::hypot(x, y); }, "hypot");
+}
+
+auto copysign_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    return binary_math_kernel(a, b,
+        [](float x, float y) { return std::copysign(x, y); },
+        [](double x, double y) { return std::copysign(x, y); }, "copysign");
+}
+
+auto nextafter_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    return binary_math_kernel(a, b,
+        [](float x, float y) { return std::nextafter(x, y); },
+        [](double x, double y) { return std::nextafter(x, y); }, "nextafter");
+}
+
+// --- Binary integer ops ---
+
+auto gcd_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    detail::validate_elementwise(a, b);
+    auto shape_a = a.shape();
+    auto shape_b = b.shape();
+    std::vector<int64_t> shape_a_vec(shape_a.begin(), shape_a.end());
+    std::vector<int64_t> shape_b_vec(shape_b.begin(), shape_b.end());
+    std::vector<int64_t> output_shape = detail::compute_broadcast_shape(shape_a_vec, shape_b_vec);
+    Tensor result(output_shape, a.dtype(), a.device());
+
+    if (detail::have_same_shape(a, b)) {
+        size_t n = static_cast<size_t>(a.numel());
+        TENZOR_DISPATCH_INTEGER_TYPES(a.dtype(), "gcd", [&]() {
+            const scalar_t* ad = a.data<scalar_t>();
+            const scalar_t* bd = b.data<scalar_t>();
+            scalar_t* od = result.data<scalar_t>();
+            for (size_t i = 0; i < n; ++i) {
+                od[i] = static_cast<scalar_t>(std::gcd(
+                    static_cast<int64_t>(ad[i]), static_cast<int64_t>(bd[i])));
+            }
+        });
+    } else {
+        auto a_strides = detail::compute_broadcast_strides(shape_a, output_shape);
+        auto b_strides = detail::compute_broadcast_strides(shape_b, output_shape);
+        int64_t ndim = static_cast<int64_t>(output_shape.size());
+        int64_t n = result.numel();
+
+        TENZOR_DISPATCH_INTEGER_TYPES(a.dtype(), "gcd", [&]() {
+            const scalar_t* ad = a.data<scalar_t>();
+            const scalar_t* bd = b.data<scalar_t>();
+            scalar_t* od = result.data<scalar_t>();
+            _Pragma("omp parallel for if(n > static_cast<int64_t>(OMP_THRESHOLD_SIMPLE))")
+            for (int64_t i = 0; i < n; ++i) {
+                int64_t a_idx = 0, b_idx = 0, idx = i;
+                for (int64_t d = ndim - 1; d >= 0; --d) {
+                    int64_t coord = idx % output_shape[d];
+                    idx /= output_shape[d];
+                    a_idx += coord * a_strides[d];
+                    b_idx += coord * b_strides[d];
+                }
+                od[i] = static_cast<scalar_t>(std::gcd(
+                    static_cast<int64_t>(ad[a_idx]), static_cast<int64_t>(bd[b_idx])));
+            }
+        });
+    }
+    return result;
+}
+
+auto lcm_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    detail::validate_elementwise(a, b);
+    auto shape_a = a.shape();
+    auto shape_b = b.shape();
+    std::vector<int64_t> shape_a_vec(shape_a.begin(), shape_a.end());
+    std::vector<int64_t> shape_b_vec(shape_b.begin(), shape_b.end());
+    std::vector<int64_t> output_shape = detail::compute_broadcast_shape(shape_a_vec, shape_b_vec);
+    Tensor result(output_shape, a.dtype(), a.device());
+
+    if (detail::have_same_shape(a, b)) {
+        size_t n = static_cast<size_t>(a.numel());
+        TENZOR_DISPATCH_INTEGER_TYPES(a.dtype(), "lcm", [&]() {
+            const scalar_t* ad = a.data<scalar_t>();
+            const scalar_t* bd = b.data<scalar_t>();
+            scalar_t* od = result.data<scalar_t>();
+            for (size_t i = 0; i < n; ++i) {
+                od[i] = static_cast<scalar_t>(std::lcm(
+                    static_cast<int64_t>(ad[i]), static_cast<int64_t>(bd[i])));
+            }
+        });
+    } else {
+        auto a_strides = detail::compute_broadcast_strides(shape_a, output_shape);
+        auto b_strides = detail::compute_broadcast_strides(shape_b, output_shape);
+        int64_t ndim = static_cast<int64_t>(output_shape.size());
+        int64_t n = result.numel();
+
+        TENZOR_DISPATCH_INTEGER_TYPES(a.dtype(), "lcm", [&]() {
+            const scalar_t* ad = a.data<scalar_t>();
+            const scalar_t* bd = b.data<scalar_t>();
+            scalar_t* od = result.data<scalar_t>();
+            _Pragma("omp parallel for if(n > static_cast<int64_t>(OMP_THRESHOLD_SIMPLE))")
+            for (int64_t i = 0; i < n; ++i) {
+                int64_t a_idx = 0, b_idx = 0, idx = i;
+                for (int64_t d = ndim - 1; d >= 0; --d) {
+                    int64_t coord = idx % output_shape[d];
+                    idx /= output_shape[d];
+                    a_idx += coord * a_strides[d];
+                    b_idx += coord * b_strides[d];
+                }
+                od[i] = static_cast<scalar_t>(std::lcm(
+                    static_cast<int64_t>(ad[a_idx]), static_cast<int64_t>(bd[b_idx])));
+            }
+        });
+    }
+    return result;
+}
+
+// --- Igamma / Igammac (regularized incomplete gamma functions) ---
+
+namespace {
+
+// Lower regularized incomplete gamma function via series expansion:
+// P(a, x) = (e^{-x} * x^a / Gamma(a)) * sum_{k=0}^{inf} x^k / (a*(a+1)*...*(a+k))
+template<typename T>
+T igamma_series(T a, T x) {
+    if (x < T(0)) return T(0);
+    if (x == T(0)) return T(0);
+
+    // Use series expansion: P(a,x) = e^{-x} x^a / Gamma(a) * Sum_{n=0}^inf x^n / (a*(a+1)*...*(a+n))
+    T lgamma_a = std::lgamma(a);
+    T prefix = std::exp(-x + a * std::log(x) - lgamma_a);
+
+    T sum = T(0);
+    T term = T(1) / a;
+    sum += term;
+
+    constexpr int max_iter = 200;
+    constexpr T eps = std::is_same_v<T, float> ? T(1e-7f) : T(1e-15);
+
+    for (int n = 1; n < max_iter; ++n) {
+        term *= x / (a + T(n));
+        sum += term;
+        if (std::abs(term) < eps * std::abs(sum)) break;
+    }
+    return prefix * sum;
+}
+
+// Upper regularized incomplete gamma via continued fraction (Legendre):
+// Q(a, x) = e^{-x} x^a / Gamma(a) * CF
+// Used when x >= a + 1 for better convergence.
+template<typename T>
+T igammac_cf(T a, T x) {
+    T lgamma_a = std::lgamma(a);
+    T prefix = std::exp(-x + a * std::log(x) - lgamma_a);
+
+    // Modified Lentz's method for continued fraction
+    constexpr T tiny = std::is_same_v<T, float> ? T(1e-30f) : T(1e-300);
+    constexpr T eps = std::is_same_v<T, float> ? T(1e-7f) : T(1e-15);
+    constexpr int max_iter = 200;
+
+    T f = tiny;
+    T C = tiny;
+    T D = T(0);
+
+    for (int n = 1; n <= max_iter; ++n) {
+        T an, bn;
+        if (n == 1) {
+            an = T(1);
+            bn = x + T(1) - a;
+        } else if (n % 2 == 0) {
+            int k = n / 2;
+            an = T(k) * (a - T(k));
+            bn = x + T(2 * k + 1) - a;
+        } else {
+            int k = (n - 1) / 2;
+            an = -(a + T(k)) * (a + T(k));  // Corrected: should be -(a+k)*(... )
+            // Actually for the standard CF representation of Q(a,x):
+            // Use the even/odd form. Let's use a simpler CF form.
+            an = -(a - T(1) + T(n)) * T(n == 1 ? 1 : (n - 1) / 2);
+            bn = x + T(n) - a;
+        }
+        // Simplified: use the standard CF for gamma
+        // a_n = n*(a-n) for even n, a_n = -(a-1+n)*((n-1)/2) for odd n>1
+        // This is getting complex. Let's use a cleaner approach.
+        (void)an; (void)bn;
+        break;
+    }
+
+    // Cleaner approach: compute Q(a,x) = 1 - P(a,x) when series is used,
+    // or use series directly for P(a,x) and subtract.
+    // For the CF path, use Gauss continued fraction:
+    // 1/(x+1-a+ 1*(1-a)/(x+3-a+ 2*(2-a)/(x+5-a+ ...)))
+    f = x + T(1) - a;
+    if (std::abs(f) < tiny) f = tiny;
+    C = f;
+    D = T(0);
+
+    for (int n = 1; n <= max_iter; ++n) {
+        T an_val = -T(n) * (T(n) - a);
+        T bn_val = x + T(2 * n + 1) - a;
+        D = bn_val + an_val * D;
+        if (std::abs(D) < tiny) D = tiny;
+        C = bn_val + an_val / C;
+        if (std::abs(C) < tiny) C = tiny;
+        D = T(1) / D;
+        T delta = C * D;
+        f *= delta;
+        if (std::abs(delta - T(1)) < eps) break;
+    }
+
+    return prefix / f;
+}
+
+} // anonymous namespace
+
+auto igamma_kernel(const Tensor& a, const Tensor& x) -> Tensor {
+    return binary_math_kernel(a, x,
+        [](float a_val, float x_val) -> float {
+            if (x_val < a_val + 1.0f) {
+                return igamma_series(a_val, x_val);
+            } else {
+                return 1.0f - igammac_cf(a_val, x_val);
+            }
+        },
+        [](double a_val, double x_val) -> double {
+            if (x_val < a_val + 1.0) {
+                return igamma_series(a_val, x_val);
+            } else {
+                return 1.0 - igammac_cf(a_val, x_val);
+            }
+        }, "igamma");
+}
+
+auto igammac_kernel(const Tensor& a, const Tensor& x) -> Tensor {
+    return binary_math_kernel(a, x,
+        [](float a_val, float x_val) -> float {
+            if (x_val < a_val + 1.0f) {
+                return 1.0f - igamma_series(a_val, x_val);
+            } else {
+                return igammac_cf(a_val, x_val);
+            }
+        },
+        [](double a_val, double x_val) -> double {
+            if (x_val < a_val + 1.0) {
+                return 1.0 - igamma_series(a_val, x_val);
+            } else {
+                return igammac_cf(a_val, x_val);
+            }
+        }, "igammac");
+}
+
+// --- Ternary ops: addcmul / addcdiv ---
+
+auto addcmul_kernel(const Tensor& input, const Tensor& tensor1, const Tensor& tensor2,
+                    double alpha) -> Tensor {
+    // Upcast Float16/BFloat16 to Float32 for numerical stability
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto orig_dtype = input.dtype();
+        auto result_f32 = addcmul_kernel(input.to(DType::Float32),
+                                         tensor1.to(DType::Float32),
+                                         tensor2.to(DType::Float32), alpha);
+        return result_f32.to(orig_dtype);
+    }
+
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    Tensor result(shape_vec, input.dtype(), input.device());
+    size_t n = static_cast<size_t>(result.numel());
+
+    TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "addcmul", [&]() {
+        const scalar_t* in = input.data<scalar_t>();
+        const scalar_t* t1 = tensor1.data<scalar_t>();
+        const scalar_t* t2 = tensor2.data<scalar_t>();
+        scalar_t* out = result.data<scalar_t>();
+        scalar_t alpha_val = static_cast<scalar_t>(alpha);
+        _Pragma("omp parallel for if(n > OMP_THRESHOLD_SIMPLE)")
+        for (size_t i = 0; i < n; ++i) {
+            out[i] = in[i] + alpha_val * t1[i] * t2[i];
+        }
+    });
+    return result;
+}
+
+auto addcdiv_kernel(const Tensor& input, const Tensor& tensor1, const Tensor& tensor2,
+                    double alpha) -> Tensor {
+    // Upcast Float16/BFloat16 to Float32 for numerical stability
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto orig_dtype = input.dtype();
+        auto result_f32 = addcdiv_kernel(input.to(DType::Float32),
+                                         tensor1.to(DType::Float32),
+                                         tensor2.to(DType::Float32), alpha);
+        return result_f32.to(orig_dtype);
+    }
+
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    Tensor result(shape_vec, input.dtype(), input.device());
+    size_t n = static_cast<size_t>(result.numel());
+
+    TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "addcdiv", [&]() {
+        const scalar_t* in = input.data<scalar_t>();
+        const scalar_t* t1 = tensor1.data<scalar_t>();
+        const scalar_t* t2 = tensor2.data<scalar_t>();
+        scalar_t* out = result.data<scalar_t>();
+        scalar_t alpha_val = static_cast<scalar_t>(alpha);
+        _Pragma("omp parallel for if(n > OMP_THRESHOLD_SIMPLE)")
+        for (size_t i = 0; i < n; ++i) {
+            out[i] = in[i] + alpha_val * t1[i] / t2[i];
+        }
+    });
+    return result;
 }
 
 } // namespace cpu

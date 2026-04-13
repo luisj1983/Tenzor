@@ -1,0 +1,68 @@
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
+
+// Cast Float32 to FP8 E5M2 (1 sign, 5 exponent, 2 mantissa, bias=15)
+// E5M2 supports infinity and NaN (same exponent width as Float16)
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuffer {
+    float data[];
+} input_buf;
+
+layout(set = 0, binding = 1) writeonly buffer OutputBuffer {
+    uint8_t data[];
+} output_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.num_elements) return;
+
+    float f = input_buf.data[idx];
+    uint f_bits = floatBitsToUint(f);
+
+    uint sign = (f_bits >> 31) & 0x1u;
+    uint exp = (f_bits >> 23) & 0xFFu;
+    uint mantissa = f_bits & 0x7FFFFFu;
+
+    uint h_sign = sign;
+    uint h_exp;
+    uint h_mantissa;
+
+    if (exp == 0xFFu) {
+        // Inf or NaN
+        h_exp = 0x1Fu;
+        h_mantissa = (mantissa != 0u) ? 0x3u : 0u;
+    } else if (exp == 0u) {
+        // Zero or denorm -> zero
+        h_exp = 0u;
+        h_mantissa = 0u;
+    } else {
+        // float32 bias=127, e5m2 bias=15
+        int new_exp = int(exp) - 127 + 15;
+
+        if (new_exp >= 0x1F) {
+            // Overflow to infinity
+            h_exp = 0x1Fu;
+            h_mantissa = 0u;
+        } else if (new_exp <= 0) {
+            if (new_exp >= -2) {
+                uint m = (mantissa | 0x800000u) >> uint(1 - new_exp);
+                h_mantissa = (m >> 21) & 0x3u;
+                h_exp = 0u;
+            } else {
+                h_exp = 0u;
+                h_mantissa = 0u;
+            }
+        } else {
+            h_exp = uint(new_exp);
+            h_mantissa = (mantissa >> 21) & 0x3u;
+        }
+    }
+
+    output_buf.data[idx] = int8_t(int((h_sign << 7) | (h_exp << 2) | h_mantissa));
+}

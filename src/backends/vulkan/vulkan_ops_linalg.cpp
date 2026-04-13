@@ -1,4 +1,5 @@
 #include "vulkan_ops_common.hpp"
+#include "tenzor/ops/linalg.hpp"
 
 namespace tenzor {
 
@@ -3286,5 +3287,19 @@ auto VulkanBackend::dispatchSparseTrsm(const Tensor& crow_indices, const Tensor&
     return output;
 }
 
+
+// ============================================================================
+// Triangular Solve (AX = B, A triangular) — CPU fallback
+// TODO: Implement native Vulkan compute shader for dense triangular solve
+// ============================================================================
+
+auto VulkanBackend::dispatchLinalgSolveTriangular(const Tensor& A, const Tensor& B,
+                                                   bool upper, bool unitriangular) -> Tensor {
+    // Fall back to CPU: transfer data, solve on CPU, transfer back
+    auto a_cpu = A.to(Device{Device::Type::CPU, 0});
+    auto b_cpu = B.to(Device{Device::Type::CPU, 0});
+    auto result_cpu = linalg::solve_triangular(a_cpu, b_cpu, upper, unitriangular);
+    return result_cpu.to(A.device());
+}
 
 } // namespace tenzor

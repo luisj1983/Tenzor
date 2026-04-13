@@ -1,0 +1,48 @@
+#version 450
+
+// Log-Cumulative-Sum-Exp (logcumsumexp) along a dimension
+// Sequential scan: running = log(exp(running) + exp(x))
+// Numerically stable via: running = max(running, x) + log1p(exp(-abs(running - x)))
+// Each workgroup thread handles one "line" along the reduction dimension
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint total_lines;     // Number of lines (outer_size * inner_size)
+    uint reduce_size;     // Size of the dimension to scan over
+    uint inner_size;      // Product of dimensions after the scan dim
+} params;
+
+void main() {
+    uint line_idx = gl_GlobalInvocationID.x;
+    if (line_idx >= params.total_lines) return;
+
+    uint outer_idx = line_idx / params.inner_size;
+    uint inner_idx = line_idx % params.inner_size;
+
+    uint base = outer_idx * params.reduce_size * params.inner_size + inner_idx;
+
+    // First element: output = input
+    float running = input_data[base];
+    output_data[base] = running;
+
+    for (uint i = 1; i < params.reduce_size; i++) {
+        uint idx = base + i * params.inner_size;
+        float x = input_data[idx];
+
+        // Numerically stable log-sum-exp accumulation
+        // log(exp(a) + exp(b)) = max(a,b) + log1p(exp(-|a-b|))
+        float m = max(running, x);
+        float diff = abs(running - x);
+
+        // For very large differences, log1p(exp(-diff)) ≈ 0
+        if (diff > 50.0) {
+            running = m;
+        } else {
+            running = m + log(1.0 + exp(-diff));
+        }
+        output_data[idx] = running;
+    }
+}

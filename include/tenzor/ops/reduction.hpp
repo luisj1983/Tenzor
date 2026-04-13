@@ -172,6 +172,62 @@ auto aminmax(const Tensor& input,
              std::optional<int64_t> dim = std::nullopt,
              bool keepdim = false) -> std::pair<Tensor, Tensor>;
 
+// =========================================================================
+// Fused reductions (compositions, no new OpIds)
+// =========================================================================
+
+/// Fused std + mean in a single pass (returns std, mean)
+auto std_mean(const Tensor& input, std::optional<int64_t> dim = std::nullopt,
+              bool keepdim = false, bool unbiased = true) -> std::pair<Tensor, Tensor>;
+
+/// Fused var + mean in a single pass (returns var, mean)
+auto var_mean(const Tensor& input, std::optional<int64_t> dim = std::nullopt,
+              bool keepdim = false, bool unbiased = true) -> std::pair<Tensor, Tensor>;
+
+/// p-norm of (a - b)
+auto dist(const Tensor& a, const Tensor& b, float p = 2.0f) -> Tensor;
+
+// =========================================================================
+// New reduction operations for PyTorch parity
+// =========================================================================
+
+/// Cumulative maximum along dim (returns values, indices)
+auto cummax(const Tensor& input, int64_t dim) -> std::pair<Tensor, Tensor>;
+
+/// Cumulative minimum along dim (returns values, indices)
+auto cummin(const Tensor& input, int64_t dim) -> std::pair<Tensor, Tensor>;
+
+/// Test if elements are in a set of test values
+auto isin(const Tensor& elements, const Tensor& test_elements) -> Tensor;
+
+/// k-th smallest value along dim (returns value, index)
+auto kthvalue(const Tensor& input, int64_t k, int64_t dim = -1, bool keepdim = false) -> std::pair<Tensor, Tensor>;
+
+/// Element-wise max ignoring NaN (returns non-NaN if one input is NaN)
+auto fmax(const Tensor& a, const Tensor& b) -> Tensor;
+
+/// Element-wise min ignoring NaN (returns non-NaN if one input is NaN)
+auto fmin(const Tensor& a, const Tensor& b) -> Tensor;
+
+/// Quantile along dim
+auto quantile(const Tensor& input, double q, std::optional<int64_t> dim = std::nullopt,
+              bool keepdim = false) -> Tensor;
+
+/// NaN-ignoring quantile along dim
+auto nanquantile(const Tensor& input, double q, std::optional<int64_t> dim = std::nullopt,
+                 bool keepdim = false) -> Tensor;
+
+/// NaN-ignoring median along dim
+auto nanmedian(const Tensor& input, std::optional<int64_t> dim = std::nullopt) -> Tensor;
+
+/// Fixed-bin histogram
+auto histc(const Tensor& input, int64_t bins = 100, double min_val = 0, double max_val = 0) -> Tensor;
+
+/// Deduplicate consecutive equal elements
+auto unique_consecutive(const Tensor& input, bool return_inverse = false,
+                        bool return_counts = false, std::optional<int64_t> dim = std::nullopt)
+    -> std::tuple<Tensor, Tensor, Tensor>;
+
 /** @} */ // end of tensor_reduction group
 
 } // namespace tenzor

@@ -9,7 +9,7 @@ layout(binding = 2) buffer Output { int result[]; };
 
 layout(push_constant) uniform PushConstants {
     uint n;          // Number of elements
-    uint op;         // Operation: 0=add, 1=sub, 2=mul, 3=div, 7=neg, 8=abs, 10=sign
+    uint op;         // Operation: 0=add, 1=sub, 2=mul, 3=div, 7=neg, 8=abs, 10=sign, 36=gcd, 37=lcm
     float param;     // Unused for int ops (kept for layout compatibility)
 } params;
 
@@ -51,6 +51,22 @@ void main() {
                 result[idx] = 0;
             }
             break;
+        case 36: { // gcd (binary)
+            int ga = val_a < 0 ? -val_a : val_a;
+            int gb = val_b < 0 ? -val_b : val_b;
+            while (gb != 0) { int t = gb; gb = ga - (ga / gb) * gb; ga = t; }
+            result[idx] = ga;
+            break;
+        }
+        case 37: { // lcm (binary)
+            int ga = val_a < 0 ? -val_a : val_a;
+            int gb = val_b < 0 ? -val_b : val_b;
+            int ta = ga; int tb = gb;
+            while (tb != 0) { int t = tb; tb = ta - (ta / tb) * tb; ta = t; }
+            int g = ta;
+            result[idx] = (g == 0) ? 0 : (ga / g) * gb;
+            break;
+        }
         default:
             result[idx] = val_a;
             break;

@@ -1,6 +1,7 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "tenzor/ops/indexing.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
@@ -1009,6 +1010,169 @@ auto repeat_interleave(const Tensor& input, const Tensor& repeats,
 
     std::vector<Tensor> inputs = {src, repeats};
     return dispatch(OpId::RepeatInterleave, std::span<const Tensor>(inputs), attrs)[0];
+}
+
+// =========================================================================
+// New shape/transform operations for PyTorch parity (compositions)
+// =========================================================================
+
+auto ravel(const Tensor& input) -> Tensor {
+    return reshape(input, {-1});
+}
+
+auto unflatten(const Tensor& input, int64_t dim, std::vector<int64_t> sizes) -> Tensor {
+    const auto& shape = input.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+
+    std::vector<int64_t> new_shape;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i == dim) {
+            for (auto s : sizes) new_shape.push_back(s);
+        } else {
+            new_shape.push_back(shape[i]);
+        }
+    }
+    return reshape(input, new_shape);
+}
+
+auto hstack(const std::vector<Tensor>& tensors) -> Tensor {
+    if (tensors.empty()) throw std::runtime_error("hstack: empty tensor list");
+    if (tensors[0].ndim() == 1) {
+        return cat(std::span<const Tensor>(tensors), 0);
+    }
+    return cat(std::span<const Tensor>(tensors), 1);
+}
+
+auto vstack(const std::vector<Tensor>& tensors) -> Tensor {
+    if (tensors.empty()) throw std::runtime_error("vstack: empty tensor list");
+    // Ensure at least 2D
+    std::vector<Tensor> reshaped;
+    for (const auto& t : tensors) {
+        if (t.ndim() == 1) {
+            reshaped.push_back(reshape(t, {1, t.shape()[0]}));
+        } else {
+            reshaped.push_back(t);
+        }
+    }
+    return cat(std::span<const Tensor>(reshaped), 0);
+}
+
+auto dstack(const std::vector<Tensor>& tensors) -> Tensor {
+    if (tensors.empty()) throw std::runtime_error("dstack: empty tensor list");
+    // Ensure at least 3D
+    std::vector<Tensor> reshaped;
+    for (const auto& t : tensors) {
+        if (t.ndim() == 1) {
+            reshaped.push_back(reshape(t, {1, t.shape()[0], 1}));
+        } else if (t.ndim() == 2) {
+            reshaped.push_back(reshape(t, {t.shape()[0], t.shape()[1], 1}));
+        } else {
+            reshaped.push_back(t);
+        }
+    }
+    return cat(std::span<const Tensor>(reshaped), 2);
+}
+
+auto tensor_split(const Tensor& input, int64_t sections, int64_t dim) -> std::vector<Tensor> {
+    const auto& shape = input.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    int64_t dim_size = shape[dim];
+    int64_t chunk_size = (dim_size + sections - 1) / sections;
+
+    std::vector<Tensor> result;
+    for (int64_t i = 0; i < sections; i++) {
+        int64_t start = i * chunk_size;
+        int64_t end = std::min(start + chunk_size, dim_size);
+        if (start >= dim_size) break;
+        result.push_back(input.slice(dim, start, end));
+    }
+    return result;
+}
+
+auto tensor_split(const Tensor& input, std::vector<int64_t> indices, int64_t dim) -> std::vector<Tensor> {
+    const auto& shape = input.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    int64_t dim_size = shape[dim];
+
+    std::vector<Tensor> result;
+    int64_t prev = 0;
+    for (auto idx : indices) {
+        if (idx > dim_size) idx = dim_size;
+        result.push_back(input.slice(dim, prev, idx));
+        prev = idx;
+    }
+    result.push_back(input.slice(dim, prev, dim_size));
+    return result;
+}
+
+auto hsplit(const Tensor& input, int64_t sections) -> std::vector<Tensor> {
+    if (input.ndim() == 1) return tensor_split(input, sections, 0);
+    return tensor_split(input, sections, 1);
+}
+
+auto vsplit(const Tensor& input, int64_t sections) -> std::vector<Tensor> {
+    return tensor_split(input, sections, 0);
+}
+
+auto dsplit(const Tensor& input, int64_t sections) -> std::vector<Tensor> {
+    if (input.ndim() < 3) throw std::runtime_error("dsplit requires tensor with ndim >= 3");
+    return tensor_split(input, sections, 2);
+}
+
+auto unbind(const Tensor& input, int64_t dim) -> std::vector<Tensor> {
+    const auto& shape = input.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    int64_t n = shape[dim];
+
+    std::vector<Tensor> result;
+    result.reserve(n);
+    for (int64_t i = 0; i < n; i++) {
+        result.push_back(squeeze(input.slice(dim, i, i + 1), dim));
+    }
+    return result;
+}
+
+auto rot90(const Tensor& input, int64_t k, std::vector<int64_t> dims) -> Tensor {
+    if (dims.size() != 2) throw std::runtime_error("rot90: dims must have exactly 2 elements");
+    int64_t ndim = static_cast<int64_t>(input.shape().size());
+    int64_t d0 = dims[0] < 0 ? dims[0] + ndim : dims[0];
+    int64_t d1 = dims[1] < 0 ? dims[1] + ndim : dims[1];
+
+    k = ((k % 4) + 4) % 4; // normalize to [0, 3]
+    if (k == 0) return input;
+
+    Tensor result = input;
+    for (int64_t i = 0; i < k; i++) {
+        result = flip(result, {d1});
+        // Transpose d0 and d1
+        std::vector<int64_t> perm;
+        for (int64_t d = 0; d < static_cast<int64_t>(result.shape().size()); d++) {
+            if (d == d0) perm.push_back(d1);
+            else if (d == d1) perm.push_back(d0);
+            else perm.push_back(d);
+        }
+        result = result.permute(perm);
+    }
+    return result;
+}
+
+auto argwhere(const Tensor& input) -> Tensor {
+    // nonzero returns (nnz, ndim) tensor of indices
+    return nonzero(input);
+}
+
+auto fliplr(const Tensor& input) -> Tensor {
+    if (input.ndim() < 2) throw std::runtime_error("fliplr requires tensor with ndim >= 2");
+    return flip(input, {1});
+}
+
+auto flipud(const Tensor& input) -> Tensor {
+    if (input.ndim() < 1) throw std::runtime_error("flipud requires tensor with ndim >= 1");
+    return flip(input, {0});
 }
 
 } // namespace tenzor

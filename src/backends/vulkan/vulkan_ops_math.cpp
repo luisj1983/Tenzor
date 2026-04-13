@@ -50,6 +50,13 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
     else if (op_name == "remainder") opcode = 25;
     else if (op_name == "minimum") opcode = 26;
     else if (op_name == "maximum") opcode = 27;
+    else if (op_name == "hypot") opcode = 33;
+    else if (op_name == "copysign") opcode = 34;
+    else if (op_name == "nextafter") opcode = 35;
+    else if (op_name == "igamma") opcode = 38;
+    else if (op_name == "igammac") opcode = 39;
+    else if (op_name == "gcd") opcode = 36;
+    else if (op_name == "lcm") opcode = 37;
     else throw std::runtime_error("Unknown binary operation: " + op_name);
 
     // Check if we can use the fast path (same-shape, no broadcasting needed)
@@ -466,6 +473,11 @@ auto VulkanBackend::dispatchUnaryOp(const std::string& op_name,
     else if (op_name == "expm1") { shader_name = "math"; opcode = 20; }
     else if (op_name == "erf") { shader_name = "math"; opcode = 21; }
     else if (op_name == "erfc") { shader_name = "math"; opcode = 22; }
+    else if (op_name == "rsqrt") { shader_name = "math"; opcode = 28; }
+    else if (op_name == "square") { shader_name = "math"; opcode = 29; }
+    else if (op_name == "asinh") { shader_name = "math"; opcode = 30; }
+    else if (op_name == "acosh") { shader_name = "math"; opcode = 31; }
+    else if (op_name == "atanh") { shader_name = "math"; opcode = 32; }
     else throw std::runtime_error("Unknown unary operation: " + op_name);
 
     // Select correct pipeline based on dtype for math operations

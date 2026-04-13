@@ -807,4 +807,72 @@ auto allclose(const Tensor& a, const Tensor& b, double rtol, double atol) -> boo
     return *static_cast<const float*>(cpu_result.data_ptr()) != 0.0f;
 }
 
+// =========================================================================
+// New element-wise math operations for PyTorch parity
+// =========================================================================
+
+auto rsqrt(const Tensor& input) -> Tensor {
+    return detail::unary_op<OpId::Rsqrt>(input);
+}
+
+auto square(const Tensor& input) -> Tensor {
+    return detail::unary_op<OpId::Square>(input);
+}
+
+auto asinh(const Tensor& input) -> Tensor {
+    return detail::unary_op<OpId::Asinh>(input);
+}
+
+auto acosh(const Tensor& input) -> Tensor {
+    return detail::unary_op<OpId::Acosh>(input);
+}
+
+auto atanh(const Tensor& input) -> Tensor {
+    return detail::unary_op<OpId::Atanh>(input);
+}
+
+auto hypot(const Tensor& x, const Tensor& y) -> Tensor {
+    return detail::binary_op_promoted<OpId::Hypot>("hypot", x, y);
+}
+
+auto copysign(const Tensor& magnitude, const Tensor& sign) -> Tensor {
+    return detail::binary_op_promoted<OpId::Copysign>("copysign", magnitude, sign);
+}
+
+auto nextafter(const Tensor& from, const Tensor& to) -> Tensor {
+    return detail::binary_op_promoted<OpId::Nextafter>("nextafter", from, to);
+}
+
+auto gcd(const Tensor& a, const Tensor& b) -> Tensor {
+    return detail::binary_op_promoted<OpId::Gcd>("gcd", a, b);
+}
+
+auto lcm(const Tensor& a, const Tensor& b) -> Tensor {
+    return detail::binary_op_promoted<OpId::Lcm>("lcm", a, b);
+}
+
+auto addcmul(const Tensor& input, const Tensor& tensor1, const Tensor& tensor2,
+             double value) -> Tensor {
+    std::array<Tensor, 3> inputs = {input.contiguous(), tensor1.contiguous(), tensor2.contiguous()};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Alpha, value);
+    return dispatch<OpId::Addcmul>(inputs, attrs)[0];
+}
+
+auto addcdiv(const Tensor& input, const Tensor& tensor1, const Tensor& tensor2,
+             double value) -> Tensor {
+    std::array<Tensor, 3> inputs = {input.contiguous(), tensor1.contiguous(), tensor2.contiguous()};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Alpha, value);
+    return dispatch<OpId::Addcdiv>(inputs, attrs)[0];
+}
+
+auto igamma(const Tensor& a, const Tensor& x) -> Tensor {
+    return detail::binary_op_promoted<OpId::Igamma>("igamma", a, x);
+}
+
+auto igammac(const Tensor& a, const Tensor& x) -> Tensor {
+    return detail::binary_op_promoted<OpId::Igammac>("igammac", a, x);
+}
+
 } // namespace tenzor

@@ -499,4 +499,16 @@ auto index_reduce(const Tensor& input, int64_t dim, const Tensor& index,
     return scatter_reduce(input, dim, index, source, reduce, include_self);
 }
 
+auto take_along_dim(const Tensor& input, const Tensor& indices, int64_t dim) -> Tensor {
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    std::vector<Tensor> inputs = {input.contiguous(), indices.contiguous()};
+    return dispatch(OpId::TakeAlongDim, inputs, attrs)[0];
+}
+
+auto masked_scatter(const Tensor& input, const Tensor& mask, const Tensor& source) -> Tensor {
+    std::vector<Tensor> inputs = {input.contiguous(), mask.contiguous(), source.contiguous()};
+    return dispatch(OpId::MaskedScatter, inputs)[0];
+}
+
 } // namespace tenzor

@@ -748,4 +748,269 @@ auto pad(const Variable& input, const std::vector<int64_t>& pad_sizes,
     return Variable(output, input.requires_grad());
 }
 
+// ============================================================================
+// Phase 9: Lp Pooling (compositions)
+// ============================================================================
+
+auto lp_pool1d(const Variable& input, double norm_type, int64_t kernel_size,
+               int64_t stride, [[maybe_unused]] bool ceil_mode) -> Variable {
+    if (input.shape().size() != 3) {
+        throw std::invalid_argument(
+            "F::lp_pool1d expects 3D input [N, C, L]");
+    }
+
+    if (stride <= 0) stride = kernel_size;
+
+    // |input|^p
+    auto abs_pow = tenzor::pow(tenzor::abs(input), static_cast<float>(norm_type));
+
+    // avg_pool1d on the powered values — this gives us sum/kernel_size
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::KernelSize, kernel_size);
+    attrs.set(AttrKey::Stride, stride);
+    attrs.set(AttrKey::Padding, int64_t{0});
+
+    std::vector<Tensor> inputs_vec = {abs_pow.tensor()};
+    auto pooled_t = dispatch_to_device(OpId::AvgPool1dForward,
+        input.tensor().device().type, inputs_vec, attrs);
+
+    // avg_pool gives sum/count. For Lp pool we want (sum/count)^(1/p) = mean^(1/p)
+    // which is the Lp-mean. This matches PyTorch's LPPool behavior.
+    auto pooled = Variable(pooled_t[0], input.requires_grad());
+    return tenzor::pow(pooled, static_cast<float>(1.0 / norm_type));
+}
+
+auto lp_pool2d(const Variable& input, double norm_type,
+               std::pair<int64_t, int64_t> kernel_size,
+               std::pair<int64_t, int64_t> stride,
+               [[maybe_unused]] bool ceil_mode) -> Variable {
+    if (input.shape().size() != 4) {
+        throw std::invalid_argument(
+            "F::lp_pool2d expects 4D input [N, C, H, W]");
+    }
+
+    if (stride.first <= 0) stride.first = kernel_size.first;
+    if (stride.second <= 0) stride.second = kernel_size.second;
+
+    // |input|^p
+    auto abs_pow = tenzor::pow(tenzor::abs(input), static_cast<float>(norm_type));
+
+    // avg_pool2d on the powered values
+    auto pooled = avg_pool2d(Variable(abs_pow.tensor(), false),
+                             kernel_size, stride, {0, 0});
+
+    // (mean)^(1/p)
+    return tenzor::pow(Variable(pooled.tensor(), input.requires_grad()),
+                       static_cast<float>(1.0 / norm_type));
+}
+
+// ============================================================================
+// Phase 9: Local Response Normalization (composition)
+// ============================================================================
+
+auto local_response_norm(const Variable& input, int64_t size,
+                         double alpha, double beta,
+                         double k) -> Variable {
+    auto shape_span = input.shape();
+    std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
+    if (shape_vec.size() < 3) {
+        throw std::invalid_argument(
+            "F::local_response_norm expects at least 3D input [N, C, ...]");
+    }
+
+    // Compute squared values
+    auto squared = input * input;
+
+    // Sum across neighboring channels using a sliding window approach.
+    // Reshape so channel dimension becomes a spatial dimension, then use
+    // avg_pool1d with appropriate kernel, and scale to get sum.
+    int64_t N = shape_vec[0];
+    int64_t C = shape_vec[1];
+    int64_t spatial = 1;
+    for (size_t i = 2; i < shape_vec.size(); ++i) spatial *= shape_vec[i];
+
+    // Reshape squared to [N, C, S] where S = product of spatial dims
+    std::vector<int64_t> flat_shape = {N, C, spatial};
+    auto sq_flat = tenzor::reshape(squared, flat_shape);
+
+    // Transpose to [N, S, C] then reshape to [N*S, 1, C]
+    auto sq_transposed = tenzor::transpose(sq_flat, 1, 2);  // [N, S, C]
+    std::vector<int64_t> pool_shape = {N * spatial, int64_t{1}, C};
+    auto sq_for_pool = tenzor::reshape(sq_transposed, pool_shape);
+
+    // Pad the channel dimension with zeros on both sides
+    int64_t pad_size = (size - 1) / 2;
+
+    // Use avg_pool1d with kernel=size, stride=1, padding=pad_size to compute channel sum
+    NewOpAttributes pool_attrs;
+    pool_attrs.set(AttrKey::KernelSize, size);
+    pool_attrs.set(AttrKey::Stride, int64_t{1});
+    pool_attrs.set(AttrKey::Padding, pad_size);
+
+    std::vector<Tensor> pool_inputs = {sq_for_pool.tensor()};
+    auto channel_avg = dispatch_to_device(OpId::AvgPool1dForward,
+        input.tensor().device().type, pool_inputs, pool_attrs);
+
+    // avg_pool1d gives sum/size, we want alpha/size * sum = alpha * (sum/size)
+    auto channel_sum_scaled = Variable(channel_avg[0], input.requires_grad());
+
+    // Reshape back: [N*S, 1, C] -> [N, S, C] -> [N, C, S] -> original shape
+    std::vector<int64_t> nsc_shape = {N, spatial, C};
+    auto reshaped = tenzor::reshape(channel_sum_scaled, nsc_shape);
+    auto transposed_back = tenzor::transpose(reshaped, 1, 2);  // [N, C, S]
+    auto final_sum = tenzor::reshape(transposed_back, shape_vec);
+
+    // div_factor = (k + alpha * avg_across_channels)^beta
+    // Since avg_pool gave us sum/size and we want alpha/size * sum = alpha * (sum/size)
+    auto scaled_sum = final_sum * static_cast<float>(alpha) + static_cast<float>(k);
+    auto div_factor = tenzor::pow(scaled_sum, static_cast<float>(beta));
+
+    return input / div_factor;
+}
+
+// ============================================================================
+// Phase 9: Fractional Max Pool (dispatch to backend)
+// ============================================================================
+
+auto fractional_max_pool2d(const Variable& input,
+                           std::pair<int64_t, int64_t> kernel_size,
+                           std::pair<int64_t, int64_t> output_size,
+                           const std::optional<Tensor>& random_samples)
+    -> std::pair<Variable, Tensor> {
+    if (input.shape().size() != 4) {
+        throw std::invalid_argument(
+            "F::fractional_max_pool2d expects 4D input [N, C, H, W]");
+    }
+
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::KernelSize, kernel_size.first);
+    attrs.set(AttrKey::OutputSizeH, output_size.first);
+    attrs.set(AttrKey::OutputSizeW, output_size.second);
+
+    std::vector<Tensor> inputs_vec = {input.tensor()};
+    if (random_samples.has_value()) {
+        inputs_vec.push_back(random_samples.value());
+    }
+
+    auto result = dispatch_to_device(OpId::FractionalMaxPool2dForward,
+        input.tensor().device().type, inputs_vec, attrs);
+
+    return {Variable(result[0], input.requires_grad()), result[1]};
+}
+
+auto fractional_max_pool3d(const Variable& input,
+                           std::tuple<int64_t, int64_t, int64_t> kernel_size,
+                           std::tuple<int64_t, int64_t, int64_t> output_size,
+                           const std::optional<Tensor>& random_samples)
+    -> std::pair<Variable, Tensor> {
+    if (input.shape().size() != 5) {
+        throw std::invalid_argument(
+            "F::fractional_max_pool3d expects 5D input [N, C, D, H, W]");
+    }
+
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::KernelSize, std::get<0>(kernel_size));
+    attrs.set(AttrKey::OutputSizeD, std::get<0>(output_size));
+    attrs.set(AttrKey::OutputSizeH, std::get<1>(output_size));
+    attrs.set(AttrKey::OutputSizeW, std::get<2>(output_size));
+
+    std::vector<Tensor> inputs_vec = {input.tensor()};
+    if (random_samples.has_value()) {
+        inputs_vec.push_back(random_samples.value());
+    }
+
+    auto result = dispatch_to_device(OpId::FractionalMaxPool3dForward,
+        input.tensor().device().type, inputs_vec, attrs);
+
+    return {Variable(result[0], input.requires_grad()), result[1]};
+}
+
+// ============================================================================
+// Phase 9: Max Unpool (dispatch to backend)
+// ============================================================================
+
+auto max_unpool2d(const Variable& input, const Tensor& indices,
+                  std::pair<int64_t, int64_t> kernel_size,
+                  std::pair<int64_t, int64_t> stride,
+                  std::pair<int64_t, int64_t> padding,
+                  std::optional<std::pair<int64_t, int64_t>> output_size) -> Variable {
+    if (input.shape().size() != 4) {
+        throw std::invalid_argument(
+            "F::max_unpool2d expects 4D input [N, C, H_pool, W_pool]");
+    }
+
+    // Default stride = kernel_size
+    if (stride.first < 0) stride.first = kernel_size.first;
+    if (stride.second < 0) stride.second = kernel_size.second;
+
+    // Compute output size if not specified
+    int64_t out_h, out_w;
+    if (output_size.has_value()) {
+        out_h = output_size->first;
+        out_w = output_size->second;
+    } else {
+        auto shape = input.shape();
+        out_h = (shape[2] - 1) * stride.first - 2 * padding.first + kernel_size.first;
+        out_w = (shape[3] - 1) * stride.second - 2 * padding.second + kernel_size.second;
+    }
+
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::KernelSize, kernel_size.first);
+    attrs.set(AttrKey::Stride, stride.first);
+    attrs.set(AttrKey::Padding, padding.first);
+    attrs.set(AttrKey::OutputSizeH, out_h);
+    attrs.set(AttrKey::OutputSizeW, out_w);
+
+    std::vector<Tensor> inputs_vec = {input.tensor(), indices};
+    auto result = dispatch_to_device(OpId::MaxUnpool2dForward,
+        input.tensor().device().type, inputs_vec, attrs);
+
+    return Variable(result[0], input.requires_grad());
+}
+
+auto max_unpool3d(const Variable& input, const Tensor& indices,
+                  std::tuple<int64_t, int64_t, int64_t> kernel_size,
+                  std::tuple<int64_t, int64_t, int64_t> stride,
+                  std::tuple<int64_t, int64_t, int64_t> padding,
+                  std::optional<std::tuple<int64_t, int64_t, int64_t>> output_size) -> Variable {
+    if (input.shape().size() != 5) {
+        throw std::invalid_argument(
+            "F::max_unpool3d expects 5D input [N, C, D_pool, H_pool, W_pool]");
+    }
+
+    // Default stride = kernel_size
+    auto [sk_d, sk_h, sk_w] = stride;
+    auto [kk_d, kk_h, kk_w] = kernel_size;
+    auto [pk_d, pk_h, pk_w] = padding;
+    if (sk_d < 0) sk_d = kk_d;
+    if (sk_h < 0) sk_h = kk_h;
+    if (sk_w < 0) sk_w = kk_w;
+
+    int64_t out_d, out_h, out_w;
+    if (output_size.has_value()) {
+        out_d = std::get<0>(output_size.value());
+        out_h = std::get<1>(output_size.value());
+        out_w = std::get<2>(output_size.value());
+    } else {
+        auto shape = input.shape();
+        out_d = (shape[2] - 1) * sk_d - 2 * pk_d + kk_d;
+        out_h = (shape[3] - 1) * sk_h - 2 * pk_h + kk_h;
+        out_w = (shape[4] - 1) * sk_w - 2 * pk_w + kk_w;
+    }
+
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::KernelSize, kk_d);
+    attrs.set(AttrKey::Stride, sk_d);
+    attrs.set(AttrKey::Padding, pk_d);
+    attrs.set(AttrKey::OutputSizeD, out_d);
+    attrs.set(AttrKey::OutputSizeH, out_h);
+    attrs.set(AttrKey::OutputSizeW, out_w);
+
+    std::vector<Tensor> inputs_vec = {input.tensor(), indices};
+    auto result = dispatch_to_device(OpId::MaxUnpool3dForward,
+        input.tensor().device().type, inputs_vec, attrs);
+
+    return Variable(result[0], input.requires_grad());
+}
+
 } // namespace tenzor::nn::functional

@@ -200,5 +200,13 @@ auto ihfft(const Tensor& input,
            int64_t dim = -1,
            const std::string& norm = "backward") -> Tensor;
 
+/// Discrete Fourier Transform sample frequencies
+auto fftfreq(int64_t n, double d = 1.0, DType dtype = DType::Float32,
+             Device device = Device::cpu()) -> Tensor;
+
+/// Real FFT sample frequencies (only non-negative frequencies)
+auto rfftfreq(int64_t n, double d = 1.0, DType dtype = DType::Float32,
+              Device device = Device::cpu()) -> Tensor;
+
 } // namespace fft
 } // namespace tenzor

@@ -267,6 +267,32 @@ auto index_reduce(const Tensor& input, int64_t dim, const Tensor& index,
                   const Tensor& source, const std::string& reduce,
                   bool include_self = true) -> Tensor;
 
+/**
+ * @brief Gather values from input along dim using indices.
+ *
+ * Like PyTorch's torch.take_along_dim. For each position in indices,
+ * gathers input[..., indices[position], ...] along the specified dim.
+ *
+ * @param input Source tensor
+ * @param indices Index tensor (Int64), same shape as input except along dim
+ * @param dim Dimension to gather along
+ * @return Tensor with same shape as indices
+ */
+auto take_along_dim(const Tensor& input, const Tensor& indices, int64_t dim) -> Tensor;
+
+/**
+ * @brief Scatter source values into positions where mask is true.
+ *
+ * Like PyTorch's torch.Tensor.masked_scatter_. Iterates through the mask
+ * in order; for each true position, writes the next value from source.
+ *
+ * @param input Destination tensor (cloned before modification)
+ * @param mask Boolean mask tensor (same shape as input)
+ * @param source 1D tensor of values to scatter
+ * @return New tensor with masked positions filled from source
+ */
+auto masked_scatter(const Tensor& input, const Tensor& mask, const Tensor& source) -> Tensor;
+
 /** @} */ // end of tensor_indexing group
 
 } // namespace tenzor
@@ -289,5 +315,7 @@ using tenzor::index_put;
 using tenzor::one_hot;
 using tenzor::bincount;
 using tenzor::index_reduce;
+using tenzor::take_along_dim;
+using tenzor::masked_scatter;
 } // namespace ops
 } // namespace tenzor

@@ -938,4 +938,43 @@ auto logspace(float start, float end, int64_t steps, double base,
     return tenzor::exp(scaled);
 }
 
+// =========================================================================
+// New creation operations for PyTorch parity (compositions)
+// =========================================================================
+
+auto full_like(const Tensor& tensor, double fill_value) -> Tensor {
+    std::vector<int64_t> shape(tensor.shape().begin(), tensor.shape().end());
+    return full(shape, fill_value, tensor.dtype(), tensor.device());
+}
+
+auto empty_like(const Tensor& tensor) -> Tensor {
+    std::vector<int64_t> shape(tensor.shape().begin(), tensor.shape().end());
+    return empty(shape, tensor.dtype(), tensor.device());
+}
+
+auto randint_like(const Tensor& tensor, int64_t low, int64_t high) -> Tensor {
+    std::vector<int64_t> shape(tensor.shape().begin(), tensor.shape().end());
+    return randint(low, high, shape, tensor.dtype(), tensor.device());
+}
+
+auto tril_indices(int64_t row, int64_t col, int64_t offset,
+                  DType /*dtype*/, Device device) -> Tensor {
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::M, row);
+    attrs.set(AttrKey::N, col);
+    attrs.set(AttrKey::Diagonal, offset);
+    std::vector<Tensor> inputs;  // no input tensors
+    return dispatch_to_device(OpId::TrilIndices, device.type, inputs, attrs)[0];
+}
+
+auto triu_indices(int64_t row, int64_t col, int64_t offset,
+                  DType /*dtype*/, Device device) -> Tensor {
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::M, row);
+    attrs.set(AttrKey::N, col);
+    attrs.set(AttrKey::Diagonal, offset);
+    std::vector<Tensor> inputs;  // no input tensors
+    return dispatch_to_device(OpId::TriuIndices, device.type, inputs, attrs)[0];
+}
+
 } // namespace tenzor

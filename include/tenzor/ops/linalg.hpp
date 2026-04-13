@@ -225,5 +225,41 @@ auto pinv(const Tensor& A, double rcond = 1e-15) -> Tensor;
  */
 auto matrix_exp(const Tensor& A) -> Tensor;
 
+// =========================================================================
+// New linear algebra operations for PyTorch parity
+// =========================================================================
+
+/**
+ * @brief Solve a triangular linear system AX = B.
+ *
+ * @param A Triangular coefficient matrix (..., N, N)
+ * @param B Right-hand side matrix (..., N, K)
+ * @param upper If true, A is upper-triangular; otherwise lower-triangular (default: true)
+ * @param unitriangular If true, assume A has unit diagonal (default: false)
+ * @return Solution matrix X (..., N, K)
+ */
+auto solve_triangular(const Tensor& A, const Tensor& B, bool upper = true, bool unitriangular = false) -> Tensor;
+
+/// Outer product: result[i,j] = a[i] * b[j]
+auto outer(const Tensor& a, const Tensor& b) -> Tensor;
+
+/// Generalized inner product (sum product over last dim of a, last dim of b)
+auto inner(const Tensor& a, const Tensor& b) -> Tensor;
+
+/// Conjugate dot product for complex tensors
+auto vdot(const Tensor& a, const Tensor& b) -> Tensor;
+
+/// Condition number of a matrix via SVD
+auto cond(const Tensor& A) -> Tensor;
+
+/// Matrix rank via SVD with tolerance
+auto matrix_rank(const Tensor& A, double tol = -1.0) -> Tensor;
+
+/// Embed a batch of vectors as batch diagonal matrices
+auto diag_embed(const Tensor& input, int64_t offset = 0, int64_t dim1 = -2, int64_t dim2 = -1) -> Tensor;
+
+/// Create diagonal matrix from flat input
+auto diagflat(const Tensor& input, int64_t offset = 0) -> Tensor;
+
 } // namespace linalg
 } // namespace tenzor

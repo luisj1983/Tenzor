@@ -1506,6 +1506,29 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     // ========================================================================
+    // New Unary Math Operations
+    // ========================================================================
+    table.register_kernel(OpId::Rsqrt, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchUnaryOp("rsqrt", inputs[0])};
+    });
+
+    table.register_kernel(OpId::Square, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchUnaryOp("square", inputs[0])};
+    });
+
+    table.register_kernel(OpId::Asinh, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchUnaryOp("asinh", inputs[0])};
+    });
+
+    table.register_kernel(OpId::Acosh, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchUnaryOp("acosh", inputs[0])};
+    });
+
+    table.register_kernel(OpId::Atanh, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchUnaryOp("atanh", inputs[0])};
+    });
+
+    // ========================================================================
     // Special Math Functions — native Vulkan compute shaders
     // ========================================================================
     // Opcodes mirror special_math_unary.comp:
@@ -1576,6 +1599,50 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Maximum, [](std::span<const Tensor> inputs, const OpAttributes&) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchBinaryOp("maximum", inputs[0], inputs[1])};
+    });
+
+    // ========================================================================
+    // New Binary Math Operations
+    // ========================================================================
+    table.register_kernel(OpId::Hypot, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchBinaryOp("hypot", inputs[0], inputs[1])};
+    });
+
+    table.register_kernel(OpId::Copysign, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchBinaryOp("copysign", inputs[0], inputs[1])};
+    });
+
+    table.register_kernel(OpId::Nextafter, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchBinaryOp("nextafter", inputs[0], inputs[1])};
+    });
+
+    table.register_kernel(OpId::Gcd, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchBinaryOp("gcd", inputs[0], inputs[1])};
+    });
+
+    table.register_kernel(OpId::Lcm, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchBinaryOp("lcm", inputs[0], inputs[1])};
+    });
+
+    table.register_kernel(OpId::Igamma, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchBinaryOp("igamma", inputs[0], inputs[1])};
+    });
+
+    table.register_kernel(OpId::Igammac, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchBinaryOp("igammac", inputs[0], inputs[1])};
+    });
+
+    // ========================================================================
+    // New Ternary Math Operations
+    // ========================================================================
+    table.register_kernel(OpId::Addcmul, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float value = static_cast<float>(attrs.get_float(AttrKey::Alpha, 1.0));
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchAddcmul(inputs[0], inputs[1], inputs[2], value)};
+    });
+
+    table.register_kernel(OpId::Addcdiv, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float value = static_cast<float>(attrs.get_float(AttrKey::Alpha, 1.0));
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchAddcdiv(inputs[0], inputs[1], inputs[2], value)};
     });
 
     // ========================================================================
@@ -1821,7 +1888,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     // ========================================================================
-    // RepeatInterleave (CPU fallback)
+    // RepeatInterleave (native Vulkan shader)
     // ========================================================================
     table.register_single_output_kernel(OpId::RepeatInterleave, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t dim = attrs.get_int(AttrKey::Dim, 0);
@@ -1991,6 +2058,13 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::LinalgEig, [](std::span<const Tensor> inputs, const OpAttributes&)
         -> std::vector<Tensor> {
         return get_vulkan_backend()->dispatchLinalgEig(inputs[0]);
+    });
+    // Triangular solve — CPU fallback (TODO: native Vulkan shader)
+    table.register_kernel(OpId::SolveTriangular, [](std::span<const Tensor> inputs, const OpAttributes& attrs)
+        -> std::vector<Tensor> {
+        bool upper = attrs.get_bool(AttrKey::Upper, true);
+        bool unitriangular = attrs.get_bool(AttrKey::UnitTriangular, false);
+        return {get_vulkan_backend()->dispatchLinalgSolveTriangular(inputs[0], inputs[1], upper, unitriangular)};
     });
 
     // Flash Attention — composed from existing matmul + softmax shaders.
@@ -2563,28 +2637,146 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         });
 
     // =========================================================================
-    // Log-Cumulative-Sum-Exp (CPU fallback)
+    // Log-Cumulative-Sum-Exp (native Vulkan shader)
     // =========================================================================
     table.register_single_output_kernel(OpId::Logcumsumexp, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t dim = attrs.get_int(AttrKey::Dim, 0);
-        auto cpu_input = inputs[0].to(Device::cpu());
-        auto cpu_result = tenzor::logcumsumexp(cpu_input, dim);
-        return cpu_result.to(inputs[0].device());
+        return get_vulkan_backend()->dispatchLogcumsumexp(inputs[0], dim);
     });
 
     // =========================================================================
-    // Bincount (CPU fallback)
+    // Bincount (native Vulkan shader)
     // =========================================================================
     table.register_single_output_kernel(OpId::Bincount, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t minlength = attrs.get_int(AttrKey::Minlength, 0);
-        auto cpu_input = inputs[0].to(Device::cpu());
-        std::optional<Tensor> cpu_weights;
+        std::optional<Tensor> weights;
         if (inputs.size() > 1) {
-            cpu_weights = inputs[1].to(Device::cpu());
+            weights = inputs[1];
         }
-        auto cpu_result = tenzor::bincount(cpu_input, cpu_weights, minlength);
-        return cpu_result.to(inputs[0].device());
+        return get_vulkan_backend()->dispatchBincount(inputs[0], weights, minlength);
     });
+
+    // =========================================================================
+    // New Reduction Operations (CumMax, CumMin, Fmax, Fmin, Isin, Kthvalue, etc.)
+    // =========================================================================
+
+    table.register_kernel(OpId::CumMax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        auto [values, indices] = get_vulkan_backend()->dispatchCumMax(inputs[0], dim);
+        return std::vector<Tensor>{values, indices};
+    });
+
+    table.register_kernel(OpId::CumMin, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        auto [values, indices] = get_vulkan_backend()->dispatchCumMin(inputs[0], dim);
+        return std::vector<Tensor>{values, indices};
+    });
+
+    table.register_single_output_kernel(OpId::Fmax,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return get_vulkan_backend()->dispatchFmax(inputs[0], inputs[1]);
+        });
+
+    table.register_single_output_kernel(OpId::Fmin,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return get_vulkan_backend()->dispatchFmin(inputs[0], inputs[1]);
+        });
+
+    table.register_single_output_kernel(OpId::Isin,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return get_vulkan_backend()->dispatchIsin(inputs[0], inputs[1]);
+        });
+
+    table.register_kernel(OpId::Kthvalue, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t k = attrs.get_int(AttrKey::K, 1);
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        auto [values, indices] = get_vulkan_backend()->dispatchKthvalue(inputs[0], k, dim, keepdim);
+        return std::vector<Tensor>{values, indices};
+    });
+
+    table.register_single_output_kernel(OpId::Quantile,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double q = attrs.get_float(AttrKey::Alpha, 0.5);
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return get_vulkan_backend()->dispatchQuantile(inputs[0], q, dim, keepdim);
+        });
+
+    table.register_single_output_kernel(OpId::Nanquantile,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double q = attrs.get_float(AttrKey::Alpha, 0.5);
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return get_vulkan_backend()->dispatchNanquantile(inputs[0], q, dim, keepdim);
+        });
+
+    table.register_single_output_kernel(OpId::Nanmedian,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            return get_vulkan_backend()->dispatchNanmedian(inputs[0], dim);
+        });
+
+    table.register_single_output_kernel(OpId::Histc,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t bins = attrs.get_int(AttrKey::N, 100);
+            double min_val = attrs.get_float(AttrKey::Alpha, 0.0);
+            double max_val = attrs.get_float(AttrKey::Beta, 0.0);
+            return get_vulkan_backend()->dispatchHistc(inputs[0], bins, min_val, max_val);
+        });
+
+    table.register_kernel(OpId::UniqueConsecutive, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        bool return_inverse = attrs.get_bool(AttrKey::Keepdim, false);
+        auto [unique_vals, inverse, counts] = get_vulkan_backend()->dispatchUniqueConsecutive(
+            inputs[0], return_inverse);
+        return std::vector<Tensor>{unique_vals, inverse, counts};
+    });
+
+    // =========================================================================
+    // TakeAlongDim — dispatch as Gather (semantically equivalent for contiguous tensors)
+    // =========================================================================
+    table.register_single_output_kernel(OpId::TakeAlongDim, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        return get_vulkan_backend()->dispatchGather(inputs[0], dim, inputs[1]);
+    });
+
+    // =========================================================================
+    // MaskedScatter — CPU fallback
+    // TODO: Implement native Vulkan compute shader for masked_scatter
+    // =========================================================================
+    table.register_single_output_kernel(OpId::MaskedScatter, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto device = inputs[0].device();
+        auto result = tenzor::masked_scatter(
+            inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu()), inputs[2].to(Device::cpu()));
+        return result.to(device);
+    });
+
+    // =========================================================================
+    // TrilIndices — CPU generation + transfer
+    // TODO: Implement native Vulkan compute shader for tril_indices
+    // =========================================================================
+    table.register_single_output_kernel(OpId::TrilIndices, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t row = attrs.get_int(AttrKey::M, 0);
+        int64_t col = attrs.get_int(AttrKey::N, 0);
+        int64_t offset = attrs.get_int(AttrKey::Diagonal, 0);
+        auto result = tenzor::tril_indices(row, col, offset, DType::Int64, Device::cpu());
+        return result.to(Device::vulkan(0));
+    });
+
+    // =========================================================================
+    // TriuIndices — CPU generation + transfer
+    // TODO: Implement native Vulkan compute shader for triu_indices
+    // =========================================================================
+    table.register_single_output_kernel(OpId::TriuIndices, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t row = attrs.get_int(AttrKey::M, 0);
+        int64_t col = attrs.get_int(AttrKey::N, 0);
+        int64_t offset = attrs.get_int(AttrKey::Diagonal, 0);
+        auto result = tenzor::triu_indices(row, col, offset, DType::Int64, Device::cpu());
+        return result.to(Device::vulkan(0));
+    });
+
+    // Phase 9: Fractional Max Pool + Max Unpool — CPU-only for now
+    // TODO: Add native Vulkan compute shaders for fractional_max_pool and max_unpool
 
     std::cout << "Vulkan dispatch table initialized with O(1) lookup" << std::endl;
 }

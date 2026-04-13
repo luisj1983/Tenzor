@@ -1,0 +1,35 @@
+#version 450
+
+// RepeatInterleave (scalar repeats) along a dimension
+// Each output element computes its source index via integer division
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint total_elements;  // Total number of output elements
+    uint repeats;         // Number of repeats per element along dim
+    uint dim_size;        // Size of the dimension being repeated (input)
+    uint inner_size;      // Product of dimensions after the repeat dim
+} params;
+
+void main() {
+    uint out_idx = gl_GlobalInvocationID.x;
+    if (out_idx >= params.total_elements) return;
+
+    // Decompose output index: out_idx = outer * (dim_size * repeats * inner) + dim_rep * inner + inner_idx
+    uint inner_idx = out_idx % params.inner_size;
+    uint dim_rep_idx = (out_idx / params.inner_size) % (params.dim_size * params.repeats);
+    uint outer_idx = out_idx / (params.inner_size * params.dim_size * params.repeats);
+
+    // Map repeated dim index back to source dim index via integer division
+    uint src_dim_idx = dim_rep_idx / params.repeats;
+
+    // Compute source linear index
+    uint src_idx = outer_idx * (params.dim_size * params.inner_size) +
+                   src_dim_idx * params.inner_size +
+                   inner_idx;
+
+    output_data[out_idx] = input_data[src_idx];
+}

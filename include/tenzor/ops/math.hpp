@@ -572,6 +572,54 @@ auto allclose(const Tensor& a, const Tensor& b, double rtol = 1e-5, double atol 
 
 /// @}
 
+// =========================================================================
+// New element-wise math operations for PyTorch parity
+// =========================================================================
+
+/// Reciprocal square root: 1/sqrt(x)
+auto rsqrt(const Tensor& input) -> Tensor;
+
+/// Element-wise square: x*x
+auto square(const Tensor& input) -> Tensor;
+
+/// Inverse hyperbolic sine
+auto asinh(const Tensor& input) -> Tensor;
+
+/// Inverse hyperbolic cosine
+auto acosh(const Tensor& input) -> Tensor;
+
+/// Inverse hyperbolic tangent
+auto atanh(const Tensor& input) -> Tensor;
+
+/// Overflow-safe hypotenuse: sqrt(x*x + y*y)
+auto hypot(const Tensor& x, const Tensor& y) -> Tensor;
+
+/// Copy sign of second tensor to magnitude of first
+auto copysign(const Tensor& magnitude, const Tensor& sign) -> Tensor;
+
+/// Next representable floating-point value from 'from' toward 'to'
+auto nextafter(const Tensor& from, const Tensor& to) -> Tensor;
+
+/// Greatest common divisor (integer tensors only)
+auto gcd(const Tensor& a, const Tensor& b) -> Tensor;
+
+/// Least common multiple (integer tensors only)
+auto lcm(const Tensor& a, const Tensor& b) -> Tensor;
+
+/// Fused add-multiply: input + value * tensor1 * tensor2
+auto addcmul(const Tensor& input, const Tensor& tensor1, const Tensor& tensor2,
+             double value = 1.0) -> Tensor;
+
+/// Fused add-divide: input + value * tensor1 / tensor2
+auto addcdiv(const Tensor& input, const Tensor& tensor1, const Tensor& tensor2,
+             double value = 1.0) -> Tensor;
+
+/// Lower regularized incomplete gamma function
+auto igamma(const Tensor& a, const Tensor& x) -> Tensor;
+
+/// Upper regularized incomplete gamma function (1 - igamma)
+auto igammac(const Tensor& a, const Tensor& x) -> Tensor;
+
 /** @} */ // end of tensor_math group
 
 } // namespace tenzor

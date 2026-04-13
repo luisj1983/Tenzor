@@ -1,0 +1,72 @@
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
+
+// Cast Float32 to FP8 E4M3 (1 sign, 4 exponent, 3 mantissa, bias=7)
+// E4M3 has no infinity; max exponent + non-zero mantissa = NaN
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuffer {
+    float data[];
+} input_buf;
+
+layout(set = 0, binding = 1) writeonly buffer OutputBuffer {
+    uint8_t data[];
+} output_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.num_elements) return;
+
+    float f = input_buf.data[idx];
+    uint f_bits = floatBitsToUint(f);
+
+    uint sign = (f_bits >> 31) & 0x1u;
+    uint exp = (f_bits >> 23) & 0xFFu;
+    uint mantissa = f_bits & 0x7FFFFFu;
+
+    uint h_sign = sign;
+    uint h_exp;
+    uint h_mantissa;
+
+    if (exp == 0xFFu) {
+        // Float32 Inf/NaN -> E4M3 NaN
+        h_exp = 0xFu;
+        h_mantissa = 0x7u;
+    } else if (exp == 0u) {
+        // Float32 zero/denorm -> E4M3 zero
+        h_exp = 0u;
+        h_mantissa = 0u;
+    } else {
+        // float32 bias=127, e4m3 bias=7
+        int new_exp = int(exp) - 127 + 7;
+
+        if (new_exp >= 15) {
+            // Overflow -> max finite value (E4M3 has no infinity)
+            // exp=15, mantissa=0 is valid number (448), exp=15 mantissa=7 is NaN
+            // Clamp to exp=14, mantissa=7 = largest non-NaN value with exp<15
+            // Or exp=15, mantissa=0 = 448 (valid). Use exp=15, mantissa=0 for max.
+            h_exp = 0xFu;
+            h_mantissa = 0u;
+        } else if (new_exp <= 0) {
+            // Denormalized or underflow
+            if (new_exp >= -3) {
+                uint m = (mantissa | 0x800000u) >> uint(1 - new_exp);
+                h_mantissa = (m >> 20) & 0x7u;
+                h_exp = 0u;
+            } else {
+                h_exp = 0u;
+                h_mantissa = 0u;
+            }
+        } else {
+            h_exp = uint(new_exp);
+            h_mantissa = (mantissa >> 20) & 0x7u;
+        }
+    }
+
+    output_buf.data[idx] = int8_t(int((h_sign << 7) | (h_exp << 3) | h_mantissa));
+}

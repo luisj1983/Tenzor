@@ -8,6 +8,7 @@
 #include "tenzor/core/shape.hpp"
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/backend/op_attributes.hpp"
+#include "tenzor/ops/creation.hpp"
 #include "simd_fast_math.hpp"
 #include <cstring>
 #include <limits>
@@ -1320,6 +1321,184 @@ auto bincount_kernel(const Tensor& input, const Tensor* weights, int64_t minleng
             }
         }
     }
+
+    return output;
+}
+
+// =============================================================================
+// TakeAlongDim kernel
+// =============================================================================
+
+auto take_along_dim_kernel(const Tensor& input, const Tensor& indices, int64_t dim) -> Tensor {
+    auto in_shape = input.shape();
+    auto idx_shape = indices.shape();
+    int64_t ndim = in_shape.size();
+
+    // Normalize dim
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("take_along_dim: dim out of range");
+    }
+
+    // Output has same shape as indices
+    Tensor output(std::vector<int64_t>(idx_shape.begin(), idx_shape.end()),
+                  input.dtype(), input.device());
+
+    int64_t numel = indices.numel();
+    if (numel == 0) return output;
+
+    // Compute outer_size (product of dims before dim), dim_size, inner_size (product of dims after dim)
+    int64_t outer_size = 1;
+    for (int64_t d = 0; d < dim; ++d) outer_size *= idx_shape[d];
+    int64_t idx_dim_size = idx_shape[dim];
+    int64_t in_dim_size = in_shape[dim];
+    int64_t inner_size = 1;
+    for (int64_t d = dim + 1; d < ndim; ++d) inner_size *= idx_shape[d];
+
+    const int64_t* idx_ptr = indices.data<int64_t>();
+
+    auto copy_elements = [&](auto* in_ptr, auto* out_ptr) {
+        #pragma omp parallel for if(numel > 65536)
+        for (int64_t i = 0; i < numel; ++i) {
+            int64_t outer = i / (idx_dim_size * inner_size);
+            int64_t rem = i % (idx_dim_size * inner_size);
+            int64_t inner = rem % inner_size;
+
+            int64_t src_idx = idx_ptr[i];
+            if (src_idx < 0) src_idx += in_dim_size;
+
+            int64_t in_offset = outer * (in_dim_size * inner_size) + src_idx * inner_size + inner;
+            out_ptr[i] = in_ptr[in_offset];
+        }
+    };
+
+    switch (input.dtype()) {
+        case DType::Float32: copy_elements(input.data<float>(), output.data<float>()); break;
+        case DType::Float64: copy_elements(input.data<double>(), output.data<double>()); break;
+        case DType::Int32:   copy_elements(input.data<int32_t>(), output.data<int32_t>()); break;
+        case DType::Int64:   copy_elements(input.data<int64_t>(), output.data<int64_t>()); break;
+        case DType::Int16:   copy_elements(input.data<int16_t>(), output.data<int16_t>()); break;
+        case DType::Int8:    copy_elements(input.data<int8_t>(), output.data<int8_t>()); break;
+        case DType::UInt8:   copy_elements(input.data<uint8_t>(), output.data<uint8_t>()); break;
+        case DType::Bool:    copy_elements(input.data<bool>(), output.data<bool>()); break;
+        default:
+            // Float16/BFloat16: use byte-level copy
+            {
+                auto elem_size = input.dtype_size();
+                const uint8_t* in_bytes = static_cast<const uint8_t*>(input.data_ptr());
+                uint8_t* out_bytes = static_cast<uint8_t*>(output.data_ptr());
+                for (int64_t i = 0; i < numel; ++i) {
+                    int64_t outer = i / (idx_dim_size * inner_size);
+                    int64_t rem = i % (idx_dim_size * inner_size);
+                    int64_t inner = rem % inner_size;
+                    int64_t src_idx = idx_ptr[i];
+                    if (src_idx < 0) src_idx += in_dim_size;
+                    int64_t in_offset = outer * (in_dim_size * inner_size) + src_idx * inner_size + inner;
+                    std::memcpy(out_bytes + i * elem_size, in_bytes + in_offset * elem_size, elem_size);
+                }
+            }
+            break;
+    }
+
+    return output;
+}
+
+// =============================================================================
+// MaskedScatter kernel
+// =============================================================================
+
+auto masked_scatter_kernel(const Tensor& input, const Tensor& mask, const Tensor& source) -> Tensor {
+    Tensor output = input.clone();
+    int64_t numel = input.numel();
+    const bool* mask_ptr = mask.data<bool>();
+
+    auto scatter_values = [&](auto* out_ptr, const auto* src_ptr, int64_t src_numel) {
+        int64_t src_idx = 0;
+        for (int64_t i = 0; i < numel; ++i) {
+            if (mask_ptr[i]) {
+                if (src_idx >= src_numel) {
+                    throw std::runtime_error("masked_scatter: source has fewer elements than mask true count");
+                }
+                out_ptr[i] = src_ptr[src_idx++];
+            }
+        }
+    };
+
+    switch (input.dtype()) {
+        case DType::Float32: scatter_values(output.data<float>(), source.data<float>(), source.numel()); break;
+        case DType::Float64: scatter_values(output.data<double>(), source.data<double>(), source.numel()); break;
+        case DType::Int32:   scatter_values(output.data<int32_t>(), source.data<int32_t>(), source.numel()); break;
+        case DType::Int64:   scatter_values(output.data<int64_t>(), source.data<int64_t>(), source.numel()); break;
+        case DType::Int16:   scatter_values(output.data<int16_t>(), source.data<int16_t>(), source.numel()); break;
+        case DType::Int8:    scatter_values(output.data<int8_t>(), source.data<int8_t>(), source.numel()); break;
+        case DType::UInt8:   scatter_values(output.data<uint8_t>(), source.data<uint8_t>(), source.numel()); break;
+        default:
+            throw std::runtime_error("masked_scatter: unsupported dtype");
+    }
+
+    return output;
+}
+
+// =============================================================================
+// TrilIndices kernel
+// =============================================================================
+
+auto tril_indices_kernel(int64_t row, int64_t col, int64_t offset) -> Tensor {
+    // Count lower-triangular elements
+    std::vector<int64_t> row_indices;
+    std::vector<int64_t> col_indices;
+    row_indices.reserve(row * col);
+    col_indices.reserve(row * col);
+
+    for (int64_t r = 0; r < row; ++r) {
+        int64_t max_c = std::min(col, r + offset + 1);
+        for (int64_t c = 0; c < max_c; ++c) {
+            row_indices.push_back(r);
+            col_indices.push_back(c);
+        }
+    }
+
+    int64_t n = static_cast<int64_t>(row_indices.size());
+    if (n == 0) {
+        return tenzor::empty({2, 0}, DType::Int64, Device::cpu());
+    }
+
+    // Build (2, N) output
+    Tensor output({2, n}, DType::Int64, Device::cpu());
+    int64_t* out = output.data<int64_t>();
+    std::memcpy(out, row_indices.data(), n * sizeof(int64_t));
+    std::memcpy(out + n, col_indices.data(), n * sizeof(int64_t));
+
+    return output;
+}
+
+// =============================================================================
+// TriuIndices kernel
+// =============================================================================
+
+auto triu_indices_kernel(int64_t row, int64_t col, int64_t offset) -> Tensor {
+    std::vector<int64_t> row_indices;
+    std::vector<int64_t> col_indices;
+    row_indices.reserve(row * col);
+    col_indices.reserve(row * col);
+
+    for (int64_t r = 0; r < row; ++r) {
+        int64_t min_c = std::max(static_cast<int64_t>(0), r + offset);
+        for (int64_t c = min_c; c < col; ++c) {
+            row_indices.push_back(r);
+            col_indices.push_back(c);
+        }
+    }
+
+    int64_t n = static_cast<int64_t>(row_indices.size());
+    if (n == 0) {
+        return tenzor::empty({2, 0}, DType::Int64, Device::cpu());
+    }
+
+    Tensor output({2, n}, DType::Int64, Device::cpu());
+    int64_t* out = output.data<int64_t>();
+    std::memcpy(out, row_indices.data(), n * sizeof(int64_t));
+    std::memcpy(out + n, col_indices.data(), n * sizeof(int64_t));
 
     return output;
 }

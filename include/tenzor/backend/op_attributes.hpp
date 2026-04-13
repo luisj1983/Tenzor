@@ -215,6 +215,7 @@ enum class AttrKey : uint16_t {
     // Linear algebra
     FullMatrices,      // SVD: compute full U/Vt
     Upper,             // Cholesky: return upper triangular
+    UnitTriangular,    // SolveTriangular: assume unit diagonal
 
     // Random generation bounds
     Low,               // Randint lower bound (inclusive)
@@ -263,6 +264,10 @@ enum class AttrKey : uint16_t {
 
     // Bincount
     Minlength,         // bincount: minimum output size
+
+    // Phase 9 pooling
+    NormType,          // lp_pool: norm exponent p
+    RandomSamples,     // fractional_max_pool: random samples tensor flag
 
     // Sentinel
     _Count
