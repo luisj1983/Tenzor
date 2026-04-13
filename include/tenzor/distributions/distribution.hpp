@@ -854,6 +854,372 @@ private:
 };
 
 // ============================================================================
+// Binomial Distribution
+// ============================================================================
+
+/**
+ * @brief Binomial(total_count, probs) distribution.
+ *
+ * The number of successes in `total_count` independent Bernoulli trials,
+ * each with success probability `probs`.
+ *
+ * Sampling is implemented by drawing `total_count` Bernoulli trials and
+ * summing. For large total_count the Normal approximation could be used,
+ * but the Bernoulli-sum approach is correct for all parameter values.
+ *
+ * Returns Float32 tensor of counts.
+ */
+class Binomial : public Distribution {
+public:
+    Binomial(int64_t total_count, Tensor probs)
+        : total_count_(total_count), probs_(std::move(probs)) {
+        if (total_count < 0) {
+            throw std::runtime_error("Binomial: total_count must be non-negative");
+        }
+    }
+
+    auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        auto shape = sample_shape.empty()
+            ? std::vector<int64_t>(probs_.shape().begin(), probs_.shape().end())
+            : sample_shape;
+
+        // Sum of total_count independent Bernoulli(probs) trials
+        auto result = zeros(shape, probs_.dtype(), probs_.device());
+        for (int64_t i = 0; i < total_count_; ++i) {
+            result = result + bernoulli(probs_);
+        }
+        return result;
+    }
+
+    auto rsample(std::vector<int64_t> /*sample_shape*/ = {}) -> Tensor override {
+        throw std::runtime_error(
+            "Binomial is not reparameterizable; use sample() instead");
+    }
+
+    auto log_prob(const Tensor& value) -> Tensor override {
+        // log P(k; n, p) = lgamma(n+1) - lgamma(k+1) - lgamma(n-k+1)
+        //                + k*log(p) + (n-k)*log(1-p)
+        auto eps = 1e-7f;
+        auto p = tenzor::clamp(probs_, eps, 1.0f - eps);
+        auto n = full(std::vector<int64_t>(value.shape().begin(), value.shape().end()),
+                      static_cast<float>(total_count_),
+                      value.dtype(), value.device());
+        auto val_f = value.to(probs_.dtype());
+
+        auto log_binom = tenzor::lgamma(n + 1.0f)
+                       - tenzor::lgamma(val_f + 1.0f)
+                       - tenzor::lgamma(n - val_f + 1.0f);
+        return log_binom + val_f * tenzor::log(p)
+             + (n - val_f) * tenzor::log(1.0f - p);
+    }
+
+    auto entropy() -> Tensor override {
+        // No simple closed form; use the 0.5 * log(2*pi*e*n*p*(1-p)) approximation
+        auto eps = 1e-7f;
+        auto p = tenzor::clamp(probs_, eps, 1.0f - eps);
+        auto n = full(std::vector<int64_t>(probs_.shape().begin(), probs_.shape().end()),
+                      static_cast<float>(total_count_),
+                      probs_.dtype(), probs_.device());
+        return 0.5f * tenzor::log(n * p * (1.0f - p) * 17.0794684f);  // 2*pi*e ~ 17.079
+    }
+
+    auto mean() -> Tensor override {
+        return probs_ * static_cast<float>(total_count_);
+    }
+
+    auto variance() -> Tensor override {
+        return probs_ * (1.0f - probs_) * static_cast<float>(total_count_);
+    }
+
+private:
+    int64_t total_count_;
+    Tensor probs_;
+};
+
+// ============================================================================
+// LogNormal Distribution
+// ============================================================================
+
+/**
+ * @brief LogNormal(loc, scale) distribution.
+ *
+ * If X ~ Normal(loc, scale), then exp(X) ~ LogNormal(loc, scale).
+ * Composes directly from Normal distribution.
+ *
+ * PDF(x) = 1/(x * scale * sqrt(2*pi)) * exp(-(log(x) - loc)^2 / (2*scale^2))
+ */
+class LogNormal : public Distribution {
+public:
+    LogNormal(Tensor loc, Tensor scale)
+        : loc_(std::move(loc)), scale_(std::move(scale)),
+          normal_(loc_, scale_) {}
+
+    auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        return tenzor::exp(normal_.sample(std::move(sample_shape)));
+    }
+
+    auto rsample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        return tenzor::exp(normal_.rsample(std::move(sample_shape)));
+    }
+
+    auto log_prob(const Tensor& value) -> Tensor override {
+        // log p(x) = Normal.log_prob(log(x)) - log(x)
+        auto log_val = tenzor::log(value);
+        return normal_.log_prob(log_val) - log_val;
+    }
+
+    auto entropy() -> Tensor override {
+        // H = loc + 0.5 + log(scale * sqrt(2*pi*e))
+        // = loc + 0.5 + log(scale) + 0.5*log(2*pi*e)
+        return loc_ + 0.5f + tenzor::log(scale_) + 0.9189385332f;
+    }
+
+    auto mean() -> Tensor override {
+        // E[X] = exp(loc + scale^2/2)
+        return tenzor::exp(loc_ + scale_ * scale_ * 0.5f);
+    }
+
+    auto variance() -> Tensor override {
+        // Var[X] = (exp(scale^2) - 1) * exp(2*loc + scale^2)
+        auto s2 = scale_ * scale_;
+        return (tenzor::exp(s2) - 1.0f) * tenzor::exp(2.0f * loc_ + s2);
+    }
+
+private:
+    Tensor loc_;
+    Tensor scale_;
+    Normal normal_;
+};
+
+// ============================================================================
+// Cauchy Distribution
+// ============================================================================
+
+/**
+ * @brief Cauchy(loc, scale) distribution.
+ *
+ * Heavy-tailed distribution with no defined mean or variance.
+ * Sampled via inverse CDF: loc + scale * tan(pi * (U - 0.5))
+ * where U ~ Uniform(0, 1).
+ *
+ * PDF(x) = 1 / (pi * scale * (1 + ((x - loc)/scale)^2))
+ */
+class Cauchy : public Distribution {
+public:
+    Cauchy(Tensor loc, Tensor scale)
+        : loc_(std::move(loc)), scale_(std::move(scale)) {}
+
+    auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        auto shape = sample_shape.empty()
+            ? std::vector<int64_t>(loc_.shape().begin(), loc_.shape().end())
+            : sample_shape;
+        auto u = rand(shape, loc_.dtype(), loc_.device());
+        // Clamp away from 0 and 1 to avoid tan(+-pi/2)
+        constexpr float kEps = 1e-7f;
+        auto u_clamped = tenzor::clamp(u, kEps, 1.0f - kEps);
+        // x = loc + scale * tan(pi * (u - 0.5))
+        auto pi_val = static_cast<float>(M_PI);
+        return loc_ + scale_ * tenzor::tan((u_clamped - 0.5f) * pi_val);
+    }
+
+    auto rsample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        // Cauchy is reparameterizable via the inverse CDF transform.
+        return sample(std::move(sample_shape));
+    }
+
+    auto log_prob(const Tensor& value) -> Tensor override {
+        // log p(x) = -log(pi * scale) - log(1 + ((x - loc)/scale)^2)
+        auto z = (value - loc_) / scale_;
+        auto log_pi_scale = tenzor::log(scale_ * static_cast<float>(M_PI));
+        return tenzor::neg(log_pi_scale) - tenzor::log(1.0f + z * z);
+    }
+
+    auto entropy() -> Tensor override {
+        // H = log(4 * pi * scale)
+        return tenzor::log(scale_ * static_cast<float>(4.0 * M_PI));
+    }
+
+    auto mean() -> Tensor override {
+        throw std::runtime_error("Cauchy distribution has no defined mean");
+    }
+
+    auto variance() -> Tensor override {
+        throw std::runtime_error("Cauchy distribution has no defined variance");
+    }
+
+private:
+    Tensor loc_;
+    Tensor scale_;
+};
+
+// ============================================================================
+// Chi2 (Chi-Squared) Distribution
+// ============================================================================
+
+/**
+ * @brief Chi-squared distribution with `df` degrees of freedom.
+ *
+ * Chi2(df) = Gamma(df/2, rate=0.5). Composes directly from Gamma.
+ *
+ * PDF(x) = x^(df/2 - 1) * exp(-x/2) / (2^(df/2) * Gamma(df/2))
+ */
+class Chi2 : public Distribution {
+public:
+    explicit Chi2(Tensor df)
+        : df_(std::move(df)),
+          gamma_(df_ * 0.5f,
+                 full(std::vector<int64_t>(df_.shape().begin(), df_.shape().end()),
+                      0.5f, df_.dtype(), df_.device())) {}
+
+    auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        return gamma_.sample(std::move(sample_shape));
+    }
+
+    auto rsample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        return gamma_.rsample(std::move(sample_shape));
+    }
+
+    auto log_prob(const Tensor& value) -> Tensor override {
+        return gamma_.log_prob(value);
+    }
+
+    auto mean() -> Tensor override { return df_; }
+
+    auto variance() -> Tensor override { return df_ * 2.0f; }
+
+private:
+    Tensor df_;
+    Gamma gamma_;
+};
+
+// ============================================================================
+// Geometric Distribution
+// ============================================================================
+
+/**
+ * @brief Geometric(probs) distribution.
+ *
+ * Models the number of trials until the first success in a sequence of
+ * independent Bernoulli trials. Uses 1-indexed convention (minimum value 1).
+ *
+ * Sampled via inverse CDF: floor(log(U) / log(1 - probs)) + 1
+ * where U ~ Uniform(0, 1).
+ *
+ * P(X = k) = (1 - probs)^(k-1) * probs, for k = 1, 2, 3, ...
+ */
+class Geometric : public Distribution {
+public:
+    explicit Geometric(Tensor probs) : probs_(std::move(probs)) {}
+
+    auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        auto shape = sample_shape.empty()
+            ? std::vector<int64_t>(probs_.shape().begin(), probs_.shape().end())
+            : sample_shape;
+        auto u = rand(shape, probs_.dtype(), probs_.device());
+        // Clamp to avoid log(0)
+        constexpr float kEps = 1e-7f;
+        auto u_clamped = tenzor::clamp(u, kEps, 1.0f);
+        auto probs_clamped = tenzor::clamp(probs_, kEps, 1.0f - kEps);
+        // k = floor(log(u) / log(1 - p)) + 1
+        return tenzor::floor(tenzor::log(u_clamped) / tenzor::log1p(tenzor::neg(probs_clamped))) + 1.0f;
+    }
+
+    auto rsample(std::vector<int64_t> /*sample_shape*/ = {}) -> Tensor override {
+        throw std::runtime_error(
+            "Geometric is not reparameterizable; use sample() instead");
+    }
+
+    auto log_prob(const Tensor& value) -> Tensor override {
+        // log P(k) = (k-1) * log(1-p) + log(p)
+        auto eps = 1e-7f;
+        auto p = tenzor::clamp(probs_, eps, 1.0f - eps);
+        auto val_f = value.to(probs_.dtype());
+        return (val_f - 1.0f) * tenzor::log(1.0f - p) + tenzor::log(p);
+    }
+
+    auto entropy() -> Tensor override {
+        // H = -(1-p)*log(1-p)/p - log(p)
+        auto eps = 1e-7f;
+        auto p = tenzor::clamp(probs_, eps, 1.0f - eps);
+        return tenzor::neg((1.0f - p) * tenzor::log(1.0f - p) / p) - tenzor::log(p);
+    }
+
+    auto mean() -> Tensor override {
+        return tenzor::reciprocal(probs_);
+    }
+
+    auto variance() -> Tensor override {
+        return (1.0f - probs_) / (probs_ * probs_);
+    }
+
+private:
+    Tensor probs_;
+};
+
+// ============================================================================
+// Gumbel Distribution
+// ============================================================================
+
+/**
+ * @brief Gumbel(loc, scale) distribution (Type-I extreme value).
+ *
+ * Used in extreme value theory and as the basis for the Gumbel-Softmax trick.
+ *
+ * Sampled via inverse CDF: loc - scale * log(-log(U))
+ * where U ~ Uniform(0, 1).
+ *
+ * PDF(x) = (1/scale) * exp(-(z + exp(-z))) where z = (x - loc)/scale
+ */
+class Gumbel : public Distribution {
+public:
+    Gumbel(Tensor loc, Tensor scale)
+        : loc_(std::move(loc)), scale_(std::move(scale)) {}
+
+    auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        auto shape = sample_shape.empty()
+            ? std::vector<int64_t>(loc_.shape().begin(), loc_.shape().end())
+            : sample_shape;
+        auto u = rand(shape, loc_.dtype(), loc_.device());
+        // Clamp to avoid log(0) and log(-log(0))
+        constexpr float kEps = 1e-7f;
+        auto u_clamped = tenzor::clamp(u, kEps, 1.0f - kEps);
+        // x = loc - scale * log(-log(u))
+        return loc_ - scale_ * tenzor::log(tenzor::neg(tenzor::log(u_clamped)));
+    }
+
+    auto rsample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        // Gumbel is reparameterizable via the inverse CDF transform.
+        return sample(std::move(sample_shape));
+    }
+
+    auto log_prob(const Tensor& value) -> Tensor override {
+        // log p(x) = -log(scale) - z - exp(-z) where z = (x - loc)/scale
+        auto z = (value - loc_) / scale_;
+        return tenzor::neg(tenzor::log(scale_)) - z - tenzor::exp(tenzor::neg(z));
+    }
+
+    auto entropy() -> Tensor override {
+        // H = log(scale) + 1 + euler_gamma (euler_gamma ~ 0.5772156649)
+        return tenzor::log(scale_) + 1.5772156649f;
+    }
+
+    auto mean() -> Tensor override {
+        // E[X] = loc + scale * euler_gamma
+        return loc_ + scale_ * 0.5772156649f;
+    }
+
+    auto variance() -> Tensor override {
+        // Var[X] = (pi^2 / 6) * scale^2
+        constexpr float pi_sq_over_6 = static_cast<float>(M_PI * M_PI / 6.0);
+        return scale_ * scale_ * pi_sq_over_6;
+    }
+
+private:
+    Tensor loc_;
+    Tensor scale_;
+};
+
+// ============================================================================
 // kl_divergence
 // ============================================================================
 //

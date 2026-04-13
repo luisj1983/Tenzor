@@ -1,0 +1,30 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
+
+// MaskedScatter — scatter source values into positions where mask is true.
+// Step 1 (external): Compute prefix sum of mask to get scatter indices.
+// Step 2 (this shader): For each position where mask[i] is true,
+//         output[i] = source[prefix_sum[i] - 1], else output[i] = input[i].
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input     { float input_data[]; };
+layout(binding = 1) readonly buffer Mask      { uint8_t mask_data[]; };
+layout(binding = 2) readonly buffer Source    { float source_data[]; };
+layout(binding = 3) readonly buffer PrefixSum { uint  prefix_data[]; };
+layout(binding = 4) writeonly buffer Output   { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_elements) return;
+
+    if (mask_data[idx] != uint8_t(0)) {
+        uint src_idx = prefix_data[idx] - 1;
+        output_data[idx] = source_data[src_idx];
+    } else {
+        output_data[idx] = input_data[idx];
+    }
+}

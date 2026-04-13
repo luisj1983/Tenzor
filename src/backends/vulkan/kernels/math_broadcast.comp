@@ -127,6 +127,22 @@ void main() {
             case 3: // div
                 res_bits = floatBitsToUint(val_a / val_b);
                 break;
+            case 42: { // fmax (binary) - NaN-propagating max: fmax(NaN, x) = x
+                float res;
+                if (isnan(val_a)) res = val_b;
+                else if (isnan(val_b)) res = val_a;
+                else res = max(val_a, val_b);
+                res_bits = floatBitsToUint(res);
+                break;
+            }
+            case 43: { // fmin (binary) - NaN-propagating min: fmin(NaN, x) = x
+                float res;
+                if (isnan(val_a)) res = val_b;
+                else if (isnan(val_b)) res = val_a;
+                else res = min(val_a, val_b);
+                res_bits = floatBitsToUint(res);
+                break;
+            }
             default:
                 res_bits = 0u;
                 break;

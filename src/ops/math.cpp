@@ -875,4 +875,100 @@ auto igammac(const Tensor& a, const Tensor& x) -> Tensor {
     return detail::binary_op_promoted<OpId::Igammac>("igammac", a, x);
 }
 
+// =========================================================================
+// Extended math operations (PyTorch parity)
+// =========================================================================
+
+auto deg2rad(const Tensor& input) -> Tensor {
+    // x * pi / 180
+    Tensor scale = full_like(input, 3.14159265358979323846f / 180.0f);
+    return input * scale;
+}
+
+auto rad2deg(const Tensor& input) -> Tensor {
+    // x * 180 / pi
+    Tensor scale = full_like(input, 180.0f / 3.14159265358979323846f);
+    return input * scale;
+}
+
+auto logit(const Tensor& input, double eps) -> Tensor {
+    // logit(x) = log(x / (1-x))
+    // With eps > 0: clamp x to [eps, 1-eps] first
+    Tensor x = input;
+    if (eps > 0) {
+        x = clamp(x, static_cast<float>(eps), static_cast<float>(1.0 - eps));
+    }
+    Tensor one = ones_like(x);
+    return log(x / (one - x));
+}
+
+auto signbit(const Tensor& input) -> Tensor {
+    // Returns true for negative values (including -0.0)
+    Tensor zero = zeros_like(input);
+    return lt(input, zero);
+}
+
+auto float_power(const Tensor& base, const Tensor& exponent) -> Tensor {
+    // Promote to Float64 for accuracy, then use exp(exponent * log(base))
+    auto base_f64 = base.to(DType::Float64);
+    auto exp_f64 = exponent.to(DType::Float64);
+    return exp(exp_f64 * log(abs(base_f64)));
+}
+
+auto xlog1py(const Tensor& x, const Tensor& y) -> Tensor {
+    // x * log1p(y), with 0 * log1p(y) = 0
+    Tensor log1p_y = log1p(y);
+    Tensor result = x * log1p_y;
+    Tensor zero = zeros_like(x);
+    Tensor zero_mask = eq(x, zero);
+    return where(zero_mask, zeros_like(result), result);
+}
+
+auto ldexp(const Tensor& x, const Tensor& n) -> Tensor {
+    // ldexp(x, n) = x * 2^n = x * exp2(n)
+    return x * exp2(n.to(x.dtype()));
+}
+
+auto isreal(const Tensor& input) -> Tensor {
+    // For real dtypes, all elements are real
+    // For complex dtypes, check if imaginary part is zero
+    if (input.dtype() != DType::Complex64 && input.dtype() != DType::Complex128) {
+        return full(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                    1.0f, DType::Bool, input.device());
+    }
+    // Complex: check imag(x) == 0
+    Tensor im = imag(input);
+    return (im == zeros_like(im));
+}
+
+auto isposinf(const Tensor& input) -> Tensor {
+    return logical_and(isinf(input), (input > zeros_like(input)));
+}
+
+auto isneginf(const Tensor& input) -> Tensor {
+    return logical_and(isinf(input), (input < zeros_like(input)));
+}
+
+auto frexp(const Tensor& input) -> std::pair<Tensor, Tensor> {
+    // frexp(x) = (mantissa, exponent) where x = mantissa * 2^exponent
+    // mantissa in [0.5, 1.0), exponent is integer
+    // Implemented via: exponent = floor(log2(|x|)) + 1, mantissa = x / 2^exponent
+    Tensor abs_input = abs(input);
+    // Avoid log2(0) by clamping to tiny value
+    Tensor safe_abs = clamp_min(abs_input, 1e-38f);
+    Tensor log2_val = log2(safe_abs);
+    Tensor exponent_f = floor(log2_val) + ones_like(log2_val);
+    // For zero input, exponent should be 0
+    Tensor is_zero = eq(input, zeros_like(input));
+    exponent_f = where(is_zero, zeros_like(exponent_f), exponent_f);
+
+    Tensor exponent = exponent_f.to(DType::Int32);
+    // mantissa = x * 2^(-exponent)
+    Tensor mantissa = input * exp2(neg(exponent_f));
+    // For zero input, mantissa should be 0
+    mantissa = where(is_zero, zeros_like(mantissa), mantissa);
+
+    return {mantissa, exponent};
+}
+
 } // namespace tenzor

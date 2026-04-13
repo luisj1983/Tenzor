@@ -637,6 +637,27 @@ enum class OpId : uint16_t {
     MaxUnpool3dBackward,
 
     // =========================================================================
+    // NaN-ignoring statistics (Phase: gap fixes)
+    // =========================================================================
+    NanVar,            // NaN-ignoring variance
+    NanStd,            // NaN-ignoring standard deviation
+
+    // =========================================================================
+    // Extended math operations (Phase 5: PyTorch parity)
+    // =========================================================================
+    Deg2Rad,           // degrees to radians
+    Rad2Deg,           // radians to degrees
+    Logit,             // logit function: log(x / (1-x))
+    Signbit,           // test sign bit (returns bool)
+    FloatPower,        // pow with Float64 promotion
+    Xlog1py,           // x * log1p(y), with 0*log1p(y) = 0
+    Ldexp,             // ldexp(x, n) = x * 2^n
+    IsReal,            // test if tensor is real (not complex) — returns bool
+    IsPosInf,          // test for positive infinity — returns bool
+    IsNegInf,          // test for negative infinity — returns bool
+    Frexp,             // decompose into mantissa and exponent
+
+    // =========================================================================
     // Sentinel (MUST BE LAST)
     // =========================================================================
     OP_COUNT

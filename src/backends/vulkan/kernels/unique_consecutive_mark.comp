@@ -1,0 +1,24 @@
+#version 450
+
+// UniqueConsecutive — Step 1: Mark boundaries where adjacent elements differ.
+// Output is a uint8 mask: 1 at positions where value differs from previous, 0 otherwise.
+// Position 0 is always 1 (first element is always unique).
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input   { float input_data[]; };
+layout(binding = 1) writeonly buffer Marks  { uint  marks_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_elements) return;
+
+    if (idx == 0) {
+        marks_data[idx] = 1;
+    } else {
+        marks_data[idx] = (input_data[idx] != input_data[idx - 1]) ? 1u : 0u;
+    }
+}

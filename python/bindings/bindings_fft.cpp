@@ -115,6 +115,42 @@ void register_fft(py::module_& m) {
        py::arg("input"), py::arg("n") = py::none(), py::arg("dim") = -1,
        py::arg("norm") = "backward",
        py::call_guard<py::gil_scoped_release>());
+
+    fft_mod.def("rfft2", [](const tenzor::Tensor& input,
+                             std::optional<std::vector<int64_t>> s,
+                             std::vector<int64_t> dim, const std::string& norm) {
+        return tenzor::fft::rfft2(input, s, dim, norm);
+    }, "2-D real-to-complex FFT",
+       py::arg("input"), py::arg("s") = py::none(),
+       py::arg("dim") = std::vector<int64_t>{-2, -1}, py::arg("norm") = "backward",
+       py::call_guard<py::gil_scoped_release>());
+
+    fft_mod.def("irfft2", [](const tenzor::Tensor& input,
+                              std::optional<std::vector<int64_t>> s,
+                              std::vector<int64_t> dim, const std::string& norm) {
+        return tenzor::fft::irfft2(input, s, dim, norm);
+    }, "2-D complex-to-real inverse FFT",
+       py::arg("input"), py::arg("s") = py::none(),
+       py::arg("dim") = std::vector<int64_t>{-2, -1}, py::arg("norm") = "backward",
+       py::call_guard<py::gil_scoped_release>());
+
+    fft_mod.def("rfftn", [](const tenzor::Tensor& input,
+                             std::optional<std::vector<int64_t>> s,
+                             std::optional<std::vector<int64_t>> dim, const std::string& norm) {
+        return tenzor::fft::rfftn(input, s, dim, norm);
+    }, "N-D real-to-complex FFT",
+       py::arg("input"), py::arg("s") = py::none(), py::arg("dim") = py::none(),
+       py::arg("norm") = "backward",
+       py::call_guard<py::gil_scoped_release>());
+
+    fft_mod.def("irfftn", [](const tenzor::Tensor& input,
+                              std::optional<std::vector<int64_t>> s,
+                              std::optional<std::vector<int64_t>> dim, const std::string& norm) {
+        return tenzor::fft::irfftn(input, s, dim, norm);
+    }, "N-D complex-to-real inverse FFT",
+       py::arg("input"), py::arg("s") = py::none(), py::arg("dim") = py::none(),
+       py::arg("norm") = "backward",
+       py::call_guard<py::gil_scoped_release>());
 }
 
 } // namespace tenzor::python

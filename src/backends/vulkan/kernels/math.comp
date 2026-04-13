@@ -12,7 +12,7 @@ layout(binding = 2) buffer Output { uint result[]; };
 
 layout(push_constant) uniform PushConstants {
     uint n;          // Number of elements
-    uint op;         // Operation: 0=add, 1=sub, 2=mul, 3=div, 4=sqrt, 5=exp, 6=log, 7=neg, 8=abs, 9=pow, 10=sign, 11=floor, 12=ceil, 13=round, 14=trunc, 15=reciprocal, 16=log2, 17=log10, 18=log1p, 19=exp2, 20=expm1, 21=erf, 22=erfc, 23=atan2, 24=fmod, 25=remainder, 26=minimum, 27=maximum, 28=rsqrt, 29=square, 30=asinh, 31=acosh, 32=atanh, 33=hypot, 34=copysign, 35=nextafter, 36=gcd, 37=lcm, 38=igamma, 39=igammac, 40=addcmul, 41=addcdiv
+    uint op;         // Operation: 0=add, 1=sub, 2=mul, 3=div, 4=sqrt, 5=exp, 6=log, 7=neg, 8=abs, 9=pow, 10=sign, 11=floor, 12=ceil, 13=round, 14=trunc, 15=reciprocal, 16=log2, 17=log10, 18=log1p, 19=exp2, 20=expm1, 21=erf, 22=erfc, 23=atan2, 24=fmod, 25=remainder, 26=minimum, 27=maximum, 28=rsqrt, 29=square, 30=asinh, 31=acosh, 32=atanh, 33=hypot, 34=copysign, 35=nextafter, 36=gcd, 37=lcm, 38=igamma, 39=igammac, 40=addcmul, 41=addcdiv, 42=fmax, 43=fmin
     float param;     // Parameter for operations like pow (exponent), addcmul/addcdiv (value)
 } params;
 
@@ -291,6 +291,22 @@ void main() {
             float res = exp(-x + a * log(x) - lg) * sum;
             res = clamp(res, 0.0, 1.0);
             result[idx] = floatBitsToUint(1.0 - res);
+            break;
+        }
+        case 42: { // fmax (binary) - NaN-propagating max: fmax(NaN, x) = x
+            float res;
+            if (isnan(val_a)) res = val_b;
+            else if (isnan(val_b)) res = val_a;
+            else res = max(val_a, val_b);
+            result[idx] = floatBitsToUint(res);
+            break;
+        }
+        case 43: { // fmin (binary) - NaN-propagating min: fmin(NaN, x) = x
+            float res;
+            if (isnan(val_a)) res = val_b;
+            else if (isnan(val_b)) res = val_a;
+            else res = min(val_a, val_b);
+            result[idx] = floatBitsToUint(res);
             break;
         }
     }

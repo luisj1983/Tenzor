@@ -76,6 +76,47 @@ auto ifft2(const Tensor& input,
            const std::string& norm = "backward") -> Tensor;
 
 /**
+ * @brief 2-D real-to-complex FFT.
+ *
+ * Applies rfft along the last dimension, then fft along the second-to-last.
+ * Output has shape [..., s[-2], s[-1]/2+1] along the transform dimensions.
+ */
+auto rfft2(const Tensor& input,
+           std::optional<std::vector<int64_t>> s = std::nullopt,
+           std::vector<int64_t> dim = {-2, -1},
+           const std::string& norm = "backward") -> Tensor;
+
+/**
+ * @brief 2-D complex-to-real inverse FFT.
+ *
+ * Inverse of rfft2. Input is the half-spectrum. Output is real.
+ */
+auto irfft2(const Tensor& input,
+            std::optional<std::vector<int64_t>> s = std::nullopt,
+            std::vector<int64_t> dim = {-2, -1},
+            const std::string& norm = "backward") -> Tensor;
+
+/**
+ * @brief N-D real-to-complex FFT.
+ *
+ * Applies rfft along the last dimension, then fft along the remaining dimensions.
+ */
+auto rfftn(const Tensor& input,
+           std::optional<std::vector<int64_t>> s = std::nullopt,
+           std::optional<std::vector<int64_t>> dim = std::nullopt,
+           const std::string& norm = "backward") -> Tensor;
+
+/**
+ * @brief N-D complex-to-real inverse FFT.
+ *
+ * Inverse of rfftn. Input is the half-spectrum. Output is real.
+ */
+auto irfftn(const Tensor& input,
+            std::optional<std::vector<int64_t>> s = std::nullopt,
+            std::optional<std::vector<int64_t>> dim = std::nullopt,
+            const std::string& norm = "backward") -> Tensor;
+
+/**
  * @brief N-D complex-to-complex FFT.
  */
 auto fftn(const Tensor& input,

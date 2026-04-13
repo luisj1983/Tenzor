@@ -2741,14 +2741,21 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     // =========================================================================
-    // MaskedScatter — CPU fallback
-    // TODO: Implement native Vulkan compute shader for masked_scatter
+    // MaskedScatter — native Vulkan via CumSum prefix on mask + scatter shader
     // =========================================================================
     table.register_single_output_kernel(OpId::MaskedScatter, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        auto device = inputs[0].device();
-        auto result = tenzor::masked_scatter(
-            inputs[0].to(Device::cpu()), inputs[1].to(Device::cpu()), inputs[2].to(Device::cpu()));
-        return result.to(device);
+        auto input = inputs[0];
+        auto mask = inputs[1];
+        auto source = inputs[2];
+
+        // Convert mask to float for CumSum, compute prefix sum
+        Tensor mask_f32 = mask.to(DType::Float32);
+        Tensor prefix = tenzor::cumsum(mask_f32, 0);
+        Tensor prefix_i32 = prefix.to(DType::Int32);
+
+        // Use dispatchMaskedScatter with the prefix sum
+        auto* backend = get_vulkan_backend();
+        return backend->dispatchMaskedScatterWithPrefix(input, mask, source, prefix_i32);
     });
 
     // =========================================================================
@@ -2775,8 +2782,66 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return result.to(Device::vulkan(0));
     });
 
-    // Phase 9: Fractional Max Pool + Max Unpool — CPU-only for now
-    // TODO: Add native Vulkan compute shaders for fractional_max_pool and max_unpool
+    // =========================================================================
+    // Phase 9: Fractional Max Pool + Max Unpool — native Vulkan compute shaders
+    // Shaders: fractional_maxpool2d.comp, fractional_maxpool2d_backward.comp,
+    //          fractional_maxpool3d.comp, fractional_maxpool3d_backward.comp,
+    //          max_unpool2d.comp, max_unpool2d_backward.comp,
+    //          max_unpool3d.comp, max_unpool3d_backward.comp
+    // Dispatch is delegated to VulkanBackend dispatch methods.
+    // =========================================================================
+
+    table.register_kernel(OpId::FractionalMaxPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        const Tensor* samples = (inputs.size() > 1) ? &inputs[1] : nullptr;
+        auto [output, indices] = get_vulkan_backend()->dispatchFractionalMaxPool2dForward(
+            inputs[0], out_h, out_w, samples);
+        return std::vector<Tensor>{output, indices};
+    });
+
+    table.register_single_output_kernel(OpId::FractionalMaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return get_vulkan_backend()->dispatchFractionalMaxPool2dBackward(inputs[0], inputs[1], input_shape);
+    });
+
+    table.register_kernel(OpId::FractionalMaxPool3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t out_d = attrs.get_int(AttrKey::OutputSizeD, 1);
+        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        const Tensor* samples = (inputs.size() > 1) ? &inputs[1] : nullptr;
+        auto [output, indices] = get_vulkan_backend()->dispatchFractionalMaxPool3dForward(
+            inputs[0], out_d, out_h, out_w, samples);
+        return std::vector<Tensor>{output, indices};
+    });
+
+    table.register_single_output_kernel(OpId::FractionalMaxPool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return get_vulkan_backend()->dispatchFractionalMaxPool3dBackward(inputs[0], inputs[1], input_shape);
+    });
+
+    table.register_single_output_kernel(OpId::MaxUnpool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        return get_vulkan_backend()->dispatchMaxUnpool2dForward(inputs[0], inputs[1], out_h, out_w);
+    });
+
+    table.register_single_output_kernel(OpId::MaxUnpool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return get_vulkan_backend()->dispatchMaxUnpool2dBackward(inputs[0], inputs[1], input_shape);
+    });
+
+    table.register_single_output_kernel(OpId::MaxUnpool3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t out_d = attrs.get_int(AttrKey::OutputSizeD, 1);
+        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        return get_vulkan_backend()->dispatchMaxUnpool3dForward(inputs[0], inputs[1], out_d, out_h, out_w);
+    });
+
+    table.register_single_output_kernel(OpId::MaxUnpool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return get_vulkan_backend()->dispatchMaxUnpool3dBackward(inputs[0], inputs[1], input_shape);
+    });
 
     std::cout << "Vulkan dispatch table initialized with O(1) lookup" << std::endl;
 }

@@ -167,6 +167,18 @@ auto nanmean(const Tensor& input,
              std::optional<int64_t> dim = std::nullopt,
              bool keepdim = false) -> Tensor;
 
+/** @brief Variance of tensor elements, ignoring NaN values. */
+auto nanvar(const Tensor& input,
+            std::optional<int64_t> dim = std::nullopt,
+            bool keepdim = false,
+            int64_t correction = 1) -> Tensor;
+
+/** @brief Standard deviation of tensor elements, ignoring NaN values. */
+auto nanstd(const Tensor& input,
+            std::optional<int64_t> dim = std::nullopt,
+            bool keepdim = false,
+            int64_t correction = 1) -> Tensor;
+
 /** @brief Simultaneous min and max in a single pass. Returns (min_values, max_values). */
 auto aminmax(const Tensor& input,
              std::optional<int64_t> dim = std::nullopt,

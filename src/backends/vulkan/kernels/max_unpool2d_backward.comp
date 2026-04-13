@@ -1,0 +1,26 @@
+#version 450
+
+// MaxUnpool2d Backward — gather gradients from output positions using indices.
+// Each invocation handles one input gradient element.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer GradOutput { float grad_out_data[]; };  // [N, C, out_h, out_w]
+layout(binding = 1) readonly buffer Indices    { int   indices_data[]; };    // [N, C, H_in, W_in]
+layout(binding = 2) writeonly buffer GradInput { float grad_in_data[]; };    // [N, C, H_in, W_in]
+
+layout(push_constant) uniform PushConstants {
+    uint total_input;    // N * C * H_in * W_in
+    uint in_spatial;     // H_in * W_in
+    uint out_spatial;    // out_h * out_w
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.total_input) return;
+
+    uint channel_idx = idx / params.in_spatial;
+    uint base_out = channel_idx * params.out_spatial;
+
+    int unpool_idx = indices_data[idx];
+    grad_in_data[idx] = grad_out_data[base_out + uint(unpool_idx)];
+}

@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <cstring>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <vector>
 #include <algorithm>
@@ -1617,17 +1618,64 @@ auto vdot(const Tensor& a, const Tensor& b) -> Tensor {
     return tenzor::dot(a_conj, b_flat);
 }
 
-auto cond(const Tensor& A) -> Tensor {
-    // Condition number via SVD: max(s) / min(s)
-    auto [U, S, Vh] = svd(A);
-    auto s_max = tenzor::max(S);
-    auto s_min = tenzor::min(S);
-    return tenzor::div(s_max, s_min);
+auto svdvals(const Tensor& A) -> Tensor {
+    if (A.ndim() < 2) {
+        throw std::invalid_argument("linalg::svdvals: input must be at least 2-D, got " +
+                                    std::to_string(A.ndim()) + "-D");
+    }
+    auto [U, S, Vh] = svd(A, /*full_matrices=*/false);
+    return S;
+}
+
+auto eigvals(const Tensor& A) -> std::tuple<Tensor, Tensor> {
+    if (A.ndim() < 2) {
+        throw std::invalid_argument("linalg::eigvals: input must be at least 2-D, got " +
+                                    std::to_string(A.ndim()) + "-D");
+    }
+    auto shape = A.shape();
+    if (shape[shape.size() - 2] != shape[shape.size() - 1]) {
+        throw std::invalid_argument("linalg::eigvals: input must be a square matrix, got (" +
+                                    std::to_string(shape[shape.size() - 2]) + ", " +
+                                    std::to_string(shape[shape.size() - 1]) + ")");
+    }
+    auto [vals_real, vals_imag, vecs] = eig(A);
+    return {vals_real, vals_imag};
+}
+
+auto cond(const Tensor& A, const std::string& p) -> Tensor {
+    if (A.ndim() < 2) {
+        throw std::invalid_argument("linalg::cond: input must be at least 2-D, got " +
+                                    std::to_string(A.ndim()) + "-D");
+    }
+    auto shape = A.shape();
+    if (shape[shape.size() - 2] != shape[shape.size() - 1]) {
+        throw std::invalid_argument("linalg::cond: input must be a square matrix for p=\"" +
+                                    p + "\", got (" + std::to_string(shape[shape.size() - 2]) +
+                                    ", " + std::to_string(shape[shape.size() - 1]) + ")");
+    }
+
+    if (p == "2") {
+        auto S = svdvals(A);
+        auto s_max = tenzor::max(S);
+        auto s_min = tenzor::min(S);
+        return tenzor::div(s_max, s_min);
+    } else if (p == "fro") {
+        auto norm_A = norm(A, "fro");
+        auto A_inv = inv(A);
+        auto norm_inv = norm(A_inv, "fro");
+        return tenzor::mul(norm_A, norm_inv);
+    } else {
+        throw std::invalid_argument("linalg::cond: unsupported norm order \"" + p +
+                                    "\", expected \"2\" or \"fro\"");
+    }
 }
 
 auto matrix_rank(const Tensor& A, double tol) -> Tensor {
-    // Rank via SVD: count singular values above tolerance
-    auto [U, S, Vh] = svd(A);
+    if (A.ndim() < 2) {
+        throw std::invalid_argument("linalg::matrix_rank: input must be at least 2-D, got " +
+                                    std::to_string(A.ndim()) + "-D");
+    }
+    auto S = svdvals(A);
     Tensor threshold;
     if (tol < 0) {
         // Default tolerance: max(M,N) * max(S) * eps
@@ -1641,6 +1689,95 @@ auto matrix_rank(const Tensor& A, double tol) -> Tensor {
     }
     auto mask = tenzor::gt(S, threshold);
     return tenzor::sum(mask.to(DType::Int64));
+}
+
+auto multi_dot(const std::vector<Tensor>& tensors) -> Tensor {
+    if (tensors.size() < 2) {
+        throw std::invalid_argument("linalg::multi_dot: need at least 2 tensors, got " +
+                                    std::to_string(tensors.size()));
+    }
+
+    // Validate shapes: all must be 1-D or 2-D, inner dimensions must match
+    const size_t n = tensors.size();
+    std::vector<int64_t> rows(n), cols(n);
+
+    for (size_t i = 0; i < n; ++i) {
+        if (tensors[i].ndim() == 1) {
+            // 1-D tensors: first one treated as row vector, last as column vector
+            if (i == 0) {
+                rows[i] = 1;
+                cols[i] = tensors[i].shape()[0];
+            } else if (i == n - 1) {
+                rows[i] = tensors[i].shape()[0];
+                cols[i] = 1;
+            } else {
+                throw std::invalid_argument(
+                    "linalg::multi_dot: inner tensors (index " + std::to_string(i) +
+                    ") must be 2-D, got 1-D");
+            }
+        } else if (tensors[i].ndim() == 2) {
+            rows[i] = tensors[i].shape()[0];
+            cols[i] = tensors[i].shape()[1];
+        } else {
+            throw std::invalid_argument(
+                "linalg::multi_dot: tensors must be 1-D or 2-D, tensor at index " +
+                std::to_string(i) + " is " + std::to_string(tensors[i].ndim()) + "-D");
+        }
+
+        if (i > 0 && cols[i - 1] != rows[i]) {
+            throw std::invalid_argument(
+                "linalg::multi_dot: shape mismatch between tensors " +
+                std::to_string(i - 1) + " and " + std::to_string(i) +
+                ": (" + std::to_string(rows[i - 1]) + ", " + std::to_string(cols[i - 1]) +
+                ") vs (" + std::to_string(rows[i]) + ", " + std::to_string(cols[i]) + ")");
+        }
+    }
+
+    // Trivial case: 2 matrices
+    if (n == 2) {
+        return tenzor::matmul(tensors[0], tensors[1]);
+    }
+
+    // Dynamic programming for optimal parenthesization (MCM algorithm)
+    // cost[i][j] = minimum scalar multiplications to compute product of tensors[i..j]
+    // split[i][j] = optimal split point k such that we multiply (i..k) x (k+1..j)
+    std::vector<std::vector<int64_t>> cost(n, std::vector<int64_t>(n, 0));
+    std::vector<std::vector<size_t>> split(n, std::vector<size_t>(n, 0));
+
+    // dims: chain of dimensions. For matrices A0(r0 x c0), A1(r1 x c1), ...,
+    // the dimension array is [r0, c0, c1, c2, ...] (since c_{i-1} == r_i)
+    std::vector<int64_t> dims(n + 1);
+    dims[0] = rows[0];
+    for (size_t i = 0; i < n; ++i) {
+        dims[i + 1] = cols[i];
+    }
+
+    // Fill DP table: chain length l from 2 to n
+    for (size_t l = 2; l <= n; ++l) {
+        for (size_t i = 0; i <= n - l; ++i) {
+            size_t j = i + l - 1;
+            cost[i][j] = std::numeric_limits<int64_t>::max();
+            for (size_t k = i; k < j; ++k) {
+                int64_t c = cost[i][k] + cost[k + 1][j] + dims[i] * dims[k + 1] * dims[j + 1];
+                if (c < cost[i][j]) {
+                    cost[i][j] = c;
+                    split[i][j] = k;
+                }
+            }
+        }
+    }
+
+    // Recursively execute the optimal parenthesization
+    std::function<Tensor(size_t, size_t)> execute = [&](size_t i, size_t j) -> Tensor {
+        if (i == j) {
+            return tensors[i];
+        }
+        auto left = execute(i, split[i][j]);
+        auto right = execute(split[i][j] + 1, j);
+        return tenzor::matmul(left, right);
+    };
+
+    return execute(0, n - 1);
 }
 
 auto diag_embed(const Tensor& input, int64_t offset, int64_t dim1, int64_t dim2) -> Tensor {

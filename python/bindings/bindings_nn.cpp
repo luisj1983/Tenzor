@@ -664,6 +664,15 @@ void register_nn(py::module_& m) {
             return "RMSNorm(" + std::to_string(size) + ")";
         });
 
+    py::class_<tenzor::nn::LocalResponseNorm, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::LocalResponseNorm>>(nn, "LocalResponseNorm",
+               "Local Response Normalization across channels")
+        .def(py::init<int64_t, double, double, double>(),
+             py::arg("size"),
+             py::arg("alpha") = 1e-4,
+             py::arg("beta") = 0.75,
+             py::arg("k") = 1.0);
+
     // Regularization layers
     py::class_<tenzor::nn::Dropout, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::Dropout>>(nn, "Dropout")
@@ -768,6 +777,26 @@ void register_nn(py::module_& m) {
              py::arg("output_d"), py::arg("output_h"), py::arg("output_w"))
         .def(py::init<int64_t>(),
              py::arg("output_size"));
+
+    py::class_<tenzor::nn::LPPool1d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::LPPool1d>>(nn, "LPPool1d",
+               "1D power-average pooling: (avg_pool(|x|^p))^(1/p)")
+        .def(py::init<int64_t, int64_t, int64_t>(),
+             py::arg("norm_type"),
+             py::arg("kernel_size"),
+             py::arg("stride") = -1);
+
+    py::class_<tenzor::nn::LPPool2d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::LPPool2d>>(nn, "LPPool2d",
+               "2D power-average pooling: (avg_pool(|x|^p))^(1/p)")
+        .def(py::init<int64_t, int64_t, int64_t>(),
+             py::arg("norm_type"),
+             py::arg("kernel_size"),
+             py::arg("stride") = -1)
+        .def(py::init<int64_t, std::pair<int64_t, int64_t>, std::pair<int64_t, int64_t>>(),
+             py::arg("norm_type"),
+             py::arg("kernel_size"),
+             py::arg("stride") = std::pair<int64_t, int64_t>{-1, -1});
 
     // Utility layers
     py::class_<tenzor::nn::Flatten, tenzor::nn::Module,

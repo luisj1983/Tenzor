@@ -495,6 +495,26 @@ namespace oneapi {
     auto adaptive_avgpool3d_backward(const Tensor& grad_output, const std::vector<int64_t>& input_shape,
                                       sycl::queue& queue) -> Tensor;
 
+    // ---- Fractional Max Pool + Max Unpool operations (kernels/pooling.cpp) ----
+    auto fractional_maxpool2d_forward_kernel(const Tensor& input, int64_t out_h, int64_t out_w,
+                                             const Tensor* random_samples, sycl::queue& queue)
+        -> std::pair<Tensor, Tensor>;
+    auto fractional_maxpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
+                                              const std::vector<int64_t>& input_shape, sycl::queue& queue) -> Tensor;
+    auto fractional_maxpool3d_forward_kernel(const Tensor& input, int64_t out_d, int64_t out_h, int64_t out_w,
+                                             const Tensor* random_samples, sycl::queue& queue)
+        -> std::pair<Tensor, Tensor>;
+    auto fractional_maxpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
+                                              const std::vector<int64_t>& input_shape, sycl::queue& queue) -> Tensor;
+    auto max_unpool2d_forward_kernel(const Tensor& input, const Tensor& indices,
+                                     int64_t out_h, int64_t out_w, sycl::queue& queue) -> Tensor;
+    auto max_unpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
+                                      const std::vector<int64_t>& input_shape, sycl::queue& queue) -> Tensor;
+    auto max_unpool3d_forward_kernel(const Tensor& input, const Tensor& indices,
+                                     int64_t out_d, int64_t out_h, int64_t out_w, sycl::queue& queue) -> Tensor;
+    auto max_unpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
+                                      const std::vector<int64_t>& input_shape, sycl::queue& queue) -> Tensor;
+
     // ---- Embedding operations (kernels/embedding.cpp) ----
     auto embedding_lookup_kernel(const Tensor& indices, const Tensor& weights,
                                  int64_t padding_idx, sycl::queue& queue) -> Tensor;
@@ -4344,8 +4364,66 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     });
 
     // =========================================================================
-    // Phase 9: Fractional Max Pool + Max Unpool — CPU-only for now
-    // TODO: Add native OneAPI/SYCL kernels for fractional_max_pool and max_unpool
+    // Phase 9: Fractional Max Pool 2D
+    // =========================================================================
+    table.register_kernel(OpId::FractionalMaxPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        const Tensor* samples = (inputs.size() > 1) ? &inputs[1] : nullptr;
+        auto [output, indices] = oneapi::fractional_maxpool2d_forward_kernel(inputs[0], out_h, out_w, samples, get_q(inputs));
+        return std::vector<Tensor>{output, indices};
+    });
+
+    table.register_single_output_kernel(OpId::FractionalMaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return oneapi::fractional_maxpool2d_backward_kernel(inputs[0], inputs[1], input_shape, get_q(inputs));
+    });
+
+    // =========================================================================
+    // Phase 9: Fractional Max Pool 3D
+    // =========================================================================
+    table.register_kernel(OpId::FractionalMaxPool3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t out_d = attrs.get_int(AttrKey::OutputSizeD, 1);
+        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        const Tensor* samples = (inputs.size() > 1) ? &inputs[1] : nullptr;
+        auto [output, indices] = oneapi::fractional_maxpool3d_forward_kernel(inputs[0], out_d, out_h, out_w, samples, get_q(inputs));
+        return std::vector<Tensor>{output, indices};
+    });
+
+    table.register_single_output_kernel(OpId::FractionalMaxPool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return oneapi::fractional_maxpool3d_backward_kernel(inputs[0], inputs[1], input_shape, get_q(inputs));
+    });
+
+    // =========================================================================
+    // Phase 9: Max Unpool 2D
+    // =========================================================================
+    table.register_single_output_kernel(OpId::MaxUnpool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        return oneapi::max_unpool2d_forward_kernel(inputs[0], inputs[1], out_h, out_w, get_q(inputs));
+    });
+
+    table.register_single_output_kernel(OpId::MaxUnpool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return oneapi::max_unpool2d_backward_kernel(inputs[0], inputs[1], input_shape, get_q(inputs));
+    });
+
+    // =========================================================================
+    // Phase 9: Max Unpool 3D
+    // =========================================================================
+    table.register_single_output_kernel(OpId::MaxUnpool3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t out_d = attrs.get_int(AttrKey::OutputSizeD, 1);
+        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        return oneapi::max_unpool3d_forward_kernel(inputs[0], inputs[1], out_d, out_h, out_w, get_q(inputs));
+    });
+
+    table.register_single_output_kernel(OpId::MaxUnpool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return oneapi::max_unpool3d_backward_kernel(inputs[0], inputs[1], input_shape, get_q(inputs));
+    });
 
 } // register_oneapi_kernels
 

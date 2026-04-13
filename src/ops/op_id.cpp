@@ -502,6 +502,19 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::MaxUnpool2dBackward)] = "max_unpool2d_backward";
     names[static_cast<size_t>(OpId::MaxUnpool3dForward)] = "max_unpool3d_forward";
     names[static_cast<size_t>(OpId::MaxUnpool3dBackward)] = "max_unpool3d_backward";
+    names[static_cast<size_t>(OpId::NanVar)] = "nanvar";
+    names[static_cast<size_t>(OpId::NanStd)] = "nanstd";
+    names[static_cast<size_t>(OpId::Deg2Rad)] = "deg2rad";
+    names[static_cast<size_t>(OpId::Rad2Deg)] = "rad2deg";
+    names[static_cast<size_t>(OpId::Logit)] = "logit";
+    names[static_cast<size_t>(OpId::Signbit)] = "signbit";
+    names[static_cast<size_t>(OpId::FloatPower)] = "float_power";
+    names[static_cast<size_t>(OpId::Xlog1py)] = "xlog1py";
+    names[static_cast<size_t>(OpId::Ldexp)] = "ldexp";
+    names[static_cast<size_t>(OpId::IsReal)] = "isreal";
+    names[static_cast<size_t>(OpId::IsPosInf)] = "isposinf";
+    names[static_cast<size_t>(OpId::IsNegInf)] = "isneginf";
+    names[static_cast<size_t>(OpId::Frexp)] = "frexp";
 
     return names;
 }();
@@ -517,7 +530,7 @@ constexpr size_t count_named_ops() {
 
 // Count of actual OpId enum values (excluding gap slots).
 // Update this when adding new OpIds to catch missing name entries at compile time.
-inline constexpr size_t EXPECTED_NAMED_OPS = 389;  // 349 original + 40 new
+inline constexpr size_t EXPECTED_NAMED_OPS = 402;  // 389 original + 13 new (Phase 4-5 + frexp)
 
 // If this fires, a new OpId was added without a corresponding name in op_names above
 static_assert(count_named_ops() == EXPECTED_NAMED_OPS,

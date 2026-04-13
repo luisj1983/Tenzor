@@ -620,6 +620,44 @@ auto igamma(const Tensor& a, const Tensor& x) -> Tensor;
 /// Upper regularized incomplete gamma function (1 - igamma)
 auto igammac(const Tensor& a, const Tensor& x) -> Tensor;
 
+// =========================================================================
+// Extended math operations (PyTorch parity)
+// =========================================================================
+
+/// Convert degrees to radians: x * pi / 180
+auto deg2rad(const Tensor& input) -> Tensor;
+
+/// Convert radians to degrees: x * 180 / pi
+auto rad2deg(const Tensor& input) -> Tensor;
+
+/// Logit function: log(x / (1 - x)), with optional eps clamping
+auto logit(const Tensor& input, double eps = -1.0) -> Tensor;
+
+/// Test sign bit — returns Bool tensor (true for negative values, including -0.0)
+auto signbit(const Tensor& input) -> Tensor;
+
+/// Power with Float64 promotion for accuracy
+auto float_power(const Tensor& base, const Tensor& exponent) -> Tensor;
+
+/// x * log1p(y), with the convention that 0 * log1p(y) = 0
+auto xlog1py(const Tensor& x, const Tensor& y) -> Tensor;
+
+/// ldexp(x, n) = x * 2^n
+auto ldexp(const Tensor& x, const Tensor& n) -> Tensor;
+
+/// Test if tensor elements are real (not complex) — returns Bool tensor
+auto isreal(const Tensor& input) -> Tensor;
+
+/// Test for positive infinity — returns Bool tensor
+auto isposinf(const Tensor& input) -> Tensor;
+
+/// Test for negative infinity — returns Bool tensor
+auto isneginf(const Tensor& input) -> Tensor;
+
+/// Decompose floating-point into mantissa and exponent: x = mantissa * 2^exponent
+/// Returns (mantissa, exponent) where mantissa is in [0.5, 1.0) and exponent is integer
+auto frexp(const Tensor& input) -> std::pair<Tensor, Tensor>;
+
 /** @} */ // end of tensor_math group
 
 } // namespace tenzor

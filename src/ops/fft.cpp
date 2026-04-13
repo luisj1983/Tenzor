@@ -146,6 +146,72 @@ auto ifft2(const Tensor& input, std::optional<std::vector<int64_t>> s,
     return result;
 }
 
+auto rfft2(const Tensor& input, std::optional<std::vector<int64_t>> s,
+           std::vector<int64_t> dim, const std::string& norm) -> Tensor {
+    // Apply rfft along last dimension, then fft along remaining dimensions
+    // dim should have exactly 2 elements, last one gets rfft
+    std::optional<int64_t> n_last = s ? std::make_optional((*s)[dim.size() - 1]) : std::nullopt;
+    Tensor result = rfft(input, n_last, dim.back(), norm);
+    // Apply fft along all dimensions except the last
+    for (size_t i = 0; i + 1 < dim.size(); ++i) {
+        std::optional<int64_t> n_i = s ? std::make_optional((*s)[i]) : std::nullopt;
+        result = fft(result, n_i, dim[i], norm);
+    }
+    return result;
+}
+
+auto irfft2(const Tensor& input, std::optional<std::vector<int64_t>> s,
+            std::vector<int64_t> dim, const std::string& norm) -> Tensor {
+    // Inverse of rfft2: apply ifft along all dims except last, then irfft along last
+    Tensor result = input;
+    for (size_t i = 0; i + 1 < dim.size(); ++i) {
+        std::optional<int64_t> n_i = s ? std::make_optional((*s)[i]) : std::nullopt;
+        result = ifft(result, n_i, dim[i], norm);
+    }
+    std::optional<int64_t> n_last = s ? std::make_optional((*s)[dim.size() - 1]) : std::nullopt;
+    result = irfft(result, n_last, dim.back(), norm);
+    return result;
+}
+
+auto rfftn(const Tensor& input, std::optional<std::vector<int64_t>> s,
+           std::optional<std::vector<int64_t>> dim, const std::string& norm) -> Tensor {
+    std::vector<int64_t> dims;
+    if (dim) {
+        dims = *dim;
+    } else {
+        dims.resize(input.ndim());
+        for (int64_t i = 0; i < input.ndim(); ++i) dims[i] = i;
+    }
+    // Apply rfft along last dimension, then fft along remaining
+    std::optional<int64_t> n_last = s ? std::make_optional((*s)[dims.size() - 1]) : std::nullopt;
+    Tensor result = rfft(input, n_last, dims.back(), norm);
+    for (size_t i = 0; i + 1 < dims.size(); ++i) {
+        std::optional<int64_t> n_i = s ? std::make_optional((*s)[i]) : std::nullopt;
+        result = fft(result, n_i, dims[i], norm);
+    }
+    return result;
+}
+
+auto irfftn(const Tensor& input, std::optional<std::vector<int64_t>> s,
+            std::optional<std::vector<int64_t>> dim, const std::string& norm) -> Tensor {
+    std::vector<int64_t> dims;
+    if (dim) {
+        dims = *dim;
+    } else {
+        dims.resize(input.ndim());
+        for (int64_t i = 0; i < input.ndim(); ++i) dims[i] = i;
+    }
+    // Apply ifft along all dims except last, then irfft along last
+    Tensor result = input;
+    for (size_t i = 0; i + 1 < dims.size(); ++i) {
+        std::optional<int64_t> n_i = s ? std::make_optional((*s)[i]) : std::nullopt;
+        result = ifft(result, n_i, dims[i], norm);
+    }
+    std::optional<int64_t> n_last = s ? std::make_optional((*s)[dims.size() - 1]) : std::nullopt;
+    result = irfft(result, n_last, dims.back(), norm);
+    return result;
+}
+
 auto fftn(const Tensor& input, std::optional<std::vector<int64_t>> s,
           std::optional<std::vector<int64_t>> dim, const std::string& norm) -> Tensor {
     std::vector<int64_t> dims;

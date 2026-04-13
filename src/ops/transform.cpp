@@ -1175,4 +1175,103 @@ auto flipud(const Tensor& input) -> Tensor {
     return flip(input, {0});
 }
 
+auto pixel_shuffle(const Tensor& input, int64_t upscale_factor) -> Tensor {
+    // Input: (*, C*r^2, H, W) -> Output: (*, C, H*r, W*r)
+    if (input.ndim() < 3) throw std::runtime_error("pixel_shuffle: input must have at least 3 dimensions");
+    auto shape = input.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    int64_t r = upscale_factor;
+    int64_t r2 = r * r;
+    int64_t C_r2 = shape[ndim - 3];
+    int64_t H = shape[ndim - 2];
+    int64_t W = shape[ndim - 1];
+
+    if (C_r2 % r2 != 0) {
+        throw std::runtime_error("pixel_shuffle: channels (" + std::to_string(C_r2) +
+                                 ") must be divisible by upscale_factor^2 (" + std::to_string(r2) + ")");
+    }
+    int64_t C = C_r2 / r2;
+
+    // Reshape to (*, C, r, r, H, W)
+    std::vector<int64_t> reshape_shape;
+    for (int64_t i = 0; i < ndim - 3; ++i) reshape_shape.push_back(shape[i]);
+    reshape_shape.push_back(C);
+    reshape_shape.push_back(r);
+    reshape_shape.push_back(r);
+    reshape_shape.push_back(H);
+    reshape_shape.push_back(W);
+
+    Tensor reshaped = reshape(input, reshape_shape);
+
+    // Permute to (*, C, H, r, W, r)
+    std::vector<int64_t> perm;
+    for (int64_t i = 0; i < ndim - 3; ++i) perm.push_back(i);
+    int64_t base = ndim - 3;
+    perm.push_back(base);     // C
+    perm.push_back(base + 3); // H
+    perm.push_back(base + 1); // r
+    perm.push_back(base + 4); // W
+    perm.push_back(base + 2); // r
+
+    Tensor permuted = permute(reshaped, perm);
+
+    // Reshape to (*, C, H*r, W*r)
+    std::vector<int64_t> out_shape;
+    for (int64_t i = 0; i < ndim - 3; ++i) out_shape.push_back(shape[i]);
+    out_shape.push_back(C);
+    out_shape.push_back(H * r);
+    out_shape.push_back(W * r);
+
+    return reshape(permuted.contiguous(), out_shape);
+}
+
+auto pixel_unshuffle(const Tensor& input, int64_t downscale_factor) -> Tensor {
+    // Input: (*, C, H*r, W*r) -> Output: (*, C*r^2, H, W)
+    if (input.ndim() < 3) throw std::runtime_error("pixel_unshuffle: input must have at least 3 dimensions");
+    auto shape = input.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    int64_t r = downscale_factor;
+    int64_t C = shape[ndim - 3];
+    int64_t Hr = shape[ndim - 2];
+    int64_t Wr = shape[ndim - 1];
+
+    if (Hr % r != 0 || Wr % r != 0) {
+        throw std::runtime_error("pixel_unshuffle: H and W must be divisible by downscale_factor");
+    }
+    int64_t H = Hr / r;
+    int64_t W = Wr / r;
+
+    // Reshape to (*, C, H, r, W, r)
+    std::vector<int64_t> reshape_shape;
+    for (int64_t i = 0; i < ndim - 3; ++i) reshape_shape.push_back(shape[i]);
+    reshape_shape.push_back(C);
+    reshape_shape.push_back(H);
+    reshape_shape.push_back(r);
+    reshape_shape.push_back(W);
+    reshape_shape.push_back(r);
+
+    Tensor reshaped = reshape(input, reshape_shape);
+
+    // Permute to (*, C, r, r, H, W)
+    std::vector<int64_t> perm;
+    for (int64_t i = 0; i < ndim - 3; ++i) perm.push_back(i);
+    int64_t base = ndim - 3;
+    perm.push_back(base);     // C
+    perm.push_back(base + 2); // r (from H*r split)
+    perm.push_back(base + 4); // r (from W*r split)
+    perm.push_back(base + 1); // H
+    perm.push_back(base + 3); // W
+
+    Tensor permuted = permute(reshaped, perm);
+
+    // Reshape to (*, C*r^2, H, W)
+    std::vector<int64_t> out_shape;
+    for (int64_t i = 0; i < ndim - 3; ++i) out_shape.push_back(shape[i]);
+    out_shape.push_back(C * r * r);
+    out_shape.push_back(H);
+    out_shape.push_back(W);
+
+    return reshape(permuted.contiguous(), out_shape);
+}
+
 } // namespace tenzor

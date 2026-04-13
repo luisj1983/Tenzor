@@ -1619,4 +1619,70 @@ auto AdaptiveAvgPool3d::forward_impl(const Variable& input) -> Variable {
     return result;
 }
 
+// ============================================================================
+// LPPool1d implementation
+// ============================================================================
+
+LPPool1d::LPPool1d(int64_t norm_type, int64_t kernel_size, int64_t stride)
+    : norm_type_(norm_type), kernel_size_(kernel_size),
+      stride_(stride == -1 ? kernel_size : stride) {
+    if (norm_type < 1) throw std::runtime_error("LPPool1d: norm_type must be >= 1");
+    if (kernel_size <= 0) throw std::runtime_error("LPPool1d: kernel_size must be positive");
+}
+
+auto LPPool1d::forward_impl(const Variable& input) -> Variable {
+    auto input_shape = input.shape();
+    if (input_shape.size() != 3) {
+        throw std::invalid_argument("LPPool1d expects 3D input [batch, channels, length]");
+    }
+
+    // LPPool: (avg_pool(|x|^p))^(1/p)
+    // This is equivalent to (sum(|x|^p, kernel) / kernel_size)^(1/p)
+    Tensor input_t = input.tensor();
+    auto x_abs = tenzor::abs(input_t);
+    auto x_pow = tenzor::pow(x_abs, static_cast<float>(norm_type_));
+
+    // Apply average pooling on |x|^p
+    AvgPool1d avg_pool(kernel_size_, stride_, /*padding=*/0);
+    auto pooled = avg_pool.forward(Variable(x_pow));
+
+    // Take the p-th root
+    float inv_p = 1.0f / static_cast<float>(norm_type_);
+    return Variable(tenzor::pow(pooled.tensor(), inv_p));
+}
+
+// ============================================================================
+// LPPool2d implementation
+// ============================================================================
+
+LPPool2d::LPPool2d(int64_t norm_type,
+                   std::pair<int64_t, int64_t> kernel_size,
+                   std::pair<int64_t, int64_t> stride)
+    : norm_type_(norm_type), kernel_size_(kernel_size),
+      stride_(stride.first == -1
+              ? kernel_size
+              : stride) {
+    if (norm_type < 1) throw std::runtime_error("LPPool2d: norm_type must be >= 1");
+    if (kernel_size.first <= 0 || kernel_size.second <= 0)
+        throw std::runtime_error("LPPool2d: kernel_size must be positive");
+}
+
+auto LPPool2d::forward_impl(const Variable& input) -> Variable {
+    auto input_shape = input.shape();
+    if (input_shape.size() != 4) {
+        throw std::invalid_argument("LPPool2d expects 4D input [batch, channels, height, width]");
+    }
+
+    // LPPool: (avg_pool(|x|^p))^(1/p)
+    Tensor input_t = input.tensor();
+    auto x_abs = tenzor::abs(input_t);
+    auto x_pow = tenzor::pow(x_abs, static_cast<float>(norm_type_));
+
+    AvgPool2d avg_pool(kernel_size_.first, stride_.first, /*padding=*/0);
+    auto pooled = avg_pool.forward(Variable(x_pow));
+
+    float inv_p = 1.0f / static_cast<float>(norm_type_);
+    return Variable(tenzor::pow(pooled.tensor(), inv_p));
+}
+
 } // namespace tenzor::nn

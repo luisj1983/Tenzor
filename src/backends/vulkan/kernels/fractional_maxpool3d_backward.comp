@@ -1,0 +1,33 @@
+#version 450
+
+// FractionalMaxPool3d Backward — scatter gradients using saved indices.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer GradOutput { float grad_out_data[]; };
+layout(binding = 1) readonly buffer Indices    { int   indices_data[]; };
+layout(binding = 2)          buffer GradInput  { uint  grad_in_data[]; };  // as uint for atomics
+
+layout(push_constant) uniform PushConstants {
+    uint total_output;   // N * C * out_d * out_h * out_w
+    uint D_H_W;          // D * H * W (input spatial size)
+    uint out_spatial;    // out_d * out_h * out_w
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.total_output) return;
+
+    uint channel_idx = idx / params.out_spatial;
+    uint base_in = channel_idx * params.D_H_W;
+    int max_idx = indices_data[idx];
+    uint target = base_in + uint(max_idx);
+    float grad_val = grad_out_data[idx];
+
+    uint expected = grad_in_data[target];
+    while (true) {
+        uint desired = floatBitsToUint(uintBitsToFloat(expected) + grad_val);
+        uint actual = atomicCompSwap(grad_in_data[target], expected, desired);
+        if (actual == expected) break;
+        expected = actual;
+    }
+}

@@ -68,6 +68,16 @@ void main() {
         case 3: // div
             res = val_a / val_b;
             break;
+        case 42: // fmax (binary) - NaN-propagating max: fmax(NaN, x) = x
+            if (isnan(val_a)) res = val_b;
+            else if (isnan(val_b)) res = val_a;
+            else res = max(val_a, val_b);
+            break;
+        case 43: // fmin (binary) - NaN-propagating min: fmin(NaN, x) = x
+            if (isnan(val_a)) res = val_b;
+            else if (isnan(val_b)) res = val_a;
+            else res = min(val_a, val_b);
+            break;
     }
     result[out_idx] = res;
 }

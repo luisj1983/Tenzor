@@ -57,6 +57,8 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
     else if (op_name == "igammac") opcode = 39;
     else if (op_name == "gcd") opcode = 36;
     else if (op_name == "lcm") opcode = 37;
+    else if (op_name == "fmax") opcode = 42;
+    else if (op_name == "fmin") opcode = 43;
     else throw std::runtime_error("Unknown binary operation: " + op_name);
 
     // Check if we can use the fast path (same-shape, no broadcasting needed)

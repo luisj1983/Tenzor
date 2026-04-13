@@ -568,6 +568,24 @@ namespace rocm {
     auto adaptive_avgpool3d_backward_hip(const Tensor& grad_output,
                                           const std::vector<int64_t>& input_shape, hipStream_t stream) -> Tensor;
 
+    // Fractional Max Pool + Max Unpool
+    auto fractional_maxpool2d_forward_hip(const Tensor& input, int64_t out_h, int64_t out_w,
+                                           const Tensor* random_samples, hipStream_t stream) -> std::pair<Tensor, Tensor>;
+    auto fractional_maxpool2d_backward_hip(const Tensor& grad_output, const Tensor& indices,
+                                            const std::vector<int64_t>& input_shape, hipStream_t stream) -> Tensor;
+    auto fractional_maxpool3d_forward_hip(const Tensor& input, int64_t out_d, int64_t out_h, int64_t out_w,
+                                           const Tensor* random_samples, hipStream_t stream) -> std::pair<Tensor, Tensor>;
+    auto fractional_maxpool3d_backward_hip(const Tensor& grad_output, const Tensor& indices,
+                                            const std::vector<int64_t>& input_shape, hipStream_t stream) -> Tensor;
+    auto max_unpool2d_forward_hip(const Tensor& input, const Tensor& indices,
+                                   int64_t out_h, int64_t out_w, hipStream_t stream) -> Tensor;
+    auto max_unpool2d_backward_hip(const Tensor& grad_output, const Tensor& indices,
+                                    const std::vector<int64_t>& input_shape, hipStream_t stream) -> Tensor;
+    auto max_unpool3d_forward_hip(const Tensor& input, const Tensor& indices,
+                                   int64_t out_d, int64_t out_h, int64_t out_w, hipStream_t stream) -> Tensor;
+    auto max_unpool3d_backward_hip(const Tensor& grad_output, const Tensor& indices,
+                                    const std::vector<int64_t>& input_shape, hipStream_t stream) -> Tensor;
+
     // Normalization operations
     auto layer_norm_kernel(const Tensor& input, const std::vector<int64_t>& normalized_shape,
                           const Tensor* weight, const Tensor* bias, float eps, hipStream_t stream) -> Tensor;
@@ -3603,8 +3621,67 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         return rocm::triu_indices_hip(row, col, offset, get_hip_stream(attrs));
     });
 
-    // Phase 9: Fractional Max Pool + Max Unpool — CPU-only for now
-    // TODO: Add native ROCm/HIP kernels for fractional_max_pool and max_unpool
+    // =========================================================================
+    // Phase 9: Fractional Max Pool 2D
+    // =========================================================================
+    table.register_kernel(OpId::FractionalMaxPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        const Tensor* samples = (inputs.size() > 1) ? &inputs[1] : nullptr;
+        auto [output, indices] = rocm::fractional_maxpool2d_forward_hip(inputs[0], out_h, out_w, samples, get_hip_stream(attrs));
+        return std::vector<Tensor>{output, indices};
+    });
+
+    table.register_single_output_kernel(OpId::FractionalMaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return rocm::fractional_maxpool2d_backward_hip(inputs[0], inputs[1], input_shape, get_hip_stream(attrs));
+    });
+
+    // =========================================================================
+    // Phase 9: Fractional Max Pool 3D
+    // =========================================================================
+    table.register_kernel(OpId::FractionalMaxPool3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t out_d = attrs.get_int(AttrKey::OutputSizeD, 1);
+        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        const Tensor* samples = (inputs.size() > 1) ? &inputs[1] : nullptr;
+        auto [output, indices] = rocm::fractional_maxpool3d_forward_hip(inputs[0], out_d, out_h, out_w, samples, get_hip_stream(attrs));
+        return std::vector<Tensor>{output, indices};
+    });
+
+    table.register_single_output_kernel(OpId::FractionalMaxPool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return rocm::fractional_maxpool3d_backward_hip(inputs[0], inputs[1], input_shape, get_hip_stream(attrs));
+    });
+
+    // =========================================================================
+    // Phase 9: Max Unpool 2D
+    // =========================================================================
+    table.register_single_output_kernel(OpId::MaxUnpool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        return rocm::max_unpool2d_forward_hip(inputs[0], inputs[1], out_h, out_w, get_hip_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::MaxUnpool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return rocm::max_unpool2d_backward_hip(inputs[0], inputs[1], input_shape, get_hip_stream(attrs));
+    });
+
+    // =========================================================================
+    // Phase 9: Max Unpool 3D
+    // =========================================================================
+    table.register_single_output_kernel(OpId::MaxUnpool3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t out_d = attrs.get_int(AttrKey::OutputSizeD, 1);
+        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        return rocm::max_unpool3d_forward_hip(inputs[0], inputs[1], out_d, out_h, out_w, get_hip_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::MaxUnpool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return rocm::max_unpool3d_backward_hip(inputs[0], inputs[1], input_shape, get_hip_stream(attrs));
+    });
 
     std::cout << "ROCm dispatch table initialized with O(1) lookup" << std::endl;
 }

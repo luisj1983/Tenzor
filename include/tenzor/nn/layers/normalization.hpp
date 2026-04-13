@@ -378,5 +378,71 @@ private:
     auto reset_parameters() -> void;
 };
 
+/**
+ * @brief Local Response Normalization.
+ *
+ * Applies LRN across channels at each spatial position:
+ * y_i = x_i / (k + alpha/size * sum(x_j^2, local_window))^beta
+ *
+ * where the local window spans `size` channels centered on channel i.
+ *
+ * Originally used in AlexNet. The normalization window covers
+ * channels [max(0, i - floor(size/2)), min(C-1, i + floor(size/2))].
+ *
+ * Shape:
+ * - Input: (N, C, *) where * is any number of spatial dimensions
+ * - Output: Same as input
+ *
+ * @code
+ * LocalResponseNorm lrn(5);  // Window size 5, default alpha/beta/k
+ * Variable x(Tensor({batch, 64, 32, 32}, DType::Float32, Device::cpu()), true);
+ * Variable normalized = lrn.forward(x);
+ * @endcode
+ *
+ * @see LayerNorm for layer normalization
+ * @see BatchNorm2d for batch normalization
+ */
+class LocalResponseNorm : public Module {
+public:
+    /**
+     * @brief Construct Local Response Normalization.
+     *
+     * @param size Number of channels in the normalization window
+     * @param alpha Multiplicative factor (default: 1e-4)
+     * @param beta Exponent (default: 0.75)
+     * @param k Additive constant (default: 1.0)
+     *
+     * @code
+     * LocalResponseNorm lrn1(5);                    // AlexNet defaults
+     * LocalResponseNorm lrn2(5, 1e-4, 0.75, 2.0);  // Custom k
+     * @endcode
+     */
+    LocalResponseNorm(int64_t size,
+                      double alpha = 1e-4,
+                      double beta = 0.75,
+                      double k = 1.0);
+
+    /**
+     * @brief Forward pass through local response normalization.
+     *
+     * @param input Input variable of shape (N, C, *)
+     * @return Normalized output (same shape as input)
+     */
+    auto forward_impl(const Variable& input) -> Variable override;
+
+    auto extra_repr() const -> std::string override {
+        return "size=" + std::to_string(size_) +
+               ", alpha=" + std::to_string(alpha_) +
+               ", beta=" + std::to_string(beta_) +
+               ", k=" + std::to_string(k_);
+    }
+
+private:
+    int64_t size_;   ///< Number of channels in normalization window
+    double alpha_;   ///< Multiplicative factor
+    double beta_;    ///< Exponent
+    double k_;       ///< Additive constant
+};
+
 } // namespace nn
 } // namespace tenzor

@@ -8,7 +8,9 @@
 #pragma once
 
 #include "tenzor/core/tensor.hpp"
+#include <string>
 #include <tuple>
+#include <vector>
 
 namespace tenzor {
 namespace linalg {
@@ -249,11 +251,63 @@ auto inner(const Tensor& a, const Tensor& b) -> Tensor;
 /// Conjugate dot product for complex tensors
 auto vdot(const Tensor& a, const Tensor& b) -> Tensor;
 
-/// Condition number of a matrix via SVD
-auto cond(const Tensor& A) -> Tensor;
+/**
+ * @brief Return only the singular values of a matrix.
+ *
+ * Equivalent to `std::get<1>(svd(A, false))`.
+ *
+ * @param A Input matrix (..., M, N)
+ * @return Singular values tensor (..., min(M,N))
+ */
+auto svdvals(const Tensor& A) -> Tensor;
 
-/// Matrix rank via SVD with tolerance
+/**
+ * @brief Return only the eigenvalues of a general (non-symmetric) matrix.
+ *
+ * Returns a pair (real_parts, imag_parts) since eigenvalues of a real
+ * non-symmetric matrix may be complex.
+ *
+ * @param A Input square matrix (..., N, N)
+ * @return Tuple of (eigenvalues_real, eigenvalues_imag) tensors, each (..., N)
+ */
+auto eigvals(const Tensor& A) -> std::tuple<Tensor, Tensor>;
+
+/**
+ * @brief Condition number of a matrix.
+ *
+ * For p="2" (default): max(svdvals) / min(svdvals).
+ * For p="fro": norm(A, "fro") * norm(inv(A), "fro").
+ *
+ * @param A Input square matrix (..., N, N)
+ * @param p Norm type: "2" (default) or "fro"
+ * @return Condition number scalar
+ */
+auto cond(const Tensor& A, const std::string& p = "2") -> Tensor;
+
+/**
+ * @brief Numerical matrix rank via SVD.
+ *
+ * Counts singular values above a tolerance. Default tolerance is
+ * max(M,N) * eps * max_singular_value.
+ *
+ * @param A Input matrix (..., M, N)
+ * @param tol Tolerance (negative means use default)
+ * @return Rank as an integer tensor
+ */
 auto matrix_rank(const Tensor& A, double tol = -1.0) -> Tensor;
+
+/**
+ * @brief Optimized chain of matrix multiplications.
+ *
+ * Uses dynamic programming to determine the optimal parenthesization
+ * that minimizes the total number of scalar multiplications, then
+ * executes the chain in that order.
+ *
+ * @param tensors Vector of 2-D matrices to multiply
+ * @return Product of all matrices
+ * @throws std::invalid_argument if fewer than 2 tensors or shapes are incompatible
+ */
+auto multi_dot(const std::vector<Tensor>& tensors) -> Tensor;
 
 /// Embed a batch of vectors as batch diagonal matrices
 auto diag_embed(const Tensor& input, int64_t offset = 0, int64_t dim1 = -2, int64_t dim2 = -1) -> Tensor;

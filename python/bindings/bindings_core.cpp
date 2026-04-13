@@ -35,6 +35,7 @@
 #include <tenzor/backend/cpu_caching_allocator.hpp>
 #include <tenzor/nn/serialize.hpp>
 #include <tenzor/nn/layers/sync_batchnorm.hpp>
+#include <tenzor/distributions/distribution.hpp>
 #include "../numpy_interop.hpp"
 
 namespace py = pybind11;
@@ -2796,6 +2797,62 @@ Returns:
          }, "x * log(y) with 0 * log(y) = 0",
          py::arg("x"), py::arg("y"),
          py::call_guard<py::gil_scoped_release>());
+
+    // Phase 5: Extended math ops
+    m.def("deg2rad", [](const tenzor::Tensor& t) { return tenzor::deg2rad(t); },
+         "Convert degrees to radians", py::arg("input"), py::call_guard<py::gil_scoped_release>());
+    m.def("rad2deg", [](const tenzor::Tensor& t) { return tenzor::rad2deg(t); },
+         "Convert radians to degrees", py::arg("input"), py::call_guard<py::gil_scoped_release>());
+    m.def("logit", [](const tenzor::Tensor& t, double eps) { return tenzor::logit(t, eps); },
+         "Logit function: log(x / (1-x))", py::arg("input"), py::arg("eps") = -1.0,
+         py::call_guard<py::gil_scoped_release>());
+    m.def("signbit", [](const tenzor::Tensor& t) { return tenzor::signbit(t); },
+         "Test sign bit", py::arg("input"), py::call_guard<py::gil_scoped_release>());
+    m.def("float_power", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
+         return tenzor::float_power(a, b); },
+         "Power with Float64 promotion", py::arg("base"), py::arg("exponent"),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("xlog1py", [](const tenzor::Tensor& x, const tenzor::Tensor& y) {
+         return tenzor::xlog1py(x, y); },
+         "x * log1p(y) with 0 * log1p(y) = 0", py::arg("x"), py::arg("y"),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("ldexp", [](const tenzor::Tensor& x, const tenzor::Tensor& n) {
+         return tenzor::ldexp(x, n); },
+         "ldexp(x, n) = x * 2^n", py::arg("x"), py::arg("n"),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("isreal", [](const tenzor::Tensor& t) { return tenzor::isreal(t); },
+         "Test if elements are real", py::arg("input"), py::call_guard<py::gil_scoped_release>());
+    m.def("isposinf", [](const tenzor::Tensor& t) { return tenzor::isposinf(t); },
+         "Test for positive infinity", py::arg("input"), py::call_guard<py::gil_scoped_release>());
+    m.def("isneginf", [](const tenzor::Tensor& t) { return tenzor::isneginf(t); },
+         "Test for negative infinity", py::arg("input"), py::call_guard<py::gil_scoped_release>());
+
+    m.def("frexp", [](const tenzor::Tensor& t) {
+         auto [m, e] = tenzor::frexp(t);
+         return py::make_tuple(m, e);
+         }, "Decompose into mantissa and exponent", py::arg("input"),
+         py::call_guard<py::gil_scoped_release>());
+
+    // Phase 4: Missing ops bindings
+    m.def("nanvar", [](const tenzor::Tensor& t, std::optional<int64_t> dim, bool keepdim, int64_t correction) {
+         return tenzor::nanvar(t, dim, keepdim, correction); },
+         "Variance ignoring NaN", py::arg("input"), py::arg("dim") = py::none(),
+         py::arg("keepdim") = false, py::arg("correction") = 1,
+         py::call_guard<py::gil_scoped_release>());
+    m.def("nanstd", [](const tenzor::Tensor& t, std::optional<int64_t> dim, bool keepdim, int64_t correction) {
+         return tenzor::nanstd(t, dim, keepdim, correction); },
+         "Standard deviation ignoring NaN", py::arg("input"), py::arg("dim") = py::none(),
+         py::arg("keepdim") = false, py::arg("correction") = 1,
+         py::call_guard<py::gil_scoped_release>());
+    m.def("pixel_shuffle", [](const tenzor::Tensor& t, int64_t r) {
+         return tenzor::pixel_shuffle(t, r); },
+         "Rearrange (C*r^2, H, W) to (C, H*r, W*r)", py::arg("input"), py::arg("upscale_factor"),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("pixel_unshuffle", [](const tenzor::Tensor& t, int64_t r) {
+         return tenzor::pixel_unshuffle(t, r); },
+         "Rearrange (C, H*r, W*r) to (C*r^2, H, W)", py::arg("input"), py::arg("downscale_factor"),
+         py::call_guard<py::gil_scoped_release>());
+
     m.def("tensordot", [](const tenzor::Tensor& a, const tenzor::Tensor& b,
                           std::vector<int64_t> dims_a, std::vector<int64_t> dims_b) {
          return tenzor::tensordot(a, b, std::move(dims_a), std::move(dims_b));
@@ -3917,6 +3974,119 @@ Returns:
         "    memory_budget_bytes: Budget for memory_budget strategy\n"
         "Returns:\n"
         "    AutoCheckpointPolicy handle (keep reference alive to maintain hooks)");
+
+
+    // ========================================================================
+    // Distributions submodule
+    // ========================================================================
+    auto dist_m = m.def_submodule("distributions", "Probability distributions");
+
+    py::class_<tenzor::distributions::Distribution>(dist_m, "Distribution")
+        .def("sample", &tenzor::distributions::Distribution::sample,
+             py::arg("sample_shape") = std::vector<int64_t>{},
+             "Draw samples from the distribution")
+        .def("rsample", &tenzor::distributions::Distribution::rsample,
+             py::arg("sample_shape") = std::vector<int64_t>{},
+             "Draw reparameterized samples")
+        .def("log_prob", &tenzor::distributions::Distribution::log_prob,
+             py::arg("value"), "Compute log probability of a value")
+        .def("entropy", &tenzor::distributions::Distribution::entropy,
+             "Compute entropy of the distribution")
+        .def("mean", &tenzor::distributions::Distribution::mean,
+             "Distribution mean")
+        .def("variance", &tenzor::distributions::Distribution::variance,
+             "Distribution variance");
+
+    py::class_<tenzor::distributions::Normal, tenzor::distributions::Distribution>(dist_m, "Normal")
+        .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
+             py::arg("loc"), py::arg("scale"),
+             "Normal distribution parameterized by mean (loc) and std (scale)");
+
+    py::class_<tenzor::distributions::Uniform, tenzor::distributions::Distribution>(dist_m, "Uniform")
+        .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
+             py::arg("low"), py::arg("high"),
+             "Uniform distribution on [low, high)");
+
+    py::class_<tenzor::distributions::Categorical, tenzor::distributions::Distribution>(dist_m, "Categorical")
+        .def(py::init<tenzor::Tensor>(), py::arg("probs"),
+             "Categorical distribution parameterized by probabilities");
+
+    py::class_<tenzor::distributions::Exponential, tenzor::distributions::Distribution>(dist_m, "Exponential")
+        .def(py::init<tenzor::Tensor>(), py::arg("rate"),
+             "Exponential distribution parameterized by rate (lambda)");
+
+    py::class_<tenzor::distributions::Laplace, tenzor::distributions::Distribution>(dist_m, "Laplace")
+        .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
+             py::arg("loc"), py::arg("scale"),
+             "Laplace distribution parameterized by location and scale");
+
+    py::class_<tenzor::distributions::BernoulliDist, tenzor::distributions::Distribution>(dist_m, "Bernoulli")
+        .def(py::init<tenzor::Tensor>(), py::arg("probs"),
+             "Bernoulli distribution parameterized by probability");
+
+    py::class_<tenzor::distributions::Gamma, tenzor::distributions::Distribution>(dist_m, "Gamma")
+        .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
+             py::arg("concentration"), py::arg("rate"),
+             "Gamma distribution (shape-rate parameterization)");
+
+    py::class_<tenzor::distributions::Beta, tenzor::distributions::Distribution>(dist_m, "Beta")
+        .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
+             py::arg("concentration1"), py::arg("concentration0"),
+             "Beta distribution on (0, 1)");
+
+    py::class_<tenzor::distributions::Dirichlet, tenzor::distributions::Distribution>(dist_m, "Dirichlet")
+        .def(py::init<tenzor::Tensor>(), py::arg("concentration"),
+             "Dirichlet distribution over the simplex");
+
+    py::class_<tenzor::distributions::StudentT, tenzor::distributions::Distribution>(dist_m, "StudentT")
+        .def(py::init<tenzor::Tensor, tenzor::Tensor, tenzor::Tensor>(),
+             py::arg("df"), py::arg("loc"), py::arg("scale"),
+             "Student-t distribution")
+        .def(py::init<tenzor::Tensor>(), py::arg("df"),
+             "Student-t distribution with loc=0, scale=1");
+
+    py::class_<tenzor::distributions::Poisson, tenzor::distributions::Distribution>(dist_m, "Poisson")
+        .def(py::init<tenzor::Tensor>(), py::arg("rate"),
+             "Poisson distribution parameterized by rate (lambda)");
+
+    py::class_<tenzor::distributions::MultivariateNormal, tenzor::distributions::Distribution>(dist_m, "MultivariateNormal")
+        .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
+             py::arg("loc"), py::arg("covariance_matrix"),
+             "Multivariate Normal distribution");
+
+    // New distributions (Phase 7)
+
+    py::class_<tenzor::distributions::Binomial, tenzor::distributions::Distribution>(dist_m, "Binomial")
+        .def(py::init<int64_t, tenzor::Tensor>(),
+             py::arg("total_count"), py::arg("probs"),
+             "Binomial distribution: number of successes in n independent Bernoulli trials");
+
+    py::class_<tenzor::distributions::LogNormal, tenzor::distributions::Distribution>(dist_m, "LogNormal")
+        .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
+             py::arg("loc"), py::arg("scale"),
+             "Log-Normal distribution: exp(Normal(loc, scale))");
+
+    py::class_<tenzor::distributions::Cauchy, tenzor::distributions::Distribution>(dist_m, "Cauchy")
+        .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
+             py::arg("loc"), py::arg("scale"),
+             "Cauchy distribution (heavy-tailed, no defined mean/variance)");
+
+    py::class_<tenzor::distributions::Chi2, tenzor::distributions::Distribution>(dist_m, "Chi2")
+        .def(py::init<tenzor::Tensor>(), py::arg("df"),
+             "Chi-squared distribution with df degrees of freedom");
+
+    py::class_<tenzor::distributions::Geometric, tenzor::distributions::Distribution>(dist_m, "Geometric")
+        .def(py::init<tenzor::Tensor>(), py::arg("probs"),
+             "Geometric distribution: trials until first success (1-indexed)");
+
+    py::class_<tenzor::distributions::Gumbel, tenzor::distributions::Distribution>(dist_m, "Gumbel")
+        .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
+             py::arg("loc"), py::arg("scale"),
+             "Gumbel (Type-I extreme value) distribution");
+
+    dist_m.def("kl_divergence", &tenzor::distributions::kl_divergence,
+               py::arg("p"), py::arg("q"),
+               "Compute KL(p || q) for supported distribution pairs");
 
 
 } // register_core

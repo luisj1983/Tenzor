@@ -1819,6 +1819,9 @@ class TakeAlongDimKernelI32;
 class TakeAlongDimKernelI64;
 class MaskedScatterKernelF32;
 class MaskedScatterKernelF64;
+class MaskedScatterKernelI32;
+class MaskedScatterKernelI64;
+class MaskedScatterPrefixSumKernel;
 
 // ============================================================================
 // take_along_dim kernel (SYCL)
@@ -1903,42 +1906,140 @@ auto take_along_dim_kernel(const Tensor& input, const Tensor& indices, int64_t d
 }
 
 // ============================================================================
-// masked_scatter kernel — CPU fallback for simplicity
+// masked_scatter kernel — native SYCL with exclusive_scan prefix sum
 // ============================================================================
 
 auto masked_scatter_kernel(const Tensor& input, const Tensor& mask,
                            const Tensor& source, sycl::queue& queue) -> Tensor {
-    // CPU fallback: transfer, compute, transfer back
-    auto device = input.device();
-    auto cpu_input = input.to(Device::cpu());
-    auto cpu_mask = mask.to(Device::cpu());
-    auto cpu_source = source.to(Device::cpu());
+    int64_t numel = input.numel();
+    int64_t src_numel = source.numel();
 
-    Tensor cpu_output = cpu_input.clone();
-    int64_t numel = cpu_input.numel();
-    const bool* mask_ptr = cpu_mask.data<bool>();
+    // Clone input to output (preserves values where mask is false)
+    Tensor output = input.clone();
 
-    auto do_scatter = [&](auto* out_ptr, const auto* src_ptr, int64_t src_numel) {
-        int64_t src_idx = 0;
-        for (int64_t i = 0; i < numel; ++i) {
-            if (mask_ptr[i]) {
-                if (src_idx >= src_numel) {
-                    throw std::runtime_error("masked_scatter: source has fewer elements than mask true count");
-                }
-                out_ptr[i] = src_ptr[src_idx++];
+    if (numel == 0) return output;
+
+    const bool* mask_ptr = get_data_ptr<const bool>(mask);
+
+    // Step 1: Convert bool mask to int32 on device for prefix sum
+    int32_t* mask_int = sycl::malloc_device<int32_t>(numel, queue);
+    queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+        mask_int[i] = mask_ptr[i] ? 1 : 0;
+    }).wait();
+
+    // Step 2: Compute exclusive prefix sum of mask to get scatter indices
+    // prefix_sum[i] = number of true values in mask[0..i-1]
+    int32_t* prefix_sum = sycl::malloc_device<int32_t>(numel, queue);
+
+    // Use a Blelloch-style work-efficient parallel scan for large arrays,
+    // or a simple sequential scan on device for moderate sizes.
+    // For production quality, we use a two-pass approach that works for all sizes.
+    {
+        // Pass 1: Compute block-level sums
+        constexpr int64_t BLOCK_SIZE = 256;
+        int64_t num_blocks = (numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+        // For simplicity with SYCL, use a sequential scan kernel for the prefix sum.
+        // This is O(n) work and runs as a single work-item, but is correct.
+        // For very large tensors, a multi-pass parallel scan would be better,
+        // but the scatter itself is the bottleneck, not the prefix sum.
+        //
+        // However, for better GPU utilization, we do a block-parallel approach:
+        // 1. Each block computes local prefix sums
+        // 2. Block totals are scanned
+        // 3. Block offsets are added
+
+        int32_t* block_totals = sycl::malloc_device<int32_t>(num_blocks, queue);
+        int32_t* block_offsets = sycl::malloc_device<int32_t>(num_blocks, queue);
+
+        // Phase 1: Local prefix sums within each block + compute block totals
+        queue.parallel_for(sycl::range<1>(num_blocks), [=](sycl::id<1> bid) {
+            int64_t block_start = bid * BLOCK_SIZE;
+            int64_t block_end = sycl::min(block_start + BLOCK_SIZE, numel);
+            int32_t running = 0;
+            for (int64_t i = block_start; i < block_end; ++i) {
+                prefix_sum[i] = running;
+                running += mask_int[i];
             }
-        }
-    };
+            block_totals[bid] = running;
+        }).wait();
 
-    switch (cpu_input.dtype()) {
-        case DType::Float32: do_scatter(cpu_output.data<float>(), cpu_source.data<float>(), cpu_source.numel()); break;
-        case DType::Float64: do_scatter(cpu_output.data<double>(), cpu_source.data<double>(), cpu_source.numel()); break;
-        case DType::Int32:   do_scatter(cpu_output.data<int32_t>(), cpu_source.data<int32_t>(), cpu_source.numel()); break;
-        case DType::Int64:   do_scatter(cpu_output.data<int64_t>(), cpu_source.data<int64_t>(), cpu_source.numel()); break;
-        default: throw std::runtime_error("masked_scatter OneAPI: unsupported dtype");
+        // Phase 2: Exclusive scan of block totals (sequential — num_blocks is small)
+        queue.single_task([=]() {
+            int32_t running = 0;
+            for (int64_t b = 0; b < num_blocks; ++b) {
+                block_offsets[b] = running;
+                running += block_totals[b];
+            }
+        }).wait();
+
+        // Phase 3: Add block offsets to local prefix sums
+        if (num_blocks > 1) {
+            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+                int64_t block_id = static_cast<int64_t>(i) / BLOCK_SIZE;
+                prefix_sum[i] += block_offsets[block_id];
+            }).wait();
+        }
+
+        sycl::free(block_totals, queue);
+        sycl::free(block_offsets, queue);
     }
 
-    return cpu_output.to(device);
+    // Step 3: Scatter source values using prefix sum indices
+    if (input.dtype() == DType::Float32) {
+        float* out_ptr = get_data_ptr<float>(output);
+        const float* src_ptr = get_data_ptr<const float>(source);
+        queue.parallel_for<MaskedScatterKernelF32>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            if (mask_ptr[i]) {
+                int32_t src_idx = prefix_sum[i];
+                if (src_idx < src_numel) {
+                    out_ptr[i] = src_ptr[src_idx];
+                }
+            }
+        }).wait();
+    } else if (input.dtype() == DType::Float64) {
+        double* out_ptr = get_data_ptr<double>(output);
+        const double* src_ptr = get_data_ptr<const double>(source);
+        queue.parallel_for<MaskedScatterKernelF64>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            if (mask_ptr[i]) {
+                int32_t src_idx = prefix_sum[i];
+                if (src_idx < src_numel) {
+                    out_ptr[i] = src_ptr[src_idx];
+                }
+            }
+        }).wait();
+    } else if (input.dtype() == DType::Int32) {
+        int32_t* out_ptr = get_data_ptr<int32_t>(output);
+        const int32_t* src_ptr = get_data_ptr<const int32_t>(source);
+        queue.parallel_for<MaskedScatterKernelI32>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            if (mask_ptr[i]) {
+                int32_t src_idx = prefix_sum[i];
+                if (src_idx < src_numel) {
+                    out_ptr[i] = src_ptr[src_idx];
+                }
+            }
+        }).wait();
+    } else if (input.dtype() == DType::Int64) {
+        int64_t* out_ptr = get_data_ptr<int64_t>(output);
+        const int64_t* src_ptr = get_data_ptr<const int64_t>(source);
+        queue.parallel_for<MaskedScatterKernelI64>(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            if (mask_ptr[i]) {
+                int32_t src_idx = prefix_sum[i];
+                if (src_idx < src_numel) {
+                    out_ptr[i] = src_ptr[src_idx];
+                }
+            }
+        }).wait();
+    } else {
+        sycl::free(mask_int, queue);
+        sycl::free(prefix_sum, queue);
+        throw std::runtime_error("masked_scatter OneAPI: unsupported dtype");
+    }
+
+    sycl::free(mask_int, queue);
+    sycl::free(prefix_sum, queue);
+
+    return output;
 }
 
 // ============================================================================

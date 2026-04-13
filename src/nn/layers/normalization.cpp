@@ -2,6 +2,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "tenzor/ops/transform.hpp"
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
@@ -2775,6 +2776,88 @@ auto RMSNorm::forward_impl(const Variable& input) -> Variable {
 
 auto RMSNorm::reset_parameters() -> void {
     // Weight initialized to 1 (already done in constructor)
+}
+
+// ============================================================================
+// LocalResponseNorm implementation
+// ============================================================================
+
+LocalResponseNorm::LocalResponseNorm(int64_t size, double alpha, double beta, double k)
+    : size_(size), alpha_(alpha), beta_(beta), k_(k) {
+    if (size <= 0) throw std::runtime_error("LocalResponseNorm: size must be positive");
+}
+
+auto LocalResponseNorm::forward_impl(const Variable& input) -> Variable {
+    // LRN: y_i = x_i / (k + alpha/size * sum(x_j^2, local_window))^beta
+    // where the window spans `size` channels centered on channel i.
+    //
+    // Implementation strategy: compute x^2, then accumulate the sliding
+    // channel-window sum by iterating over offsets and using narrow + cat
+    // to build shifted versions with zero-padding. For typical LRN window
+    // sizes (3, 5, 7) this is only a few additions through the autograd graph.
+
+    auto input_shape = input.shape();
+    if (input_shape.size() < 3) {
+        throw std::invalid_argument(
+            "LocalResponseNorm expects at least 3D input [batch, channels, ...]");
+    }
+
+    int64_t C = input_shape[1];
+    int64_t half = size_ / 2;
+
+    // Operate on raw Tensors for the LRN computation.
+    // LRN has no learnable parameters, so we compute at the Tensor level.
+    Tensor x_t = input.tensor();
+    Tensor x_sq = x_t * x_t;
+
+    auto device = x_t.device();
+    auto dtype = x_t.dtype();
+
+    // Accumulator for channel-sliding sum of x^2
+    Tensor sum_sq = x_sq;  // j=0 contribution
+
+    // Use a function pointer to the tensor-level cat to avoid name resolution
+    // picking the autograd Variable overload in namespace tenzor.
+    using TensorCatFn = auto(*)(std::span<const Tensor>, int64_t) -> Tensor;
+    TensorCatFn tensor_cat = static_cast<TensorCatFn>(&::tenzor::cat);
+
+    for (int64_t j = -half; j <= half; ++j) {
+        if (j == 0) continue;
+
+        int64_t src_start = std::max(int64_t(0), j);
+        int64_t slice_len = C - std::abs(j);
+        if (slice_len <= 0) continue;
+
+        Tensor sliced = x_sq.slice(1, src_start, src_start + slice_len);
+
+        // Build zero-padded shifted version via cat
+        Tensor shifted;
+        if (j > 0) {
+            // Pad at end: shifted = [sliced | zeros]
+            auto pad_shape = std::vector<int64_t>(input_shape.begin(), input_shape.end());
+            pad_shape[1] = j;
+            Tensor pad = tenzor::zeros(pad_shape, dtype, device);
+            Tensor parts[] = {sliced, pad};
+            shifted = tensor_cat(std::span<const Tensor>(parts, 2), 1);
+        } else {
+            // Pad at start: shifted = [zeros | sliced]
+            auto pad_shape = std::vector<int64_t>(input_shape.begin(), input_shape.end());
+            pad_shape[1] = -j;
+            Tensor pad = tenzor::zeros(pad_shape, dtype, device);
+            Tensor parts[] = {pad, sliced};
+            shifted = tensor_cat(std::span<const Tensor>(parts, 2), 1);
+        }
+
+        sum_sq = sum_sq + shifted;
+    }
+
+    // Compute divisor: (k + alpha/size * sum_sq)^beta
+    float alpha_over_size = static_cast<float>(alpha_) / static_cast<float>(size_);
+    Tensor divisor = tenzor::pow(
+        sum_sq * alpha_over_size + static_cast<float>(k_),
+        static_cast<float>(beta_));
+
+    return Variable(x_t / divisor, input.requires_grad());
 }
 
 } // namespace tenzor::nn

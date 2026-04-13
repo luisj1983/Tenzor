@@ -1,0 +1,33 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
+
+// Isin — set membership test
+// For each element in elements_data, check if it exists in test_data.
+// Output: uint8_t (Bool) per element.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Elements     { float   elements_data[]; };
+layout(binding = 1) readonly buffer TestElements { float   test_data[]; };
+layout(binding = 2) writeonly buffer Output      { uint8_t output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;      // number of elements to test
+    uint num_test_elements; // size of the test set
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_elements) return;
+
+    float val = elements_data[idx];
+    uint8_t found = uint8_t(0);
+
+    for (uint i = 0; i < params.num_test_elements; i++) {
+        if (val == test_data[i]) {
+            found = uint8_t(1);
+            break;
+        }
+    }
+
+    output_data[idx] = found;
+}

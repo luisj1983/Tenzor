@@ -1,0 +1,41 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : enable
+#extension GL_ARB_gpu_shader_fp64 : enable
+
+// Cumulative Minimum along a dimension (Float64)
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input   { double input_data[]; };
+layout(binding = 1) buffer Values  { double values_data[]; };
+layout(binding = 2) buffer Indices { int    indices_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint total_lines;
+    uint reduce_size;
+    uint inner_size;
+} params;
+
+void main() {
+    uint line_idx = gl_GlobalInvocationID.x;
+    if (line_idx >= params.total_lines) return;
+
+    uint outer_idx = line_idx / params.inner_size;
+    uint inner_idx = line_idx % params.inner_size;
+    uint base = outer_idx * params.reduce_size * params.inner_size + inner_idx;
+
+    double running = input_data[base];
+    int    ri = 0;
+    values_data[base]  = running;
+    indices_data[base] = 0;
+
+    for (uint i = 1; i < params.reduce_size; i++) {
+        uint idx = base + i * params.inner_size;
+        double val = input_data[idx];
+        if (val < running) {
+            running = val;
+            ri = int(i);
+        }
+        values_data[idx]  = running;
+        indices_data[idx] = ri;
+    }
+}

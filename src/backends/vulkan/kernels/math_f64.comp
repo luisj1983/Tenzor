@@ -330,5 +330,21 @@ void main() {
             result[idx] = 1.0 - clamp(res, 0.0, 1.0);
             break;
         }
+        case 42: { // fmax (binary) - NaN-propagating max: fmax(NaN, x) = x
+            double res;
+            if (isnan(val_a)) res = val_b;
+            else if (isnan(val_b)) res = val_a;
+            else res = max(val_a, val_b);
+            result[idx] = res;
+            break;
+        }
+        case 43: { // fmin (binary) - NaN-propagating min: fmin(NaN, x) = x
+            double res;
+            if (isnan(val_a)) res = val_b;
+            else if (isnan(val_b)) res = val_a;
+            else res = min(val_a, val_b);
+            result[idx] = res;
+            break;
+        }
     }
 }

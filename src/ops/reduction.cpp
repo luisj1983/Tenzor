@@ -231,6 +231,27 @@ auto nanmean(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> T
     return dispatch<OpId::Nanmean>(inputs, attrs)[0];
 }
 
+auto nanvar(const Tensor& input, std::optional<int64_t> dim, bool keepdim, int64_t correction) -> Tensor {
+    // Composition: nanvar = sum((x - nanmean(x))^2, ignoring NaN) / (N_valid - correction)
+    Tensor mean = nanmean(input, dim, /*keepdim=*/true);
+    Tensor diff = input - mean;
+    // Zero out NaN positions so they don't contribute
+    Tensor nan_mask = isnan(input);
+    Tensor diff_sq = diff * diff;
+    // Replace NaN-originated values with 0
+    Tensor clean = where(nan_mask, zeros_like(diff_sq), diff_sq);
+    Tensor sum_sq = nansum(clean, dim, keepdim);
+    // Count valid (non-NaN) elements
+    Tensor valid_mask = logical_not(nan_mask);
+    Tensor count = sum(valid_mask.to(input.dtype()), dim, keepdim);
+    Tensor denom = count - static_cast<float>(correction);
+    return sum_sq / denom;
+}
+
+auto nanstd(const Tensor& input, std::optional<int64_t> dim, bool keepdim, int64_t correction) -> Tensor {
+    return sqrt(nanvar(input, dim, keepdim, correction));
+}
+
 auto aminmax(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> std::pair<Tensor, Tensor> {
     std::array<Tensor, 1> inputs = {input.contiguous()};
     NewOpAttributes attrs;

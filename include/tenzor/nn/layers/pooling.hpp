@@ -373,5 +373,97 @@ private:
     int64_t output_w_;
 };
 
+/**
+ * @brief 1D power-average pooling layer.
+ *
+ * Computes: (sum(|x|^p, kernel) / kernel_size)^(1/p)
+ * Equivalent to applying avg_pool on the p-th power of absolute values,
+ * then taking the p-th root.
+ *
+ * Shape: Input (N, C, L_in) -> Output (N, C, L_out)
+ * L_out = floor((L_in - kernel_size) / stride + 1)
+ *
+ * @code
+ * LPPool1d pool(2, 3, 2);  // L2 pooling, kernel=3, stride=2
+ * Variable x(Tensor({batch, 64, 100}, DType::Float32, Device::cpu()), true);
+ * Variable pooled = pool.forward(x);
+ * @endcode
+ */
+class LPPool1d : public Module {
+public:
+    /**
+     * @brief Construct 1D LP pooling layer.
+     *
+     * @param norm_type The exponent p for Lp norm (must be >= 1)
+     * @param kernel_size Size of the pooling window
+     * @param stride Stride of the pooling window (default: same as kernel_size)
+     */
+    LPPool1d(int64_t norm_type, int64_t kernel_size, int64_t stride = -1);
+
+    auto forward_impl(const Variable& input) -> Variable override;
+
+    auto extra_repr() const -> std::string override {
+        return "norm_type=" + std::to_string(norm_type_) +
+               ", kernel_size=" + std::to_string(kernel_size_) +
+               ", stride=" + std::to_string(stride_);
+    }
+
+private:
+    int64_t norm_type_;    ///< Exponent p for the Lp norm
+    int64_t kernel_size_;  ///< Pooling window size
+    int64_t stride_;       ///< Stride
+};
+
+/**
+ * @brief 2D power-average pooling layer.
+ *
+ * Computes: (sum(|x|^p, kernel) / kernel_size)^(1/p)
+ * Applies avg_pool2d on the p-th power of absolute values, then takes
+ * the p-th root.
+ *
+ * Shape: Input (N, C, H_in, W_in) -> Output (N, C, H_out, W_out)
+ *
+ * @code
+ * LPPool2d pool(2, {3, 3}, {2, 2});  // L2 pooling, 3x3 kernel, stride 2
+ * Variable x(Tensor({batch, 64, 32, 32}, DType::Float32, Device::cpu()), true);
+ * Variable pooled = pool.forward(x);
+ * @endcode
+ */
+class LPPool2d : public Module {
+public:
+    /**
+     * @brief Construct 2D LP pooling layer.
+     *
+     * @param norm_type The exponent p for Lp norm (must be >= 1)
+     * @param kernel_size Size of the pooling window (height, width)
+     * @param stride Stride of the pooling window (default: same as kernel_size)
+     */
+    LPPool2d(int64_t norm_type,
+             std::pair<int64_t, int64_t> kernel_size,
+             std::pair<int64_t, int64_t> stride = {-1, -1});
+
+    /**
+     * @brief Convenience constructor for square kernel/stride.
+     */
+    LPPool2d(int64_t norm_type, int64_t kernel_size, int64_t stride = -1)
+        : LPPool2d(norm_type, {kernel_size, kernel_size},
+                   stride == -1 ? std::pair<int64_t,int64_t>{-1, -1} : std::pair<int64_t,int64_t>{stride, stride}) {}
+
+    auto forward_impl(const Variable& input) -> Variable override;
+
+    auto extra_repr() const -> std::string override {
+        return "norm_type=" + std::to_string(norm_type_) +
+               ", kernel_size=(" + std::to_string(kernel_size_.first) +
+               ", " + std::to_string(kernel_size_.second) + ")" +
+               ", stride=(" + std::to_string(stride_.first) +
+               ", " + std::to_string(stride_.second) + ")";
+    }
+
+private:
+    int64_t norm_type_;                       ///< Exponent p for the Lp norm
+    std::pair<int64_t, int64_t> kernel_size_; ///< Pooling window (H, W)
+    std::pair<int64_t, int64_t> stride_;      ///< Stride (H, W)
+};
+
 } // namespace nn
 } // namespace tenzor

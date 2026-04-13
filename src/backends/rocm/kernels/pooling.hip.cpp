@@ -3473,5 +3473,660 @@ auto adaptive_avgpool3d_backward_hip(
     return grad_input;
 }
 
+// ============================================================================
+// Fractional Max Pool 2D Forward
+// ============================================================================
+
+__global__ void fractional_maxpool2d_forward_kernel_f32(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int64_t* __restrict__ indices,
+    const float* __restrict__ samples,
+    int64_t N, int64_t C, int64_t H, int64_t W,
+    int64_t out_h, int64_t out_w
+) {
+    int64_t total = N * C * out_h * out_w;
+    HIP_KERNEL_LOOP(idx, total) {
+        int64_t ow = idx % out_w;
+        int64_t oh = (idx / out_w) % out_h;
+        int64_t c  = (idx / (out_w * out_h)) % C;
+        int64_t n  = idx / (out_w * out_h * C);
+
+        float sample_h = samples ? samples[(n * C + c) * 2 + 0] : 0.5f;
+        float sample_w = samples ? samples[(n * C + c) * 2 + 1] : 0.5f;
+
+        int64_t h_start = static_cast<int64_t>(floorf(
+            (oh + sample_h) * (static_cast<float>(H) / out_h) - sample_h));
+        int64_t h_end = static_cast<int64_t>(floorf(
+            (oh + 1 + sample_h) * (static_cast<float>(H) / out_h) - sample_h));
+        int64_t w_start = static_cast<int64_t>(floorf(
+            (ow + sample_w) * (static_cast<float>(W) / out_w) - sample_w));
+        int64_t w_end = static_cast<int64_t>(floorf(
+            (ow + 1 + sample_w) * (static_cast<float>(W) / out_w) - sample_w));
+
+        h_start = max(h_start, int64_t{0}); h_end = min(h_end, H);
+        w_start = max(w_start, int64_t{0}); w_end = min(w_end, W);
+        if (h_end <= h_start) h_end = h_start + 1;
+        if (w_end <= w_start) w_end = w_start + 1;
+        h_end = min(h_end, H);
+        w_end = min(w_end, W);
+
+        float max_val = -1e38f;
+        int64_t max_idx = h_start * W + w_start;
+
+        for (int64_t h = h_start; h < h_end; ++h) {
+            for (int64_t w = w_start; w < w_end; ++w) {
+                int64_t in_idx = ((n * C + c) * H + h) * W + w;
+                float val = input[in_idx];
+                if (val > max_val) {
+                    max_val = val;
+                    max_idx = h * W + w;
+                }
+            }
+        }
+
+        output[idx] = max_val;
+        indices[idx] = max_idx;
+    }
+}
+
+auto fractional_maxpool2d_forward_hip(
+    const Tensor& input,
+    int64_t out_h, int64_t out_w,
+    const Tensor* random_samples,
+    hipStream_t stream
+) -> std::pair<Tensor, Tensor> {
+    auto shape = input.shape();
+    int64_t N = shape[0], C = shape[1], H = shape[2], W = shape[3];
+
+    Tensor output({N, C, out_h, out_w}, input.dtype(), input.device());
+    Tensor indices({N, C, out_h, out_w}, DType::Int64, input.device());
+
+    int64_t total = N * C * out_h * out_w;
+    int threads = rocm::get_wavefront_size() * 4;
+    int blocks = (total + threads - 1) / threads;
+
+    const float* samples_ptr = nullptr;
+    if (random_samples && random_samples->numel() > 0) {
+        samples_ptr = random_samples->data<float>();
+    }
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(fractional_maxpool2d_forward_kernel_f32,
+            dim3(blocks), dim3(threads), 0, stream,
+            input.data<float>(), output.data<float>(), indices.data<int64_t>(),
+            samples_ptr, N, C, H, W, out_h, out_w);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::Float64) {
+        auto input_f32 = input.to(DType::Float32);
+        auto [out_f32, idx] = fractional_maxpool2d_forward_hip(input_f32, out_h, out_w, random_samples, stream);
+        return {out_f32.to(DType::Float64), idx};
+    } else if (input.dtype() == DType::Float16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto [out_f32, idx] = fractional_maxpool2d_forward_hip(input_f32, out_h, out_w, random_samples, stream);
+        return {out_f32.to(DType::Float16), idx};
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto [out_f32, idx] = fractional_maxpool2d_forward_hip(input_f32, out_h, out_w, random_samples, stream);
+        return {out_f32.to(DType::BFloat16), idx};
+    } else {
+        throw std::runtime_error("fractional_maxpool2d_forward_hip: unsupported dtype");
+    }
+
+    return {output, indices};
+}
+
+// ============================================================================
+// Fractional Max Pool 2D Backward
+// ============================================================================
+
+__global__ void fractional_maxpool2d_backward_kernel_f32(
+    const float* __restrict__ grad_output,
+    const int64_t* __restrict__ indices,
+    float* __restrict__ grad_input,
+    int64_t N, int64_t C, int64_t H, int64_t W,
+    int64_t out_h, int64_t out_w
+) {
+    int64_t total = N * C * out_h * out_w;
+    int64_t in_spatial = H * W;
+    int64_t out_spatial = out_h * out_w;
+
+    HIP_KERNEL_LOOP(idx, total) {
+        int64_t ow = idx % out_w;
+        int64_t oh = (idx / out_w) % out_h;
+        int64_t c  = (idx / (out_w * out_h)) % C;
+        int64_t n  = idx / (out_w * out_h * C);
+
+        int64_t base_in = (n * C + c) * in_spatial;
+        int64_t base_out = (n * C + c) * out_spatial;
+        int64_t out_idx = base_out + oh * out_w + ow;
+
+        int64_t max_idx = indices[out_idx];
+        atomicAdd(&grad_input[base_in + max_idx], grad_output[out_idx]);
+    }
+}
+
+auto fractional_maxpool2d_backward_hip(
+    const Tensor& grad_output,
+    const Tensor& indices,
+    const std::vector<int64_t>& input_shape,
+    hipStream_t stream
+) -> Tensor {
+    int64_t N = input_shape[0], C = input_shape[1];
+    int64_t H = input_shape[2], W = input_shape[3];
+    auto grad_shape = grad_output.shape();
+    int64_t out_h = grad_shape[2], out_w = grad_shape[3];
+
+    Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
+
+    int64_t total = N * C * out_h * out_w;
+    int threads = rocm::get_wavefront_size() * 4;
+    int blocks = (total + threads - 1) / threads;
+
+    if (grad_output.dtype() == DType::Float32) {
+        int64_t input_numel = N * C * H * W;
+        HIP_CHECK(hipMemsetAsync(grad_input.data<float>(), 0, input_numel * sizeof(float), stream));
+        hipLaunchKernelGGL(fractional_maxpool2d_backward_kernel_f32,
+            dim3(blocks), dim3(threads), 0, stream,
+            grad_output.data<float>(), indices.data<int64_t>(),
+            grad_input.data<float>(), N, C, H, W, out_h, out_w);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (grad_output.dtype() == DType::Float64) {
+        auto grad_f32 = grad_output.to(DType::Float32);
+        auto result_f32 = fractional_maxpool2d_backward_hip(grad_f32, indices, input_shape, stream);
+        return result_f32.to(DType::Float64);
+    } else if (grad_output.dtype() == DType::Float16) {
+        auto grad_f32 = grad_output.to(DType::Float32);
+        auto result_f32 = fractional_maxpool2d_backward_hip(grad_f32, indices, input_shape, stream);
+        return result_f32.to(DType::Float16);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        auto grad_f32 = grad_output.to(DType::Float32);
+        auto result_f32 = fractional_maxpool2d_backward_hip(grad_f32, indices, input_shape, stream);
+        return result_f32.to(DType::BFloat16);
+    } else {
+        throw std::runtime_error("fractional_maxpool2d_backward_hip: unsupported dtype");
+    }
+
+    return grad_input;
+}
+
+// ============================================================================
+// Fractional Max Pool 3D Forward
+// ============================================================================
+
+__global__ void fractional_maxpool3d_forward_kernel_f32(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int64_t* __restrict__ indices,
+    const float* __restrict__ samples,
+    int64_t N, int64_t C, int64_t D, int64_t H, int64_t W,
+    int64_t out_d, int64_t out_h, int64_t out_w
+) {
+    int64_t total = N * C * out_d * out_h * out_w;
+    HIP_KERNEL_LOOP(idx, total) {
+        int64_t ow = idx % out_w;
+        int64_t oh = (idx / out_w) % out_h;
+        int64_t od = (idx / (out_w * out_h)) % out_d;
+        int64_t c  = (idx / (out_w * out_h * out_d)) % C;
+        int64_t n  = idx / (out_w * out_h * out_d * C);
+
+        float sample_d = samples ? samples[(n * C + c) * 3 + 0] : 0.5f;
+        float sample_h = samples ? samples[(n * C + c) * 3 + 1] : 0.5f;
+        float sample_w = samples ? samples[(n * C + c) * 3 + 2] : 0.5f;
+
+        int64_t d_start = static_cast<int64_t>(floorf(
+            (od + sample_d) * (static_cast<float>(D) / out_d) - sample_d));
+        int64_t d_end = static_cast<int64_t>(floorf(
+            (od + 1 + sample_d) * (static_cast<float>(D) / out_d) - sample_d));
+        int64_t h_start = static_cast<int64_t>(floorf(
+            (oh + sample_h) * (static_cast<float>(H) / out_h) - sample_h));
+        int64_t h_end = static_cast<int64_t>(floorf(
+            (oh + 1 + sample_h) * (static_cast<float>(H) / out_h) - sample_h));
+        int64_t w_start = static_cast<int64_t>(floorf(
+            (ow + sample_w) * (static_cast<float>(W) / out_w) - sample_w));
+        int64_t w_end = static_cast<int64_t>(floorf(
+            (ow + 1 + sample_w) * (static_cast<float>(W) / out_w) - sample_w));
+
+        d_start = max(d_start, int64_t{0}); d_end = min(d_end, D);
+        h_start = max(h_start, int64_t{0}); h_end = min(h_end, H);
+        w_start = max(w_start, int64_t{0}); w_end = min(w_end, W);
+        if (d_end <= d_start) d_end = d_start + 1;
+        if (h_end <= h_start) h_end = h_start + 1;
+        if (w_end <= w_start) w_end = w_start + 1;
+        d_end = min(d_end, D);
+        h_end = min(h_end, H);
+        w_end = min(w_end, W);
+
+        float max_val = -1e38f;
+        int64_t max_idx = (d_start * H + h_start) * W + w_start;
+
+        for (int64_t d = d_start; d < d_end; ++d) {
+            for (int64_t h = h_start; h < h_end; ++h) {
+                for (int64_t w = w_start; w < w_end; ++w) {
+                    int64_t in_idx = (((n * C + c) * D + d) * H + h) * W + w;
+                    float val = input[in_idx];
+                    if (val > max_val) {
+                        max_val = val;
+                        max_idx = (d * H + h) * W + w;
+                    }
+                }
+            }
+        }
+
+        output[idx] = max_val;
+        indices[idx] = max_idx;
+    }
+}
+
+auto fractional_maxpool3d_forward_hip(
+    const Tensor& input,
+    int64_t out_d, int64_t out_h, int64_t out_w,
+    const Tensor* random_samples,
+    hipStream_t stream
+) -> std::pair<Tensor, Tensor> {
+    auto shape = input.shape();
+    int64_t N = shape[0], C = shape[1], D = shape[2], H = shape[3], W = shape[4];
+
+    Tensor output({N, C, out_d, out_h, out_w}, input.dtype(), input.device());
+    Tensor indices({N, C, out_d, out_h, out_w}, DType::Int64, input.device());
+
+    int64_t total = N * C * out_d * out_h * out_w;
+    int threads = rocm::get_wavefront_size() * 4;
+    int blocks = (total + threads - 1) / threads;
+
+    const float* samples_ptr = nullptr;
+    if (random_samples && random_samples->numel() > 0) {
+        samples_ptr = random_samples->data<float>();
+    }
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(fractional_maxpool3d_forward_kernel_f32,
+            dim3(blocks), dim3(threads), 0, stream,
+            input.data<float>(), output.data<float>(), indices.data<int64_t>(),
+            samples_ptr, N, C, D, H, W, out_d, out_h, out_w);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::Float64) {
+        auto input_f32 = input.to(DType::Float32);
+        auto [out_f32, idx] = fractional_maxpool3d_forward_hip(input_f32, out_d, out_h, out_w, random_samples, stream);
+        return {out_f32.to(DType::Float64), idx};
+    } else if (input.dtype() == DType::Float16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto [out_f32, idx] = fractional_maxpool3d_forward_hip(input_f32, out_d, out_h, out_w, random_samples, stream);
+        return {out_f32.to(DType::Float16), idx};
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto [out_f32, idx] = fractional_maxpool3d_forward_hip(input_f32, out_d, out_h, out_w, random_samples, stream);
+        return {out_f32.to(DType::BFloat16), idx};
+    } else {
+        throw std::runtime_error("fractional_maxpool3d_forward_hip: unsupported dtype");
+    }
+
+    return {output, indices};
+}
+
+// ============================================================================
+// Fractional Max Pool 3D Backward
+// ============================================================================
+
+__global__ void fractional_maxpool3d_backward_kernel_f32(
+    const float* __restrict__ grad_output,
+    const int64_t* __restrict__ indices,
+    float* __restrict__ grad_input,
+    int64_t N, int64_t C,
+    int64_t D, int64_t H, int64_t W,
+    int64_t out_d, int64_t out_h, int64_t out_w
+) {
+    int64_t total = N * C * out_d * out_h * out_w;
+    int64_t in_spatial = D * H * W;
+    int64_t out_spatial = out_d * out_h * out_w;
+
+    HIP_KERNEL_LOOP(idx, total) {
+        int64_t local_idx = idx % out_spatial;
+        int64_t nc = idx / out_spatial;
+
+        int64_t base_in = nc * in_spatial;
+        int64_t base_out = nc * out_spatial;
+
+        int64_t max_idx = indices[base_out + local_idx];
+        atomicAdd(&grad_input[base_in + max_idx], grad_output[base_out + local_idx]);
+    }
+}
+
+auto fractional_maxpool3d_backward_hip(
+    const Tensor& grad_output,
+    const Tensor& indices,
+    const std::vector<int64_t>& input_shape,
+    hipStream_t stream
+) -> Tensor {
+    int64_t N = input_shape[0], C = input_shape[1];
+    int64_t D = input_shape[2], H = input_shape[3], W = input_shape[4];
+    auto grad_shape = grad_output.shape();
+    int64_t out_d = grad_shape[2], out_h = grad_shape[3], out_w = grad_shape[4];
+
+    Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
+
+    int64_t total = N * C * out_d * out_h * out_w;
+    int threads = rocm::get_wavefront_size() * 4;
+    int blocks = (total + threads - 1) / threads;
+
+    if (grad_output.dtype() == DType::Float32) {
+        int64_t input_numel = N * C * D * H * W;
+        HIP_CHECK(hipMemsetAsync(grad_input.data<float>(), 0, input_numel * sizeof(float), stream));
+        hipLaunchKernelGGL(fractional_maxpool3d_backward_kernel_f32,
+            dim3(blocks), dim3(threads), 0, stream,
+            grad_output.data<float>(), indices.data<int64_t>(),
+            grad_input.data<float>(), N, C, D, H, W, out_d, out_h, out_w);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (grad_output.dtype() == DType::Float64) {
+        auto grad_f32 = grad_output.to(DType::Float32);
+        auto result_f32 = fractional_maxpool3d_backward_hip(grad_f32, indices, input_shape, stream);
+        return result_f32.to(DType::Float64);
+    } else if (grad_output.dtype() == DType::Float16) {
+        auto grad_f32 = grad_output.to(DType::Float32);
+        auto result_f32 = fractional_maxpool3d_backward_hip(grad_f32, indices, input_shape, stream);
+        return result_f32.to(DType::Float16);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        auto grad_f32 = grad_output.to(DType::Float32);
+        auto result_f32 = fractional_maxpool3d_backward_hip(grad_f32, indices, input_shape, stream);
+        return result_f32.to(DType::BFloat16);
+    } else {
+        throw std::runtime_error("fractional_maxpool3d_backward_hip: unsupported dtype");
+    }
+
+    return grad_input;
+}
+
+// ============================================================================
+// Max Unpool 2D Forward
+// ============================================================================
+
+__global__ void max_unpool2d_forward_kernel_f32(
+    const float* __restrict__ input,
+    const int64_t* __restrict__ indices,
+    float* __restrict__ output,
+    int64_t N, int64_t C,
+    int64_t in_h, int64_t in_w,
+    int64_t out_h, int64_t out_w
+) {
+    int64_t total = N * C * in_h * in_w;
+    int64_t in_spatial = in_h * in_w;
+    int64_t out_spatial = out_h * out_w;
+
+    HIP_KERNEL_LOOP(idx, total) {
+        int64_t local_idx = idx % in_spatial;
+        int64_t nc = idx / in_spatial;
+
+        int64_t base_in = nc * in_spatial;
+        int64_t base_out = nc * out_spatial;
+
+        int64_t max_idx = indices[base_in + local_idx];
+        if (max_idx >= 0 && max_idx < out_spatial) {
+            output[base_out + max_idx] = input[base_in + local_idx];
+        }
+    }
+}
+
+auto max_unpool2d_forward_hip(
+    const Tensor& input,
+    const Tensor& indices,
+    int64_t out_h, int64_t out_w,
+    hipStream_t stream
+) -> Tensor {
+    auto shape = input.shape();
+    int64_t N = shape[0], C = shape[1], in_h = shape[2], in_w = shape[3];
+
+    Tensor output({N, C, out_h, out_w}, input.dtype(), input.device());
+
+    int64_t output_numel = N * C * out_h * out_w;
+    int64_t total = N * C * in_h * in_w;
+    int threads = rocm::get_wavefront_size() * 4;
+    int blocks = (total + threads - 1) / threads;
+
+    if (input.dtype() == DType::Float32) {
+        HIP_CHECK(hipMemsetAsync(output.data<float>(), 0, output_numel * sizeof(float), stream));
+        hipLaunchKernelGGL(max_unpool2d_forward_kernel_f32,
+            dim3(blocks), dim3(threads), 0, stream,
+            input.data<float>(), indices.data<int64_t>(),
+            output.data<float>(), N, C, in_h, in_w, out_h, out_w);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::Float64) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = max_unpool2d_forward_hip(input_f32, indices, out_h, out_w, stream);
+        return result_f32.to(DType::Float64);
+    } else if (input.dtype() == DType::Float16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = max_unpool2d_forward_hip(input_f32, indices, out_h, out_w, stream);
+        return result_f32.to(DType::Float16);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = max_unpool2d_forward_hip(input_f32, indices, out_h, out_w, stream);
+        return result_f32.to(DType::BFloat16);
+    } else {
+        throw std::runtime_error("max_unpool2d_forward_hip: unsupported dtype");
+    }
+
+    return output;
+}
+
+// ============================================================================
+// Max Unpool 2D Backward
+// ============================================================================
+
+__global__ void max_unpool2d_backward_kernel_f32(
+    const float* __restrict__ grad_output,
+    const int64_t* __restrict__ indices,
+    float* __restrict__ grad_input,
+    int64_t N, int64_t C,
+    int64_t in_h, int64_t in_w,
+    int64_t out_h, int64_t out_w
+) {
+    int64_t total = N * C * in_h * in_w;
+    int64_t in_spatial = in_h * in_w;
+    int64_t out_spatial = out_h * out_w;
+
+    HIP_KERNEL_LOOP(idx, total) {
+        int64_t local_idx = idx % in_spatial;
+        int64_t nc = idx / in_spatial;
+
+        int64_t base_in = nc * in_spatial;
+        int64_t base_out = nc * out_spatial;
+
+        int64_t max_idx = indices[base_in + local_idx];
+        if (max_idx >= 0 && max_idx < out_spatial) {
+            grad_input[base_in + local_idx] = grad_output[base_out + max_idx];
+        } else {
+            grad_input[base_in + local_idx] = 0.0f;
+        }
+    }
+}
+
+auto max_unpool2d_backward_hip(
+    const Tensor& grad_output,
+    const Tensor& indices,
+    const std::vector<int64_t>& input_shape,
+    hipStream_t stream
+) -> Tensor {
+    int64_t N = input_shape[0], C = input_shape[1];
+    int64_t in_h = input_shape[2], in_w = input_shape[3];
+    auto grad_shape = grad_output.shape();
+    int64_t out_h = grad_shape[2], out_w = grad_shape[3];
+
+    Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
+
+    int64_t total = N * C * in_h * in_w;
+    int threads = rocm::get_wavefront_size() * 4;
+    int blocks = (total + threads - 1) / threads;
+
+    if (grad_output.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(max_unpool2d_backward_kernel_f32,
+            dim3(blocks), dim3(threads), 0, stream,
+            grad_output.data<float>(), indices.data<int64_t>(),
+            grad_input.data<float>(), N, C, in_h, in_w, out_h, out_w);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (grad_output.dtype() == DType::Float64) {
+        auto grad_f32 = grad_output.to(DType::Float32);
+        auto result_f32 = max_unpool2d_backward_hip(grad_f32, indices, input_shape, stream);
+        return result_f32.to(DType::Float64);
+    } else if (grad_output.dtype() == DType::Float16) {
+        auto grad_f32 = grad_output.to(DType::Float32);
+        auto result_f32 = max_unpool2d_backward_hip(grad_f32, indices, input_shape, stream);
+        return result_f32.to(DType::Float16);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        auto grad_f32 = grad_output.to(DType::Float32);
+        auto result_f32 = max_unpool2d_backward_hip(grad_f32, indices, input_shape, stream);
+        return result_f32.to(DType::BFloat16);
+    } else {
+        throw std::runtime_error("max_unpool2d_backward_hip: unsupported dtype");
+    }
+
+    return grad_input;
+}
+
+// ============================================================================
+// Max Unpool 3D Forward
+// ============================================================================
+
+__global__ void max_unpool3d_forward_kernel_f32(
+    const float* __restrict__ input,
+    const int64_t* __restrict__ indices,
+    float* __restrict__ output,
+    int64_t N, int64_t C,
+    int64_t in_d, int64_t in_h, int64_t in_w,
+    int64_t out_d, int64_t out_h, int64_t out_w
+) {
+    int64_t total = N * C * in_d * in_h * in_w;
+    int64_t in_spatial = in_d * in_h * in_w;
+    int64_t out_spatial = out_d * out_h * out_w;
+
+    HIP_KERNEL_LOOP(idx, total) {
+        int64_t local_idx = idx % in_spatial;
+        int64_t nc = idx / in_spatial;
+
+        int64_t base_in = nc * in_spatial;
+        int64_t base_out = nc * out_spatial;
+
+        int64_t max_idx = indices[base_in + local_idx];
+        if (max_idx >= 0 && max_idx < out_spatial) {
+            output[base_out + max_idx] = input[base_in + local_idx];
+        }
+    }
+}
+
+auto max_unpool3d_forward_hip(
+    const Tensor& input,
+    const Tensor& indices,
+    int64_t out_d, int64_t out_h, int64_t out_w,
+    hipStream_t stream
+) -> Tensor {
+    auto shape = input.shape();
+    int64_t N = shape[0], C = shape[1], in_d = shape[2], in_h = shape[3], in_w = shape[4];
+
+    Tensor output({N, C, out_d, out_h, out_w}, input.dtype(), input.device());
+
+    int64_t output_numel = N * C * out_d * out_h * out_w;
+    int64_t total = N * C * in_d * in_h * in_w;
+    int threads = rocm::get_wavefront_size() * 4;
+    int blocks = (total + threads - 1) / threads;
+
+    if (input.dtype() == DType::Float32) {
+        HIP_CHECK(hipMemsetAsync(output.data<float>(), 0, output_numel * sizeof(float), stream));
+        hipLaunchKernelGGL(max_unpool3d_forward_kernel_f32,
+            dim3(blocks), dim3(threads), 0, stream,
+            input.data<float>(), indices.data<int64_t>(),
+            output.data<float>(), N, C, in_d, in_h, in_w, out_d, out_h, out_w);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::Float64) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = max_unpool3d_forward_hip(input_f32, indices, out_d, out_h, out_w, stream);
+        return result_f32.to(DType::Float64);
+    } else if (input.dtype() == DType::Float16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = max_unpool3d_forward_hip(input_f32, indices, out_d, out_h, out_w, stream);
+        return result_f32.to(DType::Float16);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = max_unpool3d_forward_hip(input_f32, indices, out_d, out_h, out_w, stream);
+        return result_f32.to(DType::BFloat16);
+    } else {
+        throw std::runtime_error("max_unpool3d_forward_hip: unsupported dtype");
+    }
+
+    return output;
+}
+
+// ============================================================================
+// Max Unpool 3D Backward
+// ============================================================================
+
+__global__ void max_unpool3d_backward_kernel_f32(
+    const float* __restrict__ grad_output,
+    const int64_t* __restrict__ indices,
+    float* __restrict__ grad_input,
+    int64_t N, int64_t C,
+    int64_t in_d, int64_t in_h, int64_t in_w,
+    int64_t out_d, int64_t out_h, int64_t out_w
+) {
+    int64_t total = N * C * in_d * in_h * in_w;
+    int64_t in_spatial = in_d * in_h * in_w;
+    int64_t out_spatial = out_d * out_h * out_w;
+
+    HIP_KERNEL_LOOP(idx, total) {
+        int64_t local_idx = idx % in_spatial;
+        int64_t nc = idx / in_spatial;
+
+        int64_t base_in = nc * in_spatial;
+        int64_t base_out = nc * out_spatial;
+
+        int64_t max_idx = indices[base_in + local_idx];
+        if (max_idx >= 0 && max_idx < out_spatial) {
+            grad_input[base_in + local_idx] = grad_output[base_out + max_idx];
+        } else {
+            grad_input[base_in + local_idx] = 0.0f;
+        }
+    }
+}
+
+auto max_unpool3d_backward_hip(
+    const Tensor& grad_output,
+    const Tensor& indices,
+    const std::vector<int64_t>& input_shape,
+    hipStream_t stream
+) -> Tensor {
+    int64_t N = input_shape[0], C = input_shape[1];
+    int64_t in_d = input_shape[2], in_h = input_shape[3], in_w = input_shape[4];
+    auto grad_shape = grad_output.shape();
+    int64_t out_d = grad_shape[2], out_h = grad_shape[3], out_w = grad_shape[4];
+
+    Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
+
+    int64_t total = N * C * in_d * in_h * in_w;
+    int threads = rocm::get_wavefront_size() * 4;
+    int blocks = (total + threads - 1) / threads;
+
+    if (grad_output.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(max_unpool3d_backward_kernel_f32,
+            dim3(blocks), dim3(threads), 0, stream,
+            grad_output.data<float>(), indices.data<int64_t>(),
+            grad_input.data<float>(), N, C, in_d, in_h, in_w, out_d, out_h, out_w);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (grad_output.dtype() == DType::Float64) {
+        auto grad_f32 = grad_output.to(DType::Float32);
+        auto result_f32 = max_unpool3d_backward_hip(grad_f32, indices, input_shape, stream);
+        return result_f32.to(DType::Float64);
+    } else if (grad_output.dtype() == DType::Float16) {
+        auto grad_f32 = grad_output.to(DType::Float32);
+        auto result_f32 = max_unpool3d_backward_hip(grad_f32, indices, input_shape, stream);
+        return result_f32.to(DType::Float16);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        auto grad_f32 = grad_output.to(DType::Float32);
+        auto result_f32 = max_unpool3d_backward_hip(grad_f32, indices, input_shape, stream);
+        return result_f32.to(DType::BFloat16);
+    } else {
+        throw std::runtime_error("max_unpool3d_backward_hip: unsupported dtype");
+    }
+
+    return grad_input;
+}
+
 } // namespace rocm
 } // namespace tenzor

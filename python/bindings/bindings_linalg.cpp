@@ -8,6 +8,7 @@
 #include "register.hpp"
 
 #include <pybind11/stl.h>
+#include <pybind11/stl_bind.h>
 
 #include <tenzor/ops/linalg.hpp>
 #include <tenzor/core/tensor.hpp>
@@ -114,6 +115,39 @@ void register_linalg(py::module_& m) {
     linalg_mod.def("matrix_exp", &tenzor::linalg::matrix_exp,
                    "Matrix exponential via Padé-13 scaling-and-squaring",
                    py::arg("A"),
+                   py::call_guard<py::gil_scoped_release>());
+
+    // Convenience wrappers (compose existing ops, no new backend kernels)
+
+    linalg_mod.def("svdvals", &tenzor::linalg::svdvals,
+                   "Return only the singular values of a matrix",
+                   py::arg("A"),
+                   py::call_guard<py::gil_scoped_release>());
+
+    linalg_mod.def("eigvals", [](const tenzor::Tensor& A) {
+        std::tuple<tenzor::Tensor, tenzor::Tensor> result;
+        {
+            py::gil_scoped_release release;
+            result = tenzor::linalg::eigvals(A);
+        }
+        auto [vals_real, vals_imag] = std::move(result);
+        return py::make_tuple(vals_real, vals_imag);
+    }, "Return only eigenvalues of a general matrix (real, imag parts)",
+       py::arg("A"));
+
+    linalg_mod.def("cond", &tenzor::linalg::cond,
+                   "Condition number of a matrix (p=\"2\" or \"fro\")",
+                   py::arg("A"), py::arg("p") = "2",
+                   py::call_guard<py::gil_scoped_release>());
+
+    linalg_mod.def("matrix_rank", &tenzor::linalg::matrix_rank,
+                   "Numerical matrix rank via SVD",
+                   py::arg("A"), py::arg("tol") = -1.0,
+                   py::call_guard<py::gil_scoped_release>());
+
+    linalg_mod.def("multi_dot", &tenzor::linalg::multi_dot,
+                   "Optimized chain of matrix multiplications via dynamic programming",
+                   py::arg("tensors"),
                    py::call_guard<py::gil_scoped_release>());
 }
 

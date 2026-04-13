@@ -1517,18 +1517,68 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
     int32_t device_id = input.device().index;
     int64_t numel = input.numel();
 
-    // Complex casts: real↔complex still requires CPU round-trip since
-    // the semantics involve zero-filling imaginary parts or extracting
-    // real parts, which is not a simple reinterpretation.
-    // Complex-to-complex (Complex64 ↔ Complex128) uses native Vulkan shaders.
+    // Complex casts: real↔complex use native Vulkan shaders.
+    // Complex-to-complex (Complex64 ↔ Complex128) also uses native shaders.
     auto is_complex_of = [](DType d) {
         return d == DType::Complex64 || d == DType::Complex128;
     };
     if (is_complex_of(src_dtype) != is_complex_of(target_dtype)) {
-        // Real ↔ complex: CPU round-trip (semantic conversion, not just bit reinterpretation)
-        Tensor cpu_input = input.to(Device::cpu());
-        Tensor cpu_result = cpu_input.to(target_dtype);
-        return cpu_result.to(input.device());
+        int32_t dev_id = input.device().index;
+        int64_t n = input.numel();
+
+        if (!is_complex_of(src_dtype) && target_dtype == DType::Complex64) {
+            // Real -> Complex64: zero-fill imaginary part
+            Tensor input_f32 = (src_dtype != DType::Float32) ? input.to(DType::Float32) : input;
+            auto* pipeline_rc = getPipeline("cast_real_complex", dev_id);
+            auto input_shape = input.shape();
+            Tensor output(std::vector<int64_t>(input_shape.begin(), input_shape.end()), DType::Complex64, input.device());
+            struct { uint32_t num_elements; } pc_rc;
+            pc_rc.num_elements = static_cast<uint32_t>(n);
+            size_t in_buf_rc = static_cast<size_t>(n) * sizeof(float);
+            size_t out_buf_rc = static_cast<size_t>(n) * 2 * sizeof(float);
+            std::vector<std::pair<uint32_t, const void*>> bindings_rc = {
+                {0, input_f32.data_ptr()}, {1, output.data_ptr()}
+            };
+            std::vector<size_t> sizes_rc = {in_buf_rc, out_buf_rc};
+            VkDescriptorSet ds_rc = allocateAndWriteDescriptorSet(dev_id, pipeline_rc, bindings_rc, sizes_rc);
+            VkCommandBuffer cmd_rc = beginSingleTimeCommands(dev_id);
+            vkCmdBindPipeline(cmd_rc, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_rc->pipeline());
+            vkCmdBindDescriptorSets(cmd_rc, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                   pipeline_rc->layout(), 0, 1, &ds_rc, 0, nullptr);
+            vkCmdPushConstants(cmd_rc, pipeline_rc->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc_rc), &pc_rc);
+            vkCmdDispatch(cmd_rc, div_wg(n, devices_[dev_id].workgroupSize), 1, 1);
+            insertComputeOnlyBarrier(cmd_rc);
+            endSingleTimeCommands(cmd_rc, dev_id);
+            return output;
+        } else if (src_dtype == DType::Complex64 && !is_complex_of(target_dtype)) {
+            // Complex64 -> Real: extract real part
+            auto* pipeline_cr = getPipeline("cast_complex_real", dev_id);
+            auto input_shape = input.shape();
+            Tensor output_f32(std::vector<int64_t>(input_shape.begin(), input_shape.end()), DType::Float32, input.device());
+            struct { uint32_t num_elements; } pc_cr;
+            pc_cr.num_elements = static_cast<uint32_t>(n);
+            size_t in_buf_cr = static_cast<size_t>(n) * 2 * sizeof(float);
+            size_t out_buf_cr = static_cast<size_t>(n) * sizeof(float);
+            std::vector<std::pair<uint32_t, const void*>> bindings_cr = {
+                {0, input.data_ptr()}, {1, output_f32.data_ptr()}
+            };
+            std::vector<size_t> sizes_cr = {in_buf_cr, out_buf_cr};
+            VkDescriptorSet ds_cr = allocateAndWriteDescriptorSet(dev_id, pipeline_cr, bindings_cr, sizes_cr);
+            VkCommandBuffer cmd_cr = beginSingleTimeCommands(dev_id);
+            vkCmdBindPipeline(cmd_cr, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_cr->pipeline());
+            vkCmdBindDescriptorSets(cmd_cr, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                   pipeline_cr->layout(), 0, 1, &ds_cr, 0, nullptr);
+            vkCmdPushConstants(cmd_cr, pipeline_cr->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc_cr), &pc_cr);
+            vkCmdDispatch(cmd_cr, div_wg(n, devices_[dev_id].workgroupSize), 1, 1);
+            insertComputeOnlyBarrier(cmd_cr);
+            endSingleTimeCommands(cmd_cr, dev_id);
+            return (target_dtype != DType::Float32) ? output_f32.to(target_dtype) : output_f32;
+        } else {
+            // Complex128 ↔ real, or other complex conversions: CPU round-trip for now
+            Tensor cpu_input = input.to(Device::cpu());
+            Tensor cpu_result = cpu_input.to(target_dtype);
+            return cpu_result.to(input.device());
+        }
     }
     if (is_complex_of(src_dtype) && is_complex_of(target_dtype) && src_dtype != target_dtype) {
         // Complex-to-complex: native Vulkan shader
@@ -3769,8 +3819,7 @@ auto VulkanBackend::dispatchBitwiseBinaryOp(const std::string& shader_name,
 }
 
 // ============================================================================
-// CumMax — cumulative maximum along a dimension (host roundtrip)
-// TODO: native Vulkan compute shader for CumMax
+// CumMax — cumulative maximum along a dimension (native Vulkan compute shader)
 // ============================================================================
 
 auto VulkanBackend::dispatchCumMax(const Tensor& input, int64_t dim) -> std::pair<Tensor, Tensor> {
@@ -3778,52 +3827,53 @@ auto VulkanBackend::dispatchCumMax(const Tensor& input, int64_t dim) -> std::pai
     int64_t ndim = static_cast<int64_t>(in_shape.size());
     if (dim < 0) dim += ndim;
 
+    int32_t device_id = input.device().index;
+    bool is_f64 = (input.dtype() == DType::Float64);
+    std::string shader = is_f64 ? "cummax_f64" : "cummax";
+    auto* pipeline = getPipeline(shader, device_id);
+
     Tensor values(std::vector<int64_t>(in_shape.begin(), in_shape.end()), input.dtype(), input.device());
-    Tensor indices(std::vector<int64_t>(in_shape.begin(), in_shape.end()), DType::Int64, input.device());
+    Tensor indices(std::vector<int64_t>(in_shape.begin(), in_shape.end()), DType::Int32, input.device());
 
-    // Host roundtrip: copy to host, compute sequentially, copy back
-    Tensor host_input = input.to(Device::cpu());
-    int64_t outer_size = 1;
-    for (int64_t i = 0; i < dim; ++i) outer_size *= in_shape[i];
-    int64_t inner_size = 1;
-    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= in_shape[i];
-    int64_t dim_size = in_shape[dim];
+    uint32_t outer_size = 1;
+    for (int64_t i = 0; i < dim; i++) outer_size *= static_cast<uint32_t>(in_shape[i]);
+    uint32_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; i++) inner_size *= static_cast<uint32_t>(in_shape[i]);
+    uint32_t reduce_size = static_cast<uint32_t>(in_shape[dim]);
+    uint32_t total_lines = outer_size * inner_size;
 
-    Tensor host_values(std::vector<int64_t>(in_shape.begin(), in_shape.end()), input.dtype(), Device::cpu());
-    Tensor host_indices(std::vector<int64_t>(in_shape.begin(), in_shape.end()), DType::Int64, Device::cpu());
+    struct { uint32_t total_lines; uint32_t reduce_size; uint32_t inner_size; } pc;
+    pc.total_lines = total_lines;
+    pc.reduce_size = reduce_size;
+    pc.inner_size = inner_size;
 
-    auto compute = [&]<typename T>() {
-        const T* in = host_input.data<T>();
-        T* val = host_values.data<T>();
-        int64_t* idx = host_indices.data<int64_t>();
-        for (int64_t o = 0; o < outer_size; ++o) {
-            for (int64_t inner = 0; inner < inner_size; ++inner) {
-                T running = in[o * dim_size * inner_size + inner];
-                int64_t ri = 0;
-                val[o * dim_size * inner_size + inner] = running;
-                idx[o * dim_size * inner_size + inner] = 0;
-                for (int64_t i = 1; i < dim_size; ++i) {
-                    int64_t off = o * dim_size * inner_size + i * inner_size + inner;
-                    if (in[off] > running) { running = in[off]; ri = i; }
-                    val[off] = running;
-                    idx[off] = ri;
-                }
-            }
-        }
+    size_t elem = input.dtype_size();
+    size_t buf_size = static_cast<size_t>(input.numel()) * elem;
+    size_t idx_size = static_cast<size_t>(input.numel()) * sizeof(int32_t);
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, input.data_ptr()}, {1, values.data_ptr()}, {2, indices.data_ptr()}
     };
+    std::vector<size_t> sizes = {buf_size, buf_size, idx_size};
 
-    if (input.dtype() == DType::Float32) compute.template operator()<float>();
-    else if (input.dtype() == DType::Float64) compute.template operator()<double>();
-    else throw std::runtime_error("cummax Vulkan: unsupported dtype");
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
-    values = host_values.to(input.device());
-    indices = host_indices.to(input.device());
-    return {values, indices};
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(total_lines, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    // Convert indices to Int64 to match API contract
+    Tensor indices_i64 = indices.to(DType::Int64);
+    return {values, indices_i64};
 }
 
 // ============================================================================
-// CumMin — cumulative minimum along a dimension (host roundtrip)
-// TODO: native Vulkan compute shader for CumMin
+// CumMin — cumulative minimum along a dimension (native Vulkan compute shader)
 // ============================================================================
 
 auto VulkanBackend::dispatchCumMin(const Tensor& input, int64_t dim) -> std::pair<Tensor, Tensor> {
@@ -3831,210 +3881,196 @@ auto VulkanBackend::dispatchCumMin(const Tensor& input, int64_t dim) -> std::pai
     int64_t ndim = static_cast<int64_t>(in_shape.size());
     if (dim < 0) dim += ndim;
 
-    Tensor host_input = input.to(Device::cpu());
-    int64_t outer_size = 1;
-    for (int64_t i = 0; i < dim; ++i) outer_size *= in_shape[i];
-    int64_t inner_size = 1;
-    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= in_shape[i];
-    int64_t dim_size = in_shape[dim];
+    int32_t device_id = input.device().index;
+    bool is_f64 = (input.dtype() == DType::Float64);
+    std::string shader = is_f64 ? "cummin_f64" : "cummin";
+    auto* pipeline = getPipeline(shader, device_id);
 
-    Tensor host_values(std::vector<int64_t>(in_shape.begin(), in_shape.end()), input.dtype(), Device::cpu());
-    Tensor host_indices(std::vector<int64_t>(in_shape.begin(), in_shape.end()), DType::Int64, Device::cpu());
+    Tensor values(std::vector<int64_t>(in_shape.begin(), in_shape.end()), input.dtype(), input.device());
+    Tensor indices(std::vector<int64_t>(in_shape.begin(), in_shape.end()), DType::Int32, input.device());
 
-    auto compute = [&]<typename T>() {
-        const T* in = host_input.data<T>();
-        T* val = host_values.data<T>();
-        int64_t* idx = host_indices.data<int64_t>();
-        for (int64_t o = 0; o < outer_size; ++o) {
-            for (int64_t inner = 0; inner < inner_size; ++inner) {
-                T running = in[o * dim_size * inner_size + inner];
-                int64_t ri = 0;
-                val[o * dim_size * inner_size + inner] = running;
-                idx[o * dim_size * inner_size + inner] = 0;
-                for (int64_t i = 1; i < dim_size; ++i) {
-                    int64_t off = o * dim_size * inner_size + i * inner_size + inner;
-                    if (in[off] < running) { running = in[off]; ri = i; }
-                    val[off] = running;
-                    idx[off] = ri;
-                }
-            }
-        }
+    uint32_t outer_size = 1;
+    for (int64_t i = 0; i < dim; i++) outer_size *= static_cast<uint32_t>(in_shape[i]);
+    uint32_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; i++) inner_size *= static_cast<uint32_t>(in_shape[i]);
+    uint32_t reduce_size = static_cast<uint32_t>(in_shape[dim]);
+    uint32_t total_lines = outer_size * inner_size;
+
+    struct { uint32_t total_lines; uint32_t reduce_size; uint32_t inner_size; } pc;
+    pc.total_lines = total_lines;
+    pc.reduce_size = reduce_size;
+    pc.inner_size = inner_size;
+
+    size_t elem = input.dtype_size();
+    size_t buf_size = static_cast<size_t>(input.numel()) * elem;
+    size_t idx_size = static_cast<size_t>(input.numel()) * sizeof(int32_t);
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, input.data_ptr()}, {1, values.data_ptr()}, {2, indices.data_ptr()}
     };
+    std::vector<size_t> sizes = {buf_size, buf_size, idx_size};
 
-    if (input.dtype() == DType::Float32) compute.template operator()<float>();
-    else if (input.dtype() == DType::Float64) compute.template operator()<double>();
-    else throw std::runtime_error("cummin Vulkan: unsupported dtype");
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
-    Tensor values = host_values.to(input.device());
-    Tensor indices = host_indices.to(input.device());
-    return {values, indices};
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(total_lines, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    Tensor indices_i64 = indices.to(DType::Int64);
+    return {values, indices_i64};
 }
 
 // ============================================================================
-// Fmax — NaN-aware element-wise max (host roundtrip)
-// TODO: native Vulkan compute shader with NaN checks
+// Fmax — NaN-aware element-wise max (native Vulkan compute shader)
 // ============================================================================
 
 auto VulkanBackend::dispatchFmax(const Tensor& a, const Tensor& b) -> Tensor {
-    Tensor ha = a.to(Device::cpu());
-    Tensor hb = b.to(Device::cpu());
-    int64_t n = ha.numel();
-
-    Tensor host_out(std::vector<int64_t>(ha.shape().begin(), ha.shape().end()), ha.dtype(), Device::cpu());
-
-    if (ha.dtype() == DType::Float32) {
-        const float* ap = ha.data<float>();
-        const float* bp = hb.data<float>();
-        float* op = host_out.data<float>();
-        for (int64_t i = 0; i < n; ++i) op[i] = std::fmax(ap[i], bp[i]);
-    } else if (ha.dtype() == DType::Float64) {
-        const double* ap = ha.data<double>();
-        const double* bp = hb.data<double>();
-        double* op = host_out.data<double>();
-        for (int64_t i = 0; i < n; ++i) op[i] = std::fmax(ap[i], bp[i]);
-    } else {
-        throw std::runtime_error("fmax Vulkan: unsupported dtype");
-    }
-
-    return host_out.to(a.device());
+    return dispatchBinaryOp("fmax", a, b);
 }
 
 // ============================================================================
-// Fmin — NaN-aware element-wise min (host roundtrip)
-// TODO: native Vulkan compute shader with NaN checks
+// Fmin — NaN-aware element-wise min (native Vulkan compute shader)
 // ============================================================================
 
 auto VulkanBackend::dispatchFmin(const Tensor& a, const Tensor& b) -> Tensor {
-    Tensor ha = a.to(Device::cpu());
-    Tensor hb = b.to(Device::cpu());
-    int64_t n = ha.numel();
-
-    Tensor host_out(std::vector<int64_t>(ha.shape().begin(), ha.shape().end()), ha.dtype(), Device::cpu());
-
-    if (ha.dtype() == DType::Float32) {
-        const float* ap = ha.data<float>();
-        const float* bp = hb.data<float>();
-        float* op = host_out.data<float>();
-        for (int64_t i = 0; i < n; ++i) op[i] = std::fmin(ap[i], bp[i]);
-    } else if (ha.dtype() == DType::Float64) {
-        const double* ap = ha.data<double>();
-        const double* bp = hb.data<double>();
-        double* op = host_out.data<double>();
-        for (int64_t i = 0; i < n; ++i) op[i] = std::fmin(ap[i], bp[i]);
-    } else {
-        throw std::runtime_error("fmin Vulkan: unsupported dtype");
-    }
-
-    return host_out.to(a.device());
+    return dispatchBinaryOp("fmin", a, b);
 }
 
 // ============================================================================
-// Isin — set membership test (host roundtrip)
-// TODO: native Vulkan compute shader for Isin
+// Isin — set membership test (native Vulkan compute shader)
 // ============================================================================
 
 auto VulkanBackend::dispatchIsin(const Tensor& elements, const Tensor& test_elements) -> Tensor {
-    Tensor he = elements.to(Device::cpu());
-    Tensor ht = test_elements.to(Device::cpu());
-    int64_t ne = he.numel();
-    int64_t nt = ht.numel();
-
-    Tensor host_out(std::vector<int64_t>(he.shape().begin(), he.shape().end()), DType::Bool, Device::cpu());
-
-    auto compute = [&]<typename T>() {
-        const T* ep = he.data<T>();
-        std::vector<T> sorted(ht.data<T>(), ht.data<T>() + nt);
-        std::sort(sorted.begin(), sorted.end());
-        bool* op = reinterpret_cast<bool*>(host_out.data_ptr());
-        for (int64_t i = 0; i < ne; ++i) {
-            op[i] = std::binary_search(sorted.begin(), sorted.end(), ep[i]);
-        }
-    };
-
-    switch (he.dtype()) {
-        case DType::Float32: compute.template operator()<float>(); break;
-        case DType::Float64: compute.template operator()<double>(); break;
-        case DType::Int32:   compute.template operator()<int32_t>(); break;
-        case DType::Int64:   compute.template operator()<int64_t>(); break;
-        default: throw std::runtime_error("isin Vulkan: unsupported dtype");
+    // For non-Float32 dtypes, cast to Float32 for the shader
+    if (elements.dtype() != DType::Float32) {
+        auto elem_f32 = elements.to(DType::Float32);
+        auto test_f32 = test_elements.to(DType::Float32);
+        return dispatchIsin(elem_f32, test_f32);
     }
-    return host_out.to(elements.device());
+
+    int32_t device_id = elements.device().index;
+    auto* pipeline = getPipeline("isin", device_id);
+
+    auto elem_shape = elements.shape();
+    Tensor output(std::vector<int64_t>(elem_shape.begin(), elem_shape.end()), DType::Bool, elements.device());
+
+    struct { uint32_t num_elements; uint32_t num_test_elements; } pc;
+    pc.num_elements = static_cast<uint32_t>(elements.numel());
+    pc.num_test_elements = static_cast<uint32_t>(test_elements.numel());
+
+    size_t elem_buf = static_cast<size_t>(elements.numel()) * elements.dtype_size();
+    size_t test_buf = static_cast<size_t>(test_elements.numel()) * test_elements.dtype_size();
+    size_t out_buf = static_cast<size_t>(output.numel()) * output.dtype_size();
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, elements.data_ptr()}, {1, test_elements.data_ptr()}, {2, output.data_ptr()}
+    };
+    std::vector<size_t> sizes = {elem_buf, test_buf, out_buf};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(elements.numel(), devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return output;
 }
 
 // ============================================================================
-// Kthvalue — k-th smallest (host roundtrip)
-// TODO: native Vulkan compute shader for Kthvalue
+// Kthvalue — k-th smallest (native Vulkan compute shader)
 // ============================================================================
 
 auto VulkanBackend::dispatchKthvalue(const Tensor& input, int64_t k, int64_t dim, bool keepdim) -> std::pair<Tensor, Tensor> {
-    Tensor hi = input.to(Device::cpu());
-    auto in_shape = hi.shape();
+    // Cast non-Float32 to Float32 for the shader
+    if (input.dtype() != DType::Float32) {
+        auto input_f32 = input.to(DType::Float32);
+        auto [vals, idxs] = dispatchKthvalue(input_f32, k, dim, keepdim);
+        return {vals.to(input.dtype()), idxs};
+    }
+
+    auto in_shape = input.shape();
     int64_t ndim = static_cast<int64_t>(in_shape.size());
     if (dim < 0) dim += ndim;
     int64_t dim_size = in_shape[dim];
 
-    int64_t outer_size = 1;
-    for (int64_t i = 0; i < dim; ++i) outer_size *= in_shape[i];
-    int64_t inner_size = 1;
-    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= in_shape[i];
-    int64_t total_slices = outer_size * inner_size;
+    uint32_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= static_cast<uint32_t>(in_shape[i]);
+    uint32_t inner_sz = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_sz *= static_cast<uint32_t>(in_shape[i]);
+    uint32_t total_slices = outer_size * inner_sz;
 
     std::vector<int64_t> out_shape;
     for (int64_t i = 0; i < ndim; ++i) {
-        if (i == dim) {
-            if (keepdim) out_shape.push_back(1);
-        } else {
-            out_shape.push_back(in_shape[i]);
-        }
+        if (i == dim) { if (keepdim) out_shape.push_back(1); }
+        else out_shape.push_back(in_shape[i]);
     }
     if (out_shape.empty()) out_shape.push_back(1);
 
-    Tensor host_values(out_shape, hi.dtype(), Device::cpu());
-    Tensor host_indices(out_shape, DType::Int64, Device::cpu());
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("kthvalue", device_id);
 
-    auto compute = [&]<typename T>() {
-        const T* in = hi.data<T>();
-        T* val = host_values.data<T>();
-        int64_t* idx = host_indices.data<int64_t>();
-        for (int64_t s = 0; s < total_slices; ++s) {
-            int64_t outer = s / inner_size;
-            int64_t inner = s % inner_size;
-            std::vector<std::pair<T, int64_t>> slice(dim_size);
-            for (int64_t i = 0; i < dim_size; ++i)
-                slice[i] = {in[outer * dim_size * inner_size + i * inner_size + inner], i};
-            std::nth_element(slice.begin(), slice.begin() + (k - 1), slice.end(),
-                [](const auto& a, const auto& b) { return a.first < b.first; });
-            val[s] = slice[k - 1].first;
-            idx[s] = slice[k - 1].second;
-        }
+    Tensor values(out_shape, input.dtype(), input.device());
+    Tensor indices(out_shape, DType::Int32, input.device());
+
+    struct { uint32_t total_slices; uint32_t dim_size; uint32_t inner_size; uint32_t k; } pc;
+    pc.total_slices = total_slices;
+    pc.dim_size = static_cast<uint32_t>(dim_size);
+    pc.inner_size = inner_sz;
+    pc.k = static_cast<uint32_t>(k);
+
+    size_t in_buf = static_cast<size_t>(input.numel()) * input.dtype_size();
+    size_t out_buf = static_cast<size_t>(total_slices) * sizeof(float);
+    size_t idx_buf = static_cast<size_t>(total_slices) * sizeof(int32_t);
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, input.data_ptr()}, {1, values.data_ptr()}, {2, indices.data_ptr()}
     };
+    std::vector<size_t> sizes = {in_buf, out_buf, idx_buf};
 
-    if (hi.dtype() == DType::Float32) compute.template operator()<float>();
-    else if (hi.dtype() == DType::Float64) compute.template operator()<double>();
-    else if (hi.dtype() == DType::Int32) compute.template operator()<int32_t>();
-    else if (hi.dtype() == DType::Int64) compute.template operator()<int64_t>();
-    else throw std::runtime_error("kthvalue Vulkan: unsupported dtype");
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
-    return {host_values.to(input.device()), host_indices.to(input.device())};
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(total_slices, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return {values, indices.to(DType::Int64)};
 }
 
 // ============================================================================
-// Quantile — interpolated quantile (host roundtrip)
-// TODO: native Vulkan compute shader for Quantile
+// Quantile — interpolated quantile (native Vulkan compute shader)
 // ============================================================================
 
 auto VulkanBackend::dispatchQuantile(const Tensor& input, double q, int64_t dim, bool keepdim) -> Tensor {
-    Tensor hi = input.to(Device::cpu());
-    auto in_shape = hi.shape();
+    if (input.dtype() != DType::Float32) {
+        auto input_f32 = input.to(DType::Float32);
+        return dispatchQuantile(input_f32, q, dim, keepdim).to(input.dtype());
+    }
+
+    auto in_shape = input.shape();
     int64_t ndim = static_cast<int64_t>(in_shape.size());
     if (dim < 0) dim += ndim;
     int64_t dim_size = in_shape[dim];
 
-    int64_t outer_size = 1;
-    for (int64_t i = 0; i < dim; ++i) outer_size *= in_shape[i];
-    int64_t inner_size = 1;
-    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= in_shape[i];
-    int64_t total_slices = outer_size * inner_size;
+    uint32_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= static_cast<uint32_t>(in_shape[i]);
+    uint32_t inner_sz = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_sz *= static_cast<uint32_t>(in_shape[i]);
+    uint32_t total_slices = outer_size * inner_sz;
 
     std::vector<int64_t> out_shape;
     for (int64_t i = 0; i < ndim; ++i) {
@@ -4043,51 +4079,62 @@ auto VulkanBackend::dispatchQuantile(const Tensor& input, double q, int64_t dim,
     }
     if (out_shape.empty()) out_shape.push_back(1);
 
-    Tensor host_out(out_shape, hi.dtype(), Device::cpu());
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("quantile", device_id);
 
-    auto compute = [&]<typename T>() {
-        const T* in = hi.data<T>();
-        T* out = host_out.data<T>();
-        for (int64_t s = 0; s < total_slices; ++s) {
-            int64_t outer = s / inner_size;
-            int64_t inner = s % inner_size;
-            std::vector<T> slice(dim_size);
-            for (int64_t i = 0; i < dim_size; ++i)
-                slice[i] = in[outer * dim_size * inner_size + i * inner_size + inner];
-            std::sort(slice.begin(), slice.end());
-            double pos = q * (dim_size - 1);
-            int64_t lo = static_cast<int64_t>(pos);
-            int64_t hi_idx = std::min(lo + 1, dim_size - 1);
-            double frac = pos - lo;
-            out[s] = static_cast<T>(static_cast<double>(slice[lo]) * (1.0 - frac) +
-                                     static_cast<double>(slice[hi_idx]) * frac);
-        }
+    Tensor output(out_shape, input.dtype(), input.device());
+    // Scratch buffer for per-slice sorting
+    Tensor scratch({static_cast<int64_t>(total_slices) * dim_size}, DType::Float32, input.device());
+
+    struct { uint32_t total_slices; uint32_t dim_size; uint32_t inner_size; float q; } pc;
+    pc.total_slices = total_slices;
+    pc.dim_size = static_cast<uint32_t>(dim_size);
+    pc.inner_size = inner_sz;
+    pc.q = static_cast<float>(q);
+
+    size_t in_buf = static_cast<size_t>(input.numel()) * sizeof(float);
+    size_t out_buf = static_cast<size_t>(total_slices) * sizeof(float);
+    size_t scratch_buf = static_cast<size_t>(total_slices) * dim_size * sizeof(float);
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, input.data_ptr()}, {1, output.data_ptr()}, {2, scratch.data_ptr()}
     };
+    std::vector<size_t> sizes = {in_buf, out_buf, scratch_buf};
 
-    if (hi.dtype() == DType::Float32) compute.template operator()<float>();
-    else if (hi.dtype() == DType::Float64) compute.template operator()<double>();
-    else throw std::runtime_error("quantile Vulkan: unsupported dtype");
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
-    return host_out.to(input.device());
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(total_slices, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return output;
 }
 
 // ============================================================================
-// Nanquantile — NaN-ignoring quantile (host roundtrip)
-// TODO: native Vulkan compute shader for Nanquantile
+// Nanquantile — NaN-ignoring quantile (native Vulkan compute shader)
 // ============================================================================
 
 auto VulkanBackend::dispatchNanquantile(const Tensor& input, double q, int64_t dim, bool keepdim) -> Tensor {
-    Tensor hi = input.to(Device::cpu());
-    auto in_shape = hi.shape();
+    if (input.dtype() != DType::Float32) {
+        auto input_f32 = input.to(DType::Float32);
+        return dispatchNanquantile(input_f32, q, dim, keepdim).to(input.dtype());
+    }
+
+    auto in_shape = input.shape();
     int64_t ndim = static_cast<int64_t>(in_shape.size());
     if (dim < 0) dim += ndim;
     int64_t dim_size = in_shape[dim];
 
-    int64_t outer_size = 1;
-    for (int64_t i = 0; i < dim; ++i) outer_size *= in_shape[i];
-    int64_t inner_size = 1;
-    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= in_shape[i];
-    int64_t total_slices = outer_size * inner_size;
+    uint32_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= static_cast<uint32_t>(in_shape[i]);
+    uint32_t inner_sz = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_sz *= static_cast<uint32_t>(in_shape[i]);
+    uint32_t total_slices = outer_size * inner_sz;
 
     std::vector<int64_t> out_shape;
     for (int64_t i = 0; i < ndim; ++i) {
@@ -4096,36 +4143,39 @@ auto VulkanBackend::dispatchNanquantile(const Tensor& input, double q, int64_t d
     }
     if (out_shape.empty()) out_shape.push_back(1);
 
-    Tensor host_out(out_shape, hi.dtype(), Device::cpu());
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("nanquantile", device_id);
 
-    auto compute = [&]<typename T>() {
-        const T* in = hi.data<T>();
-        T* out = host_out.data<T>();
-        for (int64_t s = 0; s < total_slices; ++s) {
-            int64_t outer = s / inner_size;
-            int64_t inner = s % inner_size;
-            std::vector<T> slice;
-            for (int64_t i = 0; i < dim_size; ++i) {
-                T val = in[outer * dim_size * inner_size + i * inner_size + inner];
-                if (!std::isnan(static_cast<double>(val))) slice.push_back(val);
-            }
-            if (slice.empty()) { out[s] = static_cast<T>(NAN); continue; }
-            std::sort(slice.begin(), slice.end());
-            int64_t cnt = static_cast<int64_t>(slice.size());
-            double pos = q * (cnt - 1);
-            int64_t lo = static_cast<int64_t>(pos);
-            int64_t hi_idx = std::min(lo + 1, cnt - 1);
-            double frac = pos - lo;
-            out[s] = static_cast<T>(static_cast<double>(slice[lo]) * (1.0 - frac) +
-                                     static_cast<double>(slice[hi_idx]) * frac);
-        }
+    Tensor output(out_shape, input.dtype(), input.device());
+    Tensor scratch({static_cast<int64_t>(total_slices) * dim_size}, DType::Float32, input.device());
+
+    struct { uint32_t total_slices; uint32_t dim_size; uint32_t inner_size; float q; } pc;
+    pc.total_slices = total_slices;
+    pc.dim_size = static_cast<uint32_t>(dim_size);
+    pc.inner_size = inner_sz;
+    pc.q = static_cast<float>(q);
+
+    size_t in_buf = static_cast<size_t>(input.numel()) * sizeof(float);
+    size_t out_buf = static_cast<size_t>(total_slices) * sizeof(float);
+    size_t scratch_buf = static_cast<size_t>(total_slices) * dim_size * sizeof(float);
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, input.data_ptr()}, {1, output.data_ptr()}, {2, scratch.data_ptr()}
     };
+    std::vector<size_t> sizes = {in_buf, out_buf, scratch_buf};
 
-    if (hi.dtype() == DType::Float32) compute.template operator()<float>();
-    else if (hi.dtype() == DType::Float64) compute.template operator()<double>();
-    else throw std::runtime_error("nanquantile Vulkan: unsupported dtype");
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
-    return host_out.to(input.device());
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(total_slices, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return output;
 }
 
 // ============================================================================
@@ -4137,99 +4187,531 @@ auto VulkanBackend::dispatchNanmedian(const Tensor& input, int64_t dim) -> Tenso
 }
 
 // ============================================================================
-// Histc — fixed-bin histogram (host roundtrip)
-// TODO: native Vulkan compute shader with atomic operations for Histc
+// Histc — fixed-bin histogram (native Vulkan compute shader with atomics)
 // ============================================================================
 
 auto VulkanBackend::dispatchHistc(const Tensor& input, int64_t bins, double min_val, double max_val) -> Tensor {
-    Tensor hi = input.to(Device::cpu());
-    int64_t n = hi.numel();
+    // Cast to Float32 if needed
+    Tensor input_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
 
-    std::vector<float> in_host(n);
-    if (hi.dtype() == DType::Float32) {
-        std::memcpy(in_host.data(), hi.data<float>(), n * sizeof(float));
-    } else if (hi.dtype() == DType::Float64) {
-        const double* d = hi.data<double>();
-        for (int64_t i = 0; i < n; ++i) in_host[i] = static_cast<float>(d[i]);
-    } else {
-        throw std::runtime_error("histc Vulkan: unsupported dtype");
-    }
-
+    // If min >= max, compute min/max via GPU reduction + minimal scalar readback
     if (min_val >= max_val) {
-        auto [mn, mx] = std::minmax_element(in_host.begin(), in_host.end());
-        min_val = *mn;
-        max_val = *mx;
+        // Use existing Vulkan reduction dispatch for min/max (GPU-native)
+        // Flatten to 1D then reduce along dim 0
+        Tensor flat = input_f32.contiguous().reshape({input_f32.numel()});
+        Tensor mn_gpu = dispatchReduction("min", flat, 0, false);
+        Tensor mx_gpu = dispatchReduction("max", flat, 0, false);
+        // Minimal readback: 1 float each (4 bytes)
+        Tensor mn_cpu = mn_gpu.to(Device::cpu());
+        Tensor mx_cpu = mx_gpu.to(Device::cpu());
+        min_val = static_cast<double>(mn_cpu.data<float>()[0]);
+        max_val = static_cast<double>(mx_cpu.data<float>()[0]);
     }
 
-    std::vector<float> out_host(bins, 0.0f);
-    float bw = static_cast<float>((max_val - min_val) / bins);
-    for (int64_t i = 0; i < n; ++i) {
-        if (in_host[i] >= min_val && in_host[i] <= max_val) {
-            int64_t bin = static_cast<int64_t>((in_host[i] - min_val) / bw);
-            if (bin >= bins) bin = bins - 1;
-            out_host[bin] += 1.0f;
-        }
-    }
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("histc", device_id);
 
-    Tensor host_out({bins}, DType::Float32, Device::cpu());
-    std::memcpy(host_out.data<float>(), out_host.data(), bins * sizeof(float));
-    return host_out.to(input.device());
+    // Output is uint32 histogram, zero-initialized
+    Tensor output_u32 = dispatchFull({bins}, 0.0f, DType::Int32);
+
+    struct { uint32_t num_elements; uint32_t num_bins; float min_val; float max_val; } pc;
+    pc.num_elements = static_cast<uint32_t>(input_f32.numel());
+    pc.num_bins = static_cast<uint32_t>(bins);
+    pc.min_val = static_cast<float>(min_val);
+    pc.max_val = static_cast<float>(max_val);
+
+    size_t in_buf = static_cast<size_t>(input_f32.numel()) * sizeof(float);
+    size_t out_buf = static_cast<size_t>(bins) * sizeof(int32_t);
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, input_f32.data_ptr()}, {1, output_u32.data_ptr()}
+    };
+    std::vector<size_t> sizes = {in_buf, out_buf};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(input_f32.numel(), devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    // Convert to Float32 for API compatibility
+    return output_u32.to(DType::Float32);
 }
 
 // ============================================================================
-// UniqueConsecutive — consecutive dedup (host roundtrip)
-// TODO: native Vulkan compute shader for UniqueConsecutive
+// MaskedScatter with precomputed prefix sum — native Vulkan compute shader
+// ============================================================================
+
+auto VulkanBackend::dispatchMaskedScatterWithPrefix(const Tensor& input, const Tensor& mask,
+                                                     const Tensor& source, const Tensor& prefix_sum) -> Tensor {
+    Tensor in_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
+    Tensor src_f32 = (source.dtype() != DType::Float32) ? source.to(DType::Float32) : source;
+    Tensor mask_u8 = mask.to(DType::Bool);
+
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("masked_scatter", device_id);
+
+    Tensor output = in_f32.clone();
+    uint32_t n = static_cast<uint32_t>(input.numel());
+
+    struct { uint32_t num_elements; } pc;
+    pc.num_elements = n;
+
+    size_t f32_size = static_cast<size_t>(n) * sizeof(float);
+    size_t bool_size = static_cast<size_t>(n) * sizeof(uint8_t);
+    size_t i32_size = static_cast<size_t>(n) * sizeof(int32_t);
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, output.data_ptr()},       // input (will be overwritten at mask positions)
+        {1, mask_u8.data_ptr()},      // mask
+        {2, src_f32.data_ptr()},      // source values
+        {3, prefix_sum.data_ptr()},   // prefix sum of mask
+        {4, output.data_ptr()}        // output (same as input, in-place)
+    };
+    std::vector<size_t> sizes = {f32_size, bool_size, f32_size, i32_size, f32_size};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(n, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return (input.dtype() != DType::Float32) ? output.to(input.dtype()) : output;
+}
+
+// ============================================================================
+// UniqueConsecutive — consecutive dedup
+// Uses GPU boundary-marking shader + minimal host readback for variable-size output.
+// TODO: fully native multi-dispatch version (mark -> prefix_sum -> scatter)
 // ============================================================================
 
 auto VulkanBackend::dispatchUniqueConsecutive(const Tensor& input, bool return_inverse) -> std::tuple<Tensor, Tensor, Tensor> {
-    Tensor hi = input.to(Device::cpu());
-    int64_t n = hi.numel();
+    int64_t n = input.numel();
+    auto dev = input.device();
 
     if (n == 0) {
-        auto dev = input.device();
-        return {Tensor({0}, hi.dtype(), dev), Tensor({0}, DType::Int64, dev),
+        return {Tensor({0}, input.dtype(), dev), Tensor({0}, DType::Int64, dev),
                 Tensor({0}, DType::Int64, dev)};
     }
 
-    auto compute = [&]<typename T>() {
-        const T* in = hi.data<T>();
-        std::vector<T> unique_vals;
-        std::vector<int64_t> inverse(n);
-        std::vector<int64_t> counts;
+    // Step 1: Mark boundaries on GPU using unique_consecutive_mark shader
+    // marks[i] = 1 if input[i] != input[i-1], else 0; marks[0] = 1
+    Tensor input_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
 
-        unique_vals.push_back(in[0]);
-        inverse[0] = 0;
-        int64_t cnt = 1;
-        for (int64_t i = 1; i < n; ++i) {
-            if (in[i] != in[i - 1]) {
-                counts.push_back(cnt);
-                unique_vals.push_back(in[i]);
-                cnt = 1;
-            } else {
-                cnt++;
-            }
-            inverse[i] = static_cast<int64_t>(unique_vals.size()) - 1;
+    int32_t device_id = dev.index;
+    auto* mark_pipeline = getPipeline("unique_consecutive_mark", device_id);
+
+    Tensor marks({n}, DType::Int32, dev);
+    struct { uint32_t num_elements; } pc;
+    pc.num_elements = static_cast<uint32_t>(n);
+
+    size_t f32_buf = static_cast<size_t>(n) * sizeof(float);
+    size_t i32_buf = static_cast<size_t>(n) * sizeof(int32_t);
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, input_f32.data_ptr()}, {1, marks.data_ptr()}
+    };
+    std::vector<size_t> sizes = {f32_buf, i32_buf};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, mark_pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mark_pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           mark_pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, mark_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(n, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    // Step 2: Prefix sum of marks on GPU (gives inverse mapping)
+    Tensor marks_f32 = marks.to(DType::Float32);
+    Tensor inverse = dispatchCumSum(marks_f32, 0);
+    Tensor inverse_i64 = inverse.to(DType::Int64);
+    // Adjust: cumsum is 1-based (first element = 1), we need 0-based
+    Tensor one_tensor = dispatchFull({n}, 1.0f, DType::Int64);
+    inverse_i64 = inverse_i64 - one_tensor;
+
+    // Step 3: Scalar readback of unique count (mandatory for variable-size output allocation)
+    Tensor total_marks = dispatchReduction("sum", marks_f32, 0, false);
+    Tensor total_cpu = total_marks.to(Device::cpu());
+    int64_t nu = static_cast<int64_t>(total_cpu.data<float>()[0]);
+
+    // Step 4: Gather unique values on GPU using index_select-like pattern
+    // Find positions where marks == 1 using nonzero-like logic
+    // For simplicity, we do the compact step by gathering from the inverse map
+    // unique_output[k] = input[first position where inverse == k]
+    // Since consecutive, the first occurrence of each unique value is at marks == 1 positions
+
+    // Use masked_select to get unique values (marks acts as mask)
+    Tensor marks_bool = marks.to(DType::Bool);
+    Tensor unique_vals = dispatchMaskedSelect(input_f32, marks_bool);
+    if (input.dtype() != DType::Float32) {
+        unique_vals = unique_vals.to(input.dtype());
+    }
+
+    // Step 5: Compute counts on GPU: counts[k] = number of elements with inverse == k
+    // counts = diff of positions where marks == 1, plus trailing count
+    // Simpler: counts[k] = (position of (k+1)-th mark) - (position of k-th mark)
+    // For the last group: n - position_of_last_mark
+    // We can compute this from the prefix sum differences
+    Tensor counts_result({nu}, DType::Int64, dev);
+    if (nu > 0) {
+        // counts[i] for i < nu-1: number of elements between consecutive marks
+        // Extract mark positions using masked_select on arange
+        Tensor arange_t = dispatchArange(0, static_cast<float>(n), 1, DType::Int64, dev);
+        Tensor mark_positions = dispatchMaskedSelect(arange_t.to(DType::Float32), marks_bool).to(DType::Int64);
+
+        if (nu == 1) {
+            // Only one unique value: count = n
+            counts_result = dispatchFull({1}, static_cast<float>(n), DType::Int64);
+        } else {
+            // counts[i] = mark_positions[i+1] - mark_positions[i] for i < nu-1
+            // counts[nu-1] = n - mark_positions[nu-1]
+            Tensor pos_shifted = mark_positions.slice(0, 1, nu);
+            Tensor pos_base = mark_positions.slice(0, 0, nu - 1);
+            Tensor counts_head = pos_shifted - pos_base;
+
+            // Last count
+            Tensor last_pos = mark_positions.slice(0, nu - 1, nu);
+            Tensor n_tensor = dispatchFull({1}, static_cast<float>(n), DType::Int64);
+            Tensor counts_tail = n_tensor - last_pos;
+
+            // Concatenate via direct dispatch
+            std::vector<Tensor> count_parts = {counts_head, counts_tail};
+            NewOpAttributes cat_attrs;
+            cat_attrs.set(AttrKey::Dim, int64_t{0});
+            counts_result = ::tenzor::dispatch<OpId::Cat>(
+                std::span<const Tensor>(count_parts), cat_attrs)[0];
         }
-        counts.push_back(cnt);
+    }
 
-        int64_t nu = static_cast<int64_t>(unique_vals.size());
-        auto dev = input.device();
-        Tensor uo({nu}, hi.dtype(), Device::cpu());
-        Tensor io({n}, DType::Int64, Device::cpu());
-        Tensor co({nu}, DType::Int64, Device::cpu());
-        std::memcpy(uo.data<T>(), unique_vals.data(), nu * sizeof(T));
-        std::memcpy(io.data<int64_t>(), inverse.data(), n * sizeof(int64_t));
-        std::memcpy(co.data<int64_t>(), counts.data(), nu * sizeof(int64_t));
-        return std::make_tuple(uo.to(dev), io.to(dev), co.to(dev));
+    return {unique_vals, inverse_i64, counts_result};
+}
+
+// ============================================================================
+// Fractional Max Pool 2D Forward — native Vulkan compute shader
+// ============================================================================
+
+auto VulkanBackend::dispatchFractionalMaxPool2dForward(const Tensor& input, int64_t out_h, int64_t out_w,
+                                                        const Tensor* random_samples) -> std::pair<Tensor, Tensor> {
+    Tensor input_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
+    auto shape = input_f32.shape();
+    int64_t N = shape[0], C = shape[1], H = shape[2], W = shape[3];
+    int64_t total = N * C * out_h * out_w;
+    bool has_samples = (random_samples && random_samples->numel() > 0);
+
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("fractional_maxpool2d", device_id);
+
+    Tensor output({N, C, out_h, out_w}, DType::Float32, input.device());
+    Tensor indices({N, C, out_h, out_w}, DType::Int32, input.device());
+    Tensor samples_buf = has_samples ? *random_samples : Tensor({1}, DType::Float32, input.device());
+
+    struct { uint32_t N, C, H, W, out_h, out_w, total, has_samples; } pc;
+    pc.N = N; pc.C = C; pc.H = H; pc.W = W;
+    pc.out_h = out_h; pc.out_w = out_w;
+    pc.total = total; pc.has_samples = has_samples ? 1 : 0;
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, input_f32.data_ptr()}, {1, output.data_ptr()},
+        {2, indices.data_ptr()}, {3, samples_buf.data_ptr()}
+    };
+    std::vector<size_t> sizes = {
+        size_t(input_f32.numel() * sizeof(float)), size_t(total * sizeof(float)),
+        size_t(total * sizeof(int32_t)), size_t(samples_buf.numel() * sizeof(float))
     };
 
-    switch (hi.dtype()) {
-        case DType::Float32: return compute.template operator()<float>();
-        case DType::Float64: return compute.template operator()<double>();
-        case DType::Int32:   return compute.template operator()<int32_t>();
-        case DType::Int64:   return compute.template operator()<int64_t>();
-        default: throw std::runtime_error("unique_consecutive Vulkan: unsupported dtype");
-    }
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(total, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    Tensor out_final = (input.dtype() != DType::Float32) ? output.to(input.dtype()) : output;
+    return {out_final, indices.to(DType::Int64)};
+}
+
+auto VulkanBackend::dispatchFractionalMaxPool2dBackward(const Tensor& grad_output, const Tensor& indices,
+                                                         const std::vector<int64_t>& input_shape) -> Tensor {
+    Tensor go = (grad_output.dtype() != DType::Float32) ? grad_output.to(DType::Float32) : grad_output;
+    Tensor idx = indices.to(DType::Int32);
+    auto grad_shape = go.shape();
+    int64_t N = input_shape[0], C = input_shape[1], H = input_shape[2], W = input_shape[3];
+    int64_t out_h = grad_shape[2], out_w = grad_shape[3];
+    int64_t total = N * C * out_h * out_w;
+
+    int32_t device_id = go.device().index;
+    auto* pipeline = getPipeline("fractional_maxpool2d_backward", device_id);
+    Tensor grad_input = dispatchFull(input_shape, 0.0f, DType::Float32);
+
+    struct { uint32_t N, C, H_W, out_spatial, total; } pc;
+    pc.N = N; pc.C = C; pc.H_W = H * W; pc.out_spatial = out_h * out_w; pc.total = total;
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, go.data_ptr()}, {1, idx.data_ptr()}, {2, grad_input.data_ptr()}
+    };
+    std::vector<size_t> sizes = {
+        size_t(total * sizeof(float)), size_t(total * sizeof(int32_t)),
+        size_t(N * C * H * W * sizeof(float))
+    };
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(total, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return (grad_output.dtype() != DType::Float32) ? grad_input.to(grad_output.dtype()) : grad_input;
+}
+
+auto VulkanBackend::dispatchFractionalMaxPool3dForward(const Tensor& input, int64_t out_d, int64_t out_h, int64_t out_w,
+                                                        const Tensor* random_samples) -> std::pair<Tensor, Tensor> {
+    Tensor input_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
+    auto shape = input_f32.shape();
+    int64_t N = shape[0], C = shape[1], D = shape[2], H = shape[3], W = shape[4];
+    int64_t total = N * C * out_d * out_h * out_w;
+    bool has_samples = (random_samples && random_samples->numel() > 0);
+
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("fractional_maxpool3d", device_id);
+
+    Tensor output({N, C, out_d, out_h, out_w}, DType::Float32, input.device());
+    Tensor indices({N, C, out_d, out_h, out_w}, DType::Int32, input.device());
+    Tensor samples_buf = has_samples ? *random_samples : Tensor({1}, DType::Float32, input.device());
+
+    struct { uint32_t N, C, D, H, W, out_d, out_h, out_w, total, has_samples; } pc;
+    pc.N = N; pc.C = C; pc.D = D; pc.H = H; pc.W = W;
+    pc.out_d = out_d; pc.out_h = out_h; pc.out_w = out_w;
+    pc.total = total; pc.has_samples = has_samples ? 1 : 0;
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, input_f32.data_ptr()}, {1, output.data_ptr()},
+        {2, indices.data_ptr()}, {3, samples_buf.data_ptr()}
+    };
+    std::vector<size_t> sizes = {
+        size_t(input_f32.numel() * sizeof(float)), size_t(total * sizeof(float)),
+        size_t(total * sizeof(int32_t)), size_t(samples_buf.numel() * sizeof(float))
+    };
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(total, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    Tensor out_final = (input.dtype() != DType::Float32) ? output.to(input.dtype()) : output;
+    return {out_final, indices.to(DType::Int64)};
+}
+
+auto VulkanBackend::dispatchFractionalMaxPool3dBackward(const Tensor& grad_output, const Tensor& indices,
+                                                         const std::vector<int64_t>& input_shape) -> Tensor {
+    Tensor go = (grad_output.dtype() != DType::Float32) ? grad_output.to(DType::Float32) : grad_output;
+    Tensor idx = indices.to(DType::Int32);
+    auto grad_shape = go.shape();
+    int64_t N = input_shape[0], C = input_shape[1], D = input_shape[2], H = input_shape[3], W = input_shape[4];
+    int64_t out_d = grad_shape[2], out_h = grad_shape[3], out_w = grad_shape[4];
+    int64_t total = N * C * out_d * out_h * out_w;
+
+    int32_t device_id = go.device().index;
+    auto* pipeline = getPipeline("fractional_maxpool3d_backward", device_id);
+    Tensor grad_input = dispatchFull(input_shape, 0.0f, DType::Float32);
+
+    struct { uint32_t total, D_H_W, out_spatial; } pc;
+    pc.total = total; pc.D_H_W = D * H * W; pc.out_spatial = out_d * out_h * out_w;
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, go.data_ptr()}, {1, idx.data_ptr()}, {2, grad_input.data_ptr()}
+    };
+    std::vector<size_t> sizes = {
+        size_t(total * sizeof(float)), size_t(total * sizeof(int32_t)),
+        size_t(N * C * D * H * W * sizeof(float))
+    };
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(total, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return (grad_output.dtype() != DType::Float32) ? grad_input.to(grad_output.dtype()) : grad_input;
+}
+
+auto VulkanBackend::dispatchMaxUnpool2dForward(const Tensor& input, const Tensor& indices,
+                                                int64_t out_h, int64_t out_w) -> Tensor {
+    Tensor in_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
+    Tensor idx = indices.to(DType::Int32);
+    auto shape = in_f32.shape();
+    int64_t N = shape[0], C = shape[1];
+    int64_t in_spatial = shape[2] * shape[3];
+    int64_t out_spatial = out_h * out_w;
+    int64_t total_input = in_f32.numel();
+
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("max_unpool2d", device_id);
+    Tensor output = dispatchFull({N, C, out_h, out_w}, 0.0f, DType::Float32);
+
+    struct { uint32_t total_input, in_spatial, out_spatial; } pc;
+    pc.total_input = total_input; pc.in_spatial = in_spatial; pc.out_spatial = out_spatial;
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, in_f32.data_ptr()}, {1, idx.data_ptr()}, {2, output.data_ptr()}
+    };
+    std::vector<size_t> sizes = {
+        size_t(total_input * sizeof(float)), size_t(total_input * sizeof(int32_t)),
+        size_t(N * C * out_spatial * sizeof(float))
+    };
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(total_input, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return (input.dtype() != DType::Float32) ? output.to(input.dtype()) : output;
+}
+
+auto VulkanBackend::dispatchMaxUnpool2dBackward(const Tensor& grad_output, const Tensor& indices,
+                                                 const std::vector<int64_t>& input_shape) -> Tensor {
+    Tensor go = (grad_output.dtype() != DType::Float32) ? grad_output.to(DType::Float32) : grad_output;
+    Tensor idx = indices.to(DType::Int32);
+    int64_t in_spatial = input_shape[2] * input_shape[3];
+    auto go_shape = go.shape();
+    int64_t out_spatial = go_shape[2] * go_shape[3];
+    int64_t total_input = 1;
+    for (auto d : input_shape) total_input *= d;
+
+    int32_t device_id = go.device().index;
+    auto* pipeline = getPipeline("max_unpool2d_backward", device_id);
+    Tensor grad_input(input_shape, DType::Float32, go.device());
+
+    struct { uint32_t total_input, in_spatial, out_spatial; } pc;
+    pc.total_input = total_input; pc.in_spatial = in_spatial; pc.out_spatial = out_spatial;
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, go.data_ptr()}, {1, idx.data_ptr()}, {2, grad_input.data_ptr()}
+    };
+    std::vector<size_t> sizes = {
+        size_t(go.numel() * sizeof(float)), size_t(total_input * sizeof(int32_t)),
+        size_t(total_input * sizeof(float))
+    };
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(total_input, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return (grad_output.dtype() != DType::Float32) ? grad_input.to(grad_output.dtype()) : grad_input;
+}
+
+auto VulkanBackend::dispatchMaxUnpool3dForward(const Tensor& input, const Tensor& indices,
+                                                int64_t out_d, int64_t out_h, int64_t out_w) -> Tensor {
+    Tensor in_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
+    Tensor idx = indices.to(DType::Int32);
+    auto shape = in_f32.shape();
+    int64_t N = shape[0], C = shape[1];
+    int64_t in_spatial = shape[2] * shape[3] * shape[4];
+    int64_t out_spatial = out_d * out_h * out_w;
+    int64_t total_input = in_f32.numel();
+
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("max_unpool3d", device_id);
+    Tensor output = dispatchFull({N, C, out_d, out_h, out_w}, 0.0f, DType::Float32);
+
+    struct { uint32_t total_input, in_spatial, out_spatial; } pc;
+    pc.total_input = total_input; pc.in_spatial = in_spatial; pc.out_spatial = out_spatial;
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, in_f32.data_ptr()}, {1, idx.data_ptr()}, {2, output.data_ptr()}
+    };
+    std::vector<size_t> sizes = {
+        size_t(total_input * sizeof(float)), size_t(total_input * sizeof(int32_t)),
+        size_t(N * C * out_spatial * sizeof(float))
+    };
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(total_input, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return (input.dtype() != DType::Float32) ? output.to(input.dtype()) : output;
+}
+
+auto VulkanBackend::dispatchMaxUnpool3dBackward(const Tensor& grad_output, const Tensor& indices,
+                                                 const std::vector<int64_t>& input_shape) -> Tensor {
+    Tensor go = (grad_output.dtype() != DType::Float32) ? grad_output.to(DType::Float32) : grad_output;
+    Tensor idx = indices.to(DType::Int32);
+    int64_t in_spatial = input_shape[2] * input_shape[3] * input_shape[4];
+    auto go_shape = go.shape();
+    int64_t out_spatial = go_shape[2] * go_shape[3] * go_shape[4];
+    int64_t total_input = 1;
+    for (auto d : input_shape) total_input *= d;
+
+    int32_t device_id = go.device().index;
+    auto* pipeline = getPipeline("max_unpool3d_backward", device_id);
+    Tensor grad_input(input_shape, DType::Float32, go.device());
+
+    struct { uint32_t total_input, in_spatial, out_spatial; } pc;
+    pc.total_input = total_input; pc.in_spatial = in_spatial; pc.out_spatial = out_spatial;
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, go.data_ptr()}, {1, idx.data_ptr()}, {2, grad_input.data_ptr()}
+    };
+    std::vector<size_t> sizes = {
+        size_t(go.numel() * sizeof(float)), size_t(total_input * sizeof(int32_t)),
+        size_t(total_input * sizeof(float))
+    };
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(total_input, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return (grad_output.dtype() != DType::Float32) ? grad_input.to(grad_output.dtype()) : grad_input;
 }
 
 } // namespace tenzor

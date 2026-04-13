@@ -1,0 +1,30 @@
+#version 450
+
+// Histc — fixed-bin histogram using atomicAdd
+// Each thread processes one input element and atomically increments the
+// corresponding histogram bin.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input  { float input_data[]; };
+layout(binding = 1)          buffer Output { uint  output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint  num_elements;
+    uint  num_bins;
+    float min_val;
+    float max_val;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_elements) return;
+
+    float val = input_data[idx];
+    if (val < params.min_val || val > params.max_val) return;
+
+    float bw = (params.max_val - params.min_val) / float(params.num_bins);
+    uint bin = uint((val - params.min_val) / bw);
+    if (bin >= params.num_bins) bin = params.num_bins - 1;
+
+    atomicAdd(output_data[bin], 1u);
+}

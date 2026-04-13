@@ -1,0 +1,63 @@
+#version 450
+
+// Kthvalue — find k-th smallest element along a dimension
+// Each invocation handles one slice (one line along the reduction dimension).
+// Uses linear scan with running k-th smallest tracking.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input   { float input_data[]; };
+layout(binding = 1) writeonly buffer Values  { float values_data[]; };
+layout(binding = 2) writeonly buffer Indices { int   indices_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint total_slices;   // outer_size * inner_size
+    uint dim_size;       // size of the dimension to reduce over
+    uint inner_size;     // product of dimensions after the reduction dim
+    uint k;              // 1-based k (find k-th smallest)
+} params;
+
+// Simple selection: copy slice into local array, do partial insertion sort
+// This works well for moderate dim_size (< ~4096).
+void main() {
+    uint slice_idx = gl_GlobalInvocationID.x;
+    if (slice_idx >= params.total_slices) return;
+
+    uint outer_idx = slice_idx / params.inner_size;
+    uint inner_idx = slice_idx % params.inner_size;
+    uint base = outer_idx * params.dim_size * params.inner_size + inner_idx;
+
+    // Find k-th smallest using repeated linear scan
+    // Track which indices are "used" via a running threshold approach
+    float kth_val = 1.0 / 0.0; // +inf
+    int   kth_idx = 0;
+
+    // Simple approach: find min k times, masking already-found elements
+    // For correctness, we use a selection approach:
+    // 1. Find the value that has exactly (k-1) elements strictly less than it
+    // This is O(dim_size^2) but very GPU-friendly (no shared memory needed)
+    for (uint i = 0; i < params.dim_size; i++) {
+        uint idx = base + i * params.inner_size;
+        float val = input_data[idx];
+
+        // Count how many elements are strictly less than val
+        uint less_count = 0;
+        // Count how many elements equal to val appear before position i
+        uint equal_before = 0;
+        for (uint j = 0; j < params.dim_size; j++) {
+            float other = input_data[base + j * params.inner_size];
+            if (other < val) less_count++;
+            else if (other == val && j < i) equal_before++;
+        }
+
+        // This element is the (less_count + equal_before + 1)-th smallest
+        uint rank = less_count + equal_before + 1;
+        if (rank == params.k) {
+            kth_val = val;
+            kth_idx = int(i);
+            break;
+        }
+    }
+
+    values_data[slice_idx]  = kth_val;
+    indices_data[slice_idx] = kth_idx;
+}

@@ -554,6 +554,18 @@ namespace cuda {
     auto adaptive_avgpool3d_forward(const Tensor& input, int64_t output_d, int64_t output_h, int64_t output_w, cudaStream_t stream) -> Tensor;
     auto adaptive_avgpool3d_backward(const Tensor& grad_output, const std::vector<int64_t>& input_shape, cudaStream_t stream) -> Tensor;
 
+    // Fractional Max Pool operations
+    auto fractional_maxpool2d_forward_kernel(const Tensor& input, int64_t out_h, int64_t out_w, const Tensor* random_samples, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
+    auto fractional_maxpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape, cudaStream_t stream) -> Tensor;
+    auto fractional_maxpool3d_forward_kernel(const Tensor& input, int64_t out_d, int64_t out_h, int64_t out_w, const Tensor* random_samples, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
+    auto fractional_maxpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape, cudaStream_t stream) -> Tensor;
+
+    // Max Unpool operations
+    auto max_unpool2d_forward_kernel(const Tensor& input, const Tensor& indices, int64_t out_h, int64_t out_w, cudaStream_t stream) -> Tensor;
+    auto max_unpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape, cudaStream_t stream) -> Tensor;
+    auto max_unpool3d_forward_kernel(const Tensor& input, const Tensor& indices, int64_t out_d, int64_t out_h, int64_t out_w, cudaStream_t stream) -> Tensor;
+    auto max_unpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape, cudaStream_t stream) -> Tensor;
+
     // GroupNorm / InstanceNorm operations
     auto group_norm_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor& bias, int64_t num_groups, float eps, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
     auto group_norm_backward_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& weight, const Tensor& mean_saved, const Tensor& inv_std_saved, int64_t num_groups, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
@@ -3657,10 +3669,66 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     });
 
     // =========================================================================
-    // Phase 9: Fractional Max Pool + Max Unpool — not yet registered
-    // These ops are CPU-only for now; GPU dispatch will fall through to
-    // the "kernel not registered" error which is correct behavior.
-    // TODO: Add native CUDA kernels for fractional_max_pool and max_unpool
+    // Phase 9: Fractional Max Pool 2D
+    // =========================================================================
+    table.register_kernel(OpId::FractionalMaxPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        const Tensor* samples = (inputs.size() > 1) ? &inputs[1] : nullptr;
+        auto [output, indices] = cuda::fractional_maxpool2d_forward_kernel(inputs[0], out_h, out_w, samples, get_cuda_stream(attrs));
+        return std::vector<Tensor>{output, indices};
+    });
+
+    table.register_single_output_kernel(OpId::FractionalMaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return cuda::fractional_maxpool2d_backward_kernel(inputs[0], inputs[1], input_shape, get_cuda_stream(attrs));
+    });
+
+    // =========================================================================
+    // Phase 9: Fractional Max Pool 3D
+    // =========================================================================
+    table.register_kernel(OpId::FractionalMaxPool3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t out_d = attrs.get_int(AttrKey::OutputSizeD, 1);
+        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        const Tensor* samples = (inputs.size() > 1) ? &inputs[1] : nullptr;
+        auto [output, indices] = cuda::fractional_maxpool3d_forward_kernel(inputs[0], out_d, out_h, out_w, samples, get_cuda_stream(attrs));
+        return std::vector<Tensor>{output, indices};
+    });
+
+    table.register_single_output_kernel(OpId::FractionalMaxPool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return cuda::fractional_maxpool3d_backward_kernel(inputs[0], inputs[1], input_shape, get_cuda_stream(attrs));
+    });
+
+    // =========================================================================
+    // Phase 9: Max Unpool 2D
+    // =========================================================================
+    table.register_single_output_kernel(OpId::MaxUnpool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        return cuda::max_unpool2d_forward_kernel(inputs[0], inputs[1], out_h, out_w, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::MaxUnpool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return cuda::max_unpool2d_backward_kernel(inputs[0], inputs[1], input_shape, get_cuda_stream(attrs));
+    });
+
+    // =========================================================================
+    // Phase 9: Max Unpool 3D
+    // =========================================================================
+    table.register_single_output_kernel(OpId::MaxUnpool3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t out_d = attrs.get_int(AttrKey::OutputSizeD, 1);
+        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        return cuda::max_unpool3d_forward_kernel(inputs[0], inputs[1], out_d, out_h, out_w, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::MaxUnpool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto input_shape = attrs.get_int_list(AttrKey::InputShape);
+        return cuda::max_unpool3d_backward_kernel(inputs[0], inputs[1], input_shape, get_cuda_stream(attrs));
+    });
 }
 
 } // namespace tenzor

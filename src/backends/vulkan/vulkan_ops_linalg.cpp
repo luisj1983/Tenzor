@@ -3289,17 +3289,54 @@ auto VulkanBackend::dispatchSparseTrsm(const Tensor& crow_indices, const Tensor&
 
 
 // ============================================================================
-// Triangular Solve (AX = B, A triangular) — CPU fallback
-// TODO: Implement native Vulkan compute shader for dense triangular solve
+// Triangular Solve (AX = B, A triangular) — native Vulkan compute shader
 // ============================================================================
 
 auto VulkanBackend::dispatchLinalgSolveTriangular(const Tensor& A, const Tensor& B,
                                                    bool upper, bool unitriangular) -> Tensor {
-    // Fall back to CPU: transfer data, solve on CPU, transfer back
-    auto a_cpu = A.to(Device{Device::Type::CPU, 0});
-    auto b_cpu = B.to(Device{Device::Type::CPU, 0});
-    auto result_cpu = linalg::solve_triangular(a_cpu, b_cpu, upper, unitriangular);
-    return result_cpu.to(A.device());
+    if (A.dtype() != DType::Float32) {
+        auto a_f32 = A.to(DType::Float32);
+        auto b_f32 = B.to(DType::Float32);
+        return dispatchLinalgSolveTriangular(a_f32, b_f32, upper, unitriangular).to(A.dtype());
+    }
+
+    int32_t device_id = A.device().index;
+    auto* pipeline = getPipeline("solve_triangular", device_id);
+
+    auto a_shape = A.shape();
+    auto b_shape = B.shape();
+    uint32_t N = static_cast<uint32_t>(a_shape[a_shape.size() - 1]);
+    uint32_t M = (b_shape.size() >= 2) ? static_cast<uint32_t>(b_shape[b_shape.size() - 1]) : 1;
+
+    Tensor output(std::vector<int64_t>(b_shape.begin(), b_shape.end()), B.dtype(), B.device());
+
+    struct { uint32_t N; uint32_t M; uint32_t upper; uint32_t unitriangular; } pc;
+    pc.N = N;
+    pc.M = M;
+    pc.upper = upper ? 1 : 0;
+    pc.unitriangular = unitriangular ? 1 : 0;
+
+    size_t a_buf = static_cast<size_t>(A.numel()) * sizeof(float);
+    size_t b_buf = static_cast<size_t>(B.numel()) * sizeof(float);
+    size_t x_buf = static_cast<size_t>(output.numel()) * sizeof(float);
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, A.data_ptr()}, {1, B.data_ptr()}, {2, output.data_ptr()}
+    };
+    std::vector<size_t> sizes = {a_buf, b_buf, x_buf};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(M, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return output;
 }
 
 } // namespace tenzor

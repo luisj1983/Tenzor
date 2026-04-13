@@ -1,0 +1,80 @@
+#version 450
+
+// FractionalMaxPool2d Forward — each invocation handles one output element.
+// Computes pseudo-random pool region from sample values, finds max + index.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input   { float input_data[]; };    // [N, C, H, W]
+layout(binding = 1) writeonly buffer Output  { float output_data[]; };   // [N, C, out_h, out_w]
+layout(binding = 2) writeonly buffer Indices { int   indices_data[]; };   // [N, C, out_h, out_w]
+layout(binding = 3) readonly buffer Samples  { float samples_data[]; };  // [N*C*2] or empty
+
+layout(push_constant) uniform PushConstants {
+    uint N;
+    uint C;
+    uint H;
+    uint W;
+    uint out_h;
+    uint out_w;
+    uint total_output;   // N * C * out_h * out_w
+    uint has_samples;    // 1 if samples provided, 0 otherwise
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.total_output) return;
+
+    // Decompose flat index into (n, c, oh, ow)
+    uint ow = idx % params.out_w;
+    uint tmp = idx / params.out_w;
+    uint oh = tmp % params.out_h;
+    tmp = tmp / params.out_h;
+    uint c = tmp % params.C;
+    uint n = tmp / params.C;
+
+    // Get sample values (default 0.5 if no samples provided)
+    float sample_h = 0.5;
+    float sample_w = 0.5;
+    if (params.has_samples != 0) {
+        uint sample_idx = (n * params.C + c) * 2;
+        sample_h = samples_data[sample_idx];
+        sample_w = samples_data[sample_idx + 1];
+    }
+
+    // Compute pool region boundaries
+    float h_ratio = float(params.H) / float(params.out_h);
+    float w_ratio = float(params.W) / float(params.out_w);
+
+    int h_start = int(floor((float(oh) + sample_h) * h_ratio - sample_h));
+    int h_end   = int(floor((float(oh + 1) + sample_h) * h_ratio - sample_h));
+    int w_start = int(floor((float(ow) + sample_w) * w_ratio - sample_w));
+    int w_end   = int(floor((float(ow + 1) + sample_w) * w_ratio - sample_w));
+
+    // Clamp to valid range
+    h_start = max(h_start, 0);
+    h_end   = min(h_end, int(params.H));
+    w_start = max(w_start, 0);
+    w_end   = min(w_end, int(params.W));
+    if (h_end <= h_start) h_end = h_start + 1;
+    if (w_end <= w_start) w_end = w_start + 1;
+    h_end = min(h_end, int(params.H));
+    w_end = min(w_end, int(params.W));
+
+    // Find max in pool region
+    float max_val = -1.0 / 0.0; // -inf
+    int max_idx = h_start * int(params.W) + w_start;
+
+    uint base = (n * params.C + c) * params.H * params.W;
+    for (int h = h_start; h < h_end; h++) {
+        for (int w = w_start; w < w_end; w++) {
+            float val = input_data[base + uint(h) * params.W + uint(w)];
+            if (val > max_val) {
+                max_val = val;
+                max_idx = h * int(params.W) + w;
+            }
+        }
+    }
+
+    output_data[idx]  = max_val;
+    indices_data[idx] = max_idx;
+}

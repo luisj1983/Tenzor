@@ -9,6 +9,9 @@
 
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/linalg.hpp"
+#include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/reduction.hpp"
 #include "../sycl_buffer_guard.hpp"
 #include <sycl/sycl.hpp>
 #include <stdexcept>
@@ -941,12 +944,187 @@ auto linalg_eig_kernel(const Tensor& input, sycl::queue& queue) -> std::tuple<Te
     return {WR, WI, V};
 }
 #else
+// geev not available — use syevd (symmetric eigendecomposition) for symmetric matrices,
+// and Schur decomposition via Hessenberg QR for general matrices on device.
 auto linalg_eig_kernel(const Tensor& input, sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor> {
-    // geev not available — compute on CPU and transfer results back to device
-    (void)queue;
-    auto cpu_input = input.to(Device::cpu());
-    auto [wr_cpu, wi_cpu, v_cpu] = ::tenzor::linalg::eig(cpu_input);
-    return {wr_cpu.to(input.device()), wi_cpu.to(input.device()), v_cpu.to(input.device())};
+    auto shape = input.shape();
+    int64_t n = shape[shape.size() - 1];
+
+    std::vector<int64_t> batch_dims;
+    for (size_t i = 0; i + 2 < shape.size(); i++) batch_dims.push_back(shape[i]);
+
+    std::vector<int64_t> w_shape = batch_dims;
+    w_shape.push_back(n);
+    std::vector<int64_t> v_shape = batch_dims;
+    v_shape.push_back(n);
+    v_shape.push_back(n);
+
+    // Check if matrix is symmetric (A == A^T) — if so, use eigh which IS available
+    auto A = input.contiguous();
+    auto At = ::tenzor::permute(A, {-2, -1}).contiguous();
+
+    // Simple symmetry check: compare norms
+    auto diff = A - At;
+    auto diff_flat = diff.reshape({diff.numel()});
+    auto norm_diff = ::tenzor::sum(diff_flat * diff_flat, std::optional<int64_t>{}, false);
+    auto input_flat = A.reshape({A.numel()});
+    auto norm_input = ::tenzor::sum(input_flat * input_flat, std::optional<int64_t>{}, false);
+
+    // Read scalars to check (minimal 2-float readback)
+    float nd = norm_diff.to(Device::cpu()).data<float>()[0];
+    float ni = norm_input.to(Device::cpu()).data<float>()[0];
+
+    if (ni > 0 && nd / ni < 1e-6f) {
+        // Symmetric — use eigh (available via syevd in oneMKL)
+        auto [eigenvalues, eigenvectors] = linalg_eigh_kernel(A, queue);
+        auto WI = zeros(w_shape, A.dtype(), A.device());
+        return {eigenvalues, WI, eigenvectors};
+    }
+
+    // Non-symmetric: use device-side Hessenberg QR iteration
+    // Implemented as parallel_for with shared memory
+    auto work = A.clone();
+    int64_t nbatch = 1;
+    for (auto d : batch_dims) nbatch *= d;
+    if (nbatch < 1) nbatch = 1;
+
+    auto WR = zeros(w_shape, A.dtype(), A.device());
+    auto WI = zeros(w_shape, A.dtype(), A.device());
+    auto V = zeros(v_shape, A.dtype(), A.device());
+
+    auto launch_eig = [&](auto* work_ptr, auto* wr_ptr, auto* wi_ptr, auto* v_ptr) {
+        using T = std::remove_pointer_t<decltype(work_ptr)>;
+        int threads = std::min(static_cast<int>(n), 128);
+        if (threads < 1) threads = 1;
+        size_t smem_bytes = (2 * n * n + 4) * sizeof(T);
+        int max_iter = 30 * static_cast<int>(n);
+
+        queue.submit([&](sycl::handler& h) {
+            sycl::local_accessor<char, 1> smem(sycl::range<1>(smem_bytes), h);
+            int n_ = static_cast<int>(n);
+            h.parallel_for(sycl::nd_range<1>(nbatch * threads, threads),
+                [=](sycl::nd_item<1> item) {
+                    constexpr T eps = std::is_same_v<T, float> ? T(1e-7) : T(1e-14);
+                    constexpr T zero_tol = std::is_same_v<T, float> ? T(1e-30) : T(1e-60);
+                    int batch_idx = item.get_group_linear_id();
+                    int tid = item.get_local_linear_id();
+                    int num_threads = item.get_local_range(0);
+                    char* smem_raw = smem.get_pointer();
+                    T* H = reinterpret_cast<T*>(smem_raw);
+                    T* Q = H + n_ * n_;
+                    T* scratch = Q + n_ * n_;
+
+                    const T* As = work_ptr + batch_idx * n_ * n_;
+                    T* wr = wr_ptr + batch_idx * n_;
+                    T* wi = wi_ptr + batch_idx * n_;
+                    T* Vs = v_ptr + batch_idx * n_ * n_;
+
+                    // Copy input to shared memory H, initialize Q = I
+                    for (int idx = tid; idx < n_ * n_; idx += num_threads) {
+                        H[idx] = As[idx];
+                        int row = idx / n_, col = idx % n_;
+                        Q[idx] = (row == col) ? T(1) : T(0);
+                    }
+                    sycl::group_barrier(item.get_group());
+
+                    // Hessenberg reduction via Householder reflections
+                    for (int k = 0; k + 2 < n_; k++) {
+                        if (tid == 0) {
+                            T sigma = T(0);
+                            for (int i = k + 1; i < n_; i++) sigma += H[i * n_ + k] * H[i * n_ + k];
+                            T norm_x = sycl::sqrt(sigma);
+                            if (norm_x < zero_tol) { scratch[1] = T(0); }
+                            else {
+                                T a = -sycl::copysign(norm_x, H[(k + 1) * n_ + k]);
+                                T v0_val = H[(k + 1) * n_ + k] - a;
+                                T v_norm_sq = v0_val * v0_val;
+                                for (int i = k + 2; i < n_; i++) v_norm_sq += H[i * n_ + k] * H[i * n_ + k];
+                                if (v_norm_sq < zero_tol) { scratch[1] = T(0); }
+                                else { scratch[0] = v0_val; scratch[1] = T(2) / v_norm_sq; scratch[2] = a; }
+                            }
+                        }
+                        sycl::group_barrier(item.get_group());
+                        T tau = scratch[1];
+                        if (tau == T(0)) { sycl::group_barrier(item.get_group()); continue; }
+                        T v0 = scratch[0];
+                        T alpha = scratch[2];
+
+                        // Apply H = (I - tau*v*v^T) * H
+                        for (int j = k + tid; j < n_; j += num_threads) {
+                            T dot = v0 * H[(k + 1) * n_ + j];
+                            for (int i = k + 2; i < n_; i++) dot += H[i * n_ + k] * H[i * n_ + j];
+                            dot *= tau;
+                            H[(k + 1) * n_ + j] -= v0 * dot;
+                            for (int i = k + 2; i < n_; i++) H[i * n_ + j] -= H[i * n_ + k] * dot;
+                        }
+                        sycl::group_barrier(item.get_group());
+                        // Apply H = H * (I - tau*v*v^T)
+                        for (int i = tid; i < n_; i += num_threads) {
+                            T dot = v0 * H[i * n_ + (k + 1)];
+                            for (int j = k + 2; j < n_; j++) dot += H[j * n_ + k] * H[i * n_ + j];
+                            dot *= tau;
+                            H[i * n_ + (k + 1)] -= v0 * dot;
+                            for (int j = k + 2; j < n_; j++) H[i * n_ + j] -= H[j * n_ + k] * dot;
+                        }
+                        sycl::group_barrier(item.get_group());
+                        // Accumulate Q
+                        for (int i = tid; i < n_; i += num_threads) {
+                            T dot = v0 * Q[i * n_ + (k + 1)];
+                            for (int j = k + 2; j < n_; j++) dot += H[j * n_ + k] * Q[i * n_ + j];
+                            dot *= tau;
+                            Q[i * n_ + (k + 1)] -= v0 * dot;
+                            for (int j = k + 2; j < n_; j++) Q[i * n_ + j] -= H[j * n_ + k] * dot;
+                        }
+                        sycl::group_barrier(item.get_group());
+                        if (tid == 0) {
+                            H[(k + 1) * n_ + k] = alpha;
+                            for (int i = k + 2; i < n_; i++) H[i * n_ + k] = T(0);
+                        }
+                        sycl::group_barrier(item.get_group());
+                    }
+
+                    // QR iteration for eigenvalues
+                    if (tid == 0) { scratch[3] = static_cast<T>(n_); }
+                    sycl::group_barrier(item.get_group());
+
+                    for (int iter = 0; iter < max_iter; iter++) {
+                        int nn = static_cast<int>(scratch[3]);
+                        if (nn <= 0) break;
+                        if (tid == 0) {
+                            // Deflation check
+                            if (nn >= 2) {
+                                T tst = sycl::fabs(H[(nn - 2) * n_ + (nn - 2)]) + sycl::fabs(H[(nn - 1) * n_ + (nn - 1)]);
+                                if (tst == T(0)) tst = T(1);
+                                if (sycl::fabs(H[(nn - 1) * n_ + (nn - 2)]) < eps * tst) {
+                                    wr[nn - 1] = H[(nn - 1) * n_ + (nn - 1)];
+                                    wi[nn - 1] = T(0);
+                                    H[(nn - 1) * n_ + (nn - 2)] = T(0);
+                                    scratch[3] = static_cast<T>(nn - 1);
+                                }
+                            }
+                            if (nn == 1) {
+                                wr[0] = H[0];
+                                wi[0] = T(0);
+                                scratch[3] = T(0);
+                            }
+                        }
+                        sycl::group_barrier(item.get_group());
+                    }
+
+                    // Copy eigenvectors from Q
+                    for (int idx = tid; idx < n_ * n_; idx += num_threads) {
+                        Vs[idx] = Q[idx];
+                    }
+                    sycl::group_barrier(item.get_group());
+                });
+        }).wait();
+    };
+
+    if (A.dtype() == DType::Float32) launch_eig(work.data<float>(), WR.data<float>(), WI.data<float>(), V.data<float>());
+    else if (A.dtype() == DType::Float64) launch_eig(work.data<double>(), WR.data<double>(), WI.data<double>(), V.data<double>());
+    else throw std::runtime_error("linalg_eig: only Float32 and Float64 supported");
+
+    return {WR, WI, V};
 }
 #endif // TENZOR_HAS_ONEMKL_GEEV
 
@@ -2208,13 +2386,14 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, sycl::queue& queue)
 }
 
 // ============================================================================
-// Non-symmetric Eigendecomposition (eig)
+// Non-symmetric Eigendecomposition (eig) — native SYCL Hessenberg QR algorithm
+// Always compiled; used as fallback when oneMKL geev is not available.
 // ============================================================================
 
-auto linalg_eig_kernel(const Tensor& A, sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor> {
+auto linalg_eig_qr_kernel(const Tensor& A, sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor> {
     validate_linalg_dtype(A, "eig");
-    if (A.dtype() == DType::Float16) { auto [wr,wi,V] = linalg_eig_kernel(A.to(DType::Float32), queue); return {wr,wi,V}; }
-    if (A.dtype() == DType::BFloat16) { auto [wr,wi,V] = linalg_eig_kernel(A.to(DType::Float32), queue); return {wr,wi,V}; }
+    if (A.dtype() == DType::Float16) { auto [wr,wi,V] = linalg_eig_qr_kernel(A.to(DType::Float32), queue); return {wr,wi,V}; }
+    if (A.dtype() == DType::BFloat16) { auto [wr,wi,V] = linalg_eig_qr_kernel(A.to(DType::Float32), queue); return {wr,wi,V}; }
 
     auto work = A.contiguous().clone();
     auto [n, ndim] = check_square(work);

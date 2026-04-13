@@ -250,6 +250,21 @@ auto flipud(const Tensor& input) -> Tensor;
 
 /// @}
 
+/**
+ * @brief Rearranges elements in a tensor of shape (*, C*r^2, H, W) to (*, C, H*r, W*r).
+ *
+ * Used in sub-pixel convolution for super-resolution.
+ * @param input Tensor of shape (*, C*r^2, H, W)
+ * @param upscale_factor Upscale factor r
+ * @return Tensor of shape (*, C, H*r, W*r)
+ */
+auto pixel_shuffle(const Tensor& input, int64_t upscale_factor) -> Tensor;
+
+/**
+ * @brief Inverse of pixel_shuffle. Rearranges (*, C, H*r, W*r) to (*, C*r^2, H, W).
+ */
+auto pixel_unshuffle(const Tensor& input, int64_t downscale_factor) -> Tensor;
+
 /** @} */ // end of tensor_transform group
 
 } // namespace tenzor

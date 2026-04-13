@@ -555,6 +555,28 @@ public:
     auto dispatchHistc(const Tensor& input, int64_t bins, double min_val, double max_val) -> Tensor;
     auto dispatchUniqueConsecutive(const Tensor& input, bool return_inverse) -> std::tuple<Tensor, Tensor, Tensor>;
 
+    // Fractional Max Pool + Max Unpool operations
+    auto dispatchFractionalMaxPool2dForward(const Tensor& input, int64_t out_h, int64_t out_w,
+                                            const Tensor* random_samples) -> std::pair<Tensor, Tensor>;
+    auto dispatchFractionalMaxPool2dBackward(const Tensor& grad_output, const Tensor& indices,
+                                             const std::vector<int64_t>& input_shape) -> Tensor;
+    auto dispatchFractionalMaxPool3dForward(const Tensor& input, int64_t out_d, int64_t out_h, int64_t out_w,
+                                            const Tensor* random_samples) -> std::pair<Tensor, Tensor>;
+    auto dispatchFractionalMaxPool3dBackward(const Tensor& grad_output, const Tensor& indices,
+                                             const std::vector<int64_t>& input_shape) -> Tensor;
+    auto dispatchMaxUnpool2dForward(const Tensor& input, const Tensor& indices,
+                                    int64_t out_h, int64_t out_w) -> Tensor;
+    auto dispatchMaxUnpool2dBackward(const Tensor& grad_output, const Tensor& indices,
+                                     const std::vector<int64_t>& input_shape) -> Tensor;
+    auto dispatchMaxUnpool3dForward(const Tensor& input, const Tensor& indices,
+                                    int64_t out_d, int64_t out_h, int64_t out_w) -> Tensor;
+    auto dispatchMaxUnpool3dBackward(const Tensor& grad_output, const Tensor& indices,
+                                     const std::vector<int64_t>& input_shape) -> Tensor;
+
+    // MaskedScatter with precomputed prefix sum
+    auto dispatchMaskedScatterWithPrefix(const Tensor& input, const Tensor& mask,
+                                         const Tensor& source, const Tensor& prefix_sum) -> Tensor;
+
     // Histogram operations
     auto dispatchBincount(const Tensor& input, const std::optional<Tensor>& weights, int64_t minlength) -> Tensor;
 
