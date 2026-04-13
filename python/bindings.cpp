@@ -2394,6 +2394,9 @@ void bind_compression(py::module& m) {
     // Quantization — see python/bindings/bindings_quantization.cpp
     tenzor::python::register_quantization(m);
 
+    // Nested Tensor — see python/bindings/bindings_nested.cpp
+    tenzor::python::register_nested(m);
+
     // =============================================================================
     // Memory Management
     // =============================================================================

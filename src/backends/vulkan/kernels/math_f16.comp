@@ -215,6 +215,43 @@ void main() {
             res0 = float16_t(fb0 < 0.0 ? -abs(fa0) : abs(fa0));
             res1 = float16_t(fb1 < 0.0 ? -abs(fa1) : abs(fa1));
             break;
+        case 44: // deg2rad (unary)
+            res0 = float16_t(fa0 * 0.01745329251994329577);
+            res1 = float16_t(fa1 * 0.01745329251994329577);
+            break;
+        case 45: // rad2deg (unary)
+            res0 = float16_t(fa0 * 57.29577951308232087680);
+            res1 = float16_t(fa1 * 57.29577951308232087680);
+            break;
+        case 46: { // logit (unary)
+            float eps = params.param > 0.0 ? params.param : 1.17549435e-38;
+            float c0 = clamp(fa0, eps, 1.0 - eps);
+            float c1 = clamp(fa1, eps, 1.0 - eps);
+            res0 = float16_t(log(c0 / (1.0 - c0)));
+            res1 = float16_t(log(c1 / (1.0 - c1)));
+            break;
+        }
+        case 47: // float_power (binary)
+            res0 = float16_t(pow(fa0, fb0));
+            res1 = float16_t(pow(fa1, fb1));
+            break;
+        case 48: { // xlog1py (binary)
+            res0 = float16_t(fa0 == 0.0 ? 0.0 : fa0 * log(1.0 + fb0));
+            res1 = float16_t(fa1 == 0.0 ? 0.0 : fa1 * log(1.0 + fb1));
+            break;
+        }
+        case 49: // ldexp (binary)
+            res0 = float16_t(fa0 * exp2(fb0));
+            res1 = float16_t(fa1 * exp2(fb1));
+            break;
+        case 50: // frac (unary)
+            res0 = float16_t(fa0 - floor(fa0));
+            res1 = float16_t(fa1 - floor(fa1));
+            break;
+        case 51: // log_sigmoid (unary)
+            res0 = float16_t(-log(1.0 + exp(-fa0)));
+            res1 = float16_t(-log(1.0 + exp(-fa1)));
+            break;
         default:
             res0 = float16_t(0.0);
             res1 = float16_t(0.0);

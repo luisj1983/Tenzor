@@ -1,0 +1,81 @@
+#version 450
+
+// NaN-ignoring variance: Var = sum((x - mean)^2 for non-NaN x) / (count - correction)
+// Two-pass approach: pass 1 computes nanmean, pass 2 computes variance.
+// This shader does both passes in a single dispatch using shared memory.
+// Dispatched as a single workgroup for full reduction.
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer Input  { float input_data[]; };
+layout(binding = 1) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+    uint correction;   // Bessel's correction: 0 for population, 1 for sample
+} params;
+
+shared float s_sum[WORKGROUP_SIZE];
+shared float s_cnt[WORKGROUP_SIZE];
+shared float s_var[WORKGROUP_SIZE];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+
+    // Pass 1: compute nanmean
+    float accum = 0.0;
+    float count = 0.0;
+
+    for (uint i = tid; i < params.num_elements; i += WORKGROUP_SIZE) {
+        float val = input_data[i];
+        if (!isnan(val)) {
+            accum += val;
+            count += 1.0;
+        }
+    }
+
+    s_sum[tid] = accum;
+    s_cnt[tid] = count;
+    barrier();
+
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            s_sum[tid] += s_sum[tid + s];
+            s_cnt[tid] += s_cnt[tid + s];
+        }
+        barrier();
+    }
+
+    float mean = (s_cnt[0] > 0.0) ? (s_sum[0] / s_cnt[0]) : 0.0;
+    float total_count = s_cnt[0];
+    barrier();
+
+    // Pass 2: compute sum of squared deviations from mean
+    float var_accum = 0.0;
+    for (uint i = tid; i < params.num_elements; i += WORKGROUP_SIZE) {
+        float val = input_data[i];
+        if (!isnan(val)) {
+            float diff = val - mean;
+            var_accum += diff * diff;
+        }
+    }
+
+    s_var[tid] = var_accum;
+    barrier();
+
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            s_var[tid] += s_var[tid + s];
+        }
+        barrier();
+    }
+
+    if (tid == 0) {
+        float denom = total_count - float(params.correction);
+        if (denom > 0.0) {
+            output_data[0] = s_var[0] / denom;
+        } else {
+            output_data[0] = 0.0 / 0.0; // NaN
+        }
+    }
+}

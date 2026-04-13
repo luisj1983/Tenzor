@@ -246,6 +246,7 @@ if(TENZOR_BUILD_PYTHON)
             python/bindings/bindings_optim.cpp
             python/bindings/bindings_autograd.cpp
             python/bindings/bindings_nn.cpp
+            python/bindings/bindings_nested.cpp
         )
 
         target_link_libraries(tenzor_python PRIVATE tenzor_core tenzor_backend_cpu)

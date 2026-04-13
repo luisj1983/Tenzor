@@ -725,6 +725,728 @@ kernel void cast_i32_to_f32_kernel(
 }
 
 // ============================================================================
+// Activation functions: LeakyReLU, ELU, Softplus, GELU, Swish, Mish, LogSigmoid
+// ============================================================================
+
+kernel void leaky_relu_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant float& negative_slope [[buffer(2)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = input[id];
+    output[id] = x >= 0.0f ? x : negative_slope * x;
+}
+
+kernel void leaky_relu_backward_kernel(
+    device const float* grad [[buffer(0)]],
+    device const float* input [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant float& negative_slope [[buffer(3)]],
+    uint id [[thread_position_in_grid]])
+{
+    output[id] = input[id] >= 0.0f ? grad[id] : negative_slope * grad[id];
+}
+
+kernel void elu_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant float& alpha [[buffer(2)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = input[id];
+    output[id] = x >= 0.0f ? x : alpha * (exp(x) - 1.0f);
+}
+
+kernel void elu_backward_kernel(
+    device const float* grad [[buffer(0)]],
+    device const float* input [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant float& alpha [[buffer(3)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = input[id];
+    output[id] = x >= 0.0f ? grad[id] : grad[id] * alpha * exp(x);
+}
+
+kernel void softplus_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant float& beta [[buffer(2)]],
+    constant float& threshold [[buffer(3)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = input[id];
+    float bx = beta * x;
+    output[id] = (bx > threshold) ? x : log(1.0f + exp(bx)) / beta;
+}
+
+kernel void softplus_backward_kernel(
+    device const float* grad [[buffer(0)]],
+    device const float* input [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant float& beta [[buffer(3)]],
+    constant float& threshold [[buffer(4)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = input[id];
+    float bx = beta * x;
+    if (bx > threshold) {
+        output[id] = grad[id];
+    } else {
+        float e = exp(bx);
+        output[id] = grad[id] * e / (1.0f + e);
+    }
+}
+
+kernel void gelu_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = input[id];
+    // GELU: x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+    float c = 0.7978845608f;  // sqrt(2/pi)
+    float inner = c * (x + 0.044715f * x * x * x);
+    output[id] = 0.5f * x * (1.0f + tanh(inner));
+}
+
+kernel void gelu_backward_kernel(
+    device const float* grad [[buffer(0)]],
+    device const float* input [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = input[id];
+    float c = 0.7978845608f;  // sqrt(2/pi)
+    float inner = c * (x + 0.044715f * x * x * x);
+    float t = tanh(inner);
+    float sech2 = 1.0f - t * t;
+    float d_inner = c * (1.0f + 3.0f * 0.044715f * x * x);
+    output[id] = grad[id] * (0.5f * (1.0f + t) + 0.5f * x * sech2 * d_inner);
+}
+
+kernel void swish_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = input[id];
+    float s = 1.0f / (1.0f + exp(-x));
+    output[id] = x * s;
+}
+
+kernel void swish_backward_kernel(
+    device const float* grad [[buffer(0)]],
+    device const float* input [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = input[id];
+    float s = 1.0f / (1.0f + exp(-x));
+    // d/dx(x*sigmoid(x)) = sigmoid(x) + x*sigmoid(x)*(1-sigmoid(x))
+    //                     = sigmoid(x) * (1 + x*(1-sigmoid(x)))
+    output[id] = grad[id] * s * (1.0f + x * (1.0f - s));
+}
+
+kernel void mish_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = input[id];
+    float sp = log(1.0f + exp(x));
+    output[id] = x * tanh(sp);
+}
+
+kernel void mish_backward_kernel(
+    device const float* grad [[buffer(0)]],
+    device const float* input [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = input[id];
+    float e = exp(x);
+    float omega = 4.0f * (x + 1.0f) + 4.0f * e * e + e * e * e + e * (4.0f * x + 6.0f);
+    float delta = 2.0f * e + e * e + 2.0f;
+    output[id] = grad[id] * e * omega / (delta * delta);
+}
+
+kernel void log_sigmoid_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = input[id];
+    // log(sigmoid(x)) = -softplus(-x) = -log(1+exp(-x))
+    // Numerically stable: min(0, x) - log(1 + exp(-|x|))
+    output[id] = fmin(0.0f, x) - log(1.0f + exp(-fabs(x)));
+}
+
+kernel void log_sigmoid_backward_kernel(
+    device const float* grad [[buffer(0)]],
+    device const float* input [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = input[id];
+    // d/dx log(sigmoid(x)) = 1 - sigmoid(x) = sigmoid(-x)
+    float s = 1.0f / (1.0f + exp(x));
+    output[id] = grad[id] * s;
+}
+
+// ============================================================================
+// Activation F16 variants
+// ============================================================================
+
+kernel void leaky_relu_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant float& negative_slope [[buffer(2)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = float(input[id]);
+    output[id] = half(x >= 0.0f ? x : negative_slope * x);
+}
+
+kernel void leaky_relu_backward_kernel_f16(
+    device const half* grad [[buffer(0)]],
+    device const half* input [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    constant float& negative_slope [[buffer(3)]],
+    uint id [[thread_position_in_grid]])
+{
+    output[id] = half(float(input[id]) >= 0.0f ? float(grad[id]) : negative_slope * float(grad[id]));
+}
+
+kernel void elu_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant float& alpha [[buffer(2)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = float(input[id]);
+    output[id] = half(x >= 0.0f ? x : alpha * (exp(x) - 1.0f));
+}
+
+kernel void elu_backward_kernel_f16(
+    device const half* grad [[buffer(0)]],
+    device const half* input [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    constant float& alpha [[buffer(3)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = float(input[id]);
+    output[id] = half(x >= 0.0f ? float(grad[id]) : float(grad[id]) * alpha * exp(x));
+}
+
+kernel void softplus_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant float& beta [[buffer(2)]],
+    constant float& threshold [[buffer(3)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = float(input[id]);
+    float bx = beta * x;
+    output[id] = half((bx > threshold) ? x : log(1.0f + exp(bx)) / beta);
+}
+
+kernel void softplus_backward_kernel_f16(
+    device const half* grad [[buffer(0)]],
+    device const half* input [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    constant float& beta [[buffer(3)]],
+    constant float& threshold [[buffer(4)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = float(input[id]);
+    float bx = beta * x;
+    if (bx > threshold) {
+        output[id] = grad[id];
+    } else {
+        float e = exp(bx);
+        output[id] = half(float(grad[id]) * e / (1.0f + e));
+    }
+}
+
+kernel void gelu_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = float(input[id]);
+    float c = 0.7978845608f;
+    float inner = c * (x + 0.044715f * x * x * x);
+    output[id] = half(0.5f * x * (1.0f + tanh(inner)));
+}
+
+kernel void gelu_backward_kernel_f16(
+    device const half* grad [[buffer(0)]],
+    device const half* input [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = float(input[id]);
+    float c = 0.7978845608f;
+    float inner = c * (x + 0.044715f * x * x * x);
+    float t = tanh(inner);
+    float sech2 = 1.0f - t * t;
+    float d_inner = c * (1.0f + 3.0f * 0.044715f * x * x);
+    output[id] = half(float(grad[id]) * (0.5f * (1.0f + t) + 0.5f * x * sech2 * d_inner));
+}
+
+kernel void swish_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = float(input[id]);
+    float s = 1.0f / (1.0f + exp(-x));
+    output[id] = half(x * s);
+}
+
+kernel void swish_backward_kernel_f16(
+    device const half* grad [[buffer(0)]],
+    device const half* input [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = float(input[id]);
+    float s = 1.0f / (1.0f + exp(-x));
+    output[id] = half(float(grad[id]) * s * (1.0f + x * (1.0f - s)));
+}
+
+kernel void mish_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = float(input[id]);
+    float sp = log(1.0f + exp(x));
+    output[id] = half(x * tanh(sp));
+}
+
+kernel void mish_backward_kernel_f16(
+    device const half* grad [[buffer(0)]],
+    device const half* input [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = float(input[id]);
+    float e = exp(x);
+    float omega = 4.0f * (x + 1.0f) + 4.0f * e * e + e * e * e + e * (4.0f * x + 6.0f);
+    float delta = 2.0f * e + e * e + 2.0f;
+    output[id] = half(float(grad[id]) * e * omega / (delta * delta));
+}
+
+kernel void log_sigmoid_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = float(input[id]);
+    output[id] = half(fmin(0.0f, x) - log(1.0f + exp(-fabs(x))));
+}
+
+kernel void log_sigmoid_backward_kernel_f16(
+    device const half* grad [[buffer(0)]],
+    device const half* input [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = float(input[id]);
+    float s = 1.0f / (1.0f + exp(x));
+    output[id] = half(float(grad[id]) * s);
+}
+
+// ============================================================================
+// Softmax/LogSoftmax backward
+// ============================================================================
+
+kernel void softmax_backward_kernel(
+    device const float* grad_output [[buffer(0)]],
+    device const float* softmax_out [[buffer(1)]],
+    device float* grad_input [[buffer(2)]],
+    constant uint& num_classes [[buffer(3)]],
+    uint row [[thread_position_in_grid]])
+{
+    uint base = row * num_classes;
+    float dot = 0.0f;
+    for (uint j = 0; j < num_classes; ++j)
+        dot += grad_output[base + j] * softmax_out[base + j];
+    for (uint j = 0; j < num_classes; ++j)
+        grad_input[base + j] = softmax_out[base + j] * (grad_output[base + j] - dot);
+}
+
+kernel void logsoftmax_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& cols [[buffer(2)]],
+    uint row [[thread_position_in_grid]])
+{
+    uint base = row * cols;
+    float max_val = input[base];
+    for (uint j = 1; j < cols; ++j)
+        max_val = max(max_val, input[base + j]);
+    float sum = 0.0f;
+    for (uint j = 0; j < cols; ++j)
+        sum += exp(input[base + j] - max_val);
+    float log_sum = log(sum) + max_val;
+    for (uint j = 0; j < cols; ++j)
+        output[base + j] = input[base + j] - log_sum;
+}
+
+kernel void logsoftmax_backward_kernel(
+    device const float* grad_output [[buffer(0)]],
+    device const float* logsoftmax_out [[buffer(1)]],
+    device float* grad_input [[buffer(2)]],
+    constant uint& num_classes [[buffer(3)]],
+    uint row [[thread_position_in_grid]])
+{
+    uint base = row * num_classes;
+    float sum_grad = 0.0f;
+    for (uint j = 0; j < num_classes; ++j)
+        sum_grad += grad_output[base + j];
+    for (uint j = 0; j < num_classes; ++j)
+        grad_input[base + j] = grad_output[base + j] - exp(logsoftmax_out[base + j]) * sum_grad;
+}
+
+kernel void softmax_backward_kernel_f16(
+    device const half* grad_output [[buffer(0)]],
+    device const half* softmax_out [[buffer(1)]],
+    device half* grad_input [[buffer(2)]],
+    constant uint& num_classes [[buffer(3)]],
+    uint row [[thread_position_in_grid]])
+{
+    uint base = row * num_classes;
+    float dot = 0.0f;
+    for (uint j = 0; j < num_classes; ++j)
+        dot += float(grad_output[base + j]) * float(softmax_out[base + j]);
+    for (uint j = 0; j < num_classes; ++j)
+        grad_input[base + j] = half(float(softmax_out[base + j]) * (float(grad_output[base + j]) - dot));
+}
+
+kernel void logsoftmax_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant uint& cols [[buffer(2)]],
+    uint row [[thread_position_in_grid]])
+{
+    uint base = row * cols;
+    float max_val = float(input[base]);
+    for (uint j = 1; j < cols; ++j)
+        max_val = max(max_val, float(input[base + j]));
+    float sum = 0.0f;
+    for (uint j = 0; j < cols; ++j)
+        sum += exp(float(input[base + j]) - max_val);
+    float log_sum = log(sum) + max_val;
+    for (uint j = 0; j < cols; ++j)
+        output[base + j] = half(float(input[base + j]) - log_sum);
+}
+
+kernel void logsoftmax_backward_kernel_f16(
+    device const half* grad_output [[buffer(0)]],
+    device const half* logsoftmax_out [[buffer(1)]],
+    device half* grad_input [[buffer(2)]],
+    constant uint& num_classes [[buffer(3)]],
+    uint row [[thread_position_in_grid]])
+{
+    uint base = row * num_classes;
+    float sum_grad = 0.0f;
+    for (uint j = 0; j < num_classes; ++j)
+        sum_grad += float(grad_output[base + j]);
+    for (uint j = 0; j < num_classes; ++j)
+        grad_input[base + j] = half(float(grad_output[base + j]) - exp(float(logsoftmax_out[base + j])) * sum_grad);
+}
+
+// ============================================================================
+// Embedding backward (scatter-add gradients)
+// ============================================================================
+
+kernel void embedding_backward_kernel(
+    device const float* grad_output [[buffer(0)]],
+    device const int* indices [[buffer(1)]],
+    device atomic_float* grad_weight [[buffer(2)]],
+    constant uint& num_indices [[buffer(3)]],
+    constant uint& embed_dim [[buffer(4)]],
+    uint tid [[thread_position_in_grid]])
+{
+    // Each thread handles one element of one gradient row
+    uint idx_pos = tid / embed_dim;
+    uint dim = tid % embed_dim;
+    if (idx_pos >= num_indices) return;
+    int token_id = indices[idx_pos];
+    atomic_fetch_add_explicit(&grad_weight[token_id * embed_dim + dim],
+                              grad_output[tid],
+                              memory_order_relaxed);
+}
+
+// ============================================================================
+// Dropout forward and backward
+// ============================================================================
+
+kernel void dropout_forward_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    device const uint32_t* mask [[buffer(2)]],
+    constant float& scale [[buffer(3)]],
+    uint id [[thread_position_in_grid]])
+{
+    output[id] = (mask[id] != 0) ? input[id] * scale : 0.0f;
+}
+
+kernel void dropout_backward_kernel(
+    device const float* grad [[buffer(0)]],
+    device const uint32_t* mask [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant float& scale [[buffer(3)]],
+    uint id [[thread_position_in_grid]])
+{
+    output[id] = (mask[id] != 0) ? grad[id] * scale : 0.0f;
+}
+
+kernel void dropout_forward_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    device const uint32_t* mask [[buffer(2)]],
+    constant float& scale [[buffer(3)]],
+    uint id [[thread_position_in_grid]])
+{
+    output[id] = (mask[id] != 0) ? half(float(input[id]) * scale) : half(0.0f);
+}
+
+kernel void dropout_backward_kernel_f16(
+    device const half* grad [[buffer(0)]],
+    device const uint32_t* mask [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    constant float& scale [[buffer(3)]],
+    uint id [[thread_position_in_grid]])
+{
+    output[id] = (mask[id] != 0) ? half(float(grad[id]) * scale) : half(0.0f);
+}
+
+// ============================================================================
+// LayerNorm backward
+// ============================================================================
+
+kernel void layer_norm_backward_kernel(
+    device const float* grad_output [[buffer(0)]],
+    device const float* input [[buffer(1)]],
+    device const float* weight [[buffer(2)]],
+    device const float* mean [[buffer(3)]],
+    device const float* rstd [[buffer(4)]],
+    device float* grad_input [[buffer(5)]],
+    device atomic_float* grad_weight [[buffer(6)]],
+    device atomic_float* grad_bias [[buffer(7)]],
+    constant uint& normalized_size [[buffer(8)]],
+    uint row [[thread_position_in_grid]])
+{
+    uint base = row * normalized_size;
+    float mu = mean[row];
+    float rs = rstd[row];
+    float n = float(normalized_size);
+
+    // Compute intermediate sums for grad_input
+    float sum_dy = 0.0f;
+    float sum_dy_xhat = 0.0f;
+    for (uint j = 0; j < normalized_size; ++j) {
+        float dy = grad_output[base + j] * weight[j];
+        float xhat = (input[base + j] - mu) * rs;
+        sum_dy += dy;
+        sum_dy_xhat += dy * xhat;
+    }
+
+    for (uint j = 0; j < normalized_size; ++j) {
+        float xhat = (input[base + j] - mu) * rs;
+        float dy = grad_output[base + j] * weight[j];
+        grad_input[base + j] = rs * (dy - (sum_dy + xhat * sum_dy_xhat) / n);
+
+        // Accumulate grad_weight and grad_bias with atomics
+        atomic_fetch_add_explicit(&grad_weight[j],
+                                  grad_output[base + j] * xhat,
+                                  memory_order_relaxed);
+        atomic_fetch_add_explicit(&grad_bias[j],
+                                  grad_output[base + j],
+                                  memory_order_relaxed);
+    }
+}
+
+// ============================================================================
+// Additional element-wise ops
+// ============================================================================
+
+kernel void clamp_min_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant float& min_val [[buffer(2)]],
+    uint id [[thread_position_in_grid]])
+{
+    output[id] = max(input[id], min_val);
+}
+
+kernel void clamp_max_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant float& max_val [[buffer(2)]],
+    uint id [[thread_position_in_grid]])
+{
+    output[id] = min(input[id], max_val);
+}
+
+kernel void sign_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = input[id];
+    output[id] = (x > 0.0f) ? 1.0f : ((x < 0.0f) ? -1.0f : 0.0f);
+}
+
+kernel void floor_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    output[id] = floor(input[id]);
+}
+
+kernel void ceil_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    output[id] = ceil(input[id]);
+}
+
+kernel void round_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    output[id] = rint(input[id]);
+}
+
+kernel void trunc_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    output[id] = trunc(input[id]);
+}
+
+kernel void reciprocal_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    output[id] = 1.0f / input[id];
+}
+
+kernel void rsqrt_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    output[id] = rsqrt(input[id]);
+}
+
+kernel void square_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = input[id];
+    output[id] = x * x;
+}
+
+// F16 variants for additional element-wise ops
+
+kernel void clamp_min_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant float& min_val [[buffer(2)]],
+    uint id [[thread_position_in_grid]])
+{
+    output[id] = half(max(float(input[id]), min_val));
+}
+
+kernel void clamp_max_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant float& max_val [[buffer(2)]],
+    uint id [[thread_position_in_grid]])
+{
+    output[id] = half(min(float(input[id]), max_val));
+}
+
+kernel void sign_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = float(input[id]);
+    output[id] = half((x > 0.0f) ? 1.0f : ((x < 0.0f) ? -1.0f : 0.0f));
+}
+
+kernel void floor_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    output[id] = half(floor(float(input[id])));
+}
+
+kernel void ceil_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    output[id] = half(ceil(float(input[id])));
+}
+
+kernel void round_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    output[id] = half(rint(float(input[id])));
+}
+
+kernel void trunc_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    output[id] = half(trunc(float(input[id])));
+}
+
+kernel void reciprocal_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    output[id] = half(1.0f / float(input[id]));
+}
+
+kernel void rsqrt_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    output[id] = half(rsqrt(float(input[id])));
+}
+
+kernel void square_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    float x = float(input[id]);
+    output[id] = half(x * x);
+}
+
+// ============================================================================
 // Fused optimizer step kernels
 // ============================================================================
 

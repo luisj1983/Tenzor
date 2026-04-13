@@ -69,4 +69,9 @@ void register_autograd(pybind11::module_& m);
 // and the NeuralNetwork high-level wrapper.
 void register_nn(pybind11::module_& m);
 
+// Self-contained nested tensor submodule. Binds NestedTensor class,
+// factory functions, and autograd-aware functional API (nested_softmax,
+// nested_linear, nested_attention, nested_sum, nested_mean).
+void register_nested(pybind11::module_& m);
+
 } // namespace tenzor::python

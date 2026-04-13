@@ -7037,5 +7037,315 @@ auto addcdiv_kernel(const Tensor& input, const Tensor& tensor1, const Tensor& te
     return result;
 }
 
+// =========================================================================
+// Phase 5 Extended Math Operations
+// =========================================================================
+
+auto deg2rad_kernel(const Tensor& input) -> Tensor {
+    constexpr float pi_f = static_cast<float>(M_PI);
+    return unary_math_kernel(input,
+        [pi_f](float x) { return x * (pi_f / 180.0f); },
+        [](double x) { return x * (M_PI / 180.0); }, "deg2rad");
+}
+
+auto rad2deg_kernel(const Tensor& input) -> Tensor {
+    constexpr float pi_f = static_cast<float>(M_PI);
+    return unary_math_kernel(input,
+        [pi_f](float x) { return x * (180.0f / pi_f); },
+        [](double x) { return x * (180.0 / M_PI); }, "rad2deg");
+}
+
+auto logit_kernel(const Tensor& input) -> Tensor {
+    return unary_math_kernel(input,
+        [](float x) {
+            float eps = 1e-6f;
+            x = std::clamp(x, eps, 1.0f - eps);
+            return std::log(x / (1.0f - x));
+        },
+        [](double x) {
+            double eps = 1e-15;
+            x = std::clamp(x, eps, 1.0 - eps);
+            return std::log(x / (1.0 - x));
+        }, "logit");
+}
+
+auto signbit_kernel(const Tensor& input) -> Tensor {
+    return unary_bool_kernel(input,
+        [](float x) { return std::signbit(x); },
+        [](double x) { return std::signbit(x); }, "signbit");
+}
+
+auto isposinf_kernel(const Tensor& input) -> Tensor {
+    return unary_bool_kernel(input,
+        [](float x) { return std::isinf(x) && x > 0; },
+        [](double x) { return std::isinf(x) && x > 0; }, "isposinf");
+}
+
+auto isneginf_kernel(const Tensor& input) -> Tensor {
+    return unary_bool_kernel(input,
+        [](float x) { return std::isinf(x) && x < 0; },
+        [](double x) { return std::isinf(x) && x < 0; }, "isneginf");
+}
+
+auto isreal_kernel(const Tensor& input) -> Tensor {
+    bool is_real = (input.dtype() != DType::Complex64 && input.dtype() != DType::Complex128);
+    Tensor result({}, DType::Bool, input.device());
+    result.data<bool>()[0] = is_real;
+    return result;
+}
+
+auto float_power_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    auto a_f64 = a.to(DType::Float64);
+    auto b_f64 = b.to(DType::Float64);
+    return binary_math_kernel(a_f64, b_f64,
+        [](float x, float y) { return std::pow(x, y); },
+        [](double x, double y) { return std::pow(x, y); }, "float_power");
+}
+
+auto xlog1py_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    return binary_math_kernel(a, b,
+        [](float x, float y) { return x == 0.0f ? 0.0f : x * std::log1p(y); },
+        [](double x, double y) { return x == 0.0 ? 0.0 : x * std::log1p(y); }, "xlog1py");
+}
+
+auto ldexp_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    return binary_math_kernel(a, b,
+        [](float x, float n) { return std::ldexp(x, static_cast<int>(n)); },
+        [](double x, double n) { return std::ldexp(x, static_cast<int>(n)); }, "ldexp");
+}
+
+auto frexp_kernel(const Tensor& input) -> std::vector<Tensor> {
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    Tensor mantissa(shape_vec, input.dtype(), input.device());
+    Tensor exponent(shape_vec, DType::Int32, input.device());
+    size_t n = static_cast<size_t>(input.numel());
+    int32_t* exp_data = exponent.data<int32_t>();
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_data = input.data<float>();
+        float* m_data = mantissa.data<float>();
+        for (size_t i = 0; i < n; ++i) {
+            int exp_val;
+            m_data[i] = std::frexp(in_data[i], &exp_val);
+            exp_data[i] = exp_val;
+        }
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_data = input.data<double>();
+        double* m_data = mantissa.data<double>();
+        for (size_t i = 0; i < n; ++i) {
+            int exp_val;
+            m_data[i] = std::frexp(in_data[i], &exp_val);
+            exp_data[i] = exp_val;
+        }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* m_data = mantissa.data<Float16>();
+        for (size_t i = 0; i < n; ++i) {
+            int exp_val;
+            float mf = std::frexp(static_cast<float>(in_data[i]), &exp_val);
+            m_data[i] = Float16(mf);
+            exp_data[i] = exp_val;
+        }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* m_data = mantissa.data<BFloat16>();
+        for (size_t i = 0; i < n; ++i) {
+            int exp_val;
+            float mf = std::frexp(static_cast<float>(in_data[i]), &exp_val);
+            m_data[i] = BFloat16(mf);
+            exp_data[i] = exp_val;
+        }
+    } else {
+        throw std::runtime_error("frexp: unsupported dtype");
+    }
+    return {mantissa, exponent};
+}
+
+auto diag_embed_kernel(const Tensor& input, int64_t offset, int64_t dim1, int64_t dim2) -> Tensor {
+    auto in_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    int64_t diag_size = in_shape.back();
+    int64_t ndim = static_cast<int64_t>(in_shape.size()) + 1;
+
+    if (dim1 < 0) dim1 += ndim;
+    if (dim2 < 0) dim2 += ndim;
+
+    int64_t mat_size = diag_size + std::abs(offset);
+
+    // Build output shape: batch dims (all input dims except last) + two matrix dims inserted at dim1, dim2
+    std::vector<int64_t> out_shape;
+    int in_idx = 0;
+    for (int64_t d = 0; d < ndim; d++) {
+        if (d == dim1 || d == dim2) {
+            out_shape.push_back(mat_size);
+        } else {
+            if (in_idx < static_cast<int>(in_shape.size())) {
+                out_shape.push_back(in_shape[in_idx++]);
+            }
+        }
+    }
+
+    Tensor result(out_shape, input.dtype(), input.device());
+    size_t total_bytes = static_cast<size_t>(result.numel()) * result.dtype_size();
+    std::memset(result.data_ptr(), 0, total_bytes);
+
+    auto elem_size = result.dtype_size();
+
+    // For 1D input: simple diagonal fill
+    if (input.ndim() == 1) {
+        const auto* src = static_cast<const uint8_t*>(input.data_ptr());
+        auto* dst = static_cast<uint8_t*>(result.data_ptr());
+
+        for (int64_t i = 0; i < diag_size; ++i) {
+            int64_t row = offset >= 0 ? i : i - offset;
+            int64_t col = offset >= 0 ? i + offset : i;
+            int64_t dst_off = (row * mat_size + col) * static_cast<int64_t>(elem_size);
+            std::memcpy(dst + dst_off, src + i * static_cast<int64_t>(elem_size), elem_size);
+        }
+    } else {
+        // Batched case: iterate over batch dimensions
+        int64_t batch_size = 1;
+        for (size_t d = 0; d + 1 < in_shape.size(); d++) {
+            batch_size *= in_shape[d];
+        }
+        const auto* src = static_cast<const uint8_t*>(input.data_ptr());
+        auto* dst = static_cast<uint8_t*>(result.data_ptr());
+        int64_t mat_elems = mat_size * mat_size;
+
+        for (int64_t b = 0; b < batch_size; ++b) {
+            for (int64_t i = 0; i < diag_size; ++i) {
+                int64_t row = offset >= 0 ? i : i - offset;
+                int64_t col = offset >= 0 ? i + offset : i;
+                int64_t src_off = (b * diag_size + i) * static_cast<int64_t>(elem_size);
+                int64_t dst_off = (b * mat_elems + row * mat_size + col) * static_cast<int64_t>(elem_size);
+                std::memcpy(dst + dst_off, src + src_off, elem_size);
+            }
+        }
+    }
+
+    return result;
+}
+
+auto diagflat_kernel(const Tensor& input, int64_t offset) -> Tensor {
+    auto flat = input.contiguous().reshape({-1});
+    int64_t n = flat.numel();
+    int64_t mat_size = n + std::abs(offset);
+    Tensor result({mat_size, mat_size}, input.dtype(), input.device());
+    size_t total_bytes = static_cast<size_t>(result.numel()) * result.dtype_size();
+    std::memset(result.data_ptr(), 0, total_bytes);
+
+    auto elem_size = result.dtype_size();
+    const auto* src = static_cast<const uint8_t*>(flat.data_ptr());
+    auto* dst = static_cast<uint8_t*>(result.data_ptr());
+
+    for (int64_t i = 0; i < n; ++i) {
+        int64_t row = offset >= 0 ? i : i - offset;
+        int64_t col = offset >= 0 ? i + offset : i;
+        int64_t dst_off = (row * mat_size + col) * static_cast<int64_t>(elem_size);
+        std::memcpy(dst + dst_off, src + i * static_cast<int64_t>(elem_size), elem_size);
+    }
+
+    return result;
+}
+
+auto nanvar_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction) -> Tensor {
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto f32 = input.to(DType::Float32);
+        auto result = nanvar_kernel(f32, dim, keepdim, correction);
+        return result.to(input.dtype());
+    }
+
+    // Full reduction
+    if (dim < 0 && dim != -1) {
+        // Treat as full reduction when dim is unset (LLONG_MIN) or explicitly negative
+    }
+    bool full_reduce = (dim == std::numeric_limits<int64_t>::min()) || (dim < 0 && input.ndim() <= 1);
+    if (full_reduce) {
+        int64_t n = input.numel();
+        Tensor result({1}, input.dtype(), input.device());
+        TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "nanvar", [&]() {
+            const scalar_t* data = input.data<scalar_t>();
+            // First pass: compute nanmean
+            scalar_t acc = 0;
+            int64_t count = 0;
+            for (int64_t i = 0; i < n; i++) {
+                scalar_t v = data[i];
+                if (!std::isnan(v)) { acc += v; count++; }
+            }
+            scalar_t mean_val = count > 0 ? acc / static_cast<scalar_t>(count) : scalar_t(0);
+            // Second pass: compute sum of squared deviations
+            scalar_t sum_sq = 0;
+            for (int64_t i = 0; i < n; i++) {
+                scalar_t v = data[i];
+                if (!std::isnan(v)) {
+                    scalar_t diff = v - mean_val;
+                    sum_sq += diff * diff;
+                }
+            }
+            int64_t denom = count - correction;
+            *result.data<scalar_t>() = denom > 0 ? sum_sq / static_cast<scalar_t>(denom) : scalar_t(0);
+        });
+        return result;
+    }
+
+    // Dim reduction
+    if (dim < 0) dim += input.ndim();
+    auto shape = input.shape();
+    int64_t ndim = shape.size();
+    int64_t reduce_size = shape[dim];
+
+    std::vector<int64_t> out_shape;
+    for (int64_t d = 0; d < ndim; d++) {
+        if (d == dim) { if (keepdim) out_shape.push_back(1); }
+        else out_shape.push_back(shape[d]);
+    }
+    if (out_shape.empty()) out_shape.push_back(1);
+
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < dim; d++) outer *= shape[d];
+    for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
+
+    auto result = Tensor(out_shape, input.dtype(), input.device());
+    int64_t out_n = outer * inner;
+
+    TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "nanvar_dim", [&]() {
+        const scalar_t* in_data = input.data<scalar_t>();
+        scalar_t* out_data = result.data<scalar_t>();
+        _Pragma("omp parallel for if(out_n > 1000)")
+        for (int64_t idx = 0; idx < out_n; idx++) {
+            int64_t o = idx / inner;
+            int64_t i_inner = idx % inner;
+            // First pass: nanmean
+            scalar_t acc = 0;
+            int64_t count = 0;
+            for (int64_t r = 0; r < reduce_size; r++) {
+                int64_t src_idx = (o * reduce_size + r) * inner + i_inner;
+                scalar_t v = in_data[src_idx];
+                if (!std::isnan(v)) { acc += v; count++; }
+            }
+            scalar_t mean_val = count > 0 ? acc / static_cast<scalar_t>(count) : scalar_t(0);
+            // Second pass: sum of squared deviations
+            scalar_t sum_sq = 0;
+            for (int64_t r = 0; r < reduce_size; r++) {
+                int64_t src_idx = (o * reduce_size + r) * inner + i_inner;
+                scalar_t v = in_data[src_idx];
+                if (!std::isnan(v)) {
+                    scalar_t diff = v - mean_val;
+                    sum_sq += diff * diff;
+                }
+            }
+            int64_t denom = count - correction;
+            out_data[idx] = denom > 0 ? sum_sq / static_cast<scalar_t>(denom) : scalar_t(0);
+        }
+    });
+    return result;
+}
+
+auto nanstd_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction) -> Tensor {
+    auto var = nanvar_kernel(input, dim, keepdim, correction);
+    return unary_math_kernel(var,
+        [](float x) { return std::sqrt(x); },
+        [](double x) { return std::sqrt(x); }, "nanstd_sqrt");
+}
+
 } // namespace cpu
 } // namespace tenzor

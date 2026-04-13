@@ -1517,7 +1517,7 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
     int32_t device_id = input.device().index;
     int64_t numel = input.numel();
 
-    // Complex casts: real↔complex use native Vulkan shaders.
+    // Complex casts: real↔complex64 and real↔complex128 use native Vulkan shaders.
     // Complex-to-complex (Complex64 ↔ Complex128) also uses native shaders.
     auto is_complex_of = [](DType d) {
         return d == DType::Complex64 || d == DType::Complex128;
@@ -1573,8 +1573,55 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
             insertComputeOnlyBarrier(cmd_cr);
             endSingleTimeCommands(cmd_cr, dev_id);
             return (target_dtype != DType::Float32) ? output_f32.to(target_dtype) : output_f32;
+        } else if (!is_complex_of(src_dtype) && target_dtype == DType::Complex128) {
+            // Real -> Complex128: zero-fill imaginary part
+            Tensor input_f64 = (src_dtype != DType::Float64) ? input.to(DType::Float64) : input;
+            auto* pipeline_rc128 = getPipeline("cast_real_complex128", dev_id);
+            auto input_shape = input.shape();
+            Tensor output(std::vector<int64_t>(input_shape.begin(), input_shape.end()), DType::Complex128, input.device());
+            struct { uint32_t num_elements; } pc_rc128;
+            pc_rc128.num_elements = static_cast<uint32_t>(n);
+            size_t in_buf_rc128 = static_cast<size_t>(n) * sizeof(double);
+            size_t out_buf_rc128 = static_cast<size_t>(n) * 2 * sizeof(double);
+            std::vector<std::pair<uint32_t, const void*>> bindings_rc128 = {
+                {0, input_f64.data_ptr()}, {1, output.data_ptr()}
+            };
+            std::vector<size_t> sizes_rc128 = {in_buf_rc128, out_buf_rc128};
+            VkDescriptorSet ds_rc128 = allocateAndWriteDescriptorSet(dev_id, pipeline_rc128, bindings_rc128, sizes_rc128);
+            VkCommandBuffer cmd_rc128 = beginSingleTimeCommands(dev_id);
+            vkCmdBindPipeline(cmd_rc128, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_rc128->pipeline());
+            vkCmdBindDescriptorSets(cmd_rc128, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                   pipeline_rc128->layout(), 0, 1, &ds_rc128, 0, nullptr);
+            vkCmdPushConstants(cmd_rc128, pipeline_rc128->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc_rc128), &pc_rc128);
+            vkCmdDispatch(cmd_rc128, div_wg(n, devices_[dev_id].workgroupSize), 1, 1);
+            insertComputeOnlyBarrier(cmd_rc128);
+            endSingleTimeCommands(cmd_rc128, dev_id);
+            return output;
+        } else if (src_dtype == DType::Complex128 && !is_complex_of(target_dtype)) {
+            // Complex128 -> Real: extract real part
+            auto* pipeline_cr128 = getPipeline("cast_complex128_real", dev_id);
+            auto input_shape = input.shape();
+            Tensor output_f64(std::vector<int64_t>(input_shape.begin(), input_shape.end()), DType::Float64, input.device());
+            struct { uint32_t num_elements; } pc_cr128;
+            pc_cr128.num_elements = static_cast<uint32_t>(n);
+            size_t in_buf_cr128 = static_cast<size_t>(n) * 2 * sizeof(double);
+            size_t out_buf_cr128 = static_cast<size_t>(n) * sizeof(double);
+            std::vector<std::pair<uint32_t, const void*>> bindings_cr128 = {
+                {0, input.data_ptr()}, {1, output_f64.data_ptr()}
+            };
+            std::vector<size_t> sizes_cr128 = {in_buf_cr128, out_buf_cr128};
+            VkDescriptorSet ds_cr128 = allocateAndWriteDescriptorSet(dev_id, pipeline_cr128, bindings_cr128, sizes_cr128);
+            VkCommandBuffer cmd_cr128 = beginSingleTimeCommands(dev_id);
+            vkCmdBindPipeline(cmd_cr128, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_cr128->pipeline());
+            vkCmdBindDescriptorSets(cmd_cr128, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                   pipeline_cr128->layout(), 0, 1, &ds_cr128, 0, nullptr);
+            vkCmdPushConstants(cmd_cr128, pipeline_cr128->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc_cr128), &pc_cr128);
+            vkCmdDispatch(cmd_cr128, div_wg(n, devices_[dev_id].workgroupSize), 1, 1);
+            insertComputeOnlyBarrier(cmd_cr128);
+            endSingleTimeCommands(cmd_cr128, dev_id);
+            return (target_dtype != DType::Float64) ? output_f64.to(target_dtype) : output_f64;
         } else {
-            // Complex128 ↔ real, or other complex conversions: CPU round-trip for now
+            // Unexpected complex conversion path: CPU round-trip as safety fallback
             Tensor cpu_input = input.to(Device::cpu());
             Tensor cpu_result = cpu_input.to(target_dtype);
             return cpu_result.to(input.device());
@@ -2764,6 +2811,9 @@ auto VulkanBackend::dispatchBoolPredicateOp(const std::string& op_name,
     if (op_name == "isnan") opcode = 0;
     else if (op_name == "isinf") opcode = 1;
     else if (op_name == "isfinite") opcode = 2;
+    else if (op_name == "signbit") opcode = 3;
+    else if (op_name == "isposinf") opcode = 4;
+    else if (op_name == "isneginf") opcode = 5;
     else throw std::runtime_error("Unknown bool predicate operation: " + op_name);
 
     struct PushConstants {
@@ -4712,6 +4762,268 @@ auto VulkanBackend::dispatchMaxUnpool3dBackward(const Tensor& grad_output, const
     endSingleTimeCommands(cmd, device_id);
 
     return (grad_output.dtype() != DType::Float32) ? grad_input.to(grad_output.dtype()) : grad_input;
+}
+
+// ============================================================================
+// Frexp — decompose float into mantissa and exponent
+// ============================================================================
+
+auto VulkanBackend::dispatchFrexp(const Tensor& input)
+    -> std::pair<Tensor, Tensor> {
+    // Empty tensor fast path
+    if (input.numel() == 0) {
+        std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+        return {Tensor(shape, input.dtype(), input.device()),
+                Tensor(shape, DType::Int32, input.device())};
+    }
+
+    DType orig_dtype = input.dtype();
+    Tensor work_input = input;
+    if (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16) {
+        work_input = input.to(DType::Float32);
+    }
+
+    // For Float64: promote to f32, frexp, then cast mantissa back
+    if (work_input.dtype() == DType::Float64) {
+        Tensor f32_input = work_input.to(DType::Float32);
+        auto [m32, e32] = dispatchFrexp(f32_input);
+        return {m32.to(DType::Float64), e32};
+    }
+
+    std::vector<int64_t> shape(work_input.shape().begin(), work_input.shape().end());
+    Tensor mantissa(shape, DType::Float32, work_input.device());
+    Tensor exponent(shape, DType::Int32, work_input.device());
+
+    int32_t device_id = work_input.device().index;
+    auto* pipeline = getPipeline("frexp", device_id);
+
+    struct { uint32_t n; } pc;
+    pc.n = static_cast<uint32_t>(work_input.numel());
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, work_input.data_ptr()},
+        {1, mantissa.data_ptr()},
+        {2, exponent.data_ptr()},
+    };
+    size_t buf_in   = work_input.numel() * work_input.dtype_size();
+    size_t buf_mant = mantissa.numel() * mantissa.dtype_size();
+    size_t buf_exp  = exponent.numel() * exponent.dtype_size();
+    std::vector<size_t> sizes = {buf_in, buf_mant, buf_exp};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(pc.n, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+    synchronize(device_id);
+
+    if (orig_dtype != DType::Float32) {
+        mantissa = mantissa.to(orig_dtype);
+    }
+    return {mantissa, exponent};
+}
+
+// ============================================================================
+// DiagEmbed — embed a vector as a diagonal of a matrix
+// ============================================================================
+
+auto VulkanBackend::dispatchDiagEmbed(const Tensor& input, int64_t offset,
+                                       int64_t dim1, int64_t dim2)
+    -> Tensor {
+    auto input_shape = input.shape();
+    int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    // Normalize dims to output dimensionality (output has one more dim)
+    int64_t out_ndim = ndim + 1;
+    if (dim1 < 0) dim1 += out_ndim;
+    if (dim2 < 0) dim2 += out_ndim;
+
+    int64_t vec_len = input_shape[ndim - 1];
+    int64_t abs_offset = offset >= 0 ? offset : -offset;
+    int64_t mat_size = vec_len + abs_offset;
+
+    // Build output shape: batch dims + (mat_size, mat_size)
+    std::vector<int64_t> output_shape;
+    for (int64_t i = 0; i < ndim - 1; ++i) {
+        output_shape.push_back(input_shape[i]);
+    }
+    output_shape.push_back(mat_size);
+    output_shape.push_back(mat_size);
+
+    if (input.numel() == 0) {
+        return Tensor(output_shape, input.dtype(), input.device());
+    }
+
+    // Compute batch size
+    int64_t batch = 1;
+    for (int64_t i = 0; i < ndim - 1; ++i) batch *= input_shape[i];
+
+    // Zero the output
+    Tensor zero_out = dispatchFull(output_shape, 0.0f, input.dtype());
+
+    int32_t device_id = input.device().index;
+    bool is_float64 = (input.dtype() == DType::Float64);
+    bool is_float16 = (input.dtype() == DType::Float16);
+    bool is_bfloat16 = (input.dtype() == DType::BFloat16);
+    std::string shader_name = is_float64 ? "diag_f64" : is_float16 ? "diag_f16" : is_bfloat16 ? "diag_bf16" : "diag";
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    struct {
+        uint32_t n;
+        uint32_t rows;
+        uint32_t cols;
+        int32_t diagonal;
+        uint32_t op;
+    } pushConstants;
+
+    if (batch == 1) {
+        pushConstants.n = static_cast<uint32_t>(mat_size * mat_size);
+        pushConstants.rows = static_cast<uint32_t>(mat_size);
+        pushConstants.cols = static_cast<uint32_t>(mat_size);
+        pushConstants.diagonal = static_cast<int32_t>(offset);
+        pushConstants.op = 1; // construct
+
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, input.data_ptr()},
+            {1, zero_out.data_ptr()}
+        };
+        std::vector<size_t> sizes_vec = {
+            static_cast<size_t>(input.numel() * input.dtype_size()),
+            static_cast<size_t>(zero_out.numel() * zero_out.dtype_size())
+        };
+
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes_vec);
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+        vkCmdDispatch(cmd, div_wg(mat_size * mat_size, devices_[device_id].workgroupSize), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+
+        return zero_out;
+    }
+
+    // Batched case: iterate per batch
+    Tensor flat_input = input.reshape({batch, vec_len});
+    Tensor result = zero_out.reshape({batch, mat_size, mat_size});
+
+    for (int64_t b = 0; b < batch; ++b) {
+        Tensor in_slice = flat_input.select(0, b);
+        Tensor out_slice = result.select(0, b);
+
+        pushConstants.n = static_cast<uint32_t>(out_slice.numel());
+        pushConstants.rows = static_cast<uint32_t>(mat_size);
+        pushConstants.cols = static_cast<uint32_t>(mat_size);
+        pushConstants.diagonal = static_cast<int32_t>(offset);
+        pushConstants.op = 1; // construct
+
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, in_slice.data_ptr()},
+            {1, out_slice.data_ptr()}
+        };
+        std::vector<size_t> sizes_vec = {
+            static_cast<size_t>(in_slice.numel() * in_slice.dtype_size()),
+            static_cast<size_t>(out_slice.numel() * out_slice.dtype_size())
+        };
+
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes_vec);
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+        vkCmdDispatch(cmd, div_wg(out_slice.numel(), devices_[device_id].workgroupSize), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+    }
+
+    return result.reshape(output_shape);
+}
+
+// ============================================================================
+// Diagflat — flatten input, then create diagonal matrix
+// ============================================================================
+
+auto VulkanBackend::dispatchDiagflat(const Tensor& input, int64_t offset)
+    -> Tensor {
+    int64_t numel = input.numel();
+    Tensor flat = input.reshape({numel});
+    return dispatchDiag(flat, offset);
+}
+
+// ============================================================================
+// NanVar — NaN-ignoring variance
+// ============================================================================
+
+auto VulkanBackend::dispatchNanVar(const Tensor& input, int64_t correction)
+    -> Tensor {
+    if (input.numel() == 0) {
+        return dispatchFull({1}, std::numeric_limits<float>::quiet_NaN(), input.dtype());
+    }
+
+    DType orig_dtype = input.dtype();
+    Tensor work_input = input;
+    if (orig_dtype == DType::BFloat16 || orig_dtype == DType::Float16) {
+        work_input = input.to(DType::Float32);
+    }
+
+    int32_t device_id = work_input.device().index;
+
+    std::string shader_name = (work_input.dtype() == DType::Float64)
+        ? "nanvar_f64" : "nanvar";
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    Tensor output({1}, work_input.dtype(), work_input.device());
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, work_input.data_ptr()},
+        {1, output.data_ptr()}
+    };
+    std::vector<size_t> sizes = {
+        work_input.numel() * work_input.dtype_size(),
+        output.numel() * output.dtype_size()
+    };
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    struct {
+        uint32_t num_elements;
+        uint32_t correction;
+    } pushConstants;
+    pushConstants.num_elements = static_cast<uint32_t>(work_input.numel());
+    pushConstants.correction = static_cast<uint32_t>(correction);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+    vkCmdDispatch(cmd, 1, 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+    synchronize(device_id);
+
+    if (orig_dtype != work_input.dtype()) {
+        return output.to(orig_dtype);
+    }
+    return output;
+}
+
+// ============================================================================
+// NanStd — NaN-ignoring standard deviation = sqrt(nanvar)
+// ============================================================================
+
+auto VulkanBackend::dispatchNanStd(const Tensor& input, int64_t correction)
+    -> Tensor {
+    Tensor var = dispatchNanVar(input, correction);
+    return dispatchUnaryOp("sqrt", var);
 }
 
 } // namespace tenzor

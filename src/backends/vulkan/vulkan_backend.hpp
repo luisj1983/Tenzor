@@ -484,7 +484,12 @@ public:
     auto dispatchCountNonzero(const Tensor& input) -> Tensor;
     auto dispatchNansum(const Tensor& input) -> Tensor;
     auto dispatchNanmean(const Tensor& input) -> Tensor;
+    auto dispatchNanVar(const Tensor& input, int64_t correction) -> Tensor;
+    auto dispatchNanStd(const Tensor& input, int64_t correction) -> Tensor;
     auto dispatchAminmax(const Tensor& input) -> std::pair<Tensor, Tensor>;
+    auto dispatchFrexp(const Tensor& input) -> std::pair<Tensor, Tensor>;
+    auto dispatchDiagEmbed(const Tensor& input, int64_t offset, int64_t dim1, int64_t dim2) -> Tensor;
+    auto dispatchDiagflat(const Tensor& input, int64_t offset) -> Tensor;
 
     // Indexing operations
     auto dispatchEmbedding(const Tensor& weight, const Tensor& indices,

@@ -68,6 +68,7 @@ set(ROCM_HIP_SOURCES
     kernels/sort.hip.cpp
     kernels/quantization.hip.cpp
     kernels/sparse.hip.cpp
+    kernels/nested.hip.cpp
     kernels/fft.hip.cpp
     kernels/linalg.hip.cpp
 )

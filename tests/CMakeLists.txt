@@ -90,6 +90,7 @@ add_subdirectory(integration)
 add_subdirectory(backend_parity)
 add_subdirectory(utils)
 add_subdirectory(examples)
+add_subdirectory(nested)
 
 # ============================================================================
 # Combined unit test executable

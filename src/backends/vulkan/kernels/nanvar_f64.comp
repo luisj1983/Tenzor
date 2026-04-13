@@ -1,0 +1,81 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+#extension GL_ARB_gpu_shader_fp64 : enable
+
+// NaN-ignoring variance for Float64
+// Dispatched as a single workgroup for full reduction.
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer Input  { double input_data[]; };
+layout(binding = 1) buffer Output { double output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+    uint correction;
+} params;
+
+shared double s_sum[WORKGROUP_SIZE];
+shared double s_cnt[WORKGROUP_SIZE];
+shared double s_var[WORKGROUP_SIZE];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+
+    // Pass 1: compute nanmean
+    double accum = 0.0;
+    double count = 0.0;
+
+    for (uint i = tid; i < params.num_elements; i += WORKGROUP_SIZE) {
+        double val = input_data[i];
+        if (val == val) { // not NaN
+            accum += val;
+            count += 1.0;
+        }
+    }
+
+    s_sum[tid] = accum;
+    s_cnt[tid] = count;
+    barrier();
+
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            s_sum[tid] += s_sum[tid + s];
+            s_cnt[tid] += s_cnt[tid + s];
+        }
+        barrier();
+    }
+
+    double mean = (s_cnt[0] > 0.0) ? (s_sum[0] / s_cnt[0]) : 0.0;
+    double total_count = s_cnt[0];
+    barrier();
+
+    // Pass 2: compute sum of squared deviations from mean
+    double var_accum = 0.0;
+    for (uint i = tid; i < params.num_elements; i += WORKGROUP_SIZE) {
+        double val = input_data[i];
+        if (val == val) { // not NaN
+            double diff = val - mean;
+            var_accum += diff * diff;
+        }
+    }
+
+    s_var[tid] = var_accum;
+    barrier();
+
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            s_var[tid] += s_var[tid + s];
+        }
+        barrier();
+    }
+
+    if (tid == 0) {
+        double denom = total_count - double(params.correction);
+        if (denom > 0.0) {
+            output_data[0] = s_var[0] / denom;
+        } else {
+            output_data[0] = 0.0LF / 0.0LF; // NaN
+        }
+    }
+}

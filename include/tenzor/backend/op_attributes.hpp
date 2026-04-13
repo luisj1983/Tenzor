@@ -269,6 +269,11 @@ enum class AttrKey : uint16_t {
     NormType,          // lp_pool: norm exponent p
     RandomSamples,     // fractional_max_pool: random samples tensor flag
 
+    // Nested tensor parameters
+    MaxLen,            // Maximum sequence length (for padding)
+    PaddingValue,      // Fill value for padded regions
+    HeadDim,           // Attention head dimension
+
     // Sentinel
     _Count
 };

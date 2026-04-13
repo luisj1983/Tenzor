@@ -14,10 +14,13 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace tenzor::mps {
 
@@ -799,6 +802,567 @@ Tensor mps_sigmoid_backward_kernel(const Tensor& grad, const Tensor& sigmoid_out
 
 Tensor mps_tanh_backward_kernel(const Tensor& grad, const Tensor& tanh_out) {
     return dispatch_binary("tanh_backward_kernel", grad, tanh_out);
+}
+
+// ============================================================================
+// Activation functions with scalar parameters
+// ============================================================================
+
+// Helper: dispatch a unary-with-one-scalar-param shader
+static Tensor dispatch_unary_scalar1(const std::string& shader_name,
+                                      const Tensor& input, float param1) {
+    auto shape = input.shape();
+    std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+    Tensor output(shape_vec, input.dtype(), input.device());
+    size_t numel = input.numel();
+
+    auto pipeline = get_pipeline(shader_name_for_dtype(shader_name, input.dtype()));
+    id<MTLBuffer> buf_in = get_buffer(input);
+    id<MTLBuffer> buf_out = get_buffer(output);
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:buf_in offset:0 atIndex:0];
+    [encoder setBuffer:buf_out offset:0 atIndex:1];
+    [encoder setBytes:&param1 length:sizeof(float) atIndex:2];
+
+    MTLSize grid = MTLSizeMake(numel, 1, 1);
+    NSUInteger threadgroup_size = std::min(
+        static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
+        static_cast<NSUInteger>(numel));
+    [encoder dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(threadgroup_size, 1, 1)];
+    [encoder endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+    return output;
+}
+
+// Helper: dispatch a binary-with-one-scalar-param shader (grad, input, scalar -> output)
+static Tensor dispatch_binary_scalar1(const std::string& shader_name,
+                                       const Tensor& a, const Tensor& b,
+                                       float param1) {
+    auto shape = a.shape();
+    std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+    Tensor output(shape_vec, a.dtype(), a.device());
+    size_t numel = a.numel();
+
+    auto pipeline = get_pipeline(shader_name_for_dtype(shader_name, a.dtype()));
+    id<MTLBuffer> buf_a = get_buffer(a);
+    id<MTLBuffer> buf_b = get_buffer(b);
+    id<MTLBuffer> buf_out = get_buffer(output);
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:buf_a offset:0 atIndex:0];
+    [encoder setBuffer:buf_b offset:0 atIndex:1];
+    [encoder setBuffer:buf_out offset:0 atIndex:2];
+    [encoder setBytes:&param1 length:sizeof(float) atIndex:3];
+
+    MTLSize grid = MTLSizeMake(numel, 1, 1);
+    NSUInteger threadgroup_size = std::min(
+        static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
+        static_cast<NSUInteger>(numel));
+    [encoder dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(threadgroup_size, 1, 1)];
+    [encoder endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+    return output;
+}
+
+// Helper: dispatch a unary-with-two-scalar-params shader
+static Tensor dispatch_unary_scalar2(const std::string& shader_name,
+                                      const Tensor& input,
+                                      float param1, float param2) {
+    auto shape = input.shape();
+    std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+    Tensor output(shape_vec, input.dtype(), input.device());
+    size_t numel = input.numel();
+
+    auto pipeline = get_pipeline(shader_name_for_dtype(shader_name, input.dtype()));
+    id<MTLBuffer> buf_in = get_buffer(input);
+    id<MTLBuffer> buf_out = get_buffer(output);
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:buf_in offset:0 atIndex:0];
+    [encoder setBuffer:buf_out offset:0 atIndex:1];
+    [encoder setBytes:&param1 length:sizeof(float) atIndex:2];
+    [encoder setBytes:&param2 length:sizeof(float) atIndex:3];
+
+    MTLSize grid = MTLSizeMake(numel, 1, 1);
+    NSUInteger threadgroup_size = std::min(
+        static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
+        static_cast<NSUInteger>(numel));
+    [encoder dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(threadgroup_size, 1, 1)];
+    [encoder endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+    return output;
+}
+
+// Helper: dispatch a binary-with-two-scalar-params shader
+static Tensor dispatch_binary_scalar2(const std::string& shader_name,
+                                       const Tensor& a, const Tensor& b,
+                                       float param1, float param2) {
+    auto shape = a.shape();
+    std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+    Tensor output(shape_vec, a.dtype(), a.device());
+    size_t numel = a.numel();
+
+    auto pipeline = get_pipeline(shader_name_for_dtype(shader_name, a.dtype()));
+    id<MTLBuffer> buf_a = get_buffer(a);
+    id<MTLBuffer> buf_b = get_buffer(b);
+    id<MTLBuffer> buf_out = get_buffer(output);
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:buf_a offset:0 atIndex:0];
+    [encoder setBuffer:buf_b offset:0 atIndex:1];
+    [encoder setBuffer:buf_out offset:0 atIndex:2];
+    [encoder setBytes:&param1 length:sizeof(float) atIndex:3];
+    [encoder setBytes:&param2 length:sizeof(float) atIndex:4];
+
+    MTLSize grid = MTLSizeMake(numel, 1, 1);
+    NSUInteger threadgroup_size = std::min(
+        static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
+        static_cast<NSUInteger>(numel));
+    [encoder dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(threadgroup_size, 1, 1)];
+    [encoder endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+    return output;
+}
+
+Tensor mps_leaky_relu_kernel(const Tensor& input, float negative_slope) {
+    return dispatch_unary_scalar1("leaky_relu_kernel", input, negative_slope);
+}
+
+Tensor mps_leaky_relu_backward_kernel(const Tensor& grad, const Tensor& input,
+                                       float negative_slope) {
+    return dispatch_binary_scalar1("leaky_relu_backward_kernel", grad, input, negative_slope);
+}
+
+Tensor mps_elu_kernel(const Tensor& input, float alpha) {
+    return dispatch_unary_scalar1("elu_kernel", input, alpha);
+}
+
+Tensor mps_elu_backward_kernel(const Tensor& grad, const Tensor& input, float alpha) {
+    return dispatch_binary_scalar1("elu_backward_kernel", grad, input, alpha);
+}
+
+Tensor mps_softplus_kernel(const Tensor& input, float beta, float threshold) {
+    return dispatch_unary_scalar2("softplus_kernel", input, beta, threshold);
+}
+
+Tensor mps_softplus_backward_kernel(const Tensor& grad, const Tensor& input,
+                                     float beta, float threshold) {
+    return dispatch_binary_scalar2("softplus_backward_kernel", grad, input, beta, threshold);
+}
+
+Tensor mps_gelu_kernel(const Tensor& input) {
+    return dispatch_unary("gelu_kernel", input);
+}
+
+Tensor mps_gelu_backward_kernel(const Tensor& grad, const Tensor& input) {
+    return dispatch_binary("gelu_backward_kernel", grad, input);
+}
+
+Tensor mps_swish_kernel(const Tensor& input) {
+    return dispatch_unary("swish_kernel", input);
+}
+
+Tensor mps_swish_backward_kernel(const Tensor& grad, const Tensor& input) {
+    return dispatch_binary("swish_backward_kernel", grad, input);
+}
+
+Tensor mps_mish_kernel(const Tensor& input) {
+    return dispatch_unary("mish_kernel", input);
+}
+
+Tensor mps_mish_backward_kernel(const Tensor& grad, const Tensor& input) {
+    return dispatch_binary("mish_backward_kernel", grad, input);
+}
+
+Tensor mps_log_sigmoid_kernel(const Tensor& input) {
+    return dispatch_unary("log_sigmoid_kernel", input);
+}
+
+Tensor mps_log_sigmoid_backward_kernel(const Tensor& grad, const Tensor& input) {
+    return dispatch_binary("log_sigmoid_backward_kernel", grad, input);
+}
+
+// ============================================================================
+// Softmax/LogSoftmax backward
+// ============================================================================
+
+Tensor mps_softmax_backward_kernel(const Tensor& grad_output, const Tensor& softmax_out,
+                                    int64_t dim) {
+    ensure_initialized();
+    auto shape = grad_output.shape();
+    int64_t rows = 1;
+    for (size_t i = 0; i < shape.size(); ++i) {
+        if (static_cast<int64_t>(i) != dim) rows *= shape[i];
+    }
+    int64_t cols = shape[dim];
+    uint32_t ncols = static_cast<uint32_t>(cols);
+
+    std::vector<int64_t> out_shape(shape.begin(), shape.end());
+    Tensor grad_input(out_shape, grad_output.dtype(), grad_output.device());
+
+    auto pipeline = get_pipeline(shader_name_for_dtype("softmax_backward_kernel", grad_output.dtype()));
+    id<MTLBuffer> buf_grad = get_buffer(grad_output);
+    id<MTLBuffer> buf_sm = get_buffer(softmax_out);
+    id<MTLBuffer> buf_out = get_buffer(grad_input);
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:buf_grad offset:0 atIndex:0];
+    [encoder setBuffer:buf_sm offset:0 atIndex:1];
+    [encoder setBuffer:buf_out offset:0 atIndex:2];
+    [encoder setBytes:&ncols length:sizeof(ncols) atIndex:3];
+
+    [encoder dispatchThreads:MTLSizeMake(rows, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(std::min((int64_t)256, rows), 1, 1)];
+    [encoder endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+    return grad_input;
+}
+
+Tensor mps_logsoftmax_kernel(const Tensor& input, int64_t dim) {
+    ensure_initialized();
+    auto shape = input.shape();
+    int64_t rows = 1;
+    for (size_t i = 0; i < shape.size(); ++i) {
+        if (static_cast<int64_t>(i) != dim) rows *= shape[i];
+    }
+    int64_t cols = shape[dim];
+    uint32_t ncols = static_cast<uint32_t>(cols);
+
+    std::vector<int64_t> out_shape(shape.begin(), shape.end());
+    Tensor output(out_shape, input.dtype(), input.device());
+
+    auto pipeline = get_pipeline(shader_name_for_dtype("logsoftmax_kernel", input.dtype()));
+    id<MTLBuffer> buf_in = get_buffer(input);
+    id<MTLBuffer> buf_out = get_buffer(output);
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:buf_in offset:0 atIndex:0];
+    [encoder setBuffer:buf_out offset:0 atIndex:1];
+    [encoder setBytes:&ncols length:sizeof(ncols) atIndex:2];
+
+    [encoder dispatchThreads:MTLSizeMake(rows, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(std::min((int64_t)256, rows), 1, 1)];
+    [encoder endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+    return output;
+}
+
+Tensor mps_logsoftmax_backward_kernel(const Tensor& grad_output, const Tensor& logsoftmax_out,
+                                       int64_t dim) {
+    ensure_initialized();
+    auto shape = grad_output.shape();
+    int64_t rows = 1;
+    for (size_t i = 0; i < shape.size(); ++i) {
+        if (static_cast<int64_t>(i) != dim) rows *= shape[i];
+    }
+    int64_t cols = shape[dim];
+    uint32_t ncols = static_cast<uint32_t>(cols);
+
+    std::vector<int64_t> out_shape(shape.begin(), shape.end());
+    Tensor grad_input(out_shape, grad_output.dtype(), grad_output.device());
+
+    auto pipeline = get_pipeline(shader_name_for_dtype("logsoftmax_backward_kernel", grad_output.dtype()));
+    id<MTLBuffer> buf_grad = get_buffer(grad_output);
+    id<MTLBuffer> buf_ls = get_buffer(logsoftmax_out);
+    id<MTLBuffer> buf_out = get_buffer(grad_input);
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:buf_grad offset:0 atIndex:0];
+    [encoder setBuffer:buf_ls offset:0 atIndex:1];
+    [encoder setBuffer:buf_out offset:0 atIndex:2];
+    [encoder setBytes:&ncols length:sizeof(ncols) atIndex:3];
+
+    [encoder dispatchThreads:MTLSizeMake(rows, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(std::min((int64_t)256, rows), 1, 1)];
+    [encoder endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+    return grad_input;
+}
+
+// ============================================================================
+// Embedding backward (scatter-add)
+// ============================================================================
+
+Tensor mps_embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
+                                      int64_t num_embeddings) {
+    ensure_initialized();
+    int64_t num_indices = indices.numel();
+    auto grad_shape = grad_output.shape();
+    int64_t embed_dim = grad_shape.back();
+
+    // Create zero-initialized grad_weight
+    Tensor grad_weight({num_embeddings, embed_dim}, grad_output.dtype(), grad_output.device());
+    // Zero it out
+    size_t bytes = grad_weight.numel() * dtype_size(grad_weight.dtype());
+    std::memset(const_cast<void*>(grad_weight.data_ptr()), 0, bytes);
+
+    uint32_t n_idx = static_cast<uint32_t>(num_indices);
+    uint32_t e_dim = static_cast<uint32_t>(embed_dim);
+    size_t total = static_cast<size_t>(num_indices * embed_dim);
+
+    auto pipeline = get_pipeline("embedding_backward_kernel");
+    id<MTLBuffer> buf_grad = get_buffer(grad_output);
+    id<MTLBuffer> buf_idx = get_buffer(indices);
+    id<MTLBuffer> buf_out = get_buffer(grad_weight);
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:buf_grad offset:0 atIndex:0];
+    [encoder setBuffer:buf_idx offset:0 atIndex:1];
+    [encoder setBuffer:buf_out offset:0 atIndex:2];
+    [encoder setBytes:&n_idx length:sizeof(n_idx) atIndex:3];
+    [encoder setBytes:&e_dim length:sizeof(e_dim) atIndex:4];
+
+    MTLSize grid = MTLSizeMake(total, 1, 1);
+    NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
+                             static_cast<NSUInteger>(total));
+    [encoder dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+    [encoder endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+
+    return grad_weight;
+}
+
+// ============================================================================
+// Dropout forward and backward
+// ============================================================================
+
+std::pair<Tensor, Tensor> mps_dropout_kernel(const Tensor& input, float p, bool training) {
+    if (!training || p == 0.0f) {
+        // No-op: return input and all-ones mask
+        Tensor mask({input.numel()}, DType::Int32, input.device());
+        size_t bytes = mask.numel() * sizeof(uint32_t);
+        std::memset(const_cast<void*>(mask.data_ptr()), 0xFF, bytes);
+        return {input, mask};
+    }
+
+    ensure_initialized();
+    size_t numel = input.numel();
+    float scale = 1.0f / (1.0f - p);
+
+    // Generate random mask on CPU, then use it on GPU
+    // (Metal has no built-in RNG in compute shaders)
+    Tensor mask({static_cast<int64_t>(numel)}, DType::Int32, input.device());
+    auto* mask_ptr = reinterpret_cast<uint32_t*>(const_cast<void*>(mask.data_ptr()));
+    for (size_t i = 0; i < numel; ++i) {
+        float r = static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX);
+        mask_ptr[i] = (r >= p) ? 1u : 0u;
+    }
+
+    auto shape = input.shape();
+    std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+    Tensor output(shape_vec, input.dtype(), input.device());
+
+    auto pipeline = get_pipeline(shader_name_for_dtype("dropout_forward_kernel", input.dtype()));
+    id<MTLBuffer> buf_in = get_buffer(input);
+    id<MTLBuffer> buf_out = get_buffer(output);
+    id<MTLBuffer> buf_mask = get_buffer(mask);
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:buf_in offset:0 atIndex:0];
+    [encoder setBuffer:buf_out offset:0 atIndex:1];
+    [encoder setBuffer:buf_mask offset:0 atIndex:2];
+    [encoder setBytes:&scale length:sizeof(float) atIndex:3];
+
+    MTLSize grid = MTLSizeMake(numel, 1, 1);
+    NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
+                             static_cast<NSUInteger>(numel));
+    [encoder dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+    [encoder endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+
+    return {output, mask};
+}
+
+Tensor mps_dropout_backward_kernel(const Tensor& grad, const Tensor& mask, float p) {
+    ensure_initialized();
+    size_t numel = grad.numel();
+    float scale = 1.0f / (1.0f - p);
+
+    auto shape = grad.shape();
+    std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+    Tensor output(shape_vec, grad.dtype(), grad.device());
+
+    auto pipeline = get_pipeline(shader_name_for_dtype("dropout_backward_kernel", grad.dtype()));
+    id<MTLBuffer> buf_grad = get_buffer(grad);
+    id<MTLBuffer> buf_mask = get_buffer(mask);
+    id<MTLBuffer> buf_out = get_buffer(output);
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:buf_grad offset:0 atIndex:0];
+    [encoder setBuffer:buf_mask offset:0 atIndex:1];
+    [encoder setBuffer:buf_out offset:0 atIndex:2];
+    [encoder setBytes:&scale length:sizeof(float) atIndex:3];
+
+    MTLSize grid = MTLSizeMake(numel, 1, 1);
+    NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
+                             static_cast<NSUInteger>(numel));
+    [encoder dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+    [encoder endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+    return output;
+}
+
+// ============================================================================
+// LayerNorm backward
+// ============================================================================
+
+std::vector<Tensor> mps_layer_norm_backward_kernel(
+    const Tensor& grad_output, const Tensor& input,
+    const Tensor& weight, const Tensor& mean, const Tensor& rstd,
+    int64_t normalized_size) {
+    ensure_initialized();
+
+    auto shape = input.shape();
+    std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+    int64_t num_rows = input.numel() / normalized_size;
+
+    Tensor grad_input(shape_vec, input.dtype(), input.device());
+    Tensor grad_weight({normalized_size}, input.dtype(), input.device());
+    Tensor grad_bias({normalized_size}, input.dtype(), input.device());
+
+    // Zero grad_weight and grad_bias (atomics accumulate into these)
+    std::memset(const_cast<void*>(grad_weight.data_ptr()), 0,
+                grad_weight.numel() * dtype_size(grad_weight.dtype()));
+    std::memset(const_cast<void*>(grad_bias.data_ptr()), 0,
+                grad_bias.numel() * dtype_size(grad_bias.dtype()));
+
+    uint32_t nsize = static_cast<uint32_t>(normalized_size);
+
+    auto pipeline = get_pipeline("layer_norm_backward_kernel");
+    id<MTLBuffer> buf_grad_out = get_buffer(grad_output);
+    id<MTLBuffer> buf_input = get_buffer(input);
+    id<MTLBuffer> buf_weight = get_buffer(weight);
+    id<MTLBuffer> buf_mean = get_buffer(mean);
+    id<MTLBuffer> buf_rstd = get_buffer(rstd);
+    id<MTLBuffer> buf_grad_in = get_buffer(grad_input);
+    id<MTLBuffer> buf_grad_w = get_buffer(grad_weight);
+    id<MTLBuffer> buf_grad_b = get_buffer(grad_bias);
+
+    id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:buf_grad_out offset:0 atIndex:0];
+    [encoder setBuffer:buf_input offset:0 atIndex:1];
+    [encoder setBuffer:buf_weight offset:0 atIndex:2];
+    [encoder setBuffer:buf_mean offset:0 atIndex:3];
+    [encoder setBuffer:buf_rstd offset:0 atIndex:4];
+    [encoder setBuffer:buf_grad_in offset:0 atIndex:5];
+    [encoder setBuffer:buf_grad_w offset:0 atIndex:6];
+    [encoder setBuffer:buf_grad_b offset:0 atIndex:7];
+    [encoder setBytes:&nsize length:sizeof(nsize) atIndex:8];
+
+    MTLSize grid = MTLSizeMake(num_rows, 1, 1);
+    NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
+                             static_cast<NSUInteger>(num_rows));
+    [encoder dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+    [encoder endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+
+    return {grad_input, grad_weight, grad_bias};
+}
+
+// ============================================================================
+// Linear backward (composed from MatMul + sum reduction)
+// ============================================================================
+
+std::vector<Tensor> mps_linear_backward_kernel(const Tensor& grad_output,
+                                                const Tensor& input,
+                                                const Tensor& weight) {
+    // LinearBackward composes from existing native MPS ops:
+    // grad_input = grad_output @ weight      (native MPSMatrixMultiplication)
+    // grad_weight = grad_output^T @ input    (native MPSMatrixMultiplication)
+    // grad_bias = sum(grad_output, dim=0)    (native sum reduction)
+    //
+    // For now, route through CPU for correctness (transpose + matmul
+    // requires contiguous materialization that our zero-copy transpose
+    // doesn't provide). A future pass can compose from native MPS matmul.
+    auto dev = grad_output.device();
+    auto cpu_go = grad_output.to(Device::cpu());
+    auto cpu_in = input.to(Device::cpu());
+    auto cpu_w = weight.to(Device::cpu());
+
+    auto cpu_result = dispatch(OpId::LinearBackward, std::vector<Tensor>{cpu_go, cpu_in, cpu_w},
+                               OpAttributes());
+    std::vector<Tensor> result;
+    result.reserve(cpu_result.size());
+    for (auto& t : cpu_result) result.push_back(t.to(dev));
+    return result;
+}
+
+// ============================================================================
+// Additional element-wise ops
+// ============================================================================
+
+Tensor mps_clamp_min_kernel(const Tensor& input, float min_val) {
+    return dispatch_unary_scalar1("clamp_min_kernel", input, min_val);
+}
+
+Tensor mps_clamp_max_kernel(const Tensor& input, float max_val) {
+    return dispatch_unary_scalar1("clamp_max_kernel", input, max_val);
+}
+
+Tensor mps_sign_kernel(const Tensor& input) {
+    return dispatch_unary("sign_kernel", input);
+}
+
+Tensor mps_floor_kernel(const Tensor& input) {
+    return dispatch_unary("floor_kernel", input);
+}
+
+Tensor mps_ceil_kernel(const Tensor& input) {
+    return dispatch_unary("ceil_kernel", input);
+}
+
+Tensor mps_round_kernel(const Tensor& input) {
+    return dispatch_unary("round_kernel", input);
+}
+
+Tensor mps_trunc_kernel(const Tensor& input) {
+    return dispatch_unary("trunc_kernel", input);
+}
+
+Tensor mps_reciprocal_kernel(const Tensor& input) {
+    return dispatch_unary("reciprocal_kernel", input);
+}
+
+Tensor mps_rsqrt_kernel(const Tensor& input) {
+    return dispatch_unary("rsqrt_kernel", input);
+}
+
+Tensor mps_square_kernel(const Tensor& input) {
+    return dispatch_unary("square_kernel", input);
 }
 
 // ============================================================================

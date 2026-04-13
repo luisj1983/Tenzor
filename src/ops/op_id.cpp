@@ -516,6 +516,18 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::IsNegInf)] = "isneginf";
     names[static_cast<size_t>(OpId::Frexp)] = "frexp";
 
+    // Nested Tensor Operations
+    names[static_cast<size_t>(OpId::NestedSoftmax)] = "nested_softmax";
+    names[static_cast<size_t>(OpId::NestedLogSoftmax)] = "nested_log_softmax";
+    names[static_cast<size_t>(OpId::NestedLayerNorm)] = "nested_layer_norm";
+    names[static_cast<size_t>(OpId::NestedSum)] = "nested_sum";
+    names[static_cast<size_t>(OpId::NestedMean)] = "nested_mean";
+    names[static_cast<size_t>(OpId::NestedAttention)] = "nested_attention";
+    names[static_cast<size_t>(OpId::NestedAttentionBackward)] = "nested_attention_backward";
+    names[static_cast<size_t>(OpId::NestedToPadded)] = "nested_to_padded";
+    names[static_cast<size_t>(OpId::NestedFromPadded)] = "nested_from_padded";
+    names[static_cast<size_t>(OpId::NestedLinear)] = "nested_linear";
+
     return names;
 }();
 
@@ -530,7 +542,7 @@ constexpr size_t count_named_ops() {
 
 // Count of actual OpId enum values (excluding gap slots).
 // Update this when adding new OpIds to catch missing name entries at compile time.
-inline constexpr size_t EXPECTED_NAMED_OPS = 402;  // 389 original + 13 new (Phase 4-5 + frexp)
+inline constexpr size_t EXPECTED_NAMED_OPS = 412;  // 402 previous + 10 nested tensor ops
 
 // If this fires, a new OpId was added without a corresponding name in op_names above
 static_assert(count_named_ops() == EXPECTED_NAMED_OPS,

@@ -13,11 +13,14 @@
 #include "../ops/math.hpp"
 #include "../ops/reduction.hpp"
 #include "../ops/linalg.hpp"
+#include "../ops/indexing.hpp"
+#include "../ops/transform.hpp"
 #include <vector>
 #include <cmath>
 #include <optional>
 #include <random>
 #include <stdexcept>
+#include <limits>
 
 namespace tenzor {
 namespace distributions {
@@ -1220,6 +1223,698 @@ private:
 };
 
 // ============================================================================
+// HalfNormal Distribution
+// ============================================================================
+
+/**
+ * @brief HalfNormal(scale) distribution — the absolute value of N(0, scale).
+ *
+ * Support: x >= 0.
+ * PDF(x) = sqrt(2 / (pi * scale^2)) * exp(-x^2 / (2*scale^2))
+ */
+class HalfNormal : public Distribution {
+public:
+    explicit HalfNormal(Tensor scale)
+        : scale_(std::move(scale)),
+          normal_(zeros(std::vector<int64_t>(scale_.shape().begin(), scale_.shape().end()),
+                        scale_.dtype(), scale_.device()),
+                  scale_) {}
+
+    auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        return tenzor::abs(normal_.sample(std::move(sample_shape)));
+    }
+
+    auto rsample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        return tenzor::abs(normal_.rsample(std::move(sample_shape)));
+    }
+
+    auto log_prob(const Tensor& value) -> Tensor override {
+        // log p(x) = Normal(0, scale).log_prob(x) + log(2) for x >= 0
+        // For x < 0 return -inf
+        auto lp = normal_.log_prob(value) + 0.6931471806f;  // log(2)
+        auto neg_inf = full(std::vector<int64_t>(value.shape().begin(), value.shape().end()),
+                            -std::numeric_limits<float>::infinity(),
+                            value.dtype(), value.device());
+        auto zero = zeros(std::vector<int64_t>(value.shape().begin(), value.shape().end()),
+                          value.dtype(), value.device());
+        auto mask = value >= zero;
+        return where(mask, lp, neg_inf);
+    }
+
+    auto entropy() -> Tensor override {
+        // H = 0.5 * log(pi * scale^2 / 2) + 0.5
+        auto s2 = scale_ * scale_;
+        return 0.5f * tenzor::log(s2 * static_cast<float>(M_PI / 2.0)) + 0.5f;
+    }
+
+    auto mean() -> Tensor override {
+        // E[X] = scale * sqrt(2/pi)
+        constexpr float sqrt_2_over_pi = 0.7978845608f;  // sqrt(2/pi)
+        return scale_ * sqrt_2_over_pi;
+    }
+
+    auto variance() -> Tensor override {
+        // Var[X] = scale^2 * (1 - 2/pi)
+        constexpr float one_minus_2_over_pi = 0.3633802276f;  // 1 - 2/pi
+        return scale_ * scale_ * one_minus_2_over_pi;
+    }
+
+    const Tensor& scale() const { return scale_; }
+
+private:
+    Tensor scale_;
+    Normal normal_;
+};
+
+// ============================================================================
+// HalfCauchy Distribution
+// ============================================================================
+
+/**
+ * @brief HalfCauchy(scale) distribution — the absolute value of Cauchy(0, scale).
+ *
+ * Support: x >= 0.
+ * PDF(x) = 2 / (pi * scale * (1 + (x/scale)^2))
+ */
+class HalfCauchy : public Distribution {
+public:
+    explicit HalfCauchy(Tensor scale)
+        : scale_(std::move(scale)),
+          cauchy_(zeros(std::vector<int64_t>(scale_.shape().begin(), scale_.shape().end()),
+                        scale_.dtype(), scale_.device()),
+                  scale_) {}
+
+    auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        return tenzor::abs(cauchy_.sample(std::move(sample_shape)));
+    }
+
+    auto rsample(std::vector<int64_t> /*sample_shape*/ = {}) -> Tensor override {
+        throw std::runtime_error(
+            "HalfCauchy is not reparameterizable; use sample() instead");
+    }
+
+    auto log_prob(const Tensor& value) -> Tensor override {
+        // log p(x) = log(2) - log(pi) - log(scale) - log(1 + (x/scale)^2) for x >= 0
+        auto z = value / scale_;
+        auto lp = 0.6931471806f - static_cast<float>(std::log(M_PI))
+                 - tenzor::log(scale_) - tenzor::log(1.0f + z * z);
+        auto neg_inf = full(std::vector<int64_t>(value.shape().begin(), value.shape().end()),
+                            -std::numeric_limits<float>::infinity(),
+                            value.dtype(), value.device());
+        auto zero = zeros(std::vector<int64_t>(value.shape().begin(), value.shape().end()),
+                          value.dtype(), value.device());
+        auto mask = value >= zero;
+        return where(mask, lp, neg_inf);
+    }
+
+    auto mean() -> Tensor override {
+        throw std::runtime_error("HalfCauchy distribution has no defined mean");
+    }
+
+    auto variance() -> Tensor override {
+        throw std::runtime_error("HalfCauchy distribution has no defined variance");
+    }
+
+private:
+    Tensor scale_;
+    Cauchy cauchy_;
+};
+
+// ============================================================================
+// FisherSnedecor (F) Distribution
+// ============================================================================
+
+/**
+ * @brief FisherSnedecor(df1, df2) — the F-distribution.
+ *
+ * Sampled as (X1/df1) / (X2/df2) where X1 ~ Gamma(df1/2, 1) and
+ * X2 ~ Gamma(df2/2, 1).
+ */
+class FisherSnedecor : public Distribution {
+public:
+    FisherSnedecor(Tensor df1, Tensor df2)
+        : df1_(std::move(df1)), df2_(std::move(df2)) {}
+
+    auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        auto shape = sample_shape.empty()
+            ? std::vector<int64_t>(df1_.shape().begin(), df1_.shape().end())
+            : sample_shape;
+        auto one = full({1}, 1.0f, df1_.dtype(), Device::cpu());
+        auto x1 = detail::fill_gamma_cpu(df1_.to(Device::cpu()) * 0.5f, one, shape);
+        auto x2 = detail::fill_gamma_cpu(df2_.to(Device::cpu()) * 0.5f, one, shape);
+        auto result = (x1 / df1_.to(Device::cpu())) / (x2 / df2_.to(Device::cpu()));
+        return result.to(df1_.device());
+    }
+
+    auto rsample(std::vector<int64_t> /*sample_shape*/ = {}) -> Tensor override {
+        throw std::runtime_error(
+            "FisherSnedecor is not reparameterizable; use sample() instead");
+    }
+
+    auto log_prob(const Tensor& value) -> Tensor override {
+        // log p(x; d1, d2) = d1/2 * log(d1) + d2/2 * log(d2) - lgamma(d1/2)
+        //                   - lgamma(d2/2) + lgamma((d1+d2)/2)
+        //                   + (d1/2 - 1) * log(x) - (d1+d2)/2 * log(d1*x + d2)
+        auto d1h = df1_ * 0.5f;
+        auto d2h = df2_ * 0.5f;
+        auto ct = d1h * tenzor::log(df1_) + d2h * tenzor::log(df2_)
+                - tenzor::lgamma(d1h) - tenzor::lgamma(d2h)
+                + tenzor::lgamma(d1h + d2h);
+        return ct + (d1h - 1.0f) * tenzor::log(value)
+             - (d1h + d2h) * tenzor::log(df1_ * value + df2_);
+    }
+
+    auto mean() -> Tensor override {
+        // E[X] = df2 / (df2 - 2) for df2 > 2
+        return df2_ / (df2_ - 2.0f);
+    }
+
+    auto variance() -> Tensor override {
+        // Var[X] = 2 * df2^2 * (df1 + df2 - 2) / (df1 * (df2 - 2)^2 * (df2 - 4))
+        // for df2 > 4
+        auto d2m2 = df2_ - 2.0f;
+        auto d2m4 = df2_ - 4.0f;
+        return 2.0f * df2_ * df2_ * (df1_ + df2_ - 2.0f)
+             / (df1_ * d2m2 * d2m2 * d2m4);
+    }
+
+private:
+    Tensor df1_;
+    Tensor df2_;
+};
+
+// ============================================================================
+// NegativeBinomial Distribution
+// ============================================================================
+
+/**
+ * @brief NegativeBinomial(total_count, probs) distribution.
+ *
+ * Compound Poisson-Gamma formulation: sample a Gamma rate and then draw
+ * Poisson counts. `total_count` is the number of failures, `probs` is the
+ * success probability.
+ *
+ * P(X = k) = C(k + r - 1, k) * p^k * (1 - p)^r
+ */
+class NegativeBinomial : public Distribution {
+public:
+    NegativeBinomial(Tensor total_count, Tensor probs)
+        : total_count_(std::move(total_count)), probs_(std::move(probs)) {}
+
+    auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        auto shape = sample_shape.empty()
+            ? std::vector<int64_t>(total_count_.shape().begin(), total_count_.shape().end())
+            : sample_shape;
+
+        // rate ~ Gamma(total_count, probs / (1 - probs))
+        auto eps = 1e-7f;
+        auto p_clamped = tenzor::clamp(probs_, eps, 1.0f - eps);
+        auto gamma_rate = p_clamped / (1.0f - p_clamped);
+        auto rate_samples = detail::fill_gamma_cpu(
+            total_count_.to(Device::cpu()),
+            tenzor::reciprocal(gamma_rate.to(Device::cpu())),  // Gamma uses rate param
+            shape);
+
+        // Draw Poisson(rate) counts
+        auto rate_cpu = rate_samples.contiguous();
+        auto out = zeros(shape, DType::Int64, Device::cpu());
+        int64_t n = out.numel();
+        const int64_t rate_n = rate_cpu.numel();
+        int64_t* op = out.data<int64_t>();
+
+        if (rate_cpu.dtype() == DType::Float32) {
+            const float* rp = rate_cpu.data<float>();
+            for (int64_t i = 0; i < n; ++i) {
+                double lam = (rate_n == 1) ? rp[0] : rp[i % rate_n];
+                op[i] = detail::sample_poisson_scalar(std::max(lam, 0.0));
+            }
+        } else if (rate_cpu.dtype() == DType::Float64) {
+            const double* rp = rate_cpu.data<double>();
+            for (int64_t i = 0; i < n; ++i) {
+                double lam = (rate_n == 1) ? rp[0] : rp[i % rate_n];
+                op[i] = detail::sample_poisson_scalar(std::max(lam, 0.0));
+            }
+        } else {
+            throw std::runtime_error("NegativeBinomial: probs must be Float32 or Float64");
+        }
+
+        return out.to(total_count_.device());
+    }
+
+    auto rsample(std::vector<int64_t> /*sample_shape*/ = {}) -> Tensor override {
+        throw std::runtime_error(
+            "NegativeBinomial is not reparameterizable; use sample() instead");
+    }
+
+    auto log_prob(const Tensor& value) -> Tensor override {
+        // log P(k) = lgamma(k + r) - lgamma(r) - lgamma(k + 1)
+        //          + r * log(1 - p) + k * log(p)
+        auto eps = 1e-7f;
+        auto p = tenzor::clamp(probs_, eps, 1.0f - eps);
+        auto val_f = value.to(total_count_.dtype());
+        return tenzor::lgamma(val_f + total_count_)
+             - tenzor::lgamma(total_count_)
+             - tenzor::lgamma(val_f + 1.0f)
+             + total_count_ * tenzor::log(1.0f - p)
+             + val_f * tenzor::log(p);
+    }
+
+    auto mean() -> Tensor override {
+        // E[X] = r * p / (1 - p)
+        auto eps = 1e-7f;
+        auto p = tenzor::clamp(probs_, eps, 1.0f - eps);
+        return total_count_ * p / (1.0f - p);
+    }
+
+    auto variance() -> Tensor override {
+        // Var[X] = r * p / (1 - p)^2
+        auto eps = 1e-7f;
+        auto p = tenzor::clamp(probs_, eps, 1.0f - eps);
+        auto q = 1.0f - p;
+        return total_count_ * p / (q * q);
+    }
+
+private:
+    Tensor total_count_;
+    Tensor probs_;
+};
+
+// ============================================================================
+// VonMises Distribution
+// ============================================================================
+
+/**
+ * @brief VonMises(loc, concentration) — circular distribution on [-pi, pi].
+ *
+ * Uses Best & Fisher (1979) rejection sampling algorithm.
+ * PDF(x) = exp(kappa * cos(x - mu)) / (2 * pi * I0(kappa))
+ */
+class VonMises : public Distribution {
+public:
+    VonMises(Tensor loc, Tensor concentration)
+        : loc_(std::move(loc)), concentration_(std::move(concentration)) {}
+
+    auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        auto shape = sample_shape.empty()
+            ? std::vector<int64_t>(loc_.shape().begin(), loc_.shape().end())
+            : sample_shape;
+
+        // Best & Fisher (1979) rejection sampling on CPU
+        auto kappa_cpu = concentration_.to(Device::cpu()).contiguous();
+        auto loc_cpu = loc_.to(Device::cpu()).contiguous();
+        auto out = zeros(shape, loc_.dtype(), Device::cpu());
+        int64_t n = out.numel();
+        const int64_t kappa_n = kappa_cpu.numel();
+        const int64_t loc_n = loc_cpu.numel();
+
+        auto& rng = detail::distribution_rng();
+        std::uniform_real_distribution<double> uniform(0.0, 1.0);
+
+        if (out.dtype() == DType::Float32) {
+            float* op = out.data<float>();
+            const float* kp = kappa_cpu.data<float>();
+            const float* lp = loc_cpu.data<float>();
+            for (int64_t i = 0; i < n; ++i) {
+                double kappa = (kappa_n == 1) ? kp[0] : kp[i % kappa_n];
+                double mu = (loc_n == 1) ? lp[0] : lp[i % loc_n];
+                op[i] = static_cast<float>(sample_vonmises_scalar(kappa, mu, rng, uniform));
+            }
+        } else if (out.dtype() == DType::Float64) {
+            double* op = out.data<double>();
+            const double* kp = kappa_cpu.data<double>();
+            const double* lp = loc_cpu.data<double>();
+            for (int64_t i = 0; i < n; ++i) {
+                double kappa = (kappa_n == 1) ? kp[0] : kp[i % kappa_n];
+                double mu = (loc_n == 1) ? lp[0] : lp[i % loc_n];
+                op[i] = sample_vonmises_scalar(kappa, mu, rng, uniform);
+            }
+        } else {
+            throw std::runtime_error("VonMises: only Float32 and Float64 supported");
+        }
+
+        return out.to(loc_.device());
+    }
+
+    auto rsample(std::vector<int64_t> /*sample_shape*/ = {}) -> Tensor override {
+        throw std::runtime_error(
+            "VonMises is not reparameterizable; use sample() instead");
+    }
+
+    auto log_prob(const Tensor& value) -> Tensor override {
+        // log p(x) = kappa * cos(x - mu) - log(2*pi) - log(I0(kappa))
+        auto log_i0 = tenzor::log(tenzor::bessel_i0(concentration_));
+        return concentration_ * tenzor::cos(value - loc_)
+             - static_cast<float>(std::log(2.0 * M_PI)) - log_i0;
+    }
+
+    auto mean() -> Tensor override {
+        // Circular mean = loc
+        return loc_;
+    }
+
+    auto variance() -> Tensor override {
+        // Circular variance = 1 - I1(kappa) / I0(kappa)
+        return 1.0f - tenzor::bessel_i1(concentration_) / tenzor::bessel_i0(concentration_);
+    }
+
+private:
+    /// Best & Fisher (1979) rejection sampler for a single VonMises variate.
+    template <typename RNG, typename UniformDist>
+    static auto sample_vonmises_scalar(double kappa, double mu,
+                                       RNG& rng, UniformDist& uniform) -> double {
+        if (kappa < 1e-6) {
+            // Nearly uniform on the circle
+            return mu + (uniform(rng) * 2.0 - 1.0) * M_PI;
+        }
+        double tau = 1.0 + std::sqrt(1.0 + 4.0 * kappa * kappa);
+        double rho = (tau - std::sqrt(2.0 * tau)) / (2.0 * kappa);
+        double r = (1.0 + rho * rho) / (2.0 * rho);
+
+        while (true) {
+            double u1 = uniform(rng);
+            double u2 = uniform(rng);
+            double u3 = uniform(rng);
+
+            double z = std::cos(M_PI * u1);
+            double f = (1.0 + r * z) / (r + z);
+            double c = kappa * (r - f);
+
+            if (c * (2.0 - c) >= u2 || std::log(c / u2) + 1.0 - c >= 0.0) {
+                double sign = (u3 - 0.5 < 0.0) ? -1.0 : 1.0;
+                double theta = mu + sign * std::acos(f);
+                // Wrap to [-pi, pi]
+                theta = std::fmod(theta + M_PI, 2.0 * M_PI);
+                if (theta < 0.0) theta += 2.0 * M_PI;
+                theta -= M_PI;
+                return theta;
+            }
+        }
+    }
+
+    Tensor loc_;
+    Tensor concentration_;
+};
+
+// ============================================================================
+// RelaxedBernoulli Distribution
+// ============================================================================
+
+/**
+ * @brief RelaxedBernoulli(temperature, probs) — continuous relaxation of
+ *        Bernoulli via the Binary Concrete / Logistic-sigmoid.
+ *
+ * Reparameterizable. Samples are in (0, 1).
+ */
+class RelaxedBernoulli : public Distribution {
+public:
+    RelaxedBernoulli(Tensor temperature, Tensor probs)
+        : temperature_(std::move(temperature)),
+          probs_(std::move(probs)) {
+        // Compute logits = log(probs / (1 - probs))
+        auto eps = 1e-7f;
+        auto p = tenzor::clamp(probs_, eps, 1.0f - eps);
+        logits_ = tenzor::log(p / (1.0f - p));
+    }
+
+    static auto from_logits(Tensor temperature, Tensor logits) -> RelaxedBernoulli {
+        auto t = std::move(temperature);
+        auto l = std::move(logits);
+        auto probs = tenzor::sigmoid(l);
+        RelaxedBernoulli rb(t, probs);
+        rb.logits_ = l;
+        return rb;
+    }
+
+    auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        return rsample(std::move(sample_shape));
+    }
+
+    auto rsample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        auto shape = sample_shape.empty()
+            ? std::vector<int64_t>(probs_.shape().begin(), probs_.shape().end())
+            : sample_shape;
+        auto u = rand(shape, probs_.dtype(), probs_.device());
+        constexpr float kEps = 1e-7f;
+        auto u_clamped = tenzor::clamp(u, kEps, 1.0f - kEps);
+        // Standard logistic noise
+        auto logistic = tenzor::log(u_clamped) - tenzor::log(1.0f - u_clamped);
+        return tenzor::sigmoid((logits_ + logistic) / temperature_);
+    }
+
+    auto log_prob(const Tensor& value) -> Tensor override {
+        // logit(x) = log(x / (1 - x))
+        auto eps = 1e-7f;
+        auto x = tenzor::clamp(value, eps, 1.0f - eps);
+        auto logit_x = tenzor::log(x / (1.0f - x));
+        auto diff = logits_ - temperature_ * logit_x;
+        // softplus(x) = log(1 + exp(x))
+        auto sp = tenzor::log(1.0f + tenzor::exp(diff));
+        return diff - 2.0f * sp + tenzor::log(temperature_)
+             - tenzor::log(x) - tenzor::log(1.0f - x);
+    }
+
+private:
+    Tensor temperature_;
+    Tensor probs_;
+    Tensor logits_;
+};
+
+// ============================================================================
+// RelaxedOneHotCategorical Distribution (Gumbel-Softmax)
+// ============================================================================
+
+/**
+ * @brief RelaxedOneHotCategorical(temperature, probs/logits) — Gumbel-Softmax.
+ *
+ * Continuous relaxation of the Categorical distribution. Reparameterizable.
+ * Samples are on the simplex (sum to 1).
+ */
+class RelaxedOneHotCategorical : public Distribution {
+public:
+    RelaxedOneHotCategorical(Tensor temperature, Tensor probs)
+        : temperature_(std::move(temperature)),
+          probs_(std::move(probs)) {
+        auto eps = 1e-7f;
+        auto p = tenzor::clamp(probs_, eps, 1.0f);
+        logits_ = tenzor::log(p);
+    }
+
+    static auto from_logits(Tensor temperature, Tensor logits)
+        -> RelaxedOneHotCategorical {
+        // Compute probs via softmax (inline, no dependency on nn::)
+        auto max_val = tenzor::max(logits);
+        auto shifted = logits - max_val;
+        auto exp_vals = tenzor::exp(shifted);
+        auto sum_exp = tenzor::sum(exp_vals, -1, /*keepdim=*/true);
+        auto probs = exp_vals / sum_exp;
+        RelaxedOneHotCategorical d(temperature, probs);
+        d.logits_ = logits;
+        return d;
+    }
+
+    auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        return rsample(std::move(sample_shape));
+    }
+
+    auto rsample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        auto shape = sample_shape.empty()
+            ? std::vector<int64_t>(logits_.shape().begin(), logits_.shape().end())
+            : sample_shape;
+        auto u = rand(shape, logits_.dtype(), logits_.device());
+        constexpr float kEps = 1e-7f;
+        auto u_clamped = tenzor::clamp(u, kEps, 1.0f - kEps);
+        // Gumbel(0, 1) noise: -log(-log(u))
+        auto gumbels = tenzor::neg(tenzor::log(tenzor::neg(tenzor::log(u_clamped))));
+        // Scores: (logits + gumbels) / temperature
+        auto scores = (logits_ + gumbels) / temperature_;
+        // Softmax (inline implementation over last dim)
+        auto max_s = tenzor::max(scores);
+        auto shifted = scores - max_s;
+        auto exp_s = tenzor::exp(shifted);
+        auto sum_exp = tenzor::sum(exp_s, -1, /*keepdim=*/true);
+        return exp_s / sum_exp;
+    }
+
+    auto log_prob(const Tensor& value) -> Tensor override {
+        // Concrete distribution PDF:
+        // log p(x) = lgamma(K) + (K-1)*log(temp) + sum(logits/temp - log(x))
+        //          - K * logsumexp(logits/temp - log(x))
+        auto eps = 1e-7f;
+        auto x = tenzor::clamp(value, eps, 1.0f);
+        auto K_val = static_cast<float>(logits_.shape().back());
+        auto scaled_logits = logits_ / temperature_;
+        auto score = scaled_logits - tenzor::log(x);
+        auto lse = logsumexp(score, -1, /*keepdim=*/true);
+        auto lgamma_K = static_cast<float>(std::lgamma(static_cast<double>(K_val)));
+        return lgamma_K + (K_val - 1.0f) * tenzor::log(temperature_)
+             + tenzor::sum(score, -1, /*keepdim=*/true) - K_val * lse;
+    }
+
+private:
+    Tensor temperature_;
+    Tensor probs_;
+    Tensor logits_;
+};
+
+// ============================================================================
+// Wishart Distribution
+// ============================================================================
+
+/**
+ * @brief Wishart(df, scale_tril) — matrix-variate distribution over positive
+ *        definite matrices.
+ *
+ * `df` is a scalar tensor (degrees of freedom, must be >= dimension p).
+ * `scale_tril` is the lower-triangular Cholesky factor (p x p) of the scale
+ * matrix V, such that the distribution's scale is V = scale_tril @ scale_tril^T.
+ *
+ * Uses Bartlett decomposition for sampling.
+ */
+class Wishart : public Distribution {
+public:
+    Wishart(Tensor df, Tensor scale_tril)
+        : df_(std::move(df)), scale_tril_(std::move(scale_tril)) {
+        // Determine dimension from scale_tril shape
+        auto s = scale_tril_.shape();
+        if (s.size() < 2 || s[s.size()-1] != s[s.size()-2]) {
+            throw std::runtime_error("Wishart: scale_tril must be a square matrix");
+        }
+        p_ = s[s.size() - 1];
+    }
+
+    auto sample(std::vector<int64_t> /*sample_shape*/ = {}) -> Tensor override {
+        // Bartlett decomposition on CPU
+        auto df_cpu = df_.to(Device::cpu()).contiguous();
+        double df_val;
+        if (df_cpu.dtype() == DType::Float32) {
+            df_val = static_cast<double>(df_cpu.data<float>()[0]);
+        } else {
+            df_val = df_cpu.data<double>()[0];
+        }
+
+        auto dtype = scale_tril_.dtype();
+        auto device = scale_tril_.device();
+
+        // Build lower-triangular Bartlett factor L on CPU
+        auto L = zeros({p_, p_}, dtype, Device::cpu());
+
+        auto& rng = detail::distribution_rng();
+        std::normal_distribution<double> normal(0.0, 1.0);
+
+        if (dtype == DType::Float32) {
+            float* lp = L.data<float>();
+            for (int64_t i = 0; i < p_; ++i) {
+                // Diagonal: sqrt(Chi2(df - i)) = sqrt(Gamma((df-i)/2, 0.5) * 2)
+                // Equivalently, sample Chi2(df - i) via Gamma((df-i)/2, 0.5)
+                double chi2_val = detail::sample_gamma_scalar<double>(
+                    (df_val - static_cast<double>(i)) / 2.0, 0.5);
+                lp[i * p_ + i] = static_cast<float>(std::sqrt(chi2_val));
+                // Below diagonal: standard normal
+                for (int64_t j = 0; j < i; ++j) {
+                    lp[i * p_ + j] = static_cast<float>(normal(rng));
+                }
+            }
+        } else if (dtype == DType::Float64) {
+            double* lp = L.data<double>();
+            for (int64_t i = 0; i < p_; ++i) {
+                double chi2_val = detail::sample_gamma_scalar<double>(
+                    (df_val - static_cast<double>(i)) / 2.0, 0.5);
+                lp[i * p_ + i] = std::sqrt(chi2_val);
+                for (int64_t j = 0; j < i; ++j) {
+                    lp[i * p_ + j] = normal(rng);
+                }
+            }
+        } else {
+            throw std::runtime_error("Wishart: only Float32 and Float64 supported");
+        }
+
+        L = L.to(device);
+        // A = scale_tril @ L
+        auto A = matmul(scale_tril_, L);
+        // W = A @ A^T
+        return matmul(A, transpose(A, -2, -1));
+    }
+
+    auto rsample(std::vector<int64_t> /*sample_shape*/ = {}) -> Tensor override {
+        throw std::runtime_error(
+            "Wishart is not reparameterizable; use sample() instead");
+    }
+
+    auto log_prob(const Tensor& value) -> Tensor override {
+        // log p(X; n, V) = (n-p-1)/2 * log|X| - 0.5 * tr(V^{-1} X) - log C
+        // where log C = n*p/2 * log(2) + n/2 * log|V| + multivariate_lgamma(n/2, p)
+        // and |V| from scale_tril: log|V| = 2 * sum(log(diag(scale_tril)))
+
+        double df_val;
+        auto df_cpu = df_.to(Device::cpu()).contiguous();
+        if (df_cpu.dtype() == DType::Float32) {
+            df_val = static_cast<double>(df_cpu.data<float>()[0]);
+        } else {
+            df_val = df_cpu.data<double>()[0];
+        }
+
+        double half_df = df_val / 2.0;
+        double p_d = static_cast<double>(p_);
+
+        // log|V| = 2 * sum(log(diag(L)))
+        auto L_cpu = scale_tril_.to(Device::cpu()).contiguous();
+        double log_det_scale = 0.0;
+        if (L_cpu.dtype() == DType::Float32) {
+            const float* lp = L_cpu.data<float>();
+            for (int64_t i = 0; i < p_; ++i) {
+                log_det_scale += std::log(static_cast<double>(lp[i * p_ + i]));
+            }
+        } else {
+            const double* lp = L_cpu.data<double>();
+            for (int64_t i = 0; i < p_; ++i) {
+                log_det_scale += std::log(lp[i * p_ + i]);
+            }
+        }
+        log_det_scale *= 2.0;
+
+        // multivariate_lgamma(a, p) = p*(p-1)/4 * log(pi) + sum_{j=1}^{p} lgamma(a - (j-1)/2)
+        double mv_lgamma = p_d * (p_d - 1.0) / 4.0 * std::log(M_PI);
+        for (int64_t j = 1; j <= p_; ++j) {
+            mv_lgamma += std::lgamma(half_df - static_cast<double>(j - 1) / 2.0);
+        }
+
+        double log_C = half_df * p_d * std::log(2.0) + half_df * log_det_scale + mv_lgamma;
+
+        // log|X| via slogdet
+        auto [sign_det, logabsdet] = linalg::slogdet(value);
+
+        // tr(V^{-1} X): solve V Y = X, then tr(Y)
+        // V = L @ L^T, so we can solve via L.
+        auto scale_matrix = matmul(scale_tril_, transpose(scale_tril_, -2, -1));
+        auto solved = linalg::solve(scale_matrix, value);
+        auto trace_val = tenzor::trace(solved);
+
+        auto coeff = static_cast<float>((df_val - p_d - 1.0) / 2.0);
+        auto log_C_tensor = full({1}, static_cast<float>(log_C),
+                                 value.dtype(), value.device());
+
+        return coeff * logabsdet - 0.5f * trace_val - log_C_tensor;
+    }
+
+    auto mean() -> Tensor override {
+        // E[W] = df * V = df * scale_tril @ scale_tril^T
+        auto scale = matmul(scale_tril_, transpose(scale_tril_, -2, -1));
+        return df_ * scale;
+    }
+
+    auto variance() -> Tensor override {
+        throw std::runtime_error(
+            "Wishart::variance() not implemented (element-wise variance of a "
+            "matrix distribution is non-trivial; use mean() and sample())");
+    }
+
+private:
+    Tensor df_;
+    Tensor scale_tril_;
+    int64_t p_;
+};
+
+// ============================================================================
 // kl_divergence
 // ============================================================================
 //
@@ -1265,6 +1960,19 @@ inline auto kl_divergence(Distribution& p, Distribution& q) -> Tensor {
             auto q_clamped = tenzor::clamp(q_mean, eps, 1.0f - eps);
             return p_clamped * (tenzor::log(p_clamped) - tenzor::log(q_clamped))
                  + (1.0f - p_clamped) * (tenzor::log(1.0f - p_clamped) - tenzor::log(1.0f - q_clamped));
+        }
+    }
+    if (auto* ph = dynamic_cast<HalfNormal*>(&p)) {
+        if (auto* qh = dynamic_cast<HalfNormal*>(&q)) {
+            // KL(HalfNormal(s1) || HalfNormal(s2))
+            //   = KL(N(0,s1) || N(0,s2))   (the folded densities share the
+            //   same KL when both are centered at zero)
+            //   = log(s2/s1) + s1^2 / (2*s2^2) - 0.5
+            auto s1 = ph->scale();
+            auto s2 = qh->scale();
+            auto v1 = s1 * s1;
+            auto v2 = s2 * s2;
+            return tenzor::log(s2 / s1) + v1 / (v2 * 2.0f) - 0.5f;
         }
     }
     throw std::runtime_error(

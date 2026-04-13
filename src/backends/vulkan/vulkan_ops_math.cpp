@@ -59,6 +59,9 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
     else if (op_name == "lcm") opcode = 37;
     else if (op_name == "fmax") opcode = 42;
     else if (op_name == "fmin") opcode = 43;
+    else if (op_name == "float_power") opcode = 47;
+    else if (op_name == "xlog1py") opcode = 48;
+    else if (op_name == "ldexp") opcode = 49;
     else throw std::runtime_error("Unknown binary operation: " + op_name);
 
     // Check if we can use the fast path (same-shape, no broadcasting needed)
@@ -480,6 +483,12 @@ auto VulkanBackend::dispatchUnaryOp(const std::string& op_name,
     else if (op_name == "asinh") { shader_name = "math"; opcode = 30; }
     else if (op_name == "acosh") { shader_name = "math"; opcode = 31; }
     else if (op_name == "atanh") { shader_name = "math"; opcode = 32; }
+    else if (op_name == "deg2rad") { shader_name = "math"; opcode = 44; }
+    else if (op_name == "rad2deg") { shader_name = "math"; opcode = 45; }
+    else if (op_name == "logit") { shader_name = "math"; opcode = 46; }
+    else if (op_name == "frac") { shader_name = "math"; opcode = 50; }
+    else if (op_name == "log_sigmoid") { shader_name = "math"; opcode = 51; }
+    else if (op_name == "bitwise_not") { shader_name = "math"; opcode = 52; }
     else throw std::runtime_error("Unknown unary operation: " + op_name);
 
     // Select correct pipeline based on dtype for math operations
@@ -648,6 +657,7 @@ auto VulkanBackend::dispatchUnaryOpWithParam(const std::string& op_name,
     // 0=add, 1=sub, 2=mul, 3=div, 4=sqrt, 5=exp, 6=log, 7=neg, 8=abs, 9=pow, 10=sign
     uint32_t opcode = 0;
     if (op_name == "pow") opcode = 9;
+    else if (op_name == "logit") opcode = 46;
     else throw std::runtime_error("Unknown parameterized unary operation: " + op_name);
 
     // Prepare push constants - use different structure for Float32 vs Float64

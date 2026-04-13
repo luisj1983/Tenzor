@@ -30,6 +30,7 @@
 #include <climits>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -146,6 +147,25 @@ namespace oneapi {
     auto isnan_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
     auto isinf_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
     auto isfinite_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto signbit_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto isposinf_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto isneginf_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto isreal_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+
+    // New unary math
+    auto deg2rad_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto rad2deg_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto logit_kernel(const Tensor& input, float eps, sycl::queue& queue) -> Tensor;
+
+    // New binary math
+    auto float_power_kernel(const Tensor& base, const Tensor& exp, sycl::queue& queue) -> Tensor;
+    auto xlog1py_kernel(const Tensor& x, const Tensor& y, sycl::queue& queue) -> Tensor;
+    auto ldexp_kernel(const Tensor& x, const Tensor& n, sycl::queue& queue) -> Tensor;
+    auto frexp_kernel(const Tensor& input, sycl::queue& queue) -> std::vector<Tensor>;
+
+    // Tensor manipulation
+    auto diag_embed_kernel(const Tensor& input, int64_t offset, int64_t dim1, int64_t dim2, sycl::queue& queue) -> Tensor;
+    auto diagflat_kernel(const Tensor& input, int64_t offset, sycl::queue& queue) -> Tensor;
 
     // Binary math
     auto fmod_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
@@ -282,6 +302,8 @@ namespace oneapi {
     auto count_nonzero_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor;
     auto nansum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
     auto nanmean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
+    auto nanvar_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction, sycl::queue& queue) -> Tensor;
+    auto nanstd_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction, sycl::queue& queue) -> Tensor;
     auto aminmax_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> std::vector<Tensor>;
 
     // ---- Statistical operations (kernels/statistical.cpp) ----
@@ -4424,6 +4446,265 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
         return oneapi::max_unpool3d_backward_kernel(inputs[0], inputs[1], input_shape, get_q(inputs));
     });
+
+    // =========================================================================
+    // New Phase: Deg2Rad / Rad2Deg / Logit
+    // =========================================================================
+    table.register_kernel(OpId::Deg2Rad,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::deg2rad_kernel(inputs[0], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Rad2Deg,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::rad2deg_kernel(inputs[0], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Logit,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-6));
+            return {oneapi::logit_kernel(inputs[0], eps, get_q(inputs))};
+        });
+
+    // =========================================================================
+    // New Phase: Signbit / IsPosInf / IsNegInf / IsReal
+    // =========================================================================
+    table.register_kernel(OpId::Signbit,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::signbit_kernel(inputs[0], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::IsPosInf,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::isposinf_kernel(inputs[0], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::IsNegInf,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::isneginf_kernel(inputs[0], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::IsReal,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::isreal_kernel(inputs[0], get_q(inputs))};
+        });
+
+    // =========================================================================
+    // New Phase: FloatPower / Xlog1py / Ldexp
+    // =========================================================================
+    table.register_kernel(OpId::FloatPower,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::float_power_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Xlog1py,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::xlog1py_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Ldexp,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::ldexp_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    // =========================================================================
+    // New Phase: Frexp (two-output)
+    // =========================================================================
+    table.register_kernel(OpId::Frexp,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return oneapi::frexp_kernel(inputs[0], get_q(inputs));
+        });
+
+    // =========================================================================
+    // New Phase: DiagEmbed / Diagflat
+    // =========================================================================
+    table.register_kernel(OpId::DiagEmbed,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t offset = attrs.get_int(AttrKey::Diagonal, 0);
+            int64_t dim1 = attrs.get_int(AttrKey::Dim0, -2);
+            int64_t dim2 = attrs.get_int(AttrKey::Dim1, -1);
+            return {oneapi::diag_embed_kernel(inputs[0], offset, dim1, dim2, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Diagflat,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t offset = attrs.get_int(AttrKey::Diagonal, 0);
+            return {oneapi::diagflat_kernel(inputs[0], offset, get_q(inputs))};
+        });
+
+    // =========================================================================
+    // New Phase: NanVar / NanStd
+    // =========================================================================
+    table.register_kernel(OpId::NanVar,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            int64_t correction = attrs.get_int(AttrKey::Correction, 1);
+            return {oneapi::nanvar_kernel(inputs[0], dim, keepdim, correction, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::NanStd,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            int64_t correction = attrs.get_int(AttrKey::Correction, 1);
+            return {oneapi::nanstd_kernel(inputs[0], dim, keepdim, correction, get_q(inputs))};
+        });
+
+    // =========================================================================
+    // Nested Tensor Operations (fallback: unbind segments, apply regular ops)
+    // =========================================================================
+    table.register_kernel(OpId::NestedSoftmax,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto offsets_cpu = inputs[1].to(Device::cpu());
+            const int64_t* off = offsets_cpu.data<int64_t>();
+            int64_t B = offsets_cpu.numel() - 1;
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            OpAttributes sm_attrs;
+            sm_attrs.set(AttrKey::Dim, dim);
+            std::vector<Tensor> segments;
+            segments.reserve(static_cast<size_t>(B));
+            for (int64_t i = 0; i < B; ++i) {
+                auto seg = inputs[0].slice(0, off[i], off[i+1]);
+                std::vector<Tensor> sm_inputs = {seg};
+                segments.push_back(dispatch<OpId::Softmax>(sm_inputs, sm_attrs)[0]);
+            }
+            return {tenzor::cat(segments, 0)};
+        });
+
+    table.register_kernel(OpId::NestedSum,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            auto offsets_cpu = inputs[1].to(Device::cpu());
+            const int64_t* off = offsets_cpu.data<int64_t>();
+            int64_t B = offsets_cpu.numel() - 1;
+            std::vector<Tensor> sums;
+            sums.reserve(static_cast<size_t>(B));
+            for (int64_t i = 0; i < B; ++i) {
+                sums.push_back(tenzor::sum(inputs[0].slice(0, off[i], off[i+1]), 0, true));
+            }
+            return {tenzor::cat(sums, 0)};
+        });
+
+    table.register_kernel(OpId::NestedMean,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            auto offsets_cpu = inputs[1].to(Device::cpu());
+            const int64_t* off = offsets_cpu.data<int64_t>();
+            int64_t B = offsets_cpu.numel() - 1;
+            std::vector<Tensor> means;
+            means.reserve(static_cast<size_t>(B));
+            for (int64_t i = 0; i < B; ++i) {
+                means.push_back(tenzor::mean(inputs[0].slice(0, off[i], off[i+1]), 0, true));
+            }
+            return {tenzor::cat(means, 0)};
+        });
+
+    table.register_kernel(OpId::NestedLayerNorm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // Per-row LN on packed values (LN operates on last dim, same for all)
+            auto offsets_cpu = inputs[1].to(Device::cpu());
+            const int64_t* off = offsets_cpu.data<int64_t>();
+            int64_t B = offsets_cpu.numel() - 1;
+            float eps = attrs.get_float(AttrKey::Eps, 1e-5f);
+            int64_t D = inputs[0].shape().back();
+            std::vector<Tensor> segments;
+            segments.reserve(static_cast<size_t>(B));
+            for (int64_t i = 0; i < B; ++i) {
+                auto seg = inputs[0].slice(0, off[i], off[i+1]);
+                auto seg_shape = std::vector<int64_t>(seg.shape().begin(), seg.shape().end());
+                // Apply per-row normalization
+                auto mean = tenzor::mean(seg, -1, true);
+                auto centered = tenzor::sub(seg, mean.expand(seg_shape));
+                auto var = tenzor::mean(tenzor::mul(centered, centered), -1, true);
+                auto inv_std = tenzor::reciprocal(tenzor::sqrt(tenzor::add(var,
+                    tenzor::full({1}, eps, var.dtype(), var.device()))));
+                auto normed = tenzor::mul(centered, inv_std.expand(seg_shape));
+                auto result = tenzor::add(tenzor::mul(normed, inputs[2].unsqueeze(0).expand(seg_shape)),
+                                           inputs[3].unsqueeze(0).expand(seg_shape));
+                segments.push_back(result);
+            }
+            return {tenzor::cat(segments, 0)};
+        });
+
+    table.register_kernel(OpId::NestedLinear,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            auto result = tenzor::matmul(inputs[0], inputs[2].transpose(0, 1));
+            if (inputs.size() > 3) {
+                result = tenzor::add(result, inputs[3]);
+            }
+            return {result};
+        });
+
+    table.register_kernel(OpId::NestedAttention,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto q_off_cpu = inputs[3].to(Device::cpu());
+            auto kv_off_cpu = inputs[4].to(Device::cpu());
+            const int64_t* q_off = q_off_cpu.data<int64_t>();
+            const int64_t* kv_off = kv_off_cpu.data<int64_t>();
+            int64_t B = q_off_cpu.numel() - 1;
+            float scale = attrs.get_float(AttrKey::Scale, 1.0f);
+            int64_t head_dim = inputs[0].shape().back();
+            int64_t total_q = inputs[0].shape()[0];
+
+            auto output = tenzor::zeros({total_q, head_dim}, inputs[0].dtype(), inputs[0].device());
+            for (int64_t b = 0; b < B; ++b) {
+                auto Qb = inputs[0].slice(0, q_off[b], q_off[b+1]);
+                auto Kb = inputs[1].slice(0, kv_off[b], kv_off[b+1]);
+                auto Vb = inputs[2].slice(0, kv_off[b], kv_off[b+1]);
+                auto scores = tenzor::mul(tenzor::matmul(Qb, Kb.transpose(0, 1)),
+                                           tenzor::full({1}, scale, Qb.dtype(), Qb.device()));
+                OpAttributes attn_sm_attrs;
+                attn_sm_attrs.set(AttrKey::Dim, int64_t(-1));
+                std::vector<Tensor> attn_sm_in = {scores};
+                auto attn = dispatch<OpId::Softmax>(attn_sm_in, attn_sm_attrs)[0];
+                auto out_b = tenzor::matmul(attn, Vb).contiguous();
+                auto dst = output.slice(0, q_off[b], q_off[b+1]);
+                std::memcpy(dst.data_ptr(), out_b.data_ptr(),
+                            static_cast<size_t>((q_off[b+1] - q_off[b]) * head_dim) * dtype_size(output.dtype()));
+            }
+            return {output};
+        });
+
+    table.register_kernel(OpId::NestedToPadded,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto offsets_cpu = inputs[1].to(Device::cpu());
+            const int64_t* off = offsets_cpu.data<int64_t>();
+            int64_t B = offsets_cpu.numel() - 1;
+            int64_t max_len = attrs.get_int(AttrKey::MaxLen, 0);
+            float padding_value = attrs.get_float(AttrKey::PaddingValue, 0.0f);
+            int64_t D = (inputs[0].shape().size() > 1) ? inputs[0].shape()[1] : 1;
+
+            auto padded = tenzor::full({B, max_len, D}, padding_value, inputs[0].dtype(), inputs[0].device());
+            for (int64_t b = 0; b < B; ++b) {
+                int64_t len = off[b+1] - off[b];
+                if (len <= 0) continue;
+                auto seg = inputs[0].slice(0, off[b], off[b+1]).contiguous();
+                auto dst = padded.slice(0, b, b+1).reshape({max_len, D}).slice(0, 0, len);
+                std::memcpy(dst.data_ptr(), seg.data_ptr(),
+                            static_cast<size_t>(len * D) * dtype_size(inputs[0].dtype()));
+            }
+            return {padded};
+        });
+
+    table.register_kernel(OpId::NestedFromPadded,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            auto offsets_cpu = inputs[1].to(Device::cpu());
+            const int64_t* off = offsets_cpu.data<int64_t>();
+            int64_t B = offsets_cpu.numel() - 1;
+            int64_t total_len = off[B];
+            int64_t max_len = inputs[0].shape()[1];
+            int64_t D = (inputs[0].shape().size() > 2) ? inputs[0].shape()[2] : 1;
+
+            auto values = tenzor::empty({total_len, D}, inputs[0].dtype(), inputs[0].device());
+            for (int64_t b = 0; b < B; ++b) {
+                int64_t len = off[b+1] - off[b];
+                if (len <= 0) continue;
+                auto src = inputs[0].slice(0, b, b+1).reshape({max_len, D}).slice(0, 0, len).contiguous();
+                auto dst = values.slice(0, off[b], off[b+1]);
+                std::memcpy(dst.data_ptr(), src.data_ptr(),
+                            static_cast<size_t>(len * D) * dtype_size(inputs[0].dtype()));
+            }
+            return {values};
+        });
 
 } // register_oneapi_kernels
 

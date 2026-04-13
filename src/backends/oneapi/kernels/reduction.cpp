@@ -3390,5 +3390,261 @@ auto aminmax_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue&
     return {min_out, max_out};
 }
 
+// ============================================================================
+// NanVar kernel — variance ignoring NaN values
+// Uses two-pass: first compute nanmean, then compute sum of squared deviations
+// ============================================================================
+class NanvarFullF32Sum;
+class NanvarFullF32Count;
+class NanvarFullF32Dev;
+class NanvarFullF64Sum;
+class NanvarFullF64Count;
+class NanvarFullF64Dev;
+class NanvarDimF32;
+class NanvarDimF64;
+
+auto nanvar_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction,
+                   sycl::queue& queue) -> Tensor {
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto f32 = cast_kernel(input, DType::Float32, queue);
+        auto result = nanvar_kernel(f32, dim, keepdim, correction, queue);
+        return cast_kernel(result, input.dtype(), queue);
+    }
+
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    auto shape = in_cont.shape();
+    const int64_t ndim = static_cast<int64_t>(shape.size());
+    const int64_t total = in_cont.numel();
+
+    bool is_full = (dim < 0);
+
+    if (is_full) {
+        Tensor output({1}, in_cont.dtype(), in_cont.device());
+
+        if (in_cont.dtype() == DType::Float32) {
+            const float* in_ptr = get_data_ptr<const float>(in_cont);
+            float* out_ptr = get_data_ptr<float>(output);
+
+            // Pass 1: compute nanmean
+            auto sum_buf = sycl::malloc_shared<float>(1, queue);
+            auto cnt_buf = sycl::malloc_shared<int64_t>(1, queue);
+            sum_buf[0] = 0.0f;
+            cnt_buf[0] = 0;
+
+            queue.parallel_for<NanvarFullF32Sum>(sycl::range<1>(total),
+                sycl::reduction(sum_buf, sycl::plus<float>()),
+                [=](sycl::id<1> idx, auto& sum) {
+                    float v = in_ptr[idx];
+                    if (!sycl::isnan(v)) sum.combine(v);
+                }).wait();
+
+            queue.parallel_for<NanvarFullF32Count>(sycl::range<1>(total),
+                sycl::reduction(cnt_buf, sycl::plus<int64_t>()),
+                [=](sycl::id<1> idx, auto& cnt) {
+                    float v = in_ptr[idx];
+                    if (!sycl::isnan(v)) cnt.combine(int64_t(1));
+                }).wait();
+
+            float mean_val = cnt_buf[0] > 0 ? sum_buf[0] / static_cast<float>(cnt_buf[0]) : 0.0f;
+            int64_t count = cnt_buf[0];
+
+            // Pass 2: sum of squared deviations
+            auto dev_buf = sycl::malloc_shared<float>(1, queue);
+            dev_buf[0] = 0.0f;
+
+            queue.parallel_for<NanvarFullF32Dev>(sycl::range<1>(total),
+                sycl::reduction(dev_buf, sycl::plus<float>()),
+                [=](sycl::id<1> idx, auto& acc) {
+                    float v = in_ptr[idx];
+                    if (!sycl::isnan(v)) {
+                        float d = v - mean_val;
+                        acc.combine(d * d);
+                    }
+                }).wait();
+
+            int64_t denom = count - correction;
+            out_ptr[0] = denom > 0 ? dev_buf[0] / static_cast<float>(denom) : 0.0f;
+
+            sycl::free(sum_buf, queue);
+            sycl::free(cnt_buf, queue);
+            sycl::free(dev_buf, queue);
+        } else if (in_cont.dtype() == DType::Float64) {
+            const double* in_ptr = get_data_ptr<const double>(in_cont);
+            double* out_ptr = get_data_ptr<double>(output);
+
+            auto sum_buf = sycl::malloc_shared<double>(1, queue);
+            auto cnt_buf = sycl::malloc_shared<int64_t>(1, queue);
+            sum_buf[0] = 0.0;
+            cnt_buf[0] = 0;
+
+            queue.parallel_for<NanvarFullF64Sum>(sycl::range<1>(total),
+                sycl::reduction(sum_buf, sycl::plus<double>()),
+                [=](sycl::id<1> idx, auto& sum) {
+                    double v = in_ptr[idx];
+                    if (!sycl::isnan(v)) sum.combine(v);
+                }).wait();
+
+            queue.parallel_for<NanvarFullF64Count>(sycl::range<1>(total),
+                sycl::reduction(cnt_buf, sycl::plus<int64_t>()),
+                [=](sycl::id<1> idx, auto& cnt) {
+                    double v = in_ptr[idx];
+                    if (!sycl::isnan(v)) cnt.combine(int64_t(1));
+                }).wait();
+
+            double mean_val = cnt_buf[0] > 0 ? sum_buf[0] / static_cast<double>(cnt_buf[0]) : 0.0;
+            int64_t count = cnt_buf[0];
+
+            auto dev_buf = sycl::malloc_shared<double>(1, queue);
+            dev_buf[0] = 0.0;
+
+            queue.parallel_for<NanvarFullF64Dev>(sycl::range<1>(total),
+                sycl::reduction(dev_buf, sycl::plus<double>()),
+                [=](sycl::id<1> idx, auto& acc) {
+                    double v = in_ptr[idx];
+                    if (!sycl::isnan(v)) {
+                        double d = v - mean_val;
+                        acc.combine(d * d);
+                    }
+                }).wait();
+
+            int64_t denom = count - correction;
+            out_ptr[0] = denom > 0 ? dev_buf[0] / static_cast<double>(denom) : 0.0;
+
+            sycl::free(sum_buf, queue);
+            sycl::free(cnt_buf, queue);
+            sycl::free(dev_buf, queue);
+        } else {
+            throw std::runtime_error("nanvar_kernel: unsupported dtype (expected floating type)");
+        }
+
+        return output;
+    }
+
+    // Dimensional reduction
+    int64_t norm_dim = dim < 0 ? dim + ndim : dim;
+    if (norm_dim < 0 || norm_dim >= ndim) {
+        throw std::runtime_error("nanvar: dim out of range");
+    }
+
+    int64_t reduce_size = shape[norm_dim];
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < norm_dim; d++) outer *= shape[d];
+    for (int64_t d = norm_dim + 1; d < ndim; d++) inner *= shape[d];
+
+    auto out_shape = compute_reduction_shape(
+        std::vector<int64_t>(shape.begin(), shape.end()), norm_dim, keepdim);
+    Tensor output(out_shape, in_cont.dtype(), in_cont.device());
+    int64_t out_n = outer * inner;
+
+    if (in_cont.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+        int64_t corr = correction;
+        queue.parallel_for<NanvarDimF32>(sycl::range<1>(out_n),
+            [=](sycl::id<1> id) {
+                int64_t idx = id[0];
+                int64_t o = idx / inner;
+                int64_t i_inner = idx % inner;
+                // Pass 1: mean
+                float sum = 0.0f;
+                int64_t count = 0;
+                for (int64_t r = 0; r < reduce_size; r++) {
+                    int64_t src = (o * reduce_size + r) * inner + i_inner;
+                    float v = in_ptr[src];
+                    if (!sycl::isnan(v)) { sum += v; count++; }
+                }
+                float mean = count > 0 ? sum / static_cast<float>(count) : 0.0f;
+                // Pass 2: squared deviations
+                float dev_sum = 0.0f;
+                for (int64_t r = 0; r < reduce_size; r++) {
+                    int64_t src = (o * reduce_size + r) * inner + i_inner;
+                    float v = in_ptr[src];
+                    if (!sycl::isnan(v)) {
+                        float d = v - mean;
+                        dev_sum += d * d;
+                    }
+                }
+                int64_t denom = count - corr;
+                out_ptr[idx] = denom > 0 ? dev_sum / static_cast<float>(denom) : 0.0f;
+            }).wait();
+    } else if (in_cont.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+        int64_t corr = correction;
+        queue.parallel_for<NanvarDimF64>(sycl::range<1>(out_n),
+            [=](sycl::id<1> id) {
+                int64_t idx = id[0];
+                int64_t o = idx / inner;
+                int64_t i_inner = idx % inner;
+                double sum = 0.0;
+                int64_t count = 0;
+                for (int64_t r = 0; r < reduce_size; r++) {
+                    int64_t src = (o * reduce_size + r) * inner + i_inner;
+                    double v = in_ptr[src];
+                    if (!sycl::isnan(v)) { sum += v; count++; }
+                }
+                double mean = count > 0 ? sum / static_cast<double>(count) : 0.0;
+                double dev_sum = 0.0;
+                for (int64_t r = 0; r < reduce_size; r++) {
+                    int64_t src = (o * reduce_size + r) * inner + i_inner;
+                    double v = in_ptr[src];
+                    if (!sycl::isnan(v)) {
+                        double d = v - mean;
+                        dev_sum += d * d;
+                    }
+                }
+                int64_t denom = count - corr;
+                out_ptr[idx] = denom > 0 ? dev_sum / static_cast<double>(denom) : 0.0;
+            }).wait();
+    } else {
+        throw std::runtime_error("nanvar_kernel: unsupported dtype (expected floating type)");
+    }
+
+    return output;
+}
+
+// ============================================================================
+// NanStd kernel — standard deviation ignoring NaN (sqrt of nanvar)
+// ============================================================================
+auto nanstd_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction,
+                   sycl::queue& queue) -> Tensor {
+    Tensor var = nanvar_kernel(input, dim, keepdim, correction, queue);
+
+    // Take sqrt of the variance
+    int64_t numel = var.numel();
+    Tensor result(std::vector<int64_t>(var.shape().begin(), var.shape().end()),
+                  var.dtype(), var.device());
+
+    if (var.dtype() == DType::Float32) {
+        const float* v_ptr = get_data_ptr<const float>(var);
+        float* out_ptr = get_data_ptr<float>(result);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = sycl::sqrt(v_ptr[idx]);
+        }).wait();
+    } else if (var.dtype() == DType::Float64) {
+        const double* v_ptr = get_data_ptr<const double>(var);
+        double* out_ptr = get_data_ptr<double>(result);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = sycl::sqrt(v_ptr[idx]);
+        }).wait();
+    } else if (var.dtype() == DType::Float16) {
+        const sycl::half* v_ptr = get_data_ptr<const sycl::half>(var);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(result);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = sycl::half(sycl::sqrt(static_cast<float>(v_ptr[idx])));
+        }).wait();
+    } else if (var.dtype() == DType::BFloat16) {
+        const uint16_t* v_ptr = get_data_ptr<const uint16_t>(var);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(result);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = f32_to_bf16(sycl::sqrt(bf16_to_f32(v_ptr[idx])));
+        }).wait();
+    } else {
+        throw std::runtime_error("nanstd_kernel: unsupported dtype");
+    }
+
+    return result;
+}
+
 } // namespace oneapi
 } // namespace tenzor

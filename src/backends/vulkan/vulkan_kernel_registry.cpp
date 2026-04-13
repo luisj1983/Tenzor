@@ -19,8 +19,10 @@
 #include "tenzor/ops/fft.hpp"
 #include "tenzor/ops/advanced.hpp"
 #include "tenzor/ops/indexing.hpp"
+#include "tenzor/ops/transform.hpp"
 #include "vulkan_backend.hpp"
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 
 // Undefine Xlib Bool macro that conflicts with DType::Bool
@@ -2841,6 +2843,245 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::MaxUnpool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
         return get_vulkan_backend()->dispatchMaxUnpool3dBackward(inputs[0], inputs[1], input_shape);
+    });
+
+    // ========================================================================
+    // Phase: New Unary Math Operations — Deg2Rad, Rad2Deg, Logit
+    // ========================================================================
+    table.register_kernel(OpId::Deg2Rad, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchUnaryOp("deg2rad", inputs[0])};
+    });
+
+    table.register_kernel(OpId::Rad2Deg, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchUnaryOp("rad2deg", inputs[0])};
+    });
+
+    table.register_kernel(OpId::Logit, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        double eps = attrs.get_float(AttrKey::Eps, -1.0);
+        auto* vk = get_vulkan_backend();
+        if (eps > 0.0) {
+            return std::vector<Tensor>{vk->dispatchUnaryOpWithParam("logit", inputs[0], static_cast<float>(eps))};
+        }
+        return std::vector<Tensor>{vk->dispatchUnaryOp("logit", inputs[0])};
+    });
+
+    // ========================================================================
+    // Phase: Bool Predicate Operations — Signbit, IsPosInf, IsNegInf, IsReal
+    // ========================================================================
+    table.register_kernel(OpId::Signbit, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchBoolPredicateOp("signbit", inputs[0])};
+    });
+
+    table.register_kernel(OpId::IsPosInf, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchBoolPredicateOp("isposinf", inputs[0])};
+    });
+
+    table.register_kernel(OpId::IsNegInf, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchBoolPredicateOp("isneginf", inputs[0])};
+    });
+
+    table.register_single_output_kernel(OpId::IsReal, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        // IsReal is a pure metadata check: real (non-complex) dtypes return all-true
+        const auto& input = inputs[0];
+        auto input_shape = input.shape();
+        std::vector<int64_t> shape(input_shape.begin(), input_shape.end());
+        bool is_real = (input.dtype() != DType::Complex64 && input.dtype() != DType::Complex128);
+        // Return a Bool tensor filled with the result
+        auto* vk = get_vulkan_backend();
+        Tensor result = vk->dispatchFull(shape, is_real ? 1.0f : 0.0f, DType::Bool);
+        return result;
+    });
+
+    // ========================================================================
+    // Phase: Binary Math Operations — FloatPower, Xlog1py, Ldexp
+    // ========================================================================
+    table.register_kernel(OpId::FloatPower, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        // FloatPower promotes to Float64 for precision; Vulkan f64 shader handles it
+        auto* vk = get_vulkan_backend();
+        Tensor a = inputs[0];
+        Tensor b = inputs[1];
+        // Promote to Float64 if available, otherwise use Float32
+        if (a.dtype() != DType::Float64) a = a.to(DType::Float64);
+        if (b.dtype() != DType::Float64) b = b.to(DType::Float64);
+        return std::vector<Tensor>{vk->dispatchBinaryOp("float_power", a, b)};
+    });
+
+    table.register_kernel(OpId::Xlog1py, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchBinaryOp("xlog1py", inputs[0], inputs[1])};
+    });
+
+    table.register_kernel(OpId::Ldexp, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchBinaryOp("ldexp", inputs[0], inputs[1])};
+    });
+
+    // ========================================================================
+    // Phase: Two-output — Frexp
+    // ========================================================================
+    table.register_kernel(OpId::Frexp, [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+        auto [mantissa, exponent] = get_vulkan_backend()->dispatchFrexp(inputs[0]);
+        return {mantissa, exponent};
+    });
+
+    // ========================================================================
+    // Phase: Tensor manipulation — DiagEmbed, Diagflat
+    // ========================================================================
+    table.register_single_output_kernel(OpId::DiagEmbed, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t offset = attrs.get_int(AttrKey::Diagonal, 0);
+        int64_t dim1 = attrs.get_int(AttrKey::Dim0, -2);
+        int64_t dim2 = attrs.get_int(AttrKey::Dim1, -1);
+        return get_vulkan_backend()->dispatchDiagEmbed(inputs[0], offset, dim1, dim2);
+    });
+
+    table.register_single_output_kernel(OpId::Diagflat, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t offset = attrs.get_int(AttrKey::Diagonal, 0);
+        return get_vulkan_backend()->dispatchDiagflat(inputs[0], offset);
+    });
+
+    // ========================================================================
+    // Phase: NaN-aware reductions — NanVar, NanStd
+    // ========================================================================
+    table.register_single_output_kernel(OpId::NanVar, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t correction = attrs.get_int(AttrKey::Correction, 1);
+        return get_vulkan_backend()->dispatchNanVar(inputs[0], correction);
+    });
+
+    table.register_single_output_kernel(OpId::NanStd, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t correction = attrs.get_int(AttrKey::Correction, 1);
+        return get_vulkan_backend()->dispatchNanStd(inputs[0], correction);
+    });
+
+    // =========================================================================
+    // Nested Tensor Operations (fallback: unbind segments, apply regular ops)
+    // =========================================================================
+    table.register_single_output_kernel(OpId::NestedSoftmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto offsets_cpu = inputs[1].to(Device::cpu());
+        const int64_t* off = offsets_cpu.data<int64_t>();
+        int64_t B = offsets_cpu.numel() - 1;
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        OpAttributes sm_attrs;
+        sm_attrs.set(AttrKey::Dim, dim);
+        std::vector<Tensor> segments;
+        segments.reserve(static_cast<size_t>(B));
+        for (int64_t i = 0; i < B; ++i) {
+            auto seg = inputs[0].slice(0, off[i], off[i+1]);
+            std::vector<Tensor> sm_inputs = {seg};
+            segments.push_back(dispatch<OpId::Softmax>(sm_inputs, sm_attrs)[0]);
+        }
+        return tenzor::cat(segments, 0);
+    });
+
+    table.register_single_output_kernel(OpId::NestedSum, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        auto offsets_cpu = inputs[1].to(Device::cpu());
+        const int64_t* off = offsets_cpu.data<int64_t>();
+        int64_t B = offsets_cpu.numel() - 1;
+        std::vector<Tensor> sums;
+        sums.reserve(static_cast<size_t>(B));
+        for (int64_t i = 0; i < B; ++i) {
+            sums.push_back(tenzor::sum(inputs[0].slice(0, off[i], off[i+1]), 0, true));
+        }
+        return tenzor::cat(sums, 0);
+    });
+
+    table.register_single_output_kernel(OpId::NestedMean, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        auto offsets_cpu = inputs[1].to(Device::cpu());
+        const int64_t* off = offsets_cpu.data<int64_t>();
+        int64_t B = offsets_cpu.numel() - 1;
+        std::vector<Tensor> means;
+        means.reserve(static_cast<size_t>(B));
+        for (int64_t i = 0; i < B; ++i) {
+            means.push_back(tenzor::mean(inputs[0].slice(0, off[i], off[i+1]), 0, true));
+        }
+        return tenzor::cat(means, 0);
+    });
+
+    table.register_single_output_kernel(OpId::NestedLayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // Fallback: per-row layer norm is the same as regular layer norm on values
+        // since LN operates on the last dimension. Just dispatch to the regular LN.
+        auto& values = inputs[0];
+        const Tensor* weight_ptr = (inputs.size() > 2) ? &inputs[2] : nullptr;
+        const Tensor* bias_ptr = (inputs.size() > 3) ? &inputs[3] : nullptr;
+        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+        int64_t D = values.shape().back();
+        // Apply regular layer norm (operates on last dim, same for all rows)
+        auto vk = get_vulkan_backend();
+        return vk->dispatchLayerNorm(values, D, weight_ptr, bias_ptr, eps);
+    });
+
+    table.register_single_output_kernel(OpId::NestedLinear, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        auto result = tenzor::matmul(inputs[0], inputs[2].transpose(0, 1));
+        if (inputs.size() > 3) {
+            result = tenzor::add(result, inputs[3]);
+        }
+        return result;
+    });
+
+    table.register_single_output_kernel(OpId::NestedAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto q_off_cpu = inputs[3].to(Device::cpu());
+        auto kv_off_cpu = inputs[4].to(Device::cpu());
+        const int64_t* q_off = q_off_cpu.data<int64_t>();
+        const int64_t* kv_off = kv_off_cpu.data<int64_t>();
+        int64_t B = q_off_cpu.numel() - 1;
+        float scale = attrs.get_float(AttrKey::Scale, 1.0f);
+        int64_t head_dim = inputs[0].shape().back();
+        int64_t total_q = inputs[0].shape()[0];
+
+        auto output = tenzor::zeros({total_q, head_dim}, inputs[0].dtype(), inputs[0].device());
+        for (int64_t b = 0; b < B; ++b) {
+            auto Qb = inputs[0].slice(0, q_off[b], q_off[b+1]);
+            auto Kb = inputs[1].slice(0, kv_off[b], kv_off[b+1]);
+            auto Vb = inputs[2].slice(0, kv_off[b], kv_off[b+1]);
+            auto scores = tenzor::mul(tenzor::matmul(Qb, Kb.transpose(0, 1)),
+                                       tenzor::full({1}, scale, Qb.dtype(), Qb.device()));
+            OpAttributes attn_attrs;
+            attn_attrs.set(AttrKey::Dim, int64_t(-1));
+            std::vector<Tensor> attn_in = {scores};
+            auto attn = dispatch<OpId::Softmax>(attn_in, attn_attrs)[0];
+            auto out_b = tenzor::matmul(attn, Vb);
+            auto dst = output.slice(0, q_off[b], q_off[b+1]);
+            std::memcpy(dst.data_ptr(), out_b.contiguous().data_ptr(),
+                        static_cast<size_t>((q_off[b+1] - q_off[b]) * head_dim) * dtype_size(output.dtype()));
+        }
+        return output;
+    });
+
+    table.register_single_output_kernel(OpId::NestedToPadded, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto offsets_cpu = inputs[1].to(Device::cpu());
+        const int64_t* off = offsets_cpu.data<int64_t>();
+        int64_t B = offsets_cpu.numel() - 1;
+        int64_t max_len = attrs.get_int(AttrKey::MaxLen, 0);
+        float padding_value = attrs.get_float(AttrKey::PaddingValue, 0.0f);
+        int64_t D = (inputs[0].shape().size() > 1) ? inputs[0].shape()[1] : 1;
+
+        auto padded = tenzor::full({B, max_len, D}, padding_value, inputs[0].dtype(), inputs[0].device());
+        for (int64_t b = 0; b < B; ++b) {
+            int64_t len = off[b+1] - off[b];
+            if (len <= 0) continue;
+            auto seg = inputs[0].slice(0, off[b], off[b+1]).contiguous();
+            auto dst = padded.slice(0, b, b+1).reshape({max_len, D}).slice(0, 0, len);
+            std::memcpy(dst.data_ptr(), seg.data_ptr(),
+                        static_cast<size_t>(len * D) * dtype_size(inputs[0].dtype()));
+        }
+        return padded;
+    });
+
+    table.register_single_output_kernel(OpId::NestedFromPadded, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        auto offsets_cpu = inputs[1].to(Device::cpu());
+        const int64_t* off = offsets_cpu.data<int64_t>();
+        int64_t B = offsets_cpu.numel() - 1;
+        int64_t total_len = off[B];
+        int64_t max_len = inputs[0].shape()[1];
+        int64_t D = (inputs[0].shape().size() > 2) ? inputs[0].shape()[2] : 1;
+
+        auto values = tenzor::empty({total_len, D}, inputs[0].dtype(), inputs[0].device());
+        for (int64_t b = 0; b < B; ++b) {
+            int64_t len = off[b+1] - off[b];
+            if (len <= 0) continue;
+            auto src = inputs[0].slice(0, b, b+1).reshape({max_len, D}).slice(0, 0, len).contiguous();
+            auto dst = values.slice(0, off[b], off[b+1]);
+            std::memcpy(dst.data_ptr(), src.data_ptr(),
+                        static_cast<size_t>(len * D) * dtype_size(inputs[0].dtype()));
+        }
+        return values;
     });
 
     std::cout << "Vulkan dispatch table initialized with O(1) lookup" << std::endl;

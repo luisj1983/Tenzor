@@ -38,6 +38,7 @@ set(CUDA_BACKEND_SOURCES
     kernels/linalg.cu
     kernels/fft.cu
     kernels/sparse.cu
+    kernels/nested.cu
     kernels/amp.cu
     cublas_ops.cu
     cudnn_ops.cu

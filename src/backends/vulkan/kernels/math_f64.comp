@@ -346,5 +346,36 @@ void main() {
             result[idx] = res;
             break;
         }
+        case 44: // deg2rad (unary): x * (PI / 180)
+            result[idx] = val_a * 0.017453292519943295769;
+            break;
+        case 45: // rad2deg (unary): x * (180 / PI)
+            result[idx] = val_a * 57.295779513082320876798;
+            break;
+        case 46: { // logit (unary): log(clamp(x,eps,1-eps) / (1 - clamp(x,eps,1-eps)))
+            double eps = params.param > 0.0 ? params.param : 2.2250738585072014e-308;
+            double clamped = clamp(val_a, eps, 1.0 - eps);
+            result[idx] = log_double(clamped / (1.0 - clamped));
+            break;
+        }
+        case 47: // float_power (binary): pow(a, b) in double
+            result[idx] = exp_double(val_b * log_double(val_a));
+            break;
+        case 48: { // xlog1py (binary): x == 0 ? 0 : x * log(1+y)
+            double res;
+            if (val_a == 0.0) res = 0.0;
+            else res = val_a * log_double(1.0 + val_b);
+            result[idx] = res;
+            break;
+        }
+        case 49: // ldexp (binary): x * 2^n (n is val_b as int)
+            result[idx] = val_a * exp_double(val_b * 0.6931471805599453);
+            break;
+        case 50: // frac (unary): x - floor(x)
+            result[idx] = val_a - floor(val_a);
+            break;
+        case 51: // log_sigmoid (unary): -log(1 + exp(-x))
+            result[idx] = -log_double(1.0 + exp_double(-val_a));
+            break;
     }
 }

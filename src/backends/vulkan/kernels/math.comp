@@ -12,7 +12,7 @@ layout(binding = 2) buffer Output { uint result[]; };
 
 layout(push_constant) uniform PushConstants {
     uint n;          // Number of elements
-    uint op;         // Operation: 0=add, 1=sub, 2=mul, 3=div, 4=sqrt, 5=exp, 6=log, 7=neg, 8=abs, 9=pow, 10=sign, 11=floor, 12=ceil, 13=round, 14=trunc, 15=reciprocal, 16=log2, 17=log10, 18=log1p, 19=exp2, 20=expm1, 21=erf, 22=erfc, 23=atan2, 24=fmod, 25=remainder, 26=minimum, 27=maximum, 28=rsqrt, 29=square, 30=asinh, 31=acosh, 32=atanh, 33=hypot, 34=copysign, 35=nextafter, 36=gcd, 37=lcm, 38=igamma, 39=igammac, 40=addcmul, 41=addcdiv, 42=fmax, 43=fmin
+    uint op;         // Operation: 0=add, 1=sub, 2=mul, 3=div, 4=sqrt, 5=exp, 6=log, 7=neg, 8=abs, 9=pow, 10=sign, 11=floor, 12=ceil, 13=round, 14=trunc, 15=reciprocal, 16=log2, 17=log10, 18=log1p, 19=exp2, 20=expm1, 21=erf, 22=erfc, 23=atan2, 24=fmod, 25=remainder, 26=minimum, 27=maximum, 28=rsqrt, 29=square, 30=asinh, 31=acosh, 32=atanh, 33=hypot, 34=copysign, 35=nextafter, 36=gcd, 37=lcm, 38=igamma, 39=igammac, 40=addcmul, 41=addcdiv, 42=fmax, 43=fmin, 44=deg2rad, 45=rad2deg, 46=logit, 47=float_power, 48=xlog1py, 49=ldexp, 50=frac, 51=log_sigmoid, 52=bitwise_not
     float param;     // Parameter for operations like pow (exponent), addcmul/addcdiv (value)
 } params;
 
@@ -309,5 +309,39 @@ void main() {
             result[idx] = floatBitsToUint(res);
             break;
         }
+        case 44: // deg2rad (unary): x * (PI / 180)
+            result[idx] = floatBitsToUint(val_a * 0.01745329251994329577);
+            break;
+        case 45: // rad2deg (unary): x * (180 / PI)
+            result[idx] = floatBitsToUint(val_a * 57.29577951308232087680);
+            break;
+        case 46: { // logit (unary): log(clamp(x,eps,1-eps) / (1 - clamp(x,eps,1-eps)))
+            float eps = params.param > 0.0 ? params.param : 1.17549435e-38;
+            float clamped = clamp(val_a, eps, 1.0 - eps);
+            result[idx] = floatBitsToUint(log(clamped / (1.0 - clamped)));
+            break;
+        }
+        case 47: // float_power (binary): pow(a, b) in float (f64 promotion done on host)
+            result[idx] = floatBitsToUint(pow(val_a, val_b));
+            break;
+        case 48: { // xlog1py (binary): x == 0 ? 0 : x * log(1+y)
+            float res;
+            if (val_a == 0.0) res = 0.0;
+            else res = val_a * log(1.0 + val_b);
+            result[idx] = floatBitsToUint(res);
+            break;
+        }
+        case 49: // ldexp (binary): x * 2^n (n is val_b as int)
+            result[idx] = floatBitsToUint(val_a * exp2(val_b));
+            break;
+        case 50: // frac (unary): x - floor(x)
+            result[idx] = floatBitsToUint(val_a - floor(val_a));
+            break;
+        case 51: // log_sigmoid (unary): log(1 / (1 + exp(-x))) = -log(1 + exp(-x))
+            result[idx] = floatBitsToUint(-log(1.0 + exp(-val_a)));
+            break;
+        case 52: // bitwise_not (unary): ~bits
+            result[idx] = ~bits_a;
+            break;
     }
 }

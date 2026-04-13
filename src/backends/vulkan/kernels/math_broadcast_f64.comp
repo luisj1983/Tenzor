@@ -78,6 +78,28 @@ void main() {
             else if (isnan(val_b)) res = val_a;
             else res = min(val_a, val_b);
             break;
+        case 47: { // float_power (binary) - polynomial approx for double pow
+            // Use 2^(b * log2(a)) via range reduction
+            // log2(a) approximation: extract exponent and use polynomial for mantissa
+            if (val_a == 0.0) { res = (val_b == 0.0) ? 1.0 : 0.0; break; }
+            if (val_a == 1.0) { res = 1.0; break; }
+            // Fall back to float precision for broadcast path
+            float fa = float(val_a), fb = float(val_b);
+            res = double(pow(fa, fb));
+            break;
+        }
+        case 48: // xlog1py (binary)
+            if (val_a == 0.0) res = 0.0;
+            else {
+                // log(1+y) approximation via float
+                float fy = float(1.0 + val_b);
+                res = val_a * double(log(fy));
+            }
+            break;
+        case 49: // ldexp (binary) - x * 2^n
+            // exp2 via float approximation
+            res = val_a * double(exp2(float(val_b)));
+            break;
     }
     result[out_idx] = res;
 }

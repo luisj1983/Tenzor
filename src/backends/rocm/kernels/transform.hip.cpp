@@ -2225,5 +2225,126 @@ auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_
     return output;
 }
 
+// ============================================================================
+// DiagEmbed — embed a vector as a diagonal of a matrix
+//   Input: (..., N) -> Output: (..., M, M) where M = N + |offset|
+// ============================================================================
+
+template <typename T>
+__global__ void diag_embed_kernel_impl(const T* __restrict__ input,
+                                       T* __restrict__ output,
+                                       int64_t batch_size, int64_t diag_size,
+                                       int64_t mat_size, int64_t offset,
+                                       int64_t dim1, int64_t dim2) {
+    int64_t total = batch_size * mat_size * mat_size;
+    HIP_GRID_STRIDE_LOOP(idx, total) {
+        int64_t b = idx / (mat_size * mat_size);
+        int64_t rem = idx % (mat_size * mat_size);
+        int64_t r = rem / mat_size;
+        int64_t c = rem % mat_size;
+
+        int64_t diag_idx = -1;
+        if (offset >= 0) {
+            if (c - r == offset && r < diag_size) diag_idx = r;
+        } else {
+            if (r - c == -offset && c < diag_size) diag_idx = c;
+        }
+
+        if (diag_idx >= 0 && diag_idx < diag_size) {
+            output[idx] = input[b * diag_size + diag_idx];
+        } else {
+            output[idx] = T(0);
+        }
+    }
+}
+
+auto diag_embed_kernel(const Tensor& input, int64_t offset, int64_t dim1, int64_t dim2,
+                       hipStream_t stream) -> Tensor {
+    auto input_shape = input.shape();
+    int64_t ndim = static_cast<int64_t>(input_shape.size());
+    if (ndim < 1) {
+        throw std::runtime_error("diag_embed: input must be at least 1D");
+    }
+
+    int64_t diag_size = input_shape[ndim - 1];
+    int64_t mat_size = diag_size + std::abs(offset);
+
+    // Compute batch size (product of all dims except last)
+    int64_t batch_size = 1;
+    for (int64_t i = 0; i < ndim - 1; ++i) batch_size *= input_shape[i];
+
+    // Output shape: (..., mat_size, mat_size)
+    std::vector<int64_t> out_shape;
+    for (int64_t i = 0; i < ndim - 1; ++i) out_shape.push_back(input_shape[i]);
+    out_shape.push_back(mat_size);
+    out_shape.push_back(mat_size);
+
+    Tensor result(out_shape, input.dtype(), input.device());
+    int64_t total = batch_size * mat_size * mat_size;
+    if (total == 0) return result;
+    int num_blocks = get_num_blocks(total);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(diag_embed_kernel_impl<float>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<float>(), result.data<float>(),
+            batch_size, diag_size, mat_size, offset, dim1, dim2);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(diag_embed_kernel_impl<double>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<double>(), result.data<double>(),
+            batch_size, diag_size, mat_size, offset, dim1, dim2);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(diag_embed_kernel_impl<__half>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()),
+            batch_size, diag_size, mat_size, offset, dim1, dim2);
+    } else if (input.dtype() == DType::Int32) {
+        hipLaunchKernelGGL(diag_embed_kernel_impl<int32_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<int32_t>(), result.data<int32_t>(),
+            batch_size, diag_size, mat_size, offset, dim1, dim2);
+    } else if (input.dtype() == DType::Int64) {
+        hipLaunchKernelGGL(diag_embed_kernel_impl<int64_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<int64_t>(), result.data<int64_t>(),
+            batch_size, diag_size, mat_size, offset, dim1, dim2);
+    } else {
+        throw std::runtime_error("diag_embed: unsupported dtype");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ============================================================================
+// Diagflat — flatten input and create diagonal matrix
+// ============================================================================
+
+auto diagflat_kernel(const Tensor& input, int64_t offset, hipStream_t stream) -> Tensor {
+    // Flatten the input to 1D first
+    int64_t n = input.numel();
+    std::vector<int64_t> flat_shape = {n};
+
+    // Reuse diag_embed on the flattened tensor
+    // diag_embed expects (..., N) and produces (..., M, M)
+    // For diagflat, we flatten to (N,) and produce (M, M)
+    Tensor flat_input = input;
+    if (input.shape().size() != 1 || input.shape()[0] != n) {
+        // Need to make contiguous 1D view
+        flat_input = Tensor(flat_shape, input.dtype(), input.device());
+        int64_t elem_size = 4; // default for Float32
+        if (input.dtype() == DType::Float64 || input.dtype() == DType::Int64) elem_size = 8;
+        else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) elem_size = 2;
+        else if (input.dtype() == DType::Int8 || input.dtype() == DType::Bool) elem_size = 1;
+        int64_t bytes = n * elem_size;
+        HIP_CHECK(hipMemcpyAsync(flat_input.data_ptr(), input.data_ptr(),
+                                  bytes, hipMemcpyDeviceToDevice, stream));
+    }
+
+    return diag_embed_kernel(flat_input, offset, -2, -1, stream);
+}
+
 } // namespace rocm
 } // namespace tenzor

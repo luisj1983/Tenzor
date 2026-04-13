@@ -1,0 +1,60 @@
+#version 450
+
+// Frexp: decompose float into mantissa and exponent
+// mantissa in [0.5, 1.0) and exponent such that x = mantissa * 2^exponent
+// Special cases: frexp(0) = (0, 0), frexp(inf) = (inf, 0), frexp(nan) = (nan, 0)
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input     { uint input_data[]; };
+layout(binding = 1) buffer Mantissa  { uint mantissa_data[]; };
+layout(binding = 2) buffer Exponent  { int exponent_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n) return;
+
+    uint bits = input_data[idx];
+    float val = uintBitsToFloat(bits);
+
+    // Extract IEEE 754 components
+    uint sign = bits & 0x80000000u;
+    uint exponent = (bits >> 23) & 0xFFu;
+    uint mantissa_bits = bits & 0x007FFFFFu;
+
+    if (exponent == 0u && mantissa_bits == 0u) {
+        // Zero: frexp(0) = (0, 0)
+        mantissa_data[idx] = bits; // preserve sign of zero
+        exponent_data[idx] = 0;
+    } else if (exponent == 0xFFu) {
+        // Inf or NaN: return (val, 0)
+        mantissa_data[idx] = bits;
+        exponent_data[idx] = 0;
+    } else if (exponent == 0u) {
+        // Denormal: normalize first
+        // Count leading zeros in mantissa
+        float normalized = uintBitsToFloat(sign | 0x3F000000u | mantissa_bits);
+        // For denormals, the effective exponent adjustment is complex.
+        // Simple approach: multiply by 2^24 to normalize, then frexp the result
+        float scaled = val * 16777216.0; // 2^24
+        uint scaled_bits = floatBitsToUint(scaled);
+        uint scaled_exp = (scaled_bits >> 23) & 0xFFu;
+        uint scaled_mant = scaled_bits & 0x007FFFFFu;
+        uint scaled_sign = scaled_bits & 0x80000000u;
+
+        // mantissa = sign | 0x3F000000 | mantissa_bits (biased exp = 126 -> value in [0.5, 1))
+        mantissa_data[idx] = scaled_sign | 0x3F000000u | scaled_mant;
+        // exponent = original_exponent - 126, but we scaled by 2^24
+        exponent_data[idx] = int(scaled_exp) - 126 - 24;
+    } else {
+        // Normal number
+        // mantissa = sign | biased_exp=126 | mantissa_bits -> value in [0.5, 1.0)
+        mantissa_data[idx] = sign | 0x3F000000u | mantissa_bits;
+        // exponent = unbiased exponent + 1 (because mantissa is in [0.5, 1) not [1, 2))
+        exponent_data[idx] = int(exponent) - 126;
+    }
+}

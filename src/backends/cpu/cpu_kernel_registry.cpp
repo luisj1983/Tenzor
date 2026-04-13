@@ -142,6 +142,23 @@ namespace cpu {
     auto addcmul_kernel(const Tensor& input, const Tensor& tensor1, const Tensor& tensor2, double alpha) -> Tensor;
     auto addcdiv_kernel(const Tensor& input, const Tensor& tensor1, const Tensor& tensor2, double alpha) -> Tensor;
 
+    // Phase 5 Extended Math
+    auto deg2rad_kernel(const Tensor& input) -> Tensor;
+    auto rad2deg_kernel(const Tensor& input) -> Tensor;
+    auto logit_kernel(const Tensor& input) -> Tensor;
+    auto signbit_kernel(const Tensor& input) -> Tensor;
+    auto isposinf_kernel(const Tensor& input) -> Tensor;
+    auto isneginf_kernel(const Tensor& input) -> Tensor;
+    auto isreal_kernel(const Tensor& input) -> Tensor;
+    auto float_power_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto xlog1py_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto ldexp_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto frexp_kernel(const Tensor& input) -> std::vector<Tensor>;
+    auto diag_embed_kernel(const Tensor& input, int64_t offset, int64_t dim1, int64_t dim2) -> Tensor;
+    auto diagflat_kernel(const Tensor& input, int64_t offset) -> Tensor;
+    auto nanvar_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction) -> Tensor;
+    auto nanstd_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction) -> Tensor;
+
     auto logical_and_kernel(const Tensor& a, const Tensor& b) -> Tensor;
     auto logical_or_kernel(const Tensor& a, const Tensor& b) -> Tensor;
     auto logical_not_kernel(const Tensor& input) -> Tensor;
@@ -582,6 +599,17 @@ namespace cpu {
 
     // Bucketize
     auto bucketize_kernel(const Tensor& input, const Tensor& boundaries, bool right) -> Tensor;
+
+    // Nested tensor kernels
+    auto nested_softmax_kernel(const Tensor& values, const Tensor& offsets, int64_t dim) -> Tensor;
+    auto nested_log_softmax_kernel(const Tensor& values, const Tensor& offsets, int64_t dim) -> Tensor;
+    auto nested_layer_norm_kernel(const Tensor& values, const Tensor& offsets, const Tensor& weight, const Tensor& bias, double eps) -> Tensor;
+    auto nested_sum_kernel(const Tensor& values, const Tensor& offsets, int64_t dim, bool keepdim) -> Tensor;
+    auto nested_mean_kernel(const Tensor& values, const Tensor& offsets, int64_t dim, bool keepdim) -> Tensor;
+    auto nested_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V, const Tensor& q_offsets, const Tensor& kv_offsets, float scale, bool causal) -> Tensor;
+    auto nested_to_padded_kernel(const Tensor& values, const Tensor& offsets, int64_t max_len, float padding_value) -> Tensor;
+    auto nested_from_padded_kernel(const Tensor& padded, const Tensor& offsets) -> Tensor;
+    auto nested_linear_kernel(const Tensor& values, const Tensor& weight, const Tensor* bias) -> Tensor;
 } // namespace cpu
 
 // Forward declarations for quantized kernels (in nn::quantization::kernels namespace)
@@ -3310,6 +3338,119 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
         return cpu::max_unpool3d_backward_kernel(inputs[0], inputs[1], input_shape);
     });
+
+    // =========================================================================
+    // Phase 5: Extended Math Operations
+    // =========================================================================
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Deg2Rad, cpu::deg2rad_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Rad2Deg, cpu::rad2deg_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Logit, cpu::logit_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Signbit, cpu::signbit_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, IsPosInf, cpu::isposinf_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, IsNegInf, cpu::isneginf_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, IsReal, cpu::isreal_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, FloatPower, cpu::float_power_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Xlog1py, cpu::xlog1py_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Ldexp, cpu::ldexp_kernel);
+
+    // Frexp (multi-output: mantissa + exponent)
+    table.register_kernel(OpId::Frexp, [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+        return cpu::frexp_kernel(inputs[0]);
+    });
+
+    // DiagEmbed and Diagflat
+    table.register_single_output_kernel(OpId::DiagEmbed, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t offset = attrs.get_int(AttrKey::Diagonal, 0);
+        int64_t dim1 = attrs.get_int(AttrKey::Dim0, -2);
+        int64_t dim2 = attrs.get_int(AttrKey::Dim1, -1);
+        return cpu::diag_embed_kernel(inputs[0], offset, dim1, dim2);
+    });
+    table.register_single_output_kernel(OpId::Diagflat, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t offset = attrs.get_int(AttrKey::Diagonal, 0);
+        return cpu::diagflat_kernel(inputs[0], offset);
+    });
+
+    // NanVar and NanStd
+    table.register_single_output_kernel(OpId::NanVar, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, LLONG_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        int64_t correction = attrs.get_int(AttrKey::Correction, 1);
+        return cpu::nanvar_kernel(inputs[0], dim, keepdim, correction);
+    });
+    table.register_single_output_kernel(OpId::NanStd, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, LLONG_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        int64_t correction = attrs.get_int(AttrKey::Correction, 1);
+        return cpu::nanstd_kernel(inputs[0], dim, keepdim, correction);
+    });
+
+    // =========================================================================
+    // Nested Tensor Operations (OpIds 670-679)
+    //
+    // Segmented kernels for offset-aware operations on jagged layout.
+    // Input convention:
+    //   [0] = values   (Float32/Float64, shape {total_len, *regular_dims})
+    //   [1] = offsets   (Int64, shape {B+1})
+    //   [2..] = additional inputs (weight, bias for layer norm)
+    // =========================================================================
+
+    table.register_kernel(OpId::NestedSoftmax,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            return {cpu::nested_softmax_kernel(inputs[0], inputs[1], dim)};
+        });
+
+    table.register_kernel(OpId::NestedLogSoftmax,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            return {cpu::nested_log_softmax_kernel(inputs[0], inputs[1], dim)};
+        });
+
+    table.register_kernel(OpId::NestedLayerNorm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            double eps = attrs.get_float(AttrKey::Eps, 1e-5);
+            return {cpu::nested_layer_norm_kernel(inputs[0], inputs[1], inputs[2], inputs[3], eps)};
+        });
+
+    table.register_kernel(OpId::NestedSum,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return {cpu::nested_sum_kernel(inputs[0], inputs[1], dim, keepdim)};
+        });
+
+    table.register_kernel(OpId::NestedMean,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+            return {cpu::nested_mean_kernel(inputs[0], inputs[1], dim, keepdim)};
+        });
+
+    table.register_kernel(OpId::NestedAttention,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            float scale = attrs.get_float(AttrKey::Scale, 1.0f);
+            bool causal = attrs.get_bool(AttrKey::Causal, false);
+            return {cpu::nested_attention_kernel(inputs[0], inputs[1], inputs[2],
+                                                 inputs[3], inputs[4], scale, causal)};
+        });
+
+    table.register_kernel(OpId::NestedToPadded,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t max_len = attrs.get_int(AttrKey::MaxLen, 0);
+            float padding_value = attrs.get_float(AttrKey::PaddingValue, 0.0f);
+            return {cpu::nested_to_padded_kernel(inputs[0], inputs[1], max_len, padding_value)};
+        });
+
+    table.register_kernel(OpId::NestedFromPadded,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {cpu::nested_from_padded_kernel(inputs[0], inputs[1])};
+        });
+
+    table.register_kernel(OpId::NestedLinear,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            const Tensor* bias = (inputs.size() > 3) ? &inputs[3] : nullptr;
+            return {cpu::nested_linear_kernel(inputs[0], inputs[2], bias)};
+        });
 }
 
 } // namespace tenzor

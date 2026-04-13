@@ -41,6 +41,7 @@ set(CPU_BACKEND_SOURCES
     kernels/pooling_avx512.cpp
     kernels/nn_kernels.cpp
     kernels/rnn_kernels.cpp
+    kernels/nested_kernels.cpp
     kernels/vision.cpp
     kernels/grid_sample.cpp
     kernels/advanced.cpp

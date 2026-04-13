@@ -7698,5 +7698,509 @@ auto unique_consecutive_kernel(const Tensor& input, bool return_inverse,
     }
 }
 
+// ============================================================================
+// Deg2Rad / Rad2Deg — simple unary conversions
+// ============================================================================
+
+__global__ void deg2rad_kernel_f32(const float* in, float* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] * (3.14159265358979323846f / 180.0f); }
+}
+__global__ void deg2rad_kernel_f64(const double* in, double* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] * (3.14159265358979323846 / 180.0); }
+}
+__global__ void deg2rad_kernel_f16(const __half* in, __half* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float x = __half2float(in[idx]);
+        out[idx] = __float2half(x * (3.14159265358979323846f / 180.0f));
+    }
+}
+__global__ void deg2rad_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float x = static_cast<float>(in[idx]);
+        out[idx] = hip_bfloat16(x * (3.14159265358979323846f / 180.0f));
+    }
+}
+
+auto deg2rad_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(deg2rad_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(deg2rad_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(deg2rad_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(deg2rad_kernel_bf16, grid, block, 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
+    } else {
+        throw std::runtime_error("deg2rad only supports Float32, Float64, Float16, BFloat16");
+    }
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+__global__ void rad2deg_kernel_f32(const float* in, float* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] * (180.0f / 3.14159265358979323846f); }
+}
+__global__ void rad2deg_kernel_f64(const double* in, double* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] * (180.0 / 3.14159265358979323846); }
+}
+__global__ void rad2deg_kernel_f16(const __half* in, __half* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float x = __half2float(in[idx]);
+        out[idx] = __float2half(x * (180.0f / 3.14159265358979323846f));
+    }
+}
+__global__ void rad2deg_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float x = static_cast<float>(in[idx]);
+        out[idx] = hip_bfloat16(x * (180.0f / 3.14159265358979323846f));
+    }
+}
+
+auto rad2deg_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(rad2deg_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(rad2deg_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(rad2deg_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(rad2deg_kernel_bf16, grid, block, 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
+    } else {
+        throw std::runtime_error("rad2deg only supports Float32, Float64, Float16, BFloat16");
+    }
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ============================================================================
+// Logit — log(x / (1-x)) with optional clamping
+// ============================================================================
+
+__device__ inline float logit_dev_f32(float x, float eps) {
+    if (eps > 0.0f) {
+        x = fminf(fmaxf(x, eps), 1.0f - eps);
+    }
+    return logf(x / (1.0f - x));
+}
+
+__device__ inline double logit_dev_f64(double x, double eps) {
+    if (eps > 0.0) {
+        x = fmin(fmax(x, eps), 1.0 - eps);
+    }
+    return log(x / (1.0 - x));
+}
+
+__global__ void logit_kernel_f32(const float* in, float* out, int64_t n, float eps) {
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = logit_dev_f32(in[idx], eps); }
+}
+__global__ void logit_kernel_f64(const double* in, double* out, int64_t n, double eps) {
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = logit_dev_f64(in[idx], eps); }
+}
+__global__ void logit_kernel_f16(const __half* in, __half* out, int64_t n, float eps) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float x = __half2float(in[idx]);
+        out[idx] = __float2half(logit_dev_f32(x, eps));
+    }
+}
+__global__ void logit_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int64_t n, float eps) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float x = static_cast<float>(in[idx]);
+        out[idx] = hip_bfloat16(logit_dev_f32(x, eps));
+    }
+}
+
+auto logit_kernel(const Tensor& input, double eps, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(logit_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<float>(), n, static_cast<float>(eps));
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(logit_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<double>(), n, eps);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(logit_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n, static_cast<float>(eps));
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(logit_kernel_bf16, grid, block, 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n, static_cast<float>(eps));
+    } else {
+        throw std::runtime_error("logit only supports Float32, Float64, Float16, BFloat16");
+    }
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ============================================================================
+// Signbit — returns Bool tensor, true where sign bit is set
+// ============================================================================
+
+__global__ void signbit_kernel_f32(const float* input, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        uint32_t bits; memcpy(&bits, &input[idx], sizeof(bits));
+        output[idx] = static_cast<uint8_t>((bits >> 31) & 1u);
+    }
+}
+__global__ void signbit_kernel_f64(const double* input, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        uint64_t bits; memcpy(&bits, &input[idx], sizeof(bits));
+        output[idx] = static_cast<uint8_t>((bits >> 63) & 1u);
+    }
+}
+__global__ void signbit_kernel_f16(const __half* input, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float val = __half2float(input[idx]);
+        uint32_t bits; memcpy(&bits, &val, sizeof(bits));
+        output[idx] = static_cast<uint8_t>((bits >> 31) & 1u);
+    }
+}
+
+auto signbit_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, DType::Bool, input.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(signbit_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<uint8_t>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(signbit_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<uint8_t>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(signbit_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            result.data<uint8_t>(), n);
+    } else {
+        // Integer types: check if value < 0
+        HIP_CHECK(hipMemsetAsync(result.data<uint8_t>(), 0, n * sizeof(uint8_t), stream));
+        return result;
+    }
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ============================================================================
+// IsPosInf / IsNegInf — returns Bool tensor
+// ============================================================================
+
+__global__ void isposinf_kernel_f32(const float* input, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        uint32_t bits; memcpy(&bits, &input[idx], sizeof(bits));
+        output[idx] = static_cast<uint8_t>(bits == 0x7F800000u ? 1 : 0);
+    }
+}
+__global__ void isposinf_kernel_f64(const double* input, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        uint64_t bits; memcpy(&bits, &input[idx], sizeof(bits));
+        output[idx] = static_cast<uint8_t>(bits == 0x7FF0000000000000ull ? 1 : 0);
+    }
+}
+__global__ void isposinf_kernel_f16(const __half* input, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float val = __half2float(input[idx]);
+        uint32_t bits; memcpy(&bits, &val, sizeof(bits));
+        output[idx] = static_cast<uint8_t>(bits == 0x7F800000u ? 1 : 0);
+    }
+}
+
+auto isposinf_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, DType::Bool, input.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(isposinf_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<uint8_t>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(isposinf_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<uint8_t>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(isposinf_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            result.data<uint8_t>(), n);
+    } else {
+        // Integer types cannot have Inf
+        HIP_CHECK(hipMemsetAsync(result.data<uint8_t>(), 0, n * sizeof(uint8_t), stream));
+        return result;
+    }
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+__global__ void isneginf_kernel_f32(const float* input, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        uint32_t bits; memcpy(&bits, &input[idx], sizeof(bits));
+        output[idx] = static_cast<uint8_t>(bits == 0xFF800000u ? 1 : 0);
+    }
+}
+__global__ void isneginf_kernel_f64(const double* input, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        uint64_t bits; memcpy(&bits, &input[idx], sizeof(bits));
+        output[idx] = static_cast<uint8_t>(bits == 0xFFF0000000000000ull ? 1 : 0);
+    }
+}
+__global__ void isneginf_kernel_f16(const __half* input, uint8_t* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float val = __half2float(input[idx]);
+        uint32_t bits; memcpy(&bits, &val, sizeof(bits));
+        output[idx] = static_cast<uint8_t>(bits == 0xFF800000u ? 1 : 0);
+    }
+}
+
+auto isneginf_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, DType::Bool, input.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(isneginf_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<uint8_t>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(isneginf_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<uint8_t>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(isneginf_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            result.data<uint8_t>(), n);
+    } else {
+        // Integer types cannot have Inf
+        HIP_CHECK(hipMemsetAsync(result.data<uint8_t>(), 0, n * sizeof(uint8_t), stream));
+        return result;
+    }
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ============================================================================
+// FloatPower — pow with promotion to Float64
+// ============================================================================
+
+__global__ void float_power_kernel_f64(const double* a, const double* b, double* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = pow(a[idx], b[idx]); }
+}
+
+auto float_power_kernel(const Tensor& base, const Tensor& exp, hipStream_t stream) -> Tensor {
+    if (base.numel() != exp.numel()) {
+        throw std::runtime_error("float_power: tensors must have the same number of elements");
+    }
+    int64_t n = base.numel();
+    std::vector<int64_t> shape(base.shape().begin(), base.shape().end());
+
+    // Promote both inputs to Float64
+    Tensor base_f64 = (base.dtype() != DType::Float64) ? base.to(DType::Float64) : base;
+    Tensor exp_f64 = (exp.dtype() != DType::Float64) ? exp.to(DType::Float64) : exp;
+
+    Tensor result(shape, DType::Float64, base.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    hipLaunchKernelGGL(float_power_kernel_f64, grid, block, 0, stream,
+        base_f64.data<double>(), exp_f64.data<double>(), result.data<double>(), n);
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ============================================================================
+// Xlog1py — x * log1p(y), with 0*log1p(y) = 0
+// ============================================================================
+
+__global__ void xlog1py_kernel_f32(const float* x, const float* y, float* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float xv = x[idx];
+        out[idx] = (xv == 0.0f) ? 0.0f : xv * log1pf(y[idx]);
+    }
+}
+__global__ void xlog1py_kernel_f64(const double* x, const double* y, double* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        double xv = x[idx];
+        out[idx] = (xv == 0.0) ? 0.0 : xv * log1p(y[idx]);
+    }
+}
+__global__ void xlog1py_kernel_f16(const __half* x, const __half* y, __half* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float xv = __half2float(x[idx]);
+        float yv = __half2float(y[idx]);
+        out[idx] = __float2half((xv == 0.0f) ? 0.0f : xv * log1pf(yv));
+    }
+}
+
+auto xlog1py_kernel(const Tensor& x, const Tensor& y, hipStream_t stream) -> Tensor {
+    if (x.dtype() != y.dtype()) {
+        throw std::runtime_error("xlog1py: tensors must have the same dtype");
+    }
+    if (x.numel() != y.numel()) {
+        throw std::runtime_error("xlog1py: tensors must have the same number of elements");
+    }
+    int64_t n = x.numel();
+    std::vector<int64_t> shape(x.shape().begin(), x.shape().end());
+    Tensor result(shape, x.dtype(), x.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (x.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(xlog1py_kernel_f32, grid, block, 0, stream,
+            x.data<float>(), y.data<float>(), result.data<float>(), n);
+    } else if (x.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(xlog1py_kernel_f64, grid, block, 0, stream,
+            x.data<double>(), y.data<double>(), result.data<double>(), n);
+    } else if (x.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(xlog1py_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(x.data<Float16>()),
+            reinterpret_cast<const __half*>(y.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else {
+        throw std::runtime_error("xlog1py only supports Float32, Float64, Float16");
+    }
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ============================================================================
+// Ldexp — x * 2^n
+// ============================================================================
+
+__global__ void ldexp_kernel_f32(const float* x, const float* n_in, float* out, int64_t count) {
+    HIP_KERNEL_LOOP(idx, count) {
+        out[idx] = ldexpf(x[idx], static_cast<int>(n_in[idx]));
+    }
+}
+__global__ void ldexp_kernel_f64(const double* x, const double* n_in, double* out, int64_t count) {
+    HIP_KERNEL_LOOP(idx, count) {
+        out[idx] = ldexp(x[idx], static_cast<int>(n_in[idx]));
+    }
+}
+__global__ void ldexp_kernel_f16(const __half* x, const __half* n_in, __half* out, int64_t count) {
+    HIP_KERNEL_LOOP(idx, count) {
+        float xv = __half2float(x[idx]);
+        int nv = static_cast<int>(__half2float(n_in[idx]));
+        out[idx] = __float2half(ldexpf(xv, nv));
+    }
+}
+
+auto ldexp_kernel(const Tensor& x, const Tensor& n_tensor, hipStream_t stream) -> Tensor {
+    if (x.numel() != n_tensor.numel()) {
+        throw std::runtime_error("ldexp: tensors must have the same number of elements");
+    }
+    int64_t n = x.numel();
+    std::vector<int64_t> shape(x.shape().begin(), x.shape().end());
+    Tensor result(shape, x.dtype(), x.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+
+    // n_tensor should match x's dtype (or be cast)
+    Tensor n_cast = (n_tensor.dtype() != x.dtype()) ? n_tensor.to(x.dtype()) : n_tensor;
+
+    if (x.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(ldexp_kernel_f32, grid, block, 0, stream,
+            x.data<float>(), n_cast.data<float>(), result.data<float>(), n);
+    } else if (x.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(ldexp_kernel_f64, grid, block, 0, stream,
+            x.data<double>(), n_cast.data<double>(), result.data<double>(), n);
+    } else if (x.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(ldexp_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(x.data<Float16>()),
+            reinterpret_cast<const __half*>(n_cast.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else {
+        throw std::runtime_error("ldexp only supports Float32, Float64, Float16");
+    }
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ============================================================================
+// Frexp — decompose into mantissa and exponent (two outputs)
+// ============================================================================
+
+__global__ void frexp_kernel_f32(const float* input, float* mantissa, int32_t* exponent, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        int exp_val;
+        mantissa[idx] = frexpf(input[idx], &exp_val);
+        exponent[idx] = static_cast<int32_t>(exp_val);
+    }
+}
+__global__ void frexp_kernel_f64(const double* input, double* mantissa, int32_t* exponent, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        int exp_val;
+        mantissa[idx] = frexp(input[idx], &exp_val);
+        exponent[idx] = static_cast<int32_t>(exp_val);
+    }
+}
+__global__ void frexp_kernel_f16(const __half* input, __half* mantissa, int32_t* exponent, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        int exp_val;
+        float m = frexpf(__half2float(input[idx]), &exp_val);
+        mantissa[idx] = __float2half(m);
+        exponent[idx] = static_cast<int32_t>(exp_val);
+    }
+}
+
+auto frexp_kernel(const Tensor& input, hipStream_t stream) -> std::vector<Tensor> {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor mantissa(shape, input.dtype(), input.device());
+    Tensor exponent(shape, DType::Int32, input.device());
+    if (n == 0) return {mantissa, exponent};
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(frexp_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), mantissa.data<float>(), exponent.data<int32_t>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(frexp_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), mantissa.data<double>(), exponent.data<int32_t>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(frexp_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(mantissa.data<Float16>()),
+            exponent.data<int32_t>(), n);
+    } else {
+        throw std::runtime_error("frexp only supports Float32, Float64, Float16");
+    }
+    HIP_CHECK(hipGetLastError());
+    return {mantissa, exponent};
+}
+
+// ============================================================================
+// IsReal — returns Bool tensor; true for all non-complex dtypes
+// ============================================================================
+
+auto isreal_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, DType::Bool, input.device());
+    if (n == 0) return result;
+    // All dtypes in Tenzor are real (no complex support yet) — fill with 1
+    HIP_CHECK(hipMemsetAsync(result.data<uint8_t>(), 1, n * sizeof(uint8_t), stream));
+    return result;
+}
+
 } // namespace rocm
 } // namespace tenzor

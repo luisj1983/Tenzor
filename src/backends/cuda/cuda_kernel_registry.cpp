@@ -605,6 +605,16 @@ namespace cuda {
     auto fused_adadelta_step_cuda(Tensor& param, const Tensor& grad, Tensor& square_avg, Tensor& acc_delta, float rho, float eps, float lr, float weight_decay, cudaStream_t stream) -> void;
     auto fused_adagrad_step_cuda(Tensor& param, const Tensor& grad, Tensor& sum_sq, float lr, float lr_decay, float eps, float weight_decay, int64_t step, cudaStream_t stream) -> void;
 
+    // Nested tensor operations
+    auto nested_softmax_cuda(const Tensor& values, const Tensor& offsets, int64_t dim, cudaStream_t stream) -> Tensor;
+    auto nested_sum_cuda(const Tensor& values, const Tensor& offsets, cudaStream_t stream) -> Tensor;
+    auto nested_mean_cuda(const Tensor& values, const Tensor& offsets, cudaStream_t stream) -> Tensor;
+    auto nested_layer_norm_cuda(const Tensor& values, const Tensor& offsets, const Tensor& weight, const Tensor& bias, float eps, cudaStream_t stream) -> Tensor;
+    auto nested_linear_cuda(const Tensor& values, const Tensor& weight, const Tensor* bias, cudaStream_t stream) -> Tensor;
+    auto nested_attention_cuda(const Tensor& Q, const Tensor& K, const Tensor& V, const Tensor& q_offsets, const Tensor& kv_offsets, float scale, bool causal, cudaStream_t stream) -> Tensor;
+    auto nested_to_padded_cuda(const Tensor& values, const Tensor& offsets, int64_t max_len, float padding_value, cudaStream_t stream) -> Tensor;
+    auto nested_from_padded_cuda(const Tensor& padded, const Tensor& offsets, cudaStream_t stream) -> Tensor;
+
     // =========================================================================
     // Dispatch-Conformant Wrappers (SingleOutputKernelFn signature)
     // =========================================================================
@@ -740,6 +750,10 @@ namespace cuda {
     Tensor isnan_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor isinf_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor isfinite_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor signbit_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor isposinf_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor isneginf_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor isreal_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
 
     // Binary math dispatch wrappers
     Tensor atan2_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
@@ -799,6 +813,22 @@ namespace cuda {
     auto addcdiv_kernel(const Tensor& input, const Tensor& t1, const Tensor& t2, double alpha, cudaStream_t stream) -> Tensor;
     Tensor igamma_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor igammac_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+
+    // New unary/binary math dispatch wrappers
+    Tensor deg2rad_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor rad2deg_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor logit_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor float_power_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor xlog1py_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor ldexp_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor frexp_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+
+    // DiagEmbed dispatch wrapper (diagflat is implemented inline in registry)
+    Tensor diag_embed_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+
+    // NaN-ignoring variance and standard deviation
+    Tensor nanvar_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor nanstd_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
 
     // Sparse kernels (sparse.cu). Definitions exist in both the
     // TENZOR_HAS_CUSPARSE path (cuSPARSE-backed) and the fallback path
@@ -3728,6 +3758,73 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::MaxUnpool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
         return cuda::max_unpool3d_backward_kernel(inputs[0], inputs[1], input_shape, get_cuda_stream(attrs));
+    });
+
+    // =========================================================================
+    // New ops: unary math, bool predicates, binary math, structural
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Deg2Rad, cuda::deg2rad_dispatch);
+    table.register_single_output_kernel(OpId::Rad2Deg, cuda::rad2deg_dispatch);
+    table.register_single_output_kernel(OpId::Logit, cuda::logit_dispatch);
+    table.register_single_output_kernel(OpId::Signbit, cuda::signbit_dispatch);
+    table.register_single_output_kernel(OpId::IsPosInf, cuda::isposinf_dispatch);
+    table.register_single_output_kernel(OpId::IsNegInf, cuda::isneginf_dispatch);
+    table.register_single_output_kernel(OpId::IsReal, cuda::isreal_dispatch);
+    table.register_single_output_kernel(OpId::FloatPower, cuda::float_power_dispatch);
+    table.register_single_output_kernel(OpId::Xlog1py, cuda::xlog1py_dispatch);
+    table.register_single_output_kernel(OpId::Ldexp, cuda::ldexp_dispatch);
+    table.register_single_output_kernel(OpId::Frexp, cuda::frexp_dispatch);
+    table.register_single_output_kernel(OpId::DiagEmbed, cuda::diag_embed_dispatch);
+    table.register_single_output_kernel(OpId::Diagflat, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t offset = attrs.get_int(AttrKey::Diagonal, 0);
+        Tensor flat = inputs[0].reshape({-1});
+        if (!flat.is_contiguous()) flat = flat.contiguous();
+        return cuda::diag_kernel(flat, offset, get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::NanVar, cuda::nanvar_dispatch);
+    table.register_single_output_kernel(OpId::NanStd, cuda::nanstd_dispatch);
+
+    // =========================================================================
+    // Nested Tensor Operations
+    // =========================================================================
+    table.register_single_output_kernel(OpId::NestedSoftmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        return cuda::nested_softmax_cuda(inputs[0], inputs[1], dim, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::NestedSum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return cuda::nested_sum_cuda(inputs[0], inputs[1], get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::NestedMean, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return cuda::nested_mean_cuda(inputs[0], inputs[1], get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::NestedLayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        float eps = attrs.get_float(AttrKey::Eps, 1e-5f);
+        return cuda::nested_layer_norm_cuda(inputs[0], inputs[1], inputs[2], inputs[3], eps, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::NestedLinear, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        const Tensor* bias = (inputs.size() > 3) ? &inputs[3] : nullptr;
+        return cuda::nested_linear_cuda(inputs[0], inputs[2], bias, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::NestedAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        float scale = attrs.get_float(AttrKey::Scale, 1.0f);
+        bool causal = attrs.get_bool(AttrKey::Causal, false);
+        return cuda::nested_attention_cuda(inputs[0], inputs[1], inputs[2],
+                                           inputs[3], inputs[4], scale, causal, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::NestedToPadded, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t max_len = attrs.get_int(AttrKey::MaxLen, 0);
+        float padding_value = attrs.get_float(AttrKey::PaddingValue, 0.0f);
+        return cuda::nested_to_padded_cuda(inputs[0], inputs[1], max_len, padding_value, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::NestedFromPadded, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return cuda::nested_from_padded_cuda(inputs[0], inputs[1], get_cuda_stream(attrs));
     });
 }
 

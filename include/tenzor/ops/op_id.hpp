@@ -658,6 +658,20 @@ enum class OpId : uint16_t {
     Frexp,             // decompose into mantissa and exponent
 
     // =========================================================================
+    // Nested Tensor Operations (670-689)
+    // =========================================================================
+    NestedSoftmax = 670,           // Segmented softmax along ragged dim
+    NestedLogSoftmax,              // Segmented log-softmax along ragged dim
+    NestedLayerNorm,               // Segmented layer normalization
+    NestedSum,                     // Segmented sum along ragged dim
+    NestedMean,                    // Segmented mean along ragged dim
+    NestedAttention,               // Segmented scaled dot-product attention
+    NestedAttentionBackward,       // Backward for nested attention
+    NestedToPadded,                // Convert nested to padded dense tensor
+    NestedFromPadded,              // Convert padded dense tensor to nested
+    NestedLinear,                  // Linear projection on packed nested values
+
+    // =========================================================================
     // Sentinel (MUST BE LAST)
     // =========================================================================
     OP_COUNT

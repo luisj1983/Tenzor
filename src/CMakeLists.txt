@@ -230,6 +230,9 @@ set(TENZOR_CORE_SOURCES
     distributed/gradient_compression.cpp
     sparse/sparse_tensor.cpp
     sparse/sparse_ops.cpp
+    nested/nested_tensor.cpp
+    nested/nested_ops.cpp
+    autograd/nested_autograd_ops.cpp
 )
 
 # Create core library

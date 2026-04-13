@@ -8,7 +8,7 @@ layout(local_size_x_id = 0) in;
 
 layout(binding = 0) readonly buffer MatA    { float A_data[]; };  // N x N triangular
 layout(binding = 1) readonly buffer MatB    { float B_data[]; };  // N x M (RHS)
-layout(binding = 2) writeonly buffer MatX   { float X_data[]; };  // N x M (solution)
+layout(binding = 2) buffer MatX              { float X_data[]; };  // N x M (solution)
 
 layout(push_constant) uniform PushConstants {
     uint N;           // matrix dimension
