@@ -9,6 +9,13 @@
 #include <oneapi/mkl.hpp>
 #endif
 
+#ifdef TENZOR_HAS_ONEDPL
+#include <oneapi/dpl/algorithm>
+#include <oneapi/dpl/execution>
+#include <oneapi/dpl/iterator>
+#include <oneapi/dpl/numeric>
+#endif
+
 // Forward declaration for contiguous kernel
 namespace tenzor {
 namespace oneapi {
@@ -5934,11 +5941,37 @@ struct IsinKernelFloat32 {};
 struct IsinKernelFloat64 {};
 struct IsinKernelInt32 {};
 struct IsinKernelInt64 {};
+struct IsinSortKernelFloat32 {};
+struct IsinSortKernelFloat64 {};
+struct IsinSortKernelInt32 {};
+struct IsinSortKernelInt64 {};
+struct KthvalueSliceKernelFloat32 {};
+struct KthvalueSliceKernelFloat64 {};
+struct KthvalueSliceKernelInt32 {};
+struct KthvalueSliceKernelInt64 {};
+struct KthvalueIdxInitKernelFloat32 {};
+struct KthvalueIdxInitKernelFloat64 {};
+struct KthvalueIdxInitKernelInt32 {};
+struct KthvalueIdxInitKernelInt64 {};
+struct QuantileInterpKernelFloat32 {};
+struct QuantileInterpKernelFloat64 {};
+struct QuantileNanFilterFloat32 {};
+struct QuantileNanFilterFloat64 {};
 struct HistcKernelFloat32 {};
+struct HistcBinKernelFloat32 {};
+struct HistcBinKernelFloat64 {};
 struct UniqueConsecutiveMaskFloat32 {};
 struct UniqueConsecutiveMaskFloat64 {};
 struct UniqueConsecutiveMaskInt32 {};
 struct UniqueConsecutiveMaskInt64 {};
+struct UniqueConsecutiveGatherFloat32 {};
+struct UniqueConsecutiveGatherFloat64 {};
+struct UniqueConsecutiveGatherInt32 {};
+struct UniqueConsecutiveGatherInt64 {};
+struct UniqueConsecutiveCountsFloat32 {};
+struct UniqueConsecutiveCountsFloat64 {};
+struct UniqueConsecutiveCountsInt32 {};
+struct UniqueConsecutiveCountsInt64 {};
 
 auto cummax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> std::pair<Tensor, Tensor>
 {
@@ -6158,36 +6191,41 @@ auto isin_kernel(const Tensor& elements, const Tensor& test_elements, sycl::queu
     Tensor output(std::vector<int64_t>(elem_cont.shape().begin(), elem_cont.shape().end()),
                   DType::Bool, elem_cont.device());
 
-    // Sort test_elements, then binary search
-    Tensor test_sorted(std::vector<int64_t>(test_cont.shape().begin(), test_cont.shape().end()),
-                       test_cont.dtype(), test_cont.device());
+    auto launch = [&]<typename T, typename SearchKernel>() {
+        // Sort test_elements on device
+        T* sorted_buf = sycl::malloc_device<T>(num_test, queue);
+        queue.memcpy(sorted_buf, get_data_ptr<const T>(test_cont),
+                     num_test * sizeof(T)).wait();
 
-    auto launch = [&]<typename T, typename KernelName>() {
-        // Copy and sort on host (simple approach for SYCL)
+#ifdef TENZOR_HAS_ONEDPL
+        auto policy = ::oneapi::dpl::execution::make_device_policy(queue);
+        ::oneapi::dpl::sort(policy, sorted_buf, sorted_buf + num_test);
+#else
+        // Fallback: sort via host when oneDPL unavailable
         std::vector<T> test_host(num_test);
-        queue.memcpy(test_host.data(), get_data_ptr<const T>(test_cont),
-                     num_test * sizeof(T)).wait();
+        queue.memcpy(test_host.data(), sorted_buf, num_test * sizeof(T)).wait();
         std::sort(test_host.begin(), test_host.end());
-        queue.memcpy(get_data_ptr<T>(test_sorted), test_host.data(),
-                     num_test * sizeof(T)).wait();
+        queue.memcpy(sorted_buf, test_host.data(), num_test * sizeof(T)).wait();
+#endif
 
         const T* elem_ptr = get_data_ptr<const T>(elem_cont);
-        const T* sorted_ptr = get_data_ptr<const T>(test_sorted);
         bool* out_ptr = get_data_ptr<bool>(output);
 
-        queue.parallel_for<KernelName>(sycl::range<1>(num_elements), [=](sycl::id<1> idx) {
+        queue.parallel_for<SearchKernel>(sycl::range<1>(num_elements), [=](sycl::id<1> idx) {
             T val = elem_ptr[idx];
             int64_t lo = 0, hi = num_test - 1;
             bool found = false;
             while (lo <= hi) {
                 int64_t mid = lo + (hi - lo) / 2;
-                T mid_val = sorted_ptr[mid];
+                T mid_val = sorted_buf[mid];
                 if (mid_val == val) { found = true; break; }
                 else if (mid_val < val) lo = mid + 1;
                 else hi = mid - 1;
             }
             out_ptr[idx] = found;
         }).wait();
+
+        sycl::free(sorted_buf, queue);
     };
 
     switch (elem_cont.dtype()) {
@@ -6233,39 +6271,127 @@ auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim, bool keepdim,
     Tensor values(out_shape, dtype, device);
     Tensor indices_out(out_shape, DType::Int64, device);
 
-    // Kthvalue via host-side partial sort per slice (simplest correct approach for SYCL)
-    auto launch = [&]<typename T>() {
-        std::vector<T> input_host(input_cont.numel());
-        queue.memcpy(input_host.data(), get_data_ptr<const T>(input_cont),
-                     input_cont.numel() * sizeof(T)).wait();
+    auto launch = [&]<typename T, typename IdxInitKernel>() {
+        int64_t in_numel = input_cont.numel();
 
-        std::vector<T> val_host(total_slices);
-        std::vector<int64_t> idx_host(total_slices);
+        if (inner_size == 1) {
+            // Contiguous slices along last dims — sort per slice on device
+#ifdef TENZOR_HAS_ONEDPL
+            auto policy = ::oneapi::dpl::execution::make_device_policy(queue);
 
-        for (int64_t s = 0; s < total_slices; ++s) {
-            int64_t outer = s / inner_size;
-            int64_t inner = s % inner_size;
+            T* tmp_vals = sycl::malloc_device<T>(in_numel, queue);
+            int64_t* tmp_idx = sycl::malloc_device<int64_t>(in_numel, queue);
 
-            std::vector<std::pair<T, int64_t>> slice(dim_size);
-            for (int64_t i = 0; i < dim_size; ++i) {
-                slice[i] = {input_host[outer * dim_size * inner_size + i * inner_size + inner], i};
+            queue.memcpy(tmp_vals, get_data_ptr<const T>(input_cont),
+                         in_numel * sizeof(T)).wait();
+
+            // Initialize indices: each slice gets 0..dim_size-1
+            queue.parallel_for<IdxInitKernel>(sycl::range<1>(in_numel),
+                [=](sycl::id<1> gid) {
+                    tmp_idx[gid] = static_cast<int64_t>(gid[0]) % dim_size;
+                }).wait();
+
+            T* out_val_ptr = get_data_ptr<T>(values);
+            int64_t* out_idx_ptr = get_data_ptr<int64_t>(indices_out);
+
+            for (int64_t o = 0; o < outer_size; ++o) {
+                T* slice_vals = tmp_vals + o * dim_size;
+                int64_t* slice_idx = tmp_idx + o * dim_size;
+                ::oneapi::dpl::sort_by_key(policy, slice_vals, slice_vals + dim_size, slice_idx);
+                // Copy k-th element (0-indexed: k-1)
+                queue.memcpy(out_val_ptr + o, slice_vals + (k - 1), sizeof(T)).wait();
+                queue.memcpy(out_idx_ptr + o, slice_idx + (k - 1), sizeof(int64_t)).wait();
             }
-            std::nth_element(slice.begin(), slice.begin() + (k - 1), slice.end(),
-                [](const auto& a, const auto& b) { return a.first < b.first; });
-            val_host[s] = slice[k - 1].first;
-            idx_host[s] = slice[k - 1].second;
-        }
 
-        queue.memcpy(get_data_ptr<T>(values), val_host.data(), total_slices * sizeof(T)).wait();
-        queue.memcpy(get_data_ptr<int64_t>(indices_out), idx_host.data(),
-                     total_slices * sizeof(int64_t)).wait();
+            sycl::free(tmp_vals, queue);
+            sycl::free(tmp_idx, queue);
+#else
+            // Fallback: host-side partial sort when oneDPL unavailable
+            std::vector<T> input_host(in_numel);
+            queue.memcpy(input_host.data(), get_data_ptr<const T>(input_cont),
+                         in_numel * sizeof(T)).wait();
+
+            std::vector<T> val_host(total_slices);
+            std::vector<int64_t> idx_host(total_slices);
+
+            for (int64_t s = 0; s < total_slices; ++s) {
+                std::vector<std::pair<T, int64_t>> slice(dim_size);
+                for (int64_t i = 0; i < dim_size; ++i) {
+                    slice[i] = {input_host[s * dim_size + i], i};
+                }
+                std::nth_element(slice.begin(), slice.begin() + (k - 1), slice.end(),
+                    [](const auto& a, const auto& b) { return a.first < b.first; });
+                val_host[s] = slice[k - 1].first;
+                idx_host[s] = slice[k - 1].second;
+            }
+
+            queue.memcpy(get_data_ptr<T>(values), val_host.data(), total_slices * sizeof(T)).wait();
+            queue.memcpy(get_data_ptr<int64_t>(indices_out), idx_host.data(),
+                         total_slices * sizeof(int64_t)).wait();
+#endif
+        } else {
+            // Non-contiguous slices: gather per slice, sort on device, scatter result
+#ifdef TENZOR_HAS_ONEDPL
+            auto policy = ::oneapi::dpl::execution::make_device_policy(queue);
+            T* slice_buf = sycl::malloc_device<T>(dim_size, queue);
+            int64_t* idx_buf = sycl::malloc_device<int64_t>(dim_size, queue);
+            const T* in_ptr = get_data_ptr<const T>(input_cont);
+            T* out_val_ptr = get_data_ptr<T>(values);
+            int64_t* out_idx_ptr = get_data_ptr<int64_t>(indices_out);
+
+            for (int64_t s = 0; s < total_slices; ++s) {
+                int64_t outer = s / inner_size;
+                int64_t inner = s % inner_size;
+                int64_t base = outer * dim_size * inner_size + inner;
+
+                // Gather slice to contiguous buffer on device
+                queue.parallel_for(sycl::range<1>(dim_size), [=](sycl::id<1> i) {
+                    slice_buf[i] = in_ptr[base + i[0] * inner_size];
+                    idx_buf[i] = static_cast<int64_t>(i[0]);
+                }).wait();
+
+                ::oneapi::dpl::sort_by_key(policy, slice_buf, slice_buf + dim_size, idx_buf);
+                queue.memcpy(out_val_ptr + s, slice_buf + (k - 1), sizeof(T)).wait();
+                queue.memcpy(out_idx_ptr + s, idx_buf + (k - 1), sizeof(int64_t)).wait();
+            }
+
+            sycl::free(slice_buf, queue);
+            sycl::free(idx_buf, queue);
+#else
+            // Fallback: host-side partial sort
+            std::vector<T> input_host(in_numel);
+            queue.memcpy(input_host.data(), get_data_ptr<const T>(input_cont),
+                         in_numel * sizeof(T)).wait();
+
+            std::vector<T> val_host(total_slices);
+            std::vector<int64_t> idx_host(total_slices);
+
+            for (int64_t s = 0; s < total_slices; ++s) {
+                int64_t outer = s / inner_size;
+                int64_t inner = s % inner_size;
+
+                std::vector<std::pair<T, int64_t>> slice(dim_size);
+                for (int64_t i = 0; i < dim_size; ++i) {
+                    slice[i] = {input_host[outer * dim_size * inner_size + i * inner_size + inner], i};
+                }
+                std::nth_element(slice.begin(), slice.begin() + (k - 1), slice.end(),
+                    [](const auto& a, const auto& b) { return a.first < b.first; });
+                val_host[s] = slice[k - 1].first;
+                idx_host[s] = slice[k - 1].second;
+            }
+
+            queue.memcpy(get_data_ptr<T>(values), val_host.data(), total_slices * sizeof(T)).wait();
+            queue.memcpy(get_data_ptr<int64_t>(indices_out), idx_host.data(),
+                         total_slices * sizeof(int64_t)).wait();
+#endif
+        }
     };
 
     switch (dtype) {
-        case DType::Float32: launch.template operator()<float>(); break;
-        case DType::Float64: launch.template operator()<double>(); break;
-        case DType::Int32:   launch.template operator()<int32_t>(); break;
-        case DType::Int64:   launch.template operator()<int64_t>(); break;
+        case DType::Float32: launch.template operator()<float, KthvalueIdxInitKernelFloat32>(); break;
+        case DType::Float64: launch.template operator()<double, KthvalueIdxInitKernelFloat64>(); break;
+        case DType::Int32:   launch.template operator()<int32_t, KthvalueIdxInitKernelInt32>(); break;
+        case DType::Int64:   launch.template operator()<int64_t, KthvalueIdxInitKernelInt64>(); break;
         default: throw std::runtime_error("kthvalue OneAPI: unsupported dtype");
     }
     return {values, indices_out};
@@ -6303,8 +6429,56 @@ static auto quantile_impl(const Tensor& input, double q, int64_t dim, bool keepd
 
     Tensor output(out_shape, dtype, device);
 
-    // Host-side sort + interpolate per slice
     auto launch = [&]<typename T>() {
+#ifdef TENZOR_HAS_ONEDPL
+        auto policy = ::oneapi::dpl::execution::make_device_policy(queue);
+        T* slice_buf = sycl::malloc_device<T>(dim_size, queue);
+        const T* in_ptr = get_data_ptr<const T>(input_cont);
+        T* out_ptr = get_data_ptr<T>(output);
+
+        for (int64_t s = 0; s < total_slices; ++s) {
+            int64_t outer = s / inner_size;
+            int64_t inner = s % inner_size;
+            int64_t base = outer * dim_size * inner_size + inner;
+
+            // Gather slice to contiguous device buffer
+            queue.parallel_for(sycl::range<1>(dim_size), [=](sycl::id<1> i) {
+                slice_buf[i] = in_ptr[base + i[0] * inner_size];
+            }).wait();
+
+            int64_t valid_count = dim_size;
+            if (ignore_nan) {
+                // Partition non-NaN values to the front on device
+                auto end_it = ::oneapi::dpl::partition(policy, slice_buf, slice_buf + dim_size,
+                    [](T val) { return !sycl::isnan(static_cast<float>(val)); });
+                valid_count = end_it - slice_buf;
+            }
+
+            if (valid_count == 0) {
+                T nan_val = static_cast<T>(NAN);
+                queue.memcpy(out_ptr + s, &nan_val, sizeof(T)).wait();
+                continue;
+            }
+
+            // Sort valid elements on device
+            ::oneapi::dpl::sort(policy, slice_buf, slice_buf + valid_count);
+
+            // Compute interpolated quantile value on device
+            double pos = q * (static_cast<double>(valid_count) - 1.0);
+            int64_t lo = static_cast<int64_t>(pos);
+            int64_t hi = lo + 1;
+            if (hi >= valid_count) hi = valid_count - 1;
+            double frac = pos - lo;
+
+            queue.single_task([=]() {
+                out_ptr[s] = static_cast<T>(static_cast<double>(slice_buf[lo]) * (1.0 - frac) +
+                                            static_cast<double>(slice_buf[hi]) * frac);
+            }).wait();
+        }
+
+        sycl::free(slice_buf, queue);
+#else
+        // Fallback: host-side sort + interpolate when oneDPL unavailable
         std::vector<T> input_host(input_cont.numel());
         queue.memcpy(input_host.data(), get_data_ptr<const T>(input_cont),
                      input_cont.numel() * sizeof(T)).wait();
@@ -6338,6 +6512,7 @@ static auto quantile_impl(const Tensor& input, double q, int64_t dim, bool keepd
         }
 
         queue.memcpy(get_data_ptr<T>(output), out_host.data(), total_slices * sizeof(T)).wait();
+#endif
     };
 
     switch (dtype) {
@@ -6377,39 +6552,74 @@ auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_
     int64_t n = input_cont.numel();
     const auto device = input_cont.device();
 
-    // Compute on host for simplicity (atomics in SYCL are complex for histograms)
+    // Work in float32 for the histogram accumulation
     Tensor output({bins}, DType::Float32, device);
 
-    std::vector<float> in_host(n);
+    // Zero-initialize output on device
+    queue.memset(get_data_ptr<float>(output), 0, bins * sizeof(float)).wait();
+
+    // Get input as float32 on device
+    const float* in_ptr = nullptr;
+    Tensor f32_input;
     if (input_cont.dtype() == DType::Float32) {
-        queue.memcpy(in_host.data(), get_data_ptr<const float>(input_cont), n * sizeof(float)).wait();
+        in_ptr = get_data_ptr<const float>(input_cont);
     } else if (input_cont.dtype() == DType::Float64) {
-        std::vector<double> in_d(n);
-        queue.memcpy(in_d.data(), get_data_ptr<const double>(input_cont), n * sizeof(double)).wait();
-        for (int64_t i = 0; i < n; ++i) in_host[i] = static_cast<float>(in_d[i]);
+        f32_input = input_cont.to(DType::Float32);
+        in_ptr = get_data_ptr<const float>(f32_input);
     } else {
         throw std::runtime_error("histc OneAPI: unsupported dtype");
     }
 
-    // Auto-detect range
+    // Auto-detect range on device
     if (min_val >= max_val) {
-        auto [mn, mx] = std::minmax_element(in_host.begin(), in_host.end());
-        min_val = *mn;
-        max_val = *mx;
+#ifdef TENZOR_HAS_ONEDPL
+        auto policy = ::oneapi::dpl::execution::make_device_policy(queue);
+        auto minmax = ::oneapi::dpl::minmax_element(policy, in_ptr, in_ptr + n);
+        // Read two scalars from device (minimal transfer — just two floats for range)
+        float h_min, h_max;
+        queue.memcpy(&h_min, &(*minmax.first), sizeof(float)).wait();
+        queue.memcpy(&h_max, &(*minmax.second), sizeof(float)).wait();
+        min_val = h_min;
+        max_val = h_max;
+#else
+        // Fallback: reduction via parallel_for
+        float* d_min = sycl::malloc_device<float>(1, queue);
+        float* d_max = sycl::malloc_device<float>(1, queue);
+        queue.single_task([=]() { d_min[0] = in_ptr[0]; d_max[0] = in_ptr[0]; }).wait();
+        queue.parallel_for(sycl::range<1>(n), sycl::reduction(d_min, sycl::minimum<float>()),
+                           sycl::reduction(d_max, sycl::maximum<float>()),
+                           [=](sycl::id<1> idx, auto& mn, auto& mx) {
+                               mn.combine(in_ptr[idx]);
+                               mx.combine(in_ptr[idx]);
+                           }).wait();
+        float h_min, h_max;
+        queue.memcpy(&h_min, d_min, sizeof(float)).wait();
+        queue.memcpy(&h_max, d_max, sizeof(float)).wait();
+        sycl::free(d_min, queue);
+        sycl::free(d_max, queue);
+        min_val = h_min;
+        max_val = h_max;
+#endif
     }
 
-    std::vector<float> out_host(bins, 0.0f);
-    float bin_width = static_cast<float>((max_val - min_val) / bins);
-    for (int64_t i = 0; i < n; ++i) {
-        float val = in_host[i];
-        if (val >= static_cast<float>(min_val) && val <= static_cast<float>(max_val)) {
-            int64_t bin = static_cast<int64_t>((val - min_val) / bin_width);
+    // Compute histogram on device using atomic operations
+    float* out_ptr = get_data_ptr<float>(output);
+    float f_min = static_cast<float>(min_val);
+    float f_max = static_cast<float>(max_val);
+    float bin_width = (f_max - f_min) / static_cast<float>(bins);
+
+    queue.parallel_for<HistcBinKernelFloat32>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+        float val = in_ptr[idx];
+        if (val >= f_min && val <= f_max) {
+            int64_t bin = static_cast<int64_t>((val - f_min) / bin_width);
             if (bin >= bins) bin = bins - 1;
-            out_host[bin] += 1.0f;
+            sycl::atomic_ref<float, sycl::memory_order::relaxed,
+                             sycl::memory_scope::device,
+                             sycl::access::address_space::global_space> atom(out_ptr[bin]);
+            atom += 1.0f;
         }
-    }
+    }).wait();
 
-    queue.memcpy(get_data_ptr<float>(output), out_host.data(), bins * sizeof(float)).wait();
     return output;
 }
 
@@ -6430,48 +6640,79 @@ auto unique_consecutive_kernel(const Tensor& input, bool return_inverse,
                 Tensor({0}, DType::Int64, device)};
     }
 
-    // Host-side implementation for correctness
-    auto launch = [&]<typename T>() {
-        std::vector<T> in_host(n);
-        queue.memcpy(in_host.data(), get_data_ptr<const T>(input_cont), n * sizeof(T)).wait();
+    auto launch = [&]<typename T, typename MaskKernel, typename GatherKernel, typename CountsKernel>() {
+        const T* in_ptr = get_data_ptr<const T>(input_cont);
 
-        std::vector<T> unique_vals;
-        std::vector<int64_t> inverse(n);
-        std::vector<int64_t> counts;
-
-        unique_vals.push_back(in_host[0]);
-        inverse[0] = 0;
-        int64_t current_count = 1;
-
-        for (int64_t i = 1; i < n; ++i) {
-            if (in_host[i] != in_host[i - 1]) {
-                counts.push_back(current_count);
-                unique_vals.push_back(in_host[i]);
-                current_count = 1;
+        // Step 1: compute adjacency mask on device (1 where value differs from predecessor)
+        int32_t* d_mask = sycl::malloc_device<int32_t>(n, queue);
+        queue.parallel_for<MaskKernel>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            if (idx[0] == 0) {
+                d_mask[0] = 1;  // First element is always unique
             } else {
-                current_count++;
+                d_mask[idx] = (in_ptr[idx] != in_ptr[idx[0] - 1]) ? 1 : 0;
             }
-            inverse[i] = static_cast<int64_t>(unique_vals.size()) - 1;
-        }
-        counts.push_back(current_count);
+        }).wait();
 
-        int64_t num_unique = static_cast<int64_t>(unique_vals.size());
+        // Step 2: inclusive prefix sum on mask for scatter offsets
+        int32_t* d_prefix = sycl::malloc_device<int32_t>(n, queue);
+
+#ifdef TENZOR_HAS_ONEDPL
+        auto policy = ::oneapi::dpl::execution::make_device_policy(queue);
+        ::oneapi::dpl::inclusive_scan(policy, d_mask, d_mask + n, d_prefix);
+#else
+        // Fallback: host-side prefix sum
+        std::vector<int32_t> mask_host(n), prefix_host(n);
+        queue.memcpy(mask_host.data(), d_mask, n * sizeof(int32_t)).wait();
+        prefix_host[0] = mask_host[0];
+        for (int64_t i = 1; i < n; ++i) {
+            prefix_host[i] = prefix_host[i - 1] + mask_host[i];
+        }
+        queue.memcpy(d_prefix, prefix_host.data(), n * sizeof(int32_t)).wait();
+#endif
+
+        // Read total unique count from last element of prefix sum (single scalar readback)
+        int32_t num_unique_h;
+        queue.memcpy(&num_unique_h, d_prefix + n - 1, sizeof(int32_t)).wait();
+        int64_t num_unique = num_unique_h;
+
+        // Step 3: gather unique elements and compute inverse indices on device
         Tensor unique_out({num_unique}, dtype, device);
         Tensor inverse_out({n}, DType::Int64, device);
-        Tensor counts_out({num_unique}, DType::Int64, device);
 
-        queue.memcpy(get_data_ptr<T>(unique_out), unique_vals.data(), num_unique * sizeof(T)).wait();
-        queue.memcpy(get_data_ptr<int64_t>(inverse_out), inverse.data(), n * sizeof(int64_t)).wait();
-        queue.memcpy(get_data_ptr<int64_t>(counts_out), counts.data(), num_unique * sizeof(int64_t)).wait();
+        T* unique_ptr = get_data_ptr<T>(unique_out);
+        int64_t* inv_ptr = get_data_ptr<int64_t>(inverse_out);
+
+        queue.parallel_for<GatherKernel>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            int32_t out_idx = d_prefix[idx] - 1;  // prefix_sum is 1-based
+            if (d_mask[idx]) {
+                unique_ptr[out_idx] = in_ptr[idx];
+            }
+            inv_ptr[idx] = static_cast<int64_t>(out_idx);
+        }).wait();
+
+        // Step 4: compute counts on device using atomics
+        Tensor counts_out({num_unique}, DType::Int64, device);
+        queue.memset(get_data_ptr<int64_t>(counts_out), 0, num_unique * sizeof(int64_t)).wait();
+
+        int64_t* counts_ptr = get_data_ptr<int64_t>(counts_out);
+        queue.parallel_for<CountsKernel>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            sycl::atomic_ref<int64_t, sycl::memory_order::relaxed,
+                             sycl::memory_scope::device,
+                             sycl::access::address_space::global_space> atom(counts_ptr[inv_ptr[idx]]);
+            atom += 1;
+        }).wait();
+
+        sycl::free(d_mask, queue);
+        sycl::free(d_prefix, queue);
 
         return std::make_tuple(unique_out, inverse_out, counts_out);
     };
 
     switch (dtype) {
-        case DType::Float32: return launch.template operator()<float>();
-        case DType::Float64: return launch.template operator()<double>();
-        case DType::Int32:   return launch.template operator()<int32_t>();
-        case DType::Int64:   return launch.template operator()<int64_t>();
+        case DType::Float32: return launch.template operator()<float, UniqueConsecutiveMaskFloat32, UniqueConsecutiveGatherFloat32, UniqueConsecutiveCountsFloat32>();
+        case DType::Float64: return launch.template operator()<double, UniqueConsecutiveMaskFloat64, UniqueConsecutiveGatherFloat64, UniqueConsecutiveCountsFloat64>();
+        case DType::Int32:   return launch.template operator()<int32_t, UniqueConsecutiveMaskInt32, UniqueConsecutiveGatherInt32, UniqueConsecutiveCountsInt32>();
+        case DType::Int64:   return launch.template operator()<int64_t, UniqueConsecutiveMaskInt64, UniqueConsecutiveGatherInt64, UniqueConsecutiveCountsInt64>();
         default: throw std::runtime_error("unique_consecutive OneAPI: unsupported dtype");
     }
 }

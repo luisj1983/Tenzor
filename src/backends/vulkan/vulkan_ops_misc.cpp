@@ -1621,10 +1621,20 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
             endSingleTimeCommands(cmd_cr128, dev_id);
             return (target_dtype != DType::Float64) ? output_f64.to(target_dtype) : output_f64;
         } else {
-            // Unexpected complex conversion path: CPU round-trip as safety fallback
-            Tensor cpu_input = input.to(Device::cpu());
-            Tensor cpu_result = cpu_input.to(target_dtype);
-            return cpu_result.to(input.device());
+            // Defensive path: convert via on-device intermediate to avoid CPU round-trip.
+            // This branch is technically unreachable since all real↔complex combinations
+            // are handled above, but we keep it as a safety net.
+            if (is_complex_of(target_dtype)) {
+                // Unknown real type → complex: cast real to Float32/Float64 first on device
+                DType intermediate = (target_dtype == DType::Complex128) ? DType::Float64 : DType::Float32;
+                Tensor intermediate_tensor = (src_dtype != intermediate) ? dispatchCast(input, intermediate) : input;
+                return dispatchCast(intermediate_tensor, target_dtype);
+            } else {
+                // Complex → unknown real type: extract real part to Float32/Float64, then cast
+                DType intermediate = (src_dtype == DType::Complex128) ? DType::Float64 : DType::Float32;
+                Tensor intermediate_tensor = dispatchCast(input, intermediate);
+                return (intermediate != target_dtype) ? dispatchCast(intermediate_tensor, target_dtype) : intermediate_tensor;
+            }
         }
     }
     if (is_complex_of(src_dtype) && is_complex_of(target_dtype) && src_dtype != target_dtype) {

@@ -624,5 +624,118 @@ auto bernoulli_kernel(const Tensor& probs) -> Tensor {
     return result;
 }
 
+auto normal_sample_kernel(const Tensor& mean, const Tensor& std) -> Tensor {
+    Tensor mean_f32 = (mean.dtype() != DType::Float32) ? mean.to(DType::Float32) : mean;
+    Tensor std_f32 = (std.dtype() != DType::Float32) ? std.to(DType::Float32) : std;
+    int64_t n = mean_f32.numel();
+
+    Tensor result(std::vector<int64_t>(mean.shape().begin(), mean.shape().end()),
+                  DType::Float32, mean.device());
+    const float* m_data = mean_f32.data<float>();
+    const float* s_data = std_f32.data<float>();
+    float* out_data = result.data<float>();
+
+    if (n > static_cast<int64_t>(OMP_THRESHOLD)) {
+        unsigned int base_seed = detail::get_base_seed();
+        #pragma omp parallel
+        {
+#ifdef _OPENMP
+            int tid = omp_get_thread_num();
+#else
+            int tid = 0;
+#endif
+            std::mt19937 local_rng(base_seed + static_cast<unsigned int>(tid));
+            std::normal_distribution<float> dist(0.0f, 1.0f);
+            #pragma omp for schedule(static)
+            for (int64_t i = 0; i < n; ++i) {
+                out_data[i] = m_data[i] + s_data[i] * dist(local_rng);
+            }
+        }
+    } else {
+        std::mt19937 rng(detail::get_base_seed());
+        std::normal_distribution<float> dist(0.0f, 1.0f);
+        for (int64_t i = 0; i < n; ++i) {
+            out_data[i] = m_data[i] + s_data[i] * dist(rng);
+        }
+    }
+
+    return result;
+}
+
+auto poisson_sample_kernel(const Tensor& rates) -> Tensor {
+    Tensor rates_f32 = (rates.dtype() != DType::Float32) ? rates.to(DType::Float32) : rates;
+    int64_t n = rates_f32.numel();
+
+    Tensor result(std::vector<int64_t>(rates.shape().begin(), rates.shape().end()),
+                  DType::Int64, rates.device());
+    const float* r_data = rates_f32.data<float>();
+    int64_t* out_data = result.data<int64_t>();
+
+    if (n > static_cast<int64_t>(OMP_THRESHOLD)) {
+        unsigned int base_seed = detail::get_base_seed();
+        #pragma omp parallel
+        {
+#ifdef _OPENMP
+            int tid = omp_get_thread_num();
+#else
+            int tid = 0;
+#endif
+            std::mt19937 local_rng(base_seed + static_cast<unsigned int>(tid));
+            #pragma omp for schedule(static)
+            for (int64_t i = 0; i < n; ++i) {
+                std::poisson_distribution<int64_t> dist(static_cast<double>(r_data[i]));
+                out_data[i] = dist(local_rng);
+            }
+        }
+    } else {
+        std::mt19937 rng(detail::get_base_seed());
+        for (int64_t i = 0; i < n; ++i) {
+            std::poisson_distribution<int64_t> dist(static_cast<double>(r_data[i]));
+            out_data[i] = dist(rng);
+        }
+    }
+
+    return result;
+}
+
+auto exponential_sample_kernel(const Tensor& rate) -> Tensor {
+    Tensor rate_f32 = (rate.dtype() != DType::Float32) ? rate.to(DType::Float32) : rate;
+    int64_t n = rate_f32.numel();
+
+    Tensor result(std::vector<int64_t>(rate.shape().begin(), rate.shape().end()),
+                  DType::Float32, rate.device());
+    const float* r_data = rate_f32.data<float>();
+    float* out_data = result.data<float>();
+
+    if (n > static_cast<int64_t>(OMP_THRESHOLD)) {
+        unsigned int base_seed = detail::get_base_seed();
+        #pragma omp parallel
+        {
+#ifdef _OPENMP
+            int tid = omp_get_thread_num();
+#else
+            int tid = 0;
+#endif
+            std::mt19937 local_rng(base_seed + static_cast<unsigned int>(tid));
+            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+            #pragma omp for schedule(static)
+            for (int64_t i = 0; i < n; ++i) {
+                // Inverse CDF: -ln(1-U) / rate
+                float u = dist(local_rng);
+                out_data[i] = -std::log(1.0f - u) / r_data[i];
+            }
+        }
+    } else {
+        std::mt19937 rng(detail::get_base_seed());
+        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+        for (int64_t i = 0; i < n; ++i) {
+            float u = dist(rng);
+            out_data[i] = -std::log(1.0f - u) / r_data[i];
+        }
+    }
+
+    return result;
+}
+
 } // namespace cpu
 } // namespace tenzor

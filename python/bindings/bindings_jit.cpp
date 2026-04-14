@@ -16,6 +16,7 @@
 #include <tenzor/jit/graph.hpp>
 #include <tenzor/jit/serialization.hpp>
 #include <tenzor/jit/tracer.hpp>
+#include <tenzor/lazy/lazy_tensor.hpp>
 #include <tenzor/nn/module.hpp>
 
 namespace py = pybind11;
@@ -212,6 +213,46 @@ void register_jit(py::module_& m) {
     py::arg("fullgraph") = false,
     py::arg("mode") = "default",
     "Compile a function for automatic graph capture (alias for jit.compile).");
+
+    // =========================================================================
+    // Lazy Tensor API
+    // =========================================================================
+    auto lazy = m.def_submodule("lazy", "Lazy/deferred tensor execution");
+
+    py::class_<tenzor::lazy::LazyTensor>(lazy, "LazyTensor",
+        "A deferred tensor that records operations as a graph.")
+        .def_static("from_tensor", &tenzor::lazy::LazyTensor::from_tensor,
+             "Create a LazyTensor from an existing Tensor", py::arg("tensor"))
+        .def_static("placeholder", &tenzor::lazy::LazyTensor::placeholder,
+             "Create a placeholder LazyTensor with given shape/dtype/device",
+             py::arg("shape"), py::arg("dtype") = tenzor::DType::Float32,
+             py::arg("device") = tenzor::Device::cpu(), py::arg("name") = "")
+        .def("materialize", &tenzor::lazy::LazyTensor::materialize,
+             "Execute the computation graph and return the concrete Tensor",
+             py::call_guard<py::gil_scoped_release>())
+        .def("is_materialized", &tenzor::lazy::LazyTensor::is_materialized)
+        .def_property_readonly("shape", &tenzor::lazy::LazyTensor::shape)
+        .def_property_readonly("ndim", &tenzor::lazy::LazyTensor::ndim)
+        .def_property_readonly("dtype", &tenzor::lazy::LazyTensor::dtype)
+        .def_property_readonly("device", &tenzor::lazy::LazyTensor::device);
+
+    // Lazy operations
+    lazy.def("add", &tenzor::lazy::add, py::arg("a"), py::arg("b"));
+    lazy.def("sub", &tenzor::lazy::sub, py::arg("a"), py::arg("b"));
+    lazy.def("mul", &tenzor::lazy::mul, py::arg("a"), py::arg("b"));
+    lazy.def("div", &tenzor::lazy::div, py::arg("a"), py::arg("b"));
+    lazy.def("matmul", &tenzor::lazy::matmul, py::arg("a"), py::arg("b"));
+    lazy.def("neg", &tenzor::lazy::neg, py::arg("a"));
+    lazy.def("relu", &tenzor::lazy::relu, py::arg("a"));
+    lazy.def("sigmoid", &tenzor::lazy::sigmoid, py::arg("a"));
+    lazy.def("tanh", &tenzor::lazy::tanh, py::arg("a"));
+    lazy.def("exp", &tenzor::lazy::exp, py::arg("a"));
+    lazy.def("log", &tenzor::lazy::log, py::arg("a"));
+    lazy.def("sqrt", &tenzor::lazy::sqrt, py::arg("a"));
+    lazy.def("transpose", &tenzor::lazy::transpose, py::arg("a"), py::arg("dim0"), py::arg("dim1"));
+    lazy.def("reshape", &tenzor::lazy::reshape, py::arg("a"), py::arg("shape"));
+    lazy.def("sum", &tenzor::lazy::sum, py::arg("a"), py::arg("dim") = py::none());
+    lazy.def("mean", &tenzor::lazy::mean, py::arg("a"), py::arg("dim") = py::none());
 }
 
 } // namespace tenzor::python

@@ -402,6 +402,9 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::Bernoulli)] = "bernoulli";
     names[static_cast<size_t>(OpId::Histogram)] = "histogram";
     names[static_cast<size_t>(OpId::Bucketize)] = "bucketize";
+    names[static_cast<size_t>(OpId::NormalSample)] = "normal_sample";
+    names[static_cast<size_t>(OpId::PoissonSample)] = "poisson_sample";
+    names[static_cast<size_t>(OpId::ExponentialSample)] = "exponential_sample";
 
     // Special Math Functions
     names[static_cast<size_t>(OpId::Gamma)] = "gamma";
@@ -542,7 +545,7 @@ constexpr size_t count_named_ops() {
 
 // Count of actual OpId enum values (excluding gap slots).
 // Update this when adding new OpIds to catch missing name entries at compile time.
-inline constexpr size_t EXPECTED_NAMED_OPS = 412;  // 402 previous + 10 nested tensor ops
+inline constexpr size_t EXPECTED_NAMED_OPS = 415;  // 412 previous + 3 distribution sampling ops
 
 // If this fires, a new OpId was added without a corresponding name in op_names above
 static_assert(count_named_ops() == EXPECTED_NAMED_OPS,

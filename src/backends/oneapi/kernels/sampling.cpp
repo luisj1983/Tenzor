@@ -298,5 +298,54 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double /*p*/,
     return result;
 }
 
+// =========================================================================
+// Poisson sampling (Knuth algorithm per work-item)
+// =========================================================================
+
+namespace {
+struct PoissonSampleKernelTag {};
+}  // namespace
+
+auto poisson_sample_kernel(const Tensor& rates, sycl::queue& queue) -> Tensor {
+    auto input = rates.contiguous();
+    if (input.dtype() != DType::Float32) input = input.to(DType::Float32);
+
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, DType::Int64, input.device());
+    int64_t n = input.numel();
+    if (n == 0) return result;
+
+    const float* in_ptr = get_data_ptr<const float>(input);
+    int64_t* out_ptr = get_data_ptr<int64_t>(result);
+    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+
+    queue.parallel_for<PoissonSampleKernelTag>(sycl::range<1>(n), [=](sycl::id<1> idx_) {
+        int64_t i = static_cast<int64_t>(idx_);
+
+        // Per-element LCG PRNG (same constants as bernoulli_kernel)
+        uint64_t state = seed + static_cast<uint64_t>(i) * 6364136223846793005ULL + 1442695040888963407ULL;
+
+        float lambda = in_ptr[i];
+
+        // Knuth algorithm: generate Poisson(lambda) by counting uniform
+        // samples until their product drops below exp(-lambda).
+        float L = sycl::exp(-lambda);
+        int64_t k = 0;
+        float p = 1.0f;
+
+        do {
+            ++k;
+            // Advance LCG and produce a uniform in (0, 1)
+            state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+            float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+            p *= u;
+        } while (p > L && k < 1000000);  // guard against infinite loop for huge lambda
+
+        out_ptr[i] = k - 1;
+    });
+    queue.wait();
+    return result;
+}
+
 }  // namespace oneapi
 }  // namespace tenzor

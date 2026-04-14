@@ -329,6 +329,7 @@ namespace cuda {
 
     // Sampling / statistics operations
     auto bernoulli_kernel(const Tensor& probs, cudaStream_t stream) -> Tensor;
+    auto poisson_sample_kernel(const Tensor& rates, cudaStream_t stream) -> Tensor;
     auto multinomial_kernel(const Tensor& probs, int64_t num_samples, bool replacement, cudaStream_t stream) -> Tensor;
     auto bucketize_kernel(const Tensor& input, const Tensor& boundaries, bool right, cudaStream_t stream) -> Tensor;
     auto histogram_kernel(const Tensor& input, int64_t bins, double min_val, double max_val, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
@@ -3411,6 +3412,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::Bernoulli,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             return cuda::bernoulli_kernel(inputs[0], get_cuda_stream(attrs));
+        });
+
+    table.register_single_output_kernel(OpId::PoissonSample,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            return cuda::poisson_sample_kernel(inputs[0], get_cuda_stream(attrs));
         });
 
     table.register_single_output_kernel(OpId::Multinomial,

@@ -698,14 +698,57 @@ auto normalize(const Variable& input, double p, int64_t dim,
 // Pad (constant mode only for now)
 // ============================================================================
 
+// Helper: build index tensor that maps padded output positions to input positions
+static auto build_pad_indices(int64_t dim_size, int64_t pad_before, int64_t pad_after,
+                               const std::string& mode, Device device) -> Tensor {
+    int64_t out_size = dim_size + pad_before + pad_after;
+    std::vector<int64_t> indices(out_size);
+
+    for (int64_t i = 0; i < out_size; ++i) {
+        int64_t src = i - pad_before;  // position relative to input
+
+        if (mode == "reflect") {
+            // Reflect: bounce off boundaries (excluding edge element)
+            // For input [0..N-1], reflect at 0 and N-1
+            if (dim_size == 1) {
+                src = 0;
+            } else {
+                // Map into [0, 2*(N-1)) cycle, then fold back
+                if (src < 0) src = -src;
+                int64_t period = 2 * (dim_size - 1);
+                if (period > 0) {
+                    src = src % period;
+                    if (src >= dim_size) src = period - src;
+                }
+            }
+        } else if (mode == "replicate") {
+            // Replicate: clamp to valid range
+            if (src < 0) src = 0;
+            else if (src >= dim_size) src = dim_size - 1;
+        } else if (mode == "circular") {
+            // Circular: wrap around using modulo
+            src = ((src % dim_size) + dim_size) % dim_size;
+        }
+
+        indices[i] = src;
+    }
+
+    Tensor idx_tensor({out_size}, DType::Int64, Device::cpu());
+    std::memcpy(idx_tensor.data<int64_t>(), indices.data(), out_size * sizeof(int64_t));
+    if (device != Device::cpu()) {
+        idx_tensor = idx_tensor.to(device);
+    }
+    return idx_tensor;
+}
+
 auto pad(const Variable& input, const std::vector<int64_t>& pad_sizes,
          const std::string& mode, double value) -> Variable {
     if (pad_sizes.size() % 2 != 0) {
         throw std::invalid_argument("F::pad: padding must have even number of elements");
     }
-    if (mode != "constant") {
+    if (mode != "constant" && mode != "reflect" && mode != "replicate" && mode != "circular") {
         throw std::invalid_argument(
-            "F::pad: only 'constant' mode is currently supported, got '" + mode + "'");
+            "F::pad: unsupported mode '" + mode + "', expected constant/reflect/replicate/circular");
     }
 
     auto shape = input.shape();
@@ -716,36 +759,65 @@ auto pad(const Variable& input, const std::vector<int64_t>& pad_sizes,
         throw std::invalid_argument("F::pad: too many padding dimensions");
     }
 
-    // Build padded shape
-    std::vector<int64_t> new_shape(shape.begin(), shape.end());
-    for (int64_t i = 0; i < n_pad_dims; ++i) {
-        auto dim_idx = ndim - 1 - i;
-        new_shape[dim_idx] += pad_sizes[2 * i] + pad_sizes[2 * i + 1];
+    // Validate reflect mode constraints: pad size must be < dim size
+    if (mode == "reflect") {
+        for (int64_t i = 0; i < n_pad_dims; ++i) {
+            auto dim_idx = ndim - 1 - i;
+            auto dim_size = shape[dim_idx];
+            if (pad_sizes[2 * i] >= dim_size || pad_sizes[2 * i + 1] >= dim_size) {
+                throw std::invalid_argument(
+                    "F::pad reflect: padding size must be less than dimension size");
+            }
+        }
     }
 
-    // For CPU constant padding: create output, manually copy input data
     auto& inp = input.tensor();
-    auto output = tenzor::full(new_shape, value, inp.dtype(), inp.device());
 
-    // Use narrow to get a view into the padded output, then element-wise assign
-    Tensor dst = output;
+    if (mode == "constant") {
+        // Build padded shape
+        std::vector<int64_t> new_shape(shape.begin(), shape.end());
+        for (int64_t i = 0; i < n_pad_dims; ++i) {
+            auto dim_idx = ndim - 1 - i;
+            new_shape[dim_idx] += pad_sizes[2 * i] + pad_sizes[2 * i + 1];
+        }
+
+        auto output = tenzor::full(new_shape, value, inp.dtype(), inp.device());
+
+        // Use narrow to get a view into the padded output, then copy input data
+        Tensor dst = output;
+        for (int64_t i = 0; i < n_pad_dims; ++i) {
+            auto dim_idx = ndim - 1 - i;
+            auto pad_before = pad_sizes[2 * i];
+            dst = dst.narrow(dim_idx, pad_before, shape[dim_idx]);
+        }
+
+        if (dst.is_contiguous() && inp.is_contiguous() && dst.numel() == inp.numel()) {
+            std::memcpy(dst.data_ptr(), inp.data_ptr(),
+                        inp.numel() * dtype_size(inp.dtype()));
+        } else {
+            std::memcpy(dst.data_ptr(), inp.data_ptr(),
+                        inp.numel() * dtype_size(inp.dtype()));
+        }
+
+        return Variable(output, input.requires_grad());
+    }
+
+    // reflect / replicate / circular: use index_select per padded dimension
+    Tensor result = inp;
     for (int64_t i = 0; i < n_pad_dims; ++i) {
         auto dim_idx = ndim - 1 - i;
         auto pad_before = pad_sizes[2 * i];
-        dst = dst.narrow(dim_idx, pad_before, shape[dim_idx]);
+        auto pad_after = pad_sizes[2 * i + 1];
+
+        if (pad_before == 0 && pad_after == 0) continue;
+
+        auto current_dim_size = result.shape()[dim_idx];
+        auto idx = build_pad_indices(current_dim_size, pad_before, pad_after,
+                                     mode, result.device());
+        result = tenzor::index_select(result, dim_idx, idx);
     }
 
-    // Since narrow returns a view into output, memcpy writes through to output
-    if (dst.is_contiguous() && inp.is_contiguous() && dst.numel() == inp.numel()) {
-        std::memcpy(dst.data_ptr(), inp.data_ptr(),
-                    inp.numel() * dtype_size(inp.dtype()));
-    } else {
-        // Fallback: iterate (shouldn't happen for standard padding)
-        std::memcpy(dst.data_ptr(), inp.data_ptr(),
-                    inp.numel() * dtype_size(inp.dtype()));
-    }
-
-    return Variable(output, input.requires_grad());
+    return Variable(result, input.requires_grad());
 }
 
 // ============================================================================

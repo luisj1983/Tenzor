@@ -144,9 +144,34 @@ overrides = _overrides_module
 # Only wrap names that exist on this module (the C++ binding surface
 # can vary between builds, so be tolerant).
 for _op_name in (
-    "add", "sub", "mul", "div", "matmul", "bmm",
-    "sum", "mean", "max", "min",
-    "sqrt", "exp", "log", "abs", "neg",
+    # Arithmetic
+    "add", "sub", "mul", "div", "matmul", "bmm", "dot",
+    # Reduction
+    "sum", "mean", "max", "min", "prod", "var", "std", "norm",
+    "argmax", "argmin", "any", "all",
+    # Element-wise math
+    "sqrt", "exp", "log", "abs", "neg", "pow", "reciprocal",
+    "sin", "cos", "tan", "asin", "acos", "atan",
+    "sinh", "cosh", "tanh", "sigmoid",
+    "floor", "ceil", "round", "sign", "clamp",
+    "log2", "log10", "log1p", "exp2", "expm1",
+    "erf", "erfc", "rsqrt", "square",
+    # Comparison
+    "eq", "ne", "lt", "le", "gt", "ge",
+    # Shape
+    "reshape", "transpose", "permute", "squeeze", "unsqueeze",
+    "flatten", "cat", "stack", "split", "chunk",
+    # Indexing
+    "gather", "scatter", "index_select", "where", "masked_select",
+    # Creation
+    "zeros", "ones", "full", "randn", "rand", "arange", "linspace", "eye",
+    # Advanced
+    "einsum", "topk", "sort", "unique", "flip", "roll",
+    # New ops
+    "normal", "poisson", "exponential", "bernoulli", "multinomial",
+    "cov", "corrcoef", "channel_shuffle",
+    "hann_window", "hamming_window", "blackman_window",
+    "unique_consecutive",
 ):
     _op = globals().get(_op_name)
     if _op is not None and callable(_op):

@@ -152,6 +152,7 @@ namespace rocm {
 
     // Sampling / statistics (native ROCm — replaces previous CPU fallbacks)
     auto bernoulli_kernel(const Tensor& probs, hipStream_t stream) -> Tensor;
+    auto poisson_sample_kernel(const Tensor& rates, hipStream_t stream) -> Tensor;
     auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
                             bool replacement, hipStream_t stream) -> Tensor;
     auto bucketize_kernel(const Tensor& input, const Tensor& boundaries,
@@ -3321,6 +3322,11 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::Bernoulli,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             return rocm::bernoulli_kernel(inputs[0], get_hip_stream(attrs));
+        });
+
+    table.register_single_output_kernel(OpId::PoissonSample,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            return rocm::poisson_sample_kernel(inputs[0], get_hip_stream(attrs));
         });
 
     table.register_single_output_kernel(OpId::Multinomial,

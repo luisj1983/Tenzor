@@ -234,6 +234,7 @@ set(TENZOR_CORE_SOURCES
     nested/nested_tensor.cpp
     nested/nested_ops.cpp
     autograd/nested_autograd_ops.cpp
+    lazy/lazy_tensor.cpp
 )
 
 # Create core library

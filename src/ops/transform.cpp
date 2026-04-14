@@ -1274,4 +1274,26 @@ auto pixel_unshuffle(const Tensor& input, int64_t downscale_factor) -> Tensor {
     return reshape(permuted.contiguous(), out_shape);
 }
 
+auto channel_shuffle(const Tensor& input, int64_t groups) -> Tensor {
+    if (input.ndim() != 4) {
+        throw std::invalid_argument("channel_shuffle: input must be 4D (N, C, H, W)");
+    }
+    auto shape = input.shape();
+    int64_t N = shape[0], C = shape[1], H = shape[2], W = shape[3];
+
+    if (C % groups != 0) {
+        throw std::invalid_argument("channel_shuffle: channels (" + std::to_string(C) +
+            ") must be divisible by groups (" + std::to_string(groups) + ")");
+    }
+
+    int64_t channels_per_group = C / groups;
+
+    // (N, C, H, W) -> (N, groups, channels_per_group, H, W)
+    auto reshaped = reshape(input, {N, groups, channels_per_group, H, W});
+    // Transpose dims 1 and 2: (N, channels_per_group, groups, H, W)
+    auto transposed = transpose(reshaped, 1, 2);
+    // Flatten back: (N, C, H, W)
+    return reshape(transposed.contiguous(), {N, C, H, W});
+}
+
 } // namespace tenzor

@@ -380,4 +380,48 @@ auto unique_consecutive(const Tensor& input, bool return_inverse, bool return_co
     return {results[0], inverse, counts};
 }
 
+auto cov(const Tensor& input, int64_t correction) -> Tensor {
+    // For 1D input: compute variance
+    if (input.ndim() == 1) {
+        auto m = tenzor::mean(input);
+        auto diff = tenzor::sub(input, m);
+        auto n = static_cast<double>(input.shape()[0] - correction);
+        auto dot_result = tenzor::dot(diff, diff);
+        return tenzor::div(dot_result, tenzor::full({}, n, input.dtype(), input.device()));
+    }
+
+    // For 2D input (N, M): each row is a variable, each column is an observation
+    if (input.ndim() != 2) {
+        throw std::invalid_argument("cov: input must be 1D or 2D");
+    }
+
+    int64_t M = input.shape()[1];
+    auto m_val = static_cast<double>(M - correction);
+
+    // Center: subtract row means
+    auto row_means = tenzor::mean(input, 1, true);  // (N, 1)
+    auto centered = tenzor::sub(input, row_means);   // (N, M)
+
+    // Cov = centered @ centered^T / (M - correction)
+    auto centered_t = tenzor::transpose(centered, 0, 1);  // (M, N)
+    auto product = tenzor::matmul(centered, centered_t);    // (N, N)
+    return tenzor::div(product, tenzor::full({}, m_val, input.dtype(), input.device()));
+}
+
+auto corrcoef(const Tensor& input) -> Tensor {
+    auto c = tenzor::cov(input);
+
+    if (input.ndim() == 1) {
+        return tenzor::full({}, 1.0, input.dtype(), input.device());
+    }
+
+    // Normalize: corr[i,j] = cov[i,j] / (std[i] * std[j])
+    auto diag_vals = tenzor::diag(c);              // (N,)
+    auto stds = tenzor::sqrt(diag_vals);           // (N,)
+    auto stds_col = tenzor::reshape(stds, {-1, 1}); // (N, 1)
+    auto stds_row = tenzor::reshape(stds, {1, -1}); // (1, N)
+    auto norm = tenzor::matmul(stds_col, stds_row);  // (N, N)
+    return tenzor::div(c, norm);
+}
+
 } // namespace tenzor

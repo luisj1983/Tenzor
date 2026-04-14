@@ -589,9 +589,12 @@ namespace cpu {
     // CDist
     auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p) -> Tensor;
 
-    // Multinomial / Bernoulli
+    // Multinomial / Bernoulli / Distribution Sampling
     auto multinomial_kernel(const Tensor& probs, int64_t num_samples, bool replacement) -> Tensor;
     auto bernoulli_kernel(const Tensor& probs) -> Tensor;
+    auto normal_sample_kernel(const Tensor& mean, const Tensor& std) -> Tensor;
+    auto poisson_sample_kernel(const Tensor& rates) -> Tensor;
+    auto exponential_sample_kernel(const Tensor& rate) -> Tensor;
 
     // Histogram
     auto histogram_kernel(const Tensor& input, int64_t bins, double min_val, double max_val)
@@ -2834,6 +2837,10 @@ void register_cpu_kernels(BackendDispatchTable& table) {
 
     table.register_single_output_kernel(OpId::Bernoulli, [](std::span<const Tensor> inputs, [[maybe_unused]] const OpAttributes& attrs) -> Tensor {
         return cpu::bernoulli_kernel(inputs[0]);
+    });
+
+    table.register_single_output_kernel(OpId::PoissonSample, [](std::span<const Tensor> inputs, [[maybe_unused]] const OpAttributes& attrs) -> Tensor {
+        return cpu::poisson_sample_kernel(inputs[0]);
     });
 
     // =========================================================================

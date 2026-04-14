@@ -265,6 +265,18 @@ auto pixel_shuffle(const Tensor& input, int64_t upscale_factor) -> Tensor;
  */
 auto pixel_unshuffle(const Tensor& input, int64_t downscale_factor) -> Tensor;
 
+/**
+ * @brief Rearrange channels by dividing into groups and transposing.
+ *
+ * Used in ShuffleNet architectures. Input (N, C, H, W) -> reshape to
+ * (N, groups, C/groups, H, W) -> transpose dims 1,2 -> flatten back to (N, C, H, W).
+ *
+ * @param input 4D tensor of shape (N, C, H, W)
+ * @param groups Number of groups (must divide C evenly)
+ * @return Tensor with shuffled channels, same shape as input
+ */
+auto channel_shuffle(const Tensor& input, int64_t groups) -> Tensor;
+
 /** @} */ // end of tensor_transform group
 
 } // namespace tenzor

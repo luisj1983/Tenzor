@@ -240,6 +240,30 @@ auto unique_consecutive(const Tensor& input, bool return_inverse = false,
                         bool return_counts = false, std::optional<int64_t> dim = std::nullopt)
     -> std::tuple<Tensor, Tensor, Tensor>;
 
+/**
+ * @brief Covariance matrix of the given variables.
+ *
+ * If input is a 2D matrix of shape (N, M), treats each row as a variable
+ * and each column as an observation. Returns an (N, N) covariance matrix.
+ * For 1D input, returns the variance as a scalar tensor.
+ *
+ * @param input Input tensor (1D or 2D)
+ * @param correction Degrees of freedom correction (default: 1 for Bessel's)
+ * @return Covariance matrix
+ */
+auto cov(const Tensor& input, int64_t correction = 1) -> Tensor;
+
+/**
+ * @brief Pearson correlation coefficient matrix.
+ *
+ * Equivalent to normalizing the covariance matrix by the product of
+ * standard deviations. Returns values in [-1, 1].
+ *
+ * @param input Input tensor (1D or 2D)
+ * @return Correlation coefficient matrix
+ */
+auto corrcoef(const Tensor& input) -> Tensor;
+
 /** @} */ // end of tensor_reduction group
 
 } // namespace tenzor

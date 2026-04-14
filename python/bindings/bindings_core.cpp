@@ -26,6 +26,7 @@
 #include <tenzor/ops/math.hpp>
 #include <tenzor/ops/transform.hpp>
 #include <tenzor/ops/creation.hpp>
+#include <tenzor/ops/windows.hpp>
 #include <tenzor/ops/fp8_scaling.hpp>
 #include <tenzor/backend/loader.hpp>
 #include <tenzor/backend/backend.hpp>
@@ -2371,6 +2372,36 @@ Returns:
          py::arg("dtype") = tenzor::DType::Float32,
          py::arg("device") = tenzor::Device::cpu());
 
+    m.def("normal", [](const tenzor::Tensor& mean, const tenzor::Tensor& std) {
+         return tenzor::normal(mean, std);
+         }, "Sample from normal distribution N(mean, std^2)",
+         py::arg("mean"), py::arg("std"),
+         py::call_guard<py::gil_scoped_release>());
+
+    m.def("poisson", [](const tenzor::Tensor& rates) {
+         return tenzor::poisson(rates);
+         }, "Sample from Poisson distribution with given rates",
+         py::arg("rates"),
+         py::call_guard<py::gil_scoped_release>());
+
+    m.def("exponential", [](const tenzor::Tensor& rate) {
+         return tenzor::exponential(rate);
+         }, "Sample from exponential distribution with given rate",
+         py::arg("rate"),
+         py::call_guard<py::gil_scoped_release>());
+
+    m.def("bernoulli", [](const tenzor::Tensor& probs) {
+         return tenzor::bernoulli(probs);
+         }, "Sample from Bernoulli distribution",
+         py::arg("probs"),
+         py::call_guard<py::gil_scoped_release>());
+
+    m.def("multinomial", [](const tenzor::Tensor& input, int64_t num_samples, bool replacement) {
+         return tenzor::multinomial(input, num_samples, replacement);
+         }, "Weighted random sampling",
+         py::arg("input"), py::arg("num_samples"), py::arg("replacement") = false,
+         py::call_guard<py::gil_scoped_release>());
+
     m.def("linspace", [](float start, float end, int64_t steps, tenzor::DType dtype, tenzor::Device device) {
          return tenzor::linspace(start, end, steps, dtype, device);
          }, "Create 1D tensor with linearly spaced values",
@@ -2853,6 +2884,21 @@ Returns:
          "Rearrange (C, H*r, W*r) to (C*r^2, H, W)", py::arg("input"), py::arg("downscale_factor"),
          py::call_guard<py::gil_scoped_release>());
 
+    m.def("channel_shuffle", [](const tenzor::Tensor& t, int64_t groups) {
+         return tenzor::channel_shuffle(t, groups); },
+         "Shuffle channels across groups for ShuffleNet", py::arg("input"), py::arg("groups"),
+         py::call_guard<py::gil_scoped_release>());
+
+    m.def("cov", [](const tenzor::Tensor& t, int64_t correction) {
+         return tenzor::cov(t, correction); },
+         "Covariance matrix", py::arg("input"), py::arg("correction") = 1,
+         py::call_guard<py::gil_scoped_release>());
+
+    m.def("corrcoef", [](const tenzor::Tensor& t) {
+         return tenzor::corrcoef(t); },
+         "Pearson correlation coefficient matrix", py::arg("input"),
+         py::call_guard<py::gil_scoped_release>());
+
     m.def("tensordot", [](const tenzor::Tensor& a, const tenzor::Tensor& b,
                           std::vector<int64_t> dims_a, std::vector<int64_t> dims_b) {
          return tenzor::tensordot(a, b, std::move(dims_a), std::move(dims_b));
@@ -2945,6 +2991,37 @@ Returns:
          return tenzor::cross(a, b, dim);
          }, "Cross product of two tensors along dimension",
          py::arg("input"), py::arg("other"), py::arg("dim") = -1);
+    // Window functions
+    m.def("hann_window", [](int64_t size, bool periodic, tenzor::DType dtype, tenzor::Device device) {
+         return tenzor::hann_window(size, periodic, dtype, device);
+         }, "Hann (raised cosine) window",
+         py::arg("size"), py::arg("periodic") = true,
+         py::arg("dtype") = tenzor::DType::Float32,
+         py::arg("device") = tenzor::Device::cpu());
+
+    m.def("hamming_window", [](int64_t size, bool periodic, double alpha, double beta,
+                                tenzor::DType dtype, tenzor::Device device) {
+         return tenzor::hamming_window(size, periodic, alpha, beta, dtype, device);
+         }, "Hamming window",
+         py::arg("size"), py::arg("periodic") = true,
+         py::arg("alpha") = 0.54, py::arg("beta") = 0.46,
+         py::arg("dtype") = tenzor::DType::Float32,
+         py::arg("device") = tenzor::Device::cpu());
+
+    m.def("blackman_window", [](int64_t size, bool periodic, tenzor::DType dtype, tenzor::Device device) {
+         return tenzor::blackman_window(size, periodic, dtype, device);
+         }, "Blackman window",
+         py::arg("size"), py::arg("periodic") = true,
+         py::arg("dtype") = tenzor::DType::Float32,
+         py::arg("device") = tenzor::Device::cpu());
+
+    // Unique consecutive
+    m.def("unique_consecutive", [](const tenzor::Tensor& input, bool return_inverse, bool return_counts) {
+         return tenzor::unique_consecutive(input, return_inverse, return_counts);
+         }, "Deduplicate consecutive equal elements",
+         py::arg("input"), py::arg("return_inverse") = false, py::arg("return_counts") = false,
+         py::call_guard<py::gil_scoped_release>());
+
     // Search operations
     m.def("searchsorted", [](const tenzor::Tensor& sorted_sequence, const tenzor::Tensor& values, bool right) {
          return tenzor::searchsorted(sorted_sequence, values, right);

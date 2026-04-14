@@ -168,6 +168,36 @@ Tensor mps_abs_kernel(const Tensor& input);
 Tensor mps_pow_kernel(const Tensor& base, const Tensor& exponent);
 Tensor mps_clamp_kernel(const Tensor& input, float min_val, float max_val);
 Tensor mps_matmul_kernel(const Tensor& a, const Tensor& b);
+// Phase 5: additional element-wise math ops
+Tensor mps_log2_kernel(const Tensor& input);
+Tensor mps_log10_kernel(const Tensor& input);
+Tensor mps_log1p_kernel(const Tensor& input);
+Tensor mps_exp2_kernel(const Tensor& input);
+Tensor mps_expm1_kernel(const Tensor& input);
+Tensor mps_erf_kernel(const Tensor& input);
+Tensor mps_erfc_kernel(const Tensor& input);
+Tensor mps_isnan_kernel(const Tensor& input);
+Tensor mps_isinf_kernel(const Tensor& input);
+Tensor mps_isfinite_kernel(const Tensor& input);
+Tensor mps_rsqrt_kernel(const Tensor& input);
+Tensor mps_square_kernel(const Tensor& input);
+Tensor mps_reciprocal_kernel(const Tensor& input);
+Tensor mps_deg2rad_kernel(const Tensor& input);
+Tensor mps_rad2deg_kernel(const Tensor& input);
+Tensor mps_logit_kernel(const Tensor& input);
+Tensor mps_signbit_kernel(const Tensor& input);
+Tensor mps_isreal_kernel(const Tensor& input);
+Tensor mps_isposinf_kernel(const Tensor& input);
+Tensor mps_isneginf_kernel(const Tensor& input);
+Tensor mps_atan2_kernel(const Tensor& a, const Tensor& b);
+Tensor mps_fmod_kernel(const Tensor& a, const Tensor& b);
+Tensor mps_remainder_kernel(const Tensor& a, const Tensor& b);
+Tensor mps_copysign_kernel(const Tensor& a, const Tensor& b);
+Tensor mps_nextafter_kernel(const Tensor& a, const Tensor& b);
+Tensor mps_float_power_kernel(const Tensor& a, const Tensor& b);
+Tensor mps_xlog1py_kernel(const Tensor& a, const Tensor& b);
+Tensor mps_ldexp_kernel(const Tensor& a, const Tensor& b);
+Tensor mps_hypot_kernel(const Tensor& a, const Tensor& b);
 Tensor mps_linear_kernel(const Tensor& input, const Tensor& weight, const Tensor& bias);
 Tensor mps_embedding_kernel(const Tensor& weight, const Tensor& indices);
 Tensor mps_softmax_kernel(const Tensor& input, int64_t dim);
@@ -464,6 +494,41 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Sqrt, mps_sqrt_kernel);
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Abs,  mps_abs_kernel);
     TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Pow, mps_pow_kernel);
+
+    // ================================================================
+    // Phase 5: Additional element-wise math ops
+    // ================================================================
+    // Unary ops
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Log2, mps_log2_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Log10, mps_log10_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Log1p, mps_log1p_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Exp2, mps_exp2_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Expm1, mps_expm1_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Erf, mps_erf_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Erfc, mps_erfc_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, IsNan, mps_isnan_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, IsInf, mps_isinf_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, IsFinite, mps_isfinite_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Rsqrt, mps_rsqrt_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Square, mps_square_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Reciprocal, mps_reciprocal_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Deg2Rad, mps_deg2rad_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Rad2Deg, mps_rad2deg_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Logit, mps_logit_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Signbit, mps_signbit_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, IsReal, mps_isreal_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, IsPosInf, mps_isposinf_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, IsNegInf, mps_isneginf_kernel);
+    // Binary ops
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Atan2, mps_atan2_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Fmod, mps_fmod_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Remainder, mps_remainder_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Copysign, mps_copysign_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Nextafter, mps_nextafter_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, FloatPower, mps_float_power_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Xlog1py, mps_xlog1py_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Ldexp, mps_ldexp_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Hypot, mps_hypot_kernel);
 
     // Clamp needs scalar min/max plumbed through OpAttributes, so it
     // can't use the unary register macro directly.
@@ -1387,6 +1452,87 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     mps_accelerate_single(OpId::MaxUnpool2dBackward);
     mps_accelerate_single(OpId::MaxUnpool3dForward);
     mps_accelerate_single(OpId::MaxUnpool3dBackward);
+
+    // ================================================================
+    // Tier 2: Reduction and scan ops — Accelerate via shared memory
+    // ================================================================
+
+    // Cumulative scans (multi-output: values + indices)
+    mps_accelerate_multi(OpId::CumMax);
+    mps_accelerate_multi(OpId::CumMin);
+
+    // Reduction ops (single-output)
+    mps_accelerate_single(OpId::LogSumExp);
+    mps_accelerate_single(OpId::Logcumsumexp);
+    mps_accelerate_single(OpId::Bincount);
+    mps_accelerate_single(OpId::NanVar);
+    mps_accelerate_single(OpId::NanStd);
+    mps_accelerate_single(OpId::HasInfNan);
+
+    // Set membership (binary input, single boolean output)
+    mps_accelerate_single(OpId::Isin);
+
+    // K-th value (multi-output: values + indices)
+    mps_accelerate_multi(OpId::Kthvalue);
+
+    // Quantile/median ops (single-output)
+    mps_accelerate_single(OpId::Quantile);
+    mps_accelerate_single(OpId::Nanquantile);
+    mps_accelerate_single(OpId::Nanmedian);
+
+    // Fixed-bin histogram (single-output)
+    mps_accelerate_single(OpId::Histc);
+
+    // Deduplicate consecutive elements (multi-output: output, inverse, counts)
+    mps_accelerate_multi(OpId::UniqueConsecutive);
+
+    // ================================================================
+    // Tier 3: Advanced ops — Accelerate via shared memory
+    // ================================================================
+
+    // Scatter/gather ops
+    mps_accelerate_single(OpId::ScatterReduce);
+    mps_accelerate_single(OpId::RepeatInterleave);
+    mps_accelerate_single(OpId::TakeAlongDim);
+    mps_accelerate_single(OpId::MaskedScatter);
+
+    // Diagonal embedding
+    mps_accelerate_single(OpId::DiagEmbed);
+    mps_accelerate_single(OpId::Diagflat);
+
+    // Triangular solve
+    mps_accelerate_single(OpId::SolveTriangular);
+
+    // Special math functions — Accelerate vForce/vvfuncs
+    mps_accelerate_single(OpId::Gamma);
+    mps_accelerate_single(OpId::Lgamma);
+    mps_accelerate_single(OpId::Digamma);
+    mps_accelerate_single(OpId::Beta);
+    mps_accelerate_single(OpId::ErfInv);
+    mps_accelerate_single(OpId::Sinc);
+    mps_accelerate_single(OpId::Zeta);
+
+    // Bessel functions
+    mps_accelerate_single(OpId::BesselJ0);
+    mps_accelerate_single(OpId::BesselJ1);
+    mps_accelerate_single(OpId::BesselY0);
+    mps_accelerate_single(OpId::BesselY1);
+    mps_accelerate_single(OpId::BesselI0);
+    mps_accelerate_single(OpId::BesselI1);
+
+    // ================================================================
+    // Tier 4: Nested tensor ops — Accelerate via shared memory
+    // ================================================================
+
+    mps_accelerate_multi(OpId::NestedSoftmax);
+    mps_accelerate_multi(OpId::NestedLogSoftmax);
+    mps_accelerate_multi(OpId::NestedLayerNorm);
+    mps_accelerate_multi(OpId::NestedSum);
+    mps_accelerate_multi(OpId::NestedMean);
+    mps_accelerate_multi(OpId::NestedAttention);
+    mps_accelerate_multi(OpId::NestedToPadded);
+    mps_accelerate_multi(OpId::NestedFromPadded);
+    mps_accelerate_multi(OpId::NestedLinear);
 }
 
 } // namespace tenzor::mps

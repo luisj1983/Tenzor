@@ -528,6 +528,9 @@ enum class OpId : uint16_t {
     Bernoulli,                 // Bernoulli distribution sampling
     Histogram,                 // Histogram computation
     Bucketize,                 // Bucket assignment via binary search
+    NormalSample,              // Normal distribution: normal(mean, std) -> tensor
+    PoissonSample,             // Poisson distribution: poisson(rates) -> tensor
+    ExponentialSample,         // Exponential distribution: exponential(rate) -> tensor
 
     // =========================================================================
     // Special Math Functions (490-509)

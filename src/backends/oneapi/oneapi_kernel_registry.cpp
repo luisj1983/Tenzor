@@ -119,6 +119,7 @@ namespace oneapi {
                           sycl::queue& queue) -> std::pair<Tensor, Tensor>;
     auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
                       sycl::queue& queue) -> Tensor;
+    auto poisson_sample_kernel(const Tensor& rates, sycl::queue& queue) -> Tensor;
 
     // STFT / ISTFT (native OneAPI — replaces previous CPU fallbacks)
     auto stft_kernel(const Tensor& input, int64_t n_fft,
@@ -3983,6 +3984,11 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::Bernoulli,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
             return oneapi::bernoulli_kernel(inputs[0], get_q(inputs));
+        });
+
+    table.register_single_output_kernel(OpId::PoissonSample,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return oneapi::poisson_sample_kernel(inputs[0], get_q(inputs));
         });
 
     table.register_single_output_kernel(OpId::Multinomial,

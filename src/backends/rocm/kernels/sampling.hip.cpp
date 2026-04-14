@@ -62,6 +62,54 @@ auto bernoulli_kernel(const Tensor& probs, hipStream_t stream) -> Tensor {
 }
 
 // =========================================================================
+// Poisson sampling (Knuth algorithm with LCG PRNG)
+// =========================================================================
+
+__global__ void poisson_kernel_impl(const float* rates, int64_t* output,
+                                     int64_t n, uint64_t seed) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n) return;
+
+    // LCG state initialisation (same pattern as bernoulli)
+    uint64_t state = seed + static_cast<uint64_t>(tid) * 6364136223846793005ULL + 1442695040888963407ULL;
+
+    float lambda = rates[tid];
+    float L = expf(-lambda);
+    int64_t k = 0;
+    float p = 1.0f;
+
+    do {
+        ++k;
+        // Advance LCG and produce a uniform float in (0, 1)
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+        p *= u;
+    } while (p > L);
+
+    output[tid] = k - 1;
+}
+
+auto poisson_sample_kernel(const Tensor& rates, hipStream_t stream) -> Tensor {
+    auto input = rates.contiguous();
+    if (input.dtype() != DType::Float32) input = input.to(DType::Float32);
+
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, DType::Int64, input.device());
+    int64_t n = input.numel();
+    if (n == 0) return result;
+
+    int threads = 256;
+    int blocks_n = static_cast<int>((n + threads - 1) / threads);
+    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+
+    hipLaunchKernelGGL(poisson_kernel_impl,
+        dim3(blocks_n), dim3(threads), 0, stream,
+        input.data<float>(), result.data<int64_t>(), n, seed);
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// =========================================================================
 // Multinomial sampling
 // =========================================================================
 

@@ -929,6 +929,34 @@ auto bernoulli(const Tensor& probs) -> Tensor {
     return dispatch<OpId::Bernoulli>(inputs)[0];
 }
 
+auto normal(const Tensor& mean, const Tensor& std) -> Tensor {
+    // Compose: randn(shape, device) * std + mean
+    auto z = tenzor::randn(
+        std::vector<int64_t>(mean.shape().begin(), mean.shape().end()),
+        mean.dtype(), mean.device());
+    return tenzor::add(tenzor::mul(z, std), mean);
+}
+
+auto poisson(const Tensor& rates) -> Tensor {
+    // Dispatch to backend-specific kernel for proper Poisson sampling
+    auto inp = rates.contiguous();
+    std::array<Tensor, 1> inputs = {inp};
+    return dispatch<OpId::PoissonSample>(inputs)[0];
+}
+
+auto exponential(const Tensor& rate) -> Tensor {
+    // Compose: -log(1 - rand(shape, device)) / rate  (inverse CDF method)
+    auto u = tenzor::rand(
+        std::vector<int64_t>(rate.shape().begin(), rate.shape().end()),
+        rate.dtype(), rate.device());
+    // Clamp away from exactly 0 and 1 for numerical stability
+    auto one = tenzor::full(
+        std::vector<int64_t>(rate.shape().begin(), rate.shape().end()),
+        1.0, rate.dtype(), rate.device());
+    auto one_minus_u = tenzor::sub(one, u);
+    return tenzor::div(tenzor::neg(tenzor::log(one_minus_u)), rate);
+}
+
 auto logspace(float start, float end, int64_t steps, double base,
               DType dtype, Device device) -> Tensor {
     auto exponents = tenzor::linspace(start, end, steps, dtype, device);

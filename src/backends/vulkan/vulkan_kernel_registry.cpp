@@ -2372,6 +2372,19 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             return get_vulkan_backend()->dispatchBernoulli(inputs[0]);
         });
 
+    // Poisson sampling — CPU round-trip fallback.
+    // TODO(perf): implement a native Vulkan compute shader using the inverse-
+    // transform method. The Knuth algorithm's variable-iteration loop makes it
+    // a poor fit for SIMT dispatch without significant occupancy waste, so we
+    // fall back to the CPU kernel and copy the result back for correctness.
+    table.register_single_output_kernel(OpId::PoissonSample,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            Device orig_device = inputs[0].device();
+            Tensor rates_cpu = inputs[0].to(Device::cpu());
+            Tensor result_cpu = tenzor::poisson(rates_cpu);
+            return result_cpu.to(orig_device);
+        });
+
     table.register_single_output_kernel(OpId::Multinomial,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t num_samples = attrs.get_int(AttrKey::NumSamples, 1);

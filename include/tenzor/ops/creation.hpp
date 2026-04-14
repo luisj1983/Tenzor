@@ -178,6 +178,31 @@ auto multinomial(const Tensor& input, int64_t num_samples, bool replacement = fa
 auto bernoulli(const Tensor& probs) -> Tensor;
 
 /**
+ * @brief Sample from a normal (Gaussian) distribution with specified mean and std.
+ *
+ * @param mean Mean of the distribution (tensor or scalar broadcast)
+ * @param std Standard deviation of the distribution (tensor or scalar broadcast)
+ * @return Tensor with same shape as mean/std, values sampled from N(mean, std^2)
+ */
+auto normal(const Tensor& mean, const Tensor& std) -> Tensor;
+
+/**
+ * @brief Sample from a Poisson distribution with the given rates.
+ *
+ * @param rates Tensor of rate parameters (lambda > 0)
+ * @return Int64 tensor with same shape, values sampled from Poisson(rates)
+ */
+auto poisson(const Tensor& rates) -> Tensor;
+
+/**
+ * @brief Sample from an exponential distribution with the given rate.
+ *
+ * @param rate Tensor of rate parameters (lambda > 0)
+ * @return Tensor with same shape, values sampled from Exponential(rate)
+ */
+auto exponential(const Tensor& rate) -> Tensor;
+
+/**
  * @brief Create 1D tensor with evenly spaced values.
  *
  * Creates sequence [start, start+step, start+2*step, ..., end).

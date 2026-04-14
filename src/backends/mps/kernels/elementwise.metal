@@ -280,6 +280,511 @@ kernel void pow_kernel_f16(
 }
 
 // ============================================================================
+// Phase 5: Additional element-wise math ops (float32)
+// ============================================================================
+
+// --- Unary element-wise ops ---
+
+kernel void log2_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output       [[buffer(1)]],
+    uint id                    [[thread_position_in_grid]])
+{
+    output[id] = metal::log2(input[id]);
+}
+
+kernel void log10_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output       [[buffer(1)]],
+    uint id                    [[thread_position_in_grid]])
+{
+    output[id] = metal::log10(input[id]);
+}
+
+kernel void log1p_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output       [[buffer(1)]],
+    uint id                    [[thread_position_in_grid]])
+{
+    output[id] = metal::log(1.0f + input[id]);
+}
+
+kernel void exp2_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output       [[buffer(1)]],
+    uint id                    [[thread_position_in_grid]])
+{
+    output[id] = metal::exp2(input[id]);
+}
+
+kernel void expm1_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output       [[buffer(1)]],
+    uint id                    [[thread_position_in_grid]])
+{
+    output[id] = metal::exp(input[id]) - 1.0f;
+}
+
+kernel void erf_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output       [[buffer(1)]],
+    uint id                    [[thread_position_in_grid]])
+{
+    output[id] = metal::erf(input[id]);
+}
+
+kernel void erfc_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output       [[buffer(1)]],
+    uint id                    [[thread_position_in_grid]])
+{
+    output[id] = metal::erfc(input[id]);
+}
+
+kernel void isnan_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output       [[buffer(1)]],
+    uint id                    [[thread_position_in_grid]])
+{
+    output[id] = metal::isnan(input[id]) ? 1.0f : 0.0f;
+}
+
+kernel void isinf_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output       [[buffer(1)]],
+    uint id                    [[thread_position_in_grid]])
+{
+    output[id] = metal::isinf(input[id]) ? 1.0f : 0.0f;
+}
+
+kernel void isfinite_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output       [[buffer(1)]],
+    uint id                    [[thread_position_in_grid]])
+{
+    output[id] = metal::isfinite(input[id]) ? 1.0f : 0.0f;
+}
+
+kernel void rsqrt_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output       [[buffer(1)]],
+    uint id                    [[thread_position_in_grid]])
+{
+    output[id] = metal::rsqrt(input[id]);
+}
+
+kernel void square_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output       [[buffer(1)]],
+    uint id                    [[thread_position_in_grid]])
+{
+    float x = input[id];
+    output[id] = x * x;
+}
+
+kernel void reciprocal_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output       [[buffer(1)]],
+    uint id                    [[thread_position_in_grid]])
+{
+    output[id] = 1.0f / input[id];
+}
+
+kernel void deg2rad_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output       [[buffer(1)]],
+    uint id                    [[thread_position_in_grid]])
+{
+    output[id] = input[id] * (M_PI_F / 180.0f);
+}
+
+kernel void rad2deg_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output       [[buffer(1)]],
+    uint id                    [[thread_position_in_grid]])
+{
+    output[id] = input[id] * (180.0f / M_PI_F);
+}
+
+kernel void logit_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output       [[buffer(1)]],
+    uint id                    [[thread_position_in_grid]])
+{
+    float x = input[id];
+    output[id] = metal::log(x / (1.0f - x));
+}
+
+kernel void signbit_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output       [[buffer(1)]],
+    uint id                    [[thread_position_in_grid]])
+{
+    output[id] = metal::signbit(input[id]) ? 1.0f : 0.0f;
+}
+
+kernel void isreal_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output       [[buffer(1)]],
+    uint id                    [[thread_position_in_grid]])
+{
+    output[id] = 1.0f;
+}
+
+kernel void isposinf_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output       [[buffer(1)]],
+    uint id                    [[thread_position_in_grid]])
+{
+    output[id] = (metal::isinf(input[id]) && input[id] > 0.0f) ? 1.0f : 0.0f;
+}
+
+kernel void isneginf_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output       [[buffer(1)]],
+    uint id                    [[thread_position_in_grid]])
+{
+    output[id] = (metal::isinf(input[id]) && input[id] < 0.0f) ? 1.0f : 0.0f;
+}
+
+// --- Binary element-wise ops ---
+
+kernel void atan2_kernel(
+    device const float* a [[buffer(0)]],
+    device const float* b [[buffer(1)]],
+    device float* output   [[buffer(2)]],
+    uint id                [[thread_position_in_grid]])
+{
+    output[id] = metal::atan2(a[id], b[id]);
+}
+
+kernel void fmod_kernel(
+    device const float* a [[buffer(0)]],
+    device const float* b [[buffer(1)]],
+    device float* output   [[buffer(2)]],
+    uint id                [[thread_position_in_grid]])
+{
+    output[id] = metal::fmod(a[id], b[id]);
+}
+
+kernel void remainder_kernel(
+    device const float* a [[buffer(0)]],
+    device const float* b [[buffer(1)]],
+    device float* output   [[buffer(2)]],
+    uint id                [[thread_position_in_grid]])
+{
+    output[id] = metal::remainder(a[id], b[id]);
+}
+
+kernel void copysign_kernel(
+    device const float* a [[buffer(0)]],
+    device const float* b [[buffer(1)]],
+    device float* output   [[buffer(2)]],
+    uint id                [[thread_position_in_grid]])
+{
+    output[id] = metal::copysign(a[id], b[id]);
+}
+
+kernel void nextafter_kernel(
+    device const float* a [[buffer(0)]],
+    device const float* b [[buffer(1)]],
+    device float* output   [[buffer(2)]],
+    uint id                [[thread_position_in_grid]])
+{
+    output[id] = metal::nextafter(a[id], b[id]);
+}
+
+kernel void float_power_kernel(
+    device const float* a [[buffer(0)]],
+    device const float* b [[buffer(1)]],
+    device float* output   [[buffer(2)]],
+    uint id                [[thread_position_in_grid]])
+{
+    output[id] = metal::pow(a[id], b[id]);
+}
+
+kernel void xlog1py_kernel(
+    device const float* a [[buffer(0)]],
+    device const float* b [[buffer(1)]],
+    device float* output   [[buffer(2)]],
+    uint id                [[thread_position_in_grid]])
+{
+    float x = a[id];
+    output[id] = (x == 0.0f) ? 0.0f : x * metal::log(1.0f + b[id]);
+}
+
+kernel void ldexp_kernel(
+    device const float* a [[buffer(0)]],
+    device const float* b [[buffer(1)]],
+    device float* output   [[buffer(2)]],
+    uint id                [[thread_position_in_grid]])
+{
+    output[id] = metal::ldexp(a[id], static_cast<int>(b[id]));
+}
+
+kernel void hypot_kernel(
+    device const float* a [[buffer(0)]],
+    device const float* b [[buffer(1)]],
+    device float* output   [[buffer(2)]],
+    uint id                [[thread_position_in_grid]])
+{
+    output[id] = metal::sqrt(a[id] * a[id] + b[id] * b[id]);
+}
+
+// ============================================================================
+// Phase 5: Additional element-wise math ops (fp16 variants)
+// ============================================================================
+
+// --- Unary fp16 ---
+
+kernel void log2_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = (half)metal::log2((float)input[id]);
+}
+
+kernel void log10_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = (half)metal::log10((float)input[id]);
+}
+
+kernel void log1p_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = (half)metal::log(1.0f + (float)input[id]);
+}
+
+kernel void exp2_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = (half)metal::exp2((float)input[id]);
+}
+
+kernel void expm1_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = (half)(metal::exp((float)input[id]) - 1.0f);
+}
+
+kernel void erf_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = (half)metal::erf((float)input[id]);
+}
+
+kernel void erfc_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = (half)metal::erfc((float)input[id]);
+}
+
+kernel void isnan_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = metal::isnan(input[id]) ? (half)1.0 : (half)0.0;
+}
+
+kernel void isinf_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = metal::isinf(input[id]) ? (half)1.0 : (half)0.0;
+}
+
+kernel void isfinite_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = metal::isfinite(input[id]) ? (half)1.0 : (half)0.0;
+}
+
+kernel void rsqrt_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = (half)metal::rsqrt((float)input[id]);
+}
+
+kernel void square_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = input[id] * input[id];
+}
+
+kernel void reciprocal_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = (half)(1.0f / (float)input[id]);
+}
+
+kernel void deg2rad_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = (half)((float)input[id] * (M_PI_F / 180.0f));
+}
+
+kernel void rad2deg_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = (half)((float)input[id] * (180.0f / M_PI_F));
+}
+
+kernel void logit_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    float x = (float)input[id];
+    output[id] = (half)metal::log(x / (1.0f - x));
+}
+
+kernel void signbit_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = metal::signbit(input[id]) ? (half)1.0 : (half)0.0;
+}
+
+kernel void isreal_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = (half)1.0;
+}
+
+kernel void isposinf_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = (metal::isinf(input[id]) && input[id] > (half)0.0) ? (half)1.0 : (half)0.0;
+}
+
+kernel void isneginf_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* output      [[buffer(1)]],
+    uint id                  [[thread_position_in_grid]])
+{
+    output[id] = (metal::isinf(input[id]) && input[id] < (half)0.0) ? (half)1.0 : (half)0.0;
+}
+
+// --- Binary fp16 ---
+
+kernel void atan2_kernel_f16(
+    device const half* a   [[buffer(0)]],
+    device const half* b   [[buffer(1)]],
+    device half* output    [[buffer(2)]],
+    uint id                [[thread_position_in_grid]])
+{
+    output[id] = (half)metal::atan2((float)a[id], (float)b[id]);
+}
+
+kernel void fmod_kernel_f16(
+    device const half* a   [[buffer(0)]],
+    device const half* b   [[buffer(1)]],
+    device half* output    [[buffer(2)]],
+    uint id                [[thread_position_in_grid]])
+{
+    output[id] = (half)metal::fmod((float)a[id], (float)b[id]);
+}
+
+kernel void remainder_kernel_f16(
+    device const half* a   [[buffer(0)]],
+    device const half* b   [[buffer(1)]],
+    device half* output    [[buffer(2)]],
+    uint id                [[thread_position_in_grid]])
+{
+    output[id] = (half)metal::remainder((float)a[id], (float)b[id]);
+}
+
+kernel void copysign_kernel_f16(
+    device const half* a   [[buffer(0)]],
+    device const half* b   [[buffer(1)]],
+    device half* output    [[buffer(2)]],
+    uint id                [[thread_position_in_grid]])
+{
+    output[id] = (half)metal::copysign((float)a[id], (float)b[id]);
+}
+
+kernel void nextafter_kernel_f16(
+    device const half* a   [[buffer(0)]],
+    device const half* b   [[buffer(1)]],
+    device half* output    [[buffer(2)]],
+    uint id                [[thread_position_in_grid]])
+{
+    output[id] = (half)metal::nextafter((float)a[id], (float)b[id]);
+}
+
+kernel void float_power_kernel_f16(
+    device const half* a   [[buffer(0)]],
+    device const half* b   [[buffer(1)]],
+    device half* output    [[buffer(2)]],
+    uint id                [[thread_position_in_grid]])
+{
+    output[id] = (half)metal::pow((float)a[id], (float)b[id]);
+}
+
+kernel void xlog1py_kernel_f16(
+    device const half* a   [[buffer(0)]],
+    device const half* b   [[buffer(1)]],
+    device half* output    [[buffer(2)]],
+    uint id                [[thread_position_in_grid]])
+{
+    float x = (float)a[id];
+    output[id] = (x == 0.0f) ? (half)0.0 : (half)(x * metal::log(1.0f + (float)b[id]));
+}
+
+kernel void ldexp_kernel_f16(
+    device const half* a   [[buffer(0)]],
+    device const half* b   [[buffer(1)]],
+    device half* output    [[buffer(2)]],
+    uint id                [[thread_position_in_grid]])
+{
+    output[id] = (half)metal::ldexp((float)a[id], static_cast<int>((float)b[id]));
+}
+
+kernel void hypot_kernel_f16(
+    device const half* a   [[buffer(0)]],
+    device const half* b   [[buffer(1)]],
+    device half* output    [[buffer(2)]],
+    uint id                [[thread_position_in_grid]])
+{
+    float fa = (float)a[id];
+    float fb = (float)b[id];
+    output[id] = (half)metal::sqrt(fa * fa + fb * fb);
+}
+
+// ============================================================================
 // Reduction operations
 // ============================================================================
 

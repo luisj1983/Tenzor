@@ -1533,4 +1533,128 @@ std::vector<Tensor> mps_fused_adam_step(const Tensor& param, const Tensor& grad,
     return {out_param, out_m, out_v};
 }
 
+// ============================================================================
+// Phase 5: Additional element-wise math ops
+// ============================================================================
+
+// --- Unary dispatch wrappers ---
+
+Tensor mps_log2_kernel(const Tensor& input) {
+    return dispatch_unary("log2_kernel", input);
+}
+
+Tensor mps_log10_kernel(const Tensor& input) {
+    return dispatch_unary("log10_kernel", input);
+}
+
+Tensor mps_log1p_kernel(const Tensor& input) {
+    return dispatch_unary("log1p_kernel", input);
+}
+
+Tensor mps_exp2_kernel(const Tensor& input) {
+    return dispatch_unary("exp2_kernel", input);
+}
+
+Tensor mps_expm1_kernel(const Tensor& input) {
+    return dispatch_unary("expm1_kernel", input);
+}
+
+Tensor mps_erf_kernel(const Tensor& input) {
+    return dispatch_unary("erf_kernel", input);
+}
+
+Tensor mps_erfc_kernel(const Tensor& input) {
+    return dispatch_unary("erfc_kernel", input);
+}
+
+Tensor mps_isnan_kernel(const Tensor& input) {
+    return dispatch_unary("isnan_kernel", input);
+}
+
+Tensor mps_isinf_kernel(const Tensor& input) {
+    return dispatch_unary("isinf_kernel", input);
+}
+
+Tensor mps_isfinite_kernel(const Tensor& input) {
+    return dispatch_unary("isfinite_kernel", input);
+}
+
+Tensor mps_rsqrt_kernel(const Tensor& input) {
+    return dispatch_unary("rsqrt_kernel", input);
+}
+
+Tensor mps_square_kernel(const Tensor& input) {
+    return dispatch_unary("square_kernel", input);
+}
+
+Tensor mps_reciprocal_kernel(const Tensor& input) {
+    return dispatch_unary("reciprocal_kernel", input);
+}
+
+Tensor mps_deg2rad_kernel(const Tensor& input) {
+    return dispatch_unary("deg2rad_kernel", input);
+}
+
+Tensor mps_rad2deg_kernel(const Tensor& input) {
+    return dispatch_unary("rad2deg_kernel", input);
+}
+
+Tensor mps_logit_kernel(const Tensor& input) {
+    return dispatch_unary("logit_kernel", input);
+}
+
+Tensor mps_signbit_kernel(const Tensor& input) {
+    return dispatch_unary("signbit_kernel", input);
+}
+
+Tensor mps_isreal_kernel(const Tensor& input) {
+    return dispatch_unary("isreal_kernel", input);
+}
+
+Tensor mps_isposinf_kernel(const Tensor& input) {
+    return dispatch_unary("isposinf_kernel", input);
+}
+
+Tensor mps_isneginf_kernel(const Tensor& input) {
+    return dispatch_unary("isneginf_kernel", input);
+}
+
+// --- Binary dispatch wrappers ---
+
+Tensor mps_atan2_kernel(const Tensor& a, const Tensor& b) {
+    return dispatch_binary("atan2_kernel", a, b);
+}
+
+Tensor mps_fmod_kernel(const Tensor& a, const Tensor& b) {
+    return dispatch_binary("fmod_kernel", a, b);
+}
+
+Tensor mps_remainder_kernel(const Tensor& a, const Tensor& b) {
+    return dispatch_binary("remainder_kernel", a, b);
+}
+
+Tensor mps_copysign_kernel(const Tensor& a, const Tensor& b) {
+    return dispatch_binary("copysign_kernel", a, b);
+}
+
+Tensor mps_nextafter_kernel(const Tensor& a, const Tensor& b) {
+    return dispatch_binary("nextafter_kernel", a, b);
+}
+
+Tensor mps_float_power_kernel(const Tensor& a, const Tensor& b) {
+    return dispatch_binary("float_power_kernel", a, b);
+}
+
+Tensor mps_xlog1py_kernel(const Tensor& a, const Tensor& b) {
+    return dispatch_binary("xlog1py_kernel", a, b);
+}
+
+Tensor mps_ldexp_kernel(const Tensor& a, const Tensor& b) {
+    return dispatch_binary("ldexp_kernel", a, b);
+}
+
+Tensor mps_hypot_kernel(const Tensor& a, const Tensor& b) {
+    return dispatch_binary("hypot_kernel", a, b);
+}
+
 } // namespace tenzor::mps

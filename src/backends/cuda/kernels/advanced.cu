@@ -1294,6 +1294,56 @@ auto bernoulli_kernel(const Tensor& probs, cudaStream_t stream) -> Tensor {
 }
 
 // ============================================================================
+// Poisson sampling kernel (Knuth algorithm)
+// ============================================================================
+
+__global__ void poisson_kernel_impl(const float* rates, int64_t* output,
+                                     int64_t n, uint64_t seed) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n) return;
+
+    float lambda = rates[tid];
+
+    // Knuth algorithm for Poisson sampling
+    float L = expf(-lambda);
+    int64_t k = 0;
+    float p = 1.0f;
+
+    // Simple LCG-based PRNG per thread (same pattern as bernoulli)
+    uint64_t state = seed + tid * 6364136223846793005ULL + 1442695040888963407ULL;
+
+    do {
+        k++;
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+        p *= u;
+    } while (p > L);
+
+    output[tid] = k - 1;
+}
+
+auto poisson_sample_kernel(const Tensor& rates, cudaStream_t stream) -> Tensor {
+    auto input = rates.contiguous();
+    if (input.dtype() != DType::Float32) {
+        input = input.to(DType::Float32);
+    }
+    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
+    auto result = Tensor(shape_vec, DType::Int64, input.device());
+    int64_t n = input.numel();
+    if (n == 0) return result;
+
+    int threads = 256;
+    int blocks_n = (n + threads - 1) / threads;
+
+    // Use a time-based seed
+    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+
+    poisson_kernel_impl<<<blocks_n, threads, 0, stream>>>(
+        input.data<float>(), result.data<int64_t>(), n, seed);
+    return result;
+}
+
+// ============================================================================
 // Multinomial sampling kernel
 // ============================================================================
 
