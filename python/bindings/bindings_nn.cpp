@@ -29,6 +29,7 @@
 #include <tenzor/nn/layers/vision.hpp>
 #include <tenzor/nn/layers/mobilenet.hpp>
 #include <tenzor/nn/layers/segmentation.hpp>
+#include <tenzor/nn/layers/hrm.hpp>
 #include <tenzor/nn/layers/sparse_linear.hpp>
 #include <tenzor/nn/layers/sparse_embedding.hpp>
 #include <tenzor/nn/loss/losses.hpp>
@@ -1385,13 +1386,19 @@ void register_nn(py::module_& m) {
     py::class_<tenzor::nn::GroupedQueryAttention, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::GroupedQueryAttention>>(nn, "GroupedQueryAttention",
         "Grouped Query Attention (GQA / MQA) layer")
-        .def(py::init<int64_t, int64_t, int64_t, double, bool, bool>(),
+        .def(py::init([](int64_t embed_dim, int64_t num_heads, int64_t num_kv_heads,
+                         double dropout, bool bias, bool is_causal, int64_t window_size) {
+                return std::make_shared<tenzor::nn::GroupedQueryAttention>(
+                    embed_dim, num_heads, num_kv_heads, dropout, bias, is_causal,
+                    nullptr, window_size);
+             }),
              py::arg("embed_dim"),
              py::arg("num_heads"),
              py::arg("num_kv_heads"),
              py::arg("dropout") = 0.0,
              py::arg("bias") = true,
-             py::arg("is_causal") = false)
+             py::arg("is_causal") = false,
+             py::arg("window_size") = -1)
         .def("forward", [](tenzor::nn::GroupedQueryAttention& self,
                            const tenzor::Variable& query,
                            const tenzor::Variable& key,
@@ -1409,7 +1416,8 @@ void register_nn(py::module_& m) {
         .def_property_readonly("num_kv_heads", &tenzor::nn::GroupedQueryAttention::num_kv_heads)
         .def_property_readonly("num_heads_per_group", &tenzor::nn::GroupedQueryAttention::num_heads_per_group)
         .def_property_readonly("head_dim", &tenzor::nn::GroupedQueryAttention::head_dim)
-        .def_property_readonly("is_causal", &tenzor::nn::GroupedQueryAttention::is_causal);
+        .def_property_readonly("is_causal", &tenzor::nn::GroupedQueryAttention::is_causal)
+        .def_property_readonly("window_size", &tenzor::nn::GroupedQueryAttention::window_size);
 
     // =========================================================================
     // Priority 2: ViT-critical layers

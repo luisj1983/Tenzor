@@ -11,3 +11,8 @@ tenzor_discover_tests(test_nested_tensor LABELS "nested" DISCOVERY_TIMEOUT 60)
 add_executable(test_nested_autograd test_nested_autograd.cpp)
 target_link_libraries(test_nested_autograd PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_nested_autograd LABELS "nested" DISCOVERY_TIMEOUT 60)
+
+# NestedLogSoftmax backend parity tests
+add_executable(test_nested_log_softmax test_nested_log_softmax.cpp)
+target_link_libraries(test_nested_log_softmax PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_nested_log_softmax LABELS "nested" DISCOVERY_TIMEOUT 60)

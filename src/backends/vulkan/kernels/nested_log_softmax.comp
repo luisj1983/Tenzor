@@ -1,0 +1,54 @@
+#version 450
+
+// Nested (segmented) log-softmax: log(softmax(x)) per variable-length segment.
+// One workgroup per batch element (segment). Threads cooperate on inner dim D.
+// offsets[b] .. offsets[b+1] defines the segment for batch b.
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer readonly Values  { float values[];  };
+layout(binding = 1) buffer readonly Offsets { int   offsets[]; };
+layout(binding = 2) buffer writeonly Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint D;   // inner dimension
+    uint B;   // number of segments (batch size)
+} params;
+
+shared float s_max[256];
+shared float s_sum[256];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint b   = gl_WorkGroupID.x;
+    if (b >= params.B) return;
+
+    int seg_start = offsets[b];
+    int seg_end   = offsets[b + 1];
+    int seg_len   = seg_end - seg_start;
+    if (seg_len <= 0) return;
+
+    // Process each column d of the [seg_len, D] block
+    for (uint d = tid; d < params.D; d += 256) {
+
+        // Pass 1: find max for numerical stability
+        float local_max = -1.0 / 0.0;
+        for (int s = 0; s < seg_len; ++s) {
+            float v = values[uint(seg_start + s) * params.D + d];
+            local_max = max(local_max, v);
+        }
+
+        // Pass 2: compute sum(exp(x - max))
+        float local_sum = 0.0;
+        for (int s = 0; s < seg_len; ++s) {
+            local_sum += exp(values[uint(seg_start + s) * params.D + d] - local_max);
+        }
+
+        // Pass 3: write log-softmax = (x - max) - log(sum)
+        float log_sum = log(local_sum);
+        for (int s = 0; s < seg_len; ++s) {
+            uint idx = uint(seg_start + s) * params.D + d;
+            output_data[idx] = (values[idx] - local_max) - log_sum;
+        }
+    }
+}

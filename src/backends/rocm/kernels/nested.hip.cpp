@@ -97,6 +97,65 @@ auto nested_softmax_hip(const Tensor& values, const Tensor& offsets,
 }
 
 // ============================================================================
+// Segmented Log-Softmax
+// ============================================================================
+
+__global__ void nested_log_softmax_kernel(
+    const float* __restrict__ values,
+    float* __restrict__ output,
+    const int64_t* __restrict__ offsets,
+    int64_t D, int64_t B)
+{
+    int64_t b = blockIdx.x;
+    if (b >= B) return;
+
+    int64_t start = offsets[b];
+    int64_t end = offsets[b + 1];
+    int64_t len = end - start;
+    if (len <= 0) return;
+
+    for (int64_t d = threadIdx.x; d < D; d += blockDim.x) {
+        float max_val = -FLT_MAX;
+        for (int64_t s = 0; s < len; ++s) {
+            float v = values[(start + s) * D + d];
+            if (v > max_val) max_val = v;
+        }
+
+        float sum = 0.0f;
+        for (int64_t s = 0; s < len; ++s) {
+            sum += expf(values[(start + s) * D + d] - max_val);
+        }
+
+        float log_sum = logf(sum);
+        for (int64_t s = 0; s < len; ++s) {
+            output[(start + s) * D + d] = (values[(start + s) * D + d] - max_val) - log_sum;
+        }
+    }
+}
+
+auto nested_log_softmax_hip(const Tensor& values, const Tensor& offsets,
+                             int64_t dim, hipStream_t stream) -> Tensor {
+    auto shape = values.shape();
+    int64_t D = (shape.size() > 1) ? shape[1] : 1;
+    int64_t B = offsets.numel() - 1;
+
+    auto output = tenzor::empty(std::vector<int64_t>(shape.begin(), shape.end()), values.dtype(), values.device());
+    int threads = static_cast<int>(std::min(D, int64_t(256)));
+
+    if (values.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(nested_log_softmax_kernel,
+            dim3(static_cast<unsigned>(B)), dim3(threads), 0, stream,
+            values.data<float>(), output.data<float>(),
+            offsets.data<int64_t>(), D, B);
+    } else {
+        throw std::runtime_error("nested_log_softmax_hip: unsupported dtype");
+    }
+
+    HIP_CHECK_NESTED(hipGetLastError());
+    return output;
+}
+
+// ============================================================================
 // Segmented Sum Reduction
 // ============================================================================
 

@@ -1,6 +1,7 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_bfloat16.h>
+#include <hipcub/hipcub.hpp>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/shape.hpp"
@@ -2125,6 +2126,14 @@ auto repeat_interleave_scalar_kernel(const Tensor& input, int64_t repeats, int64
     return output;
 }
 
+// Cast repeats tensor to int64 on device
+template <typename SrcT>
+__global__ void ri_cast_to_int64_kernel(const SrcT* __restrict__ src,
+                                        int64_t* __restrict__ dst, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) dst[idx] = static_cast<int64_t>(src[idx]);
+}
+
 auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_tensor,
                                      int64_t dim, hipStream_t stream) -> Tensor {
     auto shape = input.shape();
@@ -2133,32 +2142,61 @@ auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_
     int64_t ndim = shape.size();
     int64_t in_dim_size = shape[dim];
 
-    // Read repeats to host to compute prefix sum
-    auto repeats_host = repeats_tensor.to(Device::cpu()).contiguous();
-    std::vector<int64_t> host_prefix(in_dim_size + 1);
-    host_prefix[0] = 0;
+    // Convert repeats to int64 on device (no CPU roundtrip)
+    int64_t* d_repeats_i64 = nullptr;
+    HIP_CHECK(hipMalloc(&d_repeats_i64, in_dim_size * sizeof(int64_t)));
 
-    if (repeats_host.dtype() == DType::Int64) {
-        const int64_t* rp = repeats_host.data<int64_t>();
-        for (int64_t i = 0; i < in_dim_size; ++i)
-            host_prefix[i + 1] = host_prefix[i] + rp[i];
-    } else if (repeats_host.dtype() == DType::Int32) {
-        const int32_t* rp = repeats_host.data<int32_t>();
-        for (int64_t i = 0; i < in_dim_size; ++i)
-            host_prefix[i + 1] = host_prefix[i] + rp[i];
-    } else if (repeats_host.dtype() == DType::Float32) {
-        const float* rp = repeats_host.data<float>();
-        for (int64_t i = 0; i < in_dim_size; ++i)
-            host_prefix[i + 1] = host_prefix[i] + static_cast<int64_t>(rp[i]);
-    } else if (repeats_host.dtype() == DType::Float64) {
-        const double* rp = repeats_host.data<double>();
-        for (int64_t i = 0; i < in_dim_size; ++i)
-            host_prefix[i + 1] = host_prefix[i] + static_cast<int64_t>(rp[i]);
+    auto repeats_cont = repeats_tensor.is_contiguous() ? repeats_tensor : repeats_tensor.contiguous();
+    constexpr int CAST_BLOCK = 256;
+    int64_t cast_blocks = (in_dim_size + CAST_BLOCK - 1) / CAST_BLOCK;
+
+    if (repeats_cont.dtype() == DType::Int64) {
+        HIP_CHECK(hipMemcpyAsync(d_repeats_i64, repeats_cont.data<int64_t>(),
+                                 in_dim_size * sizeof(int64_t),
+                                 hipMemcpyDeviceToDevice, stream));
+    } else if (repeats_cont.dtype() == DType::Int32) {
+        hipLaunchKernelGGL(ri_cast_to_int64_kernel<int32_t>,
+            dim3(cast_blocks), dim3(CAST_BLOCK), 0, stream,
+            repeats_cont.data<int32_t>(), d_repeats_i64, in_dim_size);
+    } else if (repeats_cont.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(ri_cast_to_int64_kernel<float>,
+            dim3(cast_blocks), dim3(CAST_BLOCK), 0, stream,
+            repeats_cont.data<float>(), d_repeats_i64, in_dim_size);
+    } else if (repeats_cont.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(ri_cast_to_int64_kernel<double>,
+            dim3(cast_blocks), dim3(CAST_BLOCK), 0, stream,
+            repeats_cont.data<double>(), d_repeats_i64, in_dim_size);
     } else {
+        hipFree(d_repeats_i64);
         throw std::runtime_error("repeat_interleave: unsupported repeats dtype");
     }
 
-    int64_t out_dim_size = host_prefix[in_dim_size];
+    // Compute exclusive prefix sum on device using hipcub
+    int64_t* d_prefix = nullptr;
+    HIP_CHECK(hipMalloc(&d_prefix, (in_dim_size + 1) * sizeof(int64_t)));
+
+    void* d_temp = nullptr;
+    size_t temp_bytes = 0;
+    hipcub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_repeats_i64, d_prefix,
+                                     static_cast<int>(in_dim_size), stream);
+    HIP_CHECK(hipMalloc(&d_temp, temp_bytes));
+    hipcub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_repeats_i64, d_prefix,
+                                     static_cast<int>(in_dim_size), stream);
+    hipFree(d_temp);
+
+    // Read only the total from device (2 scalars: last prefix + last repeat)
+    int64_t last_prefix = 0, last_repeat = 0;
+    HIP_CHECK(hipMemcpyAsync(&last_prefix, d_prefix + in_dim_size - 1,
+                             sizeof(int64_t), hipMemcpyDeviceToHost, stream));
+    HIP_CHECK(hipMemcpyAsync(&last_repeat, d_repeats_i64 + in_dim_size - 1,
+                             sizeof(int64_t), hipMemcpyDeviceToHost, stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
+    int64_t out_dim_size = last_prefix + last_repeat;
+    // Write total to d_prefix[in_dim_size] for the kernel
+    HIP_CHECK(hipMemcpyAsync(d_prefix + in_dim_size, &out_dim_size,
+                             sizeof(int64_t), hipMemcpyHostToDevice, stream));
+
+    hipFree(d_repeats_i64);
 
     std::vector<int64_t> out_shape(shape.begin(), shape.end());
     out_shape[dim] = out_dim_size;
@@ -2167,17 +2205,13 @@ auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_
 
     int64_t total = 1;
     for (auto s : out_shape) total *= s;
-    if (total == 0) return output;
+    if (total == 0) {
+        hipFree(d_prefix);
+        return output;
+    }
 
     int64_t inner_size = 1;
     for (int64_t d = dim + 1; d < ndim; ++d) inner_size *= shape[d];
-
-    // Upload prefix sum to device
-    int64_t* d_prefix = nullptr;
-    HIP_CHECK(hipMalloc(&d_prefix, (in_dim_size + 1) * sizeof(int64_t)));
-    HIP_CHECK(hipMemcpyAsync(d_prefix, host_prefix.data(),
-                             (in_dim_size + 1) * sizeof(int64_t),
-                             hipMemcpyHostToDevice, stream));
 
     constexpr int BLOCK = 256;
     int64_t num_blocks = (total + BLOCK - 1) / BLOCK;

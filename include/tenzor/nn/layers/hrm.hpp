@@ -152,33 +152,69 @@ struct HRMConfig {
 // RMSNorm is now defined in normalization.hpp and included above
 
 /**
+ * @brief Gate activation type for GatedLinearUnit variants.
+ */
+enum class GateType {
+    Sigmoid, ///< Standard GLU: sigmoid gate
+    SiLU,    ///< SwiGLU: SiLU (Swish) gate — LLaMA, PaLM
+    GELU,    ///< GeGLU: GELU gate — Gemma
+    ReLU     ///< ReGLU: ReLU gate
+};
+
+/**
  * @brief Gated Linear Unit (GLU) activation
  *
  * GLU(x) = x[:, :d] * sigmoid(x[:, d:])
- * or with SiLU: SwiGLU(x) = x[:, :d] * silu(x[:, d:])
+ * SwiGLU(x) = x[:, :d] * silu(x[:, d:])
+ * GeGLU(x) = x[:, :d] * gelu(x[:, d:])
+ * ReGLU(x) = x[:, :d] * relu(x[:, d:])
  *
- * Used in modern transformers like LLaMA, PaLM.
+ * Used in modern transformers like LLaMA, PaLM, Gemma.
  */
 class GatedLinearUnit : public Module {
 public:
     /**
-     * @brief Construct GLU layer
+     * @brief Construct GLU layer with gate type
      *
      * @param in_features Input dimension
      * @param hidden_features Hidden dimension (will output hidden_features)
-     * @param use_silu Use SiLU instead of sigmoid (SwiGLU)
+     * @param gate_type Gate activation function
      * @param bias Use bias in linear layers
      */
     GatedLinearUnit(int64_t in_features, int64_t hidden_features,
-                    bool use_silu = true, bool bias = false);
+                    GateType gate_type = GateType::SiLU, bool bias = false);
+
+    /// Backwards-compatible constructor
+    GatedLinearUnit(int64_t in_features, int64_t hidden_features,
+                    bool use_silu, bool bias = false);
 
     auto forward_impl(const Variable& input) -> Variable override;
+
+    auto gate_type() const -> GateType { return gate_type_; }
 
 private:
     std::shared_ptr<Linear> gate_proj_;
     std::shared_ptr<Linear> up_proj_;
     std::shared_ptr<Linear> down_proj_;
-    bool use_silu_;
+    GateType gate_type_;
+};
+
+/**
+ * @brief GeGLU — GELU-gated linear unit (Gemma, etc.)
+ */
+class GeGLU : public GatedLinearUnit {
+public:
+    GeGLU(int64_t in_features, int64_t hidden_features, bool bias = false)
+        : GatedLinearUnit(in_features, hidden_features, GateType::GELU, bias) {}
+};
+
+/**
+ * @brief ReGLU — ReLU-gated linear unit
+ */
+class ReGLU : public GatedLinearUnit {
+public:
+    ReGLU(int64_t in_features, int64_t hidden_features, bool bias = false)
+        : GatedLinearUnit(in_features, hidden_features, GateType::ReLU, bias) {}
 };
 
 /**

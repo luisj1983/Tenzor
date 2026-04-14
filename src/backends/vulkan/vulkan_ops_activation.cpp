@@ -174,6 +174,55 @@ auto VulkanBackend::dispatchLogSoftmax(const Tensor& input, int64_t dim) -> Tens
     return fp16_saturate_if_needed(*this, output);
 }
 
+auto VulkanBackend::dispatchNestedLogSoftmax(const Tensor& values, const Tensor& offsets,
+                                              int64_t /*dim*/) -> Tensor {
+    int32_t device_id = values.device().index;
+    auto shape = values.shape();
+    int64_t total_len = shape[0];
+    uint32_t D = (shape.size() > 1) ? static_cast<uint32_t>(shape[1]) : 1;
+    uint32_t B = static_cast<uint32_t>(offsets.numel() - 1);
+
+    auto* pipeline = getPipeline("nested_log_softmax", device_id);
+
+    Tensor output(std::vector<int64_t>(shape.begin(), shape.end()), values.dtype(), values.device());
+
+    // Offsets must be Int32 for the shader
+    Tensor offsets_i32 = (offsets.dtype() == DType::Int32)
+                         ? offsets : offsets.to(DType::Int32);
+
+    const void* buf_values  = values.data_ptr();
+    const void* buf_offsets = offsets_i32.data_ptr();
+    const void* buf_output  = output.data_ptr();
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, buf_values},
+        {1, buf_offsets},
+        {2, buf_output},
+    };
+    std::vector<size_t> sizes = {
+        static_cast<size_t>(values.numel()) * values.dtype_size(),
+        static_cast<size_t>(offsets_i32.numel()) * offsets_i32.dtype_size(),
+        static_cast<size_t>(output.numel()) * output.dtype_size(),
+    };
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+
+    struct { uint32_t D; uint32_t B; } pc{D, B};
+    vkCmdPushConstants(cmd, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+
+    // One workgroup per batch element
+    vkCmdDispatch(cmd, B, 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return output;
+}
+
 auto VulkanBackend::dispatchCrossEntropy(const Tensor& log_probs, const Tensor& targets,
                                          int64_t reduction) -> Tensor {
     int32_t device_id = log_probs.device().index;

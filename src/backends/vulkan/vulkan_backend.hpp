@@ -459,6 +459,7 @@ public:
     // Softmax and loss operations
     auto dispatchSoftmax(const Tensor& input, int64_t dim) -> Tensor;
     auto dispatchLogSoftmax(const Tensor& input, int64_t dim) -> Tensor;
+    auto dispatchNestedLogSoftmax(const Tensor& values, const Tensor& offsets, int64_t dim) -> Tensor;
     auto dispatchCrossEntropy(const Tensor& log_probs, const Tensor& targets,
                              int64_t reduction) -> Tensor;
 

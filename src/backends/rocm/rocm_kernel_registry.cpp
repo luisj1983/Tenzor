@@ -768,6 +768,14 @@ namespace rocm {
                                   bool upper) -> Tensor;
 #endif
 
+    // Standalone GPU implementations (always available)
+    auto spgemm_standalone_hip(std::span<const Tensor> inputs, const OpAttributes& attrs,
+                               hipStream_t stream) -> std::vector<Tensor>;
+    auto sparse_trsv_standalone_hip(const Tensor& crow, const Tensor& col_idx, const Tensor& vals,
+                                    const Tensor& b, int64_t N, bool upper, hipStream_t stream) -> Tensor;
+    auto sparse_trsm_standalone_hip(const Tensor& crow, const Tensor& col_idx, const Tensor& vals,
+                                    const Tensor& B, int64_t N, bool upper, hipStream_t stream) -> Tensor;
+
     // Sort/TopK/ArgSort/Unique operations (sort.hip.cpp)
     auto sort_kernel(const Tensor& input, int64_t dim, bool descending,
                      hipStream_t stream) -> std::pair<Tensor, Tensor>;
@@ -909,6 +917,7 @@ namespace rocm {
                       hipStream_t stream) -> Tensor;
     // Nested tensor operations
     auto nested_softmax_hip(const Tensor& values, const Tensor& offsets, int64_t dim, hipStream_t stream) -> Tensor;
+    auto nested_log_softmax_hip(const Tensor& values, const Tensor& offsets, int64_t dim, hipStream_t stream) -> Tensor;
     auto nested_sum_hip(const Tensor& values, const Tensor& offsets, hipStream_t stream) -> Tensor;
     auto nested_mean_hip(const Tensor& values, const Tensor& offsets, hipStream_t stream) -> Tensor;
     auto nested_layer_norm_hip(const Tensor& values, const Tensor& offsets, const Tensor& weight, const Tensor& bias, float eps, hipStream_t stream) -> Tensor;
@@ -2516,6 +2525,28 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N});
             return rocm::rocm_sparse_trsm_kernel(L, inputs[3], upper);
         });
+#else
+    // Standalone GPU SpGEMM/Trsv/Trsm — no rocSPARSE dependency
+    table.register_kernel(OpId::SparseSpGEMM,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return rocm::spgemm_standalone_hip(inputs, attrs, /*stream=*/nullptr);
+        });
+
+    table.register_single_output_kernel(OpId::SparseTrsv,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t N = attrs.get_int(AttrKey::N);
+            bool upper = attrs.get_bool(AttrKey::Upper, false);
+            return rocm::sparse_trsv_standalone_hip(inputs[0], inputs[1], inputs[2],
+                                                    inputs[3], N, upper, /*stream=*/nullptr);
+        });
+
+    table.register_single_output_kernel(OpId::SparseTrsm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t N = attrs.get_int(AttrKey::N);
+            bool upper = attrs.get_bool(AttrKey::Upper, false);
+            return rocm::sparse_trsm_standalone_hip(inputs[0], inputs[1], inputs[2],
+                                                    inputs[3], N, upper, /*stream=*/nullptr);
+        });
 #endif // TENZOR_HAS_ROCSPARSE
 
     // SparseToDense: CSR components -> dense tensor
@@ -3790,6 +3821,11 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::NestedSoftmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         return rocm::nested_softmax_hip(inputs[0], inputs[1], dim, get_hip_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::NestedLogSoftmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        return rocm::nested_log_softmax_hip(inputs[0], inputs[1], dim, get_hip_stream(attrs));
     });
 
     table.register_single_output_kernel(OpId::NestedSum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {

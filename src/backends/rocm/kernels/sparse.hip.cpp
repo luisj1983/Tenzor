@@ -1323,3 +1323,278 @@ Tensor rocm_sparse_add_kernel(const SparseTensor& sparse, const Tensor& dense) {
 } // namespace tenzor
 
 #endif // TENZOR_HAS_ROCSPARSE
+
+// ============================================================================
+// Standalone GPU SpGEMM and SparseTrsv/Trsm (no rocSPARSE dependency)
+// ============================================================================
+
+#include "tenzor/core/tensor.hpp"
+#include "tenzor/core/dtype.hpp"
+#include "tenzor/core/device.hpp"
+#include "tenzor/ops/creation.hpp"
+#include <hip/hip_runtime.h>
+#include <hipcub/hipcub.hpp>
+#include <cstdint>
+#include <stdexcept>
+#include <vector>
+
+namespace tenzor {
+namespace rocm {
+
+#ifndef HIP_CHECK_SPARSE_SA
+#define HIP_CHECK_SPARSE_SA(call)                                              \
+    do {                                                                        \
+        hipError_t err = (call);                                               \
+        if (err != hipSuccess) {                                               \
+            throw std::runtime_error(                                          \
+                std::string("HIP error in sparse_standalone at ") +            \
+                __FILE__ + ":" + std::to_string(__LINE__) + " - " +            \
+                hipGetErrorString(err));                                        \
+        }                                                                      \
+    } while (0)
+#endif
+
+// SpGEMM count kernel
+template <typename T>
+__global__ void spgemm_count_hip(
+    const int64_t* __restrict__ a_crow, const int64_t* __restrict__ a_col,
+    const int64_t* __restrict__ b_crow, const int64_t* __restrict__ b_col,
+    int64_t* __restrict__ row_nnz, int64_t M, int64_t N)
+{
+    int64_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= M) return;
+    int64_t count = 0;
+    for (int64_t ja = a_crow[row]; ja < a_crow[row + 1]; ++ja) {
+        int64_t k = a_col[ja];
+        count += b_crow[k + 1] - b_crow[k];
+    }
+    row_nnz[row] = count;
+}
+
+// SpGEMM fill kernel with dedup
+template <typename T>
+__global__ void spgemm_fill_hip(
+    const int64_t* __restrict__ a_crow, const int64_t* __restrict__ a_col,
+    const T* __restrict__ a_vals,
+    const int64_t* __restrict__ b_crow, const int64_t* __restrict__ b_col,
+    const T* __restrict__ b_vals,
+    const int64_t* __restrict__ c_crow, int64_t* __restrict__ c_col,
+    T* __restrict__ c_vals, int64_t* __restrict__ c_row_nnz,
+    int64_t M, int64_t N)
+{
+    int64_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= M) return;
+    int64_t c_start = c_crow[row];
+    int64_t write_pos = c_start;
+    for (int64_t ja = a_crow[row]; ja < a_crow[row + 1]; ++ja) {
+        int64_t k = a_col[ja];
+        T a_val = a_vals[ja];
+        for (int64_t jb = b_crow[k]; jb < b_crow[k + 1]; ++jb) {
+            int64_t col = b_col[jb];
+            T val = a_val * b_vals[jb];
+            bool found = false;
+            for (int64_t p = c_start; p < write_pos; ++p) {
+                if (c_col[p] == col) { c_vals[p] += val; found = true; break; }
+            }
+            if (!found) { c_col[write_pos] = col; c_vals[write_pos] = val; write_pos++; }
+        }
+    }
+    c_row_nnz[row] = write_pos - c_start;
+}
+
+// Compact kernel
+template <typename T>
+__global__ void spgemm_compact_hip(
+    const int64_t* __restrict__ old_crow, const int64_t* __restrict__ new_crow,
+    const int64_t* __restrict__ old_col, const T* __restrict__ old_vals,
+    int64_t* __restrict__ new_col, T* __restrict__ new_vals,
+    const int64_t* __restrict__ row_nnz, int64_t M)
+{
+    int64_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= M) return;
+    int64_t src = old_crow[row], dst = new_crow[row], count = row_nnz[row];
+    for (int64_t i = 0; i < count; ++i) {
+        new_col[dst + i] = old_col[src + i];
+        new_vals[dst + i] = old_vals[src + i];
+    }
+}
+
+template <typename T>
+auto spgemm_standalone_typed_hip(
+    const Tensor& a_crow, const Tensor& a_col, const Tensor& a_vals,
+    const Tensor& b_crow, const Tensor& b_col, const Tensor& b_vals,
+    int64_t M, int64_t K, int64_t N, hipStream_t stream) -> std::vector<Tensor>
+{
+    constexpr int BLK = 256;
+    int64_t nblk = (M + BLK - 1) / BLK;
+
+    // Pass 1: count
+    int64_t* d_rnnz; HIP_CHECK_SPARSE_SA(hipMalloc(&d_rnnz, M * sizeof(int64_t)));
+    hipLaunchKernelGGL(spgemm_count_hip<T>, dim3(nblk), dim3(BLK), 0, stream,
+        a_crow.data<int64_t>(), a_col.data<int64_t>(),
+        b_crow.data<int64_t>(), b_col.data<int64_t>(), d_rnnz, M, N);
+
+    // Pass 2: prefix sum
+    int64_t* d_crow_ub; HIP_CHECK_SPARSE_SA(hipMalloc(&d_crow_ub, (M + 1) * sizeof(int64_t)));
+    void* d_tmp = nullptr; size_t tmp_bytes = 0;
+    hipcub::DeviceScan::ExclusiveSum(d_tmp, tmp_bytes, d_rnnz, d_crow_ub, M, stream);
+    HIP_CHECK_SPARSE_SA(hipMalloc(&d_tmp, tmp_bytes));
+    hipcub::DeviceScan::ExclusiveSum(d_tmp, tmp_bytes, d_rnnz, d_crow_ub, M, stream);
+    hipFree(d_tmp);
+
+    int64_t lp = 0, lc = 0;
+    HIP_CHECK_SPARSE_SA(hipMemcpyAsync(&lp, d_crow_ub + M - 1, sizeof(int64_t), hipMemcpyDeviceToHost, stream));
+    HIP_CHECK_SPARSE_SA(hipMemcpyAsync(&lc, d_rnnz + M - 1, sizeof(int64_t), hipMemcpyDeviceToHost, stream));
+    HIP_CHECK_SPARSE_SA(hipStreamSynchronize(stream));
+    int64_t total_ub = lp + lc;
+    HIP_CHECK_SPARSE_SA(hipMemcpyAsync(d_crow_ub + M, &total_ub, sizeof(int64_t), hipMemcpyHostToDevice, stream));
+
+    if (total_ub == 0) {
+        hipFree(d_rnnz); hipFree(d_crow_ub);
+        return {tenzor::zeros({M+1}, DType::Int64, a_crow.device()),
+                tenzor::empty({0}, DType::Int64, a_crow.device()),
+                tenzor::empty({0}, a_vals.dtype(), a_crow.device())};
+    }
+
+    // Pass 3: fill
+    int64_t* d_col_ub; T* d_vals_ub; int64_t* d_annz;
+    HIP_CHECK_SPARSE_SA(hipMalloc(&d_col_ub, total_ub * sizeof(int64_t)));
+    HIP_CHECK_SPARSE_SA(hipMalloc(&d_vals_ub, total_ub * sizeof(T)));
+    HIP_CHECK_SPARSE_SA(hipMalloc(&d_annz, M * sizeof(int64_t)));
+
+    hipLaunchKernelGGL(spgemm_fill_hip<T>, dim3(nblk), dim3(BLK), 0, stream,
+        a_crow.data<int64_t>(), a_col.data<int64_t>(), a_vals.data<T>(),
+        b_crow.data<int64_t>(), b_col.data<int64_t>(), b_vals.data<T>(),
+        d_crow_ub, d_col_ub, d_vals_ub, d_annz, M, N);
+
+    // Compact
+    int64_t* d_crow_f; HIP_CHECK_SPARSE_SA(hipMalloc(&d_crow_f, (M + 1) * sizeof(int64_t)));
+    d_tmp = nullptr; tmp_bytes = 0;
+    hipcub::DeviceScan::ExclusiveSum(d_tmp, tmp_bytes, d_annz, d_crow_f, M, stream);
+    HIP_CHECK_SPARSE_SA(hipMalloc(&d_tmp, tmp_bytes));
+    hipcub::DeviceScan::ExclusiveSum(d_tmp, tmp_bytes, d_annz, d_crow_f, M, stream);
+    hipFree(d_tmp);
+
+    int64_t alp = 0, alc = 0;
+    HIP_CHECK_SPARSE_SA(hipMemcpyAsync(&alp, d_crow_f + M - 1, sizeof(int64_t), hipMemcpyDeviceToHost, stream));
+    HIP_CHECK_SPARSE_SA(hipMemcpyAsync(&alc, d_annz + M - 1, sizeof(int64_t), hipMemcpyDeviceToHost, stream));
+    HIP_CHECK_SPARSE_SA(hipStreamSynchronize(stream));
+    int64_t total_nnz = alp + alc;
+    HIP_CHECK_SPARSE_SA(hipMemcpyAsync(d_crow_f + M, &total_nnz, sizeof(int64_t), hipMemcpyHostToDevice, stream));
+
+    auto c_crow_t = Tensor({M + 1}, DType::Int64, a_crow.device());
+    auto c_col_t = Tensor({total_nnz}, DType::Int64, a_crow.device());
+    auto c_vals_t = Tensor({total_nnz}, a_vals.dtype(), a_crow.device());
+
+    HIP_CHECK_SPARSE_SA(hipMemcpyAsync(c_crow_t.data<int64_t>(), d_crow_f,
+        (M + 1) * sizeof(int64_t), hipMemcpyDeviceToDevice, stream));
+
+    if (total_nnz > 0) {
+        hipLaunchKernelGGL(spgemm_compact_hip<T>, dim3(nblk), dim3(BLK), 0, stream,
+            d_crow_ub, d_crow_f, d_col_ub, d_vals_ub,
+            c_col_t.data<int64_t>(), c_vals_t.data<T>(), d_annz, M);
+    }
+
+    hipFree(d_rnnz); hipFree(d_crow_ub); hipFree(d_col_ub);
+    hipFree(d_vals_ub); hipFree(d_annz); hipFree(d_crow_f);
+    return {c_crow_t, c_col_t, c_vals_t};
+}
+
+auto spgemm_standalone_hip(std::span<const Tensor> inputs, const OpAttributes& attrs,
+                           hipStream_t stream) -> std::vector<Tensor> {
+    int64_t M = attrs.get_int(AttrKey::M);
+    int64_t K = attrs.get_int(AttrKey::K);
+    int64_t N = attrs.get_int(AttrKey::N);
+    if (inputs[2].dtype() == DType::Float32)
+        return spgemm_standalone_typed_hip<float>(inputs[0], inputs[1], inputs[2],
+            inputs[3], inputs[4], inputs[5], M, K, N, stream);
+    else if (inputs[2].dtype() == DType::Float64)
+        return spgemm_standalone_typed_hip<double>(inputs[0], inputs[1], inputs[2],
+            inputs[3], inputs[4], inputs[5], M, K, N, stream);
+    throw std::runtime_error("spgemm_standalone_hip: only Float32/Float64");
+}
+
+// Sparse triangular solve with level-set atomics
+template <typename T>
+__global__ void sparse_trsv_hip_kernel(
+    const int64_t* __restrict__ crow, const int64_t* __restrict__ col,
+    const T* __restrict__ vals, const T* __restrict__ b,
+    T* __restrict__ x, int* __restrict__ solved,
+    int64_t N, bool upper)
+{
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= N) return;
+    int64_t row = upper ? (N - 1 - tid) : tid;
+
+    if (tid > 0) {
+        for (int64_t j = crow[row]; j < crow[row + 1]; ++j) {
+            int64_t c = col[j];
+            if (upper ? (c > row) : (c < row))
+                while (atomicOr(&solved[c], 0) == 0) {}
+        }
+    }
+
+    T rhs = b[row]; T diag = T(1);
+    for (int64_t j = crow[row]; j < crow[row + 1]; ++j) {
+        int64_t c = col[j];
+        if (c == row) diag = vals[j];
+        else if (upper ? (c > row) : (c < row)) rhs -= vals[j] * x[c];
+    }
+    x[row] = rhs / diag;
+    atomicExch(&solved[row], 1);
+}
+
+auto sparse_trsv_standalone_hip(const Tensor& crow, const Tensor& col_idx,
+    const Tensor& vals, const Tensor& b, int64_t N, bool upper,
+    hipStream_t stream) -> Tensor
+{
+    auto x = tenzor::zeros({N}, vals.dtype(), vals.device());
+    int* d_solved; HIP_CHECK_SPARSE_SA(hipMalloc(&d_solved, N * sizeof(int)));
+    HIP_CHECK_SPARSE_SA(hipMemsetAsync(d_solved, 0, N * sizeof(int), stream));
+
+    constexpr int BLK = 256;
+    int64_t blocks = (N + BLK - 1) / BLK;
+    if (vals.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(sparse_trsv_hip_kernel<float>, dim3(blocks), dim3(BLK), 0, stream,
+            crow.data<int64_t>(), col_idx.data<int64_t>(), vals.data<float>(),
+            b.data<float>(), x.data<float>(), d_solved, N, upper);
+    } else if (vals.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(sparse_trsv_hip_kernel<double>, dim3(blocks), dim3(BLK), 0, stream,
+            crow.data<int64_t>(), col_idx.data<int64_t>(), vals.data<double>(),
+            b.data<double>(), x.data<double>(), d_solved, N, upper);
+    } else {
+        hipFree(d_solved);
+        throw std::runtime_error("sparse_trsv_standalone_hip: only Float32/Float64");
+    }
+    HIP_CHECK_SPARSE_SA(hipGetLastError());
+    hipFree(d_solved);
+    return x;
+}
+
+auto sparse_trsm_standalone_hip(const Tensor& crow, const Tensor& col_idx,
+    const Tensor& vals, const Tensor& B, int64_t N, bool upper,
+    hipStream_t stream) -> Tensor
+{
+    int64_t K = B.shape()[1];
+    auto X = tenzor::zeros({N, K}, vals.dtype(), vals.device());
+    for (int64_t k = 0; k < K; ++k) {
+        auto b_col = B.slice(1, k, k + 1).squeeze(1);
+        auto x_col = sparse_trsv_standalone_hip(crow, col_idx, vals, b_col, N, upper, stream);
+        if (vals.dtype() == DType::Float32) {
+            HIP_CHECK_SPARSE_SA(hipMemcpy2DAsync(
+                X.data<float>() + k, K * sizeof(float),
+                x_col.data<float>(), sizeof(float),
+                sizeof(float), N, hipMemcpyDeviceToDevice, stream));
+        } else {
+            HIP_CHECK_SPARSE_SA(hipMemcpy2DAsync(
+                X.data<double>() + k, K * sizeof(double),
+                x_col.data<double>(), sizeof(double),
+                sizeof(double), N, hipMemcpyDeviceToDevice, stream));
+        }
+    }
+    HIP_CHECK_SPARSE_SA(hipStreamSynchronize(stream));
+    return X;
+}
+
+} // namespace rocm
+} // namespace tenzor

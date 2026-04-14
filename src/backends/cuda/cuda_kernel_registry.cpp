@@ -607,6 +607,7 @@ namespace cuda {
 
     // Nested tensor operations
     auto nested_softmax_cuda(const Tensor& values, const Tensor& offsets, int64_t dim, cudaStream_t stream) -> Tensor;
+    auto nested_log_softmax_cuda(const Tensor& values, const Tensor& offsets, int64_t dim, cudaStream_t stream) -> Tensor;
     auto nested_sum_cuda(const Tensor& values, const Tensor& offsets, cudaStream_t stream) -> Tensor;
     auto nested_mean_cuda(const Tensor& values, const Tensor& offsets, cudaStream_t stream) -> Tensor;
     auto nested_layer_norm_cuda(const Tensor& values, const Tensor& offsets, const Tensor& weight, const Tensor& bias, float eps, cudaStream_t stream) -> Tensor;
@@ -849,6 +850,14 @@ namespace cuda {
     auto cuda_sparse_trsm_kernel(const SparseTensor& L, const Tensor& B,
                                   bool upper, void* stream) -> Tensor;
 #endif
+
+    // Standalone GPU implementations (always available, no cuSPARSE dependency)
+    auto spgemm_standalone(std::span<const Tensor> inputs, const OpAttributes& attrs,
+                           cudaStream_t stream) -> std::vector<Tensor>;
+    auto sparse_trsv_standalone(const Tensor& crow, const Tensor& col_idx, const Tensor& vals,
+                                const Tensor& b, int64_t N, bool upper, cudaStream_t stream) -> Tensor;
+    auto sparse_trsm_standalone(const Tensor& crow, const Tensor& col_idx, const Tensor& vals,
+                                const Tensor& B, int64_t N, bool upper, cudaStream_t stream) -> Tensor;
 
 } // namespace cuda
 
@@ -3363,6 +3372,28 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N});
             return cuda::cuda_sparse_trsm_kernel(L, inputs[3], upper, /*stream=*/nullptr);
         });
+#else
+    // Standalone GPU SpGEMM/Trsv/Trsm — no cuSPARSE dependency
+    table.register_kernel(OpId::SparseSpGEMM,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cuda::spgemm_standalone(inputs, attrs, /*stream=*/nullptr);
+        });
+
+    table.register_single_output_kernel(OpId::SparseTrsv,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t N = attrs.get_int(AttrKey::N);
+            bool upper = attrs.get_bool(AttrKey::Upper, false);
+            return cuda::sparse_trsv_standalone(inputs[0], inputs[1], inputs[2],
+                                                inputs[3], N, upper, /*stream=*/nullptr);
+        });
+
+    table.register_single_output_kernel(OpId::SparseTrsm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t N = attrs.get_int(AttrKey::N);
+            bool upper = attrs.get_bool(AttrKey::Upper, false);
+            return cuda::sparse_trsm_standalone(inputs[0], inputs[1], inputs[2],
+                                                inputs[3], N, upper, /*stream=*/nullptr);
+        });
 #endif // TENZOR_HAS_CUSPARSE
 
     // SparseToDense: CSR components -> dense tensor (works on any device)
@@ -3790,6 +3821,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::NestedSoftmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t dim = attrs.get_int(AttrKey::Dim, -1);
         return cuda::nested_softmax_cuda(inputs[0], inputs[1], dim, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::NestedLogSoftmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        return cuda::nested_log_softmax_cuda(inputs[0], inputs[1], dim, get_cuda_stream(attrs));
     });
 
     table.register_single_output_kernel(OpId::NestedSum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {

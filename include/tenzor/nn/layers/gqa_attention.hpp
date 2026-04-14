@@ -86,7 +86,8 @@ public:
                          double dropout = 0.0,
                          bool bias = true,
                          bool is_causal = false,
-                         std::shared_ptr<RoPE> rope = nullptr);
+                         std::shared_ptr<RoPE> rope = nullptr,
+                         int64_t window_size = -1);
 
     /**
      * @brief Forward pass through grouped query attention.
@@ -130,6 +131,9 @@ public:
     /** @brief Get whether causal masking is enabled. */
     auto is_causal() const -> bool { return is_causal_; }
 
+    /** @brief Get sliding window size (-1 means full attention). */
+    auto window_size() const -> int64_t { return window_size_; }
+
 private:
     int64_t embed_dim_;           ///< Total embedding dimension
     int64_t num_heads_;           ///< Number of query heads
@@ -138,6 +142,7 @@ private:
     int64_t head_dim_;            ///< Dimension per head (embed_dim / num_heads)
     double dropout_;              ///< Dropout probability
     bool is_causal_;              ///< Whether to apply causal masking
+    int64_t window_size_;         ///< Sliding window size (-1 = full attention)
 
     // Projection layers
     std::shared_ptr<Linear> q_proj_;    ///< Query projection: embed_dim -> embed_dim

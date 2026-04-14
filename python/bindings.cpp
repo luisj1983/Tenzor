@@ -77,6 +77,7 @@
 #include <tenzor/utils/benchmark.hpp>
 #include <tenzor/nn/optim/adam_atan2.hpp>
 #include <tenzor/nn/layers/hrm.hpp>
+#include <tenzor/nn/layers/moe.hpp>
 #include <tenzor/nn/layers/alibi.hpp>
 #include <tenzor/nn/layers/gqa_attention.hpp>
 #include <tenzor/nn/layers/drop_path.hpp>
@@ -1698,13 +1699,58 @@ PYBIND11_MODULE(tenzor_core, m) {
 
     // RMSNorm is registered in nn module, no need to register again here
 
-    // GatedLinearUnit
+    // GateType enum
+    py::enum_<tenzor::nn::GateType>(hrm, "GateType")
+        .value("Sigmoid", tenzor::nn::GateType::Sigmoid)
+        .value("SiLU", tenzor::nn::GateType::SiLU)
+        .value("GELU", tenzor::nn::GateType::GELU)
+        .value("ReLU", tenzor::nn::GateType::ReLU);
+
+    // GatedLinearUnit (SwiGLU / GeGLU / ReGLU)
     py::class_<tenzor::nn::GatedLinearUnit, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::GatedLinearUnit>>(hrm, "GatedLinearUnit",
-        "Gated Linear Unit (GLU/SwiGLU)")
+        "Gated Linear Unit with configurable gate activation (SwiGLU, GeGLU, ReGLU)")
+        .def(py::init<int64_t, int64_t, tenzor::nn::GateType, bool>(),
+             py::arg("in_features"), py::arg("hidden_features"),
+             py::arg("gate_type") = tenzor::nn::GateType::SiLU,
+             py::arg("bias") = false)
         .def(py::init<int64_t, int64_t, bool, bool>(),
              py::arg("in_features"), py::arg("hidden_features"),
-             py::arg("use_silu") = true, py::arg("bias") = false);
+             py::arg("use_silu") = true, py::arg("bias") = false)
+        .def_property_readonly("gate_type", &tenzor::nn::GatedLinearUnit::gate_type);
+
+    // GeGLU convenience class
+    py::class_<tenzor::nn::GeGLU, tenzor::nn::GatedLinearUnit,
+               std::shared_ptr<tenzor::nn::GeGLU>>(hrm, "GeGLU",
+        "GELU-gated linear unit (Gemma, etc.)")
+        .def(py::init<int64_t, int64_t, bool>(),
+             py::arg("in_features"), py::arg("hidden_features"),
+             py::arg("bias") = false);
+
+    // ReGLU convenience class
+    py::class_<tenzor::nn::ReGLU, tenzor::nn::GatedLinearUnit,
+               std::shared_ptr<tenzor::nn::ReGLU>>(hrm, "ReGLU",
+        "ReLU-gated linear unit")
+        .def(py::init<int64_t, int64_t, bool>(),
+             py::arg("in_features"), py::arg("hidden_features"),
+             py::arg("bias") = false);
+
+    // MixtureOfExperts
+    py::class_<tenzor::nn::MixtureOfExperts, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::MixtureOfExperts>>(hrm, "MixtureOfExperts",
+        "Mixture of Experts with top-k routing and load balancing loss")
+        .def(py::init<int64_t, int64_t, int64_t, int64_t, double, double, double>(),
+             py::arg("input_dim"), py::arg("hidden_dim"),
+             py::arg("num_experts"), py::arg("top_k") = 2,
+             py::arg("capacity_factor") = 1.25,
+             py::arg("aux_loss_weight") = 0.01,
+             py::arg("dropout") = 0.0)
+        .def("forward_with_loss", &tenzor::nn::MixtureOfExperts::forward_with_loss,
+             py::arg("input"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Forward pass returning (output, aux_loss)")
+        .def_property_readonly("num_experts", &tenzor::nn::MixtureOfExperts::num_experts)
+        .def_property_readonly("top_k", &tenzor::nn::MixtureOfExperts::top_k);
 
     // RotaryPositionEmbedding
     py::class_<tenzor::nn::RotaryPositionEmbedding, tenzor::nn::Module,
@@ -2710,6 +2756,16 @@ void bind_compression(py::module& m) {
     sparse_mod.def("mul", &tenzor::sparse::mul,
         "Scalar multiplication of sparse tensor",
         py::arg("sparse"), py::arg("scalar"),
+        py::call_guard<py::gil_scoped_release>());
+
+    sparse_mod.def("spgemm", &tenzor::sparse::spgemm,
+        "Sparse-sparse matrix multiplication (CSR x CSR -> CSR)",
+        py::arg("a"), py::arg("b"),
+        py::call_guard<py::gil_scoped_release>());
+
+    sparse_mod.def("triangular_solve", &tenzor::sparse::sparse_triangular_solve,
+        "Sparse triangular solve: L @ x = b (lower) or U @ x = b (upper)",
+        py::arg("L"), py::arg("b"), py::arg("upper") = false,
         py::call_guard<py::gil_scoped_release>());
 
     // =========================================================================

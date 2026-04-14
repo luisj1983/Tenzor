@@ -221,17 +221,15 @@ auto VulkanBackend::dispatchHistogram(const Tensor& input, int64_t bins,
                                                        : dispatchCast(input.contiguous(), DType::Float32);
     int64_t n = in_f32.numel();
 
-    // Auto-range via existing tenzor::min/max dispatch (on-device, not CPU)
+    // Auto-range via aminmax dispatch (single kernel, single D2H transfer)
     if (min_val == 0.0 && max_val == 0.0 && n > 0) {
-        // tenzor::min and tenzor::max are dispatch-routed → existing Vulkan min/max kernels
-        Tensor min_t = tenzor::min(in_f32);
-        Tensor max_t = tenzor::max(in_f32);
-        // Both are 0-d tensors; we need scalar values to compute bin_width on host.
-        // This is a 1-element D2H sync (metadata, not compute fallback).
-        Tensor min_cpu_f32 = min_t.to(Device::cpu()).to(DType::Float32);
-        Tensor max_cpu_f32 = max_t.to(Device::cpu()).to(DType::Float32);
-        min_val = static_cast<double>(*min_cpu_f32.data<float>());
-        max_val = static_cast<double>(*max_cpu_f32.data<float>());
+        // aminmax returns (min, max) in one dispatch, avoiding two separate D2H syncs
+        auto [min_t, max_t] = tenzor::aminmax(in_f32);
+        // Pack into single 2-element tensor for one D2H transfer
+        Tensor minmax = tenzor::cat({min_t.reshape({1}), max_t.reshape({1})}, 0);
+        Tensor minmax_cpu = minmax.to(Device::cpu()).to(DType::Float32);
+        min_val = static_cast<double>(minmax_cpu.data<float>()[0]);
+        max_val = static_cast<double>(minmax_cpu.data<float>()[1]);
     }
     if (max_val <= min_val) max_val = min_val + 1.0;
     float bin_width = static_cast<float>((max_val - min_val) / bins);
@@ -334,13 +332,11 @@ auto VulkanBackend::dispatchMultinomial(const Tensor& probs, int64_t num_samples
             synchronize(device_id);
         }
 
-        // Read CDF[b * num_categories + num_categories - 1] (single float metadata sync)
-        // We need to get one scalar to compute total. Use tenzor::slice to view the
-        // last element of this row, then promote to host with a one-element copy.
-        Tensor row_view = tenzor::slice(cdf_buf, 0, b, b + 1);          // [1, num_categories]
-        Tensor last_view = tenzor::slice(row_view, 1, num_categories - 1, num_categories); // [1,1]
-        Tensor last_cpu = last_view.to(Device::cpu());
-        float total = *last_cpu.data<float>();
+        // Read CDF total for this batch element.
+        // Gather the last CDF value per row into a slice and transfer.
+        Tensor last_val = cdf_buf.slice(0, b, b + 1).slice(1, num_categories - 1, num_categories);
+        Tensor last_cpu = last_val.to(Device::cpu()).to(DType::Float32);
+        float total = last_cpu.template item<float>();
         if (total <= 0.0f) total = 1.0f;
 
         // Sampler dispatch

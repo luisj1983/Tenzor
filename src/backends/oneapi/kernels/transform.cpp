@@ -2583,6 +2583,12 @@ class RepeatInterleaveTensorF64;
 class RepeatInterleaveTensorI32;
 class RepeatInterleaveTensorI64;
 
+// SYCL kernel name tags for repeat_interleave cast
+class RICastToI64FromI32;
+class RICastToI64FromF32;
+class RICastToI64FromF64;
+class RIPrefixSumI64;
+
 auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_tensor,
                                      int64_t dim, sycl::queue& queue) -> Tensor {
     Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
@@ -2590,32 +2596,51 @@ auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_
     int64_t ndim = shape.size();
     int64_t in_dim_size = shape[dim];
 
-    // Read repeats to host to compute prefix sum
-    auto repeats_host = repeats_tensor.to(Device::cpu()).contiguous();
-    std::vector<int64_t> host_prefix(in_dim_size + 1);
-    host_prefix[0] = 0;
+    // Convert repeats to int64 on device (no CPU roundtrip)
+    int64_t* d_repeats_i64 = sycl::malloc_device<int64_t>(in_dim_size, queue);
+    auto repeats_cont = repeats_tensor.is_contiguous() ? repeats_tensor : repeats_tensor.contiguous();
 
-    if (repeats_host.dtype() == DType::Int64) {
-        const int64_t* rp = repeats_host.data<int64_t>();
-        for (int64_t i = 0; i < in_dim_size; ++i)
-            host_prefix[i + 1] = host_prefix[i] + rp[i];
-    } else if (repeats_host.dtype() == DType::Int32) {
-        const int32_t* rp = repeats_host.data<int32_t>();
-        for (int64_t i = 0; i < in_dim_size; ++i)
-            host_prefix[i + 1] = host_prefix[i] + rp[i];
-    } else if (repeats_host.dtype() == DType::Float32) {
-        const float* rp = repeats_host.data<float>();
-        for (int64_t i = 0; i < in_dim_size; ++i)
-            host_prefix[i + 1] = host_prefix[i] + static_cast<int64_t>(rp[i]);
-    } else if (repeats_host.dtype() == DType::Float64) {
-        const double* rp = repeats_host.data<double>();
-        for (int64_t i = 0; i < in_dim_size; ++i)
-            host_prefix[i + 1] = host_prefix[i] + static_cast<int64_t>(rp[i]);
+    if (repeats_cont.dtype() == DType::Int64) {
+        queue.memcpy(d_repeats_i64, repeats_cont.data<int64_t>(),
+                     in_dim_size * sizeof(int64_t)).wait();
+    } else if (repeats_cont.dtype() == DType::Int32) {
+        const int32_t* src = repeats_cont.data<int32_t>();
+        queue.parallel_for<RICastToI64FromI32>(sycl::range<1>(in_dim_size), [=](sycl::id<1> i) {
+            d_repeats_i64[i] = static_cast<int64_t>(src[i]);
+        }).wait();
+    } else if (repeats_cont.dtype() == DType::Float32) {
+        const float* src = repeats_cont.data<float>();
+        queue.parallel_for<RICastToI64FromF32>(sycl::range<1>(in_dim_size), [=](sycl::id<1> i) {
+            d_repeats_i64[i] = static_cast<int64_t>(src[i]);
+        }).wait();
+    } else if (repeats_cont.dtype() == DType::Float64) {
+        const double* src = repeats_cont.data<double>();
+        queue.parallel_for<RICastToI64FromF64>(sycl::range<1>(in_dim_size), [=](sycl::id<1> i) {
+            d_repeats_i64[i] = static_cast<int64_t>(src[i]);
+        }).wait();
     } else {
+        sycl::free(d_repeats_i64, queue);
         throw std::runtime_error("repeat_interleave: unsupported repeats dtype");
     }
 
-    int64_t out_dim_size = host_prefix[in_dim_size];
+    // Compute exclusive prefix sum on device
+    int64_t* d_prefix = sycl::malloc_device<int64_t>(in_dim_size + 1, queue);
+    int64_t N = in_dim_size;
+    int64_t* rp = d_repeats_i64;
+    int64_t* pfx = d_prefix;
+    queue.single_task<RIPrefixSumI64>([=]() {
+        pfx[0] = 0;
+        for (int64_t i = 0; i < N; ++i) {
+            pfx[i + 1] = pfx[i] + rp[i];
+        }
+    }).wait();
+
+    // Read only the total from device
+    int64_t out_dim_size = 0;
+    queue.memcpy(&out_dim_size, d_prefix + in_dim_size, sizeof(int64_t)).wait();
+
+    sycl::free(d_repeats_i64, queue);
+
     std::vector<int64_t> out_shape(shape.begin(), shape.end());
     out_shape[dim] = out_dim_size;
 
@@ -2623,14 +2648,13 @@ auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_
 
     int64_t total = 1;
     for (auto s : out_shape) total *= s;
-    if (total == 0) return output;
+    if (total == 0) {
+        sycl::free(d_prefix, queue);
+        return output;
+    }
 
     int64_t inner_size = 1;
     for (int64_t d = dim + 1; d < ndim; ++d) inner_size *= shape[d];
-
-    // Upload prefix to device
-    int64_t* d_prefix = sycl::malloc_device<int64_t>(in_dim_size + 1, queue);
-    queue.memcpy(d_prefix, host_prefix.data(), (in_dim_size + 1) * sizeof(int64_t)).wait();
 
     auto launch_tensor_ri = [&]<typename T, typename KernelName>() {
         const T* in_ptr = get_data_ptr<const T>(in_cont);

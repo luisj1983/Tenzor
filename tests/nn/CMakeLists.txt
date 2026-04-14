@@ -123,6 +123,18 @@ target_link_libraries(test_segmentation_multidtype PRIVATE tenzor_core GTest::gt
 add_executable(test_hrm layers/test_hrm.cpp)
 target_link_libraries(test_hrm PRIVATE tenzor_core GTest::gtest_main)
 
+# Gated Activations (GeGLU, ReGLU) Tests
+add_executable(test_gated_activations layers/test_gated_activations.cpp)
+target_link_libraries(test_gated_activations PRIVATE tenzor_core GTest::gtest_main)
+
+# Mixture of Experts Tests
+add_executable(test_moe layers/test_moe.cpp)
+target_link_libraries(test_moe PRIVATE tenzor_core GTest::gtest_main)
+
+# Sliding Window Attention Tests
+add_executable(test_sliding_window_attention layers/test_sliding_window_attention.cpp)
+target_link_libraries(test_sliding_window_attention PRIVATE tenzor_core GTest::gtest_main)
+
 # ============================================================================
 # Test Registration
 # ============================================================================
@@ -247,6 +259,10 @@ tenzor_discover_tests(test_sync_batchnorm LABELS "nn" DISCOVERY_TIMEOUT 60 DISCO
 add_executable(test_pipeline_parallel test_pipeline_parallel.cpp)
 target_link_libraries(test_pipeline_parallel PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_pipeline_parallel LABELS "nn" DISCOVERY_TIMEOUT 60)
+
+tenzor_discover_tests(test_gated_activations LABELS "nn" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_moe LABELS "nn" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_sliding_window_attention LABELS "nn" DISCOVERY_TIMEOUT 60)
 
 # tests/nn/test_data_parallel.cpp orphan removed: rotted include paths (tenzor/nn/modules/ no longer exists)
 # tests/nn/test_distributed.cpp orphan removed: requires rccl/rccl.h via TENZOR_USE_ROCM that isn't installed

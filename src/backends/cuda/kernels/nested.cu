@@ -147,6 +147,107 @@ auto nested_softmax_cuda(const Tensor& values, const Tensor& offsets,
 }
 
 // ============================================================================
+// Segmented Log-Softmax
+// ============================================================================
+
+__global__ void nested_log_softmax_kernel(
+    const float* __restrict__ values,   // [total_len, D]
+    float* __restrict__ output,         // [total_len, D]
+    const int64_t* __restrict__ offsets, // [B+1]
+    int64_t D,
+    int64_t B)
+{
+    int64_t b = blockIdx.x;
+    if (b >= B) return;
+
+    int64_t start = offsets[b];
+    int64_t end = offsets[b + 1];
+    int64_t len = end - start;
+    if (len <= 0) return;
+
+    for (int64_t d = threadIdx.x; d < D; d += blockDim.x) {
+        // Find max in segment for numerical stability
+        float max_val = -FLT_MAX;
+        for (int64_t s = 0; s < len; ++s) {
+            float v = values[(start + s) * D + d];
+            if (v > max_val) max_val = v;
+        }
+
+        // Compute sum of exp(x - max)
+        float sum = 0.0f;
+        for (int64_t s = 0; s < len; ++s) {
+            sum += expf(values[(start + s) * D + d] - max_val);
+        }
+
+        // Write log-softmax: (x - max) - log(sum)
+        float log_sum = logf(sum);
+        for (int64_t s = 0; s < len; ++s) {
+            output[(start + s) * D + d] = (values[(start + s) * D + d] - max_val) - log_sum;
+        }
+    }
+}
+
+__global__ void nested_log_softmax_kernel_f64(
+    const double* __restrict__ values,
+    double* __restrict__ output,
+    const int64_t* __restrict__ offsets,
+    int64_t D, int64_t B)
+{
+    int64_t b = blockIdx.x;
+    if (b >= B) return;
+
+    int64_t start = offsets[b];
+    int64_t end = offsets[b + 1];
+    int64_t len = end - start;
+    if (len <= 0) return;
+
+    for (int64_t d = threadIdx.x; d < D; d += blockDim.x) {
+        double max_val = -DBL_MAX;
+        for (int64_t s = 0; s < len; ++s) {
+            double v = values[(start + s) * D + d];
+            if (v > max_val) max_val = v;
+        }
+
+        double sum = 0.0;
+        for (int64_t s = 0; s < len; ++s) {
+            sum += exp(values[(start + s) * D + d] - max_val);
+        }
+
+        double log_sum = log(sum);
+        for (int64_t s = 0; s < len; ++s) {
+            output[(start + s) * D + d] = (values[(start + s) * D + d] - max_val) - log_sum;
+        }
+    }
+}
+
+auto nested_log_softmax_cuda(const Tensor& values, const Tensor& offsets,
+                              int64_t dim, cudaStream_t stream) -> Tensor {
+    auto shape = values.shape();
+    int64_t total_len = shape[0];
+    int64_t D = (shape.size() > 1) ? shape[1] : 1;
+    int64_t B = offsets.numel() - 1;
+
+    auto output = tenzor::empty(std::vector<int64_t>(shape.begin(), shape.end()), values.dtype(), values.device());
+
+    int threads = static_cast<int>(std::min(D, int64_t(256)));
+
+    if (values.dtype() == DType::Float32) {
+        nested_log_softmax_kernel<<<static_cast<unsigned>(B), threads, 0, stream>>>(
+            values.data<float>(), output.data<float>(),
+            offsets.data<int64_t>(), D, B);
+    } else if (values.dtype() == DType::Float64) {
+        nested_log_softmax_kernel_f64<<<static_cast<unsigned>(B), threads, 0, stream>>>(
+            values.data<double>(), output.data<double>(),
+            offsets.data<int64_t>(), D, B);
+    } else {
+        throw std::runtime_error("nested_log_softmax_cuda: unsupported dtype");
+    }
+
+    CUDA_CHECK_NESTED(cudaGetLastError());
+    return output;
+}
+
+// ============================================================================
 // Segmented Sum Reduction
 // ============================================================================
 

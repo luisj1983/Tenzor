@@ -31,13 +31,15 @@ GroupedQueryAttention::GroupedQueryAttention(int64_t embed_dim,
                                            double dropout,
                                            bool bias,
                                            bool is_causal,
-                                           std::shared_ptr<RoPE> rope)
+                                           std::shared_ptr<RoPE> rope,
+                                           int64_t window_size)
     : embed_dim_(embed_dim),
       num_heads_(num_heads),
       num_kv_heads_(num_kv_heads),
       dropout_(dropout),
       is_causal_(is_causal),
-      rope_(std::move(rope)) {
+      rope_(std::move(rope)),
+      window_size_(window_size) {
 
     // Validate parameters
     if (embed_dim_ % num_heads_ != 0) {
@@ -165,6 +167,25 @@ auto GroupedQueryAttention::scaled_dot_product_attention(
         }
         Variable mask_var(causal, false);
         scores = scores + mask_var;
+    }
+
+    // Apply sliding window mask if window_size > 0
+    if (window_size_ > 0) {
+        // Create band mask: positions where |i - j| > window_size/2 get -inf
+        auto row_idx = tenzor::arange(0, seq_len_q, 1, DType::Int64, query.device())
+                       .reshape({seq_len_q, 1});
+        auto col_idx = tenzor::arange(0, seq_len_k, 1, DType::Int64, query.device())
+                       .reshape({1, seq_len_k});
+        auto dist = tenzor::abs(row_idx.to(DType::Float32) - col_idx.to(DType::Float32));
+        float half_window = static_cast<float>(window_size_ / 2);
+        // gt returns a boolean mask; cast to float and multiply by -1e9
+        auto threshold = tenzor::full(std::vector<int64_t>(dist.shape().begin(), dist.shape().end()),
+                                     static_cast<double>(half_window), DType::Float32, query.device());
+        auto outside = tenzor::gt(dist, threshold);
+        auto window_mask = outside.to(query.dtype()) * full({1}, -1e9, query.dtype(), query.device());
+        // window_mask is [seq_len_q, seq_len_k], broadcasts to [batch, heads, L, S]
+        Variable window_var(window_mask, false);
+        scores = scores + window_var;
     }
 
     // Apply explicit attention mask if provided

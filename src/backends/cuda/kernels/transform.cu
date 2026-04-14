@@ -1,6 +1,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
+#include <cub/cub.cuh>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/backend/caching_allocator.hpp"
 #include "tenzor/core/dtype.hpp"
@@ -1999,6 +2000,15 @@ auto repeat_interleave_scalar_kernel(const Tensor& input, int64_t repeats, int64
     return output;
 }
 
+// Cast repeats tensor to int64 on device
+template <typename SrcT>
+__global__ void cast_to_int64_kernel(const SrcT* __restrict__ src,
+                                     int64_t* __restrict__ dst, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        dst[idx] = static_cast<int64_t>(src[idx]);
+    }
+}
+
 auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_tensor,
                                      int64_t dim, cudaStream_t stream) -> Tensor {
     auto shape = input.shape();
@@ -2007,32 +2017,76 @@ auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_
     int64_t ndim = shape.size();
     int64_t in_dim_size = shape[dim];
 
-    // Read repeats to host to compute prefix sum and total
-    auto repeats_host = repeats_tensor.to(Device::cpu()).contiguous();
-    std::vector<int64_t> host_prefix(in_dim_size + 1);
-    host_prefix[0] = 0;
+    // Convert repeats to int64 on device (no CPU roundtrip)
+    int64_t* d_repeats_i64 = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&d_repeats_i64, in_dim_size * sizeof(int64_t), stream));
 
-    if (repeats_host.dtype() == DType::Int64) {
-        const int64_t* rp = repeats_host.data<int64_t>();
-        for (int64_t i = 0; i < in_dim_size; ++i)
-            host_prefix[i + 1] = host_prefix[i] + rp[i];
-    } else if (repeats_host.dtype() == DType::Int32) {
-        const int32_t* rp = repeats_host.data<int32_t>();
-        for (int64_t i = 0; i < in_dim_size; ++i)
-            host_prefix[i + 1] = host_prefix[i] + rp[i];
-    } else if (repeats_host.dtype() == DType::Float32) {
-        const float* rp = repeats_host.data<float>();
-        for (int64_t i = 0; i < in_dim_size; ++i)
-            host_prefix[i + 1] = host_prefix[i] + static_cast<int64_t>(rp[i]);
-    } else if (repeats_host.dtype() == DType::Float64) {
-        const double* rp = repeats_host.data<double>();
-        for (int64_t i = 0; i < in_dim_size; ++i)
-            host_prefix[i + 1] = host_prefix[i] + static_cast<int64_t>(rp[i]);
+    auto repeats_cont = repeats_tensor.is_contiguous() ? repeats_tensor : repeats_tensor.contiguous();
+    if (repeats_cont.dtype() == DType::Int64) {
+        CUDA_CHECK(cudaMemcpyAsync(d_repeats_i64, repeats_cont.data<int64_t>(),
+                                   in_dim_size * sizeof(int64_t),
+                                   cudaMemcpyDeviceToDevice, stream));
     } else {
-        throw std::runtime_error("repeat_interleave: unsupported repeats dtype");
+        dim3 grid, block;
+        compute_launch_config_1d(in_dim_size, grid, block);
+        if (repeats_cont.dtype() == DType::Int32) {
+            cast_to_int64_kernel<<<grid, block, 0, stream>>>(
+                repeats_cont.data<int32_t>(), d_repeats_i64, in_dim_size);
+        } else if (repeats_cont.dtype() == DType::Float32) {
+            cast_to_int64_kernel<<<grid, block, 0, stream>>>(
+                repeats_cont.data<float>(), d_repeats_i64, in_dim_size);
+        } else if (repeats_cont.dtype() == DType::Float64) {
+            cast_to_int64_kernel<<<grid, block, 0, stream>>>(
+                repeats_cont.data<double>(), d_repeats_i64, in_dim_size);
+        } else {
+            CUDA_CHECK(cudaFreeAsync(d_repeats_i64, stream));
+            throw std::runtime_error("repeat_interleave: unsupported repeats dtype");
+        }
     }
 
-    int64_t out_dim_size = host_prefix[in_dim_size];
+    // Compute exclusive prefix sum on device using CUB
+    int64_t* d_prefix = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&d_prefix, (in_dim_size + 1) * sizeof(int64_t), stream));
+
+    // CUB ExclusiveSum: d_prefix[0]=0, d_prefix[i]=sum(d_repeats[0..i-1])
+    void* d_temp = nullptr;
+    size_t temp_bytes = 0;
+    cub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_repeats_i64, d_prefix,
+                                  static_cast<int>(in_dim_size), stream);
+    CUDA_CHECK(cudaMallocAsync(&d_temp, temp_bytes, stream));
+    cub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_repeats_i64, d_prefix,
+                                  static_cast<int>(in_dim_size), stream);
+    CUDA_CHECK(cudaFreeAsync(d_temp, stream));
+
+    // Compute total: d_prefix[in_dim_size] = d_prefix[in_dim_size-1] + d_repeats[in_dim_size-1]
+    // Read only the total from device (single scalar)
+    int64_t out_dim_size = 0;
+    // We need the last prefix + last repeat value. Use InclusiveSum's last element.
+    // Simpler: just read d_prefix[in_dim_size-1] + d_repeats[in_dim_size-1] = total
+    // But we can also just do inclusive sum and read the last element.
+    // Actually, let's write d_prefix[in_dim_size] on device via a small kernel,
+    // then only read the single total scalar to host.
+    {
+        // d_prefix[N] = d_prefix[N-1] + d_repeats[N-1]
+        // Use a 1-thread kernel for simplicity
+        auto set_last = [] __device__ (int64_t* prefix, const int64_t* repeats, int64_t N) {
+            prefix[N] = prefix[N - 1] + repeats[N - 1];
+        };
+        // Inline single-thread kernel via lambda isn't supported directly.
+        // Instead, just D2H copy the last prefix and last repeat element.
+        int64_t last_prefix = 0, last_repeat = 0;
+        CUDA_CHECK(cudaMemcpyAsync(&last_prefix, d_prefix + in_dim_size - 1,
+                                   sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaMemcpyAsync(&last_repeat, d_repeats_i64 + in_dim_size - 1,
+                                   sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        out_dim_size = last_prefix + last_repeat;
+        // Write total to d_prefix[in_dim_size] for the kernel
+        CUDA_CHECK(cudaMemcpyAsync(d_prefix + in_dim_size, &out_dim_size,
+                                   sizeof(int64_t), cudaMemcpyHostToDevice, stream));
+    }
+
+    CUDA_CHECK(cudaFreeAsync(d_repeats_i64, stream));
 
     std::vector<int64_t> out_shape(shape.begin(), shape.end());
     out_shape[dim] = out_dim_size;
@@ -2041,17 +2095,13 @@ auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_
 
     int64_t total = 1;
     for (auto s : out_shape) total *= s;
-    if (total == 0) return output;
+    if (total == 0) {
+        CUDA_CHECK(cudaFreeAsync(d_prefix, stream));
+        return output;
+    }
 
     int64_t inner_size = 1;
     for (int64_t d = dim + 1; d < ndim; ++d) inner_size *= shape[d];
-
-    // Upload prefix sum to device
-    int64_t* d_prefix = nullptr;
-    CUDA_CHECK(cudaMallocAsync(&d_prefix, (in_dim_size + 1) * sizeof(int64_t), stream));
-    CUDA_CHECK(cudaMemcpyAsync(d_prefix, host_prefix.data(),
-                               (in_dim_size + 1) * sizeof(int64_t),
-                               cudaMemcpyHostToDevice, stream));
 
     #define LAUNCH_TENSOR_RI(T) { \
         auto [grid, block] = optimal_launch_config(repeat_interleave_tensor_kernel_impl<T>, total); \

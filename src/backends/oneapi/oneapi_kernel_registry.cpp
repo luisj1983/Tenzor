@@ -4572,6 +4572,57 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return {tenzor::cat(segments, 0)};
         });
 
+    table.register_kernel(OpId::NestedLogSoftmax,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            const Tensor& values = inputs[0];
+            const Tensor& offsets = inputs[1];
+            auto shape = values.shape();
+            int64_t total_len = shape[0];
+            int64_t D = (shape.size() > 1) ? shape[1] : 1;
+            int64_t B = offsets.numel() - 1;
+
+            Tensor output = tenzor::empty(std::vector<int64_t>(shape.begin(), shape.end()),
+                                          values.dtype(), values.device());
+            auto& queue = oneapi_internal::get_queue(values.device().index);
+
+            const float* vals_ptr = values.data<float>();
+            const int64_t* off_ptr = offsets.data<int64_t>();
+            float* out_ptr = output.data<float>();
+            int64_t D_val = D;
+
+            // One work-item per (batch, d) pair — batch in dim 0, d in dim 1
+            queue.parallel_for(sycl::range<2>(B, D), [=](sycl::id<2> id) {
+                int64_t b = id[0];
+                int64_t d = id[1];
+                if (d >= D_val) return;
+
+                int64_t start = off_ptr[b];
+                int64_t end = off_ptr[b + 1];
+                int64_t len = end - start;
+                if (len <= 0) return;
+
+                // Find max
+                float max_val = -1e38f;
+                for (int64_t s = 0; s < len; ++s) {
+                    float v = vals_ptr[(start + s) * D_val + d];
+                    if (v > max_val) max_val = v;
+                }
+                // Sum of exp(x - max)
+                float sum = 0.0f;
+                for (int64_t s = 0; s < len; ++s) {
+                    sum += sycl::exp(vals_ptr[(start + s) * D_val + d] - max_val);
+                }
+                // Write log-softmax
+                float log_sum = sycl::log(sum);
+                for (int64_t s = 0; s < len; ++s) {
+                    int64_t idx = (start + s) * D_val + d;
+                    out_ptr[idx] = (vals_ptr[idx] - max_val) - log_sum;
+                }
+            }).wait();
+
+            return {output};
+        });
+
     table.register_kernel(OpId::NestedSum,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
             auto offsets_cpu = inputs[1].to(Device::cpu());

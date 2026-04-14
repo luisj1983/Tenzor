@@ -172,8 +172,8 @@ Variable stablemax_cross_entropy(const Variable& input, const Variable& target,
 // ============================================================================
 
 GatedLinearUnit::GatedLinearUnit(int64_t in_features, int64_t hidden_features,
-                                  bool use_silu, bool bias)
-    : use_silu_(use_silu) {
+                                  GateType gate_type, bool bias)
+    : gate_type_(gate_type) {
 
     // Gate and up projections: in_features -> hidden_features
     gate_proj_ = std::make_shared<Linear>(in_features, hidden_features, bias);
@@ -187,6 +187,11 @@ GatedLinearUnit::GatedLinearUnit(int64_t in_features, int64_t hidden_features,
     register_module("down_proj", down_proj_);
 }
 
+GatedLinearUnit::GatedLinearUnit(int64_t in_features, int64_t hidden_features,
+                                  bool use_silu, bool bias)
+    : GatedLinearUnit(in_features, hidden_features,
+                       use_silu ? GateType::SiLU : GateType::Sigmoid, bias) {}
+
 auto GatedLinearUnit::forward_impl(const Variable& input) -> Variable {
     // GLU: gate(x) * up(x), then down projection
     auto gate = gate_proj_->forward(input);
@@ -194,13 +199,23 @@ auto GatedLinearUnit::forward_impl(const Variable& input) -> Variable {
 
     // Apply activation to gate
     Variable activated_gate;
-    if (use_silu_) {
-        // SiLU: x * sigmoid(x)
-        auto sigmoid_gate = sigmoid(gate);
-        activated_gate = Variable(gate.tensor() * sigmoid_gate.tensor(), gate.requires_grad());
-    } else {
-        // Standard sigmoid
-        activated_gate = sigmoid(gate);
+    switch (gate_type_) {
+        case GateType::SiLU: {
+            // SiLU: x * sigmoid(x)
+            auto sigmoid_gate = sigmoid(gate);
+            activated_gate = Variable(gate.tensor() * sigmoid_gate.tensor(), gate.requires_grad());
+            break;
+        }
+        case GateType::GELU:
+            activated_gate = gelu(gate);
+            break;
+        case GateType::ReLU:
+            activated_gate = relu(gate);
+            break;
+        case GateType::Sigmoid:
+        default:
+            activated_gate = sigmoid(gate);
+            break;
     }
 
     // Element-wise multiply

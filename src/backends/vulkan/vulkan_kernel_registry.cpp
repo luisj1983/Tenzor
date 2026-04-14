@@ -2970,6 +2970,11 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return tenzor::cat(segments, 0);
     });
 
+    table.register_single_output_kernel(OpId::NestedLogSoftmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        return get_vulkan_backend()->dispatchNestedLogSoftmax(inputs[0], inputs[1], dim);
+    });
+
     table.register_single_output_kernel(OpId::NestedSum, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
         auto offsets_cpu = inputs[1].to(Device::cpu());
         const int64_t* off = offsets_cpu.data<int64_t>();

@@ -778,18 +778,17 @@ auto add(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
         }
     }
 
-    // CPU fallback. to_dense() now round-trips any GPU sparse to CPU,
-    // and we additionally ensure the dense RHS is on CPU so the direct
-    // pointer arithmetic below doesn't segfault.
-    auto result = sparse.to_dense();
-    Tensor dense_cpu = (dense.device().type != Device::Type::CPU)
-                          ? dense.to(Device::cpu())
-                          : dense;
-    const Device orig_device = dense.device();
-    if (result.device().type != Device::Type::CPU) {
-        result = result.to(Device::cpu());
+    // Refuse CPU fallback for GPU tensors.
+    if (sparse.device().type != Device::Type::CPU ||
+        dense.device().type != Device::Type::CPU) {
+        throw std::runtime_error(
+            "sparse::add: GPU tensor but no GPU SparseAdd kernel matched — "
+            "refusing CPU fallback (move tensors to CPU explicitly)");
     }
-    auto dense_c = dense_cpu.contiguous();
+
+    // CPU path: convert sparse to dense, then element-wise add.
+    auto result = sparse.to_dense();
+    auto dense_c = dense.contiguous();
     auto result_c = result.contiguous();
 
     int64_t n = result_c.numel();
@@ -828,11 +827,6 @@ auto add(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
     } else {
         throw std::runtime_error("sparse::add: unsupported dtype " +
             std::string(dtype_name(result_c.dtype())));
-    }
-
-    // Move back to the caller's original device if we round-tripped.
-    if (orig_device.type != Device::Type::CPU && result_c.device() != orig_device) {
-        return result_c.to(orig_device);
     }
     return result_c;
 }
@@ -1065,13 +1059,10 @@ auto spgemm(const SparseTensor& a, const SparseTensor& b) -> SparseTensor {
         throw std::runtime_error("spgemm: dtype mismatch");
     }
 
-    // GPU path: CUDA (with cuSPARSE registered in the CUDA backend .so)
-    // routes through the dispatch table. The lambda in
-    // cuda_kernel_registry.cpp reconstructs a CSR SparseTensor from the
-    // components and calls cuda::cuda_spgemm_kernel directly. Same pattern
-    // as the existing Vulkan sparse path.
-    if (a.device().type == Device::Type::CUDA ||
-        b.device().type == Device::Type::CUDA) {
+    // GPU path: dispatch through the backend's registered SpGEMM kernel.
+    // Supports CUDA, ROCm, Vulkan, OneAPI.
+    auto dev_type = a.device().type;
+    if (dev_type != Device::Type::CPU) {
         auto ac = extract_csr_on_device(a);
         auto bc = extract_csr_on_device(b);
         std::vector<Tensor> inputs = {
@@ -1082,50 +1073,38 @@ auto spgemm(const SparseTensor& a, const SparseTensor& b) -> SparseTensor {
         attrs.set(AttrKey::M, M);
         attrs.set(AttrKey::K, K);
         attrs.set(AttrKey::N, N);
-        auto& table = DispatchTableRegistry::get_table(Device::Type::CUDA);
+        auto& table = DispatchTableRegistry::get_table(dev_type);
         if (table.has_kernel(OpId::SparseSpGEMM)) {
             auto results = table.dispatch(OpId::SparseSpGEMM, inputs, attrs);
-            // Lambda returns a dense tensor carrying the CSR components —
-            // see the matching un-pack in cuda_kernel_registry.cpp. The
-            // first result is a packed 3-tensor result we decode as a
-            // CSR SparseTensor.
-            // (Simpler: the lambda constructs the SparseTensor itself and
-            // densifies, but that's wasteful for SpGEMM whose output is
-            // naturally sparse. We pass the three output CSR components as
-            // three successive result tensors.)
             if (results.size() != 3) {
                 throw std::runtime_error(
-                    "sparse::spgemm: CUDA SpGEMM dispatch must return 3 tensors "
+                    "sparse::spgemm: dispatch must return 3 tensors "
                     "(crow, col, values), got " + std::to_string(results.size()));
             }
             return SparseTensor::sparse_csr(
                 results[0], results[1], results[2],
                 std::vector<int64_t>{M, N});
         }
-        // Fall through to CPU path if the CUDA backend is loaded but the
-        // SpGEMM kernel wasn't registered (e.g. cuSPARSE missing at build).
+        throw std::runtime_error(
+            "spgemm: no GPU kernel registered for device " +
+            std::string(a.device().to_string()) +
+            " (vendor sparse library may be missing)");
     }
 
-    // CPU path: convert to CSR for efficient row-based iteration, then
-    // transfer any device-resident operands to CPU, run the sequential
-    // CSR × CSR algorithm, and restore the original device.
+    // CPU path: convert to CSR for efficient row-based iteration.
+    if (a.device().type != Device::Type::CPU) {
+        throw std::runtime_error(
+            "spgemm: GPU tensor but no GPU kernel available — "
+            "refusing CPU fallback (move tensors to CPU explicitly)");
+    }
     auto a_csr = a.to_csr();
     auto b_csr = b.to_csr();
-    Device target_device = a.device();
-    SparseTensor a_compute = (target_device.type != Device::Type::CPU)
-        ? a_csr.to(Device::cpu()) : a_csr;
-    SparseTensor b_compute = (target_device.type != Device::Type::CPU)
-        ? b_csr.to(Device::cpu()) : b_csr;
-
-    auto finish = [&](SparseTensor r) {
-        return (target_device.type != Device::Type::CPU) ? r.to(target_device) : r;
-    };
 
     if (a.dtype() == DType::Float32) {
-        return finish(cpu_spgemm_typed<float>(a_compute, b_compute, M, K, N));
+        return cpu_spgemm_typed<float>(a_csr, b_csr, M, K, N);
     }
     if (a.dtype() == DType::Float64) {
-        return finish(cpu_spgemm_typed<double>(a_compute, b_compute, M, K, N));
+        return cpu_spgemm_typed<double>(a_csr, b_csr, M, K, N);
     }
     throw std::runtime_error("spgemm: unsupported dtype " +
         std::string(dtype_name(a.dtype())));
@@ -1262,63 +1241,46 @@ auto sparse_triangular_solve(const SparseTensor& L, const Tensor& b, bool upper)
         throw std::runtime_error("sparse_triangular_solve: b must be 1D or 2D");
     }
 
-    // GPU path: dispatch through the OpId table so the call crosses the
-    // backend .so boundary where cuSPARSE linkage lives.
-    if (b.device().type == Device::Type::CUDA ||
-        L.device().type == Device::Type::CUDA) {
+    // GPU path: dispatch through the OpId table for any GPU device type.
+    auto dev_type = b.device().type;
+    if (dev_type != Device::Type::CPU) {
         auto Lc = extract_csr_on_device(L);
-        // b may need to be moved to CUDA if only L was on CUDA.
-        Tensor b_gpu = (b.device().type == Device::Type::CUDA)
+        Tensor b_gpu = (b.device().type == dev_type)
                           ? b
-                          : b.to(Device::cuda());
+                          : b.to(b.device());
         std::vector<Tensor> inputs = {Lc.crow, Lc.col, Lc.values, b_gpu};
         OpAttributes attrs;
         attrs.set(AttrKey::N, N);
         attrs.set(AttrKey::Upper, upper);
-        auto& table = DispatchTableRegistry::get_table(Device::Type::CUDA);
+        auto& table = DispatchTableRegistry::get_table(dev_type);
         const OpId op = (b.ndim() == 1) ? OpId::SparseTrsv : OpId::SparseTrsm;
         if (table.has_kernel(op)) {
-            auto result = table.dispatch_single(op, inputs, attrs);
-            return result;
+            return table.dispatch_single(op, inputs, attrs);
         }
-        // Fall through to CPU if the CUDA backend lacks the kernel.
+        throw std::runtime_error(
+            "sparse_triangular_solve: no GPU kernel registered for device " +
+            std::string(b.device().to_string()) +
+            " (vendor sparse library may be missing)");
     }
 
-    // CPU path: convert to CSR for row-based access, transfer any
-    // device-resident operands to CPU, run the sequential substitution,
-    // then restore the original device.
+    // CPU path: only when tensors are actually on CPU.
     auto L_csr = L.to_csr();
-    Device target_device = b.device();
-    SparseTensor L_compute = L_csr;
-    Tensor b_compute = b;
-    if (target_device.type != Device::Type::CPU) {
-        L_compute = L_csr.to(Device::cpu());
-        b_compute = b.to(Device::cpu());
-    }
 
-    auto finish = [&](Tensor result) {
-        if (target_device.type != Device::Type::CPU) {
-            result = result.to(target_device);
-        }
-        return result;
-    };
-
-    // CPU path (used whether inputs came from CPU or GPU)
-    if (b_compute.ndim() == 1) {
+    if (b.ndim() == 1) {
         if (b.dtype() == DType::Float32) {
-            return finish(cpu_sparse_trsv<float>(L_compute, b_compute, upper, N));
+            return cpu_sparse_trsv<float>(L_csr, b, upper, N);
         } else if (b.dtype() == DType::Float64) {
-            return finish(cpu_sparse_trsv<double>(L_compute, b_compute, upper, N));
+            return cpu_sparse_trsv<double>(L_csr, b, upper, N);
         } else {
             throw std::runtime_error("sparse_triangular_solve: unsupported dtype " +
                 std::string(dtype_name(b.dtype())));
         }
     } else {
-        int64_t K = b_compute.shape()[1];
+        int64_t K = b.shape()[1];
         if (b.dtype() == DType::Float32) {
-            return finish(cpu_sparse_trsm<float>(L_compute, b_compute, upper, N, K));
+            return cpu_sparse_trsm<float>(L_csr, b, upper, N, K);
         } else if (b.dtype() == DType::Float64) {
-            return finish(cpu_sparse_trsm<double>(L_compute, b_compute, upper, N, K));
+            return cpu_sparse_trsm<double>(L_csr, b, upper, N, K);
         } else {
             throw std::runtime_error("sparse_triangular_solve: unsupported dtype " +
                 std::string(dtype_name(b.dtype())));

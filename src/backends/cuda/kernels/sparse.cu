@@ -1398,3 +1398,398 @@ Tensor cuda_sparse_add_kernel(const SparseTensor& sparse, const Tensor& dense) {
 } // namespace tenzor
 
 #endif // TENZOR_HAS_CUSPARSE
+
+// ============================================================================
+// Standalone GPU SpGEMM and SparseTrsv/Trsm (no cuSPARSE dependency)
+//
+// These are always compiled and provide fallback-free GPU implementations
+// when cuSPARSE is not available. When cuSPARSE IS available, these are
+// still compiled but only used if the cuSPARSE kernels aren't registered.
+// ============================================================================
+
+#include "tenzor/core/tensor.hpp"
+#include "tenzor/core/dtype.hpp"
+#include "tenzor/core/device.hpp"
+#include "tenzor/ops/creation.hpp"
+#include <cuda_runtime.h>
+#include <cub/cub.cuh>
+#include <cstdint>
+#include <stdexcept>
+#include <vector>
+
+namespace tenzor {
+namespace cuda {
+
+#ifndef CUDA_CHECK_SPARSE_STANDALONE
+#define CUDA_CHECK_SPARSE_STANDALONE(call)                                     \
+    do {                                                                        \
+        cudaError_t err = (call);                                              \
+        if (err != cudaSuccess) {                                              \
+            throw std::runtime_error(                                          \
+                std::string("CUDA error in sparse_standalone at ") +           \
+                __FILE__ + ":" + std::to_string(__LINE__) + " - " +            \
+                cudaGetErrorString(err));                                       \
+        }                                                                      \
+    } while (0)
+#endif
+
+// ============================================================================
+// SpGEMM: 3-pass algorithm (count -> prefix sum -> fill)
+// ============================================================================
+
+// Pass 1: Count nnz per row of C = A * B (both CSR)
+template <typename T>
+__global__ void spgemm_count_kernel(
+    const int64_t* __restrict__ a_crow,  // [M+1]
+    const int64_t* __restrict__ a_col,   // [nnz_a]
+    const int64_t* __restrict__ b_crow,  // [K+1]
+    const int64_t* __restrict__ b_col,   // [nnz_b]
+    int64_t* __restrict__ row_nnz,       // [M] output: nnz per row
+    int64_t M, int64_t N)
+{
+    int64_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= M) return;
+
+    // Use a simple hash-set approach (for small row widths)
+    // For each non-zero in A[row,:], iterate B cols and count unique columns
+    int64_t count = 0;
+
+    // Simple approach: for each (row, col) pair in A, add all B[col,:] columns
+    // Use sorting-free counting with a boolean marker array (capped)
+    // For very wide rows, fall back to counting with duplicates
+    int64_t a_start = a_crow[row];
+    int64_t a_end = a_crow[row + 1];
+
+    // Count upper bound (with duplicates)
+    for (int64_t ja = a_start; ja < a_end; ++ja) {
+        int64_t k = a_col[ja];
+        count += b_crow[k + 1] - b_crow[k];
+    }
+
+    row_nnz[row] = count;  // Upper bound; dedup happens in fill pass
+}
+
+// Pass 3: Fill C values (with deduplication via sorting)
+template <typename T>
+__global__ void spgemm_fill_kernel(
+    const int64_t* __restrict__ a_crow,
+    const int64_t* __restrict__ a_col,
+    const T* __restrict__ a_vals,
+    const int64_t* __restrict__ b_crow,
+    const int64_t* __restrict__ b_col,
+    const T* __restrict__ b_vals,
+    const int64_t* __restrict__ c_crow,  // [M+1] prefix sum
+    int64_t* __restrict__ c_col,         // [total_nnz] output
+    T* __restrict__ c_vals,              // [total_nnz] output
+    int64_t* __restrict__ c_row_nnz,     // [M] actual nnz per row (written back)
+    int64_t M, int64_t N)
+{
+    int64_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= M) return;
+
+    int64_t c_start = c_crow[row];
+    int64_t a_start = a_crow[row];
+    int64_t a_end = a_crow[row + 1];
+
+    int64_t write_pos = c_start;
+
+    for (int64_t ja = a_start; ja < a_end; ++ja) {
+        int64_t k = a_col[ja];
+        T a_val = a_vals[ja];
+        int64_t b_start = b_crow[k];
+        int64_t b_end = b_crow[k + 1];
+
+        for (int64_t jb = b_start; jb < b_end; ++jb) {
+            int64_t col = b_col[jb];
+            T val = a_val * b_vals[jb];
+
+            // Check if col already exists in this row's output (linear scan)
+            bool found = false;
+            for (int64_t p = c_start; p < write_pos; ++p) {
+                if (c_col[p] == col) {
+                    c_vals[p] += val;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                c_col[write_pos] = col;
+                c_vals[write_pos] = val;
+                write_pos++;
+            }
+        }
+    }
+
+    c_row_nnz[row] = write_pos - c_start;
+}
+
+// Compact kernel: remove gaps from over-allocated output
+template <typename T>
+__global__ void spgemm_compact_kernel(
+    const int64_t* __restrict__ old_crow,   // [M+1] old prefix
+    const int64_t* __restrict__ new_crow,   // [M+1] compacted prefix
+    const int64_t* __restrict__ old_col,
+    const T* __restrict__ old_vals,
+    int64_t* __restrict__ new_col,
+    T* __restrict__ new_vals,
+    const int64_t* __restrict__ row_nnz,    // [M] actual per row
+    int64_t M)
+{
+    int64_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= M) return;
+
+    int64_t src = old_crow[row];
+    int64_t dst = new_crow[row];
+    int64_t count = row_nnz[row];
+    for (int64_t i = 0; i < count; ++i) {
+        new_col[dst + i] = old_col[src + i];
+        new_vals[dst + i] = old_vals[src + i];
+    }
+}
+
+template <typename T>
+auto spgemm_standalone_typed(
+    const Tensor& a_crow, const Tensor& a_col, const Tensor& a_vals,
+    const Tensor& b_crow, const Tensor& b_col, const Tensor& b_vals,
+    int64_t M, int64_t K, int64_t N, cudaStream_t stream) -> std::vector<Tensor>
+{
+    constexpr int BLOCK = 256;
+
+    // Pass 1: Count nnz per row (upper bound)
+    int64_t* d_row_nnz = nullptr;
+    CUDA_CHECK_SPARSE_STANDALONE(cudaMallocAsync(&d_row_nnz, M * sizeof(int64_t), stream));
+
+    int64_t count_blocks = (M + BLOCK - 1) / BLOCK;
+    spgemm_count_kernel<T><<<count_blocks, BLOCK, 0, stream>>>(
+        a_crow.data<int64_t>(), a_col.data<int64_t>(),
+        b_crow.data<int64_t>(), b_col.data<int64_t>(),
+        d_row_nnz, M, N);
+    CUDA_CHECK_SPARSE_STANDALONE(cudaGetLastError());
+
+    // Pass 2: Exclusive prefix sum on row_nnz -> c_crow (upper bound)
+    int64_t* d_crow_ub = nullptr;
+    CUDA_CHECK_SPARSE_STANDALONE(cudaMallocAsync(&d_crow_ub, (M + 1) * sizeof(int64_t), stream));
+
+    void* d_temp = nullptr;
+    size_t temp_bytes = 0;
+    cub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_row_nnz, d_crow_ub, M, stream);
+    CUDA_CHECK_SPARSE_STANDALONE(cudaMallocAsync(&d_temp, temp_bytes, stream));
+    cub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_row_nnz, d_crow_ub, M, stream);
+    CUDA_CHECK_SPARSE_STANDALONE(cudaFreeAsync(d_temp, stream));
+
+    // Get total nnz upper bound
+    int64_t last_prefix = 0, last_count = 0;
+    CUDA_CHECK_SPARSE_STANDALONE(cudaMemcpyAsync(&last_prefix, d_crow_ub + M - 1, sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK_SPARSE_STANDALONE(cudaMemcpyAsync(&last_count, d_row_nnz + M - 1, sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK_SPARSE_STANDALONE(cudaStreamSynchronize(stream));
+    int64_t total_nnz_ub = last_prefix + last_count;
+    CUDA_CHECK_SPARSE_STANDALONE(cudaMemcpyAsync(d_crow_ub + M, &total_nnz_ub, sizeof(int64_t), cudaMemcpyHostToDevice, stream));
+
+    if (total_nnz_ub == 0) {
+        auto c_crow_t = tenzor::zeros({M + 1}, DType::Int64, a_crow.device());
+        auto c_col_t = tenzor::empty({0}, DType::Int64, a_crow.device());
+        auto c_vals_t = tenzor::empty({0}, a_vals.dtype(), a_crow.device());
+        CUDA_CHECK_SPARSE_STANDALONE(cudaFreeAsync(d_row_nnz, stream));
+        CUDA_CHECK_SPARSE_STANDALONE(cudaFreeAsync(d_crow_ub, stream));
+        return {c_crow_t, c_col_t, c_vals_t};
+    }
+
+    // Allocate upper-bound output arrays
+    int64_t* d_col_ub = nullptr;
+    T* d_vals_ub = nullptr;
+    CUDA_CHECK_SPARSE_STANDALONE(cudaMallocAsync(&d_col_ub, total_nnz_ub * sizeof(int64_t), stream));
+    CUDA_CHECK_SPARSE_STANDALONE(cudaMallocAsync(&d_vals_ub, total_nnz_ub * sizeof(T), stream));
+
+    // Pass 3: Fill with deduplication
+    int64_t* d_actual_nnz = nullptr;
+    CUDA_CHECK_SPARSE_STANDALONE(cudaMallocAsync(&d_actual_nnz, M * sizeof(int64_t), stream));
+
+    spgemm_fill_kernel<T><<<count_blocks, BLOCK, 0, stream>>>(
+        a_crow.data<int64_t>(), a_col.data<int64_t>(), a_vals.data<T>(),
+        b_crow.data<int64_t>(), b_col.data<int64_t>(), b_vals.data<T>(),
+        d_crow_ub, d_col_ub, d_vals_ub, d_actual_nnz, M, N);
+    CUDA_CHECK_SPARSE_STANDALONE(cudaGetLastError());
+
+    // Compact: prefix sum on actual_nnz -> new_crow
+    int64_t* d_crow_final = nullptr;
+    CUDA_CHECK_SPARSE_STANDALONE(cudaMallocAsync(&d_crow_final, (M + 1) * sizeof(int64_t), stream));
+
+    temp_bytes = 0;
+    d_temp = nullptr;
+    cub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_actual_nnz, d_crow_final, M, stream);
+    CUDA_CHECK_SPARSE_STANDALONE(cudaMallocAsync(&d_temp, temp_bytes, stream));
+    cub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_actual_nnz, d_crow_final, M, stream);
+    CUDA_CHECK_SPARSE_STANDALONE(cudaFreeAsync(d_temp, stream));
+
+    // Get total actual nnz
+    int64_t actual_last_prefix = 0, actual_last_count = 0;
+    CUDA_CHECK_SPARSE_STANDALONE(cudaMemcpyAsync(&actual_last_prefix, d_crow_final + M - 1, sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK_SPARSE_STANDALONE(cudaMemcpyAsync(&actual_last_count, d_actual_nnz + M - 1, sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK_SPARSE_STANDALONE(cudaStreamSynchronize(stream));
+    int64_t total_nnz = actual_last_prefix + actual_last_count;
+    CUDA_CHECK_SPARSE_STANDALONE(cudaMemcpyAsync(d_crow_final + M, &total_nnz, sizeof(int64_t), cudaMemcpyHostToDevice, stream));
+
+    // Compact col/vals
+    auto c_crow_t = Tensor({M + 1}, DType::Int64, a_crow.device());
+    auto c_col_t = Tensor({total_nnz}, DType::Int64, a_crow.device());
+    auto c_vals_t = Tensor({total_nnz}, a_vals.dtype(), a_crow.device());
+
+    CUDA_CHECK_SPARSE_STANDALONE(cudaMemcpyAsync(c_crow_t.data<int64_t>(), d_crow_final,
+        (M + 1) * sizeof(int64_t), cudaMemcpyDeviceToDevice, stream));
+
+    if (total_nnz > 0) {
+        spgemm_compact_kernel<T><<<count_blocks, BLOCK, 0, stream>>>(
+            d_crow_ub, d_crow_final, d_col_ub, d_vals_ub,
+            c_col_t.data<int64_t>(), c_vals_t.data<T>(),
+            d_actual_nnz, M);
+        CUDA_CHECK_SPARSE_STANDALONE(cudaGetLastError());
+    }
+
+    CUDA_CHECK_SPARSE_STANDALONE(cudaFreeAsync(d_row_nnz, stream));
+    CUDA_CHECK_SPARSE_STANDALONE(cudaFreeAsync(d_crow_ub, stream));
+    CUDA_CHECK_SPARSE_STANDALONE(cudaFreeAsync(d_col_ub, stream));
+    CUDA_CHECK_SPARSE_STANDALONE(cudaFreeAsync(d_vals_ub, stream));
+    CUDA_CHECK_SPARSE_STANDALONE(cudaFreeAsync(d_actual_nnz, stream));
+    CUDA_CHECK_SPARSE_STANDALONE(cudaFreeAsync(d_crow_final, stream));
+
+    return {c_crow_t, c_col_t, c_vals_t};
+}
+
+auto spgemm_standalone(std::span<const Tensor> inputs, const OpAttributes& attrs,
+                       cudaStream_t stream) -> std::vector<Tensor> {
+    int64_t M = attrs.get_int(AttrKey::M);
+    int64_t K = attrs.get_int(AttrKey::K);
+    int64_t N = attrs.get_int(AttrKey::N);
+
+    if (inputs[2].dtype() == DType::Float32) {
+        return spgemm_standalone_typed<float>(
+            inputs[0], inputs[1], inputs[2],
+            inputs[3], inputs[4], inputs[5],
+            M, K, N, stream);
+    } else if (inputs[2].dtype() == DType::Float64) {
+        return spgemm_standalone_typed<double>(
+            inputs[0], inputs[1], inputs[2],
+            inputs[3], inputs[4], inputs[5],
+            M, K, N, stream);
+    } else {
+        throw std::runtime_error("spgemm_standalone: only Float32/Float64 supported");
+    }
+}
+
+// ============================================================================
+// Sparse Triangular Solve: level-set parallelism with atomics
+// ============================================================================
+
+template <typename T>
+__global__ void sparse_trsv_kernel(
+    const int64_t* __restrict__ crow,    // [N+1]
+    const int64_t* __restrict__ col,     // [nnz]
+    const T* __restrict__ vals,          // [nnz]
+    const T* __restrict__ b,             // [N]
+    T* __restrict__ x,                   // [N] output
+    int* __restrict__ solved,            // [N] atomic flags
+    int64_t N, bool upper)
+{
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= N) return;
+
+    // Map thread to row: lower tri processes row=tid, upper tri processes row=N-1-tid
+    int64_t row = upper ? (N - 1 - tid) : tid;
+
+    int64_t row_start = crow[row];
+    int64_t row_end = crow[row + 1];
+
+    // Wait for dependencies (lower: cols < row; upper: cols > row)
+    if (tid > 0) {
+        for (int64_t j = row_start; j < row_end; ++j) {
+            int64_t c = col[j];
+            if (upper ? (c > row) : (c < row)) {
+                while (atomicOr(&solved[c], 0) == 0) {
+                    // Spin-wait for dependency
+                }
+            }
+        }
+    }
+
+    // Compute: x[row] = (b[row] - sum(A[row,c]*x[c] for dependent c)) / A[row,row]
+    T rhs = b[row];
+    T diag = T(1);
+    for (int64_t j = row_start; j < row_end; ++j) {
+        int64_t c = col[j];
+        if (c == row) {
+            diag = vals[j];
+        } else if (upper ? (c > row) : (c < row)) {
+            rhs -= vals[j] * x[c];
+        }
+    }
+    x[row] = rhs / diag;
+
+    // Signal completion
+    atomicExch(&solved[row], 1);
+}
+
+auto sparse_trsv_standalone(
+    const Tensor& crow, const Tensor& col_idx, const Tensor& vals,
+    const Tensor& b, int64_t N, bool upper, cudaStream_t stream) -> Tensor
+{
+    auto x = tenzor::zeros({N}, vals.dtype(), vals.device());
+
+    // Allocate and zero solved flags
+    int* d_solved = nullptr;
+    CUDA_CHECK_SPARSE_STANDALONE(cudaMallocAsync(&d_solved, N * sizeof(int), stream));
+    CUDA_CHECK_SPARSE_STANDALONE(cudaMemsetAsync(d_solved, 0, N * sizeof(int), stream));
+
+    constexpr int BLOCK = 256;
+    int64_t blocks = (N + BLOCK - 1) / BLOCK;
+
+    if (vals.dtype() == DType::Float32) {
+        sparse_trsv_kernel<float><<<blocks, BLOCK, 0, stream>>>(
+            crow.data<int64_t>(), col_idx.data<int64_t>(), vals.data<float>(),
+            b.data<float>(), x.data<float>(), d_solved, N, upper);
+    } else if (vals.dtype() == DType::Float64) {
+        sparse_trsv_kernel<double><<<blocks, BLOCK, 0, stream>>>(
+            crow.data<int64_t>(), col_idx.data<int64_t>(), vals.data<double>(),
+            b.data<double>(), x.data<double>(), d_solved, N, upper);
+    } else {
+        CUDA_CHECK_SPARSE_STANDALONE(cudaFreeAsync(d_solved, stream));
+        throw std::runtime_error("sparse_trsv_standalone: only Float32/Float64 supported");
+    }
+
+    CUDA_CHECK_SPARSE_STANDALONE(cudaGetLastError());
+    CUDA_CHECK_SPARSE_STANDALONE(cudaFreeAsync(d_solved, stream));
+    return x;
+}
+
+auto sparse_trsm_standalone(
+    const Tensor& crow, const Tensor& col_idx, const Tensor& vals,
+    const Tensor& B, int64_t N, bool upper, cudaStream_t stream) -> Tensor
+{
+    int64_t K = B.shape()[1];
+    auto X = tenzor::zeros({N, K}, vals.dtype(), vals.device());
+
+    // Solve column-by-column
+    for (int64_t k = 0; k < K; ++k) {
+        auto b_col = B.slice(1, k, k + 1).squeeze(1);
+        auto x_col = sparse_trsv_standalone(crow, col_idx, vals, b_col, N, upper, stream);
+        // Copy x_col into X[:, k]
+        if (vals.dtype() == DType::Float32) {
+            CUDA_CHECK_SPARSE_STANDALONE(cudaMemcpy2DAsync(
+                X.data<float>() + k, K * sizeof(float),
+                x_col.data<float>(), sizeof(float),
+                sizeof(float), N,
+                cudaMemcpyDeviceToDevice, stream));
+        } else {
+            CUDA_CHECK_SPARSE_STANDALONE(cudaMemcpy2DAsync(
+                X.data<double>() + k, K * sizeof(double),
+                x_col.data<double>(), sizeof(double),
+                sizeof(double), N,
+                cudaMemcpyDeviceToDevice, stream));
+        }
+    }
+
+    CUDA_CHECK_SPARSE_STANDALONE(cudaStreamSynchronize(stream));
+    return X;
+}
+
+} // namespace cuda
+} // namespace tenzor
