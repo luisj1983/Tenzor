@@ -26,6 +26,9 @@
 namespace tenzor {
 namespace rocm {
 
+// Forward declaration for FP8 emulation (defined in transform.hip.cpp)
+auto cast_kernel(const Tensor& input, DType target_dtype, hipStream_t stream) -> Tensor;
+
 // ============================================================================
 // rocBLAS Handle Management
 // ============================================================================
@@ -613,6 +616,15 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
     // Validate input dtypes match
     if (a_contig.dtype() != b_contig.dtype()) {
         throw std::runtime_error("matmul: input tensors must have the same dtype");
+    }
+
+    // FP8 emulation: widen to Float32, matmul, narrow back
+    if (a_contig.dtype() == DType::FP8_E4M3 || a_contig.dtype() == DType::FP8_E5M2) {
+        DType orig = a_contig.dtype();
+        auto a_f32 = cast_kernel(a_contig, DType::Float32, stream);
+        auto b_f32 = cast_kernel(b_contig, DType::Float32, stream);
+        auto result_f32 = matmul_kernel(a_f32, b_f32, stream);
+        return cast_kernel(result_f32, orig, stream);
     }
 
     // Support Float32, Float64, Float16, Int32, and Int64

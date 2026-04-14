@@ -1296,4 +1296,36 @@ auto channel_shuffle(const Tensor& input, int64_t groups) -> Tensor {
     return reshape(transposed.contiguous(), {N, C, H, W});
 }
 
+auto as_strided(const Tensor& self, std::span<const int64_t> size,
+                std::span<const int64_t> stride,
+                std::optional<int64_t> storage_offset) -> Tensor {
+    if (size.size() != stride.size()) {
+        throw std::invalid_argument(
+            "as_strided: size and stride must have the same length (got " +
+            std::to_string(size.size()) + " vs " + std::to_string(stride.size()) + ")");
+    }
+
+    // Create a new tensor sharing the same storage but with custom shape/strides.
+    // Start from a clone of the metadata (empty() with same dtype/device won't do
+    // because we need the SAME storage). Instead, copy the tensor (shallow) and
+    // overwrite shape/strides/offset.
+    Tensor result = self;  // shallow copy — shares storage
+
+    // Overwrite shape
+    auto& s = result.mutable_shape();
+    s.assign(size.begin(), size.end());
+
+    // Overwrite strides
+    auto& st = result.mutable_strides();
+    st.assign(stride.begin(), stride.end());
+
+    // Set storage offset
+    result.set_offset(storage_offset.value_or(self.offset()));
+
+    // Invalidate contiguity cache since strides changed
+    result.invalidate_contiguity_cache();
+
+    return result;
+}
+
 } // namespace tenzor

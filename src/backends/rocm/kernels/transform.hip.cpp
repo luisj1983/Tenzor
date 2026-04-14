@@ -1033,6 +1033,202 @@ auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim, hipStream_t st
 }
 
 // ============================================================================
+// FP8 device helpers — bit-level conversion between FP8 and Float32
+// ============================================================================
+
+__device__ __forceinline__ float fp8_e4m3_to_float(uint8_t bits) {
+    uint32_t sign = (bits >> 7) & 0x1;
+    uint32_t exp = (bits >> 3) & 0xF;
+    uint32_t mantissa = bits & 0x7;
+    uint32_t f_exp, f_mantissa;
+
+    if (exp == 0) {
+        if (mantissa == 0) { f_exp = 0; f_mantissa = 0; }
+        else {
+            int e = -1; uint32_t m = mantissa;
+            do { e++; m <<= 1; } while ((m & 0x8) == 0);
+            f_exp = 127 - 7 - e; f_mantissa = (m & 0x7) << 20;
+        }
+    } else if (exp == 0xF && mantissa != 0) {
+        f_exp = 0xFF; f_mantissa = mantissa << 20;  // NaN
+    } else {
+        f_exp = exp - 7 + 127; f_mantissa = mantissa << 20;  // normal
+    }
+
+    uint32_t f_bits = (sign << 31) | (f_exp << 23) | f_mantissa;
+    float result;
+    __builtin_memcpy(&result, &f_bits, sizeof(float));
+    return result;
+}
+
+__device__ __forceinline__ float fp8_e5m2_to_float(uint8_t bits) {
+    uint32_t sign = (bits >> 7) & 0x1;
+    uint32_t exp = (bits >> 2) & 0x1F;
+    uint32_t mantissa = bits & 0x3;
+    uint32_t f_exp, f_mantissa;
+
+    if (exp == 0) {
+        if (mantissa == 0) { f_exp = 0; f_mantissa = 0; }
+        else {
+            int e = -1; uint32_t m = mantissa;
+            do { e++; m <<= 1; } while ((m & 0x4) == 0);
+            f_exp = 127 - 15 - e; f_mantissa = (m & 0x3) << 21;
+        }
+    } else if (exp == 0x1F) {
+        f_exp = 0xFF; f_mantissa = mantissa << 21;  // NaN / Inf
+    } else {
+        f_exp = exp - 15 + 127; f_mantissa = mantissa << 21;  // normal
+    }
+
+    uint32_t f_bits = (sign << 31) | (f_exp << 23) | f_mantissa;
+    float result;
+    __builtin_memcpy(&result, &f_bits, sizeof(float));
+    return result;
+}
+
+__device__ __forceinline__ uint8_t float_to_fp8_e4m3(float f) {
+    uint32_t f_bits;
+    __builtin_memcpy(&f_bits, &f, sizeof(uint32_t));
+    uint32_t sign = (f_bits >> 31) & 0x1;
+    uint32_t exp = (f_bits >> 23) & 0xFF;
+    uint32_t mantissa = f_bits & 0x7FFFFF;
+    uint8_t h_sign = static_cast<uint8_t>(sign);
+    uint8_t h_exp, h_mantissa;
+
+    if (exp == 0xFF) { h_exp = 0xF; h_mantissa = 0x7; }          // NaN/Inf -> NaN
+    else if (exp == 0) { h_exp = 0; h_mantissa = 0; }            // zero/denormal -> zero
+    else {
+        int32_t new_exp = static_cast<int32_t>(exp) - 127 + 7;
+        if (new_exp >= 0xF) { h_exp = 0xE; h_mantissa = 0x7; }  // overflow -> max normal
+        else if (new_exp <= 0) {
+            if (new_exp >= -3) {
+                uint32_t m = (mantissa | 0x800000) >> (1 - new_exp);
+                h_mantissa = static_cast<uint8_t>((m >> 20) & 0x7); h_exp = 0;
+            } else { h_exp = 0; h_mantissa = 0; }                // underflow -> zero
+        } else {
+            h_exp = static_cast<uint8_t>(new_exp);
+            h_mantissa = static_cast<uint8_t>((mantissa >> 20) & 0x7);
+        }
+    }
+    return (h_sign << 7) | (h_exp << 3) | h_mantissa;
+}
+
+__device__ __forceinline__ uint8_t float_to_fp8_e5m2(float f) {
+    uint32_t f_bits;
+    __builtin_memcpy(&f_bits, &f, sizeof(uint32_t));
+    uint32_t sign = (f_bits >> 31) & 0x1;
+    uint32_t exp = (f_bits >> 23) & 0xFF;
+    uint32_t mantissa = f_bits & 0x7FFFFF;
+    uint8_t h_sign = static_cast<uint8_t>(sign);
+    uint8_t h_exp, h_mantissa;
+
+    if (exp == 0xFF) { h_exp = 0x1F; h_mantissa = mantissa ? 0x3 : 0; }  // NaN/Inf
+    else if (exp == 0) { h_exp = 0; h_mantissa = 0; }
+    else {
+        int32_t new_exp = static_cast<int32_t>(exp) - 127 + 15;
+        if (new_exp >= 0x1F) { h_exp = 0x1F; h_mantissa = 0; }  // overflow -> Inf
+        else if (new_exp <= 0) {
+            if (new_exp >= -2) {
+                uint32_t m = (mantissa | 0x800000) >> (1 - new_exp);
+                h_mantissa = static_cast<uint8_t>((m >> 21) & 0x3); h_exp = 0;
+            } else { h_exp = 0; h_mantissa = 0; }
+        } else {
+            h_exp = static_cast<uint8_t>(new_exp);
+            h_mantissa = static_cast<uint8_t>((mantissa >> 21) & 0x3);
+        }
+    }
+    return (h_sign << 7) | (h_exp << 2) | h_mantissa;
+}
+
+// ============================================================================
+// FP8 cast kernels
+// ============================================================================
+
+// Float32 <-> FP8
+__global__ void cast_f32_to_fp8_e4m3_kernel(const float* input, uint8_t* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = float_to_fp8_e4m3(input[idx]); }
+}
+__global__ void cast_f32_to_fp8_e5m2_kernel(const float* input, uint8_t* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = float_to_fp8_e5m2(input[idx]); }
+}
+__global__ void cast_fp8_e4m3_to_f32_kernel(const uint8_t* input, float* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = fp8_e4m3_to_float(input[idx]); }
+}
+__global__ void cast_fp8_e5m2_to_f32_kernel(const uint8_t* input, float* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = fp8_e5m2_to_float(input[idx]); }
+}
+
+// Float64 <-> FP8
+__global__ void cast_f64_to_fp8_e4m3_kernel(const double* input, uint8_t* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = float_to_fp8_e4m3(static_cast<float>(input[idx])); }
+}
+__global__ void cast_f64_to_fp8_e5m2_kernel(const double* input, uint8_t* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = float_to_fp8_e5m2(static_cast<float>(input[idx])); }
+}
+__global__ void cast_fp8_e4m3_to_f64_kernel(const uint8_t* input, double* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = static_cast<double>(fp8_e4m3_to_float(input[idx])); }
+}
+__global__ void cast_fp8_e5m2_to_f64_kernel(const uint8_t* input, double* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = static_cast<double>(fp8_e5m2_to_float(input[idx])); }
+}
+
+// Float16 <-> FP8
+__global__ void cast_f16_to_fp8_e4m3_kernel(const __half* input, uint8_t* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = float_to_fp8_e4m3(__half2float(input[idx])); }
+}
+__global__ void cast_f16_to_fp8_e5m2_kernel(const __half* input, uint8_t* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = float_to_fp8_e5m2(__half2float(input[idx])); }
+}
+__global__ void cast_fp8_e4m3_to_f16_kernel(const uint8_t* input, __half* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = __float2half(fp8_e4m3_to_float(input[idx])); }
+}
+__global__ void cast_fp8_e5m2_to_f16_kernel(const uint8_t* input, __half* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = __float2half(fp8_e5m2_to_float(input[idx])); }
+}
+
+// BFloat16 <-> FP8
+__global__ void cast_bf16_to_fp8_e4m3_kernel(const hip_bfloat16* input, uint8_t* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = float_to_fp8_e4m3(static_cast<float>(input[idx])); }
+}
+__global__ void cast_bf16_to_fp8_e5m2_kernel(const hip_bfloat16* input, uint8_t* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = float_to_fp8_e5m2(static_cast<float>(input[idx])); }
+}
+__global__ void cast_fp8_e4m3_to_bf16_kernel(const uint8_t* input, hip_bfloat16* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = hip_bfloat16(fp8_e4m3_to_float(input[idx])); }
+}
+__global__ void cast_fp8_e5m2_to_bf16_kernel(const uint8_t* input, hip_bfloat16* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = hip_bfloat16(fp8_e5m2_to_float(input[idx])); }
+}
+
+// FP8 <-> FP8 cross-format
+__global__ void cast_fp8_e4m3_to_e5m2_kernel(const uint8_t* input, uint8_t* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = float_to_fp8_e5m2(fp8_e4m3_to_float(input[idx])); }
+}
+__global__ void cast_fp8_e5m2_to_e4m3_kernel(const uint8_t* input, uint8_t* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = float_to_fp8_e4m3(fp8_e5m2_to_float(input[idx])); }
+}
+
+// Generic FP8 -> any integer/bool type
+template<typename To>
+__global__ void cast_fp8_e4m3_to_kernel(const uint8_t* input, To* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = static_cast<To>(fp8_e4m3_to_float(input[idx])); }
+}
+template<typename To>
+__global__ void cast_fp8_e5m2_to_kernel(const uint8_t* input, To* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = static_cast<To>(fp8_e5m2_to_float(input[idx])); }
+}
+
+// Generic any type -> FP8 (via float)
+template<typename From>
+__global__ void cast_to_fp8_e4m3_kernel(const From* input, uint8_t* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = float_to_fp8_e4m3(static_cast<float>(input[idx])); }
+}
+template<typename From>
+__global__ void cast_to_fp8_e5m2_kernel(const From* input, uint8_t* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) { output[idx] = float_to_fp8_e5m2(static_cast<float>(input[idx])); }
+}
+
+// ============================================================================
 // Cast kernel — dtype conversion
 // ============================================================================
 
@@ -1094,6 +1290,16 @@ static Tensor cast_from_standard(const Tensor& input, DType target_dtype, int64_
             hipLaunchKernelGGL((cast_kernel_impl<SrcT, hip_bfloat16>),
                 dim3(num_blocks), dim3(block_size), 0, stream,
                 src, reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
+            break;
+        case DType::FP8_E4M3:
+            hipLaunchKernelGGL((cast_to_fp8_e4m3_kernel<SrcT>),
+                dim3(num_blocks), dim3(block_size), 0, stream,
+                src, result.data<uint8_t>(), n);
+            break;
+        case DType::FP8_E5M2:
+            hipLaunchKernelGGL((cast_to_fp8_e5m2_kernel<SrcT>),
+                dim3(num_blocks), dim3(block_size), 0, stream,
+                src, result.data<uint8_t>(), n);
             break;
         default:
             throw std::runtime_error("cast: unsupported target dtype");
@@ -1250,6 +1456,16 @@ auto cast_kernel(const Tensor& input, DType target_dtype, hipStream_t stream) ->
                     dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                     src, result.data<bool>(), n);
                 break;
+            case DType::FP8_E4M3:
+                hipLaunchKernelGGL(cast_f16_to_fp8_e4m3_kernel,
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, result.data<uint8_t>(), n);
+                break;
+            case DType::FP8_E5M2:
+                hipLaunchKernelGGL(cast_f16_to_fp8_e5m2_kernel,
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, result.data<uint8_t>(), n);
+                break;
             default:
                 throw std::runtime_error("cast: unsupported target dtype for Float16 source");
         }
@@ -1269,9 +1485,155 @@ auto cast_kernel(const Tensor& input, DType target_dtype, hipStream_t stream) ->
             HIP_CHECK(hipGetLastError());
             return result;
         }
+        if (target_dtype == DType::FP8_E4M3) {
+            Tensor result(shape, target_dtype, input.device());
+            hipLaunchKernelGGL(cast_bf16_to_fp8_e4m3_kernel,
+                dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
+                result.data<uint8_t>(), n);
+            HIP_CHECK(hipGetLastError());
+            return result;
+        }
+        if (target_dtype == DType::FP8_E5M2) {
+            Tensor result(shape, target_dtype, input.device());
+            hipLaunchKernelGGL(cast_bf16_to_fp8_e5m2_kernel,
+                dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
+                result.data<uint8_t>(), n);
+            HIP_CHECK(hipGetLastError());
+            return result;
+        }
         // For other targets, go through Float32
         auto f32 = cast_kernel(input, DType::Float32, stream);
         return cast_kernel(f32, target_dtype, stream);
+    }
+
+    // ---- FP8_E4M3 source ----
+    if (src_dtype == DType::FP8_E4M3) {
+        Tensor result(shape, target_dtype, input.device());
+        const uint8_t* src = input.data<uint8_t>();
+        switch (target_dtype) {
+            case DType::Float32:
+                hipLaunchKernelGGL(cast_fp8_e4m3_to_f32_kernel,
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, result.data<float>(), n);
+                break;
+            case DType::Float64:
+                hipLaunchKernelGGL(cast_fp8_e4m3_to_f64_kernel,
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, result.data<double>(), n);
+                break;
+            case DType::Float16:
+                hipLaunchKernelGGL(cast_fp8_e4m3_to_f16_kernel,
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, reinterpret_cast<__half*>(result.data<Float16>()), n);
+                break;
+            case DType::BFloat16:
+                hipLaunchKernelGGL(cast_fp8_e4m3_to_bf16_kernel,
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
+                break;
+            case DType::FP8_E4M3:
+                break;  // same type, already handled above
+            case DType::FP8_E5M2:
+                hipLaunchKernelGGL(cast_fp8_e4m3_to_e5m2_kernel,
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, result.data<uint8_t>(), n);
+                break;
+            case DType::Int8:
+                hipLaunchKernelGGL((cast_fp8_e4m3_to_kernel<int8_t>),
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, result.data<int8_t>(), n);
+                break;
+            case DType::Int32:
+                hipLaunchKernelGGL((cast_fp8_e4m3_to_kernel<int32_t>),
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, result.data<int32_t>(), n);
+                break;
+            case DType::Int64:
+                hipLaunchKernelGGL((cast_fp8_e4m3_to_kernel<int64_t>),
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, result.data<int64_t>(), n);
+                break;
+            case DType::UInt8:
+                hipLaunchKernelGGL((cast_fp8_e4m3_to_kernel<uint8_t>),
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, result.data<uint8_t>(), n);
+                break;
+            case DType::Bool:
+                hipLaunchKernelGGL((cast_fp8_e4m3_to_kernel<bool>),
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, result.data<bool>(), n);
+                break;
+            default:
+                throw std::runtime_error("cast: unsupported target dtype for FP8_E4M3 source");
+        }
+        HIP_CHECK(hipGetLastError());
+        return result;
+    }
+
+    // ---- FP8_E5M2 source ----
+    if (src_dtype == DType::FP8_E5M2) {
+        Tensor result(shape, target_dtype, input.device());
+        const uint8_t* src = input.data<uint8_t>();
+        switch (target_dtype) {
+            case DType::Float32:
+                hipLaunchKernelGGL(cast_fp8_e5m2_to_f32_kernel,
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, result.data<float>(), n);
+                break;
+            case DType::Float64:
+                hipLaunchKernelGGL(cast_fp8_e5m2_to_f64_kernel,
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, result.data<double>(), n);
+                break;
+            case DType::Float16:
+                hipLaunchKernelGGL(cast_fp8_e5m2_to_f16_kernel,
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, reinterpret_cast<__half*>(result.data<Float16>()), n);
+                break;
+            case DType::BFloat16:
+                hipLaunchKernelGGL(cast_fp8_e5m2_to_bf16_kernel,
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
+                break;
+            case DType::FP8_E4M3:
+                hipLaunchKernelGGL(cast_fp8_e5m2_to_e4m3_kernel,
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, result.data<uint8_t>(), n);
+                break;
+            case DType::FP8_E5M2:
+                break;  // same type, already handled above
+            case DType::Int8:
+                hipLaunchKernelGGL((cast_fp8_e5m2_to_kernel<int8_t>),
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, result.data<int8_t>(), n);
+                break;
+            case DType::Int32:
+                hipLaunchKernelGGL((cast_fp8_e5m2_to_kernel<int32_t>),
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, result.data<int32_t>(), n);
+                break;
+            case DType::Int64:
+                hipLaunchKernelGGL((cast_fp8_e5m2_to_kernel<int64_t>),
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, result.data<int64_t>(), n);
+                break;
+            case DType::UInt8:
+                hipLaunchKernelGGL((cast_fp8_e5m2_to_kernel<uint8_t>),
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, result.data<uint8_t>(), n);
+                break;
+            case DType::Bool:
+                hipLaunchKernelGGL((cast_fp8_e5m2_to_kernel<bool>),
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    src, result.data<bool>(), n);
+                break;
+            default:
+                throw std::runtime_error("cast: unsupported target dtype for FP8_E5M2 source");
+        }
+        HIP_CHECK(hipGetLastError());
+        return result;
     }
 
     // Standard source types

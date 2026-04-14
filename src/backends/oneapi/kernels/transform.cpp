@@ -1793,35 +1793,101 @@ auto cast_kernel(const Tensor& input, DType target_dtype, sycl::queue& queue) ->
             out[i] = static_cast<int64_t>(in[i]);
         });
     } else if ((src == DType::FP8_E4M3 || src == DType::FP8_E5M2) && dst == DType::Float32) {
-        // FP8 → Float32: host-side conversion (FP8 bit manipulation not in device code)
+        // FP8 → Float32: device-side bit manipulation
         const uint8_t* in = get_data_ptr<const uint8_t>(input);
         float* out = get_data_ptr<float>(output);
-        std::vector<uint8_t> h_in(numel);
-        std::vector<float> h_out(numel);
-        queue.memcpy(h_in.data(), in, numel * sizeof(uint8_t)).wait();
-        if (src == DType::FP8_E4M3) {
-            for (int64_t i = 0; i < numel; ++i)
-                h_out[i] = static_cast<float>(FP8_E4M3(h_in[i]));
-        } else {
-            for (int64_t i = 0; i < numel; ++i)
-                h_out[i] = static_cast<float>(FP8_E5M2(h_in[i]));
-        }
-        queue.memcpy(out, h_out.data(), numel * sizeof(float)).wait();
+        bool is_e4m3 = (src == DType::FP8_E4M3);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            uint8_t bits = in[idx];
+            uint32_t f_sign, f_exp, f_mantissa;
+            if (is_e4m3) {
+                uint32_t sign = (bits >> 7) & 0x1;
+                uint32_t exp = (bits >> 3) & 0xF;
+                uint32_t mantissa = bits & 0x7;
+                f_sign = sign;
+                if (exp == 0) {
+                    if (mantissa == 0) { f_exp = 0; f_mantissa = 0; }
+                    else {
+                        int e = -1; uint32_t m = mantissa;
+                        do { e++; m <<= 1; } while ((m & 0x8) == 0);
+                        f_exp = 127 - 7 - e; f_mantissa = (m & 0x7) << 20;
+                    }
+                } else if (exp == 0xF && mantissa != 0) {
+                    f_exp = 0xFF; f_mantissa = mantissa << 20;
+                } else {
+                    f_exp = exp - 7 + 127; f_mantissa = mantissa << 20;
+                }
+            } else {
+                uint32_t sign = (bits >> 7) & 0x1;
+                uint32_t exp = (bits >> 2) & 0x1F;
+                uint32_t mantissa = bits & 0x3;
+                f_sign = sign;
+                if (exp == 0) {
+                    if (mantissa == 0) { f_exp = 0; f_mantissa = 0; }
+                    else {
+                        int e = -1; uint32_t m = mantissa;
+                        do { e++; m <<= 1; } while ((m & 0x4) == 0);
+                        f_exp = 127 - 15 - e; f_mantissa = (m & 0x3) << 21;
+                    }
+                } else if (exp == 0x1F) {
+                    f_exp = 0xFF; f_mantissa = mantissa << 21;
+                } else {
+                    f_exp = exp - 15 + 127; f_mantissa = mantissa << 21;
+                }
+            }
+            uint32_t f_bits = (f_sign << 31) | (f_exp << 23) | f_mantissa;
+            out[idx] = sycl::bit_cast<float>(f_bits);
+        });
+        queue.wait();
     } else if (src == DType::Float32 && (dst == DType::FP8_E4M3 || dst == DType::FP8_E5M2)) {
-        // Float32 → FP8: host-side conversion
+        // Float32 → FP8: device-side bit manipulation
         const float* in = get_data_ptr<const float>(input);
         uint8_t* out = get_data_ptr<uint8_t>(output);
-        std::vector<float> h_in(numel);
-        std::vector<uint8_t> h_out(numel);
-        queue.memcpy(h_in.data(), in, numel * sizeof(float)).wait();
-        if (dst == DType::FP8_E4M3) {
-            for (int64_t i = 0; i < numel; ++i)
-                h_out[i] = FP8_E4M3(h_in[i]).bits;
-        } else {
-            for (int64_t i = 0; i < numel; ++i)
-                h_out[i] = FP8_E5M2(h_in[i]).bits;
-        }
-        queue.memcpy(out, h_out.data(), numel * sizeof(uint8_t)).wait();
+        bool is_e4m3 = (dst == DType::FP8_E4M3);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            uint32_t f_bits = sycl::bit_cast<uint32_t>(in[idx]);
+            uint32_t sign = (f_bits >> 31) & 0x1;
+            uint32_t exp = (f_bits >> 23) & 0xFF;
+            uint32_t mantissa = f_bits & 0x7FFFFF;
+            uint8_t h_sign = static_cast<uint8_t>(sign);
+            uint8_t h_exp, h_mantissa;
+            if (is_e4m3) {
+                if (exp == 0xFF) { h_exp = 0xF; h_mantissa = 0x7; }
+                else if (exp == 0) { h_exp = 0; h_mantissa = 0; }
+                else {
+                    int32_t new_exp = static_cast<int32_t>(exp) - 127 + 7;
+                    if (new_exp >= 0xF) { h_exp = 0xE; h_mantissa = 0x7; }
+                    else if (new_exp <= 0) {
+                        if (new_exp >= -3) {
+                            uint32_t m = (mantissa | 0x800000) >> (1 - new_exp);
+                            h_mantissa = static_cast<uint8_t>((m >> 20) & 0x7); h_exp = 0;
+                        } else { h_exp = 0; h_mantissa = 0; }
+                    } else {
+                        h_exp = static_cast<uint8_t>(new_exp);
+                        h_mantissa = static_cast<uint8_t>((mantissa >> 20) & 0x7);
+                    }
+                }
+                out[idx] = (h_sign << 7) | (h_exp << 3) | h_mantissa;
+            } else {
+                if (exp == 0xFF) { h_exp = 0x1F; h_mantissa = mantissa ? 0x3 : 0; }
+                else if (exp == 0) { h_exp = 0; h_mantissa = 0; }
+                else {
+                    int32_t new_exp = static_cast<int32_t>(exp) - 127 + 15;
+                    if (new_exp >= 0x1F) { h_exp = 0x1F; h_mantissa = 0; }
+                    else if (new_exp <= 0) {
+                        if (new_exp >= -2) {
+                            uint32_t m = (mantissa | 0x800000) >> (1 - new_exp);
+                            h_mantissa = static_cast<uint8_t>((m >> 21) & 0x3); h_exp = 0;
+                        } else { h_exp = 0; h_mantissa = 0; }
+                    } else {
+                        h_exp = static_cast<uint8_t>(new_exp);
+                        h_mantissa = static_cast<uint8_t>((mantissa >> 21) & 0x3);
+                    }
+                }
+                out[idx] = (h_sign << 7) | (h_exp << 2) | h_mantissa;
+            }
+        });
+        queue.wait();
     } else if (src == DType::Float32 && dst == DType::Complex64) {
         // Real → complex: fill imaginary part with zeros. Complex64
         // storage is interleaved (re, im) float pairs.

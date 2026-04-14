@@ -19,6 +19,13 @@ inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
     return (n + block_size - 1) / block_size;
 }
 
+// Numerically stable sigmoid: clamp input to [-20, 20] to prevent exp overflow
+template<typename T>
+__device__ __forceinline__ T stable_sigmoid(T x) {
+    T clamped = max(T(-20), min(T(20), x));
+    return T(1) / (T(1) + exp(-clamped));
+}
+
 // ==================================================================
 /**
  * @brief Fused LSTM cell forward kernel
@@ -75,9 +82,9 @@ __global__ void lstm_cell_forward_fused(
 
         // Apply activations
         // Sigmoid for i, f, o gates
-        T i_t = T(1) / (T(1) + exp(-i_gate));
-        T f_t = T(1) / (T(1) + exp(-f_gate));
-        T o_t = T(1) / (T(1) + exp(-o_gate));
+        T i_t = stable_sigmoid(i_gate);
+        T f_t = stable_sigmoid(f_gate);
+        T o_t = stable_sigmoid(o_gate);
 
         // Tanh for cell gate
         T g_t = tanh(g_gate);
@@ -142,10 +149,10 @@ __global__ void lstm_cell_backward_fused(
         T g_gate = gates[g_offset];
         T o_gate = gates[o_offset];
 
-        T i_t = T(1) / (T(1) + exp(-i_gate));
-        T f_t = T(1) / (T(1) + exp(-f_gate));
+        T i_t = stable_sigmoid(i_gate);
+        T f_t = stable_sigmoid(f_gate);
         T g_t = tanh(g_gate);
-        T o_t = T(1) / (T(1) + exp(-o_gate));
+        T o_t = stable_sigmoid(o_gate);
 
         // Load states
         T c_prev_val = c_prev[idx];

@@ -264,6 +264,85 @@ auto cov(const Tensor& input, int64_t correction = 1) -> Tensor;
  */
 auto corrcoef(const Tensor& input) -> Tensor;
 
+// =========================================================================
+// Numerical integration and gradient operations
+// =========================================================================
+
+/**
+ * @brief Trapezoidal numerical integration with non-uniform spacing.
+ *
+ * @param y Values tensor
+ * @param x Coordinates tensor (same shape as y along dim)
+ * @param dim Dimension to integrate along (default: -1)
+ * @return Tensor with integrated dimension removed
+ */
+auto trapezoid(const Tensor& y, const Tensor& x, int64_t dim = -1) -> Tensor;
+
+/**
+ * @brief Trapezoidal numerical integration with uniform spacing.
+ *
+ * @param y Values tensor
+ * @param dx Uniform spacing (default: 1.0)
+ * @param dim Dimension to integrate along (default: -1)
+ * @return Tensor with integrated dimension removed
+ */
+auto trapezoid(const Tensor& y, double dx = 1.0, int64_t dim = -1) -> Tensor;
+
+/**
+ * @brief Cumulative trapezoidal integration with non-uniform spacing.
+ *
+ * @param y Values tensor
+ * @param x Coordinates tensor
+ * @param dim Dimension to integrate along (default: -1)
+ * @return Tensor with dim size reduced by 1
+ */
+auto cumulative_trapezoid(const Tensor& y, const Tensor& x, int64_t dim = -1) -> Tensor;
+
+/**
+ * @brief Cumulative trapezoidal integration with uniform spacing.
+ *
+ * @param y Values tensor
+ * @param dx Uniform spacing (default: 1.0)
+ * @param dim Dimension to integrate along (default: -1)
+ * @return Tensor with dim size reduced by 1
+ */
+auto cumulative_trapezoid(const Tensor& y, double dx = 1.0, int64_t dim = -1) -> Tensor;
+
+/**
+ * @brief NumPy-style numerical gradient using finite differences.
+ *
+ * Central differences in the interior, one-sided at boundaries.
+ *
+ * @param input Input tensor
+ * @param dim Dimension along which to compute gradient (default: -1)
+ * @param spacing Uniform spacing between samples (default: 1.0)
+ * @return Gradient tensor (same shape as input)
+ */
+auto gradient(const Tensor& input, int64_t dim = -1, double spacing = 1.0) -> Tensor;
+
+/**
+ * @brief Reduce tensor elements over segments defined by offsets.
+ *
+ * Segment i contains elements from offsets[i] to offsets[i+1] along the
+ * given axis.  The supported reduction modes are "sum", "mean", "max",
+ * "min", and "prod".
+ *
+ * @param data   Input tensor
+ * @param offsets 1-D Int64 tensor of length (num_segments + 1)
+ * @param reduce Reduction mode: "sum" | "mean" | "max" | "min" | "prod"
+ * @param axis   Axis along which segments are defined (default: 0)
+ * @return Tensor with the segment dimension replaced by num_segments
+ *
+ * @code
+ * // data = [1, 2, 3, 4, 5], offsets = [0, 2, 5]
+ * // segment 0 = [1,2], segment 1 = [3,4,5]
+ * auto out = segment_reduce(data, offsets, "sum"); // [3, 12]
+ * @endcode
+ */
+auto segment_reduce(const Tensor& data, const Tensor& offsets,
+                    const std::string& reduce = "sum",
+                    int64_t axis = 0) -> Tensor;
+
 /** @} */ // end of tensor_reduction group
 
 } // namespace tenzor

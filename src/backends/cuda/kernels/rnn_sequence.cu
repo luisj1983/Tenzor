@@ -22,6 +22,13 @@
 namespace tenzor {
 namespace cuda {
 
+// Numerically stable sigmoid: clamp input to [-20, 20] to prevent exp overflow
+template<typename T>
+__device__ __forceinline__ T stable_sigmoid(T x) {
+    T clamped = max(T(-20), min(T(20), x));
+    return T(1) / (T(1) + exp(-clamped));
+}
+
 // Forward declarations from other CUDA kernels
 auto cublas_matmul(const Tensor& a, const Tensor& b) -> Tensor;
 auto add_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
@@ -96,9 +103,9 @@ __global__ void gru_cell_fused_kernel(
     T n_hh = gates_hh[base_hh + 2 * hidden_size];
 
     // Reset gate: r = sigmoid(r_ih + r_hh)
-    T r = T(1) / (T(1) + exp(-(r_ih + r_hh)));
+    T r = stable_sigmoid(r_ih + r_hh);
     // Update gate: z = sigmoid(z_ih + z_hh)
-    T z = T(1) / (T(1) + exp(-(z_ih + z_hh)));
+    T z = stable_sigmoid(z_ih + z_hh);
     // New gate: n = tanh(n_ih + r * n_hh)
     T n = tanh(n_ih + r * n_hh);
 

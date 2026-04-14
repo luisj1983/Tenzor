@@ -309,10 +309,20 @@ public:
     auto dispatchBernoulli(const Tensor& probs) -> Tensor;
     auto dispatchBucketize(const Tensor& input, const Tensor& boundaries, bool right) -> Tensor;
     auto dispatchCDist(const Tensor& x1, const Tensor& x2) -> Tensor;
+    auto dispatchTrapezoid(const Tensor& y, int64_t dim, double dx, const Tensor* x_ptr) -> Tensor;
+    auto dispatchCumulativeTrapezoid(const Tensor& y, int64_t dim, double dx, const Tensor* x_ptr) -> Tensor;
+    auto dispatchGradient(const Tensor& input, int64_t dim, double spacing) -> Tensor;
+    auto dispatchPairwiseDistance(const Tensor& x1, const Tensor& x2, double p) -> Tensor;
+    auto dispatchPdist(const Tensor& input, double p) -> Tensor;
     auto dispatchHistogram(const Tensor& input, int64_t bins, double min_val, double max_val)
         -> std::pair<Tensor, Tensor>;
     auto dispatchMultinomial(const Tensor& probs, int64_t num_samples, bool replacement) -> Tensor;
     auto dispatchPoissonSample(const Tensor& rates) -> Tensor;
+    auto dispatchNormalSample(const Tensor& mean, const Tensor& stddev) -> Tensor;
+    auto dispatchExponentialSample(const Tensor& rate) -> Tensor;
+    auto dispatchNestedAttention(const Tensor& Q, const Tensor& K, const Tensor& V,
+                                  const Tensor& q_offsets, const Tensor& kv_offsets,
+                                  float scale, bool causal) -> Tensor;
     auto dispatchSTFT(const Tensor& input, int64_t n_fft, int64_t hop_length,
                       int64_t win_length, const Tensor& window, bool center,
                       bool normalized, bool onesided) -> Tensor;
@@ -567,6 +577,8 @@ public:
     auto dispatchNanmedian(const Tensor& input, int64_t dim) -> Tensor;
     auto dispatchHistc(const Tensor& input, int64_t bins, double min_val, double max_val) -> Tensor;
     auto dispatchUniqueConsecutive(const Tensor& input, bool return_inverse) -> std::tuple<Tensor, Tensor, Tensor>;
+    auto dispatchSegmentReduce(const Tensor& data, const Tensor& offsets,
+                               const std::string& reduce, int64_t axis) -> Tensor;
 
     // Fractional Max Pool + Max Unpool operations
     auto dispatchFractionalMaxPool2dForward(const Tensor& input, int64_t out_h, int64_t out_w,

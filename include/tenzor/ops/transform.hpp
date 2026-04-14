@@ -277,6 +277,25 @@ auto pixel_unshuffle(const Tensor& input, int64_t downscale_factor) -> Tensor;
  */
 auto channel_shuffle(const Tensor& input, int64_t groups) -> Tensor;
 
+/**
+ * @brief Create a view of a tensor with custom strides and shape.
+ *
+ * Pure metadata manipulation — no data copy. The resulting tensor shares
+ * the same underlying storage as the input.
+ *
+ * @param self Input tensor
+ * @param size New shape for the view
+ * @param stride New strides for the view
+ * @param storage_offset Optional storage offset (in elements). If nullopt, uses self's offset.
+ * @return View tensor with custom strides
+ *
+ * @warning No bounds checking is performed — the caller must ensure that
+ *          the requested view is valid for the underlying storage.
+ */
+auto as_strided(const Tensor& self, std::span<const int64_t> size,
+                std::span<const int64_t> stride,
+                std::optional<int64_t> storage_offset = std::nullopt) -> Tensor;
+
 /** @} */ // end of tensor_transform group
 
 } // namespace tenzor

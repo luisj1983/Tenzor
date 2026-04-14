@@ -4459,6 +4459,86 @@ auto VulkanBackend::dispatchUniqueConsecutive(const Tensor& input, bool return_i
 }
 
 // ============================================================================
+// SegmentReduce — native Vulkan compute shader (one workgroup per segment)
+// ============================================================================
+
+auto VulkanBackend::dispatchSegmentReduce(const Tensor& data, const Tensor& offsets,
+                                          const std::string& reduce, int64_t axis) -> Tensor {
+    Tensor data_f32 = (data.dtype() != DType::Float32) ? data.to(DType::Float32) : data;
+    Tensor offs_i32 = offsets.to(DType::Int32);  // shader uses int offsets
+
+    int64_t ndim = data_f32.ndim();
+    if (axis < 0) axis += ndim;
+
+    const auto& shape = data_f32.shape();
+    int64_t axis_size = shape[axis];
+    int64_t num_segments = offs_i32.numel() - 1;
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < axis; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
+    for (int64_t i = axis + 1; i < ndim; ++i) inner_size *= shape[i];
+
+    std::vector<int64_t> out_shape;
+    for (int64_t i = 0; i < ndim; ++i) {
+        out_shape.push_back(i == axis ? num_segments : shape[i]);
+    }
+
+    uint32_t mode = 0;
+    if (reduce == "sum") mode = 0;
+    else if (reduce == "mean") mode = 1;
+    else if (reduce == "max") mode = 2;
+    else if (reduce == "min") mode = 3;
+    else if (reduce == "prod") mode = 4;
+
+    int32_t device_id = data.device().index;
+    auto* pipeline = getPipeline("segment_reduce", device_id);
+
+    Tensor output(out_shape, DType::Float32, data.device());
+
+    struct {
+        uint32_t num_segments;
+        uint32_t reduce_mode;
+        uint32_t outer_size;
+        uint32_t axis_size;
+        uint32_t inner_size;
+    } pc;
+    pc.num_segments = static_cast<uint32_t>(num_segments);
+    pc.reduce_mode = mode;
+    pc.outer_size = static_cast<uint32_t>(outer_size);
+    pc.axis_size = static_cast<uint32_t>(axis_size);
+    pc.inner_size = static_cast<uint32_t>(inner_size);
+
+    size_t data_buf_size = static_cast<size_t>(data_f32.numel()) * sizeof(float);
+    size_t offsets_buf_size = static_cast<size_t>(offs_i32.numel()) * sizeof(int32_t);
+    size_t output_buf_size = static_cast<size_t>(output.numel()) * sizeof(float);
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, data_f32.data_ptr()}, {1, offs_i32.data_ptr()}, {2, output.data_ptr()}
+    };
+    std::vector<size_t> sizes = {data_buf_size, offsets_buf_size, output_buf_size};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    // One workgroup per (outer, segment, inner) triple
+    uint32_t total_workgroups = static_cast<uint32_t>(outer_size * num_segments * inner_size);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, total_workgroups, 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    if (data.dtype() != DType::Float32) {
+        return output.to(data.dtype());
+    }
+    return output;
+}
+
+// ============================================================================
 // Fractional Max Pool 2D Forward — native Vulkan compute shader
 // ============================================================================
 

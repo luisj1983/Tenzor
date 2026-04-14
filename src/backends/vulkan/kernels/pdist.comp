@@ -1,0 +1,49 @@
+#version 450
+
+// All-pairs pairwise p-norm distance.
+// Input: (N, D), output: (N*(N-1)/2,)
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer InBuf  { float in_data[]; };
+layout(binding = 1) buffer OutBuf { float out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint N;
+    uint D;
+    uint num_pairs;
+    float p;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_pairs) return;
+
+    // Map flat index to (i, j) pair where i < j
+    uint i = 0;
+    uint offset = 0;
+    while (offset + (params.N - 1 - i) <= idx) {
+        offset += (params.N - 1 - i);
+        i++;
+    }
+    uint j = idx - offset + i + 1;
+
+    float sum = 0.0;
+    if (params.p == 2.0) {
+        for (uint d = 0; d < params.D; ++d) {
+            float diff = in_data[i * params.D + d] - in_data[j * params.D + d];
+            sum += diff * diff;
+        }
+        out_data[idx] = sqrt(sum);
+    } else if (params.p == 1.0) {
+        for (uint d = 0; d < params.D; ++d) {
+            sum += abs(in_data[i * params.D + d] - in_data[j * params.D + d]);
+        }
+        out_data[idx] = sum;
+    } else {
+        for (uint d = 0; d < params.D; ++d) {
+            sum += pow(abs(in_data[i * params.D + d] - in_data[j * params.D + d]), params.p);
+        }
+        out_data[idx] = pow(sum, 1.0 / params.p);
+    }
+}

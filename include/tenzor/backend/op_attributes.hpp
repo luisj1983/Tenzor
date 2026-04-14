@@ -278,6 +278,17 @@ enum class AttrKey : uint16_t {
     Dim2,              // Second dimension parameter (e.g. diagonal_scatter)
     Index,             // Index parameter (e.g. select_scatter)
 
+    // Numerical integration / gradient parameters
+    Spacing,           // Uniform spacing for gradient
+    Dx,                // Uniform spacing for trapezoidal integration
+
+    // Ormqr parameters
+    Left,              // ormqr: multiply from left (true) or right (false)
+    TransposeQ,        // ormqr: transpose Q before multiplying
+
+    // TensorInv parameters
+    Ind,               // tensorinv: ind parameter
+
     // Sentinel
     _Count
 };

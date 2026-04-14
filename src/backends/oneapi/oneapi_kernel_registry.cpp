@@ -119,7 +119,19 @@ namespace oneapi {
                           sycl::queue& queue) -> std::pair<Tensor, Tensor>;
     auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
                       sycl::queue& queue) -> Tensor;
+    auto trapezoid_kernel(const Tensor& y, int64_t dim, double dx, const Tensor* x_ptr, sycl::queue& queue) -> Tensor;
+    auto cumulative_trapezoid_kernel(const Tensor& y, int64_t dim, double dx, const Tensor* x_ptr, sycl::queue& queue) -> Tensor;
+    auto gradient_kernel(const Tensor& input, int64_t dim, double spacing, sycl::queue& queue) -> Tensor;
+    auto pairwise_distance_kernel(const Tensor& x1, const Tensor& x2, double p, sycl::queue& queue) -> Tensor;
+    auto pdist_kernel(const Tensor& input, double p, sycl::queue& queue) -> Tensor;
     auto poisson_sample_kernel(const Tensor& rates, sycl::queue& queue) -> Tensor;
+    auto normal_sample_kernel(const Tensor& mean, const Tensor& stddev, sycl::queue& queue) -> Tensor;
+    auto exponential_sample_kernel(const Tensor& rate, sycl::queue& queue) -> Tensor;
+
+    // NestedAttention (native SYCL — replaces previous CPU-offset fallback)
+    auto nested_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
+                                  const Tensor& q_offsets, const Tensor& kv_offsets,
+                                  float scale, bool causal, sycl::queue& queue) -> Tensor;
 
     // STFT / ISTFT (native OneAPI — replaces previous CPU fallbacks)
     auto stft_kernel(const Tensor& input, int64_t n_fft,
@@ -742,6 +754,7 @@ namespace oneapi {
     auto nanmedian_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
     auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_val, sycl::queue& queue) -> Tensor;
     auto unique_consecutive_kernel(const Tensor& input, bool return_inverse, sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor>;
+    auto segment_reduce_kernel(const Tensor& data, const Tensor& offsets, const std::string& reduce, int64_t axis, sycl::queue& queue) -> Tensor;
 
     // ---- DepthwiseConv2d (kernels/conv2d.cpp) ----
     auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
@@ -766,7 +779,6 @@ namespace oneapi {
     auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
                                          bool upper, bool unitriangular,
                                          sycl::queue& queue) -> Tensor;
-
     // ---- FFT operations (kernels/fft.cpp) ----
     auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                     const std::string& norm, sycl::queue& queue) -> Tensor;
@@ -3991,6 +4003,16 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return oneapi::poisson_sample_kernel(inputs[0], get_q(inputs));
         });
 
+    table.register_single_output_kernel(OpId::NormalSample,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return oneapi::normal_sample_kernel(inputs[0], inputs[1], get_q(inputs));
+        });
+
+    table.register_single_output_kernel(OpId::ExponentialSample,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return oneapi::exponential_sample_kernel(inputs[0], get_q(inputs));
+        });
+
     table.register_single_output_kernel(OpId::Multinomial,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t num_samples = attrs.get_int(AttrKey::NumSamples, 1);
@@ -4018,6 +4040,39 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             double p = attrs.get_float(AttrKey::DistP, 2.0);
             return oneapi::cdist_kernel(inputs[0], inputs[1], p, get_q(inputs));
         });
+
+    // =========================================================================
+    // Trapezoid / Cumulative Trapezoid / Gradient / PairwiseDistance / Pdist
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Trapezoid, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        double dx = attrs.get_float(AttrKey::Dx, 1.0);
+        const Tensor* x_ptr = (inputs.size() > 1) ? &inputs[1] : nullptr;
+        return oneapi::trapezoid_kernel(inputs[0], dim, dx, x_ptr, get_q(inputs));
+    });
+
+    table.register_single_output_kernel(OpId::CumulativeTrapezoid, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        double dx = attrs.get_float(AttrKey::Dx, 1.0);
+        const Tensor* x_ptr = (inputs.size() > 1) ? &inputs[1] : nullptr;
+        return oneapi::cumulative_trapezoid_kernel(inputs[0], dim, dx, x_ptr, get_q(inputs));
+    });
+
+    table.register_single_output_kernel(OpId::NumericalGradient, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        double spacing = attrs.get_float(AttrKey::Spacing, 1.0);
+        return oneapi::gradient_kernel(inputs[0], dim, spacing, get_q(inputs));
+    });
+
+    table.register_single_output_kernel(OpId::PairwiseDistance, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        double p = attrs.get_float(AttrKey::DistP, 2.0);
+        return oneapi::pairwise_distance_kernel(inputs[0], inputs[1], p, get_q(inputs));
+    });
+
+    table.register_single_output_kernel(OpId::Pdist, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        double p = attrs.get_float(AttrKey::DistP, 2.0);
+        return oneapi::pdist_kernel(inputs[0], p, get_q(inputs));
+    });
 
     // STFT / ISTFT — native OneAPI kernels
     table.register_single_output_kernel(OpId::STFT,
@@ -4517,6 +4572,12 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{unique_vals, inverse, counts};
     });
 
+    table.register_single_output_kernel(OpId::SegmentReduce, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t axis = attrs.get_int(AttrKey::Dim, 0);
+        std::string reduce = std::string(attrs.get_string(AttrKey::Reduction, "sum"));
+        return oneapi::segment_reduce_kernel(inputs[0], inputs[1], reduce, axis, get_q(inputs));
+    });
+
     // =========================================================================
     // TakeAlongDim
     // =========================================================================
@@ -4965,36 +5026,14 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return {result};
         });
 
-    // TODO: Eliminate CPU offset readbacks from NestedAttention — rewrite as
-    // native SYCL kernel(s) reading offsets on device, similar to NestedLogSoftmax.
-    table.register_kernel(OpId::NestedAttention,
-        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto q_off_cpu = inputs[3].to(Device::cpu());
-            auto kv_off_cpu = inputs[4].to(Device::cpu());
-            const int64_t* q_off = q_off_cpu.data<int64_t>();
-            const int64_t* kv_off = kv_off_cpu.data<int64_t>();
-            int64_t B = q_off_cpu.numel() - 1;
-            float scale = attrs.get_float(AttrKey::Scale, 1.0f);
-            int64_t head_dim = inputs[0].shape().back();
-            int64_t total_q = inputs[0].shape()[0];
-
-            auto output = tenzor::zeros({total_q, head_dim}, inputs[0].dtype(), inputs[0].device());
-            for (int64_t b = 0; b < B; ++b) {
-                auto Qb = inputs[0].slice(0, q_off[b], q_off[b+1]);
-                auto Kb = inputs[1].slice(0, kv_off[b], kv_off[b+1]);
-                auto Vb = inputs[2].slice(0, kv_off[b], kv_off[b+1]);
-                auto scores = tenzor::mul(tenzor::matmul(Qb, Kb.transpose(0, 1)),
-                                           tenzor::full({1}, scale, Qb.dtype(), Qb.device()));
-                OpAttributes attn_sm_attrs;
-                attn_sm_attrs.set(AttrKey::Dim, int64_t(-1));
-                std::vector<Tensor> attn_sm_in = {scores};
-                auto attn = dispatch<OpId::Softmax>(attn_sm_in, attn_sm_attrs)[0];
-                auto out_b = tenzor::matmul(attn, Vb).contiguous();
-                auto dst = output.slice(0, q_off[b], q_off[b+1]);
-                std::memcpy(dst.data_ptr(), out_b.data_ptr(),
-                            static_cast<size_t>((q_off[b+1] - q_off[b]) * head_dim) * dtype_size(output.dtype()));
-            }
-            return {output};
+    // NestedAttention — native SYCL kernel reading offsets on device
+    table.register_single_output_kernel(OpId::NestedAttention,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+            bool causal = attrs.get_bool(AttrKey::Causal, false);
+            return oneapi::nested_attention_kernel(
+                inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+                scale, causal, get_q(inputs));
         });
 
     table.register_kernel(OpId::NestedToPadded,

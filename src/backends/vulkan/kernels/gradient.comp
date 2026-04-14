@@ -1,0 +1,46 @@
+#version 450
+
+// Numerical gradient using finite differences.
+// Central differences for interior, one-sided at boundaries.
+// Input is logically (outer, n, inner), output same shape.
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer InBuf  { float in_data[]; };
+layout(binding = 1) buffer OutBuf { float out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint outer;
+    uint inner;
+    uint n;
+    uint total;    // outer * inner
+    float spacing;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.total) return;
+
+    uint o = idx / params.inner;
+    uint i_inner = idx % params.inner;
+
+    float h = params.spacing;
+
+    // Forward difference at left boundary
+    uint idx_0 = (o * params.n + 0) * params.inner + i_inner;
+    uint idx_1 = (o * params.n + 1) * params.inner + i_inner;
+    out_data[idx_0] = (in_data[idx_1] - in_data[idx_0]) / h;
+
+    // Central differences for interior
+    for (uint k = 1; k < params.n - 1; ++k) {
+        uint idx_km1 = (o * params.n + k - 1) * params.inner + i_inner;
+        uint idx_kp1 = (o * params.n + k + 1) * params.inner + i_inner;
+        uint idx_k   = (o * params.n + k) * params.inner + i_inner;
+        out_data[idx_k] = (in_data[idx_kp1] - in_data[idx_km1]) / (2.0 * h);
+    }
+
+    // Backward difference at right boundary
+    uint idx_nm2 = (o * params.n + params.n - 2) * params.inner + i_inner;
+    uint idx_nm1 = (o * params.n + params.n - 1) * params.inner + i_inner;
+    out_data[idx_nm1] = (in_data[idx_nm1] - in_data[idx_nm2]) / h;
+}

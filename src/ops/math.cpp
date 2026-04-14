@@ -949,6 +949,106 @@ auto isneginf(const Tensor& input) -> Tensor {
     return logical_and(isinf(input), (input < zeros_like(input)));
 }
 
+// =========================================================================
+// Normal distribution functions (composed from existing ops)
+// =========================================================================
+
+auto ndtr(const Tensor& input) -> Tensor {
+    // Phi(x) = 0.5 * erfc(-x / sqrt(2))
+    auto neg_x_over_sqrt2 = tenzor::mul(input, -0.7071067811865475);  // -1/sqrt(2)
+    auto erfc_val = tenzor::erfc(neg_x_over_sqrt2);
+    return tenzor::mul(erfc_val, 0.5);
+}
+
+auto log_ndtr(const Tensor& input) -> Tensor {
+    // Numerically stable log(Phi(x)):
+    // For x >= 0 (large positive): log1p(-0.5 * erfc(x / sqrt(2)))
+    // For x < 0 (large negative):  log(0.5 * erfc(-x / sqrt(2)))
+    //
+    // We compute both branches and select via where() for stability.
+    constexpr double SQRT1_2 = 0.7071067811865475;
+
+    // Positive branch: log1p(-0.5 * erfc(x / sqrt(2)))
+    auto x_over_sqrt2 = tenzor::mul(input, SQRT1_2);
+    auto erfc_pos = tenzor::erfc(x_over_sqrt2);
+    auto half_erfc_pos = tenzor::mul(erfc_pos, 0.5);
+    auto pos_branch = tenzor::log1p(tenzor::neg(half_erfc_pos));
+
+    // Negative branch: log(0.5 * erfc(-x / sqrt(2)))
+    auto neg_x_over_sqrt2 = tenzor::mul(input, -SQRT1_2);
+    auto erfc_neg = tenzor::erfc(neg_x_over_sqrt2);
+    auto half_erfc_neg = tenzor::mul(erfc_neg, 0.5);
+    auto neg_branch = tenzor::log(half_erfc_neg);
+
+    // Select: use negative branch where x < 0, positive branch otherwise
+    auto zero = zeros_like(input);
+    auto condition = ge(input, zero);
+    return where(condition, pos_branch, neg_branch);
+}
+
+auto multigammaln(const Tensor& input, int64_t p) -> Tensor {
+    // log(Gamma_p(a)) = p*(p-1)/4 * log(pi) + sum_{i=1}^{p} lgamma(a + (1-i)/2)
+    if (p < 1) {
+        throw std::invalid_argument("multigammaln: p must be >= 1, got " + std::to_string(p));
+    }
+
+    constexpr double LOG_PI = 1.1447298858494002;  // log(pi)
+    double prefix = static_cast<double>(p) * static_cast<double>(p - 1) / 4.0 * LOG_PI;
+
+    // Start with the prefix as a scalar added to the first lgamma term
+    Tensor result = full_like(input, prefix);
+
+    for (int64_t i = 1; i <= p; ++i) {
+        double offset = (1.0 - static_cast<double>(i)) / 2.0;
+        auto shifted = tenzor::add(input, offset);
+        result = tenzor::add(result, tenzor::lgamma(shifted));
+    }
+
+    return result;
+}
+
+// =========================================================================
+// Pairwise distance operations (dispatched to backend kernels)
+// =========================================================================
+
+auto pairwise_distance(const Tensor& x1, const Tensor& x2, double p) -> Tensor {
+    if (x1.ndim() != 2 || x2.ndim() != 2) {
+        throw std::invalid_argument("pairwise_distance: inputs must be 2D (N, D)");
+    }
+    if (x1.shape()[0] != x2.shape()[0] || x1.shape()[1] != x2.shape()[1]) {
+        throw std::invalid_argument("pairwise_distance: x1 and x2 must have the same shape");
+    }
+    if (p < 0) {
+        throw std::invalid_argument("pairwise_distance: p must be non-negative");
+    }
+
+    auto a = x1.contiguous();
+    auto b = x2.contiguous();
+    std::array<Tensor, 2> inputs = {a, b};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::DistP, p);
+    return dispatch<OpId::PairwiseDistance>(inputs, attrs)[0];
+}
+
+auto pdist(const Tensor& input, double p) -> Tensor {
+    if (input.ndim() != 2) {
+        throw std::invalid_argument("pdist: input must be 2D (N, D)");
+    }
+    if (p < 0) {
+        throw std::invalid_argument("pdist: p must be non-negative");
+    }
+
+    auto a = input.contiguous();
+    std::array<Tensor, 1> inputs = {a};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::DistP, p);
+    return dispatch<OpId::Pdist>(inputs, attrs)[0];
+}
+
+// =========================================================================
+// Extended math continued
+// =========================================================================
+
 auto frexp(const Tensor& input) -> std::pair<Tensor, Tensor> {
     // frexp(x) = (mantissa, exponent) where x = mantissa * 2^exponent
     // mantissa in [0.5, 1.0), exponent is integer

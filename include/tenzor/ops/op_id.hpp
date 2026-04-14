@@ -587,6 +587,11 @@ enum class OpId : uint16_t {
     Addmm = 540,               // beta*input + alpha*(mat1 @ mat2)
     Addmv = 541,               // beta*input + alpha*(mat @ vec)
     Baddbmm = 542,             // Batched: beta*input + alpha*(batch1 @ batch2)
+    Trapezoid = 543,           // Trapezoidal numerical integration
+    CumulativeTrapezoid,       // Cumulative trapezoidal integration
+    NumericalGradient,         // NumPy-style numerical gradient (central differences)
+    PairwiseDistance,           // Pairwise distance between two sets of vectors
+    Pdist,                     // Pairwise distance matrix (all pairs)
 
     // =========================================================================
     // Repeat/Interleave Operations (550-559)
@@ -598,6 +603,10 @@ enum class OpId : uint16_t {
     // =========================================================================
     Logcumsumexp = 560,        // Log-cumulative-sum-exp along a dimension
     Bincount = 561,            // Count occurrences of each value in integer tensor
+    SegmentReduce = 562,       // Segmented reduction (sum/mean/max/min/prod)
+    Ndtr = 563,                // Normal CDF: Φ(x) = 0.5 * erfc(-x/√2)
+    LogNdtr,                   // Log normal CDF: log Φ(x)
+    Multigammaln,              // Multivariate log-gamma function
 
     // =========================================================================
     // New Element-wise Math (570-579)
@@ -627,6 +636,11 @@ enum class OpId : uint16_t {
     DiagEmbed = 600,           // Embed vector as batch diagonal
     Diagflat,                  // Flat input to diagonal matrix
     SolveTriangular,           // Triangular system solve
+    CholeskyInverse,           // Inverse via Cholesky factors
+    TensorInv,                 // Generalized tensor inverse
+    TensorSolve,               // Generalized tensor solve
+    Ormqr,                     // Multiply by Q from QR factorization
+    Geqrf,                     // Raw QR factorization returning (tau, R)
 
     // =========================================================================
     // New Shape/Indexing Operations (610-619)
@@ -635,6 +649,8 @@ enum class OpId : uint16_t {
     MaskedScatter,             // Scatter into masked positions
     TrilIndices,               // Lower-triangular index pairs
     TriuIndices,               // Upper-triangular index pairs
+    AsStrided,                 // Zero-copy view with custom strides
+    ComplexTensor,             // Create complex tensor from real+imag parts
 
     // =========================================================================
     // New Pooling Operations (620-629)

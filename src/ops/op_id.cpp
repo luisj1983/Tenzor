@@ -448,6 +448,11 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::Addmm)] = "addmm";
     names[static_cast<size_t>(OpId::Addmv)] = "addmv";
     names[static_cast<size_t>(OpId::Baddbmm)] = "baddbmm";
+    names[static_cast<size_t>(OpId::Trapezoid)] = "trapezoid";
+    names[static_cast<size_t>(OpId::CumulativeTrapezoid)] = "cumulative_trapezoid";
+    names[static_cast<size_t>(OpId::NumericalGradient)] = "gradient";
+    names[static_cast<size_t>(OpId::PairwiseDistance)] = "pairwise_distance";
+    names[static_cast<size_t>(OpId::Pdist)] = "pdist";
 
     // Repeat interleave
     names[static_cast<size_t>(OpId::RepeatInterleave)] = "repeat_interleave";
@@ -455,6 +460,10 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     // Cumulative scan / histogram
     names[static_cast<size_t>(OpId::Logcumsumexp)] = "logcumsumexp";
     names[static_cast<size_t>(OpId::Bincount)] = "bincount";
+    names[static_cast<size_t>(OpId::SegmentReduce)] = "segment_reduce";
+    names[static_cast<size_t>(OpId::Ndtr)] = "ndtr";
+    names[static_cast<size_t>(OpId::LogNdtr)] = "log_ndtr";
+    names[static_cast<size_t>(OpId::Multigammaln)] = "multigammaln";
 
     // New element-wise math (Phase 3)
     names[static_cast<size_t>(OpId::Rsqrt)] = "rsqrt";
@@ -489,12 +498,19 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::DiagEmbed)] = "diag_embed";
     names[static_cast<size_t>(OpId::Diagflat)] = "diagflat";
     names[static_cast<size_t>(OpId::SolveTriangular)] = "solve_triangular";
+    names[static_cast<size_t>(OpId::CholeskyInverse)] = "cholesky_inverse";
+    names[static_cast<size_t>(OpId::TensorInv)] = "tensorinv";
+    names[static_cast<size_t>(OpId::TensorSolve)] = "tensorsolve";
+    names[static_cast<size_t>(OpId::Ormqr)] = "ormqr";
+    names[static_cast<size_t>(OpId::Geqrf)] = "geqrf";
 
     // New shape/indexing (Phase 6)
     names[static_cast<size_t>(OpId::TakeAlongDim)] = "take_along_dim";
     names[static_cast<size_t>(OpId::MaskedScatter)] = "masked_scatter";
     names[static_cast<size_t>(OpId::TrilIndices)] = "tril_indices";
     names[static_cast<size_t>(OpId::TriuIndices)] = "triu_indices";
+    names[static_cast<size_t>(OpId::AsStrided)] = "as_strided";
+    names[static_cast<size_t>(OpId::ComplexTensor)] = "complex";
 
     // New pooling (Phase 9)
     names[static_cast<size_t>(OpId::FractionalMaxPool2dForward)] = "fractional_max_pool2d_forward";
@@ -545,7 +561,7 @@ constexpr size_t count_named_ops() {
 
 // Count of actual OpId enum values (excluding gap slots).
 // Update this when adding new OpIds to catch missing name entries at compile time.
-inline constexpr size_t EXPECTED_NAMED_OPS = 415;  // 412 previous + 3 distribution sampling ops
+inline constexpr size_t EXPECTED_NAMED_OPS = 431;  // 415 previous + 16 new ops (math, integration, distance, etc.)
 
 // If this fires, a new OpId was added without a corresponding name in op_names above
 static_assert(count_named_ops() == EXPECTED_NAMED_OPS,

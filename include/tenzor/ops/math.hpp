@@ -658,6 +658,44 @@ auto isneginf(const Tensor& input) -> Tensor;
 /// Returns (mantissa, exponent) where mantissa is in [0.5, 1.0) and exponent is integer
 auto frexp(const Tensor& input) -> std::pair<Tensor, Tensor>;
 
+/// @name Normal Distribution Functions
+/// @{
+
+/** @brief Normal CDF: Phi(x) = 0.5 * erfc(-x / sqrt(2)) */
+auto ndtr(const Tensor& input) -> Tensor;
+
+/** @brief Log Normal CDF: log(Phi(x)), numerically stable */
+auto log_ndtr(const Tensor& input) -> Tensor;
+
+/** @brief Multivariate log-gamma function: log(Gamma_p(a)) */
+auto multigammaln(const Tensor& input, int64_t p) -> Tensor;
+
+/// @}
+
+/// @name Pairwise Distance Operations
+/// @{
+
+/**
+ * @brief Pairwise p-norm distance between two sets of row vectors.
+ *
+ * @param x1 Input tensor (N, D)
+ * @param x2 Input tensor (N, D)
+ * @param p p-norm value (default: 2.0)
+ * @return Distance tensor (N,)
+ */
+auto pairwise_distance(const Tensor& x1, const Tensor& x2, double p = 2.0) -> Tensor;
+
+/**
+ * @brief All-pairs p-norm distances between rows of a matrix.
+ *
+ * @param input Input tensor (N, D)
+ * @param p p-norm value (default: 2.0)
+ * @return Distance tensor (N*(N-1)/2,)
+ */
+auto pdist(const Tensor& input, double p = 2.0) -> Tensor;
+
+/// @}
+
 /** @} */ // end of tensor_math group
 
 } // namespace tenzor

@@ -408,6 +408,74 @@ auto cov(const Tensor& input, int64_t correction) -> Tensor {
     return tenzor::div(product, tenzor::full({}, m_val, input.dtype(), input.device()));
 }
 
+// =========================================================================
+// Numerical integration and gradient
+// =========================================================================
+
+auto trapezoid(const Tensor& y, const Tensor& x, int64_t dim) -> Tensor {
+    if (y.ndim() == 0) {
+        throw std::invalid_argument("trapezoid: input must be at least 1D");
+    }
+    auto yc = y.contiguous();
+    auto xc = x.contiguous();
+    std::array<Tensor, 2> inputs = {yc, xc};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    return dispatch(OpId::Trapezoid, inputs, attrs)[0];
+}
+
+auto trapezoid(const Tensor& y, double dx, int64_t dim) -> Tensor {
+    if (y.ndim() == 0) {
+        throw std::invalid_argument("trapezoid: input must be at least 1D");
+    }
+    auto yc = y.contiguous();
+    std::array<Tensor, 1> inputs = {yc};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    attrs.set(AttrKey::Dx, dx);
+    return dispatch(OpId::Trapezoid, inputs, attrs)[0];
+}
+
+auto cumulative_trapezoid(const Tensor& y, const Tensor& x, int64_t dim) -> Tensor {
+    if (y.ndim() == 0) {
+        throw std::invalid_argument("cumulative_trapezoid: input must be at least 1D");
+    }
+    auto yc = y.contiguous();
+    auto xc = x.contiguous();
+    std::array<Tensor, 2> inputs = {yc, xc};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    return dispatch(OpId::CumulativeTrapezoid, inputs, attrs)[0];
+}
+
+auto cumulative_trapezoid(const Tensor& y, double dx, int64_t dim) -> Tensor {
+    if (y.ndim() == 0) {
+        throw std::invalid_argument("cumulative_trapezoid: input must be at least 1D");
+    }
+    auto yc = y.contiguous();
+    std::array<Tensor, 1> inputs = {yc};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    attrs.set(AttrKey::Dx, dx);
+    return dispatch(OpId::CumulativeTrapezoid, inputs, attrs)[0];
+}
+
+auto gradient(const Tensor& input, int64_t dim, double spacing) -> Tensor {
+    if (input.ndim() == 0) {
+        throw std::invalid_argument("gradient: input must be at least 1D");
+    }
+    auto ic = input.contiguous();
+    std::array<Tensor, 1> inputs = {ic};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    attrs.set(AttrKey::Spacing, spacing);
+    return dispatch(OpId::NumericalGradient, inputs, attrs)[0];
+}
+
+// =========================================================================
+// Covariance / Correlation
+// =========================================================================
+
 auto corrcoef(const Tensor& input) -> Tensor {
     auto c = tenzor::cov(input);
 
@@ -422,6 +490,30 @@ auto corrcoef(const Tensor& input) -> Tensor {
     auto stds_row = tenzor::reshape(stds, {1, -1}); // (1, N)
     auto norm = tenzor::matmul(stds_col, stds_row);  // (N, N)
     return tenzor::div(c, norm);
+}
+
+auto segment_reduce(const Tensor& data, const Tensor& offsets,
+                    const std::string& reduce, int64_t axis) -> Tensor {
+    TENZOR_PROFILE_RANGE("segment_reduce");
+    if (offsets.ndim() != 1) {
+        throw std::invalid_argument("segment_reduce: offsets must be 1-D");
+    }
+    if (offsets.numel() < 2) {
+        throw std::invalid_argument("segment_reduce: offsets must have at least 2 elements");
+    }
+    if (reduce != "sum" && reduce != "mean" && reduce != "max" &&
+        reduce != "min" && reduce != "prod") {
+        throw std::invalid_argument("segment_reduce: unsupported reduce mode '" + reduce + "'");
+    }
+
+    auto data_cont = data.contiguous();
+    auto offsets_cont = offsets.to(DType::Int64).contiguous();
+
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, axis);
+    attrs.set(AttrKey::Reduction, reduce);
+    std::vector<Tensor> inputs = {data_cont, offsets_cont};
+    return dispatch(OpId::SegmentReduce, inputs, attrs)[0];
 }
 
 } // namespace tenzor

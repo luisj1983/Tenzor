@@ -1,0 +1,94 @@
+#version 450
+
+// Fused nested (ragged) attention: scaled dot-product attention over
+// variable-length sequences.  Each workgroup handles one batch element
+// (gl_WorkGroupID.x = batch index).  Within the workgroup, each thread
+// processes one query row using online softmax so that the entire QK^T,
+// softmax, and attn*V computation is fused in a single pass with O(D)
+// memory per query row.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly  buffer QBuf      { float q_data[];  };   // [total_q_len * head_dim]
+layout(binding = 1) readonly  buffer KBuf      { float k_data[];  };   // [total_kv_len * head_dim]
+layout(binding = 2) readonly  buffer VBuf      { float v_data[];  };   // [total_kv_len * head_dim]
+layout(binding = 3) readonly  buffer QOffsets  { int q_offsets[];  };   // [B+1]
+layout(binding = 4) readonly  buffer KVOffsets { int kv_offsets[]; };   // [B+1]
+layout(binding = 5)          buffer OutBuf    { float out_data[]; };   // [total_q_len * head_dim]
+
+layout(push_constant) uniform PushConstants {
+    uint B;          // batch size
+    uint head_dim;   // dimension of each head
+    float scale;     // typically 1/sqrt(head_dim)
+    uint causal;     // 0 = not causal, 1 = causal mask
+} params;
+
+void main() {
+    uint b = gl_WorkGroupID.x;
+    if (b >= params.B) return;
+
+    int q_start = q_offsets[b];
+    int q_end   = q_offsets[b + 1];
+    int kv_start = kv_offsets[b];
+    int kv_end   = kv_offsets[b + 1];
+
+    int Lq  = q_end - q_start;
+    int Lkv = kv_end - kv_start;
+    if (Lq <= 0 || Lkv <= 0) return;
+
+    uint local_size = gl_WorkGroupSize.x;
+
+    // Each thread handles query rows qi with stride = local_size
+    for (int qi = int(gl_LocalInvocationID.x); qi < Lq; qi += int(local_size)) {
+        uint q_row_base = uint(q_start + qi) * params.head_dim;
+
+        // Online softmax accumulators
+        float max_score = -3.402823466e+38;  // -FLT_MAX
+        float sum_exp = 0.0;
+
+        // Zero the output accumulator for this query row (in-place in out_data)
+        uint out_base = uint(q_start + qi) * params.head_dim;
+        for (uint hd = 0; hd < params.head_dim; ++hd) {
+            out_data[out_base + hd] = 0.0;
+        }
+
+        for (int ki = 0; ki < Lkv; ++ki) {
+            // Causal mask: skip future positions
+            if (params.causal != 0 && ki > qi) break;
+
+            uint k_row_base = uint(kv_start + ki) * params.head_dim;
+            uint v_row_base = uint(kv_start + ki) * params.head_dim;
+
+            // Compute dot(Q[qi], K[ki]) * scale
+            float score = 0.0;
+            for (uint hd = 0; hd < params.head_dim; ++hd) {
+                score += q_data[q_row_base + hd] * k_data[k_row_base + hd];
+            }
+            score *= params.scale;
+
+            // Online softmax update
+            if (score > max_score) {
+                float correction = exp(max_score - score);
+                sum_exp = sum_exp * correction + 1.0;
+                for (uint hd = 0; hd < params.head_dim; ++hd) {
+                    out_data[out_base + hd] = out_data[out_base + hd] * correction
+                                            + v_data[v_row_base + hd];
+                }
+                max_score = score;
+            } else {
+                float w = exp(score - max_score);
+                sum_exp += w;
+                for (uint hd = 0; hd < params.head_dim; ++hd) {
+                    out_data[out_base + hd] += w * v_data[v_row_base + hd];
+                }
+            }
+        }
+
+        // Normalize by softmax denominator
+        if (sum_exp > 0.0) {
+            float inv_sum = 1.0 / sum_exp;
+            for (uint hd = 0; hd < params.head_dim; ++hd) {
+                out_data[out_base + hd] *= inv_sum;
+            }
+        }
+    }
+}

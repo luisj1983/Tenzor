@@ -19,6 +19,9 @@
 namespace tenzor {
 namespace rocm {
 
+// Forward declaration from transform.hip.cpp (needed for FP8 emulation)
+auto cast_kernel(const Tensor& input, DType target_dtype, hipStream_t stream) -> Tensor;
+
 // ============================================================================
 // HIP Error Checking
 // ============================================================================
@@ -988,6 +991,13 @@ auto add_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
                 reinterpret_cast<const double*>(a.data_ptr()),
                 reinterpret_cast<const double*>(b.data_ptr()),
                 reinterpret_cast<double*>(result.data_ptr()), n);
+        } else if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2) {
+            // FP8 emulation: widen to Float32, add, narrow back
+            DType orig = a.dtype();
+            auto a_f32 = cast_kernel(a, DType::Float32, stream);
+            auto b_f32 = cast_kernel(b, DType::Float32, stream);
+            auto result_f32 = add_kernel(a_f32, b_f32, stream);
+            return cast_kernel(result_f32, orig, stream);
         } else {
             throw std::runtime_error("Unsupported dtype for add operation");
         }
@@ -1076,6 +1086,12 @@ auto add_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
             reinterpret_cast<const double*>(b.data_ptr()),
             reinterpret_cast<double*>(result.data_ptr()),
             d_strides_a, d_strides_b, d_output_shape, ndim, n);
+    } else if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2) {
+        DType orig = a.dtype();
+        auto a_f32 = cast_kernel(a, DType::Float32, stream);
+        auto b_f32 = cast_kernel(b, DType::Float32, stream);
+        auto result_f32 = add_kernel(a_f32, b_f32, stream);
+        return cast_kernel(result_f32, orig, stream);
     } else {
         throw std::runtime_error("Unsupported dtype for add operation");
     }
@@ -1159,6 +1175,12 @@ auto sub_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
                 reinterpret_cast<const double*>(a.data_ptr()),
                 reinterpret_cast<const double*>(b.data_ptr()),
                 reinterpret_cast<double*>(result.data_ptr()), n);
+        } else if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2) {
+            DType orig = a.dtype();
+            auto a_f32 = cast_kernel(a, DType::Float32, stream);
+            auto b_f32 = cast_kernel(b, DType::Float32, stream);
+            auto result_f32 = sub_kernel(a_f32, b_f32, stream);
+            return cast_kernel(result_f32, orig, stream);
         } else {
             throw std::runtime_error("Unsupported dtype for sub operation");
         }
@@ -1240,6 +1262,12 @@ auto sub_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
             reinterpret_cast<const double*>(b.data_ptr()),
             reinterpret_cast<double*>(result.data_ptr()),
             d_strides_a, d_strides_b, d_output_shape, ndim, n);
+    } else if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2) {
+        DType orig = a.dtype();
+        auto a_f32 = cast_kernel(a, DType::Float32, stream);
+        auto b_f32 = cast_kernel(b, DType::Float32, stream);
+        auto result_f32 = sub_kernel(a_f32, b_f32, stream);
+        return cast_kernel(result_f32, orig, stream);
     } else {
         throw std::runtime_error("Unsupported dtype for sub operation");
     }
@@ -1320,6 +1348,12 @@ auto mul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
                 reinterpret_cast<const double*>(a.data_ptr()),
                 reinterpret_cast<const double*>(b.data_ptr()),
                 reinterpret_cast<double*>(result.data_ptr()), n);
+        } else if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2) {
+            DType orig = a.dtype();
+            auto a_f32 = cast_kernel(a, DType::Float32, stream);
+            auto b_f32 = cast_kernel(b, DType::Float32, stream);
+            auto result_f32 = mul_kernel(a_f32, b_f32, stream);
+            return cast_kernel(result_f32, orig, stream);
         } else {
             throw std::runtime_error("Unsupported dtype for mul operation");
         }
@@ -1398,6 +1432,12 @@ auto mul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
             reinterpret_cast<const double*>(b.data_ptr()),
             reinterpret_cast<double*>(result.data_ptr()),
             d_strides_a, d_strides_b, d_output_shape, ndim, n);
+    } else if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2) {
+        DType orig = a.dtype();
+        auto a_f32 = cast_kernel(a, DType::Float32, stream);
+        auto b_f32 = cast_kernel(b, DType::Float32, stream);
+        auto result_f32 = mul_kernel(a_f32, b_f32, stream);
+        return cast_kernel(result_f32, orig, stream);
     } else {
         throw std::runtime_error("Unsupported dtype for mul operation");
     }
@@ -1476,6 +1516,12 @@ auto div_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
                 reinterpret_cast<const double*>(a.data_ptr()),
                 reinterpret_cast<const double*>(b.data_ptr()),
                 reinterpret_cast<double*>(result.data_ptr()), n);
+        } else if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2) {
+            DType orig = a.dtype();
+            auto a_f32 = cast_kernel(a, DType::Float32, stream);
+            auto b_f32 = cast_kernel(b, DType::Float32, stream);
+            auto result_f32 = div_kernel(a_f32, b_f32, stream);
+            return cast_kernel(result_f32, orig, stream);
         } else {
             throw std::runtime_error("Unsupported dtype for div operation");
         }
@@ -1549,6 +1595,12 @@ auto div_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
             reinterpret_cast<const double*>(b.data_ptr()),
             reinterpret_cast<double*>(result.data_ptr()),
             d_strides_a, d_strides_b, d_output_shape, ndim, n);
+    } else if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2) {
+        DType orig = a.dtype();
+        auto a_f32 = cast_kernel(a, DType::Float32, stream);
+        auto b_f32 = cast_kernel(b, DType::Float32, stream);
+        auto result_f32 = div_kernel(a_f32, b_f32, stream);
+        return cast_kernel(result_f32, orig, stream);
     } else {
         throw std::runtime_error("Unsupported dtype for div operation");
     }
@@ -7610,6 +7662,15 @@ __global__ void unique_consecutive_mask_hip(const T* __restrict__ input,
     }
 }
 
+__global__ void unique_counts_kernel_hip(const int64_t* __restrict__ inverse,
+                                          int64_t* __restrict__ counts,
+                                          int64_t n) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid < n) {
+        atomicAdd(reinterpret_cast<unsigned long long*>(&counts[inverse[tid]]), 1ULL);
+    }
+}
+
 template<typename T>
 __global__ void unique_consecutive_gather_hip(const T* __restrict__ input,
                                                const int32_t* __restrict__ prefix_sum,
@@ -7672,19 +7733,17 @@ auto unique_consecutive_kernel(const Tensor& input, bool return_inverse,
             unique_out.data<T>(), inverse_out.data<int64_t>(), n);
         HIP_CHECK(hipGetLastError());
 
-        // Compute counts from inverse indices
+        // Compute counts from inverse indices via device-side atomicAdd
         Tensor counts({num_unique}, DType::Int64, device);
         HIP_CHECK(hipMemsetAsync(counts.data<int64_t>(), 0, num_unique * sizeof(int64_t), stream));
-        // Use atomicAdd on counts via a simple kernel
-        // For now, compute on host after sync
-        HIP_CHECK(hipStreamSynchronize(stream));
-        std::vector<int64_t> inv_host(n);
-        HIP_CHECK(hipMemcpy(inv_host.data(), inverse_out.data<int64_t>(),
-                    n * sizeof(int64_t), hipMemcpyDeviceToHost));
-        std::vector<int64_t> counts_host(num_unique, 0);
-        for (int64_t i = 0; i < n; ++i) counts_host[inv_host[i]]++;
-        HIP_CHECK(hipMemcpy(counts.data<int64_t>(), counts_host.data(),
-                    num_unique * sizeof(int64_t), hipMemcpyHostToDevice));
+        {
+            int count_threads = 256;
+            int count_blocks = static_cast<int>((n + count_threads - 1) / count_threads);
+            hipLaunchKernelGGL(unique_counts_kernel_hip,
+                dim3(count_blocks), dim3(count_threads), 0, stream,
+                inverse_out.data<int64_t>(), counts.data<int64_t>(), n);
+            HIP_CHECK(hipGetLastError());
+        }
 
         return std::make_tuple(unique_out, inverse_out, counts);
     };
@@ -8200,6 +8259,139 @@ auto isreal_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     // All dtypes in Tenzor are real (no complex support yet) — fill with 1
     HIP_CHECK(hipMemsetAsync(result.data<uint8_t>(), 1, n * sizeof(uint8_t), stream));
     return result;
+}
+
+// ============================================================================
+// SegmentReduce — reduce over segments defined by offsets (HIP)
+// One warp per segment, warp-level shuffle reductions.
+// ============================================================================
+
+template<typename T>
+__global__ void segment_reduce_hip_kernel(
+    const T* __restrict__ data,
+    const int64_t* __restrict__ offsets,
+    T* __restrict__ output,
+    int64_t num_segments,
+    int64_t outer_size,
+    int64_t axis_size,
+    int64_t inner_size,
+    int mode)
+{
+    // One thread per (outer, segment, inner) triple — sequential reduction
+    // within each segment (simple and correct across all wavefront sizes)
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total_work = outer_size * num_segments * inner_size;
+    if (tid >= total_work) return;
+
+    int64_t inner = tid % inner_size;
+    int64_t seg = (tid / inner_size) % num_segments;
+    int64_t outer = tid / (inner_size * num_segments);
+
+    int64_t seg_start = offsets[seg];
+    int64_t seg_end = offsets[seg + 1];
+    int64_t seg_len = seg_end - seg_start;
+
+    T identity;
+    if (mode == 0 || mode == 1) identity = T(0);
+    else if (mode == 4) identity = T(1);
+    else if (mode == 2) identity = T(-1e38);
+    else identity = T(1e38);
+
+    T acc = identity;
+    for (int64_t i = 0; i < seg_len; ++i) {
+        int64_t d = seg_start + i;
+        int64_t in_idx = (outer * axis_size + d) * inner_size + inner;
+        T val = data[in_idx];
+        if (mode == 0 || mode == 1) acc += val;
+        else if (mode == 4) acc *= val;
+        else if (mode == 2) acc = acc > val ? acc : val;
+        else acc = acc < val ? acc : val;
+    }
+
+    if (mode == 1 && seg_len > 0) {
+        acc /= static_cast<T>(seg_len);
+    }
+    if (seg_len == 0) {
+        acc = (mode == 0 || mode == 1) ? T(0) : identity;
+    }
+    int64_t out_idx = (outer * num_segments + seg) * inner_size + inner;
+    output[out_idx] = acc;
+}
+
+auto segment_reduce_kernel(const Tensor& data, const Tensor& offsets,
+                           const std::string& reduce, int64_t axis,
+                           hipStream_t stream) -> Tensor {
+    Tensor cont = data.is_contiguous() ? data : data.contiguous();
+    Tensor offs = offsets.is_contiguous() ? offsets : offsets.contiguous();
+
+    int64_t ndim = cont.ndim();
+    if (axis < 0) axis += ndim;
+
+    const auto& shape = cont.shape();
+    int64_t axis_size = shape[axis];
+    int64_t num_segments = offs.numel() - 1;
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < axis; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
+    for (int64_t i = axis + 1; i < ndim; ++i) inner_size *= shape[i];
+
+    std::vector<int64_t> out_shape;
+    for (int64_t i = 0; i < ndim; ++i) {
+        out_shape.push_back(i == axis ? num_segments : shape[i]);
+    }
+
+    int mode = 0;
+    if (reduce == "sum") mode = 0;
+    else if (reduce == "mean") mode = 1;
+    else if (reduce == "max") mode = 2;
+    else if (reduce == "min") mode = 3;
+    else if (reduce == "prod") mode = 4;
+
+    auto dtype = cont.dtype();
+    auto device = cont.device();
+    Tensor output(out_shape, dtype, device);
+
+    int64_t total_work = outer_size * num_segments * inner_size;
+    int block = 256;
+    int grid = static_cast<int>((total_work + block - 1) / block);
+    grid = std::max(grid, 1);
+
+    const int64_t* offsets_ptr = offs.data<int64_t>();
+
+    switch (dtype) {
+        case DType::Float32:
+            segment_reduce_hip_kernel<float><<<grid, block, 0, stream>>>(
+                cont.data<float>(), offsets_ptr, output.data<float>(),
+                num_segments, outer_size, axis_size, inner_size, mode);
+            break;
+        case DType::Float64:
+            segment_reduce_hip_kernel<double><<<grid, block, 0, stream>>>(
+                cont.data<double>(), offsets_ptr, output.data<double>(),
+                num_segments, outer_size, axis_size, inner_size, mode);
+            break;
+        case DType::Int32:
+            segment_reduce_hip_kernel<int32_t><<<grid, block, 0, stream>>>(
+                cont.data<int32_t>(), offsets_ptr, output.data<int32_t>(),
+                num_segments, outer_size, axis_size, inner_size, mode);
+            break;
+        case DType::Int64:
+            segment_reduce_hip_kernel<int64_t><<<grid, block, 0, stream>>>(
+                cont.data<int64_t>(), offsets_ptr, output.data<int64_t>(),
+                num_segments, outer_size, axis_size, inner_size, mode);
+            break;
+        default: {
+            DType orig = dtype;
+            Tensor cont_f32 = cont.to(DType::Float32);
+            Tensor output_f32(out_shape, DType::Float32, device);
+            segment_reduce_hip_kernel<float><<<grid, block, 0, stream>>>(
+                cont_f32.data<float>(), offsets_ptr, output_f32.data<float>(),
+                num_segments, outer_size, axis_size, inner_size, mode);
+            output = output_f32.to(orig);
+        }
+    }
+    HIP_CHECK(hipGetLastError());
+    return output;
 }
 
 } // namespace rocm

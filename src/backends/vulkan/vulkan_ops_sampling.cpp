@@ -417,4 +417,490 @@ auto VulkanBackend::dispatchPoissonSample(const Tensor& rates) -> Tensor {
     return dispatchCast(output_i32, DType::Int64);
 }
 
+auto VulkanBackend::dispatchNormalSample(const Tensor& mean, const Tensor& stddev) -> Tensor {
+    Tensor mean_f32 = (mean.dtype() == DType::Float32)
+                          ? mean.contiguous()
+                          : dispatchCast(mean.contiguous(), DType::Float32);
+    Tensor std_f32 = (stddev.dtype() == DType::Float32)
+                         ? stddev.contiguous()
+                         : dispatchCast(stddev.contiguous(), DType::Float32);
+
+    std::vector<int64_t> shape(mean_f32.shape().begin(), mean_f32.shape().end());
+    int64_t n = mean_f32.numel();
+    Tensor output(shape, DType::Float32, mean.device());
+    if (n == 0) return output;
+
+    int32_t device_id = mean.device().index;
+    auto* pipeline = getPipeline("normal_sample", device_id);
+
+    auto [seed_lo, seed_hi] = seed_split();
+    BernoulliPC pc{static_cast<uint32_t>(n), seed_lo, seed_hi};
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, mean_f32.data_ptr()},
+        {1, std_f32.data_ptr()},
+        {2, output.data_ptr()},
+    };
+    std::vector<size_t> sizes = {
+        static_cast<size_t>(n) * sizeof(float),
+        static_cast<size_t>(n) * sizeof(float),
+        static_cast<size_t>(n) * sizeof(float),
+    };
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(BernoulliPC), &pc);
+    uint32_t workgroups = div_wg(static_cast<uint32_t>(n), devices_[device_id].workgroupSize);
+    vkCmdDispatch(cmd, workgroups, 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+    synchronize(device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchExponentialSample(const Tensor& rate) -> Tensor {
+    Tensor rate_f32 = (rate.dtype() == DType::Float32)
+                          ? rate.contiguous()
+                          : dispatchCast(rate.contiguous(), DType::Float32);
+
+    std::vector<int64_t> shape(rate_f32.shape().begin(), rate_f32.shape().end());
+    int64_t n = rate_f32.numel();
+    Tensor output(shape, DType::Float32, rate.device());
+    if (n == 0) return output;
+
+    int32_t device_id = rate.device().index;
+    auto* pipeline = getPipeline("exponential_sample", device_id);
+
+    auto [seed_lo, seed_hi] = seed_split();
+    BernoulliPC pc{static_cast<uint32_t>(n), seed_lo, seed_hi};
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, rate_f32.data_ptr()},
+        {1, output.data_ptr()},
+    };
+    std::vector<size_t> sizes = {
+        static_cast<size_t>(n) * sizeof(float),
+        static_cast<size_t>(n) * sizeof(float),
+    };
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(BernoulliPC), &pc);
+    uint32_t workgroups = div_wg(static_cast<uint32_t>(n), devices_[device_id].workgroupSize);
+    vkCmdDispatch(cmd, workgroups, 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+    synchronize(device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchNestedAttention(const Tensor& Q, const Tensor& K, const Tensor& V,
+                                              const Tensor& q_offsets, const Tensor& kv_offsets,
+                                              float scale, bool causal) -> Tensor {
+    Tensor Q_f32 = (Q.dtype() == DType::Float32) ? Q.contiguous()
+                                                   : dispatchCast(Q.contiguous(), DType::Float32);
+    Tensor K_f32 = (K.dtype() == DType::Float32) ? K.contiguous()
+                                                   : dispatchCast(K.contiguous(), DType::Float32);
+    Tensor V_f32 = (V.dtype() == DType::Float32) ? V.contiguous()
+                                                   : dispatchCast(V.contiguous(), DType::Float32);
+
+    // Offsets must be Int32 for the GLSL shader (no native int64 in Vulkan)
+    Tensor q_off_i32 = (q_offsets.dtype() == DType::Int32)
+                           ? q_offsets.contiguous()
+                           : dispatchCast(q_offsets.contiguous(), DType::Int32);
+    Tensor kv_off_i32 = (kv_offsets.dtype() == DType::Int32)
+                            ? kv_offsets.contiguous()
+                            : dispatchCast(kv_offsets.contiguous(), DType::Int32);
+
+    int64_t head_dim = Q_f32.shape().back();
+    int64_t total_q = Q_f32.shape()[0];
+    int64_t total_kv = K_f32.shape()[0];
+    uint32_t B = static_cast<uint32_t>(q_off_i32.numel() - 1);
+
+    std::vector<int64_t> out_shape(Q_f32.shape().begin(), Q_f32.shape().end());
+    Tensor output(out_shape, DType::Float32, Q.device());
+    if (total_q == 0 || B == 0) return output;
+
+    int32_t device_id = Q.device().index;
+    auto* pipeline = getPipeline("nested_attention", device_id);
+
+    struct NestedAttentionPC {
+        uint32_t B;
+        uint32_t head_dim;
+        float scale;
+        uint32_t causal;
+    };
+    NestedAttentionPC pc{B, static_cast<uint32_t>(head_dim), scale,
+                          causal ? 1u : 0u};
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, Q_f32.data_ptr()},
+        {1, K_f32.data_ptr()},
+        {2, V_f32.data_ptr()},
+        {3, q_off_i32.data_ptr()},
+        {4, kv_off_i32.data_ptr()},
+        {5, output.data_ptr()},
+    };
+    std::vector<size_t> sizes = {
+        static_cast<size_t>(total_q) * static_cast<size_t>(head_dim) * sizeof(float),
+        static_cast<size_t>(total_kv) * static_cast<size_t>(head_dim) * sizeof(float),
+        static_cast<size_t>(total_kv) * static_cast<size_t>(head_dim) * sizeof(float),
+        static_cast<size_t>(q_off_i32.numel()) * sizeof(int32_t),
+        static_cast<size_t>(kv_off_i32.numel()) * sizeof(int32_t),
+        static_cast<size_t>(total_q) * static_cast<size_t>(head_dim) * sizeof(float),
+    };
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(NestedAttentionPC), &pc);
+    vkCmdDispatch(cmd, B, 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+    synchronize(device_id);
+
+    return output;
+}
+
+// ============================================================================
+// Trapezoid integration
+// ============================================================================
+
+struct TrapezoidPC {
+    uint32_t outer;
+    uint32_t inner;
+    uint32_t n;         // size along integration dim
+    uint32_t total;     // outer * inner
+    float dx;           // uniform spacing (ignored when x tensor is provided)
+    uint32_t has_x;     // 1 if non-uniform x is provided
+};
+
+auto VulkanBackend::dispatchTrapezoid(const Tensor& y, int64_t dim, double dx,
+                                       const Tensor* x_ptr) -> Tensor {
+    DType orig_dtype = y.dtype();
+    Tensor yf = (orig_dtype == DType::Float32) ? y.contiguous() : dispatchCast(y.contiguous(), DType::Float32);
+
+    auto shape = yf.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    int64_t n = shape[dim];
+
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < dim; d++) outer *= shape[d];
+    for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
+
+    std::vector<int64_t> out_shape;
+    for (int64_t d = 0; d < ndim; d++) {
+        if (d != dim) out_shape.push_back(shape[d]);
+    }
+    if (out_shape.empty()) out_shape.push_back(1);
+
+    Tensor result_f32(out_shape, DType::Float32, y.device());
+    int64_t total = outer * inner;
+    if (n < 2 || total == 0) return (orig_dtype == DType::Float32) ? result_f32 : dispatchCast(result_f32, orig_dtype);
+
+    Tensor xf;
+    if (x_ptr) {
+        xf = (x_ptr->dtype() == DType::Float32) ? x_ptr->contiguous() : dispatchCast(x_ptr->contiguous(), DType::Float32);
+    }
+
+    int32_t device_id = y.device().index;
+    auto* pipeline = getPipeline("trapezoid", device_id);
+
+    TrapezoidPC pc{static_cast<uint32_t>(outer), static_cast<uint32_t>(inner),
+                   static_cast<uint32_t>(n), static_cast<uint32_t>(total),
+                   static_cast<float>(dx), x_ptr ? 1u : 0u};
+
+    std::vector<std::pair<uint32_t, const void*>> bindings;
+    std::vector<size_t> sizes;
+    bindings.push_back({0, yf.data_ptr()});
+    sizes.push_back(static_cast<size_t>(yf.numel()) * sizeof(float));
+    if (x_ptr) {
+        bindings.push_back({1, xf.data_ptr()});
+        sizes.push_back(static_cast<size_t>(xf.numel()) * sizeof(float));
+    } else {
+        // Bind y again as dummy for binding 1 (shader reads has_x flag)
+        bindings.push_back({1, yf.data_ptr()});
+        sizes.push_back(static_cast<size_t>(yf.numel()) * sizeof(float));
+    }
+    bindings.push_back({2, result_f32.data_ptr()});
+    sizes.push_back(static_cast<size_t>(result_f32.numel()) * sizeof(float));
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(TrapezoidPC), &pc);
+    uint32_t workgroups = div_wg(static_cast<uint32_t>(total), devices_[device_id].workgroupSize);
+    vkCmdDispatch(cmd, workgroups, 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+    synchronize(device_id);
+
+    return (orig_dtype == DType::Float32) ? result_f32 : dispatchCast(result_f32, orig_dtype);
+}
+
+// ============================================================================
+// Cumulative trapezoid integration
+// ============================================================================
+
+struct CumulativeTrapezoidPC {
+    uint32_t outer;
+    uint32_t inner;
+    uint32_t n;
+    uint32_t total;
+    float dx;
+    uint32_t has_x;
+};
+
+auto VulkanBackend::dispatchCumulativeTrapezoid(const Tensor& y, int64_t dim, double dx,
+                                                 const Tensor* x_ptr) -> Tensor {
+    DType orig_dtype = y.dtype();
+    Tensor yf = (orig_dtype == DType::Float32) ? y.contiguous() : dispatchCast(y.contiguous(), DType::Float32);
+
+    auto shape = yf.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    int64_t n = shape[dim];
+
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < dim; d++) outer *= shape[d];
+    for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
+
+    std::vector<int64_t> out_shape(shape.begin(), shape.end());
+    out_shape[dim] = n - 1;
+
+    if (n < 2) {
+        out_shape[dim] = 0;
+        return Tensor(out_shape, orig_dtype, y.device());
+    }
+
+    Tensor result_f32(out_shape, DType::Float32, y.device());
+    int64_t total = outer * inner;
+    if (total == 0) return (orig_dtype == DType::Float32) ? result_f32 : dispatchCast(result_f32, orig_dtype);
+
+    Tensor xf;
+    if (x_ptr) {
+        xf = (x_ptr->dtype() == DType::Float32) ? x_ptr->contiguous() : dispatchCast(x_ptr->contiguous(), DType::Float32);
+    }
+
+    int32_t device_id = y.device().index;
+    auto* pipeline = getPipeline("cumulative_trapezoid", device_id);
+
+    CumulativeTrapezoidPC pc{static_cast<uint32_t>(outer), static_cast<uint32_t>(inner),
+                              static_cast<uint32_t>(n), static_cast<uint32_t>(total),
+                              static_cast<float>(dx), x_ptr ? 1u : 0u};
+
+    std::vector<std::pair<uint32_t, const void*>> bindings;
+    std::vector<size_t> sizes;
+    bindings.push_back({0, yf.data_ptr()});
+    sizes.push_back(static_cast<size_t>(yf.numel()) * sizeof(float));
+    if (x_ptr) {
+        bindings.push_back({1, xf.data_ptr()});
+        sizes.push_back(static_cast<size_t>(xf.numel()) * sizeof(float));
+    } else {
+        bindings.push_back({1, yf.data_ptr()});
+        sizes.push_back(static_cast<size_t>(yf.numel()) * sizeof(float));
+    }
+    bindings.push_back({2, result_f32.data_ptr()});
+    sizes.push_back(static_cast<size_t>(result_f32.numel()) * sizeof(float));
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(CumulativeTrapezoidPC), &pc);
+    uint32_t workgroups = div_wg(static_cast<uint32_t>(total), devices_[device_id].workgroupSize);
+    vkCmdDispatch(cmd, workgroups, 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+    synchronize(device_id);
+
+    return (orig_dtype == DType::Float32) ? result_f32 : dispatchCast(result_f32, orig_dtype);
+}
+
+// ============================================================================
+// Numerical gradient
+// ============================================================================
+
+struct GradientPC {
+    uint32_t outer;
+    uint32_t inner;
+    uint32_t n;
+    uint32_t total;
+    float spacing;
+};
+
+auto VulkanBackend::dispatchGradient(const Tensor& input, int64_t dim, double spacing) -> Tensor {
+    DType orig_dtype = input.dtype();
+    Tensor inf = (orig_dtype == DType::Float32) ? input.contiguous() : dispatchCast(input.contiguous(), DType::Float32);
+
+    auto shape = inf.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    int64_t n = shape[dim];
+
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < dim; d++) outer *= shape[d];
+    for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
+
+    Tensor result_f32(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32, input.device());
+    int64_t total = outer * inner;
+    if (n < 2 || total == 0) return (orig_dtype == DType::Float32) ? result_f32 : dispatchCast(result_f32, orig_dtype);
+
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("gradient", device_id);
+
+    GradientPC pc{static_cast<uint32_t>(outer), static_cast<uint32_t>(inner),
+                  static_cast<uint32_t>(n), static_cast<uint32_t>(total),
+                  static_cast<float>(spacing)};
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, inf.data_ptr()},
+        {1, result_f32.data_ptr()},
+    };
+    std::vector<size_t> sizes = {
+        static_cast<size_t>(inf.numel()) * sizeof(float),
+        static_cast<size_t>(result_f32.numel()) * sizeof(float),
+    };
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(GradientPC), &pc);
+    uint32_t workgroups = div_wg(static_cast<uint32_t>(total), devices_[device_id].workgroupSize);
+    vkCmdDispatch(cmd, workgroups, 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+    synchronize(device_id);
+
+    return (orig_dtype == DType::Float32) ? result_f32 : dispatchCast(result_f32, orig_dtype);
+}
+
+// ============================================================================
+// Pairwise distance
+// ============================================================================
+
+struct PairwiseDistPC {
+    uint32_t N;
+    uint32_t D;
+    float p;
+};
+
+auto VulkanBackend::dispatchPairwiseDistance(const Tensor& x1, const Tensor& x2, double p) -> Tensor {
+    DType orig_dtype = x1.dtype();
+    Tensor a = (orig_dtype == DType::Float32) ? x1.contiguous() : dispatchCast(x1.contiguous(), DType::Float32);
+    Tensor b = (x2.dtype() == DType::Float32) ? x2.contiguous() : dispatchCast(x2.contiguous(), DType::Float32);
+
+    int64_t N = a.shape()[0];
+    int64_t D = a.shape()[1];
+
+    Tensor result_f32({N}, DType::Float32, x1.device());
+    if (N == 0) return (orig_dtype == DType::Float32) ? result_f32 : dispatchCast(result_f32, orig_dtype);
+
+    int32_t device_id = x1.device().index;
+    auto* pipeline = getPipeline("pairwise_distance", device_id);
+
+    PairwiseDistPC pc{static_cast<uint32_t>(N), static_cast<uint32_t>(D), static_cast<float>(p)};
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, a.data_ptr()},
+        {1, b.data_ptr()},
+        {2, result_f32.data_ptr()},
+    };
+    std::vector<size_t> sizes = {
+        static_cast<size_t>(a.numel()) * sizeof(float),
+        static_cast<size_t>(b.numel()) * sizeof(float),
+        static_cast<size_t>(N) * sizeof(float),
+    };
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PairwiseDistPC), &pc);
+    uint32_t workgroups = div_wg(static_cast<uint32_t>(N), devices_[device_id].workgroupSize);
+    vkCmdDispatch(cmd, workgroups, 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+    synchronize(device_id);
+
+    return (orig_dtype == DType::Float32) ? result_f32 : dispatchCast(result_f32, orig_dtype);
+}
+
+// ============================================================================
+// Pdist (all-pairs pairwise distances)
+// ============================================================================
+
+struct PdistPC {
+    uint32_t N;
+    uint32_t D;
+    uint32_t num_pairs;
+    float p;
+};
+
+auto VulkanBackend::dispatchPdist(const Tensor& input, double p) -> Tensor {
+    DType orig_dtype = input.dtype();
+    Tensor inf = (orig_dtype == DType::Float32) ? input.contiguous() : dispatchCast(input.contiguous(), DType::Float32);
+
+    int64_t N = inf.shape()[0];
+    int64_t D = inf.shape()[1];
+    int64_t num_pairs = N * (N - 1) / 2;
+
+    Tensor result_f32({num_pairs}, DType::Float32, input.device());
+    if (num_pairs == 0) return (orig_dtype == DType::Float32) ? result_f32 : dispatchCast(result_f32, orig_dtype);
+
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("pdist", device_id);
+
+    PdistPC pc{static_cast<uint32_t>(N), static_cast<uint32_t>(D),
+               static_cast<uint32_t>(num_pairs), static_cast<float>(p)};
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, inf.data_ptr()},
+        {1, result_f32.data_ptr()},
+    };
+    std::vector<size_t> sizes = {
+        static_cast<size_t>(inf.numel()) * sizeof(float),
+        static_cast<size_t>(num_pairs) * sizeof(float),
+    };
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PdistPC), &pc);
+    uint32_t workgroups = div_wg(static_cast<uint32_t>(num_pairs), devices_[device_id].workgroupSize);
+    vkCmdDispatch(cmd, workgroups, 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+    synchronize(device_id);
+
+    return (orig_dtype == DType::Float32) ? result_f32 : dispatchCast(result_f32, orig_dtype);
+}
+
 }  // namespace tenzor

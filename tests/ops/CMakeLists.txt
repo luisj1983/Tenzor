@@ -73,6 +73,11 @@ add_executable(test_search_sampling_multidtype test_search_sampling_multidtype.c
 target_link_libraries(test_search_sampling_multidtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_search_sampling_multidtype LABELS "ops" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
+# New ops (NormalSample, ExponentialSample, ndtr, trapezoid, gradient, pairwise_distance, segment_reduce, etc.)
+add_executable(test_new_ops test_new_ops.cpp)
+target_link_libraries(test_new_ops PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_new_ops LABELS "ops" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
 # Convolution gaps (Conv1d, ConvTranspose1d/2d/3d)
 add_executable(test_conv_gaps_multidtype test_conv_gaps_multidtype.cpp)
 target_link_libraries(test_conv_gaps_multidtype PRIVATE tenzor_core GTest::gtest_main)

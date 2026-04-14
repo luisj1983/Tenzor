@@ -1,0 +1,40 @@
+#version 450
+
+// Pairwise p-norm distance: output[i] = ||x1[i] - x2[i]||_p
+// x1, x2: (N, D), output: (N,)
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer X1Buf  { float x1[]; };
+layout(binding = 1) buffer X2Buf  { float x2[]; };
+layout(binding = 2) buffer OutBuf { float out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint N;
+    uint D;
+    float p;
+} params;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= params.N) return;
+
+    float sum = 0.0;
+    if (params.p == 2.0) {
+        for (uint j = 0; j < params.D; ++j) {
+            float diff = x1[i * params.D + j] - x2[i * params.D + j];
+            sum += diff * diff;
+        }
+        out_data[i] = sqrt(sum);
+    } else if (params.p == 1.0) {
+        for (uint j = 0; j < params.D; ++j) {
+            sum += abs(x1[i * params.D + j] - x2[i * params.D + j]);
+        }
+        out_data[i] = sum;
+    } else {
+        for (uint j = 0; j < params.D; ++j) {
+            sum += pow(abs(x1[i * params.D + j] - x2[i * params.D + j]), params.p);
+        }
+        out_data[i] = pow(sum, 1.0 / params.p);
+    }
+}

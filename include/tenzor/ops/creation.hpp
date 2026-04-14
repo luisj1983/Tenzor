@@ -441,6 +441,18 @@ auto triu_indices(int64_t row, int64_t col, int64_t offset = 0,
                   DType dtype = DType::Int64,
                   Device device = Device::cpu()) -> Tensor;
 
+/**
+ * @brief Create a complex tensor from separate real and imaginary parts.
+ *
+ * Interleaves real and imaginary components into Complex64 storage.
+ * Both inputs must have the same shape and a float dtype.
+ *
+ * @param real Tensor of real parts
+ * @param imag Tensor of imaginary parts
+ * @return Complex64 tensor with same shape as inputs
+ */
+auto complex(const Tensor& real, const Tensor& imag) -> Tensor;
+
 /** @} */ // end of tensor_creation group
 
 } // namespace tenzor

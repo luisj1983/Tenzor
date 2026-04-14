@@ -59,8 +59,8 @@ auto lstm_cell_forward_kernel(const Tensor& input, const Tensor& hx, const Tenso
     const float* cx_data = cx.data<float>();
     const float* w_ih_data = weight_ih.data<float>();
     const float* w_hh_data = weight_hh.data<float>();
-    const float* b_ih_data = bias_ih.data<float>();
-    const float* b_hh_data = bias_hh.data<float>();
+    const float* b_ih_data = bias_ih.numel() > 0 ? bias_ih.data<float>() : nullptr;
+    const float* b_hh_data = bias_hh.numel() > 0 ? bias_hh.data<float>() : nullptr;
     float* hy_data = hy.data<float>();
     float* cy_data = cy.data<float>();
 
@@ -71,7 +71,7 @@ auto lstm_cell_forward_kernel(const Tensor& input, const Tensor& hx, const Tenso
 
         // gates = input @ weight_ih^T + hx @ weight_hh^T + bias_ih + bias_hh
         for (int64_t g = 0; g < 4 * hidden_size; ++g) {
-            float sum = b_ih_data[g] + b_hh_data[g];
+            float sum = (b_ih_data ? b_ih_data[g] : 0.0f) + (b_hh_data ? b_hh_data[g] : 0.0f);
 
             for (int64_t i = 0; i < input_size; ++i) {
                 sum += in_data[b * input_size + i] * w_ih_data[g * input_size + i];
@@ -332,9 +332,11 @@ auto gru_cell_forward_kernel(const Tensor& input, const Tensor& hx,
                 n_ih += in_data[b * input_size + i] * w_ih_data[(2 * hidden_size + h) * input_size + i];
             }
             for (int64_t hh = 0; hh < hidden_size; ++hh) {
-                n_hh += (r * hx_data[b * hidden_size + hh]) *
+                n_hh += hx_data[b * hidden_size + hh] *
                         w_hh_data[(2 * hidden_size + h) * hidden_size + hh];
             }
+            // Apply reset gate to entire hidden contribution: r * (W_hh @ h + b_hh)
+            n_hh *= r;
 
             float n = std::tanh(n_ih + n_hh);
             hy_data[b * hidden_size + h] = (1.0f - z) * n + z * hx_data[b * hidden_size + h];
@@ -423,7 +425,7 @@ auto gru_cell_backward_kernel(const Tensor& grad_hy, const Tensor& input, const 
 
             // Compute n gate (with bias)
             // n_ih[h] = b_ih[2H+h] + sum(input * w_ih[2H+h,:])
-            // n_hh[h] = b_hh[2H+h] + sum((r * hx) * w_hh[2H+h,:])
+            // n_hh[h] = r[h] * (b_hh[2H+h] + sum(hx * w_hh[2H+h,:]))
             // n = tanh(n_ih + n_hh)
             std::vector<float> n_ih(hidden_size);
             std::vector<float> n_hh(hidden_size);
@@ -436,9 +438,11 @@ auto gru_cell_backward_kernel(const Tensor& grad_hy, const Tensor& input, const 
                     n_ih[h] += in_data[b * input_size + i] * w_ih_data[(2 * hidden_size + h) * input_size + i];
                 }
                 for (int64_t hh = 0; hh < hidden_size; ++hh) {
-                    n_hh[h] += (r_gate[h] * hx_data[b * hidden_size + hh]) *
+                    n_hh[h] += hx_data[b * hidden_size + hh] *
                                w_hh_data[(2 * hidden_size + h) * hidden_size + hh];
                 }
+                // Apply reset gate to entire hidden contribution
+                n_hh[h] *= r_gate[h];
                 n_gate[h] = std::tanh(n_ih[h] + n_hh[h]);
             }
 
@@ -458,16 +462,18 @@ auto gru_cell_backward_kernel(const Tensor& grad_hy, const Tensor& input, const 
                 // Backprop through n = tanh(n_ih + n_hh)
                 float dn_pre = dn * (1.0f - n_gate[h] * n_gate[h]);
 
-                // Backprop through n_hh: sum((r * hx) * w_hh)
-                // d_r from n_hh path: d(r * hx) * w_hh => need to accumulate
-                float dr_from_n = 0.0f;
+                // Backprop through n_hh = r * (b_hh + sum(hx * w_hh))
+                // d_r = dn_pre * (b_hh + sum(hx * w_hh))  [pre-reset hidden contribution]
+                // d_hx[hh] += dn_pre * r * w_hh[h, hh]
+                float n_hh_pre_reset = (b_hh_data ? b_hh_data[2 * hidden_size + h] : 0.0f);
                 for (int64_t hh = 0; hh < hidden_size; ++hh) {
-                    // d(r * hx[hh]) w.r.t r = hx[hh] * w_hh
-                    dr_from_n += dn_pre * w_hh_data[(2 * hidden_size + h) * hidden_size + hh] *
-                                 hx_data[b * hidden_size + hh];
-                    // d_hx from n_hh path
-                    d_hx[b * hidden_size + hh] += dn_pre * w_hh_data[(2 * hidden_size + h) * hidden_size + hh] *
-                                                   r_gate[h];
+                    n_hh_pre_reset += hx_data[b * hidden_size + hh] *
+                                      w_hh_data[(2 * hidden_size + h) * hidden_size + hh];
+                }
+                float dr_from_n = dn_pre * n_hh_pre_reset;
+                for (int64_t hh = 0; hh < hidden_size; ++hh) {
+                    d_hx[b * hidden_size + hh] += dn_pre * r_gate[h] *
+                                                   w_hh_data[(2 * hidden_size + h) * hidden_size + hh];
                 }
 
                 // Backprop through z = sigmoid(rz_pre[H+h])
@@ -485,7 +491,7 @@ auto gru_cell_backward_kernel(const Tensor& grad_hy, const Tensor& input, const 
                 // Gate gradients for hh (hidden-hidden): r, z, n
                 d_gates_hh[h] = dr_pre;                          // r gate
                 d_gates_hh[hidden_size + h] = dz_pre;            // z gate
-                d_gates_hh[2 * hidden_size + h] = dn_pre;        // n gate (hidden part, through r*hx)
+                d_gates_hh[2 * hidden_size + h] = dn_pre * r_gate[h];  // n gate (hidden part, through r*(b_hh + W_hh@h))
             }
 
             // Step 3: Compute input gradient

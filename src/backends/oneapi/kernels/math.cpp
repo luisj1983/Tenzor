@@ -16,6 +16,8 @@
 #include <oneapi/dpl/numeric>
 #endif
 
+#include "sycl_sort_utils.hpp"
+
 // Forward declaration for contiguous kernel
 namespace tenzor {
 namespace oneapi {
@@ -6201,11 +6203,8 @@ auto isin_kernel(const Tensor& elements, const Tensor& test_elements, sycl::queu
         auto policy = ::oneapi::dpl::execution::make_device_policy(queue);
         ::oneapi::dpl::sort(policy, sorted_buf, sorted_buf + num_test);
 #else
-        // Fallback: sort via host when oneDPL unavailable
-        std::vector<T> test_host(num_test);
-        queue.memcpy(test_host.data(), sorted_buf, num_test * sizeof(T)).wait();
-        std::sort(test_host.begin(), test_host.end());
-        queue.memcpy(sorted_buf, test_host.data(), num_test * sizeof(T)).wait();
+        // Fallback: device-side bitonic sort when oneDPL unavailable
+        sycl_bitonic_sort(sorted_buf, num_test, queue);
 #endif
 
         const T* elem_ptr = get_data_ptr<const T>(elem_cont);
@@ -6306,28 +6305,33 @@ auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim, bool keepdim,
             sycl::free(tmp_vals, queue);
             sycl::free(tmp_idx, queue);
 #else
-            // Fallback: host-side partial sort when oneDPL unavailable
-            std::vector<T> input_host(in_numel);
-            queue.memcpy(input_host.data(), get_data_ptr<const T>(input_cont),
+            // Fallback: device-side bitonic sort when oneDPL unavailable
+            T* tmp_vals = sycl::malloc_device<T>(in_numel, queue);
+            int64_t* tmp_idx = sycl::malloc_device<int64_t>(in_numel, queue);
+
+            queue.memcpy(tmp_vals, get_data_ptr<const T>(input_cont),
                          in_numel * sizeof(T)).wait();
 
-            std::vector<T> val_host(total_slices);
-            std::vector<int64_t> idx_host(total_slices);
+            // Initialize indices: each slice gets 0..dim_size-1
+            queue.parallel_for(sycl::range<1>(in_numel),
+                [=](sycl::id<1> gid) {
+                    tmp_idx[gid] = static_cast<int64_t>(gid[0]) % dim_size;
+                }).wait();
 
-            for (int64_t s = 0; s < total_slices; ++s) {
-                std::vector<std::pair<T, int64_t>> slice(dim_size);
-                for (int64_t i = 0; i < dim_size; ++i) {
-                    slice[i] = {input_host[s * dim_size + i], i};
-                }
-                std::nth_element(slice.begin(), slice.begin() + (k - 1), slice.end(),
-                    [](const auto& a, const auto& b) { return a.first < b.first; });
-                val_host[s] = slice[k - 1].first;
-                idx_host[s] = slice[k - 1].second;
+            T* out_val_ptr = get_data_ptr<T>(values);
+            int64_t* out_idx_ptr = get_data_ptr<int64_t>(indices_out);
+
+            for (int64_t o = 0; o < outer_size; ++o) {
+                T* slice_vals = tmp_vals + o * dim_size;
+                int64_t* slice_idx = tmp_idx + o * dim_size;
+                sycl_bitonic_sort_by_key(slice_vals, slice_idx, dim_size, queue);
+                // Copy k-th element (0-indexed: k-1)
+                queue.memcpy(out_val_ptr + o, slice_vals + (k - 1), sizeof(T)).wait();
+                queue.memcpy(out_idx_ptr + o, slice_idx + (k - 1), sizeof(int64_t)).wait();
             }
 
-            queue.memcpy(get_data_ptr<T>(values), val_host.data(), total_slices * sizeof(T)).wait();
-            queue.memcpy(get_data_ptr<int64_t>(indices_out), idx_host.data(),
-                         total_slices * sizeof(int64_t)).wait();
+            sycl::free(tmp_vals, queue);
+            sycl::free(tmp_idx, queue);
 #endif
         } else {
             // Non-contiguous slices: gather per slice, sort on device, scatter result
@@ -6358,31 +6362,31 @@ auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim, bool keepdim,
             sycl::free(slice_buf, queue);
             sycl::free(idx_buf, queue);
 #else
-            // Fallback: host-side partial sort
-            std::vector<T> input_host(in_numel);
-            queue.memcpy(input_host.data(), get_data_ptr<const T>(input_cont),
-                         in_numel * sizeof(T)).wait();
-
-            std::vector<T> val_host(total_slices);
-            std::vector<int64_t> idx_host(total_slices);
+            // Fallback: device-side bitonic sort when oneDPL unavailable
+            T* slice_buf = sycl::malloc_device<T>(dim_size, queue);
+            int64_t* idx_buf = sycl::malloc_device<int64_t>(dim_size, queue);
+            const T* in_ptr = get_data_ptr<const T>(input_cont);
+            T* out_val_ptr = get_data_ptr<T>(values);
+            int64_t* out_idx_ptr = get_data_ptr<int64_t>(indices_out);
 
             for (int64_t s = 0; s < total_slices; ++s) {
                 int64_t outer = s / inner_size;
                 int64_t inner = s % inner_size;
+                int64_t base = outer * dim_size * inner_size + inner;
 
-                std::vector<std::pair<T, int64_t>> slice(dim_size);
-                for (int64_t i = 0; i < dim_size; ++i) {
-                    slice[i] = {input_host[outer * dim_size * inner_size + i * inner_size + inner], i};
-                }
-                std::nth_element(slice.begin(), slice.begin() + (k - 1), slice.end(),
-                    [](const auto& a, const auto& b) { return a.first < b.first; });
-                val_host[s] = slice[k - 1].first;
-                idx_host[s] = slice[k - 1].second;
+                // Gather slice to contiguous buffer on device
+                queue.parallel_for(sycl::range<1>(dim_size), [=](sycl::id<1> i) {
+                    slice_buf[i] = in_ptr[base + i[0] * inner_size];
+                    idx_buf[i] = static_cast<int64_t>(i[0]);
+                }).wait();
+
+                sycl_bitonic_sort_by_key(slice_buf, idx_buf, dim_size, queue);
+                queue.memcpy(out_val_ptr + s, slice_buf + (k - 1), sizeof(T)).wait();
+                queue.memcpy(out_idx_ptr + s, idx_buf + (k - 1), sizeof(int64_t)).wait();
             }
 
-            queue.memcpy(get_data_ptr<T>(values), val_host.data(), total_slices * sizeof(T)).wait();
-            queue.memcpy(get_data_ptr<int64_t>(indices_out), idx_host.data(),
-                         total_slices * sizeof(int64_t)).wait();
+            sycl::free(slice_buf, queue);
+            sycl::free(idx_buf, queue);
 #endif
         }
     };
@@ -6478,40 +6482,72 @@ static auto quantile_impl(const Tensor& input, double q, int64_t dim, bool keepd
 
         sycl::free(slice_buf, queue);
 #else
-        // Fallback: host-side sort + interpolate when oneDPL unavailable
-        std::vector<T> input_host(input_cont.numel());
-        queue.memcpy(input_host.data(), get_data_ptr<const T>(input_cont),
-                     input_cont.numel() * sizeof(T)).wait();
-
-        std::vector<T> out_host(total_slices);
+        // Fallback: device-side bitonic sort + interpolate when oneDPL unavailable
+        T* slice_buf = sycl::malloc_device<T>(dim_size, queue);
+        const T* in_ptr = get_data_ptr<const T>(input_cont);
+        T* out_ptr = get_data_ptr<T>(output);
 
         for (int64_t s = 0; s < total_slices; ++s) {
             int64_t outer = s / inner_size;
             int64_t inner = s % inner_size;
+            int64_t base = outer * dim_size * inner_size + inner;
 
-            std::vector<T> slice;
-            for (int64_t i = 0; i < dim_size; ++i) {
-                T val = input_host[outer * dim_size * inner_size + i * inner_size + inner];
-                if (ignore_nan && std::isnan(static_cast<double>(val))) continue;
-                slice.push_back(val);
+            // Gather slice to contiguous device buffer
+            queue.parallel_for(sycl::range<1>(dim_size), [=](sycl::id<1> i) {
+                slice_buf[i] = in_ptr[base + i[0] * inner_size];
+            }).wait();
+
+            int64_t valid_count = dim_size;
+            if (ignore_nan) {
+                // Partition non-NaN values to front: move NaNs to end on device
+                // Use a simple compact pass with device-side count
+                int64_t* d_count = sycl::malloc_device<int64_t>(1, queue);
+                T* compact_buf = sycl::malloc_device<T>(dim_size, queue);
+                queue.memset(d_count, 0, sizeof(int64_t)).wait();
+
+                // Count and compact non-NaN values
+                queue.single_task([=]() {
+                    int64_t c = 0;
+                    for (int64_t i = 0; i < dim_size; ++i) {
+                        if (!sycl::isnan(static_cast<float>(slice_buf[i]))) {
+                            compact_buf[c++] = slice_buf[i];
+                        }
+                    }
+                    d_count[0] = c;
+                }).wait();
+
+                queue.memcpy(&valid_count, d_count, sizeof(int64_t)).wait();
+
+                // Copy compacted data back to slice_buf
+                queue.memcpy(slice_buf, compact_buf, valid_count * sizeof(T)).wait();
+
+                sycl::free(d_count, queue);
+                sycl::free(compact_buf, queue);
             }
 
-            if (slice.empty()) {
-                out_host[s] = static_cast<T>(NAN);
+            if (valid_count == 0) {
+                T nan_val = static_cast<T>(NAN);
+                queue.memcpy(out_ptr + s, &nan_val, sizeof(T)).wait();
                 continue;
             }
 
-            std::sort(slice.begin(), slice.end());
-            double pos = q * (static_cast<double>(slice.size()) - 1.0);
+            // Sort valid elements on device
+            sycl_bitonic_sort(slice_buf, valid_count, queue);
+
+            // Compute interpolated quantile value on device
+            double pos = q * (static_cast<double>(valid_count) - 1.0);
             int64_t lo = static_cast<int64_t>(pos);
             int64_t hi = lo + 1;
-            if (hi >= static_cast<int64_t>(slice.size())) hi = slice.size() - 1;
+            if (hi >= valid_count) hi = valid_count - 1;
             double frac = pos - lo;
-            out_host[s] = static_cast<T>(static_cast<double>(slice[lo]) * (1.0 - frac) +
-                                          static_cast<double>(slice[hi]) * frac);
+
+            queue.single_task([=]() {
+                out_ptr[s] = static_cast<T>(static_cast<double>(slice_buf[lo]) * (1.0 - frac) +
+                                            static_cast<double>(slice_buf[hi]) * frac);
+            }).wait();
         }
 
-        queue.memcpy(get_data_ptr<T>(output), out_host.data(), total_slices * sizeof(T)).wait();
+        sycl::free(slice_buf, queue);
 #endif
     };
 
@@ -7332,6 +7368,129 @@ auto isreal_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     uint8_t* out_ptr = get_data_ptr<uint8_t>(output);
     queue.memset(out_ptr, 1, numel * sizeof(uint8_t)).wait();
     return output;
+}
+
+// ============================================================================
+// SegmentReduce — reduce over segments defined by offsets (SYCL)
+// ============================================================================
+
+template<typename T> struct SegmentReduceKernelTag {};
+
+template<typename T>
+static auto segment_reduce_sycl_impl(const Tensor& data, const Tensor& offsets,
+                                      int64_t num_segments, int64_t outer_size,
+                                      int64_t axis_size, int64_t inner_size,
+                                      int mode, sycl::queue& queue) -> Tensor {
+    int64_t out_numel = outer_size * num_segments * inner_size;
+    Tensor output({out_numel}, data.dtype(), data.device());
+
+    const T* data_ptr = get_data_ptr<const T>(data);
+    const int64_t* offsets_ptr = get_data_ptr<const int64_t>(offsets);
+    T* out_ptr = get_data_ptr<T>(output);
+
+    int64_t total_work = outer_size * num_segments * inner_size;
+
+    queue.submit([&](sycl::handler& h) {
+        h.parallel_for<SegmentReduceKernelTag<T>>(
+            sycl::range<1>(total_work), [=](sycl::id<1> idx) {
+                int64_t id = idx[0];
+                int64_t inner = id % inner_size;
+                int64_t seg = (id / inner_size) % num_segments;
+                int64_t outer = id / (inner_size * num_segments);
+
+                int64_t seg_start = offsets_ptr[seg];
+                int64_t seg_end = offsets_ptr[seg + 1];
+                int64_t seg_len = seg_end - seg_start;
+
+                T identity;
+                if (mode == 0 || mode == 1) identity = T(0);
+                else if (mode == 4) identity = T(1);
+                else if (mode == 2) identity = T(-1e38);
+                else identity = T(1e38);
+
+                T acc = identity;
+                for (int64_t d = seg_start; d < seg_end; ++d) {
+                    int64_t in_idx = (outer * axis_size + d) * inner_size + inner;
+                    T val = data_ptr[in_idx];
+                    if (mode == 0 || mode == 1) acc += val;
+                    else if (mode == 4) acc *= val;
+                    else if (mode == 2) acc = acc > val ? acc : val;
+                    else acc = acc < val ? acc : val;
+                }
+
+                if (mode == 1 && seg_len > 0) {
+                    acc /= static_cast<T>(seg_len);
+                }
+                if (seg_len == 0) {
+                    acc = (mode == 0 || mode == 1) ? T(0) : identity;
+                }
+
+                out_ptr[(outer * num_segments + seg) * inner_size + inner] = acc;
+            });
+    }).wait();
+
+    return output;
+}
+
+auto segment_reduce_kernel(const Tensor& data, const Tensor& offsets,
+                           const std::string& reduce, int64_t axis,
+                           sycl::queue& queue) -> Tensor {
+    Tensor cont = data.is_contiguous() ? data : oneapi::contiguous_kernel(data, queue);
+    Tensor offs = offsets.is_contiguous() ? offsets : oneapi::contiguous_kernel(offsets, queue);
+
+    int64_t ndim = cont.ndim();
+    if (axis < 0) axis += ndim;
+
+    const auto& shape = cont.shape();
+    int64_t axis_size = shape[axis];
+    int64_t num_segments = offs.numel() - 1;
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < axis; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
+    for (int64_t i = axis + 1; i < ndim; ++i) inner_size *= shape[i];
+
+    int mode = 0;
+    if (reduce == "sum") mode = 0;
+    else if (reduce == "mean") mode = 1;
+    else if (reduce == "max") mode = 2;
+    else if (reduce == "min") mode = 3;
+    else if (reduce == "prod") mode = 4;
+
+    auto dtype = cont.dtype();
+    Tensor result;
+    switch (dtype) {
+        case DType::Float32:
+            result = segment_reduce_sycl_impl<float>(cont, offs, num_segments,
+                                                      outer_size, axis_size, inner_size, mode, queue);
+            break;
+        case DType::Float64:
+            result = segment_reduce_sycl_impl<double>(cont, offs, num_segments,
+                                                       outer_size, axis_size, inner_size, mode, queue);
+            break;
+        case DType::Int32:
+            result = segment_reduce_sycl_impl<int32_t>(cont, offs, num_segments,
+                                                        outer_size, axis_size, inner_size, mode, queue);
+            break;
+        case DType::Int64:
+            result = segment_reduce_sycl_impl<int64_t>(cont, offs, num_segments,
+                                                        outer_size, axis_size, inner_size, mode, queue);
+            break;
+        default: {
+            DType orig = dtype;
+            Tensor cont_f32 = cont.to(DType::Float32);
+            auto res_f32 = segment_reduce_sycl_impl<float>(cont_f32, offs, num_segments,
+                                                             outer_size, axis_size, inner_size, mode, queue);
+            result = res_f32.to(orig);
+        }
+    }
+
+    // Reshape to correct output shape
+    std::vector<int64_t> out_shape;
+    for (int64_t i = 0; i < ndim; ++i) {
+        out_shape.push_back(i == axis ? num_segments : shape[i]);
+    }
+    return result.reshape(out_shape);
 }
 
 } // namespace oneapi

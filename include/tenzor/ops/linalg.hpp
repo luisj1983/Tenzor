@@ -397,5 +397,67 @@ auto matrix_norm(const Tensor& input, double ord = 2.0) -> Tensor;
  */
 auto vecdot(const Tensor& a, const Tensor& b, int64_t dim = -1) -> Tensor;
 
+/**
+ * @brief Compute inverse of a positive-definite matrix given its Cholesky factor.
+ *
+ * Given L from A = L @ L^T (or U from A = U^T @ U), returns A^{-1}.
+ *
+ * @param L Cholesky factor (..., N, N)
+ * @param upper If true, L is upper-triangular (default: false)
+ * @return Inverse matrix (..., N, N)
+ */
+auto cholesky_inverse(const Tensor& L, bool upper = false) -> Tensor;
+
+/**
+ * @brief Compute the generalized tensor inverse.
+ *
+ * Reshapes the first `ind` dimensions and the remaining dimensions into a 2D
+ * matrix, inverts it, then reshapes back.
+ *
+ * @param input Input tensor whose first ind dimensions' product equals the remaining dimensions' product
+ * @param ind Number of leading dimensions to flatten into rows (default: 2)
+ * @return Inverse tensor
+ */
+auto tensorinv(const Tensor& input, int64_t ind = 2) -> Tensor;
+
+/**
+ * @brief Solve the tensor equation A x = B for x.
+ *
+ * Reshapes A and B into 2D, solves the linear system, then reshapes back.
+ *
+ * @param A Coefficient tensor
+ * @param B Right-hand side tensor
+ * @return Solution tensor x
+ */
+auto tensorsolve(const Tensor& A, const Tensor& B) -> Tensor;
+
+/**
+ * @brief Apply the orthogonal matrix Q from QR factorization to another matrix.
+ *
+ * Computes Q @ other (or Q^T @ other, or other @ Q, or other @ Q^T) where Q is
+ * represented by Householder reflectors stored in input and their scalar factors tau.
+ *
+ * @param input Matrix containing Householder reflectors (..., M, N)
+ * @param tau Scalar factors of the reflectors (..., K)
+ * @param other Matrix to multiply (..., M, K) or (..., K, M)
+ * @param left If true, compute Q @ other; if false, compute other @ Q (default: true)
+ * @param transpose If true, use Q^T instead of Q (default: false)
+ * @return Result of the multiplication
+ */
+auto ormqr(const Tensor& input, const Tensor& tau, const Tensor& other,
+           bool left = true, bool transpose = false) -> Tensor;
+
+/**
+ * @brief Compute the raw QR factorization (GEQRF).
+ *
+ * Returns the Householder reflector matrix and tau vector, which is more
+ * memory-efficient than the full QR decomposition when Q is not needed explicitly.
+ *
+ * @param input Input matrix (..., M, N)
+ * @return Tuple of (result, tau) where result contains packed Householder reflectors
+ *         (..., M, N) and tau is the scalar factors (..., min(M,N))
+ */
+auto geqrf(const Tensor& input) -> std::tuple<Tensor, Tensor>;
+
 } // namespace linalg
 } // namespace tenzor

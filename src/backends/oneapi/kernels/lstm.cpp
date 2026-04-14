@@ -103,9 +103,12 @@ auto lstm_cell_forward_kernel(
 
                 // Apply activations
                 // Sigmoid for i, f, o gates
-                float i_t = 1.0f / (1.0f + sycl::exp(-i_gate));
-                float f_t = 1.0f / (1.0f + sycl::exp(-f_gate));
-                float o_t = 1.0f / (1.0f + sycl::exp(-o_gate));
+                float i_clamped = sycl::fmax(-20.0f, sycl::fmin(20.0f, i_gate));
+                float f_clamped = sycl::fmax(-20.0f, sycl::fmin(20.0f, f_gate));
+                float o_clamped = sycl::fmax(-20.0f, sycl::fmin(20.0f, o_gate));
+                float i_t = 1.0f / (1.0f + sycl::exp(-i_clamped));
+                float f_t = 1.0f / (1.0f + sycl::exp(-f_clamped));
+                float o_t = 1.0f / (1.0f + sycl::exp(-o_clamped));
 
                 // Tanh for cell gate
                 float g_t = sycl::tanh(g_gate);
@@ -148,9 +151,12 @@ auto lstm_cell_forward_kernel(
                 double g_gate = gates_ptr[g_offset];
                 double o_gate = gates_ptr[o_offset];
 
-                double i_t = 1.0 / (1.0 + sycl::exp(-i_gate));
-                double f_t = 1.0 / (1.0 + sycl::exp(-f_gate));
-                double o_t = 1.0 / (1.0 + sycl::exp(-o_gate));
+                double i_clamped = sycl::fmax(-20.0, sycl::fmin(20.0, i_gate));
+                double f_clamped = sycl::fmax(-20.0, sycl::fmin(20.0, f_gate));
+                double o_clamped = sycl::fmax(-20.0, sycl::fmin(20.0, o_gate));
+                double i_t = 1.0 / (1.0 + sycl::exp(-i_clamped));
+                double f_t = 1.0 / (1.0 + sycl::exp(-f_clamped));
+                double o_t = 1.0 / (1.0 + sycl::exp(-o_clamped));
                 double g_t = sycl::tanh(g_gate);
 
                 double c_prev_val = c_prev_ptr[idx];
@@ -185,9 +191,12 @@ auto lstm_cell_forward_kernel(
                 float g_gate = bf16_to_f32(gates_ptr[g_offset]);
                 float o_gate = bf16_to_f32(gates_ptr[o_offset]);
 
-                float i_t = 1.0f / (1.0f + sycl::exp(-i_gate));
-                float f_t = 1.0f / (1.0f + sycl::exp(-f_gate));
-                float o_t = 1.0f / (1.0f + sycl::exp(-o_gate));
+                float i_clamped = sycl::fmax(-20.0f, sycl::fmin(20.0f, i_gate));
+                float f_clamped = sycl::fmax(-20.0f, sycl::fmin(20.0f, f_gate));
+                float o_clamped = sycl::fmax(-20.0f, sycl::fmin(20.0f, o_gate));
+                float i_t = 1.0f / (1.0f + sycl::exp(-i_clamped));
+                float f_t = 1.0f / (1.0f + sycl::exp(-f_clamped));
+                float o_t = 1.0f / (1.0f + sycl::exp(-o_clamped));
                 float g_t = sycl::tanh(g_gate);
 
                 float c_prev_val = bf16_to_f32(c_prev_ptr[idx]);

@@ -70,6 +70,10 @@ void main() {
             res = (g == int64_t(0)) ? int64_t(0) : (ga / g) * gb;
             break;
         }
+        case 52: { // bitwise_not
+            res = ~val_a;
+            break;
+        }
         default:
             res = int64_t(0);
             break;

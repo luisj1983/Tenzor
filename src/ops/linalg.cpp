@@ -2205,4 +2205,281 @@ auto vecdot(const Tensor& a, const Tensor& b, int64_t dim) -> Tensor {
     return tenzor::sum(product, dim, false);
 }
 
+// ============================================================================
+// cholesky_inverse / tensorinv / tensorsolve / ormqr / geqrf
+// ============================================================================
+
+auto cholesky_inverse(const Tensor& L, bool upper) -> Tensor {
+    // Compose from existing ops: given Cholesky factor L (lower) or U (upper),
+    // compute A^{-1} by solving the triangular systems:
+    //   If lower: A^{-1} = solve_triangular(L^T, solve_triangular(L, I), upper=true)
+    //   If upper: A^{-1} = solve_triangular(U, solve_triangular(U^T, I), upper=true)
+    auto shape = L.shape();
+    auto ndim = static_cast<int64_t>(shape.size());
+    if (ndim < 2) throw std::invalid_argument("linalg::cholesky_inverse: input must be at least 2D");
+    int64_t n = shape[ndim - 1];
+    if (shape[ndim - 2] != n)
+        throw std::invalid_argument("linalg::cholesky_inverse: expected square matrix");
+
+    auto I = tenzor::eye(n, std::nullopt, L.dtype(), L.device());
+
+    // Broadcast I to match batch dimensions if needed
+    if (ndim > 2) {
+        std::vector<int64_t> eye_shape(shape.begin(), shape.end());
+        I = tenzor::expand(I, std::move(eye_shape));
+        I = I.contiguous();
+    }
+
+    if (!upper) {
+        // L is lower triangular: solve L @ Y = I, then L^T @ X = Y
+        auto Y = solve_triangular(L, I, /*upper=*/false);
+        return solve_triangular(tenzor::transpose(L, ndim - 2, ndim - 1), Y, /*upper=*/true);
+    } else {
+        // U is upper triangular: solve U^T @ Y = I, then U @ X = Y
+        auto Y = solve_triangular(tenzor::transpose(L, ndim - 2, ndim - 1), I, /*upper=*/false);
+        return solve_triangular(L, Y, /*upper=*/true);
+    }
+}
+
+auto tensorinv(const Tensor& input, int64_t ind) -> Tensor {
+    auto shape = input.shape();
+    auto ndim = static_cast<int64_t>(shape.size());
+    if (ind <= 0 || ind > ndim)
+        throw std::invalid_argument("linalg::tensorinv: ind must be in [1, ndim]");
+
+    // Compute the product of the first `ind` dimensions and the remaining dimensions
+    int64_t rows = 1;
+    for (int64_t i = 0; i < ind; ++i) rows *= shape[i];
+    int64_t cols = 1;
+    for (int64_t i = ind; i < ndim; ++i) cols *= shape[i];
+
+    if (rows != cols) {
+        throw std::invalid_argument(
+            "linalg::tensorinv: product of first " + std::to_string(ind) +
+            " dims (" + std::to_string(rows) + ") must equal product of remaining dims (" +
+            std::to_string(cols) + ")");
+    }
+
+    // Reshape to 2D, invert, reshape back
+    auto mat = tenzor::reshape(input, {rows, cols});
+    auto inv_mat = inv(mat);
+
+    // Output shape: trailing dims followed by leading dims
+    std::vector<int64_t> out_shape;
+    for (int64_t i = ind; i < ndim; ++i) out_shape.push_back(shape[i]);
+    for (int64_t i = 0; i < ind; ++i) out_shape.push_back(shape[i]);
+
+    return tenzor::reshape(inv_mat, out_shape);
+}
+
+auto tensorsolve(const Tensor& A, const Tensor& B) -> Tensor {
+    auto a_shape = A.shape();
+    auto b_shape = B.shape();
+    auto a_ndim = static_cast<int64_t>(a_shape.size());
+    auto b_ndim = static_cast<int64_t>(b_shape.size());
+
+    // The number of "B dimensions" is b_ndim. The A tensor must have shape
+    // (*B.shape, *x_shape) where prod(x_shape) == prod(B.shape).
+    // We flatten A into a 2D matrix [prod(B.shape), prod(x_shape)] and solve.
+    int64_t rhs_size = 1;
+    for (int64_t i = 0; i < b_ndim; ++i) rhs_size *= b_shape[i];
+
+    int64_t total = 1;
+    for (int64_t i = 0; i < a_ndim; ++i) total *= a_shape[i];
+    int64_t lhs_size = total / rhs_size;
+
+    if (rhs_size != lhs_size) {
+        throw std::invalid_argument(
+            "linalg::tensorsolve: the dimensions of A do not form a square system "
+            "(rhs_size=" + std::to_string(rhs_size) +
+            ", lhs_size=" + std::to_string(lhs_size) + ")");
+    }
+
+    auto A_2d = tenzor::reshape(A, {rhs_size, lhs_size});
+    auto B_flat = tenzor::reshape(B, {rhs_size});
+    // solve expects (..., N, K) for B, so unsqueeze to column vector
+    auto B_col = tenzor::unsqueeze(B_flat, -1);
+    auto X_col = solve(A_2d, B_col);
+    auto X_flat = tenzor::squeeze(X_col, -1);
+
+    // Reshape X back to x_shape (the trailing dims of A after b_ndim dims)
+    std::vector<int64_t> x_shape;
+    for (int64_t i = b_ndim; i < a_ndim; ++i) x_shape.push_back(a_shape[i]);
+    if (x_shape.empty()) {
+        return X_flat;
+    }
+    return tenzor::reshape(X_flat, x_shape);
+}
+
+auto ormqr(const Tensor& input, const Tensor& tau, const Tensor& other,
+           bool left, bool transpose) -> Tensor {
+    // Try GPU dispatch first
+    {
+        Tensor result;
+        std::array<Tensor, 3> inputs = {input, tau, other};
+        OpAttributes attrs;
+        attrs.set(AttrKey::Left, left);
+        attrs.set(AttrKey::TransposeQ, transpose);
+        if (try_gpu_dispatch(OpId::Ormqr, inputs, attrs, result)) return result;
+    }
+
+#if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
+    throw_no_lapack("ormqr");
+#else
+    auto original_dtype = input.dtype();
+    auto work_input = prepare_matrix(input);
+    auto work_tau = (needs_upcast(tau.dtype()) ? tau.to(DType::Float32) : tau).contiguous();
+    auto work_other = prepare_matrix(other);
+
+    auto in_shape = input.shape();
+    auto other_shape = other.shape();
+    auto in_ndim = static_cast<int64_t>(in_shape.size());
+    auto other_ndim = static_cast<int64_t>(other_shape.size());
+    if (in_ndim < 2)
+        throw std::invalid_argument("linalg::ormqr: input must be at least 2D");
+    if (other_ndim < 2)
+        throw std::invalid_argument("linalg::ormqr: other must be at least 2D");
+
+    int64_t m = other_shape[other_ndim - 2];
+    int64_t n_cols = other_shape[other_ndim - 1];
+    int64_t k = tau.shape()[static_cast<int64_t>(tau.shape().size()) - 1];
+    int64_t nbatch = batch_size(work_other);
+
+    char side = left ? 'L' : 'R';
+    char trans = transpose ? 'T' : 'N';
+
+    if (work_input.dtype() == DType::Float32) {
+        const float* in_data = work_input.data<float>();
+        const float* tau_data = work_tau.data<float>();
+        float* other_data = work_other.data<float>();
+
+        auto lm = static_cast<lapack_int>(m);
+        auto ln = static_cast<lapack_int>(n_cols);
+        auto lk = static_cast<lapack_int>(k);
+
+        int64_t in_m = in_shape[in_ndim - 2];
+        int64_t in_n = in_shape[in_ndim - 1];
+
+        for (int64_t b = 0; b < nbatch; ++b) {
+            const float* in_mat = in_data + b * in_m * in_n;
+            const float* tau_ptr = tau_data + b * k;
+            float* other_mat = other_data + b * m * n_cols;
+
+            // LAPACKE_sormqr modifies other in-place
+            lapack_int lda = static_cast<lapack_int>(in_n);
+            lapack_int ldc = static_cast<lapack_int>(n_cols);
+            lapack_int info = LAPACKE_sormqr(LAPACK_ROW_MAJOR, side, trans,
+                lm, ln, lk,
+                const_cast<float*>(in_mat), lda,
+                const_cast<float*>(tau_ptr),
+                other_mat, ldc);
+            if (info != 0)
+                throw std::runtime_error("linalg::ormqr: sormqr failed (info=" +
+                    std::to_string(info) + ")");
+        }
+    } else {
+        const double* in_data = work_input.data<double>();
+        const double* tau_data = work_tau.data<double>();
+        double* other_data = work_other.data<double>();
+
+        auto lm = static_cast<lapack_int>(m);
+        auto ln = static_cast<lapack_int>(n_cols);
+        auto lk = static_cast<lapack_int>(k);
+
+        int64_t in_m = in_shape[in_ndim - 2];
+        int64_t in_n = in_shape[in_ndim - 1];
+
+        for (int64_t b = 0; b < nbatch; ++b) {
+            const double* in_mat = in_data + b * in_m * in_n;
+            const double* tau_ptr = tau_data + b * k;
+            double* other_mat = other_data + b * m * n_cols;
+
+            lapack_int lda = static_cast<lapack_int>(in_n);
+            lapack_int ldc = static_cast<lapack_int>(n_cols);
+            lapack_int info = LAPACKE_dormqr(LAPACK_ROW_MAJOR, side, trans,
+                lm, ln, lk,
+                const_cast<double*>(in_mat), lda,
+                const_cast<double*>(tau_ptr),
+                other_mat, ldc);
+            if (info != 0)
+                throw std::runtime_error("linalg::ormqr: dormqr failed (info=" +
+                    std::to_string(info) + ")");
+        }
+    }
+
+    return maybe_downcast(work_other, original_dtype);
+#endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
+}
+
+auto geqrf(const Tensor& input) -> std::tuple<Tensor, Tensor> {
+    // Try GPU dispatch first
+    {
+        std::vector<Tensor> results;
+        std::array<Tensor, 1> inputs = {input};
+        if (try_gpu_dispatch_multi(OpId::Geqrf, inputs, {}, results)) {
+            return {results[0], results[1]};
+        }
+    }
+
+#if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
+    throw_no_lapack("geqrf");
+#else
+    auto original_dtype = input.dtype();
+    auto work = prepare_matrix(input);
+    auto shape = input.shape();
+    auto ndim = static_cast<int64_t>(shape.size());
+    if (ndim < 2)
+        throw std::invalid_argument("linalg::geqrf: input must be at least 2D");
+
+    int64_t m = shape[ndim - 2];
+    int64_t n_cols = shape[ndim - 1];
+    int64_t k = std::min(m, n_cols);
+    int64_t nbatch = batch_size(work);
+
+    // tau shape: batch_dims + {k}
+    std::vector<int64_t> batch_dims;
+    for (size_t i = 0; i + 2 < shape.size(); ++i) batch_dims.push_back(shape[i]);
+    std::vector<int64_t> tau_shape = batch_dims;
+    tau_shape.push_back(k);
+
+    auto tau_result = tenzor::zeros(tau_shape, work.dtype(), Device::cpu());
+
+    if (work.dtype() == DType::Float32) {
+        float* a_data = work.data<float>();
+        float* tau_data = tau_result.data<float>();
+
+        auto lm = static_cast<lapack_int>(m);
+        auto ln = static_cast<lapack_int>(n_cols);
+
+        for (int64_t b = 0; b < nbatch; ++b) {
+            float* a_mat = a_data + b * m * n_cols;
+            float* tau_ptr = tau_data + b * k;
+
+            lapack_int info = LAPACKE_sgeqrf(LAPACK_ROW_MAJOR, lm, ln, a_mat, ln, tau_ptr);
+            if (info != 0)
+                throw std::runtime_error("linalg::geqrf: sgeqrf failed (info=" +
+                    std::to_string(info) + ")");
+        }
+    } else {
+        double* a_data = work.data<double>();
+        double* tau_data = tau_result.data<double>();
+
+        auto lm = static_cast<lapack_int>(m);
+        auto ln = static_cast<lapack_int>(n_cols);
+
+        for (int64_t b = 0; b < nbatch; ++b) {
+            double* a_mat = a_data + b * m * n_cols;
+            double* tau_ptr = tau_data + b * k;
+
+            lapack_int info = LAPACKE_dgeqrf(LAPACK_ROW_MAJOR, lm, ln, a_mat, ln, tau_ptr);
+            if (info != 0)
+                throw std::runtime_error("linalg::geqrf: dgeqrf failed (info=" +
+                    std::to_string(info) + ")");
+        }
+    }
+
+    return {maybe_downcast(work, original_dtype), maybe_downcast(tau_result, original_dtype)};
+#endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
+}
+
 } // namespace tenzor::linalg

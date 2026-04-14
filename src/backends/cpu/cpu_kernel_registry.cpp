@@ -159,6 +159,13 @@ namespace cpu {
     auto nanvar_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction) -> Tensor;
     auto nanstd_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction) -> Tensor;
 
+    // Numerical integration / gradient / distance kernels
+    auto trapezoid_kernel(const Tensor& y, int64_t dim, double dx, const Tensor* x_ptr) -> Tensor;
+    auto cumulative_trapezoid_kernel(const Tensor& y, int64_t dim, double dx, const Tensor* x_ptr) -> Tensor;
+    auto gradient_kernel(const Tensor& input, int64_t dim, double spacing) -> Tensor;
+    auto pairwise_distance_kernel(const Tensor& x1, const Tensor& x2, double p) -> Tensor;
+    auto pdist_kernel(const Tensor& input, double p) -> Tensor;
+
     auto logical_and_kernel(const Tensor& a, const Tensor& b) -> Tensor;
     auto logical_or_kernel(const Tensor& a, const Tensor& b) -> Tensor;
     auto logical_not_kernel(const Tensor& input) -> Tensor;
@@ -491,6 +498,8 @@ namespace cpu {
     auto unique_consecutive_kernel(const Tensor& input, bool return_inverse,
                                    bool return_counts)
         -> std::tuple<Tensor, Tensor, Tensor>;
+    auto segment_reduce_kernel(const Tensor& data, const Tensor& offsets,
+                               const std::string& reduce, int64_t axis) -> Tensor;
 
     // RMSNorm operations
     auto fused_rms_norm_kernel(const Tensor& input, const Tensor& weight, float eps)
@@ -2510,6 +2519,12 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{unique_vals, inverse, counts};
     });
 
+    table.register_single_output_kernel(OpId::SegmentReduce, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t axis = attrs.get_int(AttrKey::Dim, 0);
+        std::string reduce = std::string(attrs.get_string(AttrKey::Reduction, "sum"));
+        return cpu::segment_reduce_kernel(inputs[0], inputs[1], reduce, axis);
+    });
+
     // =========================================================================
     // RMSNorm Operations
     // =========================================================================
@@ -3002,6 +3017,39 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     });
 
     // =========================================================================
+    // Trapezoid / Cumulative Trapezoid / Gradient / PairwiseDistance / Pdist
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Trapezoid, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        double dx = attrs.get_float(AttrKey::Dx, 1.0);
+        const Tensor* x_ptr = (inputs.size() > 1) ? &inputs[1] : nullptr;
+        return cpu::trapezoid_kernel(inputs[0], dim, dx, x_ptr);
+    });
+
+    table.register_single_output_kernel(OpId::CumulativeTrapezoid, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        double dx = attrs.get_float(AttrKey::Dx, 1.0);
+        const Tensor* x_ptr = (inputs.size() > 1) ? &inputs[1] : nullptr;
+        return cpu::cumulative_trapezoid_kernel(inputs[0], dim, dx, x_ptr);
+    });
+
+    table.register_single_output_kernel(OpId::NumericalGradient, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        double spacing = attrs.get_float(AttrKey::Spacing, 1.0);
+        return cpu::gradient_kernel(inputs[0], dim, spacing);
+    });
+
+    table.register_single_output_kernel(OpId::PairwiseDistance, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        double p = attrs.get_float(AttrKey::DistP, 2.0);
+        return cpu::pairwise_distance_kernel(inputs[0], inputs[1], p);
+    });
+
+    table.register_single_output_kernel(OpId::Pdist, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        double p = attrs.get_float(AttrKey::DistP, 2.0);
+        return cpu::pdist_kernel(inputs[0], p);
+    });
+
+    // =========================================================================
     // Multinomial / Bernoulli
     // =========================================================================
     table.register_single_output_kernel(OpId::Multinomial, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -3016,6 +3064,14 @@ void register_cpu_kernels(BackendDispatchTable& table) {
 
     table.register_single_output_kernel(OpId::PoissonSample, [](std::span<const Tensor> inputs, [[maybe_unused]] const OpAttributes& attrs) -> Tensor {
         return cpu::poisson_sample_kernel(inputs[0]);
+    });
+
+    table.register_single_output_kernel(OpId::NormalSample, [](std::span<const Tensor> inputs, [[maybe_unused]] const OpAttributes& attrs) -> Tensor {
+        return cpu::normal_sample_kernel(inputs[0], inputs[1]);
+    });
+
+    table.register_single_output_kernel(OpId::ExponentialSample, [](std::span<const Tensor> inputs, [[maybe_unused]] const OpAttributes& attrs) -> Tensor {
+        return cpu::exponential_sample_kernel(inputs[0]);
     });
 
     // =========================================================================
@@ -3632,6 +3688,28 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
             const Tensor* bias = (inputs.size() > 3) ? &inputs[3] : nullptr;
             return {cpu::nested_linear_kernel(inputs[0], inputs[2], bias)};
+        });
+
+    // =========================================================================
+    // ComplexTensor, Ormqr, Geqrf CPU kernel registrations
+    // =========================================================================
+
+    table.register_single_output_kernel(OpId::ComplexTensor,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return tenzor::complex(inputs[0], inputs[1]);
+        });
+
+    table.register_single_output_kernel(OpId::Ormqr,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            bool left = attrs.get_bool(AttrKey::Left, true);
+            bool transpose = attrs.get_bool(AttrKey::TransposeQ, false);
+            return linalg::ormqr(inputs[0], inputs[1], inputs[2], left, transpose);
+        });
+
+    table.register_kernel(OpId::Geqrf,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            auto [result, tau] = linalg::geqrf(inputs[0]);
+            return {result, tau};
         });
 }
 

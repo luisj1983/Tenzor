@@ -1,0 +1,88 @@
+#version 450
+
+// SegmentReduce — one workgroup per segment
+// Reduces elements within each segment according to mode.
+// Push constants encode the reduce mode:
+//   0 = sum, 1 = mean, 2 = max, 3 = min, 4 = prod
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Data    { float data_buf[]; };
+layout(binding = 1) readonly buffer Offsets { int   offsets_buf[]; };
+layout(binding = 2)          buffer Output  { float output_buf[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_segments;
+    uint reduce_mode;    // 0=sum, 1=mean, 2=max, 3=min, 4=prod
+    uint outer_size;
+    uint axis_size;
+    uint inner_size;
+} params;
+
+shared float sdata[256];  // Shared memory for workgroup reduction
+
+void main() {
+    uint wg_id = gl_WorkGroupID.x;
+    uint lid = gl_LocalInvocationID.x;
+    uint wg_size = gl_WorkGroupSize.x;
+
+    uint total_work = params.outer_size * params.num_segments * params.inner_size;
+    if (wg_id >= total_work) return;
+
+    uint inner = wg_id % params.inner_size;
+    uint seg   = (wg_id / params.inner_size) % params.num_segments;
+    uint outer = wg_id / (params.inner_size * params.num_segments);
+
+    int seg_start = offsets_buf[seg];
+    int seg_end   = offsets_buf[seg + 1];
+    int seg_len   = seg_end - seg_start;
+
+    // Identity value for this reduction mode
+    float identity;
+    if (params.reduce_mode == 0u || params.reduce_mode == 1u) identity = 0.0;
+    else if (params.reduce_mode == 4u) identity = 1.0;
+    else if (params.reduce_mode == 2u) identity = -3.4028235e+38;  // -FLT_MAX
+    else identity = 3.4028235e+38;  // FLT_MAX
+
+    // Each thread accumulates elements with stride = wg_size
+    float acc = identity;
+    for (int i = int(lid); i < seg_len; i += int(wg_size)) {
+        int d = seg_start + i;
+        uint in_idx = (outer * params.axis_size + uint(d)) * params.inner_size + inner;
+        float val = data_buf[in_idx];
+
+        if (params.reduce_mode == 0u || params.reduce_mode == 1u) acc += val;
+        else if (params.reduce_mode == 4u) acc *= val;
+        else if (params.reduce_mode == 2u) acc = max(acc, val);
+        else acc = min(acc, val);
+    }
+
+    sdata[lid] = acc;
+    barrier();
+
+    // Tree reduction in shared memory
+    for (uint s = wg_size / 2u; s > 0u; s >>= 1u) {
+        if (lid < s) {
+            if (params.reduce_mode == 0u || params.reduce_mode == 1u)
+                sdata[lid] += sdata[lid + s];
+            else if (params.reduce_mode == 4u)
+                sdata[lid] *= sdata[lid + s];
+            else if (params.reduce_mode == 2u)
+                sdata[lid] = max(sdata[lid], sdata[lid + s]);
+            else
+                sdata[lid] = min(sdata[lid], sdata[lid + s]);
+        }
+        barrier();
+    }
+
+    if (lid == 0u) {
+        float result = sdata[0];
+        if (params.reduce_mode == 1u && seg_len > 0) {
+            result /= float(seg_len);
+        }
+        if (seg_len == 0) {
+            result = (params.reduce_mode == 0u || params.reduce_mode == 1u) ? 0.0 : identity;
+        }
+        uint out_idx = (outer * params.num_segments + seg) * params.inner_size + inner;
+        output_buf[out_idx] = result;
+    }
+}

@@ -1,0 +1,37 @@
+#version 450
+
+// Trapezoidal integration along a flattened dimension.
+// Input y is logically (outer, n, inner), output is (outer, inner).
+// If has_x == 1, non-uniform spacing from x buffer; else uniform dx.
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer YBuf   { float y_data[]; };
+layout(binding = 1) buffer XBuf   { float x_data[]; };
+layout(binding = 2) buffer OutBuf { float out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint outer;
+    uint inner;
+    uint n;
+    uint total;    // outer * inner
+    float dx;
+    uint has_x;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.total) return;
+
+    uint o = idx / params.inner;
+    uint i_inner = idx % params.inner;
+
+    float sum = 0.0;
+    for (uint k = 0; k < params.n - 1; ++k) {
+        uint idx_k  = (o * params.n + k) * params.inner + i_inner;
+        uint idx_k1 = (o * params.n + k + 1) * params.inner + i_inner;
+        float h = (params.has_x != 0) ? (x_data[idx_k1] - x_data[idx_k]) : params.dx;
+        sum += 0.5 * (y_data[idx_k] + y_data[idx_k1]) * h;
+    }
+    out_data[idx] = sum;
+}

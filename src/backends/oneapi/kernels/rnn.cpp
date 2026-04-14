@@ -95,11 +95,17 @@ auto lstm_forward_kernel(
     // For simplicity, compute gates = x @ W_ih^T + h @ W_hh^T + bias
     // matmul_kernel does (M,K) @ (K,N), but W_ih is (4H, I), so we use the transpose
 
-    // Combine biases
-    bool has_bias = (bias_ih.numel() > 0);
+    // Combine biases (handle case where one may be empty)
+    bool has_bias_ih = (bias_ih.numel() > 0);
+    bool has_bias_hh = (bias_hh.numel() > 0);
+    bool has_bias = has_bias_ih || has_bias_hh;
     Tensor combined_bias;
-    if (has_bias) {
+    if (has_bias_ih && has_bias_hh) {
         combined_bias = add_kernel(bias_ih, bias_hh, queue);
+    } else if (has_bias_ih) {
+        combined_bias = bias_ih.contiguous();
+    } else if (has_bias_hh) {
+        combined_bias = bias_hh.contiguous();
     }
 
     Tensor output({seq_len, batch_size, hidden_size}, input.dtype(), input.device());

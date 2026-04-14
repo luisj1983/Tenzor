@@ -1384,5 +1384,134 @@ auto unique_consecutive_kernel(const Tensor& input, bool return_inverse,
     }
 }
 
+// ============================================================================
+// SegmentReduce — reduce over segments defined by offsets
+// ============================================================================
+
+template<typename T>
+static auto segment_reduce_impl(const T* data, const int64_t* offsets,
+                                 int64_t num_segments, int64_t outer_size,
+                                 int64_t axis_size, int64_t inner_size,
+                                 const std::string& reduce, DType dtype, Device device) -> Tensor {
+    // Output shape: same as input but axis dimension is num_segments
+    // Layout: [outer, num_segments, inner]
+    int64_t out_numel = outer_size * num_segments * inner_size;
+    // We'll build the output shape later; for now allocate flat
+    Tensor output({out_numel}, dtype, device);
+    T* out_ptr = output.data<T>();
+
+    // Determine identity values for each reduce mode
+    auto identity = [&]() -> T {
+        if (reduce == "sum" || reduce == "mean") return T(0);
+        if (reduce == "prod") return T(1);
+        if (reduce == "max") return std::numeric_limits<T>::lowest();
+        if (reduce == "min") return std::numeric_limits<T>::max();
+        return T(0);
+    }();
+
+    // Initialize output with identity
+    for (int64_t i = 0; i < out_numel; ++i) {
+        out_ptr[i] = identity;
+    }
+
+    #pragma omp parallel for collapse(2) if(outer_size * num_segments > 64)
+    for (int64_t outer = 0; outer < outer_size; ++outer) {
+        for (int64_t seg = 0; seg < num_segments; ++seg) {
+            int64_t seg_start = offsets[seg];
+            int64_t seg_end = offsets[seg + 1];
+            int64_t seg_len = seg_end - seg_start;
+            if (seg_len <= 0) continue;
+
+            for (int64_t inner = 0; inner < inner_size; ++inner) {
+                int64_t out_idx = (outer * num_segments + seg) * inner_size + inner;
+                T acc = identity;
+
+                for (int64_t d = seg_start; d < seg_end; ++d) {
+                    int64_t in_idx = (outer * axis_size + d) * inner_size + inner;
+                    T val = data[in_idx];
+                    if (reduce == "sum" || reduce == "mean") {
+                        acc += val;
+                    } else if (reduce == "prod") {
+                        acc *= val;
+                    } else if (reduce == "max") {
+                        acc = acc > val ? acc : val;
+                    } else if (reduce == "min") {
+                        acc = acc < val ? acc : val;
+                    }
+                }
+
+                if (reduce == "mean" && seg_len > 0) {
+                    acc /= static_cast<T>(seg_len);
+                }
+
+                out_ptr[out_idx] = acc;
+            }
+        }
+    }
+
+    return output;
+}
+
+auto segment_reduce_kernel(const Tensor& data, const Tensor& offsets,
+                           const std::string& reduce, int64_t axis) -> Tensor {
+    auto cont = data.is_contiguous() ? data : data.contiguous();
+    auto offs = offsets.is_contiguous() ? offsets : offsets.contiguous();
+
+    int64_t ndim = cont.ndim();
+    if (axis < 0) axis += ndim;
+    if (axis < 0 || axis >= ndim) {
+        throw std::runtime_error("segment_reduce: axis out of range");
+    }
+
+    const auto& shape = cont.shape();
+    int64_t axis_size = shape[axis];
+    int64_t num_segments = offs.numel() - 1;
+
+    // Compute outer and inner sizes
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < axis; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
+    for (int64_t i = axis + 1; i < ndim; ++i) inner_size *= shape[i];
+
+    const int64_t* offsets_ptr = offs.data<int64_t>();
+    auto dtype = cont.dtype();
+    auto device = cont.device();
+
+    Tensor result;
+    if (dtype == DType::Float32) {
+        result = segment_reduce_impl(cont.data<float>(), offsets_ptr, num_segments,
+                                      outer_size, axis_size, inner_size, reduce, dtype, device);
+    } else if (dtype == DType::Float64) {
+        result = segment_reduce_impl(cont.data<double>(), offsets_ptr, num_segments,
+                                      outer_size, axis_size, inner_size, reduce, dtype, device);
+    } else if (dtype == DType::Int32) {
+        result = segment_reduce_impl(cont.data<int32_t>(), offsets_ptr, num_segments,
+                                      outer_size, axis_size, inner_size, reduce, dtype, device);
+    } else if (dtype == DType::Int64) {
+        result = segment_reduce_impl(cont.data<int64_t>(), offsets_ptr, num_segments,
+                                      outer_size, axis_size, inner_size, reduce, dtype, device);
+    } else if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        DType orig = dtype;
+        Tensor cont_f32 = cont.to(DType::Float32);
+        auto res_f32 = segment_reduce_impl(cont_f32.data<float>(), offsets_ptr, num_segments,
+                                            outer_size, axis_size, inner_size, reduce,
+                                            DType::Float32, device);
+        result = res_f32.to(orig);
+    } else {
+        throw std::runtime_error("segment_reduce: unsupported dtype");
+    }
+
+    // Reshape to the correct output shape
+    std::vector<int64_t> out_shape;
+    for (int64_t i = 0; i < ndim; ++i) {
+        if (i == axis) {
+            out_shape.push_back(num_segments);
+        } else {
+            out_shape.push_back(shape[i]);
+        }
+    }
+    return result.reshape(out_shape);
+}
+
 } // namespace cpu
 } // namespace tenzor

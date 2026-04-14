@@ -970,11 +970,20 @@ auto linalg_eig_kernel(const Tensor& input, sycl::queue& queue) -> std::tuple<Te
     auto input_flat = A.reshape({A.numel()});
     auto norm_input = ::tenzor::sum(input_flat * input_flat, std::optional<int64_t>{}, false);
 
-    // Read scalars to check (minimal 2-float readback)
-    float nd = norm_diff.to(Device::cpu()).data<float>()[0];
-    float ni = norm_input.to(Device::cpu()).data<float>()[0];
+    // Compute symmetry check on device, read single boolean result
+    Tensor is_sym_tensor({1}, DType::Int32, A.device());
+    {
+        const float* nd_ptr = get_data_ptr<const float>(norm_diff);
+        const float* ni_ptr = get_data_ptr<const float>(norm_input);
+        int32_t* sym_ptr = get_data_ptr<int32_t>(is_sym_tensor);
+        queue.single_task([=]() {
+            sym_ptr[0] = (ni_ptr[0] > 0.0f && nd_ptr[0] / ni_ptr[0] < 1e-6f) ? 1 : 0;
+        }).wait();
+    }
+    int32_t is_symmetric = 0;
+    queue.memcpy(&is_symmetric, get_data_ptr<const int32_t>(is_sym_tensor), sizeof(int32_t)).wait();
 
-    if (ni > 0 && nd / ni < 1e-6f) {
+    if (is_symmetric) {
         // Symmetric — use eigh (available via syevd in oneMKL)
         auto [eigenvalues, eigenvectors] = linalg_eigh_kernel(A, queue);
         auto WI = zeros(w_shape, A.dtype(), A.device());

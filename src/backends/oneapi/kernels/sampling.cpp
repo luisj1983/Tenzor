@@ -32,6 +32,11 @@ struct HistogramKernelTag {};
 struct HistogramFillEdgesTag {};
 struct HistogramMinMaxTag {};
 struct CDistKernelTag {};
+struct TrapezoidKernelTag {};
+struct CumulativeTrapezoidKernelTag {};
+struct GradientKernelTag {};
+struct PairwiseDistKernelTag {};
+struct PdistKernelTag {};
 
 }  // namespace
 
@@ -342,6 +347,335 @@ auto poisson_sample_kernel(const Tensor& rates, sycl::queue& queue) -> Tensor {
         } while (p > L && k < 1000000);  // guard against infinite loop for huge lambda
 
         out_ptr[i] = k - 1;
+    });
+    queue.wait();
+    return result;
+}
+
+// =========================================================================
+// Normal sampling (Box-Muller transform per work-item)
+// =========================================================================
+
+namespace {
+struct NormalSampleKernelTag {};
+}  // namespace
+
+auto normal_sample_kernel(const Tensor& mean, const Tensor& stddev, sycl::queue& queue) -> Tensor {
+    auto m = mean.contiguous();
+    auto s = stddev.contiguous();
+    if (m.dtype() != DType::Float32) m = m.to(DType::Float32);
+    if (s.dtype() != DType::Float32) s = s.to(DType::Float32);
+
+    std::vector<int64_t> shape(m.shape().begin(), m.shape().end());
+    Tensor result(shape, DType::Float32, m.device());
+    int64_t n = m.numel();
+    if (n == 0) return result;
+
+    const float* mean_ptr = get_data_ptr<const float>(m);
+    const float* std_ptr = get_data_ptr<const float>(s);
+    float* out_ptr = get_data_ptr<float>(result);
+    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+
+    queue.parallel_for<NormalSampleKernelTag>(sycl::range<1>(n), [=](sycl::id<1> idx_) {
+        int64_t i = static_cast<int64_t>(idx_);
+
+        uint64_t state = seed + static_cast<uint64_t>(i) * 6364136223846793005ULL + 1442695040888963407ULL;
+
+        // Generate two uniforms for Box-Muller
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        float u1 = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+        u1 = sycl::fmax(u1, 1.0e-7f);  // Clamp away from zero
+
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        float u2 = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+
+        // Box-Muller transform
+        float z = sycl::sqrt(-2.0f * sycl::log(u1)) *
+                  sycl::cos(2.0f * 3.14159265358979323846f * u2);
+
+        out_ptr[i] = mean_ptr[i] + std_ptr[i] * z;
+    });
+    queue.wait();
+    return result;
+}
+
+// =========================================================================
+// Exponential sampling (inverse CDF per work-item)
+// =========================================================================
+
+namespace {
+struct ExponentialSampleKernelTag {};
+}  // namespace
+
+auto exponential_sample_kernel(const Tensor& rate, sycl::queue& queue) -> Tensor {
+    auto input = rate.contiguous();
+    if (input.dtype() != DType::Float32) input = input.to(DType::Float32);
+
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, DType::Float32, input.device());
+    int64_t n = input.numel();
+    if (n == 0) return result;
+
+    const float* rate_ptr = get_data_ptr<const float>(input);
+    float* out_ptr = get_data_ptr<float>(result);
+    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+
+    queue.parallel_for<ExponentialSampleKernelTag>(sycl::range<1>(n), [=](sycl::id<1> idx_) {
+        int64_t i = static_cast<int64_t>(idx_);
+
+        uint64_t state = seed + static_cast<uint64_t>(i) * 6364136223846793005ULL + 1442695040888963407ULL;
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+        u = sycl::fmin(u, 1.0f - 1.0e-7f);  // Clamp away from 1.0
+
+        // Inverse CDF: -log(1 - u) / rate
+        out_ptr[i] = -sycl::log(1.0f - u) / rate_ptr[i];
+    });
+    queue.wait();
+    return result;
+}
+
+// =========================================================================
+// Trapezoid integration
+// =========================================================================
+
+auto trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
+                       const Tensor* x_ptr, sycl::queue& queue) -> Tensor {
+    Tensor yf = (y.dtype() == DType::Float32) ? y.contiguous() : y.contiguous().to(DType::Float32);
+    auto shape = yf.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    int64_t n = shape[dim];
+
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < dim; d++) outer *= shape[d];
+    for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
+
+    std::vector<int64_t> out_shape;
+    for (int64_t d = 0; d < ndim; d++) {
+        if (d != dim) out_shape.push_back(shape[d]);
+    }
+    if (out_shape.empty()) out_shape.push_back(1);
+
+    Tensor result(out_shape, DType::Float32, y.device());
+    int64_t total = outer * inner;
+    if (n < 2 || total == 0) return result;
+
+    const float* y_ptr = get_data_ptr<const float>(yf);
+    float* out_ptr = get_data_ptr<float>(result);
+    bool has_x = x_ptr != nullptr;
+    Tensor xf;
+    const float* xd = nullptr;
+    if (has_x) {
+        xf = (x_ptr->dtype() == DType::Float32) ? x_ptr->contiguous() : x_ptr->contiguous().to(DType::Float32);
+        xd = get_data_ptr<const float>(xf);
+    }
+
+    float dx_f = static_cast<float>(dx);
+    int64_t n_val = n, inner_val = inner;
+
+    queue.parallel_for<TrapezoidKernelTag>(sycl::range<1>(total), [=](sycl::id<1> id) {
+        int64_t idx = id[0];
+        int64_t o = idx / inner_val;
+        int64_t i_inner = idx % inner_val;
+
+        float sum = 0.0f;
+        for (int64_t k = 0; k < n_val - 1; k++) {
+            int64_t idx_k  = (o * n_val + k) * inner_val + i_inner;
+            int64_t idx_k1 = (o * n_val + k + 1) * inner_val + i_inner;
+            float h = has_x ? (xd[idx_k1] - xd[idx_k]) : dx_f;
+            sum += 0.5f * (y_ptr[idx_k] + y_ptr[idx_k1]) * h;
+        }
+        out_ptr[idx] = sum;
+    });
+    queue.wait();
+    return result;
+}
+
+// =========================================================================
+// Cumulative trapezoid integration
+// =========================================================================
+
+auto cumulative_trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
+                                  const Tensor* x_ptr, sycl::queue& queue) -> Tensor {
+    Tensor yf = (y.dtype() == DType::Float32) ? y.contiguous() : y.contiguous().to(DType::Float32);
+    auto shape = yf.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    int64_t n = shape[dim];
+
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < dim; d++) outer *= shape[d];
+    for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
+
+    std::vector<int64_t> out_shape(shape.begin(), shape.end());
+    out_shape[dim] = (n < 2) ? 0 : n - 1;
+    Tensor result(out_shape, DType::Float32, y.device());
+    int64_t total = outer * inner;
+    if (n < 2 || total == 0) return result;
+
+    const float* y_ptr = get_data_ptr<const float>(yf);
+    float* out_ptr = get_data_ptr<float>(result);
+    bool has_x = x_ptr != nullptr;
+    Tensor xf;
+    const float* xd = nullptr;
+    if (has_x) {
+        xf = (x_ptr->dtype() == DType::Float32) ? x_ptr->contiguous() : x_ptr->contiguous().to(DType::Float32);
+        xd = get_data_ptr<const float>(xf);
+    }
+
+    float dx_f = static_cast<float>(dx);
+    int64_t n_val = n, inner_val = inner;
+
+    queue.parallel_for<CumulativeTrapezoidKernelTag>(sycl::range<1>(total), [=](sycl::id<1> id) {
+        int64_t idx = id[0];
+        int64_t o = idx / inner_val;
+        int64_t i_inner = idx % inner_val;
+
+        float cumsum = 0.0f;
+        for (int64_t k = 0; k < n_val - 1; k++) {
+            int64_t idx_k  = (o * n_val + k) * inner_val + i_inner;
+            int64_t idx_k1 = (o * n_val + k + 1) * inner_val + i_inner;
+            float h = has_x ? (xd[idx_k1] - xd[idx_k]) : dx_f;
+            cumsum += 0.5f * (y_ptr[idx_k] + y_ptr[idx_k1]) * h;
+            out_ptr[(o * (n_val - 1) + k) * inner_val + i_inner] = cumsum;
+        }
+    });
+    queue.wait();
+    return result;
+}
+
+// =========================================================================
+// Numerical gradient (central differences)
+// =========================================================================
+
+auto gradient_kernel(const Tensor& input, int64_t dim, double spacing,
+                      sycl::queue& queue) -> Tensor {
+    Tensor inf = (input.dtype() == DType::Float32) ? input.contiguous() : input.contiguous().to(DType::Float32);
+    auto shape = inf.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    int64_t n = shape[dim];
+
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < dim; d++) outer *= shape[d];
+    for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
+
+    Tensor result(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32, input.device());
+    int64_t total = outer * inner;
+    if (n < 2 || total == 0) return result;
+
+    const float* in_ptr = get_data_ptr<const float>(inf);
+    float* out_ptr = get_data_ptr<float>(result);
+    float h = static_cast<float>(spacing);
+    int64_t n_val = n, inner_val = inner;
+
+    queue.parallel_for<GradientKernelTag>(sycl::range<1>(total), [=](sycl::id<1> id) {
+        int64_t idx = id[0];
+        int64_t o = idx / inner_val;
+        int64_t i_inner = idx % inner_val;
+
+        auto at = [&](int64_t k) -> float {
+            return in_ptr[(o * n_val + k) * inner_val + i_inner];
+        };
+
+        out_ptr[(o * n_val + 0) * inner_val + i_inner] = (at(1) - at(0)) / h;
+        for (int64_t k = 1; k < n_val - 1; k++) {
+            out_ptr[(o * n_val + k) * inner_val + i_inner] = (at(k + 1) - at(k - 1)) / (2.0f * h);
+        }
+        out_ptr[(o * n_val + n_val - 1) * inner_val + i_inner] = (at(n_val - 1) - at(n_val - 2)) / h;
+    });
+    queue.wait();
+    return result;
+}
+
+// =========================================================================
+// Pairwise distance
+// =========================================================================
+
+auto pairwise_distance_kernel(const Tensor& x1, const Tensor& x2, double p,
+                               sycl::queue& queue) -> Tensor {
+    Tensor a = (x1.dtype() == DType::Float32) ? x1.contiguous() : x1.contiguous().to(DType::Float32);
+    Tensor b = (x2.dtype() == DType::Float32) ? x2.contiguous() : x2.contiguous().to(DType::Float32);
+
+    int64_t N = a.shape()[0], D = a.shape()[1];
+    Tensor result({N}, DType::Float32, x1.device());
+    if (N == 0) return result;
+
+    const float* a_ptr = get_data_ptr<const float>(a);
+    const float* b_ptr = get_data_ptr<const float>(b);
+    float* out_ptr = get_data_ptr<float>(result);
+    float p_f = static_cast<float>(p);
+
+    queue.parallel_for<PairwiseDistKernelTag>(sycl::range<1>(N), [=](sycl::id<1> id) {
+        int64_t i = id[0];
+        float sum = 0.0f;
+        if (p_f == 2.0f) {
+            for (int64_t j = 0; j < D; j++) {
+                float diff = a_ptr[i * D + j] - b_ptr[i * D + j];
+                sum += diff * diff;
+            }
+            out_ptr[i] = sycl::sqrt(sum);
+        } else if (p_f == 1.0f) {
+            for (int64_t j = 0; j < D; j++) {
+                sum += sycl::fabs(a_ptr[i * D + j] - b_ptr[i * D + j]);
+            }
+            out_ptr[i] = sum;
+        } else {
+            for (int64_t j = 0; j < D; j++) {
+                sum += sycl::pow(sycl::fabs(a_ptr[i * D + j] - b_ptr[i * D + j]), p_f);
+            }
+            out_ptr[i] = sycl::pow(sum, 1.0f / p_f);
+        }
+    });
+    queue.wait();
+    return result;
+}
+
+// =========================================================================
+// Pdist (all-pairs pairwise distances)
+// =========================================================================
+
+auto pdist_kernel(const Tensor& input, double p, sycl::queue& queue) -> Tensor {
+    Tensor inf = (input.dtype() == DType::Float32) ? input.contiguous() : input.contiguous().to(DType::Float32);
+    int64_t N = inf.shape()[0], D = inf.shape()[1];
+    int64_t num_pairs = N * (N - 1) / 2;
+
+    Tensor result({num_pairs}, DType::Float32, input.device());
+    if (num_pairs == 0) return result;
+
+    const float* data = get_data_ptr<const float>(inf);
+    float* out_ptr = get_data_ptr<float>(result);
+    float p_f = static_cast<float>(p);
+
+    queue.parallel_for<PdistKernelTag>(sycl::range<1>(num_pairs), [=](sycl::id<1> id) {
+        int64_t idx = id[0];
+        // Map flat index to (i, j) pair where i < j
+        int64_t i = 0, offset = 0;
+        while (offset + (N - 1 - i) <= idx) {
+            offset += (N - 1 - i);
+            i++;
+        }
+        int64_t j = idx - offset + i + 1;
+
+        float sum = 0.0f;
+        if (p_f == 2.0f) {
+            for (int64_t d = 0; d < D; d++) {
+                float diff = data[i * D + d] - data[j * D + d];
+                sum += diff * diff;
+            }
+            out_ptr[idx] = sycl::sqrt(sum);
+        } else if (p_f == 1.0f) {
+            for (int64_t d = 0; d < D; d++) {
+                sum += sycl::fabs(data[i * D + d] - data[j * D + d]);
+            }
+            out_ptr[idx] = sum;
+        } else {
+            for (int64_t d = 0; d < D; d++) {
+                sum += sycl::pow(sycl::fabs(data[i * D + d] - data[j * D + d]), p_f);
+            }
+            out_ptr[idx] = sycl::pow(sum, 1.0f / p_f);
+        }
     });
     queue.wait();
     return result;

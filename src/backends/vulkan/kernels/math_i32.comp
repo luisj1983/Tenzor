@@ -67,6 +67,10 @@ void main() {
             result[idx] = (g == 0) ? 0 : (ga / g) * gb;
             break;
         }
+        case 52: { // bitwise_not
+            result[idx] = ~val_a;
+            break;
+        }
         default:
             result[idx] = val_a;
             break;

@@ -173,6 +173,9 @@ auto attr_key_name(AttrKey key) -> std::string_view {
         case AttrKey::NanValue: return "nan_value";
         case AttrKey::PosInfValue: return "pos_inf_value";
         case AttrKey::NegInfValue: return "neg_inf_value";
+        case AttrKey::Left: return "left";
+        case AttrKey::TransposeQ: return "transpose_q";
+        case AttrKey::Ind: return "ind";
         case AttrKey::_Count: return "_count";
     }
     return "unknown";

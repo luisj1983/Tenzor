@@ -235,7 +235,6 @@ namespace cuda {
     auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
                                          bool upper, bool unitriangular,
                                          cudaStream_t stream) -> Tensor;
-
     // FFT operations (cuFFT or native Cooley-Tukey + Bluestein fallback)
     auto cuda_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                          const std::string& norm, cudaStream_t stream) -> Tensor;
@@ -326,6 +325,7 @@ namespace cuda {
     auto nanmedian_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor;
     auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_val, cudaStream_t stream) -> Tensor;
     auto unique_consecutive_kernel(const Tensor& input, bool return_inverse, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
+    auto segment_reduce_kernel(const Tensor& data, const Tensor& offsets, const std::string& reduce, int64_t axis, cudaStream_t stream) -> Tensor;
 
     // Sampling / statistics operations
     auto bernoulli_kernel(const Tensor& probs, cudaStream_t stream) -> Tensor;
@@ -334,12 +334,19 @@ namespace cuda {
     auto bucketize_kernel(const Tensor& input, const Tensor& boundaries, bool right, cudaStream_t stream) -> Tensor;
     auto histogram_kernel(const Tensor& input, int64_t bins, double min_val, double max_val, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
     auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p, cudaStream_t stream) -> Tensor;
+    auto normal_sample_kernel(const Tensor& mean, const Tensor& stddev, cudaStream_t stream) -> Tensor;
+    auto exponential_sample_kernel(const Tensor& rate, cudaStream_t stream) -> Tensor;
+    auto trapezoid_kernel(const Tensor& y, int64_t dim, double dx, const Tensor* x_ptr, cudaStream_t stream) -> Tensor;
+    auto cumulative_trapezoid_kernel(const Tensor& y, int64_t dim, double dx, const Tensor* x_ptr, cudaStream_t stream) -> Tensor;
+    auto gradient_kernel(const Tensor& input, int64_t dim, double spacing, cudaStream_t stream) -> Tensor;
+    auto pairwise_distance_kernel(const Tensor& x1, const Tensor& x2, double p, cudaStream_t stream) -> Tensor;
+    auto pdist_kernel(const Tensor& input, double p, cudaStream_t stream) -> Tensor;
 
-    // Advanced indexing (CPU fallback)
+    // Advanced indexing (native CUDA kernel)
     auto advanced_index_cuda_kernel(const Tensor& src, const std::vector<Tensor>& indices, int64_t num_indices, cudaStream_t stream) -> Tensor;
     auto advanced_index_put_cuda_kernel(const Tensor& src, const std::vector<Tensor>& indices, const Tensor& values, int64_t num_indices, cudaStream_t stream) -> Tensor;
 
-    // STFT/ISTFT (CPU fallback)
+    // STFT/ISTFT (native CUDA framing + cuFFT)
     auto stft_cuda_kernel(const Tensor& input, int64_t n_fft, int64_t hop_length, int64_t win_length, const Tensor& window, bool center, bool normalized, bool onesided, cudaStream_t stream) -> Tensor;
     auto istft_cuda_kernel(const Tensor& input, int64_t n_fft, int64_t hop_length, int64_t win_length, const Tensor& window, bool center, bool normalized, bool onesided, int64_t length, cudaStream_t stream) -> Tensor;
 
@@ -3419,6 +3426,16 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             return cuda::poisson_sample_kernel(inputs[0], get_cuda_stream(attrs));
         });
 
+    table.register_single_output_kernel(OpId::NormalSample,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            return cuda::normal_sample_kernel(inputs[0], inputs[1], get_cuda_stream(attrs));
+        });
+
+    table.register_single_output_kernel(OpId::ExponentialSample,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            return cuda::exponential_sample_kernel(inputs[0], get_cuda_stream(attrs));
+        });
+
     table.register_single_output_kernel(OpId::Multinomial,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t num_samples = attrs.get_int(AttrKey::NumSamples, 1);
@@ -3448,7 +3465,40 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         });
 
     // =========================================================================
-    // Advanced indexing (CPU fallback for complex indexing logic)
+    // Trapezoid / Cumulative Trapezoid / Gradient / PairwiseDistance / Pdist
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Trapezoid, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        double dx = attrs.get_float(AttrKey::Dx, 1.0);
+        const Tensor* x_ptr = (inputs.size() > 1) ? &inputs[1] : nullptr;
+        return cuda::trapezoid_kernel(inputs[0], dim, dx, x_ptr, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::CumulativeTrapezoid, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        double dx = attrs.get_float(AttrKey::Dx, 1.0);
+        const Tensor* x_ptr = (inputs.size() > 1) ? &inputs[1] : nullptr;
+        return cuda::cumulative_trapezoid_kernel(inputs[0], dim, dx, x_ptr, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::NumericalGradient, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        double spacing = attrs.get_float(AttrKey::Spacing, 1.0);
+        return cuda::gradient_kernel(inputs[0], dim, spacing, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::PairwiseDistance, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        double p = attrs.get_float(AttrKey::DistP, 2.0);
+        return cuda::pairwise_distance_kernel(inputs[0], inputs[1], p, get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::Pdist, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        double p = attrs.get_float(AttrKey::DistP, 2.0);
+        return cuda::pdist_kernel(inputs[0], p, get_cuda_stream(attrs));
+    });
+
+    // =========================================================================
+    // Advanced indexing (native CUDA gather/scatter kernel)
     // =========================================================================
     table.register_single_output_kernel(OpId::AdvancedIndex,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -3467,7 +3517,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         });
 
     // =========================================================================
-    // STFT / ISTFT (CPU fallback for signal processing)
+    // STFT / ISTFT (native CUDA implementation)
     // =========================================================================
     table.register_single_output_kernel(OpId::STFT,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -3858,6 +3908,12 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         auto [unique_vals, inverse, counts] = cuda::unique_consecutive_kernel(
             inputs[0], return_inverse, get_cuda_stream(attrs));
         return std::vector<Tensor>{unique_vals, inverse, counts};
+    });
+
+    table.register_single_output_kernel(OpId::SegmentReduce, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t axis = attrs.get_int(AttrKey::Dim, 0);
+        std::string reduce = std::string(attrs.get_string(AttrKey::Reduction, "sum"));
+        return cuda::segment_reduce_kernel(inputs[0], inputs[1], reduce, axis, get_cuda_stream(attrs));
     });
 
     // =========================================================================

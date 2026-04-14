@@ -186,6 +186,7 @@ set(ONEAPI_SYCL_SOURCES
     kernels/linalg.cpp
     kernels/fft.cpp
     kernels/sparse.cpp
+    kernels/nested_attention.cpp
 )
 
 set(ALL_OBJECTS "")

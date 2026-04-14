@@ -1503,6 +1503,11 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     // Triangular solve
     mps_accelerate_single(OpId::SolveTriangular);
 
+    // Ormqr, Geqrf, ComplexTensor
+    mps_accelerate_single(OpId::Ormqr);
+    mps_accelerate_multi(OpId::Geqrf);
+    mps_accelerate_single(OpId::ComplexTensor);
+
     // Special math functions — Accelerate vForce/vvfuncs
     mps_accelerate_single(OpId::Gamma);
     mps_accelerate_single(OpId::Lgamma);

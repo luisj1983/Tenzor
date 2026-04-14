@@ -153,6 +153,8 @@ namespace rocm {
     // Sampling / statistics (native ROCm — replaces previous CPU fallbacks)
     auto bernoulli_kernel(const Tensor& probs, hipStream_t stream) -> Tensor;
     auto poisson_sample_kernel(const Tensor& rates, hipStream_t stream) -> Tensor;
+    auto normal_sample_kernel(const Tensor& mean, const Tensor& stddev, hipStream_t stream) -> Tensor;
+    auto exponential_sample_kernel(const Tensor& rate, hipStream_t stream) -> Tensor;
     auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
                             bool replacement, hipStream_t stream) -> Tensor;
     auto bucketize_kernel(const Tensor& input, const Tensor& boundaries,
@@ -162,6 +164,11 @@ namespace rocm {
                           hipStream_t stream) -> std::pair<Tensor, Tensor>;
     auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
                       hipStream_t stream) -> Tensor;
+    auto trapezoid_kernel(const Tensor& y, int64_t dim, double dx, const Tensor* x_ptr, hipStream_t stream) -> Tensor;
+    auto cumulative_trapezoid_kernel(const Tensor& y, int64_t dim, double dx, const Tensor* x_ptr, hipStream_t stream) -> Tensor;
+    auto gradient_kernel(const Tensor& input, int64_t dim, double spacing, hipStream_t stream) -> Tensor;
+    auto pairwise_distance_kernel(const Tensor& x1, const Tensor& x2, double p, hipStream_t stream) -> Tensor;
+    auto pdist_kernel(const Tensor& input, double p, hipStream_t stream) -> Tensor;
 
     // STFT / ISTFT (native ROCm — replaces previous CPU fallbacks)
     auto stft_kernel(const Tensor& input, int64_t n_fft,
@@ -752,7 +759,6 @@ namespace rocm {
     auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
                                          bool upper, bool unitriangular,
                                          hipStream_t stream) -> Tensor;
-
     // Sparse operations (sparse.hip.cpp) — available with or without rocSPARSE
     auto rocm_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) -> Tensor;
     auto rocm_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) -> Tensor;
@@ -830,6 +836,7 @@ namespace rocm {
     auto nanmedian_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor;
     auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_val, hipStream_t stream) -> Tensor;
     auto unique_consecutive_kernel(const Tensor& input, bool return_inverse, hipStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
+    auto segment_reduce_kernel(const Tensor& data, const Tensor& offsets, const std::string& reduce, int64_t axis, hipStream_t stream) -> Tensor;
 
     // BoxIoU (vision.hip.cpp)
     auto box_iou_hip(const Tensor& boxes1, const Tensor& boxes2, int iou_type) -> Tensor;
@@ -3329,6 +3336,16 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             return rocm::poisson_sample_kernel(inputs[0], get_hip_stream(attrs));
         });
 
+    table.register_single_output_kernel(OpId::NormalSample,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            return rocm::normal_sample_kernel(inputs[0], inputs[1], get_hip_stream(attrs));
+        });
+
+    table.register_single_output_kernel(OpId::ExponentialSample,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            return rocm::exponential_sample_kernel(inputs[0], get_hip_stream(attrs));
+        });
+
     table.register_single_output_kernel(OpId::Multinomial,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t num_samples = attrs.get_int(AttrKey::NumSamples, 1);
@@ -3356,6 +3373,39 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             double p = attrs.get_float(AttrKey::DistP, 2.0);
             return rocm::cdist_kernel(inputs[0], inputs[1], p, get_hip_stream(attrs));
         });
+
+    // =========================================================================
+    // Trapezoid / Cumulative Trapezoid / Gradient / PairwiseDistance / Pdist
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Trapezoid, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        double dx = attrs.get_float(AttrKey::Dx, 1.0);
+        const Tensor* x_ptr = (inputs.size() > 1) ? &inputs[1] : nullptr;
+        return rocm::trapezoid_kernel(inputs[0], dim, dx, x_ptr, get_hip_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::CumulativeTrapezoid, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        double dx = attrs.get_float(AttrKey::Dx, 1.0);
+        const Tensor* x_ptr = (inputs.size() > 1) ? &inputs[1] : nullptr;
+        return rocm::cumulative_trapezoid_kernel(inputs[0], dim, dx, x_ptr, get_hip_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::NumericalGradient, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        double spacing = attrs.get_float(AttrKey::Spacing, 1.0);
+        return rocm::gradient_kernel(inputs[0], dim, spacing, get_hip_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::PairwiseDistance, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        double p = attrs.get_float(AttrKey::DistP, 2.0);
+        return rocm::pairwise_distance_kernel(inputs[0], inputs[1], p, get_hip_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::Pdist, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        double p = attrs.get_float(AttrKey::DistP, 2.0);
+        return rocm::pdist_kernel(inputs[0], p, get_hip_stream(attrs));
+    });
 
     // STFT / ISTFT — native ROCm (rocFFT-backed)
     table.register_single_output_kernel(OpId::STFT,
@@ -3814,6 +3864,12 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         auto [unique_vals, inverse, counts] = rocm::unique_consecutive_kernel(
             inputs[0], return_inverse, get_hip_stream(attrs));
         return std::vector<Tensor>{unique_vals, inverse, counts};
+    });
+
+    table.register_single_output_kernel(OpId::SegmentReduce, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t axis = attrs.get_int(AttrKey::Dim, 0);
+        std::string reduce = std::string(attrs.get_string(AttrKey::Reduction, "sum"));
+        return rocm::segment_reduce_kernel(inputs[0], inputs[1], reduce, axis, get_hip_stream(attrs));
     });
 
     // =========================================================================

@@ -2061,7 +2061,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         -> std::vector<Tensor> {
         return get_vulkan_backend()->dispatchLinalgEig(inputs[0]);
     });
-    // Triangular solve — CPU fallback (TODO: native Vulkan shader)
+    // Triangular solve — native linalg_trsm compute shader
     table.register_kernel(OpId::SolveTriangular, [](std::span<const Tensor> inputs, const OpAttributes& attrs)
         -> std::vector<Tensor> {
         bool upper = attrs.get_bool(AttrKey::Upper, true);
@@ -2377,6 +2377,16 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             return get_vulkan_backend()->dispatchPoissonSample(inputs[0]);
         });
 
+    table.register_single_output_kernel(OpId::NormalSample,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return get_vulkan_backend()->dispatchNormalSample(inputs[0], inputs[1]);
+        });
+
+    table.register_single_output_kernel(OpId::ExponentialSample,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return get_vulkan_backend()->dispatchExponentialSample(inputs[0]);
+        });
+
     table.register_single_output_kernel(OpId::Multinomial,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t num_samples = attrs.get_int(AttrKey::NumSamples, 1);
@@ -2403,6 +2413,39 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
             return get_vulkan_backend()->dispatchCDist(inputs[0], inputs[1]);
         });
+
+    // =========================================================================
+    // Trapezoid / Cumulative Trapezoid / Gradient / PairwiseDistance / Pdist
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Trapezoid, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        double dx = attrs.get_float(AttrKey::Dx, 1.0);
+        const Tensor* x_ptr = (inputs.size() > 1) ? &inputs[1] : nullptr;
+        return get_vulkan_backend()->dispatchTrapezoid(inputs[0], dim, dx, x_ptr);
+    });
+
+    table.register_single_output_kernel(OpId::CumulativeTrapezoid, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        double dx = attrs.get_float(AttrKey::Dx, 1.0);
+        const Tensor* x_ptr = (inputs.size() > 1) ? &inputs[1] : nullptr;
+        return get_vulkan_backend()->dispatchCumulativeTrapezoid(inputs[0], dim, dx, x_ptr);
+    });
+
+    table.register_single_output_kernel(OpId::NumericalGradient, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        double spacing = attrs.get_float(AttrKey::Spacing, 1.0);
+        return get_vulkan_backend()->dispatchGradient(inputs[0], dim, spacing);
+    });
+
+    table.register_single_output_kernel(OpId::PairwiseDistance, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        double p = attrs.get_float(AttrKey::DistP, 2.0);
+        return get_vulkan_backend()->dispatchPairwiseDistance(inputs[0], inputs[1], p);
+    });
+
+    table.register_single_output_kernel(OpId::Pdist, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        double p = attrs.get_float(AttrKey::DistP, 2.0);
+        return get_vulkan_backend()->dispatchPdist(inputs[0], p);
+    });
 
     // STFT / ISTFT — Phase 2.3: native Vulkan implementations.
     //
@@ -2900,6 +2943,12 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{unique_vals, inverse, counts};
     });
 
+    table.register_single_output_kernel(OpId::SegmentReduce, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t axis = attrs.get_int(AttrKey::Dim, 0);
+        std::string reduce = std::string(attrs.get_string(AttrKey::Reduction, "sum"));
+        return get_vulkan_backend()->dispatchSegmentReduce(inputs[0], inputs[1], reduce, axis);
+    });
+
     // =========================================================================
     // TakeAlongDim — dispatch as Gather (semantically equivalent for contiguous tensors)
     // =========================================================================
@@ -3154,38 +3203,14 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return result;
     });
 
-    // TODO: NestedAttention still copies offsets to CPU and loops per batch element.
-    // This needs a fused Vulkan compute kernel that performs batched Q*K^T, softmax,
-    // and attn*V in a single dispatch using on-device offsets, similar to FlashAttention.
-    // The per-segment loop with GPU->CPU sync is the main bottleneck here.
-    table.register_single_output_kernel(OpId::NestedAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        auto q_off_cpu = inputs[3].to(Device::cpu());
-        auto kv_off_cpu = inputs[4].to(Device::cpu());
-        const int64_t* q_off = q_off_cpu.data<int64_t>();
-        const int64_t* kv_off = kv_off_cpu.data<int64_t>();
-        int64_t B = q_off_cpu.numel() - 1;
-        float scale = attrs.get_float(AttrKey::Scale, 1.0f);
-        int64_t head_dim = inputs[0].shape().back();
-        int64_t total_q = inputs[0].shape()[0];
-
-        auto output = tenzor::zeros({total_q, head_dim}, inputs[0].dtype(), inputs[0].device());
-        for (int64_t b = 0; b < B; ++b) {
-            auto Qb = inputs[0].slice(0, q_off[b], q_off[b+1]);
-            auto Kb = inputs[1].slice(0, kv_off[b], kv_off[b+1]);
-            auto Vb = inputs[2].slice(0, kv_off[b], kv_off[b+1]);
-            auto scores = tenzor::mul(tenzor::matmul(Qb, Kb.transpose(0, 1)),
-                                       tenzor::full({1}, scale, Qb.dtype(), Qb.device()));
-            OpAttributes attn_attrs;
-            attn_attrs.set(AttrKey::Dim, int64_t(-1));
-            std::vector<Tensor> attn_in = {scores};
-            auto attn = dispatch<OpId::Softmax>(attn_in, attn_attrs)[0];
-            auto out_b = tenzor::matmul(attn, Vb);
-            auto dst = output.slice(0, q_off[b], q_off[b+1]);
-            std::memcpy(dst.data_ptr(), out_b.contiguous().data_ptr(),
-                        static_cast<size_t>((q_off[b+1] - q_off[b]) * head_dim) * dtype_size(output.dtype()));
-        }
-        return output;
-    });
+    // NestedAttention — fused Vulkan compute shader reading offsets on device
+    table.register_single_output_kernel(OpId::NestedAttention,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+            bool causal = attrs.get_bool(AttrKey::Causal, false);
+            return get_vulkan_backend()->dispatchNestedAttention(
+                inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], scale, causal);
+        });
 
     table.register_single_output_kernel(OpId::NestedToPadded, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t max_len = attrs.get_int(AttrKey::MaxLen, 0);

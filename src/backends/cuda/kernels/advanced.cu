@@ -1344,6 +1344,91 @@ auto poisson_sample_kernel(const Tensor& rates, cudaStream_t stream) -> Tensor {
 }
 
 // ============================================================================
+// Normal sampling kernel (Box-Muller transform)
+// ============================================================================
+
+__global__ void normal_sample_kernel_impl(const float* mean, const float* stddev,
+                                           float* output, int64_t n, uint64_t seed) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n) return;
+
+    // LCG-based PRNG per thread (same pattern as bernoulli/poisson)
+    uint64_t state = seed + tid * 6364136223846793005ULL + 1442695040888963407ULL;
+
+    // Generate two uniform random numbers for Box-Muller
+    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+    float u1 = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+    // Clamp u1 away from zero to avoid log(0)
+    u1 = fmaxf(u1, 1.0e-7f);
+
+    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+    float u2 = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+
+    // Box-Muller transform
+    float z = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * 3.14159265358979323846f * u2);
+
+    output[tid] = mean[tid] + stddev[tid] * z;
+}
+
+auto normal_sample_kernel(const Tensor& mean, const Tensor& stddev, cudaStream_t stream) -> Tensor {
+    auto m = mean.contiguous();
+    auto s = stddev.contiguous();
+    if (m.dtype() != DType::Float32) m = m.to(DType::Float32);
+    if (s.dtype() != DType::Float32) s = s.to(DType::Float32);
+
+    std::vector<int64_t> shape_vec(m.shape().begin(), m.shape().end());
+    auto result = Tensor(shape_vec, DType::Float32, m.device());
+    int64_t n = m.numel();
+    if (n == 0) return result;
+
+    int threads = 256;
+    int blocks_n = (n + threads - 1) / threads;
+    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+
+    normal_sample_kernel_impl<<<blocks_n, threads, 0, stream>>>(
+        m.data<float>(), s.data<float>(), result.data<float>(), n, seed);
+    return result;
+}
+
+// ============================================================================
+// Exponential sampling kernel (inverse CDF method)
+// ============================================================================
+
+__global__ void exponential_sample_kernel_impl(const float* rate, float* output,
+                                                int64_t n, uint64_t seed) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n) return;
+
+    // LCG-based PRNG per thread
+    uint64_t state = seed + tid * 6364136223846793005ULL + 1442695040888963407ULL;
+    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+    float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+    // Clamp away from 1.0 to avoid log(0)
+    u = fminf(u, 1.0f - 1.0e-7f);
+
+    // Inverse CDF: -log(1 - u) / rate
+    output[tid] = -logf(1.0f - u) / rate[tid];
+}
+
+auto exponential_sample_kernel(const Tensor& rate, cudaStream_t stream) -> Tensor {
+    auto input = rate.contiguous();
+    if (input.dtype() != DType::Float32) input = input.to(DType::Float32);
+
+    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
+    auto result = Tensor(shape_vec, DType::Float32, input.device());
+    int64_t n = input.numel();
+    if (n == 0) return result;
+
+    int threads = 256;
+    int blocks_n = (n + threads - 1) / threads;
+    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+
+    exponential_sample_kernel_impl<<<blocks_n, threads, 0, stream>>>(
+        input.data<float>(), result.data<float>(), n, seed);
+    return result;
+}
+
+// ============================================================================
 // Multinomial sampling kernel
 // ============================================================================
 
@@ -3473,6 +3558,445 @@ auto unique_consecutive_kernel(const Tensor& input, bool return_inverse,
         case DType::Int64:   return launch.template operator()<int64_t>();
         default: throw std::runtime_error("unique_consecutive CUDA: unsupported dtype");
     }
+}
+
+// ============================================================================
+// SegmentReduce — reduce over segments defined by offsets
+// Modes: 0=sum, 1=mean, 2=max, 3=min, 4=prod
+// One warp per segment, using warp-level shuffle reductions.
+// ============================================================================
+
+template<typename T>
+__global__ void segment_reduce_kernel_cuda(
+    const T* __restrict__ data,
+    const int64_t* __restrict__ offsets,
+    T* __restrict__ output,
+    int64_t num_segments,
+    int64_t outer_size,
+    int64_t axis_size,
+    int64_t inner_size,
+    int mode)
+{
+    // Each warp handles one (outer, segment, inner) triple
+    int warp_id = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+    int lane = threadIdx.x % 32;
+
+    int64_t total_work = outer_size * num_segments * inner_size;
+    if (warp_id >= total_work) return;
+
+    int64_t inner = warp_id % inner_size;
+    int64_t seg = (warp_id / inner_size) % num_segments;
+    int64_t outer = warp_id / (inner_size * num_segments);
+
+    int64_t seg_start = offsets[seg];
+    int64_t seg_end = offsets[seg + 1];
+    int64_t seg_len = seg_end - seg_start;
+
+    // Identity value
+    T identity;
+    if (mode == 0 || mode == 1) identity = T(0);       // sum/mean
+    else if (mode == 4) identity = T(1);                 // prod
+    else if (mode == 2) identity = T(-1e38);             // max
+    else identity = T(1e38);                             // min
+
+    // Each lane processes elements with stride 32
+    T acc = identity;
+    for (int64_t i = lane; i < seg_len; i += 32) {
+        int64_t d = seg_start + i;
+        int64_t in_idx = (outer * axis_size + d) * inner_size + inner;
+        T val = data[in_idx];
+        if (mode == 0 || mode == 1) acc += val;
+        else if (mode == 4) acc *= val;
+        else if (mode == 2) acc = acc > val ? acc : val;
+        else acc = acc < val ? acc : val;
+    }
+
+    // Warp-level reduction using shuffle
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        T other = __shfl_down_sync(0xffffffff, acc, offset);
+        if (mode == 0 || mode == 1) acc += other;
+        else if (mode == 4) acc *= other;
+        else if (mode == 2) acc = acc > other ? acc : other;
+        else acc = acc < other ? acc : other;
+    }
+
+    if (lane == 0) {
+        if (mode == 1 && seg_len > 0) {
+            acc /= static_cast<T>(seg_len);
+        }
+        // Handle empty segments
+        if (seg_len == 0) {
+            acc = (mode == 0 || mode == 1) ? T(0) : identity;
+        }
+        int64_t out_idx = (outer * num_segments + seg) * inner_size + inner;
+        output[out_idx] = acc;
+    }
+}
+
+auto segment_reduce_kernel(const Tensor& data, const Tensor& offsets,
+                           const std::string& reduce, int64_t axis,
+                           cudaStream_t stream) -> Tensor {
+    Tensor cont = data.is_contiguous() ? data : data.contiguous();
+    Tensor offs = offsets.is_contiguous() ? offsets : offsets.contiguous();
+
+    int64_t ndim = cont.ndim();
+    if (axis < 0) axis += ndim;
+
+    const auto& shape = cont.shape();
+    int64_t axis_size = shape[axis];
+    int64_t num_segments = offs.numel() - 1;
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < axis; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
+    for (int64_t i = axis + 1; i < ndim; ++i) inner_size *= shape[i];
+
+    // Build output shape
+    std::vector<int64_t> out_shape;
+    for (int64_t i = 0; i < ndim; ++i) {
+        out_shape.push_back(i == axis ? num_segments : shape[i]);
+    }
+
+    int mode = 0;
+    if (reduce == "sum") mode = 0;
+    else if (reduce == "mean") mode = 1;
+    else if (reduce == "max") mode = 2;
+    else if (reduce == "min") mode = 3;
+    else if (reduce == "prod") mode = 4;
+
+    auto dtype = cont.dtype();
+    auto device = cont.device();
+    Tensor output(out_shape, dtype, device);
+
+    int64_t total_warps = outer_size * num_segments * inner_size;
+    int64_t total_threads = total_warps * 32;
+    int block = 256;
+    int grid = static_cast<int>((total_threads + block - 1) / block);
+    grid = std::min(grid, 65535);
+
+    const int64_t* offsets_ptr = offs.data<int64_t>();
+
+    switch (dtype) {
+        case DType::Float32:
+            segment_reduce_kernel_cuda<float><<<grid, block, 0, stream>>>(
+                cont.data<float>(), offsets_ptr, output.data<float>(),
+                num_segments, outer_size, axis_size, inner_size, mode);
+            break;
+        case DType::Float64:
+            segment_reduce_kernel_cuda<double><<<grid, block, 0, stream>>>(
+                cont.data<double>(), offsets_ptr, output.data<double>(),
+                num_segments, outer_size, axis_size, inner_size, mode);
+            break;
+        case DType::Int32:
+            segment_reduce_kernel_cuda<int32_t><<<grid, block, 0, stream>>>(
+                cont.data<int32_t>(), offsets_ptr, output.data<int32_t>(),
+                num_segments, outer_size, axis_size, inner_size, mode);
+            break;
+        case DType::Int64:
+            segment_reduce_kernel_cuda<int64_t><<<grid, block, 0, stream>>>(
+                cont.data<int64_t>(), offsets_ptr, output.data<int64_t>(),
+                num_segments, outer_size, axis_size, inner_size, mode);
+            break;
+        default: {
+            // Float16/BFloat16: upcast to Float32
+            DType orig = dtype;
+            Tensor cont_f32 = cont.to(DType::Float32);
+            Tensor output_f32(out_shape, DType::Float32, device);
+            segment_reduce_kernel_cuda<float><<<grid, block, 0, stream>>>(
+                cont_f32.data<float>(), offsets_ptr, output_f32.data<float>(),
+                num_segments, outer_size, axis_size, inner_size, mode);
+            output = output_f32.to(orig);
+        }
+    }
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+    return output;
+}
+
+// ============================================================================
+// Trapezoid integration kernel
+// ============================================================================
+
+__global__ void trapezoid_kernel_impl(
+    const float* __restrict__ y, const float* __restrict__ x,
+    float* __restrict__ output, uint32_t outer, uint32_t inner,
+    uint32_t n, float dx, bool has_x) {
+    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= outer * inner) return;
+
+    uint32_t o = idx / inner;
+    uint32_t i_inner = idx % inner;
+
+    float sum = 0.0f;
+    for (uint32_t k = 0; k < n - 1; k++) {
+        uint32_t idx_k  = (o * n + k) * inner + i_inner;
+        uint32_t idx_k1 = (o * n + k + 1) * inner + i_inner;
+        float y_k = y[idx_k], y_k1 = y[idx_k1];
+        float h = has_x ? (x[idx_k1] - x[idx_k]) : dx;
+        sum += 0.5f * (y_k + y_k1) * h;
+    }
+    output[idx] = sum;
+}
+
+auto trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
+                       const Tensor* x_ptr, cudaStream_t stream) -> Tensor {
+    Tensor yf = (y.dtype() == DType::Float32) ? y.contiguous() : y.contiguous().to(DType::Float32);
+    auto shape = yf.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    int64_t n = shape[dim];
+
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < dim; d++) outer *= shape[d];
+    for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
+
+    std::vector<int64_t> out_shape;
+    for (int64_t d = 0; d < ndim; d++) {
+        if (d != dim) out_shape.push_back(shape[d]);
+    }
+    if (out_shape.empty()) out_shape.push_back(1);
+
+    Tensor result(out_shape, DType::Float32, y.device());
+    int64_t total = outer * inner;
+    if (n < 2 || total == 0) return result;
+
+    const float* x_data = nullptr;
+    Tensor xf;
+    if (x_ptr) {
+        xf = (x_ptr->dtype() == DType::Float32) ? x_ptr->contiguous() : x_ptr->contiguous().to(DType::Float32);
+        x_data = xf.data<float>();
+    }
+
+    int threads = 256;
+    int blocks = (total + threads - 1) / threads;
+    trapezoid_kernel_impl<<<blocks, threads, 0, stream>>>(
+        yf.data<float>(), x_data, result.data<float>(),
+        static_cast<uint32_t>(outer), static_cast<uint32_t>(inner),
+        static_cast<uint32_t>(n), static_cast<float>(dx), x_ptr != nullptr);
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+    return result;
+}
+
+// ============================================================================
+// Cumulative trapezoid integration kernel
+// ============================================================================
+
+__global__ void cumulative_trapezoid_kernel_impl(
+    const float* __restrict__ y, const float* __restrict__ x,
+    float* __restrict__ output, uint32_t outer, uint32_t inner,
+    uint32_t n, float dx, bool has_x) {
+    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= outer * inner) return;
+
+    uint32_t o = idx / inner;
+    uint32_t i_inner = idx % inner;
+
+    float cumsum = 0.0f;
+    for (uint32_t k = 0; k < n - 1; k++) {
+        uint32_t idx_k  = (o * n + k) * inner + i_inner;
+        uint32_t idx_k1 = (o * n + k + 1) * inner + i_inner;
+        float y_k = y[idx_k], y_k1 = y[idx_k1];
+        float h = has_x ? (x[idx_k1] - x[idx_k]) : dx;
+        cumsum += 0.5f * (y_k + y_k1) * h;
+        output[(o * (n - 1) + k) * inner + i_inner] = cumsum;
+    }
+}
+
+auto cumulative_trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
+                                  const Tensor* x_ptr, cudaStream_t stream) -> Tensor {
+    Tensor yf = (y.dtype() == DType::Float32) ? y.contiguous() : y.contiguous().to(DType::Float32);
+    auto shape = yf.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    int64_t n = shape[dim];
+
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < dim; d++) outer *= shape[d];
+    for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
+
+    std::vector<int64_t> out_shape(shape.begin(), shape.end());
+    out_shape[dim] = (n < 2) ? 0 : n - 1;
+    Tensor result(out_shape, DType::Float32, y.device());
+
+    int64_t total = outer * inner;
+    if (n < 2 || total == 0) return result;
+
+    const float* x_data = nullptr;
+    Tensor xf;
+    if (x_ptr) {
+        xf = (x_ptr->dtype() == DType::Float32) ? x_ptr->contiguous() : x_ptr->contiguous().to(DType::Float32);
+        x_data = xf.data<float>();
+    }
+
+    int threads = 256;
+    int blocks = (total + threads - 1) / threads;
+    cumulative_trapezoid_kernel_impl<<<blocks, threads, 0, stream>>>(
+        yf.data<float>(), x_data, result.data<float>(),
+        static_cast<uint32_t>(outer), static_cast<uint32_t>(inner),
+        static_cast<uint32_t>(n), static_cast<float>(dx), x_ptr != nullptr);
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+    return result;
+}
+
+// ============================================================================
+// Numerical gradient kernel (central differences)
+// ============================================================================
+
+__global__ void gradient_kernel_impl(
+    const float* __restrict__ input, float* __restrict__ output,
+    uint32_t outer, uint32_t inner, uint32_t n, float spacing) {
+    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= outer * inner) return;
+
+    uint32_t o = idx / inner;
+    uint32_t i_inner = idx % inner;
+
+    auto at = [&](uint32_t k) -> float {
+        return input[(o * n + k) * inner + i_inner];
+    };
+    auto out_at = [&](uint32_t k) -> float& {
+        return output[(o * n + k) * inner + i_inner];
+    };
+
+    // Forward difference at left boundary
+    out_at(0) = (at(1) - at(0)) / spacing;
+
+    // Central differences for interior
+    for (uint32_t k = 1; k < n - 1; k++) {
+        out_at(k) = (at(k + 1) - at(k - 1)) / (2.0f * spacing);
+    }
+
+    // Backward difference at right boundary
+    out_at(n - 1) = (at(n - 1) - at(n - 2)) / spacing;
+}
+
+auto gradient_kernel(const Tensor& input, int64_t dim, double spacing,
+                      cudaStream_t stream) -> Tensor {
+    Tensor inf = (input.dtype() == DType::Float32) ? input.contiguous() : input.contiguous().to(DType::Float32);
+    auto shape = inf.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    int64_t n = shape[dim];
+
+    int64_t outer = 1, inner = 1;
+    for (int64_t d = 0; d < dim; d++) outer *= shape[d];
+    for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
+
+    Tensor result(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32, input.device());
+    int64_t total = outer * inner;
+    if (n < 2 || total == 0) return result;
+
+    int threads = 256;
+    int blocks = (total + threads - 1) / threads;
+    gradient_kernel_impl<<<blocks, threads, 0, stream>>>(
+        inf.data<float>(), result.data<float>(),
+        static_cast<uint32_t>(outer), static_cast<uint32_t>(inner),
+        static_cast<uint32_t>(n), static_cast<float>(spacing));
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+    return result;
+}
+
+// ============================================================================
+// Pairwise distance kernel
+// ============================================================================
+
+__global__ void pairwise_distance_kernel_impl(
+    const float* __restrict__ x1, const float* __restrict__ x2,
+    float* __restrict__ output, uint32_t N, uint32_t D, float p) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+
+    float sum = 0.0f;
+    if (p == 2.0f) {
+        for (uint32_t j = 0; j < D; j++) {
+            float diff = x1[i * D + j] - x2[i * D + j];
+            sum += diff * diff;
+        }
+        output[i] = sqrtf(sum);
+    } else if (p == 1.0f) {
+        for (uint32_t j = 0; j < D; j++) {
+            sum += fabsf(x1[i * D + j] - x2[i * D + j]);
+        }
+        output[i] = sum;
+    } else {
+        for (uint32_t j = 0; j < D; j++) {
+            sum += powf(fabsf(x1[i * D + j] - x2[i * D + j]), p);
+        }
+        output[i] = powf(sum, 1.0f / p);
+    }
+}
+
+auto pairwise_distance_kernel(const Tensor& x1, const Tensor& x2, double p,
+                               cudaStream_t stream) -> Tensor {
+    Tensor a = (x1.dtype() == DType::Float32) ? x1.contiguous() : x1.contiguous().to(DType::Float32);
+    Tensor b = (x2.dtype() == DType::Float32) ? x2.contiguous() : x2.contiguous().to(DType::Float32);
+
+    int64_t N = a.shape()[0], D = a.shape()[1];
+    Tensor result({N}, DType::Float32, x1.device());
+    if (N == 0) return result;
+
+    int threads = 256;
+    int blocks = (N + threads - 1) / threads;
+    pairwise_distance_kernel_impl<<<blocks, threads, 0, stream>>>(
+        a.data<float>(), b.data<float>(), result.data<float>(),
+        static_cast<uint32_t>(N), static_cast<uint32_t>(D), static_cast<float>(p));
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+    return result;
+}
+
+// ============================================================================
+// Pdist kernel (all-pairs pairwise distances)
+// ============================================================================
+
+__global__ void pdist_kernel_impl(
+    const float* __restrict__ data, float* __restrict__ output,
+    uint32_t N, uint32_t D, uint32_t num_pairs, float p) {
+    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_pairs) return;
+
+    // Map flat index to (i, j) pair where i < j
+    uint32_t i = 0, offset = 0;
+    while (offset + (N - 1 - i) <= idx) {
+        offset += (N - 1 - i);
+        i++;
+    }
+    uint32_t j = idx - offset + i + 1;
+
+    float sum = 0.0f;
+    if (p == 2.0f) {
+        for (uint32_t d = 0; d < D; d++) {
+            float diff = data[i * D + d] - data[j * D + d];
+            sum += diff * diff;
+        }
+        output[idx] = sqrtf(sum);
+    } else if (p == 1.0f) {
+        for (uint32_t d = 0; d < D; d++) {
+            sum += fabsf(data[i * D + d] - data[j * D + d]);
+        }
+        output[idx] = sum;
+    } else {
+        for (uint32_t d = 0; d < D; d++) {
+            sum += powf(fabsf(data[i * D + d] - data[j * D + d]), p);
+        }
+        output[idx] = powf(sum, 1.0f / p);
+    }
+}
+
+auto pdist_kernel(const Tensor& input, double p, cudaStream_t stream) -> Tensor {
+    Tensor inf = (input.dtype() == DType::Float32) ? input.contiguous() : input.contiguous().to(DType::Float32);
+    int64_t N = inf.shape()[0], D = inf.shape()[1];
+    int64_t num_pairs = N * (N - 1) / 2;
+
+    Tensor result({num_pairs}, DType::Float32, input.device());
+    if (num_pairs == 0) return result;
+
+    int threads = 256;
+    int blocks = (num_pairs + threads - 1) / threads;
+    pdist_kernel_impl<<<blocks, threads, 0, stream>>>(
+        inf.data<float>(), result.data<float>(),
+        static_cast<uint32_t>(N), static_cast<uint32_t>(D),
+        static_cast<uint32_t>(num_pairs), static_cast<float>(p));
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+    return result;
 }
 
 } // namespace cuda

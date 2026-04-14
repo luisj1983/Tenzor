@@ -1,0 +1,30 @@
+#version 450
+
+// Exponential sampling: out[i] = -log(1 - u) / rate[i], where u ~ Uniform(0,1)
+// Inverse CDF method with per-invocation LCG PRNG.
+// Float32 only — host promotes other dtypes via dispatchCast.
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer RateBuf   { float rate_data[]; };
+layout(binding = 1) buffer OutputBuf { float out_data[];  };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint seed_lo;
+    uint seed_hi;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n) return;
+
+    // Per-invocation LCG state (same seeding as bernoulli.comp)
+    uint state = params.seed_lo ^ (params.seed_hi * 0x9E3779B9u) ^ (idx * 0x85EBCA77u);
+    state = state * 1664525u + 1013904223u;
+    float u = float(state) / 4294967295.0;
+    u = min(u, 1.0 - 1.0e-7);  // Clamp away from 1.0 for log safety
+
+    // Inverse CDF: -log(1 - u) / rate
+    out_data[idx] = -log(1.0 - u) / rate_data[idx];
+}

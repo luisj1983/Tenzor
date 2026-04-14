@@ -930,11 +930,10 @@ auto bernoulli(const Tensor& probs) -> Tensor {
 }
 
 auto normal(const Tensor& mean, const Tensor& std) -> Tensor {
-    // Compose: randn(shape, device) * std + mean
-    auto z = tenzor::randn(
-        std::vector<int64_t>(mean.shape().begin(), mean.shape().end()),
-        mean.dtype(), mean.device());
-    return tenzor::add(tenzor::mul(z, std), mean);
+    auto m = mean.contiguous();
+    auto s = std.contiguous();
+    std::array<Tensor, 2> inputs = {m, s};
+    return dispatch<OpId::NormalSample>(inputs)[0];
 }
 
 auto poisson(const Tensor& rates) -> Tensor {
@@ -945,16 +944,9 @@ auto poisson(const Tensor& rates) -> Tensor {
 }
 
 auto exponential(const Tensor& rate) -> Tensor {
-    // Compose: -log(1 - rand(shape, device)) / rate  (inverse CDF method)
-    auto u = tenzor::rand(
-        std::vector<int64_t>(rate.shape().begin(), rate.shape().end()),
-        rate.dtype(), rate.device());
-    // Clamp away from exactly 0 and 1 for numerical stability
-    auto one = tenzor::full(
-        std::vector<int64_t>(rate.shape().begin(), rate.shape().end()),
-        1.0, rate.dtype(), rate.device());
-    auto one_minus_u = tenzor::sub(one, u);
-    return tenzor::div(tenzor::neg(tenzor::log(one_minus_u)), rate);
+    auto r = rate.contiguous();
+    std::array<Tensor, 1> inputs = {r};
+    return dispatch<OpId::ExponentialSample>(inputs)[0];
 }
 
 auto logspace(float start, float end, int64_t steps, double base,
@@ -1003,6 +995,48 @@ auto triu_indices(int64_t row, int64_t col, int64_t offset,
     attrs.set(AttrKey::Diagonal, offset);
     std::vector<Tensor> inputs;  // no input tensors
     return dispatch_to_device(OpId::TriuIndices, device.type, inputs, attrs)[0];
+}
+
+auto complex(const Tensor& real, const Tensor& imag) -> Tensor {
+    // Validate inputs
+    auto real_shape = real.shape();
+    auto imag_shape = imag.shape();
+    if (real_shape.size() != imag_shape.size()) {
+        throw std::invalid_argument("complex: real and imag must have the same number of dimensions");
+    }
+    for (size_t i = 0; i < real_shape.size(); ++i) {
+        if (real_shape[i] != imag_shape[i]) {
+            throw std::invalid_argument("complex: real and imag must have the same shape");
+        }
+    }
+    if (real.device().type != imag.device().type) {
+        throw std::invalid_argument("complex: real and imag must be on the same device");
+    }
+
+    // Dispatch through backend for GPU tensors
+    if (real.device().type != Device::Type::CPU) {
+        std::array<Tensor, 2> inputs = {real, imag};
+        return dispatch_single(OpId::ComplexTensor, inputs);
+    }
+
+    // CPU path: interleave real and imag into Complex64 storage
+    auto r = real.to(DType::Float32).contiguous();
+    auto im = imag.to(DType::Float32).contiguous();
+
+    std::vector<int64_t> shape_vec(real_shape.begin(), real_shape.end());
+    auto result = empty(shape_vec, DType::Complex64, Device::cpu());
+
+    const float* r_data = r.data<float>();
+    const float* i_data = im.data<float>();
+    auto* c_data = reinterpret_cast<std::complex<float>*>(result.storage()->data());
+    int64_t offset = result.offset();
+
+    int64_t numel = r.numel();
+    for (int64_t idx = 0; idx < numel; ++idx) {
+        c_data[offset + idx] = std::complex<float>(r_data[idx], i_data[idx]);
+    }
+
+    return result;
 }
 
 } // namespace tenzor
