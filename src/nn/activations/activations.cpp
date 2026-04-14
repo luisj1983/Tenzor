@@ -872,4 +872,37 @@ auto threshold(const Variable& input, double t, double value) -> Variable {
     return tenzor::where(mask_var, input, value_var);
 }
 
+auto Hardtanh::forward_impl(const Variable& input) -> Variable {
+    return hardtanh(input, min_val_, max_val_);
+}
+
+auto hardtanh(const Variable& input, double min_val, double max_val) -> Variable {
+    // hardtanh(x) = clamp(x, min_val, max_val)
+    //
+    // Expressed via Variable-level `where` so create_graph=true threads
+    // through naturally for higher-order gradients. The gradient is 1 where
+    // min_val <= x <= max_val and 0 otherwise.
+    if (min_val > max_val) {
+        throw std::invalid_argument("hardtanh: min_val must be <= max_val");
+    }
+    const auto dtype = input.tensor().dtype();
+    const auto device = input.tensor().device();
+    const auto shape = std::vector<int64_t>(
+        input.tensor().shape().begin(), input.tensor().shape().end());
+
+    auto min_t = tenzor::full(shape, min_val, dtype, device);
+    auto max_t = tenzor::full(shape, max_val, dtype, device);
+
+    // mask_below = x < min_val  →  clamp to min_val
+    auto mask_below = Variable(tenzor::lt(input.tensor(), min_t), false);
+    auto min_var = Variable(min_t, false);
+    auto clamped_low = tenzor::where(mask_below, min_var, input);
+
+    // mask_above = x > max_val  →  clamp to max_val
+    auto max_t2 = tenzor::full(shape, max_val, dtype, device);
+    auto mask_above = Variable(tenzor::gt(input.tensor(), max_t2), false);
+    auto max_var = Variable(max_t, false);
+    return tenzor::where(mask_above, max_var, clamped_low);
+}
+
 } // namespace tenzor::nn

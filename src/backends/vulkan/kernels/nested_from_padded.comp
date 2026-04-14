@@ -1,0 +1,38 @@
+#version 450
+
+// Padded-to-nested: copy from a [B, max_len, D] padded tensor into packed segments.
+// One workgroup per batch element. Threads stride over (row * D + col) within the
+// segment, copying only the valid rows (row < seg_len).
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer readonly Padded  { float padded[];     };
+layout(binding = 1) buffer readonly Offsets { int   offsets[];    };
+layout(binding = 2) buffer writeonly Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint D;            // inner dimension
+    uint B;            // number of segments (batch size)
+    uint max_len;      // padded sequence length
+} params;
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint b   = gl_WorkGroupID.x;
+    if (b >= params.B) return;
+
+    int seg_start = offsets[b];
+    int seg_end   = offsets[b + 1];
+    int seg_len   = seg_end - seg_start;
+    if (seg_len <= 0) return;
+
+    uint seg_elems = uint(seg_len) * params.D;
+
+    for (uint i = tid; i < seg_elems; i += 256) {
+        uint row = i / params.D;
+        uint col = i % params.D;
+        uint src_idx = (b * params.max_len + row) * params.D + col;
+        uint dst_idx = uint(seg_start + int(row)) * params.D + col;
+        output_data[dst_idx] = padded[src_idx];
+    }
+}

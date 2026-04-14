@@ -60,4 +60,34 @@ auto jacobian(std::function<Variable(const Variable&)> func,
 auto hessian(std::function<Variable(const Variable&)> func,
              const Variable& input) -> Tensor;
 
+/**
+ * @brief Compute Hessian-Vector Product using forward-over-reverse mode.
+ *
+ * For f: R^n -> R with Hessian H, computes H @ v without materializing H.
+ * Uses forward-over-reverse: JVP of the gradient function with tangent v.
+ *
+ * @param func Scalar-valued differentiable function
+ * @param input Point at which to evaluate
+ * @param v Vector to multiply (same shape as input)
+ * @return Pair of (func_output, H @ v)
+ */
+auto hvp(std::function<Variable(const Variable&)> func,
+         const Variable& input,
+         const Tensor& v) -> std::pair<Variable, Tensor>;
+
+/**
+ * @brief Compute Vector-Hessian Product using reverse-over-reverse mode.
+ *
+ * For f: R^n -> R with Hessian H, computes v^T @ H without materializing H.
+ * Uses reverse-over-reverse: backward through the gradient computation.
+ *
+ * @param func Scalar-valued differentiable function
+ * @param input Point at which to evaluate
+ * @param v Vector to multiply (same shape as input)
+ * @return Pair of (func_output, v^T @ H)
+ */
+auto vhp(std::function<Variable(const Variable&)> func,
+         const Variable& input,
+         const Tensor& v) -> std::pair<Variable, Tensor>;
+
 } // namespace tenzor

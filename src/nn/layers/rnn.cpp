@@ -5,6 +5,7 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/autograd/function.hpp"
+#include "tenzor/autograd/ops.hpp"
 #include <stdexcept>
 #include <sstream>
 
@@ -161,8 +162,8 @@ auto RNN::forward(const Variable& input, const Variable& hx) -> std::pair<Variab
         batch_size = input_shape[0];
         seq_len = input_shape[1];
         feat_size = input_shape[2];
-        // Transpose to (seq_len, batch, input_size)
-        x = Variable(x.tensor().transpose(0, 1), x.requires_grad());
+        // Transpose to (seq_len, batch, input_size) using autograd-aware op
+        x = ::tenzor::transpose(x, 0, 1);
     } else {
         // Input: (seq_len, batch, input_size)
         seq_len = input_shape[0];
@@ -192,84 +193,100 @@ auto RNN::forward(const Variable& input, const Variable& hx) -> std::pair<Variab
         throw std::runtime_error("RNN: invalid hidden state shape");
     }
 
-    // Split hidden state by layer and direction
+    // =========================================================================
+    // STANDARD PATH: Autograd-correct per-timestep forward.
+    // =========================================================================
+    // This path keeps every operation on the Variable/autograd graph so that
+    // backward() can propagate gradients all the way back to `input` (and
+    // through each cell's parameters), enabling higher-order gradients.
+    //
+    // The previous implementation pre-computed input gates via
+    // `Variable(x_flat, false)` and called `forward_with_precomputed_ih`,
+    // which silently detached the input from the graph and produced empty
+    // input gradients.
+    //
+    // We instead:
+    //   1. Slice the h0 per-layer states with autograd-aware `slice` +
+    //      `squeeze` so intermediate states carry grad history.
+    //   2. For each timestep, slice `layer_input` at t along dim=0, then
+    //      call the cell's full `forward(input_var, h_var)`.
+    //   3. Accumulate outputs via autograd-aware `unsqueeze` + `cat`.
+
+    // Split hidden state by layer and direction using autograd-aware ops
+    auto split_states_per_layer = [&](const Variable& stacked_states,
+                                      std::vector<Variable>& out) {
+        for (int64_t i = 0; i < num_layers_ * num_directions; ++i) {
+            auto sliced = ::tenzor::slice(stacked_states, 0, i, i + 1);
+            auto sq = ::tenzor::squeeze(sliced, 0);  // (batch, hidden)
+            out.push_back(sq);
+        }
+    };
+
     std::vector<Variable> h_layers;
-    for (int64_t i = 0; i < num_layers_ * num_directions; ++i) {
-        // Extract h[i, :, :]
-        auto h_tensor = h.tensor();
-        auto h_layer_tensor = h_tensor.slice(0, i, i + 1);
-        // Squeeze first dimension
-        auto h_layer_squeezed = h_layer_tensor.reshape({batch_size, hidden_size_});
-        h_layers.push_back(Variable(h_layer_squeezed, false));
-    }
+    split_states_per_layer(h, h_layers);
 
     // Process through layers
-    Variable layer_input = x;
+    Variable layer_input = x;  // shape: (seq, batch, feat)
     std::vector<Variable> final_hidden_states;
 
     for (int64_t layer = 0; layer < num_layers_; ++layer) {
-        int64_t layer_feat_size = (layer == 0) ? input_size_ : (hidden_size_ * num_directions);
-
-        // Forward direction — batch the input-to-hidden matmul across all timesteps
         auto& forward_cell = forward_cells_[layer];
         Variable forward_h = h_layers[layer * num_directions];
 
-        // Flatten (seq_len, batch, features) -> (seq_len * batch, features)
-        auto x_flat = layer_input.tensor().reshape({seq_len * batch_size, layer_feat_size});
-        // Batch matmul: all_ih = W_ih @ x_flat  -> (seq_len * batch, hidden_size)
-        auto all_ih = forward_cell->weight_ih()->forward(Variable(x_flat, false));
-        // Reshape back: (seq_len, batch, hidden_size)
-        auto ih_3d = all_ih.tensor().reshape({seq_len, batch_size, hidden_size_});
-
         std::vector<Variable> forward_outputs;
+        forward_outputs.reserve(static_cast<size_t>(seq_len));
+
+        // Per-timestep forward pass through the full cell.
         for (int64_t t = 0; t < seq_len; ++t) {
-            auto ih_t = ih_3d.slice(0, t, t + 1).reshape({batch_size, hidden_size_});
-            forward_h = forward_cell->forward_with_precomputed_ih(ih_t, forward_h);
+            auto x_t_raw = ::tenzor::slice(layer_input, 0, t, t + 1);  // (1, batch, feat)
+            auto x_t = ::tenzor::squeeze(x_t_raw, 0);                  // (batch, feat)
+
+            forward_h = forward_cell->forward(x_t, forward_h);
             forward_outputs.push_back(forward_h);
         }
 
         final_hidden_states.push_back(forward_h);
 
-        // Backward direction (if bidirectional) — same batched optimization
-        Variable layer_output = layer_input;
+        // Helper to stack timestep outputs along dim 0 using autograd ops
+        auto stack_timesteps = [](const std::vector<Variable>& step_outputs) {
+            std::vector<Variable> expanded;
+            expanded.reserve(step_outputs.size());
+            for (const auto& v : step_outputs) {
+                expanded.push_back(::tenzor::unsqueeze(v, 0));
+            }
+            return ::tenzor::cat(expanded, 0);
+        };
+
+        Variable layer_output;
         if (bidirectional_) {
             auto& backward_cell = backward_cells_[layer];
             Variable backward_h = h_layers[layer * num_directions + 1];
 
-            // Batch the input-to-hidden matmul for backward direction
-            auto all_ih_bwd = backward_cell->weight_ih()->forward(Variable(x_flat, false));
-            auto ih_3d_bwd = all_ih_bwd.tensor().reshape({seq_len, batch_size, hidden_size_});
-
             std::vector<Variable> backward_outputs;
+            backward_outputs.reserve(static_cast<size_t>(seq_len));
+
             for (int64_t t = seq_len - 1; t >= 0; --t) {
-                auto ih_t = ih_3d_bwd.slice(0, t, t + 1).reshape({batch_size, hidden_size_});
-                backward_h = backward_cell->forward_with_precomputed_ih(ih_t, backward_h);
+                auto x_t_raw = ::tenzor::slice(layer_input, 0, t, t + 1);
+                auto x_t = ::tenzor::squeeze(x_t_raw, 0);
+
+                backward_h = backward_cell->forward(x_t, backward_h);
                 backward_outputs.push_back(backward_h);
             }
 
-            // Reverse backward outputs
+            // Reverse backward outputs to align with forward time order
             std::reverse(backward_outputs.begin(), backward_outputs.end());
             final_hidden_states.push_back(backward_h);
 
-            // Concatenate forward and backward outputs
-            std::vector<Tensor> output_tensors;
+            // Concatenate forward and backward outputs per timestep
+            std::vector<Variable> concat_per_t;
+            concat_per_t.reserve(static_cast<size_t>(seq_len));
             for (int64_t t = 0; t < seq_len; ++t) {
-                auto fwd = forward_outputs[t].tensor();
-                auto bwd = backward_outputs[t].tensor();
-                std::vector<Tensor> tensors_to_concat = {fwd, bwd};
-                auto concatenated = cat(tensors_to_concat, 1);
-                output_tensors.push_back(concatenated);
+                std::vector<Variable> pair = {forward_outputs[t], backward_outputs[t]};
+                concat_per_t.push_back(::tenzor::cat(pair, 1));
             }
-
-            // Stack along time dimension
-            layer_output = Variable(stack(output_tensors, 0), true);
+            layer_output = stack_timesteps(concat_per_t);
         } else {
-            // Stack forward outputs
-            std::vector<Tensor> output_tensors;
-            for (const auto& out : forward_outputs) {
-                output_tensors.push_back(out.tensor());
-            }
-            layer_output = Variable(stack(output_tensors, 0), true);
+            layer_output = stack_timesteps(forward_outputs);
         }
 
         // Apply dropout (except after last layer)
@@ -284,17 +301,20 @@ auto RNN::forward(const Variable& input, const Variable& hx) -> std::pair<Variab
     Variable output = layer_input;
 
     if (batch_first_) {
-        // Transpose back to (batch, seq_len, hidden_size * num_directions)
-        output = Variable(output.tensor().transpose(0, 1), output.requires_grad());
+        output = ::tenzor::transpose(output, 0, 1);
     }
 
-    // Stack final hidden states
-    // Each hidden state is (batch, hidden_size), stack to (num_layers * num_directions, batch, hidden_size)
-    std::vector<Tensor> h_final_tensors;
-    for (const auto& h_state : final_hidden_states) {
-        h_final_tensors.push_back(h_state.tensor());
-    }
-    Variable h_final = Variable(stack(std::span<const Tensor>(h_final_tensors), 0), false);
+    // Stack final hidden states using autograd-aware ops
+    auto stack_layer_states = [](const std::vector<Variable>& states) {
+        std::vector<Variable> expanded;
+        expanded.reserve(states.size());
+        for (const auto& s : states) {
+            expanded.push_back(::tenzor::unsqueeze(s, 0));
+        }
+        return ::tenzor::cat(expanded, 0);
+    };
+
+    Variable h_final = stack_layer_states(final_hidden_states);
 
     return {output, h_final};
 }

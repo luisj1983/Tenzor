@@ -636,6 +636,19 @@ private:
 };
 
 /**
+ * @brief Hardtanh — clamp(x, min_val, max_val). Linear in range, flat outside.
+ */
+class Hardtanh : public Module {
+public:
+    explicit Hardtanh(double min_val = -1.0, double max_val = 1.0)
+        : min_val_(min_val), max_val_(max_val) {}
+    auto forward_impl(const Variable& input) -> Variable override;
+private:
+    double min_val_;
+    double max_val_;
+};
+
+/**
  * @defgroup functional_activations Functional Activation Functions
  * @brief Stateless activation functions for flexible use
  *
@@ -712,6 +725,9 @@ auto softsign(const Variable& input) -> Variable;
 
 /** @brief Functional threshold: x if x > threshold else value */
 auto threshold(const Variable& input, double threshold, double value) -> Variable;
+
+/** @brief Functional hardtanh: clamp(x, min_val, max_val) */
+auto hardtanh(const Variable& input, double min_val = -1.0, double max_val = 1.0) -> Variable;
 
 /** @} */ // end of functional_activations group
 

@@ -113,6 +113,8 @@ set(TENZOR_CORE_SOURCES
     nn/loss/contrastive.cpp
     nn/optim/optimizer.cpp
     nn/optim/sgd.cpp
+    nn/optim/rprop.cpp
+    nn/optim/asgd.cpp
     nn/optim/adam.cpp
     nn/optim/radam.cpp
     nn/optim/nadam.cpp
@@ -142,6 +144,7 @@ set(TENZOR_CORE_SOURCES
     nn/utils/weight_norm.cpp
     nn/utils/parametrize.cpp
     nn/utils/rnn_utils.cpp
+    nn/metrics.cpp
     nn/init.cpp
     nn/parallel/data_parallel.cpp
     nn/quantization/quantize.cpp

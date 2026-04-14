@@ -1,0 +1,68 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer RowIndices { int row_indices[]; };
+layout(binding = 1) buffer ColIndices { int col_indices[]; };
+
+layout(push_constant) uniform PushConstants {
+    int n;        // total number of index pairs
+    int row;      // number of rows
+    int col;      // number of columns
+    int offset;   // diagonal offset
+} params;
+
+// Cumulative element count for triu through row r (inclusive).
+// Each row i contributes max(0, col - max(0, i + offset)) elements.
+// Mirrors the CUDA triu_cumcount function.
+int triu_cumcount(int r) {
+    int total = 0;
+
+    // Last row that contributes col elements: i + offset <= 0 => i <= -offset
+    int last_full = min(r, -params.offset);
+    if (last_full >= 0) {
+        total += (last_full + 1) * params.col;
+    }
+
+    // First partial row
+    int first_partial = max(0, last_full + 1);
+    // Last row that contributes anything: i + offset < col => i < col - offset
+    int last_nonempty = min(r, params.col - params.offset - 1);
+
+    if (first_partial <= last_nonempty) {
+        // Contribution of row i = col - (i + offset)
+        // Sum from i=first_partial to last_nonempty
+        int count = last_nonempty - first_partial + 1;
+        int first_val = params.col - (first_partial + params.offset);
+        int last_val  = params.col - (last_nonempty + params.offset);
+        total += count * (first_val + last_val) / 2;
+    }
+
+    return total;
+}
+
+void main() {
+    int idx = int(gl_GlobalInvocationID.x);
+    if (idx >= params.n) return;
+
+    // Binary search for the row: find smallest r such that triu_cumcount(r) > idx
+    int lo = 0;
+    int hi = params.row - 1;
+
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (triu_cumcount(mid) <= idx) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+
+    int r = lo;
+    int prev = (r > 0) ? triu_cumcount(r - 1) : 0;
+    int start_c = max(0, r + params.offset);
+    int c = start_c + (idx - prev);
+
+    row_indices[idx] = r;
+    col_indices[idx] = c;
+}

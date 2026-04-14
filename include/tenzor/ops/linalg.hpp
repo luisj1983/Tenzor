@@ -315,5 +315,87 @@ auto diag_embed(const Tensor& input, int64_t offset = 0, int64_t dim1 = -2, int6
 /// Create diagonal matrix from flat input
 auto diagflat(const Tensor& input, int64_t offset = 0) -> Tensor;
 
+/**
+ * @brief Generate orthogonal matrix Q from Householder reflectors.
+ *
+ * Given the output of a QR factorization (the packed reflectors and tau),
+ * computes the full orthogonal matrix Q = H(0) * H(1) * ... * H(k-1).
+ * Uses LAPACKE_?orgqr.
+ *
+ * @param input Matrix containing Householder reflectors (..., M, N)
+ * @param tau Scalar factors of the reflectors (..., K) where K = min(M, N)
+ * @return Orthogonal matrix Q (..., M, N)
+ */
+auto householder_product(const Tensor& input, const Tensor& tau) -> Tensor;
+
+/**
+ * @brief Compute LDL^T factorization of a symmetric indefinite matrix.
+ *
+ * Factorizes A = L @ D @ L^T using LAPACKE_?sytrf (Bunch-Kaufman pivoting).
+ *
+ * @param A Symmetric matrix (..., N, N)
+ * @return Tuple of (LD, pivots) where LD contains the packed L and D factors
+ *         (..., N, N) and pivots is (..., N)
+ */
+auto ldl_factor(const Tensor& A) -> std::tuple<Tensor, Tensor>;
+
+/**
+ * @brief Solve linear system using pre-computed LDL^T factors.
+ *
+ * Given LDL^T factors from ldl_factor(), solves AX = B.
+ *
+ * @param LD Packed LDL^T factors (..., N, N)
+ * @param pivots Pivot indices from LDL factorization (..., N)
+ * @param B Right-hand side matrix (..., N, K)
+ * @return Solution matrix X (..., N, K)
+ */
+auto ldl_solve(const Tensor& LD, const Tensor& pivots, const Tensor& B) -> Tensor;
+
+/**
+ * @brief Compute vector norm along specified dimensions.
+ *
+ * Supports arbitrary p-norms. Special cases:
+ * - ord=inf: max(abs(x))
+ * - ord=-inf: min(abs(x))
+ * - ord=0: count of nonzero elements
+ * - ord=p: sum(abs(x)^p)^(1/p)
+ *
+ * @param input Input tensor
+ * @param ord Norm order (default 2.0)
+ * @param dim Dimensions to reduce over (empty = all dims)
+ * @param keepdim Whether to keep reduced dimensions (default false)
+ * @return Norm value(s)
+ */
+auto vector_norm(const Tensor& input, double ord = 2.0,
+                 std::vector<int64_t> dim = {}, bool keepdim = false) -> Tensor;
+
+/**
+ * @brief Compute matrix norm.
+ *
+ * For ord=2: largest singular value (spectral norm).
+ * For ord=1: max absolute column sum.
+ * For ord=-1: min absolute column sum.
+ * For ord=inf: max absolute row sum.
+ * For ord=-inf: min absolute row sum.
+ *
+ * @param input Input matrix (..., M, N)
+ * @param ord Norm order (default 2.0)
+ * @return Norm value(s)
+ */
+auto matrix_norm(const Tensor& input, double ord = 2.0) -> Tensor;
+
+/**
+ * @brief Compute dot product along a dimension.
+ *
+ * Computes sum(a * b, dim) — the dot product of corresponding vectors
+ * along the specified dimension.
+ *
+ * @param a First input tensor
+ * @param b Second input tensor (must be broadcastable with a)
+ * @param dim Dimension along which to compute the dot product (default -1)
+ * @return Result tensor with dim reduced
+ */
+auto vecdot(const Tensor& a, const Tensor& b, int64_t dim = -1) -> Tensor;
+
 } // namespace linalg
 } // namespace tenzor

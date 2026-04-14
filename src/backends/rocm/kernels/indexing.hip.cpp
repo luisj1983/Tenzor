@@ -3244,45 +3244,212 @@ auto masked_scatter_hip(const Tensor& input, const Tensor& mask,
 }
 
 // ============================================================================
-// tril_indices / triu_indices — CPU generation + transfer
+// tril_indices / triu_indices — native HIP GPU kernels
 // ============================================================================
 
-auto tril_indices_hip(int64_t row, int64_t col, int64_t offset, hipStream_t) -> Tensor {
-    std::vector<int64_t> row_indices, col_indices;
-    for (int64_t r = 0; r < row; ++r) {
-        int64_t max_c = std::min(col, r + offset + 1);
-        for (int64_t c = 0; c < max_c; ++c) {
-            row_indices.push_back(r);
-            col_indices.push_back(c);
-        }
+// Cumulative count of lower-triangular indices through row r (inclusive).
+// Rows before first_nonempty contribute 0. Each row r contributes
+// min(col, r + offset + 1) elements.
+__device__ inline int64_t tril_cumcount(int64_t r, int64_t col, int64_t offset,
+                                        int64_t first_nonempty) {
+    if (r < first_nonempty) return 0;
+    int64_t num_rows = r - first_nonempty + 1;
+    // Width of first contributing row
+    int64_t w_first = first_nonempty + offset + 1;
+    // Width of row r
+    int64_t w_last = r + offset + 1;
+    // Row where width first reaches col (becomes full)
+    int64_t full_start = col - offset - 1; // row index where r+offset+1 == col
+    if (w_last <= col) {
+        // All rows in [first_nonempty, r] are partial
+        return num_rows * (w_first + w_last) / 2;
+    } else if (w_first >= col) {
+        // All rows in [first_nonempty, r] are full
+        return num_rows * col;
+    } else {
+        // Some partial, some full
+        int64_t num_partial = full_start - first_nonempty; // rows with width < col
+        int64_t partial_sum = num_partial * (w_first + (full_start - 1 + offset + 1)) / 2;
+        // full_start is the first full row, but only if full_start + offset + 1 >= col
+        // Rows [full_start, r] each contribute col
+        int64_t num_full = r - full_start + 1;
+        return partial_sum + num_full * col;
     }
-    int64_t n = static_cast<int64_t>(row_indices.size());
-    if (n == 0) return tenzor::empty({2, 0}, DType::Int64, Device::rocm(0));
-
-    Tensor cpu_out({2, n}, DType::Int64, Device::cpu());
-    int64_t* ptr = cpu_out.data<int64_t>();
-    std::memcpy(ptr, row_indices.data(), n * sizeof(int64_t));
-    std::memcpy(ptr + n, col_indices.data(), n * sizeof(int64_t));
-    return cpu_out.to(Device::rocm(0));
 }
 
-auto triu_indices_hip(int64_t row, int64_t col, int64_t offset, hipStream_t) -> Tensor {
-    std::vector<int64_t> row_indices, col_indices;
-    for (int64_t r = 0; r < row; ++r) {
-        int64_t min_c = std::max(static_cast<int64_t>(0), r + offset);
-        for (int64_t c = min_c; c < col; ++c) {
-            row_indices.push_back(r);
-            col_indices.push_back(c);
+__global__ void tril_indices_kernel(int64_t* __restrict__ row_out,
+                                    int64_t* __restrict__ col_out,
+                                    int64_t n, int64_t row, int64_t col,
+                                    int64_t offset, int64_t first_nonempty) {
+    HIP_KERNEL_LOOP(idx, n) {
+        // Binary search: find smallest r such that cumcount(r) > idx
+        int64_t lo = first_nonempty, hi = row - 1;
+        while (lo < hi) {
+            int64_t mid = lo + (hi - lo) / 2;
+            if (tril_cumcount(mid, col, offset, first_nonempty) <= idx) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
         }
+        int64_t r = lo;
+        int64_t prev_count = (r > first_nonempty) ?
+            tril_cumcount(r - 1, col, offset, first_nonempty) : 0;
+        int64_t c = idx - prev_count;
+        row_out[idx] = r;
+        col_out[idx] = c;
     }
-    int64_t n = static_cast<int64_t>(row_indices.size());
+}
+
+// Cumulative count of upper-triangular indices through row r (inclusive).
+// Each row r contributes max(0, col - max(0, r + offset)) elements.
+__device__ inline int64_t triu_cumcount(int64_t r, int64_t col, int64_t offset) {
+    // Sum over rows [0, r] of max(0, col - max(0, i + offset))
+    // Find the last row that contributes: col - max(0, i + offset) > 0
+    // => max(0, i + offset) < col => if offset >= 0: i < col - offset
+    //                                 if offset < 0: i < col - offset (still)
+    // So last contributing row is min(r, col - offset - 1) if offset >= 0,
+    // or just r if all rows contribute.
+
+    if (r < 0) return 0;
+
+    // First row start column: max(0, 0 + offset) = max(0, offset)
+    // Width of row i: col - max(0, i + offset)
+    // For rows where i + offset <= 0, width = col
+    // For rows where 0 < i + offset < col, width = col - (i + offset)
+    // For rows where i + offset >= col, width = 0
+
+    int64_t total = 0;
+
+    // Phase 1: rows where i + offset <= 0, i.e. i <= -offset. Width = col each.
+    int64_t phase1_end = min(r, max(-1LL, -offset));  // last row in phase 1
+    if (phase1_end >= 0) {
+        total += (phase1_end + 1) * col;
+    }
+
+    // Phase 2: rows where 0 < i + offset < col, i.e. max(0, -offset+1) <= i <= min(r, col-offset-1)
+    int64_t phase2_start = max(0LL, -offset + 1);
+    int64_t phase2_end = min(r, col - offset - 1);
+    if (phase2_start <= phase2_end) {
+        // Width of row i = col - (i + offset)
+        int64_t w_first = col - (phase2_start + offset);
+        int64_t w_last = col - (phase2_end + offset);
+        int64_t num = phase2_end - phase2_start + 1;
+        total += num * (w_first + w_last) / 2;
+    }
+
+    // Phase 3: rows where i + offset >= col contribute 0.
+    return total;
+}
+
+__global__ void triu_indices_kernel(int64_t* __restrict__ row_out,
+                                    int64_t* __restrict__ col_out,
+                                    int64_t n, int64_t row, int64_t col,
+                                    int64_t offset) {
+    HIP_KERNEL_LOOP(idx, n) {
+        // Binary search: find smallest r such that cumcount(r) > idx
+        int64_t lo = 0, hi = row - 1;
+        while (lo < hi) {
+            int64_t mid = lo + (hi - lo) / 2;
+            if (triu_cumcount(mid, col, offset) <= idx) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        int64_t r = lo;
+        int64_t prev_count = (r > 0) ? triu_cumcount(r - 1, col, offset) : 0;
+        int64_t local_idx = idx - prev_count;
+        int64_t start_col = max(0LL, r + offset);
+        int64_t c = start_col + local_idx;
+        row_out[idx] = r;
+        col_out[idx] = c;
+    }
+}
+
+auto tril_indices_hip(int64_t row, int64_t col, int64_t offset, hipStream_t stream) -> Tensor {
+    // Closed-form total count on host
+    int64_t first_nonempty = max(0LL, -offset);
+    if (first_nonempty >= row || col <= 0) {
+        return tenzor::empty({2, 0}, DType::Int64, Device::rocm(0));
+    }
+
+    int64_t n = 0;
+    // Partial rows: rows where r + offset + 1 < col
+    int64_t full_start = col - offset - 1;  // first row with full width
+    if (full_start <= first_nonempty) {
+        // All contributing rows are full
+        n = (row - first_nonempty) * col;
+    } else if (full_start >= row) {
+        // All contributing rows are partial: sum of (r + offset + 1) for r in [first_nonempty, row-1]
+        int64_t num = row - first_nonempty;
+        int64_t w_first = first_nonempty + offset + 1;
+        int64_t w_last = (row - 1) + offset + 1;
+        n = num * (w_first + w_last) / 2;
+    } else {
+        // Mixed: partial rows [first_nonempty, full_start-1], full rows [full_start, row-1]
+        int64_t num_partial = full_start - first_nonempty;
+        int64_t w_first = first_nonempty + offset + 1;
+        int64_t w_last_partial = (full_start - 1) + offset + 1;
+        int64_t partial_sum = num_partial * (w_first + w_last_partial) / 2;
+        int64_t num_full = row - full_start;
+        n = partial_sum + num_full * col;
+    }
+
     if (n == 0) return tenzor::empty({2, 0}, DType::Int64, Device::rocm(0));
 
-    Tensor cpu_out({2, n}, DType::Int64, Device::cpu());
-    int64_t* ptr = cpu_out.data<int64_t>();
-    std::memcpy(ptr, row_indices.data(), n * sizeof(int64_t));
-    std::memcpy(ptr + n, col_indices.data(), n * sizeof(int64_t));
-    return cpu_out.to(Device::rocm(0));
+    Tensor output({2, n}, DType::Int64, Device::rocm(0));
+    int64_t* row_ptr = output.data<int64_t>();
+    int64_t* col_ptr = row_ptr + n;
+
+    int threads = 256;
+    int blocks = static_cast<int>((n + threads - 1) / threads);
+    hipLaunchKernelGGL(tril_indices_kernel,
+        dim3(blocks), dim3(threads), 0, stream,
+        row_ptr, col_ptr, n, row, col, offset, first_nonempty);
+    HIP_POST_LAUNCH_CHECK();
+
+    return output;
+}
+
+auto triu_indices_hip(int64_t row, int64_t col, int64_t offset, hipStream_t stream) -> Tensor {
+    // Closed-form total count on host
+    // Each row r contributes max(0, col - max(0, r + offset))
+    if (row <= 0 || col <= 0) {
+        return tenzor::empty({2, 0}, DType::Int64, Device::rocm(0));
+    }
+
+    int64_t n = 0;
+    // Phase 1: rows where i + offset <= 0 => full width col
+    int64_t phase1_end = min(row - 1, max(-1LL, -offset));
+    if (phase1_end >= 0) {
+        n += (phase1_end + 1) * col;
+    }
+    // Phase 2: rows where 0 < i + offset < col => width = col - (i + offset)
+    int64_t phase2_start = max(0LL, -offset + 1);
+    int64_t phase2_end = min(row - 1, col - offset - 1);
+    if (phase2_start <= phase2_end) {
+        int64_t w_first = col - (phase2_start + offset);
+        int64_t w_last = col - (phase2_end + offset);
+        int64_t num = phase2_end - phase2_start + 1;
+        n += num * (w_first + w_last) / 2;
+    }
+    // Phase 3: rows where i + offset >= col contribute 0.
+
+    if (n == 0) return tenzor::empty({2, 0}, DType::Int64, Device::rocm(0));
+
+    Tensor output({2, n}, DType::Int64, Device::rocm(0));
+    int64_t* row_ptr = output.data<int64_t>();
+    int64_t* col_ptr = row_ptr + n;
+
+    int threads = 256;
+    int blocks = static_cast<int>((n + threads - 1) / threads);
+    hipLaunchKernelGGL(triu_indices_kernel,
+        dim3(blocks), dim3(threads), 0, stream,
+        row_ptr, col_ptr, n, row, col, offset);
+    HIP_POST_LAUNCH_CHECK();
+
+    return output;
 }
 
 } // namespace rocm

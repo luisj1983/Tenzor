@@ -293,6 +293,44 @@ auto take_along_dim(const Tensor& input, const Tensor& indices, int64_t dim) -> 
  */
 auto masked_scatter(const Tensor& input, const Tensor& mask, const Tensor& source) -> Tensor;
 
+/**
+ * @brief Return a copy of input with src placed at input.select(dim, index).
+ *
+ * @param input Source tensor
+ * @param src Values to scatter (shape matches input.select(dim, index))
+ * @param dim Dimension to select along
+ * @param index Index to select
+ * @return New tensor with src placed at the selected position
+ */
+auto select_scatter(const Tensor& input, const Tensor& src, int64_t dim, int64_t index) -> Tensor;
+
+/**
+ * @brief Return a copy of input with src placed at input.slice(dim, start, end, step).
+ *
+ * @param input Source tensor
+ * @param src Values to scatter (shape matches the slice)
+ * @param dim Dimension to slice along
+ * @param start Start index (default 0)
+ * @param end End index exclusive (default -1 means end of dimension)
+ * @param step Step size (default 1)
+ * @return New tensor with src placed at the sliced region
+ */
+auto slice_scatter(const Tensor& input, const Tensor& src, int64_t dim,
+                   int64_t start = 0, int64_t end = -1, int64_t step = 1) -> Tensor;
+
+/**
+ * @brief Return a copy of input with src placed along the diagonal.
+ *
+ * @param input Source tensor (at least 2D)
+ * @param src 1D tensor of values to place on the diagonal
+ * @param offset Diagonal offset (0 = main diagonal, >0 = above, <0 = below)
+ * @param dim1 First dimension of the 2D sub-tensor (default 0)
+ * @param dim2 Second dimension of the 2D sub-tensor (default 1)
+ * @return New tensor with src placed along the specified diagonal
+ */
+auto diagonal_scatter(const Tensor& input, const Tensor& src, int64_t offset = 0,
+                      int64_t dim1 = 0, int64_t dim2 = 1) -> Tensor;
+
 /** @} */ // end of tensor_indexing group
 
 } // namespace tenzor
@@ -317,5 +355,8 @@ using tenzor::bincount;
 using tenzor::index_reduce;
 using tenzor::take_along_dim;
 using tenzor::masked_scatter;
+using tenzor::select_scatter;
+using tenzor::slice_scatter;
+using tenzor::diagonal_scatter;
 } // namespace ops
 } // namespace tenzor

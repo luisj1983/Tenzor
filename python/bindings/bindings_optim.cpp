@@ -18,6 +18,8 @@
 #include <tenzor/nn/optim/lamb.hpp>
 #include <tenzor/nn/optim/sparse_adam.hpp>
 #include <tenzor/nn/optim/adam_atan2.hpp>
+#include <tenzor/nn/optim/rprop.hpp>
+#include <tenzor/nn/optim/asgd.hpp>
 
 namespace py = pybind11;
 
@@ -114,6 +116,27 @@ void register_optim(py::module_& m) {
         .def("state_dict", &tenzor::optim::SGD::state_dict,
              "Get optimizer state dictionary")
         .def("load_state_dict", &tenzor::optim::SGD::load_state_dict,
+             py::arg("state"), "Load optimizer state dictionary");
+
+    py::class_<tenzor::optim::ASGD, tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::ASGD>>(optim, "ASGD",
+        "Averaged Stochastic Gradient Descent optimizer")
+        .def(py::init<std::vector<std::shared_ptr<tenzor::Variable>>, double, double, double, double, double>(),
+             py::arg("params"), py::arg("lr") = 0.01,
+             py::arg("lambd") = 1e-4, py::arg("alpha") = 0.75,
+             py::arg("t0") = 1e6, py::arg("weight_decay") = 0.0)
+        .def("step", [](tenzor::optim::ASGD& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
+            if (closure) return py::cast(self.step(*closure));
+            self.step(); return py::none();
+        }, py::arg("closure") = py::none(),
+           "Perform optimization step. Optionally takes a closure that recomputes the loss.")
+        .def("zero_grad", &tenzor::optim::ASGD::zero_grad)
+        .def("set_lr", &tenzor::optim::ASGD::set_lr,
+             py::arg("lr"), "Set learning rate")
+        .def("get_lr", &tenzor::optim::ASGD::get_lr,
+             "Get current learning rate")
+        .def("state_dict", &tenzor::optim::ASGD::state_dict,
+             "Get optimizer state dictionary")
+        .def("load_state_dict", &tenzor::optim::ASGD::load_state_dict,
              py::arg("state"), "Load optimizer state dictionary");
 
     py::class_<tenzor::optim::Adam, tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::Adam>>(optim, "Adam")
@@ -271,6 +294,27 @@ void register_optim(py::module_& m) {
         .def("get_lr", &tenzor::optim::SparseAdam::get_lr)
         .def("state_dict", &tenzor::optim::SparseAdam::state_dict)
         .def("load_state_dict", &tenzor::optim::SparseAdam::load_state_dict, py::arg("state"));
+
+    py::class_<tenzor::optim::Rprop, tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::Rprop>>(optim, "Rprop",
+        "Resilient Propagation optimizer with per-parameter adaptive step sizes")
+        .def(py::init<std::vector<std::shared_ptr<tenzor::Variable>>, double, double, double, double, double>(),
+             py::arg("params"), py::arg("lr") = 0.01,
+             py::arg("eta_minus") = 0.5, py::arg("eta_plus") = 1.2,
+             py::arg("step_min") = 1e-6, py::arg("step_max") = 50.0)
+        .def("step", [](tenzor::optim::Rprop& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
+            if (closure) return py::cast(self.step(*closure));
+            self.step(); return py::none();
+        }, py::arg("closure") = py::none(),
+           "Perform optimization step. Optionally takes a closure that recomputes the loss.")
+        .def("zero_grad", &tenzor::optim::Rprop::zero_grad)
+        .def("set_lr", &tenzor::optim::Rprop::set_lr,
+             py::arg("lr"), "Set learning rate (initial step size)")
+        .def("get_lr", &tenzor::optim::Rprop::get_lr,
+             "Get current learning rate")
+        .def("state_dict", &tenzor::optim::Rprop::state_dict,
+             "Get optimizer state dictionary")
+        .def("load_state_dict", &tenzor::optim::Rprop::load_state_dict,
+             py::arg("state"), "Load optimizer state dictionary");
 
     // Learning rate schedulers
     auto lr_scheduler = optim.def_submodule("lr_scheduler", "Learning rate scheduling");

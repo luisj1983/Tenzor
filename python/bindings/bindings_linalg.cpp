@@ -149,6 +149,47 @@ void register_linalg(py::module_& m) {
                    "Optimized chain of matrix multiplications via dynamic programming",
                    py::arg("tensors"),
                    py::call_guard<py::gil_scoped_release>());
+
+    // P3.5 additions — householder_product, ldl_factor, ldl_solve,
+    // vector_norm, matrix_norm, vecdot.
+
+    linalg_mod.def("householder_product", &tenzor::linalg::householder_product,
+                   "Generate orthogonal matrix Q from Householder reflectors and tau",
+                   py::arg("input"), py::arg("tau"),
+                   py::call_guard<py::gil_scoped_release>());
+
+    linalg_mod.def("ldl_factor", [](const tenzor::Tensor& A) {
+        std::tuple<tenzor::Tensor, tenzor::Tensor> result;
+        {
+            py::gil_scoped_release release;
+            result = tenzor::linalg::ldl_factor(A);
+        }
+        auto [LD, pivots] = std::move(result);
+        return py::make_tuple(LD, pivots);
+    }, "LDL^T factorization of a symmetric indefinite matrix",
+       py::arg("A"));
+
+    linalg_mod.def("ldl_solve", &tenzor::linalg::ldl_solve,
+                   "Solve linear system using pre-computed LDL^T factors",
+                   py::arg("LD"), py::arg("pivots"), py::arg("B"),
+                   py::call_guard<py::gil_scoped_release>());
+
+    linalg_mod.def("vector_norm", &tenzor::linalg::vector_norm,
+                   "Compute vector p-norm along specified dimensions",
+                   py::arg("input"), py::arg("ord") = 2.0,
+                   py::arg("dim") = std::vector<int64_t>{},
+                   py::arg("keepdim") = false,
+                   py::call_guard<py::gil_scoped_release>());
+
+    linalg_mod.def("matrix_norm", &tenzor::linalg::matrix_norm,
+                   "Compute matrix norm (spectral, 1-norm, inf-norm, etc.)",
+                   py::arg("input"), py::arg("ord") = 2.0,
+                   py::call_guard<py::gil_scoped_release>());
+
+    linalg_mod.def("vecdot", &tenzor::linalg::vecdot,
+                   "Dot product along a dimension: sum(a * b, dim)",
+                   py::arg("a"), py::arg("b"), py::arg("dim") = -1,
+                   py::call_guard<py::gil_scoped_release>());
 }
 
 } // namespace tenzor::python

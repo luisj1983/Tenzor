@@ -2579,48 +2579,193 @@ auto masked_scatter_kernel(const Tensor& input, const Tensor& mask,
 }
 
 // ============================================================================
-// tril_indices / triu_indices — CPU generation + transfer (standard pattern)
+// tril_indices / triu_indices — native CUDA kernels
 // ============================================================================
+
+// Cumulative element count for tril through row r (inclusive).
+// Each row i contributes min(col, max(0, i + offset + 1)) elements.
+// Rows before first_nonempty contribute 0. Partial rows form an arithmetic
+// series; full rows contribute col each.
+__device__ inline int64_t tril_cumcount(int64_t r, int64_t col, int64_t offset) {
+    // first row that has any element
+    int64_t first = max(static_cast<int64_t>(0), -offset);
+    if (r < first) return 0;
+
+    // row index where the contribution first reaches col (becomes "full")
+    int64_t full_from = col - offset - 1; // row index threshold
+
+    if (full_from <= first) {
+        // all non-empty rows are full rows
+        return (r - first + 1) * col;
+    }
+
+    if (r < full_from) {
+        // all rows in [first, r] are partial
+        // contribution of row i = i + offset + 1
+        // sum from i=first to r: sum of (i + offset + 1)
+        int64_t count = r - first + 1;
+        int64_t first_val = first + offset + 1;
+        int64_t last_val  = r + offset + 1;
+        return count * (first_val + last_val) / 2;
+    }
+
+    // mixed: partial rows [first, full_from-1] + full rows [full_from, r]
+    int64_t partial_count = full_from - first;
+    int64_t first_val = first + offset + 1;
+    int64_t last_val  = full_from - 1 + offset + 1;
+    int64_t partial_sum = partial_count * (first_val + last_val) / 2;
+    int64_t full_sum = (r - full_from + 1) * col;
+    return partial_sum + full_sum;
+}
+
+// Cumulative element count for triu through row r (inclusive).
+// Each row i contributes max(0, col - max(0, i + offset)) elements.
+__device__ inline int64_t triu_cumcount(int64_t r, int64_t col, int64_t offset) {
+    int64_t total = 0;
+    // Rows where i + offset <= 0 contribute col elements each.
+    // Rows where i + offset >= col contribute 0.
+    // In between: col - (i + offset).
+
+    // last row that contributes col elements: i + offset <= 0 => i <= -offset
+    int64_t last_full = min(r, -offset);
+    if (last_full >= 0) {
+        total += (last_full + 1) * col;
+    }
+
+    // first partial row
+    int64_t first_partial = max(static_cast<int64_t>(0), last_full + 1);
+    // last row that contributes anything: i + offset < col => i < col - offset
+    int64_t last_nonempty = min(r, col - offset - 1);
+
+    if (first_partial <= last_nonempty) {
+        // contribution of row i = col - (i + offset)
+        // sum from i=first_partial to last_nonempty
+        int64_t count = last_nonempty - first_partial + 1;
+        int64_t first_val = col - (first_partial + offset);
+        int64_t last_val  = col - (last_nonempty + offset);
+        total += count * (first_val + last_val) / 2;
+    }
+
+    return total;
+}
+
+__global__ void tril_indices_kernel_impl(
+    int64_t* row_out,
+    int64_t* col_out,
+    int64_t n,
+    int64_t row,
+    int64_t col,
+    int64_t offset) {
+
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        // Binary search for the row: find smallest r such that tril_cumcount(r) > idx
+        int64_t first = max(static_cast<int64_t>(0), -offset);
+        int64_t lo = first, hi = row - 1;
+        while (lo < hi) {
+            int64_t mid = lo + (hi - lo) / 2;
+            if (tril_cumcount(mid, col, offset) <= idx) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        int64_t r = lo;
+        int64_t prev = (r > first) ? tril_cumcount(r - 1, col, offset) : 0;
+        int64_t c = idx - prev;
+        row_out[idx] = r;
+        col_out[idx] = c;
+    }
+}
+
+__global__ void triu_indices_kernel_impl(
+    int64_t* row_out,
+    int64_t* col_out,
+    int64_t n,
+    int64_t row,
+    int64_t col,
+    int64_t offset) {
+
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        // Binary search for the row: find smallest r such that triu_cumcount(r) > idx
+        int64_t lo = 0, hi = row - 1;
+        while (lo < hi) {
+            int64_t mid = lo + (hi - lo) / 2;
+            if (triu_cumcount(mid, col, offset) <= idx) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        int64_t r = lo;
+        int64_t prev = (r > 0) ? triu_cumcount(r - 1, col, offset) : 0;
+        int64_t start_c = max(static_cast<int64_t>(0), r + offset);
+        int64_t c = start_c + (idx - prev);
+        row_out[idx] = r;
+        col_out[idx] = c;
+    }
+}
 
 auto tril_indices_kernel(int64_t row, int64_t col, int64_t offset,
                          cudaStream_t stream) -> Tensor {
-    // Generate on CPU
-    std::vector<int64_t> row_indices, col_indices;
-    for (int64_t r = 0; r < row; ++r) {
-        int64_t max_c = std::min(col, r + offset + 1);
-        for (int64_t c = 0; c < max_c; ++c) {
-            row_indices.push_back(r);
-            col_indices.push_back(c);
+    // Compute total element count on host (O(1) closed-form)
+    int64_t first = std::max(static_cast<int64_t>(0), -offset);
+    int64_t n = 0;
+    if (first < row) {
+        int64_t full_from = col - offset - 1;
+        if (full_from <= first) {
+            n = (row - first) * col;
+        } else if (full_from >= row) {
+            int64_t count = row - first;
+            int64_t first_val = first + offset + 1;
+            int64_t last_val  = row - 1 + offset + 1;
+            n = count * (first_val + last_val) / 2;
+        } else {
+            int64_t partial_count = full_from - first;
+            int64_t first_val = first + offset + 1;
+            int64_t last_val  = full_from - 1 + offset + 1;
+            int64_t partial_sum = partial_count * (first_val + last_val) / 2;
+            int64_t full_sum = (row - full_from) * col;
+            n = partial_sum + full_sum;
         }
     }
-    int64_t n = static_cast<int64_t>(row_indices.size());
+
     if (n == 0) return tenzor::empty({2, 0}, DType::Int64, Device::cuda(0));
 
-    Tensor cpu_out({2, n}, DType::Int64, Device::cpu());
-    int64_t* ptr = cpu_out.data<int64_t>();
-    std::memcpy(ptr, row_indices.data(), n * sizeof(int64_t));
-    std::memcpy(ptr + n, col_indices.data(), n * sizeof(int64_t));
-    return cpu_out.to(Device::cuda(0));
+    Tensor output({2, n}, DType::Int64, Device::cuda(0));
+    int64_t* ptr = output.data<int64_t>();
+    int blocks = get_num_blocks(n);
+    tril_indices_kernel_impl<<<blocks, BLOCK_SIZE, 0, stream>>>(
+        ptr, ptr + n, n, row, col, offset);
+    CUDA_CHECK(cudaGetLastError());
+    return output;
 }
 
 auto triu_indices_kernel(int64_t row, int64_t col, int64_t offset,
                          cudaStream_t stream) -> Tensor {
-    std::vector<int64_t> row_indices, col_indices;
-    for (int64_t r = 0; r < row; ++r) {
-        int64_t min_c = std::max(static_cast<int64_t>(0), r + offset);
-        for (int64_t c = min_c; c < col; ++c) {
-            row_indices.push_back(r);
-            col_indices.push_back(c);
-        }
+    // Compute total element count on host (O(1) closed-form)
+    int64_t n = 0;
+    int64_t last_full = std::min(row - 1, -offset);
+    if (last_full >= 0) {
+        n += (last_full + 1) * col;
     }
-    int64_t n = static_cast<int64_t>(row_indices.size());
+    int64_t first_partial = std::max(static_cast<int64_t>(0), last_full + 1);
+    int64_t last_nonempty = std::min(row - 1, col - offset - 1);
+    if (first_partial <= last_nonempty) {
+        int64_t count = last_nonempty - first_partial + 1;
+        int64_t first_val = col - (first_partial + offset);
+        int64_t last_val  = col - (last_nonempty + offset);
+        n += count * (first_val + last_val) / 2;
+    }
+
     if (n == 0) return tenzor::empty({2, 0}, DType::Int64, Device::cuda(0));
 
-    Tensor cpu_out({2, n}, DType::Int64, Device::cpu());
-    int64_t* ptr = cpu_out.data<int64_t>();
-    std::memcpy(ptr, row_indices.data(), n * sizeof(int64_t));
-    std::memcpy(ptr + n, col_indices.data(), n * sizeof(int64_t));
-    return cpu_out.to(Device::cuda(0));
+    Tensor output({2, n}, DType::Int64, Device::cuda(0));
+    int64_t* ptr = output.data<int64_t>();
+    int blocks = get_num_blocks(n);
+    triu_indices_kernel_impl<<<blocks, BLOCK_SIZE, 0, stream>>>(
+        ptr, ptr + n, n, row, col, offset);
+    CUDA_CHECK(cudaGetLastError());
+    return output;
 }
 
 } // namespace cuda

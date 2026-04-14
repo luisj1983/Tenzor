@@ -274,6 +274,10 @@ enum class AttrKey : uint16_t {
     PaddingValue,      // Fill value for padded regions
     HeadDim,           // Attention head dimension
 
+    // Additional dimension/index attributes
+    Dim2,              // Second dimension parameter (e.g. diagonal_scatter)
+    Index,             // Index parameter (e.g. select_scatter)
+
     // Sentinel
     _Count
 };

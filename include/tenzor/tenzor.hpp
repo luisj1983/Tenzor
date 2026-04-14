@@ -113,6 +113,8 @@
 #include "tenzor/nn/activations/activations.hpp"
 #include "tenzor/nn/loss/losses.hpp"
 #include "tenzor/nn/optim/sgd.hpp"
+#include "tenzor/nn/optim/rprop.hpp"
+#include "tenzor/nn/optim/asgd.hpp"
 #include "tenzor/nn/optim/adam.hpp"
 #include "tenzor/nn/optim/rmsprop.hpp"
 #include "tenzor/nn/optim/adagrad.hpp"

@@ -376,4 +376,45 @@ auto VulkanBackend::dispatchMultinomial(const Tensor& probs, int64_t num_samples
     return dispatchCast(result_i32, DType::Int64);
 }
 
+auto VulkanBackend::dispatchPoissonSample(const Tensor& rates) -> Tensor {
+    Tensor rates_f32 = (rates.dtype() == DType::Float32)
+                           ? rates.contiguous()
+                           : dispatchCast(rates.contiguous(), DType::Float32);
+
+    std::vector<int64_t> shape(rates_f32.shape().begin(), rates_f32.shape().end());
+    int64_t n = rates_f32.numel();
+    Tensor output_i32(shape, DType::Int32, rates.device());
+    if (n == 0) return dispatchCast(output_i32, DType::Int64);
+
+    int32_t device_id = rates.device().index;
+    auto* pipeline = getPipeline("poisson_sample", device_id);
+
+    auto [seed_lo, seed_hi] = seed_split();
+    BernoulliPC pc{static_cast<uint32_t>(n), seed_lo, seed_hi};
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, rates_f32.data_ptr()},
+        {1, output_i32.data_ptr()},
+    };
+    std::vector<size_t> sizes = {
+        static_cast<size_t>(n) * sizeof(float),
+        static_cast<size_t>(n) * sizeof(int32_t),
+    };
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(BernoulliPC), &pc);
+    uint32_t workgroups = div_wg(static_cast<uint32_t>(n), devices_[device_id].workgroupSize);
+    vkCmdDispatch(cmd, workgroups, 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+    synchronize(device_id);
+
+    return dispatchCast(output_i32, DType::Int64);
+}
+
 }  // namespace tenzor

@@ -223,6 +223,222 @@ auto VulkanBackend::dispatchNestedLogSoftmax(const Tensor& values, const Tensor&
     return output;
 }
 
+auto VulkanBackend::dispatchNestedSoftmax(const Tensor& values, const Tensor& offsets,
+                                           int64_t /*dim*/) -> Tensor {
+    int32_t device_id = values.device().index;
+    auto shape = values.shape();
+    uint32_t D = (shape.size() > 1) ? static_cast<uint32_t>(shape[1]) : 1;
+    uint32_t B = static_cast<uint32_t>(offsets.numel() - 1);
+
+    auto* pipeline = getPipeline("nested_softmax", device_id);
+
+    Tensor output(std::vector<int64_t>(shape.begin(), shape.end()), values.dtype(), values.device());
+
+    Tensor offsets_i32 = (offsets.dtype() == DType::Int32)
+                         ? offsets : offsets.to(DType::Int32);
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, values.data_ptr()},
+        {1, offsets_i32.data_ptr()},
+        {2, output.data_ptr()},
+    };
+    std::vector<size_t> sizes = {
+        static_cast<size_t>(values.numel()) * values.dtype_size(),
+        static_cast<size_t>(offsets_i32.numel()) * offsets_i32.dtype_size(),
+        static_cast<size_t>(output.numel()) * output.dtype_size(),
+    };
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+
+    struct { uint32_t D; uint32_t B; } pc{D, B};
+    vkCmdPushConstants(cmd, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+
+    vkCmdDispatch(cmd, B, 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchNestedSum(const Tensor& values, const Tensor& offsets) -> Tensor {
+    int32_t device_id = values.device().index;
+    auto shape = values.shape();
+    uint32_t D = (shape.size() > 1) ? static_cast<uint32_t>(shape[1]) : 1;
+    uint32_t B = static_cast<uint32_t>(offsets.numel() - 1);
+
+    auto* pipeline = getPipeline("nested_sum", device_id);
+
+    // Output is [B, D] (one row per segment, keepdim=true style)
+    Tensor output({static_cast<int64_t>(B), static_cast<int64_t>(D)}, values.dtype(), values.device());
+
+    Tensor offsets_i32 = (offsets.dtype() == DType::Int32)
+                         ? offsets : offsets.to(DType::Int32);
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, values.data_ptr()},
+        {1, offsets_i32.data_ptr()},
+        {2, output.data_ptr()},
+    };
+    std::vector<size_t> sizes = {
+        static_cast<size_t>(values.numel()) * values.dtype_size(),
+        static_cast<size_t>(offsets_i32.numel()) * offsets_i32.dtype_size(),
+        static_cast<size_t>(output.numel()) * output.dtype_size(),
+    };
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+
+    struct { uint32_t D; uint32_t B; } pc{D, B};
+    vkCmdPushConstants(cmd, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+
+    vkCmdDispatch(cmd, B, 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchNestedMean(const Tensor& values, const Tensor& offsets) -> Tensor {
+    int32_t device_id = values.device().index;
+    auto shape = values.shape();
+    uint32_t D = (shape.size() > 1) ? static_cast<uint32_t>(shape[1]) : 1;
+    uint32_t B = static_cast<uint32_t>(offsets.numel() - 1);
+
+    auto* pipeline = getPipeline("nested_mean", device_id);
+
+    Tensor output({static_cast<int64_t>(B), static_cast<int64_t>(D)}, values.dtype(), values.device());
+
+    Tensor offsets_i32 = (offsets.dtype() == DType::Int32)
+                         ? offsets : offsets.to(DType::Int32);
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, values.data_ptr()},
+        {1, offsets_i32.data_ptr()},
+        {2, output.data_ptr()},
+    };
+    std::vector<size_t> sizes = {
+        static_cast<size_t>(values.numel()) * values.dtype_size(),
+        static_cast<size_t>(offsets_i32.numel()) * offsets_i32.dtype_size(),
+        static_cast<size_t>(output.numel()) * output.dtype_size(),
+    };
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+
+    struct { uint32_t D; uint32_t B; } pc{D, B};
+    vkCmdPushConstants(cmd, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+
+    vkCmdDispatch(cmd, B, 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchNestedToPadded(const Tensor& values, const Tensor& offsets,
+                                            int64_t max_len, float padding_value) -> Tensor {
+    int32_t device_id = values.device().index;
+    auto shape = values.shape();
+    uint32_t D = (shape.size() > 1) ? static_cast<uint32_t>(shape[1]) : 1;
+    uint32_t B = static_cast<uint32_t>(offsets.numel() - 1);
+
+    auto* pipeline = getPipeline("nested_to_padded", device_id);
+
+    Tensor output({static_cast<int64_t>(B), max_len, static_cast<int64_t>(D)},
+                  values.dtype(), values.device());
+
+    Tensor offsets_i32 = (offsets.dtype() == DType::Int32)
+                         ? offsets : offsets.to(DType::Int32);
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, values.data_ptr()},
+        {1, offsets_i32.data_ptr()},
+        {2, output.data_ptr()},
+    };
+    std::vector<size_t> sizes = {
+        static_cast<size_t>(values.numel()) * values.dtype_size(),
+        static_cast<size_t>(offsets_i32.numel()) * offsets_i32.dtype_size(),
+        static_cast<size_t>(output.numel()) * output.dtype_size(),
+    };
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+
+    struct { uint32_t D; uint32_t B; uint32_t max_len; float pad_value; } pc{
+        D, B, static_cast<uint32_t>(max_len), padding_value};
+    vkCmdPushConstants(cmd, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+
+    vkCmdDispatch(cmd, B, 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchNestedFromPadded(const Tensor& padded, const Tensor& offsets) -> Tensor {
+    int32_t device_id = padded.device().index;
+    auto shape = padded.shape();
+    uint32_t B = static_cast<uint32_t>(offsets.numel() - 1);
+    uint32_t max_len = static_cast<uint32_t>(shape[1]);
+    uint32_t D = (shape.size() > 2) ? static_cast<uint32_t>(shape[2]) : 1;
+
+    // Read only the last element of offsets to get total_len (avoids full GPU->CPU copy)
+    Tensor total_len_scalar = offsets.slice(0, static_cast<int64_t>(B),
+                                            static_cast<int64_t>(B) + 1).to(Device::cpu());
+    int64_t total_len = total_len_scalar.data<int64_t>()[0];
+
+    auto* pipeline = getPipeline("nested_from_padded", device_id);
+
+    Tensor output({total_len, static_cast<int64_t>(D)}, padded.dtype(), padded.device());
+
+    Tensor offsets_i32 = (offsets.dtype() == DType::Int32)
+                         ? offsets : offsets.to(DType::Int32);
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, padded.data_ptr()},
+        {1, offsets_i32.data_ptr()},
+        {2, output.data_ptr()},
+    };
+    std::vector<size_t> sizes = {
+        static_cast<size_t>(padded.numel()) * padded.dtype_size(),
+        static_cast<size_t>(offsets_i32.numel()) * offsets_i32.dtype_size(),
+        static_cast<size_t>(output.numel()) * output.dtype_size(),
+    };
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+
+    struct { uint32_t D; uint32_t B; uint32_t max_len; } pc{D, B, max_len};
+    vkCmdPushConstants(cmd, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+
+    vkCmdDispatch(cmd, B, 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return output;
+}
+
 auto VulkanBackend::dispatchCrossEntropy(const Tensor& log_probs, const Tensor& targets,
                                          int64_t reduction) -> Tensor {
     int32_t device_id = log_probs.device().index;

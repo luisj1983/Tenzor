@@ -4197,6 +4197,169 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return {oneapi::scatter_reduce_kernel(inputs[0], dim, inputs[1], inputs[2], reduce, include_self, get_q(inputs))};
         });
 
+    // SelectScatter: clone input, then copy src into the selected slice
+    table.register_kernel(OpId::SelectScatter,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            const auto& input = inputs[0];
+            const auto& src = inputs[1];
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            int64_t index = attrs.get_int(AttrKey::Index, 0);
+
+            auto output = input.clone();
+            int64_t ndim = static_cast<int64_t>(output.shape().size());
+            if (dim < 0) dim += ndim;
+
+            auto dst_slice = output.slice(dim, index, index + 1, 1);
+            auto dst_sh = dst_slice.shape();
+            auto src_reshaped = src.reshape(std::vector<int64_t>(dst_sh.begin(), dst_sh.end())).contiguous();
+
+            auto n = dst_slice.numel();
+            auto elem_size = static_cast<int64_t>(dtype_size(output.dtype()));
+            auto* dst_ptr = static_cast<char*>(dst_slice.data_ptr());
+            const auto* src_ptr = static_cast<const char*>(src_reshaped.data_ptr());
+            auto& q = oneapi_internal::get_queue(output.device().index);
+            if (dst_slice.is_contiguous()) {
+                q.memcpy(dst_ptr, src_ptr, n * elem_size).wait();
+            } else {
+                auto dst_shape_v = dst_slice.shape();
+                auto dst_strides = dst_slice.strides();
+                int64_t ndims = static_cast<int64_t>(dst_shape_v.size());
+                std::vector<int64_t> coord(ndims, 0);
+                for (int64_t i = 0; i < n; i++) {
+                    int64_t byte_offset = 0;
+                    for (int64_t d = 0; d < ndims; d++) {
+                        byte_offset += coord[d] * dst_strides[d] * elem_size;
+                    }
+                    q.memcpy(dst_ptr + byte_offset, src_ptr + i * elem_size, elem_size).wait();
+                    for (int64_t d = ndims - 1; d >= 0; d--) {
+                        coord[d]++;
+                        if (coord[d] < dst_shape_v[d]) break;
+                        coord[d] = 0;
+                    }
+                }
+            }
+            return {output};
+        });
+
+    // SliceScatter: clone input, then copy src into the sliced region
+    table.register_kernel(OpId::SliceScatter,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            const auto& input = inputs[0];
+            const auto& src = inputs[1];
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            int64_t start = attrs.get_int(AttrKey::Start, 0);
+            int64_t end = attrs.get_int(AttrKey::End, -1);
+            int64_t step = attrs.get_int(AttrKey::Step, 1);
+
+            auto output = input.clone();
+            int64_t ndim = static_cast<int64_t>(output.shape().size());
+            if (dim < 0) dim += ndim;
+            int64_t dim_size = output.shape()[dim];
+
+            if (start < 0) start += dim_size;
+            if (end < 0) end += dim_size + 1;
+            if (start < 0) start = 0;
+            if (end > dim_size) end = dim_size;
+
+            auto dst_slice = output.slice(dim, start, end, step);
+            auto dst_sh = dst_slice.shape();
+            auto src_reshaped = src.reshape(std::vector<int64_t>(dst_sh.begin(), dst_sh.end())).contiguous();
+
+            auto n = dst_slice.numel();
+            auto elem_size = static_cast<int64_t>(dtype_size(output.dtype()));
+            auto* dst_ptr = static_cast<char*>(dst_slice.data_ptr());
+            const auto* src_ptr = static_cast<const char*>(src_reshaped.data_ptr());
+            auto& q = oneapi_internal::get_queue(output.device().index);
+            if (dst_slice.is_contiguous()) {
+                q.memcpy(dst_ptr, src_ptr, n * elem_size).wait();
+            } else {
+                auto dst_shape_v = dst_slice.shape();
+                auto dst_strides = dst_slice.strides();
+                int64_t ndims = static_cast<int64_t>(dst_shape_v.size());
+                std::vector<int64_t> coord(ndims, 0);
+                for (int64_t i = 0; i < n; i++) {
+                    int64_t byte_offset = 0;
+                    for (int64_t d = 0; d < ndims; d++) {
+                        byte_offset += coord[d] * dst_strides[d] * elem_size;
+                    }
+                    q.memcpy(dst_ptr + byte_offset, src_ptr + i * elem_size, elem_size).wait();
+                    for (int64_t d = ndims - 1; d >= 0; d--) {
+                        coord[d]++;
+                        if (coord[d] < dst_shape_v[d]) break;
+                        coord[d] = 0;
+                    }
+                }
+            }
+            return {output};
+        });
+
+    // DiagonalScatter: clone input, place src values along the diagonal
+    table.register_kernel(OpId::DiagonalScatter,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            const auto& input = inputs[0];
+            const auto& src_in = inputs[1];
+            int64_t offset = attrs.get_int(AttrKey::Diagonal, 0);
+            int64_t dim1 = attrs.get_int(AttrKey::Dim1, 0);
+            int64_t dim2 = attrs.get_int(AttrKey::Dim2, 1);
+
+            auto output = input.clone();
+            int64_t ndim = static_cast<int64_t>(output.shape().size());
+            if (dim1 < 0) dim1 += ndim;
+            if (dim2 < 0) dim2 += ndim;
+
+            auto shape = output.shape();
+            int64_t size1 = shape[dim1];
+            int64_t size2 = shape[dim2];
+
+            int64_t diag_len;
+            if (offset >= 0) {
+                diag_len = std::min(size1, size2 - offset);
+            } else {
+                diag_len = std::min(size1 + offset, size2);
+            }
+            if (diag_len <= 0) return {output};
+
+            auto strides = output.strides();
+            auto elem_size = static_cast<int64_t>(dtype_size(output.dtype()));
+            auto* out_ptr = static_cast<char*>(output.data_ptr());
+            auto src = src_in.contiguous();
+            const auto* src_ptr = static_cast<const char*>(src.data_ptr());
+
+            int64_t batch_size = 1;
+            std::vector<int64_t> batch_dims;
+            for (int64_t d = 0; d < ndim; d++) {
+                if (d != dim1 && d != dim2) {
+                    batch_dims.push_back(d);
+                    batch_size *= shape[d];
+                }
+            }
+
+            auto& q = oneapi_internal::get_queue(output.device().index);
+            std::vector<int64_t> batch_coord(batch_dims.size(), 0);
+            for (int64_t b = 0; b < batch_size; b++) {
+                int64_t base = 0;
+                for (size_t i = 0; i < batch_dims.size(); i++) {
+                    base += batch_coord[i] * strides[batch_dims[i]];
+                }
+
+                int64_t r0 = (offset >= 0) ? 0 : -offset;
+                int64_t c0 = (offset >= 0) ? offset : 0;
+                for (int64_t k = 0; k < diag_len; k++) {
+                    int64_t out_elem_offset = base + (r0 + k) * strides[dim1] + (c0 + k) * strides[dim2];
+                    int64_t src_elem_idx = b * diag_len + k;
+                    q.memcpy(out_ptr + out_elem_offset * elem_size,
+                             src_ptr + src_elem_idx * elem_size, elem_size).wait();
+                }
+
+                for (int64_t i = static_cast<int64_t>(batch_dims.size()) - 1; i >= 0; i--) {
+                    batch_coord[i]++;
+                    if (batch_coord[i] < shape[batch_dims[i]]) break;
+                    batch_coord[i] = 0;
+                }
+            }
+            return {output};
+        });
+
     // =========================================================================
     // Fused GEMM Operations (composed from existing OneAPI ops)
     // =========================================================================
@@ -4561,21 +4724,54 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     // Nested Tensor Operations (fallback: unbind segments, apply regular ops)
     // =========================================================================
     table.register_kernel(OpId::NestedSoftmax,
-        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto offsets_cpu = inputs[1].to(Device::cpu());
-            const int64_t* off = offsets_cpu.data<int64_t>();
-            int64_t B = offsets_cpu.numel() - 1;
-            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
-            OpAttributes sm_attrs;
-            sm_attrs.set(AttrKey::Dim, dim);
-            std::vector<Tensor> segments;
-            segments.reserve(static_cast<size_t>(B));
-            for (int64_t i = 0; i < B; ++i) {
-                auto seg = inputs[0].slice(0, off[i], off[i+1]);
-                std::vector<Tensor> sm_inputs = {seg};
-                segments.push_back(dispatch<OpId::Softmax>(sm_inputs, sm_attrs)[0]);
-            }
-            return {tenzor::cat(segments, 0)};
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            const Tensor& values = inputs[0];
+            const Tensor& offsets = inputs[1];
+            auto shape = values.shape();
+            int64_t total_len = shape[0];
+            int64_t D = (shape.size() > 1) ? shape[1] : 1;
+            int64_t B = offsets.numel() - 1;
+
+            Tensor output = tenzor::empty(std::vector<int64_t>(shape.begin(), shape.end()),
+                                          values.dtype(), values.device());
+            auto& queue = oneapi_internal::get_queue(values.device().index);
+
+            const float* vals_ptr = values.data<float>();
+            const int64_t* off_ptr = offsets.data<int64_t>();
+            float* out_ptr = output.data<float>();
+            int64_t D_val = D;
+
+            // One work-item per (batch, d) pair
+            queue.parallel_for(sycl::range<2>(B, D), [=](sycl::id<2> id) {
+                int64_t b = id[0];
+                int64_t d = id[1];
+                if (d >= D_val) return;
+
+                int64_t start = off_ptr[b];
+                int64_t end = off_ptr[b + 1];
+                int64_t len = end - start;
+                if (len <= 0) return;
+
+                // Find max
+                float max_val = -1e38f;
+                for (int64_t s = 0; s < len; ++s) {
+                    float v = vals_ptr[(start + s) * D_val + d];
+                    if (v > max_val) max_val = v;
+                }
+                // Sum of exp(x - max)
+                float sum = 0.0f;
+                for (int64_t s = 0; s < len; ++s) {
+                    sum += sycl::exp(vals_ptr[(start + s) * D_val + d] - max_val);
+                }
+                // Write softmax
+                float inv_sum = 1.0f / sum;
+                for (int64_t s = 0; s < len; ++s) {
+                    int64_t idx = (start + s) * D_val + d;
+                    out_ptr[idx] = sycl::exp(vals_ptr[idx] - max_val) * inv_sum;
+                }
+            }).wait();
+
+            return {output};
         });
 
     table.register_kernel(OpId::NestedLogSoftmax,
@@ -4631,55 +4827,133 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::NestedSum,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
-            auto offsets_cpu = inputs[1].to(Device::cpu());
-            const int64_t* off = offsets_cpu.data<int64_t>();
-            int64_t B = offsets_cpu.numel() - 1;
-            std::vector<Tensor> sums;
-            sums.reserve(static_cast<size_t>(B));
-            for (int64_t i = 0; i < B; ++i) {
-                sums.push_back(tenzor::sum(inputs[0].slice(0, off[i], off[i+1]), 0, true));
-            }
-            return {tenzor::cat(sums, 0)};
+            const Tensor& values = inputs[0];
+            const Tensor& offsets = inputs[1];
+            auto shape = values.shape();
+            int64_t D = (shape.size() > 1) ? shape[1] : 1;
+            int64_t B = offsets.numel() - 1;
+
+            // Output: one row per batch element, shape [B, D]
+            Tensor output = tenzor::zeros({B, D}, values.dtype(), values.device());
+            auto& queue = oneapi_internal::get_queue(values.device().index);
+
+            const float* vals_ptr = values.data<float>();
+            const int64_t* off_ptr = offsets.data<int64_t>();
+            float* out_ptr = output.data<float>();
+            int64_t D_val = D;
+
+            // One work-item per (batch, d) pair
+            queue.parallel_for(sycl::range<2>(B, D), [=](sycl::id<2> id) {
+                int64_t b = id[0];
+                int64_t d = id[1];
+                if (d >= D_val) return;
+
+                int64_t start = off_ptr[b];
+                int64_t end = off_ptr[b + 1];
+
+                float sum = 0.0f;
+                for (int64_t s = start; s < end; ++s) {
+                    sum += vals_ptr[s * D_val + d];
+                }
+                out_ptr[b * D_val + d] = sum;
+            }).wait();
+
+            return {output};
         });
 
     table.register_kernel(OpId::NestedMean,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
-            auto offsets_cpu = inputs[1].to(Device::cpu());
-            const int64_t* off = offsets_cpu.data<int64_t>();
-            int64_t B = offsets_cpu.numel() - 1;
-            std::vector<Tensor> means;
-            means.reserve(static_cast<size_t>(B));
-            for (int64_t i = 0; i < B; ++i) {
-                means.push_back(tenzor::mean(inputs[0].slice(0, off[i], off[i+1]), 0, true));
-            }
-            return {tenzor::cat(means, 0)};
+            const Tensor& values = inputs[0];
+            const Tensor& offsets = inputs[1];
+            auto shape = values.shape();
+            int64_t D = (shape.size() > 1) ? shape[1] : 1;
+            int64_t B = offsets.numel() - 1;
+
+            // Output: one row per batch element, shape [B, D]
+            Tensor output = tenzor::zeros({B, D}, values.dtype(), values.device());
+            auto& queue = oneapi_internal::get_queue(values.device().index);
+
+            const float* vals_ptr = values.data<float>();
+            const int64_t* off_ptr = offsets.data<int64_t>();
+            float* out_ptr = output.data<float>();
+            int64_t D_val = D;
+
+            // One work-item per (batch, d) pair
+            queue.parallel_for(sycl::range<2>(B, D), [=](sycl::id<2> id) {
+                int64_t b = id[0];
+                int64_t d = id[1];
+                if (d >= D_val) return;
+
+                int64_t start = off_ptr[b];
+                int64_t end = off_ptr[b + 1];
+                int64_t len = end - start;
+                if (len <= 0) return;
+
+                float sum = 0.0f;
+                for (int64_t s = start; s < end; ++s) {
+                    sum += vals_ptr[s * D_val + d];
+                }
+                out_ptr[b * D_val + d] = sum / static_cast<float>(len);
+            }).wait();
+
+            return {output};
         });
 
     table.register_kernel(OpId::NestedLayerNorm,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            // Per-row LN on packed values (LN operates on last dim, same for all)
-            auto offsets_cpu = inputs[1].to(Device::cpu());
-            const int64_t* off = offsets_cpu.data<int64_t>();
-            int64_t B = offsets_cpu.numel() - 1;
+            // Per-row LN on packed values (LN operates on last dim, same for all rows)
+            const Tensor& values = inputs[0];
+            const Tensor& offsets = inputs[1];
+            const Tensor& gamma = inputs[2];  // weight [D]
+            const Tensor& beta = inputs[3];   // bias [D]
+            auto shape = values.shape();
+            int64_t total_rows = shape[0];
+            int64_t D = shape.back();
             float eps = attrs.get_float(AttrKey::Eps, 1e-5f);
-            int64_t D = inputs[0].shape().back();
-            std::vector<Tensor> segments;
-            segments.reserve(static_cast<size_t>(B));
-            for (int64_t i = 0; i < B; ++i) {
-                auto seg = inputs[0].slice(0, off[i], off[i+1]);
-                auto seg_shape = std::vector<int64_t>(seg.shape().begin(), seg.shape().end());
-                // Apply per-row normalization
-                auto mean = tenzor::mean(seg, -1, true);
-                auto centered = tenzor::sub(seg, mean.expand(seg_shape));
-                auto var = tenzor::mean(tenzor::mul(centered, centered), -1, true);
-                auto inv_std = tenzor::reciprocal(tenzor::sqrt(tenzor::add(var,
-                    tenzor::full({1}, eps, var.dtype(), var.device()))));
-                auto normed = tenzor::mul(centered, inv_std.expand(seg_shape));
-                auto result = tenzor::add(tenzor::mul(normed, inputs[2].unsqueeze(0).expand(seg_shape)),
-                                           inputs[3].unsqueeze(0).expand(seg_shape));
-                segments.push_back(result);
-            }
-            return {tenzor::cat(segments, 0)};
+
+            // Output same shape as values — every row is independently normalized
+            Tensor output = tenzor::empty(std::vector<int64_t>(shape.begin(), shape.end()),
+                                          values.dtype(), values.device());
+            auto& queue = oneapi_internal::get_queue(values.device().index);
+
+            const float* vals_ptr = values.data<float>();
+            const float* gamma_ptr = gamma.data<float>();
+            const float* beta_ptr = beta.data<float>();
+            float* out_ptr = output.data<float>();
+            int64_t D_val = D;
+            float eps_val = eps;
+
+            // One work-item per row — each row is independently layer-normed
+            // Offsets not needed for the actual computation since LN is per-row,
+            // but we keep total_rows from shape to iterate all packed rows.
+            queue.parallel_for(sycl::range<1>(total_rows), [=](sycl::id<1> id) {
+                int64_t row = id[0];
+                const float* row_ptr = vals_ptr + row * D_val;
+                float* row_out = out_ptr + row * D_val;
+
+                // Compute mean
+                float mean = 0.0f;
+                for (int64_t d = 0; d < D_val; ++d) {
+                    mean += row_ptr[d];
+                }
+                mean /= static_cast<float>(D_val);
+
+                // Compute variance
+                float var = 0.0f;
+                for (int64_t d = 0; d < D_val; ++d) {
+                    float diff = row_ptr[d] - mean;
+                    var += diff * diff;
+                }
+                var /= static_cast<float>(D_val);
+
+                // Normalize and apply affine
+                float inv_std = sycl::rsqrt(var + eps_val);
+                for (int64_t d = 0; d < D_val; ++d) {
+                    row_out[d] = (row_ptr[d] - mean) * inv_std * gamma_ptr[d] + beta_ptr[d];
+                }
+            }).wait();
+
+            return {output};
         });
 
     table.register_kernel(OpId::NestedLinear,
@@ -4691,6 +4965,8 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return {result};
         });
 
+    // TODO: Eliminate CPU offset readbacks from NestedAttention — rewrite as
+    // native SYCL kernel(s) reading offsets on device, similar to NestedLogSoftmax.
     table.register_kernel(OpId::NestedAttention,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             auto q_off_cpu = inputs[3].to(Device::cpu());
@@ -4723,43 +4999,83 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::NestedToPadded,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            auto offsets_cpu = inputs[1].to(Device::cpu());
-            const int64_t* off = offsets_cpu.data<int64_t>();
-            int64_t B = offsets_cpu.numel() - 1;
+            const Tensor& values = inputs[0];
+            const Tensor& offsets = inputs[1];
+            auto shape = values.shape();
+            int64_t B = offsets.numel() - 1;
             int64_t max_len = attrs.get_int(AttrKey::MaxLen, 0);
             float padding_value = attrs.get_float(AttrKey::PaddingValue, 0.0f);
-            int64_t D = (inputs[0].shape().size() > 1) ? inputs[0].shape()[1] : 1;
+            int64_t D = (shape.size() > 1) ? shape[1] : 1;
 
-            auto padded = tenzor::full({B, max_len, D}, padding_value, inputs[0].dtype(), inputs[0].device());
-            for (int64_t b = 0; b < B; ++b) {
-                int64_t len = off[b+1] - off[b];
-                if (len <= 0) continue;
-                auto seg = inputs[0].slice(0, off[b], off[b+1]).contiguous();
-                auto dst = padded.slice(0, b, b+1).reshape({max_len, D}).slice(0, 0, len);
-                std::memcpy(dst.data_ptr(), seg.data_ptr(),
-                            static_cast<size_t>(len * D) * dtype_size(inputs[0].dtype()));
-            }
+            auto padded = tenzor::full({B, max_len, D}, padding_value, values.dtype(), values.device());
+            auto& queue = oneapi_internal::get_queue(values.device().index);
+
+            const float* vals_ptr = values.data<float>();
+            const int64_t* off_ptr = offsets.data<int64_t>();
+            float* pad_ptr = padded.data<float>();
+            int64_t D_val = D;
+            int64_t max_len_val = max_len;
+
+            // One work-item per (batch, position, d) triple
+            queue.parallel_for(sycl::range<3>(B, max_len, D), [=](sycl::id<3> id) {
+                int64_t b = id[0];
+                int64_t t = id[1];
+                int64_t d = id[2];
+                if (d >= D_val || t >= max_len_val) return;
+
+                int64_t start = off_ptr[b];
+                int64_t end = off_ptr[b + 1];
+                int64_t len = end - start;
+
+                int64_t out_idx = (b * max_len_val + t) * D_val + d;
+                if (t < len) {
+                    pad_ptr[out_idx] = vals_ptr[(start + t) * D_val + d];
+                }
+                // else: already filled with padding_value by tenzor::full
+            }).wait();
+
             return {padded};
         });
 
     table.register_kernel(OpId::NestedFromPadded,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
-            auto offsets_cpu = inputs[1].to(Device::cpu());
-            const int64_t* off = offsets_cpu.data<int64_t>();
-            int64_t B = offsets_cpu.numel() - 1;
-            int64_t total_len = off[B];
-            int64_t max_len = inputs[0].shape()[1];
-            int64_t D = (inputs[0].shape().size() > 2) ? inputs[0].shape()[2] : 1;
+            const Tensor& padded = inputs[0];
+            const Tensor& offsets = inputs[1];
+            int64_t B = offsets.numel() - 1;
+            int64_t max_len = padded.shape()[1];
+            int64_t D = (padded.shape().size() > 2) ? padded.shape()[2] : 1;
 
-            auto values = tenzor::empty({total_len, D}, inputs[0].dtype(), inputs[0].device());
-            for (int64_t b = 0; b < B; ++b) {
-                int64_t len = off[b+1] - off[b];
-                if (len <= 0) continue;
-                auto src = inputs[0].slice(0, b, b+1).reshape({max_len, D}).slice(0, 0, len).contiguous();
-                auto dst = values.slice(0, off[b], off[b+1]);
-                std::memcpy(dst.data_ptr(), src.data_ptr(),
-                            static_cast<size_t>(len * D) * dtype_size(inputs[0].dtype()));
-            }
+            // Read only offsets[B] to get total_len for output allocation
+            Tensor total_len_scalar = tenzor::slice(offsets, 0, B, B + 1).to(Device::cpu());
+            int64_t total_len = total_len_scalar.data<int64_t>()[0];
+
+            auto values = tenzor::empty({total_len, D}, padded.dtype(), padded.device());
+            auto& queue = oneapi_internal::get_queue(padded.device().index);
+
+            const float* pad_ptr = padded.data<float>();
+            const int64_t* off_ptr = offsets.data<int64_t>();
+            float* vals_ptr = values.data<float>();
+            int64_t D_val = D;
+            int64_t max_len_val = max_len;
+
+            // One work-item per (batch, position, d) triple
+            // Use total output elements as an upper bound — each work-item maps to
+            // a (b, t, d) coordinate; we iterate batches to find the right one.
+            queue.parallel_for(sycl::range<2>(B, D), [=](sycl::id<2> id) {
+                int64_t b = id[0];
+                int64_t d = id[1];
+                if (d >= D_val) return;
+
+                int64_t start = off_ptr[b];
+                int64_t end = off_ptr[b + 1];
+                int64_t len = end - start;
+
+                for (int64_t t = 0; t < len; ++t) {
+                    vals_ptr[(start + t) * D_val + d] =
+                        pad_ptr[(b * max_len_val + t) * D_val + d];
+                }
+            }).wait();
+
             return {values};
         });
 

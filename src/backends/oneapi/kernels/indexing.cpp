@@ -2043,45 +2043,208 @@ auto masked_scatter_kernel(const Tensor& input, const Tensor& mask,
 }
 
 // ============================================================================
-// tril_indices / triu_indices — CPU generation + transfer
+// tril_indices / triu_indices — native SYCL GPU kernels
 // ============================================================================
 
-auto tril_indices_kernel(int64_t row, int64_t col, int64_t offset, sycl::queue& queue) -> Tensor {
-    std::vector<int64_t> row_indices, col_indices;
-    for (int64_t r = 0; r < row; ++r) {
-        int64_t max_c = std::min(col, r + offset + 1);
-        for (int64_t c = 0; c < max_c; ++c) {
-            row_indices.push_back(r);
-            col_indices.push_back(c);
-        }
+class TrilIndicesKernel;
+class TriuIndicesKernel;
+
+// Closed-form count of lower-triangular indices.
+// Each row r contributes max(0, min(col, r + offset + 1)) elements.
+static auto tril_count(int64_t row, int64_t col, int64_t offset) -> int64_t {
+    int64_t n = 0;
+    // Rows where the contribution is partial: r + offset + 1 < col, i.e. r < col - offset - 1
+    // Rows where the contribution is full (col): r + offset + 1 >= col, i.e. r >= col - offset - 1
+    // Rows where contribution is zero: r + offset + 1 <= 0, i.e. r < -offset
+
+    int64_t r_start = std::max(int64_t(0), -offset);          // first row with nonzero count
+    int64_t r_full  = std::max(int64_t(0), col - offset - 1); // first row contributing full col
+    r_full = std::min(r_full, row);
+    r_start = std::min(r_start, row);
+
+    // Partial rows: r in [r_start, min(r_full, row)) contribute (r + offset + 1) each
+    int64_t partial_end = std::min(r_full, row);
+    if (partial_end > r_start) {
+        // Sum of (r + offset + 1) for r in [r_start, partial_end)
+        // = sum of (offset + 1 + r) = count*(offset+1) + sum(r)
+        int64_t count = partial_end - r_start;
+        int64_t first_val = r_start + offset + 1;
+        int64_t last_val  = partial_end - 1 + offset + 1;
+        n += count * (first_val + last_val) / 2;
     }
-    int64_t n = static_cast<int64_t>(row_indices.size());
+    // Full rows: r in [r_full, row) contribute col each
+    if (row > r_full) {
+        n += (row - r_full) * col;
+    }
+    return n;
+}
+
+// Closed-form count of upper-triangular indices.
+// Each row r contributes max(0, col - max(0, r + offset)) elements.
+static auto triu_count(int64_t row, int64_t col, int64_t offset) -> int64_t {
+    int64_t n = 0;
+    // Rows where contribution is full col: r + offset <= 0, i.e. r < -offset + 1
+    // Rows where contribution is partial: 0 < r + offset < col
+    // Rows where contribution is zero: r + offset >= col
+
+    int64_t r_partial_start = std::max(int64_t(0), -offset + 1); // first row with partial count (if offset <= 0, some are full)
+    // Actually: for r < max(0, 1 - offset), contribution is col (since max(0, r+offset) == 0)
+    int64_t r_full_end = std::max(int64_t(0), 1 - offset);       // rows [0, r_full_end) contribute col
+    r_full_end = std::min(r_full_end, row);
+
+    int64_t r_zero_start = std::max(int64_t(0), col - offset);   // first row with zero contribution
+    r_zero_start = std::min(r_zero_start, row);
+
+    // Full rows: [0, r_full_end)
+    n += r_full_end * col;
+
+    // Partial rows: [r_full_end, r_zero_start) contribute (col - r - offset) each
+    int64_t p_start = std::max(r_full_end, int64_t(0));
+    int64_t p_end   = r_zero_start;
+    if (p_end > p_start) {
+        int64_t count = p_end - p_start;
+        int64_t first_val = col - (p_start + offset);
+        int64_t last_val  = col - (p_end - 1 + offset);
+        n += count * (first_val + last_val) / 2;
+    }
+    return n;
+}
+
+auto tril_indices_kernel(int64_t row, int64_t col, int64_t offset, sycl::queue& queue) -> Tensor {
+    int64_t n = tril_count(row, col, offset);
     if (n == 0) return tenzor::empty({2, 0}, DType::Int64, Device::oneapi(0));
 
-    Tensor cpu_out({2, n}, DType::Int64, Device::cpu());
-    int64_t* ptr = cpu_out.data<int64_t>();
-    std::memcpy(ptr, row_indices.data(), n * sizeof(int64_t));
-    std::memcpy(ptr + n, col_indices.data(), n * sizeof(int64_t));
-    return cpu_out.to(Device::oneapi(0));
+    Tensor output = tenzor::empty({2, n}, DType::Int64, Device::oneapi(0));
+    int64_t* out_ptr = get_data_ptr<int64_t>(output);
+
+    queue.parallel_for<TrilIndicesKernel>(sycl::range<1>(n), [=](sycl::id<1> id) {
+        int64_t idx = static_cast<int64_t>(id[0]);
+
+        // Binary search: find row r such that cumulative count up to row r > idx
+        // Cumulative count through row r = sum_{i=max(0,-offset)}^{r} min(col, i + offset + 1)
+        int64_t lo = 0, hi = row - 1;
+        while (lo < hi) {
+            int64_t mid = lo + (hi - lo) / 2;
+            // Compute cumulative count through row mid
+            int64_t r_start = (-offset > 0) ? -offset : int64_t(0);
+            int64_t cum = 0;
+            if (mid >= r_start) {
+                int64_t r_full = (col - offset - 1 > 0) ? col - offset - 1 : int64_t(0);
+                int64_t partial_end = (r_full < mid + 1) ? r_full : mid + 1;
+                if (partial_end > r_start) {
+                    int64_t count = partial_end - r_start;
+                    int64_t fv = r_start + offset + 1;
+                    int64_t lv = partial_end - 1 + offset + 1;
+                    cum += count * (fv + lv) / 2;
+                }
+                if (mid + 1 > r_full) {
+                    int64_t full_start = (r_full > r_start) ? r_full : r_start;
+                    if (mid + 1 > full_start) {
+                        cum += (mid + 1 - full_start) * col;
+                    }
+                }
+            }
+            if (cum <= idx) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+
+        int64_t r = lo;
+        // Compute cumulative count through row (r - 1) to get column offset
+        int64_t prev_cum = 0;
+        if (r > 0) {
+            int64_t r_start = (-offset > 0) ? -offset : int64_t(0);
+            if (r > r_start) {
+                int64_t r_full = (col - offset - 1 > 0) ? col - offset - 1 : int64_t(0);
+                int64_t partial_end = (r_full < r) ? r_full : r;
+                if (partial_end > r_start) {
+                    int64_t count = partial_end - r_start;
+                    int64_t fv = r_start + offset + 1;
+                    int64_t lv = partial_end - 1 + offset + 1;
+                    prev_cum += count * (fv + lv) / 2;
+                }
+                if (r > r_full) {
+                    int64_t full_start = (r_full > r_start) ? r_full : r_start;
+                    if (r > full_start) {
+                        prev_cum += (r - full_start) * col;
+                    }
+                }
+            }
+        }
+        int64_t c = idx - prev_cum;
+        out_ptr[idx] = r;
+        out_ptr[n + idx] = c;
+    }).wait();
+
+    return output;
 }
 
 auto triu_indices_kernel(int64_t row, int64_t col, int64_t offset, sycl::queue& queue) -> Tensor {
-    std::vector<int64_t> row_indices, col_indices;
-    for (int64_t r = 0; r < row; ++r) {
-        int64_t min_c = std::max(static_cast<int64_t>(0), r + offset);
-        for (int64_t c = min_c; c < col; ++c) {
-            row_indices.push_back(r);
-            col_indices.push_back(c);
-        }
-    }
-    int64_t n = static_cast<int64_t>(row_indices.size());
+    int64_t n = triu_count(row, col, offset);
     if (n == 0) return tenzor::empty({2, 0}, DType::Int64, Device::oneapi(0));
 
-    Tensor cpu_out({2, n}, DType::Int64, Device::cpu());
-    int64_t* ptr = cpu_out.data<int64_t>();
-    std::memcpy(ptr, row_indices.data(), n * sizeof(int64_t));
-    std::memcpy(ptr + n, col_indices.data(), n * sizeof(int64_t));
-    return cpu_out.to(Device::oneapi(0));
+    Tensor output = tenzor::empty({2, n}, DType::Int64, Device::oneapi(0));
+    int64_t* out_ptr = get_data_ptr<int64_t>(output);
+
+    queue.parallel_for<TriuIndicesKernel>(sycl::range<1>(n), [=](sycl::id<1> id) {
+        int64_t idx = static_cast<int64_t>(id[0]);
+
+        // Binary search: find row r such that cumulative count up to row r > idx
+        int64_t lo = 0, hi = row - 1;
+        while (lo < hi) {
+            int64_t mid = lo + (hi - lo) / 2;
+            // Compute cumulative count through row mid
+            int64_t r_full_end = (1 - offset > 0) ? 1 - offset : int64_t(0);
+            int64_t r_zero = (col - offset > 0) ? col - offset : int64_t(0);
+            int64_t cum = 0;
+
+            int64_t fe = (r_full_end < mid + 1) ? r_full_end : mid + 1;
+            cum += fe * col;
+
+            int64_t p_start = (r_full_end > 0) ? r_full_end : int64_t(0);
+            int64_t p_end = (r_zero < mid + 1) ? r_zero : mid + 1;
+            if (p_end > p_start) {
+                int64_t count = p_end - p_start;
+                int64_t fv = col - (p_start + offset);
+                int64_t lv = col - (p_end - 1 + offset);
+                cum += count * (fv + lv) / 2;
+            }
+
+            if (cum <= idx) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+
+        int64_t r = lo;
+        // Compute cumulative count through row (r - 1)
+        int64_t prev_cum = 0;
+        if (r > 0) {
+            int64_t r_full_end = (1 - offset > 0) ? 1 - offset : int64_t(0);
+            int64_t r_zero = (col - offset > 0) ? col - offset : int64_t(0);
+
+            int64_t fe = (r_full_end < r) ? r_full_end : r;
+            prev_cum += fe * col;
+
+            int64_t p_start = (r_full_end > 0) ? r_full_end : int64_t(0);
+            int64_t p_end = (r_zero < r) ? r_zero : r;
+            if (p_end > p_start) {
+                int64_t count = p_end - p_start;
+                int64_t fv = col - (p_start + offset);
+                int64_t lv = col - (p_end - 1 + offset);
+                prev_cum += count * (fv + lv) / 2;
+            }
+        }
+        int64_t c = idx - prev_cum;
+        int64_t col_start = (r + offset > 0) ? r + offset : int64_t(0);
+        out_ptr[idx] = r;
+        out_ptr[n + idx] = col_start + c;
+    }).wait();
+
+    return output;
 }
 
 } // namespace oneapi

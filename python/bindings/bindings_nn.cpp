@@ -33,6 +33,7 @@
 #include <tenzor/nn/layers/sparse_linear.hpp>
 #include <tenzor/nn/layers/sparse_embedding.hpp>
 #include <tenzor/nn/loss/losses.hpp>
+#include <tenzor/nn/metrics.hpp>
 #include <tenzor/nn/loss/contrastive.hpp>
 #include <tenzor/nn/functional.hpp>
 #include <tenzor/nn/utils/clip_grad.hpp>
@@ -978,6 +979,12 @@ void register_nn(py::module_& m) {
         .def(py::init<>())
         .def("__repr__", [](const tenzor::nn::Hardsigmoid&) { return "Hardsigmoid()"; });
 
+    py::class_<tenzor::nn::Hardtanh, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::Hardtanh>>(nn, "Hardtanh")
+        .def(py::init<double, double>(),
+             py::arg("min_val") = -1.0, py::arg("max_val") = 1.0)
+        .def("__repr__", [](const tenzor::nn::Hardtanh&) { return "Hardtanh()"; });
+
     // Functional activations
     nn.def("hardswish", [](const tenzor::Variable& input) {
         return tenzor::nn::hardswish(input);
@@ -986,6 +993,11 @@ void register_nn(py::module_& m) {
     nn.def("hardsigmoid", [](const tenzor::Variable& input) {
         return tenzor::nn::hardsigmoid(input);
     }, "Functional Hardsigmoid activation", py::arg("input"));
+
+    nn.def("hardtanh", [](const tenzor::Variable& input, double min_val, double max_val) {
+        return tenzor::nn::hardtanh(input, min_val, max_val);
+    }, "Functional Hardtanh activation", py::arg("input"),
+       py::arg("min_val") = -1.0, py::arg("max_val") = 1.0);
 
     // GLU
     py::class_<tenzor::nn::GLU, tenzor::nn::Module,
@@ -1917,6 +1929,16 @@ void register_nn(py::module_& m) {
         .def("__call__", &tenzor::nn::GaussianNLLLoss::operator(),
              py::arg("input"), py::arg("target"), py::arg("var"));
 
+    py::class_<tenzor::nn::MultiLabelMarginLoss>(nn, "MultiLabelMarginLoss",
+        "Multi-label classification hinge loss")
+        .def(py::init<tenzor::nn::Reduction>(),
+             py::arg("reduction") = tenzor::nn::Reduction::Mean)
+        .def("forward", &tenzor::nn::MultiLabelMarginLoss::forward,
+             py::arg("input"), py::arg("target"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("__call__", &tenzor::nn::MultiLabelMarginLoss::operator(),
+             py::arg("input"), py::arg("target"));
+
     // Functional loss functions
     nn.def("mse_loss", &tenzor::nn::mse_loss, "MSE loss function",
           py::arg("input"), py::arg("target"),
@@ -2771,7 +2793,119 @@ void register_nn(py::module_& m) {
         .def_property_readonly("model", &tenzor::nn::NeuralNetwork::model,
              "Get underlying model")
         .def_property_readonly("optimizer", &tenzor::nn::NeuralNetwork::optimizer,
-             "Get optimizer");
+             "Get optimizer")
+        .def("add_metric", &tenzor::nn::NeuralNetwork::add_metric,
+             py::arg("metric"),
+             R"pbdoc(
+                Register a metric to be evaluated during training.
+
+                Metrics are updated with (predictions, targets) after each batch
+                during fit(), computed and logged at each epoch end, then reset.
+
+                Args:
+                    metric: A Metric instance (e.g., Accuracy, F1Score, MeanSquaredError)
+
+                Example:
+                    >>> nn_wrapper.add_metric(tenzor.nn.Accuracy(num_classes=10))
+                    >>> nn_wrapper.add_metric(tenzor.nn.F1Score(num_classes=10))
+                    >>> nn_wrapper.fit(train_loader, epochs=10)
+             )pbdoc")
+        .def_property_readonly("metrics", &tenzor::nn::NeuralNetwork::metrics,
+             "Get registered metrics");
+
+
+    // =========================================================================
+    // Training Metrics
+    // =========================================================================
+
+    py::enum_<tenzor::nn::AverageMode>(nn, "AverageMode",
+        "Averaging mode for multi-class classification metrics")
+        .value("Micro", tenzor::nn::AverageMode::Micro)
+        .value("Macro", tenzor::nn::AverageMode::Macro)
+        .value("Weighted", tenzor::nn::AverageMode::Weighted);
+
+    // Metric base class (needed for shared_ptr<Metric> in add_metric)
+    py::class_<tenzor::nn::Metric, std::shared_ptr<tenzor::nn::Metric>>(nn, "Metric",
+        "Abstract base class for training metrics")
+        .def("update", &tenzor::nn::Metric::update,
+             py::arg("preds"), py::arg("targets"),
+             "Accumulate a batch of predictions and targets")
+        .def("compute", &tenzor::nn::Metric::compute,
+             "Compute the metric from accumulated state")
+        .def("reset", &tenzor::nn::Metric::reset,
+             "Reset internal state for a new epoch")
+        .def("name", &tenzor::nn::Metric::name,
+             "Get the metric name");
+
+    py::class_<tenzor::nn::Accuracy, tenzor::nn::Metric, std::shared_ptr<tenzor::nn::Accuracy>>(nn, "Accuracy",
+        "Classification accuracy metric (stateful, accumulates across batches)")
+        .def(py::init<int64_t>(), py::arg("num_classes") = 2)
+        .def("update", &tenzor::nn::Accuracy::update,
+             py::arg("preds"), py::arg("targets"))
+        .def("compute", &tenzor::nn::Accuracy::compute)
+        .def("reset", &tenzor::nn::Accuracy::reset);
+
+    py::class_<tenzor::nn::Precision, tenzor::nn::Metric, std::shared_ptr<tenzor::nn::Precision>>(nn, "Precision",
+        "Precision metric: TP / (TP + FP)")
+        .def(py::init<int64_t, tenzor::nn::AverageMode>(),
+             py::arg("num_classes") = 2,
+             py::arg("average") = tenzor::nn::AverageMode::Macro)
+        .def("update", &tenzor::nn::Precision::update,
+             py::arg("preds"), py::arg("targets"))
+        .def("compute", &tenzor::nn::Precision::compute)
+        .def("reset", &tenzor::nn::Precision::reset);
+
+    py::class_<tenzor::nn::Recall, tenzor::nn::Metric, std::shared_ptr<tenzor::nn::Recall>>(nn, "Recall",
+        "Recall metric: TP / (TP + FN)")
+        .def(py::init<int64_t, tenzor::nn::AverageMode>(),
+             py::arg("num_classes") = 2,
+             py::arg("average") = tenzor::nn::AverageMode::Macro)
+        .def("update", &tenzor::nn::Recall::update,
+             py::arg("preds"), py::arg("targets"))
+        .def("compute", &tenzor::nn::Recall::compute)
+        .def("reset", &tenzor::nn::Recall::reset);
+
+    py::class_<tenzor::nn::F1Score, tenzor::nn::Metric, std::shared_ptr<tenzor::nn::F1Score>>(nn, "F1Score",
+        "F1 Score: harmonic mean of precision and recall")
+        .def(py::init<int64_t, tenzor::nn::AverageMode>(),
+             py::arg("num_classes") = 2,
+             py::arg("average") = tenzor::nn::AverageMode::Macro)
+        .def("update", &tenzor::nn::F1Score::update,
+             py::arg("preds"), py::arg("targets"))
+        .def("compute", &tenzor::nn::F1Score::compute)
+        .def("reset", &tenzor::nn::F1Score::reset);
+
+    py::class_<tenzor::nn::AUROC, tenzor::nn::Metric, std::shared_ptr<tenzor::nn::AUROC>>(nn, "AUROC",
+        "Area Under the ROC Curve (binary classification)")
+        .def(py::init<>())
+        .def("update", &tenzor::nn::AUROC::update,
+             py::arg("preds"), py::arg("targets"))
+        .def("compute", &tenzor::nn::AUROC::compute)
+        .def("reset", &tenzor::nn::AUROC::reset);
+
+    py::class_<tenzor::nn::ConfusionMatrix, tenzor::nn::Metric, std::shared_ptr<tenzor::nn::ConfusionMatrix>>(nn, "ConfusionMatrix",
+        "NxN confusion matrix for classification")
+        .def(py::init<int64_t>(), py::arg("num_classes"))
+        .def("update", &tenzor::nn::ConfusionMatrix::update,
+             py::arg("preds"), py::arg("targets"))
+        .def("compute", &tenzor::nn::ConfusionMatrix::compute)
+        .def("reset", &tenzor::nn::ConfusionMatrix::reset);
+
+    py::class_<tenzor::nn::MeanAbsoluteError, tenzor::nn::Metric, std::shared_ptr<tenzor::nn::MeanAbsoluteError>>(nn, "MeanAbsoluteError",
+        "Mean Absolute Error metric (running average)")
+        .def(py::init<>())
+        .def("update", &tenzor::nn::MeanAbsoluteError::update,
+             py::arg("preds"), py::arg("targets"))
+        .def("compute", &tenzor::nn::MeanAbsoluteError::compute)
+        .def("reset", &tenzor::nn::MeanAbsoluteError::reset);
+
+    py::class_<tenzor::nn::MeanSquaredError, tenzor::nn::Metric, std::shared_ptr<tenzor::nn::MeanSquaredError>>(nn, "MeanSquaredError",
+        "Mean Squared Error metric (running average)")
+        .def(py::init<>())
+        .def("update", &tenzor::nn::MeanSquaredError::update,
+             py::arg("preds"), py::arg("targets"))
+        .def("compute", &tenzor::nn::MeanSquaredError::compute)
+        .def("reset", &tenzor::nn::MeanSquaredError::reset);
 
 
 } // register_nn

@@ -201,6 +201,30 @@ void register_autograd(py::module_& m) {
         return py::make_tuple(out, tangent_out);
     }, py::arg("f"), py::arg("x"), py::arg("tangent"),
     "Forward-mode Jacobian-vector product. Returns (output, J_f(x) @ tangent).");
+
+    func_mod.def("hvp", [](py::function f, const tenzor::Variable& x,
+                           const tenzor::Tensor& v) {
+        py::gil_scoped_acquire gil;
+        auto cpp_fn = [&f](const tenzor::Variable& input) -> tenzor::Variable {
+            py::object result = f(input);
+            return result.cast<tenzor::Variable>();
+        };
+        auto [out, hvp_result] = tenzor::hvp(cpp_fn, x, v);
+        return py::make_tuple(out, hvp_result);
+    }, py::arg("f"), py::arg("x"), py::arg("v"),
+    "Hessian-vector product. Returns (output, H_f(x) @ v).");
+
+    func_mod.def("vhp", [](py::function f, const tenzor::Variable& x,
+                           const tenzor::Tensor& v) {
+        py::gil_scoped_acquire gil;
+        auto cpp_fn = [&f](const tenzor::Variable& input) -> tenzor::Variable {
+            py::object result = f(input);
+            return result.cast<tenzor::Variable>();
+        };
+        auto [out, vhp_result] = tenzor::vhp(cpp_fn, x, v);
+        return py::make_tuple(out, vhp_result);
+    }, py::arg("f"), py::arg("x"), py::arg("v"),
+    "Vector-Hessian product. Returns (output, v^T @ H_f(x)).");
 }
 
 } // namespace tenzor::python

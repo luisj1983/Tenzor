@@ -1483,18 +1483,82 @@ public:
     }
 
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
-        // Complex normalization backward -- delegate to tensor backward and wrap results
-        std::vector<Tensor> tensor_grads;
-        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
-        auto results = backward(std::move(tensor_grads));
-        std::vector<Variable> var_results;
-        for (auto& t : results) var_results.emplace_back(t, false);
-        return var_results;
+        // Full higher-order gradient support for GroupNorm.
+        // Enables create_graph=true for second derivatives through GroupNorm.
+        //
+        // GroupNorm: reshape to groups, apply LayerNorm-style normalization per group.
+        // saved: [0]=input [N,C,H,W], [1]=mean [N*G], [2]=rstd [N*G], [3]=weight [C]
+        auto& grad_out = grad_outputs[0];
+
+        Variable input_var, mean_var, rstd_var, weight_var;
+        if (has_saved_variables()) {
+            const auto& sv = saved_variables();
+            input_var = sv[0];
+            mean_var = sv[1];
+            rstd_var = sv[2];
+            weight_var = sv[3];
+        } else {
+            auto saved = saved_tensors();
+            input_var = Variable(saved[0], false);
+            mean_var = Variable(saved[1], false);
+            rstd_var = Variable(saved[2], false);
+            weight_var = Variable(saved[3], false);
+        }
+
+        auto shape = input_var.shape();
+        int64_t N = shape[0];
+        int64_t C = shape[1];
+        int64_t H = shape[2];
+        int64_t W = shape[3];
+        int64_t G = num_groups_;
+        int64_t cpg = group_size_;  // channels per group
+        int64_t group_numel = cpg * H * W;
+
+        // Reshape input and grad_output to [N, G, cpg*H*W] for per-group normalization
+        auto input_r = reshape(input_var, {N, G, group_numel});
+        auto grad_out_r = reshape(grad_out, {N, G, group_numel});
+
+        // mean/rstd are [N*G], reshape to [N, G, 1] for broadcasting
+        auto mean_bc = reshape(mean_var, {N, G, 1});
+        auto rstd_bc = reshape(rstd_var, {N, G, 1});
+
+        // x_hat = (input - mean) * rstd, per group
+        auto x_hat = (input_r - mean_bc) * rstd_bc;
+
+        // Weight broadcast: [C] -> [1, G, cpg, 1] -> reshape to [1, G, cpg*H*W]
+        // We need weight per element in the group. Weight is per-channel, so
+        // reshape to [G, cpg] then tile over spatial dims.
+        // Reshape weight [C] -> [1, C, 1, 1] and apply to [N, C, H, W] shaped grad_out
+        auto weight_bc = unsqueeze(unsqueeze(unsqueeze(weight_var, 0), 2), 3); // [1, C, 1, 1]
+        auto grad_weighted = grad_out * weight_bc;  // [N, C, H, W]
+        auto grad_x_hat = reshape(grad_weighted, {N, G, group_numel});
+
+        // mean(grad_x_hat) over group elements (last dim)
+        auto mean_gxh = sum(grad_x_hat, 2, true) / static_cast<float>(group_numel);
+
+        // mean(grad_x_hat * x_hat) over group elements
+        auto mean_gxh_xh = sum(grad_x_hat * x_hat, 2, true) / static_cast<float>(group_numel);
+
+        // grad_input = (grad_x_hat - mean_gxh - x_hat * mean_gxh_xh) * rstd
+        auto grad_input_r = (grad_x_hat - mean_gxh - x_hat * mean_gxh_xh) * rstd_bc;
+        auto grad_input = reshape(grad_input_r, {N, C, H, W});
+
+        // grad_weight = sum(grad_output * x_hat_full, dims=[0,2,3]) -> [C]
+        // x_hat reshaped back to [N, C, H, W]
+        auto x_hat_full = reshape(x_hat, {N, C, H, W});
+        auto go_xhat = reshape(grad_out * x_hat_full, {N, C, H * W});
+        auto grad_weight_var = sum(sum(go_xhat, 0, false), 1, false);  // [C]
+
+        // grad_bias = sum(grad_output, dims=[0,2,3]) -> [C]
+        auto go_flat = reshape(grad_out, {N, C, H * W});
+        auto grad_bias_var = sum(sum(go_flat, 0, false), 1, false);  // [C]
+
+        return {grad_input, grad_weight_var, grad_bias_var};
     }
 
-    // P4.2d: passthrough backward; second derivatives are zero.
+    // Full Variable-level backward enables create_graph=true for second derivatives.
     auto supports_higher_order() const -> bool override { return true; }
-    auto is_higher_order_stub() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return false; }
 
 private:
     bool affine_;
@@ -1904,18 +1968,81 @@ public:
     }
 
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
-        // Complex normalization backward -- delegate to tensor backward and wrap results
-        std::vector<Tensor> tensor_grads;
-        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
-        auto results = backward(std::move(tensor_grads));
-        std::vector<Variable> var_results;
-        for (auto& t : results) var_results.emplace_back(t, false);
-        return var_results;
+        // Full higher-order gradient support for InstanceNorm.
+        // Enables create_graph=true for second derivatives through InstanceNorm.
+        //
+        // InstanceNorm is GroupNorm with groups = channels (each channel normalized independently).
+        // saved: [0]=input [N,C,*], [1]=mean [N,C], [2]=rstd [N,C], [3]=weight [C]
+        auto& grad_out = grad_outputs[0];
+
+        Variable input_var, mean_var, rstd_var, weight_var;
+        if (has_saved_variables()) {
+            const auto& sv = saved_variables();
+            input_var = sv[0];
+            mean_var = sv[1];
+            rstd_var = sv[2];
+            weight_var = sv[3];
+        } else {
+            auto saved = saved_tensors();
+            input_var = Variable(saved[0], false);
+            mean_var = Variable(saved[1], false);
+            rstd_var = Variable(saved[2], false);
+            weight_var = Variable(saved[3], false);
+        }
+
+        auto shape = input_var.shape();
+        int64_t N = shape[0];
+        int64_t C = shape[1];
+        // Compute spatial size from remaining dimensions
+        int64_t spatial_size = 1;
+        for (size_t d = 2; d < shape.size(); ++d) {
+            spatial_size *= shape[d];
+        }
+
+        // Reshape input and grad_output to [N, C, spatial_size] for per-instance normalization
+        auto input_r = reshape(input_var, {N, C, spatial_size});
+        auto grad_out_r = reshape(grad_out, {N, C, spatial_size});
+
+        // mean/rstd are [N, C], unsqueeze to [N, C, 1] for broadcasting
+        auto mean_bc = unsqueeze(mean_var, -1);   // [N, C, 1]
+        auto rstd_bc = unsqueeze(rstd_var, -1);   // [N, C, 1]
+
+        // x_hat = (input - mean) * rstd, per instance
+        auto x_hat = (input_r - mean_bc) * rstd_bc;
+
+        // Weight broadcast: [C] -> [1, C, 1]
+        auto weight_bc = unsqueeze(unsqueeze(weight_var, 0), -1);  // [1, C, 1]
+        auto grad_x_hat = grad_out_r * weight_bc;
+
+        // mean(grad_x_hat) over spatial dim (last dim)
+        auto mean_gxh = sum(grad_x_hat, 2, true) / static_cast<float>(spatial_size);
+
+        // mean(grad_x_hat * x_hat) over spatial dim
+        auto mean_gxh_xh = sum(grad_x_hat * x_hat, 2, true) / static_cast<float>(spatial_size);
+
+        // grad_input = (grad_x_hat - mean_gxh - x_hat * mean_gxh_xh) * rstd
+        auto grad_input_r = (grad_x_hat - mean_gxh - x_hat * mean_gxh_xh) * rstd_bc;
+        std::vector<int64_t> orig_shape(shape.begin(), shape.end());
+        auto grad_input = reshape(grad_input_r, orig_shape);
+
+        // grad_weight = sum(grad_output * x_hat, dims=[0, spatial_dims]) -> [C]
+        // sum over dim 0 (batch) and dim 2 (spatial)
+        auto go_xhat = grad_out_r * x_hat;
+        Variable grad_weight_var = sum(sum(go_xhat, 0, false), 1, false);  // [C]
+
+        // grad_bias = sum(grad_output, dims=[0, spatial_dims]) -> [C]
+        Variable grad_bias_var = sum(sum(grad_out_r, 0, false), 1, false);  // [C]
+
+        std::vector<Variable> result;
+        result.push_back(std::move(grad_input));
+        result.push_back(std::move(grad_weight_var));
+        result.push_back(std::move(grad_bias_var));
+        return result;
     }
 
-    // P4.2d: passthrough backward; second derivatives are zero.
+    // Full Variable-level backward enables create_graph=true for second derivatives.
     auto supports_higher_order() const -> bool override { return true; }
-    auto is_higher_order_stub() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return false; }
 
 private:
     bool affine_;
@@ -2285,18 +2412,57 @@ public:
     }
 
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
-        // Complex normalization backward -- delegate to tensor backward and wrap results
-        std::vector<Tensor> tensor_grads;
-        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
-        auto results = backward(std::move(tensor_grads));
-        std::vector<Variable> var_results;
-        for (auto& t : results) var_results.emplace_back(t, false);
-        return var_results;
+        // Full higher-order gradient support for RMSNorm.
+        // Enables create_graph=true for second derivatives through RMSNorm.
+        //
+        // RMSNorm: y = x / rms * gamma, where rms = sqrt(mean(x^2) + eps)
+        // saved: [0]=input, [1]=rrms (1/rms), [2]=weight (gamma)
+        auto& grad_out = grad_outputs[0];
+
+        Variable input_var, rrms_var, weight_var;
+        if (has_saved_variables()) {
+            const auto& sv = saved_variables();
+            input_var = sv[0];
+            rrms_var = sv[1];
+            weight_var = sv[2];
+        } else {
+            auto saved = saved_tensors();
+            input_var = Variable(saved[0], false);
+            rrms_var = Variable(saved[1], false);
+            weight_var = Variable(saved[2], false);
+        }
+
+        int64_t norm_size = normalized_size_;
+
+        // rrms shape: input_shape[:-1], need to unsqueeze last dim for broadcasting
+        auto rrms_bc = unsqueeze(rrms_var, -1);  // [..., 1]
+
+        // normalized = x * rrms
+        auto normalized = input_var * rrms_bc;
+
+        // grad_x_hat = grad_output * weight
+        auto grad_x_hat = grad_out * weight_var;
+
+        // mean(grad_x_hat * normalized) over last dim
+        auto mean_gxh_norm = sum(grad_x_hat * normalized, -1, true) / static_cast<float>(norm_size);
+
+        // grad_input = (grad_x_hat - normalized * mean(grad_x_hat * normalized)) * rrms
+        auto grad_input = (grad_x_hat - normalized * mean_gxh_norm) * rrms_bc;
+
+        // grad_weight = sum(grad_output * normalized, dims except last)
+        auto go_norm = grad_out * normalized;
+        auto grad_weight_var = go_norm;
+        auto gw_shape = grad_weight_var.shape();
+        for (int d = static_cast<int>(gw_shape.size()) - 2; d >= 0; --d) {
+            grad_weight_var = sum(grad_weight_var, d, false);
+        }
+
+        return {grad_input, grad_weight_var};
     }
 
-    // P4.2d: passthrough backward; second derivatives are zero.
+    // Full Variable-level backward enables create_graph=true for second derivatives.
     auto supports_higher_order() const -> bool override { return true; }
-    auto is_higher_order_stub() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return false; }
 
 private:
     double eps_;

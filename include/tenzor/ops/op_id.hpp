@@ -443,6 +443,9 @@ enum class OpId : uint16_t {
     IndexAdd,            // = 411, self[index] += source along dim
     IndexCopy,           // = 412, self[index] = source along dim
     IndexFill,           // = 413, self[index] = value along dim
+    SelectScatter,       // = 414, copy of input with src at select(dim, index)
+    SliceScatter,        // = 415, copy of input with src at slice(dim, start, end, step)
+    DiagonalScatter,     // = 416, copy of input with src along diagonal
 
     // =========================================================================
     // Linear Algebra Operations (420-439)
@@ -556,6 +559,12 @@ enum class OpId : uint16_t {
     // =========================================================================
     LinalgLU = 510,            // LU factorization with partial pivoting
     LinalgLUSolve,             // Solve via pre-computed LU factors
+    LinalgHouseholder,         // Householder product (orgqr): generate Q from reflectors
+    LinalgLDLFactor,           // LDL^T factorization of symmetric indefinite matrix
+    LinalgLDLSolve,            // Solve using pre-computed LDL^T factors
+    LinalgVectorNorm,          // Vector p-norm along dimensions
+    LinalgMatrixNorm,          // Matrix norm (Frobenius, spectral, etc.)
+    LinalgVecdot,              // Dot product along a dimension
 
     // =========================================================================
     // Bitwise Operations (520-529)

@@ -3500,6 +3500,166 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         return rocm::scatter_reduce_kernel(inputs[0], inputs[1], inputs[2], dim, reduce, include_self, get_hip_stream(attrs));
     });
 
+    // SelectScatter: clone input, then copy src into the selected slice
+    table.register_single_output_kernel(OpId::SelectScatter,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            const auto& input = inputs[0];
+            const auto& src = inputs[1];
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            int64_t index = attrs.get_int(AttrKey::Index, 0);
+
+            auto output = input.clone();
+            int64_t ndim = static_cast<int64_t>(output.shape().size());
+            if (dim < 0) dim += ndim;
+
+            auto dst_slice = output.slice(dim, index, index + 1, 1);
+            auto dst_sh = dst_slice.shape();
+            auto src_reshaped = src.reshape(std::vector<int64_t>(dst_sh.begin(), dst_sh.end())).contiguous();
+
+            auto n = dst_slice.numel();
+            auto elem_size = static_cast<int64_t>(dtype_size(output.dtype()));
+            auto* dst_ptr = static_cast<char*>(dst_slice.data_ptr());
+            const auto* src_ptr = static_cast<const char*>(src_reshaped.data_ptr());
+            if (dst_slice.is_contiguous()) {
+                hipMemcpy(dst_ptr, src_ptr, n * elem_size, hipMemcpyDeviceToDevice);
+            } else {
+                auto dst_shape_v = dst_slice.shape();
+                auto dst_strides = dst_slice.strides();
+                int64_t ndims = static_cast<int64_t>(dst_shape_v.size());
+                std::vector<int64_t> coord(ndims, 0);
+                for (int64_t i = 0; i < n; i++) {
+                    int64_t byte_offset = 0;
+                    for (int64_t d = 0; d < ndims; d++) {
+                        byte_offset += coord[d] * dst_strides[d] * elem_size;
+                    }
+                    hipMemcpy(dst_ptr + byte_offset, src_ptr + i * elem_size, elem_size, hipMemcpyDeviceToDevice);
+                    for (int64_t d = ndims - 1; d >= 0; d--) {
+                        coord[d]++;
+                        if (coord[d] < dst_shape_v[d]) break;
+                        coord[d] = 0;
+                    }
+                }
+            }
+            return output;
+        });
+
+    // SliceScatter: clone input, then copy src into the sliced region
+    table.register_single_output_kernel(OpId::SliceScatter,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            const auto& input = inputs[0];
+            const auto& src = inputs[1];
+            int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+            int64_t start = attrs.get_int(AttrKey::Start, 0);
+            int64_t end = attrs.get_int(AttrKey::End, -1);
+            int64_t step = attrs.get_int(AttrKey::Step, 1);
+
+            auto output = input.clone();
+            int64_t ndim = static_cast<int64_t>(output.shape().size());
+            if (dim < 0) dim += ndim;
+            int64_t dim_size = output.shape()[dim];
+
+            if (start < 0) start += dim_size;
+            if (end < 0) end += dim_size + 1;
+            if (start < 0) start = 0;
+            if (end > dim_size) end = dim_size;
+
+            auto dst_slice = output.slice(dim, start, end, step);
+            auto dst_sh = dst_slice.shape();
+            auto src_reshaped = src.reshape(std::vector<int64_t>(dst_sh.begin(), dst_sh.end())).contiguous();
+
+            auto n = dst_slice.numel();
+            auto elem_size = static_cast<int64_t>(dtype_size(output.dtype()));
+            auto* dst_ptr = static_cast<char*>(dst_slice.data_ptr());
+            const auto* src_ptr = static_cast<const char*>(src_reshaped.data_ptr());
+            if (dst_slice.is_contiguous()) {
+                hipMemcpy(dst_ptr, src_ptr, n * elem_size, hipMemcpyDeviceToDevice);
+            } else {
+                auto dst_shape_v = dst_slice.shape();
+                auto dst_strides = dst_slice.strides();
+                int64_t ndims = static_cast<int64_t>(dst_shape_v.size());
+                std::vector<int64_t> coord(ndims, 0);
+                for (int64_t i = 0; i < n; i++) {
+                    int64_t byte_offset = 0;
+                    for (int64_t d = 0; d < ndims; d++) {
+                        byte_offset += coord[d] * dst_strides[d] * elem_size;
+                    }
+                    hipMemcpy(dst_ptr + byte_offset, src_ptr + i * elem_size, elem_size, hipMemcpyDeviceToDevice);
+                    for (int64_t d = ndims - 1; d >= 0; d--) {
+                        coord[d]++;
+                        if (coord[d] < dst_shape_v[d]) break;
+                        coord[d] = 0;
+                    }
+                }
+            }
+            return output;
+        });
+
+    // DiagonalScatter: clone input, place src values along the diagonal
+    table.register_single_output_kernel(OpId::DiagonalScatter,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            const auto& input = inputs[0];
+            const auto& src_in = inputs[1];
+            int64_t offset = attrs.get_int(AttrKey::Diagonal, 0);
+            int64_t dim1 = attrs.get_int(AttrKey::Dim1, 0);
+            int64_t dim2 = attrs.get_int(AttrKey::Dim2, 1);
+
+            auto output = input.clone();
+            int64_t ndim = static_cast<int64_t>(output.shape().size());
+            if (dim1 < 0) dim1 += ndim;
+            if (dim2 < 0) dim2 += ndim;
+
+            auto shape = output.shape();
+            int64_t size1 = shape[dim1];
+            int64_t size2 = shape[dim2];
+
+            int64_t diag_len;
+            if (offset >= 0) {
+                diag_len = std::min(size1, size2 - offset);
+            } else {
+                diag_len = std::min(size1 + offset, size2);
+            }
+            if (diag_len <= 0) return output;
+
+            auto strides = output.strides();
+            auto elem_size = static_cast<int64_t>(dtype_size(output.dtype()));
+            auto* out_ptr = static_cast<char*>(output.data_ptr());
+            auto src = src_in.contiguous();
+            const auto* src_ptr = static_cast<const char*>(src.data_ptr());
+
+            int64_t batch_size = 1;
+            std::vector<int64_t> batch_dims;
+            for (int64_t d = 0; d < ndim; d++) {
+                if (d != dim1 && d != dim2) {
+                    batch_dims.push_back(d);
+                    batch_size *= shape[d];
+                }
+            }
+
+            std::vector<int64_t> batch_coord(batch_dims.size(), 0);
+            for (int64_t b = 0; b < batch_size; b++) {
+                int64_t base = 0;
+                for (size_t i = 0; i < batch_dims.size(); i++) {
+                    base += batch_coord[i] * strides[batch_dims[i]];
+                }
+
+                int64_t r0 = (offset >= 0) ? 0 : -offset;
+                int64_t c0 = (offset >= 0) ? offset : 0;
+                for (int64_t k = 0; k < diag_len; k++) {
+                    int64_t out_elem_offset = base + (r0 + k) * strides[dim1] + (c0 + k) * strides[dim2];
+                    int64_t src_elem_idx = b * diag_len + k;
+                    hipMemcpy(out_ptr + out_elem_offset * elem_size,
+                              src_ptr + src_elem_idx * elem_size, elem_size, hipMemcpyDeviceToDevice);
+                }
+
+                for (int64_t i = static_cast<int64_t>(batch_dims.size()) - 1; i >= 0; i--) {
+                    batch_coord[i]++;
+                    if (batch_coord[i] < shape[batch_dims[i]]) break;
+                    batch_coord[i] = 0;
+                }
+            }
+            return output;
+        });
+
     // =========================================================================
     // Fused GEMM Operations (composed from existing ops)
     // =========================================================================

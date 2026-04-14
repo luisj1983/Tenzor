@@ -39,19 +39,22 @@ auto NeuralNetwork::train_step(const Variable& input, const Variable& target) ->
     // 2. Forward pass through model
     Variable predictions = model_->forward(input);
 
-    // 3. Compute loss
+    // 3. Cache predictions tensor for metric evaluation
+    last_predictions_ = predictions.tensor();
+
+    // 4. Compute loss
     Variable loss = loss_fn_(predictions, target);
 
-    // 4. Zero gradients before backward pass
+    // 5. Zero gradients before backward pass
     optimizer_->zero_grad();
 
-    // 5. Backward pass - compute gradients
+    // 6. Backward pass - compute gradients
     loss.backward();
 
-    // 6. Update parameters
+    // 7. Update parameters
     optimizer_->step();
 
-    // 7. Extract and return loss value as float
+    // 8. Extract and return loss value as float
     // Handle both scalar and multi-element loss tensors
     const auto& loss_tensor = loss.tensor();
     if (loss_tensor.numel() == 1) {
@@ -75,10 +78,13 @@ auto NeuralNetwork::eval_step(const Variable& input, const Variable& target) -> 
     // 3. Forward pass through model
     Variable predictions = model_->forward(input);
 
-    // 4. Compute loss (no gradients)
+    // 4. Cache predictions tensor for metric evaluation
+    last_predictions_ = predictions.tensor();
+
+    // 5. Compute loss (no gradients)
     Variable loss = loss_fn_(predictions, target);
 
-    // 5. Extract and return loss value as float
+    // 6. Extract and return loss value as float
     const auto& loss_tensor = loss.tensor();
     if (loss_tensor.numel() == 1) {
         // Scalar loss - extract directly
@@ -122,6 +128,13 @@ auto NeuralNetwork::fit(DataLoader& train_loader,
             running_train_loss += batch_loss;
             train_batch_count++;
 
+            // === Update metrics with batch predictions ===
+            if (!metrics_.empty()) {
+                for (auto& metric : metrics_) {
+                    metric->update(last_predictions_, targets);
+                }
+            }
+
             // === Callbacks: on_batch_end ===
             for (auto& callback : callbacks) {
                 callback->on_batch_end(train_batch_count - 1, batch_loss);
@@ -156,6 +169,18 @@ auto NeuralNetwork::fit(DataLoader& train_loader,
             avg_val_loss = val_batch_count > 0
                 ? running_val_loss / val_batch_count
                 : 0.0;
+        }
+
+        // === Compute and log metrics at epoch end ===
+        if (!metrics_.empty()) {
+            std::cout << "  Metrics:";
+            for (auto& metric : metrics_) {
+                auto value = metric->compute();
+                std::cout << " " << metric->name() << "="
+                          << std::fixed << std::setprecision(4) << value.item<float>();
+                metric->reset();
+            }
+            std::cout << std::endl;
         }
 
         // === Callbacks: on_epoch_end ===

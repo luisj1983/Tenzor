@@ -2955,6 +2955,25 @@ Returns:
          return tenzor::index_fill(t, dim, idx, value);
          }, "Fill at index positions", py::arg("input"), py::arg("dim"), py::arg("index"), py::arg("value"),
          py::call_guard<py::gil_scoped_release>());
+    m.def("select_scatter", [](const tenzor::Tensor& input, const tenzor::Tensor& src, int64_t dim, int64_t index) {
+         return tenzor::select_scatter(input, src, dim, index);
+         }, "Return copy of input with src at select(dim, index)",
+         py::arg("input"), py::arg("src"), py::arg("dim"), py::arg("index"),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("slice_scatter", [](const tenzor::Tensor& input, const tenzor::Tensor& src, int64_t dim,
+                               int64_t start, int64_t end, int64_t step) {
+         return tenzor::slice_scatter(input, src, dim, start, end, step);
+         }, "Return copy of input with src at slice(dim, start, end, step)",
+         py::arg("input"), py::arg("src"), py::arg("dim") = 0,
+         py::arg("start") = 0, py::arg("end") = -1, py::arg("step") = 1,
+         py::call_guard<py::gil_scoped_release>());
+    m.def("diagonal_scatter", [](const tenzor::Tensor& input, const tenzor::Tensor& src,
+                                  int64_t offset, int64_t dim1, int64_t dim2) {
+         return tenzor::diagonal_scatter(input, src, offset, dim1, dim2);
+         }, "Return copy of input with src placed along the diagonal",
+         py::arg("input"), py::arg("src"), py::arg("offset") = 0,
+         py::arg("dim1") = 0, py::arg("dim2") = 1,
+         py::call_guard<py::gil_scoped_release>());
     // Bitwise ops
     m.def("bitwise_and", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::bitwise_and(a, b); },
          "Bitwise AND", py::arg("a"), py::arg("b"), py::call_guard<py::gil_scoped_release>());

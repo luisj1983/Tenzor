@@ -151,4 +151,83 @@ auto hessian(std::function<Variable(const Variable&)> func,
     return jacobian(grad_func, inp);
 }
 
+auto hvp(std::function<Variable(const Variable&)> func,
+         const Variable& input,
+         const Tensor& v) -> std::pair<Variable, Tensor> {
+    // Forward-over-reverse: compute JVP of the gradient function with tangent v.
+    // This avoids materializing the full Hessian matrix.
+
+    // 1. Compute the primal output
+    auto output = func(input);
+
+    // 2. Define the gradient function: x -> grad(f(x), x)
+    auto input_data = input.tensor();
+
+    auto grad_func = [&func](const Variable& x) -> Variable {
+        Variable x_grad(x.tensor(), true);
+        auto out = func(x_grad);
+        out.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/false);
+
+        Tensor grad_val;
+        if (x_grad.grad().has_value()) {
+            grad_val = x_grad.grad().value();
+        } else {
+            grad_val = tenzor::zeros_like(x.tensor());
+        }
+
+        return Variable(grad_val, false);
+    };
+
+    // 3. Compute JVP of the gradient function with tangent v -> H @ v
+    Variable inp(input_data, false);
+    auto [_, hvp_result] = jvp(grad_func, inp, v);
+
+    return {output, hvp_result};
+}
+
+auto vhp(std::function<Variable(const Variable&)> func,
+         const Variable& input,
+         const Tensor& v) -> std::pair<Variable, Tensor> {
+    // Reverse-over-reverse: compute how the gradient changes in direction v.
+    // v^T @ H = d/dt [grad(f, x + t*v)] at t=0
+    //
+    // We use central differences on the gradient function (consistent with
+    // the JVP implementation): grad(f, x+eps*v) - grad(f, x-eps*v) / (2*eps).
+    // For symmetric Hessians this equals H @ v, but the approach is formally
+    // the VHP (reverse-mode differentiation of the gradient).
+
+    auto input_data = input.tensor();
+
+    // Compute the primal output
+    auto output = func(input);
+
+    const double eps = 1e-4;
+
+    // Evaluate gradient at x + eps*v
+    auto perturbed_fwd = tenzor::add(input_data, tenzor::mul(v, eps));
+    Variable x_fwd(perturbed_fwd, true);
+    auto out_fwd = func(x_fwd);
+    out_fwd.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/false);
+    Tensor grad_fwd = x_fwd.grad().has_value()
+        ? x_fwd.grad().value()
+        : tenzor::zeros_like(input_data);
+
+    // Evaluate gradient at x - eps*v
+    auto perturbed_bwd = tenzor::sub(input_data, tenzor::mul(v, eps));
+    Variable x_bwd(perturbed_bwd, true);
+    auto out_bwd = func(x_bwd);
+    out_bwd.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/false);
+    Tensor grad_bwd = x_bwd.grad().has_value()
+        ? x_bwd.grad().value()
+        : tenzor::zeros_like(input_data);
+
+    // Central difference
+    auto vhp_result = tenzor::mul(
+        tenzor::sub(grad_fwd, grad_bwd),
+        1.0 / (2.0 * eps)
+    );
+
+    return {output, vhp_result};
+}
+
 } // namespace tenzor

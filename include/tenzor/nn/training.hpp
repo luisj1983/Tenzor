@@ -12,9 +12,11 @@
 #include <vector>
 #include <functional>
 #include <iostream>
+#include <string>
 #include "module.hpp"
 #include "optim/optimizer.hpp"
 #include "callbacks.hpp"
+#include "metrics.hpp"
 #include <tenzor/autograd/variable.hpp>
 
 namespace tenzor {
@@ -328,11 +330,40 @@ public:
         return optimizer_;
     }
 
+    /**
+     * @brief Register a metric to be evaluated during training
+     *
+     * Metrics are updated with (predictions, targets) after each batch
+     * during fit(), computed and logged at the end of each epoch, then reset.
+     *
+     * @param metric Shared pointer to a Metric instance
+     *
+     * @code
+     * NeuralNetwork nn(model, optimizer, loss_fn);
+     * nn.add_metric(std::make_shared<Accuracy>(10));
+     * nn.add_metric(std::make_shared<F1Score>(10));
+     * nn.fit(train_loader, 10);
+     * @endcode
+     */
+    auto add_metric(std::shared_ptr<Metric> metric) -> void {
+        metrics_.push_back(std::move(metric));
+    }
+
+    /**
+     * @brief Get registered metrics
+     * @return Const reference to the vector of registered metrics
+     */
+    auto metrics() const -> const std::vector<std::shared_ptr<Metric>>& {
+        return metrics_;
+    }
+
 private:
     std::shared_ptr<Module> model_;                                        ///< Neural network model
     std::shared_ptr<optim::Optimizer> optimizer_;                          ///< Parameter optimizer
     std::function<Variable(const Variable&, const Variable&)> loss_fn_;    ///< Loss function
     bool training_{true};                                                  ///< Training mode flag
+    std::vector<std::shared_ptr<Metric>> metrics_;                         ///< Registered training metrics
+    Tensor last_predictions_;                                              ///< Cached predictions from last step (for metrics)
 };
 
 } // namespace nn

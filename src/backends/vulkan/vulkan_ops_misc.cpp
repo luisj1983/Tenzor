@@ -5036,4 +5036,140 @@ auto VulkanBackend::dispatchNanStd(const Tensor& input, int64_t correction)
     return dispatchUnaryOp("sqrt", var);
 }
 
+// ============================================================================
+// TrilIndices — native Vulkan compute shader (tril_indices.comp)
+// ============================================================================
+
+auto VulkanBackend::dispatchTrilIndices(int64_t row, int64_t col, int64_t offset) -> Tensor {
+    // Compute total element count on host using O(1) closed-form formula
+    int64_t first = std::max(static_cast<int64_t>(0), -offset);
+    int64_t n = 0;
+    if (first < row) {
+        int64_t full_from = col - offset - 1;
+        if (full_from <= first) {
+            n = (row - first) * col;
+        } else if (full_from >= row) {
+            int64_t count = row - first;
+            int64_t first_val = first + offset + 1;
+            int64_t last_val  = row - 1 + offset + 1;
+            n = count * (first_val + last_val) / 2;
+        } else {
+            int64_t partial_count = full_from - first;
+            int64_t first_val = first + offset + 1;
+            int64_t last_val  = full_from - 1 + offset + 1;
+            int64_t partial_sum = partial_count * (first_val + last_val) / 2;
+            int64_t full_sum = (row - full_from) * col;
+            n = partial_sum + full_sum;
+        }
+    }
+
+    Device device(Device::Type::Vulkan, 0);
+    if (n == 0) {
+        return Tensor({2, static_cast<int64_t>(0)}, DType::Int64, device);
+    }
+
+    int32_t device_id = 0;
+
+    // Allocate output as Int32 (Vulkan shaders use 32-bit int), shape {2, n}
+    // Two separate buffers: row_indices[n] and col_indices[n]
+    Tensor row_out({n}, DType::Int32, device);
+    Tensor col_out({n}, DType::Int32, device);
+
+    auto* pipeline = getPipeline("tril_indices", device_id);
+
+    struct { int32_t n; int32_t row; int32_t col; int32_t offset; } pc;
+    pc.n = static_cast<int32_t>(n);
+    pc.row = static_cast<int32_t>(row);
+    pc.col = static_cast<int32_t>(col);
+    pc.offset = static_cast<int32_t>(offset);
+
+    size_t buf_size = static_cast<size_t>(n) * sizeof(int32_t);
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, row_out.data_ptr()},
+        {1, col_out.data_ptr()}
+    };
+    std::vector<size_t> sizes = {buf_size, buf_size};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(n, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    // Concatenate into {2, n} Int64 output
+    Tensor row_i64 = row_out.to(DType::Int64);
+    Tensor col_i64 = col_out.to(DType::Int64);
+    return dispatchCat({row_i64.reshape({1, n}), col_i64.reshape({1, n})}, 0);
+}
+
+// ============================================================================
+// TriuIndices — native Vulkan compute shader (triu_indices.comp)
+// ============================================================================
+
+auto VulkanBackend::dispatchTriuIndices(int64_t row, int64_t col, int64_t offset) -> Tensor {
+    // Compute total element count on host using O(1) closed-form formula
+    int64_t n = 0;
+    int64_t last_full = std::min(row - 1, -offset);
+    if (last_full >= 0) {
+        n += (last_full + 1) * col;
+    }
+    int64_t first_partial = std::max(static_cast<int64_t>(0), last_full + 1);
+    int64_t last_nonempty = std::min(row - 1, col - offset - 1);
+    if (first_partial <= last_nonempty) {
+        int64_t count = last_nonempty - first_partial + 1;
+        int64_t first_val = col - (first_partial + offset);
+        int64_t last_val  = col - (last_nonempty + offset);
+        n += count * (first_val + last_val) / 2;
+    }
+
+    Device device(Device::Type::Vulkan, 0);
+    if (n == 0) {
+        return Tensor({2, static_cast<int64_t>(0)}, DType::Int64, device);
+    }
+
+    int32_t device_id = 0;
+
+    // Allocate output as Int32 (Vulkan shaders use 32-bit int)
+    Tensor row_out({n}, DType::Int32, device);
+    Tensor col_out({n}, DType::Int32, device);
+
+    auto* pipeline = getPipeline("triu_indices", device_id);
+
+    struct { int32_t n; int32_t row; int32_t col; int32_t offset; } pc;
+    pc.n = static_cast<int32_t>(n);
+    pc.row = static_cast<int32_t>(row);
+    pc.col = static_cast<int32_t>(col);
+    pc.offset = static_cast<int32_t>(offset);
+
+    size_t buf_size = static_cast<size_t>(n) * sizeof(int32_t);
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, row_out.data_ptr()},
+        {1, col_out.data_ptr()}
+    };
+    std::vector<size_t> sizes = {buf_size, buf_size};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(n, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    // Concatenate into {2, n} Int64 output
+    Tensor row_i64 = row_out.to(DType::Int64);
+    Tensor col_i64 = col_out.to(DType::Int64);
+    return dispatchCat({row_i64.reshape({1, n}), col_i64.reshape({1, n})}, 0);
+}
+
 } // namespace tenzor

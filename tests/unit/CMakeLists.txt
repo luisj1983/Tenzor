@@ -779,3 +779,42 @@ target_link_libraries(test_quantization_observers PRIVATE tenzor_core GTest::gte
 tenzor_discover_tests(test_quantization_observers LABELS "unit" DISCOVERY_TIMEOUT 60)
 
 # test_oneapi_backend.cpp orphan removed: rotted APIs (relu/gelu now require Variable not Tensor)
+
+# ============================================================================
+# New feature tests
+# ============================================================================
+
+# Scatter variants (select_scatter, slice_scatter, diagonal_scatter)
+add_executable(test_scatter_variants test_scatter_variants.cpp)
+target_link_libraries(test_scatter_variants PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_scatter_variants LABELS "unit" DISCOVERY_TIMEOUT 60)
+
+# Hardtanh activation
+add_executable(test_hardtanh test_hardtanh.cpp)
+target_link_libraries(test_hardtanh PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_hardtanh LABELS "unit" DISCOVERY_TIMEOUT 60)
+
+# Autograd HVP and VHP
+add_executable(test_autograd_hvp_vhp test_autograd_hvp_vhp.cpp)
+target_link_libraries(test_autograd_hvp_vhp PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_autograd_hvp_vhp LABELS "unit" DISCOVERY_TIMEOUT 60)
+
+# Extended linalg (vector_norm, matrix_norm, vecdot, householder_product, ldl)
+add_executable(test_linalg_extended test_linalg_extended.cpp)
+target_link_libraries(test_linalg_extended PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_linalg_extended LABELS "unit" DISCOVERY_TIMEOUT 60)
+
+# ASGD optimizer
+add_executable(test_asgd test_asgd.cpp)
+target_link_libraries(test_asgd PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_asgd LABELS "unit" DISCOVERY_TIMEOUT 60)
+
+# Rprop optimizer
+add_executable(test_rprop test_rprop.cpp)
+target_link_libraries(test_rprop PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_rprop LABELS "unit" DISCOVERY_TIMEOUT 60)
+
+# Training metrics (Accuracy, Precision, Recall, F1Score, MAE, MSE)
+add_executable(test_training_metrics test_metrics.cpp)
+target_link_libraries(test_training_metrics PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_training_metrics LABELS "unit" DISCOVERY_TIMEOUT 60)

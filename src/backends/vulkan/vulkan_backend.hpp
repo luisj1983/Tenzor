@@ -312,6 +312,7 @@ public:
     auto dispatchHistogram(const Tensor& input, int64_t bins, double min_val, double max_val)
         -> std::pair<Tensor, Tensor>;
     auto dispatchMultinomial(const Tensor& probs, int64_t num_samples, bool replacement) -> Tensor;
+    auto dispatchPoissonSample(const Tensor& rates) -> Tensor;
     auto dispatchSTFT(const Tensor& input, int64_t n_fft, int64_t hop_length,
                       int64_t win_length, const Tensor& window, bool center,
                       bool normalized, bool onesided) -> Tensor;
@@ -460,6 +461,12 @@ public:
     auto dispatchSoftmax(const Tensor& input, int64_t dim) -> Tensor;
     auto dispatchLogSoftmax(const Tensor& input, int64_t dim) -> Tensor;
     auto dispatchNestedLogSoftmax(const Tensor& values, const Tensor& offsets, int64_t dim) -> Tensor;
+    auto dispatchNestedSoftmax(const Tensor& values, const Tensor& offsets, int64_t dim) -> Tensor;
+    auto dispatchNestedSum(const Tensor& values, const Tensor& offsets) -> Tensor;
+    auto dispatchNestedMean(const Tensor& values, const Tensor& offsets) -> Tensor;
+    auto dispatchNestedToPadded(const Tensor& values, const Tensor& offsets,
+                                int64_t max_len, float padding_value) -> Tensor;
+    auto dispatchNestedFromPadded(const Tensor& padded, const Tensor& offsets) -> Tensor;
     auto dispatchCrossEntropy(const Tensor& log_probs, const Tensor& targets,
                              int64_t reduction) -> Tensor;
 
@@ -582,6 +589,10 @@ public:
     // MaskedScatter with precomputed prefix sum
     auto dispatchMaskedScatterWithPrefix(const Tensor& input, const Tensor& mask,
                                          const Tensor& source, const Tensor& prefix_sum) -> Tensor;
+
+    // Triangular index generation (native Vulkan compute shaders)
+    auto dispatchTrilIndices(int64_t row, int64_t col, int64_t offset) -> Tensor;
+    auto dispatchTriuIndices(int64_t row, int64_t col, int64_t offset) -> Tensor;
 
     // Histogram operations
     auto dispatchBincount(const Tensor& input, const std::optional<Tensor>& weights, int64_t minlength) -> Tensor;

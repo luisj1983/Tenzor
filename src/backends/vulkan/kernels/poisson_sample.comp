@@ -1,0 +1,38 @@
+#version 450
+
+// Poisson sampling: out[i] = Poisson(rates[i]) using Knuth's algorithm
+// with per-invocation LCG PRNG. Float32 rates input, Int32 output.
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer RatesBuf  { float rates[]; };
+layout(binding = 1) buffer OutputBuf { int   out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint seed_lo;
+    uint seed_hi;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n) return;
+
+    // Per-invocation LCG state (same seeding as bernoulli.comp)
+    uint state = params.seed_lo ^ (params.seed_hi * 0x9E3779B9u) ^ (idx * 0x85EBCA77u);
+
+    float lambda = rates[idx];
+    float L = exp(-lambda);
+    int k = 0;
+    float p = 1.0;
+
+    // Knuth algorithm — variable iteration count per invocation
+    while (p > L && k < 1000) {  // cap at 1000 to prevent infinite loops
+        k++;
+        state = state * 1664525u + 1013904223u;
+        float u = float(state) / 4294967295.0;
+        p *= u;
+    }
+
+    out_data[idx] = k - 1;
+}

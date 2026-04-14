@@ -511,4 +511,33 @@ auto masked_scatter(const Tensor& input, const Tensor& mask, const Tensor& sourc
     return dispatch(OpId::MaskedScatter, inputs)[0];
 }
 
+auto select_scatter(const Tensor& input, const Tensor& src, int64_t dim, int64_t index) -> Tensor {
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    attrs.set(AttrKey::Index, index);
+    std::vector<Tensor> inputs = {input.contiguous(), src.contiguous()};
+    return dispatch(OpId::SelectScatter, inputs, attrs)[0];
+}
+
+auto slice_scatter(const Tensor& input, const Tensor& src, int64_t dim,
+                   int64_t start, int64_t end, int64_t step) -> Tensor {
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    attrs.set(AttrKey::Start, start);
+    attrs.set(AttrKey::End, end);
+    attrs.set(AttrKey::Step, step);
+    std::vector<Tensor> inputs = {input.contiguous(), src.contiguous()};
+    return dispatch(OpId::SliceScatter, inputs, attrs)[0];
+}
+
+auto diagonal_scatter(const Tensor& input, const Tensor& src, int64_t offset,
+                      int64_t dim1, int64_t dim2) -> Tensor {
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Diagonal, offset);
+    attrs.set(AttrKey::Dim1, dim1);
+    attrs.set(AttrKey::Dim2, dim2);
+    std::vector<Tensor> inputs = {input.contiguous(), src.contiguous()};
+    return dispatch(OpId::DiagonalScatter, inputs, attrs)[0];
+}
+
 } // namespace tenzor

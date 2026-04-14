@@ -1838,4 +1838,371 @@ auto diagflat(const Tensor& input, int64_t offset) -> Tensor {
     return tenzor::diag(flat, offset);
 }
 
+// ============================================================================
+// householder_product / ldl_factor / ldl_solve / vector_norm / matrix_norm /
+// vecdot — additional linalg routines for PyTorch parity.
+// ============================================================================
+
+auto householder_product(const Tensor& input, const Tensor& tau) -> Tensor {
+    // Try GPU dispatch first
+    {
+        Tensor result;
+        std::array<Tensor, 2> inputs = {input, tau};
+        if (try_gpu_dispatch(OpId::LinalgHouseholder, inputs, {}, result)) return result;
+    }
+
+#if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
+    throw_no_lapack("householder_product");
+#else
+    auto original_dtype = input.dtype();
+    auto work = prepare_matrix(input);
+    auto tau_work = prepare_matrix(tau);
+
+    auto shape = input.shape();
+    auto ndim = static_cast<int64_t>(shape.size());
+    if (ndim < 2)
+        throw std::invalid_argument("linalg::householder_product: input must be at least 2D");
+
+    int64_t m = shape[ndim - 2];
+    int64_t n = shape[ndim - 1];
+
+    auto tau_shape = tau.shape();
+    int64_t k = tau_shape.back();
+    int64_t nbatch = batch_size(work);
+
+    if (work.dtype() == DType::Float32) {
+        float* data = work.data<float>();
+        float* tau_data = tau_work.data<float>();
+
+        for (int64_t b = 0; b < nbatch; ++b) {
+            float* mat = data + b * m * n;
+            float* tau_ptr = tau_data + b * k;
+            auto lm = static_cast<lapack_int>(m);
+            auto ln = static_cast<lapack_int>(n);
+            auto lk = static_cast<lapack_int>(k);
+
+            lapack_int info = LAPACKE_sorgqr(LAPACK_ROW_MAJOR, lm, ln, lk,
+                mat, ln, tau_ptr);
+            if (info != 0)
+                throw std::runtime_error("linalg::householder_product: sorgqr failed (info=" +
+                    std::to_string(info) + ")");
+        }
+    } else {
+        double* data = work.data<double>();
+        double* tau_data = tau_work.data<double>();
+
+        for (int64_t b = 0; b < nbatch; ++b) {
+            double* mat = data + b * m * n;
+            double* tau_ptr = tau_data + b * k;
+            auto lm = static_cast<lapack_int>(m);
+            auto ln = static_cast<lapack_int>(n);
+            auto lk = static_cast<lapack_int>(k);
+
+            lapack_int info = LAPACKE_dorgqr(LAPACK_ROW_MAJOR, lm, ln, lk,
+                mat, ln, tau_ptr);
+            if (info != 0)
+                throw std::runtime_error("linalg::householder_product: dorgqr failed (info=" +
+                    std::to_string(info) + ")");
+        }
+    }
+
+    return maybe_downcast(work, original_dtype);
+#endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
+}
+
+auto ldl_factor(const Tensor& A) -> std::tuple<Tensor, Tensor> {
+    // Try GPU dispatch first
+    {
+        std::vector<Tensor> results;
+        std::array<Tensor, 1> inputs = {A};
+        if (try_gpu_dispatch_multi(OpId::LinalgLDLFactor, inputs, {}, results)) {
+            return {results[0], results[1]};
+        }
+    }
+
+#if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
+    throw_no_lapack("ldl_factor");
+#else
+    auto original_dtype = A.dtype();
+    auto work = prepare_matrix(A);
+    auto [n, ndim] = check_square(work);
+    int64_t nbatch = batch_size(work);
+
+    auto shape = A.shape();
+    std::vector<int64_t> batch_dims;
+    for (size_t i = 0; i + 2 < shape.size(); ++i) batch_dims.push_back(shape[i]);
+
+    std::vector<int64_t> piv_shape = batch_dims;
+    piv_shape.push_back(n);
+
+    auto pivots_out = zeros(piv_shape, DType::Int32, Device::cpu());
+
+    if (work.dtype() == DType::Float32) {
+        float* data = work.data<float>();
+        int32_t* piv_data = pivots_out.data<int32_t>();
+        std::vector<lapack_int> ipiv(n);
+
+        for (int64_t b = 0; b < nbatch; ++b) {
+            float* mat = data + b * n * n;
+            int32_t* piv_mat = piv_data + b * n;
+            auto ln = static_cast<lapack_int>(n);
+
+            lapack_int info = LAPACKE_ssytrf(LAPACK_ROW_MAJOR, 'L', ln, mat, ln, ipiv.data());
+            if (info < 0)
+                throw std::runtime_error("linalg::ldl_factor: invalid argument " +
+                    std::to_string(-info));
+            // info > 0 means D has zeros on diagonal (singular), but factorization completed
+
+            for (int64_t i = 0; i < n; ++i)
+                piv_mat[i] = static_cast<int32_t>(ipiv[i]);
+        }
+    } else {
+        double* data = work.data<double>();
+        int32_t* piv_data = pivots_out.data<int32_t>();
+        std::vector<lapack_int> ipiv(n);
+
+        for (int64_t b = 0; b < nbatch; ++b) {
+            double* mat = data + b * n * n;
+            int32_t* piv_mat = piv_data + b * n;
+            auto ln = static_cast<lapack_int>(n);
+
+            lapack_int info = LAPACKE_dsytrf(LAPACK_ROW_MAJOR, 'L', ln, mat, ln, ipiv.data());
+            if (info < 0)
+                throw std::runtime_error("linalg::ldl_factor: invalid argument " +
+                    std::to_string(-info));
+
+            for (int64_t i = 0; i < n; ++i)
+                piv_mat[i] = static_cast<int32_t>(ipiv[i]);
+        }
+    }
+
+    return {maybe_downcast(work, original_dtype), pivots_out};
+#endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
+}
+
+auto ldl_solve(const Tensor& LD, const Tensor& pivots,
+               const Tensor& B) -> Tensor {
+    // Try GPU dispatch first
+    {
+        Tensor result;
+        std::array<Tensor, 3> inputs = {LD, pivots, B};
+        if (try_gpu_dispatch(OpId::LinalgLDLSolve, inputs, {}, result)) return result;
+    }
+
+#if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
+    throw_no_lapack("ldl_solve");
+#else
+    auto original_dtype = B.dtype();
+    auto work_ld = prepare_matrix(LD);
+    auto work_b = prepare_matrix(B);
+
+    auto ld_shape = LD.shape();
+    auto b_shape = B.shape();
+    auto ld_ndim = static_cast<int64_t>(ld_shape.size());
+    auto b_ndim = static_cast<int64_t>(b_shape.size());
+    if (ld_ndim < 2 || b_ndim < 2)
+        throw std::invalid_argument("linalg::ldl_solve: inputs must be at least 2D");
+
+    int64_t n = ld_shape[ld_ndim - 1];
+    int64_t nrhs = b_shape[b_ndim - 1];
+    int64_t nbatch = batch_size(work_ld);
+
+    auto piv_cpu = pivots.to(Device::cpu()).contiguous();
+
+    if (work_ld.dtype() == DType::Float32) {
+        float* ld_ptr = work_ld.data<float>();
+        float* b_ptr = work_b.data<float>();
+        auto* piv_ptr = piv_cpu.data<int32_t>();
+        std::vector<lapack_int> ipiv(n);
+
+        for (int64_t b = 0; b < nbatch; ++b) {
+            float* ld_mat = ld_ptr + b * n * n;
+            float* b_mat = b_ptr + b * n * nrhs;
+            int32_t* piv_mat = piv_ptr + b * n;
+            for (int64_t i = 0; i < n; ++i) ipiv[i] = static_cast<lapack_int>(piv_mat[i]);
+
+            auto ln = static_cast<lapack_int>(n);
+            auto lnrhs = static_cast<lapack_int>(nrhs);
+            lapack_int info = LAPACKE_ssytrs(LAPACK_ROW_MAJOR, 'L', ln, lnrhs,
+                ld_mat, ln, ipiv.data(), b_mat, lnrhs);
+            if (info != 0)
+                throw std::runtime_error("linalg::ldl_solve: solve failed (info=" +
+                    std::to_string(info) + ")");
+        }
+    } else {
+        double* ld_ptr = work_ld.data<double>();
+        double* b_ptr = work_b.data<double>();
+        auto* piv_ptr = piv_cpu.data<int32_t>();
+        std::vector<lapack_int> ipiv(n);
+
+        for (int64_t b = 0; b < nbatch; ++b) {
+            double* ld_mat = ld_ptr + b * n * n;
+            double* b_mat = b_ptr + b * n * nrhs;
+            int32_t* piv_mat = piv_ptr + b * n;
+            for (int64_t i = 0; i < n; ++i) ipiv[i] = static_cast<lapack_int>(piv_mat[i]);
+
+            auto ln = static_cast<lapack_int>(n);
+            auto lnrhs = static_cast<lapack_int>(nrhs);
+            lapack_int info = LAPACKE_dsytrs(LAPACK_ROW_MAJOR, 'L', ln, lnrhs,
+                ld_mat, ln, ipiv.data(), b_mat, lnrhs);
+            if (info != 0)
+                throw std::runtime_error("linalg::ldl_solve: solve failed (info=" +
+                    std::to_string(info) + ")");
+        }
+    }
+
+    return maybe_downcast(work_b, original_dtype);
+#endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
+}
+
+auto vector_norm(const Tensor& input, double ord,
+                 std::vector<int64_t> dim, bool keepdim) -> Tensor {
+    // No LAPACKE needed — implemented with tensor ops.
+    // GPU tensors use the same tensor-op path (ops dispatch per-element).
+
+    auto x = input;
+
+    // Helper: reduce over a single dim or all dims
+    auto reduce_sum = [&](const Tensor& t, const std::vector<int64_t>& dims,
+                          bool kd) -> Tensor {
+        if (dims.empty()) {
+            return tenzor::sum(t, std::nullopt, kd);
+        }
+        // Reduce dims from highest to lowest to keep indices valid
+        auto sorted_dims = dims;
+        std::sort(sorted_dims.begin(), sorted_dims.end(), std::greater<int64_t>());
+        Tensor result = t;
+        for (auto d : sorted_dims) {
+            result = tenzor::sum(result, d, kd);
+        }
+        return result;
+    };
+
+    auto reduce_max = [&](const Tensor& t, const std::vector<int64_t>& dims,
+                          bool kd) -> Tensor {
+        if (dims.empty()) {
+            return tenzor::max(t, std::nullopt, kd);
+        }
+        auto sorted_dims = dims;
+        std::sort(sorted_dims.begin(), sorted_dims.end(), std::greater<int64_t>());
+        Tensor result = t;
+        for (auto d : sorted_dims) {
+            result = tenzor::max(result, d, kd);
+        }
+        return result;
+    };
+
+    auto reduce_min = [&](const Tensor& t, const std::vector<int64_t>& dims,
+                          bool kd) -> Tensor {
+        if (dims.empty()) {
+            return tenzor::min(t, std::nullopt, kd);
+        }
+        auto sorted_dims = dims;
+        std::sort(sorted_dims.begin(), sorted_dims.end(), std::greater<int64_t>());
+        Tensor result = t;
+        for (auto d : sorted_dims) {
+            result = tenzor::min(result, d, kd);
+        }
+        return result;
+    };
+
+    if (std::isinf(ord) && ord > 0) {
+        // ord = +inf: max(abs(x))
+        return reduce_max(tenzor::abs(x), dim, keepdim);
+    } else if (std::isinf(ord) && ord < 0) {
+        // ord = -inf: min(abs(x))
+        return reduce_min(tenzor::abs(x), dim, keepdim);
+    } else if (ord == 0.0) {
+        // ord = 0: count of nonzero elements (L0 "norm")
+        // nonzero: cast abs(x) > 0 to float, then sum
+        auto nonzero = tenzor::abs(x);
+        // Clamp to 0/1: sign of abs gives 0 for zero, 1 for positive
+        // Use pow(abs(x), 0) but that gives 1 for 0 too... use comparison instead
+        // abs(x) != 0 -> we can use: min(abs(x), 1) via pow then sum
+        // Simpler: sum(abs(x) > 0) — but we don't have a > operator returning float.
+        // Use: sum(sign(abs(x)))  — sign(0) = 0, sign(positive) = 1
+        auto signs = tenzor::abs(nonzero);  // already abs
+        // Actually: use pow(abs(x), tiny_exponent) and floor, or just:
+        // sign(abs(x)) works because abs(x) >= 0, and sign(0) = 0, sign(pos) = 1
+        auto indicator = tenzor::pow(tenzor::abs(x), 0.0f);
+        // pow(0, 0) = 1 in most implementations, so this doesn't work either.
+        // Correct approach: (abs(x) > 0) as float. We can approximate:
+        // clamp(abs(x), 0, 1) then ceil. Or simply: abs(x) / (abs(x) + epsilon)
+        // rounded. Simplest correct: use the fact that sign returns -1,0,1 and
+        // abs of that gives 0 or 1 for the abs'd input.
+        // sign(abs(x)) = 0 if x==0, 1 if x!=0 (since abs(x) >= 0).
+        // But we don't have sign()... Let's use: min(abs(x) * huge, 1.0).
+        // Actually let's just do: abs(x) != 0 via (abs(x) > 0) which is mul with 0 < check.
+        // Simplest working approach for L0: sum(pow(abs(x), epsilon)) won't work.
+        // Let's just count: treat as sum of (x != 0) using the expression:
+        // 1 - pow(1 - min(abs(x), 1), huge). Or just keep it simple:
+        auto ax = tenzor::abs(x);
+        // For a clean implementation: create a ones_like, then zero where ax == 0.
+        // Since we don't have element-wise comparison yielding float, use:
+        // ax / (ax + 1e-38) which is ~1 for nonzero, ~0 for zero (in float32)
+        auto eps_tensor = tenzor::mul(tenzor::ones_like(ax), 1e-38);
+        auto counts = tenzor::mul(ax, tenzor::pow(tenzor::add(ax, eps_tensor), -1.0f));
+        return reduce_sum(counts, dim, keepdim);
+    } else if (ord == 1.0) {
+        return reduce_sum(tenzor::abs(x), dim, keepdim);
+    } else if (ord == 2.0) {
+        // Euclidean norm: sqrt(sum(x^2))
+        return tenzor::sqrt(reduce_sum(tenzor::mul(x, x), dim, keepdim));
+    } else {
+        // General p-norm: sum(abs(x)^p)^(1/p)
+        auto abs_x = tenzor::abs(x);
+        auto powered = tenzor::pow(abs_x, static_cast<float>(ord));
+        auto summed = reduce_sum(powered, dim, keepdim);
+        return tenzor::pow(summed, static_cast<float>(1.0 / ord));
+    }
+}
+
+auto matrix_norm(const Tensor& input, double ord) -> Tensor {
+    // No LAPACKE needed for most cases — implemented with tensor ops.
+    auto shape = input.shape();
+    auto ndim = static_cast<int64_t>(shape.size());
+    if (ndim < 2)
+        throw std::invalid_argument("linalg::matrix_norm: input must be at least 2D");
+
+    if (ord == 2.0) {
+        // Spectral norm: largest singular value
+        auto sv = svdvals(input);
+        return tenzor::max(sv, -1, false);
+    } else if (ord == -2.0) {
+        // Smallest singular value
+        auto sv = svdvals(input);
+        return tenzor::min(sv, -1, false);
+    } else if (ord == 1.0) {
+        // Max absolute column sum: max_j sum_i |a_ij|
+        auto abs_input = tenzor::abs(input);
+        auto col_sums = tenzor::sum(abs_input, ndim - 2, false);  // sum over rows
+        return tenzor::max(col_sums, -1, false);
+    } else if (ord == -1.0) {
+        // Min absolute column sum
+        auto abs_input = tenzor::abs(input);
+        auto col_sums = tenzor::sum(abs_input, ndim - 2, false);
+        return tenzor::min(col_sums, -1, false);
+    } else if (std::isinf(ord) && ord > 0) {
+        // Max absolute row sum: max_i sum_j |a_ij|
+        auto abs_input = tenzor::abs(input);
+        auto row_sums = tenzor::sum(abs_input, ndim - 1, false);  // sum over cols
+        return tenzor::max(row_sums, -1, false);
+    } else if (std::isinf(ord) && ord < 0) {
+        // Min absolute row sum
+        auto abs_input = tenzor::abs(input);
+        auto row_sums = tenzor::sum(abs_input, ndim - 1, false);
+        return tenzor::min(row_sums, -1, false);
+    } else {
+        throw std::invalid_argument(
+            "linalg::matrix_norm: unsupported ord=" + std::to_string(ord) +
+            ". Supported: 1, -1, 2, -2, inf, -inf");
+    }
+}
+
+auto vecdot(const Tensor& a, const Tensor& b, int64_t dim) -> Tensor {
+    // No LAPACKE needed — implemented as sum(a * b, dim)
+    auto product = tenzor::mul(a, b);
+    return tenzor::sum(product, dim, false);
+}
+
 } // namespace tenzor::linalg

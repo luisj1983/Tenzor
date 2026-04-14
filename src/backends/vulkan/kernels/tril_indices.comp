@@ -1,0 +1,74 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer RowIndices { int row_indices[]; };
+layout(binding = 1) buffer ColIndices { int col_indices[]; };
+
+layout(push_constant) uniform PushConstants {
+    int n;        // total number of index pairs
+    int row;      // number of rows
+    int col;      // number of columns
+    int offset;   // diagonal offset
+} params;
+
+// Cumulative element count for tril through row r (inclusive).
+// Each row i contributes min(col, max(0, i + offset + 1)) elements.
+// Mirrors the CUDA tril_cumcount function.
+int tril_cumcount(int r) {
+    // First row that has any element
+    int first = max(0, -params.offset);
+    if (r < first) return 0;
+
+    // Row index where contribution first reaches col (becomes "full")
+    int full_from = params.col - params.offset - 1;
+
+    if (full_from <= first) {
+        // All non-empty rows are full rows
+        return (r - first + 1) * params.col;
+    }
+
+    if (r < full_from) {
+        // All rows in [first, r] are partial
+        // Contribution of row i = i + offset + 1
+        // Sum from i=first to r
+        int count = r - first + 1;
+        int first_val = first + params.offset + 1;
+        int last_val  = r + params.offset + 1;
+        return count * (first_val + last_val) / 2;
+    }
+
+    // Mixed: partial rows [first, full_from-1] + full rows [full_from, r]
+    int partial_count = full_from - first;
+    int first_val = first + params.offset + 1;
+    int last_val  = full_from - 1 + params.offset + 1;
+    int partial_sum = partial_count * (first_val + last_val) / 2;
+    int full_sum = (r - full_from + 1) * params.col;
+    return partial_sum + full_sum;
+}
+
+void main() {
+    int idx = int(gl_GlobalInvocationID.x);
+    if (idx >= params.n) return;
+
+    // Binary search for the row: find smallest r such that tril_cumcount(r) > idx
+    int first = max(0, -params.offset);
+    int lo = first;
+    int hi = params.row - 1;
+
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (tril_cumcount(mid) <= idx) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+
+    int r = lo;
+    int prev = (r > first) ? tril_cumcount(r - 1) : 0;
+    int c = idx - prev;
+
+    row_indices[idx] = r;
+    col_indices[idx] = c;
+}

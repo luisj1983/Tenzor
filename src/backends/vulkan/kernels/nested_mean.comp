@@ -1,0 +1,42 @@
+#version 450
+
+// Nested (segmented) mean: sum each segment along axis 0 then divide by length.
+// One workgroup per batch element. Threads stride over inner dim D.
+// offsets[b] .. offsets[b+1] defines the segment for batch b.
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer readonly Values  { float values[];  };
+layout(binding = 1) buffer readonly Offsets { int   offsets[]; };
+layout(binding = 2) buffer writeonly Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint D;   // inner dimension
+    uint B;   // number of segments (batch size)
+} params;
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint b   = gl_WorkGroupID.x;
+    if (b >= params.B) return;
+
+    int seg_start = offsets[b];
+    int seg_end   = offsets[b + 1];
+    int seg_len   = seg_end - seg_start;
+    if (seg_len <= 0) {
+        for (uint d = tid; d < params.D; d += 256) {
+            output_data[b * params.D + d] = 0.0;
+        }
+        return;
+    }
+
+    float inv_len = 1.0 / float(seg_len);
+
+    for (uint d = tid; d < params.D; d += 256) {
+        float acc = 0.0;
+        for (int s = 0; s < seg_len; ++s) {
+            acc += values[uint(seg_start + s) * params.D + d];
+        }
+        output_data[b * params.D + d] = acc * inv_len;
+    }
+}
