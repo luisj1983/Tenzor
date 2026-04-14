@@ -504,6 +504,16 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::Ormqr)] = "ormqr";
     names[static_cast<size_t>(OpId::Geqrf)] = "geqrf";
 
+    // Additional linear algebra (510-517)
+    names[static_cast<size_t>(OpId::LinalgLU)] = "linalg_lu";
+    names[static_cast<size_t>(OpId::LinalgLUSolve)] = "linalg_lu_solve";
+    names[static_cast<size_t>(OpId::LinalgHouseholder)] = "linalg_householder";
+    names[static_cast<size_t>(OpId::LinalgLDLFactor)] = "linalg_ldl_factor";
+    names[static_cast<size_t>(OpId::LinalgLDLSolve)] = "linalg_ldl_solve";
+    names[static_cast<size_t>(OpId::LinalgVectorNorm)] = "linalg_vector_norm";
+    names[static_cast<size_t>(OpId::LinalgMatrixNorm)] = "linalg_matrix_norm";
+    names[static_cast<size_t>(OpId::LinalgVecdot)] = "linalg_vecdot";
+
     // New shape/indexing (Phase 6)
     names[static_cast<size_t>(OpId::TakeAlongDim)] = "take_along_dim";
     names[static_cast<size_t>(OpId::MaskedScatter)] = "masked_scatter";
@@ -547,6 +557,17 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::NestedFromPadded)] = "nested_from_padded";
     names[static_cast<size_t>(OpId::NestedLinear)] = "nested_linear";
 
+    // Numerically stable math / special functions
+    names[static_cast<size_t>(OpId::LogAddExp)] = "logaddexp";
+    names[static_cast<size_t>(OpId::LogAddExp2)] = "logaddexp2";
+    names[static_cast<size_t>(OpId::XLogY)] = "xlogy";
+    names[static_cast<size_t>(OpId::CosineSimilarity)] = "cosine_similarity";
+    names[static_cast<size_t>(OpId::Renorm)] = "renorm";
+    names[static_cast<size_t>(OpId::I0e)] = "i0e";
+    names[static_cast<size_t>(OpId::I1e)] = "i1e";
+    names[static_cast<size_t>(OpId::Entr)] = "entr";
+    names[static_cast<size_t>(OpId::SphericalBesselJ0)] = "spherical_bessel_j0";
+
     return names;
 }();
 
@@ -561,7 +582,7 @@ constexpr size_t count_named_ops() {
 
 // Count of actual OpId enum values (excluding gap slots).
 // Update this when adding new OpIds to catch missing name entries at compile time.
-inline constexpr size_t EXPECTED_NAMED_OPS = 431;  // 415 previous + 16 new ops (math, integration, distance, etc.)
+inline constexpr size_t EXPECTED_NAMED_OPS = 448;  // 440 previous + 8 new ops (linalg householder, ldl, cholesky_inverse, etc.)
 
 // If this fires, a new OpId was added without a corresponding name in op_names above
 static_assert(count_named_ops() == EXPECTED_NAMED_OPS,

@@ -176,6 +176,13 @@ auto attr_key_name(AttrKey key) -> std::string_view {
         case AttrKey::Left: return "left";
         case AttrKey::TransposeQ: return "transpose_q";
         case AttrKey::Ind: return "ind";
+        case AttrKey::Dim2: return "dim2";
+        case AttrKey::Index: return "index";
+        case AttrKey::Spacing: return "spacing";
+        case AttrKey::Dx: return "dx";
+        case AttrKey::MaxNorm: return "max_norm";
+        case AttrKey::Strides: return "strides";
+        case AttrKey::StorageOffset: return "storage_offset";
         case AttrKey::_Count: return "_count";
     }
     return "unknown";

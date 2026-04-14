@@ -762,27 +762,56 @@ auto diff(const Tensor& input, int64_t n, int64_t dim) -> Tensor {
 }
 
 auto logaddexp(const Tensor& a, const Tensor& b) -> Tensor {
-    // max(a, b) + log1p(exp(-abs(a - b)))
-    auto m = tenzor::maximum(a, b);
-    auto d = tenzor::abs(tenzor::sub(a, b));
-    return tenzor::add(m, tenzor::log1p(tenzor::exp(tenzor::neg(d))));
+    std::array<Tensor, 2> inputs = {a, b};
+    return dispatch<OpId::LogAddExp>(inputs)[0];
 }
 
 auto logaddexp2(const Tensor& a, const Tensor& b) -> Tensor {
-    // max(a, b) + log2(1 + exp2(-abs(a - b)))
-    auto m = tenzor::maximum(a, b);
-    auto d = tenzor::abs(tenzor::sub(a, b));
-    auto one = tenzor::full({1}, 1.0f, a.dtype(), a.device());
-    return tenzor::add(m, tenzor::log2(tenzor::add(one, tenzor::exp2(tenzor::neg(d)))));
+    std::array<Tensor, 2> inputs = {a, b};
+    return dispatch<OpId::LogAddExp2>(inputs)[0];
 }
 
 auto xlogy(const Tensor& x, const Tensor& y) -> Tensor {
-    // where(x == 0, zeros_like(x), x * log(y))
-    auto zero_scalar = tenzor::full({1}, 0.0f, x.dtype(), x.device());
-    auto condition = tenzor::eq(x, zero_scalar);
-    auto z = tenzor::zeros_like(x);
-    auto x_log_y = tenzor::mul(x, tenzor::log(y));
-    return where(condition, z, x_log_y);
+    std::array<Tensor, 2> inputs = {x, y};
+    return dispatch<OpId::XLogY>(inputs)[0];
+}
+
+auto i0e(const Tensor& x) -> Tensor {
+    std::array<Tensor, 1> inputs = {x};
+    return dispatch<OpId::I0e>(inputs)[0];
+}
+
+auto i1e(const Tensor& x) -> Tensor {
+    std::array<Tensor, 1> inputs = {x};
+    return dispatch<OpId::I1e>(inputs)[0];
+}
+
+auto entr(const Tensor& x) -> Tensor {
+    std::array<Tensor, 1> inputs = {x};
+    return dispatch<OpId::Entr>(inputs)[0];
+}
+
+auto spherical_bessel_j0(const Tensor& x) -> Tensor {
+    std::array<Tensor, 1> inputs = {x};
+    return dispatch<OpId::SphericalBesselJ0>(inputs)[0];
+}
+
+auto cosine_similarity(const Tensor& x1, const Tensor& x2,
+                       int64_t dim, double eps) -> Tensor {
+    OpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    attrs.set(AttrKey::Eps, eps);
+    std::array<Tensor, 2> inputs = {x1, x2};
+    return dispatch_single(OpId::CosineSimilarity, inputs, attrs);
+}
+
+auto renorm(const Tensor& input, double p, int64_t dim, double maxnorm) -> Tensor {
+    OpAttributes attrs;
+    attrs.set(AttrKey::P, p);
+    attrs.set(AttrKey::Dim, dim);
+    attrs.set(AttrKey::MaxNorm, maxnorm);
+    std::array<Tensor, 1> inputs = {input};
+    return dispatch_single(OpId::Renorm, inputs, attrs);
 }
 
 auto isclose(const Tensor& a, const Tensor& b, double rtol, double atol) -> Tensor {

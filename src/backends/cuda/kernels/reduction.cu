@@ -1,6 +1,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/backend/caching_allocator.hpp"
 #include "tenzor/backend/dtype_dispatch.hpp"
+#include "tenzor/backend/backend.hpp"  // For OpAttributes (dispatch wrappers)
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
@@ -5652,6 +5653,299 @@ auto logsumexp_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream
 
     CUDA_PEEK_AND_THROW(stream, "logsumexp_kernel");
     return output;
+}
+
+// ============================================================================
+// CosineSimilarity: sum(a*b, dim) / (norm(a, dim) * norm(b, dim) + eps)
+// ============================================================================
+
+template<typename T>
+__global__ void cosine_similarity_along_dim_kernel(
+    const T* a,
+    const T* b,
+    T* output,
+    DimMeta meta,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size,
+    float eps
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= output_size) return;
+
+    // Compute multi-dimensional indices for output position
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+    for (int64_t d = 0; d < ndim; d++) {
+        if (d == dim) {
+            indices[d] = 0;
+            continue;
+        }
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
+    }
+
+    // Accumulate dot product and norms along the reduction dimension
+    using AccT = typename AccumType<T>::type;
+    AccT dot_acc = AccT(0);
+    AccT norm_a_acc = AccT(0);
+    AccT norm_b_acc = AccT(0);
+
+    for (int64_t i = 0; i < dim_size; i++) {
+        indices[dim] = i;
+        int64_t in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * meta.strides[d];
+        }
+        AccT av = static_cast<AccT>(a[in_idx]);
+        AccT bv = static_cast<AccT>(b[in_idx]);
+        dot_acc += av * bv;
+        norm_a_acc += av * av;
+        norm_b_acc += bv * bv;
+    }
+
+    AccT denom = sqrt(norm_a_acc) * sqrt(norm_b_acc) + static_cast<AccT>(eps);
+    output[out_idx] = static_cast<T>(dot_acc / denom);
+}
+
+auto cosine_similarity_kernel(const Tensor& a, const Tensor& b, int64_t dim, double eps, cudaStream_t stream) -> Tensor {
+    // Upcast FP16/BF16 to Float32
+    if (a.dtype() == DType::Float16 || a.dtype() == DType::BFloat16) {
+        DType orig = a.dtype();
+        Tensor result = cosine_similarity_kernel(a.to(DType::Float32), b.to(DType::Float32), dim, eps, stream);
+        return result.to(orig);
+    }
+
+    if (a.dtype() != b.dtype()) throw std::runtime_error("cosine_similarity: tensors must have the same dtype");
+
+    auto [resolved_stream, stream_guard] = resolve_stream(stream, a);
+    stream = resolved_stream;
+
+    auto shape_span = a.shape();
+    int64_t ndim = static_cast<int64_t>(shape_span.size());
+
+    // Normalize dim
+    int64_t actual_dim = dim;
+    if (actual_dim < 0) actual_dim += ndim;
+    if (actual_dim < 0 || actual_dim >= ndim) {
+        throw std::runtime_error("cosine_similarity: dim out of range");
+    }
+
+    int64_t dim_size = shape_span[actual_dim];
+
+    // Compute output shape (reduction dimension removed)
+    std::vector<int64_t> output_shape;
+    for (int64_t d = 0; d < ndim; d++) {
+        if (d != actual_dim) {
+            output_shape.push_back(shape_span[d]);
+        }
+    }
+    if (output_shape.empty()) output_shape.push_back(1);
+
+    int64_t output_size = 1;
+    for (auto s : output_shape) output_size *= s;
+
+    Tensor output(output_shape, a.dtype(), a.device());
+
+    std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
+    auto strides_span = a.strides();
+    std::vector<int64_t> strides_vec(strides_span.begin(), strides_span.end());
+    DimMeta meta = make_dim_meta(shape_vec, strides_vec);
+
+    constexpr int BLOCK = 256;
+    int blocks = (output_size + BLOCK - 1) / BLOCK;
+
+    TENZOR_DISPATCH_FLOATING_TYPES(a.dtype(), "cosine_similarity", [&]() {
+        cosine_similarity_along_dim_kernel<scalar_t><<<blocks, BLOCK, 0, stream>>>(
+            a.data<scalar_t>(), b.data<scalar_t>(), output.data<scalar_t>(),
+            meta, ndim, actual_dim, output_size, dim_size, static_cast<float>(eps));
+        CUDA_CHECK(cudaGetLastError());
+    });
+
+    return output;
+}
+
+Tensor cosine_similarity_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    auto [stream, guard] = resolve_stream(nullptr, inputs[0]);
+    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
+        stream = reinterpret_cast<cudaStream_t>(
+            static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
+        guard = StreamGuard{};
+    }
+    int64_t dim = attrs.get_int(AttrKey::Dim, 1);
+    double eps = attrs.get_float(AttrKey::Eps, 1e-8);
+    return cosine_similarity_kernel(inputs[0], inputs[1], dim, eps, stream);
+}
+
+// ============================================================================
+// Renorm: scale slices along dim so that p-norm <= maxnorm
+// ============================================================================
+
+template<typename T>
+__global__ void renorm_compute_norm_kernel(
+    const T* input,
+    T* norms,         // one norm per slice
+    DimMeta meta,
+    int64_t ndim,
+    int64_t dim,
+    int64_t num_slices,
+    int64_t slice_size,
+    float p
+) {
+    int64_t slice_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (slice_idx >= num_slices) return;
+
+    // Compute the starting indices for this slice
+    int64_t indices[8] = {};
+    int64_t tmp = slice_idx;
+    for (int64_t d = ndim - 1; d >= 0; d--) {
+        if (d == dim) continue;
+        indices[d] = tmp % meta.shape[d];
+        tmp /= meta.shape[d];
+    }
+
+    // Compute p-norm for this slice
+    T acc = T(0);
+    for (int64_t i = 0; i < slice_size; i++) {
+        indices[dim] = i;
+        int64_t in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * meta.strides[d];
+        }
+        T val = input[in_idx];
+        T absval = val < T(0) ? -val : val;
+        if (p == 1.0f) {
+            acc += absval;
+        } else if (p == 2.0f) {
+            acc += val * val;
+        } else {
+            acc += pow(absval, T(p));
+        }
+    }
+
+    if (p == 2.0f) {
+        norms[slice_idx] = sqrt(acc);
+    } else if (p != 1.0f) {
+        norms[slice_idx] = pow(acc, T(1.0f / p));
+    } else {
+        norms[slice_idx] = acc;
+    }
+}
+
+template<typename T>
+__global__ void renorm_scale_kernel(
+    const T* input,
+    T* output,
+    const T* norms,
+    DimMeta meta,
+    int64_t ndim,
+    int64_t dim,
+    int64_t num_slices,
+    int64_t slice_size,
+    float maxnorm
+) {
+    int64_t total = num_slices * slice_size;
+    TENZOR_CUDA_KERNEL_LOOP(flat_idx, total) {
+        int64_t slice_idx = flat_idx / slice_size;
+        int64_t within_slice = flat_idx % slice_size;
+
+        // Compute full multi-dim index
+        int64_t indices[8] = {};
+        int64_t tmp = slice_idx;
+        for (int64_t d = ndim - 1; d >= 0; d--) {
+            if (d == dim) continue;
+            indices[d] = tmp % meta.shape[d];
+            tmp /= meta.shape[d];
+        }
+        indices[dim] = within_slice;
+
+        int64_t in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * meta.strides[d];
+        }
+
+        T norm_val = norms[slice_idx];
+        T mn = static_cast<T>(maxnorm);
+        T scale = (norm_val > mn) ? (mn / norm_val) : T(1);
+        output[in_idx] = input[in_idx] * scale;
+    }
+}
+
+auto renorm_kernel(const Tensor& input, double p, int64_t dim, double maxnorm, cudaStream_t stream) -> Tensor {
+    // Upcast FP16/BF16 to Float32
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        Tensor result = renorm_kernel(input.to(DType::Float32), p, dim, maxnorm, stream);
+        return result.to(orig);
+    }
+
+    auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
+    stream = resolved_stream;
+
+    auto shape_span = input.shape();
+    int64_t ndim = static_cast<int64_t>(shape_span.size());
+
+    // Normalize dim
+    int64_t actual_dim = dim;
+    if (actual_dim < 0) actual_dim += ndim;
+    if (actual_dim < 0 || actual_dim >= ndim) {
+        throw std::runtime_error("renorm: dim out of range");
+    }
+
+    int64_t slice_size = shape_span[actual_dim];
+
+    // Number of slices = product of all dims except the reduction dim
+    int64_t num_slices = 1;
+    for (int64_t d = 0; d < ndim; d++) {
+        if (d != actual_dim) num_slices *= shape_span[d];
+    }
+
+    std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
+    auto strides_span = input.strides();
+    std::vector<int64_t> strides_vec(strides_span.begin(), strides_span.end());
+    DimMeta meta = make_dim_meta(shape_vec, strides_vec);
+
+    // Output has same shape as input
+    Tensor output(shape_vec, input.dtype(), input.device());
+
+    // Temporary buffer for per-slice norms
+    Tensor norms({num_slices}, input.dtype(), input.device());
+
+    constexpr int BLOCK = 256;
+
+    TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "renorm", [&]() {
+        // Step 1: compute norms per slice
+        int norm_blocks = (num_slices + BLOCK - 1) / BLOCK;
+        renorm_compute_norm_kernel<scalar_t><<<norm_blocks, BLOCK, 0, stream>>>(
+            input.data<scalar_t>(), norms.data<scalar_t>(), meta,
+            ndim, actual_dim, num_slices, slice_size, static_cast<float>(p));
+        CUDA_CHECK(cudaGetLastError());
+
+        // Step 2: scale elements where norm > maxnorm
+        int64_t total = num_slices * slice_size;
+        dim3 grid, block;
+        compute_launch_config_1d(total, grid, block);
+        renorm_scale_kernel<scalar_t><<<grid, block, 0, stream>>>(
+            input.data<scalar_t>(), output.data<scalar_t>(), norms.data<scalar_t>(),
+            meta, ndim, actual_dim, num_slices, slice_size, static_cast<float>(maxnorm));
+        CUDA_CHECK(cudaGetLastError());
+    });
+
+    return output;
+}
+
+Tensor renorm_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    auto [stream, guard] = resolve_stream(nullptr, inputs[0]);
+    if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
+        stream = reinterpret_cast<cudaStream_t>(
+            static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
+        guard = StreamGuard{};
+    }
+    double p_val = attrs.get_float(AttrKey::P, 2.0);
+    int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+    double maxnorm = attrs.get_float(AttrKey::MaxNorm, 1.0);
+    return renorm_kernel(inputs[0], p_val, dim, maxnorm, stream);
 }
 
 } // namespace cuda

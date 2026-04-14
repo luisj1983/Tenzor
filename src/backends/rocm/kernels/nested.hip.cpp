@@ -349,6 +349,129 @@ auto nested_attention_hip(const Tensor& Q, const Tensor& K, const Tensor& V,
 }
 
 // ============================================================================
+// Nested Attention Backward
+// ============================================================================
+
+__global__ void nested_attention_backward_kernel(
+    const float* __restrict__ grad_out,
+    const float* __restrict__ Q,
+    const float* __restrict__ K,
+    const float* __restrict__ V,
+    float* __restrict__ grad_Q,
+    float* __restrict__ grad_K,
+    float* __restrict__ grad_V,
+    const int64_t* __restrict__ q_offsets,
+    const int64_t* __restrict__ kv_offsets,
+    float scale,
+    int64_t head_dim,
+    int64_t B,
+    bool causal)
+{
+    int64_t b = blockIdx.x;
+    if (b >= B) return;
+
+    int64_t q_start = q_offsets[b], q_end = q_offsets[b + 1];
+    int64_t kv_start = kv_offsets[b], kv_end = kv_offsets[b + 1];
+    int64_t Lq = q_end - q_start;
+    int64_t Lkv = kv_end - kv_start;
+    if (Lq <= 0 || Lkv <= 0) return;
+
+    for (int64_t qi = threadIdx.x; qi < Lq; qi += blockDim.x) {
+        const float* q_row = Q + (q_start + qi) * head_dim;
+        const float* do_row = grad_out + (q_start + qi) * head_dim;
+        float* gq_row = grad_Q + (q_start + qi) * head_dim;
+
+        int64_t ki_end = causal ? min(Lkv, qi + 1) : Lkv;
+
+        // Find max score
+        float max_score = -FLT_MAX;
+        for (int64_t ki = 0; ki < ki_end; ++ki) {
+            const float* k_row = K + (kv_start + ki) * head_dim;
+            float score = 0.0f;
+            for (int64_t d = 0; d < head_dim; ++d) score += q_row[d] * k_row[d];
+            score *= scale;
+            if (score > max_score) max_score = score;
+        }
+
+        // Compute sum_exp
+        float sum_exp = 0.0f;
+        for (int64_t ki = 0; ki < ki_end; ++ki) {
+            const float* k_row = K + (kv_start + ki) * head_dim;
+            float score = 0.0f;
+            for (int64_t d = 0; d < head_dim; ++d) score += q_row[d] * k_row[d];
+            sum_exp += expf(score * scale - max_score);
+        }
+        float inv_sum = (sum_exp > 0.0f) ? 1.0f / sum_exp : 0.0f;
+
+        // Compute softmax_dot
+        float softmax_dot = 0.0f;
+        for (int64_t ki = 0; ki < ki_end; ++ki) {
+            const float* k_row = K + (kv_start + ki) * head_dim;
+            const float* v_row = V + (kv_start + ki) * head_dim;
+            float score = 0.0f;
+            for (int64_t d = 0; d < head_dim; ++d) score += q_row[d] * k_row[d];
+            float w = expf(score * scale - max_score) * inv_sum;
+            float dot_dov = 0.0f;
+            for (int64_t d = 0; d < head_dim; ++d) dot_dov += do_row[d] * v_row[d];
+            softmax_dot += w * dot_dov;
+        }
+
+        // Compute gradients
+        for (int64_t ki = 0; ki < ki_end; ++ki) {
+            const float* k_row = K + (kv_start + ki) * head_dim;
+            const float* v_row = V + (kv_start + ki) * head_dim;
+            float* gk_row = grad_K + (kv_start + ki) * head_dim;
+            float* gv_row = grad_V + (kv_start + ki) * head_dim;
+
+            float score = 0.0f;
+            for (int64_t d = 0; d < head_dim; ++d) score += q_row[d] * k_row[d];
+            float w = expf(score * scale - max_score) * inv_sum;
+
+            for (int64_t d = 0; d < head_dim; ++d) atomicAdd(&gv_row[d], w * do_row[d]);
+
+            float dot_dov = 0.0f;
+            for (int64_t d = 0; d < head_dim; ++d) dot_dov += do_row[d] * v_row[d];
+            float ds = w * (dot_dov - softmax_dot) * scale;
+
+            for (int64_t d = 0; d < head_dim; ++d) gq_row[d] += ds * k_row[d];
+            for (int64_t d = 0; d < head_dim; ++d) atomicAdd(&gk_row[d], ds * q_row[d]);
+        }
+    }
+}
+
+auto nested_attention_backward_hip(const Tensor& grad_out, const Tensor& Q,
+                                    const Tensor& K, const Tensor& V,
+                                    const Tensor& attn_out,
+                                    const Tensor& q_offsets, const Tensor& kv_offsets,
+                                    float scale, bool causal, hipStream_t stream)
+    -> std::vector<Tensor> {
+    int64_t head_dim = Q.shape().back();
+    int64_t total_q_len = Q.shape()[0];
+    int64_t total_kv_len = K.shape()[0];
+    int64_t B = q_offsets.numel() - 1;
+
+    auto grad_Q = tenzor::zeros({total_q_len, head_dim}, Q.dtype(), Q.device());
+    auto grad_K = tenzor::zeros({total_kv_len, head_dim}, K.dtype(), K.device());
+    auto grad_V = tenzor::zeros({total_kv_len, head_dim}, V.dtype(), V.device());
+
+    int threads = static_cast<int>(std::min(int64_t(256), total_q_len));
+
+    if (Q.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(nested_attention_backward_kernel,
+            dim3(static_cast<unsigned>(B)), dim3(threads), 0, stream,
+            grad_out.data<float>(), Q.data<float>(), K.data<float>(), V.data<float>(),
+            grad_Q.data<float>(), grad_K.data<float>(), grad_V.data<float>(),
+            q_offsets.data<int64_t>(), kv_offsets.data<int64_t>(),
+            scale, head_dim, B, causal);
+    } else {
+        throw std::runtime_error("nested_attention_backward_hip: only Float32 supported");
+    }
+
+    HIP_CHECK_NESTED(hipGetLastError());
+    return {grad_Q, grad_K, grad_V};
+}
+
+// ============================================================================
 // Nested to Padded
 // ============================================================================
 

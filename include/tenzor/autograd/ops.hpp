@@ -906,6 +906,80 @@ auto spmv(const SparseTensor& sparse, const Variable& vec) -> Variable;
  */
 auto sparse_add(const SparseTensor& sparse, const Variable& dense) -> Variable;
 
+// ============================================================================
+// New Op Autograd Wrappers (Phase 7)
+// ============================================================================
+
+/// LogAddExp: log(exp(a) + exp(b)), numerically stable. Grad: sigmoid decomposition
+auto logaddexp(const Variable& a, const Variable& b) -> Variable;
+
+/// LogAddExp2: log2(2^a + 2^b), numerically stable. Grad: base-2 softmax decomposition
+auto logaddexp2(const Variable& a, const Variable& b) -> Variable;
+
+/// XLogY: x * log(y), with 0*log(y) = 0. Grad: log(y) for x, x/y for y (0-safe)
+auto xlogy(const Variable& x, const Variable& y) -> Variable;
+
+/// Scaled modified Bessel I0e: exp(-|x|) * I0(x). Grad: i1e(x) - sign(x)*i0e(x)
+auto i0e(const Variable& input) -> Variable;
+
+/// Scaled modified Bessel I1e: exp(-|x|) * I1(x). Grad: see I1eBackward
+auto i1e(const Variable& input) -> Variable;
+
+/// Element-wise entropy: -x*log(x). Grad: -(1 + log(x)) for x > 0
+auto entr(const Variable& input) -> Variable;
+
+/// Spherical Bessel j0: sin(x)/x. Grad: cos(x)/x - sin(x)/x^2
+auto spherical_bessel_j0(const Variable& input) -> Variable;
+
+/// Normal CDF. Grad: standard normal PDF
+auto ndtr(const Variable& input) -> Variable;
+
+/// Log normal CDF. Grad: pdf / ndtr (numerically stable)
+auto log_ndtr(const Variable& input) -> Variable;
+
+/// Multivariate log-gamma. Grad: sum of digamma at shifted args
+auto multigammaln(const Variable& input, int64_t p) -> Variable;
+
+/// Cosine similarity along dim. Grad: chain rule through norm/dot decomposition
+auto cosine_similarity(const Variable& x1, const Variable& x2,
+                       int64_t dim = 1, double eps = 1e-8) -> Variable;
+
+/// Renormalize tensor slices. Grad: scale by renorm factor
+auto renorm(const Variable& input, double p, int64_t dim, double maxnorm) -> Variable;
+
+/// Inverse via Cholesky factors. Grad: through triangular structure
+auto cholesky_inverse(const Variable& input, bool upper = false) -> Variable;
+
+/// LDL^T factorization. Grad: structured (stub)
+auto ldl_factor(const Variable& input) -> std::tuple<Variable, Variable>;
+
+/// Solve using LDL^T factors. Grad: re-solve with grad
+auto ldl_solve(const Variable& LD, const Tensor& pivots, const Variable& B) -> Variable;
+
+/// Householder product. Grad: complex (stub)
+auto householder_product(const Variable& input, const Variable& tau) -> Variable;
+
+/// Generalized tensor inverse. Grad: -Y @ grad @ Y (reshaped)
+auto tensorinv(const Variable& input, int64_t ind = 2) -> Variable;
+
+/// Generalized tensor solve. Grad: through linear system
+auto tensorsolve(const Variable& A, const Variable& B) -> Variable;
+
+/// Vector p-norm along dims. Grad: through p-norm formula
+auto vector_norm(const Variable& input, double ord = 2.0,
+                 std::vector<int64_t> dim = {}, bool keepdim = false) -> Variable;
+
+/// Matrix norm. Grad: depends on norm type (Frobenius supported)
+auto matrix_norm(const Variable& input, double ord = 2.0) -> Variable;
+
+/// Dot product along dim. Grad: grad.unsqueeze(dim) * other
+auto vecdot(const Variable& a, const Variable& b, int64_t dim = -1) -> Variable;
+
+/// Zero-copy view with custom strides. Grad: scatter_add inverse mapping
+auto as_strided(const Variable& input, std::span<const int64_t> size,
+                std::span<const int64_t> stride,
+                std::optional<int64_t> storage_offset = std::nullopt) -> Variable;
+
 } // namespace tenzor
 
 namespace tenzor {

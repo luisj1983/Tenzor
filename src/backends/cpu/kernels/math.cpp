@@ -7678,5 +7678,311 @@ auto pdist_kernel(const Tensor& input, double p) -> Tensor {
     return result;
 }
 
+// ============================================================================
+// LogAddExp: log(exp(a) + exp(b)), numerically stable
+// ============================================================================
+auto logaddexp_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    return binary_math_kernel(a, b,
+        [](float x, float y) { float m = std::max(x,y); return m + std::log1pf(std::expf(-(std::abs(x-y)))); },
+        [](double x, double y) { double m = std::max(x,y); return m + std::log1p(std::exp(-(std::abs(x-y)))); },
+        "logaddexp");
+}
+
+// ============================================================================
+// LogAddExp2: log2(2^a + 2^b), numerically stable
+// ============================================================================
+auto logaddexp2_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    return binary_math_kernel(a, b,
+        [](float x, float y) { float m = std::max(x,y); return m + std::log2f(1.0f + std::exp2f(-(std::abs(x-y)))); },
+        [](double x, double y) { double m = std::max(x,y); return m + std::log2(1.0 + std::exp2(-(std::abs(x-y)))); },
+        "logaddexp2");
+}
+
+// ============================================================================
+// XLogY: x * log(y), with 0 * log(y) = 0
+// ============================================================================
+auto xlogy_kernel(const Tensor& x, const Tensor& y) -> Tensor {
+    return binary_math_kernel(x, y,
+        [](float a, float b) { return a == 0.0f ? 0.0f : a * std::logf(b); },
+        [](double a, double b) { return a == 0.0 ? 0.0 : a * std::log(b); },
+        "xlogy");
+}
+
+// ============================================================================
+// I0e: exp(-|x|) * BesselI0(x), exponentially scaled
+// ============================================================================
+auto i0e_kernel(const Tensor& input) -> Tensor {
+    auto i0e_approx = [](double x) -> double {
+        double ax = std::abs(x);
+        if (ax < 3.75) {
+            double t = x / 3.75;
+            t = t * t;
+            double i0 = 1.0 + t * (3.5156229 + t * (3.0899424 + t * (1.2067492
+                        + t * (0.2659732 + t * (0.0360768 + t * 0.0045813)))));
+            return std::exp(-ax) * i0;
+        }
+        double t = 3.75 / ax;
+        return (1.0 / std::sqrt(ax)) * (0.39894228 + t * (0.01328592
+               + t * (0.00225319 - t * (0.00157565 - t * (0.00916281
+               - t * (0.02057706 - t * (0.02635537 - t * (0.01647633
+               - t * 0.00392377))))))));
+    };
+    return unary_math_kernel(input,
+        [&i0e_approx](float x) { return static_cast<float>(i0e_approx(x)); },
+        i0e_approx, "i0e");
+}
+
+// ============================================================================
+// I1e: exp(-|x|) * BesselI1(x), exponentially scaled
+// ============================================================================
+auto i1e_kernel(const Tensor& input) -> Tensor {
+    auto i1e_approx = [](double x) -> double {
+        double ax = std::abs(x);
+        double result;
+        if (ax < 3.75) {
+            double t = x / 3.75;
+            t = t * t;
+            result = ax * (0.5 + t * (0.87890594 + t * (0.51498869 + t * (0.15084934
+                     + t * (0.02658733 + t * (0.00301532 + t * 0.00032411))))));
+            result = std::exp(-ax) * result;
+        } else {
+            double t = 3.75 / ax;
+            result = (1.0 / std::sqrt(ax)) * (0.39894228 - t * (0.03988024
+                     - t * (0.00362018 + t * (0.00163801 - t * (0.01031555
+                     - t * (0.02282967 - t * (0.02895312 - t * (0.01787654
+                     - t * 0.00420059))))))));
+        }
+        return (x < 0.0) ? -result : result;
+    };
+    return unary_math_kernel(input,
+        [&i1e_approx](float x) { return static_cast<float>(i1e_approx(x)); },
+        i1e_approx, "i1e");
+}
+
+// ============================================================================
+// Entr: -x * log(x), with 0*log(0) = 0
+// ============================================================================
+auto entr_kernel(const Tensor& input) -> Tensor {
+    return unary_math_kernel(input,
+        [](float x) -> float {
+            if (x > 0.0f) return -x * std::logf(x);
+            if (x == 0.0f) return 0.0f;
+            return -std::numeric_limits<float>::infinity();
+        },
+        [](double x) -> double {
+            if (x > 0.0) return -x * std::log(x);
+            if (x == 0.0) return 0.0;
+            return -std::numeric_limits<double>::infinity();
+        },
+        "entr");
+}
+
+// ============================================================================
+// SphericalBesselJ0: sin(x)/x, with j0(0) = 1
+// ============================================================================
+auto spherical_bessel_j0_kernel(const Tensor& input) -> Tensor {
+    return unary_math_kernel(input,
+        [](float x) -> float { return x == 0.0f ? 1.0f : std::sinf(x) / x; },
+        [](double x) -> double { return x == 0.0 ? 1.0 : std::sin(x) / x; },
+        "spherical_bessel_j0");
+}
+
+// ============================================================================
+// Renorm: normalize slices along dim so p-norm <= maxnorm
+// ============================================================================
+auto renorm_kernel(const Tensor& input, double p, int64_t dim, double maxnorm) -> Tensor {
+    auto result = input.contiguous().clone();
+    auto shape = result.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+
+    int64_t dim_size = shape[dim];
+    int64_t outer = 1, inner = 1;
+    for (int64_t i = 0; i < dim; i++) outer *= shape[i];
+    for (int64_t i = dim + 1; i < ndim; i++) inner *= shape[i];
+
+    auto dispatch_typed = [&]<typename T>(T*) {
+        T* data = result.data<T>();
+        for (int64_t d = 0; d < dim_size; d++) {
+            // Compute p-norm of slice
+            T norm_val = 0;
+            for (int64_t o = 0; o < outer; o++) {
+                for (int64_t i = 0; i < inner; i++) {
+                    int64_t idx = (o * dim_size + d) * inner + i;
+                    norm_val += std::pow(std::abs(static_cast<double>(data[idx])), p);
+                }
+            }
+            norm_val = static_cast<T>(std::pow(static_cast<double>(norm_val), 1.0 / p));
+
+            // Scale if norm exceeds maxnorm
+            if (static_cast<double>(norm_val) > maxnorm) {
+                T scale = static_cast<T>(maxnorm / static_cast<double>(norm_val));
+                for (int64_t o = 0; o < outer; o++) {
+                    for (int64_t i = 0; i < inner; i++) {
+                        int64_t idx = (o * dim_size + d) * inner + i;
+                        data[idx] *= scale;
+                    }
+                }
+            }
+        }
+    };
+
+    if (result.dtype() == DType::Float32) {
+        dispatch_typed(static_cast<float*>(nullptr));
+    } else if (result.dtype() == DType::Float64) {
+        dispatch_typed(static_cast<double*>(nullptr));
+    } else {
+        throw std::invalid_argument("renorm: unsupported dtype");
+    }
+    return result;
+}
+
+// ============================================================================
+// CosineSimilarity: sum(a*b, dim) / (norm(a, dim) * norm(b, dim) + eps)
+// ============================================================================
+auto cosine_similarity_kernel(const Tensor& a, const Tensor& b,
+                               int64_t dim, double eps) -> Tensor {
+    auto a_c = a.contiguous();
+    auto b_c = b.contiguous();
+    auto shape = a_c.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+
+    // Compute output shape (remove dim)
+    std::vector<int64_t> out_shape;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != dim) out_shape.push_back(shape[i]);
+    }
+    if (out_shape.empty()) out_shape.push_back(1);
+
+    int64_t dim_size = shape[dim];
+    int64_t outer = 1, inner = 1;
+    for (int64_t i = 0; i < dim; i++) outer *= shape[i];
+    for (int64_t i = dim + 1; i < ndim; i++) inner *= shape[i];
+
+    auto result = Tensor(out_shape, a.dtype(), a.device());
+
+    auto dispatch_typed = [&]<typename T>(T*) {
+        const T* a_data = a_c.data<T>();
+        const T* b_data = b_c.data<T>();
+        T* out = result.data<T>();
+
+        for (int64_t o = 0; o < outer; o++) {
+            for (int64_t i = 0; i < inner; i++) {
+                T dot_val = 0, norm_a = 0, norm_b = 0;
+                for (int64_t d = 0; d < dim_size; d++) {
+                    int64_t idx = (o * dim_size + d) * inner + i;
+                    T av = a_data[idx], bv = b_data[idx];
+                    dot_val += av * bv;
+                    norm_a += av * av;
+                    norm_b += bv * bv;
+                }
+                T denom = std::sqrt(norm_a) * std::sqrt(norm_b) + static_cast<T>(eps);
+                out[o * inner + i] = dot_val / denom;
+            }
+        }
+    };
+
+    if (a.dtype() == DType::Float32) dispatch_typed(static_cast<float*>(nullptr));
+    else if (a.dtype() == DType::Float64) dispatch_typed(static_cast<double*>(nullptr));
+    else throw std::invalid_argument("cosine_similarity: unsupported dtype");
+
+    return result;
+}
+
+// =========================================================================
+// Ndtr: Normal CDF  Φ(x) = 0.5 * erfc(-x * M_SQRT1_2)
+// =========================================================================
+auto ndtr_kernel(const Tensor& input) -> Tensor {
+    return unary_math_kernel(input,
+        [](float x) -> float { return 0.5f * std::erfc(-x * 0.7071067811865476f); },
+        [](double x) -> double { return 0.5 * std::erfc(-x * 0.7071067811865476); }, "ndtr");
+}
+
+// =========================================================================
+// LogNdtr: Log of Normal CDF  log Φ(x)
+// For x >= -5: log(ndtr(x))
+// For x < -5: asymptotic expansion for numerical stability
+// =========================================================================
+auto log_ndtr_kernel(const Tensor& input) -> Tensor {
+    auto log_ndtr_f32 = [](float x) -> float {
+        if (x >= -5.0f) {
+            return std::log(0.5f * std::erfc(-x * 0.7071067811865476f));
+        }
+        // Asymptotic expansion: log(ndtr(x)) ≈ -x²/2 - log(-x) - 0.5*log(2π) + log(1 - 1/x² + 3/x⁴ - ...)
+        float x2 = x * x;
+        float inv_x2 = 1.0f / x2;
+        float series = 1.0f - inv_x2 * (1.0f - inv_x2 * (3.0f - inv_x2 * 15.0f));
+        return -0.5f * x2 - std::log(-x) - 0.9189385332046727f + std::log(series);
+    };
+    auto log_ndtr_f64 = [](double x) -> double {
+        if (x >= -5.0) {
+            return std::log(0.5 * std::erfc(-x * 0.7071067811865476));
+        }
+        double x2 = x * x;
+        double inv_x2 = 1.0 / x2;
+        double series = 1.0 - inv_x2 * (1.0 - inv_x2 * (3.0 - inv_x2 * 15.0));
+        return -0.5 * x2 - std::log(-x) - 0.9189385332046727 + std::log(series);
+    };
+    return unary_math_kernel(input, log_ndtr_f32, log_ndtr_f64, "log_ndtr");
+}
+
+// =========================================================================
+// Multigammaln: Multivariate log-gamma
+// sum_{j=0}^{d-1} lgamma(x - j/2.0) + d*(d-1)/4 * log(π)
+// =========================================================================
+auto multigammaln_kernel(const Tensor& input, int64_t d) -> Tensor {
+    double log_pi_coeff = static_cast<double>(d) * static_cast<double>(d - 1) / 4.0 * std::log(M_PI);
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    Tensor result(shape_vec, input.dtype(), input.device());
+    size_t n = static_cast<size_t>(input.numel());
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_data = input.data<float>();
+        float* out_data = result.data<float>();
+        float coeff_f = static_cast<float>(log_pi_coeff);
+        for (size_t i = 0; i < n; ++i) {
+            float val = coeff_f;
+            for (int64_t j = 0; j < d; ++j)
+                val += std::lgamma(in_data[i] - static_cast<float>(j) * 0.5f);
+            out_data[i] = val;
+        }
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_data = input.data<double>();
+        double* out_data = result.data<double>();
+        for (size_t i = 0; i < n; ++i) {
+            double val = log_pi_coeff;
+            for (int64_t j = 0; j < d; ++j)
+                val += std::lgamma(in_data[i] - static_cast<double>(j) * 0.5);
+            out_data[i] = val;
+        }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = result.data<Float16>();
+        float coeff_f = static_cast<float>(log_pi_coeff);
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]);
+            float val = coeff_f;
+            for (int64_t j = 0; j < d; ++j)
+                val += std::lgamma(x - static_cast<float>(j) * 0.5f);
+            out_data[i] = Float16(val);
+        }
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = result.data<BFloat16>();
+        float coeff_f = static_cast<float>(log_pi_coeff);
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]);
+            float val = coeff_f;
+            for (int64_t j = 0; j < d; ++j)
+                val += std::lgamma(x - static_cast<float>(j) * 0.5f);
+            out_data[i] = BFloat16(val);
+        }
+    } else {
+        throw std::runtime_error("multigammaln: unsupported dtype");
+    }
+    return result;
+}
+
 } // namespace cpu
 } // namespace tenzor

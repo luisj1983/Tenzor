@@ -1,0 +1,150 @@
+#version 450
+
+// LDL^T Bunch-Kaufman solve — Float32.
+// Solves L*D*L^T * X = P*B using Bunch-Kaufman pivoted LDL factors.
+// Single invocation per batch element.
+// Input: LD matrix (L below diagonal, D on/above diagonal), pivots, B matrix.
+// Output: solution X matrix.
+
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0) buffer LDBuf    { float ld_data[]; };
+layout(set = 0, binding = 1) buffer PivotBuf { int pivots[];    };
+layout(set = 0, binding = 2) buffer BBuf     { float b_data[];  };
+layout(set = 0, binding = 3) buffer OutBuf   { float x_data[];  };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint nrhs;
+    uint batch_size;
+};
+
+void main() {
+    uint batch_idx = gl_GlobalInvocationID.x;
+    if (batch_idx >= batch_size) return;
+
+    uint ld_off = batch_idx * n * n;
+    uint bx_off = batch_idx * n * nrhs;
+    uint piv_off = batch_idx * n;
+
+    // Copy B to X
+    for (uint i = 0; i < n * nrhs; i++)
+        x_data[bx_off + i] = b_data[bx_off + i];
+
+    // Step 1: Forward pivot permutation
+    for (uint k = 0; k < n; ) {
+        int p = pivots[piv_off + k];
+        if (p > 0) {
+            uint sr = uint(p - 1);
+            if (sr != k)
+                for (uint j = 0; j < nrhs; j++) {
+                    float tmp = x_data[bx_off + k * nrhs + j];
+                    x_data[bx_off + k * nrhs + j] = x_data[bx_off + sr * nrhs + j];
+                    x_data[bx_off + sr * nrhs + j] = tmp;
+                }
+            k++;
+        } else {
+            uint sr = uint(-p - 1);
+            if (sr != k + 1)
+                for (uint j = 0; j < nrhs; j++) {
+                    float tmp = x_data[bx_off + (k+1) * nrhs + j];
+                    x_data[bx_off + (k+1) * nrhs + j] = x_data[bx_off + sr * nrhs + j];
+                    x_data[bx_off + sr * nrhs + j] = tmp;
+                }
+            k += 2;
+        }
+    }
+
+    // Step 2: Forward substitution L * Y = P*B
+    for (uint k = 0; k < n; ) {
+        int p = pivots[piv_off + k];
+        if (p > 0) {
+            for (uint i = k + 1; i < n; i++) {
+                float m = ld_data[ld_off + i * n + k];
+                for (uint j = 0; j < nrhs; j++)
+                    x_data[bx_off + i * nrhs + j] -= m * x_data[bx_off + k * nrhs + j];
+            }
+            k++;
+        } else {
+            for (uint i = k + 2; i < n; i++) {
+                float m0 = ld_data[ld_off + i * n + k];
+                float m1 = ld_data[ld_off + i * n + k + 1];
+                for (uint j = 0; j < nrhs; j++)
+                    x_data[bx_off + i * nrhs + j] -= m0 * x_data[bx_off + k * nrhs + j]
+                                                    + m1 * x_data[bx_off + (k+1) * nrhs + j];
+            }
+            k += 2;
+        }
+    }
+
+    // Step 3: Diagonal solve D * Z = Y
+    for (uint k = 0; k < n; ) {
+        int p = pivots[piv_off + k];
+        if (p > 0) {
+            float d = ld_data[ld_off + k * n + k];
+            for (uint j = 0; j < nrhs; j++)
+                x_data[bx_off + k * nrhs + j] /= d;
+            k++;
+        } else {
+            float d11 = ld_data[ld_off + k * n + k];
+            float d21 = ld_data[ld_off + (k+1) * n + k];
+            float d22 = ld_data[ld_off + (k+1) * n + (k+1)];
+            float det = d11 * d22 - d21 * d21;
+            for (uint j = 0; j < nrhs; j++) {
+                float y0 = x_data[bx_off + k * nrhs + j];
+                float y1 = x_data[bx_off + (k+1) * nrhs + j];
+                x_data[bx_off + k * nrhs + j]     = (d22 * y0 - d21 * y1) / det;
+                x_data[bx_off + (k+1) * nrhs + j] = (d11 * y1 - d21 * y0) / det;
+            }
+            k += 2;
+        }
+    }
+
+    // Step 4: Backward substitution L^T * X = Z
+    for (int k = int(n) - 1; k >= 0; ) {
+        int p = pivots[piv_off + uint(k)];
+        if (p > 0) {
+            for (uint i = uint(k) + 1; i < n; i++) {
+                float m = ld_data[ld_off + i * n + uint(k)];
+                for (uint j = 0; j < nrhs; j++)
+                    x_data[bx_off + uint(k) * nrhs + j] -= m * x_data[bx_off + i * nrhs + j];
+            }
+            k--;
+        } else {
+            int k0 = k - 1;
+            for (uint i = uint(k) + 1; i < n; i++) {
+                float m0 = ld_data[ld_off + i * n + uint(k0)];
+                float m1 = ld_data[ld_off + i * n + uint(k)];
+                for (uint j = 0; j < nrhs; j++) {
+                    x_data[bx_off + uint(k0) * nrhs + j] -= m0 * x_data[bx_off + i * nrhs + j];
+                    x_data[bx_off + uint(k) * nrhs + j]  -= m1 * x_data[bx_off + i * nrhs + j];
+                }
+            }
+            k -= 2;
+        }
+    }
+
+    // Step 5: Inverse pivot permutation P^T
+    for (int k = int(n) - 1; k >= 0; ) {
+        int p = pivots[piv_off + uint(k)];
+        if (p > 0) {
+            uint sr = uint(p - 1);
+            if (sr != uint(k))
+                for (uint j = 0; j < nrhs; j++) {
+                    float tmp = x_data[bx_off + uint(k) * nrhs + j];
+                    x_data[bx_off + uint(k) * nrhs + j] = x_data[bx_off + sr * nrhs + j];
+                    x_data[bx_off + sr * nrhs + j] = tmp;
+                }
+            k--;
+        } else {
+            uint sr = uint(-p - 1);
+            if (sr != uint(k))
+                for (uint j = 0; j < nrhs; j++) {
+                    float tmp = x_data[bx_off + uint(k) * nrhs + j];
+                    x_data[bx_off + uint(k) * nrhs + j] = x_data[bx_off + sr * nrhs + j];
+                    x_data[bx_off + sr * nrhs + j] = tmp;
+                }
+            k -= 2;
+        }
+    }
+}

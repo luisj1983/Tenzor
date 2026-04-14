@@ -1,0 +1,145 @@
+#version 450
+
+// LDL^T Bunch-Kaufman factorization — Float32.
+// One workgroup per batch element. Single invocation does the full factor.
+// Input: A[n x n] symmetric matrix (row-major, modified in-place).
+// Output: L below diagonal, D on/above diagonal, pivots array.
+// Pivot convention: positive = 1x1 block (1-based row index),
+//   negative = 2x2 block (-1-based row index).
+
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0) buffer MatBuf   { float A[]; };
+layout(set = 0, binding = 1) buffer PivotBuf { int pivots[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint batch_size;
+};
+
+void main() {
+    uint batch_idx = gl_GlobalInvocationID.x;
+    if (batch_idx >= batch_size) return;
+
+    uint base = batch_idx * n * n;
+    uint piv_base = batch_idx * n;
+
+    const float alpha = 0.6404;
+
+    uint k = 0;
+    while (k < n) {
+        // Find max |A[i,k]| for i > k
+        float col_max = 0.0;
+        uint col_max_row = k;
+        for (uint i = k + 1; i < n; i++) {
+            float v = abs(A[base + i * n + k]);
+            if (v > col_max) { col_max = v; col_max_row = i; }
+        }
+
+        float abs_akk = abs(A[base + k * n + k]);
+
+        int pivot_type;  // 1 or 2
+        uint swap_row;
+
+        if (abs_akk == 0.0 && col_max == 0.0) {
+            pivots[piv_base + k] = int(k + 1);
+            pivot_type = 1; swap_row = k;
+        } else if (abs_akk >= alpha * col_max) {
+            pivots[piv_base + k] = int(k + 1);
+            pivot_type = 1; swap_row = k;
+        } else {
+            uint r = col_max_row;
+            float row_max = 0.0;
+            for (uint j = k; j < n; j++) {
+                if (j == r) continue;
+                float v = abs(A[base + r * n + j]);
+                if (v > row_max) row_max = v;
+            }
+            float abs_arr = abs(A[base + r * n + r]);
+
+            if (abs_akk * row_max >= alpha * col_max * col_max) {
+                pivots[piv_base + k] = int(k + 1);
+                pivot_type = 1; swap_row = k;
+            } else if (abs_arr >= alpha * row_max) {
+                pivots[piv_base + k] = int(r + 1);
+                pivot_type = 1; swap_row = r;
+            } else {
+                pivots[piv_base + k] = -int(r + 1);
+                pivots[piv_base + k + 1] = -int(r + 1);
+                pivot_type = 2; swap_row = r;
+            }
+        }
+
+        if (pivot_type == 1) {
+            // 1x1 pivot: swap rows/cols k and swap_row
+            if (swap_row != k) {
+                for (uint j = 0; j < n; j++) {
+                    float tmp = A[base + k * n + j];
+                    A[base + k * n + j] = A[base + swap_row * n + j];
+                    A[base + swap_row * n + j] = tmp;
+                }
+                for (uint i = 0; i < n; i++) {
+                    float tmp = A[base + i * n + k];
+                    A[base + i * n + k] = A[base + i * n + swap_row];
+                    A[base + i * n + swap_row] = tmp;
+                }
+            }
+
+            float diag = A[base + k * n + k];
+            if (diag != 0.0) {
+                for (uint i = k + 1; i < n; i++)
+                    A[base + i * n + k] /= diag;
+
+                for (uint i = k + 1; i < n; i++) {
+                    float lik = A[base + i * n + k];
+                    for (uint j = k + 1; j <= i; j++)
+                        A[base + i * n + j] -= lik * diag * A[base + j * n + k];
+                }
+            }
+            k++;
+        } else {
+            // 2x2 pivot: swap rows/cols k+1 and swap_row
+            if (swap_row != k + 1) {
+                for (uint j = 0; j < n; j++) {
+                    float tmp = A[base + (k+1) * n + j];
+                    A[base + (k+1) * n + j] = A[base + swap_row * n + j];
+                    A[base + swap_row * n + j] = tmp;
+                }
+                for (uint i = 0; i < n; i++) {
+                    float tmp = A[base + i * n + (k+1)];
+                    A[base + i * n + (k+1)] = A[base + i * n + swap_row];
+                    A[base + i * n + swap_row] = tmp;
+                }
+            }
+
+            float d11 = A[base + k * n + k];
+            float d21 = A[base + (k+1) * n + k];
+            float d22 = A[base + (k+1) * n + (k+1)];
+            float det = d11 * d22 - d21 * d21;
+
+            if (det != 0.0) {
+                float inv11 = d22 / det;
+                float inv12 = -d21 / det;
+                float inv22 = d11 / det;
+                for (uint i = k + 2; i < n; i++) {
+                    float a0 = A[base + i * n + k];
+                    float a1 = A[base + i * n + (k+1)];
+                    A[base + i * n + k]     = inv11 * a0 + inv12 * a1;
+                    A[base + i * n + (k+1)] = inv12 * a0 + inv22 * a1;
+                }
+
+                for (uint i = k + 2; i < n; i++) {
+                    float li0 = A[base + i * n + k];
+                    float li1 = A[base + i * n + (k+1)];
+                    for (uint j = k + 2; j <= i; j++) {
+                        float lj0 = A[base + j * n + k];
+                        float lj1 = A[base + j * n + (k+1)];
+                        A[base + i * n + j] -= (li0 * (d11 * lj0 + d21 * lj1)
+                                              + li1 * (d21 * lj0 + d22 * lj1));
+                    }
+                }
+            }
+            k += 2;
+        }
+    }
+}

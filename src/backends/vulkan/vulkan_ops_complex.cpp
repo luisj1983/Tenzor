@@ -450,4 +450,94 @@ auto VulkanBackend::dispatchPolar(const Tensor& abs, const Tensor& angle) -> Ten
 }
 
 
+// ============================================================================
+// ComplexTensor — create complex tensor from separate real + imag parts
+// ============================================================================
+
+auto VulkanBackend::dispatchComplexTensor(const Tensor& real, const Tensor& imag) -> Tensor {
+    if (real.numel() == 0) {
+        std::vector<int64_t> out_shape(real.shape().begin(), real.shape().end());
+        DType out_dtype = (real.dtype() == DType::Float64) ? DType::Complex128 : DType::Complex64;
+        return Tensor(out_shape, out_dtype, real.device());
+    }
+
+    // Float16/BFloat16: use native packed shaders
+    if (real.dtype() == DType::Float16 || real.dtype() == DType::BFloat16) {
+        bool is_bf16 = (real.dtype() == DType::BFloat16);
+        int32_t device_id = real.device().index;
+        auto* pipeline = getPipeline(is_bf16 ? "complex_from_parts_bf16" : "complex_from_parts_f16", device_id);
+
+        int64_t num_complex = real.numel();
+        std::vector<int64_t> out_shape(real.shape().begin(), real.shape().end());
+        Tensor output(out_shape, DType::Complex64, real.device());
+
+        struct { uint32_t num_complex; } pc;
+        pc.num_complex = static_cast<uint32_t>(num_complex);
+
+        // Packed F16/BF16 real buffers: (num_complex+1)/2 uint32 words each
+        size_t real_buf_size = ((num_complex + 1) / 2) * 4;
+        // Output is num_complex uint32 words (each holding one complex F16/BF16 pair)
+        size_t out_size = num_complex * 4;
+
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, real.data_ptr()}, {1, imag.data_ptr()}, {2, output.data_ptr()}
+        };
+        std::vector<size_t> sizes = {real_buf_size, real_buf_size, out_size};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, div_wg(num_complex, devices_[device_id].workgroupSize), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+        return output;
+    }
+
+    int32_t device_id = real.device().index;
+    bool is_float64 = (real.dtype() == DType::Float64);
+
+    std::string shader_name = is_float64 ? "complex_from_parts_f64" : "complex_from_parts";
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    int64_t num_elements = real.numel();
+    DType out_dtype = is_float64 ? DType::Complex128 : DType::Complex64;
+    std::vector<int64_t> out_shape(real.shape().begin(), real.shape().end());
+    Tensor output(out_shape, out_dtype, real.device());
+
+    struct { uint32_t num_elements; } pushConstants;
+    pushConstants.num_elements = static_cast<uint32_t>(num_elements);
+
+    size_t in_size = num_elements * real.dtype_size();
+    size_t out_size = num_elements * 2 * real.dtype_size();  // complex = 2x real size
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, real.data_ptr()},
+        {1, imag.data_ptr()},
+        {2, output.data_ptr()}
+    };
+    std::vector<size_t> sizes_vec = {in_size, in_size, out_size};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes_vec);
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+
+    uint32_t workgroups = div_wg(num_elements, devices_[device_id].workgroupSize);
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    insertComputeOnlyBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
 } // namespace tenzor

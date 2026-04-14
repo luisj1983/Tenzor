@@ -5214,6 +5214,67 @@ auto polar_kernel(const Tensor& abs_t, const Tensor& angle_t, hipStream_t stream
 }
 
 // ============================================================================
+// ComplexTensor Kernel — interleave real + imag into Complex64/Complex128
+// ============================================================================
+
+__global__ void complex_tensor_kernel_f32(const float* real, const float* imag,
+                                           float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[2 * idx]     = real[idx];
+        output[2 * idx + 1] = imag[idx];
+    }
+}
+__global__ void complex_tensor_kernel_f64(const double* real, const double* imag,
+                                           double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[2 * idx]     = real[idx];
+        output[2 * idx + 1] = imag[idx];
+    }
+}
+
+auto complex_tensor_kernel(const Tensor& real_t, const Tensor& imag_t, hipStream_t stream) -> Tensor {
+    if (real_t.dtype() != imag_t.dtype()) {
+        throw std::runtime_error("complex: real and imag must have the same dtype");
+    }
+    auto shape_r = real_t.shape();
+    auto shape_i = imag_t.shape();
+    if (!std::equal(shape_r.begin(), shape_r.end(), shape_i.begin(), shape_i.end())) {
+        throw std::runtime_error("complex: real and imag must have the same shape");
+    }
+
+    int64_t n = real_t.numel();
+    std::vector<int64_t> shape(shape_r.begin(), shape_r.end());
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (real_t.dtype() == DType::Float32) {
+        Tensor result(shape, DType::Complex64, real_t.device());
+        hipLaunchKernelGGL(complex_tensor_kernel_f32, grid, block, 0, stream,
+            real_t.data<float>(), imag_t.data<float>(),
+            reinterpret_cast<float*>(result.data_ptr()), n);
+        HIP_CHECK(hipGetLastError());
+        return result;
+    } else if (real_t.dtype() == DType::Float64) {
+        Tensor result(shape, DType::Complex128, real_t.device());
+        hipLaunchKernelGGL(complex_tensor_kernel_f64, grid, block, 0, stream,
+            real_t.data<double>(), imag_t.data<double>(),
+            reinterpret_cast<double*>(result.data_ptr()), n);
+        HIP_CHECK(hipGetLastError());
+        return result;
+    } else if (real_t.dtype() == DType::Float16 || real_t.dtype() == DType::BFloat16) {
+        Tensor real_f32 = real_t.to(DType::Float32);
+        Tensor imag_f32 = imag_t.to(DType::Float32);
+        Tensor result(shape, DType::Complex64, real_t.device());
+        hipLaunchKernelGGL(complex_tensor_kernel_f32, grid, block, 0, stream,
+            real_f32.data<float>(), imag_f32.data<float>(),
+            reinterpret_cast<float*>(result.data_ptr()), n);
+        HIP_CHECK(hipGetLastError());
+        return result;
+    }
+    throw std::runtime_error("complex: only Float32, Float64, Float16, and BFloat16 inputs are supported");
+}
+
+// ============================================================================
 // Cross Product Kernel
 // ============================================================================
 
@@ -5496,7 +5557,97 @@ DEFINE_ROCM_SPECIAL_UNARY(bessel_i1, __ocml_i1_f32(x),         __ocml_i1_f64(x))
 DEFINE_ROCM_SPECIAL_UNARY(erfinv,    __ocml_erfinv_f32(x),     __ocml_erfinv_f64(x))
 DEFINE_ROCM_SPECIAL_UNARY(sinc,      sinc_dev_f32(x),          sinc_dev_f64(x))
 
+// --- Ndtr: Normal CDF Φ(x) = 0.5 * erfc(-x * M_SQRT1_2) ---
+DEFINE_ROCM_SPECIAL_UNARY(ndtr,
+    0.5f * erfcf(-x * 0.7071067811865476f),
+    0.5  * erfc(-x * 0.7071067811865476))
+
+// --- LogNdtr: log(Φ(x)) with stable tail ---
+__device__ inline float log_ndtr_dev_f32(float x) {
+    if (x >= -5.0f) {
+        return logf(0.5f * erfcf(-x * 0.7071067811865476f));
+    }
+    float x2 = x * x;
+    float inv_x2 = 1.0f / x2;
+    float series = 1.0f - inv_x2 * (1.0f - inv_x2 * (3.0f - inv_x2 * 15.0f));
+    return -0.5f * x2 - logf(-x) - 0.9189385332046727f + logf(series);
+}
+__device__ inline double log_ndtr_dev_f64(double x) {
+    if (x >= -5.0) {
+        return log(0.5 * erfc(-x * 0.7071067811865476));
+    }
+    double x2 = x * x;
+    double inv_x2 = 1.0 / x2;
+    double series = 1.0 - inv_x2 * (1.0 - inv_x2 * (3.0 - inv_x2 * 15.0));
+    return -0.5 * x2 - log(-x) - 0.9189385332046727 + log(series);
+}
+DEFINE_ROCM_SPECIAL_UNARY(log_ndtr,  log_ndtr_dev_f32(x),      log_ndtr_dev_f64(x))
+
 #undef DEFINE_ROCM_SPECIAL_UNARY
+
+// --- Multigammaln: multivariate log-gamma with dimension parameter d ---
+__global__ void multigammaln_kernel_f32(const float* in, float* out, int64_t n, int d, float log_pi_coeff) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float val = log_pi_coeff;
+        for (int j = 0; j < d; ++j)
+            val += lgammaf(in[idx] - static_cast<float>(j) * 0.5f);
+        out[idx] = val;
+    }
+}
+__global__ void multigammaln_kernel_f64(const double* in, double* out, int64_t n, int d, double log_pi_coeff) {
+    HIP_KERNEL_LOOP(idx, n) {
+        double val = log_pi_coeff;
+        for (int j = 0; j < d; ++j)
+            val += lgamma(in[idx] - static_cast<double>(j) * 0.5);
+        out[idx] = val;
+    }
+}
+__global__ void multigammaln_kernel_f16(const __half* in, __half* out, int64_t n, int d, float log_pi_coeff) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float x = __half2float(in[idx]);
+        float val = log_pi_coeff;
+        for (int j = 0; j < d; ++j)
+            val += lgammaf(x - static_cast<float>(j) * 0.5f);
+        out[idx] = __float2half(val);
+    }
+}
+__global__ void multigammaln_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int64_t n, int d, float log_pi_coeff) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float x = static_cast<float>(in[idx]);
+        float val = log_pi_coeff;
+        for (int j = 0; j < d; ++j)
+            val += lgammaf(x - static_cast<float>(j) * 0.5f);
+        out[idx] = hip_bfloat16(val);
+    }
+}
+auto multigammaln_kernel(const Tensor& input, int d, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    if (n == 0) return result;
+    double log_pi_coeff = static_cast<double>(d) * static_cast<double>(d - 1) / 4.0 * log(M_PI);
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(multigammaln_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<float>(), n, d, static_cast<float>(log_pi_coeff));
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(multigammaln_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<double>(), n, d, log_pi_coeff);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(multigammaln_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n, d, static_cast<float>(log_pi_coeff));
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(multigammaln_kernel_bf16, grid, block, 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n, d, static_cast<float>(log_pi_coeff));
+    } else {
+        throw std::runtime_error("multigammaln only supports Float32, Float64, Float16, BFloat16");
+    }
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
 
 // --- Beta(a, b) = exp(lgamma(a) + lgamma(b) - lgamma(a + b)) ---
 __device__ inline float beta_dev_f32(float a, float b) {
@@ -8392,6 +8543,630 @@ auto segment_reduce_kernel(const Tensor& data, const Tensor& offsets,
     }
     HIP_CHECK(hipGetLastError());
     return output;
+}
+
+// ============================================================================
+// LogAddExp: max(a,b) + log1p(exp(-|a-b|)), numerically stable
+// ============================================================================
+__global__ void logaddexp_kernel_f32(const float* a, const float* b, float* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float x = a[idx], y = b[idx];
+        float m = fmaxf(x, y);
+        out[idx] = m + log1pf(expf(-fabsf(x - y)));
+    }
+}
+__global__ void logaddexp_kernel_f64(const double* a, const double* b, double* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        double x = a[idx], y = b[idx];
+        double m = fmax(x, y);
+        out[idx] = m + log1p(exp(-fabs(x - y)));
+    }
+}
+__global__ void logaddexp_kernel_f16(const __half* a, const __half* b, __half* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float x = __half2float(a[idx]), y = __half2float(b[idx]);
+        float m = fmaxf(x, y);
+        out[idx] = __float2half(m + log1pf(expf(-fabsf(x - y))));
+    }
+}
+__global__ void logaddexp_kernel_bf16(const hip_bfloat16* a, const hip_bfloat16* b, hip_bfloat16* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float x = static_cast<float>(a[idx]), y = static_cast<float>(b[idx]);
+        float m = fmaxf(x, y);
+        out[idx] = hip_bfloat16(m + log1pf(expf(-fabsf(x - y))));
+    }
+}
+auto logaddexp_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
+    int64_t n = a.numel();
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, a.dtype(), a.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (a.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(logaddexp_kernel_f32, grid, block, 0, stream,
+            a.data<float>(), b.data<float>(), result.data<float>(), n);
+    } else if (a.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(logaddexp_kernel_f64, grid, block, 0, stream,
+            a.data<double>(), b.data<double>(), result.data<double>(), n);
+    } else if (a.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(logaddexp_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(b.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (a.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(logaddexp_kernel_bf16, grid, block, 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(a.data<BFloat16>()),
+            reinterpret_cast<const hip_bfloat16*>(b.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
+    } else {
+        throw std::runtime_error("logaddexp only supports Float32, Float64, Float16, BFloat16");
+    }
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ============================================================================
+// LogAddExp2: max(a,b) + log2(1 + exp2(-|a-b|)), numerically stable
+// ============================================================================
+__global__ void logaddexp2_kernel_f32(const float* a, const float* b, float* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float x = a[idx], y = b[idx];
+        float m = fmaxf(x, y);
+        out[idx] = m + log2f(1.0f + exp2f(-fabsf(x - y)));
+    }
+}
+__global__ void logaddexp2_kernel_f64(const double* a, const double* b, double* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        double x = a[idx], y = b[idx];
+        double m = fmax(x, y);
+        out[idx] = m + log2(1.0 + exp2(-fabs(x - y)));
+    }
+}
+__global__ void logaddexp2_kernel_f16(const __half* a, const __half* b, __half* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float x = __half2float(a[idx]), y = __half2float(b[idx]);
+        float m = fmaxf(x, y);
+        out[idx] = __float2half(m + log2f(1.0f + exp2f(-fabsf(x - y))));
+    }
+}
+__global__ void logaddexp2_kernel_bf16(const hip_bfloat16* a, const hip_bfloat16* b, hip_bfloat16* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float x = static_cast<float>(a[idx]), y = static_cast<float>(b[idx]);
+        float m = fmaxf(x, y);
+        out[idx] = hip_bfloat16(m + log2f(1.0f + exp2f(-fabsf(x - y))));
+    }
+}
+auto logaddexp2_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
+    int64_t n = a.numel();
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, a.dtype(), a.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (a.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(logaddexp2_kernel_f32, grid, block, 0, stream,
+            a.data<float>(), b.data<float>(), result.data<float>(), n);
+    } else if (a.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(logaddexp2_kernel_f64, grid, block, 0, stream,
+            a.data<double>(), b.data<double>(), result.data<double>(), n);
+    } else if (a.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(logaddexp2_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(b.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (a.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(logaddexp2_kernel_bf16, grid, block, 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(a.data<BFloat16>()),
+            reinterpret_cast<const hip_bfloat16*>(b.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
+    } else {
+        throw std::runtime_error("logaddexp2 only supports Float32, Float64, Float16, BFloat16");
+    }
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ============================================================================
+// XLogY: x * log(y), with x==0 => 0
+// ============================================================================
+__global__ void xlogy_kernel_f32(const float* x, const float* y, float* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float xv = x[idx];
+        out[idx] = (xv == 0.0f) ? 0.0f : xv * logf(y[idx]);
+    }
+}
+__global__ void xlogy_kernel_f64(const double* x, const double* y, double* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        double xv = x[idx];
+        out[idx] = (xv == 0.0) ? 0.0 : xv * log(y[idx]);
+    }
+}
+__global__ void xlogy_kernel_f16(const __half* x, const __half* y, __half* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float xv = __half2float(x[idx]);
+        out[idx] = __float2half((xv == 0.0f) ? 0.0f : xv * logf(__half2float(y[idx])));
+    }
+}
+__global__ void xlogy_kernel_bf16(const hip_bfloat16* x, const hip_bfloat16* y, hip_bfloat16* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float xv = static_cast<float>(x[idx]);
+        out[idx] = hip_bfloat16((xv == 0.0f) ? 0.0f : xv * logf(static_cast<float>(y[idx])));
+    }
+}
+auto xlogy_kernel(const Tensor& x, const Tensor& y, hipStream_t stream) -> Tensor {
+    int64_t n = x.numel();
+    std::vector<int64_t> shape(x.shape().begin(), x.shape().end());
+    Tensor result(shape, x.dtype(), x.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (x.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(xlogy_kernel_f32, grid, block, 0, stream,
+            x.data<float>(), y.data<float>(), result.data<float>(), n);
+    } else if (x.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(xlogy_kernel_f64, grid, block, 0, stream,
+            x.data<double>(), y.data<double>(), result.data<double>(), n);
+    } else if (x.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(xlogy_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(x.data<Float16>()),
+            reinterpret_cast<const __half*>(y.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (x.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(xlogy_kernel_bf16, grid, block, 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(x.data<BFloat16>()),
+            reinterpret_cast<const hip_bfloat16*>(y.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
+    } else {
+        throw std::runtime_error("xlogy only supports Float32, Float64, Float16, BFloat16");
+    }
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ============================================================================
+// I0e: exp(-|x|) * BesselI0(x) — Chebyshev polynomial approximation
+// ============================================================================
+__device__ inline float i0e_dev_f32(float x) {
+    float ax = fabsf(x);
+    if (ax < 3.75f) {
+        float t = x / 3.75f;
+        t = t * t;
+        float i0 = 1.0f + t * (3.5156229f + t * (3.0899424f + t * (1.2067492f
+                    + t * (0.2659732f + t * (0.0360768f + t * 0.0045813f)))));
+        return expf(-ax) * i0;
+    }
+    float t = 3.75f / ax;
+    return (1.0f / sqrtf(ax)) * (0.39894228f + t * (0.01328592f
+           + t * (0.00225319f - t * (0.00157565f - t * (0.00916281f
+           - t * (0.02057706f - t * (0.02635537f - t * (0.01647633f
+           - t * 0.00392377f))))))));
+}
+__device__ inline double i0e_dev_f64(double x) {
+    double ax = fabs(x);
+    if (ax < 3.75) {
+        double t = x / 3.75;
+        t = t * t;
+        double i0 = 1.0 + t * (3.5156229 + t * (3.0899424 + t * (1.2067492
+                     + t * (0.2659732 + t * (0.0360768 + t * 0.0045813)))));
+        return exp(-ax) * i0;
+    }
+    double t = 3.75 / ax;
+    return (1.0 / sqrt(ax)) * (0.39894228 + t * (0.01328592
+           + t * (0.00225319 - t * (0.00157565 - t * (0.00916281
+           - t * (0.02057706 - t * (0.02635537 - t * (0.01647633
+           - t * 0.00392377))))))));
+}
+__global__ void i0e_kernel_f32(const float* in, float* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = i0e_dev_f32(in[idx]); }
+}
+__global__ void i0e_kernel_f64(const double* in, double* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = i0e_dev_f64(in[idx]); }
+}
+__global__ void i0e_kernel_f16(const __half* in, __half* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = __float2half(i0e_dev_f32(__half2float(in[idx]))); }
+}
+__global__ void i0e_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = hip_bfloat16(i0e_dev_f32(static_cast<float>(in[idx]))); }
+}
+auto i0e_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(i0e_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(i0e_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(i0e_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(i0e_kernel_bf16, grid, block, 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
+    } else {
+        throw std::runtime_error("i0e only supports Float32, Float64, Float16, BFloat16");
+    }
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ============================================================================
+// I1e: exp(-|x|) * BesselI1(x) — Chebyshev polynomial approximation
+// ============================================================================
+__device__ inline float i1e_dev_f32(float x) {
+    float ax = fabsf(x);
+    float result;
+    if (ax < 3.75f) {
+        float t = x / 3.75f;
+        t = t * t;
+        result = ax * (0.5f + t * (0.87890594f + t * (0.51498869f + t * (0.15084934f
+                 + t * (0.02658733f + t * (0.00301532f + t * 0.00032411f))))));
+        result = expf(-ax) * result;
+    } else {
+        float t = 3.75f / ax;
+        result = (1.0f / sqrtf(ax)) * (0.39894228f - t * (0.03988024f
+                 - t * (0.00362018f + t * (0.00163801f - t * (0.01031555f
+                 - t * (0.02282967f - t * (0.02895312f - t * (0.01787654f
+                 - t * 0.00420059f))))))));
+    }
+    return (x < 0.0f) ? -result : result;
+}
+__device__ inline double i1e_dev_f64(double x) {
+    double ax = fabs(x);
+    double result;
+    if (ax < 3.75) {
+        double t = x / 3.75;
+        t = t * t;
+        result = ax * (0.5 + t * (0.87890594 + t * (0.51498869 + t * (0.15084934
+                 + t * (0.02658733 + t * (0.00301532 + t * 0.00032411))))));
+        result = exp(-ax) * result;
+    } else {
+        double t = 3.75 / ax;
+        result = (1.0 / sqrt(ax)) * (0.39894228 - t * (0.03988024
+                 - t * (0.00362018 + t * (0.00163801 - t * (0.01031555
+                 - t * (0.02282967 - t * (0.02895312 - t * (0.01787654
+                 - t * 0.00420059))))))));
+    }
+    return (x < 0.0) ? -result : result;
+}
+__global__ void i1e_kernel_f32(const float* in, float* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = i1e_dev_f32(in[idx]); }
+}
+__global__ void i1e_kernel_f64(const double* in, double* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = i1e_dev_f64(in[idx]); }
+}
+__global__ void i1e_kernel_f16(const __half* in, __half* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = __float2half(i1e_dev_f32(__half2float(in[idx]))); }
+}
+__global__ void i1e_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = hip_bfloat16(i1e_dev_f32(static_cast<float>(in[idx]))); }
+}
+auto i1e_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(i1e_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(i1e_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(i1e_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(i1e_kernel_bf16, grid, block, 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
+    } else {
+        throw std::runtime_error("i1e only supports Float32, Float64, Float16, BFloat16");
+    }
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ============================================================================
+// Entr: -x*log(x), with 0->0, negative->-inf
+// ============================================================================
+__global__ void entr_kernel_f32(const float* in, float* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float x = in[idx];
+        if (x > 0.0f) out[idx] = -x * logf(x);
+        else if (x == 0.0f) out[idx] = 0.0f;
+        else out[idx] = -HUGE_VALF;
+    }
+}
+__global__ void entr_kernel_f64(const double* in, double* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        double x = in[idx];
+        if (x > 0.0) out[idx] = -x * log(x);
+        else if (x == 0.0) out[idx] = 0.0;
+        else out[idx] = -HUGE_VAL;
+    }
+}
+__global__ void entr_kernel_f16(const __half* in, __half* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float x = __half2float(in[idx]);
+        float r;
+        if (x > 0.0f) r = -x * logf(x);
+        else if (x == 0.0f) r = 0.0f;
+        else r = -HUGE_VALF;
+        out[idx] = __float2half(r);
+    }
+}
+__global__ void entr_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float x = static_cast<float>(in[idx]);
+        float r;
+        if (x > 0.0f) r = -x * logf(x);
+        else if (x == 0.0f) r = 0.0f;
+        else r = -HUGE_VALF;
+        out[idx] = hip_bfloat16(r);
+    }
+}
+auto entr_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(entr_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(entr_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(entr_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(entr_kernel_bf16, grid, block, 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
+    } else {
+        throw std::runtime_error("entr only supports Float32, Float64, Float16, BFloat16");
+    }
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ============================================================================
+// SphericalBesselJ0: sin(x)/x, with j0(0) = 1
+// ============================================================================
+__global__ void spherical_bessel_j0_kernel_f32(const float* in, float* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float x = in[idx];
+        out[idx] = (x == 0.0f) ? 1.0f : sinf(x) / x;
+    }
+}
+__global__ void spherical_bessel_j0_kernel_f64(const double* in, double* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        double x = in[idx];
+        out[idx] = (x == 0.0) ? 1.0 : sin(x) / x;
+    }
+}
+__global__ void spherical_bessel_j0_kernel_f16(const __half* in, __half* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float x = __half2float(in[idx]);
+        out[idx] = __float2half((x == 0.0f) ? 1.0f : sinf(x) / x);
+    }
+}
+__global__ void spherical_bessel_j0_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float x = static_cast<float>(in[idx]);
+        out[idx] = hip_bfloat16((x == 0.0f) ? 1.0f : sinf(x) / x);
+    }
+}
+auto spherical_bessel_j0_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    if (n == 0) return result;
+    dim3 grid, block; compute_launch_config_1d(n, grid, block);
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(spherical_bessel_j0_kernel_f32, grid, block, 0, stream,
+            input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(spherical_bessel_j0_kernel_f64, grid, block, 0, stream,
+            input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(spherical_bessel_j0_kernel_f16, grid, block, 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(spherical_bessel_j0_kernel_bf16, grid, block, 0, stream,
+            reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
+    } else {
+        throw std::runtime_error("spherical_bessel_j0 only supports Float32, Float64, Float16, BFloat16");
+    }
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ============================================================================
+// CosineSimilarity: sum(a*b, dim) / (norm(a, dim) * norm(b, dim) + eps)
+// ============================================================================
+template<typename T>
+__global__ void cosine_similarity_hip_kernel(
+    const T* __restrict__ a, const T* __restrict__ b, T* __restrict__ out,
+    int64_t outer_size, int64_t dim_size, int64_t inner_size, T eps)
+{
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = outer_size * inner_size;
+    if (idx >= total) return;
+
+    int64_t outer = idx / inner_size;
+    int64_t inner = idx % inner_size;
+
+    T dot = T(0), norm_a = T(0), norm_b = T(0);
+    for (int64_t d = 0; d < dim_size; d++) {
+        int64_t offset = (outer * dim_size + d) * inner_size + inner;
+        T av = a[offset], bv = b[offset];
+        dot += av * bv;
+        norm_a += av * av;
+        norm_b += bv * bv;
+    }
+    out[idx] = dot / (sqrt(norm_a) * sqrt(norm_b) + eps);
+}
+
+auto cosine_similarity_kernel(const Tensor& a, const Tensor& b,
+                               int64_t dim, double eps, hipStream_t stream) -> Tensor {
+    Tensor ca = a.is_contiguous() ? a : a.contiguous();
+    Tensor cb = b.is_contiguous() ? b : b.contiguous();
+    auto shape = ca.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+
+    int64_t dim_size = shape[dim];
+    int64_t outer_size = 1, inner_size = 1;
+    for (int64_t i = 0; i < dim; i++) outer_size *= shape[i];
+    for (int64_t i = dim + 1; i < ndim; i++) inner_size *= shape[i];
+
+    std::vector<int64_t> out_shape;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != dim) out_shape.push_back(shape[i]);
+    }
+    if (out_shape.empty()) out_shape.push_back(1);
+
+    Tensor result(out_shape, ca.dtype(), ca.device());
+    int64_t total = outer_size * inner_size;
+    if (total == 0) return result;
+
+    int block_size = 256;
+    int grid_size = static_cast<int>((total + block_size - 1) / block_size);
+
+    if (ca.dtype() == DType::Float32) {
+        cosine_similarity_hip_kernel<float><<<grid_size, block_size, 0, stream>>>(
+            ca.data<float>(), cb.data<float>(), result.data<float>(),
+            outer_size, dim_size, inner_size, static_cast<float>(eps));
+    } else if (ca.dtype() == DType::Float64) {
+        cosine_similarity_hip_kernel<double><<<grid_size, block_size, 0, stream>>>(
+            ca.data<double>(), cb.data<double>(), result.data<double>(),
+            outer_size, dim_size, inner_size, static_cast<double>(eps));
+    } else {
+        // Float16/BFloat16: upcast to Float32
+        Tensor a32 = cast_kernel(ca, DType::Float32, stream);
+        Tensor b32 = cast_kernel(cb, DType::Float32, stream);
+        Tensor r32(out_shape, DType::Float32, ca.device());
+        cosine_similarity_hip_kernel<float><<<grid_size, block_size, 0, stream>>>(
+            a32.data<float>(), b32.data<float>(), r32.data<float>(),
+            outer_size, dim_size, inner_size, static_cast<float>(eps));
+        HIP_CHECK(hipGetLastError());
+        return cast_kernel(r32, ca.dtype(), stream);
+    }
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
+// ============================================================================
+// Renorm: scale slices along dim so p-norm <= maxnorm
+// ============================================================================
+template<typename T>
+__global__ void renorm_norm_kernel(
+    const T* __restrict__ data, T* __restrict__ norms,
+    int64_t dim_size, int64_t outer_size, int64_t inner_size,
+    T p_val)
+{
+    int64_t d = blockIdx.x * blockDim.x + threadIdx.x;
+    if (d >= dim_size) return;
+
+    T acc = T(0);
+    for (int64_t o = 0; o < outer_size; o++) {
+        for (int64_t i = 0; i < inner_size; i++) {
+            int64_t idx = (o * dim_size + d) * inner_size + i;
+            T val = data[idx];
+            acc += pow(fabs(static_cast<double>(val)), static_cast<double>(p_val));
+        }
+    }
+    norms[d] = static_cast<T>(pow(static_cast<double>(acc), 1.0 / static_cast<double>(p_val)));
+}
+
+template<typename T>
+__global__ void renorm_scale_kernel(
+    T* __restrict__ data, const T* __restrict__ norms,
+    int64_t dim_size, int64_t outer_size, int64_t inner_size,
+    T maxnorm_val)
+{
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = outer_size * dim_size * inner_size;
+    if (tid >= total) return;
+
+    int64_t inner = tid % inner_size;
+    int64_t d = (tid / inner_size) % dim_size;
+    (void)inner; // used via d
+
+    T norm_val = norms[d];
+    if (norm_val > maxnorm_val) {
+        data[tid] *= (maxnorm_val / norm_val);
+    }
+}
+
+auto renorm_kernel(const Tensor& input, double p, int64_t dim,
+                   double maxnorm, hipStream_t stream) -> Tensor {
+    Tensor result = input.is_contiguous() ? input.clone() : input.contiguous().clone();
+    auto shape = result.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+
+    int64_t dim_size = shape[dim];
+    int64_t outer_size = 1, inner_size = 1;
+    for (int64_t i = 0; i < dim; i++) outer_size *= shape[i];
+    for (int64_t i = dim + 1; i < ndim; i++) inner_size *= shape[i];
+
+    int block = 256;
+
+    if (result.dtype() == DType::Float32) {
+        Tensor norms({dim_size}, DType::Float32, result.device());
+        int grid_norm = static_cast<int>((dim_size + block - 1) / block);
+        renorm_norm_kernel<float><<<grid_norm, block, 0, stream>>>(
+            result.data<float>(), norms.data<float>(),
+            dim_size, outer_size, inner_size, static_cast<float>(p));
+        HIP_CHECK(hipGetLastError());
+        int64_t total = outer_size * dim_size * inner_size;
+        int grid_scale = static_cast<int>((total + block - 1) / block);
+        renorm_scale_kernel<float><<<grid_scale, block, 0, stream>>>(
+            result.data<float>(), norms.data<float>(),
+            dim_size, outer_size, inner_size, static_cast<float>(maxnorm));
+    } else if (result.dtype() == DType::Float64) {
+        Tensor norms({dim_size}, DType::Float64, result.device());
+        int grid_norm = static_cast<int>((dim_size + block - 1) / block);
+        renorm_norm_kernel<double><<<grid_norm, block, 0, stream>>>(
+            result.data<double>(), norms.data<double>(),
+            dim_size, outer_size, inner_size, static_cast<double>(p));
+        HIP_CHECK(hipGetLastError());
+        int64_t total = outer_size * dim_size * inner_size;
+        int grid_scale = static_cast<int>((total + block - 1) / block);
+        renorm_scale_kernel<double><<<grid_scale, block, 0, stream>>>(
+            result.data<double>(), norms.data<double>(),
+            dim_size, outer_size, inner_size, static_cast<double>(maxnorm));
+    } else {
+        // Float16/BFloat16: upcast to Float32, renorm, downcast
+        DType orig = result.dtype();
+        Tensor r32 = cast_kernel(result, DType::Float32, stream);
+        Tensor norms({dim_size}, DType::Float32, r32.device());
+        int grid_norm = static_cast<int>((dim_size + block - 1) / block);
+        renorm_norm_kernel<float><<<grid_norm, block, 0, stream>>>(
+            r32.data<float>(), norms.data<float>(),
+            dim_size, outer_size, inner_size, static_cast<float>(p));
+        HIP_CHECK(hipGetLastError());
+        int64_t total = outer_size * dim_size * inner_size;
+        int grid_scale = static_cast<int>((total + block - 1) / block);
+        renorm_scale_kernel<float><<<grid_scale, block, 0, stream>>>(
+            r32.data<float>(), norms.data<float>(),
+            dim_size, outer_size, inner_size, static_cast<float>(maxnorm));
+        HIP_CHECK(hipGetLastError());
+        return cast_kernel(r32, orig, stream);
+    }
+    HIP_CHECK(hipGetLastError());
+    return result;
 }
 
 } // namespace rocm

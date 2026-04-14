@@ -477,6 +477,160 @@ auto nested_attention_cuda(const Tensor& Q, const Tensor& K, const Tensor& V,
 }
 
 // ============================================================================
+// Nested Attention Backward
+// ============================================================================
+
+__global__ void nested_attention_backward_kernel(
+    const float* __restrict__ grad_out,     // [total_q_len, head_dim]
+    const float* __restrict__ Q,            // [total_q_len, head_dim]
+    const float* __restrict__ K,            // [total_kv_len, head_dim]
+    const float* __restrict__ V,            // [total_kv_len, head_dim]
+    float* __restrict__ grad_Q,             // [total_q_len, head_dim]
+    float* __restrict__ grad_K,             // [total_kv_len, head_dim]
+    float* __restrict__ grad_V,             // [total_kv_len, head_dim]
+    const int64_t* __restrict__ q_offsets,  // [B+1]
+    const int64_t* __restrict__ kv_offsets, // [B+1]
+    float scale,
+    int64_t head_dim,
+    int64_t B,
+    bool causal)
+{
+    int64_t b = blockIdx.x;
+    if (b >= B) return;
+
+    int64_t q_start = q_offsets[b], q_end = q_offsets[b + 1];
+    int64_t kv_start = kv_offsets[b], kv_end = kv_offsets[b + 1];
+    int64_t Lq = q_end - q_start;
+    int64_t Lkv = kv_end - kv_start;
+    if (Lq <= 0 || Lkv <= 0) return;
+
+    // Each thread handles one query row
+    for (int64_t qi = threadIdx.x; qi < Lq; qi += blockDim.x) {
+        const float* q_row = Q + (q_start + qi) * head_dim;
+        const float* do_row = grad_out + (q_start + qi) * head_dim;
+        float* gq_row = grad_Q + (q_start + qi) * head_dim;
+
+        int64_t ki_end = causal ? min(Lkv, qi + 1) : Lkv;
+
+        // Step 1: Recompute attention weights via online softmax
+        // First pass: find max score
+        float max_score = -FLT_MAX;
+        for (int64_t ki = 0; ki < ki_end; ++ki) {
+            const float* k_row = K + (kv_start + ki) * head_dim;
+            float score = 0.0f;
+            for (int64_t d = 0; d < head_dim; ++d) {
+                score += q_row[d] * k_row[d];
+            }
+            score *= scale;
+            if (score > max_score) max_score = score;
+        }
+
+        // Second pass: compute softmax weights and d_attn dot products simultaneously
+        float sum_exp = 0.0f;
+        for (int64_t ki = 0; ki < ki_end; ++ki) {
+            const float* k_row = K + (kv_start + ki) * head_dim;
+            float score = 0.0f;
+            for (int64_t d = 0; d < head_dim; ++d) {
+                score += q_row[d] * k_row[d];
+            }
+            score *= scale;
+            sum_exp += expf(score - max_score);
+        }
+        float inv_sum = (sum_exp > 0.0f) ? 1.0f / sum_exp : 0.0f;
+
+        // Step 2: Compute softmax_dot = sum_ki(attn_w[ki] * d_attn[ki])
+        // where d_attn[ki] = dot(do_row, v_row[ki])
+        float softmax_dot = 0.0f;
+        for (int64_t ki = 0; ki < ki_end; ++ki) {
+            const float* k_row = K + (kv_start + ki) * head_dim;
+            const float* v_row = V + (kv_start + ki) * head_dim;
+            float score = 0.0f;
+            for (int64_t d = 0; d < head_dim; ++d) {
+                score += q_row[d] * k_row[d];
+            }
+            score *= scale;
+            float w = expf(score - max_score) * inv_sum;
+
+            float dot_dov = 0.0f;
+            for (int64_t d = 0; d < head_dim; ++d) {
+                dot_dov += do_row[d] * v_row[d];
+            }
+            softmax_dot += w * dot_dov;
+        }
+
+        // Step 3: Compute gradients
+        for (int64_t ki = 0; ki < ki_end; ++ki) {
+            const float* k_row = K + (kv_start + ki) * head_dim;
+            const float* v_row = V + (kv_start + ki) * head_dim;
+            float* gk_row = grad_K + (kv_start + ki) * head_dim;
+            float* gv_row = grad_V + (kv_start + ki) * head_dim;
+
+            float score = 0.0f;
+            for (int64_t d = 0; d < head_dim; ++d) {
+                score += q_row[d] * k_row[d];
+            }
+            score *= scale;
+            float w = expf(score - max_score) * inv_sum;
+
+            // grad_V += w * do_row
+            for (int64_t d = 0; d < head_dim; ++d) {
+                atomicAdd(&gv_row[d], w * do_row[d]);
+            }
+
+            // d_attn = dot(do_row, v_row)
+            float dot_dov = 0.0f;
+            for (int64_t d = 0; d < head_dim; ++d) {
+                dot_dov += do_row[d] * v_row[d];
+            }
+
+            // d_score = w * (d_attn - softmax_dot) * scale
+            float ds = w * (dot_dov - softmax_dot) * scale;
+
+            // grad_Q += ds * k_row
+            for (int64_t d = 0; d < head_dim; ++d) {
+                gq_row[d] += ds * k_row[d];
+            }
+
+            // grad_K += ds * q_row
+            for (int64_t d = 0; d < head_dim; ++d) {
+                atomicAdd(&gk_row[d], ds * q_row[d]);
+            }
+        }
+    }
+}
+
+auto nested_attention_backward_cuda(const Tensor& grad_out, const Tensor& Q,
+                                     const Tensor& K, const Tensor& V,
+                                     const Tensor& attn_out,
+                                     const Tensor& q_offsets, const Tensor& kv_offsets,
+                                     float scale, bool causal, cudaStream_t stream)
+    -> std::vector<Tensor> {
+    int64_t head_dim = Q.shape().back();
+    int64_t total_q_len = Q.shape()[0];
+    int64_t total_kv_len = K.shape()[0];
+    int64_t B = q_offsets.numel() - 1;
+
+    auto grad_Q = tenzor::zeros({total_q_len, head_dim}, Q.dtype(), Q.device());
+    auto grad_K = tenzor::zeros({total_kv_len, head_dim}, K.dtype(), K.device());
+    auto grad_V = tenzor::zeros({total_kv_len, head_dim}, V.dtype(), V.device());
+
+    int threads = static_cast<int>(std::min(int64_t(256), total_q_len));
+
+    if (Q.dtype() == DType::Float32) {
+        nested_attention_backward_kernel<<<static_cast<unsigned>(B), threads, 0, stream>>>(
+            grad_out.data<float>(), Q.data<float>(), K.data<float>(), V.data<float>(),
+            grad_Q.data<float>(), grad_K.data<float>(), grad_V.data<float>(),
+            q_offsets.data<int64_t>(), kv_offsets.data<int64_t>(),
+            scale, head_dim, B, causal);
+    } else {
+        throw std::runtime_error("nested_attention_backward_cuda: only Float32 supported");
+    }
+
+    CUDA_CHECK_NESTED(cudaGetLastError());
+    return {grad_Q, grad_K, grad_V};
+}
+
+// ============================================================================
 // Nested to Padded (convert ragged -> dense padded tensor)
 // ============================================================================
 

@@ -15,6 +15,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/vision.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/linalg.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/fft.hpp"
 #include "tenzor/ops/advanced.hpp"
@@ -1556,6 +1557,10 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     VK_REGISTER_UNARY_SPECIAL(BesselI1, 8);
     VK_REGISTER_UNARY_SPECIAL(ErfInv,   9);
     VK_REGISTER_UNARY_SPECIAL(Sinc,     10);
+    VK_REGISTER_UNARY_SPECIAL(I0e,      12);
+    VK_REGISTER_UNARY_SPECIAL(I1e,      13);
+    VK_REGISTER_UNARY_SPECIAL(Entr,     14);
+    VK_REGISTER_UNARY_SPECIAL(SphericalBesselJ0, 15);
 #undef VK_REGISTER_UNARY_SPECIAL
 
     table.register_kernel(OpId::Polygamma, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -1564,7 +1569,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             get_vulkan_backend()->dispatchSpecialMathUnary(inputs[0], 11, static_cast<int32_t>(n))};
     });
 
-    // Binary special-math: 0=beta, 1=zeta
+    // Binary special-math: 0=beta, 1=zeta, 2=logaddexp, 3=logaddexp2, 4=xlogy
     table.register_kernel(OpId::Beta, [](std::span<const Tensor> inputs, const OpAttributes&) {
         return std::vector<Tensor>{
             get_vulkan_backend()->dispatchSpecialMathBinary(inputs[0], inputs[1], 0)};
@@ -1573,11 +1578,136 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{
             get_vulkan_backend()->dispatchSpecialMathBinary(inputs[0], inputs[1], 1)};
     });
+    table.register_kernel(OpId::LogAddExp, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{
+            get_vulkan_backend()->dispatchSpecialMathBinary(inputs[0], inputs[1], 2)};
+    });
+    table.register_kernel(OpId::LogAddExp2, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{
+            get_vulkan_backend()->dispatchSpecialMathBinary(inputs[0], inputs[1], 3)};
+    });
+    table.register_kernel(OpId::XLogY, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{
+            get_vulkan_backend()->dispatchSpecialMathBinary(inputs[0], inputs[1], 4)};
+    });
 
     // Ternary special-math: betainc
     table.register_kernel(OpId::BetaInc, [](std::span<const Tensor> inputs, const OpAttributes&) {
         return std::vector<Tensor>{
             get_vulkan_backend()->dispatchSpecialMathTernary(inputs[0], inputs[1], inputs[2])};
+    });
+
+    // ========================================================================
+    // Ndtr / LogNdtr / Multigammaln / LinalgVectorNorm / LinalgMatrixNorm / LinalgVecdot
+    // ========================================================================
+
+    // Ndtr: Phi(x) = 0.5 * erfc(-x * M_SQRT1_2) -- composite from Erfc
+    table.register_kernel(OpId::Ndtr, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        auto* vk = get_vulkan_backend();
+        Tensor neg_x = vk->dispatchUnaryOp("neg", inputs[0]);
+        Tensor sqrt1_2 = vk->dispatchFull({1}, 0.7071067811865476f, inputs[0].dtype());
+        Tensor scaled = vk->dispatchBinaryOp("mul", neg_x, sqrt1_2);
+        Tensor erfc_val = vk->dispatchUnaryOp("erfc", scaled);
+        Tensor half_val = vk->dispatchFull({1}, 0.5f, inputs[0].dtype());
+        return std::vector<Tensor>{vk->dispatchBinaryOp("mul", erfc_val, half_val)};
+    });
+
+    // LogNdtr: log(Phi(x)) -- composite from Ndtr + log
+    table.register_kernel(OpId::LogNdtr, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        auto* vk = get_vulkan_backend();
+        Tensor neg_x = vk->dispatchUnaryOp("neg", inputs[0]);
+        Tensor sqrt1_2 = vk->dispatchFull({1}, 0.7071067811865476f, inputs[0].dtype());
+        Tensor scaled = vk->dispatchBinaryOp("mul", neg_x, sqrt1_2);
+        Tensor erfc_val = vk->dispatchUnaryOp("erfc", scaled);
+        Tensor half_val = vk->dispatchFull({1}, 0.5f, inputs[0].dtype());
+        Tensor ndtr_val = vk->dispatchBinaryOp("mul", erfc_val, half_val);
+        return std::vector<Tensor>{vk->dispatchUnaryOp("log", ndtr_val)};
+    });
+
+    // Multigammaln: sum_{j=0}^{d-1} lgamma(x - j/2) + d*(d-1)/4 * log(pi) -- composite
+    table.register_kernel(OpId::Multigammaln, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        auto* vk = get_vulkan_backend();
+        int64_t d = attrs.get_int(AttrKey::Dim, 1);
+        float log_pi_coeff = static_cast<float>(d) * static_cast<float>(d - 1) / 4.0f
+                           * 1.1447298858494002f;
+        Tensor result = vk->dispatchSpecialMathUnary(inputs[0], 1);
+        for (int64_t j = 1; j < d; ++j) {
+            Tensor offset = vk->dispatchFull({1}, static_cast<float>(j) * 0.5f, inputs[0].dtype());
+            Tensor shifted = vk->dispatchBinaryOp("sub", inputs[0], offset);
+            Tensor lg = vk->dispatchSpecialMathUnary(shifted, 1);
+            result = vk->dispatchBinaryOp("add", result, lg);
+        }
+        Tensor coeff = vk->dispatchFull({1}, log_pi_coeff, inputs[0].dtype());
+        result = vk->dispatchBinaryOp("add", result, coeff);
+        return std::vector<Tensor>{result};
+    });
+
+    // LinalgVectorNorm: delegates to existing Norm dispatch
+    table.register_kernel(OpId::LinalgVectorNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float p = static_cast<float>(attrs.get_float(AttrKey::P, 2.0));
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchNorm(inputs[0], p, dim, keepdim)};
+    });
+
+    // LinalgMatrixNorm: Frobenius (ord=0), nuclear (ord=1), spectral (ord=2)
+    table.register_kernel(OpId::LinalgMatrixNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t ord = static_cast<int64_t>(attrs.get_float(AttrKey::Order, 0.0));
+        auto* vk = get_vulkan_backend();
+        if (ord == 0) {
+            return std::vector<Tensor>{vk->dispatchNorm(inputs[0], 2.0f, INT64_MIN, false)};
+        }
+        auto svd_result = vk->dispatchLinalgSVD(inputs[0], false);
+        Tensor S = svd_result[1];
+        if (ord == 1) {
+            return std::vector<Tensor>{vk->dispatchReduction("sum", S, INT64_MIN, false)};
+        }
+        return std::vector<Tensor>{vk->dispatchReduction("max", S, INT64_MIN, false)};
+    });
+
+    // LinalgVecdot: sum(a * b, dim)
+    table.register_kernel(OpId::LinalgVecdot, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        auto* vk = get_vulkan_backend();
+        Tensor product = vk->dispatchBinaryOp("mul", inputs[0], inputs[1]);
+        return std::vector<Tensor>{vk->dispatchReduction("sum", product, dim, false)};
+    });
+
+    // CosineSimilarity: sum(a*b, dim) / (norm(a, dim) * norm(b, dim) + eps)
+    table.register_single_output_kernel(OpId::CosineSimilarity, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 1);
+        double eps = attrs.get_float(AttrKey::Eps, 1e-8);
+        auto* vk = get_vulkan_backend();
+        // dot product along dim
+        Tensor ab = vk->dispatchBinaryOp("mul", inputs[0], inputs[1]);
+        Tensor dot = vk->dispatchReduction("sum", ab, dim, false);
+        // norms along dim
+        Tensor norm_a = vk->dispatchNorm(inputs[0], 2.0f, dim, false);
+        Tensor norm_b = vk->dispatchNorm(inputs[1], 2.0f, dim, false);
+        // norm_a * norm_b + eps
+        Tensor norms = vk->dispatchBinaryOp("mul", norm_a, norm_b);
+        Tensor eps_tensor = vk->dispatchFull({1}, static_cast<float>(eps), norms.dtype());
+        Tensor denom = vk->dispatchBinaryOp("add", norms, eps_tensor);
+        return vk->dispatchBinaryOp("div", dot, denom);
+    });
+
+    // Renorm: scale slices along dim so p-norm <= maxnorm
+    table.register_single_output_kernel(OpId::Renorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        double p = attrs.get_float(AttrKey::P, 2.0);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        double maxnorm = attrs.get_float(AttrKey::MaxNorm, 1.0);
+        auto* vk = get_vulkan_backend();
+        // Compute p-norm along dim (keepdim=true to broadcast)
+        Tensor norm = vk->dispatchNorm(inputs[0], static_cast<float>(p), dim, true);
+        // clamp norm below to maxnorm (scale = maxnorm / max(norm, maxnorm))
+        Tensor maxnorm_tensor = vk->dispatchFull({1}, static_cast<float>(maxnorm), norm.dtype());
+        Tensor clamped_norm = vk->dispatchBinaryOp("max", norm, maxnorm_tensor);
+        Tensor scale = vk->dispatchBinaryOp("div", maxnorm_tensor, clamped_norm);
+        // Only scale down, not up: where norm > maxnorm apply scale, else keep 1.0
+        // scale is maxnorm / max(norm, maxnorm), which is:
+        //   - maxnorm/norm when norm > maxnorm (scales down)
+        //   - 1.0 when norm <= maxnorm (no change)
+        return vk->dispatchBinaryOp("mul", inputs[0], scale);
     });
 
     // ========================================================================
@@ -2018,6 +2148,10 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
 
     table.register_single_output_kernel(OpId::Polar, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
         return get_vulkan_backend()->dispatchPolar(inputs[0], inputs[1]);
+    });
+
+    table.register_single_output_kernel(OpId::ComplexTensor, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        return get_vulkan_backend()->dispatchComplexTensor(inputs[0], inputs[1]);
     });
 
     // Linear algebra ops — single-workgroup Vulkan shaders for small matrices,
@@ -2503,6 +2637,19 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             return get_vulkan_backend()->dispatchAdvancedIndexPut(inputs[0], indices, values, num_indices);
         });
 
+    // Geqrf — raw QR factorization returning packed reflectors + tau
+    table.register_kernel(OpId::Geqrf, [](std::span<const Tensor> inputs, const OpAttributes&)
+        -> std::vector<Tensor> {
+        return get_vulkan_backend()->dispatchGeqrf(inputs[0]);
+    });
+    // Ormqr — multiply matrix by Q from QR factorization
+    table.register_single_output_kernel(OpId::Ormqr, [](std::span<const Tensor> inputs, const OpAttributes& attrs)
+        -> Tensor {
+        bool left = attrs.get_bool(AttrKey::Left, true);
+        bool transpose_q = attrs.get_bool(AttrKey::TransposeQ, false);
+        return get_vulkan_backend()->dispatchOrmqr(inputs[0], inputs[1], inputs[2], left, transpose_q);
+    });
+
     // LinalgLU / LinalgLUSolve — native blocked LU + TRSM backsolve
     table.register_kernel(OpId::LinalgLU,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
@@ -2512,6 +2659,42 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::LinalgLUSolve,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
             return get_vulkan_backend()->dispatchLinalgLUSolve(inputs[0], inputs[1], inputs[2]);
+        });
+
+    // ========================================================================
+    // LinalgHouseholder, LinalgLDLFactor, LinalgLDLSolve,
+    // CholeskyInverse, TensorInv, TensorSolve
+    // ========================================================================
+    table.register_single_output_kernel(OpId::LinalgHouseholder,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return get_vulkan_backend()->dispatchLinalgHouseholder(inputs[0], inputs[1]);
+        });
+
+    table.register_kernel(OpId::LinalgLDLFactor,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return get_vulkan_backend()->dispatchLinalgLDLFactor(inputs[0]);
+        });
+
+    table.register_single_output_kernel(OpId::LinalgLDLSolve,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return get_vulkan_backend()->dispatchLinalgLDLSolve(inputs[0], inputs[1], inputs[2]);
+        });
+
+    table.register_single_output_kernel(OpId::CholeskyInverse,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            bool upper = attrs.get_bool(AttrKey::Upper, false);
+            return linalg::cholesky_inverse(inputs[0], upper);
+        });
+
+    table.register_single_output_kernel(OpId::TensorInv,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t ind = attrs.get_int(AttrKey::Ind, 2);
+            return linalg::tensorinv(inputs[0], ind);
+        });
+
+    table.register_single_output_kernel(OpId::TensorSolve,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return linalg::tensorsolve(inputs[0], inputs[1]);
         });
 
     // ========================================================================
@@ -3221,6 +3404,95 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::NestedFromPadded, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
         return get_vulkan_backend()->dispatchNestedFromPadded(inputs[0], inputs[1]);
     });
+
+    // =========================================================================
+    // AsStrided — metadata-only view with custom shape/strides
+    // =========================================================================
+    table.register_single_output_kernel(OpId::AsStrided,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto shape = attrs.get_int_list(AttrKey::Shape);
+            auto strides = attrs.get_int_list(AttrKey::Strides);
+            int64_t offset = attrs.get_int(AttrKey::StorageOffset, -1);
+            std::optional<int64_t> storage_offset = (offset >= 0) ? std::optional(offset) : std::nullopt;
+            return tenzor::as_strided(inputs[0], shape, strides, storage_offset);
+        });
+
+    // =========================================================================
+    // NestedAttentionBackward — backward for segmented attention
+    // Vulkan: dispatch to compute shader via VulkanBackend
+    // Uses the same approach as NestedAttention forward but for gradients.
+    // For now, delegate to the device-agnostic attention backward implementation
+    // using existing Vulkan matmul/softmax primitives.
+    // =========================================================================
+    table.register_kernel(OpId::NestedAttentionBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // inputs: [grad_out, Q, K, V, attn_out, q_offsets, kv_offsets]
+            float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+            bool causal = attrs.get_bool(AttrKey::Causal, false);
+            const auto& grad_out = inputs[0];
+            const auto& Q = inputs[1];
+            const auto& K = inputs[2];
+            const auto& V = inputs[3];
+            const auto& q_offsets = inputs[5];
+            const auto& kv_offsets = inputs[6];
+
+            auto q_off_cpu = q_offsets.to(Device::cpu());
+            auto kv_off_cpu = kv_offsets.to(Device::cpu());
+            const int64_t* q_off = q_off_cpu.data<int64_t>();
+            const int64_t* kv_off = kv_off_cpu.data<int64_t>();
+            int64_t B = q_off_cpu.numel() - 1;
+            int64_t hd = Q.shape().back();
+
+            auto grad_Q = tenzor::zeros(std::vector<int64_t>(Q.shape().begin(), Q.shape().end()), Q.dtype(), Q.device());
+            auto grad_K = tenzor::zeros(std::vector<int64_t>(K.shape().begin(), K.shape().end()), K.dtype(), K.device());
+            auto grad_V = tenzor::zeros(std::vector<int64_t>(V.shape().begin(), V.shape().end()), V.dtype(), V.device());
+
+            for (int64_t b = 0; b < B; ++b) {
+                int64_t qs = q_off[b], qe = q_off[b + 1];
+                int64_t kvs = kv_off[b], kve = kv_off[b + 1];
+                if (qs >= qe || kvs >= kve) continue;
+
+                auto Qb = Q.slice(0, qs, qe);
+                auto Kb = K.slice(0, kvs, kve);
+                auto Vb = V.slice(0, kvs, kve);
+                auto dO = grad_out.slice(0, qs, qe);
+
+                // scores = Q @ K^T * scale
+                auto scores = tenzor::mul(tenzor::matmul(Qb, Kb.transpose(0, 1)),
+                    tenzor::full({1}, scale, Q.dtype(), Q.device()));
+
+                // softmax
+                OpAttributes sm_attrs;
+                sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+                std::vector<Tensor> sm_in = {scores};
+                auto attn_w = dispatch_single(OpId::Softmax, sm_in, sm_attrs);
+
+                // grad_V = attn_w^T @ dO
+                auto gV = tenzor::matmul(attn_w.transpose(0, 1), dO);
+                // d_attn = dO @ V^T
+                auto d_attn = tenzor::matmul(dO, Vb.transpose(0, 1));
+                // softmax backward
+                auto ds = tenzor::mul(attn_w, tenzor::sub(d_attn,
+                    tenzor::sum(tenzor::mul(d_attn, attn_w), -1, true).expand(
+                        std::vector<int64_t>(d_attn.shape().begin(), d_attn.shape().end()))));
+                ds = tenzor::mul(ds, tenzor::full({1}, scale, Q.dtype(), Q.device()));
+
+                auto gQ = tenzor::matmul(ds, Kb);
+                auto gK = tenzor::matmul(ds.transpose(0, 1), Qb);
+
+                // Copy into output
+                auto dst_gQ = grad_Q.slice(0, qs, qe);
+                auto dst_gK = grad_K.slice(0, kvs, kve);
+                auto dst_gV = grad_V.slice(0, kvs, kve);
+                std::memcpy(dst_gQ.data_ptr(), gQ.contiguous().data_ptr(),
+                            static_cast<size_t>((qe - qs) * hd) * dtype_size(Q.dtype()));
+                std::memcpy(dst_gK.data_ptr(), gK.contiguous().data_ptr(),
+                            static_cast<size_t>((kve - kvs) * hd) * dtype_size(K.dtype()));
+                std::memcpy(dst_gV.data_ptr(), gV.contiguous().data_ptr(),
+                            static_cast<size_t>((kve - kvs) * hd) * dtype_size(V.dtype()));
+            }
+            return {grad_Q, grad_K, grad_V};
+        });
 
     std::cout << "Vulkan dispatch table initialized with O(1) lookup" << std::endl;
 }

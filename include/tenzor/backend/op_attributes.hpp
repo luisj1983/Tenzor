@@ -289,6 +289,13 @@ enum class AttrKey : uint16_t {
     // TensorInv parameters
     Ind,               // tensorinv: ind parameter
 
+    // Renorm parameters
+    MaxNorm,           // renorm: maximum norm value
+
+    // AsStrided parameters
+    Strides,           // Custom strides (comma-separated list, like Shape)
+    StorageOffset,     // Storage offset in elements
+
     // Sentinel
     _Count
 };

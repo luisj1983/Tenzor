@@ -681,4 +681,170 @@ auto nested_linear_kernel(const Tensor& values, const Tensor& weight,
     return result;
 }
 
+// =========================================================================
+// Nested Attention Backward (variable-length scaled dot-product backward)
+// =========================================================================
+
+auto nested_attention_backward_kernel(const Tensor& grad_out, const Tensor& Q,
+                                       const Tensor& K, const Tensor& V,
+                                       const Tensor& attn_out,
+                                       const Tensor& q_offsets, const Tensor& kv_offsets,
+                                       float scale, bool causal) -> std::vector<Tensor> {
+    auto q_off_cpu = (q_offsets.device().type != Device::Type::CPU)
+        ? q_offsets.to(Device::cpu()) : q_offsets;
+    auto kv_off_cpu = (kv_offsets.device().type != Device::Type::CPU)
+        ? kv_offsets.to(Device::cpu()) : kv_offsets;
+    const auto* q_off = q_off_cpu.data<int64_t>();
+    const auto* kv_off = kv_off_cpu.data<int64_t>();
+    int64_t B = q_off_cpu.numel() - 1;
+    int64_t hd = Q.shape().back();
+
+    auto grad_Q = tenzor::zeros(std::vector<int64_t>(Q.shape().begin(), Q.shape().end()),
+                                 Q.dtype(), Q.device());
+    auto grad_K = tenzor::zeros(std::vector<int64_t>(K.shape().begin(), K.shape().end()),
+                                 K.dtype(), K.device());
+    auto grad_V = tenzor::zeros(std::vector<int64_t>(V.shape().begin(), V.shape().end()),
+                                 V.dtype(), V.device());
+
+    if (Q.dtype() == DType::Float32) {
+        const float* q_ptr = Q.data<float>();
+        const float* k_ptr = K.data<float>();
+        const float* v_ptr = V.data<float>();
+        const float* do_ptr = grad_out.data<float>();
+        const float* o_ptr = attn_out.data<float>();
+        float* gq_ptr = grad_Q.data<float>();
+        float* gk_ptr = grad_K.data<float>();
+        float* gv_ptr = grad_V.data<float>();
+
+        #ifdef _OPENMP
+        #pragma omp parallel for if(B > 2) schedule(dynamic)
+        #endif
+        for (int64_t b = 0; b < B; ++b) {
+            int64_t qs = q_off[b], qe = q_off[b + 1];
+            int64_t kvs = kv_off[b], kve = kv_off[b + 1];
+            int64_t Lq = qe - qs;
+            int64_t Lkv = kve - kvs;
+            if (Lq <= 0 || Lkv <= 0) continue;
+
+            // Allocate workspace for attention weights and scores
+            std::vector<float> attn_weights(static_cast<size_t>(Lq * Lkv), 0.0f);
+
+            // Step 1: Recompute attention weights (scores -> softmax)
+            for (int64_t qi = 0; qi < Lq; ++qi) {
+                const float* q_row = q_ptr + (qs + qi) * hd;
+                float max_score = -std::numeric_limits<float>::infinity();
+
+                // Compute scores
+                for (int64_t ki = 0; ki < Lkv; ++ki) {
+                    if (causal && ki > qi) {
+                        attn_weights[static_cast<size_t>(qi * Lkv + ki)] =
+                            -std::numeric_limits<float>::infinity();
+                        continue;
+                    }
+                    const float* k_row = k_ptr + (kvs + ki) * hd;
+                    float score = 0.0f;
+                    for (int64_t d = 0; d < hd; ++d) {
+                        score += q_row[d] * k_row[d];
+                    }
+                    score *= scale;
+                    attn_weights[static_cast<size_t>(qi * Lkv + ki)] = score;
+                    max_score = std::max(max_score, score);
+                }
+
+                // Softmax
+                float sum_exp = 0.0f;
+                int64_t ki_end = causal ? std::min(Lkv, qi + 1) : Lkv;
+                for (int64_t ki = 0; ki < ki_end; ++ki) {
+                    float e = std::exp(attn_weights[static_cast<size_t>(qi * Lkv + ki)] - max_score);
+                    attn_weights[static_cast<size_t>(qi * Lkv + ki)] = e;
+                    sum_exp += e;
+                }
+                float inv_sum = (sum_exp > 0.0f) ? 1.0f / sum_exp : 0.0f;
+                for (int64_t ki = 0; ki < ki_end; ++ki) {
+                    attn_weights[static_cast<size_t>(qi * Lkv + ki)] *= inv_sum;
+                }
+                // Zero out masked positions
+                for (int64_t ki = ki_end; ki < Lkv; ++ki) {
+                    attn_weights[static_cast<size_t>(qi * Lkv + ki)] = 0.0f;
+                }
+            }
+
+            // Step 2: grad_V = attn_weights^T @ grad_out
+            // grad_V[ki, d] += sum_qi attn_weights[qi, ki] * grad_out[qi, d]
+            for (int64_t ki = 0; ki < Lkv; ++ki) {
+                float* gv_row = gv_ptr + (kvs + ki) * hd;
+                for (int64_t qi = 0; qi < Lq; ++qi) {
+                    float w = attn_weights[static_cast<size_t>(qi * Lkv + ki)];
+                    if (w == 0.0f) continue;
+                    const float* do_row = do_ptr + (qs + qi) * hd;
+                    for (int64_t d = 0; d < hd; ++d) {
+                        gv_row[d] += w * do_row[d];
+                    }
+                }
+            }
+
+            // Step 3: d_attn = grad_out @ V^T  [Lq, Lkv]
+            std::vector<float> d_attn(static_cast<size_t>(Lq * Lkv), 0.0f);
+            for (int64_t qi = 0; qi < Lq; ++qi) {
+                const float* do_row = do_ptr + (qs + qi) * hd;
+                for (int64_t ki = 0; ki < Lkv; ++ki) {
+                    const float* v_row = v_ptr + (kvs + ki) * hd;
+                    float dot = 0.0f;
+                    for (int64_t d = 0; d < hd; ++d) {
+                        dot += do_row[d] * v_row[d];
+                    }
+                    d_attn[static_cast<size_t>(qi * Lkv + ki)] = dot;
+                }
+            }
+
+            // Step 4: Softmax backward -> d_scores
+            // d_scores[qi, ki] = attn_weights[qi, ki] * (d_attn[qi, ki] - sum_ki(d_attn[qi, ki] * attn_weights[qi, ki]))
+            std::vector<float> d_scores(static_cast<size_t>(Lq * Lkv), 0.0f);
+            for (int64_t qi = 0; qi < Lq; ++qi) {
+                float dot_sum = 0.0f;
+                for (int64_t ki = 0; ki < Lkv; ++ki) {
+                    dot_sum += d_attn[static_cast<size_t>(qi * Lkv + ki)] *
+                               attn_weights[static_cast<size_t>(qi * Lkv + ki)];
+                }
+                for (int64_t ki = 0; ki < Lkv; ++ki) {
+                    d_scores[static_cast<size_t>(qi * Lkv + ki)] =
+                        attn_weights[static_cast<size_t>(qi * Lkv + ki)] *
+                        (d_attn[static_cast<size_t>(qi * Lkv + ki)] - dot_sum) * scale;
+                }
+            }
+
+            // Step 5: grad_Q = d_scores @ K  [Lq, hd]
+            for (int64_t qi = 0; qi < Lq; ++qi) {
+                float* gq_row = gq_ptr + (qs + qi) * hd;
+                for (int64_t ki = 0; ki < Lkv; ++ki) {
+                    float ds = d_scores[static_cast<size_t>(qi * Lkv + ki)];
+                    if (ds == 0.0f) continue;
+                    const float* k_row = k_ptr + (kvs + ki) * hd;
+                    for (int64_t d = 0; d < hd; ++d) {
+                        gq_row[d] += ds * k_row[d];
+                    }
+                }
+            }
+
+            // Step 6: grad_K = d_scores^T @ Q  [Lkv, hd]
+            for (int64_t ki = 0; ki < Lkv; ++ki) {
+                float* gk_row = gk_ptr + (kvs + ki) * hd;
+                for (int64_t qi = 0; qi < Lq; ++qi) {
+                    float ds = d_scores[static_cast<size_t>(qi * Lkv + ki)];
+                    if (ds == 0.0f) continue;
+                    const float* q_row = q_ptr + (qs + qi) * hd;
+                    for (int64_t d = 0; d < hd; ++d) {
+                        gk_row[d] += ds * q_row[d];
+                    }
+                }
+            }
+        }
+    } else {
+        throw std::runtime_error(
+            "nested_attention_backward_kernel: only Float32 supported");
+    }
+
+    return {grad_Q, grad_K, grad_V};
+}
+
 } // namespace tenzor::cpu

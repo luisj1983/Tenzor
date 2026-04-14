@@ -293,6 +293,10 @@ struct PolarKernelFloat32 {};
 struct PolarKernelFloat64 {};
 struct PolarKernelFloat16 {};
 struct PolarKernelBFloat16 {};
+struct ComplexTensorKernelFloat32 {};
+struct ComplexTensorKernelFloat64 {};
+struct ComplexTensorKernelFloat16 {};
+struct ComplexTensorKernelBFloat16 {};
 
 // Rounding kernel name classes
 struct RoundKernelFloat32 {};
@@ -4843,6 +4847,67 @@ auto polar_kernel(const Tensor& abs_t, const Tensor& angle_t, sycl::queue& queue
         return result;
     }
     throw std::runtime_error("polar: unsupported input dtype");
+}
+
+// ============================================================================
+// ComplexTensor Kernel — interleave real + imag into Complex64/Complex128
+// ============================================================================
+
+auto complex_tensor_kernel(const Tensor& real_t, const Tensor& imag_t, sycl::queue& queue) -> Tensor {
+    if (real_t.dtype() != imag_t.dtype()) {
+        throw std::runtime_error("complex: real and imag must have the same dtype");
+    }
+    auto shape_r = real_t.shape();
+    auto shape_i = imag_t.shape();
+    if (!std::equal(shape_r.begin(), shape_r.end(), shape_i.begin(), shape_i.end())) {
+        throw std::runtime_error("complex: real and imag must have the same shape");
+    }
+
+    int64_t n = real_t.numel();
+    std::vector<int64_t> shape(shape_r.begin(), shape_r.end());
+
+    if (real_t.dtype() == DType::Float32) {
+        Tensor result(shape, DType::Complex64, real_t.device());
+        const float* r_ptr = get_data_ptr<const float>(real_t);
+        const float* i_ptr = get_data_ptr<const float>(imag_t);
+        float* out_ptr = get_data_ptr<float>(result);
+        queue.parallel_for<ComplexTensorKernelFloat32>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            out_ptr[2 * idx]     = r_ptr[idx];
+            out_ptr[2 * idx + 1] = i_ptr[idx];
+        }).wait();
+        return result;
+    } else if (real_t.dtype() == DType::Float64) {
+        Tensor result(shape, DType::Complex128, real_t.device());
+        const double* r_ptr = get_data_ptr<const double>(real_t);
+        const double* i_ptr = get_data_ptr<const double>(imag_t);
+        double* out_ptr = get_data_ptr<double>(result);
+        queue.parallel_for<ComplexTensorKernelFloat64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            out_ptr[2 * idx]     = r_ptr[idx];
+            out_ptr[2 * idx + 1] = i_ptr[idx];
+        }).wait();
+        return result;
+    } else if (real_t.dtype() == DType::Float16) {
+        Tensor result(shape, DType::Complex64, real_t.device());
+        const sycl::half* r_ptr = get_data_ptr<const sycl::half>(real_t);
+        const sycl::half* i_ptr = get_data_ptr<const sycl::half>(imag_t);
+        float* out_ptr = get_data_ptr<float>(result);
+        queue.parallel_for<ComplexTensorKernelFloat16>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            out_ptr[2 * idx]     = static_cast<float>(r_ptr[idx]);
+            out_ptr[2 * idx + 1] = static_cast<float>(i_ptr[idx]);
+        }).wait();
+        return result;
+    } else if (real_t.dtype() == DType::BFloat16) {
+        Tensor result(shape, DType::Complex64, real_t.device());
+        const uint16_t* r_ptr = get_data_ptr<const uint16_t>(real_t);
+        const uint16_t* i_ptr = get_data_ptr<const uint16_t>(imag_t);
+        float* out_ptr = get_data_ptr<float>(result);
+        queue.parallel_for<ComplexTensorKernelBFloat16>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            out_ptr[2 * idx]     = bf16_to_f32(r_ptr[idx]);
+            out_ptr[2 * idx + 1] = bf16_to_f32(i_ptr[idx]);
+        }).wait();
+        return result;
+    }
+    throw std::runtime_error("complex: unsupported input dtype");
 }
 
 // ============================================================================

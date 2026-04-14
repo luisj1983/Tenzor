@@ -58,6 +58,7 @@ set(TENZOR_CORE_SOURCES
     autograd/function_sparse.cpp
     autograd/function_special.cpp
     autograd/function_vision.cpp
+    autograd/function_new_ops.cpp
     autograd/engine.cpp
     autograd/ops.cpp
     autograd/checkpoint.cpp

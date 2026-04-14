@@ -700,6 +700,19 @@ enum class OpId : uint16_t {
     NestedLinear,                  // Linear projection on packed nested values
 
     // =========================================================================
+    // Numerically stable math / special functions (Phase: PyTorch parity)
+    // =========================================================================
+    LogAddExp = 680,       // log(exp(a) + exp(b)), numerically stable
+    LogAddExp2,            // log2(2^a + 2^b), numerically stable
+    XLogY,                 // x*log(y) with 0*log(y) = 0
+    CosineSimilarity,      // cosine similarity along dim
+    Renorm,                // tensor renormalization to p-norm
+    I0e,                   // exp(-|x|) * BesselI0(x), scaled modified Bessel
+    I1e,                   // exp(-|x|) * BesselI1(x), scaled modified Bessel
+    Entr,                  // element-wise entropy: -x*log(x)
+    SphericalBesselJ0,     // spherical Bessel j0: sin(x)/x
+
+    // =========================================================================
     // Sentinel (MUST BE LAST)
     // =========================================================================
     OP_COUNT

@@ -751,6 +751,7 @@ public:
     auto dispatchImag(const Tensor& input) -> Tensor;
     auto dispatchAngle(const Tensor& input) -> Tensor;
     auto dispatchPolar(const Tensor& abs, const Tensor& angle) -> Tensor;
+    auto dispatchComplexTensor(const Tensor& real, const Tensor& imag) -> Tensor;
 
     // Stack/Take/Tile/Put operations (native Vulkan shaders)
     auto dispatchStack(std::span<const Tensor> inputs, int64_t dim) -> Tensor;
@@ -806,6 +807,13 @@ public:
                                const Tensor& B) -> Tensor;
     auto dispatchLinalgSolveTriangular(const Tensor& A, const Tensor& B,
                                        bool upper, bool unitriangular) -> Tensor;
+    auto dispatchGeqrf(const Tensor& input) -> std::vector<Tensor>;
+    auto dispatchOrmqr(const Tensor& reflectors, const Tensor& tau,
+                        const Tensor& C, bool left, bool transpose_q) -> Tensor;
+    auto dispatchLinalgHouseholder(const Tensor& input, const Tensor& tau) -> Tensor;
+    auto dispatchLinalgLDLFactor(const Tensor& A) -> std::vector<Tensor>;
+    auto dispatchLinalgLDLSolve(const Tensor& LD, const Tensor& pivots,
+                                 const Tensor& B) -> Tensor;
 
     // Tiled blocked linalg helpers for medium matrices (33-256)
     void runBlockedLU(Tensor& A, Tensor& pivots, int64_t n,

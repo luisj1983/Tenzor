@@ -11,8 +11,12 @@
 
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/ops/math.hpp"
+#include "tenzor/ops/reduction.hpp"
+#include "tenzor/ops/creation.hpp"
 #include <sycl/sycl.hpp>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 #ifdef TENZOR_HAS_ONEMKL
@@ -446,6 +450,18 @@ SPECIAL_TAGS(BesselI1)
 SPECIAL_TAGS(ErfInv)
 SPECIAL_TAGS(Sinc)
 SPECIAL_TAGS(Zeta)
+SPECIAL_TAGS(LogAddExp)
+SPECIAL_TAGS(LogAddExp2)
+SPECIAL_TAGS(XLogY)
+SPECIAL_TAGS(I0e)
+SPECIAL_TAGS(I1e)
+SPECIAL_TAGS(Entr)
+SPECIAL_TAGS(SphericalBesselJ0)
+SPECIAL_TAGS(Ndtr)
+SPECIAL_TAGS(LogNdtr)
+SPECIAL_TAGS(Multigammaln)
+SPECIAL_TAGS(CosineSimilarity)
+SPECIAL_TAGS(Renorm)
 #undef SPECIAL_TAGS
 
 // =========================================================================
@@ -567,7 +583,206 @@ DEFINE_ONEAPI_SPECIAL_UNARY(bessel_i1, BesselI1,  bessel_i1_dev_f32, bessel_i1_d
 DEFINE_ONEAPI_SPECIAL_UNARY(erfinv,    ErfInv,    erfinv_dev_f32, erfinv_dev_f64)
 #endif
 
+// =========================================================================
+// I0e: exp(-|x|) * BesselI0(x) -- exponentially scaled modified Bessel
+// =========================================================================
+inline float i0e_dev_f32(float x) {
+    float ax = sycl::fabs(x);
+    if (ax < 3.75f) {
+        float t = x / 3.75f;
+        t = t * t;
+        float i0 = 1.0f + t * (3.5156229f + t * (3.0899424f + t * (1.2067492f
+                   + t * (0.2659732f + t * (0.0360768f + t * 0.0045813f)))));
+        return sycl::exp(-ax) * i0;
+    }
+    float t = 3.75f / ax;
+    return (1.0f / sycl::sqrt(ax)) * (0.39894228f + t * (0.01328592f
+           + t * (0.00225319f - t * (0.00157565f - t * (0.00916281f
+           - t * (0.02057706f - t * (0.02635537f - t * (0.01647633f
+           - t * 0.00392377f))))))));
+}
+inline double i0e_dev_f64(double x) {
+    double ax = sycl::fabs(x);
+    if (ax < 3.75) {
+        double t = x / 3.75;
+        t = t * t;
+        double i0 = 1.0 + t * (3.5156229 + t * (3.0899424 + t * (1.2067492
+                    + t * (0.2659732 + t * (0.0360768 + t * 0.0045813)))));
+        return sycl::exp(-ax) * i0;
+    }
+    double t = 3.75 / ax;
+    return (1.0 / sycl::sqrt(ax)) * (0.39894228 + t * (0.01328592
+           + t * (0.00225319 - t * (0.00157565 - t * (0.00916281
+           - t * (0.02057706 - t * (0.02635537 - t * (0.01647633
+           - t * 0.00392377))))))));
+}
+DEFINE_ONEAPI_SPECIAL_UNARY(i0e, I0e, i0e_dev_f32, i0e_dev_f64)
+
+// =========================================================================
+// I1e: exp(-|x|) * BesselI1(x) -- exponentially scaled modified Bessel
+// =========================================================================
+inline float i1e_dev_f32(float x) {
+    float ax = sycl::fabs(x);
+    float result;
+    if (ax < 3.75f) {
+        float t = x / 3.75f;
+        t = t * t;
+        result = ax * (0.5f + t * (0.87890594f + t * (0.51498869f + t * (0.15084934f
+                 + t * (0.02658733f + t * (0.00301532f + t * 0.00032411f))))));
+        result = sycl::exp(-ax) * result;
+    } else {
+        float t = 3.75f / ax;
+        result = (1.0f / sycl::sqrt(ax)) * (0.39894228f - t * (0.03988024f
+                 - t * (0.00362018f + t * (0.00163801f - t * (0.01031555f
+                 - t * (0.02282967f - t * (0.02895312f - t * (0.01787654f
+                 - t * 0.00420059f))))))));
+    }
+    return (x < 0.0f) ? -result : result;
+}
+inline double i1e_dev_f64(double x) {
+    double ax = sycl::fabs(x);
+    double result;
+    if (ax < 3.75) {
+        double t = x / 3.75;
+        t = t * t;
+        result = ax * (0.5 + t * (0.87890594 + t * (0.51498869 + t * (0.15084934
+                 + t * (0.02658733 + t * (0.00301532 + t * 0.00032411))))));
+        result = sycl::exp(-ax) * result;
+    } else {
+        double t = 3.75 / ax;
+        result = (1.0 / sycl::sqrt(ax)) * (0.39894228 - t * (0.03988024
+                 - t * (0.00362018 + t * (0.00163801 - t * (0.01031555
+                 - t * (0.02282967 - t * (0.02895312 - t * (0.01787654
+                 - t * 0.00420059))))))));
+    }
+    return (x < 0.0) ? -result : result;
+}
+DEFINE_ONEAPI_SPECIAL_UNARY(i1e, I1e, i1e_dev_f32, i1e_dev_f64)
+
+// =========================================================================
+// Entr: -x*log(x), 0->0, negative->-inf
+// =========================================================================
+inline float entr_dev_f32(float x) {
+    if (x > 0.0f) return -x * sycl::log(x);
+    if (x == 0.0f) return 0.0f;
+    return -std::numeric_limits<float>::infinity();
+}
+inline double entr_dev_f64(double x) {
+    if (x > 0.0) return -x * sycl::log(x);
+    if (x == 0.0) return 0.0;
+    return -std::numeric_limits<double>::infinity();
+}
+DEFINE_ONEAPI_SPECIAL_UNARY(entr, Entr, entr_dev_f32, entr_dev_f64)
+
+// =========================================================================
+// SphericalBesselJ0: sin(x)/x, j0(0)=1
+// =========================================================================
+inline float spherical_bessel_j0_dev_f32(float x) {
+    if (x == 0.0f) return 1.0f;
+    return sycl::sin(x) / x;
+}
+inline double spherical_bessel_j0_dev_f64(double x) {
+    if (x == 0.0) return 1.0;
+    return sycl::sin(x) / x;
+}
+DEFINE_ONEAPI_SPECIAL_UNARY(spherical_bessel_j0, SphericalBesselJ0, spherical_bessel_j0_dev_f32, spherical_bessel_j0_dev_f64)
+
+// --- Ndtr: Normal CDF Phi(x) = 0.5 * erfc(-x * M_SQRT1_2) ---
+inline float ndtr_dev_f32(float x) {
+    return 0.5f * sycl::erfc(-x * 0.7071067811865476f);
+}
+inline double ndtr_dev_f64(double x) {
+    return 0.5 * sycl::erfc(-x * 0.7071067811865476);
+}
+DEFINE_ONEAPI_SPECIAL_UNARY(ndtr, Ndtr, ndtr_dev_f32, ndtr_dev_f64)
+
+// --- LogNdtr: log(Phi(x)) with stable tail for x < -5 ---
+inline float log_ndtr_dev_f32(float x) {
+    if (x >= -5.0f) {
+        return sycl::log(0.5f * sycl::erfc(-x * 0.7071067811865476f));
+    }
+    float x2 = x * x;
+    float inv_x2 = 1.0f / x2;
+    float series = 1.0f - inv_x2 * (1.0f - inv_x2 * (3.0f - inv_x2 * 15.0f));
+    return -0.5f * x2 - sycl::log(-x) - 0.9189385332046727f + sycl::log(series);
+}
+inline double log_ndtr_dev_f64(double x) {
+    if (x >= -5.0) {
+        return sycl::log(0.5 * sycl::erfc(-x * 0.7071067811865476));
+    }
+    double x2 = x * x;
+    double inv_x2 = 1.0 / x2;
+    double series = 1.0 - inv_x2 * (1.0 - inv_x2 * (3.0 - inv_x2 * 15.0));
+    return -0.5 * x2 - sycl::log(-x) - 0.9189385332046727 + sycl::log(series);
+}
+DEFINE_ONEAPI_SPECIAL_UNARY(log_ndtr, LogNdtr, log_ndtr_dev_f32, log_ndtr_dev_f64)
+
 #undef DEFINE_ONEAPI_SPECIAL_UNARY
+
+// =========================================================================
+// Multigammaln: sum_{j=0}^{d-1} lgamma(x - j/2) + d*(d-1)/4 * log(pi)
+// =========================================================================
+
+// SYCL kernel name tags
+class MultigammalnKernelF32;
+class MultigammalnKernelF64;
+class MultigammalnKernelF16;
+class MultigammalnKernelBF16;
+
+auto multigammaln_kernel(const Tensor& input, int64_t d, sycl::queue& queue) -> Tensor {
+    Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                  input.dtype(), input.device());
+    const int64_t numel = input.numel();
+    if (numel == 0) return output;
+    float log_pi_coeff = static_cast<float>(d) * static_cast<float>(d - 1) / 4.0f
+                       * 1.1447298858494002f; // log(pi)
+    int d_val = static_cast<int>(d);
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(input);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for<MultigammalnKernelF32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float val = log_pi_coeff;
+            for (int j = 0; j < d_val; ++j)
+                val += sycl::lgamma(in_ptr[idx] - static_cast<float>(j) * 0.5f);
+            out_ptr[idx] = val;
+        });
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(input);
+        double* out_ptr = get_data_ptr<double>(output);
+        double log_pi_coeff_d = static_cast<double>(d) * static_cast<double>(d - 1) / 4.0
+                              * 1.1447298858494002;
+        queue.parallel_for<MultigammalnKernelF64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double val = log_pi_coeff_d;
+            for (int j = 0; j < d_val; ++j)
+                val += sycl::lgamma(in_ptr[idx] - static_cast<double>(j) * 0.5);
+            out_ptr[idx] = val;
+        });
+    } else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<MultigammalnKernelF16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = static_cast<float>(in_ptr[idx]);
+            float val = log_pi_coeff;
+            for (int j = 0; j < d_val; ++j)
+                val += sycl::lgamma(x - static_cast<float>(j) * 0.5f);
+            out_ptr[idx] = sycl::half(val);
+        });
+    } else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for<MultigammalnKernelBF16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = bf16_to_f32_h(in_ptr[idx]);
+            float val = log_pi_coeff;
+            for (int j = 0; j < d_val; ++j)
+                val += sycl::lgamma(x - static_cast<float>(j) * 0.5f);
+            out_ptr[idx] = f32_to_bf16_h(val);
+        });
+    } else {
+        throw std::runtime_error("multigammaln: only Float32/64/16 + BF16 supported");
+    }
+    return output;
+}
 
 // =========================================================================
 // Beta(a, b) = exp(lgamma(a) + lgamma(b) - lgamma(a + b))
@@ -762,6 +977,189 @@ auto betainc_kernel(const Tensor& a, const Tensor& b, const Tensor& x, sycl::que
         throw std::runtime_error("betainc: unsupported dtype");
     }
     return output;
+}
+
+// =========================================================================
+// LogAddExp: max(a,b) + log1p(exp(-|a-b|))
+// =========================================================================
+auto logaddexp_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
+    Tensor output(std::vector<int64_t>(a.shape().begin(), a.shape().end()),
+                  a.dtype(), a.device());
+    const int64_t numel = a.numel();
+    if (numel == 0) return output;
+
+    if (a.dtype() == DType::Float32) {
+        const float* a_ptr = get_data_ptr<const float>(a);
+        const float* b_ptr = get_data_ptr<const float>(b);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for<LogAddExpKernelF32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float va = a_ptr[idx], vb = b_ptr[idx];
+            float m = sycl::fmax(va, vb);
+            out_ptr[idx] = m + sycl::log1p(sycl::exp(-sycl::fabs(va - vb)));
+        });
+    } else if (a.dtype() == DType::Float64) {
+        const double* a_ptr = get_data_ptr<const double>(a);
+        const double* b_ptr = get_data_ptr<const double>(b);
+        double* out_ptr = get_data_ptr<double>(output);
+        queue.parallel_for<LogAddExpKernelF64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double va = a_ptr[idx], vb = b_ptr[idx];
+            double m = sycl::fmax(va, vb);
+            out_ptr[idx] = m + sycl::log1p(sycl::exp(-sycl::fabs(va - vb)));
+        });
+    } else if (a.dtype() == DType::Float16) {
+        const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a);
+        const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<LogAddExpKernelF16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float va = static_cast<float>(a_ptr[idx]), vb = static_cast<float>(b_ptr[idx]);
+            float m = sycl::fmax(va, vb);
+            out_ptr[idx] = sycl::half(m + sycl::log1p(sycl::exp(-sycl::fabs(va - vb))));
+        });
+    } else if (a.dtype() == DType::BFloat16) {
+        const uint16_t* a_ptr = get_data_ptr<const uint16_t>(a);
+        const uint16_t* b_ptr = get_data_ptr<const uint16_t>(b);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for<LogAddExpKernelBF16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float va = bf16_to_f32_h(a_ptr[idx]), vb = bf16_to_f32_h(b_ptr[idx]);
+            float m = sycl::fmax(va, vb);
+            out_ptr[idx] = f32_to_bf16_h(m + sycl::log1p(sycl::exp(-sycl::fabs(va - vb))));
+        });
+    } else {
+        throw std::runtime_error("logaddexp: unsupported dtype");
+    }
+    return output;
+}
+
+// =========================================================================
+// LogAddExp2: max(a,b) + log2(1 + exp2(-|a-b|))
+// =========================================================================
+auto logaddexp2_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
+    Tensor output(std::vector<int64_t>(a.shape().begin(), a.shape().end()),
+                  a.dtype(), a.device());
+    const int64_t numel = a.numel();
+    if (numel == 0) return output;
+
+    if (a.dtype() == DType::Float32) {
+        const float* a_ptr = get_data_ptr<const float>(a);
+        const float* b_ptr = get_data_ptr<const float>(b);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for<LogAddExp2KernelF32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float va = a_ptr[idx], vb = b_ptr[idx];
+            float m = sycl::fmax(va, vb);
+            out_ptr[idx] = m + sycl::log2(1.0f + sycl::exp2(-sycl::fabs(va - vb)));
+        });
+    } else if (a.dtype() == DType::Float64) {
+        const double* a_ptr = get_data_ptr<const double>(a);
+        const double* b_ptr = get_data_ptr<const double>(b);
+        double* out_ptr = get_data_ptr<double>(output);
+        queue.parallel_for<LogAddExp2KernelF64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double va = a_ptr[idx], vb = b_ptr[idx];
+            double m = sycl::fmax(va, vb);
+            out_ptr[idx] = m + sycl::log2(1.0 + sycl::exp2(-sycl::fabs(va - vb)));
+        });
+    } else if (a.dtype() == DType::Float16) {
+        const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a);
+        const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<LogAddExp2KernelF16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float va = static_cast<float>(a_ptr[idx]), vb = static_cast<float>(b_ptr[idx]);
+            float m = sycl::fmax(va, vb);
+            out_ptr[idx] = sycl::half(m + sycl::log2(1.0f + sycl::exp2(-sycl::fabs(va - vb))));
+        });
+    } else if (a.dtype() == DType::BFloat16) {
+        const uint16_t* a_ptr = get_data_ptr<const uint16_t>(a);
+        const uint16_t* b_ptr = get_data_ptr<const uint16_t>(b);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for<LogAddExp2KernelBF16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float va = bf16_to_f32_h(a_ptr[idx]), vb = bf16_to_f32_h(b_ptr[idx]);
+            float m = sycl::fmax(va, vb);
+            out_ptr[idx] = f32_to_bf16_h(m + sycl::log2(1.0f + sycl::exp2(-sycl::fabs(va - vb))));
+        });
+    } else {
+        throw std::runtime_error("logaddexp2: unsupported dtype");
+    }
+    return output;
+}
+
+// =========================================================================
+// XLogY: x*log(y), with x==0 -> 0
+// =========================================================================
+auto xlogy_kernel(const Tensor& x, const Tensor& y, sycl::queue& queue) -> Tensor {
+    Tensor output(std::vector<int64_t>(x.shape().begin(), x.shape().end()),
+                  x.dtype(), x.device());
+    const int64_t numel = x.numel();
+    if (numel == 0) return output;
+
+    if (x.dtype() == DType::Float32) {
+        const float* x_ptr = get_data_ptr<const float>(x);
+        const float* y_ptr = get_data_ptr<const float>(y);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for<XLogYKernelF32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float xv = x_ptr[idx];
+            out_ptr[idx] = (xv == 0.0f) ? 0.0f : xv * sycl::log(y_ptr[idx]);
+        });
+    } else if (x.dtype() == DType::Float64) {
+        const double* x_ptr = get_data_ptr<const double>(x);
+        const double* y_ptr = get_data_ptr<const double>(y);
+        double* out_ptr = get_data_ptr<double>(output);
+        queue.parallel_for<XLogYKernelF64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double xv = x_ptr[idx];
+            out_ptr[idx] = (xv == 0.0) ? 0.0 : xv * sycl::log(y_ptr[idx]);
+        });
+    } else if (x.dtype() == DType::Float16) {
+        const sycl::half* x_ptr = get_data_ptr<const sycl::half>(x);
+        const sycl::half* y_ptr = get_data_ptr<const sycl::half>(y);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<XLogYKernelF16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float xv = static_cast<float>(x_ptr[idx]);
+            out_ptr[idx] = sycl::half((xv == 0.0f) ? 0.0f : xv * sycl::log(static_cast<float>(y_ptr[idx])));
+        });
+    } else if (x.dtype() == DType::BFloat16) {
+        const uint16_t* x_ptr = get_data_ptr<const uint16_t>(x);
+        const uint16_t* y_ptr = get_data_ptr<const uint16_t>(y);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for<XLogYKernelBF16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float xv = bf16_to_f32_h(x_ptr[idx]);
+            out_ptr[idx] = f32_to_bf16_h((xv == 0.0f) ? 0.0f : xv * sycl::log(bf16_to_f32_h(y_ptr[idx])));
+        });
+    } else {
+        throw std::runtime_error("xlogy: unsupported dtype");
+    }
+    return output;
+}
+
+// =========================================================================
+// CosineSimilarity: sum(a*b, dim) / (norm(a, dim) * norm(b, dim) + eps)
+// Composed from existing OneAPI primitives via the dispatch layer.
+// =========================================================================
+auto cosine_similarity_kernel(const Tensor& a, const Tensor& b,
+                               int64_t dim, double eps, sycl::queue& queue) -> Tensor {
+    // Use the same high-level composition as CPU: mul -> sum -> norm -> div
+    auto ab = tenzor::mul(a, b);
+    auto dot = tenzor::sum(ab, dim, false);
+    auto norm_a = tenzor::norm(a, 2.0, dim, false);
+    auto norm_b = tenzor::norm(b, 2.0, dim, false);
+    auto norms = tenzor::mul(norm_a, norm_b);
+    // Add eps to denominator
+    auto eps_tensor = tenzor::full_like(norms, eps);
+    auto denom = tenzor::add(norms, eps_tensor);
+    return tenzor::div(dot, denom);
+}
+
+// =========================================================================
+// Renorm: scale slices along dim so p-norm <= maxnorm
+// Composed from existing OneAPI primitives via the dispatch layer.
+// =========================================================================
+auto renorm_kernel(const Tensor& input, double p, int64_t dim, double maxnorm,
+                    sycl::queue& queue) -> Tensor {
+    // Compute p-norm along dim (keepdim=true for broadcasting)
+    auto norm_val = tenzor::norm(input, p, dim, true);
+    // clamp: max(norm, maxnorm)
+    auto maxnorm_tensor = tenzor::full_like(norm_val, maxnorm);
+    auto clamped = tenzor::maximum(norm_val, maxnorm_tensor);
+    // scale = maxnorm / max(norm, maxnorm)
+    auto scale = tenzor::div(maxnorm_tensor, clamped);
+    return tenzor::mul(input, scale);
 }
 
 } // namespace oneapi

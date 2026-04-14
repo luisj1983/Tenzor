@@ -3,6 +3,9 @@
 // Special math binary operations:
 //   0=beta(a,b) = exp(lgamma(a)+lgamma(b)-lgamma(a+b))
 //   1=zeta(s,q) = Σ 1/(q+n)^s + Euler-Maclaurin remainder
+//   2=logaddexp(a,b) = max(a,b) + log1p(exp(-|a-b|))
+//   3=logaddexp2(a,b) = max(a,b) + log2(1 + exp2(-|a-b|))
+//   4=xlogy(x,y) = x==0 ? 0 : x*log(y)
 
 layout(local_size_x_id = 0) in;
 layout(binding = 0) buffer InputA { float a_data[]; };
@@ -60,6 +63,28 @@ float zeta_impl(float s, float a) {
     return result;
 }
 
+// log1p(x) = log(1+x), numerically stable
+float log1p_impl(float x) {
+    float u = 1.0f + x;
+    if (u == 1.0f) return x;
+    return log(u) * (x / (u - 1.0f));
+}
+
+float logaddexp_impl(float a, float b) {
+    float m = max(a, b);
+    return m + log1p_impl(exp(-abs(a - b)));
+}
+
+float logaddexp2_impl(float a, float b) {
+    float m = max(a, b);
+    return m + log2(1.0f + exp2(-abs(a - b)));
+}
+
+float xlogy_impl(float x, float y) {
+    if (x == 0.0f) return 0.0f;
+    return x * log(y);
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= params.n) return;
@@ -69,6 +94,9 @@ void main() {
     switch (params.op) {
         case 0: r = beta_impl(a, b); break;
         case 1: r = zeta_impl(a, b); break;
+        case 2: r = logaddexp_impl(a, b); break;
+        case 3: r = logaddexp2_impl(a, b); break;
+        case 4: r = xlogy_impl(a, b); break;
         default: r = 0.0f;
     }
     out_data[idx] = r;

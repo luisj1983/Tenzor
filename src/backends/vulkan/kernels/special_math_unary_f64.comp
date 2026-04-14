@@ -6,7 +6,8 @@
 //
 //   0=gamma, 1=lgamma, 2=digamma, 3=bessel_j0, 4=bessel_j1,
 //   5=bessel_y0, 6=bessel_y1, 7=bessel_i0, 8=bessel_i1, 9=erfinv,
-//   10=sinc, 11=polygamma (n via push_constant param_int)
+//   10=sinc, 11=polygamma (n via push_constant param_int),
+//   12=i0e, 13=i1e, 14=entr, 15=spherical_bessel_j0
 
 layout(local_size_x_id = 0) in;
 
@@ -333,6 +334,56 @@ double sinc_impl_d(double x) {
     return sin_d(px) / px;
 }
 
+// ----- I0e (double precision): exp(-|x|) * BesselI0(x) -----
+double i0e_impl_d(double x_in) {
+    double ax = abs(x_in);
+    if (ax < 3.75) {
+        double t = x_in / 3.75;
+        t = t * t;
+        double i0 = 1.0 + t * (3.5156229 + t * (3.0899424 + t * (1.2067492
+                    + t * (0.2659732 + t * (0.0360768 + t * 0.0045813)))));
+        return exp_d(-ax) * i0;
+    }
+    double t = 3.75 / ax;
+    return (1.0 / sqrt_d(ax)) * (0.39894228 + t * (0.01328592
+           + t * (0.00225319 - t * (0.00157565 - t * (0.00916281
+           - t * (0.02057706 - t * (0.02635537 - t * (0.01647633
+           - t * 0.00392377))))))));
+}
+
+// ----- I1e (double precision): exp(-|x|) * BesselI1(x) -----
+double i1e_impl_d(double x_in) {
+    double ax = abs(x_in);
+    double result;
+    if (ax < 3.75) {
+        double t = x_in / 3.75;
+        t = t * t;
+        result = ax * (0.5 + t * (0.87890594 + t * (0.51498869 + t * (0.15084934
+                 + t * (0.02658733 + t * (0.00301532 + t * 0.00032411))))));
+        result = exp_d(-ax) * result;
+    } else {
+        double t = 3.75 / ax;
+        result = (1.0 / sqrt_d(ax)) * (0.39894228 - t * (0.03988024
+                 - t * (0.00362018 + t * (0.00163801 - t * (0.01031555
+                 - t * (0.02282967 - t * (0.02895312 - t * (0.01787654
+                 - t * 0.00420059))))))));
+    }
+    return (x_in < 0.0) ? -result : result;
+}
+
+// ----- Entr (double precision): -x*log(x), 0->0, negative->-inf -----
+double entr_impl_d(double x) {
+    if (x > 0.0) return -x * log_d(x);
+    if (x == 0.0) return 0.0;
+    return -1.0e308;
+}
+
+// ----- SphericalBesselJ0 (double precision): sin(x)/x, j0(0)=1 -----
+double spherical_bessel_j0_impl_d(double x) {
+    if (x == 0.0) return 1.0;
+    return sin_d(x) / x;
+}
+
 // ----- Polygamma (double precision) -----
 double polygamma_impl_d(int n, double x) {
     if (n == 0) return digamma_impl_d(x);
@@ -368,6 +419,10 @@ void main() {
         case 9:  r = erfinv_impl_d(x); break;
         case 10: r = sinc_impl_d(x); break;
         case 11: r = polygamma_impl_d(params.param_int, x); break;
+        case 12: r = i0e_impl_d(x); break;
+        case 13: r = i1e_impl_d(x); break;
+        case 14: r = entr_impl_d(x); break;
+        case 15: r = spherical_bessel_j0_impl_d(x); break;
         default: r = 0.0;
     }
     output_data[idx] = r;

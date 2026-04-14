@@ -191,6 +191,16 @@ class SyclDetReduceF32;
 class SyclDetReduceF64;
 class SyclDetCombineF32;
 class SyclDetCombineF64;
+class SyclTransposeGeqrfAF32;
+class SyclTransposeGeqrfAF64;
+class SyclGeqrfExtractF32;
+class SyclGeqrfExtractF64;
+class SyclTransposeOrmqrRF32;
+class SyclTransposeOrmqrRF64;
+class SyclTransposeOrmqrCF32;
+class SyclTransposeOrmqrCF64;
+class SyclTransposeOrmqrBackF32;
+class SyclTransposeOrmqrBackF64;
 
 auto linalg_det_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     auto shape = input.shape();
@@ -1262,6 +1272,134 @@ auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
         return output;
     } else {
         throw std::runtime_error("linalg_solve_triangular: only Float32 and Float64 supported");
+    }
+}
+
+// ============================================================================
+// Geqrf — raw QR factorization returning packed reflectors + tau (oneMKL)
+// ============================================================================
+auto linalg_geqrf_kernel(const Tensor& input, sycl::queue& queue) -> std::pair<Tensor, Tensor> {
+    auto shape = input.shape();
+    int64_t m = shape[shape.size() - 2];
+    int64_t n = shape[shape.size() - 1];
+    int64_t k = std::min(m, n);
+
+    if (input.dtype() == DType::Float32) {
+        SyclDeviceBuffer<float> d_a(m * n, queue);
+        SyclDeviceBuffer<float> d_tau(k, queue);
+
+        // Convert row-major input to column-major for oneMKL
+        row_to_col_major<float, SyclTransposeGeqrfAF32>(
+            d_a.get(), get_data_ptr<const float>(input), m, n, queue);
+
+        auto sp = ::oneapi::mkl::lapack::geqrf_scratchpad_size<float>(queue, m, n, m);
+        SyclDeviceBuffer<float> scratch(sp, queue);
+        ::oneapi::mkl::lapack::geqrf(queue, m, n, d_a.get(), m, d_tau.get(), scratch.get(), sp).wait();
+
+        // Convert result back to row-major (packed reflectors + R on/above diagonal)
+        Tensor result({m, n}, input.dtype(), input.device());
+        col_to_row_major<float, SyclGeqrfExtractF32>(
+            get_data_ptr<float>(result), d_a.get(), m, n, queue);
+
+        // Copy tau to output tensor
+        Tensor tau_out({k}, input.dtype(), input.device());
+        queue.memcpy(const_cast<void*>(tau_out.data_ptr()), d_tau.get(), k * sizeof(float)).wait();
+
+        return {result, tau_out};
+    } else if (input.dtype() == DType::Float64) {
+        SyclDeviceBuffer<double> d_a(m * n, queue);
+        SyclDeviceBuffer<double> d_tau(k, queue);
+
+        row_to_col_major<double, SyclTransposeGeqrfAF64>(
+            d_a.get(), get_data_ptr<const double>(input), m, n, queue);
+
+        auto sp = ::oneapi::mkl::lapack::geqrf_scratchpad_size<double>(queue, m, n, m);
+        SyclDeviceBuffer<double> scratch(sp, queue);
+        ::oneapi::mkl::lapack::geqrf(queue, m, n, d_a.get(), m, d_tau.get(), scratch.get(), sp).wait();
+
+        Tensor result({m, n}, input.dtype(), input.device());
+        col_to_row_major<double, SyclGeqrfExtractF64>(
+            get_data_ptr<double>(result), d_a.get(), m, n, queue);
+
+        Tensor tau_out({k}, input.dtype(), input.device());
+        queue.memcpy(const_cast<void*>(tau_out.data_ptr()), d_tau.get(), k * sizeof(double)).wait();
+
+        return {result, tau_out};
+    } else {
+        throw std::runtime_error("linalg_geqrf: only Float32 and Float64 supported");
+    }
+}
+
+// ============================================================================
+// Ormqr — multiply matrix by Q from QR factorization using tau (oneMKL)
+// ============================================================================
+auto linalg_ormqr_kernel(const Tensor& reflectors, const Tensor& tau,
+                          const Tensor& C, bool left, bool transpose_q,
+                          sycl::queue& queue) -> Tensor {
+    auto c_shape = C.shape();
+    auto r_shape = reflectors.shape();
+    int64_t c_m = c_shape[c_shape.size() - 2];
+    int64_t c_n = c_shape[c_shape.size() - 1];
+    int64_t r_m = r_shape[r_shape.size() - 2];
+    int64_t r_n = r_shape[r_shape.size() - 1];
+    int64_t k_refl = tau.shape()[static_cast<int64_t>(tau.shape().size()) - 1];
+
+    // oneMKL ormqr works in column-major
+    auto mkl_side = left ? ::oneapi::mkl::side::left : ::oneapi::mkl::side::right;
+    auto mkl_trans = transpose_q ? ::oneapi::mkl::transpose::trans : ::oneapi::mkl::transpose::nontrans;
+
+    if (C.dtype() == DType::Float32) {
+        SyclDeviceBuffer<float> d_refl(r_m * r_n, queue);
+        SyclDeviceBuffer<float> d_tau(k_refl, queue);
+        SyclDeviceBuffer<float> d_c(c_m * c_n, queue);
+
+        // Convert to column-major
+        row_to_col_major<float, SyclTransposeOrmqrRF32>(
+            d_refl.get(), get_data_ptr<const float>(reflectors), r_m, r_n, queue);
+        queue.memcpy(d_tau.get(), tau.data_ptr(), k_refl * sizeof(float)).wait();
+        row_to_col_major<float, SyclTransposeOrmqrCF32>(
+            d_c.get(), get_data_ptr<const float>(C), c_m, c_n, queue);
+
+        int64_t lda = left ? c_m : c_n;
+        auto sp = ::oneapi::mkl::lapack::ormqr_scratchpad_size<float>(
+            queue, mkl_side, mkl_trans, c_m, c_n, k_refl, r_m, c_m);
+        SyclDeviceBuffer<float> scratch(sp, queue);
+        ::oneapi::mkl::lapack::ormqr(queue, mkl_side, mkl_trans,
+            c_m, c_n, k_refl, d_refl.get(), r_m, d_tau.get(),
+            d_c.get(), c_m, scratch.get(), sp).wait();
+
+        Tensor output(std::vector<int64_t>(c_shape.begin(), c_shape.end()),
+                       C.dtype(), C.device());
+        col_to_row_major<float, SyclTransposeOrmqrBackF32>(
+            get_data_ptr<float>(output), d_c.get(), c_m, c_n, queue);
+
+        return output;
+    } else if (C.dtype() == DType::Float64) {
+        SyclDeviceBuffer<double> d_refl(r_m * r_n, queue);
+        SyclDeviceBuffer<double> d_tau(k_refl, queue);
+        SyclDeviceBuffer<double> d_c(c_m * c_n, queue);
+
+        row_to_col_major<double, SyclTransposeOrmqrRF64>(
+            d_refl.get(), get_data_ptr<const double>(reflectors), r_m, r_n, queue);
+        queue.memcpy(d_tau.get(), tau.data_ptr(), k_refl * sizeof(double)).wait();
+        row_to_col_major<double, SyclTransposeOrmqrCF64>(
+            d_c.get(), get_data_ptr<const double>(C), c_m, c_n, queue);
+
+        auto sp = ::oneapi::mkl::lapack::ormqr_scratchpad_size<double>(
+            queue, mkl_side, mkl_trans, c_m, c_n, k_refl, r_m, c_m);
+        SyclDeviceBuffer<double> scratch(sp, queue);
+        ::oneapi::mkl::lapack::ormqr(queue, mkl_side, mkl_trans,
+            c_m, c_n, k_refl, d_refl.get(), r_m, d_tau.get(),
+            d_c.get(), c_m, scratch.get(), sp).wait();
+
+        Tensor output(std::vector<int64_t>(c_shape.begin(), c_shape.end()),
+                       C.dtype(), C.device());
+        col_to_row_major<double, SyclTransposeOrmqrBackF64>(
+            get_data_ptr<double>(output), d_c.get(), c_m, c_n, queue);
+
+        return output;
+    } else {
+        throw std::runtime_error("linalg_ormqr: only Float32 and Float64 supported");
     }
 }
 
@@ -2711,7 +2849,7 @@ auto linalg_lu_kernel(const Tensor& A, sycl::queue& queue)
         if (threads < 1) threads = 1;
         size_t smem_lu = n * n * sizeof(T) + 4 * sizeof(T);
 
-        int32_t* piv_ptr = pivots.template data<int32_t>();
+        const int32_t* piv_ptr = pivots.template data<int32_t>();
         int64_t  n_      = n;
 
         queue.submit([&](sycl::handler& h) {
@@ -2823,7 +2961,7 @@ auto linalg_lu_solve_kernel(const Tensor& LU_data, const Tensor& pivots,
         if (threads < 1) threads = 1;
         size_t smem_solve = (n * n + n * nrhs) * sizeof(T);
 
-        int32_t* piv_ptr = pivots.template data<int32_t>();
+        const int32_t* piv_ptr = pivots.template data<int32_t>();
         int64_t n_ = n, nrhs_ = nrhs;
 
         queue.submit([&](sycl::handler& h) {
@@ -2964,7 +3102,594 @@ auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
     return work_b;
 }
 
+// ============================================================================
+// Geqrf fallback — Householder QR returning packed reflectors + tau (SYCL)
+// ============================================================================
+auto linalg_geqrf_kernel(const Tensor& A, sycl::queue& queue) -> std::pair<Tensor, Tensor> {
+    validate_linalg_dtype(A, "geqrf");
+    if (A.dtype() == DType::Float16) {
+        auto [R, tau] = linalg_geqrf_kernel(A.to(DType::Float32), queue);
+        return {R, tau};
+    }
+    if (A.dtype() == DType::BFloat16) {
+        auto [R, tau] = linalg_geqrf_kernel(A.to(DType::Float32), queue);
+        return {R, tau};
+    }
+
+    auto work = A.contiguous().clone();
+    auto shape = A.shape();
+    auto a_ndim = static_cast<int64_t>(shape.size());
+    if (a_ndim < 2) throw std::invalid_argument("linalg::geqrf: input must be at least 2D");
+
+    int64_t m = shape[a_ndim - 2];
+    int64_t n_cols = shape[a_ndim - 1];
+    int64_t k = std::min(m, n_cols);
+    int64_t nbatch = batch_size(work);
+
+    std::vector<int64_t> batch_dims;
+    for (size_t i = 0; i + 2 < shape.size(); i++) batch_dims.push_back(shape[i]);
+
+    std::vector<int64_t> tau_shape = batch_dims;
+    tau_shape.push_back(k);
+    auto tau_result = zeros(tau_shape, A.dtype(), A.device());
+
+    auto launch_geqrf = [&](auto* work_ptr, auto* tau_ptr) {
+        using T = std::remove_pointer_t<decltype(work_ptr)>;
+        check_size_limit<T>(std::max(m, n_cols), "geqrf");
+        size_t smem_bytes = (m * n_cols + 4) * sizeof(T);
+        int threads = std::min(static_cast<int>(std::max(m, n_cols)), 128);
+        if (threads < 1) threads = 1;
+
+        queue.submit([&](sycl::handler& h) {
+            sycl::local_accessor<char, 1> smem(sycl::range<1>(smem_bytes), h);
+            int m_ = static_cast<int>(m), nc_ = static_cast<int>(n_cols), k_ = static_cast<int>(k);
+            h.parallel_for(sycl::nd_range<1>(nbatch * threads, threads),
+                [=](sycl::nd_item<1> item) {
+                    int batch_idx = item.get_group_linear_id();
+                    int tid = item.get_local_linear_id();
+                    int num_threads = item.get_local_range(0);
+                    char* smem_raw = smem.get_pointer();
+                    T* R = reinterpret_cast<T*>(smem_raw);
+                    T* scratch = R + m_ * nc_;
+
+                    T* A = work_ptr + batch_idx * m_ * nc_;
+                    T* tau = tau_ptr + batch_idx * k_;
+
+                    for (int idx = tid; idx < m_ * nc_; idx += num_threads) R[idx] = A[idx];
+                    sycl::group_barrier(item.get_group());
+
+                    constexpr T zero_tol = std::is_same_v<T, float> ? T(1e-30) : T(1e-60);
+
+                    for (int j = 0; j < k_; j++) {
+                        if (tid == 0) {
+                            T sigma = T(0);
+                            for (int i = j + 1; i < m_; i++) sigma += R[i * nc_ + j] * R[i * nc_ + j];
+                            T x0 = R[j * nc_ + j];
+                            T norm_x = sycl::sqrt(x0 * x0 + sigma);
+                            if (norm_x < zero_tol || sigma < zero_tol) {
+                                scratch[1] = T(0);
+                                tau[j] = T(0);
+                            } else {
+                                T alpha = -sycl::copysign(norm_x, x0);
+                                T v0 = x0 - alpha;
+                                T v_norm_sq = v0 * v0 + sigma;
+                                T tau_val = T(2) / v_norm_sq;
+                                scratch[0] = v0;
+                                scratch[1] = tau_val;
+                                scratch[2] = alpha;
+                                tau[j] = tau_val;
+                            }
+                        }
+                        sycl::group_barrier(item.get_group());
+
+                        T tau_val = scratch[1];
+                        if (tau_val == T(0)) { sycl::group_barrier(item.get_group()); continue; }
+                        T v0 = scratch[0];
+                        T alpha = scratch[2];
+
+                        for (int col = j + tid; col < nc_; col += num_threads) {
+                            T dot = v0 * R[j * nc_ + col];
+                            for (int i = j + 1; i < m_; i++) dot += R[i * nc_ + j] * R[i * nc_ + col];
+                            dot *= tau_val;
+                            R[j * nc_ + col] -= v0 * dot;
+                            for (int i = j + 1; i < m_; i++) R[i * nc_ + col] -= R[i * nc_ + j] * dot;
+                        }
+                        sycl::group_barrier(item.get_group());
+
+                        if (tid == 0) {
+                            T inv_v0 = T(1) / v0;
+                            for (int i = j + 1; i < m_; i++) R[i * nc_ + j] *= inv_v0;
+                            R[j * nc_ + j] = alpha;
+                            tau[j] = tau_val * v0 * v0;
+                        }
+                        sycl::group_barrier(item.get_group());
+                    }
+
+                    for (int idx = tid; idx < m_ * nc_; idx += num_threads) A[idx] = R[idx];
+                });
+        }).wait();
+    };
+
+    if (work.dtype() == DType::Float32)
+        launch_geqrf(work.data<float>(), tau_result.data<float>());
+    else
+        launch_geqrf(work.data<double>(), tau_result.data<double>());
+
+    return {work, tau_result};
+}
+
+// ============================================================================
+// Ormqr fallback — apply Q (from Householder reflectors) to matrix C (SYCL)
+// ============================================================================
+auto linalg_ormqr_kernel(const Tensor& reflectors, const Tensor& tau,
+                          const Tensor& C, bool left, bool transpose_q,
+                          sycl::queue& queue) -> Tensor {
+    validate_linalg_dtype(C, "ormqr");
+    if (C.dtype() == DType::Float16) {
+        return linalg_ormqr_kernel(reflectors.to(DType::Float32), tau.to(DType::Float32),
+                                    C.to(DType::Float32), left, transpose_q, queue);
+    }
+    if (C.dtype() == DType::BFloat16) {
+        return linalg_ormqr_kernel(reflectors.to(DType::Float32), tau.to(DType::Float32),
+                                    C.to(DType::Float32), left, transpose_q, queue);
+    }
+
+    auto work_c = C.contiguous().clone();
+    auto refl = reflectors.contiguous();
+    auto tau_c = tau.contiguous();
+
+    auto c_shape = C.shape();
+    auto r_shape = reflectors.shape();
+    auto c_ndim = static_cast<int64_t>(c_shape.size());
+    auto r_ndim = static_cast<int64_t>(r_shape.size());
+    if (c_ndim < 2) throw std::invalid_argument("linalg::ormqr: C must be at least 2D");
+    if (r_ndim < 2) throw std::invalid_argument("linalg::ormqr: reflectors must be at least 2D");
+
+    int64_t c_m = c_shape[c_ndim - 2];
+    int64_t c_n = c_shape[c_ndim - 1];
+    int64_t k_refl = tau.shape()[static_cast<int64_t>(tau.shape().size()) - 1];
+    int64_t nbatch = batch_size(work_c);
+    int64_t r_m = r_shape[r_ndim - 2];
+    int64_t r_n = r_shape[r_ndim - 1];
+
+    auto launch_ormqr = [&](auto* refl_ptr, auto* tau_ptr, auto* c_ptr) {
+        using T = std::remove_pointer_t<decltype(c_ptr)>;
+        check_size_limit<T>(std::max(c_m, c_n), "ormqr");
+        size_t smem_bytes = (c_m * c_n + std::max(c_m, c_n)) * sizeof(T);
+        int threads = std::min(static_cast<int>(std::max(c_m, c_n)), 128);
+        if (threads < 1) threads = 1;
+
+        int rm_ = static_cast<int>(r_m), rn_ = static_cast<int>(r_n);
+        int cm_ = static_cast<int>(c_m), cn_ = static_cast<int>(c_n);
+        int kr_ = static_cast<int>(k_refl);
+
+        queue.submit([&](sycl::handler& h) {
+            sycl::local_accessor<char, 1> smem(sycl::range<1>(smem_bytes), h);
+            h.parallel_for(sycl::nd_range<1>(nbatch * threads, threads),
+                [=](sycl::nd_item<1> item) {
+                    int batch_idx = item.get_group_linear_id();
+                    int tid = item.get_local_linear_id();
+                    int num_threads = item.get_local_range(0);
+                    T* C = reinterpret_cast<T*>(smem.get_pointer());
+
+                    const T* refl = refl_ptr + batch_idx * rm_ * rn_;
+                    const T* tau = tau_ptr + batch_idx * kr_;
+                    T* C_out = c_ptr + batch_idx * cm_ * cn_;
+
+                    for (int idx = tid; idx < cm_ * cn_; idx += num_threads) C[idx] = C_out[idx];
+                    sycl::group_barrier(item.get_group());
+
+                    int start, end_val, step;
+                    if ((left && !transpose_q) || (!left && !transpose_q)) {
+                        start = 0; end_val = kr_; step = 1;
+                    } else {
+                        start = kr_ - 1; end_val = -1; step = -1;
+                    }
+
+                    for (int j = start; j != end_val; j += step) {
+                        T tau_j = tau[j];
+                        if (tau_j == T(0)) continue;
+
+                        if (left) {
+                            for (int col = tid; col < cn_; col += num_threads) {
+                                T dot = C[j * cn_ + col];
+                                for (int i = j + 1; i < cm_; i++)
+                                    dot += refl[i * rn_ + j] * C[i * cn_ + col];
+                                dot *= tau_j;
+                                C[j * cn_ + col] -= dot;
+                                for (int i = j + 1; i < cm_; i++)
+                                    C[i * cn_ + col] -= refl[i * rn_ + j] * dot;
+                            }
+                        } else {
+                            for (int row = tid; row < cm_; row += num_threads) {
+                                T dot = C[row * cn_ + j];
+                                for (int i = j + 1; i < cn_; i++)
+                                    dot += C[row * cn_ + i] * refl[i * rn_ + j];
+                                dot *= tau_j;
+                                C[row * cn_ + j] -= dot;
+                                for (int i = j + 1; i < cn_; i++)
+                                    C[row * cn_ + i] -= dot * refl[i * rn_ + j];
+                            }
+                        }
+                        sycl::group_barrier(item.get_group());
+                    }
+
+                    for (int idx = tid; idx < cm_ * cn_; idx += num_threads) C_out[idx] = C[idx];
+                });
+        }).wait();
+    };
+
+    if (work_c.dtype() == DType::Float32)
+        launch_ormqr(refl.data<float>(), tau_c.data<float>(), work_c.data<float>());
+    else
+        launch_ormqr(refl.data<double>(), tau_c.data<double>(), work_c.data<double>());
+
+    return work_c;
+}
+
 #endif // TENZOR_HAS_ONEMKL
+
+// =========================================================================
+// LDL^T factorization — native SYCL Bunch-Kaufman kernel
+// =========================================================================
+auto linalg_ldl_factor_kernel(const Tensor& A, sycl::queue& queue)
+    -> std::tuple<Tensor, Tensor> {
+    auto original_dtype = A.dtype();
+    if (original_dtype == DType::Float16 || original_dtype == DType::BFloat16) {
+        auto [LD32, piv] = linalg_ldl_factor_kernel(A.to(DType::Float32), queue);
+        return {LD32.to(original_dtype), piv};
+    }
+    if (original_dtype != DType::Float32 && original_dtype != DType::Float64) {
+        throw std::invalid_argument("linalg::ldl_factor: unsupported dtype");
+    }
+
+    auto shape = A.shape();
+    auto ndim = static_cast<int64_t>(shape.size());
+    if (ndim < 2) throw std::invalid_argument("linalg::ldl_factor: input must be at least 2D");
+    int64_t n = shape[ndim - 1];
+    if (shape[ndim - 2] != n) throw std::invalid_argument("linalg::ldl_factor: expected square matrix");
+
+    int64_t nbatch = 1;
+    for (int64_t i = 0; i + 2 < ndim; ++i) nbatch *= shape[i];
+
+    std::vector<int64_t> piv_shape;
+    for (size_t i = 0; i + 2 < shape.size(); ++i) piv_shape.push_back(shape[i]);
+    piv_shape.push_back(n);
+
+    auto work = A.contiguous().clone();
+    auto pivots_out = zeros(piv_shape, DType::Int32, A.device());
+
+    auto launch = [&](auto* data_ptr) {
+        using T = std::remove_pointer_t<decltype(data_ptr)>;
+        int32_t* piv_ptr = pivots_out.template data<int32_t>();
+        int64_t n_ = n;
+
+        queue.submit([&](sycl::handler& h) {
+            size_t smem_sz = (n_ * n_ + 4) * sizeof(T);
+            sycl::local_accessor<char, 1> smem(sycl::range<1>(smem_sz), h);
+            auto* data = data_ptr;
+            auto* piv = piv_ptr;
+            h.parallel_for(sycl::nd_range<1>(nbatch, 1),
+                [=](sycl::nd_item<1> item) {
+                    int batch_idx = item.get_group_linear_id();
+                    char* smem_raw = smem.get_pointer();
+                    T* As = reinterpret_cast<T*>(smem_raw);
+                    T* scratch = As + n_ * n_;
+
+                    T* batch_data = data + batch_idx * n_ * n_;
+                    int* batch_piv = piv + batch_idx * n_;
+
+                    for (int idx = 0; idx < n_ * n_; idx++)
+                        As[idx] = batch_data[idx];
+
+                    const T alpha_val = static_cast<T>(0.6404);
+
+                    int k = 0;
+                    while (k < n_) {
+                        T col_max = T(0);
+                        int col_max_row = k;
+                        for (int i = k + 1; i < n_; i++) {
+                            T v = sycl::fabs(As[i * n_ + k]);
+                            if (v > col_max) { col_max = v; col_max_row = i; }
+                        }
+                        T abs_akk = sycl::fabs(As[k * n_ + k]);
+
+                        int pivot_type;
+                        int swap_row;
+
+                        if (abs_akk == T(0) && col_max == T(0)) {
+                            batch_piv[k] = k + 1;
+                            pivot_type = 1; swap_row = k;
+                        } else if (abs_akk >= alpha_val * col_max) {
+                            batch_piv[k] = k + 1;
+                            pivot_type = 1; swap_row = k;
+                        } else {
+                            int r = col_max_row;
+                            T row_max = T(0);
+                            for (int j = k; j < n_; j++) {
+                                if (j == r) continue;
+                                T v = sycl::fabs(As[r * n_ + j]);
+                                if (v > row_max) row_max = v;
+                            }
+                            T abs_arr = sycl::fabs(As[r * n_ + r]);
+
+                            if (abs_akk * row_max >= alpha_val * col_max * col_max) {
+                                batch_piv[k] = k + 1;
+                                pivot_type = 1; swap_row = k;
+                            } else if (abs_arr >= alpha_val * row_max) {
+                                batch_piv[k] = r + 1;
+                                pivot_type = 1; swap_row = r;
+                            } else {
+                                batch_piv[k] = -(r + 1);
+                                batch_piv[k + 1] = -(r + 1);
+                                pivot_type = 2; swap_row = r;
+                            }
+                        }
+
+                        if (pivot_type == 1) {
+                            if (swap_row != k) {
+                                for (int j = 0; j < n_; j++) {
+                                    T tmp = As[k * n_ + j];
+                                    As[k * n_ + j] = As[swap_row * n_ + j];
+                                    As[swap_row * n_ + j] = tmp;
+                                }
+                                for (int i = 0; i < n_; i++) {
+                                    T tmp = As[i * n_ + k];
+                                    As[i * n_ + k] = As[i * n_ + swap_row];
+                                    As[i * n_ + swap_row] = tmp;
+                                }
+                            }
+                            T diag = As[k * n_ + k];
+                            if (diag != T(0)) {
+                                for (int i = k + 1; i < n_; i++)
+                                    As[i * n_ + k] /= diag;
+                                for (int i = k + 1; i < n_; i++) {
+                                    T lik = As[i * n_ + k];
+                                    for (int j = k + 1; j <= i; j++)
+                                        As[i * n_ + j] -= lik * diag * As[j * n_ + k];
+                                }
+                            }
+                            k++;
+                        } else {
+                            if (swap_row != k + 1) {
+                                for (int j = 0; j < n_; j++) {
+                                    T tmp = As[(k+1) * n_ + j];
+                                    As[(k+1) * n_ + j] = As[swap_row * n_ + j];
+                                    As[swap_row * n_ + j] = tmp;
+                                }
+                                for (int i = 0; i < n_; i++) {
+                                    T tmp = As[i * n_ + (k+1)];
+                                    As[i * n_ + (k+1)] = As[i * n_ + swap_row];
+                                    As[i * n_ + swap_row] = tmp;
+                                }
+                            }
+                            T d11 = As[k * n_ + k];
+                            T d21 = As[(k+1) * n_ + k];
+                            T d22 = As[(k+1) * n_ + (k+1)];
+                            T det = d11 * d22 - d21 * d21;
+                            if (det != T(0)) {
+                                T inv11 = d22 / det, inv12 = -d21 / det, inv22 = d11 / det;
+                                for (int i = k + 2; i < n_; i++) {
+                                    T a0 = As[i * n_ + k], a1 = As[i * n_ + (k+1)];
+                                    As[i * n_ + k]     = inv11 * a0 + inv12 * a1;
+                                    As[i * n_ + (k+1)] = inv12 * a0 + inv22 * a1;
+                                }
+                                for (int i = k + 2; i < n_; i++) {
+                                    T li0 = As[i * n_ + k], li1 = As[i * n_ + (k+1)];
+                                    for (int j = k + 2; j <= i; j++) {
+                                        T lj0 = As[j * n_ + k], lj1 = As[j * n_ + (k+1)];
+                                        As[i * n_ + j] -= (li0 * (d11 * lj0 + d21 * lj1)
+                                                         + li1 * (d21 * lj0 + d22 * lj1));
+                                    }
+                                }
+                            }
+                            k += 2;
+                        }
+                    }
+
+                    for (int idx = 0; idx < n_ * n_; idx++)
+                        batch_data[idx] = As[idx];
+                });
+        }).wait();
+    };
+
+    if (A.dtype() == DType::Float32)
+        launch(work.data<float>());
+    else
+        launch(work.data<double>());
+
+    return {work, pivots_out};
+}
+
+// =========================================================================
+// LDL^T solve — native SYCL Bunch-Kaufman solve kernel
+// =========================================================================
+auto linalg_ldl_solve_kernel(const Tensor& LD, const Tensor& pivots,
+                              const Tensor& B, sycl::queue& queue) -> Tensor {
+    auto original_dtype = LD.dtype();
+    if (original_dtype == DType::Float16 || original_dtype == DType::BFloat16) {
+        auto result = linalg_ldl_solve_kernel(LD.to(DType::Float32), pivots,
+                                               B.to(DType::Float32), queue);
+        return result.to(original_dtype);
+    }
+    if (original_dtype != DType::Float32 && original_dtype != DType::Float64) {
+        throw std::invalid_argument("linalg::ldl_solve: unsupported dtype");
+    }
+
+    auto ld_shape = LD.shape();
+    auto b_shape = B.shape();
+    int64_t ld_ndim = static_cast<int64_t>(ld_shape.size());
+    int64_t n = ld_shape[ld_ndim - 1];
+    int64_t nrhs = b_shape[static_cast<int64_t>(b_shape.size()) - 1];
+    int64_t nbatch = 1;
+    for (int64_t i = 0; i + 2 < ld_ndim; ++i) nbatch *= ld_shape[i];
+
+    auto ld_cont = LD.contiguous();
+    auto work_b = B.contiguous().clone();
+
+    auto launch = [&](auto* ld_ptr, auto* b_ptr) {
+        using T = std::remove_pointer_t<decltype(ld_ptr)>;
+        const int32_t* piv_ptr = pivots.template data<int32_t>();
+        int64_t n_ = n, nrhs_ = nrhs;
+
+        queue.submit([&](sycl::handler& h) {
+            size_t smem_sz = (n_ * n_ + n_ * nrhs_) * sizeof(T);
+            sycl::local_accessor<char, 1> smem(sycl::range<1>(smem_sz), h);
+            auto* ld_data = ld_ptr;
+            auto* b_data = b_ptr;
+            auto* piv = piv_ptr;
+            h.parallel_for(sycl::nd_range<1>(nbatch, 1),
+                [=](sycl::nd_item<1> item) {
+                    int batch_idx = item.get_group_linear_id();
+                    char* smem_raw = smem.get_pointer();
+                    T* LDs = reinterpret_cast<T*>(smem_raw);
+                    T* Bs = LDs + n_ * n_;
+
+                    const T* batch_ld = ld_data + batch_idx * n_ * n_;
+                    const int32_t* batch_piv = piv + batch_idx * n_;
+                    T* batch_b = b_data + batch_idx * n_ * nrhs_;
+
+                    for (int idx = 0; idx < n_ * n_; idx++)
+                        LDs[idx] = batch_ld[idx];
+                    for (int idx = 0; idx < n_ * nrhs_; idx++)
+                        Bs[idx] = batch_b[idx];
+
+                    // Forward pivot permutation
+                    for (int k = 0; k < n_; ) {
+                        int p = batch_piv[k];
+                        if (p > 0) {
+                            int sr = p - 1;
+                            if (sr != k)
+                                for (int j = 0; j < nrhs_; j++) {
+                                    T tmp = Bs[k * nrhs_ + j]; Bs[k * nrhs_ + j] = Bs[sr * nrhs_ + j]; Bs[sr * nrhs_ + j] = tmp;
+                                }
+                            k++;
+                        } else {
+                            int sr = (-p) - 1;
+                            if (sr != k + 1)
+                                for (int j = 0; j < nrhs_; j++) {
+                                    T tmp = Bs[(k+1) * nrhs_ + j]; Bs[(k+1) * nrhs_ + j] = Bs[sr * nrhs_ + j]; Bs[sr * nrhs_ + j] = tmp;
+                                }
+                            k += 2;
+                        }
+                    }
+
+                    // Forward substitution
+                    for (int k = 0; k < n_; ) {
+                        int p = batch_piv[k];
+                        if (p > 0) {
+                            for (int i = k + 1; i < n_; i++) {
+                                T m = LDs[i * n_ + k];
+                                for (int j = 0; j < nrhs_; j++)
+                                    Bs[i * nrhs_ + j] -= m * Bs[k * nrhs_ + j];
+                            }
+                            k++;
+                        } else {
+                            for (int i = k + 2; i < n_; i++) {
+                                T m0 = LDs[i * n_ + k], m1 = LDs[i * n_ + k + 1];
+                                for (int j = 0; j < nrhs_; j++)
+                                    Bs[i * nrhs_ + j] -= m0 * Bs[k * nrhs_ + j] + m1 * Bs[(k+1) * nrhs_ + j];
+                            }
+                            k += 2;
+                        }
+                    }
+
+                    // Diagonal solve
+                    for (int k = 0; k < n_; ) {
+                        int p = batch_piv[k];
+                        if (p > 0) {
+                            T d = LDs[k * n_ + k];
+                            for (int j = 0; j < nrhs_; j++) Bs[k * nrhs_ + j] /= d;
+                            k++;
+                        } else {
+                            T d11 = LDs[k * n_ + k], d21 = LDs[(k+1) * n_ + k], d22 = LDs[(k+1) * n_ + (k+1)];
+                            T det = d11 * d22 - d21 * d21;
+                            for (int j = 0; j < nrhs_; j++) {
+                                T y0 = Bs[k * nrhs_ + j], y1 = Bs[(k+1) * nrhs_ + j];
+                                Bs[k * nrhs_ + j]     = (d22 * y0 - d21 * y1) / det;
+                                Bs[(k+1) * nrhs_ + j] = (d11 * y1 - d21 * y0) / det;
+                            }
+                            k += 2;
+                        }
+                    }
+
+                    // Backward substitution
+                    for (int k = n_ - 1; k >= 0; ) {
+                        int p = batch_piv[k];
+                        if (p > 0) {
+                            for (int i = k + 1; i < n_; i++) {
+                                T m = LDs[i * n_ + k];
+                                for (int j = 0; j < nrhs_; j++)
+                                    Bs[k * nrhs_ + j] -= m * Bs[i * nrhs_ + j];
+                            }
+                            k--;
+                        } else {
+                            int k0 = k - 1;
+                            for (int i = k + 1; i < n_; i++) {
+                                T m0 = LDs[i * n_ + k0], m1 = LDs[i * n_ + k];
+                                for (int j = 0; j < nrhs_; j++) {
+                                    Bs[k0 * nrhs_ + j] -= m0 * Bs[i * nrhs_ + j];
+                                    Bs[k * nrhs_ + j]  -= m1 * Bs[i * nrhs_ + j];
+                                }
+                            }
+                            k -= 2;
+                        }
+                    }
+
+                    // Inverse pivot permutation
+                    for (int k = n_ - 1; k >= 0; ) {
+                        int p = batch_piv[k];
+                        if (p > 0) {
+                            int sr = p - 1;
+                            if (sr != k)
+                                for (int j = 0; j < nrhs_; j++) {
+                                    T tmp = Bs[k * nrhs_ + j]; Bs[k * nrhs_ + j] = Bs[sr * nrhs_ + j]; Bs[sr * nrhs_ + j] = tmp;
+                                }
+                            k--;
+                        } else {
+                            int sr = (-p) - 1;
+                            if (sr != k)
+                                for (int j = 0; j < nrhs_; j++) {
+                                    T tmp = Bs[k * nrhs_ + j]; Bs[k * nrhs_ + j] = Bs[sr * nrhs_ + j]; Bs[sr * nrhs_ + j] = tmp;
+                                }
+                            k -= 2;
+                        }
+                    }
+
+                    for (int idx = 0; idx < n_ * nrhs_; idx++)
+                        batch_b[idx] = Bs[idx];
+                });
+        }).wait();
+    };
+
+    if (LD.dtype() == DType::Float32)
+        launch(ld_cont.data<float>(), work_b.data<float>());
+    else
+        launch(ld_cont.data<double>(), work_b.data<double>());
+
+    return work_b;
+}
+
+// =========================================================================
+// Householder product — compose from existing ormqr kernel
+// =========================================================================
+auto linalg_householder_kernel(const Tensor& input, const Tensor& tau,
+                                sycl::queue& queue) -> Tensor {
+    auto shape = input.shape();
+    auto ndim = static_cast<int64_t>(shape.size());
+    int64_t m = shape[ndim - 2];
+
+    auto I = tenzor::eye(m, std::nullopt, input.dtype(), input.device());
+
+    if (ndim > 2) {
+        std::vector<int64_t> eye_shape(shape.begin(), shape.end());
+        eye_shape[ndim - 1] = m;
+        I = tenzor::expand(I, std::move(eye_shape));
+        I = I.contiguous();
+    }
+
+    return linalg_ormqr_kernel(input, tau, I, true, false, queue);
+}
 
 } // namespace oneapi
 } // namespace tenzor

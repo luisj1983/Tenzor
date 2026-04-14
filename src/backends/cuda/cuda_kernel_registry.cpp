@@ -12,6 +12,7 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/linalg.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
@@ -235,6 +236,17 @@ namespace cuda {
     auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
                                          bool upper, bool unitriangular,
                                          cudaStream_t stream) -> Tensor;
+    auto linalg_geqrf_kernel(const Tensor& A, cudaStream_t stream)
+        -> std::tuple<Tensor, Tensor>;
+    auto linalg_ormqr_kernel(const Tensor& reflectors, const Tensor& tau,
+                              const Tensor& C, bool left, bool transpose_q,
+                              cudaStream_t stream) -> Tensor;
+    auto linalg_ldl_factor_kernel(const Tensor& A, cudaStream_t stream)
+        -> std::tuple<Tensor, Tensor>;
+    auto linalg_ldl_solve_kernel(const Tensor& LD, const Tensor& pivots,
+                                  const Tensor& B, cudaStream_t stream) -> Tensor;
+    auto linalg_householder_kernel(const Tensor& input, const Tensor& tau,
+                                    cudaStream_t stream) -> Tensor;
     // FFT operations (cuFFT or native Cooley-Tukey + Bluestein fallback)
     auto cuda_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                          const std::string& norm, cudaStream_t stream) -> Tensor;
@@ -621,6 +633,9 @@ namespace cuda {
     auto nested_layer_norm_cuda(const Tensor& values, const Tensor& offsets, const Tensor& weight, const Tensor& bias, float eps, cudaStream_t stream) -> Tensor;
     auto nested_linear_cuda(const Tensor& values, const Tensor& weight, const Tensor* bias, cudaStream_t stream) -> Tensor;
     auto nested_attention_cuda(const Tensor& Q, const Tensor& K, const Tensor& V, const Tensor& q_offsets, const Tensor& kv_offsets, float scale, bool causal, cudaStream_t stream) -> Tensor;
+    auto nested_attention_backward_cuda(const Tensor& grad_out, const Tensor& Q, const Tensor& K, const Tensor& V,
+                                         const Tensor& attn_out, const Tensor& q_offsets, const Tensor& kv_offsets,
+                                         float scale, bool causal, cudaStream_t stream) -> std::vector<Tensor>;
     auto nested_to_padded_cuda(const Tensor& values, const Tensor& offsets, int64_t max_len, float padding_value, cudaStream_t stream) -> Tensor;
     auto nested_from_padded_cuda(const Tensor& padded, const Tensor& offsets, cudaStream_t stream) -> Tensor;
 
@@ -788,6 +803,7 @@ namespace cuda {
     Tensor imag_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor angle_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor polar_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor complex_tensor_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor cross_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
 
     // Special math (native CUDA implementations — replace previous CPU-roundtrip fallbacks)
@@ -806,6 +822,11 @@ namespace cuda {
     Tensor erfinv_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor sinc_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor zeta_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+
+    // Ndtr / LogNdtr / Multigammaln
+    Tensor ndtr_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor log_ndtr_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor multigammaln_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
 
     // New element-wise math ops
     Tensor rsqrt_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
@@ -838,6 +859,19 @@ namespace cuda {
     // NaN-ignoring variance and standard deviation
     Tensor nanvar_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor nanstd_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+
+    // New math ops (OpId 680-688)
+    Tensor logaddexp_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor logaddexp2_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor xlogy_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor i0e_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor i1e_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor entr_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor spherical_bessel_j0_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+
+    // New reduction ops (OpId 683-684)
+    Tensor cosine_similarity_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor renorm_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
 
     // Sparse kernels (sparse.cu). Definitions exist in both the
     // TENZOR_HAS_CUSPARSE path (cuSPARSE-backed) and the fallback path
@@ -1077,6 +1111,40 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::ErfInv,    cuda::erfinv_dispatch);
     table.register_single_output_kernel(OpId::Sinc,      cuda::sinc_dispatch);
     table.register_single_output_kernel(OpId::Zeta,      cuda::zeta_dispatch);
+    table.register_single_output_kernel(OpId::Ndtr,      cuda::ndtr_dispatch);
+    table.register_single_output_kernel(OpId::LogNdtr,   cuda::log_ndtr_dispatch);
+    table.register_single_output_kernel(OpId::Multigammaln, cuda::multigammaln_dispatch);
+
+    // LinalgVectorNorm: delegates to existing Norm kernel
+    table.register_kernel(OpId::LinalgVectorNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float p = static_cast<float>(attrs.get_float(AttrKey::P, 2.0));
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        return std::vector<Tensor>{cuda::norm_kernel(inputs[0], p, dim, keepdim, get_cuda_stream(attrs))};
+    });
+
+    // LinalgMatrixNorm: Frobenius (ord=0), nuclear (ord=1), spectral (ord=2)
+    table.register_single_output_kernel(OpId::LinalgMatrixNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t ord = static_cast<int64_t>(attrs.get_float(AttrKey::Order, 0.0));
+        if (ord == 0) {
+            return cuda::norm_kernel(inputs[0], 2.0f, INT64_MIN, false, get_cuda_stream(attrs));
+        }
+        auto stream = get_cuda_stream(attrs);
+        auto [U, S, Vt] = cuda::linalg_svd_kernel(inputs[0], false, stream);
+        if (ord == 1) {
+            return cuda::sum_kernel(S, INT64_MIN, false, stream);
+        }
+        return cuda::max_kernel(S, INT64_MIN, false, stream);
+    });
+
+    // LinalgVecdot: sum(a * b, dim)
+    table.register_single_output_kernel(OpId::LinalgVecdot, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        auto stream = get_cuda_stream(attrs);
+        Tensor product = cuda::mul_kernel(inputs[0], inputs[1], stream);
+        return cuda::sum_kernel(product, dim, false, stream);
+    });
+
     table.register_kernel(OpId::BetaInc,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             return {cuda::betainc_dispatch(inputs, attrs)};
@@ -1125,6 +1193,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::Imag, cuda::imag_dispatch);
     table.register_single_output_kernel(OpId::Angle, cuda::angle_dispatch);
     table.register_single_output_kernel(OpId::Polar, cuda::polar_dispatch);
+    table.register_single_output_kernel(OpId::ComplexTensor, cuda::complex_tensor_dispatch);
     table.register_single_output_kernel(OpId::Cross, cuda::cross_dispatch);
 
     // =========================================================================
@@ -2930,17 +2999,19 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         bool upper = attrs.get_bool(AttrKey::Upper, false);
         return cuda::linalg_cholesky_kernel(inputs[0], upper, get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::LinalgLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-        auto [L, U, pivots] = cuda::linalg_lu_kernel(inputs[0], get_cuda_stream(attrs));
-        return {L, U, pivots};
-    });
-    table.register_single_output_kernel(OpId::LinalgLUSolve, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        return cuda::linalg_lu_solve_kernel(inputs[0], inputs[1], inputs[2], get_cuda_stream(attrs));
-    });
     table.register_single_output_kernel(OpId::SolveTriangular, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         bool upper = attrs.get_bool(AttrKey::Upper, true);
         bool unitriangular = attrs.get_bool(AttrKey::UnitTriangular, false);
         return cuda::linalg_solve_triangular_kernel(inputs[0], inputs[1], upper, unitriangular, get_cuda_stream(attrs));
+    });
+    table.register_kernel(OpId::Geqrf, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto [result, tau] = cuda::linalg_geqrf_kernel(inputs[0], get_cuda_stream(attrs));
+        return {result, tau};
+    });
+    table.register_single_output_kernel(OpId::Ormqr, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        bool left = attrs.get_bool(AttrKey::Left, true);
+        bool transpose_q = attrs.get_bool(AttrKey::TransposeQ, false);
+        return cuda::linalg_ormqr_kernel(inputs[0], inputs[1], inputs[2], left, transpose_q, get_cuda_stream(attrs));
     });
 #else // !TENZOR_HAS_CUSOLVER — use native CUDA shared-memory linalg fallback
     table.register_single_output_kernel(OpId::LinalgDet, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -2978,11 +3049,64 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         bool unitriangular = attrs.get_bool(AttrKey::UnitTriangular, false);
         return cuda::linalg_solve_triangular_kernel(inputs[0], inputs[1], upper, unitriangular, get_cuda_stream(attrs));
     });
+    table.register_kernel(OpId::Geqrf, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto [result, tau] = cuda::linalg_geqrf_kernel(inputs[0], get_cuda_stream(attrs));
+        return {result, tau};
+    });
+    table.register_single_output_kernel(OpId::Ormqr, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        bool left = attrs.get_bool(AttrKey::Left, true);
+        bool transpose_q = attrs.get_bool(AttrKey::TransposeQ, false);
+        return cuda::linalg_ormqr_kernel(inputs[0], inputs[1], inputs[2], left, transpose_q, get_cuda_stream(attrs));
+    });
 #endif // TENZOR_HAS_CUSOLVER
 
-    // Note: LinalgLU / LinalgLUSolve are registered above only when cuSOLVER is
-    // available. Without cuSOLVER, dispatch falls through to the CPU LAPACKE
-    // implementation in src/ops/linalg.cpp.
+    // LinalgLU / LinalgLUSolve: registered unconditionally. Both cuSOLVER and
+    // the native shared-memory fallback paths provide linalg_lu_kernel /
+    // linalg_lu_solve_kernel.
+    table.register_kernel(OpId::LinalgLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto [L, U, pivots] = cuda::linalg_lu_kernel(inputs[0], get_cuda_stream(attrs));
+        return {L, U, pivots};
+    });
+    table.register_single_output_kernel(OpId::LinalgLUSolve, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return cuda::linalg_lu_solve_kernel(inputs[0], inputs[1], inputs[2], get_cuda_stream(attrs));
+    });
+
+    // =========================================================================
+    // LinalgHouseholder, LinalgLDLFactor, LinalgLDLSolve,
+    // CholeskyInverse, TensorInv, TensorSolve
+    // =========================================================================
+    table.register_single_output_kernel(OpId::LinalgHouseholder,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            return cuda::linalg_householder_kernel(inputs[0], inputs[1], get_cuda_stream(attrs));
+        });
+
+    table.register_kernel(OpId::LinalgLDLFactor,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            auto [LD, pivots] = cuda::linalg_ldl_factor_kernel(inputs[0], get_cuda_stream(attrs));
+            return {LD, pivots};
+        });
+
+    table.register_single_output_kernel(OpId::LinalgLDLSolve,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            return cuda::linalg_ldl_solve_kernel(inputs[0], inputs[1], inputs[2], get_cuda_stream(attrs));
+        });
+
+    table.register_single_output_kernel(OpId::CholeskyInverse,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            bool upper = attrs.get_bool(AttrKey::Upper, false);
+            return linalg::cholesky_inverse(inputs[0], upper);
+        });
+
+    table.register_single_output_kernel(OpId::TensorInv,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t ind = attrs.get_int(AttrKey::Ind, 2);
+            return linalg::tensorinv(inputs[0], ind);
+        });
+
+    table.register_single_output_kernel(OpId::TensorSolve,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return linalg::tensorsolve(inputs[0], inputs[1]);
+        });
 
     // =========================================================================
     // FFT Operations (cuFFT)
@@ -4038,6 +4162,19 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::NanStd, cuda::nanstd_dispatch);
 
     // =========================================================================
+    // New math operations (OpId 680-688)
+    // =========================================================================
+    table.register_single_output_kernel(OpId::LogAddExp, cuda::logaddexp_dispatch);
+    table.register_single_output_kernel(OpId::LogAddExp2, cuda::logaddexp2_dispatch);
+    table.register_single_output_kernel(OpId::XLogY, cuda::xlogy_dispatch);
+    table.register_single_output_kernel(OpId::I0e, cuda::i0e_dispatch);
+    table.register_single_output_kernel(OpId::I1e, cuda::i1e_dispatch);
+    table.register_single_output_kernel(OpId::Entr, cuda::entr_dispatch);
+    table.register_single_output_kernel(OpId::SphericalBesselJ0, cuda::spherical_bessel_j0_dispatch);
+    table.register_single_output_kernel(OpId::CosineSimilarity, cuda::cosine_similarity_dispatch);
+    table.register_single_output_kernel(OpId::Renorm, cuda::renorm_dispatch);
+
+    // =========================================================================
     // Nested Tensor Operations
     // =========================================================================
     table.register_single_output_kernel(OpId::NestedSoftmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -4084,6 +4221,30 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::NestedFromPadded, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         return cuda::nested_from_padded_cuda(inputs[0], inputs[1], get_cuda_stream(attrs));
     });
+
+    // =========================================================================
+    // AsStrided — metadata-only view with custom shape/strides
+    // =========================================================================
+    table.register_single_output_kernel(OpId::AsStrided,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto shape = attrs.get_int_list(AttrKey::Shape);
+            auto strides = attrs.get_int_list(AttrKey::Strides);
+            int64_t offset = attrs.get_int(AttrKey::StorageOffset, -1);
+            std::optional<int64_t> storage_offset = (offset >= 0) ? std::optional(offset) : std::nullopt;
+            return tenzor::as_strided(inputs[0], shape, strides, storage_offset);
+        });
+
+    // =========================================================================
+    // NestedAttentionBackward — backward for segmented attention
+    // =========================================================================
+    table.register_kernel(OpId::NestedAttentionBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            float scale = attrs.get_float(AttrKey::Scale, 1.0f);
+            bool causal = attrs.get_bool(AttrKey::Causal, false);
+            return cuda::nested_attention_backward_cuda(
+                inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+                inputs[5], inputs[6], scale, causal, get_cuda_stream(attrs));
+        });
 }
 
 } // namespace tenzor

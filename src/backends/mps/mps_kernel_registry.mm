@@ -1538,6 +1538,10 @@ auto register_mps_kernels(BackendDispatchTable& table) -> void {
     mps_accelerate_multi(OpId::NestedToPadded);
     mps_accelerate_multi(OpId::NestedFromPadded);
     mps_accelerate_multi(OpId::NestedLinear);
+    mps_accelerate_multi(OpId::NestedAttentionBackward);
+
+    // AsStrided — metadata-only view, works on any device
+    mps_accelerate_single(OpId::AsStrided);
 }
 
 } // namespace tenzor::mps

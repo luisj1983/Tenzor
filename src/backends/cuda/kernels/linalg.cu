@@ -22,6 +22,7 @@
 #include "../cublas_handle_pool.hpp"
 
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/linalg.hpp"
 #include "tenzor/ops/transform.hpp"
 #include <cusolverDn.h>
 #include <tuple>
@@ -1202,6 +1203,495 @@ auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
     return tenzor::transpose(b_cm, -2, -1).contiguous();
 }
 
+// ============================================================================
+// Geqrf — raw QR factorization returning packed reflectors + tau
+// ============================================================================
+
+auto linalg_geqrf_kernel(const Tensor& A, cudaStream_t stream)
+    -> std::tuple<Tensor, Tensor> {
+    auto work = A.contiguous().clone();
+    auto shape = A.shape();
+    auto a_ndim = static_cast<int64_t>(shape.size());
+    if (a_ndim < 2) throw std::invalid_argument("linalg::geqrf: input must be at least 2D");
+
+    int64_t m = shape[a_ndim - 2];
+    int64_t n_cols = shape[a_ndim - 1];
+    int64_t k = std::min(m, n_cols);
+    int64_t nbatch = batch_size(work);
+
+    std::vector<int64_t> batch_dims;
+    for (size_t i = 0; i + 2 < shape.size(); i++) batch_dims.push_back(shape[i]);
+
+    std::vector<int64_t> tau_shape = batch_dims;
+    tau_shape.push_back(k);
+    auto tau_result = zeros(tau_shape, A.dtype(), A.device());
+
+    auto handle = CuSOLVERHandlePool::get(stream);
+    DeviceInt d_info;
+
+    if (A.dtype() == DType::Float32) {
+        float* a_data = work.data<float>();
+        float* tau_data = tau_result.data<float>();
+
+        for (int64_t b = 0; b < nbatch; b++) {
+            float* a_mat = a_data + b * m * n_cols;
+            float* tau_ptr = tau_data + b * k;
+
+            // cuSOLVER geqrf works in column-major. For row-major m x n,
+            // we pass n_cols as m and m as n (treating as A^T in col-major).
+            int lwork = 0;
+            CUSOLVER_CHECK(cusolverDnSgeqrf_bufferSize(handle, n_cols, m, a_mat, n_cols, &lwork));
+            DeviceWorkspace workspace(lwork * sizeof(float));
+
+            CUSOLVER_CHECK(cusolverDnSgeqrf(handle, n_cols, m,
+                a_mat, n_cols, tau_ptr,
+                static_cast<float*>(workspace.ptr), lwork, d_info.ptr));
+            check_cusolver_info(d_info.ptr, "geqrf");
+        }
+    } else {
+        double* a_data = work.data<double>();
+        double* tau_data = tau_result.data<double>();
+
+        for (int64_t b = 0; b < nbatch; b++) {
+            double* a_mat = a_data + b * m * n_cols;
+            double* tau_ptr = tau_data + b * k;
+
+            int lwork = 0;
+            CUSOLVER_CHECK(cusolverDnDgeqrf_bufferSize(handle, n_cols, m, a_mat, n_cols, &lwork));
+            DeviceWorkspace workspace(lwork * sizeof(double));
+
+            CUSOLVER_CHECK(cusolverDnDgeqrf(handle, n_cols, m,
+                a_mat, n_cols, tau_ptr,
+                static_cast<double*>(workspace.ptr), lwork, d_info.ptr));
+            check_cusolver_info(d_info.ptr, "geqrf");
+        }
+    }
+
+    CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
+    return {work, tau_result};
+}
+
+// ============================================================================
+// Ormqr — multiply matrix by Q from QR factorization using tau vectors
+// ============================================================================
+
+auto linalg_ormqr_kernel(const Tensor& reflectors, const Tensor& tau,
+                          const Tensor& C, bool left, bool transpose_q,
+                          cudaStream_t stream) -> Tensor {
+    auto work_c = C.contiguous().clone();
+    auto refl = reflectors.contiguous();
+    auto tau_c = tau.contiguous();
+
+    auto c_shape = C.shape();
+    auto r_shape = reflectors.shape();
+    auto c_ndim = static_cast<int64_t>(c_shape.size());
+    auto r_ndim = static_cast<int64_t>(r_shape.size());
+    if (c_ndim < 2) throw std::invalid_argument("linalg::ormqr: C must be at least 2D");
+    if (r_ndim < 2) throw std::invalid_argument("linalg::ormqr: reflectors must be at least 2D");
+
+    int64_t c_m = c_shape[c_ndim - 2];
+    int64_t c_n = c_shape[c_ndim - 1];
+    int64_t k_refl = tau.shape()[static_cast<int64_t>(tau.shape().size()) - 1];
+    int64_t nbatch = batch_size(work_c);
+
+    int64_t r_m = r_shape[r_ndim - 2];
+    int64_t r_n = r_shape[r_ndim - 1];
+
+    auto handle = CuSOLVERHandlePool::get(stream);
+    DeviceInt d_info;
+
+    // cuSOLVER ormqr operates in column-major. For row-major data:
+    // C is c_m x c_n in row-major = c_n x c_m matrix in column-major (C^T).
+    // Q*C in row-major = (Q*C)^T^T; in col-major terms on C^T:
+    //   left,  no-trans Q*C:    col-major does C^T * Q^T => ormqr(Right, Trans, c_n, c_m, k, ...)
+    //   left,  trans    Q^T*C:  col-major does C^T * Q   => ormqr(Right, NoTrans, c_n, c_m, k, ...)
+    //   right, no-trans C*Q:    col-major does Q^T * C^T => ormqr(Left, Trans, c_n, c_m, k, ...)
+    //   right, trans    C*Q^T:  col-major does Q * C^T   => ormqr(Left, NoTrans, c_n, c_m, k, ...)
+    cublasSideMode_t side;
+    cublasOperation_t trans;
+    if (left && !transpose_q)       { side = CUBLAS_SIDE_RIGHT; trans = CUBLAS_OP_T; }
+    else if (left && transpose_q)   { side = CUBLAS_SIDE_RIGHT; trans = CUBLAS_OP_N; }
+    else if (!left && !transpose_q) { side = CUBLAS_SIDE_LEFT;  trans = CUBLAS_OP_T; }
+    else                            { side = CUBLAS_SIDE_LEFT;  trans = CUBLAS_OP_N; }
+
+    cusolverDnHandle_t solver_handle = handle;
+
+    if (C.dtype() == DType::Float32) {
+        float* c_data = work_c.data<float>();
+        const float* r_data = refl.data<float>();
+        const float* tau_data = tau_c.data<float>();
+
+        for (int64_t b = 0; b < nbatch; b++) {
+            const float* r_mat = r_data + b * r_m * r_n;
+            const float* tau_ptr = tau_data + b * k_refl;
+            float* c_mat = c_data + b * c_m * c_n;
+
+            int lwork = 0;
+            CUSOLVER_CHECK(cusolverDnSormqr_bufferSize(solver_handle,
+                side, trans,
+                static_cast<int>(c_n), static_cast<int>(c_m), static_cast<int>(k_refl),
+                const_cast<float*>(r_mat), static_cast<int>(r_n),
+                const_cast<float*>(tau_ptr),
+                c_mat, static_cast<int>(c_n), &lwork));
+            DeviceWorkspace workspace(lwork * sizeof(float));
+
+            CUSOLVER_CHECK(cusolverDnSormqr(solver_handle,
+                side, trans,
+                static_cast<int>(c_n), static_cast<int>(c_m), static_cast<int>(k_refl),
+                const_cast<float*>(r_mat), static_cast<int>(r_n),
+                const_cast<float*>(tau_ptr),
+                c_mat, static_cast<int>(c_n),
+                static_cast<float*>(workspace.ptr), lwork, d_info.ptr));
+            check_cusolver_info(d_info.ptr, "ormqr");
+        }
+    } else {
+        double* c_data = work_c.data<double>();
+        const double* r_data = refl.data<double>();
+        const double* tau_data = tau_c.data<double>();
+
+        for (int64_t b = 0; b < nbatch; b++) {
+            const double* r_mat = r_data + b * r_m * r_n;
+            const double* tau_ptr = tau_data + b * k_refl;
+            double* c_mat = c_data + b * c_m * c_n;
+
+            int lwork = 0;
+            CUSOLVER_CHECK(cusolverDnDormqr_bufferSize(solver_handle,
+                side, trans,
+                static_cast<int>(c_n), static_cast<int>(c_m), static_cast<int>(k_refl),
+                const_cast<double*>(r_mat), static_cast<int>(r_n),
+                const_cast<double*>(tau_ptr),
+                c_mat, static_cast<int>(c_n), &lwork));
+            DeviceWorkspace workspace(lwork * sizeof(double));
+
+            CUSOLVER_CHECK(cusolverDnDormqr(solver_handle,
+                side, trans,
+                static_cast<int>(c_n), static_cast<int>(c_m), static_cast<int>(k_refl),
+                const_cast<double*>(r_mat), static_cast<int>(r_n),
+                const_cast<double*>(tau_ptr),
+                c_mat, static_cast<int>(c_n),
+                static_cast<double*>(workspace.ptr), lwork, d_info.ptr));
+            check_cusolver_info(d_info.ptr, "ormqr");
+        }
+    }
+
+    CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
+    return work_c;
+}
+
+// =========================================================================
+// LDL^T factorization (cusolverDnSsytrf / cusolverDnDsytrf)
+// =========================================================================
+auto linalg_ldl_factor_kernel(const Tensor& A, cudaStream_t stream)
+    -> std::tuple<Tensor, Tensor> {
+    auto original_dtype = A.dtype();
+    if (original_dtype == DType::Float16 || original_dtype == DType::BFloat16) {
+        auto [LD32, piv] = linalg_ldl_factor_kernel(A.to(DType::Float32), stream);
+        return {LD32.to(original_dtype), piv};
+    }
+    if (original_dtype != DType::Float32 && original_dtype != DType::Float64) {
+        throw std::invalid_argument("linalg::ldl_factor: unsupported dtype");
+    }
+
+    auto [n, ndim] = check_square(A);
+    int64_t nbatch = batch_size(A);
+
+    auto a_shape = to_vec(A.shape());
+    std::vector<int64_t> piv_shape;
+    for (size_t i = 0; i + 2 < a_shape.size(); ++i) piv_shape.push_back(a_shape[i]);
+    piv_shape.push_back(n);
+
+    // cuSOLVER expects column-major; transpose row-major → column-major
+    auto work = tenzor::transpose(A, -2, -1).contiguous();
+    auto handle = CuSOLVERHandlePool::get(stream);
+
+    backend::CachedMemoryGuard ipiv_guard(nbatch * n * sizeof(int));
+    int* d_ipiv = static_cast<int*>(ipiv_guard.get());
+    DeviceInt d_info;
+
+    if (original_dtype == DType::Float32) {
+        float* data = work.data<float>();
+        for (int64_t b = 0; b < nbatch; ++b) {
+            float* mat = data + b * n * n;
+            int* piv = d_ipiv + b * n;
+            int lwork = 0;
+            CUSOLVER_CHECK(cusolverDnSsytrf_bufferSize(handle, static_cast<int>(n), mat,
+                static_cast<int>(n), &lwork));
+            DeviceWorkspace workspace(lwork * sizeof(float));
+            CUSOLVER_CHECK(cusolverDnSsytrf(handle, CUBLAS_FILL_MODE_LOWER,
+                static_cast<int>(n), mat, static_cast<int>(n),
+                piv, static_cast<float*>(workspace.ptr), lwork, d_info.ptr));
+            check_cusolver_info(d_info.ptr, "ldl_factor");
+        }
+    } else {
+        double* data = work.data<double>();
+        for (int64_t b = 0; b < nbatch; ++b) {
+            double* mat = data + b * n * n;
+            int* piv = d_ipiv + b * n;
+            int lwork = 0;
+            CUSOLVER_CHECK(cusolverDnDsytrf_bufferSize(handle, static_cast<int>(n), mat,
+                static_cast<int>(n), &lwork));
+            DeviceWorkspace workspace(lwork * sizeof(double));
+            CUSOLVER_CHECK(cusolverDnDsytrf(handle, CUBLAS_FILL_MODE_LOWER,
+                static_cast<int>(n), mat, static_cast<int>(n),
+                piv, static_cast<double*>(workspace.ptr), lwork, d_info.ptr));
+            check_cusolver_info(d_info.ptr, "ldl_factor");
+        }
+    }
+
+    // Transpose back to row-major
+    auto LD = tenzor::transpose(work, -2, -1).contiguous();
+
+    // Copy pivots to Int32 tensor on device
+    auto pivots_out = tenzor::zeros(piv_shape, DType::Int32, A.device());
+    CUDA_CHECK_LINALG(cudaMemcpy(pivots_out.data<int32_t>(), d_ipiv,
+        nbatch * n * sizeof(int), cudaMemcpyDeviceToDevice));
+
+    return {LD, pivots_out};
+}
+
+// =========================================================================
+// LDL^T solve — native GPU kernel using Bunch-Kaufman pivoted LDL factors.
+// Decomposes into: P*B -> forward subst L -> diagonal solve D -> back subst
+// L^T -> P^T, all in shared memory on device.
+// =========================================================================
+
+template<typename T>
+__global__ void ldl_solve_bk_kernel(
+    const T* __restrict__ ld_data,
+    const int* __restrict__ pivots,
+    T* __restrict__ b_data,
+    int n, int nrhs)
+{
+    int batch_idx = blockIdx.x;
+    int tid = threadIdx.x;
+    int num_threads = blockDim.x;
+
+    extern __shared__ char smem_raw[];
+    T* LD = reinterpret_cast<T*>(smem_raw);
+    T* B = LD + n * n;
+
+    const T* batch_ld = ld_data + batch_idx * n * n;
+    const int* batch_piv = pivots + batch_idx * n;
+    T* batch_b = b_data + batch_idx * n * nrhs;
+
+    // Load LD and B into shared memory
+    for (int idx = tid; idx < n * n; idx += num_threads)
+        LD[idx] = batch_ld[idx];
+    for (int idx = tid; idx < n * nrhs; idx += num_threads)
+        B[idx] = batch_b[idx];
+    __syncthreads();
+
+    // All solve steps are sequential (thread 0 only)
+    if (tid == 0) {
+        // Step 1: Apply forward pivot permutation P to B
+        // LAPACK sytrf pivots: if pivots[k] > 0, row k was swapped with pivots[k]-1 (1-based)
+        // if pivots[k] < 0, then (k, k+1) form a 2x2 block;
+        //   pivots[k] and pivots[k+1] have same negative value, row k+1 swapped with |pivots[k]|-1
+        for (int k = 0; k < n; ) {
+            int p = batch_piv[k];
+            if (p > 0) {
+                // 1x1 pivot: swap row k with row p-1
+                int swap_row = p - 1;
+                if (swap_row != k) {
+                    for (int j = 0; j < nrhs; j++) {
+                        T tmp = B[k * nrhs + j];
+                        B[k * nrhs + j] = B[swap_row * nrhs + j];
+                        B[swap_row * nrhs + j] = tmp;
+                    }
+                }
+                k++;
+            } else {
+                // 2x2 pivot: swap row k+1 with row |p|-1
+                int swap_row = (-p) - 1;
+                if (swap_row != k + 1) {
+                    for (int j = 0; j < nrhs; j++) {
+                        T tmp = B[(k + 1) * nrhs + j];
+                        B[(k + 1) * nrhs + j] = B[swap_row * nrhs + j];
+                        B[swap_row * nrhs + j] = tmp;
+                    }
+                }
+                k += 2;
+            }
+        }
+
+        // Step 2: Forward substitution: solve L * Y = P*B
+        // L is unit lower triangular stored below diagonal of LD
+        for (int k = 0; k < n; ) {
+            int p = batch_piv[k];
+            if (p > 0) {
+                // 1x1 pivot: column k of L
+                for (int i = k + 1; i < n; i++) {
+                    T mult = LD[i * n + k];
+                    for (int j = 0; j < nrhs; j++)
+                        B[i * nrhs + j] -= mult * B[k * nrhs + j];
+                }
+                k++;
+            } else {
+                // 2x2 pivot: columns k and k+1 of L
+                for (int i = k + 2; i < n; i++) {
+                    T m0 = LD[i * n + k];
+                    T m1 = LD[i * n + k + 1];
+                    for (int j = 0; j < nrhs; j++)
+                        B[i * nrhs + j] -= m0 * B[k * nrhs + j] + m1 * B[(k + 1) * nrhs + j];
+                }
+                k += 2;
+            }
+        }
+
+        // Step 3: Diagonal solve: solve D * Z = Y
+        // D is block diagonal with 1x1 and 2x2 blocks
+        for (int k = 0; k < n; ) {
+            int p = batch_piv[k];
+            if (p > 0) {
+                // 1x1 block: d = LD[k,k]
+                T d = LD[k * n + k];
+                for (int j = 0; j < nrhs; j++)
+                    B[k * nrhs + j] /= d;
+                k++;
+            } else {
+                // 2x2 block: [d11 d21; d21 d22] stored at LD[k,k], LD[k+1,k], LD[k+1,k+1]
+                T d11 = LD[k * n + k];
+                T d21 = LD[(k + 1) * n + k];
+                T d22 = LD[(k + 1) * n + (k + 1)];
+                T det = d11 * d22 - d21 * d21;
+                for (int j = 0; j < nrhs; j++) {
+                    T y0 = B[k * nrhs + j];
+                    T y1 = B[(k + 1) * nrhs + j];
+                    B[k * nrhs + j]       = (d22 * y0 - d21 * y1) / det;
+                    B[(k + 1) * nrhs + j] = (d11 * y1 - d21 * y0) / det;
+                }
+                k += 2;
+            }
+        }
+
+        // Step 4: Backward substitution: solve L^T * X = Z
+        for (int k = n - 1; k >= 0; ) {
+            int p = batch_piv[k];
+            if (p > 0) {
+                // 1x1 pivot: apply column k of L^T
+                for (int i = k + 1; i < n; i++) {
+                    T mult = LD[i * n + k];
+                    for (int j = 0; j < nrhs; j++)
+                        B[k * nrhs + j] -= mult * B[i * nrhs + j];
+                }
+                k--;
+            } else {
+                // 2x2 pivot at (k-1, k)
+                int k0 = k - 1;
+                for (int i = k + 1; i < n; i++) {
+                    T m0 = LD[i * n + k0];
+                    T m1 = LD[i * n + k];
+                    for (int j = 0; j < nrhs; j++) {
+                        B[k0 * nrhs + j] -= m0 * B[i * nrhs + j];
+                        B[k * nrhs + j]  -= m1 * B[i * nrhs + j];
+                    }
+                }
+                k -= 2;
+            }
+        }
+
+        // Step 5: Apply inverse pivot permutation P^T to X (reverse order)
+        for (int k = n - 1; k >= 0; ) {
+            int p = batch_piv[k];
+            if (p > 0) {
+                int swap_row = p - 1;
+                if (swap_row != k) {
+                    for (int j = 0; j < nrhs; j++) {
+                        T tmp = B[k * nrhs + j];
+                        B[k * nrhs + j] = B[swap_row * nrhs + j];
+                        B[swap_row * nrhs + j] = tmp;
+                    }
+                }
+                k--;
+            } else {
+                int swap_row = (-p) - 1;
+                if (swap_row != k) {
+                    for (int j = 0; j < nrhs; j++) {
+                        T tmp = B[k * nrhs + j];
+                        B[k * nrhs + j] = B[swap_row * nrhs + j];
+                        B[swap_row * nrhs + j] = tmp;
+                    }
+                }
+                k -= 2;
+            }
+        }
+    }
+    __syncthreads();
+
+    // Write B back to global memory
+    for (int idx = tid; idx < n * nrhs; idx += num_threads)
+        batch_b[idx] = B[idx];
+}
+
+auto linalg_ldl_solve_kernel(const Tensor& LD, const Tensor& pivots,
+                              const Tensor& B, cudaStream_t stream) -> Tensor {
+    auto original_dtype = LD.dtype();
+    if (original_dtype == DType::Float16 || original_dtype == DType::BFloat16) {
+        auto result = linalg_ldl_solve_kernel(LD.to(DType::Float32), pivots,
+                                               B.to(DType::Float32), stream);
+        return result.to(original_dtype);
+    }
+    if (original_dtype != DType::Float32 && original_dtype != DType::Float64) {
+        throw std::invalid_argument("linalg::ldl_solve: unsupported dtype");
+    }
+
+    auto ld_shape = LD.shape();
+    auto b_shape = B.shape();
+    int64_t ndim = static_cast<int64_t>(ld_shape.size());
+    int64_t n = ld_shape[ndim - 1];
+    int64_t nrhs = b_shape[static_cast<int64_t>(b_shape.size()) - 1];
+    int64_t nbatch = 1;
+    for (int64_t i = 0; i + 2 < ndim; ++i) nbatch *= ld_shape[i];
+
+    auto ld_cont = LD.contiguous();
+    auto work_b = B.contiguous().clone();
+
+    int threads = min(static_cast<int>(n), 128);
+    if (threads < 1) threads = 1;
+
+    if (original_dtype == DType::Float32) {
+        size_t smem = (n * n + n * nrhs) * sizeof(float);
+        ldl_solve_bk_kernel<float><<<nbatch, threads, smem, stream>>>(
+            ld_cont.data<float>(), pivots.data<int32_t>(),
+            work_b.data<float>(), static_cast<int>(n), static_cast<int>(nrhs));
+        CUDA_CHECK_LINALG(cudaGetLastError());
+    } else {
+        size_t smem = (n * n + n * nrhs) * sizeof(double);
+        ldl_solve_bk_kernel<double><<<nbatch, threads, smem, stream>>>(
+            ld_cont.data<double>(), pivots.data<int32_t>(),
+            work_b.data<double>(), static_cast<int>(n), static_cast<int>(nrhs));
+        CUDA_CHECK_LINALG(cudaGetLastError());
+    }
+
+    CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
+    return work_b;
+}
+
+// =========================================================================
+// Householder product — compose from existing ormqr kernel
+// =========================================================================
+auto linalg_householder_kernel(const Tensor& input, const Tensor& tau,
+                                cudaStream_t stream) -> Tensor {
+    // Apply Householder reflectors to identity: Q = H(0)*H(1)*...*H(k-1)
+    // This is ormqr(input, tau, I, left=true, transpose=false)
+    auto shape = input.shape();
+    auto ndim = static_cast<int64_t>(shape.size());
+    int64_t m = shape[ndim - 2];
+
+    // Create identity matrix on the same device
+    auto I = tenzor::eye(m, std::nullopt, input.dtype(), input.device());
+
+    // Broadcast identity to match batch dimensions
+    if (ndim > 2) {
+        std::vector<int64_t> eye_shape(shape.begin(), shape.end());
+        eye_shape[ndim - 1] = m;  // m x m identity
+        I = tenzor::expand(I, std::move(eye_shape));
+        I = I.contiguous();
+    }
+
+    return linalg_ormqr_kernel(input, tau, I, /*left=*/true, /*transpose_q=*/false, stream);
+}
+
 } // namespace cuda
 } // namespace tenzor
 
@@ -1210,6 +1700,9 @@ auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/device.hpp"
+#include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/linalg.hpp"
+#include "tenzor/ops/transform.hpp"
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <stdexcept>
@@ -1289,6 +1782,34 @@ void check_size_limit(int64_t n, const std::string& op_name) {
             "linalg::" + op_name + ": matrix size " + std::to_string(n) +
             " exceeds native CUDA fallback limit of " + std::to_string(max_n) +
             " (build with cuSOLVER for larger matrices)");
+    }
+}
+
+// ============================================================================
+// Split a row-major packed LU matrix into separate L (unit lower triangular)
+// and U (upper triangular) tensors. One thread per element.
+// ============================================================================
+
+template<typename T>
+__global__ void extract_lu_kernel(const T* packed, T* L, T* U,
+                                   int64_t n, int64_t nbatch) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t total = nbatch * n * n;
+    if (idx >= total) return;
+
+    int64_t rem = idx % (n * n);
+    int64_t i = rem / n;
+    int64_t j = rem % n;
+
+    if (i > j) {
+        L[idx] = packed[idx];
+        U[idx] = T(0);
+    } else if (i == j) {
+        L[idx] = T(1);
+        U[idx] = packed[idx];
+    } else {
+        L[idx] = T(0);
+        U[idx] = packed[idx];
     }
 }
 
@@ -3235,6 +3756,893 @@ auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
 
     CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
     return work_b;
+}
+
+// ============================================================================
+// LU Decomposition — returns (L, U, pivots) using shared-memory lu_kernel
+// ============================================================================
+
+auto linalg_lu_kernel(const Tensor& A, cudaStream_t stream)
+    -> std::tuple<Tensor, Tensor, Tensor> {
+    validate_linalg_dtype(A, "lu");
+    auto original_dtype = A.dtype();
+    if (original_dtype == DType::Float16 || original_dtype == DType::BFloat16) {
+        auto [L32, U32, piv] = linalg_lu_kernel(A.to(DType::Float32), stream);
+        return {L32.to(original_dtype), U32.to(original_dtype), piv};
+    }
+
+    auto work = A.contiguous().clone();
+    auto [n, ndim] = check_square(work);
+    int64_t nbatch = batch_size(work);
+
+    // Build output shapes
+    auto a_shape = A.shape();
+    std::vector<int64_t> mat_shape;
+    for (size_t i = 0; i + 2 < a_shape.size(); ++i) mat_shape.push_back(a_shape[i]);
+    std::vector<int64_t> piv_shape = mat_shape;
+    mat_shape.push_back(n); mat_shape.push_back(n);
+    piv_shape.push_back(n);
+
+    // Allocate pivots and info on device
+    int* d_pivots = nullptr;
+    int* d_info = nullptr;
+    CUDA_CHECK_LINALG(cudaMalloc(&d_pivots, nbatch * n * sizeof(int)));
+    CUDA_CHECK_LINALG(cudaMalloc(&d_info, nbatch * sizeof(int)));
+    CUDA_CHECK_LINALG(cudaMemset(d_info, 0, nbatch * sizeof(int)));
+
+    // Step 1: Run LU factorization in-place on work tensor
+    auto L = zeros(mat_shape, original_dtype, A.device());
+    auto U = zeros(mat_shape, original_dtype, A.device());
+
+    if (original_dtype == DType::Float32) {
+        check_size_limit<float>(n, "lu");
+        size_t smem = n * n * sizeof(float) + 4 * sizeof(float);
+        int threads = min(static_cast<int>(n), 128);
+        if (threads < 1) threads = 1;
+        lu_kernel<float><<<nbatch, threads, smem, stream>>>(
+            work.data<float>(), d_pivots, d_info, n);
+        CUDA_CHECK_LINALG(cudaGetLastError());
+
+        // Step 2: split packed LU into L and U
+        int64_t total = nbatch * n * n;
+        int ext_threads = 256;
+        int ext_blocks = static_cast<int>((total + ext_threads - 1) / ext_threads);
+        extract_lu_kernel<float><<<ext_blocks, ext_threads, 0, stream>>>(
+            work.data<float>(), L.data<float>(), U.data<float>(), n, nbatch);
+        CUDA_CHECK_LINALG(cudaGetLastError());
+    } else {
+        check_size_limit<double>(n, "lu");
+        size_t smem = n * n * sizeof(double) + 4 * sizeof(double);
+        int threads = min(static_cast<int>(n), 128);
+        if (threads < 1) threads = 1;
+        lu_kernel<double><<<nbatch, threads, smem, stream>>>(
+            work.data<double>(), d_pivots, d_info, n);
+        CUDA_CHECK_LINALG(cudaGetLastError());
+
+        int64_t total = nbatch * n * n;
+        int ext_threads = 256;
+        int ext_blocks = static_cast<int>((total + ext_threads - 1) / ext_threads);
+        extract_lu_kernel<double><<<ext_blocks, ext_threads, 0, stream>>>(
+            work.data<double>(), L.data<double>(), U.data<double>(), n, nbatch);
+        CUDA_CHECK_LINALG(cudaGetLastError());
+    }
+
+    // Step 3: copy pivots to Int32 tensor
+    auto pivots_out = zeros(piv_shape, DType::Int32, A.device());
+    CUDA_CHECK_LINALG(cudaMemcpyAsync(pivots_out.data<int32_t>(), d_pivots,
+        nbatch * n * sizeof(int), cudaMemcpyDeviceToDevice, stream));
+
+    CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
+    cudaFree(d_pivots);
+    cudaFree(d_info);
+    return {L, U, pivots_out};
+}
+
+// ============================================================================
+// LU Solve — given L, U, pivots from linalg_lu_kernel, solve A*X = B
+// The caller passes the PACKED LU (not separate L/U), plus pivots and B.
+// ============================================================================
+
+auto linalg_lu_solve_kernel(const Tensor& LU_data, const Tensor& pivots,
+                             const Tensor& B, cudaStream_t stream) -> Tensor {
+    auto original_dtype = B.dtype();
+    if (original_dtype == DType::Float16 || original_dtype == DType::BFloat16) {
+        return linalg_lu_solve_kernel(
+            LU_data.to(DType::Float32), pivots,
+            B.to(DType::Float32), stream).to(original_dtype);
+    }
+    if (original_dtype != DType::Float32 && original_dtype != DType::Float64) {
+        throw std::invalid_argument(
+            "linalg::lu_solve: unsupported dtype, expected Float32 or Float64");
+    }
+
+    auto lu_shape = LU_data.shape();
+    auto b_shape = B.shape();
+    auto lu_ndim = static_cast<int64_t>(lu_shape.size());
+    auto b_ndim = static_cast<int64_t>(b_shape.size());
+    if (lu_ndim < 2 || b_ndim < 1) {
+        throw std::invalid_argument("linalg::lu_solve: inputs must be at least 2D/1D");
+    }
+    int64_t n = lu_shape[lu_ndim - 1];
+    if (lu_shape[lu_ndim - 2] != n) {
+        throw std::invalid_argument("linalg::lu_solve: LU_data must be square");
+    }
+    int64_t nrhs = (b_ndim >= 2) ? b_shape[b_ndim - 1] : 1;
+    int64_t nbatch = batch_size(LU_data);
+
+    auto lu_work = LU_data.contiguous();
+    auto b_work = B.contiguous().clone();
+
+    // Pivots must be int32 on device
+    auto piv_dev = pivots.to(B.device()).contiguous();
+
+    if (original_dtype == DType::Float32) {
+        check_size_limit<float>(n, "lu_solve");
+        size_t smem = (n * n + n * nrhs) * sizeof(float);
+        int threads = min(max(static_cast<int>(n), 1), 128);
+        lu_solve_kernel<float><<<nbatch, threads, smem, stream>>>(
+            lu_work.data<float>(), piv_dev.data<int32_t>(),
+            b_work.data<float>(), n, nrhs);
+        CUDA_CHECK_LINALG(cudaGetLastError());
+    } else {
+        check_size_limit<double>(n, "lu_solve");
+        size_t smem = (n * n + n * nrhs) * sizeof(double);
+        int threads = min(max(static_cast<int>(n), 1), 128);
+        lu_solve_kernel<double><<<nbatch, threads, smem, stream>>>(
+            lu_work.data<double>(), piv_dev.data<int32_t>(),
+            b_work.data<double>(), n, nrhs);
+        CUDA_CHECK_LINALG(cudaGetLastError());
+    }
+
+    CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
+    return b_work;
+}
+
+// ============================================================================
+// Geqrf fallback — Householder QR returning packed reflectors + tau
+// One block per batch element.
+// Shared memory: A[m*n] + scratch[4]
+// ============================================================================
+
+template<typename T>
+__global__ void householder_geqrf_kernel(
+    T* __restrict__ A_io,
+    T* __restrict__ tau_out,
+    int m, int n_cols, int k)
+{
+    int batch_idx = blockIdx.x;
+    int tid = threadIdx.x;
+    int num_threads = blockDim.x;
+
+    extern __shared__ char smem_raw[];
+    T* R = reinterpret_cast<T*>(smem_raw);
+    T* scratch = R + m * n_cols;  // scratch[0]=v0, scratch[1]=tau, scratch[2]=alpha
+
+    T* A = A_io + batch_idx * m * n_cols;
+    T* tau = tau_out + batch_idx * k;
+
+    // Load A into shared memory
+    for (int idx = tid; idx < m * n_cols; idx += num_threads) {
+        R[idx] = A[idx];
+    }
+    __syncthreads();
+
+    constexpr T zero_tol = std::is_same_v<T, float> ? T(1e-30) : T(1e-60);
+
+    for (int j = 0; j < k; j++) {
+        // Thread 0 computes Householder parameters
+        if (tid == 0) {
+            T sigma = T(0);
+            for (int i = j + 1; i < m; i++) {
+                sigma += R[i * n_cols + j] * R[i * n_cols + j];
+            }
+            T x0 = R[j * n_cols + j];
+            T norm_x = sqrt(x0 * x0 + sigma);
+            if (norm_x < zero_tol || sigma < zero_tol) {
+                scratch[1] = T(0);  // tau = 0
+                tau[j] = T(0);
+            } else {
+                T alpha = -copysign(norm_x, x0);
+                T v0 = x0 - alpha;
+                T v_norm_sq = v0 * v0 + sigma;
+                T tau_val = T(2) / v_norm_sq;
+                scratch[0] = v0;
+                scratch[1] = tau_val;
+                scratch[2] = alpha;
+                tau[j] = tau_val;
+            }
+        }
+        __syncthreads();
+
+        T tau_val = scratch[1];
+        if (tau_val == T(0)) {
+            __syncthreads();
+            continue;
+        }
+        T v0 = scratch[0];
+        T alpha = scratch[2];
+
+        // Apply reflector H = I - tau*v*v^T to trailing columns of R
+        for (int col = j + static_cast<int>(tid); col < n_cols; col += num_threads) {
+            T dot = v0 * R[j * n_cols + col];
+            for (int i = j + 1; i < m; i++) {
+                dot += R[i * n_cols + j] * R[i * n_cols + col];
+            }
+            dot *= tau_val;
+            R[j * n_cols + col] -= v0 * dot;
+            for (int i = j + 1; i < m; i++) {
+                R[i * n_cols + col] -= R[i * n_cols + j] * dot;
+            }
+        }
+        __syncthreads();
+
+        // Store: set diagonal to alpha, store Householder vector below diagonal
+        // The reflector vector v = [v0; A[j+1:,j]] is already in place below diagonal.
+        // We need to normalize so v[0] = 1 (standard LAPACK convention):
+        // v_normalized = v / v0, tau_normalized = tau * v0^2
+        // But for simplicity, we store the raw form: diagonal = alpha,
+        // below-diagonal = raw reflector entries (unnormalized). tau already stored.
+        if (tid == 0) {
+            // Store v0 at the diagonal position (reflector vector starts with v0)
+            // Actually, LAPACK convention stores v with v[0]=1 below diagonal
+            // and tau separately. We store v/v0 below diagonal, adjust tau.
+            T inv_v0 = T(1) / v0;
+            for (int i = j + 1; i < m; i++) {
+                R[i * n_cols + j] *= inv_v0;
+            }
+            R[j * n_cols + j] = alpha;
+            tau[j] = tau_val * v0 * v0;  // adjusted tau for normalized v
+        }
+        __syncthreads();
+    }
+
+    // Write back to global memory
+    for (int idx = tid; idx < m * n_cols; idx += num_threads) {
+        A[idx] = R[idx];
+    }
+}
+
+// ============================================================================
+// Ormqr fallback — apply Q (from Householder reflectors) to matrix C
+// One block per batch element.
+// Shared memory: refl[r_m*r_n] + C[c_m*c_n] + scratch[c_max_dim]
+// ============================================================================
+
+template<typename T>
+__global__ void householder_ormqr_kernel(
+    const T* __restrict__ refl_in,
+    const T* __restrict__ tau_in,
+    T* __restrict__ C_io,
+    int r_m, int r_n, int c_m, int c_n, int k_refl,
+    bool left, bool transpose_q)
+{
+    int batch_idx = blockIdx.x;
+    int tid = threadIdx.x;
+    int num_threads = blockDim.x;
+
+    extern __shared__ char smem_raw[];
+    T* C = reinterpret_cast<T*>(smem_raw);
+    T* work = C + c_m * c_n;  // scratch vector of size max(c_m, c_n)
+
+    const T* refl = refl_in + batch_idx * r_m * r_n;
+    const T* tau = tau_in + batch_idx * k_refl;
+    T* C_out = C_io + batch_idx * c_m * c_n;
+
+    // Load C into shared memory
+    for (int idx = tid; idx < c_m * c_n; idx += num_threads) {
+        C[idx] = C_out[idx];
+    }
+    __syncthreads();
+
+    // Apply Householder reflectors
+    // Left: Q*C or Q^T*C — iterate over reflectors
+    // Right: C*Q or C*Q^T — iterate over reflectors
+    // Q = H_0 * H_1 * ... * H_{k-1}, where H_j = I - tau_j * v_j * v_j^T
+    // Q^T = H_{k-1} * ... * H_1 * H_0
+    // For left, no-trans (Q*C): apply H_0, H_1, ..., H_{k-1} from left
+    // For left, trans (Q^T*C): apply H_{k-1}, ..., H_0 from left
+    // For right, no-trans (C*Q): apply H_0, ..., H_{k-1} from right
+    // For right, trans (C*Q^T): apply H_{k-1}, ..., H_0 from right
+
+    int start, end_val, step;
+    if ((left && !transpose_q) || (!left && !transpose_q)) {
+        start = 0; end_val = k_refl; step = 1;
+    } else {
+        start = k_refl - 1; end_val = -1; step = -1;
+    }
+
+    for (int j = start; j != end_val; j += step) {
+        T tau_j = tau[j];
+        if (tau_j == T(0)) continue;
+
+        if (left) {
+            // Apply H_j from left: C = (I - tau_j * v_j * v_j^T) * C
+            // For each column c of C: c = c - tau_j * v_j * (v_j^T * c)
+            for (int col = tid; col < c_n; col += num_threads) {
+                // Compute v_j^T * C[:,col]
+                T dot = C[j * c_n + col];  // v[j] = 1 (implicit)
+                for (int i = j + 1; i < c_m; i++) {
+                    dot += refl[i * r_n + j] * C[i * c_n + col];
+                }
+                dot *= tau_j;
+                // Update C[:,col]
+                C[j * c_n + col] -= dot;
+                for (int i = j + 1; i < c_m; i++) {
+                    C[i * c_n + col] -= refl[i * r_n + j] * dot;
+                }
+            }
+        } else {
+            // Apply H_j from right: C = C * (I - tau_j * v_j * v_j^T)
+            // For each row r of C: r = r - tau_j * (r * v_j) * v_j^T
+            for (int row = tid; row < c_m; row += num_threads) {
+                T dot = C[row * c_n + j];  // v[j] = 1 (implicit)
+                for (int i = j + 1; i < c_n; i++) {
+                    dot += C[row * c_n + i] * refl[i * r_n + j];
+                }
+                dot *= tau_j;
+                C[row * c_n + j] -= dot;
+                for (int i = j + 1; i < c_n; i++) {
+                    C[row * c_n + i] -= dot * refl[i * r_n + j];
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+    // Write C back
+    for (int idx = tid; idx < c_m * c_n; idx += num_threads) {
+        C_out[idx] = C[idx];
+    }
+}
+
+auto linalg_geqrf_kernel(const Tensor& A, cudaStream_t stream)
+    -> std::tuple<Tensor, Tensor> {
+    validate_linalg_dtype(A, "geqrf");
+    if (A.dtype() == DType::Float16) {
+        auto [R, tau] = linalg_geqrf_kernel(A.to(DType::Float32), stream);
+        return {R, tau};
+    }
+    if (A.dtype() == DType::BFloat16) {
+        auto [R, tau] = linalg_geqrf_kernel(A.to(DType::Float32), stream);
+        return {R, tau};
+    }
+
+    auto work = A.contiguous().clone();
+    auto shape = A.shape();
+    auto a_ndim = static_cast<int64_t>(shape.size());
+    if (a_ndim < 2) throw std::invalid_argument("linalg::geqrf: input must be at least 2D");
+
+    int64_t m = shape[a_ndim - 2];
+    int64_t n_cols = shape[a_ndim - 1];
+    int64_t k = std::min(m, n_cols);
+    int64_t nbatch = batch_size(work);
+
+    std::vector<int64_t> batch_dims;
+    for (size_t i = 0; i + 2 < shape.size(); i++) batch_dims.push_back(shape[i]);
+
+    std::vector<int64_t> tau_shape = batch_dims;
+    tau_shape.push_back(k);
+    auto tau_result = zeros(tau_shape, A.dtype(), A.device());
+
+    if (A.dtype() == DType::Float32) {
+        check_size_limit<float>(std::max(m, n_cols), "geqrf");
+        size_t smem = (m * n_cols + 4) * sizeof(float);
+        int threads = min(static_cast<int>(std::max(m, n_cols)), 128);
+        if (threads < 1) threads = 1;
+        householder_geqrf_kernel<float><<<nbatch, threads, smem, stream>>>(
+            work.data<float>(), tau_result.data<float>(), m, n_cols, k);
+        CUDA_CHECK_LINALG(cudaGetLastError());
+    } else {
+        check_size_limit<double>(std::max(m, n_cols), "geqrf");
+        size_t smem = (m * n_cols + 4) * sizeof(double);
+        int threads = min(static_cast<int>(std::max(m, n_cols)), 128);
+        if (threads < 1) threads = 1;
+        householder_geqrf_kernel<double><<<nbatch, threads, smem, stream>>>(
+            work.data<double>(), tau_result.data<double>(), m, n_cols, k);
+        CUDA_CHECK_LINALG(cudaGetLastError());
+    }
+
+    CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
+    return {work, tau_result};
+}
+
+auto linalg_ormqr_kernel(const Tensor& reflectors, const Tensor& tau,
+                          const Tensor& C, bool left, bool transpose_q,
+                          cudaStream_t stream) -> Tensor {
+    validate_linalg_dtype(C, "ormqr");
+    if (C.dtype() == DType::Float16) {
+        return linalg_ormqr_kernel(reflectors.to(DType::Float32), tau.to(DType::Float32),
+                                    C.to(DType::Float32), left, transpose_q, stream);
+    }
+    if (C.dtype() == DType::BFloat16) {
+        return linalg_ormqr_kernel(reflectors.to(DType::Float32), tau.to(DType::Float32),
+                                    C.to(DType::Float32), left, transpose_q, stream);
+    }
+
+    auto work_c = C.contiguous().clone();
+    auto refl = reflectors.contiguous();
+    auto tau_c = tau.contiguous();
+
+    auto c_shape = C.shape();
+    auto r_shape = reflectors.shape();
+    auto c_ndim = static_cast<int64_t>(c_shape.size());
+    auto r_ndim = static_cast<int64_t>(r_shape.size());
+    if (c_ndim < 2) throw std::invalid_argument("linalg::ormqr: C must be at least 2D");
+    if (r_ndim < 2) throw std::invalid_argument("linalg::ormqr: reflectors must be at least 2D");
+
+    int64_t c_m = c_shape[c_ndim - 2];
+    int64_t c_n = c_shape[c_ndim - 1];
+    int64_t k_refl = tau.shape()[static_cast<int64_t>(tau.shape().size()) - 1];
+    int64_t nbatch = batch_size(work_c);
+
+    int64_t r_m = r_shape[r_ndim - 2];
+    int64_t r_n = r_shape[r_ndim - 1];
+
+    if (C.dtype() == DType::Float32) {
+        check_size_limit<float>(std::max(c_m, c_n), "ormqr");
+        size_t smem = (c_m * c_n + std::max(c_m, c_n)) * sizeof(float);
+        int threads = min(static_cast<int>(std::max(c_m, c_n)), 128);
+        if (threads < 1) threads = 1;
+        householder_ormqr_kernel<float><<<nbatch, threads, smem, stream>>>(
+            refl.data<float>(), tau_c.data<float>(), work_c.data<float>(),
+            r_m, r_n, c_m, c_n, k_refl, left, transpose_q);
+        CUDA_CHECK_LINALG(cudaGetLastError());
+    } else {
+        check_size_limit<double>(std::max(c_m, c_n), "ormqr");
+        size_t smem = (c_m * c_n + std::max(c_m, c_n)) * sizeof(double);
+        int threads = min(static_cast<int>(std::max(c_m, c_n)), 128);
+        if (threads < 1) threads = 1;
+        householder_ormqr_kernel<double><<<nbatch, threads, smem, stream>>>(
+            refl.data<double>(), tau_c.data<double>(), work_c.data<double>(),
+            r_m, r_n, c_m, c_n, k_refl, left, transpose_q);
+        CUDA_CHECK_LINALG(cudaGetLastError());
+    }
+
+    CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
+    return work_c;
+}
+
+// =========================================================================
+// LDL^T factorization — Bunch-Kaufman diagonal pivoting in shared memory.
+// One block per batch element. Shared memory: A[n*n] + scratch[4].
+// Stores L below diagonal, D on/above diagonal, pivots in global memory.
+// =========================================================================
+template<typename T>
+__global__ void ldl_bk_factor_kernel(
+    T* __restrict__ data,
+    int* __restrict__ pivots_out,
+    int n)
+{
+    int batch_idx = blockIdx.x;
+    int tid = threadIdx.x;
+    int num_threads = blockDim.x;
+
+    extern __shared__ char smem_raw[];
+    T* A = reinterpret_cast<T*>(smem_raw);
+    T* scratch = A + n * n;  // scratch[0..3]
+
+    T* batch_data = data + batch_idx * n * n;
+    int* batch_piv = pivots_out + batch_idx * n;
+
+    // Load matrix into shared memory (symmetric, stored fully)
+    for (int idx = tid; idx < n * n; idx += num_threads)
+        A[idx] = batch_data[idx];
+    __syncthreads();
+
+    // Bunch-Kaufman factorization with alpha = (1 + sqrt(17)) / 8
+    constexpr T alpha = static_cast<T>(0.6404);
+
+    int k = 0;
+    while (k < n) {
+        if (tid == 0) {
+            // Find max |A[i,k]| for i > k (column max below diagonal)
+            T col_max = T(0);
+            int col_max_row = k;
+            for (int i = k + 1; i < n; i++) {
+                T v = fabs(A[i * n + k]);
+                if (v > col_max) { col_max = v; col_max_row = i; }
+            }
+
+            T abs_akk = fabs(A[k * n + k]);
+
+            if (abs_akk == T(0) && col_max == T(0)) {
+                // Zero column — 1x1 pivot with zero diagonal
+                batch_piv[k] = k + 1;  // 1-based, positive = 1x1
+                scratch[0] = T(1);     // flag: 1x1 pivot
+                scratch[1] = T(k);     // no swap
+            } else if (abs_akk >= alpha * col_max) {
+                // 1x1 pivot, no interchange
+                batch_piv[k] = k + 1;
+                scratch[0] = T(1);     // 1x1
+                scratch[1] = T(k);     // swap_row = k (no swap)
+            } else {
+                // Check row max of row col_max_row
+                int r = col_max_row;
+                T row_max = T(0);
+                for (int j = k; j < n; j++) {
+                    if (j == r) continue;
+                    T v = fabs(A[r * n + j]);
+                    if (v > row_max) row_max = v;
+                }
+
+                T abs_arr = fabs(A[r * n + r]);
+
+                if (abs_akk * row_max >= alpha * col_max * col_max) {
+                    // 1x1 pivot, no interchange
+                    batch_piv[k] = k + 1;
+                    scratch[0] = T(1);
+                    scratch[1] = T(k);
+                } else if (abs_arr >= alpha * row_max) {
+                    // 1x1 pivot, interchange rows/cols k and r
+                    batch_piv[k] = r + 1;  // 1-based
+                    scratch[0] = T(1);
+                    scratch[1] = T(r);     // swap k with r
+                } else {
+                    // 2x2 pivot using rows/cols k and r
+                    // Store negative pivot to indicate 2x2 block
+                    batch_piv[k] = -(r + 1);      // negative, 1-based
+                    batch_piv[k + 1] = -(r + 1);  // same negative value
+                    scratch[0] = T(2);     // 2x2
+                    scratch[1] = T(r);     // swap row k+1 with r
+                }
+            }
+        }
+        __syncthreads();
+
+        int pivot_type = static_cast<int>(scratch[0]);
+        int swap_row = static_cast<int>(scratch[1]);
+
+        if (pivot_type == 1) {
+            // 1x1 pivot
+            // Swap rows and columns k and swap_row if needed
+            if (swap_row != k) {
+                // Swap rows k and swap_row
+                for (int j = tid; j < n; j += num_threads) {
+                    T tmp = A[k * n + j];
+                    A[k * n + j] = A[swap_row * n + j];
+                    A[swap_row * n + j] = tmp;
+                }
+                __syncthreads();
+                // Swap columns k and swap_row
+                for (int i = tid; i < n; i += num_threads) {
+                    T tmp = A[i * n + k];
+                    A[i * n + k] = A[i * n + swap_row];
+                    A[i * n + swap_row] = tmp;
+                }
+                __syncthreads();
+            }
+
+            // Compute multipliers and update
+            T diag = A[k * n + k];
+            if (diag != T(0)) {
+                // Compute L column: A[i,k] /= A[k,k] for i > k
+                if (tid == 0) {
+                    for (int i = k + 1; i < n; i++)
+                        A[i * n + k] /= diag;
+                }
+                __syncthreads();
+
+                // Symmetric rank-1 update: A[i,j] -= L[i,k] * D[k,k] * L[j,k]
+                for (int i = k + 1 + tid; i < n; i += num_threads) {
+                    T lik = A[i * n + k];
+                    for (int j = k + 1; j <= i; j++) {
+                        A[i * n + j] -= lik * diag * A[j * n + k];
+                    }
+                }
+                __syncthreads();
+            }
+            k++;
+        } else {
+            // 2x2 pivot: swap row/col k+1 with swap_row if needed
+            if (swap_row != k + 1) {
+                for (int j = tid; j < n; j += num_threads) {
+                    T tmp = A[(k + 1) * n + j];
+                    A[(k + 1) * n + j] = A[swap_row * n + j];
+                    A[swap_row * n + j] = tmp;
+                }
+                __syncthreads();
+                for (int i = tid; i < n; i += num_threads) {
+                    T tmp = A[i * n + (k + 1)];
+                    A[i * n + (k + 1)] = A[i * n + swap_row];
+                    A[i * n + swap_row] = tmp;
+                }
+                __syncthreads();
+            }
+
+            // 2x2 diagonal block D = [A[k,k], A[k+1,k]; A[k+1,k], A[k+1,k+1]]
+            T d11 = A[k * n + k];
+            T d21 = A[(k + 1) * n + k];
+            T d22 = A[(k + 1) * n + (k + 1)];
+            T det = d11 * d22 - d21 * d21;
+
+            if (det != T(0)) {
+                // Compute L columns k, k+1 for rows > k+1
+                if (tid == 0) {
+                    T inv11 = d22 / det;
+                    T inv12 = -d21 / det;
+                    T inv22 = d11 / det;
+                    for (int i = k + 2; i < n; i++) {
+                        T a0 = A[i * n + k];
+                        T a1 = A[i * n + (k + 1)];
+                        A[i * n + k]     = inv11 * a0 + inv12 * a1;
+                        A[i * n + (k + 1)] = inv12 * a0 + inv22 * a1;
+                    }
+                }
+                __syncthreads();
+
+                // Symmetric rank-2 update
+                for (int i = k + 2 + tid; i < n; i += num_threads) {
+                    T li0 = A[i * n + k];
+                    T li1 = A[i * n + (k + 1)];
+                    for (int j = k + 2; j <= i; j++) {
+                        T lj0 = A[j * n + k];
+                        T lj1 = A[j * n + (k + 1)];
+                        A[i * n + j] -= (li0 * (d11 * lj0 + d21 * lj1)
+                                       + li1 * (d21 * lj0 + d22 * lj1));
+                    }
+                }
+                __syncthreads();
+            }
+            k += 2;
+        }
+    }
+
+    // Write back to global memory
+    for (int idx = tid; idx < n * n; idx += num_threads)
+        batch_data[idx] = A[idx];
+}
+
+// =========================================================================
+// LDL^T solve — Bunch-Kaufman pivoted solve in shared memory.
+// =========================================================================
+template<typename T>
+__global__ void ldl_bk_solve_kernel(
+    const T* __restrict__ ld_data,
+    const int* __restrict__ pivots,
+    T* __restrict__ b_data,
+    int n, int nrhs)
+{
+    int batch_idx = blockIdx.x;
+    int tid = threadIdx.x;
+    int num_threads = blockDim.x;
+
+    extern __shared__ char smem_raw[];
+    T* LD = reinterpret_cast<T*>(smem_raw);
+    T* B = LD + n * n;
+
+    const T* batch_ld = ld_data + batch_idx * n * n;
+    const int* batch_piv = pivots + batch_idx * n;
+    T* batch_b = b_data + batch_idx * n * nrhs;
+
+    for (int idx = tid; idx < n * n; idx += num_threads)
+        LD[idx] = batch_ld[idx];
+    for (int idx = tid; idx < n * nrhs; idx += num_threads)
+        B[idx] = batch_b[idx];
+    __syncthreads();
+
+    if (tid == 0) {
+        // Forward pivot permutation
+        for (int k = 0; k < n; ) {
+            int p = batch_piv[k];
+            if (p > 0) {
+                int sr = p - 1;
+                if (sr != k)
+                    for (int j = 0; j < nrhs; j++) {
+                        T tmp = B[k * nrhs + j]; B[k * nrhs + j] = B[sr * nrhs + j]; B[sr * nrhs + j] = tmp;
+                    }
+                k++;
+            } else {
+                int sr = (-p) - 1;
+                if (sr != k + 1)
+                    for (int j = 0; j < nrhs; j++) {
+                        T tmp = B[(k+1) * nrhs + j]; B[(k+1) * nrhs + j] = B[sr * nrhs + j]; B[sr * nrhs + j] = tmp;
+                    }
+                k += 2;
+            }
+        }
+
+        // Forward substitution: L * Y = P*B
+        for (int k = 0; k < n; ) {
+            int p = batch_piv[k];
+            if (p > 0) {
+                for (int i = k + 1; i < n; i++) {
+                    T m = LD[i * n + k];
+                    for (int j = 0; j < nrhs; j++)
+                        B[i * nrhs + j] -= m * B[k * nrhs + j];
+                }
+                k++;
+            } else {
+                for (int i = k + 2; i < n; i++) {
+                    T m0 = LD[i * n + k], m1 = LD[i * n + k + 1];
+                    for (int j = 0; j < nrhs; j++)
+                        B[i * nrhs + j] -= m0 * B[k * nrhs + j] + m1 * B[(k+1) * nrhs + j];
+                }
+                k += 2;
+            }
+        }
+
+        // Diagonal solve: D * Z = Y
+        for (int k = 0; k < n; ) {
+            int p = batch_piv[k];
+            if (p > 0) {
+                T d = LD[k * n + k];
+                for (int j = 0; j < nrhs; j++) B[k * nrhs + j] /= d;
+                k++;
+            } else {
+                T d11 = LD[k * n + k], d21 = LD[(k+1) * n + k], d22 = LD[(k+1) * n + (k+1)];
+                T det = d11 * d22 - d21 * d21;
+                for (int j = 0; j < nrhs; j++) {
+                    T y0 = B[k * nrhs + j], y1 = B[(k+1) * nrhs + j];
+                    B[k * nrhs + j]     = (d22 * y0 - d21 * y1) / det;
+                    B[(k+1) * nrhs + j] = (d11 * y1 - d21 * y0) / det;
+                }
+                k += 2;
+            }
+        }
+
+        // Backward substitution: L^T * X = Z
+        for (int k = n - 1; k >= 0; ) {
+            int p = batch_piv[k];
+            if (p > 0) {
+                for (int i = k + 1; i < n; i++) {
+                    T m = LD[i * n + k];
+                    for (int j = 0; j < nrhs; j++)
+                        B[k * nrhs + j] -= m * B[i * nrhs + j];
+                }
+                k--;
+            } else {
+                int k0 = k - 1;
+                for (int i = k + 1; i < n; i++) {
+                    T m0 = LD[i * n + k0], m1 = LD[i * n + k];
+                    for (int j = 0; j < nrhs; j++) {
+                        B[k0 * nrhs + j] -= m0 * B[i * nrhs + j];
+                        B[k * nrhs + j]  -= m1 * B[i * nrhs + j];
+                    }
+                }
+                k -= 2;
+            }
+        }
+
+        // Inverse pivot permutation P^T
+        for (int k = n - 1; k >= 0; ) {
+            int p = batch_piv[k];
+            if (p > 0) {
+                int sr = p - 1;
+                if (sr != k)
+                    for (int j = 0; j < nrhs; j++) {
+                        T tmp = B[k * nrhs + j]; B[k * nrhs + j] = B[sr * nrhs + j]; B[sr * nrhs + j] = tmp;
+                    }
+                k--;
+            } else {
+                int sr = (-p) - 1;
+                if (sr != k)
+                    for (int j = 0; j < nrhs; j++) {
+                        T tmp = B[k * nrhs + j]; B[k * nrhs + j] = B[sr * nrhs + j]; B[sr * nrhs + j] = tmp;
+                    }
+                k -= 2;
+            }
+        }
+    }
+    __syncthreads();
+
+    for (int idx = tid; idx < n * nrhs; idx += num_threads)
+        batch_b[idx] = B[idx];
+}
+
+// =========================================================================
+// LDL^T factorization — native GPU Bunch-Kaufman kernel
+// =========================================================================
+auto linalg_ldl_factor_kernel(const Tensor& A, cudaStream_t stream)
+    -> std::tuple<Tensor, Tensor> {
+    auto original_dtype = A.dtype();
+    if (original_dtype == DType::Float16 || original_dtype == DType::BFloat16) {
+        auto [LD32, piv] = linalg_ldl_factor_kernel(A.to(DType::Float32), stream);
+        return {LD32.to(original_dtype), piv};
+    }
+    if (original_dtype != DType::Float32 && original_dtype != DType::Float64) {
+        throw std::invalid_argument("linalg::ldl_factor: unsupported dtype");
+    }
+
+    auto [n, ndim] = check_square(A);
+    int64_t nbatch = batch_size(A);
+
+    auto a_shape = to_vec(A.shape());
+    std::vector<int64_t> piv_shape;
+    for (size_t i = 0; i + 2 < a_shape.size(); ++i) piv_shape.push_back(a_shape[i]);
+    piv_shape.push_back(n);
+
+    auto work = A.contiguous().clone();
+    auto pivots_out = tenzor::zeros(piv_shape, DType::Int32, A.device());
+
+    int threads = min(static_cast<int>(n), 128);
+    if (threads < 1) threads = 1;
+
+    if (original_dtype == DType::Float32) {
+        check_size_limit<float>(n, "ldl_factor");
+        size_t smem = (n * n + 4) * sizeof(float);
+        ldl_bk_factor_kernel<float><<<nbatch, threads, smem, stream>>>(
+            work.data<float>(), pivots_out.data<int32_t>(), static_cast<int>(n));
+        CUDA_CHECK_LINALG(cudaGetLastError());
+    } else {
+        check_size_limit<double>(n, "ldl_factor");
+        size_t smem = (n * n + 4) * sizeof(double);
+        ldl_bk_factor_kernel<double><<<nbatch, threads, smem, stream>>>(
+            work.data<double>(), pivots_out.data<int32_t>(), static_cast<int>(n));
+        CUDA_CHECK_LINALG(cudaGetLastError());
+    }
+
+    CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
+    return {work, pivots_out};
+}
+
+// =========================================================================
+// LDL^T solve — native GPU Bunch-Kaufman solve kernel
+// =========================================================================
+auto linalg_ldl_solve_kernel(const Tensor& LD, const Tensor& pivots,
+                              const Tensor& B, cudaStream_t stream) -> Tensor {
+    auto original_dtype = LD.dtype();
+    if (original_dtype == DType::Float16 || original_dtype == DType::BFloat16) {
+        auto result = linalg_ldl_solve_kernel(LD.to(DType::Float32), pivots,
+                                               B.to(DType::Float32), stream);
+        return result.to(original_dtype);
+    }
+    if (original_dtype != DType::Float32 && original_dtype != DType::Float64) {
+        throw std::invalid_argument("linalg::ldl_solve: unsupported dtype");
+    }
+
+    auto ld_shape = LD.shape();
+    auto b_shape = B.shape();
+    int64_t ld_ndim = static_cast<int64_t>(ld_shape.size());
+    int64_t n = ld_shape[ld_ndim - 1];
+    int64_t nrhs = b_shape[static_cast<int64_t>(b_shape.size()) - 1];
+    int64_t nbatch = 1;
+    for (int64_t i = 0; i + 2 < ld_ndim; ++i) nbatch *= ld_shape[i];
+
+    auto ld_cont = LD.contiguous();
+    auto work_b = B.contiguous().clone();
+
+    int threads = min(static_cast<int>(n), 128);
+    if (threads < 1) threads = 1;
+
+    if (original_dtype == DType::Float32) {
+        check_size_limit<float>(n, "ldl_solve");
+        size_t smem = (n * n + n * nrhs) * sizeof(float);
+        ldl_bk_solve_kernel<float><<<nbatch, threads, smem, stream>>>(
+            ld_cont.data<float>(), pivots.data<int32_t>(),
+            work_b.data<float>(), static_cast<int>(n), static_cast<int>(nrhs));
+        CUDA_CHECK_LINALG(cudaGetLastError());
+    } else {
+        check_size_limit<double>(n, "ldl_solve");
+        size_t smem = (n * n + n * nrhs) * sizeof(double);
+        ldl_bk_solve_kernel<double><<<nbatch, threads, smem, stream>>>(
+            ld_cont.data<double>(), pivots.data<int32_t>(),
+            work_b.data<double>(), static_cast<int>(n), static_cast<int>(nrhs));
+        CUDA_CHECK_LINALG(cudaGetLastError());
+    }
+
+    CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
+    return work_b;
+}
+
+// =========================================================================
+// Householder product — compose from existing ormqr kernel
+// =========================================================================
+auto linalg_householder_kernel(const Tensor& input, const Tensor& tau,
+                                cudaStream_t stream) -> Tensor {
+    auto shape = input.shape();
+    auto ndim = static_cast<int64_t>(shape.size());
+    int64_t m = shape[ndim - 2];
+
+    auto I = tenzor::eye(m, std::nullopt, input.dtype(), input.device());
+
+    if (ndim > 2) {
+        std::vector<int64_t> eye_shape(shape.begin(), shape.end());
+        eye_shape[ndim - 1] = m;
+        I = tenzor::expand(I, std::move(eye_shape));
+        I = I.contiguous();
+    }
+
+    return linalg_ormqr_kernel(input, tau, I, true, false, stream);
 }
 
 } // namespace cuda

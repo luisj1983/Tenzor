@@ -17,6 +17,7 @@
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/linalg.hpp"
 #include "tenzor/ops/vision.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
@@ -100,6 +101,20 @@ namespace oneapi {
     auto erfinv_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
     auto sinc_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
     auto zeta_kernel(const Tensor& s, const Tensor& q, sycl::queue& queue) -> Tensor;
+    auto i0e_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto i1e_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto entr_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto spherical_bessel_j0_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto logaddexp_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto logaddexp2_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto xlogy_kernel(const Tensor& x, const Tensor& y, sycl::queue& queue) -> Tensor;
+    auto cosine_similarity_kernel(const Tensor& a, const Tensor& b, int64_t dim, double eps, sycl::queue& queue) -> Tensor;
+    auto renorm_kernel(const Tensor& input, double p, int64_t dim, double maxnorm, sycl::queue& queue) -> Tensor;
+
+    // Ndtr / LogNdtr / Multigammaln
+    auto ndtr_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto log_ndtr_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto multigammaln_kernel(const Tensor& input, int64_t d, sycl::queue& queue) -> Tensor;
 
     // Grid sample / affine grid (native OneAPI — replaces previous CPU fallbacks)
     auto grid_sample_kernel(const Tensor& input, const Tensor& grid,
@@ -132,6 +147,11 @@ namespace oneapi {
     auto nested_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
                                   const Tensor& q_offsets, const Tensor& kv_offsets,
                                   float scale, bool causal, sycl::queue& queue) -> Tensor;
+
+    // NestedAttentionBackward (native SYCL)
+    auto nested_attention_backward_kernel(const Tensor& grad_out, const Tensor& Q, const Tensor& K, const Tensor& V,
+                                           const Tensor& attn_out, const Tensor& q_offsets, const Tensor& kv_offsets,
+                                           float scale, bool causal, sycl::queue& queue) -> std::vector<Tensor>;
 
     // STFT / ISTFT (native OneAPI — replaces previous CPU fallbacks)
     auto stft_kernel(const Tensor& input, int64_t n_fft,
@@ -221,6 +241,7 @@ namespace oneapi {
     auto imag_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
     auto angle_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
     auto polar_kernel(const Tensor& abs_t, const Tensor& angle_t, sycl::queue& queue) -> Tensor;
+    auto complex_tensor_kernel(const Tensor& real_t, const Tensor& imag_t, sycl::queue& queue) -> Tensor;
     auto cross_kernel(const Tensor& a, const Tensor& b, int64_t dim, sycl::queue& queue) -> Tensor;
 
     // Phase 4 math ops (native SYCL kernels in kernels/math.cpp)
@@ -779,6 +800,17 @@ namespace oneapi {
     auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
                                          bool upper, bool unitriangular,
                                          sycl::queue& queue) -> Tensor;
+    auto linalg_geqrf_kernel(const Tensor& input, sycl::queue& queue)
+        -> std::pair<Tensor, Tensor>;
+    auto linalg_ormqr_kernel(const Tensor& reflectors, const Tensor& tau,
+                              const Tensor& C, bool left, bool transpose_q,
+                              sycl::queue& queue) -> Tensor;
+    auto linalg_ldl_factor_kernel(const Tensor& A, sycl::queue& queue)
+        -> std::tuple<Tensor, Tensor>;
+    auto linalg_ldl_solve_kernel(const Tensor& LD, const Tensor& pivots,
+                                  const Tensor& B, sycl::queue& queue) -> Tensor;
+    auto linalg_householder_kernel(const Tensor& input, const Tensor& tau,
+                                    sycl::queue& queue) -> Tensor;
     // ---- FFT operations (kernels/fft.cpp) ----
     auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                     const std::string& norm, sycl::queue& queue) -> Tensor;
@@ -1163,6 +1195,22 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     ONEAPI_REGISTER_UNARY_SPECIAL(ErfInv,    erfinv_kernel);
     ONEAPI_REGISTER_UNARY_SPECIAL(Sinc,      sinc_kernel);
     ONEAPI_REGISTER_BINARY_SPECIAL(Zeta,     zeta_kernel);
+    ONEAPI_REGISTER_UNARY_SPECIAL(I0e,       i0e_kernel);
+    ONEAPI_REGISTER_UNARY_SPECIAL(I1e,       i1e_kernel);
+    ONEAPI_REGISTER_UNARY_SPECIAL(Entr,      entr_kernel);
+    ONEAPI_REGISTER_UNARY_SPECIAL(SphericalBesselJ0, spherical_bessel_j0_kernel);
+    ONEAPI_REGISTER_BINARY_SPECIAL(LogAddExp,  logaddexp_kernel);
+    ONEAPI_REGISTER_BINARY_SPECIAL(LogAddExp2, logaddexp2_kernel);
+    ONEAPI_REGISTER_BINARY_SPECIAL(XLogY,      xlogy_kernel);
+    ONEAPI_REGISTER_UNARY_SPECIAL(Ndtr,       ndtr_kernel);
+    ONEAPI_REGISTER_UNARY_SPECIAL(LogNdtr,    log_ndtr_kernel);
+
+    // Multigammaln (needs extra dim parameter)
+    table.register_kernel(OpId::Multigammaln,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t d = attrs.get_int(AttrKey::Dim, 1);
+            return {oneapi::multigammaln_kernel(inputs[0], d, get_q(inputs))};
+        });
 
     table.register_kernel(OpId::Polygamma, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t n = static_cast<int64_t>(attrs.get_float(AttrKey::Order, 0.0));
@@ -1170,6 +1218,21 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     });
     table.register_kernel(OpId::BetaInc, [](std::span<const Tensor> inputs, const OpAttributes&) {
         return std::vector<Tensor>{oneapi::betainc_kernel(inputs[0], inputs[1], inputs[2], get_q(inputs))};
+    });
+
+    // CosineSimilarity: reduction op with dim + eps parameters
+    table.register_single_output_kernel(OpId::CosineSimilarity, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 1);
+        double eps = attrs.get_float(AttrKey::Eps, 1e-8);
+        return oneapi::cosine_similarity_kernel(inputs[0], inputs[1], dim, eps, get_q(inputs));
+    });
+
+    // Renorm: reduction op with p, dim, maxnorm parameters
+    table.register_single_output_kernel(OpId::Renorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        double p = attrs.get_float(AttrKey::P, 2.0);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        double maxnorm = attrs.get_float(AttrKey::MaxNorm, 1.0);
+        return oneapi::renorm_kernel(inputs[0], p, dim, maxnorm, get_q(inputs));
     });
 
 #undef ONEAPI_REGISTER_UNARY_SPECIAL
@@ -1381,6 +1444,11 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::Polar,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
             return {oneapi::polar_kernel(inputs[0], inputs[1], get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::ComplexTensor,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            return {oneapi::complex_tensor_kernel(inputs[0], inputs[1], get_q(inputs))};
         });
 
     table.register_single_output_kernel(OpId::Cross,
@@ -3508,6 +3576,91 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return {oneapi::linalg_solve_triangular_kernel(inputs[0], inputs[1], upper, unitriangular, get_q(inputs))};
         });
 
+    table.register_kernel(OpId::Geqrf,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            auto [result, tau] = oneapi::linalg_geqrf_kernel(inputs[0], get_q(inputs));
+            return {result, tau};
+        });
+
+    table.register_single_output_kernel(OpId::Ormqr,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            bool left = attrs.get_bool(AttrKey::Left, true);
+            bool transpose_q = attrs.get_bool(AttrKey::TransposeQ, false);
+            return oneapi::linalg_ormqr_kernel(inputs[0], inputs[1], inputs[2],
+                left, transpose_q, get_q(inputs));
+        });
+
+    // =========================================================================
+    // LinalgVectorNorm, LinalgMatrixNorm, LinalgVecdot
+    // =========================================================================
+
+    // LinalgVectorNorm: delegates to existing Norm kernel
+    table.register_kernel(OpId::LinalgVectorNorm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return {oneapi::norm_kernel(inputs[0], attrs, get_q(inputs))};
+        });
+
+    // LinalgMatrixNorm: Frobenius (ord=0), nuclear (ord=1), spectral (ord=2)
+    table.register_kernel(OpId::LinalgMatrixNorm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t ord = static_cast<int64_t>(attrs.get_float(AttrKey::Order, 0.0));
+            auto& q = get_q(inputs);
+            if (ord == 0) {
+                return {oneapi::norm_kernel(inputs[0], attrs, q)};
+            }
+            auto [U, S, Vt] = oneapi::linalg_svd_kernel(inputs[0], false, q);
+            if (ord == 1) {
+                return {oneapi::sum_kernel(S, INT64_MIN, false, q)};
+            }
+            return {oneapi::max_kernel(S, INT64_MIN, false, q)};
+        });
+
+    // LinalgVecdot: sum(a * b, dim)
+    table.register_kernel(OpId::LinalgVecdot,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            auto& q = get_q(inputs);
+            Tensor product = oneapi::mul_kernel(inputs[0], inputs[1], q);
+            return {oneapi::sum_kernel(product, dim, false, q)};
+        });
+
+    // =========================================================================
+    // LinalgHouseholder, LinalgLDLFactor, LinalgLDLSolve,
+    // CholeskyInverse, TensorInv, TensorSolve
+    // =========================================================================
+    table.register_single_output_kernel(OpId::LinalgHouseholder,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return oneapi::linalg_householder_kernel(inputs[0], inputs[1], get_q(inputs));
+        });
+
+    table.register_kernel(OpId::LinalgLDLFactor,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            auto [LD, pivots] = oneapi::linalg_ldl_factor_kernel(inputs[0], get_q(inputs));
+            return {LD, pivots};
+        });
+
+    table.register_single_output_kernel(OpId::LinalgLDLSolve,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return oneapi::linalg_ldl_solve_kernel(inputs[0], inputs[1], inputs[2], get_q(inputs));
+        });
+
+    table.register_single_output_kernel(OpId::CholeskyInverse,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            bool upper = attrs.get_bool(AttrKey::Upper, false);
+            return linalg::cholesky_inverse(inputs[0], upper);
+        });
+
+    table.register_single_output_kernel(OpId::TensorInv,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t ind = attrs.get_int(AttrKey::Ind, 2);
+            return linalg::tensorinv(inputs[0], ind);
+        });
+
+    table.register_single_output_kernel(OpId::TensorSolve,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return linalg::tensorsolve(inputs[0], inputs[1]);
+        });
+
     // =========================================================================
     // FFT Operations (Phase 10.7 - oneMKL DFT)
     // =========================================================================
@@ -3671,6 +3824,57 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             bool upper = attrs.get_bool(AttrKey::Upper, true);
             bool unitriangular = attrs.get_bool(AttrKey::UnitTriangular, false);
             return {oneapi::linalg_solve_triangular_kernel(inputs[0], inputs[1], upper, unitriangular, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::Geqrf,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            auto [result, tau] = oneapi::linalg_geqrf_kernel(inputs[0], get_q(inputs));
+            return {result, tau};
+        });
+
+    table.register_single_output_kernel(OpId::Ormqr,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            bool left = attrs.get_bool(AttrKey::Left, true);
+            bool transpose_q = attrs.get_bool(AttrKey::TransposeQ, false);
+            return oneapi::linalg_ormqr_kernel(inputs[0], inputs[1], inputs[2],
+                left, transpose_q, get_q(inputs));
+        });
+
+    // =========================================================================
+    // LinalgHouseholder, LinalgLDLFactor, LinalgLDLSolve,
+    // CholeskyInverse, TensorInv, TensorSolve (non-onemkl fallback path)
+    // =========================================================================
+    table.register_single_output_kernel(OpId::LinalgHouseholder,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return oneapi::linalg_householder_kernel(inputs[0], inputs[1], get_q(inputs));
+        });
+
+    table.register_kernel(OpId::LinalgLDLFactor,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            auto [LD, pivots] = oneapi::linalg_ldl_factor_kernel(inputs[0], get_q(inputs));
+            return {LD, pivots};
+        });
+
+    table.register_single_output_kernel(OpId::LinalgLDLSolve,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return oneapi::linalg_ldl_solve_kernel(inputs[0], inputs[1], inputs[2], get_q(inputs));
+        });
+
+    table.register_single_output_kernel(OpId::CholeskyInverse,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            bool upper = attrs.get_bool(AttrKey::Upper, false);
+            return linalg::cholesky_inverse(inputs[0], upper);
+        });
+
+    table.register_single_output_kernel(OpId::TensorInv,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t ind = attrs.get_int(AttrKey::Ind, 2);
+            return linalg::tensorinv(inputs[0], ind);
+        });
+
+    table.register_single_output_kernel(OpId::TensorSolve,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return linalg::tensorsolve(inputs[0], inputs[1]);
         });
 
     // FFT ops: use SYCL-native Cooley-Tukey + Bluestein fallback (implemented in fft.cpp)
@@ -5116,6 +5320,30 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             }).wait();
 
             return {values};
+        });
+
+    // =========================================================================
+    // AsStrided — metadata-only view with custom shape/strides
+    // =========================================================================
+    table.register_single_output_kernel(OpId::AsStrided,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto shape = attrs.get_int_list(AttrKey::Shape);
+            auto strides = attrs.get_int_list(AttrKey::Strides);
+            int64_t offset = attrs.get_int(AttrKey::StorageOffset, -1);
+            std::optional<int64_t> storage_offset = (offset >= 0) ? std::optional(offset) : std::nullopt;
+            return tenzor::as_strided(inputs[0], shape, strides, storage_offset);
+        });
+
+    // =========================================================================
+    // NestedAttentionBackward — backward for segmented attention (native SYCL)
+    // =========================================================================
+    table.register_kernel(OpId::NestedAttentionBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+            bool causal = attrs.get_bool(AttrKey::Causal, false);
+            return oneapi::nested_attention_backward_kernel(
+                inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+                inputs[5], inputs[6], scale, causal, get_q(inputs));
         });
 
 } // register_oneapi_kernels

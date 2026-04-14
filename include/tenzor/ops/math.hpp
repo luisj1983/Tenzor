@@ -538,6 +538,42 @@ auto logaddexp2(const Tensor& a, const Tensor& b) -> Tensor;
  */
 auto xlogy(const Tensor& x, const Tensor& y) -> Tensor;
 
+/**
+ * @brief Exponentially scaled modified Bessel function of the first kind, order 0.
+ * Computes exp(-|x|) * I0(x).
+ */
+auto i0e(const Tensor& x) -> Tensor;
+
+/**
+ * @brief Exponentially scaled modified Bessel function of the first kind, order 1.
+ * Computes exp(-|x|) * I1(x).
+ */
+auto i1e(const Tensor& x) -> Tensor;
+
+/**
+ * @brief Element-wise entropy: -x * log(x), with 0*log(0) = 0.
+ */
+auto entr(const Tensor& x) -> Tensor;
+
+/**
+ * @brief Spherical Bessel function of the first kind, order 0.
+ * Computes sin(x)/x, with j0(0) = 1.
+ */
+auto spherical_bessel_j0(const Tensor& x) -> Tensor;
+
+/**
+ * @brief Renormalize tensor slices along a dimension so their p-norm
+ *        does not exceed maxnorm.
+ */
+/**
+ * @brief Cosine similarity between two tensors along a dimension.
+ * Computes sum(x1*x2, dim) / (norm(x1, dim) * norm(x2, dim) + eps).
+ */
+auto cosine_similarity(const Tensor& x1, const Tensor& x2,
+                       int64_t dim = 1, double eps = 1e-8) -> Tensor;
+
+auto renorm(const Tensor& input, double p, int64_t dim, double maxnorm) -> Tensor;
+
 /// @}
 
 /// @name Comparison Utilities

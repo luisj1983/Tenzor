@@ -7,7 +7,8 @@
 //
 //   0=gamma, 1=lgamma, 2=digamma, 3=bessel_j0, 4=bessel_j1,
 //   5=bessel_y0, 6=bessel_y1, 7=bessel_i0, 8=bessel_i1, 9=erfinv,
-//   10=sinc, 11=polygamma (n via push_constant param_int)
+//   10=sinc, 11=polygamma (n via push_constant param_int),
+//   12=i0e, 13=i1e, 14=entr, 15=spherical_bessel_j0
 
 layout(local_size_x_id = 0) in;
 
@@ -269,6 +270,56 @@ float sinc_impl(float x) {
     return sin(px) / px;
 }
 
+// ----- I0e: exp(-|x|) * BesselI0(x) -----
+float i0e_impl(float x_in) {
+    float ax = abs(x_in);
+    if (ax < 3.75f) {
+        float t = x_in / 3.75f;
+        t = t * t;
+        float i0 = 1.0f + t * (3.5156229f + t * (3.0899424f + t * (1.2067492f
+                   + t * (0.2659732f + t * (0.0360768f + t * 0.0045813f)))));
+        return exp(-ax) * i0;
+    }
+    float t = 3.75f / ax;
+    return (1.0f / sqrt(ax)) * (0.39894228f + t * (0.01328592f
+           + t * (0.00225319f - t * (0.00157565f - t * (0.00916281f
+           - t * (0.02057706f - t * (0.02635537f - t * (0.01647633f
+           - t * 0.00392377f))))))));
+}
+
+// ----- I1e: exp(-|x|) * BesselI1(x) -----
+float i1e_impl(float x_in) {
+    float ax = abs(x_in);
+    float result;
+    if (ax < 3.75f) {
+        float t = x_in / 3.75f;
+        t = t * t;
+        result = ax * (0.5f + t * (0.87890594f + t * (0.51498869f + t * (0.15084934f
+                 + t * (0.02658733f + t * (0.00301532f + t * 0.00032411f))))));
+        result = exp(-ax) * result;
+    } else {
+        float t = 3.75f / ax;
+        result = (1.0f / sqrt(ax)) * (0.39894228f - t * (0.03988024f
+                 - t * (0.00362018f + t * (0.00163801f - t * (0.01031555f
+                 - t * (0.02282967f - t * (0.02895312f - t * (0.01787654f
+                 - t * 0.00420059f))))))));
+    }
+    return (x_in < 0.0f) ? -result : result;
+}
+
+// ----- Entr: -x*log(x), 0->0, negative->-inf -----
+float entr_impl(float x) {
+    if (x > 0.0f) return -x * log(x);
+    if (x == 0.0f) return 0.0f;
+    return -1.0e38f;
+}
+
+// ----- SphericalBesselJ0: sin(x)/x, j0(0)=1 -----
+float spherical_bessel_j0_impl(float x) {
+    if (x == 0.0f) return 1.0f;
+    return sin(x) / x;
+}
+
 // ----- Polygamma -----
 float polygamma_impl(int n, float x) {
     if (n == 0) return digamma_impl(x);
@@ -298,6 +349,10 @@ float compute_special(float x) {
         case 9:  return erfinv_impl(x);
         case 10: return sinc_impl(x);
         case 11: return polygamma_impl(params.param_int, x);
+        case 12: return i0e_impl(x);
+        case 13: return i1e_impl(x);
+        case 14: return entr_impl(x);
+        case 15: return spherical_bessel_j0_impl(x);
         default: return 0.0f;
     }
 }

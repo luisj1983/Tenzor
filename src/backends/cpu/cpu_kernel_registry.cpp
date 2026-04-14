@@ -166,6 +166,17 @@ namespace cpu {
     auto pairwise_distance_kernel(const Tensor& x1, const Tensor& x2, double p) -> Tensor;
     auto pdist_kernel(const Tensor& input, double p) -> Tensor;
 
+    // New math operations (PyTorch parity)
+    auto logaddexp_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto logaddexp2_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto xlogy_kernel(const Tensor& x, const Tensor& y) -> Tensor;
+    auto i0e_kernel(const Tensor& input) -> Tensor;
+    auto i1e_kernel(const Tensor& input) -> Tensor;
+    auto entr_kernel(const Tensor& input) -> Tensor;
+    auto spherical_bessel_j0_kernel(const Tensor& input) -> Tensor;
+    auto renorm_kernel(const Tensor& input, double p, int64_t dim, double maxnorm) -> Tensor;
+    auto cosine_similarity_kernel(const Tensor& a, const Tensor& b, int64_t dim, double eps) -> Tensor;
+
     auto logical_and_kernel(const Tensor& a, const Tensor& b) -> Tensor;
     auto logical_or_kernel(const Tensor& a, const Tensor& b) -> Tensor;
     auto logical_not_kernel(const Tensor& input) -> Tensor;
@@ -612,6 +623,11 @@ namespace cpu {
     // Bucketize
     auto bucketize_kernel(const Tensor& input, const Tensor& boundaries, bool right) -> Tensor;
 
+    // Ndtr / LogNdtr / Multigammaln
+    auto ndtr_kernel(const Tensor& input) -> Tensor;
+    auto log_ndtr_kernel(const Tensor& input) -> Tensor;
+    auto multigammaln_kernel(const Tensor& input, int64_t d) -> Tensor;
+
     // Nested tensor kernels
     auto nested_softmax_kernel(const Tensor& values, const Tensor& offsets, int64_t dim) -> Tensor;
     auto nested_log_softmax_kernel(const Tensor& values, const Tensor& offsets, int64_t dim) -> Tensor;
@@ -622,6 +638,9 @@ namespace cpu {
     auto nested_to_padded_kernel(const Tensor& values, const Tensor& offsets, int64_t max_len, float padding_value) -> Tensor;
     auto nested_from_padded_kernel(const Tensor& padded, const Tensor& offsets) -> Tensor;
     auto nested_linear_kernel(const Tensor& values, const Tensor& weight, const Tensor* bias) -> Tensor;
+    auto nested_attention_backward_kernel(const Tensor& grad_out, const Tensor& Q, const Tensor& K, const Tensor& V,
+                                           const Tensor& attn_out, const Tensor& q_offsets, const Tensor& kv_offsets,
+                                           float scale, bool causal) -> std::vector<Tensor>;
 } // namespace cpu
 
 // Forward declarations for quantized kernels (in nn::quantization::kernels namespace)
@@ -1116,6 +1135,46 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, BesselI1, cpu::bessel_i1_kernel);
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Sinc, cpu::sinc_kernel);
     TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Zeta, cpu::zeta_kernel);
+
+    // Ndtr / LogNdtr / Multigammaln
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Ndtr, cpu::ndtr_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, LogNdtr, cpu::log_ndtr_kernel);
+    table.register_single_output_kernel(OpId::Multigammaln, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t d = attrs.get_int(AttrKey::Dim, 1);
+        return cpu::multigammaln_kernel(inputs[0], d);
+    });
+
+    // LinalgVectorNorm: delegates to existing Norm kernel
+    table.register_single_output_kernel(OpId::LinalgVectorNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        float p = static_cast<float>(attrs.get_float(AttrKey::P, 2.0));
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        return cpu::norm_kernel(inputs[0], p, dim, keepdim);
+    });
+
+    // LinalgMatrixNorm: Frobenius (ord=0), nuclear (ord=1), spectral (ord=2)
+    table.register_single_output_kernel(OpId::LinalgMatrixNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t ord = static_cast<int64_t>(attrs.get_float(AttrKey::Order, 0.0));
+        if (ord == 0) {
+            // Frobenius norm: sqrt(sum(x^2))
+            return cpu::norm_kernel(inputs[0], 2.0f, INT64_MIN, false);
+        }
+        // Nuclear (ord==1) or Spectral (ord==2): use SVD
+        auto svd_result = linalg::svd(inputs[0], /*full_matrices=*/false);
+        const auto& S = std::get<1>(svd_result);
+        if (ord == 1) {
+            return cpu::sum_kernel(S, INT64_MIN, false);
+        }
+        return cpu::max_kernel(S, INT64_MIN, false);
+    });
+
+    // LinalgVecdot: sum(a * b, dim)
+    table.register_single_output_kernel(OpId::LinalgVecdot, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        Tensor product = cpu::mul_kernel(inputs[0], inputs[1]);
+        return cpu::sum_kernel(product, dim, false);
+    });
+
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, IsNan, cpu::isnan_kernel);
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, IsInf, cpu::isinf_kernel);
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, IsFinite, cpu::isfinite_kernel);
@@ -3691,6 +3750,29 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         });
 
     // =========================================================================
+    // New math ops (PyTorch parity)
+    // =========================================================================
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, LogAddExp, cpu::logaddexp_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, LogAddExp2, cpu::logaddexp2_kernel);
+    TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, XLogY, cpu::xlogy_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, I0e, cpu::i0e_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, I1e, cpu::i1e_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Entr, cpu::entr_kernel);
+    TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, SphericalBesselJ0, cpu::spherical_bessel_j0_kernel);
+
+    table.register_single_output_kernel(OpId::Renorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        double p = attrs.get_float(AttrKey::P, 2.0);
+        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
+        double maxnorm = attrs.get_float(AttrKey::MaxNorm, 1.0);
+        return cpu::renorm_kernel(inputs[0], p, dim, maxnorm);
+    });
+    table.register_single_output_kernel(OpId::CosineSimilarity, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t dim = attrs.get_int(AttrKey::Dim, 1);
+        double eps = attrs.get_float(AttrKey::Eps, 1e-8);
+        return cpu::cosine_similarity_kernel(inputs[0], inputs[1], dim, eps);
+    });
+
+    // =========================================================================
     // ComplexTensor, Ormqr, Geqrf CPU kernel registrations
     // =========================================================================
 
@@ -3710,6 +3792,69 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
             auto [result, tau] = linalg::geqrf(inputs[0]);
             return {result, tau};
+        });
+
+    // =========================================================================
+    // LinalgHouseholder, LinalgLDLFactor, LinalgLDLSolve,
+    // CholeskyInverse, TensorInv, TensorSolve CPU kernel registrations
+    // =========================================================================
+
+    table.register_single_output_kernel(OpId::LinalgHouseholder,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return linalg::householder_product(inputs[0], inputs[1]);
+        });
+
+    table.register_kernel(OpId::LinalgLDLFactor,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            auto [LD, pivots] = linalg::ldl_factor(inputs[0]);
+            return {LD, pivots};
+        });
+
+    table.register_single_output_kernel(OpId::LinalgLDLSolve,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return linalg::ldl_solve(inputs[0], inputs[1], inputs[2]);
+        });
+
+    table.register_single_output_kernel(OpId::CholeskyInverse,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            bool upper = attrs.get_bool(AttrKey::Upper, false);
+            return linalg::cholesky_inverse(inputs[0], upper);
+        });
+
+    table.register_single_output_kernel(OpId::TensorInv,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t ind = attrs.get_int(AttrKey::Ind, 2);
+            return linalg::tensorinv(inputs[0], ind);
+        });
+
+    table.register_single_output_kernel(OpId::TensorSolve,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return linalg::tensorsolve(inputs[0], inputs[1]);
+        });
+
+    // =========================================================================
+    // AsStrided — metadata-only view with custom shape/strides
+    // =========================================================================
+    table.register_single_output_kernel(OpId::AsStrided,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto shape = attrs.get_int_list(AttrKey::Shape);
+            auto strides = attrs.get_int_list(AttrKey::Strides);
+            int64_t offset = attrs.get_int(AttrKey::StorageOffset, -1);
+            std::optional<int64_t> storage_offset = (offset >= 0) ? std::optional(offset) : std::nullopt;
+            return tenzor::as_strided(inputs[0], shape, strides, storage_offset);
+        });
+
+    // =========================================================================
+    // NestedAttentionBackward — backward for segmented attention
+    // =========================================================================
+    table.register_kernel(OpId::NestedAttentionBackward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // inputs: [grad_out, Q, K, V, attn_out, q_offsets, kv_offsets]
+            float scale = attrs.get_float(AttrKey::Scale, 1.0f);
+            bool causal = attrs.get_bool(AttrKey::Causal, false);
+            return cpu::nested_attention_backward_kernel(
+                inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+                inputs[5], inputs[6], scale, causal);
         });
 }
 

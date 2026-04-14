@@ -33,6 +33,7 @@ BACKEND_REGISTRIES = OrderedDict([
     ("ROCm",   PROJECT_ROOT / "src" / "backends" / "rocm"   / "rocm_kernel_registry.cpp"),
     ("Vulkan", PROJECT_ROOT / "src" / "backends" / "vulkan" / "vulkan_kernel_registry.cpp"),
     ("OneAPI", PROJECT_ROOT / "src" / "backends" / "oneapi"  / "oneapi_kernel_registry.cpp"),
+    ("MPS",    PROJECT_ROOT / "src" / "backends" / "mps"    / "mps_kernel_registry.mm"),
 ])
 
 # OpIds that are explicitly documented as reserved/unused in op_id.hpp
@@ -114,6 +115,22 @@ def parse_registry(path: Path) -> dict[str, str]:
     # Pattern 5: VULKAN_CPU_FALLBACK(XXX) and VULKAN_FFT_CPU_FALLBACK(XXX)
     for m in re.finditer(r"VULKAN_(?:FFT_)?CPU_FALLBACK\((\w+)\)", text):
         registered[m.group(1)] = "fallback"  # Override — mark as fallback
+
+    # Pattern 6: ROCM_SINGLE_UNARY_NATIVE(OpName, fn)
+    for m in re.finditer(r"ROCM_SINGLE_UNARY_NATIVE\((\w+)", text):
+        registered.setdefault(m.group(1), "single")
+
+    # Pattern 7: VK_REGISTER_UNARY_SPECIAL(OpName, opcode)
+    for m in re.finditer(r"VK_REGISTER_UNARY_SPECIAL\((\w+)", text):
+        registered.setdefault(m.group(1), "single")
+
+    # Pattern 8: ONEAPI_REGISTER_UNARY_SPECIAL(OpName, fn)
+    for m in re.finditer(r"ONEAPI_REGISTER_UNARY_SPECIAL\((\w+)", text):
+        registered.setdefault(m.group(1), "single")
+
+    # Pattern 9: ONEAPI_REGISTER_BINARY_SPECIAL(OpName, fn)
+    for m in re.finditer(r"ONEAPI_REGISTER_BINARY_SPECIAL\((\w+)", text):
+        registered.setdefault(m.group(1), "kernel")
 
     return registered
 

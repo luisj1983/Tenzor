@@ -209,6 +209,13 @@ public:
      *   - CholeskyBackward, SvdBackward, QrBackward, EighBackward, EigvalshBackward
      *   - SpMMBackward, SpMVBackward, SparseAddBackward
      *   - MedianBackward, ModeBackward
+     *   - LogAddExpBackward, LogAddExp2Backward, XLogYBackward
+     *   - I0eBackward, I1eBackward, EntrBackward, SphericalBesselJ0Backward
+     *   - NdtrBackward, LogNdtrBackward, MultigammalnBackward
+     *   - CosineSimilarityBackward, RenormBackward
+     *   - CholeskyInverseBackward, LinalgLDLSolveBackward
+     *   - TensorInvBackward, TensorSolveBackward
+     *   - LinalgVectorNormBackward, LinalgMatrixNormBackward, LinalgVecdotBackward
      *
      * Ops with full backward_with_variables using Variable-level scatter_add:
      *   - GatherBackward, IndexSelectBackward, IndexBackward, ScatterAddBackward
@@ -236,6 +243,11 @@ public:
      *   - RNN/LSTM/GRU (P4.2g) — recurrent 2nd-order requires per-timestep
      *     Variable-level gate recomputation; flagged as stubs pending a
      *     dedicated branch.
+     *   - LinalgLDLFactorBackward — complex structured symmetric backprop;
+     *     returns zeros through factorization (use solve path for gradients).
+     *   - LinalgHouseholderBackward — complex Householder product backward;
+     *     returns zeros (rarely needed in gradient flows).
+     *   - AsStridedBackward — scatter_add inverse stride mapping; flagged stub.
      *
      * The "structural-zero" cases are mathematically correct. The Conv/Norm/
      * RNN cases are pragmatic correctness compromises that Warn mode accepts
@@ -2323,6 +2335,265 @@ public:
 
     std::vector<int64_t> size_;
     bool align_corners_{false};
+};
+
+// =========================================================================
+// New Op Backward Functions (Phase 7)
+// =========================================================================
+
+// --- Element-wise binary ops ---
+
+class LogAddExpBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "LogAddExpBackward"; }
+
+    std::vector<int64_t> input_shape_a_;
+    std::vector<int64_t> input_shape_b_;
+};
+
+class LogAddExp2Backward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "LogAddExp2Backward"; }
+
+    std::vector<int64_t> input_shape_a_;
+    std::vector<int64_t> input_shape_b_;
+};
+
+class XLogYBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "XLogYBackward"; }
+
+    std::vector<int64_t> input_shape_x_;
+    std::vector<int64_t> input_shape_y_;
+};
+
+// --- Element-wise unary ops ---
+
+class I0eBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "I0eBackward"; }
+};
+
+class I1eBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "I1eBackward"; }
+};
+
+class EntrBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "EntrBackward"; }
+};
+
+class SphericalBesselJ0Backward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "SphericalBesselJ0Backward"; }
+};
+
+// --- Statistical/special ops ---
+
+class NdtrBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "NdtrBackward"; }
+};
+
+class LogNdtrBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "LogNdtrBackward"; }
+};
+
+class MultigammalnBackward : public Function {
+public:
+    explicit MultigammalnBackward(int64_t p) : p_(p) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "MultigammalnBackward"; }
+private:
+    int64_t p_;
+};
+
+// --- Reduction ops ---
+
+class CosineSimilarityBackward : public Function {
+public:
+    explicit CosineSimilarityBackward(int64_t dim = 1, double eps = 1e-8)
+        : dim_(dim), eps_(eps) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "CosineSimilarityBackward"; }
+private:
+    int64_t dim_;
+    double eps_;
+};
+
+class RenormBackward : public Function {
+public:
+    RenormBackward(double p, int64_t dim, double maxnorm)
+        : p_(p), dim_(dim), maxnorm_(maxnorm) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "RenormBackward"; }
+private:
+    double p_;
+    int64_t dim_;
+    double maxnorm_;
+};
+
+// --- Linalg ops ---
+
+class CholeskyInverseBackward : public Function {
+public:
+    explicit CholeskyInverseBackward(bool upper = false) : upper_(upper) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "CholeskyInverseBackward"; }
+private:
+    bool upper_;
+};
+
+class LinalgLDLFactorBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
+    auto name() const -> std::string override { return "LinalgLDLFactorBackward"; }
+};
+
+class LinalgLDLSolveBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "LinalgLDLSolveBackward"; }
+};
+
+class LinalgHouseholderBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
+    auto name() const -> std::string override { return "LinalgHouseholderBackward"; }
+};
+
+class TensorInvBackward : public Function {
+public:
+    explicit TensorInvBackward(int64_t ind = 2) : ind_(ind) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "TensorInvBackward"; }
+private:
+    int64_t ind_;
+};
+
+class TensorSolveBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "TensorSolveBackward"; }
+};
+
+class LinalgVectorNormBackward : public Function {
+public:
+    LinalgVectorNormBackward(double ord = 2.0, std::vector<int64_t> dim = {}, bool keepdim = false)
+        : ord_(ord), dim_(std::move(dim)), keepdim_(keepdim) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "LinalgVectorNormBackward"; }
+private:
+    double ord_;
+    std::vector<int64_t> dim_;
+    bool keepdim_;
+};
+
+class LinalgMatrixNormBackward : public Function {
+public:
+    explicit LinalgMatrixNormBackward(double ord = 2.0) : ord_(ord) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "LinalgMatrixNormBackward"; }
+private:
+    double ord_;
+};
+
+class LinalgVecdotBackward : public Function {
+public:
+    explicit LinalgVecdotBackward(int64_t dim = -1) : dim_(dim) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
+    auto name() const -> std::string override { return "LinalgVecdotBackward"; }
+private:
+    int64_t dim_;
+};
+
+class AsStridedBackward : public Function {
+public:
+    AsStridedBackward(std::vector<int64_t> input_shape, std::vector<int64_t> size,
+                      std::vector<int64_t> stride, std::optional<int64_t> storage_offset)
+        : input_shape_(std::move(input_shape)), size_(std::move(size)),
+          stride_(std::move(stride)), storage_offset_(storage_offset) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
+    auto name() const -> std::string override { return "AsStridedBackward"; }
+private:
+    std::vector<int64_t> input_shape_;
+    std::vector<int64_t> size_;
+    std::vector<int64_t> stride_;
+    std::optional<int64_t> storage_offset_;
 };
 
 } // namespace tenzor

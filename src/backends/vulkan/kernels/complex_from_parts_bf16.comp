@@ -1,0 +1,32 @@
+#version 450
+
+// Create complex tensor from separate real and imaginary parts (BFloat16)
+// Operates on packed uint32 words: each uint32 holds 2 bfloat16 values
+// Input:  real packed BF16, imag packed BF16
+// Output: interleaved complex BF16 (one uint32 per complex element: [real, imag])
+
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) buffer RealBuf  { uint real_in[];  };
+layout(set = 0, binding = 1) buffer ImagBuf  { uint imag_in[];  };
+layout(set = 0, binding = 2) buffer OutputBuf { uint data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_complex;
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= num_complex) return;
+
+    uint word_idx = idx >> 1;
+    uint lane = idx & 1;
+
+    uint real_word = real_in[word_idx];
+    uint imag_word = imag_in[word_idx];
+
+    uint real_bits = (lane == 0) ? (real_word & 0xFFFFu) : (real_word >> 16);
+    uint imag_bits = (lane == 0) ? (imag_word & 0xFFFFu) : (imag_word >> 16);
+
+    data_out[idx] = real_bits | (imag_bits << 16);
+}
