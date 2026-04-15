@@ -3962,6 +3962,156 @@ auto histogram_kernel(const Tensor& input, int64_t bins, double min_val, double 
 }
 
 // ============================================================================
+// Histogramdd Kernel - Multi-dimensional histogram
+// ============================================================================
+
+auto histogramdd_kernel(const Tensor& input, std::vector<int64_t> bins,
+                        std::vector<std::pair<double,double>> ranges,
+                        bool density)
+    -> std::pair<Tensor, std::vector<Tensor>> {
+
+    if (input.dim() != 2) {
+        throw std::runtime_error("histogramdd_kernel: input must be 2-D (N, D)");
+    }
+
+    const int64_t N = input.shape()[0];
+    const int64_t D = input.shape()[1];
+
+    if (static_cast<int64_t>(bins.size()) != D) {
+        throw std::runtime_error("histogramdd_kernel: bins length must equal D");
+    }
+
+    // Determine compute dtype — work in Float64 for precision, or Float32
+    const auto orig_dtype = input.dtype();
+    const bool use_f64 = (orig_dtype == DType::Float64);
+    const auto compute_dtype = use_f64 ? DType::Float64 : DType::Float32;
+    Tensor inp = (input.dtype() != compute_dtype) ? input.to(compute_dtype) : input;
+    const auto& device = input.device();
+
+    // Auto-detect ranges from data if not provided
+    bool auto_range = ranges.empty();
+    if (auto_range) {
+        ranges.resize(static_cast<size_t>(D));
+    }
+
+    auto process = [&]<typename T>(T*) {
+        const T* data = inp.data<T>();
+
+        if (auto_range) {
+            for (int64_t d = 0; d < D; ++d) {
+                if (N == 0) {
+                    ranges[static_cast<size_t>(d)] = {0.0, 1.0};
+                } else {
+                    T vmin = data[0 * D + d];
+                    T vmax = data[0 * D + d];
+                    for (int64_t i = 1; i < N; ++i) {
+                        T v = data[i * D + d];
+                        if (v < vmin) vmin = v;
+                        if (v > vmax) vmax = v;
+                    }
+                    if (vmin == vmax) {
+                        vmin -= static_cast<T>(0.5);
+                        vmax += static_cast<T>(0.5);
+                    }
+                    ranges[static_cast<size_t>(d)] = {static_cast<double>(vmin),
+                                                       static_cast<double>(vmax)};
+                }
+            }
+        }
+
+        // Build edge tensors per dimension
+        std::vector<Tensor> edges_vec;
+        edges_vec.reserve(static_cast<size_t>(D));
+        std::vector<T> dim_min(static_cast<size_t>(D));
+        std::vector<T> dim_step(static_cast<size_t>(D));
+
+        for (int64_t d = 0; d < D; ++d) {
+            auto sd = static_cast<size_t>(d);
+            int64_t nb = bins[sd];
+            T fmin = static_cast<T>(ranges[sd].first);
+            T fmax = static_cast<T>(ranges[sd].second);
+            T step = (fmax - fmin) / static_cast<T>(nb);
+            dim_min[sd] = fmin;
+            dim_step[sd] = step;
+
+            Tensor edge({nb + 1}, compute_dtype, device);
+            T* edata = edge.data<T>();
+            for (int64_t i = 0; i <= nb; ++i) {
+                edata[i] = fmin + static_cast<T>(i) * step;
+            }
+            edges_vec.push_back(std::move(edge));
+        }
+
+        // Compute strides for the output (row-major)
+        std::vector<int64_t> out_shape(bins.begin(), bins.end());
+        std::vector<int64_t> out_strides(static_cast<size_t>(D));
+        int64_t stride = 1;
+        for (int64_t d = D - 1; d >= 0; --d) {
+            out_strides[static_cast<size_t>(d)] = stride;
+            stride *= bins[static_cast<size_t>(d)];
+        }
+        int64_t total_bins = stride;
+
+        // Allocate counts
+        Tensor counts(out_shape, DType::Int64, device);
+        int64_t* count_data = counts.data<int64_t>();
+        std::memset(count_data, 0, static_cast<size_t>(total_bins) * sizeof(int64_t));
+
+        // Bin each sample
+        for (int64_t i = 0; i < N; ++i) {
+            int64_t flat = 0;
+            bool in_range = true;
+            for (int64_t d = 0; d < D; ++d) {
+                auto sd = static_cast<size_t>(d);
+                T v = data[i * D + d];
+                T fmin_d = dim_min[sd];
+                T step_d = dim_step[sd];
+                int64_t nb = bins[sd];
+
+                if (v < fmin_d || v > fmin_d + step_d * static_cast<T>(nb)) {
+                    in_range = false;
+                    break;
+                }
+
+                int64_t b = static_cast<int64_t>((v - fmin_d) / step_d);
+                if (b >= nb) b = nb - 1;
+                if (b < 0) b = 0;
+                flat += b * out_strides[sd];
+            }
+            if (in_range) {
+                count_data[flat]++;
+            }
+        }
+
+        // Density normalization: counts / (N * bin_volume)
+        Tensor result = counts;
+        if (density && N > 0) {
+            // Compute bin volume (product of all bin widths)
+            double bin_volume = 1.0;
+            for (int64_t d = 0; d < D; ++d) {
+                bin_volume *= static_cast<double>(dim_step[static_cast<size_t>(d)]);
+            }
+            double norm = static_cast<double>(N) * bin_volume;
+
+            Tensor density_out(out_shape, compute_dtype, device);
+            T* ddata = density_out.data<T>();
+            for (int64_t i = 0; i < total_bins; ++i) {
+                ddata[i] = static_cast<T>(static_cast<double>(count_data[i]) / norm);
+            }
+            result = density_out;
+        }
+
+        return std::make_pair(std::move(result), std::move(edges_vec));
+    };
+
+    if (use_f64) {
+        return process(static_cast<double*>(nullptr));
+    } else {
+        return process(static_cast<float*>(nullptr));
+    }
+}
+
+// ============================================================================
 // logcumsumexp — Log-Cumulative-Sum-Exp (numerically stable)
 // ============================================================================
 

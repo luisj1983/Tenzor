@@ -20,6 +20,8 @@
 #include <tenzor/nn/optim/adam_atan2.hpp>
 #include <tenzor/nn/optim/rprop.hpp>
 #include <tenzor/nn/optim/asgd.hpp>
+#include <tenzor/nn/optim/sam.hpp>
+#include <tenzor/nn/optim/swa.hpp>
 
 namespace py = pybind11;
 
@@ -530,6 +532,61 @@ void register_optim(py::module_& m) {
              py::arg("schedulers"))
         .def("step", &tenzor::optim::ChainedScheduler::step)
         .def("get_last_lr", &tenzor::optim::ChainedScheduler::get_last_lr);
+
+    // SAM (Sharpness-Aware Minimization) Optimizer
+    py::class_<tenzor::optim::SAM, tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::SAM>>(optim, "SAM",
+        "Sharpness-Aware Minimization optimizer wrapper")
+        .def(py::init<std::shared_ptr<tenzor::optim::Optimizer>, double>(),
+             py::arg("base_optimizer"), py::arg("rho") = 0.05,
+             "Construct SAM wrapping a base optimizer")
+        .def("first_step", &tenzor::optim::SAM::first_step,
+             "Compute perturbation and apply to weights")
+        .def("second_step", &tenzor::optim::SAM::second_step,
+             "Restore original weights and step the base optimizer")
+        .def("zero_grad", &tenzor::optim::SAM::zero_grad)
+        .def("set_lr", &tenzor::optim::SAM::set_lr,
+             py::arg("lr"), "Set learning rate on the base optimizer")
+        .def("get_lr", &tenzor::optim::SAM::get_lr,
+             "Get current learning rate from the base optimizer")
+        .def("get_rho", &tenzor::optim::SAM::get_rho,
+             "Get perturbation radius")
+        .def("set_rho", &tenzor::optim::SAM::set_rho,
+             py::arg("rho"), "Set perturbation radius")
+        .def("state_dict", &tenzor::optim::SAM::state_dict,
+             "Get optimizer state dictionary")
+        .def("load_state_dict", &tenzor::optim::SAM::load_state_dict,
+             py::arg("state"), "Load optimizer state dictionary")
+        .def("base_optimizer",
+             static_cast<tenzor::optim::Optimizer& (tenzor::optim::SAM::*)()>(
+                 &tenzor::optim::SAM::base_optimizer),
+             py::return_value_policy::reference_internal,
+             "Get reference to the base optimizer");
+
+    // SWA (Stochastic Weight Averaging) - AveragedModel
+    py::class_<tenzor::optim::AveragedModel>(optim, "AveragedModel",
+        "Maintains a running average of model parameters for SWA")
+        .def(py::init<const std::vector<std::shared_ptr<tenzor::Variable>>&>(),
+             py::arg("params"),
+             "Initialize averaged model from current parameters")
+        .def("update_parameters", &tenzor::optim::AveragedModel::update_parameters,
+             py::arg("params"),
+             "Update running average with current model parameters")
+        .def("apply_to", &tenzor::optim::AveragedModel::apply_to,
+             py::arg("params"),
+             "Copy averaged parameters back to model parameters")
+        .def("n_averaged", &tenzor::optim::AveragedModel::n_averaged,
+             "Get number of models averaged so far");
+
+    // SWALR scheduler (in the lr_scheduler submodule)
+    py::class_<tenzor::optim::SWALR, tenzor::optim::LRScheduler>(lr_scheduler, "SWALR",
+        "SWA learning rate scheduler - anneals to constant swa_lr")
+        .def(py::init<tenzor::optim::Optimizer&, double, int, const std::string&>(),
+             py::arg("optimizer"), py::arg("swa_lr"),
+             py::arg("anneal_epochs") = 10,
+             py::arg("anneal_strategy") = "linear",
+             "Anneal learning rate to swa_lr over anneal_epochs, then hold constant")
+        .def("step", &tenzor::optim::SWALR::step)
+        .def("get_last_lr", &tenzor::optim::SWALR::get_last_lr);
 
     // Adam-atan2 Optimizer
     py::class_<tenzor::optim::AdamAtan2, tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::AdamAtan2>>(optim, "AdamAtan2",

@@ -2233,6 +2233,30 @@ void register_nn(py::module_& m) {
            "Scaled dot-product attention",
            py::call_guard<py::gil_scoped_release>());
 
+    nn.def("functional_multi_head_attention_forward",
+           [](const tenzor::Tensor& query, const tenzor::Tensor& key,
+              const tenzor::Tensor& value, int64_t num_heads,
+              const tenzor::Tensor& in_proj_weight, const tenzor::Tensor& in_proj_bias,
+              const tenzor::Tensor& out_proj_weight, const tenzor::Tensor& out_proj_bias,
+              std::optional<tenzor::Tensor> attn_mask,
+              double dropout_p, bool training, bool need_weights)
+               -> std::pair<tenzor::Tensor, tenzor::Tensor> {
+               return tenzor::nn::functional::multi_head_attention_forward(
+                   query, key, value, num_heads,
+                   in_proj_weight, in_proj_bias,
+                   out_proj_weight, out_proj_bias,
+                   attn_mask, dropout_p, training, need_weights);
+           },
+           py::arg("query"), py::arg("key"), py::arg("value"),
+           py::arg("num_heads"),
+           py::arg("in_proj_weight"), py::arg("in_proj_bias"),
+           py::arg("out_proj_weight"), py::arg("out_proj_bias"),
+           py::arg("attn_mask") = std::nullopt,
+           py::arg("dropout_p") = 0.0, py::arg("training") = false,
+           py::arg("need_weights") = false,
+           "Multi-head attention forward pass",
+           py::call_guard<py::gil_scoped_release>());
+
     // Gradient clipping utilities
     nn.def("clip_grad_norm_", &tenzor::nn::utils::clip_grad_norm_,
            py::arg("parameters"), py::arg("max_norm"), py::arg("norm_type") = 2.0,

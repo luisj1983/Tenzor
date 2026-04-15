@@ -620,6 +620,11 @@ namespace cpu {
     auto histogram_kernel(const Tensor& input, int64_t bins, double min_val, double max_val)
         -> std::pair<Tensor, Tensor>;
 
+    // Multi-dimensional histogram
+    auto histogramdd_kernel(const Tensor& input, std::vector<int64_t> bins,
+                            std::vector<std::pair<double,double>> ranges,
+                            bool density) -> std::pair<Tensor, std::vector<Tensor>>;
+
     // Bucketize
     auto bucketize_kernel(const Tensor& input, const Tensor& boundaries, bool right) -> Tensor;
 
@@ -3142,6 +3147,40 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         double max_val = attrs.get_float(AttrKey::Max, 0.0);
         auto [counts, edges] = cpu::histogram_kernel(inputs[0], bins, min_val, max_val);
         return {counts, edges};
+    });
+
+    // =========================================================================
+    // Multi-dimensional Histogram
+    // =========================================================================
+    table.register_kernel(OpId::Histogramdd, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        // Parse bins list from comma-separated string
+        auto bins_list = attrs.get_int_list(AttrKey::BinsList);
+        bool density = attrs.get_bool(AttrKey::Density, false);
+
+        // Parse ranges from comma-separated string: min0,max0,min1,max1,...
+        std::vector<std::pair<double,double>> ranges;
+        auto ranges_str = attrs.get_string(AttrKey::RangesList, "");
+        if (!ranges_str.empty()) {
+            // Parse comma-separated doubles
+            std::vector<double> vals;
+            std::string s(ranges_str);
+            size_t pos = 0;
+            while (pos < s.size()) {
+                size_t next = s.find(',', pos);
+                if (next == std::string::npos) next = s.size();
+                vals.push_back(std::stod(s.substr(pos, next - pos)));
+                pos = next + 1;
+            }
+            for (size_t i = 0; i + 1 < vals.size(); i += 2) {
+                ranges.emplace_back(vals[i], vals[i + 1]);
+            }
+        }
+
+        auto [counts, edges] = cpu::histogramdd_kernel(inputs[0], bins_list, ranges, density);
+        std::vector<Tensor> results;
+        results.push_back(counts);
+        for (auto& e : edges) results.push_back(std::move(e));
+        return results;
     });
 
     // =========================================================================

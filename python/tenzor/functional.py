@@ -1484,6 +1484,61 @@ def scaled_dot_product_attention(
         query, key, value, attn_mask, dropout_p, is_causal)
 
 
+def multi_head_attention_forward(
+    query: 'Tensor', key: 'Tensor', value: 'Tensor',
+    num_heads: int,
+    in_proj_weight: 'Tensor', in_proj_bias: 'Tensor',
+    out_proj_weight: 'Tensor', out_proj_bias: 'Tensor',
+    attn_mask: 'Optional[Tensor]' = None,
+    dropout_p: float = 0.0, training: bool = False,
+    need_weights: bool = False
+) -> 'tuple[Tensor, Tensor]':
+    """Functional multi-head attention forward pass.
+
+    Projects query/key/value through ``in_proj_weight``/``in_proj_bias``,
+    splits into ``num_heads`` attention heads, applies scaled dot-product
+    attention, merges heads, and projects the output.
+
+    Parameters
+    ----------
+    query : Tensor
+        Query tensor ``[B, Sq, E]``.
+    key : Tensor
+        Key tensor ``[B, Sk, E]``.
+    value : Tensor
+        Value tensor ``[B, Sk, E]``.
+    num_heads : int
+        Number of attention heads.
+    in_proj_weight : Tensor
+        Combined QKV projection weight ``[3*E, E]``.
+    in_proj_bias : Tensor
+        Combined QKV projection bias ``[3*E]``.
+    out_proj_weight : Tensor
+        Output projection weight ``[E, E]``.
+    out_proj_bias : Tensor
+        Output projection bias ``[E]``.
+    attn_mask : Tensor or None, optional
+        Additive attention mask. Default: ``None``.
+    dropout_p : float, optional
+        Dropout probability on attention weights. Default: ``0.0``.
+    training : bool, optional
+        If ``True``, apply dropout. Default: ``False``.
+    need_weights : bool, optional
+        If ``True``, return attention weights. Default: ``False``.
+
+    Returns
+    -------
+    tuple[Tensor, Tensor]
+        ``(output, attn_weights)`` where ``output`` is ``[B, Sq, E]`` and
+        ``attn_weights`` is ``[B, H, Sq, Sk]`` (or empty if not requested).
+    """
+    return _nn.functional_multi_head_attention_forward(
+        query, key, value, num_heads,
+        in_proj_weight, in_proj_bias,
+        out_proj_weight, out_proj_bias,
+        attn_mask, dropout_p, training, need_weights)
+
+
 def normalize(input: Variable, p: float = 2.0, dim: int = 1,
               eps: float = 1e-12) -> Variable:
     """Apply L_p normalization along a dimension.

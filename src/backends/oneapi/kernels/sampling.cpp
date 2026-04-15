@@ -31,6 +31,10 @@ struct BucketizeKernelTag {};
 struct HistogramKernelTag {};
 struct HistogramFillEdgesTag {};
 struct HistogramMinMaxTag {};
+struct HistogramddMinMaxTag {};
+struct HistogramddBinTag {};
+struct HistogramddEdgesTag {};
+struct HistogramddDensityTag {};
 struct CDistKernelTag {};
 struct TrapezoidKernelTag {};
 struct CumulativeTrapezoidKernelTag {};
@@ -252,6 +256,218 @@ auto histogram_kernel(const Tensor& input, int64_t bins,
     }
 
     return {counts, edges};
+}
+
+// =========================================================================
+// Histogramdd (multi-dimensional histogram)
+// =========================================================================
+
+auto histogramdd_kernel(const Tensor& input, std::vector<int64_t> bins,
+                        std::vector<std::pair<double,double>> ranges, bool density,
+                        sycl::queue& queue) -> std::pair<Tensor, std::vector<Tensor>> {
+    if (input.dim() != 2) {
+        throw std::runtime_error("histogramdd_kernel: input must be 2-D (N, D)");
+    }
+
+    const int64_t N = input.shape()[0];
+    const int64_t D = input.shape()[1];
+
+    if (static_cast<int64_t>(bins.size()) != D) {
+        throw std::runtime_error("histogramdd_kernel: bins length must equal D");
+    }
+
+    auto in_contig = input.contiguous();
+    if (in_contig.dtype() != DType::Float32) in_contig = in_contig.to(DType::Float32);
+    const float* in_ptr = get_data_ptr<const float>(in_contig);
+    const auto& device = input.device();
+
+    // Auto-detect ranges from data if not provided
+    bool auto_range = ranges.empty();
+    if (auto_range) {
+        ranges.resize(static_cast<size_t>(D));
+    }
+
+    if (auto_range && N > 0) {
+        // Per-dimension min/max: allocate D min/max pairs on device
+        float* d_mins = sycl::malloc_device<float>(static_cast<size_t>(D), queue);
+        float* d_maxs = sycl::malloc_device<float>(static_cast<size_t>(D), queue);
+
+        // Initialize from first sample
+        queue.memcpy(d_mins, &in_ptr[0], static_cast<size_t>(D) * sizeof(float));
+        queue.memcpy(d_maxs, &in_ptr[0], static_cast<size_t>(D) * sizeof(float));
+        queue.wait();
+
+        // Parallel min/max over all samples using atomic_ref (no sycl::reduction needed)
+        const int64_t local_D = D;
+        const int64_t local_N = N;
+        queue.parallel_for<HistogramddMinMaxTag>(sycl::range<1>(N * D), [=](sycl::id<1> idx_) {
+            int64_t linear = static_cast<int64_t>(idx_);
+            int64_t i = linear / local_D;
+            int64_t dd = linear % local_D;
+            float v = in_ptr[i * local_D + dd];
+
+            sycl::atomic_ref<float, sycl::memory_order::relaxed,
+                              sycl::memory_scope::device,
+                              sycl::access::address_space::global_space>
+                atomic_min(d_mins[dd]);
+            sycl::atomic_ref<float, sycl::memory_order::relaxed,
+                              sycl::memory_scope::device,
+                              sycl::access::address_space::global_space>
+                atomic_max(d_maxs[dd]);
+            atomic_min.fetch_min(v);
+            atomic_max.fetch_max(v);
+        });
+        queue.wait();
+
+        // Copy results back
+        std::vector<float> h_mins(static_cast<size_t>(D)), h_maxs(static_cast<size_t>(D));
+        queue.memcpy(h_mins.data(), d_mins, static_cast<size_t>(D) * sizeof(float)).wait();
+        queue.memcpy(h_maxs.data(), d_maxs, static_cast<size_t>(D) * sizeof(float)).wait();
+        sycl::free(d_mins, queue);
+        sycl::free(d_maxs, queue);
+
+        for (int64_t d = 0; d < D; ++d) {
+            float mn = h_mins[static_cast<size_t>(d)];
+            float mx = h_maxs[static_cast<size_t>(d)];
+            if (mn == mx) {
+                mn -= 0.5f;
+                mx += 0.5f;
+            }
+            ranges[static_cast<size_t>(d)] = {static_cast<double>(mn),
+                                                static_cast<double>(mx)};
+        }
+    } else if (auto_range) {
+        for (int64_t d = 0; d < D; ++d) {
+            ranges[static_cast<size_t>(d)] = {0.0, 1.0};
+        }
+    }
+
+    // Build per-dimension parameters
+    std::vector<float> dim_min_vec(static_cast<size_t>(D));
+    std::vector<float> dim_step_vec(static_cast<size_t>(D));
+
+    for (int64_t d = 0; d < D; ++d) {
+        auto sd = static_cast<size_t>(d);
+        float fmin = static_cast<float>(ranges[sd].first);
+        float fmax = static_cast<float>(ranges[sd].second);
+        float step = (fmax - fmin) / static_cast<float>(bins[sd]);
+        dim_min_vec[sd] = fmin;
+        dim_step_vec[sd] = step;
+    }
+
+    // Compute strides (row-major)
+    std::vector<int64_t> out_shape(bins.begin(), bins.end());
+    std::vector<int64_t> out_strides_vec(static_cast<size_t>(D));
+    int64_t stride = 1;
+    for (int64_t d = D - 1; d >= 0; --d) {
+        out_strides_vec[static_cast<size_t>(d)] = stride;
+        stride *= bins[static_cast<size_t>(d)];
+    }
+    int64_t total_bins = stride;
+
+    // Allocate device buffers for dim parameters and strides
+    float* d_dim_min = sycl::malloc_device<float>(static_cast<size_t>(D), queue);
+    float* d_dim_step = sycl::malloc_device<float>(static_cast<size_t>(D), queue);
+    int64_t* d_strides = sycl::malloc_device<int64_t>(static_cast<size_t>(D), queue);
+    int64_t* d_bins = sycl::malloc_device<int64_t>(static_cast<size_t>(D), queue);
+
+    queue.memcpy(d_dim_min, dim_min_vec.data(), static_cast<size_t>(D) * sizeof(float));
+    queue.memcpy(d_dim_step, dim_step_vec.data(), static_cast<size_t>(D) * sizeof(float));
+    queue.memcpy(d_strides, out_strides_vec.data(), static_cast<size_t>(D) * sizeof(int64_t));
+    queue.memcpy(d_bins, bins.data(), static_cast<size_t>(D) * sizeof(int64_t));
+    queue.wait();
+
+    // Allocate counts
+    Tensor counts(out_shape, DType::Int64, device);
+    int64_t* counts_ptr = get_data_ptr<int64_t>(counts);
+    queue.memset(counts_ptr, 0, static_cast<size_t>(total_bins) * sizeof(int64_t)).wait();
+
+    // Bin each sample
+    if (N > 0) {
+        const int64_t local_D = D;
+        queue.parallel_for<HistogramddBinTag>(sycl::range<1>(N), [=](sycl::id<1> idx_) {
+            int64_t i = static_cast<int64_t>(idx_);
+            int64_t flat = 0;
+            bool in_range = true;
+
+            for (int64_t dd = 0; dd < local_D; ++dd) {
+                float v = in_ptr[i * local_D + dd];
+                float fmin_d = d_dim_min[dd];
+                float step_d = d_dim_step[dd];
+                int64_t nb = d_bins[dd];
+
+                float range_max = fmin_d + step_d * static_cast<float>(nb);
+                if (v < fmin_d || v > range_max) {
+                    in_range = false;
+                    break;
+                }
+
+                int64_t b = static_cast<int64_t>((v - fmin_d) / step_d);
+                if (b >= nb) b = nb - 1;
+                if (b < 0) b = 0;
+                flat += b * d_strides[dd];
+            }
+
+            if (in_range) {
+                sycl::atomic_ref<int64_t, sycl::memory_order::relaxed,
+                                  sycl::memory_scope::device,
+                                  sycl::access::address_space::global_space>
+                    atomic_count(counts_ptr[flat]);
+                atomic_count.fetch_add(int64_t{1});
+            }
+        });
+        queue.wait();
+    }
+
+    // Build edge tensors on-device
+    std::vector<Tensor> edges_vec;
+    edges_vec.reserve(static_cast<size_t>(D));
+    for (int64_t d = 0; d < D; ++d) {
+        auto sd = static_cast<size_t>(d);
+        int64_t nb = bins[sd];
+        int64_t num_edges = nb + 1;
+        Tensor edge({num_edges}, DType::Float32, device);
+        float* edge_ptr = get_data_ptr<float>(edge);
+        const float local_min = dim_min_vec[sd];
+        const float local_step = dim_step_vec[sd];
+        queue.parallel_for<HistogramddEdgesTag>(sycl::range<1>(num_edges),
+            [=](sycl::id<1> idx_) {
+                int64_t j = static_cast<int64_t>(idx_);
+                edge_ptr[j] = local_min + static_cast<float>(j) * local_step;
+            });
+        queue.wait();
+        edges_vec.push_back(std::move(edge));
+    }
+
+    // Density normalization on device
+    Tensor result = counts;
+    if (density && N > 0) {
+        double bin_volume = 1.0;
+        for (int64_t d = 0; d < D; ++d) {
+            bin_volume *= static_cast<double>(dim_step_vec[static_cast<size_t>(d)]);
+        }
+        double norm = static_cast<double>(N) * bin_volume;
+        float inv_norm = static_cast<float>(1.0 / norm);
+
+        Tensor density_out(out_shape, DType::Float32, device);
+        float* ddata = get_data_ptr<float>(density_out);
+        const int64_t local_total = total_bins;
+        queue.parallel_for<HistogramddDensityTag>(sycl::range<1>(total_bins),
+            [=](sycl::id<1> idx_) {
+                int64_t j = static_cast<int64_t>(idx_);
+                ddata[j] = static_cast<float>(counts_ptr[j]) * inv_norm;
+            });
+        queue.wait();
+        result = density_out;
+    }
+
+    // Free device buffers
+    sycl::free(d_dim_min, queue);
+    sycl::free(d_dim_step, queue);
+    sycl::free(d_strides, queue);
+    sycl::free(d_bins, queue);
+
+    return {result, std::move(edges_vec)};
 }
 
 // =========================================================================

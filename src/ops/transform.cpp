@@ -1396,4 +1396,57 @@ auto view_as_complex(const Tensor& t) -> Tensor {
     return result;
 }
 
+auto narrow_copy(const Tensor& input, int64_t dim, int64_t start, int64_t length) -> Tensor {
+    // narrow() returns a view sharing the same storage; clone() guarantees a new allocation
+    return narrow(input, dim, start, length).clone();
+}
+
+auto column_stack(const std::vector<Tensor>& tensors) -> Tensor {
+    if (tensors.empty()) throw std::runtime_error("column_stack: empty tensor list");
+    std::vector<Tensor> prepared;
+    for (const auto& t : tensors) {
+        if (t.ndim() == 1) {
+            prepared.push_back(reshape(t, {t.shape()[0], 1}));
+        } else {
+            prepared.push_back(t);
+        }
+    }
+    return cat(std::span<const Tensor>(prepared), 1);
+}
+
+auto broadcast_tensors(const std::vector<Tensor>& tensors) -> std::vector<Tensor> {
+    if (tensors.empty()) return {};
+    if (tensors.size() == 1) return {tensors[0]};
+
+    // Compute broadcast shape
+    int64_t max_ndim = 0;
+    for (const auto& t : tensors) {
+        max_ndim = std::max(max_ndim, t.ndim());
+    }
+
+    std::vector<int64_t> broadcast_shape(max_ndim, 1);
+    for (const auto& t : tensors) {
+        const auto& s = t.shape();
+        int64_t offset = max_ndim - t.ndim();
+        for (int64_t i = 0; i < t.ndim(); ++i) {
+            int64_t dim = offset + i;
+            if (s[i] == 1) continue;
+            if (broadcast_shape[dim] == 1) {
+                broadcast_shape[dim] = s[i];
+            } else if (broadcast_shape[dim] != s[i]) {
+                throw std::runtime_error(
+                    "broadcast_tensors: shape mismatch at dimension " + std::to_string(dim));
+            }
+        }
+    }
+
+    // Expand each tensor to the broadcast shape
+    std::vector<Tensor> result;
+    result.reserve(tensors.size());
+    for (const auto& t : tensors) {
+        result.push_back(expand(t, broadcast_shape));
+    }
+    return result;
+}
+
 } // namespace tenzor

@@ -157,3 +157,13 @@ tenzor_discover_tests(test_scatter_reduce LABELS "ops" DISCOVERY_TIMEOUT 60)
 add_executable(test_logcumsumexp_bincount_index_reduce test_logcumsumexp_bincount_index_reduce.cpp)
 target_link_libraries(test_logcumsumexp_bincount_index_reduce PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_logcumsumexp_bincount_index_reduce LABELS "ops" DISCOVERY_TIMEOUT 60)
+
+# Histogramdd (multi-dimensional histogram)
+add_executable(test_histogramdd test_histogramdd.cpp)
+target_link_libraries(test_histogramdd PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_histogramdd LABELS "ops" DISCOVERY_TIMEOUT 60)
+
+# New transform ops (moveaxis, narrow_copy, column_stack, row_stack, broadcast_tensors)
+add_executable(test_transform_new test_transform_new.cpp)
+target_link_libraries(test_transform_new PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_transform_new LABELS "ops" DISCOVERY_TIMEOUT 60)

@@ -534,6 +534,7 @@ enum class OpId : uint16_t {
     NormalSample,              // Normal distribution: normal(mean, std) -> tensor
     PoissonSample,             // Poisson distribution: poisson(rates) -> tensor
     ExponentialSample,         // Exponential distribution: exponential(rate) -> tensor
+    Histogramdd,               // Multi-dimensional histogram
 
     // =========================================================================
     // Special Math Functions (490-509)

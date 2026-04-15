@@ -264,5 +264,15 @@ tenzor_discover_tests(test_gated_activations LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_moe LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_sliding_window_attention LABELS "nn" DISCOVERY_TIMEOUT 60)
 
+# Multi-head attention functional tests
+add_executable(test_mha_functional test_mha_functional.cpp)
+target_link_libraries(test_mha_functional PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_mha_functional LABELS "nn" DISCOVERY_TIMEOUT 60)
+
+# SAM optimizer and SWA utilities tests
+add_executable(test_sam_swa optim/test_sam_swa.cpp)
+target_link_libraries(test_sam_swa PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_sam_swa LABELS "nn" DISCOVERY_TIMEOUT 60)
+
 # tests/nn/test_data_parallel.cpp orphan removed: rotted include paths (tenzor/nn/modules/ no longer exists)
 # tests/nn/test_distributed.cpp orphan removed: requires rccl/rccl.h via TENZOR_USE_ROCM that isn't installed

@@ -105,6 +105,15 @@ def scaled_dot_product_attention(query: Tensor, key: Tensor, value: Tensor,
                                   attn_mask: Optional[Tensor] = None,
                                   dropout_p: float = 0.0,
                                   is_causal: bool = False) -> Tensor: ...
+def multi_head_attention_forward(
+    query: Tensor, key: Tensor, value: Tensor,
+    num_heads: int,
+    in_proj_weight: Tensor, in_proj_bias: Tensor,
+    out_proj_weight: Tensor, out_proj_bias: Tensor,
+    attn_mask: Optional[Tensor] = None,
+    dropout_p: float = 0.0, training: bool = False,
+    need_weights: bool = False
+) -> tuple[Tensor, Tensor]: ...
 
 # ============================================================================
 # Loss functions

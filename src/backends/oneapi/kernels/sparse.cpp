@@ -12,6 +12,7 @@
 #include "tenzor/sparse/sparse_tensor.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "../sycl_prefix_sum.hpp"
 #include <sycl/sycl.hpp>
 #include <cstdint>
 #include <span>
@@ -487,77 +488,67 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
     // Step 2: Use SpMM (sparse A * dense B) to get dense C
     Tensor C_dense = spmm_kernel(A, B_dense, queue);
 
-    // Step 3: Convert dense C back to sparse CSR
-    // Build CSR from dense: scan for nonzeros
+    // Step 3: Convert dense C back to sparse CSR (entirely on device)
+    // 3-pass approach: count NNZ per row → prefix sum → compact nonzeros
+    auto dense_to_csr_device = [&]<typename T>() -> SparseTensor {
+        const T* d_data = C_dense.data<T>();
+        Device dev = C_dense.device();
+
+        // Pass 1: Count nonzeros per row
+        std::int32_t* d_row_nnz = sycl::malloc_device<std::int32_t>(M, queue);
+        queue.parallel_for(sycl::range<1>(M), [=](sycl::id<1> idx) {
+            int64_t row = idx[0];
+            std::int32_t count = 0;
+            for (int64_t j = 0; j < N; ++j) {
+                if (d_data[row * N + j] != static_cast<T>(0)) {
+                    count++;
+                }
+            }
+            d_row_nnz[row] = count;
+        }).wait();
+
+        // Pass 2: Exclusive prefix sum → crow_indices (device-side)
+        std::int32_t* d_crow = sycl::malloc_device<std::int32_t>(M + 1, queue);
+        queue.memcpy(d_crow, d_row_nnz, M * sizeof(std::int32_t)).wait();
+        queue.memset(d_crow + M, 0, sizeof(std::int32_t)).wait();
+
+        int64_t nnz = sycl_exclusive_prefix_sum<std::int32_t>(d_crow, M + 1, queue);
+
+        Tensor c_crow({M + 1}, DType::Int32, dev);
+        Tensor c_col({nnz}, DType::Int32, dev);
+        Tensor c_vals({nnz}, dtype, dev);
+
+        queue.memcpy(c_crow.data<std::int32_t>(), d_crow,
+                     static_cast<size_t>(M + 1) * sizeof(std::int32_t)).wait();
+
+        if (nnz > 0) {
+            // Pass 3: Compact nonzeros into col_indices and values arrays
+            std::int32_t* out_col = c_col.data<std::int32_t>();
+            T* out_vals = c_vals.data<T>();
+
+            queue.parallel_for(sycl::range<1>(M), [=](sycl::id<1> idx) {
+                int64_t row = idx[0];
+                std::int32_t write_pos = d_crow[row];
+                for (int64_t j = 0; j < N; ++j) {
+                    T v = d_data[row * N + j];
+                    if (v != static_cast<T>(0)) {
+                        out_col[write_pos] = static_cast<std::int32_t>(j);
+                        out_vals[write_pos] = v;
+                        write_pos++;
+                    }
+                }
+            }).wait();
+        }
+
+        sycl::free(d_row_nnz, queue);
+        sycl::free(d_crow, queue);
+        return SparseTensor::sparse_csr(c_crow, c_col, c_vals, {M, N});
+    };
+
     if (dtype == DType::Float32) {
-        // Transfer to host for CSR construction
-        std::vector<float> host_data(static_cast<size_t>(M * N));
-        queue.memcpy(host_data.data(), C_dense.data<float>(),
-                     static_cast<size_t>(M * N) * sizeof(float)).wait();
-
-        std::vector<std::int32_t> crow(static_cast<size_t>(M + 1), 0);
-        std::vector<std::int32_t> cols;
-        std::vector<float> vals;
-
-        for (int64_t i = 0; i < M; ++i) {
-            crow[static_cast<size_t>(i + 1)] = crow[static_cast<size_t>(i)];
-            for (int64_t j = 0; j < N; ++j) {
-                float v = host_data[static_cast<size_t>(i * N + j)];
-                if (v != 0.0f) {
-                    cols.push_back(static_cast<std::int32_t>(j));
-                    vals.push_back(v);
-                    crow[static_cast<size_t>(i + 1)]++;
-                }
-            }
-        }
-
-        int64_t nnz = static_cast<int64_t>(vals.size());
-        Tensor c_crow({M + 1}, DType::Int32, C_dense.device());
-        Tensor c_col({nnz}, DType::Int32, C_dense.device());
-        Tensor c_vals({nnz}, dtype, C_dense.device());
-
-        queue.memcpy(c_crow.data<std::int32_t>(), crow.data(),
-                     static_cast<size_t>(M + 1) * sizeof(std::int32_t)).wait();
-        queue.memcpy(c_col.data<std::int32_t>(), cols.data(),
-                     static_cast<size_t>(nnz) * sizeof(std::int32_t)).wait();
-        queue.memcpy(c_vals.data<float>(), vals.data(),
-                     static_cast<size_t>(nnz) * sizeof(float)).wait();
-
-        return SparseTensor::sparse_csr(c_crow, c_col, c_vals, {M, N});
+        return dense_to_csr_device.template operator()<float>();
     } else if (dtype == DType::Float64) {
-        std::vector<double> host_data(static_cast<size_t>(M * N));
-        queue.memcpy(host_data.data(), C_dense.data<double>(),
-                     static_cast<size_t>(M * N) * sizeof(double)).wait();
-
-        std::vector<std::int32_t> crow(static_cast<size_t>(M + 1), 0);
-        std::vector<std::int32_t> cols;
-        std::vector<double> vals;
-
-        for (int64_t i = 0; i < M; ++i) {
-            crow[static_cast<size_t>(i + 1)] = crow[static_cast<size_t>(i)];
-            for (int64_t j = 0; j < N; ++j) {
-                double v = host_data[static_cast<size_t>(i * N + j)];
-                if (v != 0.0) {
-                    cols.push_back(static_cast<std::int32_t>(j));
-                    vals.push_back(v);
-                    crow[static_cast<size_t>(i + 1)]++;
-                }
-            }
-        }
-
-        int64_t nnz = static_cast<int64_t>(vals.size());
-        Tensor c_crow({M + 1}, DType::Int32, C_dense.device());
-        Tensor c_col({nnz}, DType::Int32, C_dense.device());
-        Tensor c_vals({nnz}, dtype, C_dense.device());
-
-        queue.memcpy(c_crow.data<std::int32_t>(), crow.data(),
-                     static_cast<size_t>(M + 1) * sizeof(std::int32_t)).wait();
-        queue.memcpy(c_col.data<std::int32_t>(), cols.data(),
-                     static_cast<size_t>(nnz) * sizeof(std::int32_t)).wait();
-        queue.memcpy(c_vals.data<double>(), vals.data(),
-                     static_cast<size_t>(nnz) * sizeof(double)).wait();
-
-        return SparseTensor::sparse_csr(c_crow, c_col, c_vals, {M, N});
+        return dense_to_csr_device.template operator()<double>();
     } else {
         throw std::runtime_error("oneapi spgemm_kernel: unsupported dtype (requires Float32 or Float64)");
     }
@@ -619,27 +610,30 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
         d_row_nnz[row] = count;
     }).wait();
 
-    // Pass 2: Exclusive prefix sum → crow upper bound (host-side, same as CUDA pattern)
-    std::vector<int64_t> h_row_nnz(M);
-    queue.memcpy(h_row_nnz.data(), d_row_nnz, M * sizeof(int64_t)).wait();
+    // Pass 2: Exclusive prefix sum → crow upper bound (device-side)
+    // crow[0] = 0, crow[i+1] = crow[i] + row_nnz[i]
+    // We build this by placing row_nnz into crow[0..M-1], running exclusive scan
+    // on M+1 elements with crow[M] temporarily set to 0. The exclusive scan of
+    // [nnz0, nnz1, ..., nnzM-1, 0] gives [0, nnz0, nnz0+nnz1, ..., total, total]
+    // but that's M+1 entries which is exactly what we want (last entry = total).
+    //
+    // Simpler: copy row_nnz into d_crow_ub[0..M-1], set d_crow_ub[M]=0, run
+    // exclusive scan on all M+1 elements. Result: [0, nnz0, nnz0+nnz1, ..., total].
+    int64_t* d_crow_ub = sycl::malloc_device<int64_t>(M + 1, queue);
+    queue.memcpy(d_crow_ub, d_row_nnz, M * sizeof(int64_t)).wait();
+    queue.memset(d_crow_ub + M, 0, sizeof(int64_t)).wait();  // d_crow_ub[M] = 0
 
-    std::vector<int64_t> h_crow_ub(M + 1);
-    h_crow_ub[0] = 0;
-    for (int64_t i = 0; i < M; ++i) {
-        h_crow_ub[i + 1] = h_crow_ub[i] + h_row_nnz[i];
-    }
-    int64_t total_nnz_ub = h_crow_ub[M];
+    // Device-side exclusive prefix sum; returns total as a single scalar D2H (acceptable)
+    int64_t total_nnz_ub = sycl_exclusive_prefix_sum<int64_t>(d_crow_ub, M + 1, queue);
 
     if (total_nnz_ub == 0) {
         sycl::free(d_row_nnz, queue);
+        sycl::free(d_crow_ub, queue);
         auto c_crow = tenzor::zeros({M + 1}, DType::Int64, dev);
         auto c_col  = tenzor::empty({0}, DType::Int64, dev);
         auto c_vals = tenzor::empty({0}, dtype, dev);
         return SparseTensor::sparse_csr(c_crow, c_col, c_vals, {M, N});
     }
-
-    int64_t* d_crow_ub = sycl::malloc_device<int64_t>(M + 1, queue);
-    queue.memcpy(d_crow_ub, h_crow_ub.data(), (M + 1) * sizeof(int64_t)).wait();
 
     // Allocate upper-bound output
     int64_t* d_col_ub = sycl::malloc_device<int64_t>(total_nnz_ub, queue);
@@ -687,28 +681,22 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
             d_actual_nnz[row] = write_pos - c_start;
         }).wait();
 
-        // Compact: prefix sum on actual nnz (host-side)
-        std::vector<int64_t> h_actual_nnz(M);
-        queue.memcpy(h_actual_nnz.data(), d_actual_nnz, M * sizeof(int64_t)).wait();
+        // Compact: device-side prefix sum on actual nnz → final crow indices
+        int64_t* d_crow_final = sycl::malloc_device<int64_t>(M + 1, queue);
+        queue.memcpy(d_crow_final, d_actual_nnz, M * sizeof(int64_t)).wait();
+        queue.memset(d_crow_final + M, 0, sizeof(int64_t)).wait();
 
-        std::vector<int64_t> h_crow_final(M + 1);
-        h_crow_final[0] = 0;
-        for (int64_t i = 0; i < M; ++i) {
-            h_crow_final[i + 1] = h_crow_final[i] + h_actual_nnz[i];
-        }
-        int64_t total_nnz = h_crow_final[M];
+        // Device-side exclusive prefix sum; single scalar D2H for total (acceptable)
+        int64_t total_nnz = sycl_exclusive_prefix_sum<int64_t>(d_crow_final, M + 1, queue);
 
         auto c_crow_t = Tensor({M + 1}, DType::Int64, dev);
         auto c_col_t  = Tensor({total_nnz}, DType::Int64, dev);
         auto c_vals_t = Tensor({total_nnz}, dtype, dev);
 
-        queue.memcpy(c_crow_t.data<int64_t>(), h_crow_final.data(),
+        queue.memcpy(c_crow_t.data<int64_t>(), d_crow_final,
                      (M + 1) * sizeof(int64_t)).wait();
 
         if (total_nnz > 0) {
-            int64_t* d_crow_final = sycl::malloc_device<int64_t>(M + 1, queue);
-            queue.memcpy(d_crow_final, h_crow_final.data(), (M + 1) * sizeof(int64_t)).wait();
-
             int64_t* out_col = c_col_t.data<int64_t>();
             T* out_vals = c_vals_t.data<T>();
 
@@ -722,9 +710,9 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
                     out_vals[dst + i] = d_vals_ub[src + i];
                 }
             }).wait();
-
-            sycl::free(d_crow_final, queue);
         }
+
+        sycl::free(d_crow_final, queue);
 
         sycl::free(d_vals_ub, queue);
         return SparseTensor::sparse_csr(c_crow_t, c_col_t, c_vals_t, {M, N});

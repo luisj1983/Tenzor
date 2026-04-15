@@ -1192,10 +1192,10 @@ auto VulkanBackend::dispatchRepeatInterleaveTensor(const Tensor& input, const Te
     Tensor prefix_sum = dispatchCumSum(int_repeats.to(DType::Float32), 0);
     // We need an offsets array of size (dim_size + 1) with offsets[0] = 0
     // The prefix sum gives us offsets[1..dim_size]
-    // Read total from GPU to determine output shape
-    Tensor total_tensor = prefix_sum.to(Device::cpu());
+    // Minimal scalar readback: only the total (last element) for output allocation
     int64_t dim_size = input_shape[dim];
-    float total_f = static_cast<const float*>(total_tensor.data_ptr())[dim_size - 1];
+    Tensor total_scalar = prefix_sum.slice(0, dim_size - 1, dim_size).to(Device::cpu());
+    float total_f = static_cast<const float*>(total_scalar.data_ptr())[0];
     int64_t total_repeats = static_cast<int64_t>(total_f);
 
     if (total_repeats == 0 || input.numel() == 0) {
@@ -1204,18 +1204,32 @@ auto VulkanBackend::dispatchRepeatInterleaveTensor(const Tensor& input, const Te
         return Tensor(out_shape, input.dtype(), input.device());
     }
 
-    // Build offsets buffer: [0, cumsum[0], cumsum[1], ..., cumsum[dim_size-1]]
-    // Create on CPU and upload
-    std::vector<int32_t> offsets_host(dim_size + 1);
-    offsets_host[0] = 0;
-    for (int64_t i = 0; i < dim_size; i++) {
-        offsets_host[i + 1] = static_cast<int32_t>(
-            static_cast<const float*>(total_tensor.data_ptr())[i]);
+    // Build offsets on GPU: offsets[0] = 0, offsets[i+1] = int(cumsum[i])
+    Tensor offsets = dispatchZeros({dim_size + 1}, DType::Int32, input.device());
+    {
+        auto* ofs_pipeline = getPipeline("build_offsets_from_cumsum", device_id);
+        size_t cs_size = prefix_sum.numel() * sizeof(float);
+        size_t of_size = offsets.numel() * sizeof(int32_t);
+        std::vector<std::pair<uint32_t, const void*>> ofs_bindings = {
+            {0, prefix_sum.data_ptr()}, {1, offsets.data_ptr()},
+        };
+        std::vector<size_t> ofs_sizes = {cs_size, of_size};
+        VkDescriptorSet ofs_ds = allocateAndWriteDescriptorSet(
+            device_id, ofs_pipeline, ofs_bindings, ofs_sizes);
+
+        struct { uint32_t n; } ofs_pc;
+        ofs_pc.n = static_cast<uint32_t>(dim_size);
+
+        VkCommandBuffer ofs_cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(ofs_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ofs_pipeline->pipeline());
+        vkCmdBindDescriptorSets(ofs_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               ofs_pipeline->layout(), 0, 1, &ofs_ds, 0, nullptr);
+        vkCmdPushConstants(ofs_cmd, ofs_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(ofs_pc), &ofs_pc);
+        vkCmdDispatch(ofs_cmd, 1, 1, 1);
+        insertComputeOnlyBarrier(ofs_cmd);
+        endSingleTimeCommands(ofs_cmd, device_id);
     }
-    Tensor offsets_cpu({dim_size + 1}, DType::Int32, Device::cpu());
-    std::memcpy(const_cast<void*>(offsets_cpu.data_ptr()), offsets_host.data(),
-                offsets_host.size() * sizeof(int32_t));
-    Tensor offsets = offsets_cpu.to(input.device());
 
     // Build output shape
     std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());

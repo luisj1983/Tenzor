@@ -1,0 +1,73 @@
+#version 450
+
+// Histogramdd: multi-dimensional histogram via per-sample atomic add.
+// Each invocation handles one sample (row) of the (N, D) input.
+//
+// Buffers:
+//   binding 0: float input_data[]    - flattened (N * D) float samples
+//   binding 1: int   counts[]        - flattened output histogram bins (total_bins int32)
+//   binding 2: float dim_params[]    - per-dimension (min, step) pairs: [min0, step0, min1, step1, ...]
+//   binding 3: int   strides[]       - per-dimension output strides
+//
+// Push constants:
+//   n          - number of samples
+//   D          - number of dimensions
+//   total_bins - total number of output bins (product of all bins[d])
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer InputBuf   { float input_data[]; };
+layout(binding = 1) buffer CountsBuf  { int   counts[];     };
+layout(binding = 2) buffer ParamsBuf  { float dim_params[]; };
+layout(binding = 3) buffer StridesBuf { int   strides[];    };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint D;
+    uint total_bins;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n) return;
+
+    int flat_index = 0;
+    bool in_range = true;
+
+    for (uint d = 0; d < params.D; ++d) {
+        float val     = input_data[idx * params.D + d];
+        float dim_min = dim_params[d * 2];
+        float step    = dim_params[d * 2 + 1];
+
+        // Compute number of bins for this dimension from stride info:
+        // bins[d] = (d == D-1) ? total_bins / strides[d] ... but we can just
+        // infer the max bin index from total_bins and strides.
+        // Actually, bins[d] = strides[d-1] / strides[d] for d>0, or total_bins / strides[0] for d==0.
+        // Easier: compute bin, clamp, and check range using step * num_bins = range.
+        // We pass num_bins per dim via strides: we can compute num_bins[d] from strides.
+        // Instead, let's compute bin and clamp using the stride array directly.
+
+        // Determine num_bins for this dimension:
+        int num_bins_d;
+        if (d == 0) {
+            num_bins_d = int(params.total_bins) / strides[0];
+        } else {
+            num_bins_d = strides[d - 1] / strides[d];
+        }
+
+        float range_max = dim_min + step * float(num_bins_d);
+        if (val < dim_min || val > range_max) {
+            in_range = false;
+            break;
+        }
+
+        int b = int((val - dim_min) / step);
+        if (b >= num_bins_d) b = num_bins_d - 1;
+        if (b < 0) b = 0;
+        flat_index += b * strides[d];
+    }
+
+    if (in_range) {
+        atomicAdd(counts[flat_index], 1);
+    }
+}

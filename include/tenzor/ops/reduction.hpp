@@ -153,6 +153,22 @@ auto has_inf_nan(const Tensor& input) -> Tensor;
 auto histogram(const Tensor& input, int64_t bins = 10, double min = 0.0, double max = 0.0)
     -> std::pair<Tensor, Tensor>;
 
+/**
+ * @brief Compute multi-dimensional histogram.
+ *
+ * @param input Input tensor of shape (N, D) where N is the number of samples
+ *              and D is the number of dimensions
+ * @param bins Number of bins per dimension (length D)
+ * @param ranges Optional per-dimension (min, max) ranges. If nullopt, auto-detects from data.
+ * @param density If true, normalize the histogram so that the integral over the
+ *                bins equals 1 (counts / (total_count * bin_volume))
+ * @return Pair of (counts tensor of shape bins[0] x bins[1] x ... x bins[D-1],
+ *         vector of D edge tensors)
+ */
+auto histogramdd(const Tensor& input, std::vector<int64_t> bins,
+                 std::optional<std::vector<std::pair<double,double>>> ranges = std::nullopt,
+                 bool density = false) -> std::pair<Tensor, std::vector<Tensor>>;
+
 /** @brief Count nonzero elements along a dimension or globally. */
 auto count_nonzero(const Tensor& input,
                    std::optional<int64_t> dim = std::nullopt) -> Tensor;

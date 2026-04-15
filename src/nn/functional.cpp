@@ -1085,4 +1085,145 @@ auto max_unpool3d(const Variable& input, const Tensor& indices,
     return Variable(result[0], input.requires_grad());
 }
 
+// ============================================================================
+// Multi-Head Attention
+// ============================================================================
+
+auto multi_head_attention_forward(
+    const Tensor& query, const Tensor& key, const Tensor& value,
+    int64_t num_heads,
+    const Tensor& in_proj_weight, const Tensor& in_proj_bias,
+    const Tensor& out_proj_weight, const Tensor& out_proj_bias,
+    std::optional<Tensor> attn_mask,
+    double dropout_p,
+    bool training,
+    bool need_weights
+) -> std::pair<Tensor, Tensor> {
+
+    // Validate input shapes
+    auto q_shape = query.shape();
+    if (q_shape.size() != 3) {
+        throw std::invalid_argument(
+            "F::multi_head_attention_forward: query must be 3D [batch, seq_q, embed_dim], got " +
+            std::to_string(q_shape.size()) + "D");
+    }
+    auto k_shape = key.shape();
+    auto v_shape = value.shape();
+    if (k_shape.size() != 3) {
+        throw std::invalid_argument(
+            "F::multi_head_attention_forward: key must be 3D [batch, seq_k, embed_dim], got " +
+            std::to_string(k_shape.size()) + "D");
+    }
+    if (v_shape.size() != 3) {
+        throw std::invalid_argument(
+            "F::multi_head_attention_forward: value must be 3D [batch, seq_k, embed_dim], got " +
+            std::to_string(v_shape.size()) + "D");
+    }
+
+    int64_t batch_size = q_shape[0];
+    int64_t seq_len_q = q_shape[1];
+    int64_t embed_dim = q_shape[2];
+    int64_t seq_len_k = k_shape[1];
+
+    if (embed_dim % num_heads != 0) {
+        throw std::invalid_argument(
+            "F::multi_head_attention_forward: embed_dim (" + std::to_string(embed_dim) +
+            ") must be divisible by num_heads (" + std::to_string(num_heads) + ")");
+    }
+    int64_t head_dim = embed_dim / num_heads;
+
+    // Validate projection weight shapes
+    auto w_shape = in_proj_weight.shape();
+    if (w_shape.size() != 2 || w_shape[0] != 3 * embed_dim || w_shape[1] != embed_dim) {
+        throw std::invalid_argument(
+            "F::multi_head_attention_forward: in_proj_weight must be [3*embed_dim, embed_dim], got [" +
+            std::to_string(w_shape[0]) + ", " + std::to_string(w_shape[1]) + "]");
+    }
+    auto b_shape = in_proj_bias.shape();
+    if (b_shape.size() != 1 || b_shape[0] != 3 * embed_dim) {
+        throw std::invalid_argument(
+            "F::multi_head_attention_forward: in_proj_bias must be [3*embed_dim]");
+    }
+
+    // 1. Input projection: project Q, K, V using combined weight
+    //    in_proj_weight is [3*E, E], in_proj_bias is [3*E]
+    //    We split the weight into three [E, E] chunks for Q, K, V
+
+    // Slice projection weight and bias for Q, K, V
+    auto w_q = tenzor::slice(in_proj_weight, 0, 0, embed_dim);           // [E, E]
+    auto w_k = tenzor::slice(in_proj_weight, 0, embed_dim, 2 * embed_dim);   // [E, E]
+    auto w_v = tenzor::slice(in_proj_weight, 0, 2 * embed_dim, 3 * embed_dim); // [E, E]
+
+    auto b_q = tenzor::slice(in_proj_bias, 0, 0, embed_dim);             // [E]
+    auto b_k = tenzor::slice(in_proj_bias, 0, embed_dim, 2 * embed_dim);     // [E]
+    auto b_v = tenzor::slice(in_proj_bias, 0, 2 * embed_dim, 3 * embed_dim);   // [E]
+
+    // Project: Q = query @ w_q^T + b_q, etc.
+    // query is [B, Sq, E], w_q^T is [E, E] => result is [B, Sq, E]
+    auto w_q_t = tenzor::transpose(w_q, 0, 1);
+    auto w_k_t = tenzor::transpose(w_k, 0, 1);
+    auto w_v_t = tenzor::transpose(w_v, 0, 1);
+
+    auto Q = tenzor::matmul(query, w_q_t) + b_q;   // [B, Sq, E]
+    auto K = tenzor::matmul(key, w_k_t) + b_k;      // [B, Sk, E]
+    auto V = tenzor::matmul(value, w_v_t) + b_v;     // [B, Sk, E]
+
+    // 2. Reshape to (batch, num_heads, seq_len, head_dim)
+    Q = tenzor::permute(tenzor::reshape(Q, {batch_size, seq_len_q, num_heads, head_dim}), {0, 2, 1, 3});
+    K = tenzor::permute(tenzor::reshape(K, {batch_size, seq_len_k, num_heads, head_dim}), {0, 2, 1, 3});
+    V = tenzor::permute(tenzor::reshape(V, {batch_size, seq_len_k, num_heads, head_dim}), {0, 2, 1, 3});
+
+    // 3. Scaled dot-product attention via existing functional
+    //    scaled_dot_product_attention expects Variables with shape [B, H, L, E]
+    Variable q_var(Q, false);
+    Variable k_var(K, false);
+    Variable v_var(V, false);
+
+    SDPAOptions opts;
+    if (attn_mask.has_value()) {
+        opts.attn_mask = Variable(attn_mask.value(), false);
+    }
+    opts.dropout_p = (training ? dropout_p : 0.0);
+
+    auto attended = scaled_dot_product_attention(q_var, k_var, v_var, opts);
+    // attended shape: [B, H, Sq, head_dim]
+
+    // Compute attention weights if requested (before merge)
+    Tensor attn_weights_out;
+    if (need_weights) {
+        // Recompute weights: softmax(Q @ K^T / sqrt(d_k))
+        auto d_k_f = static_cast<float>(head_dim);
+        float scale = 1.0f / std::sqrt(d_k_f);
+
+        auto kt = tenzor::transpose(K, -2, -1);  // [B, H, head_dim, Sk]
+        auto scores = tenzor::matmul(Q, kt);      // [B, H, Sq, Sk]
+        scores = scores * scale;
+
+        if (attn_mask.has_value()) {
+            scores = scores + attn_mask.value();
+        }
+
+        attn_weights_out = tenzor::softmax(Variable(scores, false), -1).tensor();
+        // [B, H, Sq, Sk]
+    }
+
+    // 4. Reshape back to (batch, seq_len, embed_dim)
+    //    attended: [B, H, Sq, head_dim] -> permute -> [B, Sq, H, head_dim] -> reshape -> [B, Sq, E]
+    auto merged = tenzor::reshape(
+        tenzor::permute(attended.tensor(), {0, 2, 1, 3}),
+        {batch_size, seq_len_q, embed_dim});
+
+    // 5. Output projection: output = merged @ out_proj_weight^T + out_proj_bias
+    auto out_w_t = tenzor::transpose(out_proj_weight, 0, 1);
+    auto output = tenzor::matmul(merged, out_w_t) + out_proj_bias;
+
+    // Return (output, attention_weights)
+    if (!need_weights) {
+        // Return empty tensor for weights
+        attn_weights_out = Tensor({0}, query.dtype(), query.device());
+    }
+
+    return {output, attn_weights_out};
+}
+
 } // namespace tenzor::nn::functional

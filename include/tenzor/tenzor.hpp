@@ -119,6 +119,8 @@
 #include "tenzor/nn/optim/rmsprop.hpp"
 #include "tenzor/nn/optim/adagrad.hpp"
 #include "tenzor/nn/optim/adadelta.hpp"
+#include "tenzor/nn/optim/sam.hpp"
+#include "tenzor/nn/optim/swa.hpp"
 #include "tenzor/nn/optim/scheduler.hpp"
 
 // Pre-trained models

@@ -682,4 +682,40 @@ auto max_unpool3d(const Variable& input, const Tensor& indices,
                   std::optional<std::tuple<int64_t, int64_t, int64_t>> output_size = std::nullopt)
     -> Variable;
 
+// ============================================================================
+// Multi-Head Attention (implemented in functional.cpp)
+// ============================================================================
+
+/**
+ * @brief Functional multi-head attention forward pass.
+ *
+ * Composes existing operations to implement the full multi-head attention
+ * computation: input projection, split heads, scaled dot-product attention,
+ * merge heads, and output projection.
+ *
+ * @param query  Query tensor [batch, seq_q, embed_dim]
+ * @param key    Key tensor [batch, seq_k, embed_dim]  (or kdim if using separate projections)
+ * @param value  Value tensor [batch, seq_k, embed_dim] (or vdim if using separate projections)
+ * @param num_heads Number of attention heads
+ * @param in_proj_weight Combined QKV projection weight [3 * embed_dim, embed_dim]
+ * @param in_proj_bias Combined QKV projection bias [3 * embed_dim]
+ * @param out_proj_weight Output projection weight [embed_dim, embed_dim]
+ * @param out_proj_bias Output projection bias [embed_dim]
+ * @param attn_mask Optional attention mask [seq_q, seq_k] or [batch, num_heads, seq_q, seq_k]
+ * @param dropout_p Dropout probability applied to attention weights
+ * @param training If true, apply dropout
+ * @param need_weights If true, return attention weights; otherwise second element is empty
+ * @return (output [batch, seq_q, embed_dim], attn_weights [batch, num_heads, seq_q, seq_k] or empty)
+ */
+auto multi_head_attention_forward(
+    const Tensor& query, const Tensor& key, const Tensor& value,
+    int64_t num_heads,
+    const Tensor& in_proj_weight, const Tensor& in_proj_bias,
+    const Tensor& out_proj_weight, const Tensor& out_proj_bias,
+    std::optional<Tensor> attn_mask = std::nullopt,
+    double dropout_p = 0.0,
+    bool training = false,
+    bool need_weights = false
+) -> std::pair<Tensor, Tensor>;
+
 } // namespace tenzor::nn::functional

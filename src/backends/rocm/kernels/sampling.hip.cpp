@@ -764,5 +764,266 @@ auto pdist_kernel(const Tensor& input, double p, hipStream_t stream) -> Tensor {
     return result;
 }
 
+// =========================================================================
+// Histogramdd (multi-dimensional histogram) kernel
+// =========================================================================
+
+// Device kernel: each thread processes one sample, computing a flat bin index
+// and atomically incrementing the counts tensor.
+// params_buf layout per dimension d: [min_d, step_d, bins_d, stride_d] (4 doubles each)
+template <typename T>
+__global__ void histogramdd_kernel_impl(const T* input, int64_t* counts,
+                                         const double* params_buf,
+                                         int64_t N, int64_t D) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= N) return;
+
+    const T* sample = input + tid * D;
+    int64_t flat = 0;
+    for (int64_t d = 0; d < D; ++d) {
+        int64_t base = d * 4;
+        double fmin   = params_buf[base + 0];
+        double step   = params_buf[base + 1];
+        int64_t nbins = static_cast<int64_t>(params_buf[base + 2]);
+        int64_t str   = static_cast<int64_t>(params_buf[base + 3]);
+
+        double v = static_cast<double>(sample[d]);
+        double upper = fmin + step * static_cast<double>(nbins);
+        if (v < fmin || v > upper) return; // out of range — skip sample
+
+        int64_t b = static_cast<int64_t>((v - fmin) / step);
+        if (b >= nbins) b = nbins - 1;
+        if (b < 0) b = 0;
+        flat += b * str;
+    }
+    atomicAdd(reinterpret_cast<unsigned long long*>(&counts[flat]),
+              static_cast<unsigned long long>(1));
+}
+
+// Device kernel: fill edge tensor for one dimension
+template <typename T>
+__global__ void histogramdd_fill_edges_kernel(T* edges, T fmin, T step, int64_t num_edges) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_edges) return;
+    edges[i] = fmin + static_cast<T>(i) * step;
+}
+
+// Device kernel: density normalisation — convert int64 counts to float
+template <typename T>
+__global__ void histogramdd_density_kernel(const int64_t* counts, T* output,
+                                            int64_t total_bins, double norm) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total_bins) return;
+    output[i] = static_cast<T>(static_cast<double>(counts[i]) / norm);
+}
+
+// Column min/max reduction: one block per dimension, walks all N rows.
+template <typename T>
+__global__ void histogramdd_col_minmax_kernel(const T* input, double* min_max_out,
+                                               int64_t N, int64_t D) {
+    extern __shared__ char smem_raw[];
+    double* smin = reinterpret_cast<double*>(smem_raw);
+    double* smax = smin + blockDim.x;
+
+    int64_t d = blockIdx.x; // one block per dimension
+    int tid = threadIdx.x;
+
+    double lmin = 1e308;
+    double lmax = -1e308;
+    for (int64_t i = tid; i < N; i += blockDim.x) {
+        double v = static_cast<double>(input[i * D + d]);
+        if (v < lmin) lmin = v;
+        if (v > lmax) lmax = v;
+    }
+    smin[tid] = lmin;
+    smax[tid] = lmax;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            if (smin[tid + s] < smin[tid]) smin[tid] = smin[tid + s];
+            if (smax[tid + s] > smax[tid]) smax[tid] = smax[tid + s];
+        }
+        __syncthreads();
+    }
+    if (tid == 0) {
+        min_max_out[d * 2 + 0] = smin[0];
+        min_max_out[d * 2 + 1] = smax[0];
+    }
+}
+
+auto histogramdd_kernel(const Tensor& input,
+                        std::vector<int64_t> bins,
+                        std::vector<std::pair<double,double>> ranges,
+                        bool density,
+                        hipStream_t stream)
+    -> std::pair<Tensor, std::vector<Tensor>> {
+
+    if (input.dim() != 2) {
+        throw std::runtime_error("histogramdd_kernel: input must be 2-D (N, D)");
+    }
+
+    const int64_t N = input.shape()[0];
+    const int64_t D = input.shape()[1];
+
+    if (static_cast<int64_t>(bins.size()) != D) {
+        throw std::runtime_error("histogramdd_kernel: bins length must equal D");
+    }
+
+    const auto orig_dtype = input.dtype();
+    const bool use_f64 = (orig_dtype == DType::Float64);
+    const auto compute_dtype = use_f64 ? DType::Float64 : DType::Float32;
+    auto inp = (input.dtype() != compute_dtype) ? input.to(compute_dtype) : input;
+    inp = inp.contiguous();
+    const auto& device = input.device();
+
+    bool auto_range = ranges.empty();
+    if (auto_range) {
+        ranges.resize(static_cast<size_t>(D));
+    }
+
+    // Auto-detect ranges on device
+    if (auto_range && N > 0) {
+        double* d_minmax;
+        size_t mm_bytes = static_cast<size_t>(D) * 2 * sizeof(double);
+        HIP_CHECK(hipMalloc(&d_minmax, mm_bytes));
+
+        int block_size = 256;
+        size_t smem_bytes = 2 * block_size * sizeof(double);
+        if (use_f64) {
+            hipLaunchKernelGGL(histogramdd_col_minmax_kernel<double>,
+                dim3(static_cast<int>(D)), dim3(block_size), smem_bytes, stream,
+                inp.data<double>(), d_minmax, N, D);
+        } else {
+            hipLaunchKernelGGL(histogramdd_col_minmax_kernel<float>,
+                dim3(static_cast<int>(D)), dim3(block_size), smem_bytes, stream,
+                inp.data<float>(), d_minmax, N, D);
+        }
+
+        std::vector<double> h_minmax(static_cast<size_t>(D) * 2);
+        HIP_CHECK(hipMemcpyAsync(h_minmax.data(), d_minmax,
+                                  mm_bytes, hipMemcpyDeviceToHost, stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
+        HIP_CHECK(hipFree(d_minmax));
+
+        for (int64_t d = 0; d < D; ++d) {
+            double vmin = h_minmax[static_cast<size_t>(d) * 2 + 0];
+            double vmax = h_minmax[static_cast<size_t>(d) * 2 + 1];
+            if (vmin == vmax) { vmin -= 0.5; vmax += 0.5; }
+            ranges[static_cast<size_t>(d)] = {vmin, vmax};
+        }
+    } else if (auto_range && N == 0) {
+        for (int64_t d = 0; d < D; ++d) {
+            ranges[static_cast<size_t>(d)] = {0.0, 1.0};
+        }
+    }
+
+    // Build per-dimension parameters and edge tensors
+    std::vector<double> dim_min(static_cast<size_t>(D));
+    std::vector<double> dim_step(static_cast<size_t>(D));
+    std::vector<Tensor> edges_vec;
+    edges_vec.reserve(static_cast<size_t>(D));
+
+    for (int64_t d = 0; d < D; ++d) {
+        auto sd = static_cast<size_t>(d);
+        int64_t nb = bins[sd];
+        double fmin = ranges[sd].first;
+        double fmax = ranges[sd].second;
+        double step = (fmax - fmin) / static_cast<double>(nb);
+        dim_min[sd] = fmin;
+        dim_step[sd] = step;
+
+        Tensor edge({nb + 1}, compute_dtype, device);
+        int64_t num_edges = nb + 1;
+        int threads_e = 128;
+        int blocks_e = static_cast<int>((num_edges + threads_e - 1) / threads_e);
+        if (use_f64) {
+            hipLaunchKernelGGL(histogramdd_fill_edges_kernel<double>,
+                dim3(blocks_e), dim3(threads_e), 0, stream,
+                edge.data<double>(), fmin, step, num_edges);
+        } else {
+            hipLaunchKernelGGL(histogramdd_fill_edges_kernel<float>,
+                dim3(blocks_e), dim3(threads_e), 0, stream,
+                edge.data<float>(), static_cast<float>(fmin), static_cast<float>(step), num_edges);
+        }
+        edges_vec.push_back(std::move(edge));
+    }
+
+    // Compute output shape and strides (row-major)
+    std::vector<int64_t> out_shape(bins.begin(), bins.end());
+    std::vector<int64_t> out_strides(static_cast<size_t>(D));
+    int64_t stride = 1;
+    for (int64_t d = D - 1; d >= 0; --d) {
+        out_strides[static_cast<size_t>(d)] = stride;
+        stride *= bins[static_cast<size_t>(d)];
+    }
+    int64_t total_bins = stride;
+
+    // Allocate counts (zero-initialised)
+    Tensor counts(out_shape, DType::Int64, device);
+    HIP_CHECK(hipMemsetAsync(counts.data_ptr(), 0,
+                              static_cast<size_t>(total_bins) * sizeof(int64_t), stream));
+
+    // Upload per-dimension params buffer to device: [min, step, bins, stride] * D
+    std::vector<double> h_params(static_cast<size_t>(D) * 4);
+    for (int64_t d = 0; d < D; ++d) {
+        auto sd = static_cast<size_t>(d);
+        h_params[sd * 4 + 0] = dim_min[sd];
+        h_params[sd * 4 + 1] = dim_step[sd];
+        h_params[sd * 4 + 2] = static_cast<double>(bins[sd]);
+        h_params[sd * 4 + 3] = static_cast<double>(out_strides[sd]);
+    }
+    double* d_params;
+    size_t params_bytes = h_params.size() * sizeof(double);
+    HIP_CHECK(hipMalloc(&d_params, params_bytes));
+    HIP_CHECK(hipMemcpyAsync(d_params, h_params.data(), params_bytes,
+                              hipMemcpyHostToDevice, stream));
+
+    // Launch histogram kernel
+    if (N > 0) {
+        int threads = 256;
+        int blocks_n = static_cast<int>((N + threads - 1) / threads);
+        if (use_f64) {
+            hipLaunchKernelGGL(histogramdd_kernel_impl<double>,
+                dim3(blocks_n), dim3(threads), 0, stream,
+                inp.data<double>(), counts.data<int64_t>(), d_params, N, D);
+        } else {
+            hipLaunchKernelGGL(histogramdd_kernel_impl<float>,
+                dim3(blocks_n), dim3(threads), 0, stream,
+                inp.data<float>(), counts.data<int64_t>(), d_params, N, D);
+        }
+        HIP_CHECK(hipGetLastError());
+    }
+
+    HIP_CHECK(hipFree(d_params));
+
+    // Density normalisation
+    Tensor result = counts;
+    if (density && N > 0) {
+        double bin_volume = 1.0;
+        for (int64_t d = 0; d < D; ++d) {
+            bin_volume *= dim_step[static_cast<size_t>(d)];
+        }
+        double norm = static_cast<double>(N) * bin_volume;
+
+        Tensor density_out(out_shape, compute_dtype, device);
+        int threads_d = 256;
+        int blocks_d = static_cast<int>((total_bins + threads_d - 1) / threads_d);
+        if (use_f64) {
+            hipLaunchKernelGGL(histogramdd_density_kernel<double>,
+                dim3(blocks_d), dim3(threads_d), 0, stream,
+                counts.data<int64_t>(), density_out.data<double>(), total_bins, norm);
+        } else {
+            hipLaunchKernelGGL(histogramdd_density_kernel<float>,
+                dim3(blocks_d), dim3(threads_d), 0, stream,
+                counts.data<int64_t>(), density_out.data<float>(), total_bins, norm);
+        }
+        HIP_CHECK(hipGetLastError());
+        result = density_out;
+    }
+
+    return {std::move(result), std::move(edges_vec)};
+}
+
 }  // namespace rocm
 }  // namespace tenzor

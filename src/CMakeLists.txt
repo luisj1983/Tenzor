@@ -132,6 +132,8 @@ set(TENZOR_CORE_SOURCES
     nn/optim/lbfgs.cpp
     nn/optim/zero_optimizer.cpp
     nn/optim/gradient_utils.cpp
+    nn/optim/sam.cpp
+    nn/optim/swa.cpp
     nn/optim/scheduler.cpp
     nn/optim/scheduler_advanced.cpp
     nn/callbacks.cpp

@@ -299,6 +299,11 @@ enum class AttrKey : uint16_t {
     // Generator seed
     Seed,              // Explicit seed from Generator for reproducible random ops
 
+    // Histogramdd parameters
+    BinsList,          // Per-dimension bin counts (comma-separated)
+    RangesList,        // Per-dimension min,max pairs (comma-separated: min0,max0,min1,max1,...)
+    Density,           // Normalize histogram by bin volume and total count
+
     // Sentinel
     _Count
 };

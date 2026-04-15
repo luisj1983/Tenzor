@@ -316,6 +316,9 @@ public:
     auto dispatchPdist(const Tensor& input, double p) -> Tensor;
     auto dispatchHistogram(const Tensor& input, int64_t bins, double min_val, double max_val)
         -> std::pair<Tensor, Tensor>;
+    auto dispatchHistogramdd(const Tensor& input, std::vector<int64_t> bins,
+                             std::vector<std::pair<double,double>> ranges, bool density)
+        -> std::pair<Tensor, std::vector<Tensor>>;
     auto dispatchMultinomial(const Tensor& probs, int64_t num_samples, bool replacement) -> Tensor;
     auto dispatchPoissonSample(const Tensor& rates) -> Tensor;
     auto dispatchNormalSample(const Tensor& mean, const Tensor& stddev) -> Tensor;

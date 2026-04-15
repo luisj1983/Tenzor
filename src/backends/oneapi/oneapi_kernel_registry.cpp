@@ -132,6 +132,9 @@ namespace oneapi {
     auto histogram_kernel(const Tensor& input, int64_t bins,
                           double min_val, double max_val,
                           sycl::queue& queue) -> std::pair<Tensor, Tensor>;
+    auto histogramdd_kernel(const Tensor& input, std::vector<int64_t> bins,
+                            std::vector<std::pair<double,double>> ranges, bool density,
+                            sycl::queue& queue) -> std::pair<Tensor, std::vector<Tensor>>;
     auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
                       sycl::queue& queue) -> Tensor;
     auto trapezoid_kernel(const Tensor& y, int64_t dim, double dx, const Tensor* x_ptr, sycl::queue& queue) -> Tensor;
@@ -4269,6 +4272,37 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             double max_val = attrs.get_float(AttrKey::Max, 0.0);
             auto [counts, edges] = oneapi::histogram_kernel(inputs[0], bins, min_val, max_val, get_q(inputs));
             return {counts, edges};
+        });
+
+    table.register_kernel(OpId::Histogramdd,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // Parse bins list from comma-separated string
+            auto bins_list = attrs.get_int_list(AttrKey::BinsList);
+            bool density = attrs.get_bool(AttrKey::Density, false);
+
+            // Parse ranges from comma-separated string: min0,max0,min1,max1,...
+            std::vector<std::pair<double,double>> ranges;
+            auto ranges_str = attrs.get_string(AttrKey::RangesList, "");
+            if (!ranges_str.empty()) {
+                std::vector<double> vals;
+                std::string s(ranges_str);
+                size_t pos = 0;
+                while (pos < s.size()) {
+                    size_t next = s.find(',', pos);
+                    if (next == std::string::npos) next = s.size();
+                    vals.push_back(std::stod(s.substr(pos, next - pos)));
+                    pos = next + 1;
+                }
+                for (size_t i = 0; i + 1 < vals.size(); i += 2) {
+                    ranges.emplace_back(vals[i], vals[i + 1]);
+                }
+            }
+
+            auto [counts, edges] = oneapi::histogramdd_kernel(inputs[0], bins_list, ranges, density, get_q(inputs));
+            std::vector<Tensor> results;
+            results.push_back(counts);
+            for (auto& e : edges) results.push_back(std::move(e));
+            return results;
         });
 
     table.register_single_output_kernel(OpId::CDist,

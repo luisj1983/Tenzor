@@ -1816,11 +1816,16 @@ auto VulkanBackend::dispatchLinalgEig(const Tensor& input) -> std::vector<Tensor
                 endSingleTimeCommands(cmd, device_id);
             }
 
-            // Single sync + readback of one uint32 flag (not per-batch metadata)
-            synchronize(device_id);
+            // Batch convergence readback: check every 8 iterations to reduce D2H syncs.
+            // The GPU-side convergence shader still runs every iteration, so converged
+            // batches early-exit in the QR shader. We just defer the host-visible check.
+            constexpr uint32_t kConvergenceCheckInterval = 8;
+            if ((iter + 1) % kConvergenceCheckInterval == 0 || iter == max_qr_iterations - 1) {
+                synchronize(device_id);
 
-            Tensor ac_cpu = gpu_all_converged.to(Device::cpu());
-            if (ac_cpu.data<int32_t>()[0] != 0) break;
+                Tensor ac_cpu = gpu_all_converged.to(Device::cpu());
+                if (ac_cpu.data<int32_t>()[0] != 0) break;
+            }
         }
 
         // Step 3: Extract eigenvalues from quasi-upper-triangular (real Schur) form

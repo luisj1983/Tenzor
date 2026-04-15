@@ -208,6 +208,55 @@ auto histogram(const Tensor& input, int64_t bins, double min_val, double max_val
     return {results[0], results[1]};
 }
 
+auto histogramdd(const Tensor& input, std::vector<int64_t> bins,
+                 std::optional<std::vector<std::pair<double,double>>> ranges,
+                 bool density) -> std::pair<Tensor, std::vector<Tensor>> {
+    if (input.dim() != 2) {
+        throw std::invalid_argument("histogramdd: input must be 2-D (N, D)");
+    }
+    int64_t D = input.shape()[1];
+    if (static_cast<int64_t>(bins.size()) != D) {
+        throw std::invalid_argument("histogramdd: bins length must match input dimension D");
+    }
+    for (auto b : bins) {
+        if (b <= 0) {
+            throw std::invalid_argument("histogramdd: all bin counts must be positive");
+        }
+    }
+
+    auto inp = input.contiguous();
+    std::array<Tensor, 1> inputs = {inp};
+    NewOpAttributes attrs;
+
+    // Encode bins as comma-separated string
+    std::string bins_str;
+    for (size_t i = 0; i < bins.size(); ++i) {
+        if (i > 0) bins_str += ',';
+        bins_str += std::to_string(bins[i]);
+    }
+    attrs.set(AttrKey::BinsList, bins_str);
+    attrs.set(AttrKey::Density, density);
+
+    // Encode ranges as comma-separated pairs: min0,max0,min1,max1,...
+    if (ranges.has_value()) {
+        const auto& r = ranges.value();
+        if (static_cast<int64_t>(r.size()) != D) {
+            throw std::invalid_argument("histogramdd: ranges length must match input dimension D");
+        }
+        std::string ranges_str;
+        for (size_t i = 0; i < r.size(); ++i) {
+            if (i > 0) ranges_str += ',';
+            ranges_str += std::to_string(r[i].first) + ',' + std::to_string(r[i].second);
+        }
+        attrs.set(AttrKey::RangesList, ranges_str);
+    }
+
+    auto results = dispatch<OpId::Histogramdd>(inputs, attrs);
+    // results[0] = counts, results[1..D] = edge tensors
+    std::vector<Tensor> edges(results.begin() + 1, results.end());
+    return {results[0], edges};
+}
+
 auto count_nonzero(const Tensor& input, std::optional<int64_t> dim) -> Tensor {
     std::array<Tensor, 1> inputs = {input.contiguous()};
     NewOpAttributes attrs;

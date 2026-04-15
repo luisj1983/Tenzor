@@ -1,0 +1,25 @@
+#version 450
+
+// Build int32 offsets array from a float cumulative sum:
+//   offsets[0] = 0
+//   offsets[i+1] = int(cumsum[i])  for i in [0, n)
+// Single-thread sequential scan — n (dimension size along which repeat_interleave
+// operates) is typically small (hundreds at most). For very large n, a parallel
+// approach with multiple workgroups would be needed.
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0) readonly  buffer CumSum  { float cumsum[]; };
+layout(set = 0, binding = 1) writeonly buffer Offsets  { int   offsets[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;   // number of elements in cumsum (= dim_size)
+};
+
+void main() {
+    if (gl_GlobalInvocationID.x != 0) return;
+
+    offsets[0] = 0;
+    for (uint i = 0; i < n; ++i) {
+        offsets[i + 1] = int(cumsum[i]);
+    }
+}

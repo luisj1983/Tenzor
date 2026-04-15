@@ -2958,6 +2958,28 @@ Returns:
          return tenzor::swapaxes(t, dim0, dim1);
          }, "Swap two dimensions", py::arg("input"), py::arg("dim0"), py::arg("dim1"),
          py::call_guard<py::gil_scoped_release>());
+    m.def("moveaxis", [](const tenzor::Tensor& t, std::vector<int64_t> src, std::vector<int64_t> dst) {
+         return tenzor::moveaxis(t, src, dst);
+         }, "Move dimensions to new positions (alias for movedim)",
+         py::arg("input"), py::arg("source"), py::arg("destination"),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("narrow_copy", [](const tenzor::Tensor& t, int64_t dim, int64_t start, int64_t length) {
+         return tenzor::narrow_copy(t, dim, start, length);
+         }, "Narrow with copy semantics",
+         py::arg("input"), py::arg("dim"), py::arg("start"), py::arg("length"),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("column_stack", [](const std::vector<tenzor::Tensor>& tensors) {
+         return tenzor::column_stack(tensors);
+         }, "Stack 1D tensors as columns, 2D+ cat along dim 1",
+         py::arg("tensors"), py::call_guard<py::gil_scoped_release>());
+    m.def("row_stack", [](const std::vector<tenzor::Tensor>& tensors) {
+         return tenzor::row_stack(tensors);
+         }, "Alias for vstack",
+         py::arg("tensors"), py::call_guard<py::gil_scoped_release>());
+    m.def("broadcast_tensors", [](const std::vector<tenzor::Tensor>& tensors) {
+         return tenzor::broadcast_tensors(tensors);
+         }, "Broadcast all tensors to a common shape",
+         py::arg("tensors"), py::call_guard<py::gil_scoped_release>());
     m.def("logspace", [](float start, float end, int64_t steps, double base,
                           tenzor::DType dtype, tenzor::Device device) {
          return tenzor::logspace(start, end, steps, base, dtype, device);
@@ -2981,6 +3003,14 @@ Returns:
          return tenzor::aminmax(t, dim, keepdim);
          }, "Simultaneous min and max", py::arg("input"), py::arg("dim") = std::nullopt,
          py::arg("keepdim") = false, py::call_guard<py::gil_scoped_release>());
+    m.def("histogramdd", [](const tenzor::Tensor& t, std::vector<int64_t> bins,
+                             std::optional<std::vector<std::pair<double,double>>> ranges,
+                             bool density) {
+         return tenzor::histogramdd(t, bins, ranges, density);
+         }, "Multi-dimensional histogram",
+         py::arg("input"), py::arg("bins"),
+         py::arg("ranges") = std::nullopt, py::arg("density") = false,
+         py::call_guard<py::gil_scoped_release>());
     m.def("index_add", [](const tenzor::Tensor& t, int64_t dim, const tenzor::Tensor& idx, const tenzor::Tensor& src) {
          return tenzor::index_add(t, dim, idx, src);
          }, "Accumulate at index positions", py::arg("input"), py::arg("dim"), py::arg("index"), py::arg("source"),

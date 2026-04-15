@@ -48,6 +48,12 @@ struct HistogramPC {
     float bin_width;
 };
 
+struct HistogramddPC {
+    uint32_t n;
+    uint32_t D;
+    uint32_t total_bins;
+};
+
 struct MultinomialCdfPC {
     uint32_t num_categories;
     uint32_t probs_offset;
@@ -281,6 +287,174 @@ auto VulkanBackend::dispatchHistogram(const Tensor& input, int64_t bins,
     edges = tenzor::add(edges, tenzor::full({bins + 1}, static_cast<float>(min_val), DType::Float32, input.device()));
 
     return {counts_i64, edges};
+}
+
+auto VulkanBackend::dispatchHistogramdd(const Tensor& input,
+                                        std::vector<int64_t> bins,
+                                        std::vector<std::pair<double,double>> ranges,
+                                        bool density)
+    -> std::pair<Tensor, std::vector<Tensor>> {
+    if (input.dim() != 2) {
+        throw std::runtime_error("dispatchHistogramdd: input must be 2-D (N, D)");
+    }
+
+    const int64_t N = input.shape()[0];
+    const int64_t D = input.shape()[1];
+
+    if (static_cast<int64_t>(bins.size()) != D) {
+        throw std::runtime_error("dispatchHistogramdd: bins length must equal D");
+    }
+
+    Tensor in_f32 = (input.dtype() == DType::Float32) ? input.contiguous()
+                                                       : dispatchCast(input.contiguous(), DType::Float32);
+    int32_t device_id = input.device().index;
+
+    // Auto-detect ranges from data if not provided
+    bool auto_range = ranges.empty();
+    if (auto_range) {
+        ranges.resize(static_cast<size_t>(D));
+    }
+
+    if (auto_range && N > 0) {
+        // Compute per-column min/max entirely on GPU via standard reduction ops
+        // in_f32 is (N, D); reduce along dim 0 to get (D,) min and max vectors
+        Tensor col_min = tenzor::min(in_f32, /*dim=*/0, /*keepdim=*/false);
+        Tensor col_max = tenzor::max(in_f32, /*dim=*/0, /*keepdim=*/false);
+
+        // Single D2H for the D-sized min/max vectors (small, acceptable)
+        Tensor min_cpu = col_min.to(Device::cpu());
+        Tensor max_cpu = col_max.to(Device::cpu());
+        const float* min_data = min_cpu.data<float>();
+        const float* max_data = max_cpu.data<float>();
+        for (int64_t d = 0; d < D; ++d) {
+            float vmin = min_data[d];
+            float vmax = max_data[d];
+            if (vmin == vmax) {
+                vmin -= 0.5f;
+                vmax += 0.5f;
+            }
+            ranges[static_cast<size_t>(d)] = {static_cast<double>(vmin),
+                                                static_cast<double>(vmax)};
+        }
+    } else if (auto_range) {
+        // N == 0: use default ranges
+        for (int64_t d = 0; d < D; ++d) {
+            ranges[static_cast<size_t>(d)] = {0.0, 1.0};
+        }
+    }
+
+    // Build per-dimension parameters: (min, step) pairs and strides
+    std::vector<float> dim_params(static_cast<size_t>(D) * 2);
+    std::vector<float> dim_steps(static_cast<size_t>(D));
+
+    for (int64_t d = 0; d < D; ++d) {
+        auto sd = static_cast<size_t>(d);
+        float fmin = static_cast<float>(ranges[sd].first);
+        float fmax = static_cast<float>(ranges[sd].second);
+        float step = (fmax - fmin) / static_cast<float>(bins[sd]);
+        dim_params[sd * 2]     = fmin;
+        dim_params[sd * 2 + 1] = step;
+        dim_steps[sd] = step;
+    }
+
+    // Compute strides (row-major)
+    std::vector<int64_t> out_shape(bins.begin(), bins.end());
+    std::vector<int32_t> out_strides(static_cast<size_t>(D));
+    int64_t stride = 1;
+    for (int64_t d = D - 1; d >= 0; --d) {
+        out_strides[static_cast<size_t>(d)] = static_cast<int32_t>(stride);
+        stride *= bins[static_cast<size_t>(d)];
+    }
+    int64_t total_bins = stride;
+
+    // Build edge tensors on-device
+    std::vector<Tensor> edges_vec;
+    edges_vec.reserve(static_cast<size_t>(D));
+    for (int64_t d = 0; d < D; ++d) {
+        auto sd = static_cast<size_t>(d);
+        int64_t nb = bins[sd];
+        float fmin = dim_params[sd * 2];
+        float step = dim_params[sd * 2 + 1];
+
+        // Build edges using arange + scale on device
+        Tensor edge = tenzor::arange(0, nb + 1, 1, DType::Float32, input.device());
+        edge = tenzor::mul(edge, tenzor::full({nb + 1}, step, DType::Float32, input.device()));
+        edge = tenzor::add(edge, tenzor::full({nb + 1}, fmin, DType::Float32, input.device()));
+        edges_vec.push_back(std::move(edge));
+    }
+
+    // Allocate counts as int32 (shader uses atomicAdd on int)
+    Tensor counts_i32 = tenzor::zeros(out_shape, DType::Int32, input.device());
+
+    if (N > 0) {
+        // Upload dim_params and strides buffers to device
+        Tensor params_buf({static_cast<int64_t>(dim_params.size())}, DType::Float32, input.device());
+        Tensor strides_buf({D}, DType::Int32, input.device());
+
+        // We need to fill these buffers. Use CPU staging.
+        {
+            Tensor params_cpu({static_cast<int64_t>(dim_params.size())}, DType::Float32, Device::cpu());
+            std::memcpy(params_cpu.data<float>(), dim_params.data(), dim_params.size() * sizeof(float));
+            params_buf = params_cpu.to(input.device());
+        }
+        {
+            Tensor strides_cpu({D}, DType::Int32, Device::cpu());
+            std::memcpy(strides_cpu.data<int32_t>(), out_strides.data(),
+                        static_cast<size_t>(D) * sizeof(int32_t));
+            strides_buf = strides_cpu.to(input.device());
+        }
+
+        auto* pipeline = getPipeline("histogramdd", device_id);
+        HistogramddPC pc{static_cast<uint32_t>(N),
+                         static_cast<uint32_t>(D),
+                         static_cast<uint32_t>(total_bins)};
+
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, in_f32.data_ptr()},
+            {1, counts_i32.data_ptr()},
+            {2, params_buf.data_ptr()},
+            {3, strides_buf.data_ptr()},
+        };
+        std::vector<size_t> sizes = {
+            static_cast<size_t>(N * D) * sizeof(float),
+            static_cast<size_t>(total_bins) * sizeof(int32_t),
+            dim_params.size() * sizeof(float),
+            static_cast<size_t>(D) * sizeof(int32_t),
+        };
+
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(HistogramddPC), &pc);
+        uint32_t workgroups = div_wg(static_cast<uint32_t>(N), devices_[device_id].workgroupSize);
+        vkCmdDispatch(cmd, workgroups, 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+        synchronize(device_id);
+    }
+
+    // Promote counts to int64
+    Tensor counts_i64 = dispatchCast(counts_i32, DType::Int64);
+
+    // Density normalization
+    Tensor result = counts_i64;
+    if (density && N > 0) {
+        double bin_volume = 1.0;
+        for (int64_t d = 0; d < D; ++d) {
+            bin_volume *= static_cast<double>(dim_steps[static_cast<size_t>(d)]);
+        }
+        double norm = static_cast<double>(N) * bin_volume;
+        float inv_norm = static_cast<float>(1.0 / norm);
+
+        // Convert counts to float, multiply by inv_norm
+        Tensor counts_f = dispatchCast(counts_i32, DType::Float32);
+        result = tenzor::mul(counts_f, tenzor::full(out_shape, inv_norm, DType::Float32, input.device()));
+    }
+
+    return {result, std::move(edges_vec)};
 }
 
 auto VulkanBackend::dispatchMultinomial(const Tensor& probs, int64_t num_samples,

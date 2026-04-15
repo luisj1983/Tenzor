@@ -248,6 +248,25 @@ auto fliplr(const Tensor& input) -> Tensor;
 /// Flip up-down (flip along dim 0)
 auto flipud(const Tensor& input) -> Tensor;
 
+/// Alias for movedim (PyTorch compatibility)
+inline auto moveaxis(const Tensor& input, std::vector<int64_t> source, std::vector<int64_t> destination) -> Tensor {
+    return movedim(input, std::move(source), std::move(destination));
+}
+
+/// Narrow with copy semantics (returns a new contiguous tensor, not a view)
+auto narrow_copy(const Tensor& input, int64_t dim, int64_t start, int64_t length) -> Tensor;
+
+/// Stack 1D tensors as columns (2D+: cat along dim 1)
+auto column_stack(const std::vector<Tensor>& tensors) -> Tensor;
+
+/// Alias for vstack (PyTorch compatibility)
+inline auto row_stack(const std::vector<Tensor>& tensors) -> Tensor {
+    return vstack(tensors);
+}
+
+/// Broadcast all tensors to a common shape
+auto broadcast_tensors(const std::vector<Tensor>& tensors) -> std::vector<Tensor>;
+
 /// @}
 
 /**
