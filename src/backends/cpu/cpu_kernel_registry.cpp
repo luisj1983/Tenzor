@@ -3653,6 +3653,25 @@ void register_cpu_kernels(BackendDispatchTable& table) {
             return sparse::sparse_triangular_solve(L, inputs[3], upper);
         });
 
+    // SparseSoftmax: softmax over non-zero values per row (CSR)
+    // inputs: [0]=crow_indices, [1]=col_indices, [2]=values
+    table.register_single_output_kernel(OpId::SparseSoftmax,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto shape = attrs.get_int_list(AttrKey::Shape);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], shape);
+            auto result = sparse::sparse_softmax(sp);
+            return result.values();
+        });
+
+    // SparseLogSoftmax: log-softmax over non-zero values per row (CSR)
+    table.register_single_output_kernel(OpId::SparseLogSoftmax,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto shape = attrs.get_int_list(AttrKey::Shape);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], shape);
+            auto result = sparse::sparse_log_softmax(sp);
+            return result.values();
+        });
+
     // =========================================================================
     // Fused GEMM Operations
     // =========================================================================

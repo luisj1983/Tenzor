@@ -1527,24 +1527,9 @@ auto VulkanBackend::dispatchAminmax(const Tensor& input) -> std::pair<Tensor, Te
     synchronize(device_id);
 
     // Split the 2-element output [min, max] into two {1}-shaped tensors.
-    // Move to CPU for the split, then back to the original device.
-    Device orig_device = work_input.device();
-    Tensor output_cpu = output.to(Device::cpu());
-
-    Tensor min_tensor({1}, work_input.dtype(), Device::cpu());
-    Tensor max_tensor({1}, work_input.dtype(), Device::cpu());
-
-    size_t elem_size = work_input.dtype_size();
-    std::memcpy(min_tensor.data_ptr(),
-                static_cast<const char*>(output_cpu.data_ptr()),
-                elem_size);
-    std::memcpy(max_tensor.data_ptr(),
-                static_cast<const char*>(output_cpu.data_ptr()) + elem_size,
-                elem_size);
-
-    // Move back to original device
-    min_tensor = min_tensor.to(orig_device);
-    max_tensor = max_tensor.to(orig_device);
+    // Use device-side slice to avoid unnecessary GPU->CPU->GPU roundtrip.
+    Tensor min_tensor = output.slice(0, 0, 1);
+    Tensor max_tensor = output.slice(0, 1, 2);
 
     // Convert back to original dtype if needed
     if (orig_dtype != work_input.dtype()) {

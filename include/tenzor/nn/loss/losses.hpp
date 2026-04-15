@@ -12,6 +12,7 @@
 #include "../module.hpp"
 #include <string>
 #include <stdexcept>
+#include <functional>
 
 namespace tenzor {
 namespace nn {
@@ -1039,6 +1040,46 @@ auto triplet_margin_loss(const Variable& anchor, const Variable& positive,
                          double margin = 1.0, double p = 2.0,
                          bool swap = false,
                          Reduction reduction = Reduction::Mean) -> Variable;
+
+/**
+ * @brief Triplet Margin Loss with custom distance function.
+ *
+ * Like TripletMarginLoss but allows a user-supplied distance function
+ * instead of the hardcoded p-norm distance.
+ *
+ * \f[
+ * L(a, p, n) = \max(0, d(a, p) - d(a, n) + \text{margin})
+ * \f]
+ *
+ * @param distance_fn Custom distance function taking two Variables and returning a Variable
+ * @param margin Margin between positive/negative distances (default: 1.0)
+ * @param swap Use distance swap heuristic (default: false)
+ * @param reduction How to reduce the loss (default: Mean)
+ */
+class TripletMarginWithDistanceLoss {
+public:
+    using DistanceFunction = std::function<Variable(const Variable&, const Variable&)>;
+
+    explicit TripletMarginWithDistanceLoss(
+        DistanceFunction distance_fn,
+        double margin = 1.0,
+        bool swap = false,
+        Reduction reduction = Reduction::Mean);
+
+    auto forward(const Variable& anchor, const Variable& positive,
+                 const Variable& negative) -> Variable;
+
+    auto operator()(const Variable& anchor, const Variable& positive,
+                   const Variable& negative) -> Variable {
+        return forward(anchor, positive, negative);
+    }
+
+private:
+    DistanceFunction distance_fn_;
+    double margin_;
+    bool swap_;
+    Reduction reduction_;
+};
 
 /**
  * @brief Multi-Label Soft Margin Loss

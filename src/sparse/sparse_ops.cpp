@@ -1393,5 +1393,187 @@ auto sddmm(const SparseTensor& mask, const Tensor& A, const Tensor& B) -> Sparse
                                     {M, N});
 }
 
+// ============================================================================
+// Sparse Softmax
+// ============================================================================
+
+auto sparse_softmax(const SparseTensor& sparse) -> SparseTensor {
+    if (sparse.layout() != SparseLayout::CSR) {
+        throw std::runtime_error("sparse_softmax: only CSR layout is supported");
+    }
+    auto shape = sparse.shape();
+    if (shape.size() != 2) {
+        throw std::runtime_error("sparse_softmax: input must be 2D");
+    }
+
+    int64_t M = shape[0];
+    auto crow = sparse.crow_indices();
+    auto col = sparse.col_indices();
+    auto vals = sparse.values();
+
+    // Work on CPU (dispatch to GPU backends via OpId for GPU tensors)
+    auto crow_cpu = (crow.device().type != Device::Type::CPU) ? crow.to(Device::cpu()) : crow;
+    auto vals_cpu = (vals.device().type != Device::Type::CPU) ? vals.to(Device::cpu()) : vals;
+    auto col_cpu = (col.device().type != Device::Type::CPU) ? col.to(Device::cpu()) : col;
+
+    int64_t nnz = vals_cpu.numel();
+    Tensor out_vals = tenzor::zeros({nnz}, vals_cpu.dtype(), Device::cpu());
+
+    const int64_t* row_ptr = crow_cpu.data<int64_t>();
+
+    if (vals_cpu.dtype() == DType::Float32) {
+        const float* v = vals_cpu.data<float>();
+        float* o = out_vals.data<float>();
+
+        for (int64_t i = 0; i < M; ++i) {
+            int64_t start = row_ptr[i];
+            int64_t end = row_ptr[i + 1];
+            if (start == end) continue;
+
+            // Find max for numerical stability
+            float max_val = v[start];
+            for (int64_t j = start + 1; j < end; ++j) {
+                max_val = std::max(max_val, v[j]);
+            }
+
+            // Compute exp and sum
+            float sum_exp = 0.0f;
+            for (int64_t j = start; j < end; ++j) {
+                o[j] = std::exp(v[j] - max_val);
+                sum_exp += o[j];
+            }
+
+            // Normalize
+            float inv_sum = 1.0f / sum_exp;
+            for (int64_t j = start; j < end; ++j) {
+                o[j] *= inv_sum;
+            }
+        }
+    } else if (vals_cpu.dtype() == DType::Float64) {
+        const double* v = vals_cpu.data<double>();
+        double* o = out_vals.data<double>();
+
+        for (int64_t i = 0; i < M; ++i) {
+            int64_t start = row_ptr[i];
+            int64_t end = row_ptr[i + 1];
+            if (start == end) continue;
+
+            double max_val = v[start];
+            for (int64_t j = start + 1; j < end; ++j) {
+                max_val = std::max(max_val, v[j]);
+            }
+
+            double sum_exp = 0.0;
+            for (int64_t j = start; j < end; ++j) {
+                o[j] = std::exp(v[j] - max_val);
+                sum_exp += o[j];
+            }
+
+            double inv_sum = 1.0 / sum_exp;
+            for (int64_t j = start; j < end; ++j) {
+                o[j] *= inv_sum;
+            }
+        }
+    } else {
+        throw std::runtime_error("sparse_softmax: unsupported dtype");
+    }
+
+    // Transfer back to original device if needed
+    if (vals.device().type != Device::Type::CPU) {
+        out_vals = out_vals.to(vals.device());
+    }
+
+    return SparseTensor::sparse_csr(crow, col, out_vals, shape);
+}
+
+// ============================================================================
+// Sparse Log-Softmax
+// ============================================================================
+
+auto sparse_log_softmax(const SparseTensor& sparse) -> SparseTensor {
+    if (sparse.layout() != SparseLayout::CSR) {
+        throw std::runtime_error("sparse_log_softmax: only CSR layout is supported");
+    }
+    auto shape = sparse.shape();
+    if (shape.size() != 2) {
+        throw std::runtime_error("sparse_log_softmax: input must be 2D");
+    }
+
+    int64_t M = shape[0];
+    auto crow = sparse.crow_indices();
+    auto col = sparse.col_indices();
+    auto vals = sparse.values();
+
+    auto crow_cpu = (crow.device().type != Device::Type::CPU) ? crow.to(Device::cpu()) : crow;
+    auto vals_cpu = (vals.device().type != Device::Type::CPU) ? vals.to(Device::cpu()) : vals;
+    auto col_cpu = (col.device().type != Device::Type::CPU) ? col.to(Device::cpu()) : col;
+
+    int64_t nnz = vals_cpu.numel();
+    Tensor out_vals = tenzor::zeros({nnz}, vals_cpu.dtype(), Device::cpu());
+
+    const int64_t* row_ptr = crow_cpu.data<int64_t>();
+
+    if (vals_cpu.dtype() == DType::Float32) {
+        const float* v = vals_cpu.data<float>();
+        float* o = out_vals.data<float>();
+
+        for (int64_t i = 0; i < M; ++i) {
+            int64_t start = row_ptr[i];
+            int64_t end = row_ptr[i + 1];
+            if (start == end) continue;
+
+            // Find max for numerical stability
+            float max_val = v[start];
+            for (int64_t j = start + 1; j < end; ++j) {
+                max_val = std::max(max_val, v[j]);
+            }
+
+            // Compute log-sum-exp
+            float sum_exp = 0.0f;
+            for (int64_t j = start; j < end; ++j) {
+                sum_exp += std::exp(v[j] - max_val);
+            }
+            float log_sum_exp = max_val + std::log(sum_exp);
+
+            // log_softmax = x - log_sum_exp
+            for (int64_t j = start; j < end; ++j) {
+                o[j] = v[j] - log_sum_exp;
+            }
+        }
+    } else if (vals_cpu.dtype() == DType::Float64) {
+        const double* v = vals_cpu.data<double>();
+        double* o = out_vals.data<double>();
+
+        for (int64_t i = 0; i < M; ++i) {
+            int64_t start = row_ptr[i];
+            int64_t end = row_ptr[i + 1];
+            if (start == end) continue;
+
+            double max_val = v[start];
+            for (int64_t j = start + 1; j < end; ++j) {
+                max_val = std::max(max_val, v[j]);
+            }
+
+            double sum_exp = 0.0;
+            for (int64_t j = start; j < end; ++j) {
+                sum_exp += std::exp(v[j] - max_val);
+            }
+            double log_sum_exp = max_val + std::log(sum_exp);
+
+            for (int64_t j = start; j < end; ++j) {
+                o[j] = v[j] - log_sum_exp;
+            }
+        }
+    } else {
+        throw std::runtime_error("sparse_log_softmax: unsupported dtype");
+    }
+
+    if (vals.device().type != Device::Type::CPU) {
+        out_vals = out_vals.to(vals.device());
+    }
+
+    return SparseTensor::sparse_csr(crow, col, out_vals, shape);
+}
+
 } // namespace sparse
 } // namespace tenzor

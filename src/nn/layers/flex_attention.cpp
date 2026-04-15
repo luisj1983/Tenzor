@@ -1,0 +1,415 @@
+/**
+ * @file flex_attention.cpp
+ * @brief CPU reference implementation of FlexAttention
+ *
+ * Implements block-sparse attention with optional score modification using
+ * the online softmax algorithm for numerical stability. This is a reference
+ * implementation that processes one block tile at a time, skipping inactive
+ * blocks as indicated by the BlockMask.
+ */
+
+#include "tenzor/nn/layers/flex_attention.hpp"
+#include "tenzor/ops/math.hpp"
+#include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/op_id.hpp"
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <stdexcept>
+#include <vector>
+
+namespace tenzor {
+namespace nn {
+
+// =============================================================================
+// BlockMask implementation
+// =============================================================================
+
+BlockMask::BlockMask(Tensor block_mask, int64_t block_size)
+    : mask_(std::move(block_mask)), block_size_(block_size) {
+    if (block_size_ <= 0) {
+        throw std::invalid_argument(
+            "BlockMask: block_size must be positive, got " +
+            std::to_string(block_size_));
+    }
+
+    auto s = mask_.shape();
+    if (s.size() != 2) {
+        throw std::invalid_argument(
+            "BlockMask: block_mask must be 2D (num_q_blocks, num_kv_blocks), got " +
+            std::to_string(s.size()) + "D tensor");
+    }
+}
+
+auto BlockMask::causal(int64_t seq_len, int64_t block_size) -> BlockMask {
+    const int64_t n_blocks = (seq_len + block_size - 1) / block_size;
+
+    // Build bool mask on CPU: block (q, kv) is active iff kv <= q
+    auto mask_tensor = zeros({n_blocks, n_blocks}, DType::Bool, Device::cpu());
+    auto* data = static_cast<bool*>(mask_tensor.data_ptr());
+    for (int64_t q = 0; q < n_blocks; ++q) {
+        for (int64_t kv = 0; kv <= q; ++kv) {
+            data[q * n_blocks + kv] = true;
+        }
+    }
+    return BlockMask(std::move(mask_tensor), block_size);
+}
+
+auto BlockMask::sliding_window(int64_t seq_len, int64_t window_size,
+                               int64_t block_size) -> BlockMask {
+    const int64_t n_blocks = (seq_len + block_size - 1) / block_size;
+    // Number of blocks that fit in the window (on each side)
+    const int64_t win_blocks = (window_size + block_size - 1) / block_size;
+
+    auto mask_tensor = zeros({n_blocks, n_blocks}, DType::Bool, Device::cpu());
+    auto* data = static_cast<bool*>(mask_tensor.data_ptr());
+    for (int64_t q = 0; q < n_blocks; ++q) {
+        const int64_t kv_lo = std::max<int64_t>(0, q - win_blocks);
+        const int64_t kv_hi = std::min<int64_t>(n_blocks, q + win_blocks + 1);
+        for (int64_t kv = kv_lo; kv < kv_hi; ++kv) {
+            data[q * n_blocks + kv] = true;
+        }
+    }
+    return BlockMask(std::move(mask_tensor), block_size);
+}
+
+auto BlockMask::prefix_lm(int64_t seq_len, int64_t prefix_len,
+                           int64_t block_size) -> BlockMask {
+    const int64_t n_blocks = (seq_len + block_size - 1) / block_size;
+    const int64_t prefix_blocks = (prefix_len + block_size - 1) / block_size;
+
+    auto mask_tensor = zeros({n_blocks, n_blocks}, DType::Bool, Device::cpu());
+    auto* data = static_cast<bool*>(mask_tensor.data_ptr());
+    for (int64_t q = 0; q < n_blocks; ++q) {
+        for (int64_t kv = 0; kv < n_blocks; ++kv) {
+            // Prefix region: bidirectional (both q and kv in prefix)
+            // or q is in prefix and can see everything in prefix
+            // or kv is in prefix (everyone can attend to prefix)
+            // After prefix: causal (kv <= q)
+            if (kv < prefix_blocks || kv <= q) {
+                data[q * n_blocks + kv] = true;
+            }
+        }
+    }
+    return BlockMask(std::move(mask_tensor), block_size);
+}
+
+auto BlockMask::full(int64_t seq_len, int64_t block_size) -> BlockMask {
+    const int64_t n_blocks = (seq_len + block_size - 1) / block_size;
+    auto mask_tensor = ones({n_blocks, n_blocks}, DType::Bool, Device::cpu());
+    return BlockMask(std::move(mask_tensor), block_size);
+}
+
+auto BlockMask::num_q_blocks() const -> int64_t {
+    return mask_.size(0);
+}
+
+auto BlockMask::num_kv_blocks() const -> int64_t {
+    return mask_.size(1);
+}
+
+auto BlockMask::is_active(int64_t q_block, int64_t kv_block) const -> bool {
+    if (q_block < 0 || q_block >= num_q_blocks() ||
+        kv_block < 0 || kv_block >= num_kv_blocks()) {
+        return false;
+    }
+    // Read from the CPU bool tensor
+    const auto* data = static_cast<const bool*>(mask_.data_ptr());
+    return data[q_block * num_kv_blocks() + kv_block];
+}
+
+// =============================================================================
+// Predefined score modifications
+// =============================================================================
+
+auto causal_score_mod() -> ScoreModFn {
+    return [](const Tensor& score, [[maybe_unused]] int64_t b,
+              [[maybe_unused]] int64_t h, int64_t q_start, int64_t kv_start) -> Tensor {
+        // score shape: (q_block_len, kv_block_len)
+        const int64_t q_len = score.size(0);
+        const int64_t kv_len = score.size(1);
+
+        // Build element-level causal mask within this block tile
+        auto mask_tensor = zeros({q_len, kv_len}, score.dtype(), score.device());
+        auto* mask_ptr = static_cast<float*>(mask_tensor.data_ptr());
+        const float neg_inf = -std::numeric_limits<float>::infinity();
+
+        for (int64_t qi = 0; qi < q_len; ++qi) {
+            const int64_t q_pos = q_start + qi;
+            for (int64_t kvi = 0; kvi < kv_len; ++kvi) {
+                const int64_t kv_pos = kv_start + kvi;
+                if (kv_pos > q_pos) {
+                    mask_ptr[qi * kv_len + kvi] = neg_inf;
+                }
+            }
+        }
+
+        // Add the mask to the scores (additive masking)
+        return add(score, mask_tensor);
+    };
+}
+
+auto alibi_score_mod(const Tensor& slopes) -> ScoreModFn {
+    // Capture slopes by value (shared ownership via Tensor's internal ref-counting)
+    Tensor slopes_captured = slopes;
+    return [slopes_captured](const Tensor& score, [[maybe_unused]] int64_t b,
+                             int64_t h, int64_t q_start, int64_t kv_start) -> Tensor {
+        const int64_t q_len = score.size(0);
+        const int64_t kv_len = score.size(1);
+
+        // Get the slope for this head
+        const auto* slope_data = static_cast<const float*>(slopes_captured.data_ptr());
+        const float slope = slope_data[h];
+
+        // Build ALiBi bias: slope * (kv_pos - q_pos)
+        auto bias = zeros({q_len, kv_len}, score.dtype(), score.device());
+        auto* bias_ptr = static_cast<float*>(bias.data_ptr());
+
+        for (int64_t qi = 0; qi < q_len; ++qi) {
+            const int64_t q_pos = q_start + qi;
+            for (int64_t kvi = 0; kvi < kv_len; ++kvi) {
+                const int64_t kv_pos = kv_start + kvi;
+                bias_ptr[qi * kv_len + kvi] = slope * static_cast<float>(kv_pos - q_pos);
+            }
+        }
+
+        return add(score, bias);
+    };
+}
+
+// =============================================================================
+// FlexAttention CPU reference implementation
+// =============================================================================
+
+
+auto flex_attention(
+    const Tensor& query,
+    const Tensor& key,
+    const Tensor& value,
+    const BlockMask& block_mask,
+    ScoreModFn score_mod,
+    float scale
+) -> Tensor {
+    // ---- Validate inputs ----
+    auto q_shape = query.shape();
+    auto k_shape = key.shape();
+    auto v_shape = value.shape();
+
+    if (q_shape.size() != 4 || k_shape.size() != 4 || v_shape.size() != 4) {
+        throw std::invalid_argument(
+            "flex_attention: Q/K/V must be 4D tensors (B, H, S, D), got " +
+            std::to_string(q_shape.size()) + "D, " +
+            std::to_string(k_shape.size()) + "D, " +
+            std::to_string(v_shape.size()) + "D");
+    }
+
+    const int64_t B = q_shape[0];
+    const int64_t H = q_shape[1];
+    const int64_t S = q_shape[2];
+    const int64_t D = q_shape[3];
+
+    if (k_shape[0] != B || k_shape[1] != H || k_shape[3] != D) {
+        throw std::invalid_argument(
+            "flex_attention: K shape must match Q in batch, heads, and head_dim");
+    }
+    if (v_shape[0] != B || v_shape[1] != H || v_shape[3] != D) {
+        throw std::invalid_argument(
+            "flex_attention: V shape must match Q in batch, heads, and head_dim");
+    }
+
+    const int64_t S_kv = k_shape[2];
+    const int64_t bs = block_mask.block_size();
+
+    // Validate block mask dimensions against sequence lengths
+    const int64_t expected_q_blocks = (S + bs - 1) / bs;
+    const int64_t expected_kv_blocks = (S_kv + bs - 1) / bs;
+
+    if (block_mask.num_q_blocks() != expected_q_blocks ||
+        block_mask.num_kv_blocks() != expected_kv_blocks) {
+        throw std::invalid_argument(
+            "flex_attention: BlockMask dimensions (" +
+            std::to_string(block_mask.num_q_blocks()) + ", " +
+            std::to_string(block_mask.num_kv_blocks()) +
+            ") don't match sequence lengths (expected " +
+            std::to_string(expected_q_blocks) + ", " +
+            std::to_string(expected_kv_blocks) + ")");
+    }
+
+    // Auto-scale
+    if (scale < 0.0f) {
+        scale = 1.0f / std::sqrt(static_cast<float>(D));
+    }
+
+    // Ensure inputs are contiguous Float32 on CPU for the reference implementation.
+    // (Non-CPU tensors or non-Float32 dtypes would need backend dispatch in production.)
+    auto q_contig = query.contiguous();
+    auto k_contig = key.contiguous();
+    auto v_contig = value.contiguous();
+
+    // Allocate output: (B, H, S, D), initialized to zero
+    auto output = zeros({B, H, S, D}, query.dtype(), query.device());
+    const float neg_inf = -std::numeric_limits<float>::infinity();
+
+    // Raw pointers into contiguous (B, H, S, D) layout.
+    // Stride pattern: [H*S*D, S*D, D, 1]
+    const float* q_ptr = static_cast<const float*>(q_contig.data_ptr());
+    const float* k_ptr = static_cast<const float*>(k_contig.data_ptr());
+    const float* v_ptr = static_cast<const float*>(v_contig.data_ptr());
+    float* out_ptr = static_cast<float*>(output.data_ptr());
+
+    const int64_t stride_b = H * S * D;     // batch stride (shared by Q/K output)
+    const int64_t stride_h = S * D;          // head stride
+    // For K/V the sequence length may differ from Q
+    const int64_t stride_b_kv = H * S_kv * D;
+    const int64_t stride_h_kv = S_kv * D;
+
+    // ---- Main loop: iterate over batch and heads ----
+    for (int64_t b = 0; b < B; ++b) {
+        for (int64_t h = 0; h < H; ++h) {
+
+            // Base pointers for this (batch, head) slice
+            const float* q_bh = q_ptr + b * stride_b + h * stride_h;
+            const float* k_bh = k_ptr + b * stride_b_kv + h * stride_h_kv;
+            const float* v_bh = v_ptr + b * stride_b_kv + h * stride_h_kv;
+            float* out_bh = out_ptr + b * stride_b + h * stride_h;
+
+            // Process each query block
+            for (int64_t q_blk = 0; q_blk < expected_q_blocks; ++q_blk) {
+                const int64_t q_start = q_blk * bs;
+                const int64_t q_len = std::min(bs, S - q_start);
+
+                // ----------------------------------------------------------
+                // Online softmax across all active KV blocks for this Q block.
+                //
+                // For each query row we maintain:
+                //   running_max[qi]      — max score seen so far
+                //   running_sum_exp[qi]  — sum of exp(score - running_max) so far
+                //   acc[qi*D .. (qi+1)*D] — running weighted sum of V rows,
+                //                           scaled by exp(score - running_max)
+                //
+                // After processing all active KV blocks we divide acc by
+                // running_sum_exp to get the final attended output.
+                // ----------------------------------------------------------
+
+                const auto uq = static_cast<size_t>(q_len);
+                const auto ud = static_cast<size_t>(D);
+
+                // Accumulators for online softmax
+                std::vector<float> acc(uq * ud, 0.0f);
+
+                // Per-query-row running max (initialized to -inf)
+                std::vector<float> running_max(uq, neg_inf);
+
+                // Per-query-row running sum-of-exp
+                std::vector<float> running_sum_exp(uq, 0.0f);
+
+                bool any_active = false;
+
+                for (int64_t kv_blk = 0; kv_blk < expected_kv_blocks; ++kv_blk) {
+                    if (!block_mask.is_active(q_blk, kv_blk)) {
+                        continue;
+                    }
+                    any_active = true;
+
+                    const int64_t kv_start = kv_blk * bs;
+                    const int64_t kv_len = std::min(bs, S_kv - kv_start);
+
+                    // Compute scores for this block tile via raw pointers:
+                    // scores[qi][kvi] = sum_d Q[q_start+qi][d] * K[kv_start+kvi][d] * scale
+                    std::vector<float> scores(static_cast<size_t>(q_len * kv_len));
+                    for (int64_t qi = 0; qi < q_len; ++qi) {
+                        const float* q_row = q_bh + (q_start + qi) * D;
+                        for (int64_t kvi = 0; kvi < kv_len; ++kvi) {
+                            const float* k_row = k_bh + (kv_start + kvi) * D;
+                            float dot = 0.0f;
+                            for (int64_t d = 0; d < D; ++d) {
+                                dot += q_row[d] * k_row[d];
+                            }
+                            scores[static_cast<size_t>(qi * kv_len + kvi)] = dot * scale;
+                        }
+                    }
+
+                    // Apply score modification if provided.
+                    // We wrap scores in a Tensor so the ScoreModFn can work with
+                    // the Tensor API. After modification we read back the raw data.
+                    if (score_mod) {
+                        // Build a (q_len, kv_len) tensor from our scores buffer
+                        auto score_tensor = zeros({q_len, kv_len}, DType::Float32, Device::cpu());
+                        float* st_ptr = static_cast<float*>(score_tensor.data_ptr());
+                        std::copy(scores.begin(), scores.end(), st_ptr);
+
+                        auto modified = score_mod(score_tensor, b, h, q_start, kv_start);
+                        const float* mod_ptr = static_cast<const float*>(modified.data_ptr());
+                        std::copy(mod_ptr, mod_ptr + q_len * kv_len, scores.begin());
+                    }
+
+                    // ---- Online softmax update ----
+                    for (int64_t qi = 0; qi < q_len; ++qi) {
+                        const auto uqi = static_cast<size_t>(qi);
+
+                        // Find max of scores for this query row in this KV block
+                        float block_max = neg_inf;
+                        for (int64_t kvi = 0; kvi < kv_len; ++kvi) {
+                            float s = scores[static_cast<size_t>(qi * kv_len + kvi)];
+                            if (s > block_max) block_max = s;
+                        }
+
+                        // Skip rows where all scores are -inf (fully masked)
+                        if (block_max == neg_inf) continue;
+
+                        const float old_max = running_max[uqi];
+
+                        if (block_max > old_max) {
+                            // Rescale existing accumulators
+                            if (old_max != neg_inf) {
+                                const float correction = std::exp(old_max - block_max);
+                                running_sum_exp[uqi] *= correction;
+                                for (int64_t d = 0; d < D; ++d) {
+                                    acc[uqi * ud + static_cast<size_t>(d)] *= correction;
+                                }
+                            }
+                            running_max[uqi] = block_max;
+                        }
+
+                        const float current_max = running_max[uqi];
+
+                        // Accumulate exp(score - max) and weighted V
+                        const float* v_base = v_bh + kv_start * D;
+                        for (int64_t kvi = 0; kvi < kv_len; ++kvi) {
+                            float s = scores[static_cast<size_t>(qi * kv_len + kvi)];
+                            float w = std::exp(s - current_max);
+                            running_sum_exp[uqi] += w;
+
+                            // acc[qi, :] += w * V[kv_start + kvi, :]
+                            const float* v_row = v_base + kvi * D;
+                            for (int64_t d = 0; d < D; ++d) {
+                                acc[uqi * ud + static_cast<size_t>(d)] += w * v_row[d];
+                            }
+                        }
+                    }
+                } // kv_blk loop
+
+                // Normalize: acc /= running_sum_exp and write to output
+                if (any_active) {
+                    for (int64_t qi = 0; qi < q_len; ++qi) {
+                        const auto uqi = static_cast<size_t>(qi);
+                        float sum_exp = running_sum_exp[uqi];
+                        float* dst = out_bh + (q_start + qi) * D;
+                        if (sum_exp > 0.0f) {
+                            const float inv_sum = 1.0f / sum_exp;
+                            for (int64_t d = 0; d < D; ++d) {
+                                dst[d] = acc[uqi * ud + static_cast<size_t>(d)] * inv_sum;
+                            }
+                        }
+                        // If sum_exp == 0 (no valid scores), output stays zero
+                    }
+                }
+            } // q_blk loop
+        } // head loop
+    } // batch loop
+
+    return output;
+}
+
+} // namespace nn
+} // namespace tenzor

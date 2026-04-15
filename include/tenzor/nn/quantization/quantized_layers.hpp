@@ -949,6 +949,44 @@ private:
     std::optional<Tensor> bias_hh_;
 };
 
+/**
+ * @brief Quantized EmbeddingBag for efficient bag-of-embeddings lookup.
+ *
+ * Uses INT8 or INT4 quantized weights with per-row scales.
+ * Supports sum, mean, and max reduction modes.
+ */
+class QuantizedEmbeddingBag : public Module {
+public:
+    enum class Mode { Sum, Mean, Max };
+
+    QuantizedEmbeddingBag(
+        int64_t num_embeddings,
+        int64_t embedding_dim,
+        QuantizationParams weight_qparams,
+        Mode mode = Mode::Mean
+    );
+
+    auto forward_impl(const Variable& input) -> Variable override;
+
+    /// Forward with offsets for variable-length bags
+    auto forward_quantized(const Tensor& indices, const Tensor& offsets) -> Tensor;
+
+    auto set_weight(const QuantizedTensor& weights) -> void;
+
+    auto num_embeddings() const -> int64_t { return num_embeddings_; }
+    auto embedding_dim() const -> int64_t { return embedding_dim_; }
+    auto mode() const -> Mode { return mode_; }
+
+    static auto from_float(Module& fp_embedding_bag, const QConfig& qconfig)
+        -> std::shared_ptr<QuantizedEmbeddingBag>;
+
+private:
+    int64_t num_embeddings_;
+    int64_t embedding_dim_;
+    Mode mode_;
+    QuantizedTensor weight_;
+};
+
 } // namespace quantization
 } // namespace nn
 } // namespace tenzor

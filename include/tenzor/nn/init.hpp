@@ -232,6 +232,75 @@ auto zeros_(Tensor& tensor) -> Tensor&;
  */
 auto ones_(Tensor& tensor) -> Tensor&;
 
+// ============================================================================
+// Truncated Normal Initialization
+// ============================================================================
+
+/**
+ * @brief Truncated normal initialization.
+ *
+ * Fills tensor with values from a truncated normal distribution.
+ * Values outside [a, b] are redrawn. Uses CDF-based inversion for
+ * efficiency: samples uniform in [Phi(a), Phi(b)] and applies
+ * inverse normal CDF.
+ *
+ * Widely used in Vision Transformers (ViT, DeiT, Swin).
+ *
+ * @param tensor Tensor to initialize (modified in-place)
+ * @param mean Mean of the normal distribution (default: 0.0)
+ * @param std Standard deviation (default: 1.0)
+ * @param a Lower bound for truncation (default: -2.0)
+ * @param b Upper bound for truncation (default: 2.0)
+ * @return Reference to the modified tensor
+ */
+auto trunc_normal_(Tensor& tensor,
+                   double mean = 0.0,
+                   double std = 1.0,
+                   double a = -2.0,
+                   double b = 2.0) -> Tensor&;
+
+// ============================================================================
+// Dirac Initialization
+// ============================================================================
+
+/**
+ * @brief Dirac delta initialization for convolutional layers.
+ *
+ * Fills the tensor so that the convolution acts as an identity mapping
+ * for matching input/output channels. Sets the center element of each
+ * channel-to-channel kernel to 1, all others to 0.
+ *
+ * Requires tensor to be 3D (Conv1d), 4D (Conv2d), or 5D (Conv3d).
+ * When groups > 1, sets weight[i, i/groups, center...] = 1.
+ *
+ * @param tensor Tensor to initialize (modified in-place, must be 3-5D)
+ * @param groups Number of groups for grouped convolution (default: 1)
+ * @return Reference to the modified tensor
+ * @throws std::invalid_argument if tensor is not 3-5D or dimensions are incompatible
+ */
+auto dirac_(Tensor& tensor, int64_t groups = 1) -> Tensor&;
+
+// ============================================================================
+// Sparse Initialization
+// ============================================================================
+
+/**
+ * @brief Sparse initialization.
+ *
+ * Fills tensor with a normal distribution N(0, std^2), then zeros out
+ * a fraction of elements in each column. The sparsity parameter controls
+ * the fraction of elements set to zero.
+ *
+ * Requires tensor to be 2D.
+ *
+ * @param tensor Tensor to initialize (modified in-place, must be 2D)
+ * @param sparsity Fraction of elements per column to be zero (0 to 1)
+ * @param std Standard deviation of the normal distribution (default: 0.01)
+ * @return Reference to the modified tensor
+ * @throws std::invalid_argument if tensor is not 2D or sparsity is out of [0, 1)
+ */
+auto sparse_(Tensor& tensor, double sparsity, double std = 0.01) -> Tensor&;
+
 } // namespace init
 } // namespace nn
 } // namespace tenzor

@@ -48,6 +48,7 @@ struct DataLoaderConfig {
     bool pin_memory = false;       ///< Pin memory for faster CUDA transfer
     bool drop_last = false;        ///< Drop last incomplete batch
     size_t prefetch_factor = 2;    ///< Number of batches to prefetch per worker
+    bool persistent_workers = false; ///< Keep workers alive between epochs
     CollateFn collate_fn;          ///< Optional custom collation function
 
     DataLoaderConfig() = default;
@@ -189,6 +190,10 @@ private:
     std::atomic<size_t> next_batch_idx_;
     std::atomic<size_t> active_workers_;  ///< Number of workers still processing
     std::exception_ptr worker_exception_;  ///< First exception from any worker thread
+
+    // Persistent workers synchronization
+    std::condition_variable epoch_start_cv_;  ///< Signals workers to start new epoch
+    std::atomic<bool> new_epoch_ready_;       ///< Flag for new epoch availability
 
     // Batch management
     size_t num_batches_;

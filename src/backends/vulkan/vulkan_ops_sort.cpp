@@ -510,13 +510,7 @@ auto VulkanBackend::dispatchMedian(const Tensor& input, int64_t dim, bool keepdi
     int64_t median_idx = (dim_size - 1) / 2;
 
     // Extract the median element using index_select along dim
-    Tensor idx_tensor({1}, DType::Int64, input.device());
-    {
-        int64_t idx_val = median_idx;
-        Tensor cpu_idx({1}, DType::Int64, Device::cpu());
-        *cpu_idx.data<int64_t>() = idx_val;
-        idx_tensor = cpu_idx.to(input.device());
-    }
+    Tensor idx_tensor = dispatchFull({1}, static_cast<float>(median_idx), DType::Int64);
 
     Tensor median_values = dispatchIndexSelect(sorted_values, dim, idx_tensor);
     Tensor median_indices = dispatchIndexSelect(sorted_indices, dim, idx_tensor);

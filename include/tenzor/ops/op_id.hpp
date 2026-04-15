@@ -521,6 +521,8 @@ enum class OpId : uint16_t {
     SparseSpGEMM = 465,        // Sparse × Sparse → Sparse (CSR × CSR → CSR)
     SparseTrsv,                // Sparse lower/upper triangular solve: L*x = b
     SparseTrsm,                // Sparse triangular multi-RHS solve: L*X = B
+    SparseSoftmax,             // Softmax over non-zero values per row (CSR)
+    SparseLogSoftmax,          // Log-softmax over non-zero values per row (CSR)
 
     // =========================================================================
     // Signal Processing Operations (470-479)
@@ -725,6 +727,12 @@ enum class OpId : uint16_t {
     Cov,                   // Sample covariance matrix
     Corrcoef,              // Pearson correlation coefficient matrix
     LOBPCG,                // Locally Optimal Block Preconditioned Conjugate Gradient
+
+    // =========================================================================
+    // FlexAttention (693-694)
+    // =========================================================================
+    FlexAttention = 693,           // Block-sparse attention with score modification
+    FlexAttentionBackward,         // Backward pass for FlexAttention
 
     // =========================================================================
     // Sentinel (MUST BE LAST)

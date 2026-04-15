@@ -33,6 +33,7 @@
 #include <tenzor/nn/layers/hrm.hpp>
 #include <tenzor/nn/layers/sparse_linear.hpp>
 #include <tenzor/nn/layers/sparse_embedding.hpp>
+#include <tenzor/nn/layers/distance.hpp>
 #include <tenzor/nn/loss/losses.hpp>
 #include <tenzor/nn/metrics.hpp>
 #include <tenzor/nn/loss/contrastive.hpp>
@@ -1990,6 +1991,40 @@ void register_nn(py::module_& m) {
              py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::TripletMarginLoss::operator(),
              py::arg("anchor"), py::arg("positive"), py::arg("negative"));
+
+    py::class_<tenzor::nn::TripletMarginWithDistanceLoss>(nn, "TripletMarginWithDistanceLoss",
+        "Triplet margin loss with user-supplied distance function")
+        .def(py::init<tenzor::nn::TripletMarginWithDistanceLoss::DistanceFunction,
+                      double, bool, tenzor::nn::Reduction>(),
+             py::arg("distance_function"),
+             py::arg("margin") = 1.0,
+             py::arg("swap") = false,
+             py::arg("reduction") = tenzor::nn::Reduction::Mean)
+        .def("forward", &tenzor::nn::TripletMarginWithDistanceLoss::forward,
+             py::arg("anchor"), py::arg("positive"), py::arg("negative"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("__call__", &tenzor::nn::TripletMarginWithDistanceLoss::operator(),
+             py::arg("anchor"), py::arg("positive"), py::arg("negative"));
+
+    py::class_<tenzor::nn::CosineSimilarity>(nn, "CosineSimilarity",
+        "Cosine similarity module")
+        .def(py::init<int64_t, double>(),
+             py::arg("dim") = 1, py::arg("eps") = 1e-8)
+        .def("forward", &tenzor::nn::CosineSimilarity::forward,
+             py::arg("x1"), py::arg("x2"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("__call__", &tenzor::nn::CosineSimilarity::operator(),
+             py::arg("x1"), py::arg("x2"));
+
+    py::class_<tenzor::nn::PairwiseDistance>(nn, "PairwiseDistance",
+        "Pairwise distance module")
+        .def(py::init<double, double, bool>(),
+             py::arg("p") = 2.0, py::arg("eps") = 1e-6, py::arg("keepdim") = false)
+        .def("forward", &tenzor::nn::PairwiseDistance::forward,
+             py::arg("x1"), py::arg("x2"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("__call__", &tenzor::nn::PairwiseDistance::operator(),
+             py::arg("x1"), py::arg("x2"));
 
     py::class_<tenzor::nn::MultiLabelSoftMarginLoss>(nn, "MultiLabelSoftMarginLoss",
         "Multi-label one-versus-all loss based on max-entropy")

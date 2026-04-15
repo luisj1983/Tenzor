@@ -21,6 +21,7 @@
 #include "tenzor/ops/advanced.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/sparse/sparse_ops.hpp"
 #include "vulkan_backend.hpp"
 #include <cstdlib>
 #include <cstring>
@@ -2579,6 +2580,24 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             int64_t K_rhs = inputs[3].shape().size() > 1 ? inputs[3].shape()[1] : 1;
             return get_vulkan_backend()->dispatchSparseTrsm(
                 inputs[0], inputs[1], inputs[2], inputs[3], N, K_rhs, upper);
+        });
+
+    // SparseSoftmax: row-wise softmax on CSR sparse tensor values
+    table.register_single_output_kernel(OpId::SparseSoftmax,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto shape = attrs.get_int_list(AttrKey::Shape);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], shape);
+            auto result = sparse::sparse_softmax(sp);
+            return result.values();
+        });
+
+    // SparseLogSoftmax: row-wise log-softmax on CSR sparse tensor values
+    table.register_single_output_kernel(OpId::SparseLogSoftmax,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto shape = attrs.get_int_list(AttrKey::Shape);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], shape);
+            auto result = sparse::sparse_log_softmax(sp);
+            return result.values();
         });
 
     // ========================================================================

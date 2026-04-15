@@ -2144,6 +2144,131 @@ auto QuantizedLSTMCell::from_float(Module& fp_lstm_cell, [[maybe_unused]] const 
     return result;
 }
 
+// ============================================================================
+// QuantizedEmbeddingBag
+// ============================================================================
+
+QuantizedEmbeddingBag::QuantizedEmbeddingBag(
+    int64_t num_embeddings,
+    int64_t embedding_dim,
+    QuantizationParams weight_qparams,
+    Mode mode)
+    : num_embeddings_(num_embeddings)
+    , embedding_dim_(embedding_dim)
+    , mode_(mode)
+    , weight_(Tensor({num_embeddings, embedding_dim}, DType::Int8, Device::cpu()),
+              std::move(weight_qparams)) {}
+
+auto QuantizedEmbeddingBag::forward_impl(const Variable& input) -> Variable {
+    // Simple forward: treat entire input as one bag with no offsets
+    Tensor offsets = tenzor::zeros({1}, DType::Int64, input.tensor().device());
+    Tensor output = forward_quantized(input.tensor(), offsets);
+    return Variable(output, false);
+}
+
+auto QuantizedEmbeddingBag::forward_quantized(const Tensor& indices,
+                                               const Tensor& offsets) -> Tensor {
+    int64_t num_bags = offsets.numel();
+
+    Tensor output({num_bags, embedding_dim_}, DType::Float32, Device::cpu());
+
+    // Get quantization parameters
+    Tensor scale_cpu = weight_.params().scale;
+    Tensor zp_cpu = weight_.params().zero_point;
+    if (scale_cpu.device() != Device::cpu()) scale_cpu = scale_cpu.to(Device::cpu());
+    if (zp_cpu.device() != Device::cpu()) zp_cpu = zp_cpu.to(Device::cpu());
+
+    float scale = scale_cpu.data<float>()[0];
+    int32_t zp = zp_cpu.data<int32_t>()[0];
+
+    Tensor weight_cpu = weight_.data();
+    if (weight_cpu.device() != Device::cpu()) weight_cpu = weight_cpu.to(Device::cpu());
+    const int8_t* w_data = weight_cpu.data<int8_t>();
+
+    Tensor indices_cpu = (indices.device() != Device::cpu()) ? indices.to(Device::cpu()) : indices;
+    Tensor offsets_cpu = (offsets.device() != Device::cpu()) ? offsets.to(Device::cpu()) : offsets;
+
+    const int64_t* idx_data = indices_cpu.data<int64_t>();
+    const int64_t* off_data = offsets_cpu.data<int64_t>();
+    int64_t total_indices = indices_cpu.numel();
+    float* out_data = output.data<float>();
+
+    for (int64_t b = 0; b < num_bags; ++b) {
+        int64_t start = off_data[b];
+        int64_t end = (b + 1 < num_bags) ? off_data[b + 1] : total_indices;
+        int64_t bag_size = end - start;
+
+        float* out_row = out_data + b * embedding_dim_;
+
+        // Initialize output
+        for (int64_t j = 0; j < embedding_dim_; ++j) {
+            out_row[j] = (mode_ == Mode::Max) ? -std::numeric_limits<float>::infinity() : 0.0f;
+        }
+
+        // Accumulate embeddings
+        for (int64_t i = start; i < end; ++i) {
+            int64_t idx = idx_data[i];
+            if (idx < 0) idx += num_embeddings_;
+            if (idx < 0 || idx >= num_embeddings_) {
+                throw std::out_of_range("QuantizedEmbeddingBag: index out of range");
+            }
+
+            const int8_t* row = w_data + idx * embedding_dim_;
+            for (int64_t j = 0; j < embedding_dim_; ++j) {
+                float val = (static_cast<float>(row[j]) - zp) * scale;
+                if (mode_ == Mode::Max) {
+                    out_row[j] = std::max(out_row[j], val);
+                } else {
+                    out_row[j] += val;
+                }
+            }
+        }
+
+        // Apply mean reduction
+        if (mode_ == Mode::Mean && bag_size > 0) {
+            float inv_size = 1.0f / static_cast<float>(bag_size);
+            for (int64_t j = 0; j < embedding_dim_; ++j) {
+                out_row[j] *= inv_size;
+            }
+        }
+    }
+
+    if (indices.device() != Device::cpu()) {
+        output = output.to(indices.device());
+    }
+
+    return output;
+}
+
+auto QuantizedEmbeddingBag::set_weight(const QuantizedTensor& weights) -> void {
+    weight_ = weights;
+}
+
+auto QuantizedEmbeddingBag::from_float(Module& fp_embedding_bag,
+                                        [[maybe_unused]] const QConfig& qconfig)
+    -> std::shared_ptr<QuantizedEmbeddingBag> {
+    auto params = fp_embedding_bag.named_parameters();
+    Tensor weight;
+    bool found = false;
+    for (auto& [name, var] : params) {
+        if (name == "weight") { weight = var->tensor(); found = true; break; }
+    }
+    if (!found) {
+        throw std::runtime_error("QuantizedEmbeddingBag::from_float: module has no 'weight' parameter");
+    }
+    auto shape = weight.shape();
+    int64_t num_embeddings = shape[0];
+    int64_t embedding_dim = shape[1];
+
+    auto weight_cpu = (weight.device() == Device::cpu()) ? weight : weight.to(Device::cpu());
+    auto q_weight = quantize_per_tensor_symmetric(weight_cpu);
+
+    auto result = std::make_shared<QuantizedEmbeddingBag>(
+        num_embeddings, embedding_dim, q_weight.params());
+    result->set_weight(q_weight);
+    return result;
+}
+
 } // namespace quantization
 } // namespace nn
 } // namespace tenzor

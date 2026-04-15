@@ -105,5 +105,28 @@ auto sparse_triangular_solve(const SparseTensor& L, const Tensor& b, bool upper 
  */
 auto sddmm(const SparseTensor& mask, const Tensor& A, const Tensor& B) -> SparseTensor;
 
+/**
+ * @brief Sparse softmax over non-zero values per row.
+ *
+ * For CSR format: applies softmax independently to each row's non-zero values.
+ * Masked positions (zeros/unstored entries) are treated as -inf and do not
+ * participate in the softmax normalization.
+ *
+ * @param sparse Input sparse tensor (CSR format, 2D)
+ * @return Sparse tensor with same pattern, values replaced by softmax output
+ */
+auto sparse_softmax(const SparseTensor& sparse) -> SparseTensor;
+
+/**
+ * @brief Sparse log-softmax over non-zero values per row.
+ *
+ * Same as sparse_softmax but returns log-probabilities. Numerically stable
+ * via the log-sum-exp trick over each row's non-zero values.
+ *
+ * @param sparse Input sparse tensor (CSR format, 2D)
+ * @return Sparse tensor with same pattern, values replaced by log-softmax output
+ */
+auto sparse_log_softmax(const SparseTensor& sparse) -> SparseTensor;
+
 } // namespace sparse
 } // namespace tenzor

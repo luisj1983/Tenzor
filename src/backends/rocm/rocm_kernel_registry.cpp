@@ -2724,6 +2724,24 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             return rocm::rocm_sparse_add_kernel(sp, inputs[3]);
         });
 
+    // SparseSoftmax: row-wise softmax on CSR sparse tensor values
+    table.register_single_output_kernel(OpId::SparseSoftmax,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto shape = attrs.get_int_list(AttrKey::Shape);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], shape);
+            auto result = sparse::sparse_softmax(sp);
+            return result.values();
+        });
+
+    // SparseLogSoftmax: row-wise log-softmax on CSR sparse tensor values
+    table.register_single_output_kernel(OpId::SparseLogSoftmax,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            auto shape = attrs.get_int_list(AttrKey::Shape);
+            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], shape);
+            auto result = sparse::sparse_log_softmax(sp);
+            return result.values();
+        });
+
     // =========================================================================
     // Single-output kernel registrations
     //

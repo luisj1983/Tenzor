@@ -16,6 +16,8 @@ set(TENZOR_CORE_SOURCES
     core/offload_engine.cpp
     core/device_guard.cpp
     core/generator.cpp
+    core/named_tensor.cpp
+    core/masked_tensor.cpp
     backend/backend.cpp
     backend/loader.cpp
     backend/registry.cpp
@@ -97,6 +99,7 @@ set(TENZOR_CORE_SOURCES
     nn/layers/sparse_embedding.cpp
     nn/layers/attention.cpp
     nn/layers/gqa_attention.cpp
+    nn/layers/flex_attention.cpp
     nn/layers/transformer.cpp
     nn/layers/rnn.cpp
     nn/layers/lstm.cpp
@@ -158,6 +161,8 @@ set(TENZOR_CORE_SOURCES
     nn/quantization/fake_quantize.cpp
     nn/quantization/qconfig.cpp
     nn/quantization/quantized_layers.cpp
+    nn/quantization/gptq.cpp
+    nn/quantization/awq.cpp
     quantization/quantize_api.cpp
     quantization/module_conversion.cpp
     utils/threading/threadpool.cpp
@@ -241,6 +246,11 @@ set(TENZOR_CORE_SOURCES
     distributed/tensor_parallel.cpp
     distributed/launch.cpp
     distributed/gradient_compression.cpp
+    distributed/device_mesh.cpp
+    distributed/dtensor.cpp
+    distributed/fsdp2.cpp
+    distributed/dist_checkpoint.cpp
+    distributed/sequence_parallel.cpp
     sparse/sparse_tensor.cpp
     sparse/sparse_ops.cpp
     nested/nested_tensor.cpp

@@ -385,6 +385,197 @@ private:
     float scale_min_, scale_max_, shear_;
 };
 
+/**
+ * @brief Random erasing augmentation (Zhong et al., 2020)
+ *
+ * With probability p, erases a random rectangular region of the input
+ * and fills it with a constant value. Assumes input is 3D (C,H,W).
+ */
+class RandomErasing : public Transform {
+public:
+    /**
+     * @param p Probability of applying erasing
+     * @param scale_min Minimum fraction of image area to erase
+     * @param scale_max Maximum fraction of image area to erase
+     * @param ratio_min Minimum aspect ratio of erased region
+     * @param ratio_max Maximum aspect ratio of erased region
+     * @param value Fill value for erased region
+     */
+    explicit RandomErasing(float p = 0.5f, float scale_min = 0.02f,
+                           float scale_max = 0.33f, float ratio_min = 0.3f,
+                           float ratio_max = 3.3f, float value = 0.0f);
+
+    auto operator()(const Tensor& input, const Tensor& target)
+        -> std::pair<Tensor, Tensor> override;
+
+private:
+    float p_, scale_min_, scale_max_, ratio_min_, ratio_max_, value_;
+};
+
+/**
+ * @brief Random perspective warp augmentation
+ *
+ * With probability p, applies a random perspective transformation
+ * using bilinear interpolation. Assumes input is 3D (C,H,W).
+ */
+class RandomPerspective : public Transform {
+public:
+    /**
+     * @param distortion_scale Controls the magnitude of corner displacements
+     * @param p Probability of applying the transform
+     */
+    explicit RandomPerspective(float distortion_scale = 0.5f, float p = 0.5f);
+
+    auto operator()(const Tensor& input, const Tensor& target)
+        -> std::pair<Tensor, Tensor> override;
+
+private:
+    float distortion_scale_, p_;
+};
+
+/**
+ * @brief Elastic deformation augmentation (Simard et al., 2003)
+ *
+ * With probability p, applies random elastic distortion by generating
+ * displacement fields smoothed with a Gaussian kernel. Assumes input is 3D (C,H,W).
+ */
+class ElasticTransform : public Transform {
+public:
+    /**
+     * @param alpha Displacement magnitude scaling factor
+     * @param sigma Gaussian smoothing sigma for displacement fields
+     * @param p Probability of applying the transform
+     */
+    explicit ElasticTransform(float alpha = 50.0f, float sigma = 5.0f, float p = 0.5f);
+
+    auto operator()(const Tensor& input, const Tensor& target)
+        -> std::pair<Tensor, Tensor> override;
+
+private:
+    float alpha_, sigma_, p_;
+};
+
+/**
+ * @brief MixUp data augmentation (Zhang et al., 2018)
+ *
+ * Blends two input-target pairs using a mixing coefficient sampled from
+ * Beta(alpha, alpha). This is a standalone class, not a Transform subclass,
+ * because it operates on pairs of samples.
+ */
+class MixUp {
+public:
+    /**
+     * @param alpha Beta distribution parameter controlling mixing strength
+     */
+    explicit MixUp(float alpha = 0.2f);
+
+    /**
+     * @brief Mix two input-target pairs
+     * @return Mixed (input, target) pair where mixed = lambda*first + (1-lambda)*second
+     */
+    auto operator()(const Tensor& input1, const Tensor& target1,
+                    const Tensor& input2, const Tensor& target2)
+        -> std::pair<Tensor, Tensor>;
+
+private:
+    float alpha_;
+};
+
+/**
+ * @brief CutMix data augmentation (Yun et al., 2019)
+ *
+ * Cuts a rectangular region from one image and pastes it onto another,
+ * with proportional target mixing. Standalone class (not a Transform subclass).
+ */
+class CutMix {
+public:
+    /**
+     * @param alpha Beta distribution parameter controlling cut size
+     */
+    explicit CutMix(float alpha = 1.0f);
+
+    /**
+     * @brief Apply CutMix to two input-target pairs
+     * @return Mixed (input, target) pair
+     */
+    auto operator()(const Tensor& input1, const Tensor& target1,
+                    const Tensor& input2, const Tensor& target2)
+        -> std::pair<Tensor, Tensor>;
+
+private:
+    float alpha_;
+};
+
+/**
+ * @brief RandAugment automatic augmentation policy (Cubuk et al., 2020)
+ *
+ * Randomly selects and applies num_ops transforms from a predefined pool,
+ * each at a strength controlled by magnitude. Assumes input is 3D (C,H,W).
+ */
+class RandAugment : public Transform {
+public:
+    /**
+     * @param num_ops Number of transforms to apply per invocation
+     * @param magnitude Magnitude level (0-30) controlling transform strength
+     * @param magnitude_std Standard deviation for per-application magnitude randomization
+     */
+    explicit RandAugment(int num_ops = 2, int magnitude = 9, float magnitude_std = 0.5f);
+
+    auto operator()(const Tensor& input, const Tensor& target)
+        -> std::pair<Tensor, Tensor> override;
+
+private:
+    int num_ops_, magnitude_;
+    float magnitude_std_;
+};
+
+/**
+ * @brief TrivialAugmentWide augmentation policy (Muller & Hutter, 2021)
+ *
+ * Applies a single randomly selected transform at a uniformly sampled magnitude.
+ * Simpler than RandAugment with no hyperparameter tuning needed.
+ * Assumes input is 3D (C,H,W).
+ */
+class TrivialAugmentWide : public Transform {
+public:
+    /**
+     * @param num_magnitude_bins Number of discrete magnitude levels
+     */
+    explicit TrivialAugmentWide(int num_magnitude_bins = 31);
+
+    auto operator()(const Tensor& input, const Tensor& target)
+        -> std::pair<Tensor, Tensor> override;
+
+private:
+    int num_magnitude_bins_;
+};
+
+/**
+ * @brief AugMix augmentation strategy (Hendrycks et al., 2020)
+ *
+ * Creates multiple parallel augmentation chains mixed via Dirichlet weights,
+ * then blended with the original image using a Beta-distributed coefficient.
+ * Assumes input is 3D (C,H,W).
+ */
+class AugMix : public Transform {
+public:
+    /**
+     * @param width Number of parallel augmentation chains
+     * @param depth Number of transforms per chain (-1 for random 1-3)
+     * @param severity Augmentation severity (0-10)
+     * @param alpha Dirichlet/Beta mixing parameter
+     */
+    explicit AugMix(int width = 3, int depth = -1, float severity = 3.0f,
+                    float alpha = 1.0f);
+
+    auto operator()(const Tensor& input, const Tensor& target)
+        -> std::pair<Tensor, Tensor> override;
+
+private:
+    int width_, depth_;
+    float severity_, alpha_;
+};
+
 } // namespace transforms
 } // namespace data
 } // namespace tenzor

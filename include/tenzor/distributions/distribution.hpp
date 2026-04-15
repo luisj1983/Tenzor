@@ -152,6 +152,9 @@ public:
     Uniform(Tensor low, Tensor high)
         : low_(std::move(low)), high_(std::move(high)) {}
 
+    auto low() const -> const Tensor& { return low_; }
+    auto high() const -> const Tensor& { return high_; }
+
     auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
         auto shape = sample_shape.empty()
             ? std::vector<int64_t>(low_.shape().begin(), low_.shape().end())
@@ -190,6 +193,8 @@ private:
 class Categorical : public Distribution {
 public:
     explicit Categorical(Tensor probs) : probs_(std::move(probs)) {}
+
+    auto probs() const -> const Tensor& { return probs_; }
 
     static auto from_logits(const Tensor& logits) -> Categorical {
         // Softmax to convert logits to probabilities
@@ -238,6 +243,8 @@ class Exponential : public Distribution {
 public:
     explicit Exponential(Tensor rate) : rate_(std::move(rate)) {}
 
+    auto rate() const -> const Tensor& { return rate_; }
+
     auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
         auto shape = sample_shape.empty()
             ? std::vector<int64_t>(rate_.shape().begin(), rate_.shape().end())
@@ -283,6 +290,9 @@ class Laplace : public Distribution {
 public:
     Laplace(Tensor loc, Tensor scale)
         : loc_(std::move(loc)), scale_(std::move(scale)) {}
+
+    auto loc() const -> const Tensor& { return loc_; }
+    auto scale() const -> const Tensor& { return scale_; }
 
     auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
         auto shape = sample_shape.empty()
@@ -515,6 +525,9 @@ public:
     Gamma(Tensor concentration, Tensor rate)
         : concentration_(std::move(concentration)), rate_(std::move(rate)) {}
 
+    auto concentration() const -> const Tensor& { return concentration_; }
+    auto rate() const -> const Tensor& { return rate_; }
+
     auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
         auto shape = sample_shape.empty()
             ? std::vector<int64_t>(concentration_.shape().begin(), concentration_.shape().end())
@@ -569,6 +582,9 @@ public:
     Beta(Tensor concentration1, Tensor concentration0)
         : c1_(std::move(concentration1)), c0_(std::move(concentration0)) {}
 
+    auto concentration1() const -> const Tensor& { return c1_; }
+    auto concentration0() const -> const Tensor& { return c0_; }
+
     auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
         auto shape = sample_shape.empty()
             ? std::vector<int64_t>(c1_.shape().begin(), c1_.shape().end())
@@ -614,6 +630,8 @@ class Dirichlet : public Distribution {
 public:
     explicit Dirichlet(Tensor concentration)
         : concentration_(std::move(concentration)) {}
+
+    auto concentration() const -> const Tensor& { return concentration_; }
 
     auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
         auto shape = sample_shape.empty()
@@ -725,6 +743,8 @@ private:
 class Poisson : public Distribution {
 public:
     explicit Poisson(Tensor rate) : rate_(std::move(rate)) {}
+
+    auto rate() const -> const Tensor& { return rate_; }
 
     auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
         auto shape = sample_shape.empty()
@@ -981,6 +1001,9 @@ public:
     LogNormal(Tensor loc, Tensor scale)
         : loc_(std::move(loc)), scale_(std::move(scale)),
           normal_(loc_, scale_) {}
+
+    auto loc() const -> const Tensor& { return loc_; }
+    auto scale() const -> const Tensor& { return scale_; }
 
     auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
         return tenzor::exp(normal_.sample(std::move(sample_shape)));
@@ -1952,22 +1975,25 @@ private:
  *
  * Supported pairs:
  *   - Normal || Normal
- *   - Uniform || Uniform (same support)
+ *   - Bernoulli || Bernoulli
+ *   - HalfNormal || HalfNormal
+ *   - Uniform || Uniform
  *   - Exponential || Exponential
- *   - Laplace || Laplace (same loc)
+ *   - Laplace || Laplace
  *   - Gamma || Gamma
  *   - Beta || Beta
  *   - Categorical || Categorical
- *   - Bernoulli || Bernoulli
+ *   - Dirichlet || Dirichlet
+ *   - Poisson || Poisson
+ *   - LogNormal || LogNormal
  *
  * For anything else, throws std::runtime_error. Use Monte-Carlo estimation
  * via `(p.sample() * (p.log_prob(x) - q.log_prob(x))).mean()` instead.
  */
 inline auto kl_divergence(Distribution& p, Distribution& q) -> Tensor {
+    // --- Normal || Normal ---
     if (auto* pn = dynamic_cast<Normal*>(&p)) {
         if (auto* qn = dynamic_cast<Normal*>(&q)) {
-            // KL(N(mu1, s1) || N(mu2, s2))
-            //   = log(s2/s1) + (s1^2 + (mu1 - mu2)^2) / (2 s2^2) - 0.5
             auto mu1 = pn->mean(); auto v1 = pn->variance();
             auto mu2 = qn->mean(); auto v2 = qn->variance();
             auto s1 = tenzor::sqrt(v1);
@@ -1976,6 +2002,7 @@ inline auto kl_divergence(Distribution& p, Distribution& q) -> Tensor {
             return tenzor::log(s2 / s1) + (v1 + diff * diff) / (v2 * 2.0f) - 0.5f;
         }
     }
+    // --- Bernoulli || Bernoulli ---
     if (auto* pb = dynamic_cast<BernoulliDist*>(&p)) {
         if (auto* qb = dynamic_cast<BernoulliDist*>(&q)) {
             auto p_mean = pb->mean();
@@ -1987,17 +2014,129 @@ inline auto kl_divergence(Distribution& p, Distribution& q) -> Tensor {
                  + (1.0f - p_clamped) * (tenzor::log(1.0f - p_clamped) - tenzor::log(1.0f - q_clamped));
         }
     }
+    // --- HalfNormal || HalfNormal ---
     if (auto* ph = dynamic_cast<HalfNormal*>(&p)) {
         if (auto* qh = dynamic_cast<HalfNormal*>(&q)) {
-            // KL(HalfNormal(s1) || HalfNormal(s2))
-            //   = KL(N(0,s1) || N(0,s2))   (the folded densities share the
-            //   same KL when both are centered at zero)
-            //   = log(s2/s1) + s1^2 / (2*s2^2) - 0.5
             auto s1 = ph->scale();
             auto s2 = qh->scale();
             auto v1 = s1 * s1;
             auto v2 = s2 * s2;
             return tenzor::log(s2 / s1) + v1 / (v2 * 2.0f) - 0.5f;
+        }
+    }
+    // --- Uniform || Uniform ---
+    if (auto* pu = dynamic_cast<Uniform*>(&p)) {
+        if (auto* qu = dynamic_cast<Uniform*>(&q)) {
+            // KL = log((b2 - a2) / (b1 - a1))
+            // Only valid when support(p) ⊆ support(q)
+            auto range_p = pu->high() - pu->low();
+            auto range_q = qu->high() - qu->low();
+            return tenzor::log(range_q / range_p);
+        }
+    }
+    // --- Exponential || Exponential ---
+    if (auto* pe = dynamic_cast<Exponential*>(&p)) {
+        if (auto* qe = dynamic_cast<Exponential*>(&q)) {
+            // KL = log(λ2/λ1) + λ1/λ2 - 1
+            auto r1 = pe->rate();
+            auto r2 = qe->rate();
+            return tenzor::log(r2 / r1) + r1 / r2 - 1.0f;
+        }
+    }
+    // --- Laplace || Laplace ---
+    if (auto* pl = dynamic_cast<Laplace*>(&p)) {
+        if (auto* ql = dynamic_cast<Laplace*>(&q)) {
+            // KL = |μ1 - μ2|/b2 + b1/b2 * exp(-|μ1 - μ2|/b1) + log(b2/b1) - 1
+            auto b1 = pl->scale();
+            auto b2 = ql->scale();
+            auto abs_diff = tenzor::abs(pl->loc() - ql->loc());
+            return abs_diff / b2
+                 + (b1 / b2) * tenzor::exp(tenzor::neg(abs_diff / b1))
+                 + tenzor::log(b2 / b1) - 1.0f;
+        }
+    }
+    // --- Gamma || Gamma ---
+    if (auto* pg = dynamic_cast<Gamma*>(&p)) {
+        if (auto* qg = dynamic_cast<Gamma*>(&q)) {
+            // KL = (α1-α2)ψ(α1) - lgamma(α1) + lgamma(α2)
+            //      + α2·log(β1/β2) + α1(β2/β1 - 1)
+            auto a1 = pg->concentration();
+            auto a2 = qg->concentration();
+            auto b1 = pg->rate();
+            auto b2 = qg->rate();
+            return (a1 - a2) * tenzor::digamma(a1)
+                 - tenzor::lgamma(a1) + tenzor::lgamma(a2)
+                 + a2 * tenzor::log(b1 / b2)
+                 + a1 * (b2 / b1 - 1.0f);
+        }
+    }
+    // --- Beta || Beta ---
+    if (auto* pb = dynamic_cast<Beta*>(&p)) {
+        if (auto* qb = dynamic_cast<Beta*>(&q)) {
+            // KL = lgamma(a1) + lgamma(b1) - lgamma(a1+b1)
+            //    - lgamma(a2) - lgamma(b2) + lgamma(a2+b2)
+            //    + (a1-a2)ψ(a1) + (b1-b2)ψ(b1)
+            //    - (a1+b1-a2-b2)ψ(a1+b1)
+            //  (note: sign flipped vs some references because
+            //   we compute lgamma(q) - lgamma(p) terms)
+            auto a1 = pb->concentration1();
+            auto b1 = pb->concentration0();
+            auto a2 = qb->concentration1();
+            auto b2 = qb->concentration0();
+            auto sum1 = a1 + b1;
+            auto sum2 = a2 + b2;
+            return tenzor::lgamma(a2) + tenzor::lgamma(b2) - tenzor::lgamma(sum2)
+                 - tenzor::lgamma(a1) - tenzor::lgamma(b1) + tenzor::lgamma(sum1)
+                 + (a1 - a2) * tenzor::digamma(a1)
+                 + (b1 - b2) * tenzor::digamma(b1)
+                 - (sum1 - sum2) * tenzor::digamma(sum1);
+        }
+    }
+    // --- Categorical || Categorical ---
+    if (auto* pc = dynamic_cast<Categorical*>(&p)) {
+        if (auto* qc = dynamic_cast<Categorical*>(&q)) {
+            // KL = Σ p_i (log p_i - log q_i)
+            auto eps = 1e-7f;
+            auto p_probs = tenzor::clamp(pc->probs(), eps, 1.0f);
+            auto q_probs = tenzor::clamp(qc->probs(), eps, 1.0f);
+            auto t = p_probs * (tenzor::log(p_probs) - tenzor::log(q_probs));
+            return tenzor::sum(t);
+        }
+    }
+    // --- Dirichlet || Dirichlet ---
+    if (auto* pd = dynamic_cast<Dirichlet*>(&p)) {
+        if (auto* qd = dynamic_cast<Dirichlet*>(&q)) {
+            // KL = lgamma(Σα1) - lgamma(Σα2) - Σlgamma(α1) + Σlgamma(α2)
+            //      + Σ(α1-α2)(ψ(α1) - ψ(Σα1))
+            auto a1 = pd->concentration();
+            auto a2 = qd->concentration();
+            auto sum_a1 = tenzor::sum(a1);
+            auto sum_a2 = tenzor::sum(a2);
+            return tenzor::lgamma(sum_a1) - tenzor::lgamma(sum_a2)
+                 - tenzor::sum(tenzor::lgamma(a1)) + tenzor::sum(tenzor::lgamma(a2))
+                 + tenzor::sum((a1 - a2) * (tenzor::digamma(a1) - tenzor::digamma(sum_a1)));
+        }
+    }
+    // --- Poisson || Poisson ---
+    if (auto* pp = dynamic_cast<Poisson*>(&p)) {
+        if (auto* qp = dynamic_cast<Poisson*>(&q)) {
+            // KL = λ1(log λ1 - log λ2) - (λ1 - λ2)
+            auto r1 = pp->rate();
+            auto r2 = qp->rate();
+            return r1 * (tenzor::log(r1) - tenzor::log(r2)) - (r1 - r2);
+        }
+    }
+    // --- LogNormal || LogNormal ---
+    if (auto* pln = dynamic_cast<LogNormal*>(&p)) {
+        if (auto* qln = dynamic_cast<LogNormal*>(&q)) {
+            // KL(LogNormal(μ1,σ1) || LogNormal(μ2,σ2))
+            //   = KL(Normal(μ1,σ1) || Normal(μ2,σ2))
+            auto mu1 = pln->loc(); auto s1 = pln->scale();
+            auto mu2 = qln->loc(); auto s2 = qln->scale();
+            auto v1 = s1 * s1;
+            auto v2 = s2 * s2;
+            auto diff = mu1 - mu2;
+            return tenzor::log(s2 / s1) + (v1 + diff * diff) / (v2 * 2.0f) - 0.5f;
         }
     }
     throw std::runtime_error(

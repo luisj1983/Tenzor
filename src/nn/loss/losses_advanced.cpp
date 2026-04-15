@@ -735,6 +735,36 @@ auto triplet_margin_loss(const Variable& anchor, const Variable& positive,
 }
 
 //==============================================================================
+// TripletMarginWithDistanceLoss Implementation
+//==============================================================================
+
+TripletMarginWithDistanceLoss::TripletMarginWithDistanceLoss(
+    DistanceFunction distance_fn, double margin, bool swap, Reduction reduction)
+    : distance_fn_(std::move(distance_fn))
+    , margin_(margin)
+    , swap_(swap)
+    , reduction_(reduction) {}
+
+auto TripletMarginWithDistanceLoss::forward(const Variable& anchor,
+                                            const Variable& positive,
+                                            const Variable& negative) -> Variable {
+    auto d_pos = distance_fn_(anchor, positive);
+    auto d_neg = distance_fn_(anchor, negative);
+
+    if (swap_) {
+        auto d_pn = distance_fn_(positive, negative);
+        // d_neg = min(d_neg, d_pn) via: d_neg - relu(d_neg - d_pn)
+        d_neg = d_neg - relu(d_neg - d_pn);
+    }
+
+    auto margin_var = scalar_var(static_cast<float>(margin_), d_pos);
+    auto loss = relu(d_pos - d_neg + margin_var);
+
+    auto red_str = reduction_to_string(reduction_);
+    return apply_reduction(loss, red_str);
+}
+
+//==============================================================================
 // MultiLabelSoftMarginLoss Implementation
 //==============================================================================
 

@@ -724,6 +724,14 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("tensor"), py::return_value_policy::reference);
     init.def("ones_", &tenzor::nn::init::ones_,
              py::arg("tensor"), py::return_value_policy::reference);
+    init.def("trunc_normal_", &tenzor::nn::init::trunc_normal_,
+             py::arg("tensor"), py::arg("mean") = 0.0, py::arg("std") = 1.0,
+             py::arg("a") = -2.0, py::arg("b") = 2.0, py::return_value_policy::reference);
+    init.def("dirac_", &tenzor::nn::init::dirac_,
+             py::arg("tensor"), py::arg("groups") = 1, py::return_value_policy::reference);
+    init.def("sparse_", &tenzor::nn::init::sparse_,
+             py::arg("tensor"), py::arg("sparsity"), py::arg("std") = 0.01,
+             py::return_value_policy::reference);
 
     // Data loading utilities
     auto data_mod = m.def_submodule("data", "Data loading and dataset utilities");

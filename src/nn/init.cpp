@@ -332,4 +332,212 @@ auto ones_(Tensor& tensor) -> Tensor& {
     return constant_(tensor, 1.0);
 }
 
+// ============================================================================
+// Truncated Normal Initialization
+// ============================================================================
+
+auto trunc_normal_(Tensor& tensor,
+                   double mean, double std,
+                   double a, double b) -> Tensor& {
+    // Normalize bounds to standard normal
+    double l = (a - mean) / std;
+    double u = (b - mean) / std;
+
+    // CDF of standard normal (using erfc for numerical stability)
+    auto norm_cdf = [](double x) -> double {
+        return 0.5 * std::erfc(-x * M_SQRT1_2);
+    };
+
+    // Inverse CDF of standard normal (Beasley-Springer-Moro approximation)
+    auto norm_icdf = [](double p) -> double {
+        // Rational approximation from Peter Acklam
+        static constexpr double a1 = -3.969683028665376e+01;
+        static constexpr double a2 =  2.209460984245205e+02;
+        static constexpr double a3 = -2.759285104469687e+02;
+        static constexpr double a4 =  1.383577518672690e+02;
+        static constexpr double a5 = -3.066479806614716e+01;
+        static constexpr double a6 =  2.506628277459239e+00;
+
+        static constexpr double b1 = -5.447609879822406e+01;
+        static constexpr double b2 =  1.615858368580409e+02;
+        static constexpr double b3 = -1.556989798598866e+02;
+        static constexpr double b4 =  6.680131188771972e+01;
+        static constexpr double b5 = -1.328068155288572e+01;
+
+        static constexpr double c1 = -7.784894002430293e-03;
+        static constexpr double c2 = -3.223964580411365e-01;
+        static constexpr double c3 = -2.400758277161838e+00;
+        static constexpr double c4 = -2.549732539343734e+00;
+        static constexpr double c5 =  4.374664141464968e+00;
+        static constexpr double c6 =  2.938163982698783e+00;
+
+        static constexpr double d1 =  7.784695709041462e-03;
+        static constexpr double d2 =  3.224671290700398e-01;
+        static constexpr double d3 =  2.445134137142996e+00;
+        static constexpr double d4 =  3.754408661907416e+00;
+
+        static constexpr double p_low  = 0.02425;
+        static constexpr double p_high = 1.0 - p_low;
+
+        double q, r;
+        if (p < p_low) {
+            q = std::sqrt(-2.0 * std::log(p));
+            return (((((c1*q+c2)*q+c3)*q+c4)*q+c5)*q+c6) /
+                   ((((d1*q+d2)*q+d3)*q+d4)*q+1.0);
+        } else if (p <= p_high) {
+            q = p - 0.5;
+            r = q * q;
+            return (((((a1*r+a2)*r+a3)*r+a4)*r+a5)*r+a6)*q /
+                   (((((b1*r+b2)*r+b3)*r+b4)*r+b5)*r+1.0);
+        } else {
+            q = std::sqrt(-2.0 * std::log(1.0 - p));
+            return -(((((c1*q+c2)*q+c3)*q+c4)*q+c5)*q+c6) /
+                    ((((d1*q+d2)*q+d3)*q+d4)*q+1.0);
+        }
+    };
+
+    double cdf_l = norm_cdf(l);
+    double cdf_u = norm_cdf(u);
+
+    std::uniform_real_distribution<double> dist(cdf_l, cdf_u);
+    fill_tensor(tensor, [&]() {
+        double u_val = dist(get_rng());
+        // Clamp to avoid numerical issues at tails
+        u_val = std::clamp(u_val, cdf_l + 1e-10, cdf_u - 1e-10);
+        return norm_icdf(u_val) * std + mean;
+    });
+
+    return tensor;
+}
+
+// ============================================================================
+// Dirac Initialization
+// ============================================================================
+
+auto dirac_(Tensor& tensor, int64_t groups) -> Tensor& {
+    auto shape = tensor.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+
+    if (ndim < 3 || ndim > 5) {
+        throw std::invalid_argument(
+            "dirac_: tensor must be 3D (Conv1d), 4D (Conv2d), or 5D (Conv3d), got " +
+            std::to_string(ndim) + "D");
+    }
+
+    int64_t out_channels = shape[0];
+    int64_t in_channels_per_group = shape[1];
+    int64_t min_dim = std::min(out_channels, in_channels_per_group * groups);
+
+    // Zero out first
+    zeros_(tensor);
+
+    // Work on CPU
+    bool needs_device_transfer = (tensor.device().type != Device::Type::CPU);
+    Tensor work_tensor = needs_device_transfer ? tensor.to(Device::cpu()) : tensor;
+
+    // Compute center indices for spatial dimensions
+    std::vector<int64_t> center;
+    for (int64_t d = 2; d < ndim; ++d) {
+        center.push_back(shape[d] / 2);
+    }
+
+    // Set weight[i, i/groups, center...] = 1 for i in [0, min_dim)
+    if (work_tensor.dtype() == DType::Float32) {
+        float* data = work_tensor.data<float>();
+        for (int64_t i = 0; i < min_dim; ++i) {
+            int64_t c_in = i % in_channels_per_group;
+            // Compute flat index
+            int64_t idx = i;
+            for (int64_t d = 1; d < ndim; ++d) {
+                idx *= shape[d];
+                if (d == 1) idx += c_in;
+                else idx += center[d - 2];
+            }
+            data[idx] = 1.0f;
+        }
+    } else if (work_tensor.dtype() == DType::Float64) {
+        double* data = work_tensor.data<double>();
+        for (int64_t i = 0; i < min_dim; ++i) {
+            int64_t c_in = i % in_channels_per_group;
+            int64_t idx = i;
+            for (int64_t d = 1; d < ndim; ++d) {
+                idx *= shape[d];
+                if (d == 1) idx += c_in;
+                else idx += center[d - 2];
+            }
+            data[idx] = 1.0;
+        }
+    } else {
+        throw std::runtime_error("dirac_: unsupported dtype " +
+            std::string(dtype_name(work_tensor.dtype())));
+    }
+
+    if (needs_device_transfer) {
+        tensor = work_tensor.to(tensor.device());
+    }
+
+    return tensor;
+}
+
+// ============================================================================
+// Sparse Initialization
+// ============================================================================
+
+auto sparse_(Tensor& tensor, double sparsity, double std) -> Tensor& {
+    auto shape = tensor.shape();
+    if (shape.size() != 2) {
+        throw std::invalid_argument(
+            "sparse_: tensor must be 2D, got " +
+            std::to_string(shape.size()) + "D");
+    }
+
+    if (sparsity < 0.0 || sparsity >= 1.0) {
+        throw std::invalid_argument(
+            "sparse_: sparsity must be in [0, 1), got " +
+            std::to_string(sparsity));
+    }
+
+    int64_t rows = shape[0];
+    int64_t cols = shape[1];
+    int64_t num_zeros = static_cast<int64_t>(std::ceil(sparsity * rows));
+
+    // Fill with normal distribution first
+    normal_(tensor, 0.0, std);
+
+    // Work on CPU for the zeroing
+    bool needs_device_transfer = (tensor.device().type != Device::Type::CPU);
+    Tensor work_tensor = needs_device_transfer ? tensor.to(Device::cpu()) : tensor;
+
+    // For each column, randomly zero out num_zeros rows
+    std::vector<int64_t> row_indices(rows);
+    std::iota(row_indices.begin(), row_indices.end(), 0);
+
+    if (work_tensor.dtype() == DType::Float32) {
+        float* data = work_tensor.data<float>();
+        for (int64_t c = 0; c < cols; ++c) {
+            std::shuffle(row_indices.begin(), row_indices.end(), get_rng());
+            for (int64_t i = 0; i < num_zeros; ++i) {
+                data[row_indices[i] * cols + c] = 0.0f;
+            }
+        }
+    } else if (work_tensor.dtype() == DType::Float64) {
+        double* data = work_tensor.data<double>();
+        for (int64_t c = 0; c < cols; ++c) {
+            std::shuffle(row_indices.begin(), row_indices.end(), get_rng());
+            for (int64_t i = 0; i < num_zeros; ++i) {
+                data[row_indices[i] * cols + c] = 0.0;
+            }
+        }
+    } else {
+        throw std::runtime_error("sparse_: unsupported dtype " +
+            std::string(dtype_name(work_tensor.dtype())));
+    }
+
+    if (needs_device_transfer) {
+        tensor = work_tensor.to(tensor.device());
+    }
+
+    return tensor;
+}
+
 } // namespace tenzor::nn::init
