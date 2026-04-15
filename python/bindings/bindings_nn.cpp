@@ -22,6 +22,7 @@
 #include <tenzor/nn/layers/transformer.hpp>
 #include <tenzor/nn/layers/embedding.hpp>
 #include <tenzor/nn/layers/lazy_linear.hpp>
+#include <tenzor/nn/layers/lazy_conv.hpp>
 #include <tenzor/nn/layers/sync_batchnorm.hpp>
 #include <tenzor/nn/layers/alibi.hpp>
 #include <tenzor/nn/layers/gqa_attention.hpp>
@@ -412,6 +413,49 @@ void register_nn(py::module_& m) {
             return "LazyLinear(in_features=" + std::to_string(in_f) +
                    ", out_features=" + std::to_string(out_f) +
                    ", bias=" + (has_bias ? "True" : "False") + ")";
+        });
+
+    // Lazy convolution layers
+    py::class_<tenzor::nn::LazyConv1d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::LazyConv1d>>(nn, "LazyConv1d")
+        .def(py::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, bool>(),
+             py::arg("out_channels"), py::arg("kernel_size"),
+             py::arg("stride") = 1, py::arg("padding") = 0,
+             py::arg("dilation") = 1, py::arg("groups") = 1, py::arg("bias") = true)
+        .def("is_materialized", &tenzor::nn::LazyConv1d::is_materialized)
+        .def("__repr__", [](const tenzor::nn::LazyConv1d& self) {
+            if (!self.is_materialized()) {
+                return std::string("LazyConv1d(in_channels=<not materialized>)");
+            }
+            return std::string("LazyConv1d(materialized)");
+        });
+
+    py::class_<tenzor::nn::LazyConv2d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::LazyConv2d>>(nn, "LazyConv2d")
+        .def(py::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, bool>(),
+             py::arg("out_channels"), py::arg("kernel_size"),
+             py::arg("stride") = 1, py::arg("padding") = 0,
+             py::arg("dilation") = 1, py::arg("groups") = 1, py::arg("bias") = true)
+        .def("is_materialized", &tenzor::nn::LazyConv2d::is_materialized)
+        .def("__repr__", [](const tenzor::nn::LazyConv2d& self) {
+            if (!self.is_materialized()) {
+                return std::string("LazyConv2d(in_channels=<not materialized>)");
+            }
+            return std::string("LazyConv2d(materialized)");
+        });
+
+    py::class_<tenzor::nn::LazyConv3d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::LazyConv3d>>(nn, "LazyConv3d")
+        .def(py::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, bool>(),
+             py::arg("out_channels"), py::arg("kernel_size"),
+             py::arg("stride") = 1, py::arg("padding") = 0,
+             py::arg("dilation") = 1, py::arg("groups") = 1, py::arg("bias") = true)
+        .def("is_materialized", &tenzor::nn::LazyConv3d::is_materialized)
+        .def("__repr__", [](const tenzor::nn::LazyConv3d& self) {
+            if (!self.is_materialized()) {
+                return std::string("LazyConv3d(in_channels=<not materialized>)");
+            }
+            return std::string("LazyConv3d(materialized)");
         });
 
     // Convolution layers

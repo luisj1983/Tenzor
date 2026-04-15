@@ -750,6 +750,95 @@ auto VulkanBackend::dispatchNestedAttention(const Tensor& Q, const Tensor& K, co
 }
 
 // ============================================================================
+// Nested attention backward
+// ============================================================================
+
+auto VulkanBackend::dispatchNestedAttentionBackward(
+    const Tensor& grad_out, const Tensor& Q, const Tensor& K, const Tensor& V,
+    const Tensor& q_offsets, const Tensor& kv_offsets,
+    float scale, bool causal) -> std::vector<Tensor>
+{
+    Tensor dO_f32 = (grad_out.dtype() == DType::Float32) ? grad_out.contiguous()
+                                                          : dispatchCast(grad_out.contiguous(), DType::Float32);
+    Tensor Q_f32 = (Q.dtype() == DType::Float32) ? Q.contiguous()
+                                                   : dispatchCast(Q.contiguous(), DType::Float32);
+    Tensor K_f32 = (K.dtype() == DType::Float32) ? K.contiguous()
+                                                   : dispatchCast(K.contiguous(), DType::Float32);
+    Tensor V_f32 = (V.dtype() == DType::Float32) ? V.contiguous()
+                                                   : dispatchCast(V.contiguous(), DType::Float32);
+
+    Tensor q_off_i32 = (q_offsets.dtype() == DType::Int32)
+                           ? q_offsets.contiguous()
+                           : dispatchCast(q_offsets.contiguous(), DType::Int32);
+    Tensor kv_off_i32 = (kv_offsets.dtype() == DType::Int32)
+                            ? kv_offsets.contiguous()
+                            : dispatchCast(kv_offsets.contiguous(), DType::Int32);
+
+    int64_t head_dim = Q_f32.shape().back();
+    int64_t total_q = Q_f32.shape()[0];
+    int64_t total_kv = K_f32.shape()[0];
+    uint32_t B = static_cast<uint32_t>(q_off_i32.numel() - 1);
+
+    std::vector<int64_t> q_shape(Q_f32.shape().begin(), Q_f32.shape().end());
+    std::vector<int64_t> kv_shape(K_f32.shape().begin(), K_f32.shape().end());
+
+    Tensor grad_Q = tenzor::zeros(q_shape, DType::Float32, Q.device());
+    Tensor grad_K = tenzor::zeros(kv_shape, DType::Float32, K.device());
+    Tensor grad_V = tenzor::zeros(kv_shape, DType::Float32, V.device());
+
+    if (total_q == 0 || total_kv == 0 || B == 0) return {grad_Q, grad_K, grad_V};
+
+    int32_t device_id = Q.device().index;
+    auto* pipeline = getPipeline("nested_attention_backward", device_id);
+
+    struct NestedAttentionBackwardPC {
+        uint32_t B;
+        uint32_t head_dim;
+        float scale;
+        uint32_t causal;
+    };
+    NestedAttentionBackwardPC pc{B, static_cast<uint32_t>(head_dim), scale,
+                                  causal ? 1u : 0u};
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, dO_f32.data_ptr()},
+        {1, Q_f32.data_ptr()},
+        {2, K_f32.data_ptr()},
+        {3, V_f32.data_ptr()},
+        {4, grad_Q.data_ptr()},
+        {5, grad_K.data_ptr()},
+        {6, grad_V.data_ptr()},
+        {7, q_off_i32.data_ptr()},
+        {8, kv_off_i32.data_ptr()},
+    };
+    std::vector<size_t> sizes = {
+        static_cast<size_t>(total_q) * static_cast<size_t>(head_dim) * sizeof(float),
+        static_cast<size_t>(total_q) * static_cast<size_t>(head_dim) * sizeof(float),
+        static_cast<size_t>(total_kv) * static_cast<size_t>(head_dim) * sizeof(float),
+        static_cast<size_t>(total_kv) * static_cast<size_t>(head_dim) * sizeof(float),
+        static_cast<size_t>(total_q) * static_cast<size_t>(head_dim) * sizeof(float),
+        static_cast<size_t>(total_kv) * static_cast<size_t>(head_dim) * sizeof(float),
+        static_cast<size_t>(total_kv) * static_cast<size_t>(head_dim) * sizeof(float),
+        static_cast<size_t>(q_off_i32.numel()) * sizeof(int32_t),
+        static_cast<size_t>(kv_off_i32.numel()) * sizeof(int32_t),
+    };
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(NestedAttentionBackwardPC), &pc);
+    vkCmdDispatch(cmd, B, 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+    synchronize(device_id);
+
+    return {grad_Q, grad_K, grad_V};
+}
+
+// ============================================================================
 // Trapezoid integration
 // ============================================================================
 

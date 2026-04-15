@@ -79,6 +79,7 @@ set(TENZOR_CORE_SOURCES
     nn/checkpoint.cpp
     nn/layers/linear.cpp
     nn/layers/lazy_linear.cpp
+    nn/layers/lazy_conv.cpp
     nn/layers/conv.cpp
     nn/layers/batchnorm.cpp
     nn/layers/sync_batchnorm.cpp

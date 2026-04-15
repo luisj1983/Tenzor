@@ -488,4 +488,72 @@ auto gradcheck_verbose(
     return result.passed;
 }
 
+auto gradgradcheck_detailed(
+    std::function<Variable(const Variable&)> func,
+    const Variable& input,
+    double eps,
+    double atol,
+    double rtol
+) -> GradCheckResult {
+    // Validate input
+    if (!input.requires_grad()) {
+        GradCheckResult result;
+        result.passed = false;
+        result.max_abs_error = std::numeric_limits<double>::infinity();
+        result.error_message = "Input variable must have requires_grad=true";
+        return result;
+    }
+
+    // Construct a gradient function: given x, compute grad(func(x)) w.r.t. x
+    // and return it as a new Variable suitable for further differentiation.
+    auto grad_func = [&func](const Variable& x) -> Variable {
+        // Create a fresh variable that requires grad so backward() accumulates here
+        Variable fresh_x(x.tensor().clone(), true);
+
+        // Forward pass through the original function
+        Variable output = func(fresh_x);
+
+        // Reduce to scalar if needed
+        Variable scalar_output = output;
+        if (output.tensor().numel() != 1) {
+            scalar_output = tenzor::sum(output);
+        }
+
+        // Backward pass to compute gradients
+        scalar_output.backward();
+
+        // Extract the gradient and wrap as a new Variable
+        if (!fresh_x.has_grad()) {
+            // No gradient computed - return zeros
+            auto zero_grad = zeros_like_tensor(x.tensor());
+            return Variable(zero_grad, false);
+        }
+
+        Tensor grad = *fresh_x.grad();
+        return Variable(grad.clone(), false);
+    };
+
+    // Use existing gradcheck_detailed on the gradient function
+    // Create input without requires_grad for the outer numerical perturbation,
+    // but gradcheck_detailed expects requires_grad=true
+    return gradcheck_detailed(grad_func, input, eps, atol, rtol);
+}
+
+auto gradgradcheck(
+    std::function<Variable(const Variable&)> func,
+    const Variable& input,
+    double eps,
+    double atol,
+    double rtol,
+    bool raise_exception
+) -> bool {
+    auto result = gradgradcheck_detailed(func, input, eps, atol, rtol);
+
+    if (!result.passed && raise_exception) {
+        throw GradCheckError(result);
+    }
+
+    return result.passed;
+}
+
 } // namespace tenzor

@@ -64,3 +64,14 @@ def gradcheck(
 ) -> bool:
     """Check gradients computed via backprop against numerical gradients."""
     ...
+
+def gradgradcheck(
+    func: Callable,
+    inputs: Tuple[Variable, ...],
+    eps: float = 1e-6,
+    atol: float = 1e-5,
+    rtol: float = 1e-3,
+    raise_exception: bool = False,
+) -> bool:
+    """Check second-order gradients by applying gradcheck to the gradient function."""
+    ...

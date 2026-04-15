@@ -527,6 +527,108 @@ class DistributedSampler(Sampler[int]):
         return self.num_samples
 
 
+class WeightedRandomSampler(Sampler[int]):
+    """Samples elements according to given probabilities (weights).
+
+    Elements are drawn from ``[0, len(weights))`` with probability
+    proportional to *weights*.  Supports sampling with or without
+    replacement.
+
+    Parameters
+    ----------
+    weights : Sequence[float]
+        Non-negative sampling weights (one per dataset element).
+    num_samples : int
+        Number of samples to draw.
+    replacement : bool, optional
+        If ``True``, draw with replacement.  Default: ``True``.
+    seed : int, optional
+        Random seed for reproducibility.  Default: ``0``.
+
+    Example
+    -------
+    >>> sampler = WeightedRandomSampler([0.1, 0.9, 0.5], num_samples=5)
+    >>> list(sampler)
+    [1, 2, 1, 1, 2]
+    """
+
+    def __init__(
+        self,
+        weights: Sequence[float],
+        num_samples: int,
+        replacement: bool = True,
+        seed: int = 0,
+    ):
+        if not weights:
+            raise ValueError("weights must not be empty")
+        if any(w < 0 for w in weights):
+            raise ValueError("weights must be non-negative")
+        if not replacement and num_samples > len(weights):
+            raise ValueError(
+                "num_samples must be <= len(weights) when sampling without replacement"
+            )
+        self.weights = list(weights)
+        self.num_samples = num_samples
+        self.replacement = replacement
+        self.seed = seed
+
+    def __iter__(self) -> Iterator[int]:
+        g = random.Random(self.seed)
+        if self.replacement:
+            indices = g.choices(
+                range(len(self.weights)), weights=self.weights, k=self.num_samples
+            )
+        else:
+            # Weighted sampling without replacement
+            pool = list(range(len(self.weights)))
+            w = list(self.weights)
+            indices = []
+            for _ in range(self.num_samples):
+                chosen = g.choices(pool, weights=w, k=1)[0]
+                idx = pool.index(chosen)
+                indices.append(chosen)
+                pool.pop(idx)
+                w.pop(idx)
+        return iter(indices)
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+
+class SubsetRandomSampler(Sampler[int]):
+    """Samples elements randomly from a given list of indices.
+
+    Useful for creating train/validation splits or restricting sampling
+    to a subset of the dataset.
+
+    Parameters
+    ----------
+    indices : Sequence[int]
+        Indices to sample from.
+    seed : int, optional
+        Random seed for reproducibility.  Default: ``0``.
+
+    Example
+    -------
+    >>> sampler = SubsetRandomSampler([10, 20, 30, 40])
+    >>> list(sampler)
+    [30, 10, 40, 20]
+    """
+
+    def __init__(self, indices: Sequence[int], seed: int = 0):
+        self.indices = list(indices)
+        self.seed = seed
+
+    def __iter__(self) -> Iterator[int]:
+        g = random.Random(self.seed)
+        shuffled = list(self.indices)
+        g.shuffle(shuffled)
+        return iter(shuffled)
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+
 # ---------------------------------------------------------------------------
 # Collate
 # ---------------------------------------------------------------------------
@@ -1060,6 +1162,8 @@ __all__ = [
     "RandomSampler",
     "BatchSampler",
     "DistributedSampler",
+    "WeightedRandomSampler",
+    "SubsetRandomSampler",
     "DataLoader",
     "default_collate",
     "random_split",

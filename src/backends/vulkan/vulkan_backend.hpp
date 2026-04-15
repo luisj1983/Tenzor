@@ -326,6 +326,10 @@ public:
     auto dispatchNestedAttention(const Tensor& Q, const Tensor& K, const Tensor& V,
                                   const Tensor& q_offsets, const Tensor& kv_offsets,
                                   float scale, bool causal) -> Tensor;
+    auto dispatchNestedAttentionBackward(const Tensor& grad_out,
+                                          const Tensor& Q, const Tensor& K, const Tensor& V,
+                                          const Tensor& q_offsets, const Tensor& kv_offsets,
+                                          float scale, bool causal) -> std::vector<Tensor>;
     auto dispatchSTFT(const Tensor& input, int64_t n_fft, int64_t hop_length,
                       int64_t win_length, const Tensor& window, bool center,
                       bool normalized, bool onesided) -> Tensor;

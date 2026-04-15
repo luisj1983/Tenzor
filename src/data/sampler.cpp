@@ -38,6 +38,74 @@ auto RandomSampler::reset(int64_t epoch) -> void {
 }
 
 // ============================================================================
+// WeightedRandomSampler
+// ============================================================================
+
+WeightedRandomSampler::WeightedRandomSampler(
+    std::vector<double> weights, int64_t num_samples, bool replacement, int64_t seed)
+    : weights_(std::move(weights)),
+      num_samples_(num_samples),
+      replacement_(replacement),
+      seed_(seed) {
+
+    if (weights_.empty()) {
+        throw std::invalid_argument("weights must not be empty");
+    }
+    for (auto w : weights_) {
+        if (w < 0.0) {
+            throw std::invalid_argument("weights must be non-negative");
+        }
+    }
+    if (!replacement_ && num_samples_ > static_cast<int64_t>(weights_.size())) {
+        throw std::invalid_argument(
+            "num_samples must be <= number of weights when sampling without replacement");
+    }
+
+    reset();
+}
+
+auto WeightedRandomSampler::reset(int64_t epoch) -> void {
+    indices_.clear();
+    indices_.reserve(static_cast<size_t>(num_samples_));
+
+    std::mt19937 rng(static_cast<unsigned>(seed_ + epoch));
+    std::discrete_distribution<size_t> dist(weights_.begin(), weights_.end());
+
+    if (replacement_) {
+        for (int64_t i = 0; i < num_samples_; ++i) {
+            indices_.push_back(dist(rng));
+        }
+    } else {
+        // Sample without replacement: rebuild distribution after each selection
+        // to avoid rejection-loop stalls when high-weight indices dominate
+        std::vector<double> remaining_weights(weights_);
+        for (int64_t i = 0; i < num_samples_; ++i) {
+            std::discrete_distribution<size_t> d(remaining_weights.begin(),
+                                                  remaining_weights.end());
+            size_t idx = d(rng);
+            indices_.push_back(idx);
+            remaining_weights[idx] = 0.0;  // Remove selected index
+        }
+    }
+}
+
+// ============================================================================
+// SubsetRandomSampler
+// ============================================================================
+
+SubsetRandomSampler::SubsetRandomSampler(std::vector<size_t> indices, int64_t seed)
+    : subset_indices_(std::move(indices)), seed_(seed) {
+    reset();
+}
+
+auto SubsetRandomSampler::reset(int64_t epoch) -> void {
+    indices_ = subset_indices_;
+
+    std::mt19937 rng(static_cast<unsigned>(seed_ + epoch));
+    std::shuffle(indices_.begin(), indices_.end(), rng);
+}
+
+// ============================================================================
 // DistributedSampler
 // ============================================================================
 

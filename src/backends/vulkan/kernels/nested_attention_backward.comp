@@ -1,0 +1,139 @@
+#version 450
+
+// Backward pass for fused nested (ragged) attention.
+// Each workgroup handles one batch element (gl_WorkGroupID.x = batch index).
+// Within the workgroup, each thread processes query rows with stride = local_size.
+//
+// Three passes per query row:
+//   1. Max-score pass over KV positions
+//   2. Sum-exp + softmax_dot computation
+//   3. Gradient accumulation for grad_Q (direct), grad_K (atomicAdd), grad_V (atomicAdd)
+
+#extension GL_EXT_shader_atomic_float : require
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly  buffer GradOutBuf { float grad_out_data[]; };  // [total_q_len * head_dim]
+layout(binding = 1) readonly  buffer QBuf       { float q_data[];         };  // [total_q_len * head_dim]
+layout(binding = 2) readonly  buffer KBuf       { float k_data[];         };  // [total_kv_len * head_dim]
+layout(binding = 3) readonly  buffer VBuf       { float v_data[];         };  // [total_kv_len * head_dim]
+layout(binding = 4)           buffer GradQBuf   { float grad_q_data[];    };  // [total_q_len * head_dim]
+layout(binding = 5)           buffer GradKBuf   { float grad_k_data[];    };  // [total_kv_len * head_dim]
+layout(binding = 6)           buffer GradVBuf   { float grad_v_data[];    };  // [total_kv_len * head_dim]
+layout(binding = 7) readonly  buffer QOffsets   { int q_offsets[];         };  // [B+1]
+layout(binding = 8) readonly  buffer KVOffsets  { int kv_offsets[];        };  // [B+1]
+
+layout(push_constant) uniform PushConstants {
+    uint B;          // batch size
+    uint head_dim;   // dimension of each head
+    float scale;     // typically 1/sqrt(head_dim)
+    uint causal;     // 0 = not causal, 1 = causal mask
+} params;
+
+void main() {
+    uint b = gl_WorkGroupID.x;
+    if (b >= params.B) return;
+
+    int q_start = q_offsets[b];
+    int q_end   = q_offsets[b + 1];
+    int kv_start = kv_offsets[b];
+    int kv_end   = kv_offsets[b + 1];
+
+    int Lq  = q_end - q_start;
+    int Lkv = kv_end - kv_start;
+    if (Lq <= 0 || Lkv <= 0) return;
+
+    uint local_size = gl_WorkGroupSize.x;
+
+    for (int qi = int(gl_LocalInvocationID.x); qi < Lq; qi += int(local_size)) {
+        uint q_row_base  = uint(q_start + qi) * params.head_dim;
+        uint do_row_base = uint(q_start + qi) * params.head_dim;
+        uint gq_row_base = uint(q_start + qi) * params.head_dim;
+
+        int ki_end = (params.causal != 0) ? min(Lkv, qi + 1) : Lkv;
+
+        // ---- Pass 1: find max score ----
+        float max_score = -3.402823466e+38;  // -FLT_MAX
+        for (int ki = 0; ki < ki_end; ++ki) {
+            uint k_row_base = uint(kv_start + ki) * params.head_dim;
+            float score = 0.0;
+            for (uint hd = 0; hd < params.head_dim; ++hd) {
+                score += q_data[q_row_base + hd] * k_data[k_row_base + hd];
+            }
+            score *= params.scale;
+            if (score > max_score) max_score = score;
+        }
+
+        // ---- Pass 2: sum_exp and softmax_dot ----
+        float sum_exp = 0.0;
+        for (int ki = 0; ki < ki_end; ++ki) {
+            uint k_row_base = uint(kv_start + ki) * params.head_dim;
+            float score = 0.0;
+            for (uint hd = 0; hd < params.head_dim; ++hd) {
+                score += q_data[q_row_base + hd] * k_data[k_row_base + hd];
+            }
+            score *= params.scale;
+            sum_exp += exp(score - max_score);
+        }
+        float inv_sum = (sum_exp > 0.0) ? 1.0 / sum_exp : 0.0;
+
+        // Compute softmax_dot = sum_ki(attn_w[ki] * dot(dO, V[ki]))
+        float softmax_dot = 0.0;
+        for (int ki = 0; ki < ki_end; ++ki) {
+            uint k_row_base = uint(kv_start + ki) * params.head_dim;
+            uint v_row_base = uint(kv_start + ki) * params.head_dim;
+
+            float score = 0.0;
+            for (uint hd = 0; hd < params.head_dim; ++hd) {
+                score += q_data[q_row_base + hd] * k_data[k_row_base + hd];
+            }
+            score *= params.scale;
+            float w = exp(score - max_score) * inv_sum;
+
+            float dot_dov = 0.0;
+            for (uint hd = 0; hd < params.head_dim; ++hd) {
+                dot_dov += grad_out_data[do_row_base + hd] * v_data[v_row_base + hd];
+            }
+            softmax_dot += w * dot_dov;
+        }
+
+        // ---- Pass 3: compute gradients ----
+        for (int ki = 0; ki < ki_end; ++ki) {
+            uint k_row_base = uint(kv_start + ki) * params.head_dim;
+            uint v_row_base = uint(kv_start + ki) * params.head_dim;
+            uint gk_row_base = uint(kv_start + ki) * params.head_dim;
+            uint gv_row_base = uint(kv_start + ki) * params.head_dim;
+
+            float score = 0.0;
+            for (uint hd = 0; hd < params.head_dim; ++hd) {
+                score += q_data[q_row_base + hd] * k_data[k_row_base + hd];
+            }
+            score *= params.scale;
+            float w = exp(score - max_score) * inv_sum;
+
+            // grad_V += w * dO  (atomicAdd — multiple threads may write same KV row)
+            for (uint hd = 0; hd < params.head_dim; ++hd) {
+                atomicAdd(grad_v_data[gv_row_base + hd], w * grad_out_data[do_row_base + hd]);
+            }
+
+            // d_attn = dot(dO, V)
+            float dot_dov = 0.0;
+            for (uint hd = 0; hd < params.head_dim; ++hd) {
+                dot_dov += grad_out_data[do_row_base + hd] * v_data[v_row_base + hd];
+            }
+
+            // d_score = w * (d_attn - softmax_dot) * scale
+            float ds = w * (dot_dov - softmax_dot) * params.scale;
+
+            // grad_Q += ds * K  (direct write — only one thread writes each Q row)
+            for (uint hd = 0; hd < params.head_dim; ++hd) {
+                grad_q_data[gq_row_base + hd] += ds * k_data[k_row_base + hd];
+            }
+
+            // grad_K += ds * Q  (atomicAdd — multiple threads may write same KV row)
+            for (uint hd = 0; hd < params.head_dim; ++hd) {
+                atomicAdd(grad_k_data[gk_row_base + hd], ds * q_data[q_row_base + hd]);
+            }
+        }
+    }
+}

@@ -235,4 +235,78 @@ auto gradcheck_verbose(
     double rtol = 1e-3
 ) -> bool;
 
+/**
+ * @brief Check second-order gradients (gradients of gradients) using numerical differentiation.
+ *
+ * Verifies that the second-order derivatives are correct by constructing a
+ * gradient function from the original function, then applying gradcheck to it.
+ * This checks that backward-of-backward produces correct results.
+ *
+ * Algorithm:
+ * 1. Define grad_func(x) = gradient of func(x) with respect to x
+ * 2. Apply gradcheck to grad_func
+ *
+ * @param func Function to check (must return scalar or single-output Variable)
+ * @param input Input variable to compute gradients for
+ * @param eps Epsilon for finite differences (default: 1e-6)
+ * @param atol Absolute tolerance for comparison (default: 1e-5)
+ * @param rtol Relative tolerance for comparison (default: 1e-3)
+ * @param raise_exception If true, throw on failure; if false, return false (default: false)
+ *
+ * @return true if second-order gradients match within tolerances
+ *
+ * @throws std::invalid_argument if input doesn't require gradients
+ * @throws GradCheckError if raise_exception=true and check fails
+ *
+ * @code
+ * auto f = [](const Variable& x) {
+ *     return (x * x * x).sum();  // f(x) = sum(x^3), f''(x) = 6x
+ * };
+ *
+ * Variable x(Tensor({3}, DType::Float64, Device::cpu()), true);
+ * x.tensor().fill_(2.0);
+ *
+ * bool ok = gradgradcheck(f, x);  // Checks second-order gradients
+ * @endcode
+ */
+auto gradgradcheck(
+    std::function<Variable(const Variable&)> func,
+    const Variable& input,
+    double eps = 1e-6,
+    double atol = 1e-5,
+    double rtol = 1e-3,
+    bool raise_exception = false
+) -> bool;
+
+/**
+ * @brief Detailed second-order gradient checking with full result information.
+ *
+ * Like gradgradcheck() but returns detailed information about the comparison,
+ * including error statistics and sample failing elements.
+ *
+ * @param func Function to check
+ * @param input Input variable
+ * @param eps Epsilon for finite differences
+ * @param atol Absolute tolerance
+ * @param rtol Relative tolerance
+ *
+ * @return GradCheckResult with detailed comparison information
+ *
+ * @code
+ * auto result = gradgradcheck_detailed(func, x);
+ * if (!result.passed) {
+ *     std::cout << "Max abs error: " << result.max_abs_error << std::endl;
+ *     std::cout << "Failing elements: " << result.failing_elements
+ *               << " / " << result.total_elements << std::endl;
+ * }
+ * @endcode
+ */
+auto gradgradcheck_detailed(
+    std::function<Variable(const Variable&)> func,
+    const Variable& input,
+    double eps = 1e-6,
+    double atol = 1e-5,
+    double rtol = 1e-3
+) -> GradCheckResult;
+
 } // namespace tenzor

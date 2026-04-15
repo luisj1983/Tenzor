@@ -3580,79 +3580,17 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
 
     // =========================================================================
     // NestedAttentionBackward — backward for segmented attention
-    // Vulkan: dispatch to compute shader via VulkanBackend
-    // Uses the same approach as NestedAttention forward but for gradients.
-    // For now, delegate to the device-agnostic attention backward implementation
-    // using existing Vulkan matmul/softmax primitives.
+    // Vulkan: dispatch to GPU compute shader (nested_attention_backward.comp)
+    // Three-pass algorithm: max-score, softmax+dot, gradient accumulation.
+    // inputs[4] (attn_out) is unused — weights are recomputed in the shader.
     // =========================================================================
     table.register_kernel(OpId::NestedAttentionBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            // inputs: [grad_out, Q, K, V, attn_out, q_offsets, kv_offsets]
             float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
             bool causal = attrs.get_bool(AttrKey::Causal, false);
-            const auto& grad_out = inputs[0];
-            const auto& Q = inputs[1];
-            const auto& K = inputs[2];
-            const auto& V = inputs[3];
-            const auto& q_offsets = inputs[5];
-            const auto& kv_offsets = inputs[6];
-
-            auto q_off_cpu = q_offsets.to(Device::cpu());
-            auto kv_off_cpu = kv_offsets.to(Device::cpu());
-            const int64_t* q_off = q_off_cpu.data<int64_t>();
-            const int64_t* kv_off = kv_off_cpu.data<int64_t>();
-            int64_t B = q_off_cpu.numel() - 1;
-            int64_t hd = Q.shape().back();
-
-            auto grad_Q = tenzor::zeros(std::vector<int64_t>(Q.shape().begin(), Q.shape().end()), Q.dtype(), Q.device());
-            auto grad_K = tenzor::zeros(std::vector<int64_t>(K.shape().begin(), K.shape().end()), K.dtype(), K.device());
-            auto grad_V = tenzor::zeros(std::vector<int64_t>(V.shape().begin(), V.shape().end()), V.dtype(), V.device());
-
-            for (int64_t b = 0; b < B; ++b) {
-                int64_t qs = q_off[b], qe = q_off[b + 1];
-                int64_t kvs = kv_off[b], kve = kv_off[b + 1];
-                if (qs >= qe || kvs >= kve) continue;
-
-                auto Qb = Q.slice(0, qs, qe);
-                auto Kb = K.slice(0, kvs, kve);
-                auto Vb = V.slice(0, kvs, kve);
-                auto dO = grad_out.slice(0, qs, qe);
-
-                // scores = Q @ K^T * scale
-                auto scores = tenzor::mul(tenzor::matmul(Qb, Kb.transpose(0, 1)),
-                    tenzor::full({1}, scale, Q.dtype(), Q.device()));
-
-                // softmax
-                OpAttributes sm_attrs;
-                sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
-                std::vector<Tensor> sm_in = {scores};
-                auto attn_w = dispatch_single(OpId::Softmax, sm_in, sm_attrs);
-
-                // grad_V = attn_w^T @ dO
-                auto gV = tenzor::matmul(attn_w.transpose(0, 1), dO);
-                // d_attn = dO @ V^T
-                auto d_attn = tenzor::matmul(dO, Vb.transpose(0, 1));
-                // softmax backward
-                auto ds = tenzor::mul(attn_w, tenzor::sub(d_attn,
-                    tenzor::sum(tenzor::mul(d_attn, attn_w), -1, true).expand(
-                        std::vector<int64_t>(d_attn.shape().begin(), d_attn.shape().end()))));
-                ds = tenzor::mul(ds, tenzor::full({1}, scale, Q.dtype(), Q.device()));
-
-                auto gQ = tenzor::matmul(ds, Kb);
-                auto gK = tenzor::matmul(ds.transpose(0, 1), Qb);
-
-                // Copy into output
-                auto dst_gQ = grad_Q.slice(0, qs, qe);
-                auto dst_gK = grad_K.slice(0, kvs, kve);
-                auto dst_gV = grad_V.slice(0, kvs, kve);
-                std::memcpy(dst_gQ.data_ptr(), gQ.contiguous().data_ptr(),
-                            static_cast<size_t>((qe - qs) * hd) * dtype_size(Q.dtype()));
-                std::memcpy(dst_gK.data_ptr(), gK.contiguous().data_ptr(),
-                            static_cast<size_t>((kve - kvs) * hd) * dtype_size(K.dtype()));
-                std::memcpy(dst_gV.data_ptr(), gV.contiguous().data_ptr(),
-                            static_cast<size_t>((kve - kvs) * hd) * dtype_size(V.dtype()));
-            }
-            return {grad_Q, grad_K, grad_V};
+            return get_vulkan_backend()->dispatchNestedAttentionBackward(
+                inputs[0], inputs[1], inputs[2], inputs[3],
+                inputs[5], inputs[6], scale, causal);
         });
 
     // =========================================================================
