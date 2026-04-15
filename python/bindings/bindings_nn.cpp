@@ -1151,6 +1151,27 @@ void register_nn(py::module_& m) {
         .def(py::init<int64_t>(), py::arg("padding"))
         .def("__repr__", [](const tenzor::nn::ZeroPad2d&) { return "ZeroPad2d()"; });
 
+    py::class_<tenzor::nn::CircularPad1d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::CircularPad1d>>(nn, "CircularPad1d")
+        .def(py::init<int64_t, int64_t>(),
+             py::arg("padding_left"), py::arg("padding_right"))
+        .def(py::init<int64_t>(), py::arg("padding"))
+        .def("__repr__", [](const tenzor::nn::CircularPad1d&) { return "CircularPad1d()"; });
+
+    py::class_<tenzor::nn::CircularPad2d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::CircularPad2d>>(nn, "CircularPad2d")
+        .def(py::init<int64_t, int64_t, int64_t, int64_t>(),
+             py::arg("padding_left"), py::arg("padding_right"),
+             py::arg("padding_top"), py::arg("padding_bottom"))
+        .def(py::init<int64_t>(), py::arg("padding"))
+        .def("__repr__", [](const tenzor::nn::CircularPad2d&) { return "CircularPad2d()"; });
+
+    py::class_<tenzor::nn::CircularPad3d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::CircularPad3d>>(nn, "CircularPad3d")
+        .def(py::init<std::vector<int64_t>>(), py::arg("padding"))
+        .def(py::init<int64_t>(), py::arg("padding"))
+        .def("__repr__", [](const tenzor::nn::CircularPad3d&) { return "CircularPad3d()"; });
+
     // Upsample layer
     py::class_<tenzor::nn::Upsample, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::Upsample>>(nn, "Upsample")

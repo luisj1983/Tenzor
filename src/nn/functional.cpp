@@ -648,24 +648,55 @@ auto scaled_dot_product_attention(
     auto d_k = static_cast<float>(query.shape().back());
     float scale = 1.0f / std::sqrt(d_k);
 
-    // Q @ K^T / sqrt(d_k)
+    // Try FlashAttention dispatch for eligible inputs:
+    // 4D tensors, no explicit attn_mask, supported dtype
+    bool is_4d = query.tensor().ndim() == 4;
+    bool no_mask = !opts.attn_mask.has_value();
+    bool supported_dtype = (query.tensor().dtype() == DType::Float32 ||
+                            query.tensor().dtype() == DType::Float16 ||
+                            query.tensor().dtype() == DType::BFloat16);
+
+    if (is_4d && no_mask && supported_dtype) {
+        try {
+            Tensor q_contig = query.tensor().is_contiguous() ? query.tensor() : query.tensor().contiguous();
+            Tensor k_contig = key.tensor().is_contiguous() ? key.tensor() : key.tensor().contiguous();
+            Tensor v_contig = value.tensor().is_contiguous() ? value.tensor() : value.tensor().contiguous();
+
+            OpAttributes attrs;
+            attrs.set(AttrKey::Scale, static_cast<double>(scale));
+            attrs.set(AttrKey::Causal, opts.is_causal);
+            attrs.set(AttrKey::DropoutP, opts.dropout_p);
+            // Use dropout_p > 0 as training proxy: FlashAttention applies
+            // dropout internally when IsTraining is true. Callers should set
+            // dropout_p = 0 during inference (matches PyTorch convention).
+            attrs.set(AttrKey::IsTraining, opts.dropout_p > 0.0);
+            std::vector<Tensor> flash_inputs = {q_contig, k_contig, v_contig};
+            Tensor output = dispatch<OpId::FlashAttention>(flash_inputs, attrs)[0];
+
+            return Variable(output, query.requires_grad() || key.requires_grad() || value.requires_grad());
+        } catch (const std::exception&) {
+            // Fall through to manual path if FlashAttention kernel unavailable
+        }
+    }
+
+    // Manual attention path: Q @ K^T / sqrt(d_k)
     auto kt = Variable(tenzor::transpose(key.tensor(), -2, -1), key.requires_grad());
     auto scores = tenzor::matmul(query, kt);
     auto scaled = Variable(scores.tensor() * scale, scores.requires_grad());
 
-    // Causal mask: set upper triangle to -inf
+    // Causal mask: use triu to build mask on-device (no CPU fallback).
+    // Always use Float32 for the mask to avoid overflow in half-precision
+    // types (Float16 max ~65504, -1e9 would overflow).
     if (opts.is_causal) {
         auto L = query.shape()[query.shape().size() - 2];
         auto S = key.shape()[key.shape().size() - 2];
-        auto mask_cpu = tenzor::zeros({L, S}, DType::Float32, Device::cpu());
-        float* mask_data = mask_cpu.data<float>();
-        for (int64_t i = 0; i < L; ++i) {
-            for (int64_t j = i + 1; j < S; ++j) {
-                mask_data[i * S + j] = -1e9f;
-            }
+        auto mask = tenzor::triu(
+            tenzor::ones({L, S}, DType::Float32, query.tensor().device()),
+            /*diagonal=*/1) * -1e9f;
+        if (query.tensor().dtype() != DType::Float32) {
+            mask = mask.to(query.tensor().dtype());
         }
-        auto mask_dev = mask_cpu.to(query.tensor().device());
-        scaled = Variable(scaled.tensor() + mask_dev, scaled.requires_grad());
+        scaled = Variable(scaled.tensor() + mask, scaled.requires_grad());
     }
 
     // Optional attention mask
@@ -675,6 +706,19 @@ auto scaled_dot_product_attention(
 
     // Softmax along last dimension
     auto attn = tenzor::softmax(scaled, -1);
+
+    // Dropout (if requested). Callers should set dropout_p = 0 during
+    // inference — this is a free function without training-mode state.
+    if (opts.dropout_p > 0.0) {
+        auto drop_mask = tenzor::rand(
+            std::vector<int64_t>(attn.tensor().shape().begin(), attn.tensor().shape().end()),
+            attn.tensor().dtype(), attn.tensor().device());
+        auto threshold = tenzor::full({1}, static_cast<float>(opts.dropout_p),
+                                      attn.tensor().dtype(), attn.tensor().device());
+        auto keep = Variable(tenzor::gt(drop_mask, threshold), false);
+        attn = Variable(attn.tensor() * keep.tensor() * static_cast<float>(1.0 / (1.0 - opts.dropout_p)),
+                        attn.requires_grad());
+    }
 
     // attn @ V
     return tenzor::matmul(attn, value);

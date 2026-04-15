@@ -100,22 +100,17 @@ auto dequantize_from_fp8(const Tensor& fp8_tensor, float scale) -> Tensor {
 
 auto fp8_is_native(Device::Type device_type) -> bool {
     // CPU and CUDA both register Cast kernels that understand FP8.
-    // The other backends fall back via the CPU-roundtrip path in
-    // Tensor::to(DType). If/when Vulkan (FP8 intrinsics) or ROCm
-    // (MI300 MFMA) gain a native Cast kernel, flip them on here.
-    //
-    // The check uses the dispatch table's OpId::Cast registration to
-    // detect native support, but we special-case CPU (which always
-    // has Float32/FP8 conversion via the elementwise path) and treat
-    // OneAPI as native because its Cast kernel includes FP8_E4M3 /
-    // FP8_E5M2 handling (see src/backends/oneapi/kernels/transform.cpp).
+    // ROCm has native FP8 Cast kernels in kernels/transform.hip.cpp.
+    // Vulkan has FP8 cast compute shaders (cast_f32_fp8e4m3.comp, etc.).
+    // OneAPI's Cast kernel includes FP8_E4M3 / FP8_E5M2 handling
+    // (see src/backends/oneapi/kernels/transform.cpp).
     switch (device_type) {
         case Device::Type::CPU:
         case Device::Type::CUDA:
         case Device::Type::OneAPI:
-            return true;
         case Device::Type::ROCm:
         case Device::Type::Vulkan:
+            return true;
         case Device::Type::MPS:
             return false;
         default:

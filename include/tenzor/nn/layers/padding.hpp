@@ -2,7 +2,7 @@
  * @file padding.hpp
  * @brief Padding layers for neural networks
  *
- * Provides constant, reflection, and replication padding layers
+ * Provides constant, reflection, replication, and circular padding layers
  * for 1D, 2D, and 3D inputs.
  */
 
@@ -259,6 +259,74 @@ public:
 
 private:
     ConstantPad2d impl_;
+};
+
+// ============================================================================
+// Circular Padding
+// ============================================================================
+
+/**
+ * @brief 1D circular padding layer.
+ *
+ * Pads the last dimension by wrapping values from the opposite end,
+ * treating the input as periodic.
+ *
+ * @code
+ * CircularPad1d pad(2, 1);
+ * // Input [a, b, c, d] -> [c, d, a, b, c, d, a]
+ * @endcode
+ */
+class CircularPad1d : public Module {
+public:
+    CircularPad1d(int64_t padding_left, int64_t padding_right);
+    explicit CircularPad1d(int64_t padding);
+
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    int64_t padding_left_;
+    int64_t padding_right_;
+};
+
+/**
+ * @brief 2D circular padding layer.
+ *
+ * Pads the last two dimensions by wrapping values from the opposite end.
+ */
+class CircularPad2d : public Module {
+public:
+    CircularPad2d(int64_t padding_left, int64_t padding_right,
+                  int64_t padding_top, int64_t padding_bottom);
+    explicit CircularPad2d(int64_t padding);
+
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    int64_t padding_left_;
+    int64_t padding_right_;
+    int64_t padding_top_;
+    int64_t padding_bottom_;
+};
+
+/**
+ * @brief 3D circular padding layer.
+ *
+ * Pads the last three dimensions by wrapping values from the opposite end.
+ */
+class CircularPad3d : public Module {
+public:
+    /**
+     * @param padding Six-element array: (left, right, top, bottom, front, back)
+     */
+    explicit CircularPad3d(std::vector<int64_t> padding);
+
+    /// Symmetric padding convenience constructor
+    explicit CircularPad3d(int64_t padding);
+
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    std::vector<int64_t> padding_;  ///< [left, right, top, bottom, front, back]
 };
 
 } // namespace nn

@@ -125,6 +125,59 @@ auto pad_dim_replicate(const Variable& input, int64_t dim, int64_t pad_before,
     return cat(parts, dim);
 }
 
+/// Helper: pad a single dimension using circular (wrap-around) mode.
+auto pad_dim_circular(const Variable& input, int64_t dim, int64_t pad_before,
+                      int64_t pad_after) -> Variable {
+    if (pad_before == 0 && pad_after == 0) return input;
+
+    if (pad_before < 0 || pad_after < 0) {
+        throw std::invalid_argument(
+            "CircularPad: padding sizes must be non-negative, got (" +
+            std::to_string(pad_before) + ", " + std::to_string(pad_after) + ")");
+    }
+
+    auto shape = input.tensor().shape();
+    int64_t dim_size = shape[dim];
+
+    if (dim_size == 0) {
+        throw std::invalid_argument("CircularPad: cannot pad a zero-size dimension");
+    }
+
+    std::vector<Variable> parts;
+
+    if (pad_before > 0) {
+        // Wrap from end: take last pad_before elements
+        // Handle padding larger than dim_size by repeating
+        int64_t remaining = pad_before;
+        std::vector<Variable> before_parts;
+        while (remaining > 0) {
+            int64_t take = std::min(remaining, dim_size);
+            auto wrapped = slice(input, dim, dim_size - take, dim_size);
+            before_parts.push_back(wrapped);
+            remaining -= take;
+        }
+        // Reverse so that wrapping order is correct
+        for (auto it = before_parts.rbegin(); it != before_parts.rend(); ++it) {
+            parts.push_back(*it);
+        }
+    }
+
+    parts.push_back(input);
+
+    if (pad_after > 0) {
+        // Wrap from beginning: take first pad_after elements
+        int64_t remaining = pad_after;
+        while (remaining > 0) {
+            int64_t take = std::min(remaining, dim_size);
+            auto wrapped = slice(input, dim, 0, take);
+            parts.push_back(wrapped);
+            remaining -= take;
+        }
+    }
+
+    return cat(parts, dim);
+}
+
 } // anonymous namespace
 
 // ============================================================================
@@ -321,6 +374,75 @@ ZeroPad2d::ZeroPad2d(int64_t padding)
 
 auto ZeroPad2d::forward_impl(const Variable& input) -> Variable {
     return impl_.forward_impl(input);
+}
+
+// ============================================================================
+// CircularPad1d
+// ============================================================================
+
+CircularPad1d::CircularPad1d(int64_t padding_left, int64_t padding_right)
+    : padding_left_(padding_left), padding_right_(padding_right) {}
+
+CircularPad1d::CircularPad1d(int64_t padding)
+    : padding_left_(padding), padding_right_(padding) {}
+
+auto CircularPad1d::forward_impl(const Variable& input) -> Variable {
+    if (input.tensor().shape().size() < 2) {
+        throw std::invalid_argument("CircularPad1d: input must have at least 2 dimensions");
+    }
+    int64_t last_dim = static_cast<int64_t>(input.tensor().shape().size()) - 1;
+    return pad_dim_circular(input, last_dim, padding_left_, padding_right_);
+}
+
+// ============================================================================
+// CircularPad2d
+// ============================================================================
+
+CircularPad2d::CircularPad2d(int64_t padding_left, int64_t padding_right,
+                             int64_t padding_top, int64_t padding_bottom)
+    : padding_left_(padding_left), padding_right_(padding_right),
+      padding_top_(padding_top), padding_bottom_(padding_bottom) {}
+
+CircularPad2d::CircularPad2d(int64_t padding)
+    : padding_left_(padding), padding_right_(padding),
+      padding_top_(padding), padding_bottom_(padding) {}
+
+auto CircularPad2d::forward_impl(const Variable& input) -> Variable {
+    if (input.tensor().shape().size() < 3) {
+        throw std::invalid_argument("CircularPad2d: input must have at least 3 dimensions");
+    }
+    auto ndim = static_cast<int64_t>(input.tensor().shape().size());
+    auto result = pad_dim_circular(input, ndim - 1, padding_left_, padding_right_);
+    result = pad_dim_circular(result, ndim - 2, padding_top_, padding_bottom_);
+    return result;
+}
+
+// ============================================================================
+// CircularPad3d
+// ============================================================================
+
+CircularPad3d::CircularPad3d(std::vector<int64_t> padding)
+    : padding_(std::move(padding)) {
+    if (padding_.size() != 6) {
+        throw std::invalid_argument(
+            "CircularPad3d: padding must have 6 elements "
+            "(left, right, top, bottom, front, back), got " +
+            std::to_string(padding_.size()));
+    }
+}
+
+CircularPad3d::CircularPad3d(int64_t padding)
+    : padding_({padding, padding, padding, padding, padding, padding}) {}
+
+auto CircularPad3d::forward_impl(const Variable& input) -> Variable {
+    if (input.tensor().shape().size() < 4) {
+        throw std::invalid_argument("CircularPad3d: input must have at least 4 dimensions");
+    }
+    auto ndim = static_cast<int64_t>(input.tensor().shape().size());
+    auto result = pad_dim_circular(input, ndim - 1, padding_[0], padding_[1]);
+    result = pad_dim_circular(result, ndim - 2, padding_[2], padding_[3]);
+    result = pad_dim_circular(result, ndim - 3, padding_[4], padding_[5]);
+    return result;
 }
 
 } // namespace tenzor::nn
