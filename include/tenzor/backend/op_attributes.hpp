@@ -296,6 +296,9 @@ enum class AttrKey : uint16_t {
     Strides,           // Custom strides (comma-separated list, like Shape)
     StorageOffset,     // Storage offset in elements
 
+    // Generator seed
+    Seed,              // Explicit seed from Generator for reproducible random ops
+
     // Sentinel
     _Count
 };

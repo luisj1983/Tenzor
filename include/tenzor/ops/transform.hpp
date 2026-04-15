@@ -296,6 +296,28 @@ auto as_strided(const Tensor& self, std::span<const int64_t> size,
                 std::span<const int64_t> stride,
                 std::optional<int64_t> storage_offset = std::nullopt) -> Tensor;
 
+/**
+ * @brief View a complex tensor as a real tensor with an extra trailing dimension of size 2.
+ *
+ * Complex64 -> Float32 with shape (..., 2), Complex128 -> Float64 with shape (..., 2).
+ * Zero-copy view sharing the same storage.
+ *
+ * @param input Complex tensor
+ * @return Real-valued view with trailing dimension of 2
+ */
+auto view_as_real(const Tensor& input) -> Tensor;
+
+/**
+ * @brief View a real tensor with trailing dimension 2 as a complex tensor.
+ *
+ * Float32 -> Complex64, Float64 -> Complex128. The last dimension must be 2
+ * and contiguous (stride 1). Zero-copy view sharing the same storage.
+ *
+ * @param input Real-valued tensor with last dimension == 2
+ * @return Complex-valued view with the trailing dimension removed
+ */
+auto view_as_complex(const Tensor& input) -> Tensor;
+
 /** @} */ // end of tensor_transform group
 
 } // namespace tenzor

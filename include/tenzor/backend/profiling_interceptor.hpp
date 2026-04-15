@@ -18,6 +18,7 @@
 
 #include "dispatch_interceptor.hpp"
 #include "../ops/op_id.hpp"
+#include "../autograd/profiler.hpp"
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -135,12 +136,20 @@ inline DispatchInterceptor make_profiling_interceptor() {
             return next(op, inputs, attrs);
         }
 
-        auto start = std::chrono::high_resolution_clock::now();
+        auto start = std::chrono::steady_clock::now();
         auto result = next(op, inputs, attrs);
-        auto end = std::chrono::high_resolution_clock::now();
+        auto end = std::chrono::steady_clock::now();
 
-        OpProfiler::instance().record(op,
-            std::chrono::duration_cast<std::chrono::nanoseconds>(end - start));
+        auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+        OpProfiler::instance().record(op, ns);
+
+        // Record per-invocation trace event when trace mode is active
+        if (AutogradProfiler::instance().is_trace_enabled()) {
+            AutogradProfiler::instance().record_trace(
+                "OpId:" + std::to_string(static_cast<int>(op)),
+                start, ns, ProfilePhase::Forward);
+        }
+
         return result;
     };
 }

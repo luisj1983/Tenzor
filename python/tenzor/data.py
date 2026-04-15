@@ -123,15 +123,47 @@ class IterableDataset(ABC, Generic[T_co]):
 
 
 class WorkerInfo:
-    """Metadata passed to each DataLoader worker."""
+    """Metadata passed to each DataLoader worker.
 
-    __slots__ = ("id", "num_workers", "seed", "dataset")
+    Attributes
+    ----------
+    id : int
+        Index of this worker within the DataLoader (0-based).
+    num_workers : int
+        Total number of workers in this DataLoader.
+    seed : int
+        Per-worker random seed for reproducibility.
+    dataset : Any
+        Reference to the dataset replica in this worker.
+    rank : int
+        Distributed rank of this process (default 0).
+    world_size : int
+        Total number of distributed processes (default 1).
+    """
 
-    def __init__(self, id: int, num_workers: int, seed: int, dataset: Any):
+    __slots__ = ("id", "num_workers", "seed", "dataset", "rank", "world_size")
+
+    def __init__(
+        self,
+        id: int,
+        num_workers: int,
+        seed: int,
+        dataset: Any,
+        rank: int = 0,
+        world_size: int = 1,
+    ):
         self.id = id
         self.num_workers = num_workers
         self.seed = seed
         self.dataset = dataset
+        self.rank = rank
+        self.world_size = world_size
+
+    def __repr__(self) -> str:
+        return (
+            f"WorkerInfo(id={self.id}, num_workers={self.num_workers}, "
+            f"seed={self.seed}, rank={self.rank}, world_size={self.world_size})"
+        )
 
 
 _worker_info: Optional[WorkerInfo] = None
@@ -141,8 +173,44 @@ def get_worker_info() -> Optional[WorkerInfo]:
     """Return the ``WorkerInfo`` for the current DataLoader worker.
 
     Returns ``None`` if called outside a DataLoader worker process.
+
+    When using multi-worker loading with ``IterableDataset``, each worker
+    should call this function to determine its shard of the data.  The
+    ``rank`` and ``world_size`` fields allow further sharding across
+    distributed processes.
+
+    Example
+    -------
+    >>> class MyStream(IterableDataset):
+    ...     def __iter__(self):
+    ...         info = get_worker_info()
+    ...         if info is not None:
+    ...             # Shard across workers and ranks
+    ...             total = info.num_workers * info.world_size
+    ...             shard_id = info.rank * info.num_workers + info.id
+    ...             for i, item in enumerate(self._all_items()):
+    ...                 if i % total == shard_id:
+    ...                     yield item
+    ...         else:
+    ...             yield from self._all_items()
     """
     return _worker_info
+
+
+def set_worker_info(info: Optional[WorkerInfo]) -> None:
+    """Set the ``WorkerInfo`` for the current process/thread.
+
+    This is called internally by DataLoader worker processes and should
+    not normally be called by user code.
+    """
+    global _worker_info
+    _worker_info = info
+
+
+def clear_worker_info() -> None:
+    """Clear the ``WorkerInfo`` for the current process/thread."""
+    global _worker_info
+    _worker_info = None
 
 
 class TensorDataset(Dataset):
@@ -546,11 +614,14 @@ def _worker_loop(
     num_workers: int,
     seed: int,
     worker_init_fn: Optional[Callable],
+    rank: int = 0,
+    world_size: int = 1,
 ):
     """Target function for each DataLoader worker process."""
     global _worker_info
     _worker_info = WorkerInfo(
-        id=worker_id, num_workers=num_workers, seed=seed, dataset=dataset
+        id=worker_id, num_workers=num_workers, seed=seed, dataset=dataset,
+        rank=rank, world_size=world_size,
     )
 
     # Ignore SIGINT in workers — let the main process handle it
@@ -611,6 +682,8 @@ class _MultiProcessLoader:
         persistent_workers: bool,
         timeout: float,
         seed: int,
+        rank: int = 0,
+        world_size: int = 1,
     ):
         self._dataset = dataset
         self._batch_sampler = batch_sampler
@@ -621,6 +694,8 @@ class _MultiProcessLoader:
         self._persistent = persistent_workers
         self._timeout = timeout
         self._seed = seed
+        self._rank = rank
+        self._world_size = world_size
         self._workers: list[mp.Process] = []
         self._index_queues: list[mp.Queue] = []
         self._output_queue: Optional[mp.Queue] = None
@@ -643,6 +718,8 @@ class _MultiProcessLoader:
                     self._num_workers,
                     self._seed,
                     self._worker_init_fn,
+                    self._rank,
+                    self._world_size,
                 ),
                 daemon=True,
             )
@@ -828,6 +905,8 @@ class DataLoader(Generic[T_co]):
         persistent_workers: bool = False,
         timeout: float = 60.0,
         pin_memory: bool = False,
+        rank: int = 0,
+        world_size: int = 1,
     ):
         self.dataset = dataset
         self.collate_fn = collate_fn or default_collate
@@ -837,6 +916,8 @@ class DataLoader(Generic[T_co]):
         self.persistent_workers = persistent_workers
         self.timeout = timeout
         self.pin_memory = pin_memory
+        self.rank = rank
+        self.world_size = world_size
         self._multiprocess_loader: Optional[_MultiProcessLoader] = None
 
         is_iterable = isinstance(dataset, IterableDataset)
@@ -906,6 +987,8 @@ class DataLoader(Generic[T_co]):
                 persistent_workers=self.persistent_workers,
                 timeout=self.timeout,
                 seed=random.randint(0, 2**31),
+                rank=self.rank,
+                world_size=self.world_size,
             )
         return _wrap_pin_memory(iter(self._multiprocess_loader), self.pin_memory)
 
@@ -964,6 +1047,11 @@ def random_split(dataset: Dataset, lengths: Sequence[int],
 
 __all__ = [
     "Dataset",
+    "IterableDataset",
+    "WorkerInfo",
+    "get_worker_info",
+    "set_worker_info",
+    "clear_worker_info",
     "TensorDataset",
     "Subset",
     "ConcatDataset",

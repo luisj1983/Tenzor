@@ -15,6 +15,7 @@
 #include "../core/tensor.hpp"
 #include "../core/dtype.hpp"
 #include "../core/device.hpp"
+#include "../core/generator.hpp"
 #include "../backend/loader_fwd.hpp"
 #include "../backend/backend.hpp"
 
@@ -113,6 +114,11 @@ auto rand(std::vector<int64_t> shape,
          DType dtype = DType::Float32,
          Device device = Device::cpu()) -> Tensor;
 
+/// @brief Create tensor with random uniform values using a specific Generator.
+auto rand(std::vector<int64_t> shape,
+         DType dtype, Device device,
+         Generator& generator) -> Tensor;
+
 /**
  * @brief Create tensor with random normal values N(0, 1).
  *
@@ -125,6 +131,11 @@ auto randn(std::vector<int64_t> shape,
           DType dtype = DType::Float32,
           Device device = Device::cpu()) -> Tensor;
 
+/// @brief Create tensor with random normal values using a specific Generator.
+auto randn(std::vector<int64_t> shape,
+          DType dtype, Device device,
+          Generator& generator) -> Tensor;
+
 /**
  * @brief Create random permutation of integers.
  *
@@ -135,6 +146,9 @@ auto randn(std::vector<int64_t> shape,
  * @return Tensor of shape {n} with permuted indices
  */
 auto randperm(int64_t n, Device device = Device::cpu()) -> Tensor;
+
+/// @brief Create random permutation using a specific Generator.
+auto randperm(int64_t n, Device device, Generator& generator) -> Tensor;
 
 /**
  * @brief Create tensor with random integers.
@@ -156,6 +170,11 @@ auto randint(int64_t low, int64_t high, std::vector<int64_t> shape,
             DType dtype = DType::Int64,
             Device device = Device::cpu()) -> Tensor;
 
+/// @brief Create tensor with random integers using a specific Generator.
+auto randint(int64_t low, int64_t high, std::vector<int64_t> shape,
+            DType dtype, Device device,
+            Generator& generator) -> Tensor;
+
 /**
  * @brief Draw samples from a multinomial distribution.
  *
@@ -165,6 +184,10 @@ auto randint(int64_t low, int64_t high, std::vector<int64_t> shape,
  * @return Int64 tensor of sampled indices
  */
 auto multinomial(const Tensor& input, int64_t num_samples, bool replacement = false) -> Tensor;
+
+/// @brief Draw samples from a multinomial distribution using a specific Generator.
+auto multinomial(const Tensor& input, int64_t num_samples, bool replacement,
+                Generator& generator) -> Tensor;
 
 /**
  * @brief Sample from a Bernoulli distribution.
@@ -177,6 +200,9 @@ auto multinomial(const Tensor& input, int64_t num_samples, bool replacement = fa
  */
 auto bernoulli(const Tensor& probs) -> Tensor;
 
+/// @brief Sample from Bernoulli distribution using a specific Generator.
+auto bernoulli(const Tensor& probs, Generator& generator) -> Tensor;
+
 /**
  * @brief Sample from a normal (Gaussian) distribution with specified mean and std.
  *
@@ -186,6 +212,9 @@ auto bernoulli(const Tensor& probs) -> Tensor;
  */
 auto normal(const Tensor& mean, const Tensor& std) -> Tensor;
 
+/// @brief Sample from normal distribution using a specific Generator.
+auto normal(const Tensor& mean, const Tensor& std, Generator& generator) -> Tensor;
+
 /**
  * @brief Sample from a Poisson distribution with the given rates.
  *
@@ -194,6 +223,9 @@ auto normal(const Tensor& mean, const Tensor& std) -> Tensor;
  */
 auto poisson(const Tensor& rates) -> Tensor;
 
+/// @brief Sample from Poisson distribution using a specific Generator.
+auto poisson(const Tensor& rates, Generator& generator) -> Tensor;
+
 /**
  * @brief Sample from an exponential distribution with the given rate.
  *
@@ -201,6 +233,9 @@ auto poisson(const Tensor& rates) -> Tensor;
  * @return Tensor with same shape, values sampled from Exponential(rate)
  */
 auto exponential(const Tensor& rate) -> Tensor;
+
+/// @brief Sample from exponential distribution using a specific Generator.
+auto exponential(const Tensor& rate, Generator& generator) -> Tensor;
 
 /**
  * @brief Create 1D tensor with evenly spaced values.

@@ -36,6 +36,19 @@ public:
     virtual auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor = 0;
 
     /**
+     * @brief Draw samples using a specific Generator for reproducibility.
+     *
+     * Default implementation sets the generator as active, calls sample(),
+     * then clears it. Subclasses can override for direct generator usage.
+     */
+    virtual auto sample(std::vector<int64_t> sample_shape, Generator& generator) -> Tensor {
+        generator_ = &generator;
+        auto result = sample(std::move(sample_shape));
+        generator_ = nullptr;
+        return result;
+    }
+
+    /**
      * @brief Draw reparameterized samples (differentiable through the sampler).
      *
      * For reparameterizable distributions (Normal, Uniform, Exponential,
@@ -50,6 +63,14 @@ public:
      */
     virtual auto rsample(std::vector<int64_t> sample_shape = {}) -> Tensor {
         return sample(std::move(sample_shape));
+    }
+
+    /** @brief Reparameterized sample with a specific Generator. */
+    virtual auto rsample(std::vector<int64_t> sample_shape, Generator& generator) -> Tensor {
+        generator_ = &generator;
+        auto result = rsample(std::move(sample_shape));
+        generator_ = nullptr;
+        return result;
     }
 
     /** @brief Compute log probability of a value under this distribution */
@@ -69,6 +90,10 @@ public:
     virtual auto variance() -> Tensor {
         throw std::runtime_error("variance() not implemented for this distribution");
     }
+
+protected:
+    /** @brief Active generator (set during Generator-aware sample/rsample calls) */
+    Generator* generator_{nullptr};
 };
 
 // ============================================================================

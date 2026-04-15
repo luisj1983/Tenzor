@@ -37,6 +37,10 @@
 #include <tenzor/nn/serialize.hpp>
 #include <tenzor/nn/layers/sync_batchnorm.hpp>
 #include <tenzor/distributions/distribution.hpp>
+#include <tenzor/distributions/transforms.hpp>
+#include <tenzor/distributions/transformed.hpp>
+#include <tenzor/distributions/independent.hpp>
+#include <tenzor/distributions/mixture.hpp>
 #include "../numpy_interop.hpp"
 
 namespace py = pybind11;
@@ -2345,12 +2349,16 @@ Returns:
          py::arg("dtype") = tenzor::DType::Float32,
          py::arg("device") = tenzor::Device::cpu());
 
-    m.def("randn", &tenzor::randn, "Create tensor with random normal values",
+    m.def("randn",
+         static_cast<tenzor::Tensor(*)(std::vector<int64_t>, tenzor::DType, tenzor::Device)>(&tenzor::randn),
+         "Create tensor with random normal values",
          py::arg("shape"),
          py::arg("dtype") = tenzor::DType::Float32,
          py::arg("device") = tenzor::Device::cpu());
 
-    m.def("randint", &tenzor::randint, "Create tensor with random integers",
+    m.def("randint",
+         static_cast<tenzor::Tensor(*)(int64_t, int64_t, std::vector<int64_t>, tenzor::DType, tenzor::Device)>(&tenzor::randint),
+         "Create tensor with random integers",
          py::arg("low"),
          py::arg("high"),
          py::arg("shape"),
@@ -2431,8 +2439,10 @@ Returns:
          py::arg("dtype") = tenzor::DType::Float32,
          py::arg("device") = tenzor::Device::cpu());
 
-    m.def("randperm", &tenzor::randperm, "Create random permutation of integers [0, n)",
-          py::arg("n"), py::arg("device") = tenzor::Device::cpu());
+    m.def("randperm",
+         static_cast<tenzor::Tensor(*)(int64_t, tenzor::Device)>(&tenzor::randperm),
+         "Create random permutation of integers [0, n)",
+         py::arg("n"), py::arg("device") = tenzor::Device::cpu());
 
     // tensor() - create tensor from Python data (lists, nested lists, scalars)
     m.def("tensor", [](py::object data, std::optional<tenzor::DType> dtype, tenzor::Device device) -> tenzor::Tensor {
@@ -2519,6 +2529,28 @@ Returns:
     m.def("manual_seed", &tenzor::manual_seed,
           "Set the random seed for reproducibility",
           py::arg("seed"));
+
+    // Generator class
+    py::class_<tenzor::Generator>(m, "Generator")
+        .def(py::init<tenzor::Device>(), py::arg("device") = tenzor::Device::cpu())
+        .def("manual_seed", &tenzor::Generator::manual_seed, py::arg("seed"),
+             py::return_value_policy::reference_internal)
+        .def("seed", &tenzor::Generator::seed)
+        .def("initial_seed", &tenzor::Generator::initial_seed)
+        .def("device", &tenzor::Generator::device)
+        .def("next_seed", &tenzor::Generator::next_seed);
+
+    // Generator-aware random ops
+    m.def("rand_with_generator",
+         static_cast<tenzor::Tensor(*)(std::vector<int64_t>, tenzor::DType, tenzor::Device, tenzor::Generator&)>(&tenzor::rand),
+         "Create tensor with random uniform values using a Generator",
+         py::arg("shape"), py::arg("dtype") = tenzor::DType::Float32,
+         py::arg("device") = tenzor::Device::cpu(), py::arg("generator"));
+    m.def("randn_with_generator",
+         static_cast<tenzor::Tensor(*)(std::vector<int64_t>, tenzor::DType, tenzor::Device, tenzor::Generator&)>(&tenzor::randn),
+         "Create tensor with random normal values using a Generator",
+         py::arg("shape"), py::arg("dtype") = tenzor::DType::Float32,
+         py::arg("device") = tenzor::Device::cpu(), py::arg("generator"));
 
     // save/load top-level functions (like torch.save / torch.load)
     m.def("save", [](py::object obj, const std::string& path) {
@@ -3234,6 +3266,15 @@ Returns:
          return tenzor::split_with_sizes(input, split_sizes, dim);
          }, "Split tensor into chunks with specified sizes",
          py::arg("input"), py::arg("split_sizes"), py::arg("dim") = 0,
+         py::call_guard<py::gil_scoped_release>());
+
+    m.def("view_as_real", &tenzor::view_as_real,
+         "View a complex tensor as real with trailing dim 2",
+         py::arg("input"),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("view_as_complex", &tenzor::view_as_complex,
+         "View a real tensor with trailing dim 2 as complex",
+         py::arg("input"),
          py::call_guard<py::gil_scoped_release>());
 
     // Indexing operations
@@ -4077,12 +4118,17 @@ Returns:
     // ========================================================================
     auto dist_m = m.def_submodule("distributions", "Probability distributions");
 
-    py::class_<tenzor::distributions::Distribution>(dist_m, "Distribution")
-        .def("sample", &tenzor::distributions::Distribution::sample,
-             py::arg("sample_shape") = std::vector<int64_t>{},
+    py::class_<tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::Distribution>>(dist_m, "Distribution")
+        .def("sample", [](tenzor::distributions::Distribution& self,
+                           std::vector<int64_t> sample_shape) {
+            return self.sample(std::move(sample_shape));
+        }, py::arg("sample_shape") = std::vector<int64_t>{},
              "Draw samples from the distribution")
-        .def("rsample", &tenzor::distributions::Distribution::rsample,
-             py::arg("sample_shape") = std::vector<int64_t>{},
+        .def("rsample", [](tenzor::distributions::Distribution& self,
+                            std::vector<int64_t> sample_shape) {
+            return self.rsample(std::move(sample_shape));
+        }, py::arg("sample_shape") = std::vector<int64_t>{},
              "Draw reparameterized samples")
         .def("log_prob", &tenzor::distributions::Distribution::log_prob,
              py::arg("value"), "Compute log probability of a value")
@@ -4093,89 +4139,128 @@ Returns:
         .def("variance", &tenzor::distributions::Distribution::variance,
              "Distribution variance");
 
-    py::class_<tenzor::distributions::Normal, tenzor::distributions::Distribution>(dist_m, "Normal")
+    py::class_<tenzor::distributions::Normal,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::Normal>>(dist_m, "Normal")
         .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
              py::arg("loc"), py::arg("scale"),
              "Normal distribution parameterized by mean (loc) and std (scale)");
 
-    py::class_<tenzor::distributions::Uniform, tenzor::distributions::Distribution>(dist_m, "Uniform")
+    py::class_<tenzor::distributions::Uniform,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::Uniform>>(dist_m, "Uniform")
         .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
              py::arg("low"), py::arg("high"),
              "Uniform distribution on [low, high)");
 
-    py::class_<tenzor::distributions::Categorical, tenzor::distributions::Distribution>(dist_m, "Categorical")
+    py::class_<tenzor::distributions::Categorical,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::Categorical>>(dist_m, "Categorical")
         .def(py::init<tenzor::Tensor>(), py::arg("probs"),
-             "Categorical distribution parameterized by probabilities");
+             "Categorical distribution parameterized by probabilities")
+        .def_static("from_logits", &tenzor::distributions::Categorical::from_logits,
+                     py::arg("logits"),
+                     "Create Categorical from unnormalized log-probabilities");
 
-    py::class_<tenzor::distributions::Exponential, tenzor::distributions::Distribution>(dist_m, "Exponential")
+    py::class_<tenzor::distributions::Exponential,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::Exponential>>(dist_m, "Exponential")
         .def(py::init<tenzor::Tensor>(), py::arg("rate"),
              "Exponential distribution parameterized by rate (lambda)");
 
-    py::class_<tenzor::distributions::Laplace, tenzor::distributions::Distribution>(dist_m, "Laplace")
+    py::class_<tenzor::distributions::Laplace,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::Laplace>>(dist_m, "Laplace")
         .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
              py::arg("loc"), py::arg("scale"),
              "Laplace distribution parameterized by location and scale");
 
-    py::class_<tenzor::distributions::BernoulliDist, tenzor::distributions::Distribution>(dist_m, "Bernoulli")
+    py::class_<tenzor::distributions::BernoulliDist,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::BernoulliDist>>(dist_m, "Bernoulli")
         .def(py::init<tenzor::Tensor>(), py::arg("probs"),
              "Bernoulli distribution parameterized by probability");
 
-    py::class_<tenzor::distributions::Gamma, tenzor::distributions::Distribution>(dist_m, "Gamma")
+    py::class_<tenzor::distributions::Gamma,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::Gamma>>(dist_m, "Gamma")
         .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
              py::arg("concentration"), py::arg("rate"),
              "Gamma distribution (shape-rate parameterization)");
 
-    py::class_<tenzor::distributions::Beta, tenzor::distributions::Distribution>(dist_m, "Beta")
+    py::class_<tenzor::distributions::Beta,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::Beta>>(dist_m, "Beta")
         .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
              py::arg("concentration1"), py::arg("concentration0"),
              "Beta distribution on (0, 1)");
 
-    py::class_<tenzor::distributions::Dirichlet, tenzor::distributions::Distribution>(dist_m, "Dirichlet")
+    py::class_<tenzor::distributions::Dirichlet,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::Dirichlet>>(dist_m, "Dirichlet")
         .def(py::init<tenzor::Tensor>(), py::arg("concentration"),
              "Dirichlet distribution over the simplex");
 
-    py::class_<tenzor::distributions::StudentT, tenzor::distributions::Distribution>(dist_m, "StudentT")
+    py::class_<tenzor::distributions::StudentT,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::StudentT>>(dist_m, "StudentT")
         .def(py::init<tenzor::Tensor, tenzor::Tensor, tenzor::Tensor>(),
              py::arg("df"), py::arg("loc"), py::arg("scale"),
              "Student-t distribution")
         .def(py::init<tenzor::Tensor>(), py::arg("df"),
              "Student-t distribution with loc=0, scale=1");
 
-    py::class_<tenzor::distributions::Poisson, tenzor::distributions::Distribution>(dist_m, "Poisson")
+    py::class_<tenzor::distributions::Poisson,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::Poisson>>(dist_m, "Poisson")
         .def(py::init<tenzor::Tensor>(), py::arg("rate"),
              "Poisson distribution parameterized by rate (lambda)");
 
-    py::class_<tenzor::distributions::MultivariateNormal, tenzor::distributions::Distribution>(dist_m, "MultivariateNormal")
+    py::class_<tenzor::distributions::MultivariateNormal,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::MultivariateNormal>>(dist_m, "MultivariateNormal")
         .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
              py::arg("loc"), py::arg("covariance_matrix"),
              "Multivariate Normal distribution");
 
     // New distributions (Phase 7)
 
-    py::class_<tenzor::distributions::Binomial, tenzor::distributions::Distribution>(dist_m, "Binomial")
+    py::class_<tenzor::distributions::Binomial,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::Binomial>>(dist_m, "Binomial")
         .def(py::init<int64_t, tenzor::Tensor>(),
              py::arg("total_count"), py::arg("probs"),
              "Binomial distribution: number of successes in n independent Bernoulli trials");
 
-    py::class_<tenzor::distributions::LogNormal, tenzor::distributions::Distribution>(dist_m, "LogNormal")
+    py::class_<tenzor::distributions::LogNormal,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::LogNormal>>(dist_m, "LogNormal")
         .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
              py::arg("loc"), py::arg("scale"),
              "Log-Normal distribution: exp(Normal(loc, scale))");
 
-    py::class_<tenzor::distributions::Cauchy, tenzor::distributions::Distribution>(dist_m, "Cauchy")
+    py::class_<tenzor::distributions::Cauchy,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::Cauchy>>(dist_m, "Cauchy")
         .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
              py::arg("loc"), py::arg("scale"),
              "Cauchy distribution (heavy-tailed, no defined mean/variance)");
 
-    py::class_<tenzor::distributions::Chi2, tenzor::distributions::Distribution>(dist_m, "Chi2")
+    py::class_<tenzor::distributions::Chi2,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::Chi2>>(dist_m, "Chi2")
         .def(py::init<tenzor::Tensor>(), py::arg("df"),
              "Chi-squared distribution with df degrees of freedom");
 
-    py::class_<tenzor::distributions::Geometric, tenzor::distributions::Distribution>(dist_m, "Geometric")
+    py::class_<tenzor::distributions::Geometric,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::Geometric>>(dist_m, "Geometric")
         .def(py::init<tenzor::Tensor>(), py::arg("probs"),
              "Geometric distribution: trials until first success (1-indexed)");
 
-    py::class_<tenzor::distributions::Gumbel, tenzor::distributions::Distribution>(dist_m, "Gumbel")
+    py::class_<tenzor::distributions::Gumbel,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::Gumbel>>(dist_m, "Gumbel")
         .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
              py::arg("loc"), py::arg("scale"),
              "Gumbel (Type-I extreme value) distribution");
@@ -4183,6 +4268,94 @@ Returns:
     dist_m.def("kl_divergence", &tenzor::distributions::kl_divergence,
                py::arg("p"), py::arg("q"),
                "Compute KL(p || q) for supported distribution pairs");
+
+    // --- Transform base class ---
+    py::class_<tenzor::distributions::Transform,
+               std::shared_ptr<tenzor::distributions::Transform>>(dist_m, "Transform",
+        "Abstract base class for invertible transforms")
+        .def("__call__", &tenzor::distributions::Transform::call, py::arg("x"),
+             "Apply the transform: y = f(x)")
+        .def("inv", &tenzor::distributions::Transform::inv, py::arg("y"),
+             "Apply the inverse: x = f^{-1}(y)")
+        .def("log_abs_det_jacobian", &tenzor::distributions::Transform::log_abs_det_jacobian,
+             py::arg("x"), py::arg("y"),
+             "Log absolute determinant of the Jacobian");
+
+    // --- Concrete transforms ---
+    py::class_<tenzor::distributions::ExpTransform,
+               tenzor::distributions::Transform,
+               std::shared_ptr<tenzor::distributions::ExpTransform>>(dist_m, "ExpTransform",
+        "Exponential transform: y = exp(x)")
+        .def(py::init<>());
+
+    py::class_<tenzor::distributions::AffineTransform,
+               tenzor::distributions::Transform,
+               std::shared_ptr<tenzor::distributions::AffineTransform>>(dist_m, "AffineTransform",
+        "Affine transform: y = loc + scale * x")
+        .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
+             py::arg("loc"), py::arg("scale"));
+
+    py::class_<tenzor::distributions::SigmoidTransform,
+               tenzor::distributions::Transform,
+               std::shared_ptr<tenzor::distributions::SigmoidTransform>>(dist_m, "SigmoidTransform",
+        "Sigmoid transform: y = 1 / (1 + exp(-x))")
+        .def(py::init<>());
+
+    py::class_<tenzor::distributions::TanhTransform,
+               tenzor::distributions::Transform,
+               std::shared_ptr<tenzor::distributions::TanhTransform>>(dist_m, "TanhTransform",
+        "Tanh transform: y = tanh(x)")
+        .def(py::init<>());
+
+    py::class_<tenzor::distributions::SoftmaxTransform,
+               tenzor::distributions::Transform,
+               std::shared_ptr<tenzor::distributions::SoftmaxTransform>>(dist_m, "SoftmaxTransform",
+        "Softmax transform along a dimension")
+        .def(py::init<int64_t>(), py::arg("dim") = -1);
+
+    py::class_<tenzor::distributions::ComposeTransform,
+               tenzor::distributions::Transform,
+               std::shared_ptr<tenzor::distributions::ComposeTransform>>(dist_m, "ComposeTransform",
+        "Composition of transforms: y = f_n(f_{n-1}(...f_1(x)))")
+        .def(py::init<std::vector<std::shared_ptr<tenzor::distributions::Transform>>>(),
+             py::arg("transforms"));
+
+    // --- TransformedDistribution ---
+    py::class_<tenzor::distributions::TransformedDistribution,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::TransformedDistribution>>(dist_m, "TransformedDistribution",
+        "Distribution formed by applying transforms to a base distribution")
+        .def(py::init<std::shared_ptr<tenzor::distributions::Distribution>,
+                       std::vector<std::shared_ptr<tenzor::distributions::Transform>>>(),
+             py::arg("base_distribution"), py::arg("transforms"),
+             "Create a transformed distribution from a base and a list of transforms");
+
+    // --- Independent ---
+    py::class_<tenzor::distributions::Independent,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::Independent>>(dist_m, "Independent",
+        "Reinterprets trailing batch dimensions as event dimensions")
+        .def(py::init<std::shared_ptr<tenzor::distributions::Distribution>, int64_t>(),
+             py::arg("base_distribution"), py::arg("reinterpreted_batch_ndims"),
+             "Create Independent wrapper around a base distribution")
+        .def_property_readonly("reinterpreted_batch_ndims",
+             &tenzor::distributions::Independent::reinterpreted_batch_ndims);
+
+    // --- MixtureSameFamily ---
+    py::class_<tenzor::distributions::MixtureSameFamily,
+               tenzor::distributions::Distribution,
+               std::shared_ptr<tenzor::distributions::MixtureSameFamily>>(dist_m, "MixtureSameFamily",
+        "Mixture model where all components are from the same distribution family")
+        .def(py::init<std::shared_ptr<tenzor::distributions::Distribution>,
+                       std::shared_ptr<tenzor::distributions::Distribution>,
+                       tenzor::Tensor>(),
+             py::arg("mixture_distribution"), py::arg("component_distribution"),
+             py::arg("mixture_logits"),
+             "Create mixture from Categorical, component distribution, and log-weights")
+        .def(py::init<const tenzor::Tensor&,
+                       std::shared_ptr<tenzor::distributions::Distribution>>(),
+             py::arg("weights"), py::arg("component_distribution"),
+             "Create mixture from unnormalized weights and component distribution");
 
 
 } // register_core

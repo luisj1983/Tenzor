@@ -1,4 +1,5 @@
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/core/generator.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/backend/dispatch.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
@@ -947,6 +948,212 @@ auto exponential(const Tensor& rate) -> Tensor {
     auto r = rate.contiguous();
     std::array<Tensor, 1> inputs = {r};
     return dispatch<OpId::ExponentialSample>(inputs)[0];
+}
+
+// ============================================================================
+// Generator-aware overloads
+// ============================================================================
+
+auto rand(std::vector<int64_t> shape, DType dtype, Device device,
+         Generator& generator) -> Tensor {
+    if (device.type != Device::Type::CPU) {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Shape, shape_to_string(shape));
+        attrs.set(AttrKey::Dtype, dtype_to_string(dtype));
+        attrs.set(AttrKey::Device, static_cast<int64_t>(device.index));
+        attrs.set(AttrKey::Seed, static_cast<int64_t>(generator.next_seed()));
+        return dispatch_to_device(OpId::Rand, device.type, {}, attrs)[0];
+    }
+
+    auto tensor = Tensor::empty_uninitialized(std::move(shape), dtype, device);
+    if (!tensor.impl() || !tensor.storage()) return tensor;
+
+    size_t numel = tensor.numel();
+    void* data = tensor.storage()->data();
+    auto& eng = generator.engine();
+
+    switch (dtype) {
+        case DType::Float32: {
+            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+            auto* ptr = static_cast<float*>(data);
+            for (size_t i = 0; i < numel; ++i) ptr[i] = dist(eng);
+            break;
+        }
+        case DType::Float64: {
+            std::uniform_real_distribution<double> dist(0.0, 1.0);
+            auto* ptr = static_cast<double*>(data);
+            for (size_t i = 0; i < numel; ++i) ptr[i] = dist(eng);
+            break;
+        }
+        case DType::Float16: {
+            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+            auto* ptr = static_cast<Float16*>(data);
+            for (size_t i = 0; i < numel; ++i) ptr[i] = Float16(dist(eng));
+            break;
+        }
+        case DType::BFloat16: {
+            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+            auto* ptr = static_cast<BFloat16*>(data);
+            for (size_t i = 0; i < numel; ++i) ptr[i] = BFloat16(dist(eng));
+            break;
+        }
+        default:
+            throw std::runtime_error("Unsupported dtype for rand() with Generator");
+    }
+    return tensor;
+}
+
+auto randn(std::vector<int64_t> shape, DType dtype, Device device,
+          Generator& generator) -> Tensor {
+    if (device.type != Device::Type::CPU) {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Shape, shape_to_string(shape));
+        attrs.set(AttrKey::Dtype, dtype_to_string(dtype));
+        attrs.set(AttrKey::Device, static_cast<int64_t>(device.index));
+        attrs.set(AttrKey::Seed, static_cast<int64_t>(generator.next_seed()));
+        return dispatch_to_device(OpId::Randn, device.type, {}, attrs)[0];
+    }
+
+    auto tensor = Tensor::empty_uninitialized(std::move(shape), dtype, device);
+    if (!tensor.impl() || !tensor.storage()) return tensor;
+
+    size_t numel = tensor.numel();
+    void* data = tensor.storage()->data();
+    auto& eng = generator.engine();
+
+    switch (dtype) {
+        case DType::Float32: {
+            std::normal_distribution<float> dist(0.0f, 1.0f);
+            auto* ptr = static_cast<float*>(data);
+            for (size_t i = 0; i < numel; ++i) ptr[i] = dist(eng);
+            break;
+        }
+        case DType::Float64: {
+            std::normal_distribution<double> dist(0.0, 1.0);
+            auto* ptr = static_cast<double*>(data);
+            for (size_t i = 0; i < numel; ++i) ptr[i] = dist(eng);
+            break;
+        }
+        case DType::Float16: {
+            std::normal_distribution<float> dist(0.0f, 1.0f);
+            auto* ptr = static_cast<Float16*>(data);
+            for (size_t i = 0; i < numel; ++i) ptr[i] = Float16(dist(eng));
+            break;
+        }
+        case DType::BFloat16: {
+            std::normal_distribution<float> dist(0.0f, 1.0f);
+            auto* ptr = static_cast<BFloat16*>(data);
+            for (size_t i = 0; i < numel; ++i) ptr[i] = BFloat16(dist(eng));
+            break;
+        }
+        default:
+            throw std::runtime_error("Unsupported dtype for randn() with Generator");
+    }
+    return tensor;
+}
+
+auto randint(int64_t low, int64_t high, std::vector<int64_t> shape,
+            DType dtype, Device device, Generator& generator) -> Tensor {
+    if (device.type != Device::Type::CPU) {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Shape, shape_to_string(shape));
+        attrs.set(AttrKey::Dtype, dtype_to_string(dtype));
+        attrs.set(AttrKey::Device, static_cast<int64_t>(device.index));
+        attrs.set(AttrKey::Low, low);
+        attrs.set(AttrKey::High, high);
+        attrs.set(AttrKey::Seed, static_cast<int64_t>(generator.next_seed()));
+        return dispatch_to_device(OpId::Randint, device.type, {}, attrs)[0];
+    }
+
+    auto tensor = Tensor::empty_uninitialized(std::move(shape), dtype, device);
+    if (!tensor.impl() || !tensor.storage()) return tensor;
+
+    size_t numel = tensor.numel();
+    void* data = tensor.storage()->data();
+    auto& eng = generator.engine();
+    std::uniform_int_distribution<int64_t> dist(low, high - 1);
+
+    switch (dtype) {
+        case DType::Int32: {
+            auto* ptr = static_cast<int32_t*>(data);
+            for (size_t i = 0; i < numel; ++i) ptr[i] = static_cast<int32_t>(dist(eng));
+            break;
+        }
+        case DType::Int64: {
+            auto* ptr = static_cast<int64_t*>(data);
+            for (size_t i = 0; i < numel; ++i) ptr[i] = dist(eng);
+            break;
+        }
+        default:
+            throw std::runtime_error("Unsupported dtype for randint() with Generator");
+    }
+    return tensor;
+}
+
+auto multinomial(const Tensor& input, int64_t num_samples, bool replacement,
+                Generator& generator) -> Tensor {
+    if (input.ndim() < 1 || input.ndim() > 2) {
+        throw std::invalid_argument("multinomial: input must be 1D or 2D");
+    }
+    if (num_samples <= 0) {
+        throw std::invalid_argument("multinomial: num_samples must be positive");
+    }
+
+    auto inp = input.contiguous();
+    std::array<Tensor, 1> inputs = {inp};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::NumSamples, num_samples);
+    attrs.set(AttrKey::Replacement, replacement);
+    attrs.set(AttrKey::Seed, static_cast<int64_t>(generator.next_seed()));
+    return dispatch<OpId::Multinomial>(inputs, attrs)[0];
+}
+
+auto bernoulli(const Tensor& probs, Generator& generator) -> Tensor {
+    auto inp = probs.contiguous();
+    std::array<Tensor, 1> inputs = {inp};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Seed, static_cast<int64_t>(generator.next_seed()));
+    return dispatch<OpId::Bernoulli>(inputs, attrs)[0];
+}
+
+auto normal(const Tensor& mean, const Tensor& std, Generator& generator) -> Tensor {
+    auto m = mean.contiguous();
+    auto s = std.contiguous();
+    std::array<Tensor, 2> inputs = {m, s};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Seed, static_cast<int64_t>(generator.next_seed()));
+    return dispatch<OpId::NormalSample>(inputs, attrs)[0];
+}
+
+auto poisson(const Tensor& rates, Generator& generator) -> Tensor {
+    auto inp = rates.contiguous();
+    std::array<Tensor, 1> inputs = {inp};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Seed, static_cast<int64_t>(generator.next_seed()));
+    return dispatch<OpId::PoissonSample>(inputs, attrs)[0];
+}
+
+auto exponential(const Tensor& rate, Generator& generator) -> Tensor {
+    auto r = rate.contiguous();
+    std::array<Tensor, 1> inputs = {r};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Seed, static_cast<int64_t>(generator.next_seed()));
+    return dispatch<OpId::ExponentialSample>(inputs, attrs)[0];
+}
+
+auto randperm(int64_t n, Device device, Generator& generator) -> Tensor {
+    // Generate sequential tensor then shuffle with Generator's engine
+    auto result = tenzor::arange(0.0, static_cast<double>(n), 1.0, DType::Int64, device);
+    if (device.type == Device::Type::CPU && n > 1) {
+        auto& eng = generator.engine();
+        auto* data = result.data<int64_t>();
+        for (int64_t i = n - 1; i > 0; --i) {
+            std::uniform_int_distribution<int64_t> dist(0, i);
+            int64_t j = dist(eng);
+            std::swap(data[i], data[j]);
+        }
+    }
+    return result;
 }
 
 auto logspace(float start, float end, int64_t steps, double base,

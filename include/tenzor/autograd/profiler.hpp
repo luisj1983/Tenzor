@@ -24,6 +24,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -49,6 +50,20 @@ struct AutogradProfile {
 using BackwardProfile = AutogradProfile;
 
 /**
+ * @brief A single trace event for Chrome Trace Event Format export.
+ *
+ * Captures per-invocation timing (as opposed to AutogradProfile which
+ * aggregates). Only recorded when trace mode is active.
+ */
+struct TraceEvent {
+    std::string name;
+    ProfilePhase phase{ProfilePhase::Forward};
+    std::chrono::steady_clock::time_point start;
+    std::chrono::nanoseconds duration{0};
+    uint32_t thread_id{0};
+};
+
+/**
  * @brief Singleton profiler for autograd backward pass timing.
  *
  * When enabled, records wall-clock time for each Function::backward()
@@ -68,18 +83,34 @@ public:
     /// Enable profiling. Subsequent backward() calls will be timed.
     auto enable() -> void { enabled_.store(true, std::memory_order_release); }
 
-    /// Disable profiling.
-    auto disable() -> void { enabled_.store(false, std::memory_order_release); }
+    /// Enable trace mode. When active, individual TraceEvents are recorded
+    /// in addition to the aggregate profiles. Also enables profiling.
+    auto enable_trace() -> void {
+        trace_enabled_.store(true, std::memory_order_release);
+        enable();
+    }
+
+    /// Disable profiling (also disables trace mode).
+    auto disable() -> void {
+        enabled_.store(false, std::memory_order_release);
+        trace_enabled_.store(false, std::memory_order_release);
+    }
 
     /// Check if profiling is enabled (lock-free).
     [[nodiscard]] auto is_enabled() const noexcept -> bool {
         return enabled_.load(std::memory_order_acquire);
     }
 
-    /// Clear all recorded data.
+    /// Check if trace mode is enabled (lock-free).
+    [[nodiscard]] auto is_trace_enabled() const noexcept -> bool {
+        return trace_enabled_.load(std::memory_order_acquire);
+    }
+
+    /// Clear all recorded data (aggregate profiles and trace events).
     auto reset() -> void {
         std::lock_guard lock(mutex_);
         data_.clear();
+        trace_events_.clear();
     }
 
     /// Record an operation execution (backward-compatible: defaults to Backward phase).
@@ -99,6 +130,22 @@ public:
         }
         entry.total_time += elapsed;
         entry.call_count++;
+    }
+
+    /// Record a trace event (individual invocation). Only called when trace mode is active.
+    auto record_trace(const std::string& name,
+                      std::chrono::steady_clock::time_point start,
+                      std::chrono::nanoseconds duration,
+                      ProfilePhase phase) -> void {
+        TraceEvent evt;
+        evt.name = name;
+        evt.phase = phase;
+        evt.start = start;
+        evt.duration = duration;
+        evt.thread_id = static_cast<uint32_t>(
+            std::hash<std::thread::id>{}(std::this_thread::get_id()));
+        std::lock_guard lock(mutex_);
+        trace_events_.push_back(std::move(evt));
     }
 
     /// Get all recorded profiles, sorted by total time descending.
@@ -150,11 +197,29 @@ public:
         return out;
     }
 
+    /// Get a copy of all recorded trace events.
+    [[nodiscard]] auto trace_events() const -> std::vector<TraceEvent> {
+        std::lock_guard lock(mutex_);
+        return trace_events_;
+    }
+
+    /**
+     * @brief Export recorded trace events to Chrome Trace Event Format JSON.
+     *
+     * Writes a JSON file compatible with chrome://tracing and Perfetto.
+     * All timestamps are relative to the earliest event.
+     *
+     * @param path  Output file path (e.g. "trace.json").
+     */
+    auto export_chrome_trace(const std::string& path) const -> void;
+
 private:
     AutogradProfiler() = default;
     std::atomic<bool> enabled_{false};
+    std::atomic<bool> trace_enabled_{false};
     mutable std::mutex mutex_;
     std::unordered_map<std::string, AutogradProfile> data_;
+    std::vector<TraceEvent> trace_events_;
 };
 
 /**
@@ -170,8 +235,12 @@ public:
 
     ~BackwardTimer() {
         auto elapsed = std::chrono::steady_clock::now() - start_;
-        AutogradProfiler::instance().record(
-            name_, std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed));
+        auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed);
+        auto& prof = AutogradProfiler::instance();
+        prof.record(name_, ns);
+        if (prof.is_trace_enabled()) {
+            prof.record_trace(name_, start_, ns, ProfilePhase::Backward);
+        }
     }
 
     BackwardTimer(const BackwardTimer&) = delete;
@@ -195,9 +264,12 @@ public:
 
     ~ForwardTimer() {
         auto elapsed = std::chrono::steady_clock::now() - start_;
-        AutogradProfiler::instance().record(
-            name_, std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed),
-            ProfilePhase::Forward);
+        auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed);
+        auto& prof = AutogradProfiler::instance();
+        prof.record(name_, ns, ProfilePhase::Forward);
+        if (prof.is_trace_enabled()) {
+            prof.record_trace(name_, start_, ns, ProfilePhase::Forward);
+        }
     }
 
     ForwardTimer(const ForwardTimer&) = delete;

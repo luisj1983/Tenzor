@@ -15,6 +15,7 @@ set(TENZOR_CORE_SOURCES
     core/pinned_allocator.cpp
     core/offload_engine.cpp
     core/device_guard.cpp
+    core/generator.cpp
     backend/backend.cpp
     backend/loader.cpp
     backend/registry.cpp
@@ -69,6 +70,7 @@ set(TENZOR_CORE_SOURCES
     autograd/jvp_rules.cpp
     autograd/functional.cpp
     autograd/vmap.cpp
+    autograd/chrome_trace.cpp
     nn/module.cpp
     nn/functional.cpp
     nn/serialize.cpp
@@ -156,6 +158,7 @@ set(TENZOR_CORE_SOURCES
     quantization/quantize_api.cpp
     quantization/module_conversion.cpp
     utils/threading/threadpool.cpp
+    data/dataset.cpp
     data/dataloader.cpp
     data/sampler.cpp
     data/transforms.cpp
@@ -188,6 +191,7 @@ set(TENZOR_CORE_SOURCES
     utils/benchmark.cpp
     utils/tensorboard.cpp
     utils/memory_profiler.cpp
+    utils/monitor.cpp
     backends/cpu/kernels/quantization/quantized_linear.cpp
     backends/cpu/kernels/quantization/quantized_conv2d.cpp
     onnx/exporter.cpp
@@ -239,6 +243,7 @@ set(TENZOR_CORE_SOURCES
     nested/nested_ops.cpp
     autograd/nested_autograd_ops.cpp
     lazy/lazy_tensor.cpp
+    export/export.cpp
 )
 
 # Create core library

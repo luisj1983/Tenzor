@@ -143,6 +143,16 @@ namespace oneapi {
     auto normal_sample_kernel(const Tensor& mean, const Tensor& stddev, sycl::queue& queue) -> Tensor;
     auto exponential_sample_kernel(const Tensor& rate, sycl::queue& queue) -> Tensor;
 
+    // Standalone SYCL sparse ops (no oneMKL dependency)
+    auto spgemm_standalone_sycl(std::span<const Tensor> inputs, const OpAttributes& attrs,
+                                sycl::queue& queue) -> std::vector<Tensor>;
+    auto sparse_trsv_standalone_sycl(const Tensor& crow, const Tensor& col_idx, const Tensor& vals,
+                                     const Tensor& b, int64_t N, bool upper,
+                                     sycl::queue& queue) -> Tensor;
+    auto sparse_trsm_standalone_sycl(const Tensor& crow, const Tensor& col_idx, const Tensor& vals,
+                                     const Tensor& B, int64_t N, bool upper,
+                                     sycl::queue& queue) -> Tensor;
+
     // NestedAttention (native SYCL — replaces previous CPU-offset fallback)
     auto nested_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
                                   const Tensor& q_offsets, const Tensor& kv_offsets,
@@ -4190,6 +4200,28 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             bool upper = attrs.get_bool(AttrKey::Upper, false);
             auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N});
             return sparse::sparse_triangular_solve(L, inputs[3], upper);
+        });
+#else
+    // Standalone SYCL SpGEMM/Trsv/Trsm — no oneMKL dependency
+    table.register_kernel(OpId::SparseSpGEMM,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return oneapi::spgemm_standalone_sycl(inputs, attrs, get_q(inputs));
+        });
+
+    table.register_single_output_kernel(OpId::SparseTrsv,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t N = attrs.get_int(AttrKey::N);
+            bool upper = attrs.get_bool(AttrKey::Upper, false);
+            return oneapi::sparse_trsv_standalone_sycl(
+                inputs[0], inputs[1], inputs[2], inputs[3], N, upper, get_q(inputs));
+        });
+
+    table.register_single_output_kernel(OpId::SparseTrsm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t N = attrs.get_int(AttrKey::N);
+            bool upper = attrs.get_bool(AttrKey::Upper, false);
+            return oneapi::sparse_trsm_standalone_sycl(
+                inputs[0], inputs[1], inputs[2], inputs[3], N, upper, get_q(inputs));
         });
 #endif // TENZOR_HAS_ONEMKL
 

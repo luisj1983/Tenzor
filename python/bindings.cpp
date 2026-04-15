@@ -56,6 +56,7 @@
 #include <tenzor/serving/server.hpp>
 #include <tenzor/models/hub.hpp>
 #include <tenzor/onnx/exporter.hpp>
+#include <tenzor/export/export.hpp>
 #include <tenzor/data/dataset.hpp>
 #include <tenzor/data/datasets/mnist.hpp>
 #include <tenzor/data/datasets/cifar10.hpp>
@@ -75,6 +76,7 @@
 #include <tenzor/autograd/graph_viz.hpp>
 #include <tenzor/utils/tensorboard.hpp>
 #include <tenzor/utils/benchmark.hpp>
+#include <tenzor/utils/monitor.hpp>
 #include <tenzor/nn/optim/adam_atan2.hpp>
 #include <tenzor/nn/layers/hrm.hpp>
 #include <tenzor/nn/layers/moe.hpp>
@@ -725,6 +727,58 @@ PYBIND11_MODULE(tenzor_core, m) {
 
     // Data loading utilities
     auto data_mod = m.def_submodule("data", "Data loading and dataset utilities");
+
+    // WorkerInfo struct for distributed sharding of IterableDatasets
+    py::class_<tenzor::data::WorkerInfo>(data_mod, "WorkerInfo",
+             "Metadata describing the current DataLoader worker context")
+        .def(py::init<>())
+        .def(py::init([](int worker_id, int num_workers, int64_t seed, int rank, int world_size) {
+            tenzor::data::WorkerInfo info;
+            info.worker_id = worker_id;
+            info.num_workers = num_workers;
+            info.seed = seed;
+            info.rank = rank;
+            info.world_size = world_size;
+            return info;
+        }), py::arg("worker_id") = 0, py::arg("num_workers") = 1,
+            py::arg("seed") = 0, py::arg("rank") = 0, py::arg("world_size") = 1)
+        .def_readwrite("worker_id", &tenzor::data::WorkerInfo::worker_id,
+                       "Index of this worker within the DataLoader (0-based)")
+        .def_readwrite("num_workers", &tenzor::data::WorkerInfo::num_workers,
+                       "Total number of workers in this DataLoader")
+        .def_readwrite("seed", &tenzor::data::WorkerInfo::seed,
+                       "Per-worker random seed for reproducibility")
+        .def_readwrite("rank", &tenzor::data::WorkerInfo::rank,
+                       "Distributed rank of this process")
+        .def_readwrite("world_size", &tenzor::data::WorkerInfo::world_size,
+                       "Total number of distributed processes")
+        .def("__repr__", [](const tenzor::data::WorkerInfo& info) {
+            return "WorkerInfo(worker_id=" + std::to_string(info.worker_id) +
+                   ", num_workers=" + std::to_string(info.num_workers) +
+                   ", seed=" + std::to_string(info.seed) +
+                   ", rank=" + std::to_string(info.rank) +
+                   ", world_size=" + std::to_string(info.world_size) + ")";
+        });
+
+    data_mod.def("get_worker_info", &tenzor::data::get_worker_info,
+                 R"pbdoc(
+                     Get the WorkerInfo for the current DataLoader worker thread.
+
+                     Returns None if called outside a DataLoader worker thread.
+
+                     Returns:
+                         WorkerInfo or None
+                 )pbdoc");
+    data_mod.def("set_worker_info", &tenzor::data::set_worker_info,
+                 py::arg("info"),
+                 "Set the WorkerInfo for the current thread");
+    data_mod.def("clear_worker_info", &tenzor::data::clear_worker_info,
+                 "Clear the WorkerInfo for the current thread");
+
+    // IterableDataset base class
+    py::class_<tenzor::data::IterableDataset, tenzor::data::Dataset,
+               std::shared_ptr<tenzor::data::IterableDataset>>(data_mod, "IterableDataset",
+             "Abstract base class for iterable-style streaming datasets");
 
     // Dataset abstract base class
     py::class_<tenzor::data::Dataset, std::shared_ptr<tenzor::data::Dataset>>(data_mod, "Dataset")
@@ -2589,6 +2643,20 @@ void bind_compression(py::module& m) {
     }, py::arg("phase") = py::none(),
     "Get profiling data as list of dicts. Optional phase filter.");
 
+    profiler.def("enable_trace", []() {
+        tenzor::AutogradProfiler::instance().enable_trace();
+        // Also enable OpProfiler + interceptor so forward ops are captured
+        tenzor::OpProfiler::instance().enable();
+        if (!s_fwd_guard) {
+            s_fwd_guard = std::make_unique<tenzor::ProfilingInterceptorGuard>();
+        }
+    }, "Enable trace mode (records per-invocation events for Chrome trace export)");
+
+    profiler.def("export_chrome_trace", [](const std::string& path) {
+        tenzor::AutogradProfiler::instance().export_chrome_trace(path);
+    }, py::arg("path"),
+    "Export recorded trace events to Chrome Trace Event Format JSON file");
+
     // =========================================================================
     // Custom Op Registration API
     // =========================================================================
@@ -2855,4 +2923,146 @@ void bind_compression(py::module& m) {
         .def("unload_model", &tenzor::serving::ModelRepository::unload_model,
              py::arg("name"))
         .def("list_models", &tenzor::serving::ModelRepository::list_models);
+
+    // =========================================================================
+    // Monitor submodule
+    // =========================================================================
+    auto monitor_mod = m.def_submodule("monitor", "Event-based monitoring system");
+
+    py::enum_<tenzor::monitor::Aggregation>(monitor_mod, "Aggregation")
+        .value("Sum", tenzor::monitor::Aggregation::Sum)
+        .value("Mean", tenzor::monitor::Aggregation::Mean)
+        .value("Count", tenzor::monitor::Aggregation::Count)
+        .value("MinMax", tenzor::monitor::Aggregation::MinMax)
+        .value("Value", tenzor::monitor::Aggregation::Value);
+
+    py::class_<tenzor::monitor::Stat>(monitor_mod, "Stat",
+        "A named statistic with thread-safe accumulation")
+        .def("add", &tenzor::monitor::Stat::add, py::arg("value"),
+             "Accumulate a value into this statistic")
+        .def("get", &tenzor::monitor::Stat::get,
+             "Retrieve the current aggregate value")
+        .def("count", &tenzor::monitor::Stat::count,
+             "Number of add() calls since last reset")
+        .def("name", &tenzor::monitor::Stat::name,
+             "The name this stat was registered under")
+        .def("reset", &tenzor::monitor::Stat::reset,
+             "Reset this statistic to its initial state");
+
+    // Trampoline class for Python-side EventHandler subclasses
+    class PyEventHandler : public tenzor::monitor::EventHandler {
+    public:
+        using tenzor::monitor::EventHandler::EventHandler;
+
+        auto handle(const std::string& event_name,
+                    const std::unordered_map<std::string, double>& data) -> void override {
+            py::gil_scoped_acquire gil;
+            PYBIND11_OVERRIDE_PURE(void, tenzor::monitor::EventHandler, handle, event_name, data);
+        }
+    };
+
+    py::class_<tenzor::monitor::EventHandler, PyEventHandler,
+               std::shared_ptr<tenzor::monitor::EventHandler>>(monitor_mod, "EventHandler",
+        "Base class for event handlers")
+        .def(py::init<>())
+        .def("handle", &tenzor::monitor::EventHandler::handle,
+             py::arg("event_name"), py::arg("data"),
+             "Handle a named event with key-value data payload");
+
+    py::class_<tenzor::monitor::Monitor>(monitor_mod, "Monitor",
+        "Singleton event-based monitoring system")
+        .def_static("instance", &tenzor::monitor::Monitor::instance,
+                    py::return_value_policy::reference,
+                    "Get the process-wide Monitor instance")
+        .def("register_stat", &tenzor::monitor::Monitor::register_stat,
+             py::arg("name"), py::arg("agg"),
+             py::return_value_policy::reference_internal,
+             "Register a new statistic with the given aggregation type")
+        .def("get_stat", &tenzor::monitor::Monitor::get_stat,
+             py::arg("name"),
+             py::return_value_policy::reference_internal,
+             "Look up a statistic by name (returns None if not found)")
+        .def("log_event",
+             &tenzor::monitor::Monitor::log_event,
+             py::arg("name"),
+             py::arg("data") = std::unordered_map<std::string, double>{},
+             "Dispatch a named event to all registered handlers")
+        .def("add_handler", &tenzor::monitor::Monitor::add_handler,
+             py::arg("handler"),
+             "Add an event handler to the dispatch chain")
+        .def("remove_all_handlers", &tenzor::monitor::Monitor::remove_all_handlers,
+             "Remove all event handlers")
+        .def("reset_all_stats", &tenzor::monitor::Monitor::reset_all_stats,
+             "Reset every registered statistic")
+        .def("stat_names", &tenzor::monitor::Monitor::stat_names,
+             "Return the names of all registered statistics");
+
+    // =========================================================================
+    // Export submodule (AOT compilation)
+    // =========================================================================
+    auto export_mod = m.def_submodule("export_program", "AOT model export (torch.export-style)");
+
+    py::class_<tenzor::export_::ExportOptions>(export_mod, "ExportOptions",
+        "Options controlling the export process")
+        .def(py::init<>())
+        .def_readwrite("strict", &tenzor::export_::ExportOptions::strict,
+                       "Strict mode: disallow dynamic control flow (default: True)")
+        .def_readwrite("preserve_module_call_signature",
+                       &tenzor::export_::ExportOptions::preserve_module_call_signature,
+                       "Preserve module call signature metadata (default: False)");
+
+    py::class_<tenzor::export_::ExportedProgram>(export_mod, "ExportedProgram",
+        "A self-contained, serializable representation of a traced model")
+        .def("save", &tenzor::export_::ExportedProgram::save,
+             py::arg("path"),
+             "Serialize the exported program to a binary file")
+        .def_static("load", &tenzor::export_::ExportedProgram::load,
+             py::arg("path"),
+             "Load an exported program from a binary file")
+        .def("run", &tenzor::export_::ExportedProgram::run,
+             py::arg("inputs"),
+             "Execute the exported program with runtime inputs")
+        .def("state_dict", &tenzor::export_::ExportedProgram::state_dict,
+             "Get the captured state dict")
+        .def_property_readonly("num_inputs", &tenzor::export_::ExportedProgram::num_inputs,
+             "Number of expected inputs")
+        .def_property_readonly("num_outputs", &tenzor::export_::ExportedProgram::num_outputs,
+             "Number of produced outputs");
+
+    export_mod.def("export_model",
+        [](tenzor::nn::Module& module,
+           const std::vector<tenzor::Tensor>& example_inputs,
+           bool strict,
+           bool preserve_signature) {
+            tenzor::export_::ExportOptions opts;
+            opts.strict = strict;
+            opts.preserve_module_call_signature = preserve_signature;
+            return tenzor::export_::export_model(module, example_inputs, opts);
+        },
+        py::arg("module"),
+        py::arg("example_inputs"),
+        py::arg("strict") = true,
+        py::arg("preserve_module_call_signature") = false,
+        R"doc(
+        Export a module via JIT tracing with example inputs.
+
+        Traces the module's forward pass, captures the computation graph
+        and state dict, and returns an ExportedProgram that can be saved,
+        loaded, and executed independently of the original module.
+
+        Args:
+            module: The neural network module to export
+            example_inputs: Example input tensors for tracing
+            strict: If True, raise on dynamic control flow (default: True)
+            preserve_module_call_signature: Preserve call signature metadata
+
+        Returns:
+            ExportedProgram containing the traced graph and state dict
+
+        Example:
+            >>> model = MyNetwork()
+            >>> dummy = tenzor.Tensor([1, 784], tenzor.float32)
+            >>> ep = tenzor.export_program.export_model(model, [dummy])
+            >>> ep.save("model.tzep")
+        )doc");
 }

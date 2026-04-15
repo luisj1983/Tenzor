@@ -1,7 +1,10 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <optional>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 #include <functional>
@@ -9,6 +12,39 @@
 
 namespace tenzor {
 namespace data {
+
+/**
+ * @brief Metadata describing the current DataLoader worker context
+ *
+ * When a DataLoader uses multiple workers, each worker thread receives
+ * a WorkerInfo instance via set_worker_info() before processing begins.
+ * IterableDataset subclasses can call get_worker_info() to shard their
+ * data stream across workers and distributed ranks.
+ */
+struct WorkerInfo {
+    int worker_id{0};       ///< Index of this worker within the DataLoader (0-based)
+    int num_workers{1};     ///< Total number of workers in this DataLoader
+    int64_t seed{0};        ///< Per-worker random seed for reproducibility
+    int rank{0};            ///< Distributed rank of this process
+    int world_size{1};      ///< Total number of distributed processes
+};
+
+/**
+ * @brief Get the WorkerInfo for the current DataLoader worker thread
+ * @return WorkerInfo if called from a worker thread, std::nullopt otherwise
+ */
+auto get_worker_info() -> std::optional<WorkerInfo>;
+
+/**
+ * @brief Set the WorkerInfo for the current thread
+ * @param info WorkerInfo to associate with the current thread
+ */
+auto set_worker_info(WorkerInfo info) -> void;
+
+/**
+ * @brief Clear the WorkerInfo for the current thread
+ */
+auto clear_worker_info() -> void;
 
 /**
  * @brief Abstract base class for datasets
@@ -56,10 +92,42 @@ public:
  * @brief Iterable-style dataset for streaming data
  *
  * Suitable for datasets that are generated on-the-fly or streamed.
+ * Unlike MapDataset, IterableDataset does not support random access or
+ * known size. Subclasses should use get_worker_info() to partition their
+ * data stream across DataLoader workers and distributed ranks.
+ *
+ * Example:
+ * @code
+ * class MyStream : public IterableDataset {
+ * public:
+ *     auto size() const -> size_t override {
+ *         throw std::runtime_error("IterableDataset does not support size()");
+ *     }
+ *     auto get(size_t) -> std::pair<Tensor, Tensor> override {
+ *         throw std::runtime_error("IterableDataset does not support random access");
+ *     }
+ * };
+ * @endcode
  */
 class IterableDataset : public Dataset {
 public:
-    virtual ~IterableDataset() = default;
+    ~IterableDataset() override = default;
+
+    /**
+     * @brief Size is unknown for iterable datasets
+     * @throws std::runtime_error always
+     */
+    auto size() const -> size_t override {
+        throw std::runtime_error("IterableDataset does not support size()");
+    }
+
+    /**
+     * @brief Random access is not supported for iterable datasets
+     * @throws std::runtime_error always
+     */
+    auto get(size_t /*index*/) -> std::pair<Tensor, Tensor> override {
+        throw std::runtime_error("IterableDataset does not support random access");
+    }
 };
 
 /**

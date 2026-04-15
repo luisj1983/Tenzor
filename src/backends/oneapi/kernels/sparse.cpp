@@ -10,8 +10,11 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/sparse/sparse_tensor.hpp"
+#include "tenzor/backend/op_attributes.hpp"
+#include "tenzor/ops/creation.hpp"
 #include <sycl/sycl.hpp>
 #include <cstdint>
+#include <span>
 #include <stdexcept>
 #include <vector>
 
@@ -559,7 +562,190 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
         throw std::runtime_error("oneapi spgemm_kernel: unsupported dtype (requires Float32 or Float64)");
     }
 #else
-    throw std::runtime_error("oneapi spgemm_kernel requires oneMKL (TENZOR_HAS_ONEMKL not defined)");
+    // ========================================================================
+    // Standalone SYCL SpGEMM — no oneMKL dependency
+    // 3-pass algorithm: count → prefix sum → fill with dedup → compact
+    // ========================================================================
+    if (A.layout() != SparseLayout::CSR || B.layout() != SparseLayout::CSR) {
+        throw std::runtime_error("oneapi spgemm_kernel requires CSR format for both inputs");
+    }
+
+    const auto& a_shape = A.shape();
+    const auto& b_shape = B.shape();
+    int64_t M = a_shape[0];
+    int64_t K = a_shape[1];
+    int64_t N = b_shape[1];
+
+    if (K != b_shape[0]) {
+        throw std::runtime_error("oneapi spgemm_kernel: inner dimensions must match");
+    }
+    if (A.dtype() != B.dtype()) {
+        throw std::runtime_error("oneapi spgemm_kernel: dtype mismatch");
+    }
+
+    DType dtype = A.values().dtype();
+    Device dev = A.values().device();
+
+    auto a_crow = A.crow_indices();
+    auto a_col  = A.col_indices();
+    auto a_vals = A.values();
+    auto b_crow = B.crow_indices();
+    auto b_col  = B.col_indices();
+    auto b_vals = B.values();
+
+    if (M == 0) {
+        auto c_crow = tenzor::zeros({1}, DType::Int64, dev);
+        auto c_col  = tenzor::empty({0}, DType::Int64, dev);
+        auto c_vals = tenzor::empty({0}, dtype, dev);
+        return SparseTensor::sparse_csr(c_crow, c_col, c_vals, {M, N});
+    }
+
+    // Pass 1: Count nnz upper bound per row
+    int64_t* d_row_nnz = sycl::malloc_device<int64_t>(M, queue);
+
+    const int64_t* ac = a_crow.data<int64_t>();
+    const int64_t* acol = a_col.data<int64_t>();
+    const int64_t* bc = b_crow.data<int64_t>();
+
+    queue.parallel_for(sycl::range<1>(M), [=](sycl::id<1> idx) {
+        int64_t row = idx[0];
+        int64_t count = 0;
+        int64_t a_start = ac[row];
+        int64_t a_end = ac[row + 1];
+        for (int64_t ja = a_start; ja < a_end; ++ja) {
+            int64_t k = acol[ja];
+            count += bc[k + 1] - bc[k];
+        }
+        d_row_nnz[row] = count;
+    }).wait();
+
+    // Pass 2: Exclusive prefix sum → crow upper bound (host-side, same as CUDA pattern)
+    std::vector<int64_t> h_row_nnz(M);
+    queue.memcpy(h_row_nnz.data(), d_row_nnz, M * sizeof(int64_t)).wait();
+
+    std::vector<int64_t> h_crow_ub(M + 1);
+    h_crow_ub[0] = 0;
+    for (int64_t i = 0; i < M; ++i) {
+        h_crow_ub[i + 1] = h_crow_ub[i] + h_row_nnz[i];
+    }
+    int64_t total_nnz_ub = h_crow_ub[M];
+
+    if (total_nnz_ub == 0) {
+        sycl::free(d_row_nnz, queue);
+        auto c_crow = tenzor::zeros({M + 1}, DType::Int64, dev);
+        auto c_col  = tenzor::empty({0}, DType::Int64, dev);
+        auto c_vals = tenzor::empty({0}, dtype, dev);
+        return SparseTensor::sparse_csr(c_crow, c_col, c_vals, {M, N});
+    }
+
+    int64_t* d_crow_ub = sycl::malloc_device<int64_t>(M + 1, queue);
+    queue.memcpy(d_crow_ub, h_crow_ub.data(), (M + 1) * sizeof(int64_t)).wait();
+
+    // Allocate upper-bound output
+    int64_t* d_col_ub = sycl::malloc_device<int64_t>(total_nnz_ub, queue);
+    int64_t* d_actual_nnz = sycl::malloc_device<int64_t>(M, queue);
+
+    // Pass 3 + Compact: Fill with dedup (templated by dtype)
+    auto run_fill_and_compact = [&]<typename T>() {
+        T* d_vals_ub = sycl::malloc_device<T>(total_nnz_ub, queue);
+        const T* av = a_vals.data<T>();
+        const T* bv = b_vals.data<T>();
+        const int64_t* bcol = b_col.data<int64_t>();
+
+        queue.parallel_for(sycl::range<1>(M), [=](sycl::id<1> idx) {
+            int64_t row = idx[0];
+            int64_t c_start = d_crow_ub[row];
+            int64_t a_start = ac[row];
+            int64_t a_end = ac[row + 1];
+            int64_t write_pos = c_start;
+
+            for (int64_t ja = a_start; ja < a_end; ++ja) {
+                int64_t k = acol[ja];
+                T a_val = av[ja];
+                int64_t b_start = bc[k];
+                int64_t b_end = bc[k + 1];
+
+                for (int64_t jb = b_start; jb < b_end; ++jb) {
+                    int64_t col = bcol[jb];
+                    T val = a_val * bv[jb];
+
+                    bool found = false;
+                    for (int64_t p = c_start; p < write_pos; ++p) {
+                        if (d_col_ub[p] == col) {
+                            d_vals_ub[p] += val;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        d_col_ub[write_pos] = col;
+                        d_vals_ub[write_pos] = val;
+                        write_pos++;
+                    }
+                }
+            }
+            d_actual_nnz[row] = write_pos - c_start;
+        }).wait();
+
+        // Compact: prefix sum on actual nnz (host-side)
+        std::vector<int64_t> h_actual_nnz(M);
+        queue.memcpy(h_actual_nnz.data(), d_actual_nnz, M * sizeof(int64_t)).wait();
+
+        std::vector<int64_t> h_crow_final(M + 1);
+        h_crow_final[0] = 0;
+        for (int64_t i = 0; i < M; ++i) {
+            h_crow_final[i + 1] = h_crow_final[i] + h_actual_nnz[i];
+        }
+        int64_t total_nnz = h_crow_final[M];
+
+        auto c_crow_t = Tensor({M + 1}, DType::Int64, dev);
+        auto c_col_t  = Tensor({total_nnz}, DType::Int64, dev);
+        auto c_vals_t = Tensor({total_nnz}, dtype, dev);
+
+        queue.memcpy(c_crow_t.data<int64_t>(), h_crow_final.data(),
+                     (M + 1) * sizeof(int64_t)).wait();
+
+        if (total_nnz > 0) {
+            int64_t* d_crow_final = sycl::malloc_device<int64_t>(M + 1, queue);
+            queue.memcpy(d_crow_final, h_crow_final.data(), (M + 1) * sizeof(int64_t)).wait();
+
+            int64_t* out_col = c_col_t.data<int64_t>();
+            T* out_vals = c_vals_t.data<T>();
+
+            queue.parallel_for(sycl::range<1>(M), [=](sycl::id<1> idx) {
+                int64_t row = idx[0];
+                int64_t src = d_crow_ub[row];
+                int64_t dst = d_crow_final[row];
+                int64_t count = d_actual_nnz[row];
+                for (int64_t i = 0; i < count; ++i) {
+                    out_col[dst + i] = d_col_ub[src + i];
+                    out_vals[dst + i] = d_vals_ub[src + i];
+                }
+            }).wait();
+
+            sycl::free(d_crow_final, queue);
+        }
+
+        sycl::free(d_vals_ub, queue);
+        return SparseTensor::sparse_csr(c_crow_t, c_col_t, c_vals_t, {M, N});
+    };
+
+    SparseTensor result = [&]() {
+        if (dtype == DType::Float32) {
+            return run_fill_and_compact.template operator()<float>();
+        } else if (dtype == DType::Float64) {
+            return run_fill_and_compact.template operator()<double>();
+        } else {
+            throw std::runtime_error("oneapi spgemm_kernel: only Float32/Float64 supported");
+        }
+    }();
+
+    sycl::free(d_row_nnz, queue);
+    sycl::free(d_crow_ub, queue);
+    sycl::free(d_col_ub, queue);
+    sycl::free(d_actual_nnz, queue);
+
+    return result;
 #endif
 }
 
@@ -644,7 +830,96 @@ auto sparse_trsv_kernel(const SparseTensor& L, const Tensor& b, bool upper,
 
     return x;
 #else
-    throw std::runtime_error("oneapi sparse_trsv_kernel requires oneMKL (TENZOR_HAS_ONEMKL not defined)");
+    // ========================================================================
+    // Standalone SYCL SparseTrsv — level-set parallelism with atomics
+    // ========================================================================
+    if (L.layout() != SparseLayout::CSR) {
+        throw std::runtime_error("oneapi sparse_trsv_kernel requires CSR format");
+    }
+
+    const auto& shape = L.shape();
+    int64_t N = shape[0];
+    if (shape[1] != N) {
+        throw std::runtime_error("oneapi sparse_trsv_kernel: L must be square");
+    }
+    if (b.shape()[0] != N || b.ndim() != 1) {
+        throw std::runtime_error("oneapi sparse_trsv_kernel: b must be 1D with length N");
+    }
+
+    auto crow = L.crow_indices();
+    auto col  = L.col_indices();
+    auto vals = L.values();
+    DType dtype = vals.dtype();
+
+    auto x = tenzor::zeros({N}, dtype, vals.device());
+
+    int* d_solved = sycl::malloc_device<int>(N, queue);
+    queue.memset(d_solved, 0, N * sizeof(int)).wait();
+
+    auto run_trsv = [&]<typename T>() {
+        const int64_t* cr = crow.data<int64_t>();
+        const int64_t* cl = col.data<int64_t>();
+        const T* v = vals.data<T>();
+        const T* b_ptr = b.data<T>();
+        T* x_ptr = x.data<T>();
+        int* solved = d_solved;
+        bool is_upper = upper;
+        int64_t n = N;
+
+        queue.parallel_for(sycl::range<1>(N), [=](sycl::id<1> idx) {
+            int64_t tid = idx[0];
+            int64_t row = is_upper ? (n - 1 - tid) : tid;
+
+            int64_t row_start = cr[row];
+            int64_t row_end = cr[row + 1];
+
+            // Wait for dependencies
+            if (tid > 0) {
+                for (int64_t j = row_start; j < row_end; ++j) {
+                    int64_t c = cl[j];
+                    if (is_upper ? (c > row) : (c < row)) {
+                        sycl::atomic_ref<int, sycl::memory_order::relaxed,
+                                         sycl::memory_scope::device,
+                                         sycl::access::address_space::global_space> flag(solved[c]);
+                        while (flag.load() == 0) {
+                            // Spin-wait for dependency
+                        }
+                    }
+                }
+            }
+
+            // Compute: x[row] = (b[row] - sum(L[row,c]*x[c])) / L[row,row]
+            T rhs = b_ptr[row];
+            T diag = T(1);
+            for (int64_t j = row_start; j < row_end; ++j) {
+                int64_t c = cl[j];
+                if (c == row) {
+                    diag = v[j];
+                } else if (is_upper ? (c > row) : (c < row)) {
+                    rhs -= v[j] * x_ptr[c];
+                }
+            }
+            x_ptr[row] = rhs / diag;
+
+            // Signal completion
+            sycl::atomic_ref<int, sycl::memory_order::relaxed,
+                             sycl::memory_scope::device,
+                             sycl::access::address_space::global_space> my_flag(solved[row]);
+            my_flag.store(1);
+        }).wait();
+    };
+
+    if (dtype == DType::Float32) {
+        run_trsv.template operator()<float>();
+    } else if (dtype == DType::Float64) {
+        run_trsv.template operator()<double>();
+    } else {
+        sycl::free(d_solved, queue);
+        throw std::runtime_error("oneapi sparse_trsv_kernel: only Float32/Float64 supported");
+    }
+
+    sycl::free(d_solved, queue);
+    return x;
 #endif
 }
 
@@ -741,8 +1016,81 @@ auto sparse_trsm_kernel(const SparseTensor& L, const Tensor& B, bool upper,
 
     return X;
 #else
-    throw std::runtime_error("oneapi sparse_trsm_kernel requires oneMKL (TENZOR_HAS_ONEMKL not defined)");
+    // ========================================================================
+    // Standalone SYCL SparseTrsm — solve column-by-column via Trsv
+    // ========================================================================
+    if (L.layout() != SparseLayout::CSR) {
+        throw std::runtime_error("oneapi sparse_trsm_kernel requires CSR format");
+    }
+
+    const auto& shape = L.shape();
+    int64_t N = shape[0];
+    if (shape[1] != N) {
+        throw std::runtime_error("oneapi sparse_trsm_kernel: L must be square");
+    }
+    if (B.ndim() != 2 || B.shape()[0] != N) {
+        throw std::runtime_error("oneapi sparse_trsm_kernel: B must be 2D with first dim N");
+    }
+
+    int64_t K = B.shape()[1];
+    DType dtype = L.values().dtype();
+
+    auto X = tenzor::zeros({N, K}, dtype, L.values().device());
+
+    // Solve column-by-column
+    for (int64_t k = 0; k < K; ++k) {
+        auto b_col = B.slice(1, k, k + 1).squeeze(1);
+        auto x_col = sparse_trsv_kernel(L, b_col, upper, queue);
+
+        // Copy x_col into X[:, k]
+        if (dtype == DType::Float32) {
+            const float* src = x_col.data<float>();
+            float* dst = X.data<float>();
+            queue.parallel_for(sycl::range<1>(N), [=](sycl::id<1> i) {
+                dst[i[0] * K + k] = src[i[0]];
+            }).wait();
+        } else if (dtype == DType::Float64) {
+            const double* src = x_col.data<double>();
+            double* dst = X.data<double>();
+            queue.parallel_for(sycl::range<1>(N), [=](sycl::id<1> i) {
+                dst[i[0] * K + k] = src[i[0]];
+            }).wait();
+        }
+    }
+
+    return X;
 #endif
+}
+
+// ============================================================================
+// Standalone SYCL sparse dispatch wrappers (for kernel registry)
+// These provide the same interface as the CUDA/ROCm standalone functions.
+// ============================================================================
+
+auto spgemm_standalone_sycl(std::span<const Tensor> inputs, const OpAttributes& attrs,
+                            sycl::queue& queue) -> std::vector<Tensor> {
+    int64_t M = attrs.get_int(AttrKey::M);
+    int64_t K = attrs.get_int(AttrKey::K);
+    int64_t N = attrs.get_int(AttrKey::N);
+
+    auto a = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
+    auto b = SparseTensor::sparse_csr(inputs[3], inputs[4], inputs[5], {K, N});
+    auto c = spgemm_kernel(a, b, queue);
+    return {c.crow_indices(), c.col_indices(), c.values()};
+}
+
+auto sparse_trsv_standalone_sycl(const Tensor& crow, const Tensor& col_idx, const Tensor& vals,
+                                 const Tensor& b, int64_t N, bool upper,
+                                 sycl::queue& queue) -> Tensor {
+    auto L = SparseTensor::sparse_csr(crow, col_idx, vals, {N, N});
+    return sparse_trsv_kernel(L, b, upper, queue);
+}
+
+auto sparse_trsm_standalone_sycl(const Tensor& crow, const Tensor& col_idx, const Tensor& vals,
+                                 const Tensor& B, int64_t N, bool upper,
+                                 sycl::queue& queue) -> Tensor {
+    auto L = SparseTensor::sparse_csr(crow, col_idx, vals, {N, N});
+    return sparse_trsm_kernel(L, B, upper, queue);
 }
 
 } // namespace oneapi

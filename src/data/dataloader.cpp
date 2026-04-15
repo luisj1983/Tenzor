@@ -277,6 +277,16 @@ auto DataLoader::collate_samples(const std::vector<std::pair<Tensor, Tensor>>& s
 
 // Worker thread function
 void DataLoader::worker_thread([[maybe_unused]] size_t worker_id) {
+    // Set per-thread worker info so IterableDataset subclasses can shard
+    WorkerInfo info;
+    info.worker_id = static_cast<int>(worker_id);
+    info.num_workers = static_cast<int>(config_.num_workers);
+    info.seed = static_cast<int64_t>(rng_()) + static_cast<int64_t>(worker_id);
+    // rank and world_size remain at defaults (0 and 1) for single-process;
+    // distributed launchers should set them via set_worker_info() before
+    // constructing the DataLoader, or the Python layer handles it.
+    set_worker_info(info);
+
     try {
         while (!stop_workers_) {
             // Get next batch index to process
@@ -333,7 +343,9 @@ void DataLoader::worker_thread([[maybe_unused]] size_t worker_id) {
                 queue_cv_.notify_one();
             }
         }
+        clear_worker_info();
     } catch (...) {
+        clear_worker_info();
         // Store first exception and signal epoch done so consumer unblocks
         std::unique_lock<std::mutex> lock(queue_mutex_);
         if (!worker_exception_) {

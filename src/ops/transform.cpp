@@ -1328,4 +1328,72 @@ auto as_strided(const Tensor& self, std::span<const int64_t> size,
     return result;
 }
 
+auto view_as_real(const Tensor& t) -> Tensor {
+    if (t.dtype() != DType::Complex64 && t.dtype() != DType::Complex128) {
+        throw std::runtime_error("view_as_real: input must be complex");
+    }
+
+    DType real_dtype = (t.dtype() == DType::Complex64) ? DType::Float32 : DType::Float64;
+
+    // Build new shape: append 2
+    auto old_shape = t.shape();
+    std::vector<int64_t> new_shape(old_shape.begin(), old_shape.end());
+    new_shape.push_back(2);
+
+    // Build new strides: multiply existing strides by 2, add stride of 1 for last dim
+    auto old_strides = t.strides();
+    std::vector<int64_t> new_strides;
+    new_strides.reserve(old_strides.size() + 1);
+    for (auto s : old_strides) {
+        new_strides.push_back(s * 2);
+    }
+    new_strides.push_back(1);
+
+    // Create a new TensorImpl sharing the same storage but with real dtype
+    auto new_impl = make_intrusive<TensorImpl>(
+        t.storage(), std::move(new_shape), std::move(new_strides),
+        real_dtype, t.device());
+
+    Tensor result;
+    TensorAccessor::get_impl_mutable(result) = std::move(new_impl);
+    result.set_offset(t.offset() * 2);
+
+    return result;
+}
+
+auto view_as_complex(const Tensor& t) -> Tensor {
+    if (t.dtype() != DType::Float32 && t.dtype() != DType::Float64) {
+        throw std::runtime_error("view_as_complex: input must be float32 or float64");
+    }
+    if (t.ndim() < 1 || t.shape().back() != 2) {
+        throw std::runtime_error("view_as_complex: last dimension must be 2");
+    }
+    auto strides = t.strides();
+    if (strides.back() != 1) {
+        throw std::runtime_error("view_as_complex: last dimension must be contiguous (stride 1)");
+    }
+
+    DType complex_dtype = (t.dtype() == DType::Float32) ? DType::Complex64 : DType::Complex128;
+
+    auto old_shape = t.shape();
+    std::vector<int64_t> new_shape(old_shape.begin(), old_shape.end() - 1);
+
+    std::vector<int64_t> new_strides;
+    new_strides.reserve(strides.size() - 1);
+    for (size_t i = 0; i + 1 < strides.size(); ++i) {
+        new_strides.push_back(strides[i] / 2);
+    }
+
+    // Create a new TensorImpl sharing the same storage but with complex dtype
+    auto new_impl = make_intrusive<TensorImpl>(
+        t.storage(), std::move(new_shape), std::move(new_strides),
+        complex_dtype, t.device());
+
+    Tensor result;
+    TensorAccessor::get_impl_mutable(result) = std::move(new_impl);
+    result.set_offset(t.offset() / 2);
+
+    return result;
+}
+
 } // namespace tenzor

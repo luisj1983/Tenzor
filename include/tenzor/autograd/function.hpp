@@ -2596,4 +2596,34 @@ private:
     std::optional<int64_t> storage_offset_;
 };
 
+/**
+ * @brief ViewAsReal gradient function.
+ *
+ * Forward: y = view_as_real(x)   [Complex -> Real with trailing dim 2]
+ * Backward: dL/dx = view_as_complex(dL/dy)
+ */
+class ViewAsRealBackward : public Function {
+public:
+    ViewAsRealBackward() = default;
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
+    auto name() const -> std::string override { return "ViewAsRealBackward"; }
+};
+
+/**
+ * @brief ViewAsComplex gradient function.
+ *
+ * Forward: y = view_as_complex(x)   [Real with trailing dim 2 -> Complex]
+ * Backward: dL/dx = view_as_real(dL/dy)
+ */
+class ViewAsComplexBackward : public Function {
+public:
+    ViewAsComplexBackward() = default;
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
+    auto name() const -> std::string override { return "ViewAsComplexBackward"; }
+};
+
 } // namespace tenzor

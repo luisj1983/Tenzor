@@ -369,4 +369,26 @@ auto UpsampleBilinearBackward::backward_with_variables(std::vector<Variable> gra
     return {Variable(result[0], grad_outputs[0].requires_grad())};
 }
 
+// ============================================================================
+// ViewAsReal / ViewAsComplex backward
+// ============================================================================
+
+auto ViewAsRealBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+    auto result = tenzor::view_as_real(inputs[0].tensor());
+    return {Variable(result, inputs[0].requires_grad())};
+}
+
+auto ViewAsRealBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    return {tenzor::view_as_complex(grad_outputs[0])};
+}
+
+auto ViewAsComplexBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+    auto result = tenzor::view_as_complex(inputs[0].tensor());
+    return {Variable(result, inputs[0].requires_grad())};
+}
+
+auto ViewAsComplexBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    return {tenzor::view_as_real(grad_outputs[0])};
+}
+
 } // namespace tenzor

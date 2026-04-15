@@ -19,6 +19,30 @@ class IterableDataset(Dataset):
 
     def __iter__(self) -> Iterator: ...
 
+class WorkerInfo:
+    """Metadata describing the current DataLoader worker context."""
+
+    id: int
+    num_workers: int
+    seed: int
+    dataset: Any
+    rank: int
+    world_size: int
+
+    def __init__(
+        self,
+        id: int,
+        num_workers: int,
+        seed: int,
+        dataset: Any,
+        rank: int = 0,
+        world_size: int = 1,
+    ) -> None: ...
+
+def get_worker_info() -> Optional[WorkerInfo]: ...
+def set_worker_info(info: Optional[WorkerInfo]) -> None: ...
+def clear_worker_info() -> None: ...
+
 class TensorDataset(Dataset):
     """Dataset wrapping a list of tensors. Each sample is a tuple of tensors."""
 
@@ -80,6 +104,8 @@ class DataLoader:
         worker_init_fn: Optional[Callable[[int], None]] = None,
         prefetch_factor: int = 2,
         persistent_workers: bool = False,
+        rank: int = 0,
+        world_size: int = 1,
     ) -> None: ...
 
     def __iter__(self) -> Iterator: ...
