@@ -1758,5 +1758,654 @@ auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight, const Te
     return output;
 }
 
+// ============================================================================
+// Deformable Conv2d (DCNv2) — SYCL device kernels
+// ============================================================================
+
+// SYCL kernel name classes
+class DeformableConv2dForwardF32;
+class DeformableConv2dForwardF64;
+class DeformableConv2dBackwardInputF32;
+class DeformableConv2dBackwardInputF64;
+class DeformableConv2dBackwardWeightF32;
+class DeformableConv2dBackwardWeightF64;
+
+// Device-side bilinear interpolation at fractional (h, w) in a single channel plane.
+// Returns 0 for out-of-bounds.
+template <typename T>
+inline T dcn_bilinear_sample(const T* data, int64_t H, int64_t W,
+                             float h, float w) {
+    if (h <= -1.0f || h >= static_cast<float>(H) ||
+        w <= -1.0f || w >= static_cast<float>(W)) {
+        return T(0);
+    }
+
+    int64_t h_low = static_cast<int64_t>(sycl::floor(h));
+    int64_t w_low = static_cast<int64_t>(sycl::floor(w));
+    int64_t h_high = h_low + 1;
+    int64_t w_high = w_low + 1;
+
+    float lh = h - static_cast<float>(h_low);
+    float lw = w - static_cast<float>(w_low);
+    float hh = 1.0f - lh;
+    float hw = 1.0f - lw;
+
+    float v1 = (h_low >= 0 && w_low >= 0)   ? static_cast<float>(data[h_low * W + w_low])   : 0.0f;
+    float v2 = (h_low >= 0 && w_high < W)    ? static_cast<float>(data[h_low * W + w_high])  : 0.0f;
+    float v3 = (h_high < H && w_low >= 0)    ? static_cast<float>(data[h_high * W + w_low])  : 0.0f;
+    float v4 = (h_high < H && w_high < W)    ? static_cast<float>(data[h_high * W + w_high]) : 0.0f;
+
+    return static_cast<T>(hh * hw * v1 + hh * lw * v2 + lh * hw * v3 + lh * lw * v4);
+}
+
+// Device-side: scatter gradient back through bilinear interpolation via sycl::atomic_ref.
+template <typename T>
+inline void dcn_bilinear_scatter(T* grad_data, int64_t H, int64_t W,
+                                  float h, float w, float top_grad) {
+    if (h <= -1.0f || h >= static_cast<float>(H) ||
+        w <= -1.0f || w >= static_cast<float>(W)) {
+        return;
+    }
+
+    int64_t h_low = static_cast<int64_t>(sycl::floor(h));
+    int64_t w_low = static_cast<int64_t>(sycl::floor(w));
+    int64_t h_high = h_low + 1;
+    int64_t w_high = w_low + 1;
+
+    float lh = h - static_cast<float>(h_low);
+    float lw = w - static_cast<float>(w_low);
+    float hh = 1.0f - lh;
+    float hw = 1.0f - lw;
+
+    if (h_low >= 0 && w_low >= 0) {
+        sycl::atomic_ref<T, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                         sycl::access::address_space::global_space>
+            ref(grad_data[h_low * W + w_low]);
+        ref.fetch_add(static_cast<T>(hh * hw * top_grad));
+    }
+    if (h_low >= 0 && w_high < W) {
+        sycl::atomic_ref<T, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                         sycl::access::address_space::global_space>
+            ref(grad_data[h_low * W + w_high]);
+        ref.fetch_add(static_cast<T>(hh * lw * top_grad));
+    }
+    if (h_high < H && w_low >= 0) {
+        sycl::atomic_ref<T, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                         sycl::access::address_space::global_space>
+            ref(grad_data[h_high * W + w_low]);
+        ref.fetch_add(static_cast<T>(lh * hw * top_grad));
+    }
+    if (h_high < H && w_high < W) {
+        sycl::atomic_ref<T, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                         sycl::access::address_space::global_space>
+            ref(grad_data[h_high * W + w_high]);
+        ref.fetch_add(static_cast<T>(lh * lw * top_grad));
+    }
+}
+
+// Device-side: compute dval/dh and dval/dw for bilinear interpolation (offset gradients).
+template <typename T>
+inline void dcn_bilinear_offset_grad(const T* data, int64_t H, int64_t W,
+                                      float h, float w,
+                                      float& grad_h, float& grad_w) {
+    grad_h = 0.0f;
+    grad_w = 0.0f;
+    if (h <= -1.0f || h >= static_cast<float>(H) ||
+        w <= -1.0f || w >= static_cast<float>(W)) {
+        return;
+    }
+
+    int64_t h_low = static_cast<int64_t>(sycl::floor(h));
+    int64_t w_low = static_cast<int64_t>(sycl::floor(w));
+    int64_t h_high = h_low + 1;
+    int64_t w_high = w_low + 1;
+
+    float lh = h - static_cast<float>(h_low);
+    float lw = w - static_cast<float>(w_low);
+    float hh = 1.0f - lh;
+    float hw = 1.0f - lw;
+
+    float v1 = (h_low >= 0 && w_low >= 0)   ? static_cast<float>(data[h_low * W + w_low])   : 0.0f;
+    float v2 = (h_low >= 0 && w_high < W)    ? static_cast<float>(data[h_low * W + w_high])  : 0.0f;
+    float v3 = (h_high < H && w_low >= 0)    ? static_cast<float>(data[h_high * W + w_low])  : 0.0f;
+    float v4 = (h_high < H && w_high < W)    ? static_cast<float>(data[h_high * W + w_high]) : 0.0f;
+
+    // d/dh: derivative of bilinear w.r.t. h
+    grad_h = -hw * v1 - lw * v2 + hw * v3 + lw * v4;
+    // d/dw: derivative of bilinear w.r.t. w
+    grad_w = -hh * v1 + hh * v2 - lh * v3 + lh * v4;
+}
+
+auto deformable_conv2d_forward_kernel(
+    const Tensor& input, const Tensor& offset, const Tensor& weight,
+    const Tensor& bias, const Tensor& mask,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups, int64_t offset_groups,
+    sycl::queue& queue) -> Tensor {
+
+    auto ishape = input.shape();
+    auto wshape = weight.shape();
+    const int64_t N = ishape[0], C_in = ishape[1], H = ishape[2], W = ishape[3];
+    const int64_t C_out = wshape[0], kH = wshape[2], kW = wshape[3];
+    const int64_t H_out = (H + 2 * pad_h - dil_h * (kH - 1) - 1) / stride_h + 1;
+    const int64_t W_out = (W + 2 * pad_w - dil_w * (kW - 1) - 1) / stride_w + 1;
+
+    const bool use_mask = mask.numel() > 0;
+    const bool use_bias = bias.numel() > 0;
+    const int64_t channels_per_group = C_in / groups;
+    const int64_t out_channels_per_group = C_out / groups;
+    const int64_t channels_per_offset_group = C_in / offset_groups;
+    const int64_t total = N * C_out * H_out * W_out;
+
+    Tensor output({N, C_out, H_out, W_out}, input.dtype(), input.device());
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(input);
+        const float* off_ptr = get_data_ptr<const float>(offset);
+        const float* w_ptr = get_data_ptr<const float>(weight);
+        const float* b_ptr = use_bias ? get_data_ptr<const float>(bias) : nullptr;
+        const float* m_ptr = use_mask ? get_data_ptr<const float>(mask) : nullptr;
+        float* out_ptr = get_data_ptr<float>(output);
+
+        queue.parallel_for<DeformableConv2dForwardF32>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            const int64_t ow = idx % W_out;
+            const int64_t oh = (idx / W_out) % H_out;
+            const int64_t oc = (idx / (W_out * H_out)) % C_out;
+            const int64_t n  = idx / (W_out * H_out * C_out);
+
+            const int64_t g = oc / out_channels_per_group;
+            float sum = 0.0f;
+
+            for (int64_t ic_local = 0; ic_local < channels_per_group; ++ic_local) {
+                const int64_t ic = g * channels_per_group + ic_local;
+                const int64_t og = ic / channels_per_offset_group;
+
+                const float* input_plane = in_ptr + (n * C_in + ic) * H * W;
+                const float* weight_plane = w_ptr + (oc * channels_per_group + ic_local) * kH * kW;
+
+                for (int64_t kh = 0; kh < kH; ++kh) {
+                    for (int64_t kw = 0; kw < kW; ++kw) {
+                        const int64_t k_linear = kh * kW + kw;
+                        const int64_t offset_base = og * 2 * kH * kW;
+
+                        const float* off_h_plane = off_ptr +
+                            (n * offset_groups * 2 * kH * kW + offset_base + 2 * k_linear) * H_out * W_out;
+                        const float* off_w_plane = off_ptr +
+                            (n * offset_groups * 2 * kH * kW + offset_base + 2 * k_linear + 1) * H_out * W_out;
+
+                        float h_base = oh * stride_h - pad_h + kh * dil_h;
+                        float w_base = ow * stride_w - pad_w + kw * dil_w;
+                        float h_loc = h_base + off_h_plane[oh * W_out + ow];
+                        float w_loc = w_base + off_w_plane[oh * W_out + ow];
+
+                        float val = dcn_bilinear_sample(input_plane, H, W, h_loc, w_loc);
+
+                        if (use_mask) {
+                            const int64_t mask_base = og * kH * kW;
+                            const float* mask_plane = m_ptr +
+                                (n * offset_groups * kH * kW + mask_base + k_linear) * H_out * W_out;
+                            val *= mask_plane[oh * W_out + ow];
+                        }
+
+                        sum += val * weight_plane[k_linear];
+                    }
+                }
+            }
+
+            if (use_bias) {
+                sum += b_ptr[oc];
+            }
+            out_ptr[idx] = sum;
+        });
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(input);
+        const double* off_ptr = get_data_ptr<const double>(offset);
+        const double* w_ptr = get_data_ptr<const double>(weight);
+        const double* b_ptr = use_bias ? get_data_ptr<const double>(bias) : nullptr;
+        const double* m_ptr = use_mask ? get_data_ptr<const double>(mask) : nullptr;
+        double* out_ptr = get_data_ptr<double>(output);
+
+        queue.parallel_for<DeformableConv2dForwardF64>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            const int64_t ow = idx % W_out;
+            const int64_t oh = (idx / W_out) % H_out;
+            const int64_t oc = (idx / (W_out * H_out)) % C_out;
+            const int64_t n  = idx / (W_out * H_out * C_out);
+
+            const int64_t g = oc / out_channels_per_group;
+            double sum = 0.0;
+
+            for (int64_t ic_local = 0; ic_local < channels_per_group; ++ic_local) {
+                const int64_t ic = g * channels_per_group + ic_local;
+                const int64_t og = ic / channels_per_offset_group;
+
+                const double* input_plane = in_ptr + (n * C_in + ic) * H * W;
+                const double* weight_plane = w_ptr + (oc * channels_per_group + ic_local) * kH * kW;
+
+                for (int64_t kh = 0; kh < kH; ++kh) {
+                    for (int64_t kw = 0; kw < kW; ++kw) {
+                        const int64_t k_linear = kh * kW + kw;
+                        const int64_t offset_base = og * 2 * kH * kW;
+
+                        const double* off_h_plane = off_ptr +
+                            (n * offset_groups * 2 * kH * kW + offset_base + 2 * k_linear) * H_out * W_out;
+                        const double* off_w_plane = off_ptr +
+                            (n * offset_groups * 2 * kH * kW + offset_base + 2 * k_linear + 1) * H_out * W_out;
+
+                        float h_base = static_cast<float>(oh * stride_h - pad_h + kh * dil_h);
+                        float w_base = static_cast<float>(ow * stride_w - pad_w + kw * dil_w);
+                        float h_loc = h_base + static_cast<float>(off_h_plane[oh * W_out + ow]);
+                        float w_loc = w_base + static_cast<float>(off_w_plane[oh * W_out + ow]);
+
+                        double val = dcn_bilinear_sample(input_plane, H, W, h_loc, w_loc);
+
+                        if (use_mask) {
+                            const int64_t mask_base = og * kH * kW;
+                            const double* mask_plane = m_ptr +
+                                (n * offset_groups * kH * kW + mask_base + k_linear) * H_out * W_out;
+                            val *= mask_plane[oh * W_out + ow];
+                        }
+
+                        sum += val * weight_plane[k_linear];
+                    }
+                }
+            }
+
+            if (use_bias) {
+                sum += b_ptr[oc];
+            }
+            out_ptr[idx] = sum;
+        });
+    } else {
+        throw std::runtime_error("deformable_conv2d_forward: unsupported dtype (requires Float32 or Float64)");
+    }
+
+    return output;
+}
+
+auto deformable_conv2d_backward_input_kernel(
+    const Tensor& grad_output, const Tensor& input, const Tensor& offset,
+    const Tensor& weight, const Tensor& mask,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups, int64_t offset_groups,
+    sycl::queue& queue) -> std::vector<Tensor> {
+
+    auto ishape = input.shape();
+    auto wshape = weight.shape();
+    auto oshape = offset.shape();
+    const int64_t N = ishape[0], C_in = ishape[1], H = ishape[2], W = ishape[3];
+    const int64_t C_out = wshape[0], kH = wshape[2], kW = wshape[3];
+    const int64_t H_out = grad_output.shape()[2], W_out = grad_output.shape()[3];
+
+    const bool use_mask = mask.numel() > 0;
+    const int64_t channels_per_group = C_in / groups;
+    const int64_t out_channels_per_group = C_out / groups;
+    const int64_t channels_per_offset_group = C_in / offset_groups;
+
+    // Total work items: one per (n, oc, oh, ow) — mirrors the forward kernel decomposition
+    const int64_t total = N * C_out * H_out * W_out;
+
+    Tensor grad_input(std::vector<int64_t>(ishape.begin(), ishape.end()), input.dtype(), input.device());
+    Tensor grad_offset(std::vector<int64_t>(oshape.begin(), oshape.end()), input.dtype(), input.device());
+    Tensor grad_mask;
+    if (use_mask) {
+        auto mshape = mask.shape();
+        grad_mask = Tensor(std::vector<int64_t>(mshape.begin(), mshape.end()), input.dtype(), input.device());
+    }
+
+    if (input.dtype() == DType::Float32) {
+        float* gi_ptr = get_data_ptr<float>(grad_input);
+        float* go_off_ptr = get_data_ptr<float>(grad_offset);
+        float* gm_ptr = use_mask ? get_data_ptr<float>(grad_mask) : nullptr;
+
+        queue.fill(gi_ptr, 0.0f, static_cast<size_t>(N * C_in * H * W));
+        queue.fill(go_off_ptr, 0.0f, static_cast<size_t>(offset.numel()));
+        if (use_mask) queue.fill(gm_ptr, 0.0f, static_cast<size_t>(mask.numel()));
+        queue.wait();
+
+        const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
+        const float* in_ptr = get_data_ptr<const float>(input);
+        const float* off_ptr = get_data_ptr<const float>(offset);
+        const float* w_ptr = get_data_ptr<const float>(weight);
+        const float* m_ptr = use_mask ? get_data_ptr<const float>(mask) : nullptr;
+
+        queue.parallel_for<DeformableConv2dBackwardInputF32>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            const int64_t ow = idx % W_out;
+            const int64_t oh = (idx / W_out) % H_out;
+            const int64_t oc = (idx / (W_out * H_out)) % C_out;
+            const int64_t n  = idx / (W_out * H_out * C_out);
+
+            const int64_t g = oc / out_channels_per_group;
+            const float grad_out_val = grad_out_ptr[(n * C_out + oc) * H_out * W_out + oh * W_out + ow];
+
+            for (int64_t ic_local = 0; ic_local < channels_per_group; ++ic_local) {
+                const int64_t ic = g * channels_per_group + ic_local;
+                const int64_t og = ic / channels_per_offset_group;
+
+                const float* input_plane = in_ptr + (n * C_in + ic) * H * W;
+                float* grad_input_plane = gi_ptr + (n * C_in + ic) * H * W;
+                const float* weight_plane = w_ptr + (oc * channels_per_group + ic_local) * kH * kW;
+
+                for (int64_t kh = 0; kh < kH; ++kh) {
+                    for (int64_t kw = 0; kw < kW; ++kw) {
+                        const int64_t k_linear = kh * kW + kw;
+                        const int64_t offset_base = og * 2 * kH * kW;
+                        const int64_t mask_base = og * kH * kW;
+
+                        const int64_t off_h_idx = offset_base + 2 * k_linear;
+                        const int64_t off_w_idx = offset_base + 2 * k_linear + 1;
+
+                        const float* off_h_plane = off_ptr +
+                            (n * offset_groups * 2 * kH * kW + off_h_idx) * H_out * W_out;
+                        const float* off_w_plane = off_ptr +
+                            (n * offset_groups * 2 * kH * kW + off_w_idx) * H_out * W_out;
+
+                        float h_base = oh * stride_h - pad_h + kh * dil_h;
+                        float w_base = ow * stride_w - pad_w + kw * dil_w;
+                        float h_loc = h_base + off_h_plane[oh * W_out + ow];
+                        float w_loc = w_base + off_w_plane[oh * W_out + ow];
+
+                        float w_val = weight_plane[k_linear];
+                        float m_val = 1.0f;
+                        if (use_mask) {
+                            const float* mask_plane = m_ptr +
+                                (n * offset_groups * kH * kW + mask_base + k_linear) * H_out * W_out;
+                            m_val = mask_plane[oh * W_out + ow];
+                        }
+
+                        float top_grad = grad_out_val * w_val * m_val;
+
+                        // grad_input: scatter through bilinear interpolation
+                        dcn_bilinear_scatter(grad_input_plane, H, W, h_loc, w_loc, top_grad);
+
+                        // grad_offset: d(bilinear)/d(h,w)
+                        float dh, dw;
+                        dcn_bilinear_offset_grad(input_plane, H, W, h_loc, w_loc, dh, dw);
+
+                        float* grad_off_h = go_off_ptr +
+                            (n * offset_groups * 2 * kH * kW + off_h_idx) * H_out * W_out;
+                        float* grad_off_w = go_off_ptr +
+                            (n * offset_groups * 2 * kH * kW + off_w_idx) * H_out * W_out;
+
+                        sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                                         sycl::access::address_space::global_space>
+                            ref_h(grad_off_h[oh * W_out + ow]);
+                        ref_h.fetch_add(grad_out_val * w_val * m_val * dh);
+
+                        sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                                         sycl::access::address_space::global_space>
+                            ref_w(grad_off_w[oh * W_out + ow]);
+                        ref_w.fetch_add(grad_out_val * w_val * m_val * dw);
+
+                        // grad_mask
+                        if (use_mask && gm_ptr) {
+                            float interp_val = dcn_bilinear_sample(input_plane, H, W, h_loc, w_loc);
+                            float* grad_mask_plane = gm_ptr +
+                                (n * offset_groups * kH * kW + mask_base + k_linear) * H_out * W_out;
+                            sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                                             sycl::access::address_space::global_space>
+                                ref_m(grad_mask_plane[oh * W_out + ow]);
+                            ref_m.fetch_add(grad_out_val * w_val * interp_val);
+                        }
+                    }
+                }
+            }
+        });
+    } else if (input.dtype() == DType::Float64) {
+        double* gi_ptr = get_data_ptr<double>(grad_input);
+        double* go_off_ptr = get_data_ptr<double>(grad_offset);
+        double* gm_ptr = use_mask ? get_data_ptr<double>(grad_mask) : nullptr;
+
+        queue.fill(gi_ptr, 0.0, static_cast<size_t>(N * C_in * H * W));
+        queue.fill(go_off_ptr, 0.0, static_cast<size_t>(offset.numel()));
+        if (use_mask) queue.fill(gm_ptr, 0.0, static_cast<size_t>(mask.numel()));
+        queue.wait();
+
+        const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
+        const double* in_ptr = get_data_ptr<const double>(input);
+        const double* off_ptr = get_data_ptr<const double>(offset);
+        const double* w_ptr = get_data_ptr<const double>(weight);
+        const double* m_ptr = use_mask ? get_data_ptr<const double>(mask) : nullptr;
+
+        queue.parallel_for<DeformableConv2dBackwardInputF64>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            const int64_t ow = idx % W_out;
+            const int64_t oh = (idx / W_out) % H_out;
+            const int64_t oc = (idx / (W_out * H_out)) % C_out;
+            const int64_t n  = idx / (W_out * H_out * C_out);
+
+            const int64_t g = oc / out_channels_per_group;
+            const double grad_out_val = grad_out_ptr[(n * C_out + oc) * H_out * W_out + oh * W_out + ow];
+
+            for (int64_t ic_local = 0; ic_local < channels_per_group; ++ic_local) {
+                const int64_t ic = g * channels_per_group + ic_local;
+                const int64_t og = ic / channels_per_offset_group;
+
+                const double* input_plane = in_ptr + (n * C_in + ic) * H * W;
+                double* grad_input_plane = gi_ptr + (n * C_in + ic) * H * W;
+                const double* weight_plane = w_ptr + (oc * channels_per_group + ic_local) * kH * kW;
+
+                for (int64_t kh = 0; kh < kH; ++kh) {
+                    for (int64_t kw = 0; kw < kW; ++kw) {
+                        const int64_t k_linear = kh * kW + kw;
+                        const int64_t offset_base = og * 2 * kH * kW;
+                        const int64_t mask_base = og * kH * kW;
+
+                        const int64_t off_h_idx = offset_base + 2 * k_linear;
+                        const int64_t off_w_idx = offset_base + 2 * k_linear + 1;
+
+                        const double* off_h_plane = off_ptr +
+                            (n * offset_groups * 2 * kH * kW + off_h_idx) * H_out * W_out;
+                        const double* off_w_plane = off_ptr +
+                            (n * offset_groups * 2 * kH * kW + off_w_idx) * H_out * W_out;
+
+                        float h_base = static_cast<float>(oh * stride_h - pad_h + kh * dil_h);
+                        float w_base = static_cast<float>(ow * stride_w - pad_w + kw * dil_w);
+                        float h_loc = h_base + static_cast<float>(off_h_plane[oh * W_out + ow]);
+                        float w_loc = w_base + static_cast<float>(off_w_plane[oh * W_out + ow]);
+
+                        double w_val = weight_plane[k_linear];
+                        double m_val = 1.0;
+                        if (use_mask) {
+                            const double* mask_plane = m_ptr +
+                                (n * offset_groups * kH * kW + mask_base + k_linear) * H_out * W_out;
+                            m_val = mask_plane[oh * W_out + ow];
+                        }
+
+                        double top_grad = grad_out_val * w_val * m_val;
+
+                        dcn_bilinear_scatter(grad_input_plane, H, W, h_loc, w_loc, static_cast<float>(top_grad));
+
+                        float dh, dw_grad;
+                        dcn_bilinear_offset_grad(input_plane, H, W, h_loc, w_loc, dh, dw_grad);
+
+                        double* grad_off_h = go_off_ptr +
+                            (n * offset_groups * 2 * kH * kW + off_h_idx) * H_out * W_out;
+                        double* grad_off_w = go_off_ptr +
+                            (n * offset_groups * 2 * kH * kW + off_w_idx) * H_out * W_out;
+
+                        sycl::atomic_ref<double, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                                         sycl::access::address_space::global_space>
+                            ref_h(grad_off_h[oh * W_out + ow]);
+                        ref_h.fetch_add(static_cast<double>(grad_out_val * w_val * m_val * dh));
+
+                        sycl::atomic_ref<double, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                                         sycl::access::address_space::global_space>
+                            ref_w(grad_off_w[oh * W_out + ow]);
+                        ref_w.fetch_add(static_cast<double>(grad_out_val * w_val * m_val * dw_grad));
+
+                        if (use_mask && gm_ptr) {
+                            double interp_val = dcn_bilinear_sample(input_plane, H, W, h_loc, w_loc);
+                            double* grad_mask_plane = gm_ptr +
+                                (n * offset_groups * kH * kW + mask_base + k_linear) * H_out * W_out;
+                            sycl::atomic_ref<double, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                                             sycl::access::address_space::global_space>
+                                ref_m(grad_mask_plane[oh * W_out + ow]);
+                            ref_m.fetch_add(static_cast<double>(grad_out_val * w_val * interp_val));
+                        }
+                    }
+                }
+            }
+        });
+    } else {
+        throw std::runtime_error("deformable_conv2d_backward_input: unsupported dtype (requires Float32 or Float64)");
+    }
+
+    if (use_mask) {
+        return {grad_input, grad_offset, grad_mask};
+    }
+    return {grad_input, grad_offset};
+}
+
+auto deformable_conv2d_backward_weight_kernel(
+    const Tensor& grad_output, const Tensor& input, const Tensor& offset,
+    const Tensor& mask,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups, int64_t offset_groups,
+    const std::vector<int64_t>& weight_shape,
+    sycl::queue& queue) -> Tensor {
+
+    auto ishape = input.shape();
+    const int64_t N = ishape[0], C_in = ishape[1], H = ishape[2], W = ishape[3];
+    const int64_t C_out = weight_shape[0], kH = weight_shape[2], kW = weight_shape[3];
+    const int64_t H_out = grad_output.shape()[2], W_out = grad_output.shape()[3];
+
+    const bool use_mask = mask.numel() > 0;
+    const int64_t channels_per_group = C_in / groups;
+    const int64_t out_channels_per_group = C_out / groups;
+    const int64_t channels_per_offset_group = C_in / offset_groups;
+
+    // One work item per (oc, ic_local, kh, kw) — each accumulates over N * H_out * W_out
+    const int64_t total = C_out * channels_per_group * kH * kW;
+
+    Tensor grad_weight(weight_shape, input.dtype(), input.device());
+
+    if (input.dtype() == DType::Float32) {
+        float* gw_ptr = get_data_ptr<float>(grad_weight);
+        queue.fill(gw_ptr, 0.0f, static_cast<size_t>(C_out * channels_per_group * kH * kW));
+        queue.wait();
+
+        const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
+        const float* in_ptr = get_data_ptr<const float>(input);
+        const float* off_ptr = get_data_ptr<const float>(offset);
+        const float* m_ptr = use_mask ? get_data_ptr<const float>(mask) : nullptr;
+
+        queue.parallel_for<DeformableConv2dBackwardWeightF32>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            const int64_t kw_idx = idx % kW;
+            const int64_t kh_idx = (idx / kW) % kH;
+            const int64_t ic_local = (idx / (kW * kH)) % channels_per_group;
+            const int64_t oc = idx / (kW * kH * channels_per_group);
+
+            const int64_t g = oc / out_channels_per_group;
+            const int64_t ic = g * channels_per_group + ic_local;
+            const int64_t og = ic / channels_per_offset_group;
+
+            const int64_t k_linear = kh_idx * kW + kw_idx;
+            const int64_t offset_base = og * 2 * kH * kW;
+            const int64_t mask_base = og * kH * kW;
+
+            float sum = 0.0f;
+
+            for (int64_t n = 0; n < N; ++n) {
+                const float* input_plane = in_ptr + (n * C_in + ic) * H * W;
+
+                for (int64_t oh = 0; oh < H_out; ++oh) {
+                    for (int64_t ow = 0; ow < W_out; ++ow) {
+                        float h_base = oh * stride_h - pad_h + kh_idx * dil_h;
+                        float w_base = ow * stride_w - pad_w + kw_idx * dil_w;
+
+                        const float* off_h_plane = off_ptr +
+                            (n * offset_groups * 2 * kH * kW + offset_base + 2 * k_linear) * H_out * W_out;
+                        const float* off_w_plane = off_ptr +
+                            (n * offset_groups * 2 * kH * kW + offset_base + 2 * k_linear + 1) * H_out * W_out;
+
+                        float h_loc = h_base + off_h_plane[oh * W_out + ow];
+                        float w_loc = w_base + off_w_plane[oh * W_out + ow];
+
+                        float val = dcn_bilinear_sample(input_plane, H, W, h_loc, w_loc);
+
+                        if (use_mask) {
+                            const float* mask_plane = m_ptr +
+                                (n * offset_groups * kH * kW + mask_base + k_linear) * H_out * W_out;
+                            val *= mask_plane[oh * W_out + ow];
+                        }
+
+                        float go = grad_out_ptr[(n * C_out + oc) * H_out * W_out + oh * W_out + ow];
+                        sum += go * val;
+                    }
+                }
+            }
+
+            gw_ptr[(oc * channels_per_group + ic_local) * kH * kW + k_linear] = sum;
+        });
+    } else if (input.dtype() == DType::Float64) {
+        double* gw_ptr = get_data_ptr<double>(grad_weight);
+        queue.fill(gw_ptr, 0.0, static_cast<size_t>(C_out * channels_per_group * kH * kW));
+        queue.wait();
+
+        const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
+        const double* in_ptr = get_data_ptr<const double>(input);
+        const double* off_ptr = get_data_ptr<const double>(offset);
+        const double* m_ptr = use_mask ? get_data_ptr<const double>(mask) : nullptr;
+
+        queue.parallel_for<DeformableConv2dBackwardWeightF64>(sycl::range<1>(total), [=](sycl::id<1> idx) {
+            const int64_t kw_idx = idx % kW;
+            const int64_t kh_idx = (idx / kW) % kH;
+            const int64_t ic_local = (idx / (kW * kH)) % channels_per_group;
+            const int64_t oc = idx / (kW * kH * channels_per_group);
+
+            const int64_t g = oc / out_channels_per_group;
+            const int64_t ic = g * channels_per_group + ic_local;
+            const int64_t og = ic / channels_per_offset_group;
+
+            const int64_t k_linear = kh_idx * kW + kw_idx;
+            const int64_t offset_base = og * 2 * kH * kW;
+            const int64_t mask_base = og * kH * kW;
+
+            double sum = 0.0;
+
+            for (int64_t n = 0; n < N; ++n) {
+                const double* input_plane = in_ptr + (n * C_in + ic) * H * W;
+
+                for (int64_t oh = 0; oh < H_out; ++oh) {
+                    for (int64_t ow = 0; ow < W_out; ++ow) {
+                        float h_base = static_cast<float>(oh * stride_h - pad_h + kh_idx * dil_h);
+                        float w_base = static_cast<float>(ow * stride_w - pad_w + kw_idx * dil_w);
+
+                        const double* off_h_plane = off_ptr +
+                            (n * offset_groups * 2 * kH * kW + offset_base + 2 * k_linear) * H_out * W_out;
+                        const double* off_w_plane = off_ptr +
+                            (n * offset_groups * 2 * kH * kW + offset_base + 2 * k_linear + 1) * H_out * W_out;
+
+                        float h_loc = h_base + static_cast<float>(off_h_plane[oh * W_out + ow]);
+                        float w_loc = w_base + static_cast<float>(off_w_plane[oh * W_out + ow]);
+
+                        double val = dcn_bilinear_sample(input_plane, H, W, h_loc, w_loc);
+
+                        if (use_mask) {
+                            const double* mask_plane = m_ptr +
+                                (n * offset_groups * kH * kW + mask_base + k_linear) * H_out * W_out;
+                            val *= mask_plane[oh * W_out + ow];
+                        }
+
+                        double go = grad_out_ptr[(n * C_out + oc) * H_out * W_out + oh * W_out + ow];
+                        sum += go * val;
+                    }
+                }
+            }
+
+            gw_ptr[(oc * channels_per_group + ic_local) * kH * kW + k_linear] = sum;
+        });
+    } else {
+        throw std::runtime_error("deformable_conv2d_backward_weight: unsupported dtype (requires Float32 or Float64)");
+    }
+
+    return grad_weight;
+}
+
 } // namespace oneapi
 } // namespace tenzor

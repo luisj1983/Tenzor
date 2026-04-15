@@ -324,6 +324,11 @@ add_executable(test_comparison_operators_multidtype test_comparison_operators_mu
 target_link_libraries(test_comparison_operators_multidtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_comparison_operators_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
+# Statistics operations (cov, corrcoef) multi-backend
+add_executable(test_statistics_multidtype test_statistics_multidtype.cpp)
+target_link_libraries(test_statistics_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_statistics_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
 # Indexing operator multi-backend
 add_executable(test_indexing_operator_multidtype test_indexing_operator_multidtype.cpp)
 target_link_libraries(test_indexing_operator_multidtype PRIVATE tenzor_core GTest::gtest_main)
@@ -348,6 +353,21 @@ tenzor_discover_tests(test_split_operation_multidtype DISCOVERY_TIMEOUT 60 DISCO
 add_executable(test_conv1d_multidtype test_conv1d_multidtype.cpp)
 target_link_libraries(test_conv1d_multidtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_conv1d_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# CholeskySolve multi-backend
+add_executable(test_cholesky_solve_multidtype test_cholesky_solve_multidtype.cpp)
+target_link_libraries(test_cholesky_solve_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_cholesky_solve_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# DeformableConv2d multi-backend
+add_executable(test_deformable_conv2d_multidtype test_deformable_conv2d_multidtype.cpp)
+target_link_libraries(test_deformable_conv2d_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_deformable_conv2d_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Einsum dispatch multi-backend
+add_executable(test_einsum_dispatch_multidtype test_einsum_dispatch_multidtype.cpp)
+target_link_libraries(test_einsum_dispatch_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_einsum_dispatch_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
 # ConvTranspose2d multi-backend
 add_executable(test_convtranspose2d_multidtype test_convtranspose2d_multidtype.cpp)
@@ -392,6 +412,20 @@ tenzor_discover_tests(test_grad_accumulation DISCOVERY_TIMEOUT 60 DISCOVERY_MODE
 add_executable(test_roi_ops_multidtype test_roi_ops_multidtype.cpp)
 target_link_libraries(test_roi_ops_multidtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_roi_ops_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# LOBPCG eigenvalue solver multi-backend
+add_executable(test_lobpcg_multidtype test_lobpcg_multidtype.cpp)
+target_link_libraries(test_lobpcg_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_lobpcg_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# DCT / IDCT multi-backend
+add_executable(test_dct_multidtype test_dct_multidtype.cpp)
+target_link_libraries(test_dct_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_dct_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_mfcc_multidtype test_mfcc_multidtype.cpp)
+target_link_libraries(test_mfcc_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_mfcc_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
 # Vulkan tensor creation test (standalone, non-GTest)
 add_executable(vulkan_tensor_test vulkan_tensor_test.cpp)

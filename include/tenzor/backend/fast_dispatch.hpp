@@ -49,6 +49,7 @@ inline bool is_autocast_compute_heavy(OpId op) {
         case OpId::Conv3dForward:
         case OpId::ConvTranspose2dForward:
         case OpId::DepthwiseConv2d:
+        case OpId::DeformableConv2dForward:
         case OpId::LSTMForward:
         case OpId::LSTMCellForward:
         case OpId::LSTMMultiLayerForward:

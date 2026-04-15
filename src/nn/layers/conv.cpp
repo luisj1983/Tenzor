@@ -1860,4 +1860,226 @@ auto ConvTranspose1d::reset_parameters() -> void {
     }
 }
 
+// ============================================================================
+// DeformableConv2dBackward - Autograd Function
+// ============================================================================
+
+class DeformableConv2dBackward : public Function {
+public:
+    DeformableConv2dBackward(int64_t stride, int64_t padding, int64_t dilation,
+                              int64_t groups, int64_t offset_groups, bool use_mask,
+                              std::vector<Tensor> tensors_to_save)
+        : stride_(stride), padding_(padding), dilation_(dilation),
+          groups_(groups), offset_groups_(offset_groups), use_mask_(use_mask) {
+        save_for_backward(std::move(tensors_to_save));
+    }
+
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
+        throw std::runtime_error("DeformableConv2dBackward::forward should not be called");
+    }
+
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        const Tensor& grad_output = grad_outputs[0];
+        const Tensor& input = saved_tensors_[0];
+        const Tensor& offset = saved_tensors_[1];
+        const Tensor& weight = saved_tensors_[2];
+        const Tensor& mask = saved_tensors_[3];
+        bool has_bias = saved_tensors_.size() > 4;
+
+        OpAttributes backward_attrs;
+        backward_attrs.set(AttrKey::StrideH, stride_);
+        backward_attrs.set(AttrKey::StrideW, stride_);
+        backward_attrs.set(AttrKey::PaddingH, padding_);
+        backward_attrs.set(AttrKey::PaddingW, padding_);
+        backward_attrs.set(AttrKey::DilationH, dilation_);
+        backward_attrs.set(AttrKey::DilationW, dilation_);
+        backward_attrs.set(AttrKey::Groups, groups_);
+        backward_attrs.set(AttrKey::OffsetGroups, offset_groups_);
+        backward_attrs.set(AttrKey::UseMask, use_mask_ ? 1 : 0);
+
+        // Set shape attributes for backward kernels
+        {
+            auto is = input.shape();
+            std::string is_str;
+            for (size_t i = 0; i < is.size(); ++i) {
+                if (i > 0) is_str += ',';
+                is_str += std::to_string(is[i]);
+            }
+            backward_attrs.set(AttrKey::InputShape, is_str);
+
+            auto ws = weight.shape();
+            std::string ws_str;
+            for (size_t i = 0; i < ws.size(); ++i) {
+                if (i > 0) ws_str += ',';
+                ws_str += std::to_string(ws[i]);
+            }
+            backward_attrs.set(AttrKey::WeightShape, ws_str);
+        }
+
+        // BackwardInput: returns {grad_input, grad_offset, grad_mask}
+        std::vector<Tensor> bwd_input_inputs = {grad_output, input, offset, weight, mask};
+        auto bwd_input_result = dispatch(OpId::DeformableConv2dBackwardInput,
+                                          bwd_input_inputs, backward_attrs);
+
+        // BackwardWeight: returns {grad_weight}
+        std::vector<Tensor> bwd_weight_inputs = {grad_output, input, offset, mask};
+        auto bwd_weight_result = dispatch(OpId::DeformableConv2dBackwardWeight,
+                                           bwd_weight_inputs, backward_attrs);
+
+        // Result order: grad_input, grad_offset, grad_weight, grad_bias, grad_mask
+        std::vector<Tensor> grads;
+        grads.push_back(bwd_input_result[0]);   // grad_input
+        grads.push_back(bwd_input_result[1]);   // grad_offset
+        grads.push_back(bwd_weight_result[0]);  // grad_weight
+
+        if (has_bias) {
+            std::vector<Tensor> bwd_bias_inputs = {grad_output};
+            auto bwd_bias_result = dispatch(OpId::DeformableConv2dBackwardBias,
+                                             bwd_bias_inputs, backward_attrs);
+            grads.push_back(bwd_bias_result[0]); // grad_bias
+        }
+
+        if (use_mask_ && bwd_input_result.size() > 2) {
+            grads.push_back(bwd_input_result[2]); // grad_mask
+        }
+
+        return grads;
+    }
+
+    TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
+
+private:
+    int64_t stride_;
+    int64_t padding_;
+    int64_t dilation_;
+    int64_t groups_;
+    int64_t offset_groups_;
+    bool use_mask_;
+};
+
+// ============================================================================
+// DeformableConv2d - NN Layer
+// ============================================================================
+
+DeformableConv2d::DeformableConv2d(int64_t in_channels, int64_t out_channels,
+                                     int64_t kernel_size, int64_t stride,
+                                     int64_t padding, int64_t dilation,
+                                     int64_t groups, int64_t offset_groups,
+                                     bool bias)
+    : in_channels_(in_channels), out_channels_(out_channels),
+      kernel_size_(kernel_size), stride_(stride), padding_(padding),
+      dilation_(dilation), groups_(groups), offset_groups_(offset_groups) {
+
+    if (in_channels % groups != 0) {
+        throw std::invalid_argument("in_channels must be divisible by groups");
+    }
+    if (out_channels % groups != 0) {
+        throw std::invalid_argument("out_channels must be divisible by groups");
+    }
+    if (in_channels % offset_groups != 0) {
+        throw std::invalid_argument("in_channels must be divisible by offset_groups");
+    }
+
+    std::vector<int64_t> weight_shape = {out_channels, in_channels / groups,
+                                          kernel_size, kernel_size};
+    auto weight_init = Variable(zeros(weight_shape, DType::Float32, Device::cpu()), true);
+    register_parameter("weight", weight_init);
+
+    if (bias) {
+        std::vector<int64_t> bias_shape = {out_channels};
+        auto bias_init = Variable(zeros(bias_shape, DType::Float32, Device::cpu()), true);
+        register_parameter("bias", bias_init);
+    }
+
+    reset_parameters();
+}
+
+auto DeformableConv2d::forward(const Variable& input, const Variable& offset,
+                                const Variable& mask) -> Variable {
+    auto& weight = *parameters_["weight"];
+    auto bias_it = parameters_.find("bias");
+    bool has_bias = bias_it != parameters_.end();
+
+    Tensor bias_t = has_bias ? bias_it->second->tensor() : zeros({0}, input.dtype(), input.tensor().device());
+    bool use_mask = mask.is_initialized() && mask.tensor().numel() > 0;
+    Tensor mask_t = use_mask ? mask.tensor() : zeros({0}, input.dtype(), input.tensor().device());
+
+    OpAttributes forward_attrs;
+    forward_attrs.set(AttrKey::StrideH, stride_);
+    forward_attrs.set(AttrKey::StrideW, stride_);
+    forward_attrs.set(AttrKey::PaddingH, padding_);
+    forward_attrs.set(AttrKey::PaddingW, padding_);
+    forward_attrs.set(AttrKey::DilationH, dilation_);
+    forward_attrs.set(AttrKey::DilationW, dilation_);
+    forward_attrs.set(AttrKey::Groups, groups_);
+    forward_attrs.set(AttrKey::OffsetGroups, offset_groups_);
+    forward_attrs.set(AttrKey::UseMask, use_mask ? 1 : 0);
+
+    std::vector<Tensor> inputs_vec = {input.tensor(), offset.tensor(),
+                                       weight.tensor(), bias_t, mask_t};
+
+    auto output_result = dispatch_to_device(OpId::DeformableConv2dForward,
+        input.tensor().device().type, inputs_vec, forward_attrs);
+    Tensor output = output_result[0];
+
+    bool needs_grad = input.requires_grad() || offset.requires_grad() ||
+                      weight.requires_grad() ||
+                      (use_mask && mask.requires_grad());
+    auto result = Variable(output, needs_grad);
+
+    if (needs_grad) {
+        std::vector<Tensor> tensors_to_save = {input.tensor(), offset.tensor(),
+                                                weight.tensor(), mask_t};
+        if (has_bias) {
+            tensors_to_save.push_back(bias_it->second->tensor());
+        }
+
+        auto backward_fn = std::make_shared<DeformableConv2dBackward>(
+            stride_, padding_, dilation_, groups_, offset_groups_, use_mask,
+            std::move(tensors_to_save)
+        );
+
+        result.set_grad_fn(backward_fn);
+
+        std::vector<Variable> input_vars = {input, offset, weight};
+        if (has_bias) {
+            input_vars.push_back(*bias_it->second);
+        }
+        if (use_mask) {
+            input_vars.push_back(mask);
+        }
+        backward_fn->set_input_variables(input_vars);
+
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        if (input.grad_fn()) next_funcs.push_back(input.grad_fn());
+        if (offset.grad_fn()) next_funcs.push_back(offset.grad_fn());
+        backward_fn->set_next_functions(next_funcs);
+    }
+
+    return result;
+}
+
+auto DeformableConv2d::forward_impl(const Variable& /*input*/) -> Variable {
+    throw std::runtime_error(
+        "DeformableConv2d::forward_impl: use forward(input, offset, mask) instead");
+}
+
+auto DeformableConv2d::reset_parameters() -> void {
+    int64_t fan_in = in_channels_ * kernel_size_ * kernel_size_;
+    float std = std::sqrt(2.0f / fan_in);
+
+    std::vector<int64_t> weight_shape = {out_channels_, in_channels_ / groups_,
+                                          kernel_size_, kernel_size_};
+    auto new_weight_tensor = randn(weight_shape) * std;
+    parameters_["weight"] = std::make_shared<Variable>(new_weight_tensor, true);
+
+    auto bias_it = parameters_.find("bias");
+    if (bias_it != parameters_.end()) {
+        std::vector<int64_t> bias_shape = {out_channels_};
+        float bound = 1.0f / std::sqrt(static_cast<float>(fan_in));
+        auto new_bias_tensor = (rand(bias_shape) * 2.0f * bound) - bound;
+        bias_it->second = std::make_shared<Variable>(new_bias_tensor, true);
+    }
+}
+
 } // namespace tenzor::nn

@@ -795,6 +795,35 @@ namespace oneapi {
                                   int64_t stride, int64_t padding, int64_t dilation,
                                   sycl::queue& queue) -> Tensor;
 
+    // ---- DeformableConv2d / DCNv2 (kernels/conv2d.cpp) ----
+    auto deformable_conv2d_forward_kernel(
+        const Tensor& input, const Tensor& offset, const Tensor& weight,
+        const Tensor& bias, const Tensor& mask,
+        int64_t stride_h, int64_t stride_w,
+        int64_t pad_h, int64_t pad_w,
+        int64_t dil_h, int64_t dil_w,
+        int64_t groups, int64_t offset_groups,
+        sycl::queue& queue) -> Tensor;
+
+    auto deformable_conv2d_backward_input_kernel(
+        const Tensor& grad_output, const Tensor& input, const Tensor& offset,
+        const Tensor& weight, const Tensor& mask,
+        int64_t stride_h, int64_t stride_w,
+        int64_t pad_h, int64_t pad_w,
+        int64_t dil_h, int64_t dil_w,
+        int64_t groups, int64_t offset_groups,
+        sycl::queue& queue) -> std::vector<Tensor>;
+
+    auto deformable_conv2d_backward_weight_kernel(
+        const Tensor& grad_output, const Tensor& input, const Tensor& offset,
+        const Tensor& mask,
+        int64_t stride_h, int64_t stride_w,
+        int64_t pad_h, int64_t pad_w,
+        int64_t dil_h, int64_t dil_w,
+        int64_t groups, int64_t offset_groups,
+        const std::vector<int64_t>& weight_shape,
+        sycl::queue& queue) -> Tensor;
+
     // ---- Linalg operations (kernels/linalg.cpp) ----
 #ifdef TENZOR_HAS_ONEMKL
     auto linalg_det_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
@@ -2967,6 +2996,15 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         });
 
     // =========================================================================
+    // Einsum (composed — delegates to einsum_composed to avoid dispatch loop)
+    // =========================================================================
+    table.register_kernel(OpId::Einsum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto equation = std::string(attrs.get_string(AttrKey::EinsumEquation, ""));
+        std::vector<Tensor> tensors(inputs.begin(), inputs.end());
+        return {einsum_composed(equation, tensors)};
+    });
+
+    // =========================================================================
     // BatchNorm2d Fused Training (compose mean_var + forward_affine + update_running_stats)
     // =========================================================================
 
@@ -3509,6 +3547,65 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
                                                      stride, padding, dilation, get_q(inputs))};
         });
 
+    // DeformableConv2d (DCNv2)
+    table.register_kernel(OpId::DeformableConv2dForward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // inputs: {input, offset, weight, bias, mask}
+            int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
+            int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
+            int64_t pad_h = attrs.get_int(AttrKey::PaddingH, 0);
+            int64_t pad_w = attrs.get_int(AttrKey::PaddingW, 0);
+            int64_t dil_h = attrs.get_int(AttrKey::DilationH, 1);
+            int64_t dil_w = attrs.get_int(AttrKey::DilationW, 1);
+            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+            int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
+            return std::vector<Tensor>{oneapi::deformable_conv2d_forward_kernel(
+                inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+                stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+                groups, offset_groups, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::DeformableConv2dBackwardInput,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // inputs: {grad_output, input, offset, weight, mask}
+            int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
+            int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
+            int64_t pad_h = attrs.get_int(AttrKey::PaddingH, 0);
+            int64_t pad_w = attrs.get_int(AttrKey::PaddingW, 0);
+            int64_t dil_h = attrs.get_int(AttrKey::DilationH, 1);
+            int64_t dil_w = attrs.get_int(AttrKey::DilationW, 1);
+            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+            int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
+            return oneapi::deformable_conv2d_backward_input_kernel(
+                inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+                stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+                groups, offset_groups, get_q(inputs));
+        });
+
+    table.register_kernel(OpId::DeformableConv2dBackwardWeight,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // inputs: {grad_output, input, offset, mask}
+            int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
+            int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
+            int64_t pad_h = attrs.get_int(AttrKey::PaddingH, 0);
+            int64_t pad_w = attrs.get_int(AttrKey::PaddingW, 0);
+            int64_t dil_h = attrs.get_int(AttrKey::DilationH, 1);
+            int64_t dil_w = attrs.get_int(AttrKey::DilationW, 1);
+            int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+            int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
+            auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
+            return std::vector<Tensor>{oneapi::deformable_conv2d_backward_weight_kernel(
+                inputs[0], inputs[1], inputs[2], inputs[3],
+                stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+                groups, offset_groups, weight_shape, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::DeformableConv2dBackwardBias,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+            // Reuse regular conv2d bias backward (channel-wise sum of grad_output)
+            return {oneapi::conv2d_backward_bias(inputs[0], get_q(inputs))};
+        });
+
     table.register_kernel(OpId::CumSum,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             int64_t dim = attrs.get_int(AttrKey::Dim, 0);
@@ -3589,6 +3686,23 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return {oneapi::linalg_solve_triangular_kernel(inputs[0], inputs[1], upper, unitriangular, get_q(inputs))};
         });
 
+    table.register_kernel(OpId::LinalgCholeskySolve,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            bool upper = attrs.get_bool(AttrKey::Upper, false);
+            auto& q = get_q(inputs);
+            if (!upper) {
+                auto Y = oneapi::linalg_solve_triangular_kernel(inputs[1], inputs[0], false, false, q);
+                int64_t ndim = inputs[1].ndim();
+                auto Lt = tenzor::transpose(inputs[1], ndim - 2, ndim - 1).contiguous();
+                return {oneapi::linalg_solve_triangular_kernel(Lt, Y, true, false, q)};
+            } else {
+                int64_t ndim = inputs[1].ndim();
+                auto Ut = tenzor::transpose(inputs[1], ndim - 2, ndim - 1).contiguous();
+                auto Y = oneapi::linalg_solve_triangular_kernel(Ut, inputs[0], false, false, q);
+                return {oneapi::linalg_solve_triangular_kernel(inputs[1], Y, true, false, q)};
+            }
+        });
+
     table.register_kernel(OpId::Geqrf,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
             auto [result, tau] = oneapi::linalg_geqrf_kernel(inputs[0], get_q(inputs));
@@ -3601,6 +3715,23 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             bool transpose_q = attrs.get_bool(AttrKey::TransposeQ, false);
             return oneapi::linalg_ormqr_kernel(inputs[0], inputs[1], inputs[2],
                 left, transpose_q, get_q(inputs));
+        });
+
+    table.register_kernel(OpId::LinalgCholeskySolve,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            bool upper = attrs.get_bool(AttrKey::Upper, false);
+            auto& q = get_q(inputs);
+            if (!upper) {
+                auto Y = oneapi::linalg_solve_triangular_kernel(inputs[1], inputs[0], false, false, q);
+                int64_t ndim = inputs[1].ndim();
+                auto Lt = tenzor::transpose(inputs[1], ndim - 2, ndim - 1).contiguous();
+                return {oneapi::linalg_solve_triangular_kernel(Lt, Y, true, false, q)};
+            } else {
+                int64_t ndim = inputs[1].ndim();
+                auto Ut = tenzor::transpose(inputs[1], ndim - 2, ndim - 1).contiguous();
+                auto Y = oneapi::linalg_solve_triangular_kernel(Ut, inputs[0], false, false, q);
+                return {oneapi::linalg_solve_triangular_kernel(inputs[1], Y, true, false, q)};
+            }
         });
 
     // =========================================================================
@@ -3837,6 +3968,23 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             bool upper = attrs.get_bool(AttrKey::Upper, true);
             bool unitriangular = attrs.get_bool(AttrKey::UnitTriangular, false);
             return {oneapi::linalg_solve_triangular_kernel(inputs[0], inputs[1], upper, unitriangular, get_q(inputs))};
+        });
+
+    table.register_kernel(OpId::LinalgCholeskySolve,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            bool upper = attrs.get_bool(AttrKey::Upper, false);
+            auto& q = get_q(inputs);
+            if (!upper) {
+                auto Y = oneapi::linalg_solve_triangular_kernel(inputs[1], inputs[0], false, false, q);
+                int64_t ndim = inputs[1].ndim();
+                auto Lt = tenzor::transpose(inputs[1], ndim - 2, ndim - 1).contiguous();
+                return {oneapi::linalg_solve_triangular_kernel(Lt, Y, true, false, q)};
+            } else {
+                int64_t ndim = inputs[1].ndim();
+                auto Ut = tenzor::transpose(inputs[1], ndim - 2, ndim - 1).contiguous();
+                auto Y = oneapi::linalg_solve_triangular_kernel(Ut, inputs[0], false, false, q);
+                return {oneapi::linalg_solve_triangular_kernel(inputs[1], Y, true, false, q)};
+            }
         });
 
     table.register_kernel(OpId::Geqrf,
@@ -4371,6 +4519,52 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return oneapi::istft_kernel(inputs[0], n_fft, hop_length, win_length,
                                         window, center, normalized, onesided,
                                         length_val, get_q(inputs));
+        });
+
+    // =========================================================================
+    // DCT / IDCT
+    // =========================================================================
+    table.register_single_output_kernel(OpId::DCT,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int type = static_cast<int>(attrs.get_int(AttrKey::DCTType, 2));
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            std::string norm{attrs.get_string(AttrKey::Norm, "backward")};
+            std::optional<int64_t> n = std::nullopt;
+            int64_t n_val = attrs.get_int(AttrKey::N, -1);
+            if (n_val > 0) n = n_val;
+            return fft::dct(inputs[0], type, n, dim, norm);
+        });
+
+    table.register_single_output_kernel(OpId::IDCT,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int type = static_cast<int>(attrs.get_int(AttrKey::DCTType, 2));
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            std::string norm{attrs.get_string(AttrKey::Norm, "backward")};
+            std::optional<int64_t> n = std::nullopt;
+            int64_t n_val = attrs.get_int(AttrKey::N, -1);
+            if (n_val > 0) n = n_val;
+            return fft::idct(inputs[0], type, n, dim, norm);
+        });
+
+    table.register_single_output_kernel(OpId::MelScale,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t n_mels = attrs.get_int(AttrKey::NumMels, 128);
+            double f_min = attrs.get_float(AttrKey::FMin, 0.0);
+            double f_max = attrs.get_float(AttrKey::FMax, 0.0);
+            int64_t sample_rate = attrs.get_int(AttrKey::SampleRate, 16000);
+            return fft::mel_scale(inputs[0], n_mels, f_min, f_max, sample_rate);
+        });
+
+    table.register_single_output_kernel(OpId::MFCC,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t sample_rate = attrs.get_int(AttrKey::SampleRate, 16000);
+            int64_t n_mfcc = attrs.get_int(AttrKey::NumMFCC, 40);
+            int64_t n_mels = attrs.get_int(AttrKey::NumMels, 128);
+            int64_t n_fft = attrs.get_int(AttrKey::NFft, 400);
+            int64_t hop_length = attrs.get_int(AttrKey::HopLength, 160);
+            double f_min = attrs.get_float(AttrKey::FMin, 0.0);
+            double f_max = attrs.get_float(AttrKey::FMax, 0.0);
+            return fft::mfcc(inputs[0], sample_rate, n_mfcc, n_mels, n_fft, hop_length, f_min, f_max);
         });
 
     // AdvancedIndex (fancy indexing) — native OneAPI kernel
@@ -5410,6 +5604,31 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return oneapi::nested_attention_backward_kernel(
                 inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
                 inputs[5], inputs[6], scale, causal, get_q(inputs));
+        });
+
+    // =========================================================================
+    // Statistical operations (Cov, Corrcoef) — composed from existing ops
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Cov, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t correction = attrs.get_int(AttrKey::Correction, 1);
+        return cov(inputs[0], correction);
+    });
+
+    table.register_single_output_kernel(OpId::Corrcoef, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        return corrcoef(inputs[0]);
+    });
+
+    // =========================================================================
+    // LOBPCG — Locally Optimal Block Preconditioned Conjugate Gradient
+    // =========================================================================
+    table.register_kernel(OpId::LOBPCG,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t k = attrs.get_int(AttrKey::K, 1);
+            int64_t max_iter = attrs.get_int(AttrKey::MaxIter, 100);
+            double tol = attrs.get_float(AttrKey::Tolerance, 1e-6);
+            Tensor B = inputs.size() > 2 ? inputs[2] : Tensor();
+            auto [evals, evecs] = linalg::lobpcg(inputs[0], inputs[1], k, B, max_iter, tol);
+            return {evals, evecs};
         });
 
 } // register_oneapi_kernels

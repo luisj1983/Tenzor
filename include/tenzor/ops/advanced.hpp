@@ -155,6 +155,16 @@ auto einsum(const std::string& equation,
             std::span<const Tensor> tensors) -> Tensor;
 
 /**
+ * @brief Composed (decomposed-ops) einsum implementation.
+ *
+ * This is the fallback path that decomposes einsum into matmul/reshape/sum.
+ * Backend kernels should call this to avoid infinite recursion with the
+ * dispatch-first einsum() wrapper.
+ */
+auto einsum_composed(const std::string& equation,
+                     std::span<const Tensor> tensors) -> Tensor;
+
+/**
  * @brief Median of tensor elements along a dimension.
  *
  * @param input Input tensor

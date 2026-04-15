@@ -1979,6 +1979,26 @@ public:
  *
  * @note Saves L for backward computation.
  */
+/**
+ * @brief Cholesky solve gradient function.
+ *
+ * Forward: X = cholesky_solve(B, L) where A = L @ L^T, A @ X = B
+ * Backward: grad_B = cholesky_solve(grad_X, L)
+ *           grad_L = -tril(L^{-T} @ (grad_X @ X^T + X @ grad_X^T) @ L^{-1})
+ *
+ * @note Saves X and L for backward computation.
+ */
+class CholeskySolveBackward : public Function {
+public:
+    CholeskySolveBackward(bool upper = false) : upper_(upper) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
+    auto name() const -> std::string override { return "CholeskySolveBackward"; }
+private:
+    bool upper_;
+};
+
 class CholeskyBackward : public Function {
 public:
     CholeskyBackward(bool upper = false) : upper_(upper) {}

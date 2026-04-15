@@ -5,6 +5,8 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/indexing.hpp"
+#include <cmath>
 #include <stdexcept>
 
 namespace tenzor {
@@ -462,6 +464,623 @@ auto rfftfreq(int64_t n, double d, DType dtype, Device device) -> Tensor {
     auto freqs = tenzor::arange(0.0f, static_cast<float>(half), 1.0f, dtype, device);
     float scale = 1.0f / (static_cast<float>(n) * static_cast<float>(d));
     return tenzor::mul(freqs, tenzor::full({1}, scale, dtype, device));
+}
+
+// ============================================================================
+// DCT / IDCT — Discrete Cosine Transform via RFFT composition
+// ============================================================================
+
+namespace {
+
+// Validate DCT type is 1-4
+void validate_dct_type(int type, const char* op_name) {
+    if (type < 1 || type > 4) {
+        throw std::runtime_error(
+            std::string(op_name) + ": type must be 1, 2, 3, or 4, got " + std::to_string(type));
+    }
+}
+
+// DCT-II via RFFT: the standard "DCT" used in JPEG/MPEG.
+//
+// Algorithm:
+//   1. Form y[k] = x[2k] for k=0..ceil(N/2)-1, x[2N-1-2k] for k=ceil(N/2)..N-1
+//   2. Y = RFFT(y, N)
+//   3. Multiply by twiddle factors: 2 * Re(Y[k] * exp(-j*pi*k/(2N)))
+//
+Tensor dct2_via_rfft(const Tensor& input, int64_t N, int64_t dim, const std::string& norm) {
+    auto dtype = input.dtype();
+    auto device = input.device();
+    int64_t ndim = input.ndim();
+
+    // Resolve dim
+    int64_t d = dim < 0 ? dim + ndim : dim;
+
+    // Step 1: Reorder input along dim
+    // Build index tensor: [0, 2, 4, ..., 2*ceil(N/2)-2, 2*floor(N/2)-1, ..., 3, 1]
+    // i.e., even indices ascending, then odd indices descending
+    auto even_idx = tenzor::arange(0.0, static_cast<double>(N), 2.0, DType::Int64, device);
+    // Odd indices descending: N-1, N-3, ...
+    auto odd_idx = tenzor::arange(static_cast<double>(N - 1),
+                                  0.0 - 1.0, -2.0, DType::Int64, device);
+    auto reorder_idx = tenzor::cat({even_idx, odd_idx}, 0);
+
+    auto y = tenzor::index_select(input, d, reorder_idx);
+
+    // Step 2: Full FFT of reordered signal (need all N coefficients)
+    double pi = 3.14159265358979323846;
+    auto Y_full = fft::fft(y, N, d, "backward");
+
+    // Twiddle for all N coefficients
+    auto k_full = tenzor::arange(0.0, static_cast<double>(N), 1.0, dtype, device);
+    auto angle_full = tenzor::mul(k_full, static_cast<float>(-pi / (2.0 * N)));
+    auto tw_cos_full = tenzor::cos(angle_full);
+    auto tw_sin_full = tenzor::sin(angle_full);
+
+    std::vector<int64_t> tw_full_shape(ndim, 1);
+    tw_full_shape[d] = N;
+    tw_cos_full = tw_cos_full.reshape(tw_full_shape);
+    tw_sin_full = tw_sin_full.reshape(tw_full_shape);
+
+    auto Yf_real = tenzor::real(Y_full);
+    auto Yf_imag = tenzor::imag(Y_full);
+
+    auto result = tenzor::sub(tenzor::mul(Yf_real, tw_cos_full),
+                              tenzor::mul(Yf_imag, tw_sin_full));
+    result = tenzor::mul(result, 2.0);
+
+    // Apply normalization
+    if (norm == "ortho") {
+        // Ortho normalization: multiply by 1/sqrt(2*N) for all k,
+        // then multiply k=0 by 1/sqrt(2) extra (or equivalently,
+        // multiply all by sqrt(2/(N)) and k=0 by sqrt(1/(2*N))).
+        //
+        // Standard ortho: DCT[0] *= 1/sqrt(4*N), DCT[k>0] *= 1/sqrt(2*N)
+        // But we already have 2* factor, so:
+        // result already = 2*Re(Y*tw). Standard DCT-II is sum of x[n]*cos(pi*(2n+1)*k/(2N)).
+        // With our reorder+FFT approach, the 2* gives us the right scale for "backward".
+        // For "ortho": scale everything by sqrt(1/(2*N)), then k=0 by extra 1/sqrt(2).
+        float scale_all = std::sqrt(1.0f / (2.0f * N));
+        result = tenzor::mul(result, scale_all);
+
+        // Scale k=0 by 1/sqrt(2)
+        // Create a scale tensor: [1/sqrt(2), 1, 1, ..., 1]
+        auto ortho_scale = tenzor::ones({N}, dtype, device);
+        auto first_val = tenzor::full({1}, static_cast<float>(1.0 / std::sqrt(2.0)), dtype, device);
+        auto rest = tenzor::ones({N - 1}, dtype, device);
+        ortho_scale = tenzor::cat({first_val, rest}, 0);
+        ortho_scale = ortho_scale.reshape(tw_full_shape);
+        result = tenzor::mul(result, ortho_scale);
+    } else if (norm == "forward") {
+        // Forward normalization: divide by N
+        result = tenzor::mul(result, static_cast<float>(1.0 / N));
+    }
+    // "backward" normalization: no additional scaling
+
+    return result;
+}
+
+// DCT-III (inverse of DCT-II)
+//
+// The DCT-II backward computes:
+//   C[k] = 2 * sum_{n=0}^{N-1} x[n] * cos(pi*(2n+1)*k/(2N))
+//
+// Its exact inverse is:
+//   x[n] = (1/(2N)) * [C[0] + 2*sum_{k=1}^{N-1} C[k]*cos(pi*k*(2n+1)/(2N))]
+//
+// Algorithm using FFT:
+//   1. Form modified coefficients: W[0] = C[0]/2, W[k] = C[k] for k>0
+//      (This accounts for the half-weight on the DC term in the inverse formula.)
+//   2. Multiply by twiddle: V[k] = W[k] * exp(+j*pi*k/(2N))
+//   3. y_reordered = Re(IFFT(V)) * N   (IFFT backward = (1/N)*sum, multiply by N to undo)
+//      This gives us (1/2)*[W[0] + 2*sum_{k=1} W[k]*cos(...)] with the *N canceling the 1/N.
+//      Wait — let's be precise:
+//      IFFT_backward(V)[n] = (1/N)*sum V[k]*exp(j*2*pi*k*n/N)
+//      Re part = (1/N)*sum W[k]*cos(pi*k*(2n+1)/(2N))
+//      Multiplied by N = sum W[k]*cos(pi*k*(2n+1)/(2N))
+//        = C[0]/2 + sum_{k=1} C[k]*cos(pi*k*(2n+1)/(2N))
+//      We want x[n] = (1/(2N))*[C[0] + 2*sum_{k=1} C[k]*cos(...)]
+//        = (1/N)*[C[0]/2 + sum_{k=1} C[k]*cos(...)]
+//      So we need result * (1/N) = IFFT_backward(V) after taking Re.
+//      Actually IFFT already has the 1/N. So just take Re(IFFT(V)):
+//      Re(IFFT_backward(V))[n] = (1/N)*sum W[k]*cos(pi*k*(2n+1)/(2N))
+//        = (1/N)*[C[0]/2 + sum_{k=1} C[k]*cos(...)]
+//        = x[n]  (for the backward norm case)
+//
+//   4. Un-reorder to get x from reorder(x).
+//
+Tensor dct3_via_rfft(const Tensor& input, int64_t N, int64_t dim, const std::string& norm) {
+    auto dtype = input.dtype();
+    auto device = input.device();
+    int64_t ndim = input.ndim();
+    int64_t d = dim < 0 ? dim + ndim : dim;
+    double pi = 3.14159265358979323846;
+
+    Tensor X = input;
+
+    std::vector<int64_t> bcast_shape(ndim, 1);
+    bcast_shape[d] = N;
+
+    // For ortho norm: undo the ortho scaling that DCT-II ortho applied on the input,
+    // converting the ortho-normalized coefficients back to "backward" norm coefficients.
+    // DCT-II ortho applied: all *= sqrt(1/(2N)), k=0 *= extra 1/sqrt(2)
+    // Undo: k=0 *= sqrt(2), then all /= sqrt(1/(2N)) = all *= sqrt(2N)
+    if (norm == "ortho") {
+        auto k0_scale = tenzor::full({1}, static_cast<float>(std::sqrt(2.0)), dtype, device);
+        auto rest_ones = tenzor::ones({N - 1}, dtype, device);
+        auto undo_k0 = tenzor::cat({k0_scale, rest_ones}, 0).reshape(bcast_shape);
+        X = tenzor::mul(X, undo_k0);
+        X = tenzor::mul(X, static_cast<float>(std::sqrt(2.0 * N)));
+    }
+
+    // Step 1: Half the DC term to account for the inverse formula weight
+    // W[0] = X[0]/2, W[k>0] = X[k]
+    auto dc_scale = tenzor::full({1}, 0.5f, dtype, device);
+    auto rest_ones = tenzor::ones({N - 1}, dtype, device);
+    auto w_scale = tenzor::cat({dc_scale, rest_ones}, 0).reshape(bcast_shape);
+    auto W = tenzor::mul(X, w_scale);
+
+    // Step 2: Twiddle factors: exp(+j*pi*k/(2N))
+    auto k_full = tenzor::arange(0.0, static_cast<double>(N), 1.0, dtype, device);
+    auto angle = tenzor::mul(k_full, static_cast<float>(pi / (2.0 * N)));
+    auto tw_cos = tenzor::cos(angle).reshape(bcast_shape);
+    auto tw_sin = tenzor::sin(angle).reshape(bcast_shape);
+
+    // V = W * exp(+j*angle) = (W*cos(angle)) + j*(W*sin(angle))
+    auto V_r = tenzor::mul(W, tw_cos);
+    auto V_i = tenzor::mul(W, tw_sin);
+
+    // Step 3: y_reordered = Re(IFFT(V))
+    auto V_complex = tenzor::complex(V_r, V_i);
+    auto y_complex = fft::ifft(V_complex, N, d, "backward");
+    auto y_reordered = tenzor::real(y_complex);
+    // y_reordered[n] = (1/N)*sum W[k]*cos(pi*k*(2n+1)/(2N))
+    //                = (1/N)*[C[0]/2 + sum_{k=1} C[k]*cos(...)]
+    //                = reorder(x)[n]  (for backward norm)
+
+    // Step 4: Un-reorder
+    // The DCT-II reorder: even original index i -> position i/2,
+    //                      odd original index i -> position N-(i+1)/2
+    // Inverse: for output position i, read from reordered position:
+    //   i even -> i/2,   i odd -> N - (i+1)/2
+    std::vector<int64_t> inv_idx_vec(N);
+    for (int64_t i = 0; i < N; ++i) {
+        if (i % 2 == 0) {
+            inv_idx_vec[i] = i / 2;
+        } else {
+            inv_idx_vec[i] = N - (i + 1) / 2;
+        }
+    }
+    auto inv_idx = Tensor::from_blob(inv_idx_vec.data(), {N}, DType::Int64, Device::cpu()).clone();
+    if (device.type != Device::Type::CPU) {
+        inv_idx = inv_idx.to(device);
+    }
+
+    auto result = tenzor::index_select(y_reordered, d, inv_idx);
+
+    // Normalization adjustments
+    if (norm == "backward") {
+        // For backward norm: result already = (1/N)*[C[0]/2 + sum C[k]*cos(...)]
+        // But the backward inverse of DCT-II backward needs the raw inverse:
+        //   x[n] = (1/(2N))*[C[0] + 2*sum_{k=1} C[k]*cos(...)]
+        //        = (1/N)*[C[0]/2 + sum_{k=1} C[k]*cos(...)]
+        // This is exactly what we computed. No additional scaling.
+    } else if (norm == "ortho") {
+        // We already converted ortho coefficients to backward coefficients above.
+        // The result is the original x. No additional scaling.
+    } else {
+        // "forward" norm
+        result = tenzor::mul(result, static_cast<float>(N));
+    }
+
+    return result;
+}
+
+// DCT-I: X[k] = x[0] + (-1)^k * x[N-1] + 2 * sum_{n=1}^{N-2} x[n] * cos(pi*n*k/(N-1))
+// This is just a scaled version of the DFT of a symmetrically extended signal.
+Tensor dct1_via_rfft(const Tensor& input, int64_t N, int64_t dim, const std::string& norm) {
+    if (N < 2) {
+        throw std::runtime_error("dct type 1 requires signal length >= 2");
+    }
+    auto dtype = input.dtype();
+    auto device = input.device();
+    int64_t ndim = input.ndim();
+    int64_t d = dim < 0 ? dim + ndim : dim;
+
+    // DCT-I can be computed via RFFT of a mirrored signal of length 2*(N-1):
+    // y = [x[0], x[1], ..., x[N-1], x[N-2], ..., x[1]]
+    // DCT-I[k] = Re(FFT(y)[k]) for k=0..N-1
+
+    // Build mirrored signal
+    auto middle = tenzor::slice(input, d, 1, N - 1);  // x[1..N-2]
+    auto middle_rev = tenzor::flip(middle, {d});       // x[N-2..1]
+    auto mirrored = tenzor::cat({input, middle_rev}, d);
+
+    int64_t M = 2 * (N - 1);  // length of mirrored signal
+
+    // FFT of mirrored signal
+    auto Y = fft::fft(mirrored, M, d, "backward");
+
+    // Take first N real components
+    auto result = tenzor::real(tenzor::slice(Y, d, 0, N));
+
+    // Normalization
+    if (norm == "ortho") {
+        // Ortho: 1/sqrt(2*(N-1)), with endpoints scaled by 1/sqrt(2)
+        float scale = std::sqrt(1.0f / (2.0f * (N - 1)));
+        result = tenzor::mul(result, scale);
+
+        std::vector<int64_t> s(ndim, 1);
+        s[d] = N;
+        auto edge_scale = tenzor::ones({N}, dtype, device);
+        auto inv_sqrt2 = static_cast<float>(1.0 / std::sqrt(2.0));
+        auto first = tenzor::full({1}, inv_sqrt2, dtype, device);
+        auto last = tenzor::full({1}, inv_sqrt2, dtype, device);
+        auto mid = tenzor::ones({N - 2}, dtype, device);
+        edge_scale = tenzor::cat({first, mid, last}, 0).reshape(s);
+        result = tenzor::mul(result, edge_scale);
+    } else if (norm == "forward") {
+        result = tenzor::mul(result, static_cast<float>(1.0 / (2.0 * (N - 1))));
+    }
+
+    return result;
+}
+
+// DCT-IV: X[k] = 2 * sum_{n=0}^{N-1} x[n] * cos(pi*(2n+1)*(2k+1)/(4N))
+//
+// Algorithm via 4N-point FFT:
+//   1. Form u of length 4N: u[0]=x[0], u[4N-n]=x[n] for n=1..N-1, rest zero.
+//      This time-reversal trick gives: DFT_{4N}(u)[j] = sum_n x[n]*exp(+j*pi*nj/(2N))
+//   2. S[k] = DFT_{4N}(u)[2k+1] = sum_n x[n]*exp(j*pi*n*(2k+1)/(2N))
+//   3. C[k] = 2*Re(exp(j*pi*(2k+1)/(4N)) * S[k])
+//
+// Self-inverse: DCT-IV applied twice = 2N * identity (backward norm).
+// Ortho norm with sqrt(1/(2N)) scaling makes it self-inverse.
+//
+Tensor dct4_via_rfft(const Tensor& input, int64_t N, int64_t dim, const std::string& norm) {
+    auto dtype = input.dtype();
+    auto device = input.device();
+    int64_t ndim = input.ndim();
+    int64_t d = dim < 0 ? dim + ndim : dim;
+    double pi = 3.14159265358979323846;
+
+    int64_t M = 4 * N;
+
+    // Step 1: Build u of length 4N.
+    // u[0] = x[0], u[4N-n] = x[n] for n=1..N-1, rest zero.
+    // Equivalently: u = [x[0], zeros(3N), x[1], x[2], ..., x[N-1]]
+    //   where the last N-1 elements are x[1..N-1] at positions 3N+1..4N-1
+    auto u_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    u_shape[d] = M;
+
+    auto x_first = tenzor::slice(input, d, 0, 1);     // x[0], length 1
+
+    if (N == 1) {
+        // Special case: just x[0] followed by zeros
+        auto zero_rest_shape = u_shape;
+        zero_rest_shape[d] = M - 1;
+        auto u = tenzor::cat({x_first, tenzor::zeros(zero_rest_shape, dtype, device)}, d);
+        auto U = fft::fft(u, M, d, "backward");
+        auto odd_idx = tenzor::arange(1.0, 2.0, 2.0, DType::Int64, device);
+        auto U_odd = tenzor::index_select(U, d, odd_idx);
+        auto tw_angle_val = static_cast<float>(pi / (4.0 * N));
+        auto result = tenzor::mul(tenzor::real(U_odd), 2.0f * std::cos(tw_angle_val));
+        if (norm == "ortho") {
+            result = tenzor::mul(result, static_cast<float>(std::sqrt(1.0 / (2.0 * N))));
+        } else if (norm == "forward") {
+            result = tenzor::mul(result, static_cast<float>(1.0 / (2.0 * N)));
+        }
+        return result;
+    }
+
+    auto x_rest = tenzor::slice(input, d, 1, N);      // x[1..N-1], length N-1
+    auto x_rest_rev = tenzor::flip(x_rest, {d});      // x[N-1..1], reversed
+
+    auto zero_mid_shape = u_shape;
+    zero_mid_shape[d] = 3 * N;
+    auto zero_mid = tenzor::zeros(zero_mid_shape, dtype, device);
+
+    // u = [x[0], zeros(3N), x[N-1], x[N-2], ..., x[1]]
+    // so that u[4N-n] = x[n] for n=1..N-1
+    auto u = tenzor::cat({x_first, zero_mid, x_rest_rev}, d);
+
+    // Step 2: DFT of u (length 4N, backward = unnormalized)
+    auto U = fft::fft(u, M, d, "backward");
+
+    // Step 3: Extract odd DFT indices (1, 3, 5, ..., 2N-1) and apply twiddle
+    // Split into real/imag before index_select (index_select may not support complex)
+    auto U_real_all = tenzor::real(U);
+    auto U_imag_all = tenzor::imag(U);
+    auto odd_idx = tenzor::arange(1.0, static_cast<double>(2 * N), 2.0, DType::Int64, device);
+    auto U_r = tenzor::index_select(U_real_all, d, odd_idx);
+    auto U_i = tenzor::index_select(U_imag_all, d, odd_idx);
+
+    // Twiddle: exp(+j*pi*(2k+1)/(4N)) for k=0..N-1
+    auto k_vals = tenzor::arange(0.0, static_cast<double>(N), 1.0, dtype, device);
+    // angle_k = pi*(2k+1)/(4N)
+    auto tw_angle = tenzor::mul(
+        tenzor::add(tenzor::mul(k_vals, 2.0f), tenzor::full({1}, 1.0f, dtype, device)),
+        static_cast<float>(pi / (4.0 * N)));
+    auto tw_cos = tenzor::cos(tw_angle);
+    auto tw_sin = tenzor::sin(tw_angle);
+
+    std::vector<int64_t> tw_shape(ndim, 1);
+    tw_shape[d] = N;
+    tw_cos = tw_cos.reshape(tw_shape);
+    tw_sin = tw_sin.reshape(tw_shape);
+
+    // (U_r + j*U_i) * (tw_cos + j*tw_sin) -> Real = U_r*tw_cos - U_i*tw_sin
+    auto result = tenzor::sub(tenzor::mul(U_r, tw_cos), tenzor::mul(U_i, tw_sin));
+    result = tenzor::mul(result, 2.0f);
+
+    // Normalization
+    if (norm == "ortho") {
+        result = tenzor::mul(result, static_cast<float>(std::sqrt(1.0 / (2.0 * N))));
+    } else if (norm == "forward") {
+        result = tenzor::mul(result, static_cast<float>(1.0 / (2.0 * N)));
+    }
+    // backward: no scaling (raw DCT-IV with factor-2 convention)
+
+    return result;
+}
+
+} // anonymous namespace
+
+auto dct(const Tensor& input, int type, std::optional<int64_t> n, int64_t dim,
+         const std::string& norm) -> Tensor {
+    validate_fft_input(input, "dct");
+    validate_dct_type(type, "dct");
+    dim = normalize_dim(dim, input.ndim());
+
+    int64_t N = n.value_or(input.shape()[dim]);
+    if (N <= 0) {
+        throw std::runtime_error("dct: n must be positive, got " + std::to_string(N));
+    }
+
+    // Composed RFFT-based implementation — works on all backends that support FFT.
+    // Backend kernels (OpId::DCT) delegate here, so we do NOT dispatch to avoid recursion.
+
+    // Pad or truncate to length N if needed
+    Tensor x = input;
+    if (input.shape()[dim] != N) {
+        if (input.shape()[dim] > N) {
+            x = tenzor::slice(input, dim, 0, N);
+        } else {
+            // Pad with zeros
+            auto pad_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+            pad_shape[dim] = N - input.shape()[dim];
+            auto pad = tenzor::zeros(pad_shape, input.dtype(), input.device());
+            x = tenzor::cat({input, pad}, dim);
+        }
+    }
+
+    switch (type) {
+        case 1: return dct1_via_rfft(x, N, dim, norm);
+        case 2: return dct2_via_rfft(x, N, dim, norm);
+        case 3: return dct3_via_rfft(x, N, dim, norm);
+        case 4: return dct4_via_rfft(x, N, dim, norm);
+        default:
+            throw std::runtime_error("dct: invalid type " + std::to_string(type));
+    }
+}
+
+auto idct(const Tensor& input, int type, std::optional<int64_t> n, int64_t dim,
+          const std::string& norm) -> Tensor {
+    validate_fft_input(input, "idct");
+    validate_dct_type(type, "idct");
+    dim = normalize_dim(dim, input.ndim());
+
+    int64_t N = n.value_or(input.shape()[dim]);
+    if (N <= 0) {
+        throw std::runtime_error("idct: n must be positive, got " + std::to_string(N));
+    }
+
+    // Composed implementation — backend kernels (OpId::IDCT) delegate here,
+    // so we do NOT dispatch to avoid recursion.
+
+    // IDCT is the inverse of DCT:
+    // IDCT of type 2 = DCT of type 3 (and vice versa)
+    // IDCT of type 1 = DCT of type 1 (self-inverse, up to scaling)
+    // IDCT of type 4 = DCT of type 4 (self-inverse, up to scaling)
+
+    // Pad or truncate to length N if needed
+    Tensor x = input;
+    if (input.shape()[dim] != N) {
+        if (input.shape()[dim] > N) {
+            x = tenzor::slice(input, dim, 0, N);
+        } else {
+            auto pad_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+            pad_shape[dim] = N - input.shape()[dim];
+            auto pad = tenzor::zeros(pad_shape, input.dtype(), input.device());
+            x = tenzor::cat({input, pad}, dim);
+        }
+    }
+
+    // Map IDCT to the appropriate DCT type
+    switch (type) {
+        case 1: {
+            // DCT-I is self-inverse up to scaling: T(T(x)) = 2*(N-1)*x
+            if (norm == "backward") {
+                auto result = dct1_via_rfft(x, N, dim, "backward");
+                return tenzor::mul(result, static_cast<float>(1.0 / (2.0 * (N - 1))));
+            } else if (norm == "ortho") {
+                // Undo the ortho scaling on the input coefficients:
+                //   ortho forward applied: all *= sqrt(1/(2*(N-1))), endpoints *= 1/sqrt(2)
+                //   undo: endpoints *= sqrt(2), all *= sqrt(2*(N-1))
+                int64_t dd = normalize_dim(dim, x.ndim());
+                std::vector<int64_t> s(x.ndim(), 1);
+                s[dd] = N;
+                auto inv_sqrt2 = static_cast<float>(std::sqrt(2.0));
+                auto first = tenzor::full({1}, inv_sqrt2, x.dtype(), x.device());
+                auto last = tenzor::full({1}, inv_sqrt2, x.dtype(), x.device());
+                auto mid = tenzor::ones({N - 2}, x.dtype(), x.device());
+                auto undo_edge = tenzor::cat({first, mid, last}, 0).reshape(s);
+
+                auto unscaled = tenzor::mul(x, undo_edge);
+                unscaled = tenzor::mul(unscaled, static_cast<float>(std::sqrt(2.0 * (N - 1))));
+
+                // Apply backward DCT-I, then scale by 1/(2*(N-1))
+                auto result = dct1_via_rfft(unscaled, N, dim, "backward");
+                result = tenzor::mul(result, static_cast<float>(1.0 / (2.0 * (N - 1))));
+                return result;
+            } else {
+                // forward norm
+                auto result = dct1_via_rfft(x, N, dim, "backward");
+                return tenzor::mul(result, static_cast<float>(1.0 / (2.0 * (N - 1))));
+            }
+        }
+        case 2:
+            // IDCT-II = DCT-III (with appropriate normalization)
+            if (norm == "ortho") {
+                return dct3_via_rfft(x, N, dim, "ortho");
+            } else if (norm == "backward") {
+                // For "backward" DCT-II, the inverse needs 1/(2N) scaling
+                return dct3_via_rfft(x, N, dim, "backward");
+            } else {
+                // forward
+                auto result = dct3_via_rfft(x, N, dim, "backward");
+                return tenzor::mul(result, static_cast<float>(1.0 / N));
+            }
+        case 3:
+            // IDCT-III = DCT-II (with appropriate normalization)
+            if (norm == "ortho") {
+                return dct2_via_rfft(x, N, dim, "ortho");
+            } else if (norm == "backward") {
+                auto result = dct2_via_rfft(x, N, dim, "backward");
+                return tenzor::mul(result, static_cast<float>(1.0 / (2.0 * N)));
+            } else {
+                auto result = dct2_via_rfft(x, N, dim, "backward");
+                return tenzor::mul(result, static_cast<float>(1.0 / N));
+            }
+        case 4: {
+            // DCT-IV is its own inverse (up to scaling by N/2)
+            auto result = dct4_via_rfft(x, N, dim, norm);
+            if (norm == "backward") {
+                result = tenzor::mul(result, static_cast<float>(1.0 / (2.0 * N)));
+            }
+            return result;
+        }
+        default:
+            throw std::runtime_error("idct: invalid type " + std::to_string(type));
+    }
+}
+
+auto mel_scale(const Tensor& spectrogram, int64_t n_mels,
+               double f_min, double f_max,
+               int64_t sample_rate) -> Tensor {
+    if (n_mels <= 0) {
+        throw std::runtime_error("mel_scale: n_mels must be positive");
+    }
+
+    // Default f_max to Nyquist
+    if (f_max <= 0.0) {
+        f_max = static_cast<double>(sample_rate) / 2.0;
+    }
+
+    // Determine n_freqs from the spectrogram's second-to-last dimension
+    int64_t ndim = spectrogram.ndim();
+    if (ndim < 2) {
+        throw std::runtime_error("mel_scale: spectrogram must have at least 2 dimensions");
+    }
+    int64_t n_freqs = spectrogram.shape()[ndim - 2];
+    int64_t n_fft = (n_freqs - 1) * 2;
+
+    // Hz-to-mel conversion (HTK formula)
+    auto hz_to_mel = [](double hz) -> double {
+        return 2595.0 * std::log10(1.0 + hz / 700.0);
+    };
+    auto mel_to_hz = [](double mel) -> double {
+        return 700.0 * (std::pow(10.0, mel / 2595.0) - 1.0);
+    };
+
+    double mel_min = hz_to_mel(f_min);
+    double mel_max = hz_to_mel(f_max);
+
+    // Create n_mels+2 equally spaced mel points
+    int64_t n_points = n_mels + 2;
+    std::vector<double> mel_points(n_points);
+    for (int64_t i = 0; i < n_points; ++i) {
+        mel_points[i] = mel_min + i * (mel_max - mel_min) / (n_points - 1);
+    }
+
+    // Convert mel points to Hz and then to FFT bin indices
+    std::vector<double> hz_points(n_points);
+    std::vector<int64_t> bins(n_points);
+    for (int64_t i = 0; i < n_points; ++i) {
+        hz_points[i] = mel_to_hz(mel_points[i]);
+        bins[i] = static_cast<int64_t>(std::floor((n_fft + 1) * hz_points[i] / sample_rate));
+    }
+
+    // Build triangular filterbank matrix (n_mels x n_freqs)
+    std::vector<float> fb_data(n_mels * n_freqs, 0.0f);
+    for (int64_t m = 0; m < n_mels; ++m) {
+        int64_t left = bins[m];
+        int64_t center = bins[m + 1];
+        int64_t right = bins[m + 2];
+
+        // Rising slope: left to center
+        for (int64_t k = left; k < center && k < n_freqs; ++k) {
+            if (k >= 0 && center != left) {
+                fb_data[m * n_freqs + k] = static_cast<float>(
+                    static_cast<double>(k - left) / static_cast<double>(center - left));
+            }
+        }
+        // Falling slope: center to right
+        for (int64_t k = center; k <= right && k < n_freqs; ++k) {
+            if (k >= 0 && right != center) {
+                fb_data[m * n_freqs + k] = static_cast<float>(
+                    static_cast<double>(right - k) / static_cast<double>(right - center));
+            }
+        }
+    }
+
+    // Create filterbank tensor on CPU, then move to spectrogram's device
+    auto filterbank = Tensor::from_blob(fb_data.data(), {n_mels, n_freqs},
+                                        DType::Float32, Device::cpu()).clone();
+    if (spectrogram.dtype() != DType::Float32) {
+        filterbank = filterbank.to(spectrogram.device(), spectrogram.dtype());
+    } else if (spectrogram.device().type != Device::Type::CPU) {
+        filterbank = filterbank.to(spectrogram.device());
+    }
+
+    // Apply filterbank: result = filterbank @ spectrogram
+    return tenzor::matmul(filterbank, spectrogram);
+}
+
+auto mfcc(const Tensor& waveform, int64_t sample_rate,
+          int64_t n_mfcc, int64_t n_mels,
+          int64_t n_fft, int64_t hop_length,
+          double f_min, double f_max) -> Tensor {
+    if (n_mfcc <= 0) {
+        throw std::runtime_error("mfcc: n_mfcc must be positive");
+    }
+    if (n_mfcc > n_mels) {
+        throw std::runtime_error("mfcc: n_mfcc must be <= n_mels");
+    }
+
+    // Step 1: Power spectrogram = |STFT(waveform)|^2
+    auto stft_result = fft::stft(waveform, n_fft, hop_length);
+    // Compute power from complex STFT: |z|^2 = real(z)^2 + imag(z)^2
+    auto re = tenzor::real(stft_result);
+    auto im = tenzor::imag(stft_result);
+    auto power_spec = tenzor::add(tenzor::mul(re, re), tenzor::mul(im, im));
+
+    // Step 2: Apply mel-scale filterbank
+    auto mel_spec = fft::mel_scale(power_spec, n_mels, f_min, f_max, sample_rate);
+
+    // Step 3: Log mel spectrogram (add epsilon for numerical stability)
+    auto log_mel = tenzor::log(tenzor::add(mel_spec, 1e-10));
+
+    // Step 4: DCT (type 2, ortho normalization) along the mel dimension
+    // log_mel shape: (..., n_mels, time_frames)
+    // DCT along dim=-2 (the mel dimension)
+    auto dct_result = fft::dct(log_mel, 2, std::nullopt, -2, "ortho");
+
+    // Step 5: Truncate to n_mfcc coefficients along the mel dimension (dim=-2)
+    int64_t ndim = dct_result.ndim();
+    int64_t mel_dim = ndim - 2;
+    auto result = tenzor::slice(dct_result, mel_dim, 0, n_mfcc);
+
+    return result;
 }
 
 } // namespace fft

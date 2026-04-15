@@ -249,5 +249,79 @@ auto fftfreq(int64_t n, double d = 1.0, DType dtype = DType::Float32,
 auto rfftfreq(int64_t n, double d = 1.0, DType dtype = DType::Float32,
               Device device = Device::cpu()) -> Tensor;
 
+/**
+ * @brief Discrete Cosine Transform (DCT).
+ *
+ * Computes DCT of the given type along the specified dimension.
+ * Supports types 1-4 (type 2 is the most common, used in JPEG/MPEG).
+ *
+ * Implemented via RFFT composition, so it works on all backends that
+ * support RFFT. Backends may also register a native OpId::DCT kernel.
+ *
+ * @param input Real input tensor
+ * @param type DCT type (1, 2, 3, or 4). Default: 2
+ * @param n Signal length (default: input.shape[dim])
+ * @param dim Dimension to transform (default: -1)
+ * @param norm Normalization mode: "backward" (default), "forward", "ortho"
+ * @return Real output tensor
+ */
+auto dct(const Tensor& input, int type = 2,
+         std::optional<int64_t> n = std::nullopt, int64_t dim = -1,
+         const std::string& norm = "backward") -> Tensor;
+
+/**
+ * @brief Inverse Discrete Cosine Transform (IDCT).
+ *
+ * Computes the inverse DCT. For type 2, this is DCT-III (and vice versa).
+ *
+ * @param input Real input tensor
+ * @param type DCT type (1, 2, 3, or 4). Default: 2
+ * @param n Signal length (default: input.shape[dim])
+ * @param dim Dimension to transform (default: -1)
+ * @param norm Normalization mode: "backward" (default), "forward", "ortho"
+ * @return Real output tensor
+ */
+auto idct(const Tensor& input, int type = 2,
+          std::optional<int64_t> n = std::nullopt, int64_t dim = -1,
+          const std::string& norm = "backward") -> Tensor;
+
+/**
+ * @brief Apply a mel-frequency filterbank to a spectrogram.
+ *
+ * Converts a linear-frequency spectrogram into a mel-frequency spectrogram
+ * using triangular mel-spaced filter banks (HTK formula).
+ *
+ * @param spectrogram Input tensor of shape (..., n_freqs, time_frames)
+ * @param n_mels Number of mel bands (default: 128)
+ * @param f_min Minimum frequency in Hz (default: 0.0)
+ * @param f_max Maximum frequency in Hz (default: 0.0 means sample_rate/2)
+ * @param sample_rate Audio sample rate in Hz (default: 16000)
+ * @return Tensor of shape (..., n_mels, time_frames)
+ */
+auto mel_scale(const Tensor& spectrogram, int64_t n_mels = 128,
+               double f_min = 0.0, double f_max = 0.0,
+               int64_t sample_rate = 16000) -> Tensor;
+
+/**
+ * @brief Compute Mel-Frequency Cepstral Coefficients (MFCC).
+ *
+ * Computes MFCCs from a raw waveform by computing a power spectrogram,
+ * applying mel-scale filterbank, taking log, and applying DCT.
+ *
+ * @param waveform Input waveform tensor of shape (..., signal_length)
+ * @param sample_rate Audio sample rate in Hz (default: 16000)
+ * @param n_mfcc Number of MFCC coefficients to return (default: 40)
+ * @param n_mels Number of mel bands (default: 128)
+ * @param n_fft FFT window size (default: 400)
+ * @param hop_length Hop length for STFT (default: 160)
+ * @param f_min Minimum frequency in Hz (default: 0.0)
+ * @param f_max Maximum frequency in Hz (default: 0.0 means sample_rate/2)
+ * @return Tensor of shape (..., n_mfcc, time_frames)
+ */
+auto mfcc(const Tensor& waveform, int64_t sample_rate = 16000,
+          int64_t n_mfcc = 40, int64_t n_mels = 128,
+          int64_t n_fft = 400, int64_t hop_length = 160,
+          double f_min = 0.0, double f_max = 0.0) -> Tensor;
+
 } // namespace fft
 } // namespace tenzor

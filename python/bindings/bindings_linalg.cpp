@@ -32,6 +32,10 @@ void register_linalg(py::module_& m) {
     linalg_mod.def("cholesky", &tenzor::linalg::cholesky, "Cholesky decomposition",
                    py::arg("A"), py::arg("upper") = false,
                    py::call_guard<py::gil_scoped_release>());
+    linalg_mod.def("cholesky_solve", &tenzor::linalg::cholesky_solve,
+                   "Solve a linear system using a pre-computed Cholesky factor",
+                   py::arg("B"), py::arg("L"), py::arg("upper") = false,
+                   py::call_guard<py::gil_scoped_release>());
     linalg_mod.def("norm", &tenzor::linalg::norm, "Matrix norm",
                    py::arg("A"), py::arg("ord") = "fro",
                    py::call_guard<py::gil_scoped_release>());
@@ -190,6 +194,17 @@ void register_linalg(py::module_& m) {
                    "Dot product along a dimension: sum(a * b, dim)",
                    py::arg("a"), py::arg("b"), py::arg("dim") = -1,
                    py::call_guard<py::gil_scoped_release>());
+
+    linalg_mod.def("lobpcg", [](const tenzor::Tensor& A, const tenzor::Tensor& X0,
+                                int64_t k, const tenzor::Tensor& B,
+                                int64_t max_iter, double tol) {
+        auto [evals, evecs] = tenzor::linalg::lobpcg(A, X0, k, B, max_iter, tol);
+        return py::make_tuple(evals, evecs);
+    }, "LOBPCG: find k smallest eigenvalues/vectors of a large sparse symmetric matrix",
+       py::arg("A"), py::arg("X0"), py::arg("k"),
+       py::arg("B") = tenzor::Tensor(),
+       py::arg("max_iter") = 100, py::arg("tol") = 1e-6,
+       py::call_guard<py::gil_scoped_release>());
 }
 
 } // namespace tenzor::python

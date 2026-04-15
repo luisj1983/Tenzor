@@ -772,6 +772,18 @@ auto solve(const Variable& A, const Variable& B) -> Variable;
 auto cholesky(const Variable& input, bool upper = false) -> Variable;
 
 /**
+ * @brief Solve a linear system using a Cholesky factor, with gradient tracking.
+ *
+ * Solves A @ X = B given the Cholesky factor L of A (A = L @ L^T).
+ *
+ * @param B Right-hand side variable (..., N, K)
+ * @param L Cholesky factor variable (..., N, N)
+ * @param upper If true, L is upper-triangular (default: false)
+ * @return Solution variable X with same shape as B
+ */
+auto cholesky_solve(const Variable& B, const Variable& L, bool upper = false) -> Variable;
+
+/**
  * @brief Singular Value Decomposition with gradient tracking.
  *
  * Factorizes A = U @ diag(S) @ Vh.

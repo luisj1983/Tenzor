@@ -688,8 +688,8 @@ static auto parse_einsum_equation(const std::string& equation)
     return {input_subs, output_str};
 }
 
-auto einsum(const std::string& equation,
-            std::span<const Tensor> tensors) -> Tensor {
+auto einsum_composed(const std::string& equation,
+                     std::span<const Tensor> tensors) -> Tensor {
     auto [input_subs, output_sub] = parse_einsum_equation(equation);
 
     if (input_subs.size() != tensors.size()) {
@@ -821,6 +821,25 @@ auto einsum(const std::string& equation,
     }
 
     return result;
+}
+
+auto einsum(const std::string& equation,
+            std::span<const Tensor> tensors) -> Tensor {
+    // Try OpId dispatch first (for backends with optimized einsum, e.g. cuTENSOR)
+    if (!tensors.empty()) {
+        auto dev_type = tensors[0].device().type;
+        auto& table = DispatchTableRegistry::get_table(dev_type);
+        if (table.has_kernel(OpId::Einsum)) {
+            OpAttributes attrs;
+            attrs.set(AttrKey::EinsumEquation, equation);
+            std::vector<Tensor> inputs(tensors.begin(), tensors.end());
+            auto result = table.dispatch(OpId::Einsum, inputs, attrs);
+            return result[0];
+        }
+    }
+
+    // Fall back to composed implementation
+    return einsum_composed(equation, tensors);
 }
 
 // ============================================================================

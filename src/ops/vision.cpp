@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/ops/vision.hpp"
+#include "tenzor/ops/creation.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
@@ -244,6 +245,47 @@ auto affine_grid(const Tensor& theta,
 
     std::vector<Tensor> inputs = {theta};
     return dispatch(OpId::AffineGrid, inputs, attrs)[0];
+}
+
+auto deformable_conv2d(const Tensor& input, const Tensor& offset,
+                       const Tensor& weight, const Tensor& bias,
+                       const Tensor& mask,
+                       int64_t stride_h, int64_t stride_w,
+                       int64_t padding_h, int64_t padding_w,
+                       int64_t dilation_h, int64_t dilation_w,
+                       int64_t groups, int64_t offset_groups) -> Tensor {
+    auto ishape = input.shape();
+    if (ishape.size() != 4) {
+        throw std::invalid_argument(
+            "deformable_conv2d expects 4D input (N, C, H, W), got " +
+            std::to_string(ishape.size()) + "D");
+    }
+    auto wshape = weight.shape();
+    if (wshape.size() != 4) {
+        throw std::invalid_argument(
+            "deformable_conv2d expects 4D weight (C_out, C_in/groups, kH, kW), got " +
+            std::to_string(wshape.size()) + "D");
+    }
+
+    OpAttributes attrs;
+    attrs.set(AttrKey::StrideH, stride_h);
+    attrs.set(AttrKey::StrideW, stride_w);
+    attrs.set(AttrKey::PaddingH, padding_h);
+    attrs.set(AttrKey::PaddingW, padding_w);
+    attrs.set(AttrKey::DilationH, dilation_h);
+    attrs.set(AttrKey::DilationW, dilation_w);
+    attrs.set(AttrKey::Groups, groups);
+    attrs.set(AttrKey::OffsetGroups, offset_groups);
+    // Create zero-element tensors for uninitialized bias/mask so dispatch doesn't crash
+    bool has_bias = bias.is_valid() && bias.numel() > 0;
+    bool has_mask = mask.is_valid() && mask.numel() > 0;
+    attrs.set(AttrKey::UseMask, has_mask ? 1 : 0);
+
+    Tensor safe_bias = has_bias ? bias : zeros({0}, input.dtype(), input.device());
+    Tensor safe_mask = has_mask ? mask : zeros({0}, input.dtype(), input.device());
+
+    std::vector<Tensor> inputs = {input, offset, weight, safe_bias, safe_mask};
+    return dispatch(OpId::DeformableConv2dForward, inputs, attrs)[0];
 }
 
 } // namespace tenzor::ops

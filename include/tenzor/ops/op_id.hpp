@@ -231,6 +231,10 @@ enum class OpId : uint16_t {
     Conv1dBackwardInput,             // 1D convolution gradient w.r.t. input
     Conv1dBackwardWeight,            // 1D convolution gradient w.r.t. weight
     Conv1dBackwardBias,              // 1D convolution gradient w.r.t. bias
+    DeformableConv2dForward = 184,   // Deformable conv2d forward (DCNv2)
+    DeformableConv2dBackwardInput,   // Backward w.r.t. input, offset, and mask
+    DeformableConv2dBackwardWeight,  // Backward w.r.t. weight
+    DeformableConv2dBackwardBias,    // Backward w.r.t. bias (channel sum)
 
     // =========================================================================
     // Pooling Operations (190-209)
@@ -336,6 +340,7 @@ enum class OpId : uint16_t {
     Unique,
     FlashAttention = 295,
     FlashAttentionBackward,
+    Einsum,                          // General tensor contraction via equation string
 
     // =========================================================================
     // 3D Convolution and Pooling Operations (301-315)
@@ -523,6 +528,10 @@ enum class OpId : uint16_t {
     STFT = 470,                // Short-time Fourier transform
     ISTFT,                     // Inverse short-time Fourier transform
     CDist,                     // Pairwise distance computation
+    DCT,                       // Discrete Cosine Transform (types I-IV)
+    IDCT,                      // Inverse Discrete Cosine Transform
+    MelScale,                  // Mel-frequency filterbank application
+    MFCC,                      // Mel-Frequency Cepstral Coefficients
 
     // =========================================================================
     // Sampling and Statistics Operations (480-489)
@@ -566,6 +575,7 @@ enum class OpId : uint16_t {
     LinalgVectorNorm,          // Vector p-norm along dimensions
     LinalgMatrixNorm,          // Matrix norm (Frobenius, spectral, etc.)
     LinalgVecdot,              // Dot product along a dimension
+    LinalgCholeskySolve,       // Solve via pre-computed Cholesky factor (potrs)
 
     // =========================================================================
     // Bitwise Operations (520-529)
@@ -712,6 +722,9 @@ enum class OpId : uint16_t {
     I1e,                   // exp(-|x|) * BesselI1(x), scaled modified Bessel
     Entr,                  // element-wise entropy: -x*log(x)
     SphericalBesselJ0,     // spherical Bessel j0: sin(x)/x
+    Cov,                   // Sample covariance matrix
+    Corrcoef,              // Pearson correlation coefficient matrix
+    LOBPCG,                // Locally Optimal Block Preconditioned Conjugate Gradient
 
     // =========================================================================
     // Sentinel (MUST BE LAST)

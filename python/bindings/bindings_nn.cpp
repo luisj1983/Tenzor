@@ -467,6 +467,33 @@ void register_nn(py::module_& m) {
                    ", bias=" + (has_bias ? "True" : "False") + ")";
         });
 
+    // DeformableConv2d (DCNv2)
+    py::class_<tenzor::nn::DeformableConv2d, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::DeformableConv2d>>(nn, "DeformableConv2d",
+        "Deformable 2D convolution (DCNv2) with learnable offsets and optional modulation mask.")
+        .def(py::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, bool>(),
+             py::arg("in_channels"),
+             py::arg("out_channels"),
+             py::arg("kernel_size"),
+             py::arg("stride") = 1,
+             py::arg("padding") = 0,
+             py::arg("dilation") = 1,
+             py::arg("groups") = 1,
+             py::arg("offset_groups") = 1,
+             py::arg("bias") = true)
+        .def("forward", &tenzor::nn::DeformableConv2d::forward,
+             py::arg("input"),
+             py::arg("offset"),
+             py::arg("mask") = tenzor::Variable())
+        .def_property_readonly("stride_h", &tenzor::nn::DeformableConv2d::stride_h)
+        .def_property_readonly("stride_w", &tenzor::nn::DeformableConv2d::stride_w)
+        .def_property_readonly("padding_h", &tenzor::nn::DeformableConv2d::padding_h)
+        .def_property_readonly("padding_w", &tenzor::nn::DeformableConv2d::padding_w)
+        .def_property_readonly("offset_groups", &tenzor::nn::DeformableConv2d::offset_groups)
+        .def("__repr__", [](const tenzor::nn::DeformableConv2d& self) {
+            return "DeformableConv2d(" + self.extra_repr() + ")";
+        });
+
     // Conv1d - verified implemented in conv.cpp (lines 989-1216)
     py::class_<tenzor::nn::Conv1d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::Conv1d>>(nn, "Conv1d")

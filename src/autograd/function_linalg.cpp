@@ -944,4 +944,51 @@ auto LUBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> 
     return {grad_A};
 }
 
+// ============================================================================
+// CholeskySolveBackward
+// ============================================================================
+// Forward: X = cholesky_solve(B, L) = L^{-T} L^{-1} B   (lower)
+// Backward:
+//   grad_B = cholesky_solve(grad_X, L)
+//   grad_L = -tril(L^{-T} @ S @ L^{-1})
+//     where S = grad_X @ X^T + X @ grad_X^T  (symmetrized)
+
+auto CholeskySolveBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
+    throw std::runtime_error("CholeskySolveBackward::forward should not be called directly");
+}
+
+auto CholeskySolveBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    const auto& grad_X = grad_outputs[0];   // dLoss/dX, (..., N, K)
+    const auto& X = saved_tensors_[0];      // solution X, (..., N, K)
+    const auto& L = saved_tensors_[1];      // Cholesky factor, (..., N, N)
+
+    auto ndim = X.ndim();
+
+    // grad_B = cholesky_solve(grad_X, L, upper)
+    auto grad_B = tenzor::linalg::cholesky_solve(grad_X, L, upper_);
+
+    // grad_L: S = grad_X @ X^T + X @ grad_X^T (symmetrized outer product)
+    auto Xt = transpose(X, ndim - 2, ndim - 1);
+    auto grad_Xt = transpose(grad_X, ndim - 2, ndim - 1);
+    auto S = add(matmul(grad_X, Xt), matmul(X, grad_Xt));
+
+    // grad_L = -tril(L^{-T} @ S @ L^{-1})
+    // For lower: L^{-1} @ S via solve_triangular(L, S, lower)
+    //            then L^{-T} @ result via solve_triangular(L^T, result, upper)
+    auto L_ndim = L.ndim();
+    if (!upper_) {
+        auto temp = tenzor::linalg::solve_triangular(L, S, false);
+        auto Lt = transpose(L, L_ndim - 2, L_ndim - 1);
+        auto grad_L_full = tenzor::linalg::solve_triangular(Lt, temp, true);
+        auto grad_L = neg(tril(grad_L_full));
+        return {grad_B, grad_L};
+    } else {
+        auto Ut = transpose(L, L_ndim - 2, L_ndim - 1);
+        auto temp = tenzor::linalg::solve_triangular(Ut, S, false);
+        auto grad_U_full = tenzor::linalg::solve_triangular(L, temp, true);
+        auto grad_U = neg(triu(grad_U_full));
+        return {grad_B, grad_U};
+    }
+}
+
 } // namespace tenzor

@@ -16,6 +16,8 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/advanced.hpp"
+#include "tenzor/ops/fft.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/sparse/sparse_tensor.hpp"
 #include "tenzor/sparse/sparse_ops.hpp"
@@ -522,6 +524,33 @@ namespace cuda {
     auto conv_transpose2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
     auto depthwise_conv2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, cudaStream_t stream) -> Tensor;
 
+    // Deformable Conv2d (DCNv2) operations
+    auto deformable_conv2d_forward_kernel(
+        const Tensor& input, const Tensor& offset, const Tensor& weight,
+        const Tensor& bias, const Tensor& mask,
+        int64_t stride_h, int64_t stride_w,
+        int64_t pad_h, int64_t pad_w,
+        int64_t dil_h, int64_t dil_w,
+        int64_t groups, int64_t offset_groups,
+        cudaStream_t stream) -> Tensor;
+    auto deformable_conv2d_backward_input_kernel(
+        const Tensor& grad_output, const Tensor& input, const Tensor& offset,
+        const Tensor& weight, const Tensor& mask,
+        int64_t stride_h, int64_t stride_w,
+        int64_t pad_h, int64_t pad_w,
+        int64_t dil_h, int64_t dil_w,
+        int64_t groups, int64_t offset_groups,
+        cudaStream_t stream) -> std::vector<Tensor>;
+    auto deformable_conv2d_backward_weight_kernel(
+        const Tensor& grad_output, const Tensor& input, const Tensor& offset,
+        const Tensor& mask,
+        int64_t stride_h, int64_t stride_w,
+        int64_t pad_h, int64_t pad_w,
+        int64_t dil_h, int64_t dil_w,
+        int64_t groups, int64_t offset_groups,
+        const std::vector<int64_t>& weight_shape,
+        cudaStream_t stream) -> Tensor;
+
 #ifdef TENZOR_HAS_CUDNN
     auto cudnn_conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
     auto cudnn_conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& weight, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
@@ -887,7 +916,7 @@ namespace cuda {
 #ifdef TENZOR_HAS_CUSPARSE
     // SpGEMM and triangular solve are only defined when cuSPARSE is
     // available — the hand-rolled fallback intentionally doesn't cover
-    // them. sparse_ops.cpp will fall through to the CPU implementation
+    // them. sparse_ops.cpp will throw std::runtime_error
     // if has_kernel(SparseSpGEMM/Trsv/Trsm) returns false.
     auto cuda_spgemm_kernel(const SparseTensor& a, const SparseTensor& b,
                             void* stream) -> SparseTensor;
@@ -1726,6 +1755,15 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         });
 
     // =========================================================================
+    // Einsum (composed — delegates to einsum_composed to avoid dispatch loop)
+    // =========================================================================
+    table.register_kernel(OpId::Einsum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto equation = std::string(attrs.get_string(AttrKey::EinsumEquation, ""));
+        std::vector<Tensor> tensors(inputs.begin(), inputs.end());
+        return {einsum_composed(equation, tensors)};
+    });
+
+    // =========================================================================
     // Fused LayerNorm Backward
     // =========================================================================
     table.register_kernel(OpId::FusedLayerNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -2161,6 +2199,69 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
         return cuda::depthwise_conv2d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, get_cuda_stream(attrs));
+    });
+
+    // =========================================================================
+    // Deformable Conv2d (DCNv2) Operations
+    // =========================================================================
+
+    // DeformableConv2dForward: inputs = {input, offset, weight, bias, mask}
+    table.register_kernel(OpId::DeformableConv2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
+        int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
+        int64_t pad_h = attrs.get_int(AttrKey::PaddingH, 0);
+        int64_t pad_w = attrs.get_int(AttrKey::PaddingW, 0);
+        int64_t dil_h = attrs.get_int(AttrKey::DilationH, 1);
+        int64_t dil_w = attrs.get_int(AttrKey::DilationW, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
+        return std::vector<Tensor>{cuda::deformable_conv2d_forward_kernel(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, get_cuda_stream(attrs))};
+    });
+
+    // DeformableConv2dBackwardInput: inputs = {grad_output, input, offset, weight, mask}
+    table.register_kernel(OpId::DeformableConv2dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
+        int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
+        int64_t pad_h = attrs.get_int(AttrKey::PaddingH, 0);
+        int64_t pad_w = attrs.get_int(AttrKey::PaddingW, 0);
+        int64_t dil_h = attrs.get_int(AttrKey::DilationH, 1);
+        int64_t dil_w = attrs.get_int(AttrKey::DilationW, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
+        return cuda::deformable_conv2d_backward_input_kernel(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, get_cuda_stream(attrs));
+    });
+
+    // DeformableConv2dBackwardWeight: inputs = {grad_output, input, offset, mask}
+    table.register_kernel(OpId::DeformableConv2dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
+        int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
+        int64_t pad_h = attrs.get_int(AttrKey::PaddingH, 0);
+        int64_t pad_w = attrs.get_int(AttrKey::PaddingW, 0);
+        int64_t dil_h = attrs.get_int(AttrKey::DilationH, 1);
+        int64_t dil_w = attrs.get_int(AttrKey::DilationW, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
+        auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
+        return std::vector<Tensor>{cuda::deformable_conv2d_backward_weight_kernel(
+            inputs[0], inputs[1], inputs[2], inputs[3],
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, weight_shape, get_cuda_stream(attrs))};
+    });
+
+    // DeformableConv2dBackwardBias: inputs = {grad_output}
+    // Bias gradient = channel-wise sum of grad_output over (N, H, W)
+    table.register_kernel(OpId::DeformableConv2dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+        const Tensor& grad_output = inputs[0]; // (N, C, H, W)
+        auto t1 = tenzor::sum(grad_output, 3); // (N, C, H)
+        auto t2 = tenzor::sum(t1, 2);          // (N, C)
+        auto grad_bias = tenzor::sum(t2, 0);   // (C,)
+        return {grad_bias};
     });
 
     // =========================================================================
@@ -3017,6 +3118,21 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         bool transpose_q = attrs.get_bool(AttrKey::TransposeQ, false);
         return cuda::linalg_ormqr_kernel(inputs[0], inputs[1], inputs[2], left, transpose_q, get_cuda_stream(attrs));
     });
+    table.register_single_output_kernel(OpId::LinalgCholeskySolve, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        bool upper = attrs.get_bool(AttrKey::Upper, false);
+        auto stream = get_cuda_stream(attrs);
+        if (!upper) {
+            auto Y = cuda::linalg_solve_triangular_kernel(inputs[1], inputs[0], false, false, stream);
+            int64_t ndim = inputs[1].ndim();
+            auto Lt = tenzor::transpose(inputs[1], ndim - 2, ndim - 1).contiguous();
+            return cuda::linalg_solve_triangular_kernel(Lt, Y, true, false, stream);
+        } else {
+            int64_t ndim = inputs[1].ndim();
+            auto Ut = tenzor::transpose(inputs[1], ndim - 2, ndim - 1).contiguous();
+            auto Y = cuda::linalg_solve_triangular_kernel(Ut, inputs[0], false, false, stream);
+            return cuda::linalg_solve_triangular_kernel(inputs[1], Y, true, false, stream);
+        }
+    });
 #else // !TENZOR_HAS_CUSOLVER — use native CUDA shared-memory linalg fallback
     table.register_single_output_kernel(OpId::LinalgDet, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         return cuda::linalg_det_kernel(inputs[0], get_cuda_stream(attrs));
@@ -3061,6 +3177,21 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         bool left = attrs.get_bool(AttrKey::Left, true);
         bool transpose_q = attrs.get_bool(AttrKey::TransposeQ, false);
         return cuda::linalg_ormqr_kernel(inputs[0], inputs[1], inputs[2], left, transpose_q, get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::LinalgCholeskySolve, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        bool upper = attrs.get_bool(AttrKey::Upper, false);
+        auto stream = get_cuda_stream(attrs);
+        if (!upper) {
+            auto Y = cuda::linalg_solve_triangular_kernel(inputs[1], inputs[0], false, false, stream);
+            int64_t ndim = inputs[1].ndim();
+            auto Lt = tenzor::transpose(inputs[1], ndim - 2, ndim - 1).contiguous();
+            return cuda::linalg_solve_triangular_kernel(Lt, Y, true, false, stream);
+        } else {
+            int64_t ndim = inputs[1].ndim();
+            auto Ut = tenzor::transpose(inputs[1], ndim - 2, ndim - 1).contiguous();
+            auto Y = cuda::linalg_solve_triangular_kernel(Ut, inputs[0], false, false, stream);
+            return cuda::linalg_solve_triangular_kernel(inputs[1], Y, true, false, stream);
+        }
     });
 #endif // TENZOR_HAS_CUSOLVER
 
@@ -3708,6 +3839,52 @@ void register_cuda_kernels(BackendDispatchTable& table) {
                                            length, get_cuda_stream(attrs));
         });
 
+    // =========================================================================
+    // DCT / IDCT
+    // =========================================================================
+    table.register_single_output_kernel(OpId::DCT,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int type = static_cast<int>(attrs.get_int(AttrKey::DCTType, 2));
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            std::string norm{attrs.get_string(AttrKey::Norm, "backward")};
+            std::optional<int64_t> n = std::nullopt;
+            int64_t n_val = attrs.get_int(AttrKey::N, -1);
+            if (n_val > 0) n = n_val;
+            return tenzor::fft::dct(inputs[0], type, n, dim, norm);
+        });
+
+    table.register_single_output_kernel(OpId::IDCT,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int type = static_cast<int>(attrs.get_int(AttrKey::DCTType, 2));
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            std::string norm{attrs.get_string(AttrKey::Norm, "backward")};
+            std::optional<int64_t> n = std::nullopt;
+            int64_t n_val = attrs.get_int(AttrKey::N, -1);
+            if (n_val > 0) n = n_val;
+            return tenzor::fft::idct(inputs[0], type, n, dim, norm);
+        });
+
+    table.register_single_output_kernel(OpId::MelScale,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t n_mels = attrs.get_int(AttrKey::NumMels, 128);
+            double f_min = attrs.get_float(AttrKey::FMin, 0.0);
+            double f_max = attrs.get_float(AttrKey::FMax, 0.0);
+            int64_t sample_rate = attrs.get_int(AttrKey::SampleRate, 16000);
+            return tenzor::fft::mel_scale(inputs[0], n_mels, f_min, f_max, sample_rate);
+        });
+
+    table.register_single_output_kernel(OpId::MFCC,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t sample_rate = attrs.get_int(AttrKey::SampleRate, 16000);
+            int64_t n_mfcc = attrs.get_int(AttrKey::NumMFCC, 40);
+            int64_t n_mels = attrs.get_int(AttrKey::NumMels, 128);
+            int64_t n_fft = attrs.get_int(AttrKey::NFft, 400);
+            int64_t hop_length = attrs.get_int(AttrKey::HopLength, 160);
+            double f_min = attrs.get_float(AttrKey::FMin, 0.0);
+            double f_max = attrs.get_float(AttrKey::FMax, 0.0);
+            return tenzor::fft::mfcc(inputs[0], sample_rate, n_mfcc, n_mels, n_fft, hop_length, f_min, f_max);
+        });
+
     // DenseToSparse: dense tensor -> CSR components [crow_indices, col_indices, values]
     table.register_kernel(OpId::DenseToSparse,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
@@ -4259,6 +4436,18 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     });
 
     // =========================================================================
+    // Statistical operations (Cov, Corrcoef) — composed from existing ops
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Cov, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t correction = attrs.get_int(AttrKey::Correction, 1);
+        return cov(inputs[0], correction);
+    });
+
+    table.register_single_output_kernel(OpId::Corrcoef, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        return corrcoef(inputs[0]);
+    });
+
+    // =========================================================================
     // AsStrided — metadata-only view with custom shape/strides
     // =========================================================================
     table.register_single_output_kernel(OpId::AsStrided,
@@ -4268,6 +4457,19 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             int64_t offset = attrs.get_int(AttrKey::StorageOffset, -1);
             std::optional<int64_t> storage_offset = (offset >= 0) ? std::optional(offset) : std::nullopt;
             return tenzor::as_strided(inputs[0], shape, strides, storage_offset);
+        });
+
+    // =========================================================================
+    // LOBPCG — Locally Optimal Block Preconditioned Conjugate Gradient
+    // =========================================================================
+    table.register_kernel(OpId::LOBPCG,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t k = attrs.get_int(AttrKey::K, 1);
+            int64_t max_iter = attrs.get_int(AttrKey::MaxIter, 100);
+            double tol = attrs.get_float(AttrKey::Tolerance, 1e-6);
+            Tensor B = inputs.size() > 2 ? inputs[2] : Tensor();
+            auto [evals, evecs] = linalg::lobpcg(inputs[0], inputs[1], k, B, max_iter, tol);
+            return {evals, evecs};
         });
 
     // =========================================================================

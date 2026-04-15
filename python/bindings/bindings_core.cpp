@@ -2867,6 +2867,18 @@ Returns:
          py::arg("x"), py::arg("y"),
          py::call_guard<py::gil_scoped_release>());
 
+    // Statistical operations (cov, corrcoef)
+    m.def("cov", [](const tenzor::Tensor& input, int64_t correction) {
+         return tenzor::cov(input, correction);
+         }, "Compute sample covariance matrix",
+         py::arg("input"), py::arg("correction") = 1,
+         py::call_guard<py::gil_scoped_release>());
+    m.def("corrcoef", [](const tenzor::Tensor& input) {
+         return tenzor::corrcoef(input);
+         }, "Compute Pearson correlation coefficient matrix",
+         py::arg("input"),
+         py::call_guard<py::gil_scoped_release>());
+
     // Phase 5: Extended math ops
     m.def("deg2rad", [](const tenzor::Tensor& t) { return tenzor::deg2rad(t); },
          "Convert degrees to radians", py::arg("input"), py::call_guard<py::gil_scoped_release>());

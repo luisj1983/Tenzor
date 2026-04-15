@@ -2188,5 +2188,811 @@ auto depthwise_conv2d_forward_kernel(
     TENZOR_CUDA_POST_LAUNCH_CHECK();
     return output;
 }
+
+// ============================================================================
+// Deformable Conv2d (DCNv2) CUDA Kernels
+// ============================================================================
+
+/**
+ * @brief Bilinear interpolation sampling from a single-channel 2D feature map.
+ *
+ * Computes the bilinearly-interpolated value at continuous location (h, w)
+ * within a feature map of spatial size (height x width).  Out-of-bounds
+ * locations return zero.
+ */
+template<typename T>
+__device__ inline T deformable_bilinear_sample(
+    const T* data, int64_t height, int64_t width,
+    T h, T w)
+{
+    if (h <= static_cast<T>(-1) || h >= static_cast<T>(height) ||
+        w <= static_cast<T>(-1) || w >= static_cast<T>(width)) {
+        return static_cast<T>(0);
+    }
+
+    int64_t h_low = static_cast<int64_t>(floor(static_cast<double>(h)));
+    int64_t w_low = static_cast<int64_t>(floor(static_cast<double>(w)));
+    int64_t h_high = h_low + 1;
+    int64_t w_high = w_low + 1;
+
+    T lh = h - static_cast<T>(h_low);
+    T lw = w - static_cast<T>(w_low);
+    T hh = static_cast<T>(1) - lh;
+    T hw = static_cast<T>(1) - lw;
+
+    T v1 = (h_low >= 0 && w_low >= 0)   ? data[h_low  * width + w_low]  : static_cast<T>(0);
+    T v2 = (h_low >= 0 && w_high < width)  ? data[h_low  * width + w_high] : static_cast<T>(0);
+    T v3 = (h_high < height && w_low >= 0) ? data[h_high * width + w_low]  : static_cast<T>(0);
+    T v4 = (h_high < height && w_high < width) ? data[h_high * width + w_high] : static_cast<T>(0);
+
+    return hh * hw * v1 + hh * lw * v2 + lh * hw * v3 + lh * lw * v4;
+}
+
+/**
+ * @brief Partial derivatives of bilinear interpolation w.r.t. spatial coords.
+ *
+ * Returns (dval/dh, dval/dw) at the continuous position (h, w).
+ */
+template<typename T>
+__device__ inline void deformable_bilinear_sample_grad_hw(
+    const T* data, int64_t height, int64_t width,
+    T h, T w,
+    T& grad_h, T& grad_w)
+{
+    grad_h = static_cast<T>(0);
+    grad_w = static_cast<T>(0);
+
+    if (h <= static_cast<T>(-1) || h >= static_cast<T>(height) ||
+        w <= static_cast<T>(-1) || w >= static_cast<T>(width)) {
+        return;
+    }
+
+    int64_t h_low = static_cast<int64_t>(floor(static_cast<double>(h)));
+    int64_t w_low = static_cast<int64_t>(floor(static_cast<double>(w)));
+    int64_t h_high = h_low + 1;
+    int64_t w_high = w_low + 1;
+
+    T lh = h - static_cast<T>(h_low);
+    T lw = w - static_cast<T>(w_low);
+    T hh = static_cast<T>(1) - lh;
+    T hw = static_cast<T>(1) - lw;
+
+    T v1 = (h_low >= 0 && w_low >= 0)          ? data[h_low  * width + w_low]  : static_cast<T>(0);
+    T v2 = (h_low >= 0 && w_high < width)       ? data[h_low  * width + w_high] : static_cast<T>(0);
+    T v3 = (h_high < height && w_low >= 0)      ? data[h_high * width + w_low]  : static_cast<T>(0);
+    T v4 = (h_high < height && w_high < width)  ? data[h_high * width + w_high] : static_cast<T>(0);
+
+    // d/dh of bilinear: hh = (1-lh), lh = (h - h_low)
+    //   d hh/dh = -1, d lh/dh = +1
+    grad_h = -hw * v1 - lw * v2 + hw * v3 + lw * v4;
+    // d/dw of bilinear: hw = (1-lw), lw = (w - w_low)
+    grad_w = -hh * v1 + hh * v2 - lh * v3 + lh * v4;
+}
+
+/**
+ * @brief Atomically scatter bilinear interpolation gradients to grad_input.
+ *
+ * Given a gradient scalar `val` to distribute at continuous position (h, w),
+ * scatters the four bilinear-weighted contributions via atomicAdd.
+ */
+template<typename T>
+__device__ inline void deformable_bilinear_scatter(
+    T* grad_data, int64_t height, int64_t width,
+    T h, T w, T val)
+{
+    if (h <= static_cast<T>(-1) || h >= static_cast<T>(height) ||
+        w <= static_cast<T>(-1) || w >= static_cast<T>(width)) {
+        return;
+    }
+
+    int64_t h_low = static_cast<int64_t>(floor(static_cast<double>(h)));
+    int64_t w_low = static_cast<int64_t>(floor(static_cast<double>(w)));
+    int64_t h_high = h_low + 1;
+    int64_t w_high = w_low + 1;
+
+    T lh = h - static_cast<T>(h_low);
+    T lw = w - static_cast<T>(w_low);
+    T hh = static_cast<T>(1) - lh;
+    T hw = static_cast<T>(1) - lw;
+
+    if (h_low >= 0 && w_low >= 0)
+        atomicAdd(&grad_data[h_low * width + w_low], hh * hw * val);
+    if (h_low >= 0 && w_high < width)
+        atomicAdd(&grad_data[h_low * width + w_high], hh * lw * val);
+    if (h_high < height && w_low >= 0)
+        atomicAdd(&grad_data[h_high * width + w_low], lh * hw * val);
+    if (h_high < height && w_high < width)
+        atomicAdd(&grad_data[h_high * width + w_high], lh * lw * val);
+}
+
+// Specialization for double atomicAdd (not natively supported on all archs)
+__device__ inline double atomicAdd_double(double* address, double val) {
+    unsigned long long int* address_as_ull = reinterpret_cast<unsigned long long int*>(address);
+    unsigned long long int old = *address_as_ull, assumed;
+    do {
+        assumed = old;
+        old = atomicCAS(address_as_ull, assumed,
+            __double_as_longlong(val + __longlong_as_double(assumed)));
+    } while (assumed != old);
+    return __longlong_as_double(old);
+}
+
+template<>
+__device__ inline void deformable_bilinear_scatter<double>(
+    double* grad_data, int64_t height, int64_t width,
+    double h, double w, double val)
+{
+    if (h <= -1.0 || h >= static_cast<double>(height) ||
+        w <= -1.0 || w >= static_cast<double>(width)) {
+        return;
+    }
+
+    int64_t h_low = static_cast<int64_t>(floor(h));
+    int64_t w_low = static_cast<int64_t>(floor(w));
+    int64_t h_high = h_low + 1;
+    int64_t w_high = w_low + 1;
+
+    double lh = h - static_cast<double>(h_low);
+    double lw = w - static_cast<double>(w_low);
+    double hh = 1.0 - lh;
+    double hw = 1.0 - lw;
+
+    if (h_low >= 0 && w_low >= 0)
+        atomicAdd_double(&grad_data[h_low * width + w_low], hh * hw * val);
+    if (h_low >= 0 && w_high < width)
+        atomicAdd_double(&grad_data[h_low * width + w_high], hh * lw * val);
+    if (h_high < height && w_low >= 0)
+        atomicAdd_double(&grad_data[h_high * width + w_low], lh * hw * val);
+    if (h_high < height && w_high < width)
+        atomicAdd_double(&grad_data[h_high * width + w_high], lh * lw * val);
+}
+
+// ============================================================================
+// DCNv2 Forward Kernel
+// ============================================================================
+
+template<typename T>
+__global__ void deformable_conv2d_forward_impl(
+    const T* input,          // (N, C_in, H_in, W_in)
+    const T* offset,         // (N, offset_groups * 2 * kH * kW, H_out, W_out)
+    const T* weight,         // (C_out, C_in/groups, kH, kW)
+    const T* bias,           // (C_out,) or nullptr
+    const T* mask,           // (N, offset_groups * kH * kW, H_out, W_out) or nullptr
+    T* output,               // (N, C_out, H_out, W_out)
+    int64_t batch, int64_t in_channels, int64_t in_h, int64_t in_w,
+    int64_t out_channels, int64_t out_h, int64_t out_w,
+    int64_t kernel_h, int64_t kernel_w,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups, int64_t offset_groups,
+    bool has_bias, bool has_mask)
+{
+    int64_t total = batch * out_channels * out_h * out_w;
+    TENZOR_CUDA_KERNEL_LOOP(idx, total) {
+        // Decode flat index -> (n, oc, oh, ow)
+        int64_t ow = idx % out_w;
+        int64_t oh = (idx / out_w) % out_h;
+        int64_t oc = (idx / (out_w * out_h)) % out_channels;
+        int64_t n  = idx / (out_w * out_h * out_channels);
+
+        int64_t out_channels_per_group = out_channels / groups;
+        int64_t in_channels_per_group = in_channels / groups;
+        int64_t g = oc / out_channels_per_group;
+
+        // Which offset group does this output channel belong to?
+        int64_t channels_per_offset_group = in_channels / offset_groups;
+
+        T sum = static_cast<T>(0);
+
+        for (int64_t ic = 0; ic < in_channels_per_group; ++ic) {
+            int64_t c_in = g * in_channels_per_group + ic;
+            // Determine offset group for this input channel
+            int64_t og = c_in / channels_per_offset_group;
+
+            const T* input_channel = input + (n * in_channels + c_in) * in_h * in_w;
+
+            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                    int64_t offset_idx_base = og * 2 * kernel_h * kernel_w;
+                    int64_t offset_h_idx = offset_idx_base + 2 * (kh * kernel_w + kw);
+                    int64_t offset_w_idx = offset_h_idx + 1;
+
+                    // Offset tensor layout: (N, offset_groups*2*kH*kW, H_out, W_out)
+                    T off_h = offset[((n * offset_groups * 2 * kernel_h * kernel_w + offset_h_idx) * out_h + oh) * out_w + ow];
+                    T off_w = offset[((n * offset_groups * 2 * kernel_h * kernel_w + offset_w_idx) * out_h + oh) * out_w + ow];
+
+                    T h_in = static_cast<T>(oh * stride_h - pad_h + kh * dil_h) + off_h;
+                    T w_in = static_cast<T>(ow * stride_w - pad_w + kw * dil_w) + off_w;
+
+                    T val = deformable_bilinear_sample(input_channel, in_h, in_w, h_in, w_in);
+
+                    // DCNv2 modulation mask
+                    if (has_mask) {
+                        int64_t mask_idx_base = og * kernel_h * kernel_w;
+                        int64_t mask_idx = mask_idx_base + kh * kernel_w + kw;
+                        T m = mask[((n * offset_groups * kernel_h * kernel_w + mask_idx) * out_h + oh) * out_w + ow];
+                        val *= m;
+                    }
+
+                    // Weight layout: (C_out, C_in/groups, kH, kW)
+                    int64_t w_idx = ((oc * in_channels_per_group + ic) * kernel_h + kh) * kernel_w + kw;
+                    sum += val * weight[w_idx];
+                }
+            }
+        }
+
+        if (has_bias) {
+            sum += bias[oc];
+        }
+
+        output[idx] = sum;
+    }
+}
+
+// ============================================================================
+// DCNv2 Backward Input/Offset/Mask Kernel
+// ============================================================================
+
+template<typename T>
+__global__ void deformable_conv2d_backward_input_impl(
+    const T* grad_output,    // (N, C_out, H_out, W_out)
+    const T* input,          // (N, C_in, H_in, W_in)
+    const T* offset,         // (N, offset_groups * 2 * kH * kW, H_out, W_out)
+    const T* weight,         // (C_out, C_in/groups, kH, kW)
+    const T* mask,           // (N, offset_groups * kH * kW, H_out, W_out) or nullptr
+    T* grad_input,           // (N, C_in, H_in, W_in)
+    T* grad_offset,          // (N, offset_groups * 2 * kH * kW, H_out, W_out)
+    T* grad_mask,            // (N, offset_groups * kH * kW, H_out, W_out) or nullptr
+    int64_t batch, int64_t in_channels, int64_t in_h, int64_t in_w,
+    int64_t out_channels, int64_t out_h, int64_t out_w,
+    int64_t kernel_h, int64_t kernel_w,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups, int64_t offset_groups,
+    bool has_mask)
+{
+    // Iterate over (n, og, kh, kw, oh, ow) for offset/mask gradients
+    // and scatter grad_input via bilinear
+    int64_t total = batch * out_channels * out_h * out_w;
+    int64_t out_channels_per_group = out_channels / groups;
+    int64_t in_channels_per_group = in_channels / groups;
+    int64_t channels_per_offset_group = in_channels / offset_groups;
+
+    TENZOR_CUDA_KERNEL_LOOP(idx, total) {
+        int64_t ow = idx % out_w;
+        int64_t oh = (idx / out_w) % out_h;
+        int64_t oc = (idx / (out_w * out_h)) % out_channels;
+        int64_t n  = idx / (out_w * out_h * out_channels);
+
+        int64_t g = oc / out_channels_per_group;
+        T grad_out_val = grad_output[idx];
+
+        for (int64_t ic = 0; ic < in_channels_per_group; ++ic) {
+            int64_t c_in = g * in_channels_per_group + ic;
+            int64_t og = c_in / channels_per_offset_group;
+
+            const T* input_channel = input + (n * in_channels + c_in) * in_h * in_w;
+            T* grad_input_channel = grad_input + (n * in_channels + c_in) * in_h * in_w;
+
+            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                    int64_t offset_idx_base = og * 2 * kernel_h * kernel_w;
+                    int64_t offset_h_idx = offset_idx_base + 2 * (kh * kernel_w + kw);
+                    int64_t offset_w_idx = offset_h_idx + 1;
+
+                    T off_h = offset[((n * offset_groups * 2 * kernel_h * kernel_w + offset_h_idx) * out_h + oh) * out_w + ow];
+                    T off_w = offset[((n * offset_groups * 2 * kernel_h * kernel_w + offset_w_idx) * out_h + oh) * out_w + ow];
+
+                    T h_in = static_cast<T>(oh * stride_h - pad_h + kh * dil_h) + off_h;
+                    T w_in = static_cast<T>(ow * stride_w - pad_w + kw * dil_w) + off_w;
+
+                    int64_t w_weight_idx = ((oc * in_channels_per_group + ic) * kernel_h + kh) * kernel_w + kw;
+                    T w_val = weight[w_weight_idx];
+
+                    T sampled_val = deformable_bilinear_sample(input_channel, in_h, in_w, h_in, w_in);
+
+                    T m_val = static_cast<T>(1);
+                    if (has_mask) {
+                        int64_t mask_idx_base = og * kernel_h * kernel_w;
+                        int64_t mask_idx = mask_idx_base + kh * kernel_w + kw;
+                        m_val = mask[((n * offset_groups * kernel_h * kernel_w + mask_idx) * out_h + oh) * out_w + ow];
+                    }
+
+                    // grad_input: scatter bilinear
+                    T grad_to_scatter = grad_out_val * w_val * m_val;
+                    deformable_bilinear_scatter(grad_input_channel, in_h, in_w, h_in, w_in, grad_to_scatter);
+
+                    // grad_offset: d/dh and d/dw of bilinear * weight * mask * grad_output
+                    T dval_dh, dval_dw;
+                    deformable_bilinear_sample_grad_hw(input_channel, in_h, in_w, h_in, w_in, dval_dh, dval_dw);
+
+                    T grad_offset_h = grad_out_val * w_val * m_val * dval_dh;
+                    T grad_offset_w = grad_out_val * w_val * m_val * dval_dw;
+
+                    int64_t off_h_flat = ((n * offset_groups * 2 * kernel_h * kernel_w + offset_h_idx) * out_h + oh) * out_w + ow;
+                    int64_t off_w_flat = ((n * offset_groups * 2 * kernel_h * kernel_w + offset_w_idx) * out_h + oh) * out_w + ow;
+
+                    atomicAdd(&grad_offset[off_h_flat], grad_offset_h);
+                    atomicAdd(&grad_offset[off_w_flat], grad_offset_w);
+
+                    // grad_mask: sampled_val * weight * grad_output
+                    if (has_mask) {
+                        int64_t mask_idx_base = og * kernel_h * kernel_w;
+                        int64_t mask_idx = mask_idx_base + kh * kernel_w + kw;
+                        int64_t mask_flat = ((n * offset_groups * kernel_h * kernel_w + mask_idx) * out_h + oh) * out_w + ow;
+                        T grad_mask_val = grad_out_val * w_val * sampled_val;
+                        atomicAdd(&grad_mask[mask_flat], grad_mask_val);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Double specialization for atomicAdd in backward input kernel
+template<>
+__global__ void deformable_conv2d_backward_input_impl<double>(
+    const double* grad_output,
+    const double* input,
+    const double* offset,
+    const double* weight,
+    const double* mask,
+    double* grad_input,
+    double* grad_offset,
+    double* grad_mask,
+    int64_t batch, int64_t in_channels, int64_t in_h, int64_t in_w,
+    int64_t out_channels, int64_t out_h, int64_t out_w,
+    int64_t kernel_h, int64_t kernel_w,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups, int64_t offset_groups,
+    bool has_mask)
+{
+    int64_t total = batch * out_channels * out_h * out_w;
+    int64_t out_channels_per_group = out_channels / groups;
+    int64_t in_channels_per_group = in_channels / groups;
+    int64_t channels_per_offset_group = in_channels / offset_groups;
+
+    TENZOR_CUDA_KERNEL_LOOP(idx, total) {
+        int64_t ow = idx % out_w;
+        int64_t oh = (idx / out_w) % out_h;
+        int64_t oc = (idx / (out_w * out_h)) % out_channels;
+        int64_t n  = idx / (out_w * out_h * out_channels);
+
+        int64_t g = oc / out_channels_per_group;
+        double grad_out_val = grad_output[idx];
+
+        for (int64_t ic = 0; ic < in_channels_per_group; ++ic) {
+            int64_t c_in = g * in_channels_per_group + ic;
+            int64_t og = c_in / channels_per_offset_group;
+
+            const double* input_channel = input + (n * in_channels + c_in) * in_h * in_w;
+            double* grad_input_channel = grad_input + (n * in_channels + c_in) * in_h * in_w;
+
+            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                    int64_t offset_idx_base = og * 2 * kernel_h * kernel_w;
+                    int64_t offset_h_idx = offset_idx_base + 2 * (kh * kernel_w + kw);
+                    int64_t offset_w_idx = offset_h_idx + 1;
+
+                    double off_h = offset[((n * offset_groups * 2 * kernel_h * kernel_w + offset_h_idx) * out_h + oh) * out_w + ow];
+                    double off_w = offset[((n * offset_groups * 2 * kernel_h * kernel_w + offset_w_idx) * out_h + oh) * out_w + ow];
+
+                    double h_in = static_cast<double>(oh * stride_h - pad_h + kh * dil_h) + off_h;
+                    double w_in = static_cast<double>(ow * stride_w - pad_w + kw * dil_w) + off_w;
+
+                    int64_t w_weight_idx = ((oc * in_channels_per_group + ic) * kernel_h + kh) * kernel_w + kw;
+                    double w_val = weight[w_weight_idx];
+
+                    double sampled_val = deformable_bilinear_sample(input_channel, in_h, in_w, h_in, w_in);
+
+                    double m_val = 1.0;
+                    if (has_mask) {
+                        int64_t mask_idx_base = og * kernel_h * kernel_w;
+                        int64_t mask_idx = mask_idx_base + kh * kernel_w + kw;
+                        m_val = mask[((n * offset_groups * kernel_h * kernel_w + mask_idx) * out_h + oh) * out_w + ow];
+                    }
+
+                    // grad_input
+                    double grad_to_scatter = grad_out_val * w_val * m_val;
+                    deformable_bilinear_scatter(grad_input_channel, in_h, in_w, h_in, w_in, grad_to_scatter);
+
+                    // grad_offset
+                    double dval_dh, dval_dw;
+                    deformable_bilinear_sample_grad_hw(input_channel, in_h, in_w, h_in, w_in, dval_dh, dval_dw);
+
+                    int64_t off_h_flat = ((n * offset_groups * 2 * kernel_h * kernel_w + offset_h_idx) * out_h + oh) * out_w + ow;
+                    int64_t off_w_flat = ((n * offset_groups * 2 * kernel_h * kernel_w + offset_w_idx) * out_h + oh) * out_w + ow;
+
+                    atomicAdd_double(&grad_offset[off_h_flat], grad_out_val * w_val * m_val * dval_dh);
+                    atomicAdd_double(&grad_offset[off_w_flat], grad_out_val * w_val * m_val * dval_dw);
+
+                    // grad_mask
+                    if (has_mask) {
+                        int64_t mask_idx_base = og * kernel_h * kernel_w;
+                        int64_t mask_idx = mask_idx_base + kh * kernel_w + kw;
+                        int64_t mask_flat = ((n * offset_groups * kernel_h * kernel_w + mask_idx) * out_h + oh) * out_w + ow;
+                        atomicAdd_double(&grad_mask[mask_flat], grad_out_val * w_val * sampled_val);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// DCNv2 Backward Weight Kernel
+// ============================================================================
+
+template<typename T>
+__global__ void deformable_conv2d_backward_weight_impl(
+    const T* grad_output,    // (N, C_out, H_out, W_out)
+    const T* input,          // (N, C_in, H_in, W_in)
+    const T* offset,         // (N, offset_groups * 2 * kH * kW, H_out, W_out)
+    const T* mask,           // (N, offset_groups * kH * kW, H_out, W_out) or nullptr
+    T* grad_weight,          // (C_out, C_in/groups, kH, kW)
+    int64_t batch, int64_t in_channels, int64_t in_h, int64_t in_w,
+    int64_t out_channels, int64_t out_h, int64_t out_w,
+    int64_t kernel_h, int64_t kernel_w,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups, int64_t offset_groups,
+    bool has_mask)
+{
+    // Each thread accumulates one element of grad_weight
+    int64_t in_channels_per_group = in_channels / groups;
+    int64_t out_channels_per_group = out_channels / groups;
+    int64_t channels_per_offset_group = in_channels / offset_groups;
+    int64_t total_weight = out_channels * in_channels_per_group * kernel_h * kernel_w;
+
+    TENZOR_CUDA_KERNEL_LOOP(w_idx, total_weight) {
+        int64_t kw = w_idx % kernel_w;
+        int64_t kh = (w_idx / kernel_w) % kernel_h;
+        int64_t ic = (w_idx / (kernel_w * kernel_h)) % in_channels_per_group;
+        int64_t oc = w_idx / (kernel_w * kernel_h * in_channels_per_group);
+
+        int64_t g = oc / out_channels_per_group;
+        int64_t c_in = g * in_channels_per_group + ic;
+        int64_t og = c_in / channels_per_offset_group;
+
+        T grad_w_acc = static_cast<T>(0);
+
+        for (int64_t n = 0; n < batch; ++n) {
+            const T* input_channel = input + (n * in_channels + c_in) * in_h * in_w;
+
+            for (int64_t oh = 0; oh < out_h; ++oh) {
+                for (int64_t ow = 0; ow < out_w; ++ow) {
+                    int64_t offset_idx_base = og * 2 * kernel_h * kernel_w;
+                    int64_t offset_h_idx = offset_idx_base + 2 * (kh * kernel_w + kw);
+                    int64_t offset_w_idx = offset_h_idx + 1;
+
+                    T off_h = offset[((n * offset_groups * 2 * kernel_h * kernel_w + offset_h_idx) * out_h + oh) * out_w + ow];
+                    T off_w = offset[((n * offset_groups * 2 * kernel_h * kernel_w + offset_w_idx) * out_h + oh) * out_w + ow];
+
+                    T h_in = static_cast<T>(oh * stride_h - pad_h + kh * dil_h) + off_h;
+                    T w_in = static_cast<T>(ow * stride_w - pad_w + kw * dil_w) + off_w;
+
+                    T val = deformable_bilinear_sample(input_channel, in_h, in_w, h_in, w_in);
+
+                    if (has_mask) {
+                        int64_t mask_idx_base = og * kernel_h * kernel_w;
+                        int64_t mask_idx = mask_idx_base + kh * kernel_w + kw;
+                        T m = mask[((n * offset_groups * kernel_h * kernel_w + mask_idx) * out_h + oh) * out_w + ow];
+                        val *= m;
+                    }
+
+                    int64_t go_idx = ((n * out_channels + oc) * out_h + oh) * out_w + ow;
+                    grad_w_acc += grad_output[go_idx] * val;
+                }
+            }
+        }
+
+        atomicAdd(&grad_weight[w_idx], grad_w_acc);
+    }
+}
+
+// Double specialization for backward weight
+template<>
+__global__ void deformable_conv2d_backward_weight_impl<double>(
+    const double* grad_output,
+    const double* input,
+    const double* offset,
+    const double* mask,
+    double* grad_weight,
+    int64_t batch, int64_t in_channels, int64_t in_h, int64_t in_w,
+    int64_t out_channels, int64_t out_h, int64_t out_w,
+    int64_t kernel_h, int64_t kernel_w,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups, int64_t offset_groups,
+    bool has_mask)
+{
+    int64_t in_channels_per_group = in_channels / groups;
+    int64_t out_channels_per_group = out_channels / groups;
+    int64_t channels_per_offset_group = in_channels / offset_groups;
+    int64_t total_weight = out_channels * in_channels_per_group * kernel_h * kernel_w;
+
+    TENZOR_CUDA_KERNEL_LOOP(w_idx, total_weight) {
+        int64_t kw = w_idx % kernel_w;
+        int64_t kh = (w_idx / kernel_w) % kernel_h;
+        int64_t ic = (w_idx / (kernel_w * kernel_h)) % in_channels_per_group;
+        int64_t oc = w_idx / (kernel_w * kernel_h * in_channels_per_group);
+
+        int64_t g = oc / out_channels_per_group;
+        int64_t c_in = g * in_channels_per_group + ic;
+        int64_t og = c_in / channels_per_offset_group;
+
+        double grad_w_acc = 0.0;
+
+        for (int64_t n = 0; n < batch; ++n) {
+            const double* input_channel = input + (n * in_channels + c_in) * in_h * in_w;
+
+            for (int64_t oh = 0; oh < out_h; ++oh) {
+                for (int64_t ow = 0; ow < out_w; ++ow) {
+                    int64_t offset_idx_base = og * 2 * kernel_h * kernel_w;
+                    int64_t offset_h_idx = offset_idx_base + 2 * (kh * kernel_w + kw);
+                    int64_t offset_w_idx = offset_h_idx + 1;
+
+                    double off_h = offset[((n * offset_groups * 2 * kernel_h * kernel_w + offset_h_idx) * out_h + oh) * out_w + ow];
+                    double off_w = offset[((n * offset_groups * 2 * kernel_h * kernel_w + offset_w_idx) * out_h + oh) * out_w + ow];
+
+                    double h_in = static_cast<double>(oh * stride_h - pad_h + kh * dil_h) + off_h;
+                    double w_in = static_cast<double>(ow * stride_w - pad_w + kw * dil_w) + off_w;
+
+                    double val = deformable_bilinear_sample(input_channel, in_h, in_w, h_in, w_in);
+
+                    if (has_mask) {
+                        int64_t mask_idx_base = og * kernel_h * kernel_w;
+                        int64_t mask_idx = mask_idx_base + kh * kernel_w + kw;
+                        double m = mask[((n * offset_groups * kernel_h * kernel_w + mask_idx) * out_h + oh) * out_w + ow];
+                        val *= m;
+                    }
+
+                    int64_t go_idx = ((n * out_channels + oc) * out_h + oh) * out_w + ow;
+                    grad_w_acc += grad_output[go_idx] * val;
+                }
+            }
+        }
+
+        atomicAdd_double(&grad_weight[w_idx], grad_w_acc);
+    }
+}
+
+// ============================================================================
+// DCNv2 Host Launcher Functions
+// ============================================================================
+
+auto deformable_conv2d_forward_kernel(
+    const Tensor& input,       // (N, C_in, H_in, W_in)
+    const Tensor& offset,      // (N, offset_groups*2*kH*kW, H_out, W_out)
+    const Tensor& weight,      // (C_out, C_in/groups, kH, kW)
+    const Tensor& bias,        // (C_out,)
+    const Tensor& mask,        // (N, offset_groups*kH*kW, H_out, W_out)
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups, int64_t offset_groups,
+    cudaStream_t stream) -> Tensor
+{
+    auto in_shape = input.shape();
+    auto w_shape = weight.shape();
+
+    int64_t batch = in_shape[0];
+    int64_t in_channels = in_shape[1];
+    int64_t in_h = in_shape[2];
+    int64_t in_w = in_shape[3];
+
+    int64_t out_channels = w_shape[0];
+    int64_t kernel_h = w_shape[2];
+    int64_t kernel_w = w_shape[3];
+
+    int64_t out_h = (in_h + 2 * pad_h - dil_h * (kernel_h - 1) - 1) / stride_h + 1;
+    int64_t out_w = (in_w + 2 * pad_w - dil_w * (kernel_w - 1) - 1) / stride_w + 1;
+
+    Tensor output({batch, out_channels, out_h, out_w}, input.dtype(), input.device());
+
+    bool has_bias = (bias.numel() > 0);
+    bool has_mask = (mask.numel() > 0);
+
+    int64_t total = batch * out_channels * out_h * out_w;
+
+    if (input.dtype() == DType::Float32) {
+        auto [num_blocks, block_size] = optimal_launch_config(
+            deformable_conv2d_forward_impl<float>, total);
+        deformable_conv2d_forward_impl<float><<<num_blocks, block_size, 0, stream>>>(
+            input.data<float>(), offset.data<float>(), weight.data<float>(),
+            has_bias ? bias.data<float>() : nullptr,
+            has_mask ? mask.data<float>() : nullptr,
+            output.data<float>(),
+            batch, in_channels, in_h, in_w,
+            out_channels, out_h, out_w,
+            kernel_h, kernel_w,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, has_bias, has_mask);
+    } else if (input.dtype() == DType::Float64) {
+        auto [num_blocks, block_size] = optimal_launch_config(
+            deformable_conv2d_forward_impl<double>, total);
+        deformable_conv2d_forward_impl<double><<<num_blocks, block_size, 0, stream>>>(
+            input.data<double>(), offset.data<double>(), weight.data<double>(),
+            has_bias ? bias.data<double>() : nullptr,
+            has_mask ? mask.data<double>() : nullptr,
+            output.data<double>(),
+            batch, in_channels, in_h, in_w,
+            out_channels, out_h, out_w,
+            kernel_h, kernel_w,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, has_bias, has_mask);
+    } else {
+        throw std::runtime_error("deformable_conv2d_forward: unsupported dtype (requires Float32 or Float64)");
+    }
+
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+    return output;
+}
+
+auto deformable_conv2d_backward_input_kernel(
+    const Tensor& grad_output,   // (N, C_out, H_out, W_out)
+    const Tensor& input,         // (N, C_in, H_in, W_in)
+    const Tensor& offset,        // (N, offset_groups*2*kH*kW, H_out, W_out)
+    const Tensor& weight,        // (C_out, C_in/groups, kH, kW)
+    const Tensor& mask,          // (N, offset_groups*kH*kW, H_out, W_out)
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups, int64_t offset_groups,
+    cudaStream_t stream) -> std::vector<Tensor>
+{
+    auto in_shape = input.shape();
+    auto off_shape = offset.shape();
+    auto w_shape = weight.shape();
+    auto go_shape = grad_output.shape();
+
+    int64_t batch = in_shape[0];
+    int64_t in_channels = in_shape[1];
+    int64_t in_h = in_shape[2];
+    int64_t in_w = in_shape[3];
+    int64_t out_channels = w_shape[0];
+    int64_t out_h = go_shape[2];
+    int64_t out_w = go_shape[3];
+    int64_t kernel_h = w_shape[2];
+    int64_t kernel_w = w_shape[3];
+
+    bool has_mask = (mask.numel() > 0);
+
+    Tensor grad_input(std::vector<int64_t>(in_shape.begin(), in_shape.end()), input.dtype(), input.device());
+    Tensor grad_offset(std::vector<int64_t>(off_shape.begin(), off_shape.end()), offset.dtype(), offset.device());
+    Tensor grad_mask_tensor;
+    if (has_mask) {
+        auto ms = mask.shape();
+        grad_mask_tensor = Tensor(std::vector<int64_t>(ms.begin(), ms.end()), mask.dtype(), mask.device());
+    }
+
+    int64_t total = batch * out_channels * out_h * out_w;
+
+    if (input.dtype() == DType::Float32) {
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(grad_input.data<float>(), 0, grad_input.numel() * sizeof(float), stream));
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(grad_offset.data<float>(), 0, grad_offset.numel() * sizeof(float), stream));
+        if (has_mask) {
+            TENZOR_CUDA_CHECK(cudaMemsetAsync(grad_mask_tensor.data<float>(), 0, grad_mask_tensor.numel() * sizeof(float), stream));
+        }
+
+        auto [num_blocks, block_size] = optimal_launch_config(
+            deformable_conv2d_backward_input_impl<float>, total);
+        deformable_conv2d_backward_input_impl<float><<<num_blocks, block_size, 0, stream>>>(
+            grad_output.data<float>(), input.data<float>(), offset.data<float>(),
+            weight.data<float>(),
+            has_mask ? mask.data<float>() : nullptr,
+            grad_input.data<float>(), grad_offset.data<float>(),
+            has_mask ? grad_mask_tensor.data<float>() : nullptr,
+            batch, in_channels, in_h, in_w,
+            out_channels, out_h, out_w,
+            kernel_h, kernel_w,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, has_mask);
+    } else if (input.dtype() == DType::Float64) {
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(grad_input.data<double>(), 0, grad_input.numel() * sizeof(double), stream));
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(grad_offset.data<double>(), 0, grad_offset.numel() * sizeof(double), stream));
+        if (has_mask) {
+            TENZOR_CUDA_CHECK(cudaMemsetAsync(grad_mask_tensor.data<double>(), 0, grad_mask_tensor.numel() * sizeof(double), stream));
+        }
+
+        auto [num_blocks, block_size] = optimal_launch_config(
+            deformable_conv2d_backward_input_impl<double>, total);
+        deformable_conv2d_backward_input_impl<double><<<num_blocks, block_size, 0, stream>>>(
+            grad_output.data<double>(), input.data<double>(), offset.data<double>(),
+            weight.data<double>(),
+            has_mask ? mask.data<double>() : nullptr,
+            grad_input.data<double>(), grad_offset.data<double>(),
+            has_mask ? grad_mask_tensor.data<double>() : nullptr,
+            batch, in_channels, in_h, in_w,
+            out_channels, out_h, out_w,
+            kernel_h, kernel_w,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, has_mask);
+    } else {
+        throw std::runtime_error("deformable_conv2d_backward_input: unsupported dtype (requires Float32 or Float64)");
+    }
+
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+    if (has_mask) {
+        return {grad_input, grad_offset, grad_mask_tensor};
+    }
+    return {grad_input, grad_offset};
+}
+
+auto deformable_conv2d_backward_weight_kernel(
+    const Tensor& grad_output,   // (N, C_out, H_out, W_out)
+    const Tensor& input,         // (N, C_in, H_in, W_in)
+    const Tensor& offset,        // (N, offset_groups*2*kH*kW, H_out, W_out)
+    const Tensor& mask,          // (N, offset_groups*kH*kW, H_out, W_out)
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups, int64_t offset_groups,
+    const std::vector<int64_t>& weight_shape,
+    cudaStream_t stream) -> Tensor
+{
+    auto in_shape = input.shape();
+    auto go_shape = grad_output.shape();
+
+    int64_t batch = in_shape[0];
+    int64_t in_channels = in_shape[1];
+    int64_t in_h = in_shape[2];
+    int64_t in_w = in_shape[3];
+    int64_t out_channels = weight_shape[0];
+    int64_t in_channels_per_group = weight_shape[1];
+    int64_t kernel_h = weight_shape[2];
+    int64_t kernel_w = weight_shape[3];
+    int64_t out_h = go_shape[2];
+    int64_t out_w = go_shape[3];
+
+    bool has_mask = (mask.numel() > 0);
+
+    Tensor grad_weight(weight_shape, input.dtype(), input.device());
+
+    int64_t total_weight = out_channels * in_channels_per_group * kernel_h * kernel_w;
+
+    if (input.dtype() == DType::Float32) {
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(grad_weight.data<float>(), 0, grad_weight.numel() * sizeof(float), stream));
+
+        auto [num_blocks, block_size] = optimal_launch_config(
+            deformable_conv2d_backward_weight_impl<float>, total_weight);
+        deformable_conv2d_backward_weight_impl<float><<<num_blocks, block_size, 0, stream>>>(
+            grad_output.data<float>(), input.data<float>(), offset.data<float>(),
+            has_mask ? mask.data<float>() : nullptr,
+            grad_weight.data<float>(),
+            batch, in_channels, in_h, in_w,
+            out_channels, out_h, out_w,
+            kernel_h, kernel_w,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, has_mask);
+    } else if (input.dtype() == DType::Float64) {
+        TENZOR_CUDA_CHECK(cudaMemsetAsync(grad_weight.data<double>(), 0, grad_weight.numel() * sizeof(double), stream));
+
+        auto [num_blocks, block_size] = optimal_launch_config(
+            deformable_conv2d_backward_weight_impl<double>, total_weight);
+        deformable_conv2d_backward_weight_impl<double><<<num_blocks, block_size, 0, stream>>>(
+            grad_output.data<double>(), input.data<double>(), offset.data<double>(),
+            has_mask ? mask.data<double>() : nullptr,
+            grad_weight.data<double>(),
+            batch, in_channels, in_h, in_w,
+            out_channels, out_h, out_w,
+            kernel_h, kernel_w,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, has_mask);
+    } else {
+        throw std::runtime_error("deformable_conv2d_backward_weight: unsupported dtype (requires Float32 or Float64)");
+    }
+
+    TENZOR_CUDA_POST_LAUNCH_CHECK();
+    return grad_weight;
+}
+
 } // namespace cuda
 } // namespace tenzor

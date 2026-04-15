@@ -1425,6 +1425,31 @@ auto solve(const Variable& A, const Variable& B) -> Variable {
     return output;
 }
 
+auto cholesky_solve(const Variable& B, const Variable& L, bool upper) -> Variable {
+    if ((!B.requires_grad() && !L.requires_grad()) || !is_grad_enabled()) {
+        return Variable(tenzor::linalg::cholesky_solve(B.tensor(), L.tensor(), upper), false);
+    }
+
+    auto result_tensor = tenzor::linalg::cholesky_solve(B.tensor(), L.tensor(), upper);
+
+    auto grad_fn = std::make_shared<CholeskySolveBackward>(upper);
+    grad_fn->save_for_backward({result_tensor, L.tensor()});
+
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    next_funcs.push_back(B.grad_fn());
+    next_funcs.push_back(L.grad_fn());
+    grad_fn->set_next_functions(next_funcs);
+
+    std::vector<Variable> input_vars;
+    if (B.requires_grad()) input_vars.push_back(B);
+    if (L.requires_grad()) input_vars.push_back(L);
+    grad_fn->set_input_variables(input_vars);
+
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
 auto cholesky(const Variable& input, bool upper) -> Variable {
     if (!input.requires_grad() || !is_grad_enabled()) {
         return Variable(tenzor::linalg::cholesky(input.tensor(), upper), false);

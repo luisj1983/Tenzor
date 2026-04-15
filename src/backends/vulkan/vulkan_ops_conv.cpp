@@ -1222,4 +1222,325 @@ auto VulkanBackend::dispatchConvTranspose3dBackwardBias(const Tensor& grad_outpu
 }
 
 
+// ============================================================================
+// Deformable Conv2d Forward (DCNv2)
+// ============================================================================
+
+auto VulkanBackend::dispatchDeformableConv2dForward(
+    const Tensor& input, const Tensor& offset,
+    const Tensor& weight, const Tensor& bias,
+    const Tensor& mask,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups, int64_t offset_groups,
+    bool use_mask) -> Tensor {
+
+    auto input_shape  = input.shape();   // (N, C_in, H, W)
+    auto weight_shape = weight.shape();  // (C_out, C_in/groups, kH, kW)
+
+    int64_t batch       = input_shape[0];
+    int64_t in_channels = input_shape[1];
+    int64_t H           = input_shape[2];
+    int64_t W           = input_shape[3];
+    int64_t out_channels = weight_shape[0];
+    int64_t kH          = weight_shape[2];
+    int64_t kW          = weight_shape[3];
+
+    int64_t H_out = (H + 2 * pad_h - dil_h * (kH - 1) - 1) / stride_h + 1;
+    int64_t W_out = (W + 2 * pad_w - dil_w * (kW - 1) - 1) / stride_w + 1;
+
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("deformable_conv2d", device_id);
+
+    std::vector<int64_t> output_shape = {batch, out_channels, H_out, W_out};
+    Tensor output(output_shape, input.dtype(), input.device());
+
+    const void* buffer_input  = input.data_ptr();
+    const void* buffer_offset = offset.data_ptr();
+    const void* buffer_weight = weight.data_ptr();
+    const void* buffer_bias   = bias.data_ptr();
+    const void* buffer_mask   = use_mask ? mask.data_ptr() : output.data_ptr();
+    const void* buffer_output = output.data_ptr();
+
+    size_t size_input  = input.numel()  * input.dtype_size();
+    size_t size_offset = offset.numel() * offset.dtype_size();
+    size_t size_weight = weight.numel() * weight.dtype_size();
+    size_t size_bias   = bias.numel()   * bias.dtype_size();
+    size_t size_mask   = use_mask ? (mask.numel() * mask.dtype_size()) : 4;
+    size_t size_output = output.numel() * output.dtype_size();
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, buffer_input}, {1, buffer_offset}, {2, buffer_weight},
+        {3, buffer_bias},  {4, buffer_mask},   {5, buffer_output}
+    };
+    std::vector<size_t> sizes = {size_input, size_offset, size_weight, size_bias, size_mask, size_output};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+
+    struct PushConstants {
+        uint32_t batch, in_channels, out_channels, H, W, kH, kW;
+        uint32_t H_out, W_out, stride_h, stride_w, pad_h, pad_w;
+        uint32_t dil_h, dil_w, groups, offset_groups, use_mask, n_elements;
+    } pc;
+
+    pc.batch        = static_cast<uint32_t>(batch);
+    pc.in_channels  = static_cast<uint32_t>(in_channels);
+    pc.out_channels = static_cast<uint32_t>(out_channels);
+    pc.H            = static_cast<uint32_t>(H);
+    pc.W            = static_cast<uint32_t>(W);
+    pc.kH           = static_cast<uint32_t>(kH);
+    pc.kW           = static_cast<uint32_t>(kW);
+    pc.H_out        = static_cast<uint32_t>(H_out);
+    pc.W_out        = static_cast<uint32_t>(W_out);
+    pc.stride_h     = static_cast<uint32_t>(stride_h);
+    pc.stride_w     = static_cast<uint32_t>(stride_w);
+    pc.pad_h        = static_cast<uint32_t>(pad_h);
+    pc.pad_w        = static_cast<uint32_t>(pad_w);
+    pc.dil_h        = static_cast<uint32_t>(dil_h);
+    pc.dil_w        = static_cast<uint32_t>(dil_w);
+    pc.groups        = static_cast<uint32_t>(groups);
+    pc.offset_groups = static_cast<uint32_t>(offset_groups);
+    pc.use_mask      = use_mask ? 1u : 0u;
+    pc.n_elements    = static_cast<uint32_t>(output.numel());
+
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+
+    uint32_t workgroups = static_cast<uint32_t>(div_wg(output.numel(), devices_[device_id].workgroupSize));
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+    insertComputeOnlyBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+// ============================================================================
+// Deformable Conv2d Backward Input (DCNv2) — grad_input, grad_offset, grad_mask
+// ============================================================================
+
+auto VulkanBackend::dispatchDeformableConv2dBackwardInput(
+    const Tensor& grad_output, const Tensor& input,
+    const Tensor& offset, const Tensor& weight,
+    const Tensor& mask,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups, int64_t offset_groups,
+    bool use_mask) -> std::vector<Tensor> {
+
+    auto input_shape  = input.shape();
+    auto weight_shape = weight.shape();
+    auto go_shape     = grad_output.shape();
+
+    int64_t batch       = input_shape[0];
+    int64_t in_channels = input_shape[1];
+    int64_t H           = input_shape[2];
+    int64_t W           = input_shape[3];
+    int64_t out_channels = weight_shape[0];
+    int64_t kH          = weight_shape[2];
+    int64_t kW          = weight_shape[3];
+    int64_t H_out       = go_shape[2];
+    int64_t W_out       = go_shape[3];
+
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("deformable_conv2d_backward_input", device_id);
+
+    // Create output tensors (zero-initialized for atomic accumulation)
+    auto is = input.shape();
+    auto os = offset.shape();
+    Tensor grad_input(std::vector<int64_t>(is.begin(), is.end()), input.dtype(), input.device());
+    grad_input.zero_();
+    Tensor grad_offset(std::vector<int64_t>(os.begin(), os.end()), offset.dtype(), offset.device());
+    grad_offset.zero_();
+    Tensor grad_mask_out;
+    if (use_mask) {
+        auto ms = mask.shape();
+        grad_mask_out = Tensor(std::vector<int64_t>(ms.begin(), ms.end()), mask.dtype(), mask.device());
+        grad_mask_out.zero_();
+    } else {
+        grad_mask_out = Tensor({1}, input.dtype(), input.device());  // dummy
+    }
+
+    const void* buffer_go      = grad_output.data_ptr();
+    const void* buffer_input   = input.data_ptr();
+    const void* buffer_offset  = offset.data_ptr();
+    const void* buffer_weight  = weight.data_ptr();
+    const void* buffer_mask    = use_mask ? mask.data_ptr() : grad_mask_out.data_ptr();
+    const void* buffer_gi      = grad_input.data_ptr();
+    const void* buffer_g_off   = grad_offset.data_ptr();
+    const void* buffer_g_mask  = grad_mask_out.data_ptr();
+
+    size_t size_go     = grad_output.numel() * grad_output.dtype_size();
+    size_t size_input  = input.numel()       * input.dtype_size();
+    size_t size_offset = offset.numel()      * offset.dtype_size();
+    size_t size_weight = weight.numel()      * weight.dtype_size();
+    size_t size_mask   = use_mask ? (mask.numel() * mask.dtype_size()) : 4;
+    size_t size_gi     = grad_input.numel()  * grad_input.dtype_size();
+    size_t size_g_off  = grad_offset.numel() * grad_offset.dtype_size();
+    size_t size_g_mask = grad_mask_out.numel() * grad_mask_out.dtype_size();
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, buffer_go},     {1, buffer_input},  {2, buffer_offset},
+        {3, buffer_weight}, {4, buffer_mask},   {5, buffer_gi},
+        {6, buffer_g_off},  {7, buffer_g_mask}
+    };
+    std::vector<size_t> sizes = {
+        size_go, size_input, size_offset, size_weight,
+        size_mask, size_gi, size_g_off, size_g_mask
+    };
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+
+    // Thread count: batch * offset_groups * kH * kW * H_out * W_out
+    int64_t n_elements = batch * offset_groups * kH * kW * H_out * W_out;
+
+    struct PushConstants {
+        uint32_t batch, in_channels, out_channels, H, W, kH, kW;
+        uint32_t H_out, W_out, stride_h, stride_w, pad_h, pad_w;
+        uint32_t dil_h, dil_w, groups, offset_groups, use_mask, n_elements;
+    } pc;
+
+    pc.batch        = static_cast<uint32_t>(batch);
+    pc.in_channels  = static_cast<uint32_t>(in_channels);
+    pc.out_channels = static_cast<uint32_t>(out_channels);
+    pc.H            = static_cast<uint32_t>(H);
+    pc.W            = static_cast<uint32_t>(W);
+    pc.kH           = static_cast<uint32_t>(kH);
+    pc.kW           = static_cast<uint32_t>(kW);
+    pc.H_out        = static_cast<uint32_t>(H_out);
+    pc.W_out        = static_cast<uint32_t>(W_out);
+    pc.stride_h     = static_cast<uint32_t>(stride_h);
+    pc.stride_w     = static_cast<uint32_t>(stride_w);
+    pc.pad_h        = static_cast<uint32_t>(pad_h);
+    pc.pad_w        = static_cast<uint32_t>(pad_w);
+    pc.dil_h        = static_cast<uint32_t>(dil_h);
+    pc.dil_w        = static_cast<uint32_t>(dil_w);
+    pc.groups        = static_cast<uint32_t>(groups);
+    pc.offset_groups = static_cast<uint32_t>(offset_groups);
+    pc.use_mask      = use_mask ? 1u : 0u;
+    pc.n_elements    = static_cast<uint32_t>(n_elements);
+
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+
+    uint32_t workgroups = static_cast<uint32_t>(div_wg(n_elements, devices_[device_id].workgroupSize));
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+    insertComputeOnlyBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    if (use_mask) {
+        return {grad_input, grad_offset, grad_mask_out};
+    }
+    return {grad_input, grad_offset};
+}
+
+// ============================================================================
+// Deformable Conv2d Backward Weight (DCNv2)
+// ============================================================================
+
+auto VulkanBackend::dispatchDeformableConv2dBackwardWeight(
+    const Tensor& grad_output, const Tensor& input,
+    const Tensor& offset, const Tensor& mask,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups, int64_t offset_groups,
+    bool use_mask,
+    const std::vector<int64_t>& weight_shape) -> Tensor {
+
+    auto input_shape = input.shape();
+    auto go_shape    = grad_output.shape();
+
+    int64_t batch       = input_shape[0];
+    int64_t in_channels = input_shape[1];
+    int64_t H           = input_shape[2];
+    int64_t W           = input_shape[3];
+    int64_t out_channels = weight_shape[0];
+    int64_t kH          = weight_shape[2];
+    int64_t kW          = weight_shape[3];
+    int64_t H_out       = go_shape[2];
+    int64_t W_out       = go_shape[3];
+
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("deformable_conv2d_backward_weight", device_id);
+
+    Tensor grad_weight(weight_shape, input.dtype(), input.device());
+
+    const void* buffer_go     = grad_output.data_ptr();
+    const void* buffer_input  = input.data_ptr();
+    const void* buffer_offset = offset.data_ptr();
+    const void* buffer_mask   = use_mask ? mask.data_ptr() : grad_weight.data_ptr();
+    const void* buffer_gw     = grad_weight.data_ptr();
+
+    size_t size_go     = grad_output.numel() * grad_output.dtype_size();
+    size_t size_input  = input.numel()       * input.dtype_size();
+    size_t size_offset = offset.numel()      * offset.dtype_size();
+    size_t size_mask   = use_mask ? (mask.numel() * mask.dtype_size()) : 4;
+    size_t size_gw     = grad_weight.numel() * grad_weight.dtype_size();
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, buffer_go},    {1, buffer_input}, {2, buffer_offset},
+        {3, buffer_mask},  {4, buffer_gw}
+    };
+    std::vector<size_t> sizes = {size_go, size_input, size_offset, size_mask, size_gw};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+
+    int64_t in_channels_per_group = in_channels / groups;
+    int64_t n_weight_elements = out_channels * in_channels_per_group * kH * kW;
+
+    struct PushConstants {
+        uint32_t batch, in_channels, out_channels, H, W, kH, kW;
+        uint32_t H_out, W_out, stride_h, stride_w, pad_h, pad_w;
+        uint32_t dil_h, dil_w, groups, offset_groups, use_mask, n_weight_elements;
+    } pc;
+
+    pc.batch            = static_cast<uint32_t>(batch);
+    pc.in_channels      = static_cast<uint32_t>(in_channels);
+    pc.out_channels     = static_cast<uint32_t>(out_channels);
+    pc.H                = static_cast<uint32_t>(H);
+    pc.W                = static_cast<uint32_t>(W);
+    pc.kH               = static_cast<uint32_t>(kH);
+    pc.kW               = static_cast<uint32_t>(kW);
+    pc.H_out            = static_cast<uint32_t>(H_out);
+    pc.W_out            = static_cast<uint32_t>(W_out);
+    pc.stride_h         = static_cast<uint32_t>(stride_h);
+    pc.stride_w         = static_cast<uint32_t>(stride_w);
+    pc.pad_h            = static_cast<uint32_t>(pad_h);
+    pc.pad_w            = static_cast<uint32_t>(pad_w);
+    pc.dil_h            = static_cast<uint32_t>(dil_h);
+    pc.dil_w            = static_cast<uint32_t>(dil_w);
+    pc.groups           = static_cast<uint32_t>(groups);
+    pc.offset_groups    = static_cast<uint32_t>(offset_groups);
+    pc.use_mask         = use_mask ? 1u : 0u;
+    pc.n_weight_elements = static_cast<uint32_t>(n_weight_elements);
+
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+
+    uint32_t workgroups = static_cast<uint32_t>(div_wg(n_weight_elements, devices_[device_id].workgroupSize));
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+    insertComputeOnlyBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return grad_weight;
+}
+
+
 } // namespace tenzor

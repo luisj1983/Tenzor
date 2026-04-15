@@ -409,6 +409,19 @@ auto vecdot(const Tensor& a, const Tensor& b, int64_t dim = -1) -> Tensor;
 auto cholesky_inverse(const Tensor& L, bool upper = false) -> Tensor;
 
 /**
+ * @brief Solve a linear system using a pre-computed Cholesky factor.
+ *
+ * Given L from A = L @ L^T (or U from A = U^T @ U), solves A @ X = B
+ * using forward/back substitution. Equivalent to torch.linalg.cholesky_solve.
+ *
+ * @param B Right-hand side tensor (..., N, K) or (..., N)
+ * @param L Cholesky factor (..., N, N)
+ * @param upper If true, L is upper-triangular (default: false)
+ * @return Solution tensor X with same shape as B
+ */
+auto cholesky_solve(const Tensor& B, const Tensor& L, bool upper = false) -> Tensor;
+
+/**
  * @brief Compute the generalized tensor inverse.
  *
  * Reshapes the first `ind` dimensions and the remaining dimensions into a 2D
@@ -458,6 +471,25 @@ auto ormqr(const Tensor& input, const Tensor& tau, const Tensor& other,
  *         (..., M, N) and tau is the scalar factors (..., min(M,N))
  */
 auto geqrf(const Tensor& input) -> std::tuple<Tensor, Tensor>;
+
+/**
+ * @brief LOBPCG: find k smallest eigenvalues/vectors of a large sparse symmetric matrix.
+ *
+ * Locally Optimal Block Preconditioned Conjugate Gradient method.
+ * This is an iterative algorithm that works through existing tensor ops
+ * (matmul, QR, eigh), so it runs on all backends automatically.
+ *
+ * @param A Symmetric matrix (N, N)
+ * @param X0 Initial guess for eigenvectors (N, k)
+ * @param k Number of eigenvalues to find
+ * @param B Optional preconditioner (defaults to identity)
+ * @param max_iter Maximum iterations (default: 100)
+ * @param tol Convergence tolerance (default: 1e-6)
+ * @return Pair of (eigenvalues (k,), eigenvectors (N, k))
+ */
+auto lobpcg(const Tensor& A, const Tensor& X0, int64_t k,
+            const Tensor& B = Tensor(),
+            int64_t max_iter = 100, double tol = 1e-6) -> std::pair<Tensor, Tensor>;
 
 } // namespace linalg
 } // namespace tenzor

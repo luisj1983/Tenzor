@@ -487,5 +487,109 @@ private:
     auto reset_parameters() -> void;
 };
 
+/**
+ * @brief Deformable 2D convolutional layer (DCNv2).
+ *
+ * Applies deformable convolution where sampling locations are augmented
+ * with learnable offsets and optional modulation masks. Unlike regular
+ * convolution with a fixed receptive field, deformable conv adapts the
+ * sampling grid to object geometry.
+ *
+ * The layer owns weight and bias parameters. Offset and mask tensors
+ * are produced externally (typically by a small Conv2d predicting
+ * 2*kH*kW offsets and kH*kW mask values per spatial location) and
+ * passed to forward().
+ *
+ * Shape transformations:
+ * - Input: (N, C_in, H, W)
+ * - Offset: (N, offset_groups * 2 * kH * kW, H_out, W_out)
+ * - Mask: (N, offset_groups * kH * kW, H_out, W_out)  [optional]
+ * - Output: (N, C_out, H_out, W_out)
+ *
+ * Reference: Zhu et al., "Deformable ConvNets v2" (CVPR 2019)
+ *
+ * @code
+ * DeformableConv2d dcn(64, 128, 3, 1, 1);
+ * Variable input = ...;   // (N, 64, H, W)
+ * Variable offset = ...;  // (N, 2*3*3, H, W) from offset predictor
+ * Variable mask = ...;    // (N, 3*3, H, W) from mask predictor
+ * Variable out = dcn.forward(input, offset, mask);  // (N, 128, H, W)
+ * @endcode
+ */
+class DeformableConv2d : public Module {
+public:
+    /**
+     * @brief Construct DeformableConv2d with square kernel.
+     *
+     * @param in_channels Input channels
+     * @param out_channels Output channels (filters)
+     * @param kernel_size Square kernel size
+     * @param stride Stride (default: 1)
+     * @param padding Padding (default: 0)
+     * @param dilation Dilation (default: 1)
+     * @param groups Channel groups (default: 1)
+     * @param offset_groups Offset groups — channels_in / offset_groups gives
+     *                      the number of input channels sharing each set of
+     *                      offsets (default: 1)
+     * @param bias If true, add learnable bias (default: true)
+     */
+    DeformableConv2d(int64_t in_channels,
+                     int64_t out_channels,
+                     int64_t kernel_size,
+                     int64_t stride = 1,
+                     int64_t padding = 0,
+                     int64_t dilation = 1,
+                     int64_t groups = 1,
+                     int64_t offset_groups = 1,
+                     bool bias = true);
+
+    /**
+     * @brief Forward pass through deformable 2D convolution.
+     *
+     * @param input Input variable of shape (N, C_in, H, W)
+     * @param offset Offset variable of shape (N, offset_groups*2*kH*kW, H_out, W_out)
+     * @param mask Modulation mask of shape (N, offset_groups*kH*kW, H_out, W_out).
+     *             Pass a default-constructed Variable for DCNv1 (no mask).
+     * @return Output variable of shape (N, C_out, H_out, W_out)
+     */
+    auto forward(const Variable& input, const Variable& offset,
+                 const Variable& mask = Variable()) -> Variable;
+
+    /// Module interface (single-input forward). Not supported for DeformableConv2d;
+    /// use forward(input, offset, mask) instead.
+    auto forward_impl(const Variable& input) -> Variable override;
+
+    auto stride_h() const -> int64_t { return stride_; }
+    auto stride_w() const -> int64_t { return stride_; }
+    auto padding_h() const -> int64_t { return padding_; }
+    auto padding_w() const -> int64_t { return padding_; }
+    auto dilation_h() const -> int64_t { return dilation_; }
+    auto dilation_w() const -> int64_t { return dilation_; }
+    auto groups() const -> int64_t { return groups_; }
+    auto offset_groups() const -> int64_t { return offset_groups_; }
+
+    auto extra_repr() const -> std::string override {
+        return "in_channels=" + std::to_string(in_channels_) +
+               ", out_channels=" + std::to_string(out_channels_) +
+               ", kernel_size=" + std::to_string(kernel_size_) +
+               ", stride=" + std::to_string(stride_) +
+               ", padding=" + std::to_string(padding_) +
+               ", offset_groups=" + std::to_string(offset_groups_) +
+               ", bias=" + (parameters_.count("bias") ? "True" : "False");
+    }
+
+private:
+    int64_t in_channels_;
+    int64_t out_channels_;
+    int64_t kernel_size_;
+    int64_t stride_;
+    int64_t padding_;
+    int64_t dilation_;
+    int64_t groups_;
+    int64_t offset_groups_;
+
+    auto reset_parameters() -> void;
+};
+
 } // namespace nn
 } // namespace tenzor

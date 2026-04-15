@@ -304,6 +304,27 @@ enum class AttrKey : uint16_t {
     RangesList,        // Per-dimension min,max pairs (comma-separated: min0,max0,min1,max1,...)
     Density,           // Normalize histogram by bin volume and total count
 
+    // DeformableConv2d parameters
+    OffsetGroups,          // Number of offset groups for deformable convolution
+    UseMask,               // Whether to use modulation mask (DCNv2)
+
+    // LOBPCG parameters
+    MaxIter,               // Maximum iteration count
+    Tolerance,             // Convergence tolerance
+
+    // Einsum parameters
+    EinsumEquation,        // Einsum equation string (e.g. "ij,jk->ik")
+
+    // Mel-scale parameters
+    NumMels,               // Number of mel filterbank channels
+    NumMFCC,               // Number of MFCC coefficients to return
+    SampleRate,            // Audio sample rate in Hz
+    FMin,                  // Minimum frequency for mel filterbank
+    FMax,                  // Maximum frequency for mel filterbank
+
+    // DCT parameters
+    DCTType,               // DCT type (1, 2, 3, or 4)
+
     // Sentinel
     _Count
 };

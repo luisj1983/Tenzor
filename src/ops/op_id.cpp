@@ -188,6 +188,10 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::Conv2dBackwardBias)] = "conv2d_backward_bias";
     names[static_cast<size_t>(OpId::ConvTranspose2dForward)] = "conv_transpose2d_forward";
     names[static_cast<size_t>(OpId::DepthwiseConv2d)] = "depthwise_conv2d";
+    names[static_cast<size_t>(OpId::DeformableConv2dForward)] = "deformable_conv2d_forward";
+    names[static_cast<size_t>(OpId::DeformableConv2dBackwardInput)] = "deformable_conv2d_backward_input";
+    names[static_cast<size_t>(OpId::DeformableConv2dBackwardWeight)] = "deformable_conv2d_backward_weight";
+    names[static_cast<size_t>(OpId::DeformableConv2dBackwardBias)] = "deformable_conv2d_backward_bias";
 
     // Pooling
     names[static_cast<size_t>(OpId::MaxPool2dForward)] = "maxpool2d_forward";
@@ -275,6 +279,7 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::Unique)] = "unique";
     names[static_cast<size_t>(OpId::FlashAttention)] = "flash_attention";
     names[static_cast<size_t>(OpId::FlashAttentionBackward)] = "flash_attention_backward";
+    names[static_cast<size_t>(OpId::Einsum)] = "einsum";
 
     // 3D Convolution and Pooling
     names[static_cast<size_t>(OpId::Conv3dForward)] = "conv3d_forward";
@@ -396,6 +401,10 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::STFT)] = "stft";
     names[static_cast<size_t>(OpId::ISTFT)] = "istft";
     names[static_cast<size_t>(OpId::CDist)] = "cdist";
+    names[static_cast<size_t>(OpId::DCT)] = "dct";
+    names[static_cast<size_t>(OpId::IDCT)] = "idct";
+    names[static_cast<size_t>(OpId::MelScale)] = "mel_scale";
+    names[static_cast<size_t>(OpId::MFCC)] = "mfcc";
 
     // Sampling and Statistics Operations
     names[static_cast<size_t>(OpId::Multinomial)] = "multinomial";
@@ -514,6 +523,7 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::LinalgVectorNorm)] = "linalg_vector_norm";
     names[static_cast<size_t>(OpId::LinalgMatrixNorm)] = "linalg_matrix_norm";
     names[static_cast<size_t>(OpId::LinalgVecdot)] = "linalg_vecdot";
+    names[static_cast<size_t>(OpId::LinalgCholeskySolve)] = "linalg_cholesky_solve";
 
     // New shape/indexing (Phase 6)
     names[static_cast<size_t>(OpId::TakeAlongDim)] = "take_along_dim";
@@ -568,6 +578,9 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::I1e)] = "i1e";
     names[static_cast<size_t>(OpId::Entr)] = "entr";
     names[static_cast<size_t>(OpId::SphericalBesselJ0)] = "spherical_bessel_j0";
+    names[static_cast<size_t>(OpId::Cov)] = "cov";
+    names[static_cast<size_t>(OpId::Corrcoef)] = "corrcoef";
+    names[static_cast<size_t>(OpId::LOBPCG)] = "lobpcg";
 
     return names;
 }();
@@ -583,7 +596,7 @@ constexpr size_t count_named_ops() {
 
 // Count of actual OpId enum values (excluding gap slots).
 // Update this when adding new OpIds to catch missing name entries at compile time.
-inline constexpr size_t EXPECTED_NAMED_OPS = 449;  // 448 previous + 1 new op
+inline constexpr size_t EXPECTED_NAMED_OPS = 462;  // 449 + 13 new ops (DeformableConv2d x4, Einsum, DCT, IDCT, MelScale, MFCC, CholeskySolve, Cov, Corrcoef, LOBPCG)
 
 // If this fires, a new OpId was added without a corresponding name in op_names above
 static_assert(count_named_ops() == EXPECTED_NAMED_OPS,

@@ -3,6 +3,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/indexing.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
@@ -2241,6 +2242,32 @@ auto cholesky_inverse(const Tensor& L, bool upper) -> Tensor {
     }
 }
 
+auto cholesky_solve(const Tensor& B, const Tensor& L, bool upper) -> Tensor {
+    auto shape = L.shape();
+    auto ndim = static_cast<int64_t>(shape.size());
+    if (ndim < 2) throw std::invalid_argument("linalg::cholesky_solve: L must be at least 2D");
+    int64_t n = shape[ndim - 1];
+    if (shape[ndim - 2] != n)
+        throw std::invalid_argument("linalg::cholesky_solve: expected square Cholesky factor");
+
+    // Compose from solve_triangular (which handles GPU dispatch internally)
+    // A = L @ L^T, solve A @ X = B
+    // Step 1: L @ Y = B  (forward substitution)
+    // Step 2: L^T @ X = Y (back substitution)
+    if (!upper) {
+        auto Y = solve_triangular(L.contiguous(), B.contiguous(), /*upper=*/false);
+        auto Lt = tenzor::transpose(L, ndim - 2, ndim - 1).contiguous();
+        return solve_triangular(Lt, Y.contiguous(), /*upper=*/true);
+    } else {
+        // A = U^T @ U, solve A @ X = B
+        // Step 1: U^T @ Y = B
+        // Step 2: U @ X = Y
+        auto Ut = tenzor::transpose(L, ndim - 2, ndim - 1).contiguous();
+        auto Y = solve_triangular(Ut, B.contiguous(), /*upper=*/false);
+        return solve_triangular(L, Y, /*upper=*/true);
+    }
+}
+
 auto tensorinv(const Tensor& input, int64_t ind) -> Tensor {
     auto shape = input.shape();
     auto ndim = static_cast<int64_t>(shape.size());
@@ -2480,6 +2507,189 @@ auto geqrf(const Tensor& input) -> std::tuple<Tensor, Tensor> {
 
     return {maybe_downcast(work, original_dtype), maybe_downcast(tau_result, original_dtype)};
 #endif // TENZOR_USE_MKL || TENZOR_USE_LAPACKE
+}
+
+// ============================================================================
+// LOBPCG — Locally Optimal Block Preconditioned Conjugate Gradient
+// ============================================================================
+
+auto lobpcg(const Tensor& A, const Tensor& X0, int64_t k,
+            const Tensor& B, int64_t max_iter, double tol)
+    -> std::pair<Tensor, Tensor>
+{
+    // Validate inputs
+    if (A.ndim() != 2 || A.shape()[0] != A.shape()[1])
+        throw std::invalid_argument("lobpcg: A must be a square 2D matrix");
+    int64_t N = A.shape()[0];
+    if (X0.ndim() != 2 || X0.shape()[0] != N || X0.shape()[1] < k)
+        throw std::invalid_argument("lobpcg: X0 must have shape (N, k) with k <= columns");
+    if (k < 1 || k > N)
+        throw std::invalid_argument("lobpcg: k must be in [1, N]");
+
+    auto dtype = A.dtype();
+    auto dev = A.device();
+
+    // GPU dispatch: this is a composed algorithm using existing ops,
+    // so it works on all backends. No special GPU dispatch needed.
+
+    // Helper: orthonormalize columns via QR
+    auto orthonormalize = [](const Tensor& M) -> Tensor {
+        auto [Q, R] = qr(M.contiguous());
+        return Q;
+    };
+
+    // Helper: regularize a gram matrix by adding eps * I to the diagonal
+    auto regularize_gram = [&](const Tensor& G, int64_t sz) -> Tensor {
+        double eps = (dtype == DType::Float32) ? 1e-6 : 1e-12;
+        auto reg = tenzor::mul(
+            eye(sz, std::nullopt, dtype, dev),
+            tenzor::full({1}, eps, dtype, dev));
+        return tenzor::add(G, reg);
+    };
+
+    // Step 1: orthonormalize initial guess, take first k columns
+    Tensor X = orthonormalize(
+        tenzor::slice(X0, 1, 0, k).contiguous());
+
+    Tensor eigenvalues;
+    Tensor P;  // conjugate directions, empty initially
+    bool have_P = false;
+
+    for (int64_t iter = 0; iter < max_iter; ++iter) {
+        // Compute A @ X
+        auto AX = tenzor::matmul(A.contiguous(), X.contiguous());
+
+        // Rayleigh quotient: eigenvalues = diag(X^T A X)
+        auto XtAX = tenzor::matmul(
+            tenzor::transpose(X, 0, 1).contiguous(), AX.contiguous());
+
+        // Solve small eigenvalue problem for the current subspace X
+        auto [evals_x, evecs_x] = eigh(XtAX.contiguous());
+        eigenvalues = evals_x;
+
+        // Reorder X to align with eigenvectors of XtAX
+        X = tenzor::matmul(X.contiguous(), evecs_x.contiguous());
+        AX = tenzor::matmul(AX.contiguous(), evecs_x.contiguous());
+
+        // Compute residual: G = AX - X * diag(eigenvalues)
+        // Broadcast eigenvalues (k,) across rows of X (N, k)
+        auto evals_row = tenzor::reshape(eigenvalues, {1, k});
+        auto G = tenzor::sub(AX, tenzor::mul(X, evals_row));
+
+        // Check convergence: max absolute residual
+        auto max_residual = tenzor::max(tenzor::abs(G));
+        // Move to CPU for comparison
+        auto max_res_cpu = max_residual.to(Device::cpu()).contiguous();
+        double residual_val = 0.0;
+        if (dtype == DType::Float32) {
+            residual_val = static_cast<double>(*max_res_cpu.data<float>());
+        } else if (dtype == DType::Float64) {
+            residual_val = *max_res_cpu.data<double>();
+        } else {
+            // For Float16/BFloat16, cast to float32
+            auto as_f32 = max_res_cpu.to(DType::Float32);
+            residual_val = static_cast<double>(*as_f32.data<float>());
+        }
+
+        if (residual_val < tol) break;
+
+        // Apply preconditioner if provided
+        Tensor W = G;
+        if (B.is_valid() && B.numel() > 0) {
+            W = tenzor::matmul(B.contiguous(), G.contiguous());
+        }
+
+        // Orthogonalize W against X
+        auto XtW = tenzor::matmul(
+            tenzor::transpose(X, 0, 1).contiguous(), W.contiguous());
+        W = tenzor::sub(W, tenzor::matmul(X.contiguous(), XtW.contiguous()));
+
+        // QR orthonormalize W
+        W = orthonormalize(W);
+
+        // Build search subspace S and A@S
+        Tensor S, AS;
+        if (!have_P) {
+            // First iteration: S = [X, W]
+            S = tenzor::cat({X, W}, /*dim=*/1);
+            auto AW = tenzor::matmul(A.contiguous(), W.contiguous());
+            AS = tenzor::cat({AX, AW}, /*dim=*/1);
+        } else {
+            // Subsequent iterations: S = [X, W, P]
+            S = tenzor::cat({X, W, P}, /*dim=*/1);
+            auto AW = tenzor::matmul(A.contiguous(), W.contiguous());
+            auto AP = tenzor::matmul(A.contiguous(), P.contiguous());
+            AS = tenzor::cat({AX, AW, AP}, /*dim=*/1);
+        }
+
+        int64_t subspace_dim = S.shape()[1];
+
+        // Solve projected generalized eigenproblem:
+        // S^T A S c = lambda * S^T S c
+        auto St = tenzor::transpose(S, 0, 1).contiguous();
+        auto gram_A = tenzor::matmul(St, AS.contiguous());
+        auto gram_S = tenzor::matmul(St, S.contiguous());
+
+        // Regularize gram_S for numerical stability
+        gram_S = regularize_gram(gram_S, subspace_dim);
+
+        // Solve the generalized eigenvalue problem:
+        //   gram_A @ c = lambda * gram_S @ c
+        // via Cholesky reduction: gram_S = L @ L^T
+        //   L^{-1} @ gram_A @ L^{-T} @ c' = lambda * c'
+        // where c = L^{-T} @ c'
+        //
+        // This preserves symmetry so eigh gives correct results.
+        Tensor sub_evals, sub_evecs;
+        try {
+            auto L_sub = tenzor::linalg::cholesky(gram_S.contiguous(), false);
+            // M = L^{-1} @ gram_A @ L^{-T}
+            auto temp = solve_triangular(L_sub, gram_A.contiguous(), false);
+            auto L_sub_t = tenzor::transpose(L_sub, 0, 1).contiguous();
+            auto M = solve_triangular(L_sub_t, tenzor::transpose(temp, 0, 1).contiguous(), true);
+            M = tenzor::transpose(M, 0, 1).contiguous();
+
+            // Symmetrize for numerical stability
+            auto Mt = tenzor::transpose(M, 0, 1).contiguous();
+            M = tenzor::mul(tenzor::add(M, Mt), tenzor::full({1}, 0.5f, dtype, dev));
+
+            auto [evals_sub, evecs_sub] = eigh(M.contiguous());
+            sub_evals = evals_sub;
+            // Transform back: c = L^{-T} @ c'
+            sub_evecs = solve_triangular(L_sub_t, evecs_sub.contiguous(), true);
+        } catch (...) {
+            // Fallback: use pinv if Cholesky fails (gram_S near-singular)
+            auto M = tenzor::matmul(pinv(gram_S.contiguous()), gram_A.contiguous());
+            auto Mt_f = tenzor::transpose(M, 0, 1).contiguous();
+            M = tenzor::mul(tenzor::add(M, Mt_f), tenzor::full({1}, 0.5f, dtype, dev));
+            auto [evals_f, evecs_f] = eigh(M.contiguous());
+            sub_evals = evals_f;
+            sub_evecs = evecs_f;
+        }
+
+        // Select the k smallest eigenvalues
+        eigenvalues = tenzor::slice(sub_evals, 0, 0, k);
+        auto coeffs_k = tenzor::slice(sub_evecs, 1, 0, k).contiguous();
+
+        // Update X = S @ coeffs_k
+        X = tenzor::matmul(S.contiguous(), coeffs_k);
+        X = orthonormalize(X);
+
+        // Update conjugate directions P
+        if (subspace_dim > 2 * k) {
+            // P = S @ coeffs for directions k..2k
+            auto coeffs_p = tenzor::slice(sub_evecs, 1, k,
+                                          std::min(2 * k, subspace_dim)).contiguous();
+            P = tenzor::matmul(S.contiguous(), coeffs_p);
+            P = orthonormalize(P);
+        } else {
+            // Not enough directions for P, use W
+            P = W;
+        }
+        have_P = true;
+    }
+
+    return {eigenvalues, X};
 }
 
 } // namespace tenzor::linalg

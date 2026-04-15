@@ -1,0 +1,118 @@
+#version 450
+
+// Deformable Conv2d Backward Weight — gradient w.r.t. convolution weights.
+//
+// One thread per weight element (oc, ic_local, kh, kw).
+// Accumulates across batch and output spatial positions using the same
+// deformable sampling locations as the forward pass.
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { float grad_output[]; };  // (N, C_out, H_out, W_out)
+layout(binding = 1) buffer Input      { float input_data[];  };  // (N, C_in, H, W)
+layout(binding = 2) buffer Offset     { float offset_data[]; };  // (N, og*kH*kW*2, H_out, W_out)
+layout(binding = 3) buffer Mask       { float mask_data[];   };  // (N, og*kH*kW, H_out, W_out)
+layout(binding = 4) buffer GradWeight { float grad_weight[]; };  // (C_out, C_in/groups, kH, kW)
+
+layout(push_constant) uniform PushConstants {
+    uint batch;
+    uint in_channels;
+    uint out_channels;
+    uint H;
+    uint W;
+    uint kH;
+    uint kW;
+    uint H_out;
+    uint W_out;
+    uint stride_h;
+    uint stride_w;
+    uint pad_h;
+    uint pad_w;
+    uint dil_h;
+    uint dil_w;
+    uint groups;
+    uint offset_groups;
+    uint use_mask;
+    uint n_weight_elements;
+} params;
+
+float bilinear_interp(uint base_idx, float h, float w) {
+    if (h <= -1.0 || h >= float(params.H) || w <= -1.0 || w >= float(params.W))
+        return 0.0;
+    int h_low = int(floor(h));
+    int w_low = int(floor(w));
+    int h_high = h_low + 1;
+    int w_high = w_low + 1;
+    float lh = h - float(h_low);
+    float lw = w - float(w_low);
+    float hh = 1.0 - lh;
+    float hw = 1.0 - lw;
+    float v1 = 0.0, v2 = 0.0, v3 = 0.0, v4 = 0.0;
+    if (h_low >= 0 && w_low >= 0)
+        v1 = input_data[base_idx + uint(h_low) * params.W + uint(w_low)];
+    if (h_low >= 0 && w_high < int(params.W))
+        v2 = input_data[base_idx + uint(h_low) * params.W + uint(w_high)];
+    if (h_high < int(params.H) && w_low >= 0)
+        v3 = input_data[base_idx + uint(h_high) * params.W + uint(w_low)];
+    if (h_high < int(params.H) && w_high < int(params.W))
+        v4 = input_data[base_idx + uint(h_high) * params.W + uint(w_high)];
+    return hh * hw * v1 + hh * lw * v2 + lh * hw * v3 + lh * lw * v4;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_weight_elements)
+        return;
+
+    // Decode weight index -> (oc, ic_local, kh, kw)
+    uint in_channels_per_group  = params.in_channels / params.groups;
+    uint out_channels_per_group = params.out_channels / params.groups;
+    uint channels_per_offset_group = params.in_channels / params.offset_groups;
+
+    uint tmp = idx;
+    uint kw = tmp % params.kW;
+    tmp /= params.kW;
+    uint kh = tmp % params.kH;
+    tmp /= params.kH;
+    uint ic_local = tmp % in_channels_per_group;
+    uint oc = tmp / in_channels_per_group;
+
+    uint g = oc / out_channels_per_group;
+    uint ic = g * in_channels_per_group + ic_local;
+    uint og = ic / channels_per_offset_group;
+
+    uint kernel_idx = kh * params.kW + kw;
+
+    float sum = 0.0;
+
+    for (uint n = 0; n < params.batch; n++) {
+        for (uint oh = 0; oh < params.H_out; oh++) {
+            for (uint ow = 0; ow < params.W_out; ow++) {
+                // Offset
+                uint off_base = ((n * params.offset_groups + og) * params.kH * params.kW + kernel_idx) * 2;
+                uint spatial = oh * params.W_out + ow;
+                float h_off = offset_data[off_base * params.H_out * params.W_out + spatial];
+                float w_off = offset_data[(off_base + 1) * params.H_out * params.W_out + spatial];
+
+                float h_loc = float(oh * params.stride_h) - float(params.pad_h) + float(kh * params.dil_h) + h_off;
+                float w_loc = float(ow * params.stride_w) - float(params.pad_w) + float(kw * params.dil_w) + w_off;
+
+                uint input_plane = (n * params.in_channels + ic) * params.H * params.W;
+                float val = bilinear_interp(input_plane, h_loc, w_loc);
+
+                // Mask
+                if (params.use_mask == 1) {
+                    uint mask_idx = ((n * params.offset_groups + og) * params.kH * params.kW + kernel_idx)
+                                    * params.H_out * params.W_out + spatial;
+                    val *= mask_data[mask_idx];
+                }
+
+                // grad_output
+                uint go_idx = ((n * params.out_channels + oc) * params.H_out + oh) * params.W_out + ow;
+                sum += grad_output[go_idx] * val;
+            }
+        }
+    }
+
+    grad_weight[idx] = sum;
+}

@@ -1451,6 +1451,58 @@ def conv2d(input: Variable, weight: Variable, bias: Optional[Variable] = None,
     return _nn.functional_conv2d(input, weight, bias, stride, padding, dilation, groups)
 
 
+def deformable_conv2d(
+    input: Variable, offset: Variable, weight: Variable,
+    bias: Optional[Variable] = None,
+    mask: Optional[Variable] = None,
+    stride: Union[int, tuple[int, int]] = 1,
+    padding: Union[int, tuple[int, int]] = 0,
+    dilation: Union[int, tuple[int, int]] = 1,
+    groups: int = 1,
+    offset_groups: int = 1,
+) -> Variable:
+    """Apply deformable 2D convolution (DCNv2).
+
+    Parameters
+    ----------
+    input : Variable
+        Input tensor of shape ``(N, C_in, H, W)``.
+    offset : Variable
+        Offset tensor of shape ``(N, offset_groups * 2 * kH * kW, H_out, W_out)``.
+    weight : Variable
+        Filters of shape ``(C_out, C_in/groups, kH, kW)``.
+    bias : Variable or None, optional
+        Bias of shape ``(C_out,)``. Default: ``None``.
+    mask : Variable or None, optional
+        Modulation mask of shape ``(N, offset_groups * kH * kW, H_out, W_out)``.
+        Default: ``None`` (DCNv1 behavior).
+    stride : int or tuple, optional
+        Stride of the convolution. Default: ``1``.
+    padding : int or tuple, optional
+        Zero-padding. Default: ``0``.
+    dilation : int or tuple, optional
+        Dilation. Default: ``1``.
+    groups : int, optional
+        Number of channel groups. Default: ``1``.
+    offset_groups : int, optional
+        Number of offset groups. Default: ``1``.
+
+    Returns
+    -------
+    Variable
+        Output tensor.
+    """
+    if isinstance(stride, int):
+        stride = (stride, stride)
+    if isinstance(padding, int):
+        padding = (padding, padding)
+    if isinstance(dilation, int):
+        dilation = (dilation, dilation)
+    return _nn.functional_deformable_conv2d(
+        input, offset, weight, bias, mask,
+        stride, padding, dilation, groups, offset_groups)
+
+
 def scaled_dot_product_attention(
     query: Variable, key: Variable, value: Variable,
     attn_mask: Optional[Variable] = None,
@@ -1657,6 +1709,50 @@ def xlogy(x, y):
     return _core.xlogy(x, y)
 
 
+def cov(input, correction=1, fweights=None, aweights=None):
+    """Compute the sample covariance matrix.
+
+    Parameters
+    ----------
+    input : Tensor
+        Input tensor of shape ``(N, M)`` where *N* is the number of variables
+        and *M* is the number of observations. A 1-D input is treated as a
+        single variable with *N* observations.
+    correction : int, optional
+        Bessel's correction (default: ``1`` for unbiased estimate).
+    fweights : Tensor or None, optional
+        Integer frequency weights of length *M*.
+    aweights : Tensor or None, optional
+        Float analytic (importance) weights of length *M*.
+
+    Returns
+    -------
+    Tensor
+        Covariance matrix of shape ``(N, N)``.
+    """
+    from .. import tenzor_core as _c
+    fw = fweights if fweights is not None else _c.Tensor()
+    aw = aweights if aweights is not None else _c.Tensor()
+    return _core.cov(input, correction, fw, aw)
+
+
+def corrcoef(input):
+    """Compute the Pearson correlation coefficient matrix.
+
+    Parameters
+    ----------
+    input : Tensor
+        Input tensor of shape ``(N, M)``.
+
+    Returns
+    -------
+    Tensor
+        Correlation coefficient matrix of shape ``(N, N)`` with ones on
+        the diagonal.
+    """
+    return _core.corrcoef(input)
+
+
 def tensordot(a, b, dims=2):
     """Generalized tensor contraction (like ``numpy.tensordot``).
 
@@ -1678,6 +1774,146 @@ def tensordot(a, b, dims=2):
     else:
         dims_a, dims_b = dims
         return _core.tensordot(a, b, list(dims_a), list(dims_b))
+
+
+def dct(input, type=2, n=None, dim=-1, norm="backward"):
+    """Compute the Discrete Cosine Transform.
+
+    Parameters
+    ----------
+    input : Tensor
+        Input signal.
+    type : int
+        DCT type (1, 2, 3, or 4). Default: 2.
+    n : int or None
+        Signal length. Default: input size along dim.
+    dim : int
+        Dimension along which to compute. Default: -1.
+    norm : str
+        Normalization mode: "backward", "forward", or "ortho". Default: "backward".
+
+    Returns
+    -------
+    Tensor
+        DCT coefficients.
+    """
+    return _core.fft.dct(input, type, n, dim, norm)
+
+
+def idct(input, type=2, n=None, dim=-1, norm="backward"):
+    """Compute the Inverse Discrete Cosine Transform.
+
+    Parameters
+    ----------
+    input : Tensor
+        DCT coefficients.
+    type : int
+        DCT type (1, 2, 3, or 4). Default: 2.
+    n : int or None
+        Signal length. Default: input size along dim.
+    dim : int
+        Dimension along which to compute. Default: -1.
+    norm : str
+        Normalization mode: "backward", "forward", or "ortho". Default: "backward".
+
+    Returns
+    -------
+    Tensor
+        Reconstructed signal.
+    """
+    return _core.fft.idct(input, type, n, dim, norm)
+
+
+def mel_scale(spectrogram, n_mels=128, f_min=0.0, f_max=0.0, sample_rate=16000):
+    """Apply a mel-frequency filterbank to a spectrogram.
+
+    Converts a linear-frequency spectrogram into a mel-frequency spectrogram
+    using triangular mel-spaced filter banks (HTK formula).
+
+    Parameters
+    ----------
+    spectrogram : Tensor
+        Input tensor of shape ``(..., n_freqs, time_frames)``.
+    n_mels : int
+        Number of mel bands (default: 128).
+    f_min : float
+        Minimum frequency in Hz (default: 0.0).
+    f_max : float
+        Maximum frequency in Hz (default: 0.0 means ``sample_rate / 2``).
+    sample_rate : int
+        Audio sample rate in Hz (default: 16000).
+
+    Returns
+    -------
+    Tensor
+        Mel spectrogram of shape ``(..., n_mels, time_frames)``.
+    """
+    return _core.fft.mel_scale(spectrogram, n_mels, f_min, f_max, sample_rate)
+
+
+def mfcc(waveform, sample_rate=16000, n_mfcc=40, n_mels=128,
+         n_fft=400, hop_length=160, f_min=0.0, f_max=0.0):
+    """Compute Mel-Frequency Cepstral Coefficients (MFCC).
+
+    Computes MFCCs from a raw waveform by computing a power spectrogram,
+    applying mel-scale filterbank, taking log, and applying DCT.
+
+    Parameters
+    ----------
+    waveform : Tensor
+        Input waveform tensor of shape ``(..., signal_length)``.
+    sample_rate : int
+        Audio sample rate in Hz (default: 16000).
+    n_mfcc : int
+        Number of MFCC coefficients to return (default: 40).
+    n_mels : int
+        Number of mel bands (default: 128).
+    n_fft : int
+        FFT window size (default: 400).
+    hop_length : int
+        Hop length for STFT (default: 160).
+    f_min : float
+        Minimum frequency in Hz (default: 0.0).
+    f_max : float
+        Maximum frequency in Hz (default: 0.0 means ``sample_rate / 2``).
+
+    Returns
+    -------
+    Tensor
+        MFCC tensor of shape ``(..., n_mfcc, time_frames)``.
+    """
+    return _core.fft.mfcc(waveform, sample_rate, n_mfcc, n_mels,
+                           n_fft, hop_length, f_min, f_max)
+
+
+def lobpcg(A, X0, k, B=None, max_iter=100, tol=1e-6):
+    """LOBPCG: find k smallest eigenvalues/vectors of a large sparse symmetric matrix.
+
+    Locally Optimal Block Preconditioned Conjugate Gradient method.
+
+    Parameters
+    ----------
+    A : Tensor
+        Symmetric matrix of shape ``(N, N)``.
+    X0 : Tensor
+        Initial guess for eigenvectors of shape ``(N, k)``.
+    k : int
+        Number of eigenvalues to find.
+    B : Tensor, optional
+        Preconditioner matrix (defaults to identity).
+    max_iter : int
+        Maximum iterations (default: 100).
+    tol : float
+        Convergence tolerance (default: 1e-6).
+
+    Returns
+    -------
+    tuple of (Tensor, Tensor)
+        (eigenvalues of shape ``(k,)``, eigenvectors of shape ``(N, k)``).
+    """
+    from .. import tenzor_core as _c
+    b_tensor = B if B is not None else _c.Tensor()
+    return _core.linalg.lobpcg(A, X0, k, b_tensor, max_iter, tol)
 
 
 __all__ = [
@@ -1743,4 +1979,12 @@ __all__ = [
     "logaddexp2",
     "xlogy",
     "tensordot",
+    # Statistical operations
+    "cov",
+    "corrcoef",
+    # Audio / spectral operations
+    "mel_scale",
+    "mfcc",
+    # Sparse eigenvalue solver
+    "lobpcg",
 ]

@@ -579,6 +579,34 @@ namespace rocm {
     auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
                                  int64_t stride_h, int64_t stride_w, int64_t padding_h, int64_t padding_w,
                                  int64_t dilation_h, int64_t dilation_w, hipStream_t stream) -> Tensor;
+
+    // Deformable Convolution v2 (DCNv2)
+    auto deformable_conv2d_forward_kernel(
+        const Tensor& input, const Tensor& offset, const Tensor& weight,
+        const Tensor& bias, const Tensor& mask,
+        int64_t stride_h, int64_t stride_w,
+        int64_t pad_h, int64_t pad_w,
+        int64_t dil_h, int64_t dil_w,
+        int64_t groups, int64_t offset_groups,
+        hipStream_t stream) -> Tensor;
+    auto deformable_conv2d_backward_input_kernel(
+        const Tensor& grad_output, const Tensor& input, const Tensor& offset,
+        const Tensor& weight, const Tensor& mask,
+        int64_t stride_h, int64_t stride_w,
+        int64_t pad_h, int64_t pad_w,
+        int64_t dil_h, int64_t dil_w,
+        int64_t groups, int64_t offset_groups,
+        hipStream_t stream) -> std::vector<Tensor>;
+    auto deformable_conv2d_backward_weight_kernel(
+        const Tensor& grad_output, const Tensor& input, const Tensor& offset,
+        const Tensor& mask,
+        int64_t stride_h, int64_t stride_w,
+        int64_t pad_h, int64_t pad_w,
+        int64_t dil_h, int64_t dil_w,
+        int64_t groups, int64_t offset_groups,
+        const std::vector<int64_t>& weight_shape,
+        hipStream_t stream) -> Tensor;
+
     auto adaptive_avgpool2d_backward_hip(const Tensor& grad_output, const Tensor& input, hipStream_t stream) -> Tensor;
     auto adaptive_maxpool2d_backward_hip(const Tensor& grad_output, const Tensor& indices, const Tensor& input, hipStream_t stream) -> Tensor;
 
@@ -1795,6 +1823,15 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         });
 
     // ========================================================================
+    // Einsum (composed — delegates to einsum_composed to avoid dispatch loop)
+    // ========================================================================
+    table.register_kernel(OpId::Einsum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto equation = std::string(attrs.get_string(AttrKey::EinsumEquation, ""));
+        std::vector<Tensor> tensors(inputs.begin(), inputs.end());
+        return {einsum_composed(equation, tensors)};
+    });
+
+    // ========================================================================
     // Fused LayerNorm Backward
     // ========================================================================
     table.register_kernel(OpId::FusedLayerNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -2181,6 +2218,22 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             bool unitriangular = attrs.get_bool(AttrKey::UnitTriangular, false);
             return rocm::linalg_solve_triangular_kernel(
                 inputs[0], inputs[1], upper, unitriangular, get_hip_stream(attrs));
+        });
+    table.register_single_output_kernel(OpId::LinalgCholeskySolve,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            bool upper = attrs.get_bool(AttrKey::Upper, false);
+            auto stream = get_hip_stream(attrs);
+            if (!upper) {
+                auto Y = rocm::linalg_solve_triangular_kernel(inputs[1], inputs[0], false, false, stream);
+                int64_t ndim = inputs[1].ndim();
+                auto Lt = tenzor::transpose(inputs[1], ndim - 2, ndim - 1).contiguous();
+                return rocm::linalg_solve_triangular_kernel(Lt, Y, true, false, stream);
+            } else {
+                int64_t ndim = inputs[1].ndim();
+                auto Ut = tenzor::transpose(inputs[1], ndim - 2, ndim - 1).contiguous();
+                auto Y = rocm::linalg_solve_triangular_kernel(Ut, inputs[0], false, false, stream);
+                return rocm::linalg_solve_triangular_kernel(inputs[1], Y, true, false, stream);
+            }
         });
     table.register_kernel(OpId::Geqrf,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
@@ -3242,6 +3295,58 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             dilation_h, dilation_w, get_hip_stream(attrs));
     });
 
+    // --- Deformable Convolution v2 (DCNv2) ------------------------------------
+    table.register_kernel(OpId::DeformableConv2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: {input, offset, weight, bias, mask}
+        int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
+        int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
+        int64_t pad_h = attrs.get_int(AttrKey::PaddingH, 0);
+        int64_t pad_w = attrs.get_int(AttrKey::PaddingW, 0);
+        int64_t dil_h = attrs.get_int(AttrKey::DilationH, 1);
+        int64_t dil_w = attrs.get_int(AttrKey::DilationW, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
+        return std::vector<Tensor>{rocm::deformable_conv2d_forward_kernel(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, get_hip_stream(attrs))};
+    });
+    table.register_kernel(OpId::DeformableConv2dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: {grad_output, input, offset, weight, mask}
+        int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
+        int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
+        int64_t pad_h = attrs.get_int(AttrKey::PaddingH, 0);
+        int64_t pad_w = attrs.get_int(AttrKey::PaddingW, 0);
+        int64_t dil_h = attrs.get_int(AttrKey::DilationH, 1);
+        int64_t dil_w = attrs.get_int(AttrKey::DilationW, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
+        return rocm::deformable_conv2d_backward_input_kernel(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, get_hip_stream(attrs));
+    });
+    table.register_kernel(OpId::DeformableConv2dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: {grad_output, input, offset, mask}
+        int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
+        int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
+        int64_t pad_h = attrs.get_int(AttrKey::PaddingH, 0);
+        int64_t pad_w = attrs.get_int(AttrKey::PaddingW, 0);
+        int64_t dil_h = attrs.get_int(AttrKey::DilationH, 1);
+        int64_t dil_w = attrs.get_int(AttrKey::DilationW, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
+        auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
+        return std::vector<Tensor>{rocm::deformable_conv2d_backward_weight_kernel(
+            inputs[0], inputs[1], inputs[2], inputs[3],
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, weight_shape, get_hip_stream(attrs))};
+    });
+    table.register_kernel(OpId::DeformableConv2dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // Reuse regular conv2d bias backward (channel-wise sum of grad_output)
+        return std::vector<Tensor>{rocm::conv2d_backward_bias(inputs[0], get_hip_stream(attrs))};
+    });
+
     // --- Pooling Operations (2D) -----------------------------------------------
     table.register_single_output_kernel(OpId::AvgPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
@@ -3593,6 +3698,52 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             Tensor window = (inputs.size() > 1) ? inputs[1] : Tensor();
             return rocm::istft_kernel(inputs[0], n_fft, hop_length, win_length,
                                       window, center, normalized, onesided, length, get_hip_stream(attrs));
+        });
+
+    // =========================================================================
+    // DCT / IDCT
+    // =========================================================================
+    table.register_single_output_kernel(OpId::DCT,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int type = static_cast<int>(attrs.get_int(AttrKey::DCTType, 2));
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            std::string norm{attrs.get_string(AttrKey::Norm, "backward")};
+            std::optional<int64_t> n = std::nullopt;
+            int64_t n_val = attrs.get_int(AttrKey::N, -1);
+            if (n_val > 0) n = n_val;
+            return fft::dct(inputs[0], type, n, dim, norm);
+        });
+
+    table.register_single_output_kernel(OpId::IDCT,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int type = static_cast<int>(attrs.get_int(AttrKey::DCTType, 2));
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            std::string norm{attrs.get_string(AttrKey::Norm, "backward")};
+            std::optional<int64_t> n = std::nullopt;
+            int64_t n_val = attrs.get_int(AttrKey::N, -1);
+            if (n_val > 0) n = n_val;
+            return fft::idct(inputs[0], type, n, dim, norm);
+        });
+
+    table.register_single_output_kernel(OpId::MelScale,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t n_mels = attrs.get_int(AttrKey::NumMels, 128);
+            double f_min = attrs.get_float(AttrKey::FMin, 0.0);
+            double f_max = attrs.get_float(AttrKey::FMax, 0.0);
+            int64_t sample_rate = attrs.get_int(AttrKey::SampleRate, 16000);
+            return fft::mel_scale(inputs[0], n_mels, f_min, f_max, sample_rate);
+        });
+
+    table.register_single_output_kernel(OpId::MFCC,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t sample_rate = attrs.get_int(AttrKey::SampleRate, 16000);
+            int64_t n_mfcc = attrs.get_int(AttrKey::NumMFCC, 40);
+            int64_t n_mels = attrs.get_int(AttrKey::NumMels, 128);
+            int64_t n_fft = attrs.get_int(AttrKey::NFft, 400);
+            int64_t hop_length = attrs.get_int(AttrKey::HopLength, 160);
+            double f_min = attrs.get_float(AttrKey::FMin, 0.0);
+            double f_max = attrs.get_float(AttrKey::FMax, 0.0);
+            return fft::mfcc(inputs[0], sample_rate, n_mfcc, n_mels, n_fft, hop_length, f_min, f_max);
         });
 
     // AdvancedIndex (native ROCm fancy indexing)
@@ -4282,6 +4433,18 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     // =========================================================================
+    // Statistical operations (Cov, Corrcoef) — composed from existing ops
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Cov, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t correction = attrs.get_int(AttrKey::Correction, 1);
+        return cov(inputs[0], correction);
+    });
+
+    table.register_single_output_kernel(OpId::Corrcoef, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        return corrcoef(inputs[0]);
+    });
+
+    // =========================================================================
     // AsStrided — metadata-only view with custom shape/strides
     // =========================================================================
     table.register_single_output_kernel(OpId::AsStrided,
@@ -4291,6 +4454,19 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             int64_t offset = attrs.get_int(AttrKey::StorageOffset, -1);
             std::optional<int64_t> storage_offset = (offset >= 0) ? std::optional(offset) : std::nullopt;
             return tenzor::as_strided(inputs[0], shape, strides, storage_offset);
+        });
+
+    // =========================================================================
+    // LOBPCG — Locally Optimal Block Preconditioned Conjugate Gradient
+    // =========================================================================
+    table.register_kernel(OpId::LOBPCG,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t k = attrs.get_int(AttrKey::K, 1);
+            int64_t max_iter = attrs.get_int(AttrKey::MaxIter, 100);
+            double tol = attrs.get_float(AttrKey::Tolerance, 1e-6);
+            Tensor B = inputs.size() > 2 ? inputs[2] : Tensor();
+            auto [evals, evecs] = linalg::lobpcg(inputs[0], inputs[1], k, B, max_iter, tol);
+            return {evals, evecs};
         });
 
     // =========================================================================

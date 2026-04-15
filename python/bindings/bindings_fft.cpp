@@ -151,6 +151,46 @@ void register_fft(py::module_& m) {
        py::arg("input"), py::arg("s") = py::none(), py::arg("dim") = py::none(),
        py::arg("norm") = "backward",
        py::call_guard<py::gil_scoped_release>());
+
+    fft_mod.def("dct", [](const tenzor::Tensor& input, int type,
+                            std::optional<int64_t> n, int64_t dim,
+                            const std::string& norm) {
+        return tenzor::fft::dct(input, type, n, dim, norm);
+    }, "Discrete Cosine Transform (DCT)",
+       py::arg("input"), py::arg("type") = 2, py::arg("n") = py::none(),
+       py::arg("dim") = -1, py::arg("norm") = "backward",
+       py::call_guard<py::gil_scoped_release>());
+
+    fft_mod.def("idct", [](const tenzor::Tensor& input, int type,
+                             std::optional<int64_t> n, int64_t dim,
+                             const std::string& norm) {
+        return tenzor::fft::idct(input, type, n, dim, norm);
+    }, "Inverse Discrete Cosine Transform (IDCT)",
+       py::arg("input"), py::arg("type") = 2, py::arg("n") = py::none(),
+       py::arg("dim") = -1, py::arg("norm") = "backward",
+       py::call_guard<py::gil_scoped_release>());
+
+    fft_mod.def("mel_scale", [](const tenzor::Tensor& spectrogram,
+                                 int64_t n_mels, double f_min, double f_max,
+                                 int64_t sample_rate) {
+        return tenzor::fft::mel_scale(spectrogram, n_mels, f_min, f_max, sample_rate);
+    }, "Apply mel-frequency filterbank to a spectrogram",
+       py::arg("spectrogram"), py::arg("n_mels") = 128,
+       py::arg("f_min") = 0.0, py::arg("f_max") = 0.0,
+       py::arg("sample_rate") = 16000,
+       py::call_guard<py::gil_scoped_release>());
+
+    fft_mod.def("mfcc", [](const tenzor::Tensor& waveform,
+                            int64_t sample_rate, int64_t n_mfcc,
+                            int64_t n_mels, int64_t n_fft,
+                            int64_t hop_length, double f_min, double f_max) {
+        return tenzor::fft::mfcc(waveform, sample_rate, n_mfcc, n_mels, n_fft, hop_length, f_min, f_max);
+    }, "Compute Mel-Frequency Cepstral Coefficients (MFCC)",
+       py::arg("waveform"), py::arg("sample_rate") = 16000,
+       py::arg("n_mfcc") = 40, py::arg("n_mels") = 128,
+       py::arg("n_fft") = 400, py::arg("hop_length") = 160,
+       py::arg("f_min") = 0.0, py::arg("f_max") = 0.0,
+       py::call_guard<py::gil_scoped_release>());
 }
 
 } // namespace tenzor::python

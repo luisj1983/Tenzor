@@ -1462,6 +1462,64 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return get_vulkan_backend()->dispatchDepthwiseConv2d(inputs[0], inputs[1], bias, stride, padding, dilation);
     });
 
+    // DeformableConv2d (DCNv2) — inputs: {input, offset, weight, bias, mask}
+    table.register_kernel(OpId::DeformableConv2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
+        int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
+        int64_t pad_h = attrs.get_int(AttrKey::PaddingH, 0);
+        int64_t pad_w = attrs.get_int(AttrKey::PaddingW, 0);
+        int64_t dil_h = attrs.get_int(AttrKey::DilationH, 1);
+        int64_t dil_w = attrs.get_int(AttrKey::DilationW, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
+        bool use_mask = attrs.get_int(AttrKey::UseMask, 0) != 0;
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchDeformableConv2dForward(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, use_mask)};
+    });
+
+    // DeformableConv2dBackwardInput — inputs: {grad_output, input, offset, weight, mask}
+    // Returns: {grad_input, grad_offset[, grad_mask]}
+    table.register_kernel(OpId::DeformableConv2dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
+        int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
+        int64_t pad_h = attrs.get_int(AttrKey::PaddingH, 0);
+        int64_t pad_w = attrs.get_int(AttrKey::PaddingW, 0);
+        int64_t dil_h = attrs.get_int(AttrKey::DilationH, 1);
+        int64_t dil_w = attrs.get_int(AttrKey::DilationW, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
+        bool use_mask = attrs.get_int(AttrKey::UseMask, 0) != 0;
+        return get_vulkan_backend()->dispatchDeformableConv2dBackwardInput(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, use_mask);
+    });
+
+    // DeformableConv2dBackwardWeight — inputs: {grad_output, input, offset, mask}
+    table.register_kernel(OpId::DeformableConv2dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
+        int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
+        int64_t pad_h = attrs.get_int(AttrKey::PaddingH, 0);
+        int64_t pad_w = attrs.get_int(AttrKey::PaddingW, 0);
+        int64_t dil_h = attrs.get_int(AttrKey::DilationH, 1);
+        int64_t dil_w = attrs.get_int(AttrKey::DilationW, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
+        bool use_mask = attrs.get_int(AttrKey::UseMask, 0) != 0;
+        auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchDeformableConv2dBackwardWeight(
+            inputs[0], inputs[1], inputs[2], inputs[3],
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, use_mask, weight_shape)};
+    });
+
+    // DeformableConv2dBackwardBias — reuse regular conv2d bias backward (channel-wise sum)
+    table.register_kernel(OpId::DeformableConv2dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchConv2dBackwardBias(inputs[0])};
+    });
+
     table.register_single_output_kernel(OpId::AdaptiveMaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
         return get_vulkan_backend()->dispatchAdaptiveMaxPool2dBackward(inputs[0], inputs[1], input_shape);
@@ -2203,6 +2261,23 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return {get_vulkan_backend()->dispatchLinalgSolveTriangular(inputs[0], inputs[1], upper, unitriangular)};
     });
 
+    table.register_kernel(OpId::LinalgCholeskySolve, [](std::span<const Tensor> inputs, const OpAttributes& attrs)
+        -> std::vector<Tensor> {
+        bool upper = attrs.get_bool(AttrKey::Upper, false);
+        auto* vk = get_vulkan_backend();
+        if (!upper) {
+            auto Y = vk->dispatchLinalgSolveTriangular(inputs[1], inputs[0], false, false);
+            int64_t ndim = inputs[1].ndim();
+            auto Lt = tenzor::transpose(inputs[1], ndim - 2, ndim - 1).contiguous();
+            return {vk->dispatchLinalgSolveTriangular(Lt, Y, true, false)};
+        } else {
+            int64_t ndim = inputs[1].ndim();
+            auto Ut = tenzor::transpose(inputs[1], ndim - 2, ndim - 1).contiguous();
+            auto Y = vk->dispatchLinalgSolveTriangular(Ut, inputs[0], false, false);
+            return {vk->dispatchLinalgSolveTriangular(inputs[1], Y, true, false)};
+        }
+    });
+
     // Flash Attention — composed from existing matmul + softmax shaders.
     // Both forward and backward are fully GPU-based using composed Vulkan dispatches.
     //
@@ -2312,6 +2387,15 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
 
             return {dQ, dK, dV};
         });
+
+    // =========================================================================
+    // Einsum (composed — delegates to einsum_composed to avoid dispatch loop)
+    // =========================================================================
+    table.register_kernel(OpId::Einsum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto equation = std::string(attrs.get_string(AttrKey::EinsumEquation, ""));
+        std::vector<Tensor> tensors(inputs.begin(), inputs.end());
+        return {einsum_composed(equation, tensors)};
+    });
 
     // SearchSorted — native GPU binary search shader
     table.register_single_output_kernel(OpId::SearchSorted,
@@ -2649,6 +2733,52 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             return get_vulkan_backend()->dispatchISTFT(
                 inputs[0], n_fft, hop_length, win_length, window,
                 center, normalized, onesided, length_val);
+        });
+
+    // =========================================================================
+    // DCT / IDCT
+    // =========================================================================
+    table.register_single_output_kernel(OpId::DCT,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int type = static_cast<int>(attrs.get_int(AttrKey::DCTType, 2));
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            std::string norm{attrs.get_string(AttrKey::Norm, "backward")};
+            std::optional<int64_t> n = std::nullopt;
+            int64_t n_val = attrs.get_int(AttrKey::N, -1);
+            if (n_val > 0) n = n_val;
+            return fft::dct(inputs[0], type, n, dim, norm);
+        });
+
+    table.register_single_output_kernel(OpId::IDCT,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int type = static_cast<int>(attrs.get_int(AttrKey::DCTType, 2));
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            std::string norm{attrs.get_string(AttrKey::Norm, "backward")};
+            std::optional<int64_t> n = std::nullopt;
+            int64_t n_val = attrs.get_int(AttrKey::N, -1);
+            if (n_val > 0) n = n_val;
+            return fft::idct(inputs[0], type, n, dim, norm);
+        });
+
+    table.register_single_output_kernel(OpId::MelScale,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t n_mels = attrs.get_int(AttrKey::NumMels, 128);
+            double f_min = attrs.get_float(AttrKey::FMin, 0.0);
+            double f_max = attrs.get_float(AttrKey::FMax, 0.0);
+            int64_t sample_rate = attrs.get_int(AttrKey::SampleRate, 16000);
+            return fft::mel_scale(inputs[0], n_mels, f_min, f_max, sample_rate);
+        });
+
+    table.register_single_output_kernel(OpId::MFCC,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            int64_t sample_rate = attrs.get_int(AttrKey::SampleRate, 16000);
+            int64_t n_mfcc = attrs.get_int(AttrKey::NumMFCC, 40);
+            int64_t n_mels = attrs.get_int(AttrKey::NumMels, 128);
+            int64_t n_fft = attrs.get_int(AttrKey::NFft, 400);
+            int64_t hop_length = attrs.get_int(AttrKey::HopLength, 160);
+            double f_min = attrs.get_float(AttrKey::FMin, 0.0);
+            double f_max = attrs.get_float(AttrKey::FMax, 0.0);
+            return fft::mfcc(inputs[0], sample_rate, n_mfcc, n_mels, n_fft, hop_length, f_min, f_max);
         });
 
     // AdvancedIndex / AdvancedIndexPut — native Vulkan compute shaders
@@ -3523,6 +3653,31 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
                             static_cast<size_t>((kve - kvs) * hd) * dtype_size(V.dtype()));
             }
             return {grad_Q, grad_K, grad_V};
+        });
+
+    // =========================================================================
+    // Statistical operations (Cov, Corrcoef) — composed from existing ops
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Cov, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t correction = attrs.get_int(AttrKey::Correction, 1);
+        return cov(inputs[0], correction);
+    });
+
+    table.register_single_output_kernel(OpId::Corrcoef, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        return corrcoef(inputs[0]);
+    });
+
+    // =========================================================================
+    // LOBPCG — Locally Optimal Block Preconditioned Conjugate Gradient
+    // =========================================================================
+    table.register_kernel(OpId::LOBPCG,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t k = attrs.get_int(AttrKey::K, 1);
+            int64_t max_iter = attrs.get_int(AttrKey::MaxIter, 100);
+            double tol = attrs.get_float(AttrKey::Tolerance, 1e-6);
+            Tensor B = inputs.size() > 2 ? inputs[2] : Tensor();
+            auto [evals, evecs] = linalg::lobpcg(inputs[0], inputs[1], k, B, max_iter, tol);
+            return {evals, evecs};
         });
 
     std::cout << "Vulkan dispatch table initialized with O(1) lookup" << std::endl;

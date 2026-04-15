@@ -362,6 +362,32 @@ public:
                                       int64_t groups = 1) -> Tensor;
     auto dispatchConv2dBackwardBias(const Tensor& grad_output) -> Tensor;
 
+    // Deformable Conv2d (DCNv2) operations
+    auto dispatchDeformableConv2dForward(const Tensor& input, const Tensor& offset,
+                                         const Tensor& weight, const Tensor& bias,
+                                         const Tensor& mask,
+                                         int64_t stride_h, int64_t stride_w,
+                                         int64_t pad_h, int64_t pad_w,
+                                         int64_t dil_h, int64_t dil_w,
+                                         int64_t groups, int64_t offset_groups,
+                                         bool use_mask) -> Tensor;
+    auto dispatchDeformableConv2dBackwardInput(const Tensor& grad_output, const Tensor& input,
+                                                const Tensor& offset, const Tensor& weight,
+                                                const Tensor& mask,
+                                                int64_t stride_h, int64_t stride_w,
+                                                int64_t pad_h, int64_t pad_w,
+                                                int64_t dil_h, int64_t dil_w,
+                                                int64_t groups, int64_t offset_groups,
+                                                bool use_mask) -> std::vector<Tensor>;
+    auto dispatchDeformableConv2dBackwardWeight(const Tensor& grad_output, const Tensor& input,
+                                                 const Tensor& offset, const Tensor& mask,
+                                                 int64_t stride_h, int64_t stride_w,
+                                                 int64_t pad_h, int64_t pad_w,
+                                                 int64_t dil_h, int64_t dil_w,
+                                                 int64_t groups, int64_t offset_groups,
+                                                 bool use_mask,
+                                                 const std::vector<int64_t>& weight_shape) -> Tensor;
+
     // Conv3d operations
     auto dispatchConv3dForward(const Tensor& input, const Tensor& weight, const Tensor* bias, const OpAttributes& attrs) -> Tensor;
     auto dispatchConv3dBackwardInput(const Tensor& grad_output, const Tensor& weight,

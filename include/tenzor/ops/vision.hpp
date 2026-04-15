@@ -157,5 +157,38 @@ auto affine_grid(const Tensor& theta,
                  const std::vector<int64_t>& size,
                  bool align_corners = false) -> Tensor;
 
+/**
+ * @brief Deformable 2D convolution (DCNv2).
+ *
+ * Applies a deformable convolution where sampling positions are augmented
+ * with learnable 2D offsets and optional modulation masks, enabling the
+ * receptive field to adapt to object geometry.
+ *
+ * Reference: Zhu et al., "Deformable ConvNets v2" (CVPR 2019)
+ *
+ * @param input Input tensor of shape (N, C_in, H, W)
+ * @param offset Offset tensor of shape (N, offset_groups * 2 * kH * kW, H_out, W_out)
+ * @param weight Weight tensor of shape (C_out, C_in / groups, kH, kW)
+ * @param bias Bias tensor of shape (C_out), or empty tensor for no bias
+ * @param mask Modulation mask of shape (N, offset_groups * kH * kW, H_out, W_out),
+ *             or empty tensor for no mask (DCNv1 behavior, mask = 1)
+ * @param stride_h Vertical stride
+ * @param stride_w Horizontal stride
+ * @param padding_h Vertical padding
+ * @param padding_w Horizontal padding
+ * @param dilation_h Vertical dilation
+ * @param dilation_w Horizontal dilation
+ * @param groups Number of blocked connections from input to output channels
+ * @param offset_groups Number of groups for the offset/mask (typically 1)
+ * @return Output tensor of shape (N, C_out, H_out, W_out)
+ */
+auto deformable_conv2d(const Tensor& input, const Tensor& offset,
+                       const Tensor& weight, const Tensor& bias,
+                       const Tensor& mask,
+                       int64_t stride_h, int64_t stride_w,
+                       int64_t padding_h, int64_t padding_w,
+                       int64_t dilation_h, int64_t dilation_w,
+                       int64_t groups, int64_t offset_groups) -> Tensor;
+
 } // namespace ops
 } // namespace tenzor

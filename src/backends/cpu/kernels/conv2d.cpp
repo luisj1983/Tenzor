@@ -1,4 +1,5 @@
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/ops/creation.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/backend/omp_thresholds.hpp"
 #include "gemm_optimized.hpp"
@@ -1896,6 +1897,497 @@ auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight,
     }
 
     return output;
+}
+
+// ============================================================================
+// Deformable Conv2d (DCNv2) kernels
+// ============================================================================
+
+namespace {
+
+/// Bilinear interpolation at fractional position (h, w) in a single channel plane.
+/// Returns 0 for out-of-bounds positions.
+template <typename T>
+inline T bilinear_interpolate(const T* data, int64_t H, int64_t W,
+                               float h, float w) {
+    if (h <= -1 || h >= H || w <= -1 || w >= W) return T(0);
+
+    int64_t h_low = static_cast<int64_t>(std::floor(h));
+    int64_t w_low = static_cast<int64_t>(std::floor(w));
+    int64_t h_high = h_low + 1;
+    int64_t w_high = w_low + 1;
+
+    float lh = h - h_low;
+    float lw = w - w_low;
+    float hh = 1.0f - lh;
+    float hw = 1.0f - lw;
+
+    auto val = [&](int64_t r, int64_t c) -> float {
+        if (r < 0 || r >= H || c < 0 || c >= W) return 0.0f;
+        return static_cast<float>(data[r * W + c]);
+    };
+
+    float v = hh * hw * val(h_low, w_low) +
+              hh * lw * val(h_low, w_high) +
+              lh * hw * val(h_high, w_low) +
+              lh * lw * val(h_high, w_high);
+    return static_cast<T>(v);
+}
+
+/// Scatter gradient back through bilinear interpolation (used in backward).
+template <typename T>
+inline void bilinear_interpolate_gradient(T* grad_data, int64_t H, int64_t W,
+                                           float h, float w, float top_grad) {
+    if (h <= -1 || h >= H || w <= -1 || w >= W) return;
+
+    int64_t h_low = static_cast<int64_t>(std::floor(h));
+    int64_t w_low = static_cast<int64_t>(std::floor(w));
+    int64_t h_high = h_low + 1;
+    int64_t w_high = w_low + 1;
+
+    float lh = h - h_low;
+    float lw = w - w_low;
+    float hh = 1.0f - lh;
+    float hw = 1.0f - lw;
+
+    auto add = [&](int64_t r, int64_t c, float weight) {
+        if (r >= 0 && r < H && c >= 0 && c < W) {
+            // Use atomic for thread safety under OpenMP
+            #pragma omp atomic
+            grad_data[r * W + c] += static_cast<T>(weight * top_grad);
+        }
+    };
+
+    add(h_low, w_low, hh * hw);
+    add(h_low, w_high, hh * lw);
+    add(h_high, w_low, lh * hw);
+    add(h_high, w_high, lh * lw);
+}
+
+/// Compute dval/dh and dval/dw for bilinear interpolation — needed for offset gradients.
+template <typename T>
+inline void bilinear_interpolate_offset_gradient(
+    const T* data, int64_t H, int64_t W, float h, float w,
+    float& grad_h, float& grad_w) {
+    grad_h = 0.0f;
+    grad_w = 0.0f;
+    if (h <= -1 || h >= H || w <= -1 || w >= W) return;
+
+    int64_t h_low = static_cast<int64_t>(std::floor(h));
+    int64_t w_low = static_cast<int64_t>(std::floor(w));
+    int64_t h_high = h_low + 1;
+    int64_t w_high = w_low + 1;
+
+    float lh = h - h_low;
+    float lw = w - w_low;
+    float hh = 1.0f - lh;
+    float hw = 1.0f - lw;
+
+    auto val = [&](int64_t r, int64_t c) -> float {
+        if (r < 0 || r >= H || c < 0 || c >= W) return 0.0f;
+        return static_cast<float>(data[r * W + c]);
+    };
+
+    float v00 = val(h_low, w_low);
+    float v01 = val(h_low, w_high);
+    float v10 = val(h_high, w_low);
+    float v11 = val(h_high, w_high);
+
+    // d(bilinear)/dh = (-hw * v00) + (-lw * v01) + (hw * v10) + (lw * v11)
+    grad_h = -hw * v00 - lw * v01 + hw * v10 + lw * v11;
+    // d(bilinear)/dw = (-hh * v00) + (hh * v01) + (-lh * v10) + (lh * v11)
+    grad_w = -hh * v00 + hh * v01 - lh * v10 + lh * v11;
+}
+
+} // anonymous namespace
+
+template <typename T>
+static void deformable_conv2d_forward_impl(
+    const T* input, const T* offset, const T* weight,
+    const T* bias, const T* mask,
+    T* output,
+    int64_t N, int64_t C_in, int64_t H, int64_t W,
+    int64_t C_out, int64_t kH, int64_t kW,
+    int64_t H_out, int64_t W_out,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups, int64_t offset_groups,
+    bool use_mask) {
+
+    int64_t channels_per_group = C_in / groups;
+    int64_t out_channels_per_group = C_out / groups;
+    int64_t channels_per_offset_group = C_in / offset_groups;
+
+    #pragma omp parallel for collapse(3) schedule(static) if(N * C_out * H_out * W_out > 65536)
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t oc = 0; oc < C_out; ++oc) {
+            for (int64_t oh = 0; oh < H_out; ++oh) {
+                int64_t g = oc / out_channels_per_group;
+
+                for (int64_t ow = 0; ow < W_out; ++ow) {
+                    float sum = 0.0f;
+
+                    for (int64_t ic_local = 0; ic_local < channels_per_group; ++ic_local) {
+                        int64_t ic = g * channels_per_group + ic_local;
+                        int64_t og = ic / channels_per_offset_group; // offset group for this channel
+
+                        const T* input_plane = input + (n * C_in + ic) * H * W;
+                        const T* weight_plane = weight + (oc * channels_per_group + ic_local) * kH * kW;
+
+                        for (int64_t kh = 0; kh < kH; ++kh) {
+                            for (int64_t kw = 0; kw < kW; ++kw) {
+                                int64_t offset_idx = og * 2 * kH * kW;
+                                int64_t mask_idx = og * kH * kW;
+                                int64_t k_linear = kh * kW + kw;
+
+                                // Deformed position
+                                float h_base = oh * stride_h - pad_h + kh * dil_h;
+                                float w_base = ow * stride_w - pad_w + kw * dil_w;
+
+                                const T* off_h_plane = offset + (n * offset_groups * 2 * kH * kW +
+                                    (offset_idx + 2 * k_linear)) * H_out * W_out;
+                                const T* off_w_plane = offset + (n * offset_groups * 2 * kH * kW +
+                                    (offset_idx + 2 * k_linear + 1)) * H_out * W_out;
+
+                                float h_off = static_cast<float>(off_h_plane[oh * W_out + ow]);
+                                float w_off = static_cast<float>(off_w_plane[oh * W_out + ow]);
+
+                                float h_loc = h_base + h_off;
+                                float w_loc = w_base + w_off;
+
+                                float val = static_cast<float>(
+                                    bilinear_interpolate(input_plane, H, W, h_loc, w_loc));
+
+                                if (use_mask) {
+                                    const T* mask_plane = mask + (n * offset_groups * kH * kW +
+                                        (mask_idx + k_linear)) * H_out * W_out;
+                                    val *= static_cast<float>(mask_plane[oh * W_out + ow]);
+                                }
+
+                                sum += val * static_cast<float>(weight_plane[k_linear]);
+                            }
+                        }
+                    }
+
+                    if (bias) {
+                        sum += static_cast<float>(bias[oc]);
+                    }
+
+                    output[(n * C_out + oc) * H_out * W_out + oh * W_out + ow] = static_cast<T>(sum);
+                }
+            }
+        }
+    }
+}
+
+template <typename T>
+static void deformable_conv2d_backward_input_impl(
+    const T* grad_output, const T* input, const T* offset,
+    const T* weight, const T* mask,
+    T* grad_input, T* grad_offset, T* grad_mask,
+    int64_t N, int64_t C_in, int64_t H, int64_t W,
+    int64_t C_out, int64_t kH, int64_t kW,
+    int64_t H_out, int64_t W_out,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups, int64_t offset_groups,
+    bool use_mask) {
+
+    int64_t channels_per_group = C_in / groups;
+    int64_t out_channels_per_group = C_out / groups;
+    int64_t channels_per_offset_group = C_in / offset_groups;
+
+    #pragma omp parallel for collapse(2) schedule(static) if(N * C_out > 4)
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t oc = 0; oc < C_out; ++oc) {
+            int64_t g = oc / out_channels_per_group;
+
+            for (int64_t oh = 0; oh < H_out; ++oh) {
+                for (int64_t ow = 0; ow < W_out; ++ow) {
+                    float grad_out_val = static_cast<float>(
+                        grad_output[(n * C_out + oc) * H_out * W_out + oh * W_out + ow]);
+
+                    for (int64_t ic_local = 0; ic_local < channels_per_group; ++ic_local) {
+                        int64_t ic = g * channels_per_group + ic_local;
+                        int64_t og = ic / channels_per_offset_group;
+
+                        const T* input_plane = input + (n * C_in + ic) * H * W;
+                        T* grad_input_plane = grad_input + (n * C_in + ic) * H * W;
+                        const T* weight_plane = weight + (oc * channels_per_group + ic_local) * kH * kW;
+
+                        for (int64_t kh = 0; kh < kH; ++kh) {
+                            for (int64_t kw = 0; kw < kW; ++kw) {
+                                int64_t offset_idx = og * 2 * kH * kW;
+                                int64_t mask_idx = og * kH * kW;
+                                int64_t k_linear = kh * kW + kw;
+
+                                float h_base = oh * stride_h - pad_h + kh * dil_h;
+                                float w_base = ow * stride_w - pad_w + kw * dil_w;
+
+                                int64_t off_h_idx = (offset_idx + 2 * k_linear);
+                                int64_t off_w_idx = (offset_idx + 2 * k_linear + 1);
+
+                                const T* off_h_plane = offset + (n * offset_groups * 2 * kH * kW + off_h_idx) * H_out * W_out;
+                                const T* off_w_plane = offset + (n * offset_groups * 2 * kH * kW + off_w_idx) * H_out * W_out;
+
+                                float h_off = static_cast<float>(off_h_plane[oh * W_out + ow]);
+                                float w_off = static_cast<float>(off_w_plane[oh * W_out + ow]);
+
+                                float h_loc = h_base + h_off;
+                                float w_loc = w_base + w_off;
+
+                                float w_val = static_cast<float>(weight_plane[k_linear]);
+                                float m_val = 1.0f;
+                                if (use_mask) {
+                                    const T* mask_plane = mask + (n * offset_groups * kH * kW + (mask_idx + k_linear)) * H_out * W_out;
+                                    m_val = static_cast<float>(mask_plane[oh * W_out + ow]);
+                                }
+
+                                float top_grad = grad_out_val * w_val * m_val;
+
+                                // grad_input
+                                bilinear_interpolate_gradient(grad_input_plane, H, W, h_loc, w_loc, top_grad);
+
+                                // grad_offset (d/dh, d/dw of bilinear)
+                                float grad_h, grad_w;
+                                bilinear_interpolate_offset_gradient(input_plane, H, W, h_loc, w_loc, grad_h, grad_w);
+
+                                T* grad_off_h = grad_offset + (n * offset_groups * 2 * kH * kW + off_h_idx) * H_out * W_out;
+                                T* grad_off_w = grad_offset + (n * offset_groups * 2 * kH * kW + off_w_idx) * H_out * W_out;
+
+                                float off_grad_h = grad_out_val * w_val * m_val * grad_h;
+                                float off_grad_w = grad_out_val * w_val * m_val * grad_w;
+
+                                #pragma omp atomic
+                                grad_off_h[oh * W_out + ow] += static_cast<T>(off_grad_h);
+                                #pragma omp atomic
+                                grad_off_w[oh * W_out + ow] += static_cast<T>(off_grad_w);
+
+                                // grad_mask
+                                if (use_mask && grad_mask) {
+                                    float interp_val = static_cast<float>(
+                                        bilinear_interpolate(input_plane, H, W, h_loc, w_loc));
+                                    T* grad_mask_plane = grad_mask + (n * offset_groups * kH * kW + (mask_idx + k_linear)) * H_out * W_out;
+                                    float mask_grad = grad_out_val * w_val * interp_val;
+                                    #pragma omp atomic
+                                    grad_mask_plane[oh * W_out + ow] += static_cast<T>(mask_grad);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+template <typename T>
+static void deformable_conv2d_backward_weight_impl(
+    const T* grad_output, const T* input, const T* offset, const T* mask,
+    T* grad_weight,
+    int64_t N, int64_t C_in, int64_t H, int64_t W,
+    int64_t C_out, int64_t kH, int64_t kW,
+    int64_t H_out, int64_t W_out,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups, int64_t offset_groups,
+    bool use_mask) {
+
+    int64_t channels_per_group = C_in / groups;
+    int64_t out_channels_per_group = C_out / groups;
+    int64_t channels_per_offset_group = C_in / offset_groups;
+
+    #pragma omp parallel for collapse(2) schedule(static) if(C_out * channels_per_group > 16)
+    for (int64_t oc = 0; oc < C_out; ++oc) {
+        for (int64_t ic_local = 0; ic_local < channels_per_group; ++ic_local) {
+            int64_t g = oc / out_channels_per_group;
+            int64_t ic = g * channels_per_group + ic_local;
+            int64_t og = ic / channels_per_offset_group;
+
+            T* gw = grad_weight + (oc * channels_per_group + ic_local) * kH * kW;
+
+            for (int64_t kh = 0; kh < kH; ++kh) {
+                for (int64_t kw = 0; kw < kW; ++kw) {
+                    int64_t k_linear = kh * kW + kw;
+                    int64_t offset_idx = og * 2 * kH * kW;
+                    int64_t mask_idx = og * kH * kW;
+                    float sum = 0.0f;
+
+                    for (int64_t n = 0; n < N; ++n) {
+                        const T* input_plane = input + (n * C_in + ic) * H * W;
+
+                        for (int64_t oh = 0; oh < H_out; ++oh) {
+                            for (int64_t ow = 0; ow < W_out; ++ow) {
+                                float h_base = oh * stride_h - pad_h + kh * dil_h;
+                                float w_base = ow * stride_w - pad_w + kw * dil_w;
+
+                                const T* off_h_plane = offset + (n * offset_groups * 2 * kH * kW +
+                                    (offset_idx + 2 * k_linear)) * H_out * W_out;
+                                const T* off_w_plane = offset + (n * offset_groups * 2 * kH * kW +
+                                    (offset_idx + 2 * k_linear + 1)) * H_out * W_out;
+
+                                float h_loc = h_base + static_cast<float>(off_h_plane[oh * W_out + ow]);
+                                float w_loc = w_base + static_cast<float>(off_w_plane[oh * W_out + ow]);
+
+                                float val = static_cast<float>(
+                                    bilinear_interpolate(input_plane, H, W, h_loc, w_loc));
+
+                                if (use_mask) {
+                                    const T* mask_plane = mask + (n * offset_groups * kH * kW +
+                                        (mask_idx + k_linear)) * H_out * W_out;
+                                    val *= static_cast<float>(mask_plane[oh * W_out + ow]);
+                                }
+
+                                float go = static_cast<float>(
+                                    grad_output[(n * C_out + oc) * H_out * W_out + oh * W_out + ow]);
+                                sum += go * val;
+                            }
+                        }
+                    }
+
+                    gw[k_linear] = static_cast<T>(sum);
+                }
+            }
+        }
+    }
+}
+
+auto deformable_conv2d_forward_kernel(
+    const Tensor& input, const Tensor& offset, const Tensor& weight,
+    const Tensor& bias, const Tensor& mask,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups, int64_t offset_groups) -> Tensor {
+
+    auto ishape = input.shape();
+    auto wshape = weight.shape();
+    int64_t N = ishape[0], C_in = ishape[1], H = ishape[2], W = ishape[3];
+    int64_t C_out = wshape[0], kH = wshape[2], kW = wshape[3];
+    int64_t H_out = (H + 2 * pad_h - dil_h * (kH - 1) - 1) / stride_h + 1;
+    int64_t W_out = (W + 2 * pad_w - dil_w * (kW - 1) - 1) / stride_w + 1;
+
+    bool use_mask = mask.numel() > 0;
+    auto output = zeros({N, C_out, H_out, W_out}, input.dtype(), input.device());
+
+    if (input.dtype() == DType::Float32) {
+        deformable_conv2d_forward_impl<float>(
+            input.data<float>(), offset.data<float>(), weight.data<float>(),
+            bias.numel() > 0 ? bias.data<float>() : nullptr,
+            use_mask ? mask.data<float>() : nullptr,
+            output.data<float>(),
+            N, C_in, H, W, C_out, kH, kW, H_out, W_out,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, use_mask);
+    } else if (input.dtype() == DType::Float64) {
+        deformable_conv2d_forward_impl<double>(
+            input.data<double>(), offset.data<double>(), weight.data<double>(),
+            bias.numel() > 0 ? bias.data<double>() : nullptr,
+            use_mask ? mask.data<double>() : nullptr,
+            output.data<double>(),
+            N, C_in, H, W, C_out, kH, kW, H_out, W_out,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, use_mask);
+    } else {
+        throw std::runtime_error("deformable_conv2d: unsupported dtype (requires Float32 or Float64)");
+    }
+
+    return output;
+}
+
+auto deformable_conv2d_backward_input_kernel(
+    const Tensor& grad_output, const Tensor& input, const Tensor& offset,
+    const Tensor& weight, const Tensor& mask,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups, int64_t offset_groups) -> std::vector<Tensor> {
+
+    auto ishape = input.shape();
+    auto wshape = weight.shape();
+    auto oshape = offset.shape();
+    int64_t N = ishape[0], C_in = ishape[1], H = ishape[2], W = ishape[3];
+    int64_t C_out = wshape[0], kH = wshape[2], kW = wshape[3];
+    int64_t H_out = grad_output.shape()[2], W_out = grad_output.shape()[3];
+
+    bool use_mask = mask.numel() > 0;
+    auto grad_input = zeros(std::vector<int64_t>(ishape.begin(), ishape.end()), input.dtype(), input.device());
+    auto grad_offset = zeros(std::vector<int64_t>(oshape.begin(), oshape.end()), input.dtype(), input.device());
+    Tensor grad_mask;
+    if (use_mask) {
+        auto ms = mask.shape();
+        grad_mask = zeros(std::vector<int64_t>(ms.begin(), ms.end()), input.dtype(), input.device());
+    }
+
+    if (input.dtype() == DType::Float32) {
+        deformable_conv2d_backward_input_impl<float>(
+            grad_output.data<float>(), input.data<float>(), offset.data<float>(),
+            weight.data<float>(), use_mask ? mask.data<float>() : nullptr,
+            grad_input.data<float>(), grad_offset.data<float>(),
+            use_mask ? grad_mask.data<float>() : nullptr,
+            N, C_in, H, W, C_out, kH, kW, H_out, W_out,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, use_mask);
+    } else if (input.dtype() == DType::Float64) {
+        deformable_conv2d_backward_input_impl<double>(
+            grad_output.data<double>(), input.data<double>(), offset.data<double>(),
+            weight.data<double>(), use_mask ? mask.data<double>() : nullptr,
+            grad_input.data<double>(), grad_offset.data<double>(),
+            use_mask ? grad_mask.data<double>() : nullptr,
+            N, C_in, H, W, C_out, kH, kW, H_out, W_out,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, use_mask);
+    } else {
+        throw std::runtime_error("deformable_conv2d_backward_input: unsupported dtype");
+    }
+
+    if (use_mask) {
+        return {grad_input, grad_offset, grad_mask};
+    }
+    return {grad_input, grad_offset};
+}
+
+auto deformable_conv2d_backward_weight_kernel(
+    const Tensor& grad_output, const Tensor& input, const Tensor& offset,
+    const Tensor& mask,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
+    int64_t groups, int64_t offset_groups,
+    const std::vector<int64_t>& weight_shape) -> Tensor {
+
+    auto ishape = input.shape();
+    int64_t N = ishape[0], C_in = ishape[1], H = ishape[2], W = ishape[3];
+    int64_t C_out = weight_shape[0], kH = weight_shape[2], kW = weight_shape[3];
+    int64_t H_out = grad_output.shape()[2], W_out = grad_output.shape()[3];
+
+    bool use_mask = mask.numel() > 0;
+    auto grad_weight = zeros(weight_shape, input.dtype(), input.device());
+
+    if (input.dtype() == DType::Float32) {
+        deformable_conv2d_backward_weight_impl<float>(
+            grad_output.data<float>(), input.data<float>(), offset.data<float>(),
+            use_mask ? mask.data<float>() : nullptr,
+            grad_weight.data<float>(),
+            N, C_in, H, W, C_out, kH, kW, H_out, W_out,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, use_mask);
+    } else if (input.dtype() == DType::Float64) {
+        deformable_conv2d_backward_weight_impl<double>(
+            grad_output.data<double>(), input.data<double>(), offset.data<double>(),
+            use_mask ? mask.data<double>() : nullptr,
+            grad_weight.data<double>(),
+            N, C_in, H, W, C_out, kH, kW, H_out, W_out,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, use_mask);
+    } else {
+        throw std::runtime_error("deformable_conv2d_backward_weight: unsupported dtype");
+    }
+
+    return grad_weight;
 }
 
 } // namespace cpu
