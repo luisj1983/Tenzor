@@ -1413,6 +1413,65 @@ def cosine_similarity(x1: Variable, x2: Variable, dim: int = 1, eps: float = 1e-
     return _nn.functional_cosine_similarity(x1, x2, dim, eps)
 
 
+def pairwise_distance(x1: Variable, x2: Variable, p: float = 2.0) -> Variable:
+    """Compute pairwise p-norm distance between corresponding rows.
+
+    Parameters
+    ----------
+    x1, x2 : Variable
+        Input tensors of shape ``(N, D)``.
+    p : float, optional
+        Norm degree. Default: ``2.0`` (Euclidean).
+
+    Returns
+    -------
+    Variable
+        Distance tensor of shape ``(N,)``.
+    """
+    return _core.pairwise_distance(x1, x2, p)
+
+
+def pdist(input: Variable, p: float = 2.0) -> Variable:
+    """Compute all-pairs p-norm distances between rows of a matrix.
+
+    Returns the condensed distance matrix (upper triangle, row-major).
+    Output size is ``N*(N-1)/2`` for input with ``N`` rows.
+
+    Parameters
+    ----------
+    input : Variable
+        Input tensor of shape ``(N, D)``.
+    p : float, optional
+        Norm degree. Default: ``2.0`` (Euclidean).
+
+    Returns
+    -------
+    Variable
+        Condensed distance tensor of shape ``(N*(N-1)/2,)``.
+    """
+    return _core.pdist(input, p)
+
+
+def channel_shuffle(input: Variable, groups: int) -> Variable:
+    """Rearrange channels by dividing into groups and transposing.
+
+    Used in ShuffleNet architectures.
+
+    Parameters
+    ----------
+    input : Variable
+        4D input tensor of shape ``(N, C, H, W)``.
+    groups : int
+        Number of groups (must divide ``C`` evenly).
+
+    Returns
+    -------
+    Variable
+        Tensor with shuffled channels, same shape as input.
+    """
+    return _core.channel_shuffle(input, groups)
+
+
 def conv2d(input: Variable, weight: Variable, bias: Optional[Variable] = None,
            stride: Union[int, tuple[int, int]] = 1,
            padding: Union[int, tuple[int, int]] = 0,

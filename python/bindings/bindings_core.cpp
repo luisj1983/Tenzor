@@ -13,6 +13,8 @@
 #include <sstream>
 #include <cstring>
 
+#include <tenzor/io/image.hpp>
+
 #include <tenzor/tenzor.hpp>
 #include <tenzor/autograd/ops.hpp>
 #include <tenzor/autograd/anomaly_mode.hpp>
@@ -698,6 +700,10 @@ Returns:
         .def("chunk", &tenzor::Tensor::chunk,
              py::arg("chunks"), py::arg("dim") = 0,
              "Split tensor into chunks along a dimension",
+             py::call_guard<py::gil_scoped_release>())
+        .def("unfold", &tenzor::Tensor::unfold,
+             py::arg("dim"), py::arg("size"), py::arg("step"),
+             "Extract sliding windows along a dimension",
              py::call_guard<py::gil_scoped_release>())
         // Memory operations
         .def("clone", &tenzor::Tensor::clone,
@@ -2939,6 +2945,19 @@ Returns:
          "Shuffle channels across groups for ShuffleNet", py::arg("input"), py::arg("groups"),
          py::call_guard<py::gil_scoped_release>());
 
+    // --- Gap-fill: distance functions ---
+
+    m.def("pairwise_distance", [](const tenzor::Tensor& x1, const tenzor::Tensor& x2, double p) {
+         return tenzor::pairwise_distance(x1, x2, p); },
+         "Pairwise p-norm distance between corresponding rows",
+         py::arg("x1"), py::arg("x2"), py::arg("p") = 2.0,
+         py::call_guard<py::gil_scoped_release>());
+    m.def("pdist", [](const tenzor::Tensor& input, double p) {
+         return tenzor::pdist(input, p); },
+         "All-pairs p-norm distances between rows of a matrix",
+         py::arg("input"), py::arg("p") = 2.0,
+         py::call_guard<py::gil_scoped_release>());
+
     m.def("cov", [](const tenzor::Tensor& t, int64_t correction) {
          return tenzor::cov(t, correction); },
          "Covariance matrix", py::arg("input"), py::arg("correction") = 1,
@@ -2988,6 +3007,48 @@ Returns:
          return tenzor::row_stack(tensors);
          }, "Alias for vstack",
          py::arg("tensors"), py::call_guard<py::gil_scoped_release>());
+
+    // --- Phase 1 gap-fill: stacking / splitting ops ---
+
+    m.def("hstack", [](const std::vector<tenzor::Tensor>& tensors) {
+         return tenzor::hstack(tensors);
+         }, "Horizontal stack: cat along dim 1 (dim 0 for 1D)",
+         py::arg("tensors"), py::call_guard<py::gil_scoped_release>());
+    m.def("vstack", [](const std::vector<tenzor::Tensor>& tensors) {
+         return tenzor::vstack(tensors);
+         }, "Vertical stack: cat along dim 0",
+         py::arg("tensors"), py::call_guard<py::gil_scoped_release>());
+    m.def("dstack", [](const std::vector<tenzor::Tensor>& tensors) {
+         return tenzor::dstack(tensors);
+         }, "Depth stack: cat along dim 2",
+         py::arg("tensors"), py::call_guard<py::gil_scoped_release>());
+
+    m.def("tensor_split", [](const tenzor::Tensor& t, int64_t sections, int64_t dim) {
+         return tenzor::tensor_split(t, sections, dim);
+         }, "Split tensor into equal sections along dim",
+         py::arg("input"), py::arg("sections"), py::arg("dim") = 0,
+         py::call_guard<py::gil_scoped_release>());
+    m.def("tensor_split", [](const tenzor::Tensor& t, std::vector<int64_t> indices, int64_t dim) {
+         return tenzor::tensor_split(t, indices, dim);
+         }, "Split tensor at given indices along dim",
+         py::arg("input"), py::arg("indices"), py::arg("dim") = 0,
+         py::call_guard<py::gil_scoped_release>());
+
+    m.def("hsplit", [](const tenzor::Tensor& t, int64_t sections) {
+         return tenzor::hsplit(t, sections);
+         }, "Horizontal split",
+         py::arg("input"), py::arg("sections"),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("vsplit", [](const tenzor::Tensor& t, int64_t sections) {
+         return tenzor::vsplit(t, sections);
+         }, "Vertical split",
+         py::arg("input"), py::arg("sections"),
+         py::call_guard<py::gil_scoped_release>());
+    m.def("dsplit", [](const tenzor::Tensor& t, int64_t sections) {
+         return tenzor::dsplit(t, sections);
+         }, "Depth split (requires ndim >= 3)",
+         py::arg("input"), py::arg("sections"),
+         py::call_guard<py::gil_scoped_release>());
     m.def("broadcast_tensors", [](const std::vector<tenzor::Tensor>& tensors) {
          return tenzor::broadcast_tensors(tensors);
          }, "Broadcast all tensors to a common shape",
@@ -4405,6 +4466,38 @@ Returns:
              py::arg("weights"), py::arg("component_distribution"),
              "Create mixture from unnormalized weights and component distribution");
 
+
+    // =========================================================================
+    // Image I/O — tenzor.io submodule
+    // =========================================================================
+    auto io_mod = m.def_submodule("io", "Image I/O operations");
+
+    py::enum_<tenzor::io::ImageMode>(io_mod, "ImageMode")
+        .value("RGB", tenzor::io::ImageMode::RGB)
+        .value("RGBA", tenzor::io::ImageMode::RGBA)
+        .value("GRAYSCALE", tenzor::io::ImageMode::GRAYSCALE)
+        .value("UNCHANGED", tenzor::io::ImageMode::UNCHANGED);
+
+    io_mod.def("read_image", &tenzor::io::read_image,
+        py::arg("path"), py::arg("mode") = tenzor::io::ImageMode::RGB,
+        "Read an image file into a uint8 CHW tensor",
+        py::call_guard<py::gil_scoped_release>());
+    io_mod.def("write_image", &tenzor::io::write_image,
+        py::arg("tensor"), py::arg("path"), py::arg("quality") = 95,
+        "Write a uint8 CHW tensor to an image file",
+        py::call_guard<py::gil_scoped_release>());
+    io_mod.def("decode_jpeg", &tenzor::io::decode_jpeg,
+        py::arg("data"), py::arg("mode") = tenzor::io::ImageMode::RGB,
+        "Decode JPEG bytes into a uint8 CHW tensor");
+    io_mod.def("decode_png", &tenzor::io::decode_png,
+        py::arg("data"), py::arg("mode") = tenzor::io::ImageMode::RGB,
+        "Decode PNG bytes into a uint8 CHW tensor");
+    io_mod.def("encode_jpeg", &tenzor::io::encode_jpeg,
+        py::arg("tensor"), py::arg("quality") = 95,
+        "Encode a uint8 CHW tensor to JPEG bytes");
+    io_mod.def("encode_png", &tenzor::io::encode_png,
+        py::arg("tensor"),
+        "Encode a uint8 CHW tensor to PNG bytes");
 
 } // register_core
 

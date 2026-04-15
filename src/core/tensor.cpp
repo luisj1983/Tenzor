@@ -1981,6 +1981,40 @@ auto Tensor::select(int64_t dim, int64_t index) const -> Tensor {
     return tenzor::select(*this, dim, index);
 }
 
+auto Tensor::unfold(int64_t dim, int64_t size, int64_t step) const -> Tensor {
+    int64_t nd = this->ndim();
+    if (dim < 0) dim += nd;
+    if (dim < 0 || dim >= nd) {
+        throw std::out_of_range("unfold: dim " + std::to_string(dim) +
+                                " out of range for " + std::to_string(nd) + "D tensor");
+    }
+    int64_t dim_size = shape()[dim];
+    if (size <= 0 || size > dim_size) {
+        throw std::invalid_argument("unfold: size must be in (0, " +
+                                    std::to_string(dim_size) + "]");
+    }
+    if (step <= 0) {
+        throw std::invalid_argument("unfold: step must be > 0");
+    }
+
+    int64_t num_windows = (dim_size - size) / step + 1;
+
+    // Build new shape: replace shape[dim] with num_windows, append size
+    auto old_shape = shape();
+    auto old_strides = strides();
+    std::vector<int64_t> new_shape(old_shape.begin(), old_shape.end());
+    new_shape[dim] = num_windows;
+    new_shape.push_back(size);
+
+    // Build new strides: stride[dim] *= step, append old stride[dim]
+    std::vector<int64_t> new_strides(old_strides.begin(), old_strides.end());
+    int64_t old_stride_dim = new_strides[dim];
+    new_strides[dim] = old_stride_dim * step;
+    new_strides.push_back(old_stride_dim);
+
+    return tenzor::as_strided(*this, new_shape, new_strides, offset());
+}
+
 auto Tensor::chunk(int64_t chunks, int64_t dim) const -> std::vector<Tensor> {
     return tenzor::chunk(*this, chunks, dim);
 }

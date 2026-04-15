@@ -2378,6 +2378,10 @@ void register_nn(py::module_& m) {
     nn.def("pack_sequence", &tenzor::nn::pack_sequence,
            py::arg("sequences"), py::arg("enforce_sorted") = true,
            "Pack a list of variable-length tensors");
+    nn.def("pad_sequence", &tenzor::nn::pad_sequence,
+           py::arg("sequences"), py::arg("batch_first") = false,
+           py::arg("padding_value") = 0.0f,
+           "Pad a list of variable-length tensors to the same length");
 
     // ========================================================================
     // Training Callbacks

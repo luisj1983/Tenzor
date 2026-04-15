@@ -1199,6 +1199,24 @@ public:
     auto select(int64_t dim, int64_t index) const -> Tensor;
 
     /**
+     * @brief Extract sliding local blocks along a dimension.
+     *
+     * Returns a view with an additional dimension appended, containing
+     * windows of @p size elements extracted every @p step positions
+     * along dimension @p dim.
+     *
+     * For a tensor of shape [..., L, ...] along dim, the output along
+     * that dim has size (L - size) / step + 1, and a new trailing
+     * dimension of size @p size is appended.
+     *
+     * @param dim Dimension along which to unfold
+     * @param size Size of each sliding window
+     * @param step Step between windows
+     * @return Tensor with an extra trailing dimension
+     */
+    auto unfold(int64_t dim, int64_t size, int64_t step) const -> Tensor;
+
+    /**
      * @brief Split tensor into chunks along a dimension.
      * @param chunks Number of chunks
      * @param dim Dimension to split along (default: 0)

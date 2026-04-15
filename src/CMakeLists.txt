@@ -200,6 +200,7 @@ set(TENZOR_CORE_SOURCES
     onnx/exporter.cpp
     onnx/importer.cpp
     onnx/graph_module.cpp
+    io/image.cpp
     jit/tracer.cpp
     jit/graph.cpp
     jit/compiler.cpp

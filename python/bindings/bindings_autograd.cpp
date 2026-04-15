@@ -225,6 +225,18 @@ void register_autograd(py::module_& m) {
         return py::make_tuple(out, vhp_result);
     }, py::arg("f"), py::arg("x"), py::arg("v"),
     "Vector-Hessian product. Returns (output, v^T @ H_f(x)).");
+
+    func_mod.def("vjp", [](py::function f, const tenzor::Variable& x,
+                           const tenzor::Tensor& cotangent) {
+        py::gil_scoped_acquire gil;
+        auto cpp_fn = [&f](const tenzor::Variable& input) -> tenzor::Variable {
+            py::object result = f(input);
+            return result.cast<tenzor::Variable>();
+        };
+        auto [out, vjp_result] = tenzor::vjp(cpp_fn, x, cotangent);
+        return py::make_tuple(out, vjp_result);
+    }, py::arg("f"), py::arg("x"), py::arg("cotangent"),
+    "Vector-Jacobian product (reverse-mode). Returns (output, v^T @ J_f(x)).");
 }
 
 } // namespace tenzor::python

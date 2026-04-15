@@ -82,5 +82,22 @@ auto pack_sequence(const std::vector<Tensor>& sequences,
                    bool enforce_sorted = true)
     -> PackedSequence;
 
+/**
+ * @brief Pad a list of variable-length tensors to the same length.
+ *
+ * Each tensor in @p sequences should have shape (length_i, *), where
+ * the trailing dimensions must be identical across all tensors.
+ *
+ * @param sequences Vector of tensors, each of shape (length_i, ...)
+ * @param batch_first If true, output is (batch, max_length, ...);
+ *                    if false, output is (max_length, batch, ...)
+ * @param padding_value Value to fill padding positions (default: 0.0)
+ * @return Padded tensor
+ */
+auto pad_sequence(const std::vector<Tensor>& sequences,
+                  bool batch_first = false,
+                  float padding_value = 0.0f)
+    -> Tensor;
+
 } // namespace nn
 } // namespace tenzor

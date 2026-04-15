@@ -273,4 +273,60 @@ auto pack_sequence(const std::vector<Tensor>& sequences, bool enforce_sorted)
     return pack_padded_sequence(padded, lengths_tensor, /*batch_first=*/true, enforce_sorted);
 }
 
+auto pad_sequence(const std::vector<Tensor>& sequences,
+                  bool batch_first,
+                  float padding_value)
+    -> Tensor {
+    if (sequences.empty()) {
+        throw std::invalid_argument("pad_sequence: got empty list of sequences");
+    }
+
+    int64_t max_len = 0;
+    int64_t batch_size = static_cast<int64_t>(sequences.size());
+
+    for (const auto& seq : sequences) {
+        if (seq.ndim() == 0) {
+            throw std::invalid_argument("pad_sequence: sequences must have at least 1 dimension");
+        }
+        max_len = std::max(max_len, seq.shape()[0]);
+    }
+
+    // Trailing dimensions (must match across all sequences)
+    auto trailing = std::vector<int64_t>(
+        sequences[0].shape().begin() + 1, sequences[0].shape().end());
+    int64_t trail_elems = 1;
+    for (auto d : trailing) trail_elems *= d;
+
+    // Always build batch_first: (batch, max_len, *trailing)
+    std::vector<int64_t> padded_shape = {batch_size, max_len};
+    padded_shape.insert(padded_shape.end(), trailing.begin(), trailing.end());
+
+    Tensor out = full(padded_shape, padding_value,
+                      sequences[0].dtype(), sequences[0].device());
+
+    // Copy each sequence using memcpy (same pattern as pack_sequence)
+    int64_t row_stride = max_len * trail_elems;
+    size_t elem_size = out.dtype_size();
+    for (int64_t i = 0; i < batch_size; ++i) {
+        auto seq = sequences[i].contiguous();
+        int64_t length = seq.shape()[0];
+        std::memcpy(
+            static_cast<char*>(out.data_ptr()) + i * row_stride * elem_size,
+            seq.data_ptr(),
+            length * trail_elems * elem_size
+        );
+    }
+
+    // Permute to (max_len, batch, *trailing) if not batch_first
+    if (!batch_first) {
+        std::vector<int64_t> perm = {1, 0};
+        for (size_t d = 2; d < padded_shape.size(); ++d) {
+            perm.push_back(static_cast<int64_t>(d));
+        }
+        out = out.permute(perm).contiguous();
+    }
+
+    return out;
+}
+
 } // namespace tenzor::nn

@@ -775,12 +775,7 @@ PYBIND11_MODULE(tenzor_core, m) {
     data_mod.def("clear_worker_info", &tenzor::data::clear_worker_info,
                  "Clear the WorkerInfo for the current thread");
 
-    // IterableDataset base class
-    py::class_<tenzor::data::IterableDataset, tenzor::data::Dataset,
-               std::shared_ptr<tenzor::data::IterableDataset>>(data_mod, "IterableDataset",
-             "Abstract base class for iterable-style streaming datasets");
-
-    // Dataset abstract base class
+    // Dataset abstract base class (must be registered before derived classes)
     py::class_<tenzor::data::Dataset, std::shared_ptr<tenzor::data::Dataset>>(data_mod, "Dataset")
         .def("size", &tenzor::data::Dataset::size,
              "Get the number of samples in the dataset")
@@ -794,6 +789,11 @@ PYBIND11_MODULE(tenzor_core, m) {
              "Get a sample at the specified index")
         .def("empty", &tenzor::data::Dataset::empty,
              "Check if the dataset is empty");
+
+    // IterableDataset (derives from Dataset, so registered after)
+    py::class_<tenzor::data::IterableDataset, tenzor::data::Dataset,
+               std::shared_ptr<tenzor::data::IterableDataset>>(data_mod, "IterableDataset",
+             "Abstract base class for iterable-style streaming datasets");
 
     // TensorDataset
     py::class_<tenzor::data::TensorDataset, tenzor::data::Dataset,
@@ -2306,6 +2306,20 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def(py::init<int64_t, int64_t, int64_t>(),
              py::arg("in_channels"), py::arg("num_classes"),
              py::arg("roi_size") = 7);
+
+    py::class_<tenzor::models::MaskRCNN, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::MaskRCNN>>(models, "MaskRCNN",
+        "Mask R-CNN instance segmentation")
+        .def(py::init<std::shared_ptr<tenzor::nn::Module>, int64_t>(),
+             py::arg("backbone"), py::arg("num_classes"));
+    models.def("mask_rcnn_resnet50_fpn", &tenzor::models::mask_rcnn_resnet50_fpn,
+        py::arg("num_classes") = 80, py::arg("pretrained") = false,
+        "Create Mask R-CNN with ResNet-50 FPN backbone",
+        py::call_guard<py::gil_scoped_release>());
+    models.def("mask_rcnn_resnet101_fpn", &tenzor::models::mask_rcnn_resnet101_fpn,
+        py::arg("num_classes") = 80, py::arg("pretrained") = false,
+        "Create Mask R-CNN with ResNet-101 FPN backbone",
+        py::call_guard<py::gil_scoped_release>());
 
     // ========== Model Compression (Pruning + Quantization) ==========
     bind_compression(m);

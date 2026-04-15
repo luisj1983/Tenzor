@@ -90,4 +90,23 @@ auto vhp(std::function<Variable(const Variable&)> func,
          const Variable& input,
          const Tensor& v) -> std::pair<Variable, Tensor>;
 
+/**
+ * @brief Compute Vector-Jacobian Product (reverse-mode AD).
+ *
+ * Given a function f, input x, and cotangent vector v, computes:
+ *   (f(x), v^T @ J_f(x))
+ * where J_f is the Jacobian of f at x.
+ *
+ * This is the dual of JVP and corresponds to a single backward pass
+ * with the cotangent as the upstream gradient.
+ *
+ * @param func Differentiable function from Variable to Variable
+ * @param input Point at which to evaluate
+ * @param cotangent Cotangent (upstream gradient) vector
+ * @return Pair of (output, v^T @ J_f(x))
+ */
+auto vjp(std::function<Variable(const Variable&)> func,
+         const Variable& input,
+         const Tensor& cotangent) -> std::pair<Variable, Tensor>;
+
 } // namespace tenzor

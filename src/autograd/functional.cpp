@@ -230,4 +230,23 @@ auto vhp(std::function<Variable(const Variable&)> func,
     return {output, vhp_result};
 }
 
+auto vjp(std::function<Variable(const Variable&)> func,
+         const Variable& input,
+         const Tensor& cotangent) -> std::pair<Variable, Tensor> {
+    // Create a new variable that requires grad, detached from any existing graph
+    Variable x(input.tensor().clone(), /*requires_grad=*/true);
+
+    // Forward pass
+    auto output = func(x);
+
+    // Backward pass with cotangent as upstream gradient
+    output.backward(cotangent, /*retain_graph=*/false, /*create_graph=*/false);
+
+    Tensor vjp_result = x.grad().has_value()
+        ? x.grad().value()
+        : tenzor::zeros_like(input.tensor());
+
+    return {output, vjp_result};
+}
+
 } // namespace tenzor

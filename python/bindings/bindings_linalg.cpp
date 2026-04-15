@@ -154,6 +154,21 @@ void register_linalg(py::module_& m) {
                    py::arg("tensors"),
                    py::call_guard<py::gil_scoped_release>());
 
+    // --- Gap-fill: inner, outer, vdot ---
+
+    m.def("inner", &tenzor::linalg::inner,
+          "Generalized inner product (sum over last dims of a and b)",
+          py::arg("a"), py::arg("b"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("outer", &tenzor::linalg::outer,
+          "Outer product: result[i,j] = a[i] * b[j]",
+          py::arg("a"), py::arg("b"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("vdot", &tenzor::linalg::vdot,
+          "Conjugate dot product (handles complex tensors)",
+          py::arg("a"), py::arg("b"),
+          py::call_guard<py::gil_scoped_release>());
+
     // P3.5 additions — householder_product, ldl_factor, ldl_solve,
     // vector_norm, matrix_norm, vecdot.
 
