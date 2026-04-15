@@ -1636,6 +1636,10 @@ void register_nn(py::module_& m) {
     nn.def("selu", &tenzor::nn::selu, "SELU activation function");
     nn.def("swish", &tenzor::nn::swish, "Swish activation function");
     nn.def("mish", &tenzor::nn::mish, "Mish activation function");
+    nn.def("rrelu", &tenzor::nn::rrelu, "Randomized ReLU activation function",
+          py::arg("input"), py::arg("lower") = 1.0 / 8.0,
+          py::arg("upper") = 1.0 / 3.0, py::arg("training") = false);
+    nn.def("log_sigmoid", &tenzor::nn::log_sigmoid, "Log-Sigmoid activation function");
 
     nn.def("softplus", [](const tenzor::Variable& input, float beta) -> tenzor::Variable {
         return tenzor::softplus(input, beta);

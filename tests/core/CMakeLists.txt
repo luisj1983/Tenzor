@@ -104,3 +104,4 @@ tenzor_add_test(NAME test_laplace_distribution SOURCE test_laplace_distribution.
 tenzor_add_test(NAME test_distributions_advanced SOURCE test_distributions_advanced.cpp LABELS core)
 tenzor_add_test(NAME test_sddmm SOURCE test_sddmm.cpp LABELS core)
 tenzor_add_test(NAME test_vulkan_flash_attention_parity SOURCE test_vulkan_flash_attention_parity.cpp LABELS core)
+tenzor_add_test(NAME test_new_features SOURCE test_new_features.cpp LABELS core)

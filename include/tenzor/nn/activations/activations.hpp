@@ -729,6 +729,20 @@ auto threshold(const Variable& input, double threshold, double value) -> Variabl
 /** @brief Functional hardtanh: clamp(x, min_val, max_val) */
 auto hardtanh(const Variable& input, double min_val = -1.0, double max_val = 1.0) -> Variable;
 
+/** @brief Functional randomized ReLU
+ *  @param lower Lower bound of uniform distribution for negative slope (default: 1/8)
+ *  @param upper Upper bound of uniform distribution for negative slope (default: 1/3)
+ *  @param training If true, sample slope uniformly; if false, use midpoint
+ */
+auto rrelu(const Variable& input, double lower = 1.0 / 8.0, double upper = 1.0 / 3.0,
+           bool training = false) -> Variable;
+
+/** @brief Functional log-sigmoid: log(sigmoid(x)) = -softplus(-x)
+ *
+ *  Numerically stable implementation that avoids computing sigmoid explicitly.
+ */
+auto log_sigmoid(const Variable& input) -> Variable;
+
 /** @} */ // end of functional_activations group
 
 /**

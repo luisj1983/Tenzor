@@ -904,6 +904,16 @@ auto igammac(const Tensor& a, const Tensor& x) -> Tensor {
     return detail::binary_op_promoted<OpId::Igammac>("igammac", a, x);
 }
 
+auto gammainc(const Tensor& a, const Tensor& x) -> Tensor {
+    // Lower incomplete gamma (non-regularized) = igamma(a, x) * Gamma(a)
+    return tenzor::mul(igamma(a, x), tenzor::gamma(a));
+}
+
+auto gammaincc(const Tensor& a, const Tensor& x) -> Tensor {
+    // Upper incomplete gamma (non-regularized) = igammac(a, x) * Gamma(a)
+    return tenzor::mul(igammac(a, x), tenzor::gamma(a));
+}
+
 // =========================================================================
 // Extended math operations (PyTorch parity)
 // =========================================================================
@@ -987,6 +997,14 @@ auto ndtr(const Tensor& input) -> Tensor {
     auto neg_x_over_sqrt2 = tenzor::mul(input, -0.7071067811865475);  // -1/sqrt(2)
     auto erfc_val = tenzor::erfc(neg_x_over_sqrt2);
     return tenzor::mul(erfc_val, 0.5);
+}
+
+auto ndtri(const Tensor& p) -> Tensor {
+    // Inverse normal CDF (probit function):
+    // ndtri(p) = sqrt(2) * erfinv(2p - 1)
+    constexpr double SQRT2 = 1.4142135623730951;
+    auto two_p_minus_one = tenzor::sub(tenzor::mul(p, 2.0), full_like(p, 1.0));
+    return tenzor::mul(tenzor::erfinv(two_p_minus_one), SQRT2);
 }
 
 auto log_ndtr(const Tensor& input) -> Tensor {

@@ -905,4 +905,110 @@ auto hardtanh(const Variable& input, double min_val, double max_val) -> Variable
     return tenzor::where(mask_above, max_var, clamped_low);
 }
 
+// ============================================================================
+// Functional RReLU (Randomized Leaky ReLU)
+// ============================================================================
+
+class RReLUBackward : public Function {
+public:
+    RReLUBackward(double lower, double upper) : lower_(lower), upper_(upper) {}
+
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
+        throw std::runtime_error("RReLUBackward::forward should not be called");
+    }
+
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        auto& grad_output = grad_outputs[0];
+        const auto& input = saved_tensors()[0];
+
+        OpAttributes attrs;
+        attrs.set(AttrKey::Lower, lower_);
+        attrs.set(AttrKey::High, upper_);
+        std::vector<Tensor> backward_inputs = {grad_output, input};
+        auto grad_input = dispatch(OpId::RReLUBackward, backward_inputs, attrs)[0];
+        return {grad_input};
+    }
+
+private:
+    double lower_;
+    double upper_;
+};
+
+auto rrelu(const Variable& input, double lower, double upper, bool training) -> Variable {
+    OpAttributes attrs;
+    attrs.set(AttrKey::Lower, lower);
+    attrs.set(AttrKey::High, upper);
+    attrs.set(AttrKey::Training, training);
+
+    std::vector<Tensor> inputs_vec = {input.tensor()};
+    auto result_tensor = dispatch(OpId::RReLU, inputs_vec, attrs)[0];
+
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result_tensor, false);
+    }
+
+    auto grad_fn = std::make_shared<RReLUBackward>(lower, upper);
+    grad_fn->save_for_backward({input.tensor()});
+
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    if (input.grad_fn()) {
+        next_funcs.push_back(input.grad_fn());
+    }
+    grad_fn->set_next_functions(next_funcs);
+
+    std::vector<Variable> input_vars;
+    input_vars.push_back(input);
+    grad_fn->set_input_variables(input_vars);
+
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
+// ============================================================================
+// Functional LogSigmoid: log(sigmoid(x)) = -softplus(-x)
+// ============================================================================
+
+class LogSigmoidBackward : public Function {
+public:
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
+        throw std::runtime_error("LogSigmoidBackward::forward should not be called");
+    }
+
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        auto& grad_output = grad_outputs[0];
+        const auto& input = saved_tensors()[0];
+
+        std::vector<Tensor> backward_inputs = {grad_output, input};
+        auto grad_input = dispatch(OpId::LogSigmoidBackward, backward_inputs)[0];
+        return {grad_input};
+    }
+};
+
+auto log_sigmoid(const Variable& input) -> Variable {
+    std::vector<Tensor> inputs_vec = {input.tensor()};
+    auto result_tensor = dispatch(OpId::LogSigmoid, inputs_vec)[0];
+
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(result_tensor, false);
+    }
+
+    auto grad_fn = std::make_shared<LogSigmoidBackward>();
+    grad_fn->save_for_backward({input.tensor()});
+
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    if (input.grad_fn()) {
+        next_funcs.push_back(input.grad_fn());
+    }
+    grad_fn->set_next_functions(next_funcs);
+
+    std::vector<Variable> input_vars;
+    input_vars.push_back(input);
+    grad_fn->set_input_variables(input_vars);
+
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+    return output;
+}
+
 } // namespace tenzor::nn

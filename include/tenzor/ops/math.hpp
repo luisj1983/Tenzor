@@ -656,6 +656,12 @@ auto igamma(const Tensor& a, const Tensor& x) -> Tensor;
 /// Upper regularized incomplete gamma function (1 - igamma)
 auto igammac(const Tensor& a, const Tensor& x) -> Tensor;
 
+/// Lower incomplete gamma function (non-regularized): gammainc(a, x) = igamma(a, x) * gamma(a)
+auto gammainc(const Tensor& a, const Tensor& x) -> Tensor;
+
+/// Upper incomplete gamma function (non-regularized): gammaincc(a, x) = igammac(a, x) * gamma(a)
+auto gammaincc(const Tensor& a, const Tensor& x) -> Tensor;
+
 // =========================================================================
 // Extended math operations (PyTorch parity)
 // =========================================================================
@@ -702,6 +708,9 @@ auto ndtr(const Tensor& input) -> Tensor;
 
 /** @brief Log Normal CDF: log(Phi(x)), numerically stable */
 auto log_ndtr(const Tensor& input) -> Tensor;
+
+/** @brief Inverse Normal CDF (probit): ndtri(p) = sqrt(2) * erfinv(2p - 1) */
+auto ndtri(const Tensor& p) -> Tensor;
 
 /** @brief Multivariate log-gamma function: log(Gamma_p(a)) */
 auto multigammaln(const Tensor& input, int64_t p) -> Tensor;

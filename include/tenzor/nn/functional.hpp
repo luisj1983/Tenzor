@@ -93,6 +93,17 @@ inline auto log_softmax(const Variable& input, int64_t dim = -1) -> Variable {
     return nn::log_softmax(input, dim);
 }
 
+/** @brief Functional randomized ReLU */
+inline auto rrelu(const Variable& input, double lower = 1.0 / 8.0, double upper = 1.0 / 3.0,
+                  bool training = false) -> Variable {
+    return nn::rrelu(input, lower, upper, training);
+}
+
+/** @brief Functional log-sigmoid: log(sigmoid(x)) */
+inline auto log_sigmoid(const Variable& input) -> Variable {
+    return nn::log_sigmoid(input);
+}
+
 // ============================================================================
 // Linear Algebra
 // ============================================================================

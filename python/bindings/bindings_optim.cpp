@@ -492,6 +492,45 @@ void register_optim(py::module_& m) {
              py::arg("eta_min") = 0.0)
         .def("step", &tenzor::optim::CosineAnnealingWarmRestarts::step);
 
+    // ConstantLR scheduler
+    py::class_<tenzor::optim::ConstantLR, tenzor::optim::LRScheduler>(lr_scheduler, "ConstantLR")
+        .def(py::init<tenzor::optim::Optimizer&, double, int>(),
+             py::arg("optimizer"), py::arg("factor") = 1.0 / 3.0,
+             py::arg("total_iters") = 5)
+        .def("step", &tenzor::optim::ConstantLR::step)
+        .def("get_last_lr", &tenzor::optim::ConstantLR::get_last_lr);
+
+    // LinearLR scheduler
+    py::class_<tenzor::optim::LinearLR, tenzor::optim::LRScheduler>(lr_scheduler, "LinearLR")
+        .def(py::init<tenzor::optim::Optimizer&, double, double, int>(),
+             py::arg("optimizer"), py::arg("start_factor") = 1.0 / 3.0,
+             py::arg("end_factor") = 1.0, py::arg("total_iters") = 5)
+        .def("step", &tenzor::optim::LinearLR::step)
+        .def("get_last_lr", &tenzor::optim::LinearLR::get_last_lr);
+
+    // MultiplicativeLR scheduler
+    py::class_<tenzor::optim::MultiplicativeLR, tenzor::optim::LRScheduler>(lr_scheduler, "MultiplicativeLR")
+        .def(py::init<tenzor::optim::Optimizer&, std::function<double(int)>>(),
+             py::arg("optimizer"), py::arg("lr_lambda"))
+        .def("step", &tenzor::optim::MultiplicativeLR::step)
+        .def("get_last_lr", &tenzor::optim::MultiplicativeLR::get_last_lr);
+
+    // SequentialLR scheduler
+    py::class_<tenzor::optim::SequentialLR, tenzor::optim::LRScheduler>(lr_scheduler, "SequentialLR")
+        .def(py::init<tenzor::optim::Optimizer&,
+                       std::vector<std::shared_ptr<tenzor::optim::LRScheduler>>,
+                       std::vector<int>>(),
+             py::arg("optimizer"), py::arg("schedulers"), py::arg("milestones"))
+        .def("step", &tenzor::optim::SequentialLR::step)
+        .def("get_last_lr", &tenzor::optim::SequentialLR::get_last_lr);
+
+    // ChainedScheduler
+    py::class_<tenzor::optim::ChainedScheduler, tenzor::optim::LRScheduler>(lr_scheduler, "ChainedScheduler")
+        .def(py::init<std::vector<std::shared_ptr<tenzor::optim::LRScheduler>>>(),
+             py::arg("schedulers"))
+        .def("step", &tenzor::optim::ChainedScheduler::step)
+        .def("get_last_lr", &tenzor::optim::ChainedScheduler::get_last_lr);
+
     // Adam-atan2 Optimizer
     py::class_<tenzor::optim::AdamAtan2, tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::AdamAtan2>>(optim, "AdamAtan2",
         "Adam-atan2 optimizer for HRM training with bounded updates")

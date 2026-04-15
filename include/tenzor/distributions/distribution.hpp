@@ -2005,5 +2005,476 @@ inline auto kl_divergence(Distribution& p, Distribution& q) -> Tensor {
         "use Monte-Carlo estimation via sample() + log_prob()");
 }
 
+// ============================================================================
+// Pareto Distribution
+// ============================================================================
+
+/**
+ * @brief Pareto (Type I) distribution parameterized by scale and alpha.
+ *
+ * f(x) = alpha * scale^alpha / x^(alpha+1),  x >= scale
+ */
+class Pareto : public Distribution {
+public:
+    Pareto(Tensor scale, Tensor alpha)
+        : scale_(std::move(scale)), alpha_(std::move(alpha)) {}
+
+    auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        auto shape = sample_shape.empty()
+            ? std::vector<int64_t>(scale_.shape().begin(), scale_.shape().end())
+            : sample_shape;
+        // Inverse CDF: scale / U^(1/alpha) = scale * exp(-log(U)/alpha)
+        auto u = rand(shape, scale_.dtype(), scale_.device());
+        u = tenzor::clamp(u, 1e-7f, 1.0f);
+        return scale_ * tenzor::exp(tenzor::neg(tenzor::log(u)) / alpha_);
+    }
+
+    auto rsample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        return sample(std::move(sample_shape));  // Inverse CDF is differentiable
+    }
+
+    auto log_prob(const Tensor& value) -> Tensor override {
+        return tenzor::log(alpha_) + alpha_ * tenzor::log(scale_)
+             - (alpha_ + 1.0f) * tenzor::log(value);
+    }
+
+    auto cdf(const Tensor& value) -> Tensor {
+        // CDF = 1 - (scale/x)^alpha = 1 - exp(alpha * log(scale/x))
+        return 1.0f - tenzor::exp(alpha_ * tenzor::log(scale_ / value));
+    }
+
+    auto entropy() -> Tensor override {
+        return tenzor::log(scale_ / alpha_) + tenzor::reciprocal(alpha_) + 1.0f;
+    }
+
+    auto mean() -> Tensor override {
+        return alpha_ * scale_ / (alpha_ - 1.0f);
+    }
+
+    auto variance() -> Tensor override {
+        auto am1 = alpha_ - 1.0f;
+        return scale_ * scale_ * alpha_ / (am1 * am1 * (alpha_ - 2.0f));
+    }
+
+private:
+    Tensor scale_, alpha_;
+};
+
+// ============================================================================
+// Weibull Distribution
+// ============================================================================
+
+/**
+ * @brief Weibull distribution parameterized by scale (lambda) and concentration (k).
+ *
+ * f(x) = (k/lambda) * (x/lambda)^(k-1) * exp(-(x/lambda)^k)
+ */
+class Weibull : public Distribution {
+public:
+    Weibull(Tensor scale, Tensor concentration)
+        : scale_(std::move(scale)), concentration_(std::move(concentration)) {}
+
+    auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        auto shape = sample_shape.empty()
+            ? std::vector<int64_t>(scale_.shape().begin(), scale_.shape().end())
+            : sample_shape;
+        auto u = rand(shape, scale_.dtype(), scale_.device());
+        u = tenzor::clamp(u, 1e-7f, 1.0f - 1e-7f);
+        auto neg_log = tenzor::neg(tenzor::log(1.0f - u));
+        return scale_ * tenzor::exp(tenzor::log(neg_log) / concentration_);
+    }
+
+    auto rsample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        return sample(std::move(sample_shape));  // Inverse CDF is differentiable
+    }
+
+    auto log_prob(const Tensor& value) -> Tensor override {
+        auto x_over_l = value / scale_;
+        auto log_x_over_l = tenzor::log(x_over_l);
+        return tenzor::log(concentration_ / scale_)
+             + (concentration_ - 1.0f) * log_x_over_l
+             - tenzor::exp(concentration_ * log_x_over_l);
+    }
+
+    auto cdf(const Tensor& value) -> Tensor {
+        // CDF = 1 - exp(-(x/lambda)^k)
+        auto log_x_over_l = tenzor::log(value / scale_);
+        return 1.0f - tenzor::exp(tenzor::neg(tenzor::exp(concentration_ * log_x_over_l)));
+    }
+
+    auto entropy() -> Tensor override {
+        // H = gamma_const * (1 - 1/k) + log(lambda/k) + 1
+        // where gamma_const = Euler-Mascheroni constant ~ 0.5772
+        constexpr float euler_mascheroni = 0.5772156649f;
+        return euler_mascheroni * (1.0f - tenzor::reciprocal(concentration_))
+             + tenzor::log(scale_ / concentration_) + 1.0f;
+    }
+
+    auto mean() -> Tensor override {
+        return scale_ * tenzor::gamma(1.0f + tenzor::reciprocal(concentration_));
+    }
+
+    auto variance() -> Tensor override {
+        auto inv_k = tenzor::reciprocal(concentration_);
+        auto g1 = tenzor::gamma(1.0f + inv_k);
+        auto g2 = tenzor::gamma(1.0f + 2.0f * inv_k);
+        return scale_ * scale_ * (g2 - g1 * g1);
+    }
+
+private:
+    Tensor scale_, concentration_;
+};
+
+// ============================================================================
+// Kumaraswamy Distribution
+// ============================================================================
+
+/**
+ * @brief Kumaraswamy distribution on (0, 1).
+ *
+ * f(x) = a * b * x^(a-1) * (1 - x^a)^(b-1)
+ */
+class Kumaraswamy : public Distribution {
+public:
+    Kumaraswamy(Tensor concentration1, Tensor concentration0)
+        : a_(std::move(concentration1)), b_(std::move(concentration0)) {}
+
+    auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        auto shape = sample_shape.empty()
+            ? std::vector<int64_t>(a_.shape().begin(), a_.shape().end())
+            : sample_shape;
+        // Inverse CDF: (1 - (1 - U)^(1/b))^(1/a)
+        // = exp(log(1 - exp(log(1-U)/b)) / a)
+        auto u = rand(shape, a_.dtype(), a_.device());
+        u = tenzor::clamp(u, 1e-7f, 1.0f - 1e-7f);
+        auto inner = 1.0f - tenzor::exp(tenzor::log(1.0f - u) / b_);
+        inner = tenzor::clamp(inner, 1e-7f, 1.0f);
+        return tenzor::exp(tenzor::log(inner) / a_);
+    }
+
+    auto rsample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        return sample(std::move(sample_shape));  // Inverse CDF is differentiable
+    }
+
+    auto log_prob(const Tensor& value) -> Tensor override {
+        auto log_x = tenzor::log(tenzor::clamp(value, 1e-7f, 1.0f));
+        auto x_a = tenzor::exp(a_ * log_x);
+        return tenzor::log(a_) + tenzor::log(b_)
+             + (a_ - 1.0f) * log_x
+             + (b_ - 1.0f) * tenzor::log(tenzor::clamp(1.0f - x_a, 1e-7f, 1.0f));
+    }
+
+    auto cdf(const Tensor& value) -> Tensor {
+        // CDF = 1 - (1 - x^a)^b
+        auto log_x = tenzor::log(tenzor::clamp(value, 1e-7f, 1.0f));
+        auto x_a = tenzor::exp(a_ * log_x);
+        return 1.0f - tenzor::exp(b_ * tenzor::log(tenzor::clamp(1.0f - x_a, 1e-7f, 1.0f)));
+    }
+
+private:
+    Tensor a_, b_;
+};
+
+// ============================================================================
+// ContinuousBernoulli Distribution
+// ============================================================================
+
+/**
+ * @brief Continuous Bernoulli distribution on (0, 1).
+ *
+ * f(x) = C(lambda) * lambda^x * (1 - lambda)^(1-x)
+ * where C(lambda) is the normalizing constant.
+ */
+class ContinuousBernoulli : public Distribution {
+public:
+    explicit ContinuousBernoulli(Tensor probs)
+        : probs_(std::move(probs)) {}
+
+    auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        auto shape = sample_shape.empty()
+            ? std::vector<int64_t>(probs_.shape().begin(), probs_.shape().end())
+            : sample_shape;
+        // Sample via rejection or direct inverse CDF.
+        // For lambda != 0.5: icdf(u) = log1p((2*lambda - 1) * u / (1 - lambda))
+        //                              / log(lambda / (1 - lambda))
+        auto u = rand(shape, probs_.dtype(), probs_.device());
+        u = tenzor::clamp(u, 1e-6f, 1.0f - 1e-6f);
+        auto p = tenzor::clamp(probs_, 1e-6f, 1.0f - 1e-6f);
+        auto logits = tenzor::log(p) - tenzor::log(1.0f - p);
+        // Stable inverse CDF: x = log1p(u * (exp(logits) - 1)) / logits
+        auto exp_logits = tenzor::exp(logits);
+        auto x = tenzor::log1p(u * (exp_logits - 1.0f)) / logits;
+        return tenzor::clamp(x, 0.0f, 1.0f);
+    }
+
+    auto rsample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        return sample(std::move(sample_shape));  // Inverse CDF is differentiable
+    }
+
+    auto log_prob(const Tensor& value) -> Tensor override {
+        auto p = tenzor::clamp(probs_, 1e-6f, 1.0f - 1e-6f);
+        auto log_c = log_normalizing_constant(p);
+        return log_c + value * tenzor::log(p) + (1.0f - value) * tenzor::log(1.0f - p);
+    }
+
+    auto entropy() -> Tensor override {
+        // H = -log(C) + (2*lambda - 1) / (2*lambda*(1 - lambda)) * mean
+        //   - where mean is the distribution mean
+        auto p = tenzor::clamp(probs_, 1e-6f, 1.0f - 1e-6f);
+        auto log_c = log_normalizing_constant(p);
+        auto m = this->mean();
+        auto logits = tenzor::log(p) - tenzor::log(1.0f - p);
+        return tenzor::neg(log_c) - logits * m;
+    }
+
+    auto mean() -> Tensor override {
+        auto p = tenzor::clamp(probs_, 1e-6f, 1.0f - 1e-6f);
+        auto two_p_minus_1 = 2.0f * p - 1.0f;
+        return p / two_p_minus_1 + 1.0f / (2.0f * tenzor::atanh(1.0f - 2.0f * p));
+    }
+
+    auto variance() -> Tensor override {
+        auto p = tenzor::clamp(probs_, 1e-6f, 1.0f - 1e-6f);
+        auto m = this->mean();
+        auto logits = tenzor::log(p) - tenzor::log(1.0f - p);
+        // var = mean * (1 - mean) / (1 + logits * (1 - 2*mean))
+        // Simplified: use second moment
+        return (m - m * m) / (1.0f + logits * (1.0f - 2.0f * m));
+    }
+
+private:
+    static auto log_normalizing_constant(const Tensor& p) -> Tensor {
+        // C(lambda) = 2 * atanh(1 - 2*lambda) / (1 - 2*lambda)
+        auto two_p_minus_1 = 2.0f * p - 1.0f;
+        auto abs_diff = tenzor::abs(two_p_minus_1);
+        return tenzor::log(2.0f * tenzor::atanh(abs_diff) / abs_diff);
+    }
+
+    Tensor probs_;
+};
+
+// ============================================================================
+// OneHotCategorical Distribution
+// ============================================================================
+
+/**
+ * @brief One-hot categorical distribution.
+ *
+ * Samples are one-hot vectors drawn from a categorical distribution.
+ */
+class OneHotCategorical : public Distribution {
+public:
+    explicit OneHotCategorical(Tensor probs)
+        : probs_(std::move(probs)),
+          categorical_(probs_) {}
+
+    auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        auto indices = categorical_.sample(sample_shape);
+        auto num_classes = probs_.shape().back();
+        return one_hot(indices, num_classes).to(probs_.dtype());
+    }
+
+    auto log_prob(const Tensor& value) -> Tensor override {
+        // log_prob = sum(value * log(probs), dim=-1)
+        auto log_probs = tenzor::log(tenzor::clamp(probs_, 1e-7f, 1.0f));
+        return tenzor::sum(value * log_probs, -1);
+    }
+
+    auto entropy() -> Tensor override {
+        return categorical_.entropy();
+    }
+
+    auto mean() -> Tensor override {
+        return probs_;
+    }
+
+    auto variance() -> Tensor override {
+        return probs_ * (1.0f - probs_);
+    }
+
+private:
+    Tensor probs_;
+    Categorical categorical_;
+};
+
+// ============================================================================
+// LogisticNormal Distribution
+// ============================================================================
+
+/**
+ * @brief Logistic-normal distribution (softmax of a multivariate normal).
+ *
+ * Samples lie on the simplex: X = softmax(Y), Y ~ Normal(loc, scale).
+ */
+class LogisticNormal : public Distribution {
+public:
+    LogisticNormal(Tensor loc, Tensor scale)
+        : loc_(std::move(loc)), scale_(std::move(scale)),
+          normal_(loc_, scale_) {}
+
+    auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        // Combine sample_shape with event shape
+        auto event_shape = std::vector<int64_t>(loc_.shape().begin(), loc_.shape().end());
+        auto full_shape = sample_shape;
+        full_shape.insert(full_shape.end(), event_shape.begin(), event_shape.end());
+
+        auto y = normal_.sample(full_shape);
+        // softmax: exp(y_i) / sum(exp(y_j))
+        auto exp_y = tenzor::exp(y);
+        auto sum_exp = tenzor::sum(exp_y, -1, /*keepdim=*/true);
+        return exp_y / sum_exp;
+    }
+
+    auto rsample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        return sample(std::move(sample_shape));  // Normal rsample + softmax is differentiable
+    }
+
+    auto log_prob(const Tensor& value) -> Tensor override {
+        auto log_x = tenzor::log(tenzor::clamp(value, 1e-7f, 1.0f));
+        auto normal_lp = normal_.log_prob(log_x);
+        return tenzor::sum(normal_lp, -1) - tenzor::sum(log_x, -1);
+    }
+
+private:
+    Tensor loc_, scale_;
+    Normal normal_;
+};
+
+// ============================================================================
+// LowRankMultivariateNormal Distribution
+// ============================================================================
+
+/**
+ * @brief Multivariate normal with low-rank plus diagonal covariance.
+ *
+ * Covariance = W @ W^T + diag(D), where W is (p, rank) and D is (p,).
+ * Efficient for high-dimensional distributions with low-rank structure.
+ */
+class LowRankMultivariateNormal : public Distribution {
+public:
+    LowRankMultivariateNormal(Tensor loc, Tensor cov_factor, Tensor cov_diag)
+        : loc_(std::move(loc)), cov_factor_(std::move(cov_factor)),
+          cov_diag_(std::move(cov_diag)) {}
+
+    auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        auto p = loc_.shape().back();
+        auto rank = cov_factor_.shape().back();
+        auto shape = sample_shape.empty()
+            ? std::vector<int64_t>(loc_.shape().begin(), loc_.shape().end())
+            : sample_shape;
+
+        // Sample z ~ N(0, I_rank) and eps ~ N(0, I_p)
+        auto z_shape = shape;
+        z_shape.back() = rank;
+        auto z = randn(z_shape, loc_.dtype(), loc_.device());
+        auto eps = randn(shape, loc_.dtype(), loc_.device());
+
+        // X = loc + W @ z + sqrt(D) * eps
+        auto wz = matmul(z, transpose(cov_factor_, -2, -1));
+        // W is (p, rank), z is (..., rank), wz needs to be (..., p)
+        // Actually z is (..., rank) and W^T is (rank, p), so matmul(z, W^T) = (..., p)
+        return loc_ + wz + tenzor::sqrt(cov_diag_) * eps;
+    }
+
+    auto log_prob(const Tensor& value) -> Tensor override {
+        auto diff = value - loc_;
+        auto p = static_cast<double>(loc_.shape().back());
+
+        // Use Woodbury identity for efficient log-det and solve
+        // Sigma = D + W W^T
+        // Sigma^-1 = D^-1 - D^-1 W (I + W^T D^-1 W)^-1 W^T D^-1
+        auto d_inv = tenzor::reciprocal(cov_diag_);
+        auto d_inv_w = d_inv.unsqueeze(-1) * cov_factor_;
+        auto capacitance = tenzor::eye(cov_factor_.shape().back(), std::nullopt,
+                                      loc_.dtype(), loc_.device())
+                         + matmul(transpose(cov_factor_, -2, -1), d_inv_w);
+        auto cap_chol = tenzor::linalg::cholesky(capacitance);
+
+        // log|Sigma| = log|D| + log|capacitance|
+        auto log_det_d = tenzor::sum(tenzor::log(cov_diag_), -1);
+        auto log_det_cap = 2.0f * tenzor::sum(
+            tenzor::log(tenzor::abs(tenzor::diag(cap_chol))), -1);
+        auto log_det = log_det_d + log_det_cap;
+
+        // Mahalanobis: diff^T Sigma^-1 diff
+        auto d_inv_diff = d_inv * diff;
+        auto w_d_inv_diff = matmul(transpose(cov_factor_, -2, -1),
+                                    d_inv_diff.unsqueeze(-1));
+        auto solved = tenzor::linalg::solve(capacitance, w_d_inv_diff);
+        auto quad_term = tenzor::sum(diff * d_inv_diff, -1)
+                       - tenzor::sum(w_d_inv_diff.squeeze(-1)
+                                   * solved.squeeze(-1), -1);
+
+        return -0.5 * (p * std::log(2.0 * M_PI) + log_det + quad_term);
+    }
+
+    auto mean() -> Tensor override { return loc_; }
+
+private:
+    Tensor loc_, cov_factor_, cov_diag_;
+};
+
+// ============================================================================
+// LKJCholesky Distribution
+// ============================================================================
+
+/**
+ * @brief LKJ distribution over Cholesky factors of correlation matrices.
+ *
+ * Parameterized by dimension d and concentration eta.
+ * eta > 0: higher values concentrate around the identity.
+ */
+class LKJCholesky : public Distribution {
+public:
+    LKJCholesky(int64_t dim, Tensor concentration)
+        : dim_(dim), concentration_(std::move(concentration)) {}
+
+    auto sample(std::vector<int64_t> sample_shape = {}) -> Tensor override {
+        // Generate via Bartlett decomposition of Wishart(df, I) then normalize
+        // to produce Cholesky factor of a correlation matrix.
+        // df = 2*eta + d - 1 maps LKJ concentration to Wishart degrees of freedom.
+        auto dtype = concentration_.dtype();
+        auto device = concentration_.device();
+
+        auto batch_shape = sample_shape.empty()
+            ? std::vector<int64_t>(concentration_.shape().begin(),
+                                    concentration_.shape().end())
+            : sample_shape;
+
+        auto df = 2.0 * concentration_.item<double>() + dim_ - 1.0;
+        auto eye_mat = tenzor::eye(dim_, std::nullopt, dtype, device);
+        auto wishart = Wishart(tenzor::full({1}, df, dtype, device), eye_mat);
+        auto W = wishart.sample(batch_shape);
+
+        // Cholesky of the Wishart sample
+        auto chol_W = tenzor::linalg::cholesky(W);
+        // Normalize each row by its diagonal to get Cholesky of correlation matrix
+        auto diag_chol = tenzor::diag(chol_W);
+        auto inv_diag = tenzor::reciprocal(diag_chol);
+        return chol_W * inv_diag.unsqueeze(-1);
+    }
+
+    auto log_prob(const Tensor& value) -> Tensor override {
+        // log p(L) = sum_{k=1}^{d-1} (d - k - 1 + 2*eta - 2) * log(L_{k+1,k+1})
+        // The first diagonal element L[0,0] = 1 always, so it's excluded.
+        auto diag_vals = tenzor::diag(value);
+        auto log_diag = tenzor::log(tenzor::abs(diag_vals));
+
+        auto eta = concentration_.item<double>();
+        // Build weight tensor: weight[k] = (d - k - 1 + 2*eta - 2) for k = 1..d-1
+        auto weights = tenzor::Tensor({dim_}, diag_vals.dtype(), diag_vals.device());
+        auto w_ptr = weights.data<float>();
+        w_ptr[0] = 0.0f;  // First diagonal excluded
+        for (int64_t k = 1; k < dim_; ++k) {
+            w_ptr[k] = static_cast<float>(dim_ - k - 1.0 + 2.0 * eta - 2.0);
+        }
+        return tenzor::sum(weights * log_diag, -1);
+    }
+
+private:
+    int64_t dim_;
+    Tensor concentration_;
+};
+
 } // namespace distributions
 } // namespace tenzor

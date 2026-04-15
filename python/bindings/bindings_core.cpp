@@ -2775,6 +2775,12 @@ Returns:
          "Normalized sinc function: sin(pi*x)/(pi*x)", py::call_guard<py::gil_scoped_release>());
     m.def("zeta", [](const tenzor::Tensor& x, const tenzor::Tensor& q) { return tenzor::zeta(x, q); },
          "Hurwitz zeta function", py::call_guard<py::gil_scoped_release>());
+    m.def("ndtri", [](const tenzor::Tensor& p) { return tenzor::ndtri(p); },
+         "Inverse normal CDF (probit function)", py::call_guard<py::gil_scoped_release>());
+    m.def("gammainc", [](const tenzor::Tensor& a, const tenzor::Tensor& x) { return tenzor::gammainc(a, x); },
+         "Lower incomplete gamma function (non-regularized)", py::call_guard<py::gil_scoped_release>());
+    m.def("gammaincc", [](const tenzor::Tensor& a, const tenzor::Tensor& x) { return tenzor::gammaincc(a, x); },
+         "Upper incomplete gamma function (non-regularized)", py::call_guard<py::gil_scoped_release>());
 
     // Matrix construction operations
     m.def("kron", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return tenzor::kron(a, b); },

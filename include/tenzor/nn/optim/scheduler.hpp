@@ -908,5 +908,113 @@ private:
     int epoch_{0};
 };
 
+/**
+ * @brief Constant learning rate for a fixed number of epochs
+ *
+ * Multiplies base_lr by a constant factor for the first total_iters epochs,
+ * then restores base_lr.
+ */
+class ConstantLR : public LRScheduler {
+public:
+    ConstantLR(Optimizer& optimizer, double factor = 1.0 / 3.0, int total_iters = 5);
+
+    auto step() -> void override;
+    auto get_last_lr() const -> double override { return last_lr_; }
+
+private:
+    Optimizer& optimizer_;
+    double factor_;
+    int total_iters_;
+    double base_lr_;
+    double last_lr_;
+    int epoch_{0};
+};
+
+/**
+ * @brief Linear learning rate decay
+ *
+ * Linearly interpolates the learning rate multiplier from start_factor to
+ * end_factor over total_iters epochs.
+ */
+class LinearLR : public LRScheduler {
+public:
+    LinearLR(Optimizer& optimizer, double start_factor = 1.0 / 3.0,
+             double end_factor = 1.0, int total_iters = 5);
+
+    auto step() -> void override;
+    auto get_last_lr() const -> double override { return last_lr_; }
+
+private:
+    Optimizer& optimizer_;
+    double start_factor_;
+    double end_factor_;
+    int total_iters_;
+    double base_lr_;
+    double last_lr_;
+    int epoch_{0};
+};
+
+/**
+ * @brief Multiplicative learning rate scheduler
+ *
+ * Each epoch, the learning rate is multiplied by a user-provided function:
+ * lr_epoch = lr_epoch-1 * lr_lambda(epoch)
+ */
+class MultiplicativeLR : public LRScheduler {
+public:
+    using LambdaFunc = std::function<double(int)>;
+
+    MultiplicativeLR(Optimizer& optimizer, LambdaFunc lr_lambda);
+
+    auto step() -> void override;
+    auto get_last_lr() const -> double override { return last_lr_; }
+
+private:
+    Optimizer& optimizer_;
+    LambdaFunc lr_lambda_;
+    double last_lr_;
+    int epoch_{0};
+};
+
+/**
+ * @brief Sequential composition of schedulers
+ *
+ * Applies a sequence of schedulers, each active for a span defined
+ * by milestones. milestones[i] is the epoch at which scheduler i+1 starts.
+ */
+class SequentialLR : public LRScheduler {
+public:
+    SequentialLR(Optimizer& optimizer,
+                 std::vector<std::shared_ptr<LRScheduler>> schedulers,
+                 std::vector<int> milestones);
+
+    auto step() -> void override;
+    auto get_last_lr() const -> double override { return last_lr_; }
+
+private:
+    Optimizer& optimizer_;
+    std::vector<std::shared_ptr<LRScheduler>> schedulers_;
+    std::vector<int> milestones_;
+    double last_lr_;
+    int epoch_{0};
+};
+
+/**
+ * @brief Chain multiple schedulers together (multiplicative)
+ *
+ * Applies all schedulers simultaneously. Each scheduler's step() is called
+ * in sequence every epoch.
+ */
+class ChainedScheduler : public LRScheduler {
+public:
+    explicit ChainedScheduler(std::vector<std::shared_ptr<LRScheduler>> schedulers);
+
+    auto step() -> void override;
+    auto get_last_lr() const -> double override;
+
+private:
+    std::vector<std::shared_ptr<LRScheduler>> schedulers_;
+};
+
 } // namespace optim
 } // namespace tenzor

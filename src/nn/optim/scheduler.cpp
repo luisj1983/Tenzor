@@ -136,4 +136,119 @@ auto LinearWarmupScheduler::step() -> void {
     }
 }
 
+//==============================================================================
+// ConstantLR Implementation
+//==============================================================================
+
+ConstantLR::ConstantLR(Optimizer& optimizer, double factor, int total_iters)
+    : optimizer_(optimizer), factor_(factor), total_iters_(total_iters) {
+    base_lr_ = optimizer.get_lr();
+    last_lr_ = base_lr_ * factor_;
+    optimizer_.set_lr(last_lr_);
+}
+
+auto ConstantLR::step() -> void {
+    epoch_++;
+    if (epoch_ >= total_iters_) {
+        last_lr_ = base_lr_;
+    } else {
+        last_lr_ = base_lr_ * factor_;
+    }
+    optimizer_.set_lr(last_lr_);
+}
+
+//==============================================================================
+// LinearLR Implementation
+//==============================================================================
+
+LinearLR::LinearLR(Optimizer& optimizer, double start_factor, double end_factor,
+                   int total_iters)
+    : optimizer_(optimizer), start_factor_(start_factor), end_factor_(end_factor),
+      total_iters_(total_iters) {
+    base_lr_ = optimizer.get_lr();
+    last_lr_ = base_lr_ * start_factor_;
+    optimizer_.set_lr(last_lr_);
+}
+
+auto LinearLR::step() -> void {
+    epoch_++;
+    double factor;
+    if (epoch_ >= total_iters_) {
+        factor = end_factor_;
+    } else {
+        double t = static_cast<double>(epoch_) / static_cast<double>(total_iters_);
+        factor = start_factor_ + (end_factor_ - start_factor_) * t;
+    }
+    last_lr_ = base_lr_ * factor;
+    optimizer_.set_lr(last_lr_);
+}
+
+//==============================================================================
+// MultiplicativeLR Implementation
+//==============================================================================
+
+MultiplicativeLR::MultiplicativeLR(Optimizer& optimizer, LambdaFunc lr_lambda)
+    : optimizer_(optimizer), lr_lambda_(std::move(lr_lambda)) {
+    last_lr_ = optimizer.get_lr();
+}
+
+auto MultiplicativeLR::step() -> void {
+    epoch_++;
+    last_lr_ *= lr_lambda_(epoch_);
+    optimizer_.set_lr(last_lr_);
+}
+
+//==============================================================================
+// SequentialLR Implementation
+//==============================================================================
+
+SequentialLR::SequentialLR(Optimizer& optimizer,
+                           std::vector<std::shared_ptr<LRScheduler>> schedulers,
+                           std::vector<int> milestones)
+    : optimizer_(optimizer), schedulers_(std::move(schedulers)),
+      milestones_(std::move(milestones)) {
+    if (schedulers_.empty()) {
+        throw std::invalid_argument("SequentialLR: at least one scheduler required");
+    }
+    if (milestones_.size() != schedulers_.size() - 1) {
+        throw std::invalid_argument(
+            "SequentialLR: milestones must have len(schedulers) - 1 elements");
+    }
+    last_lr_ = optimizer.get_lr();
+}
+
+auto SequentialLR::step() -> void {
+    epoch_++;
+    // Find which scheduler is active
+    size_t idx = 0;
+    for (size_t i = 0; i < milestones_.size(); ++i) {
+        if (epoch_ >= milestones_[i]) {
+            idx = i + 1;
+        }
+    }
+    schedulers_[idx]->step();
+    last_lr_ = schedulers_[idx]->get_last_lr();
+}
+
+//==============================================================================
+// ChainedScheduler Implementation
+//==============================================================================
+
+ChainedScheduler::ChainedScheduler(std::vector<std::shared_ptr<LRScheduler>> schedulers)
+    : schedulers_(std::move(schedulers)) {
+    if (schedulers_.empty()) {
+        throw std::invalid_argument("ChainedScheduler: at least one scheduler required");
+    }
+}
+
+auto ChainedScheduler::step() -> void {
+    for (auto& scheduler : schedulers_) {
+        scheduler->step();
+    }
+}
+
+auto ChainedScheduler::get_last_lr() const -> double {
+    return schedulers_.back()->get_last_lr();
+}
+
 } // namespace tenzor::optim
