@@ -45,3 +45,8 @@ tenzor_discover_tests(test_jit_strict_mode LABELS "jit" DISCOVERY_TIMEOUT 60)
 add_executable(test_control_flow_hook_integration test_control_flow_hook_integration.cpp)
 target_link_libraries(test_control_flow_hook_integration PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_control_flow_hook_integration LABELS "jit" DISCOVERY_TIMEOUT 60)
+
+# JIT backend parity tests (multi-backend forward pass comparison for composed models)
+add_executable(test_jit_backend_parity test_jit_backend_parity.cpp)
+target_link_libraries(test_jit_backend_parity PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_jit_backend_parity LABELS "jit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)

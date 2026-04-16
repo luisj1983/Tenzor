@@ -160,3 +160,8 @@ tenzor_discover_tests(test_optimization_multidtype DISCOVERY_TIMEOUT 60 DISCOVER
 # - test_nn.cpp
 # - test_training.cpp
 # - test_cuda_training.cpp (if CUDA enabled)
+
+# Model backend parity tests (end-to-end forward pass parity for small models)
+add_executable(test_model_backend_parity test_model_backend_parity.cpp)
+target_link_libraries(test_model_backend_parity PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_model_backend_parity DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration")

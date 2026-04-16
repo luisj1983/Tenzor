@@ -82,6 +82,90 @@ add_parity_test(test_sparse_parity test_sparse_parity.cpp)
 # Quantization parity tests
 add_parity_test(test_quantization_parity test_quantization_parity.cpp)
 
+# Extended math parity tests (log2, log10, exp2, erf, erfc, rsqrt, etc.)
+add_parity_test(test_extended_math_parity test_extended_math_parity.cpp)
+
+# Trigonometric parity tests (asin, acos, sinh, cosh, asinh, acosh, atanh, etc.)
+add_parity_test(test_trig_parity test_trig_parity.cpp)
+
+# Shape operations parity tests (reshape, transpose, permute, stack, cat, etc.)
+add_parity_test(test_shape_ops_parity test_shape_ops_parity.cpp)
+
+# Comparison parity tests (eq, ne, lt, le, gt, ge + broadcasting)
+add_parity_test(test_comparison_parity test_comparison_parity.cpp)
+
+# Logical parity tests (and, or, not, xor + combined expressions)
+add_parity_test(test_logical_parity test_logical_parity.cpp)
+
+# Indexing parity tests (index_select, gather, scatter, masked_select, where, etc.)
+add_parity_test(test_indexing_parity test_indexing_parity.cpp)
+
+# Manipulation parity tests (triu, tril, diag, trace, flip, roll)
+add_parity_test(test_manipulation_parity test_manipulation_parity.cpp)
+
+# Cumulative/sorting parity tests (cumsum, cumprod, topk, sort, cummax, cummin)
+add_parity_test(test_cumulative_parity test_cumulative_parity.cpp)
+
+# Complex number parity tests (conj, real, imag, angle, polar, complex arithmetic)
+add_parity_test(test_complex_parity test_complex_parity.cpp)
+
+# Special math parity tests (gamma, lgamma, digamma, bessel, sinc, erfinv, etc.)
+add_parity_test(test_special_math_parity test_special_math_parity.cpp)
+
+# Linear algebra parity tests (det, inv, solve, svd, qr, eigh, cholesky, lu, etc.)
+add_parity_test(test_linalg_parity test_linalg_parity.cpp)
+
+# NN Convolution parity tests (Conv1d, Conv3d, ConvTranspose, DeformableConv, groups, depthwise)
+add_parity_test(test_nn_conv_parity test_nn_conv_parity.cpp)
+
+# NN Pooling parity tests (MaxPool1d/3d, AvgPool1d/3d, Adaptive, LP, Fractional)
+add_parity_test(test_nn_pooling_parity test_nn_pooling_parity.cpp)
+
+# NN RNN parity tests (LSTMCell, GRUCell, RNNCell, LSTM, GRU, RNN)
+add_parity_test(test_nn_rnn_parity test_nn_rnn_parity.cpp)
+
+# NN Linear/Embedding parity tests (Linear, Bilinear, EmbeddingBag, LazyLinear)
+add_parity_test(test_nn_linear_emb_parity test_nn_linear_emb_parity.cpp)
+
+# NN Normalization parity tests (InstanceNorm, RMSNorm, LocalResponseNorm, SyncBatchNorm)
+add_parity_test(test_nn_norm_parity test_nn_norm_parity.cpp)
+
+# NN Activation parity tests (SELU, Mish, Softplus, Hardswish, PReLU, etc.)
+add_parity_test(test_nn_activation_parity test_nn_activation_parity.cpp)
+
+# NN Loss parity tests (HuberLoss, NLLLoss, KLDivLoss, TripletMarginLoss, etc.)
+add_parity_test(test_nn_loss_parity test_nn_loss_parity.cpp)
+
+# NN Transformer parity tests (TransformerEncoder/Decoder, MultiheadAttention, etc.)
+add_parity_test(test_nn_transformer_parity test_nn_transformer_parity.cpp)
+
+# Gradient arithmetic parity tests (Sub, Div, Pow, Sqrt, Exp, Log, etc.)
+add_parity_test(test_grad_arithmetic_parity test_grad_arithmetic_parity.cpp)
+
+# Gradient activation parity tests (LeakyReLU, ELU, SELU, Mish, Softmax, etc.)
+add_parity_test(test_grad_activation_parity test_grad_activation_parity.cpp)
+
+# Gradient reduction parity tests (Sum, Mean, Var, Std, Norm, LogSumExp, etc.)
+add_parity_test(test_grad_reduction_parity test_grad_reduction_parity.cpp)
+
+# Gradient linear algebra parity tests (MatMul, Bmm, Linear, Det, etc.)
+add_parity_test(test_grad_linalg_parity test_grad_linalg_parity.cpp)
+
+# Gradient NN layer parity tests (Conv, Pool, BatchNorm, LayerNorm, Embedding, RNN)
+add_parity_test(test_grad_nn_parity test_grad_nn_parity.cpp)
+
+# Gradient shape/indexing parity tests (Reshape, Transpose, Gather, Cat, Split)
+add_parity_test(test_grad_shape_parity test_grad_shape_parity.cpp)
+
+# Numerical gradcheck parity tests (finite difference verification on each backend)
+add_parity_test(test_gradcheck_parity test_gradcheck_parity.cpp)
+
+# Kernel completeness tests (Phase 4A — required ops registered on each backend)
+add_parity_test(test_kernel_completeness test_kernel_completeness.cpp)
+
+# Registration report (Phase 4B — informational coverage matrix)
+add_parity_test(test_registration_report test_registration_report.cpp)
+
 # ==============================================================================
 # Test Groups
 # ==============================================================================
@@ -105,6 +189,34 @@ add_custom_target(test_parity_full
         test_numerical_stability
         test_performance_regression
         test_vulkan_parity
+        test_extended_math_parity
+        test_trig_parity
+        test_shape_ops_parity
+        test_comparison_parity
+        test_logical_parity
+        test_indexing_parity
+        test_manipulation_parity
+        test_cumulative_parity
+        test_complex_parity
+        test_special_math_parity
+        test_linalg_parity
+        test_nn_conv_parity
+        test_nn_pooling_parity
+        test_nn_rnn_parity
+        test_nn_linear_emb_parity
+        test_nn_norm_parity
+        test_nn_activation_parity
+        test_nn_loss_parity
+        test_nn_transformer_parity
+        test_grad_arithmetic_parity
+        test_grad_activation_parity
+        test_grad_reduction_parity
+        test_grad_linalg_parity
+        test_grad_nn_parity
+        test_grad_shape_parity
+        test_gradcheck_parity
+        test_kernel_completeness
+        test_registration_report
     COMMENT "Running full backend parity test suite..."
 )
 
@@ -124,8 +236,10 @@ add_custom_target(test_parity_performance
 
 # Gradient tests only
 add_custom_target(test_parity_gradients
-    COMMAND ${CMAKE_CTEST_COMMAND} -L "backend_parity" -R "test_gradient_parity" --output-on-failure
-    DEPENDS test_gradient_parity
+    COMMAND ${CMAKE_CTEST_COMMAND} -L "backend_parity" -R "test_grad.*_parity" --output-on-failure
+    DEPENDS test_gradient_parity test_grad_arithmetic_parity test_grad_activation_parity
+            test_grad_reduction_parity test_grad_linalg_parity test_grad_nn_parity
+            test_grad_shape_parity test_gradcheck_parity
     COMMENT "Running gradient parity tests..."
 )
 
