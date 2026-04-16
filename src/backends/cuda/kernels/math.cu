@@ -2486,8 +2486,14 @@ __global__ void expand_kernel_device(
 }
 
 // Expand kernel launcher
-auto expand_kernel(const Tensor& input, const std::vector<int64_t>& shape, void* stream_ptr) -> Tensor {
+auto expand_kernel(const Tensor& input_in, const std::vector<int64_t>& shape, void* stream_ptr) -> Tensor {
     cudaStream_t stream = static_cast<cudaStream_t>(stream_ptr);
+    // The kernel below computes input strides from the input shape assuming a
+    // contiguous layout. If the caller passed a non-contiguous view (e.g. the
+    // result of permute or unsqueeze-on-permuted), the computed strides would
+    // be wrong and the kernel would read garbage. Materialize to contiguous
+    // first to match the CPU semantics. (CPU does the same in src/ops/transform.cpp.)
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     auto input_shape_span = input.shape();
     std::vector<int64_t> input_shape_vec(input_shape_span.begin(), input_shape_span.end());
 

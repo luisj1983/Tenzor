@@ -24,9 +24,13 @@ layout(push_constant) uniform PushConstants {
     uint n_cols;
 };
 
-// Dense accumulator stored as uint for atomic CAS (max 16384 entries = 64KB)
-shared uint acc_bits[16384];
-shared uint col_flag[512]; // bitfield: 512 * 32 = 16384 bits
+// Dense accumulator stored as uint for atomic CAS.
+// NOTE: total shared memory must fit inside maxComputeSharedMemorySize.
+// NVIDIA hardware reports 48 KB; 16384 uints (64 KB) exceeded the limit
+// and caused silent dispatch failure → all-zero C output. Cap at 4096
+// entries (16 KB) + 128-uint bitfield (512 B) = 16.5 KB total.
+shared uint acc_bits[4096];
+shared uint col_flag[128]; // bitfield: 128 * 32 = 4096 bits
 
 void main() {
     uint row = gl_WorkGroupID.x;
@@ -35,7 +39,7 @@ void main() {
 
     uint c_start = uint(c_row_offsets[row]);
 
-    bool use_dense = (n_cols <= 16384u);
+    bool use_dense = (n_cols <= 4096u);
 
     if (use_dense) {
         // Clear accumulator and bitfield

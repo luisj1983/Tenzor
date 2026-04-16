@@ -504,6 +504,9 @@ TEST(JITBackendParity, ConvPool) {
     }
 }
 
+// Backward-through-JIT parity tests moved to
+// tests/backend_parity/test_jit_autograd_parity.cpp per plan 4.4.
+
 // ============================================================================
 // Main
 // ============================================================================

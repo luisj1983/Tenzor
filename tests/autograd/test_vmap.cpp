@@ -12,6 +12,7 @@
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/tenzor.hpp"
+#include "../backend_test_fixture.hpp"
 #include <cmath>
 
 using namespace tenzor;
@@ -126,3 +127,42 @@ TEST_F(VmapTest, VmapMatchesManualLoop) {
     float max_diff = *tenzor::max(diff).data<float>();
     EXPECT_LT(max_diff, 1e-5f);
 }
+
+// ============================================================================
+// Backend-parameterized variants (plan 4.1)
+//
+// The legacy TEST_F tests above stay CPU-only. This fixture runs the same
+// core vmap semantics on every available backend, skipping unsupported ones.
+// ============================================================================
+
+class VmapBackendTest : public tenzor::testing::BackendTest {
+protected:
+    void SetUp() override {
+        BackendTest::SetUp();
+        set_grad_enabled(true);
+    }
+};
+
+TEST_P(VmapBackendTest, VmapSquare_CrossBackend) {
+    auto data = tenzor::ones({4, 3}, DType::Float32, device);
+    Variable input(data, false);
+
+    auto f = [](const Variable& x) -> Variable {
+        auto t = x.tensor();
+        return Variable(tenzor::mul(t, t), false);
+    };
+
+    auto result = vmap(f, input, 0);
+    device.synchronize();
+    auto result_shape = result.tensor().shape();
+    EXPECT_EQ(result_shape[0], 4);
+    EXPECT_EQ(result_shape[1], 3);
+    // ones squared = ones
+    auto result_cpu = result.tensor().to(Device::cpu());
+    float max_diff = *tenzor::max(
+        tenzor::abs(tenzor::sub(result_cpu, tenzor::ones({4, 3},
+                                DType::Float32, Device::cpu())))).data<float>();
+    EXPECT_LT(max_diff, 1e-5f);
+}
+
+INSTANTIATE_BACKEND_TESTS(VmapBackendTest);

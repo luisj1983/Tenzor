@@ -3030,7 +3030,10 @@ auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y, syc
 }
 
 // Repeat kernel - repeats tensor along specified dimensions
-auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, sycl::queue& queue) -> Tensor {
+auto repeat_kernel(const Tensor& input_in, const std::vector<int64_t>& repeats, sycl::queue& queue) -> Tensor {
+    // Kernel below computes contiguous strides from shape; a non-contiguous
+    // input view would be read at wrong offsets. Materialize to contiguous.
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     auto shape = input.shape();
     if (repeats.size() != shape.size()) {
         throw std::invalid_argument("repeat: repeats size must match tensor dimensions");

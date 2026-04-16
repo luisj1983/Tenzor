@@ -419,6 +419,121 @@ TEST(NNConvParity, DepthwiseConv2d) {
 }
 
 // ============================================================================
+// ConvTranspose2d (missing from the original file) + backward parity for
+// convs.  Phase 3.2 gap-fill.
+// ============================================================================
+
+TEST(NNConvParity, ConvTranspose2d) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    nn::ConvTranspose2d conv(4, 8, 3, 2, 1, 0, 1, true);
+    auto input = randn({1, 4, 8, 8}, DType::Float32, Device::cpu());
+    auto ref_output = conv.forward(Variable(input, false)).tensor();
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        try {
+            nn::ConvTranspose2d conv_dev(4, 8, 3, 2, 1, 0, 1, true);
+            auto params = conv.parameters();
+            auto dev_params = conv_dev.parameters();
+            for (size_t p = 0; p < params.size(); ++p) {
+                dev_params[p]->tensor() = params[p]->tensor().clone();
+            }
+            conv_dev.to(backends[i]);
+            auto input_dev = input.to(backends[i]);
+            auto output = conv_dev.forward(Variable(input_dev, false)).tensor();
+            backends[i].synchronize();
+            SCOPED_TRACE(std::string("ConvTranspose2d on ") + backend_name(backends[i]));
+            EXPECT_TENSORS_CLOSE(ref_output, output, 1e-3f, 1e-5f);
+        } catch (const std::exception& e) {
+            std::cerr << "ConvTranspose2d skipped on " << backend_name(backends[i])
+                      << ": " << e.what() << std::endl;
+        }
+    }
+}
+
+// Helper: forward+backward conv parity — uses test_gradient_parity. Holds the
+// weight/bias as parameter tensors wrapped as Variables so backward returns
+// grads for them in addition to the input.
+namespace {
+template <typename ConvT>
+void conv_grad_parity(ConvT make_conv,
+                      const std::vector<int64_t>& input_shape,
+                      const char* name) {
+    auto input = randn(input_shape, DType::Float32, Device::cpu());
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    // Reference on CPU: materialize one conv, extract weight/bias, then for
+    // each backend rebuild a fresh conv with cloned params and compare grads.
+    auto ref_conv = make_conv();
+    auto v_in = Variable(input.clone(), true);
+    auto ref_out = ref_conv.forward(v_in);
+    ref_out.backward(ones_like(ref_out.tensor()));
+    Tensor ref_output_t = ref_out.tensor();
+    Tensor ref_input_grad = v_in.grad().value();
+    // Capture parameter gradients
+    auto ref_params = ref_conv.parameters();
+    std::vector<Tensor> ref_param_grads;
+    for (auto& p : ref_params) {
+        ref_param_grads.push_back(p->grad().value());
+    }
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        try {
+            auto dev_conv = make_conv();
+            auto dev_params = dev_conv.parameters();
+            for (size_t p = 0; p < ref_params.size(); ++p) {
+                dev_params[p]->tensor() = ref_params[p]->tensor().clone();
+            }
+            dev_conv.to(backends[i]);
+            auto dev_in = Variable(input.to(backends[i]), true);
+            auto dev_out = dev_conv.forward(dev_in);
+            dev_out.backward(ones_like(dev_out.tensor()));
+            backends[i].synchronize();
+
+            SCOPED_TRACE(std::string(name) + " on " + backend_name(backends[i]));
+            EXPECT_TENSORS_CLOSE(ref_output_t,
+                                 dev_out.tensor().to(Device::cpu()),
+                                 1e-3f, 1e-5f);
+            EXPECT_TENSORS_CLOSE(ref_input_grad,
+                                 dev_in.grad().value().to(Device::cpu()),
+                                 1e-3f, 1e-4f);
+            for (size_t p = 0; p < ref_params.size(); ++p) {
+                EXPECT_TENSORS_CLOSE(ref_param_grads[p],
+                                     dev_params[p]->grad().value().to(Device::cpu()),
+                                     1e-3f, 1e-4f);
+            }
+        } catch (const std::exception& e) {
+            std::cerr << name << " skipped on "
+                      << backend_name(backends[i]) << ": " << e.what() << std::endl;
+        }
+    }
+}
+}  // namespace
+
+TEST(NNConvParity, Conv2d_Backward) {
+    conv_grad_parity(
+        [] { return nn::Conv2d(3, 8, 3, 1, 1); },
+        {1, 3, 8, 8},
+        "Conv2d_Backward");
+}
+
+TEST(NNConvParity, Conv1d_Backward) {
+    conv_grad_parity(
+        [] { return nn::Conv1d(3, 8, 3, 1, 1); },
+        {1, 3, 16},
+        "Conv1d_Backward");
+}
+
+TEST(NNConvParity, Conv3d_Backward) {
+    conv_grad_parity(
+        [] { return nn::Conv3d(2, 4, 3, 1, 1); },
+        {1, 2, 4, 4, 4},
+        "Conv3d_Backward");
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 

@@ -588,6 +588,58 @@ TEST(NNOperationParity, SmoothL1Loss) {
     }, {pred, target}, 1e-5f, 1e-7f, "SmoothL1Loss");
 }
 
+// ============================================================================
+// Circular Padding Layers (fwd + bwd parity)
+// ============================================================================
+// Commit 77485367 added CircularPad{1,2,3}d. These tests exercise both the
+// forward wrap-around semantics and the autograd gradient routing through
+// the padding op on every available backend.
+
+TEST(NNOperationParity, CircularPad1d_FwdBwd) {
+    // Input: (N=2, C=3, W=6); pad 2 on each side => W=10
+    auto input = randn({2, 3, 6}, DType::Float32, Device::cpu());
+
+    test_gradient_parity(
+        [](std::vector<Variable>& vars) -> Variable {
+            nn::CircularPad1d pad(2, 2);
+            return pad.forward(vars[0]);
+        },
+        {input},
+        /*grad_output_factory=*/{},
+        /*rtol_fwd=*/1e-5f, /*atol_fwd=*/1e-7f,
+        /*rtol_bwd=*/1e-4f, /*atol_bwd=*/1e-6f,
+        /*backends=*/{},
+        "CircularPad1d");
+}
+
+TEST(NNOperationParity, CircularPad2d_FwdBwd) {
+    // Input: (N=2, C=3, H=4, W=5); pad 1 on each side
+    auto input = randn({2, 3, 4, 5}, DType::Float32, Device::cpu());
+
+    test_gradient_parity(
+        [](std::vector<Variable>& vars) -> Variable {
+            nn::CircularPad2d pad(1, 1, 1, 1);
+            return pad.forward(vars[0]);
+        },
+        {input}, {},
+        1e-5f, 1e-7f, 1e-4f, 1e-6f, {},
+        "CircularPad2d");
+}
+
+TEST(NNOperationParity, CircularPad3d_FwdBwd) {
+    // Input: (N=1, C=2, D=3, H=4, W=4); symmetric pad 1
+    auto input = randn({1, 2, 3, 4, 4}, DType::Float32, Device::cpu());
+
+    test_gradient_parity(
+        [](std::vector<Variable>& vars) -> Variable {
+            nn::CircularPad3d pad(1);
+            return pad.forward(vars[0]);
+        },
+        {input}, {},
+        1e-5f, 1e-7f, 1e-4f, 1e-6f, {},
+        "CircularPad3d");
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
 

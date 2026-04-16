@@ -447,7 +447,12 @@ auto sparse_add_kernel(const SparseTensor& A, const Tensor& B, sycl::queue& queu
 
 auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
                    sycl::queue& queue) -> SparseTensor {
-#ifdef TENZOR_HAS_ONEMKL
+#if defined(TENZOR_HAS_ONEMKL) && 0
+    // Historical oneMKL path: dense-intermediate approach using `spmm_kernel`
+    // and `sparse_to_dense_kernel`. Disabled because those inner helpers use
+    // Int32 CSR indices internally, while Tenzor's SparseTensor API requires
+    // Int64. Converting in/out would defeat the perf win; we use the native
+    // SYCL path below, which already works in Int64 end-to-end.
     if (A.layout() != SparseLayout::CSR || B.layout() != SparseLayout::CSR) {
         throw std::runtime_error("oneapi spgemm_kernel requires CSR format for both inputs");
     }
@@ -475,13 +480,6 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
 
     DType dtype = a_vals.dtype();
 
-    // oneMKL sparse::gemm for sparse-sparse multiply requires setting up
-    // two matrix handles (A, B) and calling gemm with a dense output.
-    // The oneMKL sparse::gemm signature operates on sparse A * dense B,
-    // so for true SpGEMM we convert B to dense, compute, then sparsify.
-    // This is the standard approach when the vendor library doesn't expose
-    // a native sparse-sparse multiply with sparse output.
-    //
     // Step 1: Convert B to dense
     Tensor B_dense = sparse_to_dense_kernel(B, queue);
 
@@ -490,15 +488,17 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
 
     // Step 3: Convert dense C back to sparse CSR (entirely on device)
     // 3-pass approach: count NNZ per row → prefix sum → compact nonzeros
+    // Note: Tenzor's SparseTensor API uses int64 crow/col indices, so the
+    // output tensors must be Int64 even though we use int32 scratch buffers.
     auto dense_to_csr_device = [&]<typename T>() -> SparseTensor {
         const T* d_data = C_dense.data<T>();
         Device dev = C_dense.device();
 
         // Pass 1: Count nonzeros per row
-        std::int32_t* d_row_nnz = sycl::malloc_device<std::int32_t>(M, queue);
+        std::int64_t* d_row_nnz = sycl::malloc_device<std::int64_t>(M, queue);
         queue.parallel_for(sycl::range<1>(M), [=](sycl::id<1> idx) {
             int64_t row = idx[0];
-            std::int32_t count = 0;
+            std::int64_t count = 0;
             for (int64_t j = 0; j < N; ++j) {
                 if (d_data[row * N + j] != static_cast<T>(0)) {
                     count++;
@@ -508,31 +508,31 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
         }).wait();
 
         // Pass 2: Exclusive prefix sum → crow_indices (device-side)
-        std::int32_t* d_crow = sycl::malloc_device<std::int32_t>(M + 1, queue);
-        queue.memcpy(d_crow, d_row_nnz, M * sizeof(std::int32_t)).wait();
-        queue.memset(d_crow + M, 0, sizeof(std::int32_t)).wait();
+        std::int64_t* d_crow = sycl::malloc_device<std::int64_t>(M + 1, queue);
+        queue.memcpy(d_crow, d_row_nnz, M * sizeof(std::int64_t)).wait();
+        queue.memset(d_crow + M, 0, sizeof(std::int64_t)).wait();
 
-        int64_t nnz = sycl_exclusive_prefix_sum<std::int32_t>(d_crow, M + 1, queue);
+        int64_t nnz = sycl_exclusive_prefix_sum<std::int64_t>(d_crow, M + 1, queue);
 
-        Tensor c_crow({M + 1}, DType::Int32, dev);
-        Tensor c_col({nnz}, DType::Int32, dev);
+        Tensor c_crow({M + 1}, DType::Int64, dev);
+        Tensor c_col({nnz}, DType::Int64, dev);
         Tensor c_vals({nnz}, dtype, dev);
 
-        queue.memcpy(c_crow.data<std::int32_t>(), d_crow,
-                     static_cast<size_t>(M + 1) * sizeof(std::int32_t)).wait();
+        queue.memcpy(c_crow.data<std::int64_t>(), d_crow,
+                     static_cast<size_t>(M + 1) * sizeof(std::int64_t)).wait();
 
         if (nnz > 0) {
             // Pass 3: Compact nonzeros into col_indices and values arrays
-            std::int32_t* out_col = c_col.data<std::int32_t>();
+            std::int64_t* out_col = c_col.data<std::int64_t>();
             T* out_vals = c_vals.data<T>();
 
             queue.parallel_for(sycl::range<1>(M), [=](sycl::id<1> idx) {
                 int64_t row = idx[0];
-                std::int32_t write_pos = d_crow[row];
+                std::int64_t write_pos = d_crow[row];
                 for (int64_t j = 0; j < N; ++j) {
                     T v = d_data[row * N + j];
                     if (v != static_cast<T>(0)) {
-                        out_col[write_pos] = static_cast<std::int32_t>(j);
+                        out_col[write_pos] = static_cast<std::int64_t>(j);
                         out_vals[write_pos] = v;
                         write_pos++;
                     }
@@ -743,7 +743,10 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
 
 auto sparse_trsv_kernel(const SparseTensor& L, const Tensor& b, bool upper,
                         sycl::queue& queue) -> Tensor {
-#ifdef TENZOR_HAS_ONEMKL
+#if defined(TENZOR_HAS_ONEMKL) && 0
+    // Historical oneMKL path: disabled because oneMKL's sparse::trsv here
+    // is wired for Int32 CSR indices, while Tenzor's SparseTensor API uses
+    // Int64. The native SYCL `#else` path handles Int64 end-to-end.
     if (L.layout() != SparseLayout::CSR) {
         throw std::runtime_error("oneapi sparse_trsv_kernel requires CSR format");
     }
@@ -917,7 +920,10 @@ auto sparse_trsv_kernel(const SparseTensor& L, const Tensor& b, bool upper,
 
 auto sparse_trsm_kernel(const SparseTensor& L, const Tensor& B, bool upper,
                         sycl::queue& queue) -> Tensor {
-#ifdef TENZOR_HAS_ONEMKL
+#if defined(TENZOR_HAS_ONEMKL) && 0
+    // Historical oneMKL path: disabled because oneMKL's sparse::trsm here
+    // is wired for Int32 CSR indices, while Tenzor's SparseTensor API uses
+    // Int64. The native SYCL `#else` path handles Int64 end-to-end.
     if (L.layout() != SparseLayout::CSR) {
         throw std::runtime_error("oneapi sparse_trsm_kernel requires CSR format");
     }

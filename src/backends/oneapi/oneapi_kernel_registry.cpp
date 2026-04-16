@@ -156,6 +156,14 @@ namespace oneapi {
                                      const Tensor& B, int64_t N, bool upper,
                                      sycl::queue& queue) -> Tensor;
 
+    // oneMKL-backed sparse ops
+    auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
+                       sycl::queue& queue) -> SparseTensor;
+    auto sparse_trsv_kernel(const SparseTensor& L, const Tensor& b, bool upper,
+                            sycl::queue& queue) -> Tensor;
+    auto sparse_trsm_kernel(const SparseTensor& L, const Tensor& B, bool upper,
+                            sycl::queue& queue) -> Tensor;
+
     // NestedAttention (native SYCL — replaces previous CPU-offset fallback)
     auto nested_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
                                   const Tensor& q_offsets, const Tensor& kv_offsets,
@@ -2814,7 +2822,19 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             auto& queue = get_q(inputs);
             Tensor conv_out = oneapi::conv2d_forward(inputs[0], inputs[1], bias,
                 stride, padding, dilation, groups, queue);
-            return oneapi::sigmoid_kernel(conv_out, queue);
+            // conv2d_forward drives oneDNN on an interop stream created from
+            // `queue`. dnnl_stream.wait() only drains the dnnl stream — the
+            // outer sycl::queue can still have pending task graph state from
+            // prior SYCL dispatches in this session (e.g., device migration).
+            // Drain the outer queue before submitting sigmoid_kernel so the
+            // two do not race on conv_out's USM memory. Fixes the OneAPI hang
+            // on FusedConv2dSigmoid (verified standalone; ReLU/Tanh paths do
+            // not hit this because of different oneDNN primitive caching,
+            // but the same fix is defensive and harmless there).
+            queue.wait();
+            Tensor sig_out = oneapi::sigmoid_kernel(conv_out, queue);
+            queue.wait();
+            return sig_out;
         });
 
     table.register_single_output_kernel(OpId::FusedConv2dTanh,
@@ -4320,6 +4340,10 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     // SparseSpGEMM: sparse(M,K) × sparse(K,N) -> sparse(M,N).
     // inputs: [0..2] = A's {crow, col, values}, [3..5] = B's {crow, col, values}
     // attrs: M, K, N. Returns three tensors (crow, col, values) of result.
+    // IMPORTANT: must call the backend-local `oneapi::spgemm_kernel` — calling
+    // the top-level `sparse::spgemm` here re-enters this same kernel through
+    // the dispatch table and recurses forever (observed as a hang on OneAPI
+    // SpGEMM parity tests).
     table.register_kernel(OpId::SparseSpGEMM,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             int64_t M = attrs.get_int(AttrKey::M);
@@ -4327,30 +4351,33 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             int64_t N = attrs.get_int(AttrKey::N);
             auto a = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
             auto b = SparseTensor::sparse_csr(inputs[3], inputs[4], inputs[5], {K, N});
-            auto c = sparse::spgemm(a, b);
+            auto c = oneapi::spgemm_kernel(a, b, get_q(inputs));
             return {c.crow_indices(), c.col_indices(), c.values()};
         });
 
     // SparseTrsv: solve L @ x = b (1D RHS), L is lower or upper triangular
     // stored in CSR. inputs: [0..2] = L's {crow, col, values}, [3] = b (N,).
     // attrs: N, Upper. Returns x (N,).
+    // IMPORTANT: call the backend-local `oneapi::sparse_trsv_kernel` — calling
+    // the top-level `sparse::sparse_triangular_solve` re-enters this same
+    // kernel via the dispatch table and recurses forever.
     table.register_single_output_kernel(OpId::SparseTrsv,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t N = attrs.get_int(AttrKey::N);
             bool upper = attrs.get_bool(AttrKey::Upper, false);
             auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N});
-            return sparse::sparse_triangular_solve(L, inputs[3], upper);
+            return oneapi::sparse_trsv_kernel(L, inputs[3], upper, get_q(inputs));
         });
 
     // SparseTrsm: solve L @ X = B (2D RHS), same semantics as Trsv but b is
-    // (N, K). Dispatches into the same public entry point which forwards to
-    // the appropriate backend.
+    // (N, K). Same note about recursion as SparseTrsv — call the backend-
+    // local kernel directly, not the top-level `sparse::sparse_triangular_solve`.
     table.register_single_output_kernel(OpId::SparseTrsm,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t N = attrs.get_int(AttrKey::N);
             bool upper = attrs.get_bool(AttrKey::Upper, false);
             auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N});
-            return sparse::sparse_triangular_solve(L, inputs[3], upper);
+            return oneapi::sparse_trsm_kernel(L, inputs[3], upper, get_q(inputs));
         });
 #else
     // Standalone SYCL SpGEMM/Trsv/Trsm — no oneMKL dependency

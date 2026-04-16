@@ -564,7 +564,11 @@ __global__ void repeat_kernel_device(
     }
 }
 
-auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, cudaStream_t stream) -> Tensor {
+auto repeat_kernel(const Tensor& input_in, const std::vector<int64_t>& repeats, cudaStream_t stream) -> Tensor {
+    // The kernel below computes contiguous strides from input shape; any
+    // non-contiguous input (e.g., permute view) would be read with the wrong
+    // offsets and produce garbage. Materialize to contiguous first.
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     auto input_shape_span = input.shape();
     std::vector<int64_t> input_shape(input_shape_span.begin(), input_shape_span.end());
     int64_t ndim = input_shape.size();

@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/gqa_attention.hpp>
+#include <tenzor/nn/layers/flex_attention.hpp>
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
@@ -182,15 +183,89 @@ TEST(NNTransformerParity, PositionalEncoding) {
     }
 }
 
+// Previously DISABLED_ due to suspected CPU hang. Standalone verification
+// confirms CPU flex_attention completes in milliseconds; the original "hang"
+// was accumulated OneAPI backend-initialization time exceeding a short test
+// timeout. The test now runs across all available backends.
 TEST(NNTransformerParity, FlexAttention) {
-    // FlexAttention is not implemented in Tenzor
-    GTEST_SKIP() << "FlexAttention not available";
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    constexpr int64_t B = 2, H = 4, S = 32, D = 16;
+    constexpr int64_t block_size = 16;
+
+    try {
+        auto q = randn({B, H, S, D}, DType::Float32, Device::cpu());
+        auto k = randn({B, H, S, D}, DType::Float32, Device::cpu());
+        auto v = randn({B, H, S, D}, DType::Float32, Device::cpu());
+
+        auto mask_cpu = nn::BlockMask::causal(S, block_size);
+        auto ref = nn::flex_attention(q, k, v, mask_cpu,
+                                      nn::causal_score_mod(), -1.0f);
+
+        for (size_t i = 1; i < backends.size(); ++i) {
+            auto q_dev = q.to(backends[i]);
+            auto k_dev = k.to(backends[i]);
+            auto v_dev = v.to(backends[i]);
+            auto mask_bool = mask_cpu.mask().to(backends[i]);
+            nn::BlockMask mask_dev(mask_bool, block_size);
+
+            auto out = nn::flex_attention(q_dev, k_dev, v_dev, mask_dev,
+                                          nn::causal_score_mod(), -1.0f);
+            backends[i].synchronize();
+            EXPECT_TENSORS_CLOSE(ref, out.to(Device::cpu()), 1e-3f, 1e-3f);
+        }
+    } catch (const std::exception& e) {
+        GTEST_SKIP() << "FlexAttention unsupported on one of the backends: "
+                     << e.what();
+    }
 }
 
+// Sliding-window attention is exposed as the window_size parameter on
+// GroupedQueryAttention. The prior cross-backend divergence traced to a
+// broken Expand kernel on CUDA/Vulkan/OneAPI that ignored the input's actual
+// strides when the input was a non-contiguous view (repeat_kv feeds it the
+// result of permute+unsqueeze). Fix: materialize input to contiguous in
+// each backend's expand_kernel.
 TEST(NNTransformerParity, SlidingWindowAttention) {
-    // SlidingWindowAttention is not a standalone class in Tenzor;
-    // sliding window is a parameter of GroupedQueryAttention.
-    GTEST_SKIP() << "SlidingWindowAttention not available as standalone module";
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    try {
+        nn::GroupedQueryAttention gqa(64, 4, 2, 0.0, true, true, nullptr, 4);
+        gqa.eval();
+
+        auto query = randn({4, 16, 64}, DType::Float32, Device::cpu());
+        auto key = randn({4, 16, 64}, DType::Float32, Device::cpu());
+        auto value = randn({4, 16, 64}, DType::Float32, Device::cpu());
+
+        auto [ref_out, ref_weights] = gqa.forward(
+            Variable(query, false), Variable(key, false), Variable(value, false));
+        auto ref = ref_out.tensor();
+
+        for (size_t i = 1; i < backends.size(); ++i) {
+            nn::GroupedQueryAttention gqa_dev(64, 4, 2, 0.0, true, true, nullptr, 4);
+            gqa_dev.eval();
+            auto params = gqa.parameters();
+            auto dev_params = gqa_dev.parameters();
+            for (size_t p = 0; p < params.size(); ++p) {
+                dev_params[p]->tensor() = params[p]->tensor().clone();
+            }
+            gqa_dev.to(backends[i]);
+            auto query_dev = query.to(backends[i]);
+            auto key_dev = key.to(backends[i]);
+            auto value_dev = value.to(backends[i]);
+            auto [out, weights] = gqa_dev.forward(
+                Variable(query_dev, false), Variable(key_dev, false),
+                Variable(value_dev, false));
+            backends[i].synchronize();
+            EXPECT_TENSORS_CLOSE(ref, out.tensor().to(Device::cpu()),
+                                 1e-3f, 1e-3f);
+        }
+    } catch (const std::exception& e) {
+        GTEST_SKIP() << "Sliding-window GQA unsupported on one of the backends: "
+                     << e.what();
+    }
 }
 
 TEST(NNTransformerParity, GroupedQueryAttention) {

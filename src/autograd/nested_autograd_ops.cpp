@@ -111,28 +111,37 @@ public:
         int64_t total_len = values_shape[0];
         int64_t D = (values_shape.size() > 1) ? values_shape[1] : 1;
 
-        // Create expanded tensor: each row gets its segment's sum
-        auto expanded = tenzor::zeros({total_len, D}, grad.dtype(), grad.device());
-        // Use offsets to fill segments
+        // Build the "expanded" [total_len, D] tensor by concatenating each
+        // per-segment expanded row block. This is correct on every backend;
+        // the previous implementation used std::memcpy on data pointers,
+        // which is undefined behavior when the tensors live on GPU memory.
+        std::vector<Tensor> parts;
+        parts.reserve(B);
         for (int64_t b = 0; b < B; ++b) {
             int64_t start = off[b];
             int64_t end = off[b + 1];
             if (start >= end) continue;
-            auto seg_sum = dot_sums.slice(0, b, b + 1);  // [1, D]
-            auto seg_expanded = seg_sum.expand({end - start, D});
-            // Copy into the right region
-            auto dst_slice = expanded.slice(0, start, end);
-            // In-place copy via add with zero
-            auto src_contig = seg_expanded.contiguous();
-            std::memcpy(dst_slice.data_ptr(),
-                        src_contig.data_ptr(),
-                        static_cast<size_t>((end - start) * D) * dtype_size(grad.dtype()));
+            auto seg_sum = dot_sums.slice(0, b, b + 1);          // [1, D]
+            auto seg_expanded = seg_sum.expand({end - start, D}); // view
+            parts.push_back(seg_expanded.contiguous());
         }
+        Tensor expanded;
+        if (parts.empty()) {
+            expanded = tenzor::zeros({total_len, D}, grad.dtype(), grad.device());
+        } else if (parts.size() == 1 && parts[0].shape()[0] == total_len) {
+            expanded = std::move(parts[0]);
+        } else {
+            expanded = tenzor::cat(std::span<const Tensor>(parts), 0);
+        }
+        (void)total_len;
 
         // grad_input = softmax_out * (grad - expanded_dot_sums)
         auto grad_input = tenzor::mul(softmax_out, tenzor::sub(grad, expanded));
 
-        return {grad_input, Tensor()};  // no grad for offsets
+        // nested_softmax's set_input_variables({values}) has a single slot.
+        // Returning a trailing Tensor() for "offsets" is a mismatch (offsets
+        // is a Tensor, not a Variable input). Return exactly one grad.
+        return {grad_input};
     }
 
     auto name() const -> std::string override { return "NestedSoftmaxBackward"; }
@@ -169,9 +178,15 @@ public:
         int64_t B = offsets_cpu.numel() - 1;
         int64_t D = (input.shape().size() > 1) ? input.shape()[1] : 1;
 
-        auto grad_input = tenzor::zeros_like(input);
+        int64_t total_len = (input.shape().size() > 0) ? input.shape()[0] : 0;
         auto grad_weight = tenzor::zeros({D}, weight.dtype(), weight.device());
         auto grad_bias = tenzor::zeros({D}, weight.dtype(), weight.device());
+
+        // Collect per-segment grad_input rows to cat at the end. Using cat
+        // instead of std::memcpy is backend-safe; the previous memcpy approach
+        // was undefined behavior on GPU-resident tensors.
+        std::vector<Tensor> grad_input_parts;
+        grad_input_parts.reserve(B);
 
         for (int64_t b = 0; b < B; ++b) {
             int64_t start = off[b];
@@ -213,13 +228,26 @@ public:
                 )
             );
 
-            // Copy back
-            auto dst = grad_input.slice(0, start, end);
-            std::memcpy(dst.data_ptr(), seg_grad_in.contiguous().data_ptr(),
-                        static_cast<size_t>(L * D) * dtype_size(input.dtype()));
+            grad_input_parts.push_back(seg_grad_in.contiguous());
         }
 
-        return {grad_input, Tensor(), grad_weight, grad_bias};  // no grad for offsets
+        Tensor grad_input;
+        if (grad_input_parts.empty()) {
+            grad_input = tenzor::zeros_like(input);
+        } else if (grad_input_parts.size() == 1 &&
+                   grad_input_parts[0].shape()[0] == total_len) {
+            grad_input = std::move(grad_input_parts[0]);
+        } else {
+            grad_input = tenzor::cat(std::span<const Tensor>(grad_input_parts), 0);
+        }
+
+        // NestedLayerNorm takes 3 Variable inputs (values, weight, bias);
+        // offsets is a Tensor passed separately and has no grad slot, so
+        // returning grad_input / grad_weight / grad_bias — three entries —
+        // matches set_input_variables({values, weight, bias}). Previously a
+        // fourth Tensor() was returned for "offsets", causing a mismatch
+        // that downstream propagated as "Operation on uninitialized tensor".
+        return {grad_input, grad_weight, grad_bias};
     }
 
     auto name() const -> std::string override { return "NestedLayerNormBackward"; }
@@ -260,9 +288,11 @@ public:
         int64_t B = q_off_cpu.numel() - 1;
         int64_t hd = Q.shape().back();
 
-        auto grad_Q = tenzor::zeros_like(Q);
-        auto grad_K = tenzor::zeros_like(K);
-        auto grad_V = tenzor::zeros_like(V);
+        int64_t total_q = Q.shape()[0];
+        int64_t total_kv = K.shape()[0];
+
+        std::vector<Tensor> gQ_parts, gK_parts, gV_parts;
+        gQ_parts.reserve(B); gK_parts.reserve(B); gV_parts.reserve(B);
 
         for (int64_t b = 0; b < B; ++b) {
             int64_t qs = q_off[b], qe = q_off[b + 1];
@@ -317,24 +347,25 @@ public:
             // grad_K = d_scores^T @ Q
             auto gK = tenzor::matmul(d_scores.transpose(0, 1), Qb);
 
-            // Copy gradients into output buffers
-            auto dst_gQ = grad_Q.slice(0, qs, qe);
-            auto dst_gK = grad_K.slice(0, kvs, kve);
-            auto dst_gV = grad_V.slice(0, kvs, kve);
-
-            auto gQ_c = gQ.contiguous();
-            auto gK_c = gK.contiguous();
-            auto gV_c = gV.contiguous();
-
-            std::memcpy(dst_gQ.data_ptr(), gQ_c.data_ptr(),
-                        static_cast<size_t>((qe - qs) * hd) * dtype_size(Q.dtype()));
-            std::memcpy(dst_gK.data_ptr(), gK_c.data_ptr(),
-                        static_cast<size_t>((kve - kvs) * hd) * dtype_size(K.dtype()));
-            std::memcpy(dst_gV.data_ptr(), gV_c.data_ptr(),
-                        static_cast<size_t>((kve - kvs) * hd) * dtype_size(V.dtype()));
+            gQ_parts.push_back(gQ.contiguous());
+            gK_parts.push_back(gK.contiguous());
+            gV_parts.push_back(gV.contiguous());
         }
 
-        return {grad_Q, grad_K, grad_V, Tensor(), Tensor()};  // no grad for offsets
+        auto assemble = [&](std::vector<Tensor>& parts, int64_t total, const Tensor& like)
+            -> Tensor {
+            if (parts.empty()) return tenzor::zeros_like(like);
+            if (parts.size() == 1 && parts[0].shape()[0] == total)
+                return std::move(parts[0]);
+            return tenzor::cat(std::span<const Tensor>(parts), 0);
+        };
+        auto grad_Q = assemble(gQ_parts, total_q, Q);
+        auto grad_K = assemble(gK_parts, total_kv, K);
+        auto grad_V = assemble(gV_parts, total_kv, V);
+
+        // NestedAttention takes 3 Variable inputs (Q, K, V). q_offsets and
+        // kv_offsets are Tensors, not Variables, so they have no grad slots.
+        return {grad_Q, grad_K, grad_V};
     }
 
     auto name() const -> std::string override { return "NestedAttentionBackward"; }
@@ -364,18 +395,28 @@ public:
         int64_t B = offsets_cpu.numel() - 1;
         int64_t D = (grad.shape().size() > 1) ? grad.shape()[1] : 1;
 
-        // Scatter grad[b] to every position in segment b
-        auto grad_input = tenzor::zeros({total_len_, D}, grad.dtype(), grad.device());
+        // Scatter grad[b] to every position in segment b via concatenation
+        // (device-safe; the previous std::memcpy approach was undefined
+        // behavior on GPU-resident tensors).
+        std::vector<Tensor> parts;
+        parts.reserve(B);
         for (int64_t b = 0; b < B; ++b) {
             int64_t start = off[b];
             int64_t end = off[b + 1];
             if (start >= end) continue;
-            auto seg_grad = grad.slice(0, b, b + 1).expand({end - start, D}).contiguous();
-            auto dst = grad_input.slice(0, start, end);
-            std::memcpy(dst.data_ptr(), seg_grad.data_ptr(),
-                        static_cast<size_t>((end - start) * D) * dtype_size(grad.dtype()));
+            parts.push_back(
+                grad.slice(0, b, b + 1).expand({end - start, D}).contiguous());
         }
-        return {grad_input, Tensor()};
+        Tensor grad_input;
+        if (parts.empty()) {
+            grad_input = tenzor::zeros({total_len_, D}, grad.dtype(), grad.device());
+        } else if (parts.size() == 1 && parts[0].shape()[0] == total_len_) {
+            grad_input = std::move(parts[0]);
+        } else {
+            grad_input = tenzor::cat(std::span<const Tensor>(parts), 0);
+        }
+        // Single Variable input (values); offsets is a Tensor with no grad.
+        return {grad_input};
     }
 
     auto name() const -> std::string override { return "NestedSumBackward"; }
@@ -399,19 +440,27 @@ public:
         int64_t B = offsets_cpu.numel() - 1;
         int64_t D = (grad.shape().size() > 1) ? grad.shape()[1] : 1;
 
-        auto grad_input = tenzor::zeros({total_len_, D}, grad.dtype(), grad.device());
+        std::vector<Tensor> parts;
+        parts.reserve(B);
         for (int64_t b = 0; b < B; ++b) {
             int64_t start = off[b];
             int64_t end = off[b + 1];
             int64_t L = end - start;
             if (L <= 0) continue;
             auto scale = tenzor::full({1}, 1.0f / static_cast<float>(L), grad.dtype(), grad.device());
-            auto seg_grad = tenzor::mul(grad.slice(0, b, b + 1), scale).expand({L, D}).contiguous();
-            auto dst = grad_input.slice(0, start, end);
-            std::memcpy(dst.data_ptr(), seg_grad.data_ptr(),
-                        static_cast<size_t>(L * D) * dtype_size(grad.dtype()));
+            parts.push_back(
+                tenzor::mul(grad.slice(0, b, b + 1), scale).expand({L, D}).contiguous());
         }
-        return {grad_input, Tensor()};
+        Tensor grad_input;
+        if (parts.empty()) {
+            grad_input = tenzor::zeros({total_len_, D}, grad.dtype(), grad.device());
+        } else if (parts.size() == 1 && parts[0].shape()[0] == total_len_) {
+            grad_input = std::move(parts[0]);
+        } else {
+            grad_input = tenzor::cat(std::span<const Tensor>(parts), 0);
+        }
+        // Single Variable input; offsets is a Tensor with no grad.
+        return {grad_input};
     }
 
     auto name() const -> std::string override { return "NestedMeanBackward"; }

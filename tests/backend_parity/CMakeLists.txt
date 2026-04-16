@@ -82,6 +82,42 @@ add_parity_test(test_sparse_parity test_sparse_parity.cpp)
 # Quantization parity tests
 add_parity_test(test_quantization_parity test_quantization_parity.cpp)
 
+# Nested tensor parity tests (nested_softmax, layer_norm, attention fwd+bwd)
+add_parity_test(test_nested_parity test_nested_parity.cpp)
+
+# Vision helpers and fused ops parity (Phase 3.1)
+add_parity_test(test_vision_fused_parity test_vision_fused_parity.cpp)
+
+# Sampling parity (Phase 3.8) — uses statistical-moment matching, not RNG parity
+add_parity_test(test_sampling_parity test_sampling_parity.cpp)
+
+# Autograd transforms parity (Phase 4.1) — jvp, vjp, jacobian, hessian, vmap
+add_parity_test(test_grad_transform_parity test_grad_transform_parity.cpp)
+
+# AMP / GradScaler parity (Phase 4.2)
+add_parity_test(test_amp_parity test_amp_parity.cpp)
+
+# Custom op cross-backend parity (Phase 4.3)
+add_parity_test(test_custom_op_parity test_custom_op_parity.cpp)
+
+# Phase 5: ALiBi, RoPE, window ops parity
+add_parity_test(test_phase5_parity test_phase5_parity.cpp)
+
+# Phase 5.1: distributions parity (log_prob / entropy / mean / variance)
+add_parity_test(test_distributions_parity test_distributions_parity.cpp)
+
+# Phase 5.3: FP8 parity (hardware-dependent; graceful skip via try/catch)
+add_parity_test(test_fp8_parity test_fp8_parity.cpp)
+
+# Phase 5.4/5.5: MoE and HRM parity
+add_parity_test(test_moe_hrm_parity test_moe_hrm_parity.cpp)
+
+# Phase 3.6: extended linalg parity (pinv, lstsq, matrix_exp)
+add_parity_test(test_linalg_extended_parity test_linalg_extended_parity.cpp)
+
+# Phase 4.4: backward-through-JIT parity (DISABLED_ pending upstream fix)
+add_parity_test(test_jit_autograd_parity test_jit_autograd_parity.cpp)
+
 # Extended math parity tests (log2, log10, exp2, erf, erfc, rsqrt, etc.)
 add_parity_test(test_extended_math_parity test_extended_math_parity.cpp)
 

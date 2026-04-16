@@ -868,9 +868,15 @@ vulkan::ComputePipeline* VulkanBackend::getPipeline(const std::string& shader_na
     }
 #endif
 
-    // Create descriptor bindings (up to 8 buffers)
+    // Create descriptor bindings (up to 12 buffers).
+    // IMPORTANT: some shaders (e.g. sparse_spgemm_fill) use binding indices 0..8
+    // (9 buffers). A previous value of 8 silently dropped binding 8's writes
+    // (they went to an undefined binding and the buffer stayed zero-initialized,
+    // producing an all-zero SpGEMM output). 12 covers all current shaders and
+    // stays well under the Vulkan spec minimum maxPerStageDescriptorStorageBuffers
+    // guarantee of 16.
     std::vector<VkDescriptorSetLayoutBinding> bindings;
-    for (uint32_t i = 0; i < 8; i++) {
+    for (uint32_t i = 0; i < 12; i++) {
         VkDescriptorSetLayoutBinding binding{};
         binding.binding = i;
         binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -972,9 +978,15 @@ vulkan::ComputePipeline* VulkanBackend::getPipelineSpecialized(
     }
 #endif
 
-    // Create descriptor bindings (up to 8 buffers)
+    // Create descriptor bindings (up to 12 buffers).
+    // IMPORTANT: some shaders (e.g. sparse_spgemm_fill) use binding indices 0..8
+    // (9 buffers). A previous value of 8 silently dropped binding 8's writes
+    // (they went to an undefined binding and the buffer stayed zero-initialized,
+    // producing an all-zero SpGEMM output). 12 covers all current shaders and
+    // stays well under the Vulkan spec minimum maxPerStageDescriptorStorageBuffers
+    // guarantee of 16.
     std::vector<VkDescriptorSetLayoutBinding> bindings;
-    for (uint32_t i = 0; i < 8; i++) {
+    for (uint32_t i = 0; i < 12; i++) {
         VkDescriptorSetLayoutBinding binding{};
         binding.binding = i;
         binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;

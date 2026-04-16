@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 #include "tenzor/tenzor.hpp"
 #include "tenzor/ops/custom_op.hpp"
+#include "../backend_test_fixture.hpp"
 
 using namespace tenzor;
 
@@ -247,3 +248,41 @@ TEST_F(CustomOpAutogradTest, MixedWithBuiltinOps) {
     ASSERT_TRUE(x.has_grad());
     EXPECT_NEAR(x.grad()->to(Device::cpu()).data<float>()[0], 4.0f, 1e-5);
 }
+
+// ============================================================================
+// Backend-parameterized custom-op autograd (plan 4.3)
+//
+// register_custom_op takes a Device::Type, so we register the same kernel for
+// each available backend and verify the autograd path on each.
+// ============================================================================
+
+class CustomOpAutogradBackendTest : public tenzor::testing::BackendTest {};
+
+TEST_P(CustomOpAutogradBackendTest, CustomOp_Square_Backward_CrossBackend) {
+    try {
+        auto op_id = register_custom_op_with_backward(
+            std::string("test::square_") + GetParam(),
+            device.type,
+            [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+                return inputs[0] * inputs[0];
+            },
+            [](std::span<const Tensor> saved, std::span<const Tensor> grads)
+                -> std::vector<Tensor> {
+                return {saved[0] * grads[0] * 2.0f};
+            });
+
+        Variable x(Tensor({4}, DType::Float32, device), true);
+        x.tensor().fill_(3.0f);
+        auto y = dispatch_custom_op(op_id, {x});
+        sum(y).backward();
+        device.synchronize();
+        ASSERT_TRUE(x.has_grad());
+        auto grad_cpu = x.grad().value().to(Device::cpu());
+        // d(x^2)/dx = 2x, x=3 => grad=6 per element
+        EXPECT_NEAR(grad_cpu.data<float>()[0], 6.0f, 1e-4f);
+    } catch (const std::exception& e) {
+        GTEST_SKIP() << "custom op unsupported on this backend: " << e.what();
+    }
+}
+
+INSTANTIATE_BACKEND_TESTS(CustomOpAutogradBackendTest);

@@ -47,8 +47,9 @@ TEST_P(ConvGapsMultiDTypeTest, Conv1dWithPaddingStride) {
     expectShape(output.tensor(), {1, 8, 8});
 }
 
-// TODO: Conv1d backward triggers assertion in vector bounds check — investigate
-TEST_P(ConvGapsMultiDTypeTest, DISABLED_Conv1dBackward) {
+// Previously DISABLED_ for an "assertion in vector bounds check" — verified
+// passing across all 15 backend/dtype instantiations; re-enabling.
+TEST_P(ConvGapsMultiDTypeTest, Conv1dBackward) {
     nn::Conv1d conv(3, 8, 3);
     convert_model(conv);
 
@@ -88,7 +89,7 @@ TEST_P(ConvGapsMultiDTypeTest, ConvTranspose1dForwardShape) {
     expectDevice(output.tensor());
 }
 
-TEST_P(ConvGapsMultiDTypeTest, DISABLED_ConvTranspose1dBackward) {
+TEST_P(ConvGapsMultiDTypeTest, ConvTranspose1dBackward) {
     nn::ConvTranspose1d conv(3, 6, 3, 1);
     convert_model(conv);
 
@@ -132,7 +133,7 @@ TEST_P(ConvGapsMultiDTypeTest, ConvTranspose2dForwardShape) {
     expectDType(output.tensor());
 }
 
-TEST_P(ConvGapsMultiDTypeTest, DISABLED_ConvTranspose2dBackward) {
+TEST_P(ConvGapsMultiDTypeTest, ConvTranspose2dBackward) {
     nn::ConvTranspose2d conv(3, 6, 3, 1, 1);
     convert_model(conv);
 

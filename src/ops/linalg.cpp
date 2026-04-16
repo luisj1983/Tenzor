@@ -1393,20 +1393,25 @@ auto pinv(const Tensor& A, double rcond) -> Tensor {
     }
 
     auto original_dtype = A.dtype();
+    auto original_device = A.device();
     // Use reduced SVD (full_matrices=false): U is (M, K), S is (K,), Vt is (K, N).
     auto [U, S, Vt] = svd(A, /*full_matrices=*/false);
 
     const int64_t k = S.numel();
     if (k == 0) {
-        // Degenerate case: return a zero (N, M) pseudoinverse.
-        return zeros({a_shape[1], a_shape[0]}, original_dtype, Device::cpu());
+        // Degenerate case: return a zero (N, M) pseudoinverse on the input device.
+        return zeros({a_shape[1], a_shape[0]}, original_dtype, original_device);
     }
 
     // Build a diagonal scaling vector: s_inv[i] = 1/s[i] if s[i] > cutoff, else 0.
     auto compute_dtype = S.dtype();  // Float32 or Float64 (maybe upcast from F16).
 
-    // Extract max(s) to compute cutoff.
-    auto s_contig = S.contiguous();
+    // Extract max(s) to compute cutoff. Move S to CPU because the per-element
+    // scan below uses raw host-pointer reads; previously this crashed for
+    // non-CPU inputs (S would be a device-resident tensor).
+    auto s_cpu = S.device().type == Device::Type::CPU
+        ? S.contiguous() : S.to(Device::cpu()).contiguous();
+    auto s_contig = s_cpu;
     double max_s = 0.0;
     if (compute_dtype == DType::Float32) {
         const float* sp = s_contig.data<float>();
@@ -1441,7 +1446,11 @@ auto pinv(const Tensor& A, double rcond) -> Tensor {
     // Compute V = Vt^T (shape (N, K)) and scale its columns by s_inv.
     // Vt.transpose(-2, -1) gives (N, K); then element-wise multiply by s_inv
     // broadcast along rows; then matmul with U^T (K, M).
-    auto Vt_contig = Vt.contiguous();
+    //
+    // The assembly below uses raw host pointer loops, so we need CPU-resident
+    // Vt/U data. Move them off-device if needed.
+    auto Vt_contig = Vt.device().type == Device::Type::CPU
+        ? Vt.contiguous() : Vt.to(Device::cpu()).contiguous();
     const int64_t n_cols = a_shape[1];
     const int64_t m_rows = a_shape[0];
 
@@ -1466,8 +1475,9 @@ auto pinv(const Tensor& A, double rcond) -> Tensor {
         }
     }
 
-    // UT = U^T, shape (K, M).
-    auto U_contig = U.contiguous();
+    // UT = U^T, shape (K, M). Same host-pointer assumption as Vt above.
+    auto U_contig = U.device().type == Device::Type::CPU
+        ? U.contiguous() : U.to(Device::cpu()).contiguous();
     auto UT = zeros({k, m_rows}, compute_dtype, Device::cpu());
     if (compute_dtype == DType::Float32) {
         const float* u = U_contig.data<float>();
@@ -1489,7 +1499,12 @@ auto pinv(const Tensor& A, double rcond) -> Tensor {
 
     // Final: V @ UT  (N, K) @ (K, M) = (N, M).
     auto result = matmul(V, UT);
-    return maybe_downcast(result, original_dtype);
+    auto down = maybe_downcast(result, original_dtype);
+    // Restore the original device for GPU callers.
+    if (original_device.type != Device::Type::CPU) {
+        return down.to(original_device);
+    }
+    return down;
 }
 
 auto matrix_exp(const Tensor& A) -> Tensor {

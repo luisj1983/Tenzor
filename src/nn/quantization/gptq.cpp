@@ -106,9 +106,18 @@ auto GPTQQuantizer::quantize_layer(const Tensor& weight, const Tensor& hessian)
     int64_t out_features = w_shape[0];
     int64_t in_features = w_shape[1];
 
-    // Work in Float32 for numerical stability
-    auto W = weight.to(DType::Float32).clone();
-    auto H = hessian.to(DType::Float32).clone();
+    // This routine uses raw host-pointer loops throughout; any non-CPU input
+    // must be migrated to CPU first or the host reads crash. Previously this
+    // hung/crashed when weight or hessian were on a GPU backend.
+    Device original_device = weight.device();
+    auto weight_cpu = original_device.type == Device::Type::CPU
+        ? weight : weight.to(Device::cpu());
+    auto hessian_cpu = hessian.device().type == Device::Type::CPU
+        ? hessian : hessian.to(Device::cpu());
+
+    // Work in Float32 for numerical stability (all on CPU).
+    auto W = weight_cpu.to(DType::Float32).clone();
+    auto H = hessian_cpu.to(DType::Float32).clone();
 
     // Column permutation for desc_act (activation order)
     Tensor perm;
@@ -261,11 +270,20 @@ auto GPTQQuantizer::quantize_layer(const Tensor& weight, const Tensor& hessian)
         packed = Q.to(DType::Int8);
     }
 
+    // Move results back to the caller's original device.
+    Tensor result_perm = config_.desc_act ? std::move(perm) : Tensor{};
+    if (original_device.type != Device::Type::CPU) {
+        packed = packed.to(original_device);
+        scales = scales.to(original_device);
+        zeros_tensor = zeros_tensor.to(original_device);
+        if (result_perm.numel() > 0) result_perm = result_perm.to(original_device);
+    }
+
     return GPTQResult{
         .packed_weight = std::move(packed),
         .scales = std::move(scales),
         .zeros = std::move(zeros_tensor),
-        .perm = config_.desc_act ? std::move(perm) : Tensor{}
+        .perm = std::move(result_perm)
     };
 }
 

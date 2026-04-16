@@ -21,6 +21,35 @@ inline bool shapes_equal(std::span<const int64_t> a, std::span<const int64_t> b)
     return std::equal(a.begin(), a.end(), b.begin(), b.end());
 }
 
+// Broadcast two shapes to a common shape per numpy rules, or return empty if
+// incompatible.
+inline std::vector<int64_t> broadcast_shape(
+    std::span<const int64_t> a, std::span<const int64_t> b) {
+    std::vector<int64_t> out;
+    auto ai = a.rbegin(); auto bi = b.rbegin();
+    while (ai != a.rend() || bi != b.rend()) {
+        int64_t da = (ai != a.rend()) ? *ai : 1;
+        int64_t db = (bi != b.rend()) ? *bi : 1;
+        if (da != db && da != 1 && db != 1) return {};
+        out.push_back(std::max(da, db));
+        if (ai != a.rend()) ++ai;
+        if (bi != b.rend()) ++bi;
+    }
+    std::reverse(out.begin(), out.end());
+    return out;
+}
+
+// Materialize a broadcast of `t` to `target_shape` as a contiguous Tensor.
+// Uses Tensor::expand + .contiguous() which routes through the regular
+// contiguous op (already fixed for UAF on ROCm).
+inline Tensor broadcast_to_shape(const Tensor& t,
+                                  const std::vector<int64_t>& target_shape) {
+    if (shapes_equal(t.shape(), std::span<const int64_t>(target_shape))) {
+        return t.is_contiguous() ? t : t.contiguous();
+    }
+    return t.expand(target_shape).contiguous();
+}
+
 // HIP Error checking macro
 #define HIP_CHECK(call) \
     do { \
@@ -159,12 +188,25 @@ __global__ void eq_broadcast_kernel(
 // Public API - Tensor vs Tensor comparisons
 // ==============================================================================
 
-auto eq_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
-    if (!shapes_equal(a.shape(), b.shape())) {
-        throw std::runtime_error("eq_kernel: tensor shapes must match");
-    }
-    if (a.dtype() != b.dtype()) {
+auto eq_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> Tensor {
+    if (a_in.dtype() != b_in.dtype()) {
         throw std::runtime_error("eq_kernel: tensor dtypes must match");
+    }
+    // Broadcast to common shape so callers can pass e.g. (N,) == (1,)
+    // without special-casing at every call site. Previously this threw for
+    // any shape mismatch, which broke MoE's eq(idx_col, expert_scalar).
+    Tensor a = a_in;
+    Tensor b = b_in;
+    if (!shapes_equal(a.shape(), b.shape())) {
+        auto shape = broadcast_shape(a.shape(), b.shape());
+        if (shape.empty()) {
+            throw std::runtime_error("eq_kernel: tensor shapes not broadcastable");
+        }
+        a = broadcast_to_shape(a_in, shape);
+        b = broadcast_to_shape(b_in, shape);
+    } else {
+        if (!a.is_contiguous()) a = a.contiguous();
+        if (!b.is_contiguous()) b = b.contiguous();
     }
 
     Tensor output(std::vector<int64_t>(a.shape().begin(), a.shape().end()), DType::Bool, a.device());
@@ -213,12 +255,19 @@ auto eq_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
     return output;
 }
 
-auto ne_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
-    if (!shapes_equal(a.shape(), b.shape())) {
-        throw std::runtime_error("ne_kernel: tensor shapes must match");
-    }
-    if (a.dtype() != b.dtype()) {
+auto ne_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> Tensor {
+    if (a_in.dtype() != b_in.dtype()) {
         throw std::runtime_error("ne_kernel: tensor dtypes must match");
+    }
+    Tensor a = a_in; Tensor b = b_in;
+    if (!shapes_equal(a.shape(), b.shape())) {
+        auto shape = broadcast_shape(a.shape(), b.shape());
+        if (shape.empty()) throw std::runtime_error("ne_kernel: tensor shapes not broadcastable");
+        a = broadcast_to_shape(a_in, shape);
+        b = broadcast_to_shape(b_in, shape);
+    } else {
+        if (!a.is_contiguous()) a = a.contiguous();
+        if (!b.is_contiguous()) b = b.contiguous();
     }
 
     Tensor output(std::vector<int64_t>(a.shape().begin(), a.shape().end()), DType::Bool, a.device());
@@ -267,9 +316,16 @@ auto ne_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
     return output;
 }
 
-auto lt_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
+auto lt_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> Tensor {
+    Tensor a = a_in; Tensor b = b_in;
     if (!shapes_equal(a.shape(), b.shape())) {
-        throw std::runtime_error("lt_kernel: tensor shapes must match");
+        auto shape = broadcast_shape(a.shape(), b.shape());
+        if (shape.empty()) throw std::runtime_error("lt_kernel: tensor shapes not broadcastable");
+        a = broadcast_to_shape(a_in, shape);
+        b = broadcast_to_shape(b_in, shape);
+    } else {
+        if (!a.is_contiguous()) a = a.contiguous();
+        if (!b.is_contiguous()) b = b.contiguous();
     }
     if (a.dtype() != b.dtype()) {
         throw std::runtime_error("lt_kernel: tensor dtypes must match");
@@ -317,9 +373,16 @@ auto lt_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
     return output;
 }
 
-auto le_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
+auto le_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> Tensor {
+    Tensor a = a_in; Tensor b = b_in;
     if (!shapes_equal(a.shape(), b.shape())) {
-        throw std::runtime_error("le_kernel: tensor shapes must match");
+        auto shape = broadcast_shape(a.shape(), b.shape());
+        if (shape.empty()) throw std::runtime_error("le_kernel: tensor shapes not broadcastable");
+        a = broadcast_to_shape(a_in, shape);
+        b = broadcast_to_shape(b_in, shape);
+    } else {
+        if (!a.is_contiguous()) a = a.contiguous();
+        if (!b.is_contiguous()) b = b.contiguous();
     }
     if (a.dtype() != b.dtype()) {
         throw std::runtime_error("le_kernel: tensor dtypes must match");
@@ -367,9 +430,16 @@ auto le_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
     return output;
 }
 
-auto gt_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
+auto gt_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> Tensor {
+    Tensor a = a_in; Tensor b = b_in;
     if (!shapes_equal(a.shape(), b.shape())) {
-        throw std::runtime_error("gt_kernel: tensor shapes must match");
+        auto shape = broadcast_shape(a.shape(), b.shape());
+        if (shape.empty()) throw std::runtime_error("gt_kernel: tensor shapes not broadcastable");
+        a = broadcast_to_shape(a_in, shape);
+        b = broadcast_to_shape(b_in, shape);
+    } else {
+        if (!a.is_contiguous()) a = a.contiguous();
+        if (!b.is_contiguous()) b = b.contiguous();
     }
     if (a.dtype() != b.dtype()) {
         throw std::runtime_error("gt_kernel: tensor dtypes must match");
@@ -417,9 +487,16 @@ auto gt_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
     return output;
 }
 
-auto ge_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
+auto ge_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> Tensor {
+    Tensor a = a_in; Tensor b = b_in;
     if (!shapes_equal(a.shape(), b.shape())) {
-        throw std::runtime_error("ge_kernel: tensor shapes must match");
+        auto shape = broadcast_shape(a.shape(), b.shape());
+        if (shape.empty()) throw std::runtime_error("ge_kernel: tensor shapes not broadcastable");
+        a = broadcast_to_shape(a_in, shape);
+        b = broadcast_to_shape(b_in, shape);
+    } else {
+        if (!a.is_contiguous()) a = a.contiguous();
+        if (!b.is_contiguous()) b = b.contiguous();
     }
     if (a.dtype() != b.dtype()) {
         throw std::runtime_error("ge_kernel: tensor dtypes must match");

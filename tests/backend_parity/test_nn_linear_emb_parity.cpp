@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/lazy_linear.hpp>
+#include <tenzor/nn/layers/lazy_conv.hpp>
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
@@ -214,6 +215,92 @@ TEST(NNLinearEmbParity, LazyLinear) {
             std::cerr << "Skipped on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
         }
     }
+}
+
+// ============================================================================
+// LazyConv{1,2,3}d  (commit 37be63b4)
+// ============================================================================
+// LazyConv infers C_in from the first forward pass, materializing the underlying
+// Conv*d. The tests verify two things: (a) forward-pass parity after warmup,
+// (b) that materialized weight shapes are identical on every backend.
+
+namespace {
+// Helper: warmup-materialize the reference LazyConv on CPU, clone params into
+// a new LazyConv on the target backend, run and compare.
+template <typename LazyConvT>
+void lazy_conv_parity_test(
+    LazyConvT&& make_layer,
+    const std::vector<int64_t>& warmup_shape,
+    const std::vector<int64_t>& test_shape,
+    const char* name)
+{
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    auto ref_layer = make_layer();
+    // Materialize on CPU first so parameters exist to clone.
+    auto warmup = randn(warmup_shape, DType::Float32, Device::cpu());
+    ref_layer.forward(Variable(warmup, false));
+    auto input = randn(test_shape, DType::Float32, Device::cpu());
+    auto ref = ref_layer.forward(Variable(input, false)).tensor();
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        try {
+            auto dev_layer = make_layer();
+            // Warm up on CPU (with a scratch tensor of the same C_in) so the
+            // child Conv is materialized before we copy params in.
+            auto dev_warmup = randn(warmup_shape, DType::Float32, Device::cpu());
+            dev_layer.forward(Variable(dev_warmup, false));
+
+            auto params_src = ref_layer.parameters();
+            auto params_dst = dev_layer.parameters();
+            ASSERT_EQ(params_src.size(), params_dst.size())
+                << name << ": materialized param count differs between layers";
+            for (size_t p = 0; p < params_src.size(); ++p) {
+                auto src_shape = params_src[p]->tensor().shape();
+                auto dst_shape = params_dst[p]->tensor().shape();
+                std::vector<int64_t> src_vec(src_shape.begin(), src_shape.end());
+                std::vector<int64_t> dst_vec(dst_shape.begin(), dst_shape.end());
+                ASSERT_EQ(src_vec, dst_vec)
+                    << name << ": materialized weight shape mismatch";
+                params_dst[p]->tensor() = params_src[p]->tensor().clone();
+            }
+            dev_layer.to(backends[i]);
+            auto input_dev = input.to(backends[i]);
+            auto output = dev_layer.forward(Variable(input_dev, false)).tensor();
+            backends[i].synchronize();
+            SCOPED_TRACE(std::string(name) + " on " + backend_name(backends[i]));
+            EXPECT_TENSORS_CLOSE(ref, output, 1e-3f, 1e-3f);
+        } catch (const std::exception& e) {
+            std::cerr << "Skipped " << name << " on "
+                      << backend_name(backends[i]) << ": " << e.what() << std::endl;
+        }
+    }
+}
+}  // namespace
+
+TEST(NNLinearEmbParity, LazyConv1d) {
+    lazy_conv_parity_test(
+        [] { return nn::LazyConv1d(/*out=*/8, /*k=*/3, /*stride=*/1, /*pad=*/1); },
+        /*warmup_shape=*/{1, 4, 16},
+        /*test_shape=*/{2, 4, 16},
+        "LazyConv1d");
+}
+
+TEST(NNLinearEmbParity, LazyConv2d) {
+    lazy_conv_parity_test(
+        [] { return nn::LazyConv2d(/*out=*/8, /*k=*/3, /*stride=*/1, /*pad=*/1); },
+        /*warmup_shape=*/{1, 4, 8, 8},
+        /*test_shape=*/{2, 4, 8, 8},
+        "LazyConv2d");
+}
+
+TEST(NNLinearEmbParity, LazyConv3d) {
+    lazy_conv_parity_test(
+        [] { return nn::LazyConv3d(/*out=*/4, /*k=*/3, /*stride=*/1, /*pad=*/1); },
+        /*warmup_shape=*/{1, 2, 4, 4, 4},
+        /*test_shape=*/{1, 2, 4, 4, 4},
+        "LazyConv3d");
 }
 
 int main(int argc, char** argv) {

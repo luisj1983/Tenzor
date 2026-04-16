@@ -706,6 +706,134 @@ void test_operation_parity(Op operation,
 }
 
 /**
+ * @brief Test forward + backward parity across all available backends.
+ *
+ * Symmetric to test_operation_parity_backends but for ops that participate in
+ * autograd. For each backend we:
+ *   1. Move `inputs` to the backend and wrap each in a `Variable` with
+ *      requires_grad=true.
+ *   2. Run `op(vars)` to produce an output Variable.
+ *   3. Run `.backward(grad_output)` where `grad_output` is built from
+ *      `grad_output_factory(output.tensor())` (defaults to ones_like).
+ *   4. Capture the output tensor and each input's `.grad()` tensor.
+ *
+ * We then compare both the forward outputs and each input's gradient against
+ * the reference backend (first successful backend in the list), reporting
+ * the first mismatch with backend names and max absolute difference.
+ *
+ * Forward and backward each have their own tolerance pair because accumulation
+ * paths on the backward pass typically have looser numerical bounds than the
+ * single-step forward path.
+ *
+ * @param op Callable with signature `Variable(std::vector<Variable>&)`
+ * @param inputs Leaf tensors on CPU (will be cloned per backend)
+ * @param grad_output_factory Builds the backward seed from the forward output
+ *        tensor. Defaults to `ones_like(out)` (the scalar-loss convention).
+ * @param rtol_fwd/atol_fwd Forward-output tolerance
+ * @param rtol_bwd/atol_bwd Input-gradient tolerance
+ * @param backends Backends to test; empty => get_available_backends()
+ * @param test_name Name used in error messages
+ */
+template<typename Op>
+void test_gradient_parity(
+    Op op,
+    const std::vector<Tensor>& inputs,
+    std::function<Tensor(const Tensor&)> grad_output_factory = {},
+    float rtol_fwd = 1e-5f,
+    float atol_fwd = 1e-8f,
+    float rtol_bwd = 1e-4f,
+    float atol_bwd = 1e-6f,
+    std::vector<Device> backends = {},
+    const std::string& test_name = "GradientParity") {
+
+    if (backends.empty()) {
+        backends = get_available_backends();
+    }
+    if (backends.size() < 2) {
+        GTEST_SKIP() << "Need at least 2 backends for gradient parity testing";
+        return;
+    }
+
+    struct PerBackend {
+        Tensor output;
+        std::vector<Tensor> grads;
+        Device backend;
+    };
+
+    std::vector<PerBackend> runs;
+
+    for (const auto& backend : backends) {
+        try {
+            std::vector<Variable> vars;
+            vars.reserve(inputs.size());
+            for (const auto& t : inputs) {
+                // Clone so each backend gets its own storage; move to device.
+                vars.emplace_back(t.clone().to(backend), /*requires_grad=*/true);
+            }
+
+            auto out = op(vars);
+
+            Tensor grad_seed = grad_output_factory
+                ? grad_output_factory(out.tensor())
+                : ones_like(out.tensor());
+            out.backward(grad_seed);
+            backend.synchronize();
+
+            PerBackend run{out.tensor(), {}, backend};
+            run.grads.reserve(vars.size());
+            for (auto& v : vars) {
+                if (!v.has_grad()) {
+                    throw std::runtime_error(
+                        "Input has no gradient after backward() — "
+                        "op may have ignored an input or grad didn't flow.");
+                }
+                run.grads.push_back(v.grad().value());
+            }
+            runs.push_back(std::move(run));
+        } catch (const std::exception& e) {
+            std::cerr << test_name << ": backend "
+                      << backend_name(backend)
+                      << " failed: " << e.what() << std::endl;
+        }
+    }
+
+    if (runs.size() < 2) {
+        GTEST_SKIP() << "Need at least 2 successful backends for comparison";
+        return;
+    }
+
+    const auto& ref = runs[0];
+
+    for (size_t i = 1; i < runs.size(); ++i) {
+        const auto& cur = runs[i];
+
+        // Forward parity
+        if (!tensors_close(ref.output, cur.output, rtol_fwd, atol_fwd)) {
+            float diff = max_abs_diff(ref.output, cur.output);
+            FAIL() << test_name << " forward parity failed:\n"
+                   << "  Reference backend: " << backend_name(ref.backend) << "\n"
+                   << "  Test backend: " << backend_name(cur.backend) << "\n"
+                   << "  Max absolute difference: " << std::scientific << diff << "\n"
+                   << "  Tolerance: rtol=" << rtol_fwd << ", atol=" << atol_fwd;
+        }
+
+        // Gradient parity (per input)
+        ASSERT_EQ(ref.grads.size(), cur.grads.size())
+            << test_name << " gradient count differs between backends";
+        for (size_t g = 0; g < ref.grads.size(); ++g) {
+            if (!tensors_close(ref.grads[g], cur.grads[g], rtol_bwd, atol_bwd)) {
+                float diff = max_abs_diff(ref.grads[g], cur.grads[g]);
+                FAIL() << test_name << " backward parity failed on input #" << g << ":\n"
+                       << "  Reference backend: " << backend_name(ref.backend) << "\n"
+                       << "  Test backend: " << backend_name(cur.backend) << "\n"
+                       << "  Max absolute difference: " << std::scientific << diff << "\n"
+                       << "  Tolerance: rtol=" << rtol_bwd << ", atol=" << atol_bwd;
+            }
+        }
+    }
+}
+
+/**
  * @brief Macro for expecting tensors to be close with detailed error message.
  */
 #define EXPECT_TENSORS_CLOSE(a, b, rtol, atol) \

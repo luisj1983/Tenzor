@@ -502,13 +502,32 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, cudaStream_t stream) 
 
 auto linalg_svd_kernel(const Tensor& A, bool full_matrices, cudaStream_t stream)
     -> std::tuple<Tensor, Tensor, Tensor> {
-    auto work = A.contiguous().clone();
     auto shape = A.shape();
     auto a_ndim = static_cast<int64_t>(shape.size());
     if (a_ndim < 2) throw std::invalid_argument("linalg::svd: input must be at least 2D");
 
     int64_t m = shape[a_ndim - 2];
     int64_t n_cols = shape[a_ndim - 1];
+
+    // cusolverDnSgesvd requires m_arg >= n_arg in col-major. The wide-matrix
+    // path below passes our row-major A as col-major A^T with m_arg=N, n_arg=M
+    // (which satisfies the constraint when M <= N). For tall matrices (M > N)
+    // that same path would violate m_arg >= n_arg and cuSOLVER returns status=3.
+    //
+    // Handle the tall case by computing SVD(A^T) using the wide path: if
+    // A = U S Vt, then A^T = V S U^T, so the wide-path returns (V, S, U^T).
+    // We swap the U and Vt outputs (and transpose them) to recover SVD(A).
+    if (m > n_cols) {
+        Tensor A_T = tenzor::transpose(A, -2, -1).contiguous();
+        auto [U_of_AT, S_of_AT, Vt_of_AT] =
+            linalg_svd_kernel(A_T, full_matrices, stream);
+        // Our U = transpose(Vt_of_AT); our Vt = transpose(U_of_AT).
+        auto U = tenzor::transpose(Vt_of_AT, -2, -1).contiguous();
+        auto Vt = tenzor::transpose(U_of_AT, -2, -1).contiguous();
+        return {U, S_of_AT, Vt};
+    }
+
+    auto work = A.contiguous().clone();
     int64_t k = std::min(m, n_cols);
     int64_t nbatch = batch_size(work);
 
@@ -559,24 +578,33 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, cudaStream_t stream)
             float* u_mat = u_data + b * u_stride;
             float* vt_mat = vt_data + b * vt_stride;
 
-            // Row-major A[m][n] => column-major A^T[n][m]
-            // gesvd(A^T) => V^T * S * U^T where U,Vt are swapped
-            int ldu = full_matrices ? m : m;
-            int ldvt = full_matrices ? n_cols : k;
+            // Row-major A[m][n] => column-major A^T[n][m] in memory.
+            // We call gesvd with m_gesvd=n_cols, n_gesvd=m. For the "wide"
+            // branch reached here we have m <= n_cols, so constraint m>=n is
+            // OK. gesvd returns U_g (m_gesvd, k_g) col-major and Vt_g (k_g,
+            // n_gesvd) col-major where k_g = min(m_gesvd, n_gesvd) = m.
+            // Our U slot gets Vt_g; our Vt slot gets U_g. Leading dims for
+            // gesvd are the col-major leading dim = first shape element:
+            //   gesvd's ldu = m_gesvd = n_cols   (goes into our ldvt_arg)
+            //   gesvd's ldvt = k_g = m           (goes into our ldu_arg)
+            // Previously ldvt was set to k instead of n_cols, which is
+            // correct only for square/wide-equal-square cases; for tall
+            // matrices routed via the recursive transpose it violates the
+            // leading-dimension contract and cuSOLVER returns status 3.
+            int ldu_arg = m;            // for Vt_g output buffer
+            int ldvt_arg = full_matrices ? n_cols : n_cols;  // for U_g output buffer
 
             int lwork = 0;
-            CUSOLVER_CHECK(cusolverDnSgesvd_bufferSize(handle, m, n_cols, &lwork));
+            CUSOLVER_CHECK(cusolverDnSgesvd_bufferSize(handle, n_cols, m, &lwork));
             DeviceWorkspace workspace(lwork * sizeof(float));
 
-            // For row-major: we pass n_cols as m and m as n to treat as col-major A^T
-            // Then U output is actually Vt, and Vt output is actually U
             float* rwork = nullptr;  // not needed for real SVD
             CUSOLVER_CHECK(cusolverDnSgesvd(handle, jobu, jobvt,
                 n_cols, m,  // swapped: col-major sees our row-major as transposed
-                a_mat, n_cols,  // lda = n_cols (stride between columns in row-major)
+                a_mat, n_cols,  // lda = n_cols (leading dim of col-major A^T)
                 s_vec,
-                vt_mat, ldvt,  // "U" output → our Vt
-                u_mat, ldu,    // "Vt" output → our U
+                vt_mat, ldvt_arg,  // "U" output → our Vt slot (col-major n_cols x k)
+                u_mat, ldu_arg,    // "Vt" output → our U slot (col-major k x m)
                 static_cast<float*>(workspace.ptr), lwork,
                 rwork, d_info.ptr));
             check_cusolver_info(d_info.ptr, "svd");
@@ -596,11 +624,14 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, cudaStream_t stream)
             double* u_mat = u_data + b * u_stride;
             double* vt_mat = vt_data + b * vt_stride;
 
-            int ldvt = full_matrices ? n_cols : k;
-            int ldu = full_matrices ? m : m;
+            // Leading dims match gesvd's expectations of col-major output
+            // shapes: U_g(n_cols, k_g) has leading dim n_cols; Vt_g(k_g, m)
+            // has leading dim k_g = min(n_cols, m) = m for the wide branch.
+            int ldu_arg = m;
+            int ldvt_arg = n_cols;
 
             int lwork = 0;
-            CUSOLVER_CHECK(cusolverDnDgesvd_bufferSize(handle, m, n_cols, &lwork));
+            CUSOLVER_CHECK(cusolverDnDgesvd_bufferSize(handle, n_cols, m, &lwork));
             DeviceWorkspace workspace(lwork * sizeof(double));
 
             double* rwork = nullptr;
@@ -608,8 +639,8 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, cudaStream_t stream)
                 n_cols, m,
                 a_mat, n_cols,
                 s_vec,
-                vt_mat, ldvt,
-                u_mat, ldu,
+                vt_mat, ldvt_arg,
+                u_mat, ldu_arg,
                 static_cast<double*>(workspace.ptr), lwork,
                 rwork, d_info.ptr));
             check_cusolver_info(d_info.ptr, "svd");

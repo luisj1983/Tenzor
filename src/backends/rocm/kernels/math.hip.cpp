@@ -922,10 +922,14 @@ __global__ void add_kernel_shared(const T* a, const T* b, T* c, int64_t n) {
  *
  * Supports both fast path (same shape) and broadcast path
  */
-auto add_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
-    if (a.dtype() != b.dtype()) {
+auto add_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> Tensor {
+    if (a_in.dtype() != b_in.dtype()) {
         throw std::runtime_error("Tensors must have the same dtype");
     }
+
+    // Flat-index kernels require contiguous storage; materialize views.
+    Tensor a = a_in.is_contiguous() ? a_in : a_in.contiguous();
+    Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
 
     auto a_shape_span = a.shape();
     auto b_shape_span = b.shape();
@@ -1115,10 +1119,14 @@ auto add_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
  * @param stream HIP stream for asynchronous execution
  * @return Result tensor (a - b)
  */
-auto sub_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
-    if (a.dtype() != b.dtype()) {
+auto sub_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> Tensor {
+    if (a_in.dtype() != b_in.dtype()) {
         throw std::runtime_error("Tensors must have the same dtype");
     }
+
+    // Flat-index kernels require contiguous storage; materialize views.
+    Tensor a = a_in.is_contiguous() ? a_in : a_in.contiguous();
+    Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
 
     auto a_shape_span = a.shape();
     auto b_shape_span = b.shape();
@@ -1290,10 +1298,15 @@ auto sub_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
  * @param stream HIP stream for asynchronous execution
  * @return Result tensor (a * b)
  */
-auto mul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
-    if (a.dtype() != b.dtype()) {
+auto mul_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> Tensor {
+    if (a_in.dtype() != b_in.dtype()) {
         throw std::runtime_error("Tensors must have the same dtype");
     }
+
+    // Materialize contiguous copies so the flat-index kernels below are safe
+    // when callers pass non-contiguous views (e.g. from slice()).
+    Tensor a = a_in.is_contiguous() ? a_in : a_in.contiguous();
+    Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
 
     auto a_shape_span = a.shape();
     auto b_shape_span = b.shape();
@@ -1462,10 +1475,14 @@ auto mul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
  *
  * Division by zero returns INFINITY
  */
-auto div_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
-    if (a.dtype() != b.dtype()) {
+auto div_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> Tensor {
+    if (a_in.dtype() != b_in.dtype()) {
         throw std::runtime_error("Tensors must have the same dtype");
     }
+
+    // Flat-index kernels require contiguous storage; materialize views.
+    Tensor a = a_in.is_contiguous() ? a_in : a_in.contiguous();
+    Tensor b = b_in.is_contiguous() ? b_in : b_in.contiguous();
 
     auto a_shape_span = a.shape();
     auto b_shape_span = b.shape();

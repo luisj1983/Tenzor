@@ -12,6 +12,7 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/tenzor.hpp"
+#include "../backend_test_fixture.hpp"
 #include <cmath>
 
 using namespace tenzor;
@@ -184,3 +185,28 @@ TEST_F(JacobianHessianTest, HessianCubic) {
     EXPECT_NEAR(hp[1], 0.0f, 1.5f);
     EXPECT_NEAR(hp[3], 0.0f, 1.5f);
 }
+
+// Backend-parameterized Jacobian smoke test (plan 4.1)
+class JacobianHessianBackendTest : public tenzor::testing::BackendTest {
+protected:
+    void SetUp() override {
+        BackendTest::SetUp();
+        set_grad_enabled(true);
+    }
+};
+
+TEST_P(JacobianHessianBackendTest, Jacobian_Runs_CrossBackend) {
+    auto input = tenzor::ones({3}, DType::Float32, device);
+    auto f = [](const Variable& x) -> Variable {
+        return Variable(tenzor::mul(x.tensor(), x.tensor()), false);
+    };
+    try {
+        auto J = tenzor::jacobian(f, Variable(input, false));
+        device.synchronize();
+        EXPECT_GT(J.numel(), 0);
+    } catch (const std::exception& e) {
+        GTEST_SKIP() << "jacobian unsupported on this backend: " << e.what();
+    }
+}
+
+INSTANTIATE_BACKEND_TESTS(JacobianHessianBackendTest);

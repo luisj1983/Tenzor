@@ -818,3 +818,8 @@ tenzor_discover_tests(test_rprop LABELS "unit" DISCOVERY_TIMEOUT 60)
 add_executable(test_training_metrics test_metrics.cpp)
 target_link_libraries(test_training_metrics PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_training_metrics LABELS "unit" DISCOVERY_TIMEOUT 60)
+
+# Image I/O (stb_image wrapper) — CPU-only, commit ca264523
+add_executable(test_image_io test_image_io.cpp)
+target_link_libraries(test_image_io PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_image_io LABELS "unit" DISCOVERY_TIMEOUT 60)

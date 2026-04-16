@@ -651,17 +651,29 @@ auto VulkanBackend::dispatchClone(const Tensor& input) -> Tensor {
 /**
  * @brief Expand tensor to larger size using broadcasting
  */
-auto VulkanBackend::dispatchExpand(const Tensor& input, const std::vector<int64_t>& shape) -> Tensor {
+auto VulkanBackend::dispatchExpand(const Tensor& input_in, const std::vector<int64_t>& shape) -> Tensor {
+    // The shader below receives input strides computed from the input shape
+    // (contiguous assumption). If the caller passed a non-contiguous view
+    // (e.g. permute + unsqueeze) those computed strides would not match the
+    // actual memory layout and the shader would read wrong elements.
+    // Materialize to contiguous first, matching CPU semantics.
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     int32_t device_id = input.device().index;
     // Select correct pipeline based on dtype
     bool is_float64 = (input.dtype() == DType::Float64);
     bool is_float16 = (input.dtype() == DType::Float16);
+    bool is_int64   = (input.dtype() == DType::Int64);
     std::string shader_name;
     if (is_float64) {
         shader_name = "expand_f64";
     } else if (is_float16) {
         shader_name = "expand_f16";
+    } else if (is_int64) {
+        shader_name = "expand_i64";
     } else {
+        // Default 4-byte shader (Float32 / Int32 / Bool pad). Bool buffer is
+        // uint8; Bool outputs are stored as uint8 and should NOT use this path
+        // (handled by callers via cast where needed).
         shader_name = "expand";
     }
 

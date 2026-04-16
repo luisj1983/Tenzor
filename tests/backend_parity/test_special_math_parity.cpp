@@ -245,7 +245,75 @@ TEST(SpecialMathParity, Beta) {
     }, {a, b}, backends, 1e-3f, 1e-4f, "Beta");
 }
 
+// ============================================================================
+// Phase 3.7 additions: BesselY0, BesselY1, Zeta, I1e, LogAddExp, XLog1Py,
+// SphericalBesselJ0
+// ============================================================================
 
+TEST(SpecialMathParity, BesselY0) {
+    // bessel_y0 is singular at x=0 — use strictly positive input.
+    auto input = rand({4, 16}, DType::Float32, Device::cpu()) + 0.1f;
+    test_operation_parity([](const std::vector<Tensor>& ins) {
+        return tenzor::bessel_y0(ins[0]);
+    }, {input}, 1e-3f, 1e-4f, "bessel_y0");
+}
+
+TEST(SpecialMathParity, BesselY1) {
+    auto input = rand({4, 16}, DType::Float32, Device::cpu()) + 0.1f;
+    test_operation_parity([](const std::vector<Tensor>& ins) {
+        return tenzor::bessel_y1(ins[0]);
+    }, {input}, 1e-3f, 1e-4f, "bessel_y1");
+}
+
+TEST(SpecialMathParity, Zeta) {
+    // zeta(x, q) is real for x > 1. Use x in [2, 4], q > 0.
+    auto x = rand({4, 8}, DType::Float32, Device::cpu()) * 2.0f + 2.0f;
+    auto q = rand({4, 8}, DType::Float32, Device::cpu()) + 0.5f;
+    test_operation_parity([](const std::vector<Tensor>& ins) {
+        return tenzor::zeta(ins[0], ins[1]);
+    }, {x, q}, 1e-3f, 1e-4f, "zeta");
+}
+
+TEST(SpecialMathParity, I1e) {
+    auto input = randn({4, 16}, DType::Float32, Device::cpu());
+    test_operation_parity([](const std::vector<Tensor>& ins) {
+        return tenzor::i1e(ins[0]);
+    }, {input}, 1e-3f, 1e-4f, "i1e");
+}
+
+TEST(SpecialMathParity, LogAddExp) {
+    auto a = randn({4, 16}, DType::Float32, Device::cpu());
+    auto b = randn({4, 16}, DType::Float32, Device::cpu());
+    test_operation_parity([](const std::vector<Tensor>& ins) {
+        return tenzor::logaddexp(ins[0], ins[1]);
+    }, {a, b}, 1e-4f, 1e-6f, "logaddexp");
+}
+
+TEST(SpecialMathParity, XLog1Py) {
+    auto x = randn({4, 16}, DType::Float32, Device::cpu());
+    // y > -1 for log1p(y) to be finite; sample in [0, 1].
+    auto y = rand({4, 16}, DType::Float32, Device::cpu());
+    test_operation_parity([](const std::vector<Tensor>& ins) {
+        return tenzor::xlog1py(ins[0], ins[1]);
+    }, {x, y}, 1e-4f, 1e-6f, "xlog1py");
+}
+
+TEST(SpecialMathParity, SphericalBesselJ0) {
+    auto input = rand({4, 16}, DType::Float32, Device::cpu()) + 0.1f;
+    test_operation_parity([](const std::vector<Tensor>& ins) {
+        return tenzor::spherical_bessel_j0(ins[0]);
+    }, {input}, 1e-3f, 1e-4f, "spherical_bessel_j0");
+}
+
+TEST(SpecialMathParity, BetaInc) {
+    // Incomplete beta I_x(a, b). Requires a > 0, b > 0, x ∈ [0, 1].
+    auto a = rand({4, 8}, DType::Float32, Device::cpu()) + 0.5f;
+    auto b = rand({4, 8}, DType::Float32, Device::cpu()) + 0.5f;
+    auto x = rand({4, 8}, DType::Float32, Device::cpu());  // in [0,1)
+    test_operation_parity([](const std::vector<Tensor>& ins) {
+        return tenzor::betainc(ins[0], ins[1], ins[2]);
+    }, {a, b, x}, 1e-3f, 1e-4f, "betainc");
+}
 
 int main(int argc, char** argv) {
     try {

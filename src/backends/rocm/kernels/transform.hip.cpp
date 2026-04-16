@@ -177,6 +177,12 @@ auto contiguous_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         throw std::runtime_error(std::string("HIP error in contiguous_kernel: ") + hipGetErrorString(err));
     }
 
+    // Synchronize before the HipMemGuard destructors free d_strides / d_shape.
+    // The kernel launch above is asynchronous on `stream`; without this sync
+    // the freed device memory would be read by the still-running kernel,
+    // causing a use-after-free crash.
+    HIP_CHECK(hipStreamSynchronize(stream));
+
     return result;
 }
 
@@ -564,7 +570,10 @@ __global__ void repeat_kernel_impl(
     }
 }
 
-auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, hipStream_t stream) -> Tensor {
+auto repeat_kernel(const Tensor& input_in, const std::vector<int64_t>& repeats, hipStream_t stream) -> Tensor {
+    // Kernel below derives contiguous strides from input_shape; non-contiguous
+    // input views would be read at wrong offsets. Materialize first.
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     auto input_shape = input.shape();
     int64_t ndim = input_shape.size();
 

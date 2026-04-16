@@ -187,6 +187,58 @@ TEST_P(WindowFunctionsMultiDTypeTest, PeriodicVsSymmetric) {
 }
 
 // ============================================================================
+// Cross-backend value parity (plan 5.2)
+//
+// The tests above validate shape/symmetry/range per (backend, dtype). This
+// test compares actual values between the current backend and a CPU reference
+// of the same dtype — closes Phase 5.2's "extend into backend-parity test"
+// scope.
+// ============================================================================
+
+TEST_P(WindowFunctionsMultiDTypeTest, HannWindow_ValueParity) {
+    const int64_t N = 64;
+    auto ref = tenzor::hann_window(N, true, dtype(), Device::cpu());
+    auto dev_win = tenzor::hann_window(N, true, dtype(), device());
+    device().synchronize();
+
+    auto ref_f = toFloats(ref);
+    auto dev_f = toFloats(dev_win);
+    ASSERT_EQ(ref_f.size(), dev_f.size());
+    for (size_t i = 0; i < ref_f.size(); ++i) {
+        EXPECT_NEAR(ref_f[i], dev_f[i], atol())
+            << "hann_window[" << i << "] diverges between CPU and backend";
+    }
+}
+
+TEST_P(WindowFunctionsMultiDTypeTest, HammingWindow_ValueParity) {
+    const int64_t N = 64;
+    auto ref = tenzor::hamming_window(N, true, 0.54, 0.46, dtype(), Device::cpu());
+    auto dev_win = tenzor::hamming_window(N, true, 0.54, 0.46, dtype(), device());
+    device().synchronize();
+
+    auto ref_f = toFloats(ref);
+    auto dev_f = toFloats(dev_win);
+    for (size_t i = 0; i < ref_f.size(); ++i) {
+        EXPECT_NEAR(ref_f[i], dev_f[i], atol())
+            << "hamming_window[" << i << "] diverges";
+    }
+}
+
+TEST_P(WindowFunctionsMultiDTypeTest, BlackmanWindow_ValueParity) {
+    const int64_t N = 64;
+    auto ref = tenzor::blackman_window(N, true, dtype(), Device::cpu());
+    auto dev_win = tenzor::blackman_window(N, true, dtype(), device());
+    device().synchronize();
+
+    auto ref_f = toFloats(ref);
+    auto dev_f = toFloats(dev_win);
+    for (size_t i = 0; i < ref_f.size(); ++i) {
+        EXPECT_NEAR(ref_f[i], dev_f[i], atol())
+            << "blackman_window[" << i << "] diverges";
+    }
+}
+
+// ============================================================================
 // Instantiation
 // ============================================================================
 

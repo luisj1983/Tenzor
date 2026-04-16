@@ -733,6 +733,20 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, hipStream_t stream)
     size_t e_bytes = (k > 1 ? k - 1 : 1) * (A.dtype() == DType::Float32 ? sizeof(float) : sizeof(double));
     void* d_e = backend::rocm::RocmCachingAllocator::get().allocate(e_bytes);
 
+    // rocSOLVER gesvd leading-dimension rules (col-major), with m',n' = rocSOLVER
+    // arguments (= our swapped n_cols, m):
+    //   * U   arg: m' × m' (all) or m' × min(m',n')=k (singular). ldu >= m' = n_cols.
+    //   * V^T arg: n' × n' (all) or k × n'                (singular). ldv >= n' (full)
+    //                                                                       or >= k (reduced).
+    // In this wrapper the rocSOLVER "U" buffer is our Vt (row-major k×n_cols = col-major
+    // n_cols×k with leading dim n_cols for full, k for reduced), and the rocSOLVER
+    // "V^T" buffer is our U (row-major m×k = col-major k×m with leading dim m for full,
+    // k for reduced). Prior code passed ldv=m always, which overwrote beyond the
+    // reduced-mode U buffer and produced a wrong SVD (symptom: A·pinv(A)·A diverged
+    // by ~2.4 from A).
+    int ldu_arg  = full_matrices ? n_cols : k;  // rocSOLVER "U" leading dim
+    int ldvt_arg = full_matrices ? m      : k;  // rocSOLVER "V^T" leading dim
+
     if (A.dtype() == DType::Float32) {
         float* a_data = work.data<float>();
         float* s_data = S.data<float>();
@@ -748,16 +762,14 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, hipStream_t stream)
             float* u_mat = u_data + b * u_stride;
             float* vt_mat = vt_data + b * vt_stride;
 
-            int ldvt = full_matrices ? n_cols : k;
-
             // For row-major: we pass n_cols as m and m as n to treat as col-major A^T
             // Then U output is actually Vt, and Vt output is actually U
             ROCBLAS_CHECK_LINALG(rocsolver_sgesvd(handle, left_svect, right_svect,
                 n_cols, m,  // swapped: col-major sees our row-major as transposed
                 a_mat, n_cols,  // lda = n_cols (stride between columns in row-major)
                 s_vec,
-                vt_mat, ldvt,  // "U" output -> our Vt
-                u_mat, m,      // "Vt" output -> our U
+                vt_mat, ldu_arg,   // "U" output -> our Vt
+                u_mat, ldvt_arg,   // "V^T" output -> our U
                 static_cast<float*>(d_e),
                 rocblas_outofplace,
                 d_info.ptr));
@@ -778,14 +790,12 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, hipStream_t stream)
             double* u_mat = u_data + b * u_stride;
             double* vt_mat = vt_data + b * vt_stride;
 
-            int ldvt = full_matrices ? n_cols : k;
-
             ROCBLAS_CHECK_LINALG(rocsolver_dgesvd(handle, left_svect, right_svect,
                 n_cols, m,
                 a_mat, n_cols,
                 s_vec,
-                vt_mat, ldvt,
-                u_mat, m,
+                vt_mat, ldu_arg,
+                u_mat, ldvt_arg,
                 static_cast<double*>(d_e),
                 rocblas_outofplace,
                 d_info.ptr));

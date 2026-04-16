@@ -240,14 +240,30 @@ auto flex_attention(
         scale = 1.0f / std::sqrt(static_cast<float>(D));
     }
 
-    // Ensure inputs are contiguous Float32 on CPU for the reference implementation.
-    // (Non-CPU tensors or non-Float32 dtypes would need backend dispatch in production.)
-    auto q_contig = query.contiguous();
-    auto k_contig = key.contiguous();
-    auto v_contig = value.contiguous();
+    // The implementation below uses host-side raw-pointer loops. Move GPU
+    // tensors (including the block mask) to CPU, run the reference
+    // computation, then move the result back. Previously the code assumed
+    // CPU memory and crashed on CUDA/ROCm.
+    Device original_device = query.device();
+    auto q_contig = original_device.type == Device::Type::CPU
+        ? query.contiguous() : query.to(Device::cpu()).contiguous();
+    auto k_contig = original_device.type == Device::Type::CPU
+        ? key.contiguous() : key.to(Device::cpu()).contiguous();
+    auto v_contig = original_device.type == Device::Type::CPU
+        ? value.contiguous() : value.to(Device::cpu()).contiguous();
 
-    // Allocate output: (B, H, S, D), initialized to zero
-    auto output = zeros({B, H, S, D}, query.dtype(), query.device());
+    // If the BlockMask's underlying tensor lives on a device, build a CPU
+    // copy for the host-side is_active() reads below. The BlockMask type
+    // doesn't expose its dtype in is_active(), so we construct a
+    // locally-scoped BlockMask on CPU.
+    BlockMask block_mask_host = block_mask;
+    if (block_mask.mask().device().type != Device::Type::CPU) {
+        block_mask_host = BlockMask(block_mask.mask().to(Device::cpu()),
+                                     block_mask.block_size());
+    }
+
+    // Allocate output on CPU (for the raw-pointer math); move back at end.
+    auto output = zeros({B, H, S, D}, query.dtype(), Device::cpu());
     const float neg_inf = -std::numeric_limits<float>::infinity();
 
     // Raw pointers into contiguous (B, H, S, D) layout.
@@ -306,7 +322,7 @@ auto flex_attention(
                 bool any_active = false;
 
                 for (int64_t kv_blk = 0; kv_blk < expected_kv_blocks; ++kv_blk) {
-                    if (!block_mask.is_active(q_blk, kv_blk)) {
+                    if (!block_mask_host.is_active(q_blk, kv_blk)) {
                         continue;
                     }
                     any_active = true;
@@ -408,6 +424,10 @@ auto flex_attention(
         } // head loop
     } // batch loop
 
+    // Restore the original device if callers passed GPU inputs.
+    if (original_device.type != Device::Type::CPU) {
+        return output.to(original_device);
+    }
     return output;
 }
 

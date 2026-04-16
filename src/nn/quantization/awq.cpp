@@ -208,17 +208,27 @@ auto AWQQuantizer::quantize_layer(const Tensor& weight, const Tensor& act_scales
     int64_t out_features = w_shape[0];
     int64_t in_features = w_shape[1];
 
-    // Work in Float32 for numerical stability
-    auto W = weight.to(DType::Float32).clone();
-    auto act = act_scales.to(DType::Float32).clone();
+    // The routine below uses raw host-pointer loops, so all intermediate
+    // tensors must live on CPU even when the caller passes GPU tensors.
+    // Previously this would hang/crash when weight or act_scales were on a
+    // GPU backend (Variable host-ptr reads on device memory).
+    Device original_device = weight.device();
+    auto weight_cpu = original_device.type == Device::Type::CPU
+        ? weight : weight.to(Device::cpu());
+    auto act_scales_cpu = act_scales.device().type == Device::Type::CPU
+        ? act_scales : act_scales.to(Device::cpu());
 
-    // Prepare output tensors
+    // Work in Float32 for numerical stability (all on CPU).
+    auto W = weight_cpu.to(DType::Float32).clone();
+    auto act = act_scales_cpu.to(DType::Float32).clone();
+
+    // Prepare output tensors on CPU; move back to original device at the end.
     int64_t num_groups = (in_features + config_.group_size - 1) / config_.group_size;
-    auto scales = ops::zeros({out_features, num_groups}, DType::Float32, W.device());
-    auto zeros_tensor = ops::zeros({out_features, num_groups}, DType::Float32, W.device());
+    auto scales = ops::zeros({out_features, num_groups}, DType::Float32, Device::cpu());
+    auto zeros_tensor = ops::zeros({out_features, num_groups}, DType::Float32, Device::cpu());
 
     // Quantized weight in int32 (will be packed later)
-    auto Q = ops::zeros({out_features, in_features}, DType::Int32, W.device());
+    auto Q = ops::zeros({out_features, in_features}, DType::Int32, Device::cpu());
 
     auto [qmin, qmax] = quant_range();
 
@@ -341,6 +351,14 @@ auto AWQQuantizer::quantize_layer(const Tensor& weight, const Tensor& act_scales
     } else {
         // 8-bit: store as Int8 directly
         packed = Q.to(DType::Int8);
+    }
+
+    // Move results back to the original input device so downstream callers
+    // (e.g. inference kernels) can use the outputs without an extra copy.
+    if (original_device.type != Device::Type::CPU) {
+        packed = packed.to(original_device);
+        scales = scales.to(original_device);
+        zeros_tensor = zeros_tensor.to(original_device);
     }
 
     return AWQResult{

@@ -12,6 +12,7 @@
 #include <tenzor/ops/op_id.hpp>
 #include <tenzor/backend/dispatch_table.hpp>
 #include "parity_test_utils.hpp"
+#include "required_ops.hpp"
 #include <vector>
 #include <string>
 #include <sstream>
@@ -21,90 +22,9 @@ using namespace tenzor::testing;
 
 namespace {
 
-// ---------------------------------------------------------------------------
-// Helper: curated list of ops every compute backend must support
-// ---------------------------------------------------------------------------
-std::vector<OpId> get_required_ops() {
-    return {
-        // Arithmetic (0-6)
-        OpId::Add, OpId::Sub, OpId::Mul, OpId::Div,
-        OpId::MatMul, OpId::Bmm, OpId::Dot,
-
-        // Reductions (11-20)
-        OpId::Sum, OpId::Mean, OpId::Max, OpId::Min,
-        OpId::ArgMax, OpId::ArgMin, OpId::Prod,
-        OpId::Var, OpId::Std, OpId::Norm,
-
-        // Element-wise math (30-42)
-        OpId::Sqrt, OpId::Neg, OpId::Abs, OpId::Sign,
-        OpId::Log, OpId::Exp, OpId::Pow, OpId::Clamp,
-        OpId::Reciprocal, OpId::Floor, OpId::Ceil, OpId::Round,
-
-        // Trigonometric (50-61)
-        OpId::Sin, OpId::Cos, OpId::Tan,
-        OpId::Asin, OpId::Acos, OpId::Atan,
-        OpId::Sinh, OpId::Cosh, OpId::Tanh,
-        OpId::Asinh, OpId::Acosh, OpId::Atanh,
-
-        // Activations — forward only (65-94)
-        OpId::ReLU, OpId::Sigmoid, OpId::TanhActivation,
-        OpId::Gelu, OpId::Swish, OpId::LeakyReLU,
-        OpId::Elu, OpId::Selu, OpId::Mish,
-        OpId::Softplus, OpId::Softmax, OpId::LogSoftmax,
-        OpId::LogSigmoid,
-
-        // Shape/View (100-114)
-        OpId::Reshape, OpId::Transpose, OpId::Permute,
-        OpId::Squeeze, OpId::Unsqueeze, OpId::Flatten,
-        OpId::Contiguous, OpId::Clone, OpId::Fill,
-        OpId::Repeat, OpId::Tile, OpId::Expand,
-        OpId::Stack, OpId::Split, OpId::Chunk,
-
-        // Indexing (120-130)
-        OpId::IndexSelect, OpId::Gather, OpId::Scatter,
-        OpId::MaskedSelect, OpId::MaskedFill, OpId::Where,
-        OpId::Slice, OpId::Cat, OpId::Take, OpId::Put,
-        OpId::Nonzero,
-
-        // Comparison (140-145)
-        OpId::Eq, OpId::Ne, OpId::Lt, OpId::Le, OpId::Gt, OpId::Ge,
-
-        // Conv2d forward (170)
-        OpId::Conv2dForward,
-
-        // Pooling forward (190-196)
-        OpId::MaxPool2dForward, OpId::AvgPool2dForward,
-        OpId::AdaptiveAvgPool2d, OpId::AdaptiveMaxPool2d,
-
-        // Embedding (260)
-        OpId::Embedding,
-
-        // Linear (270)
-        OpId::Linear,
-
-        // Cast (316)
-        OpId::Cast,
-
-        // Extended math (320-335)
-        OpId::Log2, OpId::Log10, OpId::Log1p,
-        OpId::Exp2, OpId::Expm1,
-        OpId::Erf, OpId::Erfc,
-        OpId::Atan2, OpId::Fmod, OpId::Remainder,
-        OpId::Hypot, OpId::Copysign,
-
-        // Manipulation (340-345)
-        OpId::Triu, OpId::Tril, OpId::Diag,
-        OpId::Trace, OpId::Flip, OpId::Roll,
-
-        // Logical (350-353)
-        OpId::LogicalAnd, OpId::LogicalOr,
-        OpId::LogicalNot, OpId::LogicalXor,
-
-        // Complex (440-444)
-        OpId::Conj, OpId::Real, OpId::Imag,
-        OpId::Angle, OpId::Polar,
-    };
-}
+// The required-op floor lives in required_ops.hpp so new parity tests can
+// include the same list when asserting "this op must exist everywhere" before
+// running. See that header for the grow-the-floor convention.
 
 // ---------------------------------------------------------------------------
 // Helper: join a vector of strings with ", "

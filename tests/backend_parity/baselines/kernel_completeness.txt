@@ -1,0 +1,66 @@
+Running main() from /usr/src/debug/gtest/googletest-1.17.0/googletest/src/gtest_main.cc
+[==========] Running 5 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 5 tests from KernelCompleteness
+[ RUN      ] KernelCompleteness.CPU
+Initializing Tenzor library v1.0.0
+Loading CPU backend from: "/home/lee/Projects/Tenzor/build/bin/tenzor_backend_cpu.so"
+CPU backend registered: cpu
+[dispatch_table] WARNING: OpId 156 already registered in a different kernel array
+CPU dispatch table initialized (467 operations registered)
+Loading CUDA backend from: "/home/lee/Projects/Tenzor/build/bin/tenzor_backend_cuda.so"
+CUDA backend registered: cuda
+Found 1 CUDA device(s)
+CUDA dispatch table initialized (467 operations registered)
+Loading ROCm backend from: "/home/lee/Projects/Tenzor/build/bin/tenzor_backend_rocm.so"
+ROCm backend registered: rocm
+Found 1 ROCm device(s)
+ROCm dispatch table initialized with O(1) lookup
+ROCm dispatch table initialized (416 operations registered)
+Loading OneAPI backend from: "/home/lee/Projects/Tenzor/build/bin/tenzor_backend_oneapi.so"
+OneAPI backend registered: oneapi
+Found 1 OneAPI device(s)
+[dispatch_table] WARNING: overwriting kernel for OpId 518
+OneAPI dispatch table initialized (422 operations registered)
+Loading Vulkan backend from: "/home/lee/Projects/Tenzor/build/bin/tenzor_backend_vulkan.so"
+Found dedicated GPU: NVIDIA GeForce RTX 5070 Laptop GPU
+Found integrated GPU: AMD Radeon 890M Graphics (RADV STRIX1)
+Default Vulkan device (index 0): Dedicated GPU
+Vulkan backend registered: vulkan
+Found 2 Vulkan device(s)
+Vulkan dispatch table initialized with O(1) lookup
+Vulkan dispatch table initialized (467 operations registered)
+Tenzor initialization complete
+[       OK ] KernelCompleteness.CPU (886 ms)
+[ RUN      ] KernelCompleteness.CUDA
+[       OK ] KernelCompleteness.CUDA (74 ms)
+[ RUN      ] KernelCompleteness.ROCm
+/home/lee/Projects/Tenzor/tests/backend_parity/test_kernel_completeness.cpp:57: Failure
+Value of: missing.empty()
+  Actual: false
+Expected: true
+ROCm backend is missing 30 of 145 required kernels:
+  bmm, dot, sign, log, exp, asinh, acosh, atanh, tile, expand, le, gt, ge, conv2d_forward, embedding, linear, cast, atan2, trace, flip, roll, logical_or, logical_not, logical_xor, imag, angle, polar, log_softmax_backward, log_sigmoid_backward, embedding_backward
+
+[  FAILED  ] KernelCompleteness.ROCm (76 ms)
+[ RUN      ] KernelCompleteness.Vulkan
+[       OK ] KernelCompleteness.Vulkan (1 ms)
+[ RUN      ] KernelCompleteness.OneAPI
+/home/lee/Projects/Tenzor/tests/backend_parity/test_kernel_completeness.cpp:57: Failure
+Value of: missing.empty()
+  Actual: false
+Expected: true
+OneAPI backend is missing 9 of 145 required kernels:
+  tanh_activation, log_sigmoid, flatten, tile, slice, take, linear, roll, mish_backward
+
+[  FAILED  ] KernelCompleteness.OneAPI (0 ms)
+[----------] 5 tests from KernelCompleteness (1039 ms total)
+
+[----------] Global test environment tear-down
+[==========] 5 tests from 1 test suite ran. (1039 ms total)
+[  PASSED  ] 3 tests.
+[  FAILED  ] 2 tests, listed below:
+[  FAILED  ] KernelCompleteness.ROCm
+[  FAILED  ] KernelCompleteness.OneAPI
+
+ 2 FAILED TESTS

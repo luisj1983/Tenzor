@@ -896,12 +896,40 @@ auto VulkanBackend::dispatchHyperbolicOp(const std::string& op_name,
 }
 
 auto VulkanBackend::dispatchComparisonOp(const std::string& op_name,
-                                          const Tensor& a, const Tensor& b) -> Tensor {
-    auto a_shape = a.shape();
-    auto b_shape = b.shape();
-    if (!std::equal(a_shape.begin(), a_shape.end(), b_shape.begin(), b_shape.end())) {
-        throw std::invalid_argument("Tensors must have same shape for comparison op");
+                                          const Tensor& a_in, const Tensor& b_in) -> Tensor {
+    // Broadcast inputs to a common shape per numpy rules. Previously this
+    // threw on any shape mismatch, which broke callers like MoE that pass
+    // e.g. eq(idx_col_shape_N, scalar_shape_1).
+    auto broadcast_shape = [](std::span<const int64_t> x, std::span<const int64_t> y)
+        -> std::vector<int64_t> {
+        std::vector<int64_t> out;
+        auto xi = x.rbegin(); auto yi = y.rbegin();
+        while (xi != x.rend() || yi != y.rend()) {
+            int64_t dx = (xi != x.rend()) ? *xi : 1;
+            int64_t dy = (yi != y.rend()) ? *yi : 1;
+            if (dx != dy && dx != 1 && dy != 1) return {};
+            out.push_back(std::max(dx, dy));
+            if (xi != x.rend()) ++xi;
+            if (yi != y.rend()) ++yi;
+        }
+        std::reverse(out.begin(), out.end());
+        return out;
+    };
+    Tensor a = a_in; Tensor b = b_in;
+    if (!std::equal(a.shape().begin(), a.shape().end(),
+                    b.shape().begin(), b.shape().end())) {
+        auto bcast = broadcast_shape(a.shape(), b.shape());
+        if (bcast.empty()) {
+            throw std::invalid_argument("Tensors not broadcastable for comparison op");
+        }
+        bool a_matches = std::equal(a.shape().begin(), a.shape().end(),
+                                     bcast.begin(), bcast.end());
+        bool b_matches = std::equal(b.shape().begin(), b.shape().end(),
+                                     bcast.begin(), bcast.end());
+        if (!a_matches) a = a_in.expand(bcast).contiguous();
+        if (!b_matches) b = b_in.expand(bcast).contiguous();
     }
+    auto a_shape = a.shape();
 
     // Handle empty tensors - no GPU work needed
     if (a.numel() == 0) {
@@ -2200,14 +2228,47 @@ auto VulkanBackend::dispatchCol2Im(const Tensor& input, const OpAttributes& attr
 
     int64_t batch = input_shape[0];
 
-    // Extract attributes
-    int64_t channels = attrs.get_int(AttrKey::Channels);
-    int64_t height = attrs.get_int(AttrKey::Height);
-    int64_t width = attrs.get_int(AttrKey::Width);
+    // Extract attributes. The public ops::fold() wrapper (src/ops/vision.cpp)
+    // stores the output H/W as a comma-separated AttrKey::OutputSize string
+    // and computes channels from input_shape[1] / (kernel^2); it does NOT set
+    // per-dim AttrKey::Channels / Height / Width. Previously we read those
+    // missing keys as 0, producing empty output tensors.
     int64_t kernel_size = attrs.get_int(AttrKey::KernelSize);
     int64_t stride = attrs.get_int(AttrKey::Stride, 1);
     int64_t padding = attrs.get_int(AttrKey::Padding, 0);
     int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+
+    int64_t height = 0, width = 0, channels = 0;
+    if (attrs.has(AttrKey::OutputSize)) {
+        auto parsed = attrs.get_int_list(AttrKey::OutputSize);
+        if (parsed.size() != 2) {
+            throw std::invalid_argument(
+                "col2im: OutputSize must have 2 elements (H, W); got " +
+                std::to_string(parsed.size()));
+        }
+        height = parsed[0];
+        width = parsed[1];
+    } else {
+        height = attrs.get_int(AttrKey::Height);
+        width = attrs.get_int(AttrKey::Width);
+    }
+    if (attrs.has(AttrKey::Channels)) {
+        channels = attrs.get_int(AttrKey::Channels);
+    } else {
+        // Derive channels from input: input shape (N, C*K*K, L) so
+        // C = second-dim / (kernel_size^2). Fall back if kernel_size <= 0.
+        if (kernel_size <= 0) {
+            throw std::invalid_argument("col2im: kernel_size must be positive");
+        }
+        int64_t col_dim = input_shape[1];
+        int64_t k_sq = kernel_size * kernel_size;
+        if (col_dim % k_sq != 0) {
+            throw std::invalid_argument(
+                "col2im: second input dim (" + std::to_string(col_dim) +
+                ") must be divisible by kernel^2 (" + std::to_string(k_sq) + ")");
+        }
+        channels = col_dim / k_sq;
+    }
 
     // Calculate output dimensions
     int64_t out_h = (height + 2*padding - dilation*(kernel_size-1) - 1) / stride + 1;

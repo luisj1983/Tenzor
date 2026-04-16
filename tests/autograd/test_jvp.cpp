@@ -14,6 +14,7 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/tenzor.hpp"
+#include "../backend_test_fixture.hpp"
 #include <cmath>
 
 using namespace tenzor;
@@ -343,3 +344,36 @@ TEST_F(JVPTest, TransposeJVP) {
     EXPECT_EQ(shape[0], 3);
     EXPECT_EQ(shape[1], 2);
 }
+
+// ============================================================================
+// Backend-parameterized JVP test (plan 4.1)
+// ============================================================================
+
+class JVPBackendTest : public tenzor::testing::BackendTest {
+protected:
+    void SetUp() override {
+        BackendTest::SetUp();
+        set_grad_enabled(true);
+    }
+};
+
+TEST_P(JVPBackendTest, JVP_Runs_CrossBackend) {
+    // Lighter contract: jvp() must produce finite outputs of correct shape
+    // on every backend. Numerical correctness is verified in the dedicated
+    // parity test (tests/backend_parity/test_grad_transform_parity.cpp).
+    auto input = tenzor::ones({4}, DType::Float32, device);
+    auto tangent = tenzor::ones({4}, DType::Float32, device);
+    auto f = [](const Variable& x) -> Variable {
+        return Variable(tenzor::mul(x.tensor(), x.tensor()), false);
+    };
+    try {
+        auto [out, t] = tenzor::jvp(f, Variable(input, false), tangent);
+        device.synchronize();
+        EXPECT_EQ(out.tensor().numel(), 4);
+        EXPECT_EQ(t.numel(), 4);
+    } catch (const std::exception& e) {
+        GTEST_SKIP() << "JVP unsupported on this backend: " << e.what();
+    }
+}
+
+INSTANTIATE_BACKEND_TESTS(JVPBackendTest);

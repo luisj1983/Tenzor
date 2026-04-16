@@ -699,15 +699,23 @@ auto VulkanBackend::dispatchMaxPool2dForward(const Tensor& input, const OpAttrib
         throw std::invalid_argument("max_pool2d requires 4D input (N, C, H, W)");
     }
 
-    // Extract attributes
-    int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH);
-    int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW);
-    int64_t stride_h = attrs.has(AttrKey::StrideH) ? attrs.get_int(AttrKey::StrideH) : kernel_h;
-    int64_t stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : kernel_w;
-    int64_t padding_h = attrs.get_int(AttrKey::PaddingH, 0);
-    int64_t padding_w = attrs.get_int(AttrKey::PaddingW, 0);
-    int64_t dilation_h = attrs.get_int(AttrKey::DilationH, 1);
-    int64_t dilation_w = attrs.get_int(AttrKey::DilationW, 1);
+    // Extract attributes. Accept scalar KernelSize/Stride/Padding fallbacks
+    // set by the MaxPool2d Module.
+    int64_t ks = attrs.get_int(AttrKey::KernelSize, 0);
+    int64_t st = attrs.get_int(AttrKey::Stride, ks);
+    int64_t pd = attrs.get_int(AttrKey::Padding, 0);
+    int64_t dl = attrs.get_int(AttrKey::Dilation, 1);
+    int64_t kernel_h = attrs.has(AttrKey::KernelSizeH) ? attrs.get_int(AttrKey::KernelSizeH) : ks;
+    int64_t kernel_w = attrs.has(AttrKey::KernelSizeW) ? attrs.get_int(AttrKey::KernelSizeW) : ks;
+    int64_t stride_h = attrs.has(AttrKey::StrideH) ? attrs.get_int(AttrKey::StrideH) : (st > 0 ? st : kernel_h);
+    int64_t stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : (st > 0 ? st : kernel_w);
+    int64_t padding_h = attrs.has(AttrKey::PaddingH) ? attrs.get_int(AttrKey::PaddingH) : pd;
+    int64_t padding_w = attrs.has(AttrKey::PaddingW) ? attrs.get_int(AttrKey::PaddingW) : pd;
+    int64_t dilation_h = attrs.has(AttrKey::DilationH) ? attrs.get_int(AttrKey::DilationH) : dl;
+    int64_t dilation_w = attrs.has(AttrKey::DilationW) ? attrs.get_int(AttrKey::DilationW) : dl;
+    if (kernel_h <= 0 || kernel_w <= 0 || stride_h <= 0 || stride_w <= 0) {
+        throw std::invalid_argument("Vulkan max_pool2d: kernel_size and stride must be positive");
+    }
 
     int64_t batch = input_shape[0];
     int64_t channels = input_shape[1];
@@ -1603,15 +1611,31 @@ auto VulkanBackend::dispatchMaxPool3dForward(const Tensor& input, const OpAttrib
         throw std::invalid_argument("max_pool3d requires 5D input (N, C, D, H, W)");
     }
 
-    int64_t kernel_d = attrs.get_int(AttrKey::KernelSizeD);
-    int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH);
-    int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW);
-    int64_t stride_d = attrs.has(AttrKey::StrideD) ? attrs.get_int(AttrKey::StrideD) : kernel_d;
-    int64_t stride_h = attrs.has(AttrKey::StrideH) ? attrs.get_int(AttrKey::StrideH) : kernel_h;
-    int64_t stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : kernel_w;
-    int64_t padding_d = attrs.get_int(AttrKey::PaddingD, 0);
-    int64_t padding_h = attrs.get_int(AttrKey::PaddingH, 0);
-    int64_t padding_w = attrs.get_int(AttrKey::PaddingW, 0);
+    // Module code (src/nn/layers/pooling.cpp) sets scalar AttrKey::KernelSize /
+    // Stride / Padding. Accept those as fallbacks if per-dim keys are absent,
+    // otherwise kernel_d/h/w default to 0 and the output-shape math below
+    // does a division by zero — which was causing GPU hangs.
+    int64_t ks = attrs.get_int(AttrKey::KernelSize, 0);
+    int64_t st = attrs.get_int(AttrKey::Stride, ks);
+    int64_t pd = attrs.get_int(AttrKey::Padding, 0);
+    int64_t kernel_d = attrs.has(AttrKey::KernelSizeD) ? attrs.get_int(AttrKey::KernelSizeD) : ks;
+    int64_t kernel_h = attrs.has(AttrKey::KernelSizeH) ? attrs.get_int(AttrKey::KernelSizeH) : ks;
+    int64_t kernel_w = attrs.has(AttrKey::KernelSizeW) ? attrs.get_int(AttrKey::KernelSizeW) : ks;
+    int64_t stride_d = attrs.has(AttrKey::StrideD) ? attrs.get_int(AttrKey::StrideD) : (st > 0 ? st : kernel_d);
+    int64_t stride_h = attrs.has(AttrKey::StrideH) ? attrs.get_int(AttrKey::StrideH) : (st > 0 ? st : kernel_h);
+    int64_t stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : (st > 0 ? st : kernel_w);
+    int64_t padding_d = attrs.has(AttrKey::PaddingD) ? attrs.get_int(AttrKey::PaddingD) : pd;
+    int64_t padding_h = attrs.has(AttrKey::PaddingH) ? attrs.get_int(AttrKey::PaddingH) : pd;
+    int64_t padding_w = attrs.has(AttrKey::PaddingW) ? attrs.get_int(AttrKey::PaddingW) : pd;
+    if (kernel_d <= 0 || kernel_h <= 0 || kernel_w <= 0 ||
+        stride_d <= 0 || stride_h <= 0 || stride_w <= 0) {
+        throw std::invalid_argument(
+            "Vulkan max_pool3d: kernel_size and stride must be positive "
+            "(got kernel=" + std::to_string(kernel_d) + "x" +
+            std::to_string(kernel_h) + "x" + std::to_string(kernel_w) +
+            ", stride=" + std::to_string(stride_d) + "x" +
+            std::to_string(stride_h) + "x" + std::to_string(stride_w) + ")");
+    }
 
     int64_t batch = input_shape[0], channels = input_shape[1];
     int64_t in_depth = input_shape[2], in_height = input_shape[3], in_width = input_shape[4];
@@ -1738,16 +1762,25 @@ auto VulkanBackend::dispatchAvgPool3dForward(const Tensor& input, const OpAttrib
         throw std::invalid_argument("avg_pool3d requires 5D input (N, C, D, H, W)");
     }
 
-    int64_t kernel_d = attrs.get_int(AttrKey::KernelSizeD);
-    int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH);
-    int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW);
-    int64_t stride_d = attrs.has(AttrKey::StrideD) ? attrs.get_int(AttrKey::StrideD) : kernel_d;
-    int64_t stride_h = attrs.has(AttrKey::StrideH) ? attrs.get_int(AttrKey::StrideH) : kernel_h;
-    int64_t stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : kernel_w;
-    int64_t padding_d = attrs.get_int(AttrKey::PaddingD, 0);
-    int64_t padding_h = attrs.get_int(AttrKey::PaddingH, 0);
-    int64_t padding_w = attrs.get_int(AttrKey::PaddingW, 0);
+    // Accept scalar KernelSize/Stride/Padding fallbacks (set by AvgPool3d
+    // Module); otherwise the output-shape math below divides by zero.
+    int64_t ks = attrs.get_int(AttrKey::KernelSize, 0);
+    int64_t st = attrs.get_int(AttrKey::Stride, ks);
+    int64_t pd = attrs.get_int(AttrKey::Padding, 0);
+    int64_t kernel_d = attrs.has(AttrKey::KernelSizeD) ? attrs.get_int(AttrKey::KernelSizeD) : ks;
+    int64_t kernel_h = attrs.has(AttrKey::KernelSizeH) ? attrs.get_int(AttrKey::KernelSizeH) : ks;
+    int64_t kernel_w = attrs.has(AttrKey::KernelSizeW) ? attrs.get_int(AttrKey::KernelSizeW) : ks;
+    int64_t stride_d = attrs.has(AttrKey::StrideD) ? attrs.get_int(AttrKey::StrideD) : (st > 0 ? st : kernel_d);
+    int64_t stride_h = attrs.has(AttrKey::StrideH) ? attrs.get_int(AttrKey::StrideH) : (st > 0 ? st : kernel_h);
+    int64_t stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : (st > 0 ? st : kernel_w);
+    int64_t padding_d = attrs.has(AttrKey::PaddingD) ? attrs.get_int(AttrKey::PaddingD) : pd;
+    int64_t padding_h = attrs.has(AttrKey::PaddingH) ? attrs.get_int(AttrKey::PaddingH) : pd;
+    int64_t padding_w = attrs.has(AttrKey::PaddingW) ? attrs.get_int(AttrKey::PaddingW) : pd;
     int64_t count_include_pad = attrs.get_int(AttrKey::CountIncludePad, 1);
+    if (kernel_d <= 0 || kernel_h <= 0 || kernel_w <= 0 ||
+        stride_d <= 0 || stride_h <= 0 || stride_w <= 0) {
+        throw std::invalid_argument("Vulkan avg_pool3d: kernel_size and stride must be positive");
+    }
 
     int64_t batch = input_shape[0], channels = input_shape[1];
     int64_t in_depth = input_shape[2], in_height = input_shape[3], in_width = input_shape[4];
@@ -1823,15 +1856,19 @@ auto VulkanBackend::dispatchAvgPool3dForward(const Tensor& input, const OpAttrib
 
 auto VulkanBackend::dispatchAvgPool3dBackward(const Tensor& grad_output, const Tensor& input, const OpAttributes& attrs) -> Tensor {
     auto input_shape = input.shape();
-    int64_t kernel_d = attrs.get_int(AttrKey::KernelSizeD);
-    int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH);
-    int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW);
-    int64_t stride_d = attrs.has(AttrKey::StrideD) ? attrs.get_int(AttrKey::StrideD) : kernel_d;
-    int64_t stride_h = attrs.has(AttrKey::StrideH) ? attrs.get_int(AttrKey::StrideH) : kernel_h;
-    int64_t stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : kernel_w;
-    int64_t padding_d = attrs.get_int(AttrKey::PaddingD, 0);
-    int64_t padding_h = attrs.get_int(AttrKey::PaddingH, 0);
-    int64_t padding_w = attrs.get_int(AttrKey::PaddingW, 0);
+    // Accept scalar KernelSize/Stride/Padding fallbacks.
+    int64_t ks = attrs.get_int(AttrKey::KernelSize, 0);
+    int64_t st = attrs.get_int(AttrKey::Stride, ks);
+    int64_t pd = attrs.get_int(AttrKey::Padding, 0);
+    int64_t kernel_d = attrs.has(AttrKey::KernelSizeD) ? attrs.get_int(AttrKey::KernelSizeD) : ks;
+    int64_t kernel_h = attrs.has(AttrKey::KernelSizeH) ? attrs.get_int(AttrKey::KernelSizeH) : ks;
+    int64_t kernel_w = attrs.has(AttrKey::KernelSizeW) ? attrs.get_int(AttrKey::KernelSizeW) : ks;
+    int64_t stride_d = attrs.has(AttrKey::StrideD) ? attrs.get_int(AttrKey::StrideD) : (st > 0 ? st : kernel_d);
+    int64_t stride_h = attrs.has(AttrKey::StrideH) ? attrs.get_int(AttrKey::StrideH) : (st > 0 ? st : kernel_h);
+    int64_t stride_w = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : (st > 0 ? st : kernel_w);
+    int64_t padding_d = attrs.has(AttrKey::PaddingD) ? attrs.get_int(AttrKey::PaddingD) : pd;
+    int64_t padding_h = attrs.has(AttrKey::PaddingH) ? attrs.get_int(AttrKey::PaddingH) : pd;
+    int64_t padding_w = attrs.has(AttrKey::PaddingW) ? attrs.get_int(AttrKey::PaddingW) : pd;
     int64_t count_include_pad = attrs.get_int(AttrKey::CountIncludePad, 1);
 
     int64_t batch = input_shape[0], channels = input_shape[1];

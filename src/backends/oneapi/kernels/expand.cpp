@@ -151,11 +151,18 @@ void expand_kernel_impl(const T* input_data, T* output_data,
  * @return Tensor Expanded tensor with target shape
  * @throws std::invalid_argument If shapes are incompatible or invalid
  */
-auto expand_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
+auto expand_kernel(const Tensor& input_in, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
     // Extract target shape from attributes
     if (!attrs.has(AttrKey::Shape)) {
         throw std::invalid_argument("expand: 'shape' attribute is required");
     }
+
+    // The kernel below recomputes input strides from the padded input shape,
+    // assuming a contiguous layout. If the caller passed a non-contiguous view
+    // (e.g. from permute/unsqueeze-on-permuted), the computed strides would not
+    // match the actual memory layout and the kernel would read wrong elements.
+    // Materialize to contiguous first, matching the CPU semantics.
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
 
     std::vector<int64_t> target_shape = attrs.get_int_list(AttrKey::Shape);
     auto input_shape_span = input.shape();

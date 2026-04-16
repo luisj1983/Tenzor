@@ -5,7 +5,10 @@
 layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { float grad_output[]; };
-layout(binding = 1) buffer Indices { float indices[]; };
+// Indices come from MaxPool3dForward as Int32 — read them with matching type
+// so the bit pattern is interpreted correctly. Reading Int32 bytes as float
+// silently corrupts every index.
+layout(binding = 1) buffer Indices { int indices[]; };
 layout(binding = 2) buffer GradInput { float grad_input[]; };
 
 layout(push_constant) uniform PushConstants {
@@ -18,7 +21,7 @@ void main() {
     if (idx >= params.n_elements) return;
 
     float grad = grad_output[idx];
-    int target_idx = int(indices[idx]);
+    int target_idx = indices[idx];
 
     if (target_idx >= 0 && target_idx < int(params.grad_input_size)) {
         atomicAdd(grad_input[target_idx], grad);

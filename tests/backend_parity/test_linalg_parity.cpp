@@ -444,7 +444,7 @@ TEST(LinalgParity, SolveTriangular) {
     }
 }
 
-
+// Pinv, LstSq, MatrixExp moved to test_linalg_extended_parity.cpp (plan 3.6).
 
 int main(int argc, char** argv) {
     try {

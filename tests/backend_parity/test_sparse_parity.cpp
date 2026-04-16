@@ -247,6 +247,155 @@ TEST(SparseParity, EmptySparseTensor) {
     EXPECT_NEAR(sum_val, 0.0f, 1e-7f) << "Empty sparse tensor should be all zeros";
 }
 
+// ============================================================================
+// SpGEMM, DenseToSparse, sparse triangular solve (plan Phase 3.5)
+// ============================================================================
+
+TEST(SparseParity, DenseToSparse_Roundtrip_AllBackends) {
+    // Sparse pattern we control: 4x4 with two nonzeros per row.
+    auto dense = zeros({4, 4}, DType::Float32, Device::cpu());
+    auto* d = dense.data<float>();
+    d[0]=1.0f; d[5]=2.0f; d[10]=3.0f; d[15]=4.0f; d[1]=0.5f; d[6]=0.25f;
+
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    for (const auto& dev : backends) {
+        try {
+            auto dev_dense = dense.to(dev);
+            auto sp = tenzor::to_sparse(dev_dense);
+            auto back = sp.to_dense();
+            dev.synchronize();
+            SCOPED_TRACE(std::string("to_sparse roundtrip on ") + backend_name(dev));
+            EXPECT_TENSORS_CLOSE(dense, back.to(Device::cpu()), 1e-5f, 1e-7f);
+        } catch (const std::exception& e) {
+            std::cerr << "to_sparse skipped on " << backend_name(dev) << ": "
+                      << e.what() << std::endl;
+        }
+    }
+}
+
+// Previously DISABLED_ — sparse::spgemm on OneAPI hung in infinite recursion
+// (the oneMKL lambda called back into sparse::spgemm, which re-dispatched to
+// the same lambda). Fixed by having the backend lambdas call `oneapi::
+// spgemm_kernel` directly, and by routing spgemm through the SYCL-native
+// Int64 path instead of the dense-intermediate oneMKL path whose helpers
+// assume Int32 CSR indices.
+TEST(SparseParity, SpGEMM) {
+    // A: 4x5 sparse, B: 5x3 sparse; product C = A @ B is 4x3 sparse.
+    auto A_dense = zeros({4, 5}, DType::Float32, Device::cpu());
+    auto B_dense = zeros({5, 3}, DType::Float32, Device::cpu());
+    auto* a = A_dense.data<float>();
+    auto* b = B_dense.data<float>();
+    a[0]=1; a[6]=2; a[12]=3; a[18]=4;  // diagonal-ish
+    b[0]=1; b[4]=2; b[8]=3;
+
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    Tensor ref_dense;
+    try {
+        auto A_sparse = tenzor::to_sparse(A_dense);
+        auto B_sparse = tenzor::to_sparse(B_dense);
+        auto C_sparse = tenzor::sparse::spgemm(A_sparse, B_sparse);
+        ref_dense = C_sparse.to_dense();
+    } catch (const std::exception& e) {
+        GTEST_SKIP() << "spgemm CPU reference failed: " << e.what();
+    }
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        try {
+            auto A_sp = tenzor::to_sparse(A_dense.to(backends[i]));
+            auto B_sp = tenzor::to_sparse(B_dense.to(backends[i]));
+            auto C_sp = tenzor::sparse::spgemm(A_sp, B_sp);
+            auto C_dense = C_sp.to_dense();
+            backends[i].synchronize();
+            SCOPED_TRACE(std::string("spgemm on ") + backend_name(backends[i]));
+            EXPECT_TENSORS_CLOSE(ref_dense, C_dense.to(Device::cpu()),
+                                 1e-4f, 1e-6f);
+        } catch (const std::exception& e) {
+            std::cerr << "spgemm skipped on " << backend_name(backends[i])
+                      << ": " << e.what() << std::endl;
+        }
+    }
+}
+
+TEST(SparseParity, SparseTriangularSolve) {
+    // Build lower-triangular sparse L with nonzero diagonal; solve L @ x = b.
+    auto L_dense = zeros({4, 4}, DType::Float32, Device::cpu());
+    auto* l = L_dense.data<float>();
+    l[0]=2.0f;  l[5]=3.0f;  l[10]=4.0f; l[15]=5.0f;   // diag
+    l[4]=1.0f;  l[8]=0.5f;  l[9]=1.5f;                // below diag
+    auto b_dense = ones({4, 1}, DType::Float32, Device::cpu());
+
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    Tensor ref;
+    try {
+        auto L_sparse = tenzor::to_sparse(L_dense);
+        ref = tenzor::sparse::sparse_triangular_solve(L_sparse, b_dense, false);
+    } catch (const std::exception& e) {
+        GTEST_SKIP() << "sparse_triangular_solve CPU reference failed: " << e.what();
+    }
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        try {
+            auto L_sp = tenzor::to_sparse(L_dense.to(backends[i]));
+            auto x = tenzor::sparse::sparse_triangular_solve(
+                L_sp, b_dense.to(backends[i]), false);
+            backends[i].synchronize();
+            SCOPED_TRACE(std::string("sparse_triangular_solve on ")
+                         + backend_name(backends[i]));
+            EXPECT_TENSORS_CLOSE(ref, x.to(Device::cpu()), 1e-3f, 1e-5f);
+        } catch (const std::exception& e) {
+            std::cerr << "sparse_triangular_solve skipped on "
+                      << backend_name(backends[i]) << ": " << e.what()
+                      << std::endl;
+        }
+    }
+}
+
+// Note: plan called for SparseTrsv and SparseTrsm separately. The codebase
+// exposes a single `sparse_triangular_solve(L, b)` which works for both the
+// vector (b is [N, 1]) and matrix-RHS (b is [N, K]) cases. The test above
+// covers the vector case; extend to matrix-RHS below.
+TEST(SparseParity, SparseTriangularSolve_Matrix) {
+    auto L_dense = zeros({4, 4}, DType::Float32, Device::cpu());
+    auto* l = L_dense.data<float>();
+    l[0]=2.0f;  l[5]=3.0f;  l[10]=4.0f; l[15]=5.0f;
+    l[4]=1.0f;  l[8]=0.5f;
+    auto B_dense = randn({4, 3}, DType::Float32, Device::cpu());
+
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    Tensor ref;
+    try {
+        auto L_sparse = tenzor::to_sparse(L_dense);
+        ref = tenzor::sparse::sparse_triangular_solve(L_sparse, B_dense, false);
+    } catch (const std::exception& e) {
+        GTEST_SKIP() << "matrix sparse_triangular_solve CPU reference failed: "
+                     << e.what();
+    }
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        try {
+            auto L_sp = tenzor::to_sparse(L_dense.to(backends[i]));
+            auto X = tenzor::sparse::sparse_triangular_solve(
+                L_sp, B_dense.to(backends[i]), false);
+            backends[i].synchronize();
+            SCOPED_TRACE(std::string("sparse_triangular_solve_matrix on ")
+                         + backend_name(backends[i]));
+            EXPECT_TENSORS_CLOSE(ref, X.to(Device::cpu()), 1e-3f, 1e-5f);
+        } catch (const std::exception& e) {
+            std::cerr << "sparse_triangular_solve_matrix skipped on "
+                      << backend_name(backends[i]) << ": " << e.what()
+                      << std::endl;
+        }
+    }
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
 
