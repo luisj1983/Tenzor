@@ -167,13 +167,62 @@ TEST(JitScript, RejectsIfElse) {
     }, std::runtime_error);
 }
 
-TEST(JitScript, RejectsMethodCall) {
+// Zero-argument method calls are now supported (relu / sigmoid / tanh / exp /
+// log / sqrt / abs / neg / sum / mean / sin / cos).
+TEST(JitScript, MethodCallMean) {
+    auto compiled = jit::compile_script(R"(
+        def forward(x):
+            return x.mean()
+    )");
+    auto input = Variable(ones({4}, DType::Float32, Device::cpu()) * 3.0f, false);
+    auto out = compiled->forward(input);
+    EXPECT_NEAR(out.tensor().item<float>(), 3.0f, 1e-6f);
+}
+
+TEST(JitScript, MethodCallChained) {
+    auto compiled = jit::compile_script(R"(
+        def forward(x):
+            return (x * x).sum().sqrt()
+    )");
+    auto input = Variable(ones({3}, DType::Float32, Device::cpu()) * 2.0f, false);
+    // sum(x*x) = 4+4+4 = 12; sqrt = ~3.4641
+    auto out = compiled->forward(input);
+    EXPECT_NEAR(out.tensor().item<float>(), std::sqrt(12.0f), 1e-5f);
+}
+
+TEST(JitScript, RejectsUnknownMethod) {
     EXPECT_THROW({
         jit::compile_script(R"(
             def forward(x):
-                return x.mean()
+                return x.does_not_exist()
         )");
     }, std::runtime_error);
+}
+
+// Variable assignment.
+TEST(JitScript, Assignment) {
+    auto compiled = jit::compile_script(R"(
+        def forward(x):
+            y = x * 2.0
+            z = y + 1.0
+            return z * z
+    )");
+    auto input = Variable(ones({1}, DType::Float32, Device::cpu()) * 3.0f, false);
+    // y = 6, z = 7, z*z = 49
+    auto out = compiled->forward(input);
+    EXPECT_NEAR(out.tensor().item<float>(), 49.0f, 1e-5f);
+}
+
+TEST(JitScript, AssignmentWithMethodCall) {
+    auto compiled = jit::compile_script(R"(
+        def forward(x):
+            s = x.sigmoid()
+            return s * s
+    )");
+    auto input = Variable(ones({1}, DType::Float32, Device::cpu()) * 0.0f, false);
+    // sigmoid(0) = 0.5 → 0.25
+    auto out = compiled->forward(input);
+    EXPECT_NEAR(out.tensor().item<float>(), 0.25f, 1e-5f);
 }
 
 TEST(JitScript, RejectsMissingReturn) {
@@ -206,4 +255,147 @@ TEST(JitScript, RejectsMalformedSyntax) {
 
 TEST(JitScript, RejectsNullSource) {
     EXPECT_THROW({ jit::compile_script(nullptr); }, std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// Control flow: if / else and for-range
+// ---------------------------------------------------------------------------
+
+// Control flow is traced through jit::cond: during trace() with a fixed
+// dummy, the taken branch's ops are recorded. The compiled module replays
+// those ops for any subsequent input (a standard trace-based JIT semantic).
+// Full dynamic branch dispatch via trace_if subgraphs is still deferred.
+TEST(JitScript, IfElseThenPathTracedWithPositiveDummy) {
+    const char* src = R"(
+        def forward(x):
+            if x > 0.0:
+                y = x * 2.0
+            else:
+                y = x.neg()
+            return y + 1.0
+    )";
+    Tensor dummy = full({}, 1.0f, DType::Float32, Device::cpu());   // 1 > 0 → then
+    auto compiled = jit::compile_script(src, dummy);
+    auto x_pos = Variable(full({}, 3.0f, DType::Float32, Device::cpu()), false);
+    EXPECT_NEAR(compiled->forward(x_pos).tensor().item<float>(), 7.0f, 1e-5f);
+}
+
+TEST(JitScript, IfElseElsePathTracedWithNegativeDummy) {
+    const char* src = R"(
+        def forward(x):
+            if x > 0.0:
+                y = x * 2.0
+            else:
+                y = x.neg()
+            return y + 1.0
+    )";
+    Tensor dummy = full({}, -1.0f, DType::Float32, Device::cpu());  // -1 > 0 false → else
+    auto compiled = jit::compile_script(src, dummy);
+    auto x_neg = Variable(full({}, -2.0f, DType::Float32, Device::cpu()), false);
+    // Else branch: y = -(-2) = 2; return 2 + 1 = 3.
+    EXPECT_NEAR(compiled->forward(x_neg).tensor().item<float>(), 3.0f, 1e-5f);
+}
+
+TEST(JitScript, IfWithoutElse) {
+    const char* src = R"(
+        def forward(x):
+            y = x
+            if x > 0.0:
+                y = x * x
+            return y
+    )";
+    Tensor dummy = full({}, 1.0f, DType::Float32, Device::cpu());
+    auto compiled = jit::compile_script(src, dummy);
+    auto x_pos = Variable(full({}, 4.0f, DType::Float32, Device::cpu()), false);
+    EXPECT_NEAR(compiled->forward(x_pos).tensor().item<float>(), 16.0f, 1e-5f);
+}
+
+TEST(JitScript, ForRangeUnrolled) {
+    // y = x; for 4 iterations y = y * 2 → y = x * 16
+    auto compiled = jit::compile_script(R"(
+        def forward(x):
+            y = x
+            for i in range(4):
+                y = y * 2.0
+            return y
+    )");
+    auto x = Variable(full({}, 1.0f, DType::Float32, Device::cpu()), false);
+    EXPECT_NEAR(compiled->forward(x).tensor().item<float>(), 16.0f, 1e-5f);
+}
+
+TEST(JitScript, ForRangeZero) {
+    // Loop runs zero times; returned unchanged.
+    auto compiled = jit::compile_script(R"(
+        def forward(x):
+            y = x
+            for i in range(0):
+                y = y * 999.0
+            return y
+    )");
+    auto x = Variable(full({}, 7.0f, DType::Float32, Device::cpu()), false);
+    EXPECT_NEAR(compiled->forward(x).tensor().item<float>(), 7.0f, 1e-5f);
+}
+
+// ---------------------------------------------------------------------------
+// Method calls with arguments
+// ---------------------------------------------------------------------------
+
+TEST(JitScript, MethodPow) {
+    auto compiled = jit::compile_script(R"(
+        def forward(x):
+            return x.pow(2.0) + 1.0
+    )");
+    auto x = Variable(full({}, 3.0f, DType::Float32, Device::cpu()), false);
+    EXPECT_NEAR(compiled->forward(x).tensor().item<float>(), 10.0f, 1e-5f);
+}
+
+TEST(JitScript, MethodClamp) {
+    auto compiled = jit::compile_script(R"(
+        def forward(x):
+            return x.clamp(-1.0, 1.0)
+    )");
+    auto x_hi = Variable(full({}, 5.0f, DType::Float32, Device::cpu()), false);
+    EXPECT_NEAR(compiled->forward(x_hi).tensor().item<float>(), 1.0f, 1e-6f);
+    auto x_lo = Variable(full({}, -5.0f, DType::Float32, Device::cpu()), false);
+    EXPECT_NEAR(compiled->forward(x_lo).tensor().item<float>(), -1.0f, 1e-6f);
+    auto x_mid = Variable(full({}, 0.5f, DType::Float32, Device::cpu()), false);
+    EXPECT_NEAR(compiled->forward(x_mid).tensor().item<float>(), 0.5f, 1e-6f);
+}
+
+TEST(JitScript, MethodSumDim) {
+    Tensor dummy = ones({3, 4}, DType::Float32, Device::cpu());
+    auto compiled = jit::compile_script(R"(
+        def forward(x):
+            return x.sum(1)
+    )", dummy);
+    Tensor data = ones({3, 4}, DType::Float32, Device::cpu()) * 2.0f;
+    auto x = Variable(data, false);
+    auto out = compiled->forward(x);
+    // sum over dim=1 of a (3,4) tensor with each entry 2 → (3,) with each 8.
+    EXPECT_EQ(out.tensor().shape().size(), 1u);
+    EXPECT_EQ(out.tensor().shape()[0], 3);
+    auto* p = out.tensor().data<float>();
+    for (int i = 0; i < 3; ++i) EXPECT_NEAR(p[i], 8.0f, 1e-5f);
+}
+
+TEST(JitScript, MethodCallArgCountMismatch) {
+    EXPECT_THROW({
+        auto c = jit::compile_script(R"(
+            def forward(x):
+                return x.pow(1.0, 2.0)
+        )");
+        auto x = Variable(full({}, 3.0f, DType::Float32, Device::cpu()), false);
+        c->forward(x);
+    }, std::runtime_error);
+}
+
+TEST(JitScript, RejectsMalformedIfMissingColon) {
+    EXPECT_THROW({
+        jit::compile_script(R"(
+            def forward(x):
+                if x > 0
+                    y = x
+                return x
+        )");
+    }, std::runtime_error);
 }

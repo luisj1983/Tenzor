@@ -3,6 +3,7 @@
 #include <sycl/sycl.hpp>
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <stdexcept>
 
 #ifdef TENZOR_HAS_ONEMKL
@@ -1915,6 +1916,34 @@ auto sqrt_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             out_ptr[idx] = f32_to_bf16(sycl::sqrt(bf16_to_f32(in_ptr[idx])));
         }).wait();
     }
+    else if (input.dtype() == DType::Complex64) {
+        const auto* in_ptr = get_data_ptr<const std::complex<float>>(input);
+        auto* out_ptr = get_data_ptr<std::complex<float>>(output);
+        queue.parallel_for<class SqrtKernelComplex64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float a = in_ptr[idx].real();
+            float b = in_ptr[idx].imag();
+            if (a == 0.0f && b == 0.0f) { out_ptr[idx] = std::complex<float>(0.0f, 0.0f); return; }
+            float s = sycl::sqrt(0.5f * (sycl::fabs(a) + sycl::hypot(a, b)));
+            float re, im;
+            if (a >= 0.0f) { re = s;                     im = b / (2.0f * s); }
+            else            { re = sycl::fabs(b) / (2.0f * s); im = sycl::copysign(s, b); }
+            out_ptr[idx] = std::complex<float>(re, im);
+        }).wait();
+    }
+    else if (input.dtype() == DType::Complex128) {
+        const auto* in_ptr = get_data_ptr<const std::complex<double>>(input);
+        auto* out_ptr = get_data_ptr<std::complex<double>>(output);
+        queue.parallel_for<class SqrtKernelComplex128>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double a = in_ptr[idx].real();
+            double b = in_ptr[idx].imag();
+            if (a == 0.0 && b == 0.0) { out_ptr[idx] = std::complex<double>(0.0, 0.0); return; }
+            double s = sycl::sqrt(0.5 * (sycl::fabs(a) + sycl::hypot(a, b)));
+            double re, im;
+            if (a >= 0.0) { re = s;                  im = b / (2.0 * s); }
+            else           { re = sycl::fabs(b) / (2.0 * s); im = sycl::copysign(s, b); }
+            out_ptr[idx] = std::complex<double>(re, im);
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for sqrt");
     }
@@ -1969,6 +1998,20 @@ auto neg_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             out_ptr[idx] = -in_ptr[idx];
         }).wait();
     }
+    else if (input.dtype() == DType::Complex64) {
+        const auto* in_ptr  = get_data_ptr<const std::complex<float>>(input);
+        auto*       out_ptr = get_data_ptr<std::complex<float>>(output);
+        queue.parallel_for<class NegKernelComplex64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = -in_ptr[idx];
+        }).wait();
+    }
+    else if (input.dtype() == DType::Complex128) {
+        const auto* in_ptr  = get_data_ptr<const std::complex<double>>(input);
+        auto*       out_ptr = get_data_ptr<std::complex<double>>(output);
+        queue.parallel_for<class NegKernelComplex128>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = -in_ptr[idx];
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for negation");
     }
@@ -1978,10 +2021,30 @@ auto neg_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 
 // Absolute value kernel
 auto abs_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
-    Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                  input.dtype(), input.device());
-
     const int64_t numel = input.numel();
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+
+    // Complex → real magnitude: allocate output with reduced dtype.
+    if (input.dtype() == DType::Complex64) {
+        Tensor output(shape_vec, DType::Float32, input.device());
+        const auto* in_ptr  = get_data_ptr<const std::complex<float>>(input);
+        float*      out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for<class AbsKernelComplex64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = sycl::hypot(in_ptr[idx].real(), in_ptr[idx].imag());
+        }).wait();
+        return output;
+    }
+    if (input.dtype() == DType::Complex128) {
+        Tensor output(shape_vec, DType::Float64, input.device());
+        const auto* in_ptr  = get_data_ptr<const std::complex<double>>(input);
+        double*     out_ptr = get_data_ptr<double>(output);
+        queue.parallel_for<class AbsKernelComplex128>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = sycl::hypot(in_ptr[idx].real(), in_ptr[idx].imag());
+        }).wait();
+        return output;
+    }
+
+    Tensor output(shape_vec, input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
         const float* in_ptr = get_data_ptr<const float>(input);
@@ -2069,6 +2132,24 @@ auto log_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             out_ptr[idx] = f32_to_bf16(sycl::log(bf16_to_f32(in_ptr[idx])));
         }).wait();
     }
+    else if (input.dtype() == DType::Complex64) {
+        const auto* in_ptr = get_data_ptr<const std::complex<float>>(input);
+        auto* out_ptr = get_data_ptr<std::complex<float>>(output);
+        queue.parallel_for<class LogKernelComplex64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float a = in_ptr[idx].real();
+            float b = in_ptr[idx].imag();
+            out_ptr[idx] = std::complex<float>(sycl::log(sycl::hypot(a, b)), sycl::atan2(b, a));
+        }).wait();
+    }
+    else if (input.dtype() == DType::Complex128) {
+        const auto* in_ptr = get_data_ptr<const std::complex<double>>(input);
+        auto* out_ptr = get_data_ptr<std::complex<double>>(output);
+        queue.parallel_for<class LogKernelComplex128>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double a = in_ptr[idx].real();
+            double b = in_ptr[idx].imag();
+            out_ptr[idx] = std::complex<double>(sycl::log(sycl::hypot(a, b)), sycl::atan2(b, a));
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for log");
     }
@@ -2114,6 +2195,26 @@ auto exp_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 
         queue.parallel_for<ExpKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = f32_to_bf16(sycl::exp(bf16_to_f32(in_ptr[idx])));
+        }).wait();
+    }
+    else if (input.dtype() == DType::Complex64) {
+        const auto* in_ptr = get_data_ptr<const std::complex<float>>(input);
+        auto* out_ptr = get_data_ptr<std::complex<float>>(output);
+        queue.parallel_for<class ExpKernelComplex64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float a = in_ptr[idx].real();
+            float b = in_ptr[idx].imag();
+            float ea = sycl::exp(a);
+            out_ptr[idx] = std::complex<float>(ea * sycl::cos(b), ea * sycl::sin(b));
+        }).wait();
+    }
+    else if (input.dtype() == DType::Complex128) {
+        const auto* in_ptr = get_data_ptr<const std::complex<double>>(input);
+        auto* out_ptr = get_data_ptr<std::complex<double>>(output);
+        queue.parallel_for<class ExpKernelComplex128>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double a = in_ptr[idx].real();
+            double b = in_ptr[idx].imag();
+            double ea = sycl::exp(a);
+            out_ptr[idx] = std::complex<double>(ea * sycl::cos(b), ea * sycl::sin(b));
         }).wait();
     }
     else {
@@ -2276,6 +2377,26 @@ auto sin_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             out_ptr[idx] = f32_to_bf16(sycl::sin(bf16_to_f32(in_ptr[idx])));
         }).wait();
     }
+    else if (input.dtype() == DType::Complex64) {
+        const auto* in_ptr = get_data_ptr<const std::complex<float>>(input);
+        auto* out_ptr = get_data_ptr<std::complex<float>>(output);
+        queue.parallel_for<class SinKernelComplex64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float a = in_ptr[idx].real();
+            float b = in_ptr[idx].imag();
+            out_ptr[idx] = std::complex<float>(
+                sycl::sin(a) * sycl::cosh(b), sycl::cos(a) * sycl::sinh(b));
+        }).wait();
+    }
+    else if (input.dtype() == DType::Complex128) {
+        const auto* in_ptr = get_data_ptr<const std::complex<double>>(input);
+        auto* out_ptr = get_data_ptr<std::complex<double>>(output);
+        queue.parallel_for<class SinKernelComplex128>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double a = in_ptr[idx].real();
+            double b = in_ptr[idx].imag();
+            out_ptr[idx] = std::complex<double>(
+                sycl::sin(a) * sycl::cosh(b), sycl::cos(a) * sycl::sinh(b));
+        }).wait();
+    }
     else {
         throw std::runtime_error("sin: unsupported dtype");
     }
@@ -2318,6 +2439,26 @@ auto cos_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
         queue.parallel_for<CosKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = f32_to_bf16(sycl::cos(bf16_to_f32(in_ptr[idx])));
+        }).wait();
+    }
+    else if (input.dtype() == DType::Complex64) {
+        const auto* in_ptr = get_data_ptr<const std::complex<float>>(input);
+        auto* out_ptr = get_data_ptr<std::complex<float>>(output);
+        queue.parallel_for<class CosKernelComplex64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float a = in_ptr[idx].real();
+            float b = in_ptr[idx].imag();
+            out_ptr[idx] = std::complex<float>(
+                sycl::cos(a) * sycl::cosh(b), -sycl::sin(a) * sycl::sinh(b));
+        }).wait();
+    }
+    else if (input.dtype() == DType::Complex128) {
+        const auto* in_ptr = get_data_ptr<const std::complex<double>>(input);
+        auto* out_ptr = get_data_ptr<std::complex<double>>(output);
+        queue.parallel_for<class CosKernelComplex128>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double a = in_ptr[idx].real();
+            double b = in_ptr[idx].imag();
+            out_ptr[idx] = std::complex<double>(
+                sycl::cos(a) * sycl::cosh(b), -sycl::sin(a) * sycl::sinh(b));
         }).wait();
     }
     else {

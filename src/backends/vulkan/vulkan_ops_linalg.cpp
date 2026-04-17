@@ -647,6 +647,14 @@ auto VulkanBackend::dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Ten
         std::string shader = is_f64 ? "linalg_solve_f64" : is_f16 ? "linalg_solve_f16" : "linalg_solve";
         auto* pipeline = getPipeline(shader, device_id);
 
+        // Extract nrhs from B's trailing dim (B shape is (..., N, nrhs) or
+        // (..., N) for the nrhs=1 case).
+        int64_t b_ndim_small = static_cast<int64_t>(b_shape.size());
+        int64_t nrhs_small = (b_ndim_small >= 2 &&
+                              b_shape[b_ndim_small - 2] == n)
+                                 ? b_shape[b_ndim_small - 1]
+                                 : 1;
+
         struct PushConstants {
             uint32_t n;
             uint32_t batch;
@@ -654,13 +662,13 @@ auto VulkanBackend::dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Ten
         } pc;
         pc.n = static_cast<uint32_t>(n);
         pc.batch = static_cast<uint32_t>(batch_size);
-        pc.nrhs = 1;
+        pc.nrhs = static_cast<uint32_t>(nrhs_small);
 
         auto a_cont = a.contiguous();
         auto b_cont = b.contiguous();
         size_t elem_size = is_f64 ? 8 : is_f16 ? 2 : 4;
         size_t a_numel = batch_size * n * n;
-        size_t b_numel = batch_size * n;
+        size_t b_numel = batch_size * n * nrhs_small;
         size_t a_size = is_f16 ? f16_buf(a_numel) : a_numel * elem_size;
         size_t b_size = is_f16 ? f16_buf(b_numel) : b_numel * elem_size;
 

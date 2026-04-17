@@ -9,8 +9,6 @@
  * - Tracing with different dtypes
  * - Optimization passes
  * - Serialization/deserialization across dtypes
- *
- * Note: Many tests are currently disabled as JIT API is incomplete.
  */
 
 #include <gtest/gtest.h>
@@ -237,17 +235,17 @@ TEST_P(JITMultiDTypeTest, CompileComplexFunction) {
 // ============================================================================
 
 TEST_P(JITMultiDTypeTest, CompileScriptModule) {
-    // LIMITATION: the MVP compile_script() traces with a CPU+Float32 dummy
-    // input so the returned CompiledModule is specialized for that
-    // combination. Dtype / device polymorphism is future work; on other
-    // parameterizations this test is expected to FAIL until compile_script
-    // accepts a caller-supplied dummy.
     const char* script = R"(
         def forward(x):
             return x * 2.0 + 1.0
     )";
 
-    auto compiled = jit::compile_script(script);
+    // The traced graph is specialised for the dummy input's dtype, device,
+    // and shape. Pass a dummy matching the runtime input so the graph's
+    // recorded operations produce a compatible output. Shape polymorphism
+    // (tracing with {1} and running with {2,3}) is a future tracer feature.
+    auto dummy = tenzor::ones({2, 3}, DType::Float32, Device::cpu()).to(dtype()).to(device());
+    auto compiled = jit::compile_script(script, dummy);
     ASSERT_NE(compiled, nullptr);
 
     Variable input = createInput({2, 3}, false);
@@ -644,12 +642,10 @@ INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(JITMultiDTypeTest);
 /*
  * COVERAGE SUMMARY:
  *
- * Test Cases: 21 (all currently skipped - JIT API incomplete)
- * DTypes Tested: Float32, Float64, Float16
- * Backends Tested: CPU, CUDA, OneAPI
- * Total Scenarios: 21 tests × 3 dtypes × 3 backends = 189 test scenarios
+ * Test Cases: 20 × (CPU, CUDA, Vulkan, OneAPI, ROCm) × (Float32, Float64, Float16)
+ * = 300 parameterized scenarios registered via INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS.
  *
- * Coverage (when JIT API is complete):
+ * Coverage:
  * - Trace mode: simple model, conv model, with batch norm
  * - Function compilation: simple, complex
  * - Script compilation: module, with control flow

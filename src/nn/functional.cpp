@@ -23,6 +23,72 @@
 
 namespace tenzor::nn::functional {
 
+namespace {
+
+// Serialize a shape vector as the comma-separated int-list the backward
+// kernel registries expect via AttrKey::InputShape.
+inline std::string shape_to_csv(const std::vector<int64_t>& shape) {
+    std::string s;
+    for (size_t i = 0; i < shape.size(); ++i) {
+        if (i) s += ',';
+        s += std::to_string(shape[i]);
+    }
+    return s;
+}
+
+// Backward node for ops whose backward kernel takes
+// [grad_output, indices] and attr InputShape, returning grad_input.
+// Covers MaxUnpool2d/3dBackward and FractionalMaxPool2d/3dBackward.
+template <OpId BackwardOp>
+class IndexedPoolBackward : public Function {
+public:
+    IndexedPoolBackward(std::vector<int64_t> input_shape, Tensor indices)
+        : input_shape_(std::move(input_shape)) {
+        save_for_backward({std::move(indices)});
+    }
+
+    auto forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> override {
+        throw std::runtime_error("IndexedPoolBackward::forward should not be called");
+    }
+
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        OpAttributes attrs;
+        attrs.set(AttrKey::InputShape, shape_to_csv(input_shape_));
+        std::vector<Tensor> inputs = {grad_outputs[0], saved_tensors_[0]};
+        auto result = dispatch_to_device(BackwardOp,
+            grad_outputs[0].device().type, inputs, attrs);
+        return {result[0]};
+    }
+
+    auto backward_with_variables(std::vector<Variable> grad_outputs)
+        -> std::vector<Variable> override {
+        std::vector<Tensor> tensor_grads;
+        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
+        auto results = backward(std::move(tensor_grads));
+        std::vector<Variable> var_results;
+        for (auto& t : results) var_results.emplace_back(t, false);
+        return var_results;
+    }
+
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
+
+private:
+    std::vector<int64_t> input_shape_;
+};
+
+inline void wire_pool_grad_fn(Variable& result, const Variable& input,
+                              std::shared_ptr<Function> backward_fn) {
+    result.set_grad_fn(backward_fn);
+    std::vector<Variable> input_vars{input};
+    backward_fn->set_input_variables(input_vars);
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    if (input.grad_fn()) next_funcs.push_back(input.grad_fn());
+    backward_fn->set_next_functions(next_funcs);
+}
+
+}  // anonymous namespace
+
 // ============================================================================
 // Convolution
 // ============================================================================
@@ -1005,7 +1071,16 @@ auto fractional_max_pool2d(const Variable& input,
     auto result = dispatch_to_device(OpId::FractionalMaxPool2dForward,
         input.tensor().device().type, inputs_vec, attrs);
 
-    return {Variable(result[0], input.requires_grad()), result[1]};
+    Variable out(result[0], input.requires_grad());
+    Tensor indices = result[1];
+    if (input.requires_grad() && ::tenzor::is_grad_enabled()) {
+        std::vector<int64_t> in_shape(input.shape().begin(), input.shape().end());
+        auto backward_fn = std::make_shared<
+            IndexedPoolBackward<OpId::FractionalMaxPool2dBackward>>(
+                std::move(in_shape), indices);
+        wire_pool_grad_fn(out, input, backward_fn);
+    }
+    return {std::move(out), indices};
 }
 
 auto fractional_max_pool3d(const Variable& input,
@@ -1032,7 +1107,16 @@ auto fractional_max_pool3d(const Variable& input,
     auto result = dispatch_to_device(OpId::FractionalMaxPool3dForward,
         input.tensor().device().type, inputs_vec, attrs);
 
-    return {Variable(result[0], input.requires_grad()), result[1]};
+    Variable out(result[0], input.requires_grad());
+    Tensor indices = result[1];
+    if (input.requires_grad() && ::tenzor::is_grad_enabled()) {
+        std::vector<int64_t> in_shape(input.shape().begin(), input.shape().end());
+        auto backward_fn = std::make_shared<
+            IndexedPoolBackward<OpId::FractionalMaxPool3dBackward>>(
+                std::move(in_shape), indices);
+        wire_pool_grad_fn(out, input, backward_fn);
+    }
+    return {std::move(out), indices};
 }
 
 // ============================================================================
@@ -1075,7 +1159,15 @@ auto max_unpool2d(const Variable& input, const Tensor& indices,
     auto result = dispatch_to_device(OpId::MaxUnpool2dForward,
         input.tensor().device().type, inputs_vec, attrs);
 
-    return Variable(result[0], input.requires_grad());
+    Variable out(result[0], input.requires_grad());
+    if (input.requires_grad() && ::tenzor::is_grad_enabled()) {
+        std::vector<int64_t> in_shape(input.shape().begin(), input.shape().end());
+        auto backward_fn = std::make_shared<
+            IndexedPoolBackward<OpId::MaxUnpool2dBackward>>(
+                std::move(in_shape), indices);
+        wire_pool_grad_fn(out, input, backward_fn);
+    }
+    return out;
 }
 
 auto max_unpool3d(const Variable& input, const Tensor& indices,
@@ -1120,7 +1212,15 @@ auto max_unpool3d(const Variable& input, const Tensor& indices,
     auto result = dispatch_to_device(OpId::MaxUnpool3dForward,
         input.tensor().device().type, inputs_vec, attrs);
 
-    return Variable(result[0], input.requires_grad());
+    Variable out(result[0], input.requires_grad());
+    if (input.requires_grad() && ::tenzor::is_grad_enabled()) {
+        std::vector<int64_t> in_shape(input.shape().begin(), input.shape().end());
+        auto backward_fn = std::make_shared<
+            IndexedPoolBackward<OpId::MaxUnpool3dBackward>>(
+                std::move(in_shape), indices);
+        wire_pool_grad_fn(out, input, backward_fn);
+    }
+    return out;
 }
 
 // ============================================================================

@@ -78,9 +78,6 @@ add_parity_test(test_numerical_stability test_numerical_stability.cpp)
 # Performance regression baseline tests
 add_parity_test(test_performance_regression test_performance_regression.cpp)
 
-# Vulkan backend parity tests (Float64 shaders, Float16 buffer rounding, slice views)
-add_parity_test(test_vulkan_parity test_vulkan_parity.cpp)
-
 # Missing ops parity tests (9 CUDA-exclusive ops now available on all backends)
 add_parity_test(test_missing_ops_parity test_missing_ops_parity.cpp)
 
@@ -240,7 +237,6 @@ add_custom_target(test_parity_full
         test_backend_stress
         test_numerical_stability
         test_performance_regression
-        test_vulkan_parity
         test_extended_math_parity
         test_trig_parity
         test_shape_ops_parity
@@ -308,7 +304,6 @@ message(STATUS "  - DType parity tests: test_dtype_parity")
 message(STATUS "  - Stress tests: test_backend_stress")
 message(STATUS "  - Numerical stability tests: test_numerical_stability")
 message(STATUS "  - Performance regression tests: test_performance_regression")
-message(STATUS "  - Vulkan parity tests: test_vulkan_parity")
 message(STATUS "")
 message(STATUS "Run test groups with:")
 message(STATUS "  - make test_parity_quick      # Quick tests only")

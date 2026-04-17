@@ -1359,6 +1359,13 @@ auto cast_kernel(const Tensor& input, DType target_dtype, hipStream_t stream) ->
     }
 
     int64_t n = input.numel();
+    // Empty-tensor fast path: HIP rejects zero-grid launches with
+    // "invalid configuration argument". Just allocate an empty result of
+    // the target dtype and return.
+    if (n == 0) {
+        std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+        return Tensor(shape, target_dtype, input.device());
+    }
     int num_blocks = get_num_blocks(n);
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
 

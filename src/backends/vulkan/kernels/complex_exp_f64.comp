@@ -1,0 +1,25 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Complex128 exp. GLSL exp/sin/cos only accept float, so we narrow for the
+// transcendental call and widen back. This matches the f64 abs shader's
+// approach to computing hypot.
+
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { double data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { double data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= num_elements) return;
+    float a = float(data_in[idx * 2u]);
+    float b = float(data_in[idx * 2u + 1u]);
+    float ea = exp(a);
+    data_out[idx * 2u]      = double(ea * cos(b));
+    data_out[idx * 2u + 1u] = double(ea * sin(b));
+}

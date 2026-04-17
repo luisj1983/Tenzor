@@ -60,15 +60,9 @@ TEST_P(ConvGapsMultiDTypeTest, Conv1dBackward) {
     std::vector<int64_t> out_shape_vec(out_shape.begin(), out_shape.end());
     auto grad_output = tenzor::ones(out_shape_vec, dtype(), device());
 
-    try {
-        output.backward(grad_output);
-    } catch (...) {
-        GTEST_SKIP() << "Backward threw for this op/backend";
-    }
-
-    if (!input.grad().has_value()) {
-        GTEST_SKIP() << "Backward not yet implemented for this op/backend";
-    }
+    output.backward(grad_output);
+    ASSERT_TRUE(input.grad().has_value())
+        << "Backward produced no gradient on " << device().to_string();
     expectShape(*input.grad(), {1, 3, 10});
 }
 
@@ -100,15 +94,9 @@ TEST_P(ConvGapsMultiDTypeTest, ConvTranspose1dBackward) {
     std::vector<int64_t> out_shape_vec(out_shape.begin(), out_shape.end());
     auto grad_output = tenzor::ones(out_shape_vec, dtype(), device());
 
-    try {
-        output.backward(grad_output);
-    } catch (...) {
-        GTEST_SKIP() << "Backward threw for this op/backend";
-    }
-
-    if (!input.grad().has_value()) {
-        GTEST_SKIP() << "Backward not yet implemented for this op/backend";
-    }
+    output.backward(grad_output);
+    ASSERT_TRUE(input.grad().has_value())
+        << "Backward produced no gradient on " << device().to_string();
     expectShape(*input.grad(), {1, 3, 8});
 }
 
@@ -144,15 +132,9 @@ TEST_P(ConvGapsMultiDTypeTest, ConvTranspose2dBackward) {
     std::vector<int64_t> out_shape_vec(out_shape.begin(), out_shape.end());
     auto grad_output = tenzor::ones(out_shape_vec, dtype(), device());
 
-    try {
-        output.backward(grad_output);
-    } catch (...) {
-        GTEST_SKIP() << "Backward threw for this op/backend";
-    }
-
-    if (!input.grad().has_value()) {
-        GTEST_SKIP() << "Backward not yet implemented for this op/backend";
-    }
+    output.backward(grad_output);
+    ASSERT_TRUE(input.grad().has_value())
+        << "Backward produced no gradient on " << device().to_string();
     expectShape(*input.grad(), {1, 3, 8, 8});
 }
 

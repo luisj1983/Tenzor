@@ -155,6 +155,51 @@ inline std::vector<OpId> get_required_ops() {
         // Creation ops (fundamental — backend is broken without these)
         OpId::Zeros, OpId::Ones, OpId::Full, OpId::Rand, OpId::Randn,
         OpId::Arange, OpId::Eye,
+
+        // ====================================================================
+        // Phase 1 coverage floor (added Phase 3.3 of the test-coverage plan)
+        //
+        // These ops have multidtype parity test coverage in Phase 1 and are
+        // verified registered on all 5 backends per
+        // tests/backend_parity/baselines/registration_report.txt.
+        // ====================================================================
+
+        // Conv1d — forward + 3 backward variants
+        OpId::Conv1dForward,
+        OpId::Conv1dBackwardInput, OpId::Conv1dBackwardWeight,
+        OpId::Conv1dBackwardBias,
+
+        // ConvTranspose3d backward (forward is reduced via im2col +
+        // Conv2dForward on several backends; the backward OpIds are distinct)
+        OpId::ConvTranspose3dBackwardInput,
+        OpId::ConvTranspose3dBackwardWeight,
+        OpId::ConvTranspose3dBackwardBias,
+
+        // Fractional + MaxUnpool pooling variants — all 5 backends
+        OpId::FractionalMaxPool2dForward,  OpId::FractionalMaxPool2dBackward,
+        OpId::FractionalMaxPool3dForward,  OpId::FractionalMaxPool3dBackward,
+        OpId::MaxUnpool2dForward,
+
+        // Signal processing — STFT/ISTFT/DCT all have cross-backend coverage
+        OpId::STFT, OpId::ISTFT, OpId::DCT,
+
+        // Vision detection / sampling — NMS and GridSample are universally
+        // supported and covered by vision_fused_parity.
+        OpId::NMS, OpId::GridSample,
+        OpId::ROIAlignForward, OpId::ROIAlignBackward,
+
+        // Sampling primitives — Bernoulli and Multinomial are in the
+        // training-critical path for dropout masks and categorical policies.
+        OpId::Bernoulli, OpId::Multinomial,
+
+        // Reduction extensions covered by parity tests
+        OpId::Aminmax,
+
+        // Normalization forward (backward already in Phase 1.4 floor above)
+        OpId::RMSNorm, OpId::FusedRMSNorm,
+
+        // Histogram family (test_histogramdd_multidtype + test_histogram)
+        OpId::Histogram, OpId::Histogramdd,
     };
 }
 

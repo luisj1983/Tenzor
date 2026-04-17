@@ -116,9 +116,18 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<int64_t> next_request_id_{0};
 
-    // Connection state
+    // Connection state (connections_ mutated from multiple threads).
     std::vector<WorkerInfo> workers_;
-    std::unordered_map<int32_t, int> connections_;  // worker_id -> socket_fd
+    std::mutex connections_mutex_;
+    std::unordered_map<int32_t, int> connections_;  // worker_id -> outbound socket_fd
+    std::unordered_map<int32_t, int> inbound_connections_;  // worker_id -> inbound socket_fd
+    // One write-mutex per fd so concurrent send_framed() calls on the same
+    // socket can't interleave bytes of two different messages.
+    std::unordered_map<int, std::shared_ptr<std::mutex>> fd_write_mutexes_;
+    int listen_fd_ = -1;
+    // Signals that accept_loop() has finished binding/listening (or
+    // failed). Used by init() to surface bind failures synchronously.
+    std::promise<bool> listen_ready_;
 
     // Threading
     std::vector<std::thread> io_threads_;
@@ -137,12 +146,15 @@ private:
     std::unordered_map<MessageType, std::function<Message(const Message&)>> handlers_;
 
     // Internal methods
-    auto accept_loop() -> void;
-    auto receive_loop(int fd, int32_t peer_id) -> void;
+    void accept_loop();
+    void receive_loop(int fd, int32_t peer_id);
+    int  get_or_connect(int32_t peer_id);
+    // Send a message on fd with per-fd write serialization to prevent
+    // interleaving under concurrent send() calls. Returns false on write
+    // failure (connection dropped).
+    bool send_framed_locked(int fd, const Message& msg);
     auto dispatch_message(Message msg) -> void;
     auto handle_rpc_call(const Message& msg) -> Message;
-    auto send_raw(int fd, const Message& msg) -> bool;
-    auto recv_raw(int fd) -> std::optional<Message>;
 };
 
 } // namespace rpc

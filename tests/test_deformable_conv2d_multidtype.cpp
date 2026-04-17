@@ -192,22 +192,16 @@ TEST_P(DeformableConv2dTest, NNLayerForward) {
 // ============================================================================
 
 TEST_P(DeformableConv2dTest, BackwardGradientFlow) {
-    if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "Gradient test currently runs on CPU only";
-    }
-
     nn::DeformableConv2d dcn(2, 4, 3, 1, 1);
+    dcn.to(device);
     auto input = Variable(randn({1, 2, 6, 6}, DType::Float32, device), true);
     auto offset = Variable(zeros({1, 18, 6, 6}, DType::Float32, device), true);
     auto mask = Variable(ones({1, 9, 6, 6}, DType::Float32, device), true);
 
     auto output = dcn.forward(input, offset, mask);
-
-    // Sum and backward — use autograd::sum to preserve computation graph
     auto loss = tenzor::sum(output);
     loss.backward();
 
-    // Check that input gradient exists and is non-zero
     ASSERT_TRUE(input.grad().has_value());
     auto grad_cpu = input.grad().value().to(Device::cpu());
     auto* grad_data = grad_cpu.data<float>();
@@ -216,6 +210,72 @@ TEST_P(DeformableConv2dTest, BackwardGradientFlow) {
         grad_sum += std::abs(grad_data[i]);
     }
     EXPECT_GT(grad_sum, 0.0f) << "Input gradient should be non-zero";
+}
+
+// Cross-backend gradient parity: build identical inputs/weights on CPU and
+// the test device, run forward+backward, and compare gradients. This
+// exercises the deformable_conv2d backward kernels (bilinear interp
+// gradient + weight + offset) against the CPU reference.
+TEST_P(DeformableConv2dTest, BackwardParityVsCPU) {
+    if (device.type == Device::Type::CPU) GTEST_SKIP();
+
+    const int64_t in_ch = 2, out_ch = 4, k = 3;
+    nn::DeformableConv2d dcn_cpu(in_ch, out_ch, k, 1, 1);
+
+    auto input = randn({1, in_ch, 6, 6}, DType::Float32, Device::cpu());
+    auto offset = randn({1, 2*k*k, 6, 6}, DType::Float32, Device::cpu()) * 0.2f;
+    auto mask = ones({1, k*k, 6, 6}, DType::Float32, Device::cpu());
+
+    // CPU run
+    auto in_cpu = Variable(input.clone(), true);
+    auto off_cpu = Variable(offset.clone(), true);
+    auto msk_cpu = Variable(mask.clone(), true);
+    auto out_cpu = dcn_cpu.forward(in_cpu, off_cpu, msk_cpu);
+    tenzor::sum(out_cpu).backward();
+
+    // Device run — clone the module's state_dict so parameters match exactly.
+    nn::DeformableConv2d dcn_dev(in_ch, out_ch, k, 1, 1);
+    dcn_dev.load_state_dict(dcn_cpu.state_dict());
+    dcn_dev.to(device);
+
+    auto in_dev = Variable(input.to(device), true);
+    auto off_dev = Variable(offset.to(device), true);
+    auto msk_dev = Variable(mask.to(device), true);
+    auto out_dev = dcn_dev.forward(in_dev, off_dev, msk_dev);
+    tenzor::sum(out_dev).backward();
+    device.synchronize();
+
+    auto diff = [](const Tensor& a, const Tensor& b) {
+        auto ac = a.to(Device::cpu());
+        auto bc = b.to(Device::cpu());
+        float m = 0;
+        auto* ap = ac.data<float>();
+        auto* bp = bc.data<float>();
+        for (int64_t i = 0; i < ac.numel(); ++i) {
+            float e = std::fabs(ap[i] - bp[i]);
+            if (e > m) m = e;
+        }
+        return m;
+    };
+
+    // Forward must match (tight).
+    EXPECT_LT(diff(out_cpu.tensor(), out_dev.tensor()), 1e-4f)
+        << "DeformableConv2d forward diverges";
+
+    ASSERT_TRUE(in_cpu.grad().has_value());
+    ASSERT_TRUE(in_dev.grad().has_value());
+    EXPECT_LT(diff(in_cpu.grad().value(), in_dev.grad().value()), 1e-3f)
+        << "input gradient diverges";
+
+    ASSERT_TRUE(off_cpu.grad().has_value());
+    ASSERT_TRUE(off_dev.grad().has_value());
+    EXPECT_LT(diff(off_cpu.grad().value(), off_dev.grad().value()), 1e-3f)
+        << "offset gradient diverges";
+
+    ASSERT_TRUE(msk_cpu.grad().has_value());
+    ASSERT_TRUE(msk_dev.grad().has_value());
+    EXPECT_LT(diff(msk_cpu.grad().value(), msk_dev.grad().value()), 1e-3f)
+        << "mask gradient diverges";
 }
 
 INSTANTIATE_BACKEND_TESTS(DeformableConv2dTest);

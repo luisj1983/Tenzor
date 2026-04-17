@@ -497,6 +497,11 @@ public:
                                   kernel_size_, stride_, padding_, dilation_)};
     }
 
+    // Unfold is a linear rearrangement (im2col) so its second derivative
+    // is structurally zero — the passthrough stub produces the correct
+    // higher-order gradient.
+    TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
+
 private:
     std::vector<int64_t> input_shape_;
     int64_t kernel_size_;
@@ -558,6 +563,10 @@ public:
         return {tenzor::ops::unfold(grad_outputs[0],
                                     kernel_size_, stride_, padding_, dilation_)};
     }
+
+    // Fold is a linear rearrangement (col2im) so its second derivative
+    // is structurally zero.
+    TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
 
 private:
     int64_t kernel_size_;

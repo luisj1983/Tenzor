@@ -497,6 +497,15 @@ auto norm(const Tensor& A, const std::string& ord) -> Tensor {
 }
 
 auto slogdet(const Tensor& A) -> std::tuple<Tensor, Tensor> {
+    // GPU path: derive slogdet from det (which dispatches to backend kernels).
+    // sign = sign(det), logabsdet = log(|det|). This avoids a dedicated
+    // slogdet OpId + per-backend kernels while still running on-device.
+    if (A.device().type != Device::Type::CPU) {
+        Tensor d = tenzor::linalg::det(A);
+        Tensor sign_t = tenzor::sign(d);
+        Tensor logabsdet_t = tenzor::log(tenzor::abs(d));
+        return {sign_t, logabsdet_t};
+    }
 #if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
     throw_no_lapack("slogdet");
 #else

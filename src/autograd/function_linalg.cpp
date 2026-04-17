@@ -39,21 +39,27 @@ auto DetBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 }
 
 auto DetBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    const auto& grad = grad_outputs[0];          // dL/dy, scalar or (...,)
+    const auto& grad = grad_outputs[0];          // dL/dy, scalar or (batch,)
     const auto& det_val = saved_tensors_[0];      // det(A), same shape as grad
     const auto& inv_A = saved_tensors_[1];        // A^{-1}, (..., N, N)
 
     auto ndim = inv_A.ndim();
-    // A^{-T} = transpose of inverse
     auto inv_At = transpose(inv_A, ndim - 2, ndim - 1);
+    auto grad_det = mul(grad, det_val);
 
-    // grad * det(A) is scalar (per batch), need to broadcast to matrix shape
-    auto grad_det = mul(grad, det_val);  // (...,)
-
-    // Reshape grad_det to broadcast with inv_At: add two trailing dims
-    auto gd_shape = std::vector<int64_t>(grad_det.shape().begin(), grad_det.shape().end());
-    gd_shape.push_back(1);
-    gd_shape.push_back(1);
+    // Build a broadcast-compatible shape with two trailing singleton dims,
+    // but only if the result carries batch dimensions; for a plain 2-D
+    // matrix the det is a 1-element tensor that must collapse back to ()
+    // so grad_A keeps the input's (N, N) rank.
+    std::vector<int64_t> gd_shape;
+    int64_t expected_batch_rank = ndim - 2;  // 0 for a plain matrix
+    if (expected_batch_rank == 0) {
+        gd_shape = {1, 1};  // broadcasts to (N, N) against inv_At
+    } else {
+        gd_shape.assign(grad_det.shape().begin(), grad_det.shape().end());
+        gd_shape.push_back(1);
+        gd_shape.push_back(1);
+    }
     auto grad_det_expanded = reshape(grad_det, gd_shape);
 
     auto grad_A = mul(grad_det_expanded, inv_At);

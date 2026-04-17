@@ -277,8 +277,10 @@ auto StdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     std_expanded = expand(std_expanded, input_shape_vec);
     grad_expanded = expand(grad_expanded, input_shape_vec);
 
-    // grad_input = grad * (input - mean) / (N * std)
-    auto n_std = mul(std_expanded, static_cast<double>(N));
+    // grad_input = grad * (input - mean) / ((N - 1) * std)
+    // Matches tenzor::std default unbiased=true (N-1 denominator).
+    double denom = (N > 1) ? static_cast<double>(N - 1) : 1.0;
+    auto n_std = mul(std_expanded, denom);
     auto grad_input = div(mul(grad_expanded, diff), n_std);
 
     return {grad_input};
@@ -317,7 +319,8 @@ auto StdBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
         std_expanded = reshape(std_out, std::vector<int64_t>(input_shape_vec.size(), 1));
     }
     std_expanded = expand(std_expanded, input_shape_vec);
-    auto n_std = mul(std_expanded, static_cast<double>(N));
+    double denom = (N > 1) ? static_cast<double>(N - 1) : 1.0;
+    auto n_std = mul(std_expanded, denom);
     auto factor = div(diff, n_std);
     Variable factor_var(factor, false);
 
@@ -382,8 +385,10 @@ auto VarBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     }
     grad_expanded = expand(grad_expanded, input_shape_vec);
 
-    // grad_input = grad * 2 * (input - mean) / N
-    auto scale = 2.0 / static_cast<double>(N);
+    // grad_input = grad * 2 * (input - mean) / (N - 1)
+    // Matches tenzor::var default unbiased=true (N-1 denominator, Bessel).
+    double denom = (N > 1) ? static_cast<double>(N - 1) : 1.0;
+    auto scale = 2.0 / denom;
     auto grad_input = mul(mul(grad_expanded, diff), scale);
 
     return {grad_input};
@@ -414,7 +419,8 @@ auto VarBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     // diff = (input - mean) is a constant w.r.t. higher-order gradients
     auto input_mean = mean(input, dim_opt, true);
     auto diff = sub(input, expand(input_mean, input_shape_vec));
-    double scale = 2.0 / static_cast<double>(N);
+    double denom = (N > 1) ? static_cast<double>(N - 1) : 1.0;
+    double scale = 2.0 / denom;
     auto factor = mul(diff, scale);
     Variable factor_var(factor, false);
 

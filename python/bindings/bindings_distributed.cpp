@@ -12,6 +12,7 @@
 #include <tenzor/distributed/fsdp.hpp>
 #include <tenzor/distributed/gradient_compression.hpp>
 #include <tenzor/distributed/rpc/rpc.hpp>
+#include <tenzor/distributed/rpc/function_registry.hpp>
 #include <tenzor/nn/module.hpp>
 
 namespace py = pybind11;
@@ -187,6 +188,32 @@ void register_distributed(py::module_& m) {
     },
     py::arg("dst"), py::arg("func_name"), py::arg("args"),
     "Asynchronous RPC call (blocks until result available in Python)");
+
+    rpc.def("register_function",
+        [](const std::string& name, py::function fn) {
+            // Wrap the Python callable so it can be invoked from the C++
+            // RPC handler thread. We acquire the GIL before calling in.
+            auto py_fn = fn.cast<py::object>();
+            tenzor::distributed::rpc::FunctionRegistry::instance()
+                .register_function(name,
+                    [py_fn](const std::vector<tenzor::Tensor>& args)
+                        -> std::vector<tenzor::Tensor> {
+                        py::gil_scoped_acquire gil;
+                        py::object result = py_fn(args);
+                        return result.cast<std::vector<tenzor::Tensor>>();
+                    });
+        },
+        py::arg("name"), py::arg("fn"),
+        "Register a Python callable under `name` for remote invocation. "
+        "The callable receives and returns a list of Tensors.");
+
+    rpc.def("has_function",
+        [](const std::string& name) -> bool {
+            return tenzor::distributed::rpc::FunctionRegistry::instance()
+                .has_function(name);
+        },
+        py::arg("name"),
+        "Check whether a function is registered.");
 }
 
 } // namespace tenzor::python

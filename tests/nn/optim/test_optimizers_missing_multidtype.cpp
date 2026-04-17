@@ -22,17 +22,6 @@ using namespace tenzor::testing;
 // Test Fixture
 // ============================================================================
 
-// Macro (not a method) so that GTEST_SKIP's internal `return`
-// statement returns from the TEST_P body rather than from a helper
-// method — otherwise the test continues and fails on the first op
-// that doesn't support Float16.
-#define skipIfHalf() \
-    do { \
-        if (dtype() == DType::Float16 || dtype() == DType::BFloat16) { \
-            GTEST_SKIP() << "Optimizer convergence unreliable in half precision"; \
-        } \
-    } while (0)
-
 class MissingOptimizersMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
     /**
@@ -82,7 +71,6 @@ protected:
 // ============================================================================
 
 TEST_P(MissingOptimizersMultiDTypeTest, RAdam_BasicStep) {
-    skipIfHalf();
     auto params = makeParams();
     optim::RAdam optimizer(params, /*lr=*/0.01);
 
@@ -104,7 +92,6 @@ TEST_P(MissingOptimizersMultiDTypeTest, RAdam_LRGetSet) {
 }
 
 TEST_P(MissingOptimizersMultiDTypeTest, RAdam_StateDictRoundtrip) {
-    skipIfHalf();
     auto params = makeParams();
     optim::RAdam optimizer(params, /*lr=*/0.01);
 
@@ -131,7 +118,6 @@ TEST_P(MissingOptimizersMultiDTypeTest, RAdam_StateDictRoundtrip) {
 // ============================================================================
 
 TEST_P(MissingOptimizersMultiDTypeTest, LAMB_BasicStep) {
-    skipIfHalf();
     auto params = makeParams();
     optim::LAMB optimizer(params, /*lr=*/0.01);
 
@@ -153,7 +139,6 @@ TEST_P(MissingOptimizersMultiDTypeTest, LAMB_LRGetSet) {
 }
 
 TEST_P(MissingOptimizersMultiDTypeTest, LAMB_StateDictRoundtrip) {
-    skipIfHalf();
     auto params = makeParams();
     optim::LAMB optimizer(params, /*lr=*/0.01);
 
@@ -178,7 +163,6 @@ TEST_P(MissingOptimizersMultiDTypeTest, LAMB_StateDictRoundtrip) {
 // ============================================================================
 
 TEST_P(MissingOptimizersMultiDTypeTest, AdamAtan2_BasicStep) {
-    skipIfHalf();
     auto params = makeParams();
     optim::AdamAtan2 optimizer(params, /*lr=*/0.01);
 
@@ -200,7 +184,6 @@ TEST_P(MissingOptimizersMultiDTypeTest, AdamAtan2_LRGetSet) {
 }
 
 TEST_P(MissingOptimizersMultiDTypeTest, AdamAtan2_StateDictRoundtrip) {
-    skipIfHalf();
     auto params = makeParams();
     optim::AdamAtan2 optimizer(params, /*lr=*/0.01);
 
@@ -225,7 +208,6 @@ TEST_P(MissingOptimizersMultiDTypeTest, AdamAtan2_StateDictRoundtrip) {
 // ============================================================================
 
 TEST_P(MissingOptimizersMultiDTypeTest, SparseAdam_BasicStep) {
-    skipIfHalf();
     auto params = makeParams();
     optim::SparseAdam optimizer(params, /*lr=*/0.01);
 
@@ -247,7 +229,6 @@ TEST_P(MissingOptimizersMultiDTypeTest, SparseAdam_LRGetSet) {
 }
 
 TEST_P(MissingOptimizersMultiDTypeTest, SparseAdam_StateDictRoundtrip) {
-    skipIfHalf();
     auto params = makeParams();
     optim::SparseAdam optimizer(params, /*lr=*/0.01);
 
@@ -272,7 +253,6 @@ TEST_P(MissingOptimizersMultiDTypeTest, SparseAdam_StateDictRoundtrip) {
 // ============================================================================
 
 TEST_P(MissingOptimizersMultiDTypeTest, Adadelta_BasicStep) {
-    skipIfHalf();
     auto params = makeParams();
     // Adadelta defaults to lr=1.0 but use explicit value for clarity
     optim::Adadelta optimizer(params, /*lr=*/1.0, /*rho=*/0.9, /*eps=*/1e-6);
@@ -295,7 +275,6 @@ TEST_P(MissingOptimizersMultiDTypeTest, Adadelta_LRGetSet) {
 }
 
 TEST_P(MissingOptimizersMultiDTypeTest, Adadelta_StateDictRoundtrip) {
-    skipIfHalf();
     auto params = makeParams();
     optim::Adadelta optimizer(params, /*lr=*/1.0);
 

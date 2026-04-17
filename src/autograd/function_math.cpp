@@ -63,32 +63,24 @@ auto PowBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     const auto& input = saved_tensors_[0];
     const auto& exp_tensor = saved_tensors_[1];  // scalar tensor holding exponent
 
-    // Dtype-aware scalar extraction (the param tensor is allocated with
-    // the input's dtype — Float32/Float64/Float16/BFloat16 — and hard-
-    // coding Float32 crashes on any other dtype).
     double exp_val = extract_scalar_param(exp_tensor);
 
-    // Special cases for numerical safety
     if (exp_val == 0.0) {
-        // d/dx(x^0) = 0
         return {zeros(std::vector<int64_t>(grad.shape().begin(), grad.shape().end()),
                        grad.dtype(), grad.device())};
     }
     if (exp_val == 1.0) {
-        // d/dx(x^1) = 1
         return {grad};
     }
 
-    // General case: grad * exponent * pow(input, exponent - 1)
-    // Use abs(input) + eps for negative base safety with fractional exponents
-    auto eps = full(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                    detail::dtype_epsilon(input.dtype()), input.dtype(), input.device());
-    auto safe_input = add(abs(input), eps);
-    auto pow_term = pow(safe_input, static_cast<float>(exp_val - 1.0));
+    // d/dx (x^n) = n * x^(n-1)
+    // For positive x the direct form is exact. For negative x with
+    // fractional n the derivative is undefined; let pow produce NaN so the
+    // caller sees the invalid region, rather than fabricating a wrong
+    // value via |x|+eps + sign(x).
+    auto pow_term = pow(input, static_cast<float>(exp_val - 1.0));
     auto scaled = mul(pow_term, exp_val);
-    // Restore sign: d/dx(|x|^n) * sign(x) for odd integer exponents
-    auto result = mul(grad, mul(scaled, sign(input)));
-    return {result};
+    return {mul(grad, scaled)};
 }
 
 auto PowBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
@@ -97,27 +89,17 @@ auto PowBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     double exp_val = extract_scalar_param(saved_tensors_[1]);
 
     if (exp_val == 0.0) {
-        // d/dx(x^0) = 0
         return {Variable(zeros(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                                input.dtype(), input.device()), false)};
     }
     if (exp_val == 1.0) {
-        // d/dx(x^1) = 1
         return {grad_outputs[0]};
     }
 
-    // General case: grad * exponent * pow(input, exponent - 1) * sign(input)
-    // Use Variable ops for pow and sign tracking
     Variable input_var(input, false);
-    auto eps_tensor = full(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                           detail::dtype_epsilon(input.dtype()), input.dtype(), input.device());
-    Variable eps_var(eps_tensor, false);
-    auto safe_input = tenzor::abs(input_var) + eps_var;
-    auto pow_term = tenzor::pow(safe_input, static_cast<float>(exp_val - 1.0));
+    auto pow_term = tenzor::pow(input_var, static_cast<float>(exp_val - 1.0));
     auto scaled = pow_term * exp_val;
-    auto sign_tensor = sign(input);
-    Variable sign_var(sign_tensor, false);
-    return {grad_outputs[0] * scaled * sign_var};
+    return {grad_outputs[0] * scaled};
 }
 
 // ReciprocalBackward implementation
@@ -519,18 +501,16 @@ auto SincBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 auto SincBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     const auto& grad = grad_outputs[0];
     const auto& input = saved_tensors_[0];
-    // d/dx[sin(πx)/(πx)] = cos(πx)/x - sin(πx)/(πx²)
-    // = (π*x*cos(πx) - sin(πx)) / (π*x²)
+    // sinc(x) = sin(πx) / (πx).  Derivative:
+    //   d/dx [sin(πx)/(πx)] = (πx·cos(πx) − sin(πx)) / (πx²)
     auto pi_x = mul(input, M_PI);
     auto cos_px = tenzor::cos(pi_x);
     auto sin_px = tenzor::sin(pi_x);
     auto x_sq = mul(input, input);
-    // (cos(πx)/x - sin(πx)/(πx²))
     auto numer = sub(mul(pi_x, cos_px), sin_px);
-    auto denom = mul(mul(input, x_sq), M_PI);
-    // Handle x=0 case: derivative is 0 at x=0
+    auto denom = mul(x_sq, M_PI);
     auto deriv = div(numer, denom);
-    // Where input is 0, set gradient to 0
+    // x = 0 is a removable singularity (derivative is 0); mask it out.
     auto zero = tenzor::zeros_like(input);
     auto mask = tenzor::ne(input, zero);
     return {mul(grad, mul(deriv, mask))};
@@ -542,8 +522,7 @@ auto SincBackward::backward_with_variables(std::vector<Variable> grad_outputs) -
     auto cos_px = tenzor::cos(pi_x);
     auto sin_px = tenzor::sin(pi_x);
     auto numer = pi_x * cos_px - sin_px;
-    auto denom = input_var * input_var * input_var * M_PI;
-    // Simplified: handle div-by-zero via masking
+    auto denom = input_var * input_var * M_PI;
     auto zero_t = tenzor::zeros_like(input_var.tensor());
     auto mask_tensor = tenzor::ne(input_var.tensor(), zero_t);
     Variable mask_var(mask_tensor, false);

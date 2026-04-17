@@ -44,6 +44,30 @@ def pytest_configure(config):
 
 
 # ---------------------------------------------------------------------------
+# Shared device constants
+# ---------------------------------------------------------------------------
+
+# Canonical list of backends to parameterize tests over. Single source of
+# truth — previously duplicated in test_multibackend_ops.py and a handful of
+# other files. Tests import this via ``from conftest import ALL_DEVICES`` OR
+# pull it in implicitly via ``@pytest.mark.parametrize("device", ALL_DEVICES,
+# indirect=True)`` (the ``device`` fixture below handles the availability
+# skip).
+ALL_DEVICES = ["cpu", "cuda", "vulkan", "oneapi", "rocm"]
+
+# CPU + any GPU backends actually present on the host. Handy when you want
+# to skip a test entirely unless there's at least one GPU.
+AVAILABLE_DEVICES = ["cpu"] + [
+    name for name, check in (
+        ("cuda",   lambda: tz.cuda_is_available()),
+        ("vulkan", lambda: tz.vulkan_is_available()),
+        ("oneapi", lambda: tz.oneapi_is_available()),
+        ("rocm",   lambda: tz.rocm_is_available()),
+    ) if check()
+]
+
+
+# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
@@ -53,7 +77,7 @@ def device(request):
 
     Usage::
 
-        @pytest.mark.parametrize("device", ["cpu", "cuda", "vulkan", "oneapi", "rocm"], indirect=True)
+        @pytest.mark.parametrize("device", ALL_DEVICES, indirect=True)
         def test_foo(device):
             x = tz.randn([3], device=device)
     """

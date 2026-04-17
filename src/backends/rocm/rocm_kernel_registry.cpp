@@ -3398,7 +3398,10 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
         int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, true);
+        // Match Tenzor CPU/CUDA/Vulkan/OneAPI convention: averages divide
+        // by the count of valid (non-padded) positions. Older ROCm code
+        // defaulted to `true` which diverged from every other backend.
+        bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, false);
         hipStream_t stream = get_hip_stream(attrs);
         return rocm::avgpool2d_forward_hip(inputs[0],
             kernel_size, kernel_size, stride, stride, padding, padding, count_include_pad, stream);
@@ -3407,7 +3410,10 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
         int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, true);
+        // Match Tenzor CPU/CUDA/Vulkan/OneAPI convention: averages divide
+        // by the count of valid (non-padded) positions. Older ROCm code
+        // defaulted to `true` which diverged from every other backend.
+        bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, false);
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
         hipStream_t stream = get_hip_stream(attrs);
         return rocm::avgpool2d_backward_hip(inputs[0], input_shape,

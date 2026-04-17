@@ -1,12 +1,13 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
-// Solve Ax = b via LU factorization for small matrices (<= 32x32) — Float64
+// Solve AX = B via LU factorization for small matrices (<= 32x32), Float64.
+// Supports nrhs right-hand sides (<= 32).
 
 layout(local_size_x = 32) in;
 
 layout(set = 0, binding = 0) buffer MatrixA { double a_data[]; };
-layout(set = 0, binding = 1) buffer VectorB { double b_data[]; };
+layout(set = 0, binding = 1) buffer MatrixB { double b_data[]; };
 layout(set = 0, binding = 2) buffer OutputX { double x_data[]; };
 
 layout(push_constant) uniform PushConstants {
@@ -16,8 +17,8 @@ layout(push_constant) uniform PushConstants {
 };
 
 shared double mat[32][32];
-shared double rhs[32];
-shared uint piv[32];
+shared double rhs[32][32];
+shared uint   piv[32];
 
 void main() {
     uint batch_idx = gl_WorkGroupID.x;
@@ -26,17 +27,17 @@ void main() {
     if (batch_idx >= batch) return;
 
     uint a_offset = batch_idx * n * n;
-    uint b_offset = batch_idx * n;
+    uint b_offset = batch_idx * n * nrhs;
 
     for (uint row = 0; row < n; row++) {
         if (tid < n) {
             mat[row][tid] = a_data[a_offset + row * n + tid];
         }
+        if (tid < nrhs) {
+            rhs[row][tid] = b_data[b_offset + row * nrhs + tid];
+        }
     }
-    if (tid < n) {
-        rhs[tid] = b_data[b_offset + tid];
-        piv[tid] = tid;
-    }
+    if (tid < n) piv[tid] = tid;
     barrier();
 
     for (uint col = 0; col < n; col++) {
@@ -45,10 +46,7 @@ void main() {
             double max_val = abs(mat[col][col]);
             for (uint row = col + 1; row < n; row++) {
                 double val = abs(mat[row][col]);
-                if (val > max_val) {
-                    max_val = val;
-                    max_row = row;
-                }
+                if (val > max_val) { max_val = val; max_row = row; }
             }
             piv[col] = max_row;
             if (max_row != col) {
@@ -57,9 +55,11 @@ void main() {
                     mat[col][j] = mat[max_row][j];
                     mat[max_row][j] = tmp;
                 }
-                double tmp = rhs[col];
-                rhs[col] = rhs[max_row];
-                rhs[max_row] = tmp;
+                for (uint k = 0; k < nrhs; k++) {
+                    double tmp = rhs[col][k];
+                    rhs[col][k] = rhs[max_row][k];
+                    rhs[max_row][k] = tmp;
+                }
             }
         }
         barrier();
@@ -72,28 +72,34 @@ void main() {
                 for (uint j = col + 1; j < n; j++) {
                     mat[tid][j] -= factor * mat[col][j];
                 }
-                rhs[tid] -= factor * rhs[col];
+                for (uint k = 0; k < nrhs; k++) {
+                    rhs[tid][k] -= factor * rhs[col][k];
+                }
             }
         }
         barrier();
     }
 
     if (tid == 0) {
-        for (int i = int(n) - 1; i >= 0; i--) {
-            double sum = rhs[i];
-            for (uint j = uint(i) + 1; j < n; j++) {
-                sum -= mat[i][j] * rhs[j];
-            }
-            if (abs(mat[i][i]) > 1e-300LF) {
-                rhs[i] = sum / mat[i][i];
-            } else {
-                rhs[i] = 0.0LF;
+        for (uint k = 0; k < nrhs; k++) {
+            for (int i = int(n) - 1; i >= 0; i--) {
+                double sum = rhs[i][k];
+                for (uint j = uint(i) + 1; j < n; j++) {
+                    sum -= mat[i][j] * rhs[j][k];
+                }
+                if (abs(mat[i][i]) > 1e-300LF) {
+                    rhs[i][k] = sum / mat[i][i];
+                } else {
+                    rhs[i][k] = 0.0LF;
+                }
             }
         }
     }
     barrier();
 
-    if (tid < n) {
-        x_data[b_offset + tid] = rhs[tid];
+    for (uint row = 0; row < n; row++) {
+        if (tid < nrhs) {
+            x_data[b_offset + row * nrhs + tid] = rhs[row][tid];
+        }
     }
 }

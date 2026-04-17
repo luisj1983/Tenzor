@@ -63,13 +63,9 @@ TEST_P(ComplexArithmeticTest, Complex64ZerosValues) {
 TEST_P(ComplexArithmeticTest, Complex64OnesValues) {
     // Note: ones() for complex may not produce (1,0) since fill is scalar-based.
     // This test documents the current behavior.
-    try {
-        auto t = ones({3}, DType::Complex64, device).to(Device::cpu());
-        // Check that values are created without crashing
-        EXPECT_EQ(t.numel(), 3);
-    } catch (const std::runtime_error&) {
-        GTEST_SKIP() << "Complex ones not supported on " << device.to_string();
-    }
+    auto t = ones({3}, DType::Complex64, device).to(Device::cpu());
+    // Check that values are created without crashing
+    EXPECT_EQ(t.numel(), 3);
 }
 
 // ============================================================================
@@ -89,16 +85,12 @@ TEST_P(ComplexArithmeticTest, ComplexAdd) {
     bp[0] = {5.0f, 6.0f};
     bp[1] = {7.0f, 8.0f};
 
-    try {
-        auto c = add(a, b).to(Device::cpu());
-        auto* cp = c.data<std::complex<float>>();
-        EXPECT_FLOAT_EQ(cp[0].real(), 6.0f);
-        EXPECT_FLOAT_EQ(cp[0].imag(), 8.0f);
-        EXPECT_FLOAT_EQ(cp[1].real(), 10.0f);
-        EXPECT_FLOAT_EQ(cp[1].imag(), 12.0f);
-    } catch (const std::runtime_error&) {
-        GTEST_SKIP() << "Complex add not yet supported on " << device.to_string();
-    }
+    auto c = add(a, b).to(Device::cpu());
+    auto* cp = c.data<std::complex<float>>();
+    EXPECT_FLOAT_EQ(cp[0].real(), 6.0f);
+    EXPECT_FLOAT_EQ(cp[0].imag(), 8.0f);
+    EXPECT_FLOAT_EQ(cp[1].real(), 10.0f);
+    EXPECT_FLOAT_EQ(cp[1].imag(), 12.0f);
 }
 
 TEST_P(ComplexArithmeticTest, ComplexSub) {
@@ -110,16 +102,12 @@ TEST_P(ComplexArithmeticTest, ComplexSub) {
     b.data<std::complex<float>>()[0] = {2.0f, 3.0f};
     b.data<std::complex<float>>()[1] = {1.0f, 1.0f};
 
-    try {
-        auto c = sub(a, b).to(Device::cpu());
-        auto* cp = c.data<std::complex<float>>();
-        EXPECT_FLOAT_EQ(cp[0].real(), 3.0f);
-        EXPECT_FLOAT_EQ(cp[0].imag(), 5.0f);
-        EXPECT_FLOAT_EQ(cp[1].real(), 2.0f);
-        EXPECT_FLOAT_EQ(cp[1].imag(), 0.0f);
-    } catch (const std::runtime_error&) {
-        GTEST_SKIP() << "Complex sub not yet supported on " << device.to_string();
-    }
+    auto c = sub(a, b).to(Device::cpu());
+    auto* cp = c.data<std::complex<float>>();
+    EXPECT_FLOAT_EQ(cp[0].real(), 3.0f);
+    EXPECT_FLOAT_EQ(cp[0].imag(), 5.0f);
+    EXPECT_FLOAT_EQ(cp[1].real(), 2.0f);
+    EXPECT_FLOAT_EQ(cp[1].imag(), 0.0f);
 }
 
 TEST_P(ComplexArithmeticTest, ComplexMul) {
@@ -130,14 +118,10 @@ TEST_P(ComplexArithmeticTest, ComplexMul) {
     a.data<std::complex<float>>()[0] = {1.0f, 2.0f};
     b.data<std::complex<float>>()[0] = {3.0f, 4.0f};
 
-    try {
-        auto c = mul(a, b).to(Device::cpu());
-        auto* cp = c.data<std::complex<float>>();
-        EXPECT_FLOAT_EQ(cp[0].real(), -5.0f);
-        EXPECT_FLOAT_EQ(cp[0].imag(), 10.0f);
-    } catch (const std::runtime_error&) {
-        GTEST_SKIP() << "Complex mul not yet supported on " << device.to_string();
-    }
+    auto c = mul(a, b).to(Device::cpu());
+    auto* cp = c.data<std::complex<float>>();
+    EXPECT_FLOAT_EQ(cp[0].real(), -5.0f);
+    EXPECT_FLOAT_EQ(cp[0].imag(), 10.0f);
 }
 
 TEST_P(ComplexArithmeticTest, ComplexDiv) {
@@ -147,30 +131,22 @@ TEST_P(ComplexArithmeticTest, ComplexDiv) {
     a.data<std::complex<float>>()[0] = {1.0f, 2.0f};
     b.data<std::complex<float>>()[0] = {1.0f, 0.0f};
 
-    try {
-        auto c = div(a, b).to(Device::cpu());
-        auto* cp = c.data<std::complex<float>>();
-        EXPECT_FLOAT_EQ(cp[0].real(), 1.0f);
-        EXPECT_FLOAT_EQ(cp[0].imag(), 2.0f);
-    } catch (const std::runtime_error&) {
-        GTEST_SKIP() << "Complex div not yet supported on " << device.to_string();
-    }
+    auto c = div(a, b).to(Device::cpu());
+    auto* cp = c.data<std::complex<float>>();
+    EXPECT_FLOAT_EQ(cp[0].real(), 1.0f);
+    EXPECT_FLOAT_EQ(cp[0].imag(), 2.0f);
 }
 
 TEST_P(ComplexArithmeticTest, ComplexAbs) {
     auto a = Tensor({int64_t(1)}, DType::Complex64, device);
     a.data<std::complex<float>>()[0] = {3.0f, 4.0f};
 
-    try {
-        auto result = abs(a).to(Device::cpu());
-        if (result.dtype() == DType::Float32) {
-            EXPECT_NEAR(result.data<float>()[0], 5.0f, 1e-5f);
-        } else if (result.dtype() == DType::Complex64) {
-            auto* rp = result.data<std::complex<float>>();
-            EXPECT_NEAR(rp[0].real(), 5.0f, 1e-5f);
-        }
-    } catch (const std::runtime_error&) {
-        GTEST_SKIP() << "Complex abs not yet supported on " << device.to_string();
+    auto result = abs(a).to(Device::cpu());
+    if (result.dtype() == DType::Float32) {
+        EXPECT_NEAR(result.data<float>()[0], 5.0f, 1e-5f);
+    } else if (result.dtype() == DType::Complex64) {
+        auto* rp = result.data<std::complex<float>>();
+        EXPECT_NEAR(rp[0].real(), 5.0f, 1e-5f);
     }
 }
 
@@ -183,15 +159,11 @@ TEST_P(ComplexArithmeticTest, ComplexRealAdd) {
     real_t.data<float>()[0] = 10.0f;
     real_t.data<float>()[1] = 20.0f;
 
-    try {
-        auto result = add(complex_t, real_t).to(Device::cpu());
-        EXPECT_EQ(result.dtype(), DType::Complex64);
-        auto* rp = result.data<std::complex<float>>();
-        EXPECT_FLOAT_EQ(rp[0].real(), 11.0f);
-        EXPECT_FLOAT_EQ(rp[0].imag(), 2.0f);
-    } catch (const std::runtime_error&) {
-        GTEST_SKIP() << "Complex-real add not yet supported on " << device.to_string();
-    }
+    auto result = add(complex_t, real_t).to(Device::cpu());
+    EXPECT_EQ(result.dtype(), DType::Complex64);
+    auto* rp = result.data<std::complex<float>>();
+    EXPECT_FLOAT_EQ(rp[0].real(), 11.0f);
+    EXPECT_FLOAT_EQ(rp[0].imag(), 2.0f);
 }
 
 // ============================================================================
@@ -206,14 +178,10 @@ TEST_P(ComplexArithmeticTest, ComplexDivNonTrivial) {
     a.data<std::complex<float>>()[0] = {1.0f, 2.0f};
     b.data<std::complex<float>>()[0] = {3.0f, 4.0f};
 
-    try {
-        auto c = div(a, b).to(Device::cpu());
-        auto* cp = c.data<std::complex<float>>();
-        EXPECT_NEAR(cp[0].real(), 0.44f, 1e-5f);
-        EXPECT_NEAR(cp[0].imag(), 0.08f, 1e-5f);
-    } catch (const std::runtime_error&) {
-        GTEST_SKIP() << "Complex div not yet supported on " << device.to_string();
-    }
+    auto c = div(a, b).to(Device::cpu());
+    auto* cp = c.data<std::complex<float>>();
+    EXPECT_NEAR(cp[0].real(), 0.44f, 1e-5f);
+    EXPECT_NEAR(cp[0].imag(), 0.08f, 1e-5f);
 }
 
 // ============================================================================
@@ -225,16 +193,12 @@ TEST_P(ComplexArithmeticTest, ComplexNeg) {
     a.data<std::complex<float>>()[0] = {1.0f, -2.0f};
     a.data<std::complex<float>>()[1] = {-3.0f, 4.0f};
 
-    try {
-        auto c = neg(a).to(Device::cpu());
-        auto* cp = c.data<std::complex<float>>();
-        EXPECT_FLOAT_EQ(cp[0].real(), -1.0f);
-        EXPECT_FLOAT_EQ(cp[0].imag(), 2.0f);
-        EXPECT_FLOAT_EQ(cp[1].real(), 3.0f);
-        EXPECT_FLOAT_EQ(cp[1].imag(), -4.0f);
-    } catch (const std::runtime_error&) {
-        GTEST_SKIP() << "Complex neg not yet supported on " << device.to_string();
-    }
+    auto c = neg(a).to(Device::cpu());
+    auto* cp = c.data<std::complex<float>>();
+    EXPECT_FLOAT_EQ(cp[0].real(), -1.0f);
+    EXPECT_FLOAT_EQ(cp[0].imag(), 2.0f);
+    EXPECT_FLOAT_EQ(cp[1].real(), 3.0f);
+    EXPECT_FLOAT_EQ(cp[1].imag(), -4.0f);
 }
 
 // ============================================================================
@@ -246,14 +210,10 @@ TEST_P(ComplexArithmeticTest, ComplexExp) {
     // exp(0+pi*i) = cos(pi) + i*sin(pi) = -1 + 0i
     a.data<std::complex<float>>()[0] = {0.0f, static_cast<float>(M_PI)};
 
-    try {
-        auto c = exp(a).to(Device::cpu());
-        auto* cp = c.data<std::complex<float>>();
-        EXPECT_NEAR(cp[0].real(), -1.0f, 1e-5f);
-        EXPECT_NEAR(cp[0].imag(), 0.0f, 1e-5f);
-    } catch (const std::runtime_error&) {
-        GTEST_SKIP() << "Complex exp not yet supported on " << device.to_string();
-    }
+    auto c = exp(a).to(Device::cpu());
+    auto* cp = c.data<std::complex<float>>();
+    EXPECT_NEAR(cp[0].real(), -1.0f, 1e-5f);
+    EXPECT_NEAR(cp[0].imag(), 0.0f, 1e-5f);
 }
 
 // ============================================================================
@@ -265,14 +225,10 @@ TEST_P(ComplexArithmeticTest, ComplexLog) {
     // log(1+0i) = 0+0i
     a.data<std::complex<float>>()[0] = {1.0f, 0.0f};
 
-    try {
-        auto c = log(a).to(Device::cpu());
-        auto* cp = c.data<std::complex<float>>();
-        EXPECT_NEAR(cp[0].real(), 0.0f, 1e-5f);
-        EXPECT_NEAR(cp[0].imag(), 0.0f, 1e-5f);
-    } catch (const std::runtime_error&) {
-        GTEST_SKIP() << "Complex log not yet supported on " << device.to_string();
-    }
+    auto c = log(a).to(Device::cpu());
+    auto* cp = c.data<std::complex<float>>();
+    EXPECT_NEAR(cp[0].real(), 0.0f, 1e-5f);
+    EXPECT_NEAR(cp[0].imag(), 0.0f, 1e-5f);
 }
 
 // ============================================================================
@@ -288,19 +244,15 @@ TEST_P(ComplexArithmeticTest, ComplexBroadcastAdd) {
     auto* bp = b.data<std::complex<float>>();
     for (int i = 0; i < 3; ++i) bp[i] = {0.0f, static_cast<float>(i)};
 
-    try {
-        auto c = add(a, b).to(Device::cpu());
-        EXPECT_EQ(c.shape()[0], 2);
-        EXPECT_EQ(c.shape()[1], 3);
-        auto* cp = c.data<std::complex<float>>();
-        // First row: (0+0i, 1+1i, 2+2i)
-        EXPECT_FLOAT_EQ(cp[0].real(), 0.0f);
-        EXPECT_FLOAT_EQ(cp[0].imag(), 0.0f);
-        EXPECT_FLOAT_EQ(cp[1].real(), 1.0f);
-        EXPECT_FLOAT_EQ(cp[1].imag(), 1.0f);
-    } catch (const std::runtime_error&) {
-        GTEST_SKIP() << "Complex broadcast add not yet supported on " << device.to_string();
-    }
+    auto c = add(a, b).to(Device::cpu());
+    EXPECT_EQ(c.shape()[0], 2);
+    EXPECT_EQ(c.shape()[1], 3);
+    auto* cp = c.data<std::complex<float>>();
+    // First row: (0+0i, 1+1i, 2+2i)
+    EXPECT_FLOAT_EQ(cp[0].real(), 0.0f);
+    EXPECT_FLOAT_EQ(cp[0].imag(), 0.0f);
+    EXPECT_FLOAT_EQ(cp[1].real(), 1.0f);
+    EXPECT_FLOAT_EQ(cp[1].imag(), 1.0f);
 }
 
 // ============================================================================
@@ -316,14 +268,10 @@ TEST_P(ComplexArithmeticTest, Complex128MulAccuracy) {
     a.data<std::complex<double>>()[0] = {1e-10, 2e-10};
     b.data<std::complex<double>>()[0] = {3e-10, 4e-10};
 
-    try {
-        auto c = mul(a, b).to(Device::cpu());
-        auto* cp = c.data<std::complex<double>>();
-        EXPECT_NEAR(cp[0].real(), -5e-20, 1e-30);
-        EXPECT_NEAR(cp[0].imag(), 10e-20, 1e-30);
-    } catch (const std::runtime_error&) {
-        GTEST_SKIP() << "Complex128 mul not yet supported on " << device.to_string();
-    }
+    auto c = mul(a, b).to(Device::cpu());
+    auto* cp = c.data<std::complex<double>>();
+    EXPECT_NEAR(cp[0].real(), -5e-20, 1e-30);
+    EXPECT_NEAR(cp[0].imag(), 10e-20, 1e-30);
 }
 
 // ============================================================================
@@ -335,14 +283,10 @@ TEST_P(ComplexArithmeticTest, ComplexSqrt) {
     // sqrt(-1+0i) = 0+1i
     a.data<std::complex<float>>()[0] = {-1.0f, 0.0f};
 
-    try {
-        auto c = sqrt(a).to(Device::cpu());
-        auto* cp = c.data<std::complex<float>>();
-        EXPECT_NEAR(cp[0].real(), 0.0f, 1e-5f);
-        EXPECT_NEAR(std::abs(cp[0].imag()), 1.0f, 1e-5f);
-    } catch (const std::runtime_error&) {
-        GTEST_SKIP() << "Complex sqrt not yet supported on " << device.to_string();
-    }
+    auto c = sqrt(a).to(Device::cpu());
+    auto* cp = c.data<std::complex<float>>();
+    EXPECT_NEAR(cp[0].real(), 0.0f, 1e-5f);
+    EXPECT_NEAR(std::abs(cp[0].imag()), 1.0f, 1e-5f);
 }
 
 // ============================================================================
@@ -350,50 +294,42 @@ TEST_P(ComplexArithmeticTest, ComplexSqrt) {
 // ============================================================================
 
 TEST_P(ComplexArithmeticTest, ComplexSinCos) {
-    try {
-        auto t = zeros({2}, DType::Complex64, device);
-        auto* p = t.data<std::complex<float>>();
-        p[0] = {0.0f, 0.0f};     // sin(0) = 0, cos(0) = 1
-        p[1] = {1.5708f, 0.0f};  // sin(pi/2) ≈ 1, cos(pi/2) ≈ 0
+    auto t = zeros({2}, DType::Complex64, device);
+    auto* p = t.data<std::complex<float>>();
+    p[0] = {0.0f, 0.0f};     // sin(0) = 0, cos(0) = 1
+    p[1] = {1.5708f, 0.0f};  // sin(pi/2) ≈ 1, cos(pi/2) ≈ 0
 
-        auto s = tenzor::sin(t);
-        auto c = tenzor::cos(t);
-        auto* sp = s.data<std::complex<float>>();
-        auto* cp = c.data<std::complex<float>>();
+    auto s = tenzor::sin(t);
+    auto c = tenzor::cos(t);
+    auto* sp = s.data<std::complex<float>>();
+    auto* cp = c.data<std::complex<float>>();
 
-        EXPECT_NEAR(sp[0].real(), 0.0f, 1e-5f);
-        EXPECT_NEAR(cp[0].real(), 1.0f, 1e-5f);
-        EXPECT_NEAR(sp[1].real(), 1.0f, 1e-3f);
-        EXPECT_NEAR(cp[1].real(), 0.0f, 1e-3f);
-    } catch (const std::runtime_error&) {
-        GTEST_SKIP() << "Complex sin/cos not yet supported on " << device.to_string();
-    }
+    EXPECT_NEAR(sp[0].real(), 0.0f, 1e-5f);
+    EXPECT_NEAR(cp[0].real(), 1.0f, 1e-5f);
+    EXPECT_NEAR(sp[1].real(), 1.0f, 1e-3f);
+    EXPECT_NEAR(cp[1].real(), 0.0f, 1e-3f);
 }
 
 TEST_P(ComplexArithmeticTest, ComplexMatmul) {
-    try {
-        auto a = zeros({2, 3}, DType::Complex64, device);
-        auto b = zeros({3, 2}, DType::Complex64, device);
+    auto a = zeros({2, 3}, DType::Complex64, device);
+    auto b = zeros({3, 2}, DType::Complex64, device);
 
-        // Fill with simple values
-        auto* ap = a.data<std::complex<float>>();
-        auto* bp = b.data<std::complex<float>>();
-        for (int i = 0; i < 6; ++i) {
-            ap[i] = {static_cast<float>(i + 1), 0.0f};
-            bp[i] = {static_cast<float>(i + 1), 0.0f};
-        }
-
-        auto c = tenzor::matmul(a, b);
-        EXPECT_EQ(c.dtype(), DType::Complex64);
-        EXPECT_EQ(c.shape()[0], 2);
-        EXPECT_EQ(c.shape()[1], 2);
-
-        // C[0,0] = a[0,:] . b[:,0] = 1*1 + 2*2 + 3*3 = 14 (real values)
-        auto* cp = c.data<std::complex<float>>();
-        EXPECT_NEAR(cp[0].real(), 22.0f, 1e-3f);
-    } catch (const std::runtime_error&) {
-        GTEST_SKIP() << "Complex matmul not yet supported on " << device.to_string();
+    // Fill with simple values
+    auto* ap = a.data<std::complex<float>>();
+    auto* bp = b.data<std::complex<float>>();
+    for (int i = 0; i < 6; ++i) {
+        ap[i] = {static_cast<float>(i + 1), 0.0f};
+        bp[i] = {static_cast<float>(i + 1), 0.0f};
     }
+
+    auto c = tenzor::matmul(a, b);
+    EXPECT_EQ(c.dtype(), DType::Complex64);
+    EXPECT_EQ(c.shape()[0], 2);
+    EXPECT_EQ(c.shape()[1], 2);
+
+    // C[0,0] = a[0,:] . b[:,0] = 1*1 + 2*2 + 3*3 = 14 (real values)
+    auto* cp = c.data<std::complex<float>>();
+    EXPECT_NEAR(cp[0].real(), 22.0f, 1e-3f);
 }
 
 // ============================================================================

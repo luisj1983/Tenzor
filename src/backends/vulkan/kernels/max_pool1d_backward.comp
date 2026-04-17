@@ -1,33 +1,30 @@
 #version 450
 #extension GL_EXT_shader_atomic_float : enable
 
-// Max Pooling 1D Backward Pass using pre-computed indices
-// Scatters gradients to the positions where max values were found
-// Uses atomic operations for overlapping pooling windows
+// Max Pooling 1D Backward: scatter grad_output to grad_input at positions
+// named by `indices` (produced by the forward shader as Int32). The
+// original shader declared `float indices[]` and cast the bit pattern,
+// which silently reinterpreted small positive int indices as subnormal
+// floats (all truncating to 0); every gradient was sent to position 0.
 layout(local_size_x_id = 0) in;
 
-layout(binding = 0) buffer GradOutput { float grad_output[]; };  // (N, C, L_out) flattened
-layout(binding = 1) buffer Indices { float indices[]; };          // Pre-computed max indices
-layout(binding = 2) buffer GradInput { float grad_input[]; };     // (N, C, L) output
+layout(binding = 0) buffer GradOutput { float grad_output[]; };  // (N, C, L_out)
+layout(binding = 1) buffer Indices    { int   indices[];     };  // (N, C, L_out), Int32 from forward
+layout(binding = 2) buffer GradInput  { float grad_input[];  };  // (N, C, L_in)
 
 layout(push_constant) uniform PushConstants {
-    uint n_elements;          // Total output gradient elements (N * C * L_out)
-    uint grad_input_size;     // Total input gradient elements (N * C * L)
+    uint n_elements;          // N * C * L_out
+    uint grad_input_size;     // N * C * L_in
 } params;
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
 
-    if (idx >= params.n_elements) {
-        return;
-    }
-
-    // Get gradient and target index
     float grad = grad_output[idx];
-    int target_idx = int(indices[idx]);
+    int target = indices[idx];
 
-    // Bounds check and scatter gradient
-    if (target_idx >= 0 && target_idx < int(params.grad_input_size)) {
-        atomicAdd(grad_input[target_idx], grad);
+    if (target >= 0 && target < int(params.grad_input_size)) {
+        atomicAdd(grad_input[target], grad);
     }
 }

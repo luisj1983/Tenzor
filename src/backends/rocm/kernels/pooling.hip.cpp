@@ -502,13 +502,18 @@ auto maxpool2d_forward_hip(
 ) -> std::pair<Tensor, Tensor> {
 
 #ifdef USE_MIOPEN
-    // Use MIOpen for supported dtypes (Float32, Float16, BFloat16)
+    // Prefer MIOpen, fall back to HIP kernel if MIOpen JIT fails (see
+    // avgpool2d_forward_hip for the same pattern).
     if (input.dtype() == DType::Float32 ||
         input.dtype() == DType::Float16 ||
         input.dtype() == DType::BFloat16) {
-        return maxpool2d_forward_miopen(input, kernel_h, kernel_w,
-                                        stride_h, stride_w, pad_h, pad_w,
-                                        return_indices, stream);
+        try {
+            return maxpool2d_forward_miopen(input, kernel_h, kernel_w,
+                                            stride_h, stride_w, pad_h, pad_w,
+                                            return_indices, stream);
+        } catch (const std::exception&) {
+            // fall through to HIP kernel below
+        }
     }
 #endif
 
@@ -804,13 +809,20 @@ auto avgpool2d_forward_hip(
 ) -> Tensor {
 
 #ifdef USE_MIOPEN
-    // Use MIOpen for supported dtypes (Float32, Float16, BFloat16)
+    // Prefer MIOpen for supported dtypes, but fall back to the HIP kernel
+    // if MIOpen's JIT compilation fails (e.g., hip headers missing from
+    // the runtime compiler's search path — environment-dependent error 7
+    // we've observed on gfx1150).
     if (input.dtype() == DType::Float32 ||
         input.dtype() == DType::Float16 ||
         input.dtype() == DType::BFloat16) {
-        return avgpool2d_forward_miopen(input, kernel_h, kernel_w,
-                                        stride_h, stride_w, pad_h, pad_w,
-                                        count_include_pad, stream);
+        try {
+            return avgpool2d_forward_miopen(input, kernel_h, kernel_w,
+                                            stride_h, stride_w, pad_h, pad_w,
+                                            count_include_pad, stream);
+        } catch (const std::exception&) {
+            // fall through to HIP kernel below
+        }
     }
 #endif
 

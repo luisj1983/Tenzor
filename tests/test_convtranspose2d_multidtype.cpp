@@ -44,4 +44,24 @@ TEST_P(ConvTranspose2dMultiDTypeTest, BatchDim) {
     EXPECT_EQ(output.tensor().shape()[1], 8);
 }
 
+TEST_P(ConvTranspose2dMultiDTypeTest, BackwardProducesGradients) {
+    nn::ConvTranspose2d deconv(3, 6, 4, 2, 1);
+    convert_model(deconv);
+
+    auto input = createInput({1, 3, 4, 4}, /*requires_grad=*/true);
+    auto output = deconv.forward(input);
+    auto loss = tenzor::sum(output);
+    loss.backward();
+
+    ASSERT_TRUE(input.has_grad()) << "input gradient must be populated";
+    auto g = input.grad().value();
+    EXPECT_EQ(g.shape()[0], 1);
+    EXPECT_EQ(g.shape()[1], 3);
+    expectDevice(g);
+
+    for (const auto& [name, p] : deconv.named_parameters()) {
+        ASSERT_TRUE(p->has_grad()) << "parameter " << name << " missing grad";
+    }
+}
+
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(ConvTranspose2dMultiDTypeTest);

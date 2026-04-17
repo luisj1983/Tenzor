@@ -200,7 +200,7 @@ __global__ void zero_triangle_f64(double* data, int n, int nbatch, bool upper) {
     }
 }
 
-/// HIP kernel to extract R (upper triangle) from QR factorization result.
+/// Extract R from col-major QR result (m × n_cols) into row-major R (k × n_cols).
 __global__ void extract_r_f32(const float* a_data, float* r_data,
                                int m, int n_cols, int k, int nbatch) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -214,7 +214,7 @@ __global__ void extract_r_f32(const float* a_data, float* r_data,
 
     const float* a_mat = a_data + b * m * n_cols;
     float* r_mat = r_data + b * k * n_cols;
-    r_mat[i * n_cols + j] = (j >= i) ? a_mat[i * n_cols + j] : 0.0f;
+    r_mat[i * n_cols + j] = (j >= i) ? a_mat[j * m + i] : 0.0f;
 }
 
 __global__ void extract_r_f64(const double* a_data, double* r_data,
@@ -230,10 +230,10 @@ __global__ void extract_r_f64(const double* a_data, double* r_data,
 
     const double* a_mat = a_data + b * m * n_cols;
     double* r_mat = r_data + b * k * n_cols;
-    r_mat[i * n_cols + j] = (j >= i) ? a_mat[i * n_cols + j] : 0.0;
+    r_mat[i * n_cols + j] = (j >= i) ? a_mat[j * m + i] : 0.0;
 }
 
-/// HIP kernel to copy Q columns from householder result.
+/// Copy Q from col-major orgqr result (m × k) into row-major Q (m × k).
 __global__ void copy_q_columns_f32(const float* a_data, float* q_data,
                                     int m, int n_cols, int k, int nbatch) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -247,7 +247,7 @@ __global__ void copy_q_columns_f32(const float* a_data, float* q_data,
 
     const float* a_mat = a_data + b * m * n_cols;
     float* q_mat = q_data + b * m * k;
-    q_mat[i * k + j] = a_mat[i * n_cols + j];
+    q_mat[i * k + j] = a_mat[j * m + i];
 }
 
 __global__ void copy_q_columns_f64(const double* a_data, double* q_data,
@@ -256,6 +256,7 @@ __global__ void copy_q_columns_f64(const double* a_data, double* q_data,
     int total = nbatch * m * k;
     if (idx >= total) return;
 
+    /* col-major read: q_mat[i*k+j] = a_mat[j*m+i] */
     int b = idx / (m * k);
     int rem = idx % (m * k);
     int i = rem / k;
@@ -263,7 +264,7 @@ __global__ void copy_q_columns_f64(const double* a_data, double* q_data,
 
     const double* a_mat = a_data + b * m * n_cols;
     double* q_mat = q_data + b * m * k;
-    q_mat[i * k + j] = a_mat[i * n_cols + j];
+    q_mat[i * k + j] = a_mat[j * m + i];
 }
 
 /// HIP kernel to split a row-major packed LU matrix into separate L (unit
@@ -453,8 +454,12 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, hipStream_t stream) -
         auto B_f32 = B.to(DType::Float32);
         return linalg_solve_kernel(A_f32, B_f32, stream).to(DType::BFloat16);
     }
-    auto work_a = A.contiguous().clone();
-    auto work_b = B.contiguous().clone();
+    // rocSOLVER (like cuSOLVER / LAPACK) uses column-major; Tenzor is
+    // row-major. Transposing-then-contiguous gives row-major storage of
+    // A^T, which rocSOLVER reads as col-major equal to A. Transpose the
+    // result back at the end.
+    auto work_a = tenzor::transpose(A.contiguous(), -1, -2).contiguous();
+    auto work_b = tenzor::transpose(B.contiguous(), -1, -2).contiguous();
     auto [n, ndim_a] = check_square(work_a);
     int64_t nbatch = batch_size(work_a);
 
@@ -501,7 +506,7 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, hipStream_t stream) -
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
     backend::rocm::RocmCachingAllocator::get().free(d_ipiv);
-    return work_b;
+    return tenzor::transpose(work_b, -1, -2).contiguous();
 }
 
 // ============================================================================
@@ -823,7 +828,6 @@ auto linalg_qr_kernel(const Tensor& A, hipStream_t stream)
         auto [Q, R] = linalg_qr_kernel(A.to(DType::Float32), stream);
         return {Q.to(DType::BFloat16), R.to(DType::BFloat16)};
     }
-    auto work = A.contiguous().clone();
     auto shape = A.shape();
     auto a_ndim = static_cast<int64_t>(shape.size());
     if (a_ndim < 2) throw std::invalid_argument("linalg::qr: input must be at least 2D");
@@ -831,6 +835,11 @@ auto linalg_qr_kernel(const Tensor& A, hipStream_t stream)
     int64_t m = shape[a_ndim - 2];
     int64_t n_cols = shape[a_ndim - 1];
     int64_t k = std::min(m, n_cols);
+
+    // rocSOLVER geqrf is column-major; transposing row-major A into row-major
+    // A^T buffers hands rocSOLVER col-major A. The extract_r / copy_q_columns
+    // helpers then read the col-major result and emit row-major Q/R.
+    auto work = tenzor::transpose(A.contiguous(), -1, -2).contiguous();
     int64_t nbatch = batch_size(work);
 
     std::vector<int64_t> batch_dims;
@@ -851,7 +860,6 @@ auto linalg_qr_kernel(const Tensor& A, hipStream_t stream)
         float* q_data = Q.data<float>();
         float* r_data = R.data<float>();
 
-        // Allocate tau on device
         size_t tau_bytes = k * sizeof(float);
         auto* d_tau = static_cast<float*>(
             backend::rocm::RocmCachingAllocator::get().allocate(tau_bytes));
@@ -859,23 +867,18 @@ auto linalg_qr_kernel(const Tensor& A, hipStream_t stream)
         for (int64_t b = 0; b < nbatch; b++) {
             float* a_mat = a_data + b * m * n_cols;
 
-            // rocSOLVER geqrf works in column-major. For row-major m x n,
-            // we pass n_cols as m and m as n (treating as A^T in col-major).
-            ROCBLAS_CHECK_LINALG(rocsolver_sgeqrf(handle, n_cols, m,
-                a_mat, n_cols, d_tau));
+            ROCBLAS_CHECK_LINALG(rocsolver_sgeqrf(handle, m, n_cols,
+                a_mat, m, d_tau));
 
-            // Extract R from upper triangle
             int threads = 256;
             int total_r = k * n_cols;
             int blocks = (total_r + threads - 1) / threads;
             extract_r_f32<<<blocks, threads, 0, stream>>>(
                 a_mat, r_data + b * k * n_cols, m, n_cols, k, 1);
 
-            // Generate Q using orgqr
-            ROCBLAS_CHECK_LINALG(rocsolver_sorgqr(handle, n_cols, k, k,
-                a_mat, n_cols, d_tau));
+            ROCBLAS_CHECK_LINALG(rocsolver_sorgqr(handle, m, k, k,
+                a_mat, m, d_tau));
 
-            // Copy Q columns
             int total_q = m * k;
             blocks = (total_q + threads - 1) / threads;
             copy_q_columns_f32<<<blocks, threads, 0, stream>>>(
@@ -895,8 +898,8 @@ auto linalg_qr_kernel(const Tensor& A, hipStream_t stream)
         for (int64_t b = 0; b < nbatch; b++) {
             double* a_mat = a_data + b * m * n_cols;
 
-            ROCBLAS_CHECK_LINALG(rocsolver_dgeqrf(handle, n_cols, m,
-                a_mat, n_cols, d_tau));
+            ROCBLAS_CHECK_LINALG(rocsolver_dgeqrf(handle, m, n_cols,
+                a_mat, m, d_tau));
 
             int threads = 256;
             int total_r = k * n_cols;
@@ -904,8 +907,8 @@ auto linalg_qr_kernel(const Tensor& A, hipStream_t stream)
             extract_r_f64<<<blocks, threads, 0, stream>>>(
                 a_mat, r_data + b * k * n_cols, m, n_cols, k, 1);
 
-            ROCBLAS_CHECK_LINALG(rocsolver_dorgqr(handle, n_cols, k, k,
-                a_mat, n_cols, d_tau));
+            ROCBLAS_CHECK_LINALG(rocsolver_dorgqr(handle, m, k, k,
+                a_mat, m, d_tau));
 
             int total_q = m * k;
             blocks = (total_q + threads - 1) / threads;
@@ -1541,7 +1544,12 @@ auto linalg_cholesky_kernel(const Tensor& A, bool upper, hipStream_t stream) -> 
     auto handle = RocSOLVERHandlePool::get(stream);
     DeviceInfo d_info;
 
-    rocblas_fill uplo_mode = upper ? rocblas_fill_upper : rocblas_fill_lower;
+    // rocSOLVER operates column-major; Tenzor is row-major. A is symmetric
+    // so A_col == A_row, but the output triangle is inverted between
+    // conventions: col-major LOWER = row-major UPPER. Feed the opposite
+    // uplo and let zero_triangle preserve the user-requested row-major
+    // triangle.
+    rocblas_fill uplo_mode = upper ? rocblas_fill_lower : rocblas_fill_upper;
 
     if (A.dtype() == DType::Float32) {
         float* data = work.data<float>();

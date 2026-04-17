@@ -213,10 +213,16 @@ auto GraphWriter::write_tensor(const Tensor& tensor) -> void {
     write_uint32(static_cast<uint32_t>(tensor.device().type));
     write_int64(tensor.device().index);
 
-    // Write data
-    size_t data_size = tensor.numel() * tensor.dtype_size();
+    // Write data. fstream::write expects a host pointer — if the tensor
+    // lives on a GPU backend, data_ptr() returns a device pointer which
+    // would SEGV on host read. Also materialise a contiguous CPU copy so
+    // the serialized byte order matches what the reader expects.
+    Tensor host = tensor.device().type == Device::Type::CPU
+                      ? tensor.contiguous()
+                      : tensor.to(Device::cpu()).contiguous();
+    size_t data_size = host.numel() * host.dtype_size();
     write_uint64(data_size);
-    file_.write(reinterpret_cast<const char*>(tensor.data_ptr()), data_size);
+    file_.write(reinterpret_cast<const char*>(host.data_ptr()), data_size);
 }
 
 auto GraphWriter::write_int64_vector(const std::vector<int64_t>& vec) -> void {
@@ -456,13 +462,19 @@ auto GraphReader::read_tensor() -> Tensor {
     DType dtype = static_cast<DType>(read_uint32());
     auto dev_type = static_cast<Device::Type>(read_uint32());
     int64_t dev_index = read_int64();
-    Device device(dev_type, dev_index);
+    Device original_device(dev_type, dev_index);
 
-    Tensor tensor(shape, dtype, device);
+    // Mirror write_tensor: bytes were serialized from a CPU copy. Read into
+    // a CPU tensor first (fstream::read needs a host pointer), then migrate
+    // to the recorded device if needed.
+    Tensor tensor(shape, dtype, Device::cpu());
 
     uint64_t data_size = read_uint64();
     file_.read(reinterpret_cast<char*>(tensor.data_ptr()), data_size);
 
+    if (original_device.type != Device::Type::CPU) {
+        tensor = tensor.to(original_device);
+    }
     return tensor;
 }
 

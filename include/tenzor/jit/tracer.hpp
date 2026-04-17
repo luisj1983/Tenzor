@@ -175,6 +175,12 @@ struct TracedOp {
     std::unordered_map<std::string, bool> bool_attrs;  ///< Boolean attributes (e.g., bias)
     std::unordered_map<std::string, Tensor> tensor_attrs;  ///< Tensor constants (e.g., weights)
 
+    /// Control-flow sidecar: for `If` ops, `outputs` holds then-branch
+    /// output tensor IDs and `else_outputs` holds else-branch output
+    /// tensor IDs (empty for all other op types). end_trace uses this
+    /// to surface the correct per-branch outputs from each subgraph.
+    std::vector<std::string> else_outputs;
+
     /**
      * @brief Construct traced operation.
      *

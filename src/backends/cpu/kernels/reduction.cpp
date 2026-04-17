@@ -3268,6 +3268,35 @@ auto any_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                 for (int64_t i = 0; i < n; i++) { if (d[i]) { found = true; break; } }
                 break;
             }
+            case DType::Float16: {
+                auto* d = input.data<Float16>();
+                for (int64_t i = 0; i < n; i++) {
+                    if (static_cast<float>(d[i]) != 0.0f) { found = true; break; }
+                }
+                break;
+            }
+            case DType::BFloat16: {
+                auto* d = input.data<BFloat16>();
+                for (int64_t i = 0; i < n; i++) {
+                    if (static_cast<float>(d[i]) != 0.0f) { found = true; break; }
+                }
+                break;
+            }
+            case DType::Int8: {
+                auto* d = input.data<int8_t>();
+                for (int64_t i = 0; i < n; i++) { if (d[i]) { found = true; break; } }
+                break;
+            }
+            case DType::UInt8: {
+                auto* d = input.data<uint8_t>();
+                for (int64_t i = 0; i < n; i++) { if (d[i]) { found = true; break; } }
+                break;
+            }
+            case DType::Int16: {
+                auto* d = input.data<int16_t>();
+                for (int64_t i = 0; i < n; i++) { if (d[i]) { found = true; break; } }
+                break;
+            }
             default:
                 throw std::runtime_error("any: unsupported dtype");
         }
@@ -3300,8 +3329,13 @@ auto any_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                 switch (input.dtype()) {
                     case DType::Float32: found = input.data<float>()[flat] != 0.0f; break;
                     case DType::Float64: found = input.data<double>()[flat] != 0.0; break;
+                    case DType::Float16:  found = static_cast<float>(input.data<Float16>()[flat]) != 0.0f; break;
+                    case DType::BFloat16: found = static_cast<float>(input.data<BFloat16>()[flat]) != 0.0f; break;
+                    case DType::Int8:  found = input.data<int8_t>()[flat] != 0; break;
+                    case DType::Int16: found = input.data<int16_t>()[flat] != 0; break;
                     case DType::Int32: found = input.data<int32_t>()[flat] != 0; break;
                     case DType::Int64: found = input.data<int64_t>()[flat] != 0; break;
+                    case DType::UInt8: found = input.data<uint8_t>()[flat] != 0; break;
                     case DType::Bool: found = input.data<bool>()[flat]; break;
                     default: break;
                 }
@@ -3359,6 +3393,35 @@ auto all_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                 for (int64_t i = 0; i < n; i++) { if (!d[i]) { result = false; break; } }
                 break;
             }
+            case DType::Float16: {
+                auto* d = input.data<Float16>();
+                for (int64_t i = 0; i < n; i++) {
+                    if (static_cast<float>(d[i]) == 0.0f) { result = false; break; }
+                }
+                break;
+            }
+            case DType::BFloat16: {
+                auto* d = input.data<BFloat16>();
+                for (int64_t i = 0; i < n; i++) {
+                    if (static_cast<float>(d[i]) == 0.0f) { result = false; break; }
+                }
+                break;
+            }
+            case DType::Int8: {
+                auto* d = input.data<int8_t>();
+                for (int64_t i = 0; i < n; i++) { if (!d[i]) { result = false; break; } }
+                break;
+            }
+            case DType::UInt8: {
+                auto* d = input.data<uint8_t>();
+                for (int64_t i = 0; i < n; i++) { if (!d[i]) { result = false; break; } }
+                break;
+            }
+            case DType::Int16: {
+                auto* d = input.data<int16_t>();
+                for (int64_t i = 0; i < n; i++) { if (!d[i]) { result = false; break; } }
+                break;
+            }
             default:
                 throw std::runtime_error("all: unsupported dtype");
         }
@@ -3391,8 +3454,13 @@ auto all_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                 switch (input.dtype()) {
                     case DType::Float32: result = input.data<float>()[flat] != 0.0f; break;
                     case DType::Float64: result = input.data<double>()[flat] != 0.0; break;
+                    case DType::Float16:  result = static_cast<float>(input.data<Float16>()[flat]) != 0.0f; break;
+                    case DType::BFloat16: result = static_cast<float>(input.data<BFloat16>()[flat]) != 0.0f; break;
+                    case DType::Int8:  result = input.data<int8_t>()[flat] != 0; break;
+                    case DType::Int16: result = input.data<int16_t>()[flat] != 0; break;
                     case DType::Int32: result = input.data<int32_t>()[flat] != 0; break;
                     case DType::Int64: result = input.data<int64_t>()[flat] != 0; break;
+                    case DType::UInt8: result = input.data<uint8_t>()[flat] != 0; break;
                     case DType::Bool: result = input.data<bool>()[flat]; break;
                     default: break;
                 }

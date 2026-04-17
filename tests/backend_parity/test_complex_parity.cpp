@@ -75,9 +75,12 @@ TEST(ComplexParity, Polar) {
     auto abs_t = generate_uniform_tensor({32, 32}, 0.1f, 5.0f, DType::Float32, Device::cpu());
     auto ang_t = generate_uniform_tensor({32, 32}, -3.14f, 3.14f, DType::Float32, Device::cpu(), 99999);
 
+    // atol=1e-5 matches other transcendental parity tests — polar is a
+    // cos/sin-based op, whose accuracy on GLSL/Vulkan is up to ~2 ULP
+    // looser than libm's, so the default 1e-7 atol is unreachable.
     test_operation_parity([](const std::vector<Tensor>& inputs) {
         return polar(inputs[0], inputs[1]);
-    }, {abs_t, ang_t}, 1e-5f, 1e-7f, "Polar");
+    }, {abs_t, ang_t}, 1e-5f, 1e-5f, "Polar");
 }
 
 // ============================================================================
@@ -117,6 +120,67 @@ TEST(ComplexParity, Complex_Abs) {
     test_operation_parity([](const std::vector<Tensor>& inputs) {
         return abs(inputs[0]);
     }, {a}, 1e-5f, 1e-7f, "Complex_Abs");
+}
+
+// ============================================================================
+// Complex Transcendentals
+// ============================================================================
+
+TEST(ComplexParity, Complex_Exp) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    // Keep real parts bounded so exp(Re) doesn't overflow Float32.
+    auto a = randn({16, 16}, DType::Complex64, Device::cpu());
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        return exp(inputs[0]);
+    }, {a}, 1e-4f, 1e-5f, "Complex_Exp");
+}
+
+TEST(ComplexParity, Complex_Log) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    // Avoid log(0) — shift away from the origin.
+    auto base = randn({16, 16}, DType::Complex64, Device::cpu());
+    auto* d = base.data<std::complex<float>>();
+    for (int64_t i = 0; i < base.numel(); ++i) {
+        d[i] = std::complex<float>(d[i].real() + 2.0f, d[i].imag());
+    }
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        return log(inputs[0]);
+    }, {base}, 1e-5f, 1e-6f, "Complex_Log");
+}
+
+TEST(ComplexParity, Complex_Sqrt) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    auto a = randn({16, 16}, DType::Complex64, Device::cpu());
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        return sqrt(inputs[0]);
+    }, {a}, 1e-5f, 1e-6f, "Complex_Sqrt");
+}
+
+TEST(ComplexParity, Complex_Sin) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    // Keep imag bounded so cosh(Im)/sinh(Im) stay finite in Float32.
+    auto a = randn({16, 16}, DType::Complex64, Device::cpu());
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        return sin(inputs[0]);
+    }, {a}, 1e-4f, 1e-5f, "Complex_Sin");
+}
+
+TEST(ComplexParity, Complex_Cos) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+
+    auto a = randn({16, 16}, DType::Complex64, Device::cpu());
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        return cos(inputs[0]);
+    }, {a}, 1e-4f, 1e-5f, "Complex_Cos");
 }
 
 

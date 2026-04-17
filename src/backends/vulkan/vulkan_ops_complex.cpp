@@ -46,7 +46,8 @@ auto VulkanBackend::dispatchConj(const Tensor& input) -> Tensor {
     }
 
     int32_t device_id = input.device().index;
-    bool is_float64 = (input.dtype() == DType::Float64);
+    bool is_complex = (input.dtype() == DType::Complex64 || input.dtype() == DType::Complex128);
+    bool is_float64 = (input.dtype() == DType::Float64 || input.dtype() == DType::Complex128);
     bool is_bfloat16_conj = (input.dtype() == DType::BFloat16);
 
     std::string shader_name = is_float64 ? "conj_f64" : is_bfloat16_conj ? "conj_bf16" : "conj";
@@ -55,7 +56,12 @@ auto VulkanBackend::dispatchConj(const Tensor& input) -> Tensor {
     std::vector<int64_t> out_shape(input.shape().begin(), input.shape().end());
     Tensor output(out_shape, input.dtype(), input.device());
 
-    uint32_t num_elements = static_cast<uint32_t>(input.numel());
+    // The shader indexes by FLOAT slot, not by complex element. For a true
+    // Complex64/128 tensor, numel() is the complex element count; we need
+    // 2x that to cover both real and imag slots. For the legacy
+    // packed-float-with-trailing-2 layout, numel already is the float count.
+    uint32_t num_elements = static_cast<uint32_t>(
+        is_complex ? input.numel() * 2 : input.numel());
 
     struct { uint32_t num_elements; } pushConstants;
     pushConstants.num_elements = num_elements;
@@ -81,7 +87,7 @@ auto VulkanBackend::dispatchConj(const Tensor& input) -> Tensor {
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
 
-    uint32_t workgroups = div_wg(input.numel(), devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg(num_elements, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     insertComputeOnlyBarrier(cmdBuffer);
@@ -91,6 +97,47 @@ auto VulkanBackend::dispatchConj(const Tensor& input) -> Tensor {
 }
 
 auto VulkanBackend::dispatchReal(const Tensor& input) -> Tensor {
+    // Complex64/128 fast path: input is a true complex tensor (numel =
+    // element count, dtype_size = 2 floats). Output is the same shape but
+    // Float32/Float64. Extract real parts by walking the interleaved
+    // storage two floats at a time.
+    if (input.dtype() == DType::Complex64 || input.dtype() == DType::Complex128) {
+        int32_t device_id = input.device().index;
+        bool is_c128 = (input.dtype() == DType::Complex128);
+        std::string shader_name = is_c128 ? "complex_to_real_f64" : "complex_to_real";
+        auto* pipeline = getPipeline(shader_name, device_id);
+
+        std::vector<int64_t> out_shape(input.shape().begin(), input.shape().end());
+        DType out_dtype = is_c128 ? DType::Float64 : DType::Float32;
+        Tensor output(out_shape, out_dtype, input.device());
+
+        int64_t num_complex = input.numel();
+        struct { uint32_t num_complex; } pc{static_cast<uint32_t>(num_complex)};
+
+        const void* buffer_in  = input.data_ptr();
+        const void* buffer_out = output.data_ptr();
+        size_t in_size  = input.numel()  * input.dtype_size();
+        size_t out_size = output.numel() * output.dtype_size();
+
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, buffer_in}, {1, buffer_out}
+        };
+        std::vector<size_t> sizes = {in_size, out_size};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(
+            device_id, pipeline, bindings, sizes);
+
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(),
+                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, div_wg(num_complex, devices_[device_id].workgroupSize), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+        return output;
+    }
+
     if (input.numel() == 0) {
         // Output has half the elements (real parts only)
         std::vector<int64_t> out_shape(input.shape().begin(), input.shape().end());
@@ -182,6 +229,46 @@ auto VulkanBackend::dispatchReal(const Tensor& input) -> Tensor {
 }
 
 auto VulkanBackend::dispatchImag(const Tensor& input) -> Tensor {
+    // Complex64/128 fast path (mirrors dispatchReal — see comment there).
+    // Uses the existing imag / imag_f64 shaders which read the second
+    // float of each interleaved (re, im) pair.
+    if (input.dtype() == DType::Complex64 || input.dtype() == DType::Complex128) {
+        int32_t device_id = input.device().index;
+        bool is_c128 = (input.dtype() == DType::Complex128);
+        std::string shader_name = is_c128 ? "imag_f64" : "imag";
+        auto* pipeline = getPipeline(shader_name, device_id);
+
+        std::vector<int64_t> out_shape(input.shape().begin(), input.shape().end());
+        DType out_dtype = is_c128 ? DType::Float64 : DType::Float32;
+        Tensor output(out_shape, out_dtype, input.device());
+
+        int64_t num_complex = input.numel();
+        struct { uint32_t num_complex; } pc{static_cast<uint32_t>(num_complex)};
+
+        const void* buffer_in  = input.data_ptr();
+        const void* buffer_out = output.data_ptr();
+        size_t in_size  = input.numel()  * input.dtype_size();
+        size_t out_size = output.numel() * output.dtype_size();
+
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, buffer_in}, {1, buffer_out}
+        };
+        std::vector<size_t> sizes = {in_size, out_size};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(
+            device_id, pipeline, bindings, sizes);
+
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(),
+                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, div_wg(num_complex, devices_[device_id].workgroupSize), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+        return output;
+    }
+
     if (input.numel() == 0) {
         std::vector<int64_t> out_shape(input.shape().begin(), input.shape().end());
         if (!out_shape.empty()) out_shape.back() /= 2;
@@ -270,6 +357,44 @@ auto VulkanBackend::dispatchImag(const Tensor& input) -> Tensor {
 }
 
 auto VulkanBackend::dispatchAngle(const Tensor& input) -> Tensor {
+    // Complex64/128 fast path — mirrors dispatchReal. Shape preserved,
+    // output dtype is the corresponding real. Reuses existing angle /
+    // angle_f64 shaders which read (re, im) pairs.
+    if (input.dtype() == DType::Complex64 || input.dtype() == DType::Complex128) {
+        int32_t device_id = input.device().index;
+        bool is_c128 = (input.dtype() == DType::Complex128);
+        std::string shader_name = is_c128 ? "angle_f64" : "angle";
+        auto* pipeline = getPipeline(shader_name, device_id);
+
+        std::vector<int64_t> out_shape(input.shape().begin(), input.shape().end());
+        DType out_dtype = is_c128 ? DType::Float64 : DType::Float32;
+        Tensor output(out_shape, out_dtype, input.device());
+
+        int64_t num_complex = input.numel();
+        struct { uint32_t num_complex; } pc{static_cast<uint32_t>(num_complex)};
+
+        size_t in_size  = input.numel()  * input.dtype_size();
+        size_t out_size = output.numel() * output.dtype_size();
+
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, input.data_ptr()}, {1, output.data_ptr()}
+        };
+        std::vector<size_t> sizes = {in_size, out_size};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(
+            device_id, pipeline, bindings, sizes);
+
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(),
+                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, div_wg(num_complex, devices_[device_id].workgroupSize), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+        return output;
+    }
+
     if (input.numel() == 0) {
         std::vector<int64_t> out_shape(input.shape().begin(), input.shape().end());
         if (!out_shape.empty()) out_shape.back() /= 2;
@@ -358,6 +483,47 @@ auto VulkanBackend::dispatchAngle(const Tensor& input) -> Tensor {
 }
 
 auto VulkanBackend::dispatchPolar(const Tensor& abs, const Tensor& angle) -> Tensor {
+    // Float32/64 → Complex64/128 fast path — matches CPU semantics.
+    // Shape is preserved (not doubled) and dtype promotes to the
+    // corresponding complex type. Uses the existing polar / polar_f64
+    // shaders which write interleaved (re, im) pairs.
+    if (abs.dtype() == DType::Float32 || abs.dtype() == DType::Float64) {
+        int32_t device_id = abs.device().index;
+        bool is_f64 = (abs.dtype() == DType::Float64);
+        std::string shader_name = is_f64 ? "polar_f64" : "polar";
+        auto* pipeline = getPipeline(shader_name, device_id);
+
+        std::vector<int64_t> out_shape(abs.shape().begin(), abs.shape().end());
+        DType out_dtype = is_f64 ? DType::Complex128 : DType::Complex64;
+        Tensor output(out_shape, out_dtype, abs.device());
+
+        int64_t num_complex = abs.numel();
+        struct { uint32_t num_complex; } pc{static_cast<uint32_t>(num_complex)};
+
+        size_t real_size    = abs.numel()    * abs.dtype_size();
+        size_t output_size  = output.numel() * output.dtype_size();
+
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, abs.data_ptr()},
+            {1, angle.data_ptr()},
+            {2, output.data_ptr()},
+        };
+        std::vector<size_t> sizes = {real_size, real_size, output_size};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(
+            device_id, pipeline, bindings, sizes);
+
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(),
+                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, div_wg(num_complex, devices_[device_id].workgroupSize), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+        return output;
+    }
+
     if (abs.numel() == 0) {
         // Output shape: same as input but last dim doubled (interleaved real, imag)
         std::vector<int64_t> out_shape(abs.shape().begin(), abs.shape().end());

@@ -1,0 +1,37 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Complex128 sqrt. Magnitude and sqrt stay in double; sign test is trivial.
+
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { double data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { double data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= num_elements) return;
+    double a = data_in[idx * 2u];
+    double b = data_in[idx * 2u + 1u];
+    if (a == 0.0lf && b == 0.0lf) {
+        data_out[idx * 2u]      = 0.0lf;
+        data_out[idx * 2u + 1u] = 0.0lf;
+        return;
+    }
+    double ar = abs(a);
+    double ai = abs(b);
+    double m = max(ar, ai);
+    double r = ar / m;
+    double i = ai / m;
+    double mag = m * sqrt(r * r + i * i);
+    double s = sqrt(0.5lf * (abs(a) + mag));
+    double re, im;
+    if (a >= 0.0lf) { re = s;                  im = b / (2.0lf * s); }
+    else             { re = abs(b) / (2.0lf * s); im = (b >= 0.0lf) ? s : -s; }
+    data_out[idx * 2u]      = re;
+    data_out[idx * 2u + 1u] = im;
+}

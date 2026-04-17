@@ -47,27 +47,14 @@ TEST_P(HigherOrderNNMultiDTypeTest, Conv2d_DoubleBackward) {
     auto output = conv.forward(input);
     auto loss = tenzor::sum(output);
 
-    // First backward with create_graph=true to retain computation graph
     loss.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
 
-    // The gradient of input should exist
-    ASSERT_TRUE(input.grad().has_value());
-    auto grad1 = input.grad().value();
-
-    // Compute norm of the gradient (a scalar function of grad)
-    auto grad_var = Variable(grad1, true);
+    ASSERT_TRUE(input.grad_variable().has_value())
+        << "create_graph=true must populate grad_variable()";
+    Variable grad_var = input.grad_variable().value();
     auto grad_norm = tenzor::sum(grad_var * grad_var);
-
-    // Second backward — this requires higher-order derivatives through Conv2d
-    try {
-        grad_norm.backward();
-        // If we get here, double-backward worked
-        EXPECT_TRUE(grad_var.grad().has_value())
-            << "Second backward should produce gradients";
-    } catch (const std::runtime_error& e) {
-        // Higher-order not supported for this op yet is acceptable
-        GTEST_SKIP() << "Double backward through Conv2d not yet supported: " << e.what();
-    }
+    grad_norm.backward();
+    EXPECT_TRUE(input.grad().has_value());
 }
 
 // ============================================================================
@@ -93,22 +80,14 @@ TEST_P(HigherOrderNNMultiDTypeTest, LSTM_InnerLoop_Gradient) {
     // Simple loss: sum of output
     auto loss = tenzor::sum(output);
 
-    // Backward with create_graph=true
     try {
         loss.backward(std::nullopt, false, true);
-
-        ASSERT_TRUE(input.grad().has_value());
-        auto grad = input.grad().value();
-
-        // Gradient norm as a scalar function
-        auto grad_var = Variable(grad, true);
+        ASSERT_TRUE(input.grad_variable().has_value())
+            << "LSTM create_graph=true must populate grad_variable()";
+        Variable grad_var = input.grad_variable().value();
         auto grad_norm = tenzor::sum(grad_var * grad_var);
-
-        // Second backward through the LSTM graph
         grad_norm.backward();
-
-        EXPECT_TRUE(grad_var.grad().has_value())
-            << "LSTM double backward should produce gradients";
+        EXPECT_TRUE(input.grad().has_value());
     } catch (const std::runtime_error& e) {
         GTEST_SKIP() << "LSTM double backward not supported: " << e.what();
     }
@@ -136,16 +115,12 @@ TEST_P(HigherOrderNNMultiDTypeTest, GRU_InnerLoop_Gradient) {
 
     try {
         loss.backward(std::nullopt, false, true);
-
-        ASSERT_TRUE(input.grad().has_value());
-        auto grad = input.grad().value();
-
-        auto grad_var = Variable(grad, true);
+        ASSERT_TRUE(input.grad_variable().has_value())
+            << "GRU create_graph=true must populate grad_variable()";
+        Variable grad_var = input.grad_variable().value();
         auto grad_norm = tenzor::sum(grad_var * grad_var);
         grad_norm.backward();
-
-        EXPECT_TRUE(grad_var.grad().has_value())
-            << "GRU double backward should produce gradients";
+        EXPECT_TRUE(input.grad().has_value());
     } catch (const std::runtime_error& e) {
         GTEST_SKIP() << "GRU double backward not supported: " << e.what();
     }

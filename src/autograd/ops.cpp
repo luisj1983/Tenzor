@@ -341,8 +341,15 @@ auto max(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Var
     // Compute result first so we can save it
     auto result_tensor = tenzor::max(input.tensor(), dim, keepdim);
 
-    // Save input and output for backward pass
-    grad_fn->save_for_backward({input.tensor(), result_tensor});
+    // Save input, output, and optionally dim for backward. MaxBackward reads
+    // saved_tensors_[2] when dim was provided.
+    std::vector<Tensor> max_saved = {input.tensor(), result_tensor};
+    if (dim.has_value()) {
+        Tensor dim_t({1}, DType::Int64, Device::cpu());
+        dim_t.data<int64_t>()[0] = *dim;
+        max_saved.push_back(dim_t);
+    }
+    grad_fn->save_for_backward(std::move(max_saved));
 
     std::vector<std::shared_ptr<Function>> next_funcs;
 
@@ -997,9 +1004,31 @@ auto digamma(const Variable& input) -> Variable {
 }
 
 auto polygamma(int64_t n, const Variable& input) -> Variable {
-    // Polygamma backward: d/dx ψ^(n)(x) = ψ^(n+1)(x)
-    // For now, no autograd support (would need recursive backward)
-    return Variable(tenzor::polygamma(n, input.tensor()), false);
+    // Polygamma: d/dx ψ^(n)(x) = ψ^(n+1)(x).
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::polygamma(n, input.tensor()), false);
+    }
+    struct Grad : public Function {
+        int64_t n;
+        explicit Grad(int64_t nn) : n(nn) {}
+        auto forward(std::vector<Variable>) -> std::vector<Variable> override {
+            throw std::runtime_error("PolygammaBackward::forward should not be called");
+        }
+        auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+            const auto& grad = grad_outputs[0];
+            const auto& x = saved_tensors_[0];
+            auto next = tenzor::polygamma(n + 1, x);
+            return {mul(grad, next)};
+        }
+    };
+    auto result = tenzor::polygamma(n, input.tensor());
+    auto grad_fn = std::make_shared<Grad>(n);
+    grad_fn->save_for_backward({input.tensor()});
+    grad_fn->set_next_functions({input.grad_fn()});
+    grad_fn->set_input_variables({input});
+    Variable output(result, true);
+    output.set_grad_fn(grad_fn);
+    return output;
 }
 
 auto bessel_i0(const Variable& input) -> Variable {
@@ -1069,7 +1098,13 @@ auto min(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Var
     }
     auto result = tenzor::min(input.tensor(), dim, keepdim);
     auto grad_fn = std::make_shared<MinBackward>(dim, keepdim);
-    grad_fn->save_for_backward({input.tensor(), result});
+    std::vector<Tensor> saved = {input.tensor(), result};
+    if (dim.has_value()) {
+        Tensor dim_t({1}, DType::Int64, Device::cpu());
+        dim_t.data<int64_t>()[0] = *dim;
+        saved.push_back(dim_t);
+    }
+    grad_fn->save_for_backward(std::move(saved));
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
     Variable output(result, true);
@@ -1083,7 +1118,15 @@ auto std(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Var
     }
     auto result = tenzor::std(input.tensor(), dim, keepdim);
     auto grad_fn = std::make_shared<StdBackward>(dim, keepdim);
-    grad_fn->save_for_backward({input.tensor(), result});
+    // StdBackward reads dim from saved_tensors_[2] when present; saving it
+    // keeps the reduction axis correct for dim-specific gradients.
+    std::vector<Tensor> saved = {input.tensor(), result};
+    if (dim.has_value()) {
+        Tensor dim_t({1}, DType::Int64, Device::cpu());
+        dim_t.data<int64_t>()[0] = *dim;
+        saved.push_back(dim_t);
+    }
+    grad_fn->save_for_backward(std::move(saved));
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
     Variable output(result, true);
@@ -1097,7 +1140,15 @@ auto var(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Var
     }
     auto result = tenzor::var(input.tensor(), dim, keepdim);
     auto grad_fn = std::make_shared<VarBackward>(dim, keepdim);
-    grad_fn->save_for_backward({input.tensor()});
+    // VarBackward::backward reads saved_tensors_[0]=input and [1]=result; when a
+    // dim is supplied, it optionally reads [2]=dim as an Int64 scalar tensor.
+    std::vector<Tensor> saved = {input.tensor(), result};
+    if (dim.has_value()) {
+        Tensor dim_t({1}, DType::Int64, Device::cpu());
+        dim_t.data<int64_t>()[0] = *dim;
+        saved.push_back(dim_t);
+    }
+    grad_fn->save_for_backward(std::move(saved));
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
     Variable output(result, true);
@@ -1111,7 +1162,13 @@ auto prod(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Va
     }
     auto result = tenzor::prod(input.tensor(), dim, keepdim);
     auto grad_fn = std::make_shared<ProdBackward>(dim, keepdim);
-    grad_fn->save_for_backward({input.tensor(), result});
+    std::vector<Tensor> saved = {input.tensor(), result};
+    if (dim.has_value()) {
+        Tensor dim_t({1}, DType::Int64, Device::cpu());
+        dim_t.data<int64_t>()[0] = *dim;
+        saved.push_back(dim_t);
+    }
+    grad_fn->save_for_backward(std::move(saved));
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
     Variable output(result, true);
@@ -1125,7 +1182,11 @@ auto logsumexp(const Variable& input, int64_t dim, bool keepdim) -> Variable {
     }
     auto result = tenzor::logsumexp(input.tensor(), dim, keepdim);
     auto grad_fn = std::make_shared<LogSumExpBackward>(dim, keepdim);
-    grad_fn->save_for_backward({input.tensor(), result});
+    // LogSumExpBackward unconditionally reads saved_tensors_[2] as the dim;
+    // the dim is always present for this op (required parameter).
+    Tensor dim_t({1}, DType::Int64, Device::cpu());
+    dim_t.data<int64_t>()[0] = dim;
+    grad_fn->save_for_backward({input.tensor(), result, dim_t});
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
     Variable output(result, true);

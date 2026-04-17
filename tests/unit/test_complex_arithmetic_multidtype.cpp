@@ -48,16 +48,12 @@ TEST_P(ComplexArithmeticMultiDTypeTest, ComplexAdd) {
     bp[0] = {5.0f, 6.0f};
     bp[1] = {7.0f, 8.0f};
 
-    try {
-        auto c = add(a, b).to(Device::cpu());
-        auto* cp = c.data<std::complex<float>>();
-        EXPECT_FLOAT_EQ(cp[0].real(), 6.0f);
-        EXPECT_FLOAT_EQ(cp[0].imag(), 8.0f);
-        EXPECT_FLOAT_EQ(cp[1].real(), 10.0f);
-        EXPECT_FLOAT_EQ(cp[1].imag(), 12.0f);
-    } catch (const std::runtime_error&) {
-        GTEST_SKIP() << "Complex add not supported on this backend";
-    }
+    auto c = add(a, b).to(Device::cpu());
+    auto* cp = c.data<std::complex<float>>();
+    EXPECT_FLOAT_EQ(cp[0].real(), 6.0f);
+    EXPECT_FLOAT_EQ(cp[0].imag(), 8.0f);
+    EXPECT_FLOAT_EQ(cp[1].real(), 10.0f);
+    EXPECT_FLOAT_EQ(cp[1].imag(), 12.0f);
 }
 
 TEST_P(ComplexArithmeticMultiDTypeTest, ComplexMul) {
@@ -68,14 +64,10 @@ TEST_P(ComplexArithmeticMultiDTypeTest, ComplexMul) {
     a.data<std::complex<float>>()[0] = {1.0f, 2.0f};
     b.data<std::complex<float>>()[0] = {3.0f, 4.0f};
 
-    try {
-        auto c = mul(a, b).to(Device::cpu());
-        auto* cp = c.data<std::complex<float>>();
-        EXPECT_FLOAT_EQ(cp[0].real(), -5.0f);
-        EXPECT_FLOAT_EQ(cp[0].imag(), 10.0f);
-    } catch (const std::runtime_error&) {
-        GTEST_SKIP() << "Complex mul not supported on this backend";
-    }
+    auto c = mul(a, b).to(Device::cpu());
+    auto* cp = c.data<std::complex<float>>();
+    EXPECT_FLOAT_EQ(cp[0].real(), -5.0f);
+    EXPECT_FLOAT_EQ(cp[0].imag(), 10.0f);
 }
 
 TEST_P(ComplexArithmeticMultiDTypeTest, ComplexAbs) {
@@ -83,16 +75,12 @@ TEST_P(ComplexArithmeticMultiDTypeTest, ComplexAbs) {
     auto a = Tensor({int64_t(1)}, DType::Complex64, device());
     a.data<std::complex<float>>()[0] = {3.0f, 4.0f};
 
-    try {
-        auto result = abs(a).to(Device::cpu());
-        if (result.dtype() == DType::Float32) {
-            EXPECT_NEAR(result.data<float>()[0], 5.0f, 1e-5f);
-        } else if (result.dtype() == DType::Complex64) {
-            auto* rp = result.data<std::complex<float>>();
-            EXPECT_NEAR(rp[0].real(), 5.0f, 1e-5f);
-        }
-    } catch (const std::runtime_error&) {
-        GTEST_SKIP() << "Complex abs not supported on this backend";
+    auto result = abs(a).to(Device::cpu());
+    if (result.dtype() == DType::Float32) {
+        EXPECT_NEAR(result.data<float>()[0], 5.0f, 1e-5f);
+    } else if (result.dtype() == DType::Complex64) {
+        auto* rp = result.data<std::complex<float>>();
+        EXPECT_NEAR(rp[0].real(), 5.0f, 1e-5f);
     }
 }
 
@@ -101,14 +89,10 @@ TEST_P(ComplexArithmeticMultiDTypeTest, ComplexExp) {
     auto a = Tensor({int64_t(1)}, DType::Complex64, device());
     a.data<std::complex<float>>()[0] = {0.0f, static_cast<float>(M_PI)};
 
-    try {
-        auto c = exp(a).to(Device::cpu());
-        auto* cp = c.data<std::complex<float>>();
-        EXPECT_NEAR(cp[0].real(), -1.0f, 1e-5f);
-        EXPECT_NEAR(cp[0].imag(), 0.0f, 1e-5f);
-    } catch (const std::runtime_error&) {
-        GTEST_SKIP() << "Complex exp not supported on this backend";
-    }
+    auto c = exp(a).to(Device::cpu());
+    auto* cp = c.data<std::complex<float>>();
+    EXPECT_NEAR(cp[0].real(), -1.0f, 1e-5f);
+    EXPECT_NEAR(cp[0].imag(), 0.0f, 1e-5f);
 }
 
 TEST_P(ComplexArithmeticMultiDTypeTest, ComplexSqrt) {
@@ -116,14 +100,10 @@ TEST_P(ComplexArithmeticMultiDTypeTest, ComplexSqrt) {
     auto a = Tensor({int64_t(1)}, DType::Complex64, device());
     a.data<std::complex<float>>()[0] = {-1.0f, 0.0f};
 
-    try {
-        auto c = sqrt(a).to(Device::cpu());
-        auto* cp = c.data<std::complex<float>>();
-        EXPECT_NEAR(cp[0].real(), 0.0f, 1e-5f);
-        EXPECT_NEAR(std::abs(cp[0].imag()), 1.0f, 1e-5f);
-    } catch (const std::runtime_error&) {
-        GTEST_SKIP() << "Complex sqrt not supported on this backend";
-    }
+    auto c = sqrt(a).to(Device::cpu());
+    auto* cp = c.data<std::complex<float>>();
+    EXPECT_NEAR(cp[0].real(), 0.0f, 1e-5f);
+    EXPECT_NEAR(std::abs(cp[0].imag()), 1.0f, 1e-5f);
 }
 
 TEST_P(ComplexArithmeticMultiDTypeTest, ComplexDivNonTrivial) {
@@ -134,14 +114,10 @@ TEST_P(ComplexArithmeticMultiDTypeTest, ComplexDivNonTrivial) {
     a.data<std::complex<float>>()[0] = {1.0f, 2.0f};
     b.data<std::complex<float>>()[0] = {3.0f, 4.0f};
 
-    try {
-        auto c = div(a, b).to(Device::cpu());
-        auto* cp = c.data<std::complex<float>>();
-        EXPECT_NEAR(cp[0].real(), 0.44f, 1e-5f);
-        EXPECT_NEAR(cp[0].imag(), 0.08f, 1e-5f);
-    } catch (const std::runtime_error&) {
-        GTEST_SKIP() << "Complex div not supported on this backend";
-    }
+    auto c = div(a, b).to(Device::cpu());
+    auto* cp = c.data<std::complex<float>>();
+    EXPECT_NEAR(cp[0].real(), 0.44f, 1e-5f);
+    EXPECT_NEAR(cp[0].imag(), 0.08f, 1e-5f);
 }
 
 TEST_P(ComplexArithmeticMultiDTypeTest, Complex128MulAccuracy) {
@@ -152,14 +128,10 @@ TEST_P(ComplexArithmeticMultiDTypeTest, Complex128MulAccuracy) {
     a.data<std::complex<double>>()[0] = {1e-10, 2e-10};
     b.data<std::complex<double>>()[0] = {3e-10, 4e-10};
 
-    try {
-        auto c = mul(a, b).to(Device::cpu());
-        auto* cp = c.data<std::complex<double>>();
-        EXPECT_NEAR(cp[0].real(), -5e-20, 1e-30);
-        EXPECT_NEAR(cp[0].imag(), 10e-20, 1e-30);
-    } catch (const std::runtime_error&) {
-        GTEST_SKIP() << "Complex128 mul not supported on this backend";
-    }
+    auto c = mul(a, b).to(Device::cpu());
+    auto* cp = c.data<std::complex<double>>();
+    EXPECT_NEAR(cp[0].real(), -5e-20, 1e-30);
+    EXPECT_NEAR(cp[0].imag(), 10e-20, 1e-30);
 }
 
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(ComplexArithmeticMultiDTypeTest);

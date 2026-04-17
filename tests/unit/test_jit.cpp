@@ -75,10 +75,6 @@ protected:
 // ============================================================================
 // Trace Mode Tests
 // ============================================================================
-// NOTE: These tests are disabled because the JIT API is incomplete.
-// The tests were written against an API that doesn't match the actual implementation.
-// Re-enable and fix once JIT implementation is complete.
-// ============================================================================
 
 TEST_F(JITTest, TraceSimpleModel) {
     auto model = std::make_shared<SimpleLinearModel>();

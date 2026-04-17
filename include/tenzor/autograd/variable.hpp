@@ -23,6 +23,7 @@ namespace tenzor {
 // Forward declarations
 class Function;
 struct AnomalyMetadata;
+class Variable;
 
 /**
  * @brief Implementation class for Variable's handle pattern.
@@ -139,6 +140,18 @@ struct VariableImpl {
 
     /// Accumulated gradient tensor (requires synchronization for writes)
     std::optional<Tensor> grad_;
+
+    /// Accumulated gradient as a Variable (held by impl pointer — Variable
+    /// itself is forward-declared here so we can't embed it directly).
+    /// Populated only when the most recent backward was run with
+    /// create_graph=true. Callers use Variable::grad_variable() to retrieve
+    /// this; the grad_fn attached traces back through the original forward.
+    std::shared_ptr<VariableImpl> grad_with_graph_impl_;
+
+    /// Lazy Variable handle wrapping grad_with_graph_impl_ so grad_variable()
+    /// can return a stable reference. Held via a raw buffer because Variable
+    /// is forward-declared here; constructed lazily by grad_variable().
+    mutable std::unique_ptr<char[]> grad_with_graph_cache_storage_;
 
     /// Accumulated sparse gradient (for embeddings and sparse parameters).
     /// When set, this takes precedence over grad_ for sparse-aware optimizers.
@@ -275,6 +288,18 @@ public:
      * @return Optional tensor containing gradient (nullopt if no gradient)
      */
     auto grad() const -> const std::optional<Tensor>&;
+
+    /**
+     * @brief Get gradient as a Variable with its backward graph attached.
+     *
+     * Populated only after a backward pass with create_graph=true. The
+     * returned Variable has a grad_fn that traces back through the
+     * original forward computation, so calling .backward() on it (or
+     * on an expression built from it) performs a proper double-backward.
+     *
+     * @return Optional Variable; nullopt if no graph-preserving grad is set.
+     */
+    auto grad_variable() const -> const std::optional<Variable>&;
 
     /**
      * @brief Get mutable reference to gradient (internal use only).

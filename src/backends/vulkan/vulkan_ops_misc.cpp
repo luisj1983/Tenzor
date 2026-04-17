@@ -1702,6 +1702,8 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
         shader_name = "cast_f32_i8";
     } else if (src_dtype == DType::Bool && target_dtype == DType::Float32) {
         shader_name = "cast_bool_f32";
+    } else if (src_dtype == DType::Float32 && target_dtype == DType::Bool) {
+        shader_name = "cast_f32_bool";
     } else if (src_dtype == DType::Bool && target_dtype == DType::Int64) {
         shader_name = "cast_bool_i64";
     } else if (src_dtype == DType::BFloat16 && target_dtype == DType::Float32) {
@@ -2064,23 +2066,232 @@ auto VulkanBackend::dispatchBatchNorm2dUpdateRunningStats(
 
 auto VulkanBackend::dispatchFusedRMSPropStep(
     std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-    bool is_f64 = (!inputs.empty() && inputs[0].dtype() == DType::Float64);
+    // inputs (from registry): [param, grad, square_avg, grad_avg?, momentum?]
+    // shader bindings:         0=grad, 1=param, 2=square_avg, 3=momentum, 4=grad_avg
+    //
+    // Direct pipeline invocation — the previous dispatch("fused_rmsprop_step",
+    // inputs, attrs) recursed back through the op-id table and blew the
+    // stack. Same bug class as dispatchFusedAdadeltaStep.
+    if (inputs.size() < 3) {
+        throw std::invalid_argument(
+            "FusedRMSPropStep requires at least 3 inputs (param, grad, square_avg)");
+    }
+
+    double lr = attrs.get_float(AttrKey::Lr, 0.01);
+    double alpha = attrs.get_float(AttrKey::Alpha, 0.99);
+    double eps = attrs.get_float(AttrKey::Eps, 1e-8);
+    double weight_decay = attrs.get_float(AttrKey::WeightDecay, 0.0);
+    double momentum = attrs.get_float(AttrKey::Momentum, 0.0);
+    bool centered = attrs.get_bool(AttrKey::Centered, false);
+    bool has_momentum = (momentum > 0.0);
+
+    int64_t numel = inputs[0].numel();
+    int32_t device_id = inputs[0].device().index;
+    bool is_f64 = (inputs[0].dtype() == DType::Float64);
     std::string shader = is_f64 ? "fused_rmsprop_step_f64" : "fused_rmsprop_step";
-    return dispatch(shader, inputs, attrs);
+    auto* pipeline = getPipeline(shader, device_id);
+
+    size_t buf_size = numel * inputs[0].dtype_size();
+
+    // grad_avg and momentum_buffer are optional. If the caller didn't
+    // provide them but centered/has_momentum is on, bail with a clear
+    // message rather than crashing. If centered/has_momentum is off, we
+    // still need SOMETHING to bind at slots 3 and 4 (shader unconditionally
+    // declares them) — reuse square_avg as a harmless placeholder.
+    const Tensor* momentum_src = &inputs[2];  // placeholder
+    const Tensor* gradavg_src  = &inputs[2];  // placeholder
+    if (has_momentum) {
+        if (inputs.size() <= 4) {
+            throw std::invalid_argument(
+                "FusedRMSPropStep: momentum>0 requires inputs[4] momentum buffer");
+        }
+        momentum_src = &inputs[4];
+    }
+    if (centered) {
+        if (inputs.size() <= 3) {
+            throw std::invalid_argument(
+                "FusedRMSPropStep: centered=true requires inputs[3] grad_avg buffer");
+        }
+        gradavg_src = &inputs[3];
+    }
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, inputs[1].data_ptr()},       // grad
+        {1, inputs[0].data_ptr()},       // param
+        {2, inputs[2].data_ptr()},       // square_avg
+        {3, momentum_src->data_ptr()},   // momentum_buffer (or placeholder)
+        {4, gradavg_src->data_ptr()},    // grad_avg (or placeholder)
+    };
+    std::vector<size_t> sizes = {buf_size, buf_size, buf_size, buf_size, buf_size};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    struct PushConstants {
+        uint32_t numel;
+        float lr;
+        float alpha;
+        float eps;
+        float weight_decay;
+        float momentum;
+        uint32_t centered;
+        uint32_t has_momentum;
+    } pc = {};
+    pc.numel = static_cast<uint32_t>(numel);
+    pc.lr = static_cast<float>(lr);
+    pc.alpha = static_cast<float>(alpha);
+    pc.eps = static_cast<float>(eps);
+    pc.weight_decay = static_cast<float>(weight_decay);
+    pc.momentum = static_cast<float>(momentum);
+    pc.centered = centered ? 1u : 0u;
+    pc.has_momentum = has_momentum ? 1u : 0u;
+
+    uint32_t workgroups = div_wg(numel, devices_[device_id].workgroupSize);
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                       0, sizeof(pc), &pc);
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+    insertComputeBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return {inputs[0]};
 }
 
 auto VulkanBackend::dispatchFusedAdadeltaStep(
     std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-    bool is_f64 = (!inputs.empty() && inputs[0].dtype() == DType::Float64);
-    std::string shader = is_f64 ? "fused_adadelta_step_f64" : "fused_adadelta_step";
-    return dispatch(shader, inputs, attrs);
+    // inputs (from registry): [param, grad, square_avg, acc_delta]
+    // shader bindings:         0=grad, 1=param, 2=square_avg, 3=acc_delta
+    //
+    // Previously this called the generic dispatch(shader, inputs, attrs) helper,
+    // which loops back through the op-id dispatch table and re-enters *this*
+    // function — infinite recursion → stack overflow → SIGSEGV. Match the
+    // direct-pipeline pattern used by FusedAdamStep instead.
+    if (inputs.size() < 4) {
+        throw std::invalid_argument(
+            "FusedAdadeltaStep requires 4 inputs (param, grad, square_avg, acc_delta)");
+    }
+
+    double rho = attrs.get_float(AttrKey::Rho, 0.9);
+    double eps = attrs.get_float(AttrKey::Eps, 1e-6);
+    double lr  = attrs.get_float(AttrKey::Lr, 1.0);
+    double weight_decay = attrs.get_float(AttrKey::WeightDecay, 0.0);
+
+    int64_t numel = inputs[0].numel();
+    int32_t device_id = inputs[0].device().index;
+    DType dt = inputs[0].dtype();
+    std::string shader =
+        (dt == DType::Float64)  ? "fused_adadelta_step_f64" :
+        (dt == DType::Float16)  ? "fused_adadelta_step_f16" :
+        (dt == DType::BFloat16) ? "fused_adadelta_step_bf16" :
+                                  "fused_adadelta_step";
+    auto* pipeline = getPipeline(shader, device_id);
+
+    // Half-precision buffers are packed: 2 FP16/BF16 elements per uint32.
+    size_t elem_bytes = inputs[0].dtype_size();
+    bool is_half = (dt == DType::Float16 || dt == DType::BFloat16);
+    size_t buf_size = is_half ? ((numel + 1) / 2) * 4
+                              : numel * elem_bytes;
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, inputs[1].data_ptr()},  // grad     -> binding 0
+        {1, inputs[0].data_ptr()},  // param    -> binding 1
+        {2, inputs[2].data_ptr()},  // squareAvg-> binding 2
+        {3, inputs[3].data_ptr()},  // accDelta -> binding 3
+    };
+    std::vector<size_t> sizes = {buf_size, buf_size, buf_size, buf_size};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    struct PushConstants {
+        uint32_t numel;
+        float lr;
+        float rho;
+        float eps;
+        float weight_decay;
+        uint32_t padding0, padding1, padding2;
+    } pc = {};
+    pc.numel = static_cast<uint32_t>(numel);
+    pc.lr = static_cast<float>(lr);
+    pc.rho = static_cast<float>(rho);
+    pc.eps = static_cast<float>(eps);
+    pc.weight_decay = static_cast<float>(weight_decay);
+
+    // Half shaders process 2 elements per invocation (packed uint32 words);
+    // scale the dispatch count accordingly.
+    int64_t dispatch_count = is_half ? (numel + 1) / 2 : numel;
+    uint32_t workgroups = div_wg(dispatch_count, devices_[device_id].workgroupSize);
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                       0, sizeof(pc), &pc);
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+    insertComputeBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return {inputs[0]};  // param is written in-place
 }
 
 auto VulkanBackend::dispatchFusedAdagradStep(
     std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-    bool is_f64 = (!inputs.empty() && inputs[0].dtype() == DType::Float64);
+    // inputs (from registry): [param, grad, sum_sq]
+    // shader bindings:         0=grad, 1=param, 2=sum_sq
+    // Direct pipeline invocation — same infinite-recursion fix as Adadelta/RMSProp.
+    if (inputs.size() < 3) {
+        throw std::invalid_argument(
+            "FusedAdagradStep requires 3 inputs (param, grad, sum_sq)");
+    }
+
+    double lr = attrs.get_float(AttrKey::Lr, 0.01);
+    double eps = attrs.get_float(AttrKey::Eps, 1e-10);
+    double weight_decay = attrs.get_float(AttrKey::WeightDecay, 0.0);
+
+    int64_t numel = inputs[0].numel();
+    int32_t device_id = inputs[0].device().index;
+    bool is_f64 = (inputs[0].dtype() == DType::Float64);
     std::string shader = is_f64 ? "fused_adagrad_step_f64" : "fused_adagrad_step";
-    return dispatch(shader, inputs, attrs);
+    auto* pipeline = getPipeline(shader, device_id);
+
+    size_t buf_size = numel * inputs[0].dtype_size();
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, inputs[1].data_ptr()},   // grad
+        {1, inputs[0].data_ptr()},   // param
+        {2, inputs[2].data_ptr()},   // sum_sq
+    };
+    std::vector<size_t> sizes = {buf_size, buf_size, buf_size};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    struct PushConstants {
+        uint32_t numel;
+        float lr;
+        float eps;
+        float weight_decay;
+    } pc = {};
+    pc.numel = static_cast<uint32_t>(numel);
+    pc.lr = static_cast<float>(lr);
+    pc.eps = static_cast<float>(eps);
+    pc.weight_decay = static_cast<float>(weight_decay);
+
+    uint32_t workgroups = div_wg(numel, devices_[device_id].workgroupSize);
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                       0, sizeof(pc), &pc);
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+    insertComputeBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return {inputs[0]};
 }
 
 

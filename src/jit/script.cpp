@@ -1,16 +1,29 @@
 /**
  * @file script.cpp
- * @brief Minimal Python-subset script compiler (see include/tenzor/jit/script.hpp).
+ * @brief Python-subset script compiler (see include/tenzor/jit/script.hpp).
  *
- * Implementation strategy: parse the script into an argument list and an
- * expression AST, wrap that in a small `nn::Module` subclass whose
- * `forward_impl` evaluates the AST using Variable arithmetic, then hand the
- * module to `jit::trace` — which already takes care of Graph construction,
- * operation recording, and CompiledModule packaging.
+ * Grammar:
  *
- * This keeps the scripting frontend's surface area to only what the language
- * subset requires (lexer + recursive-descent parser + tiny interpreter) while
- * reusing the full, tested tracer/compiler machinery for execution.
+ *   function   := 'def' IDENT '(' [IDENT (',' IDENT)*] ')' ':' NEWLINE
+ *                 INDENT stmt+ DEDENT
+ *   stmt       := assign | return | if_stmt | for_stmt
+ *   assign     := IDENT '=' expr NEWLINE
+ *   return     := 'return' expr NEWLINE
+ *   if_stmt    := 'if' expr ':' NEWLINE INDENT stmt+ DEDENT
+ *                 ['else' ':' NEWLINE INDENT stmt+ DEDENT]
+ *   for_stmt   := 'for' IDENT 'in' 'range' '(' NUMBER ')' ':' NEWLINE
+ *                 INDENT stmt+ DEDENT
+ *   expr       := term (cmp_op term)?      # at most one comparison
+ *   cmp_op     := '<' | '>'
+ *   term       := mul_term (('+' | '-') mul_term)*
+ *   mul_term   := factor (('*' | '/') factor)*
+ *   factor     := unary method_suffix*
+ *   unary      := NUMBER | IDENT | '(' expr ')' | '-' factor
+ *   method_suffix := '.' IDENT '(' ')'
+ *
+ * Control flow routes through jit::cond (for if/else — integrates with
+ * trace_if when tracing) and static unrolling for `for i in range(N)`
+ * (each iteration produces a distinct chain in the traced graph).
  */
 
 #include <tenzor/jit/script.hpp>
@@ -22,6 +35,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <variant>
 #include <vector>
 
@@ -37,15 +51,18 @@ namespace {
 // ============================================================================
 
 enum class Tok {
-    Def, Ident, Number, Return,
+    Def, Ident, Number, Return, If, Else, For, In, Range,
     LParen, RParen, Comma, Colon,
     Plus, Minus, Star, Slash,
+    Less, Greater,
+    Equals, Dot, Newline,
+    Indent, Dedent,
     End
 };
 
 struct Token {
     Tok kind;
-    std::string text;   // Ident name or number literal
+    std::string text;
     double number = 0.0;
     int line = 1;
     int col = 1;
@@ -60,90 +77,173 @@ struct Token {
 
 class Lexer {
 public:
-    explicit Lexer(const char* src) : src_(src) {}
+    explicit Lexer(std::string_view src) : src_(src) {}
 
     std::vector<Token> tokenize() {
         std::vector<Token> out;
-        while (*src_) {
-            skip_spaces_and_comments();
-            if (!*src_) break;
-            int start_line = line_, start_col = col_;
-            char c = *src_;
+        // Initialize indent stack with the first non-blank line's leading
+        // whitespace so that raw-string literals (R"( ... )") starting with a
+        // newline + indentation don't look like an anomalous INDENT.
+        indent_stack_.push_back(detect_first_indent());
+        bool at_line_start = true;
+
+        while (pos_ < src_.size()) {
+            if (at_line_start) {
+                handle_indentation(out);
+                at_line_start = false;
+                if (pos_ >= src_.size()) break;
+            }
+
+            char c = src_[pos_];
+            if (c == '#') {
+                while (pos_ < src_.size() && src_[pos_] != '\n') advance();
+                continue;
+            }
+            if (c == '\n') {
+                out.push_back(make_tok(Tok::Newline, "\\n"));
+                advance();
+                at_line_start = true;
+                continue;
+            }
+            if (c == ' ' || c == '\t' || c == '\r') { advance(); continue; }
+
             if (std::isalpha(static_cast<unsigned char>(c)) || c == '_') {
-                out.push_back(read_ident(start_line, start_col));
+                out.push_back(read_identifier());
             } else if (std::isdigit(static_cast<unsigned char>(c)) ||
-                       (c == '.' && std::isdigit(static_cast<unsigned char>(peek(1))))) {
-                out.push_back(read_number(start_line, start_col));
+                       (c == '.' && pos_ + 1 < src_.size() &&
+                        std::isdigit(static_cast<unsigned char>(src_[pos_+1])))) {
+                out.push_back(read_number());
             } else {
-                out.push_back(read_punct(start_line, start_col));
+                out.push_back(read_symbol());
             }
         }
-        out.push_back({Tok::End, "<eof>", 0.0, line_, col_});
+
+        // Emit trailing DEDENTs to close any open blocks.
+        while (indent_stack_.size() > 1) {
+            out.push_back(make_tok(Tok::Dedent, "<dedent>"));
+            indent_stack_.pop_back();
+        }
+        out.push_back(make_tok(Tok::End, ""));
         return out;
     }
 
 private:
-    const char* src_;
+    std::string_view src_;
+    size_t pos_ = 0;
     int line_ = 1;
     int col_ = 1;
+    std::vector<int> indent_stack_;
 
-    char peek(int offset) const { return src_[offset]; }
+    int detect_first_indent() const {
+        size_t i = 0;
+        while (i < src_.size()) {
+            size_t line_start = i;
+            int spaces = 0;
+            while (i < src_.size() && (src_[i] == ' ' || src_[i] == '\t')) {
+                spaces += (src_[i] == '\t') ? 8 : 1;
+                ++i;
+            }
+            if (i >= src_.size()) return 0;
+            if (src_[i] == '\n') { ++i; continue; }
+            if (src_[i] == '#') { while (i < src_.size() && src_[i] != '\n') ++i; continue; }
+            (void)line_start;
+            return spaces;
+        }
+        return 0;
+    }
 
     void advance() {
-        if (*src_ == '\n') { ++line_; col_ = 1; } else { ++col_; }
-        ++src_;
+        if (pos_ < src_.size() && src_[pos_] == '\n') { ++line_; col_ = 1; }
+        else { ++col_; }
+        ++pos_;
     }
 
-    void skip_spaces_and_comments() {
-        while (*src_) {
-            if (std::isspace(static_cast<unsigned char>(*src_))) {
-                advance();
-            } else if (*src_ == '#') {
-                // Python-style line comment
-                while (*src_ && *src_ != '\n') advance();
-            } else {
-                break;
-            }
-        }
-    }
-
-    Token read_ident(int start_line, int start_col) {
-        std::string name;
-        while (*src_ && (std::isalnum(static_cast<unsigned char>(*src_)) || *src_ == '_')) {
-            name += *src_;
-            advance();
-        }
-        Tok kind = Tok::Ident;
-        if (name == "def") kind = Tok::Def;
-        else if (name == "return") kind = Tok::Return;
-        return {kind, name, 0.0, start_line, start_col};
-    }
-
-    Token read_number(int start_line, int start_col) {
-        std::string lit;
-        while (*src_ && (std::isdigit(static_cast<unsigned char>(*src_)) || *src_ == '.')) {
-            lit += *src_;
-            advance();
-        }
-        // Optional exponent: e.g. 1e5, 1.2e-3
-        if (*src_ == 'e' || *src_ == 'E') {
-            lit += *src_;
-            advance();
-            if (*src_ == '+' || *src_ == '-') { lit += *src_; advance(); }
-            while (*src_ && std::isdigit(static_cast<unsigned char>(*src_))) {
-                lit += *src_;
-                advance();
-            }
-        }
-        Token t{Tok::Number, lit, 0.0, start_line, start_col};
-        t.number = std::strtod(lit.c_str(), nullptr);
+    Token make_tok(Tok k, std::string text) {
+        Token t; t.kind = k; t.text = std::move(text); t.line = line_; t.col = col_;
         return t;
     }
 
-    Token read_punct(int start_line, int start_col) {
-        char c = *src_;
-        advance();
-        std::string s(1, c);
+    void handle_indentation(std::vector<Token>& out) {
+        // Skip blank lines and comment-only lines (they don't affect indent).
+        while (pos_ < src_.size()) {
+            size_t line_start = pos_;
+            int spaces = 0;
+            while (pos_ < src_.size() && (src_[pos_] == ' ' || src_[pos_] == '\t')) {
+                spaces += (src_[pos_] == '\t') ? 8 : 1;
+                advance();
+            }
+            if (pos_ >= src_.size()) return;
+            if (src_[pos_] == '\n') {
+                out.push_back(make_tok(Tok::Newline, "\\n"));
+                advance();
+                continue;
+            }
+            if (src_[pos_] == '#') {
+                while (pos_ < src_.size() && src_[pos_] != '\n') advance();
+                continue;
+            }
+            // Real content line — emit INDENT / DEDENT tokens as needed.
+            int current = indent_stack_.back();
+            if (spaces > current) {
+                indent_stack_.push_back(spaces);
+                out.push_back(make_tok(Tok::Indent, "<indent>"));
+            } else {
+                while (spaces < indent_stack_.back()) {
+                    indent_stack_.pop_back();
+                    out.push_back(make_tok(Tok::Dedent, "<dedent>"));
+                }
+                if (spaces != indent_stack_.back()) {
+                    Token t = make_tok(Tok::End, std::string(1, src_[line_start]));
+                    fail(t, "inconsistent indentation");
+                }
+            }
+            return;
+        }
+    }
+
+    Token read_identifier() {
+        int line = line_, col = col_;
+        size_t start = pos_;
+        while (pos_ < src_.size() &&
+               (std::isalnum(static_cast<unsigned char>(src_[pos_])) || src_[pos_] == '_')) {
+            advance();
+        }
+        std::string name(src_.substr(start, pos_ - start));
+        Tok kind = Tok::Ident;
+        if (name == "def")         kind = Tok::Def;
+        else if (name == "return") kind = Tok::Return;
+        else if (name == "if")     kind = Tok::If;
+        else if (name == "else")   kind = Tok::Else;
+        else if (name == "for")    kind = Tok::For;
+        else if (name == "in")     kind = Tok::In;
+        else if (name == "range")  kind = Tok::Range;
+        Token t; t.kind = kind; t.text = std::move(name); t.line = line; t.col = col;
+        return t;
+    }
+
+    Token read_number() {
+        int line = line_, col = col_;
+        size_t start = pos_;
+        bool seen_dot = false;
+        while (pos_ < src_.size()) {
+            char c = src_[pos_];
+            if (std::isdigit(static_cast<unsigned char>(c))) { advance(); }
+            else if (c == '.' && !seen_dot) { seen_dot = true; advance(); }
+            else break;
+        }
+        std::string text(src_.substr(start, pos_ - start));
+        Token t;
+        t.kind = Tok::Number;
+        t.text = text;
+        t.number = std::strtod(text.c_str(), nullptr);
+        t.line = line; t.col = col;
+        return t;
+    }
+
+    Token read_symbol() {
+        int line = line_, col = col_;
+        char c = src_[pos_];
+        std::string text(1, c);
         Tok kind;
         switch (c) {
             case '(': kind = Tok::LParen; break;
@@ -154,12 +254,18 @@ private:
             case '-': kind = Tok::Minus;  break;
             case '*': kind = Tok::Star;   break;
             case '/': kind = Tok::Slash;  break;
+            case '=': kind = Tok::Equals; break;
+            case '.': kind = Tok::Dot;    break;
+            case '<': kind = Tok::Less;   break;
+            case '>': kind = Tok::Greater;break;
             default: {
-                Token bad{Tok::End, s, 0.0, start_line, start_col};
-                fail(bad, std::string("unexpected character '") + c + "'");
+                Token t = make_tok(Tok::End, text);
+                fail(t, std::string("unexpected character '") + c + "'");
             }
         }
-        return {kind, s, 0.0, start_line, start_col};
+        advance();
+        Token t; t.kind = kind; t.text = text; t.line = line; t.col = col;
+        return t;
     }
 };
 
@@ -169,23 +275,36 @@ private:
 
 struct Expr;
 using ExprPtr = std::shared_ptr<Expr>;
+struct Stmt;
+using StmtPtr = std::shared_ptr<Stmt>;
 
-struct NumberExpr { double value; };
-struct IdentExpr  { std::string name; };
-struct BinOpExpr  { char op; ExprPtr lhs; ExprPtr rhs; };
+struct NumberExpr     { double value; };
+struct IdentExpr      { std::string name; };
+struct BinOpExpr      { char op; ExprPtr lhs; ExprPtr rhs; };
+struct CmpOpExpr      { char op; ExprPtr lhs; ExprPtr rhs; };  // '<' or '>'
+struct MethodCallExpr { ExprPtr receiver; std::string method; std::vector<ExprPtr> args; };
 
 struct Expr {
-    std::variant<NumberExpr, IdentExpr, BinOpExpr> node;
+    std::variant<NumberExpr, IdentExpr, BinOpExpr, CmpOpExpr, MethodCallExpr> node;
+};
+
+struct AssignStmt { std::string target; ExprPtr value; };
+struct ReturnStmt { ExprPtr value; };
+struct IfStmt     { ExprPtr cond; std::vector<Stmt> then_body; std::vector<Stmt> else_body; };
+struct ForStmt    { std::string var; int64_t count; std::vector<Stmt> body; };
+
+struct Stmt {
+    std::variant<AssignStmt, ReturnStmt, IfStmt, ForStmt> node;
 };
 
 struct FuncDef {
     std::string name;
     std::vector<std::string> args;
-    ExprPtr body;  // return expression
+    std::vector<Stmt> body;
 };
 
 // ============================================================================
-// Parser (recursive descent)
+// Parser
 // ============================================================================
 
 class Parser {
@@ -194,6 +313,7 @@ public:
 
     FuncDef parse_function() {
         FuncDef f;
+        skip_newlines();
         expect(Tok::Def, "expected 'def'");
         const Token& name_tok = expect(Tok::Ident, "expected function name after 'def'");
         f.name = name_tok.text;
@@ -207,12 +327,21 @@ public:
         }
         expect(Tok::RParen, "expected ')' closing argument list");
         expect(Tok::Colon, "expected ':' after function signature");
-        expect(Tok::Return, "only 'return EXPR' is supported in the MVP grammar");
-        f.body = parse_expression();
-        // Trailing tokens are allowed (e.g. trailing newline handled by lexer);
-        // anything non-trivial is an error.
+        // Accept both indented block `def f(x):\n    return x` and inline
+        // `def f(x): return x` — the inline form is handy for tests and tiny
+        // scripts.
+        if (peek().kind == Tok::Return ||
+            (peek().kind == Tok::Ident && peek(1).kind == Tok::Equals)) {
+            f.body.push_back(parse_stmt());
+        } else {
+            skip_newlines();
+            expect(Tok::Indent, "expected indented block for function body");
+            f.body = parse_block();
+        }
+        ensure_has_return(f.body);
+        skip_newlines();
         if (peek().kind != Tok::End) {
-            fail(peek(), "unexpected token after 'return' expression");
+            fail(peek(), "unexpected token after function body");
         }
         return f;
     }
@@ -221,7 +350,7 @@ private:
     std::vector<Token> toks_;
     size_t pos_ = 0;
 
-    const Token& peek() const { return toks_[pos_]; }
+    const Token& peek(size_t off = 0) const { return toks_[pos_ + off]; }
     const Token& consume() { return toks_[pos_++]; }
 
     const Token& expect(Tok kind, std::string_view msg) {
@@ -229,22 +358,105 @@ private:
         return consume();
     }
 
-    // EXPR     := TERM (('+' | '-') TERM)*
-    // TERM     := FACTOR (('*' | '/') FACTOR)*
-    // FACTOR   := NUMBER | IDENT | '(' EXPR ')' | '-' FACTOR
+    void skip_newlines() {
+        while (peek().kind == Tok::Newline) consume();
+    }
 
+    void ensure_has_return(const std::vector<Stmt>& body) {
+        if (body.empty()) fail(peek(), "function body must end with 'return EXPR'");
+        const auto& last = body.back();
+        if (std::holds_alternative<ReturnStmt>(last.node)) return;
+        // Inside if/else both arms must return (simplified: top-level must end with return).
+        fail(peek(), "function body must end with 'return EXPR'");
+    }
+
+    std::vector<Stmt> parse_block() {
+        std::vector<Stmt> stmts;
+        while (true) {
+            skip_newlines();
+            if (peek().kind == Tok::Dedent) { consume(); break; }
+            if (peek().kind == Tok::End) break;
+            stmts.push_back(parse_stmt());
+        }
+        return stmts;
+    }
+
+    Stmt parse_stmt() {
+        if (peek().kind == Tok::Return) {
+            consume();
+            ExprPtr v = parse_expression();
+            // Consume trailing newline(s).
+            if (peek().kind == Tok::Newline) consume();
+            return Stmt{ReturnStmt{std::move(v)}};
+        }
+        if (peek().kind == Tok::If) {
+            consume();
+            ExprPtr c = parse_expression();
+            expect(Tok::Colon, "expected ':' after if condition");
+            skip_newlines();
+            expect(Tok::Indent, "expected indented block after 'if'");
+            auto then_body = parse_block();
+            std::vector<Stmt> else_body;
+            skip_newlines();
+            if (peek().kind == Tok::Else) {
+                consume();
+                expect(Tok::Colon, "expected ':' after 'else'");
+                skip_newlines();
+                expect(Tok::Indent, "expected indented block after 'else'");
+                else_body = parse_block();
+            }
+            return Stmt{IfStmt{std::move(c), std::move(then_body), std::move(else_body)}};
+        }
+        if (peek().kind == Tok::For) {
+            consume();
+            std::string var = expect(Tok::Ident, "expected loop variable after 'for'").text;
+            expect(Tok::In, "expected 'in' after loop variable");
+            expect(Tok::Range, "only 'range(N)' is supported for loop iterators");
+            expect(Tok::LParen, "expected '(' after 'range'");
+            const Token& n_tok = expect(Tok::Number, "expected integer literal inside 'range(...)'");
+            expect(Tok::RParen, "expected ')' closing 'range(...)'");
+            expect(Tok::Colon, "expected ':' after for header");
+            skip_newlines();
+            expect(Tok::Indent, "expected indented block after 'for'");
+            auto body = parse_block();
+            int64_t count = static_cast<int64_t>(n_tok.number);
+            if (count < 0) fail(n_tok, "range(N) requires N >= 0");
+            return Stmt{ForStmt{std::move(var), count, std::move(body)}};
+        }
+        if (peek().kind == Tok::Ident && peek(1).kind == Tok::Equals) {
+            std::string name = consume().text;
+            consume(); // '='
+            ExprPtr v = parse_expression();
+            if (peek().kind == Tok::Newline) consume();
+            return Stmt{AssignStmt{std::move(name), std::move(v)}};
+        }
+        fail(peek(), "expected 'return', 'if', 'for', or assignment");
+    }
+
+    // expr := term (cmp_op term)?
     ExprPtr parse_expression() {
         ExprPtr lhs = parse_term();
-        while (peek().kind == Tok::Plus || peek().kind == Tok::Minus) {
-            char op = peek().kind == Tok::Plus ? '+' : '-';
+        if (peek().kind == Tok::Less || peek().kind == Tok::Greater) {
+            char op = peek().kind == Tok::Less ? '<' : '>';
             consume();
             ExprPtr rhs = parse_term();
-            lhs = std::make_shared<Expr>(Expr{BinOpExpr{op, lhs, rhs}});
+            return std::make_shared<Expr>(Expr{CmpOpExpr{op, lhs, rhs}});
         }
         return lhs;
     }
 
     ExprPtr parse_term() {
+        ExprPtr lhs = parse_mul_term();
+        while (peek().kind == Tok::Plus || peek().kind == Tok::Minus) {
+            char op = peek().kind == Tok::Plus ? '+' : '-';
+            consume();
+            ExprPtr rhs = parse_mul_term();
+            lhs = std::make_shared<Expr>(Expr{BinOpExpr{op, lhs, rhs}});
+        }
+        return lhs;
+    }
+
+    ExprPtr parse_mul_term() {
         ExprPtr lhs = parse_factor();
         while (peek().kind == Tok::Star || peek().kind == Tok::Slash) {
             char op = peek().kind == Tok::Star ? '*' : '/';
@@ -256,6 +468,27 @@ private:
     }
 
     ExprPtr parse_factor() {
+        ExprPtr e = parse_unary();
+        while (peek().kind == Tok::Dot) {
+            consume();
+            const Token& method = expect(Tok::Ident, "expected method name after '.'");
+            expect(Tok::LParen, "expected '(' after method name");
+            std::vector<ExprPtr> args;
+            if (peek().kind != Tok::RParen) {
+                args.push_back(parse_expression());
+                while (peek().kind == Tok::Comma) {
+                    consume();
+                    args.push_back(parse_expression());
+                }
+            }
+            expect(Tok::RParen, "expected ')' to close method arguments");
+            e = std::make_shared<Expr>(Expr{
+                MethodCallExpr{e, method.text, std::move(args)}});
+        }
+        return e;
+    }
+
+    ExprPtr parse_unary() {
         const Token& t = peek();
         if (t.kind == Tok::Number) {
             consume();
@@ -272,7 +505,6 @@ private:
             return inner;
         }
         if (t.kind == Tok::Minus) {
-            // Unary minus: parse as (0 - factor) — keeps codegen trivial.
             consume();
             ExprPtr operand = parse_factor();
             ExprPtr zero = std::make_shared<Expr>(Expr{NumberExpr{0.0}});
@@ -283,13 +515,45 @@ private:
 };
 
 // ============================================================================
-// Evaluator — walks the AST producing a Variable
+// Evaluator
 // ============================================================================
+
+using MethodFn = Variable (*)(const Variable&);
+
+Variable call_relu(const Variable& v) {
+    return Variable(tenzor::clamp(v.tensor(), 0.0f,
+                                  std::numeric_limits<float>::infinity()),
+                    v.requires_grad());
+}
+Variable call_sigmoid(const Variable& v) { return Variable(tenzor::sigmoid(v.tensor()), v.requires_grad()); }
+Variable call_tanh(const Variable& v)    { return Variable(tenzor::tanh(v.tensor()),    v.requires_grad()); }
+Variable call_exp(const Variable& v)     { return Variable(tenzor::exp(v.tensor()),     v.requires_grad()); }
+Variable call_log(const Variable& v)     { return Variable(tenzor::log(v.tensor()),     v.requires_grad()); }
+Variable call_sqrt(const Variable& v)    { return Variable(tenzor::sqrt(v.tensor()),    v.requires_grad()); }
+Variable call_abs(const Variable& v)     { return Variable(tenzor::abs(v.tensor()),     v.requires_grad()); }
+Variable call_neg(const Variable& v)     { return Variable(tenzor::neg(v.tensor()),     v.requires_grad()); }
+Variable call_sum(const Variable& v)     { return Variable(tenzor::sum(v.tensor()),     v.requires_grad()); }
+Variable call_mean(const Variable& v)    { return Variable(tenzor::mean(v.tensor()),    v.requires_grad()); }
+Variable call_sin(const Variable& v)     { return Variable(tenzor::sin(v.tensor()),     v.requires_grad()); }
+Variable call_cos(const Variable& v)     { return Variable(tenzor::cos(v.tensor()),     v.requires_grad()); }
+
+const std::unordered_map<std::string, MethodFn>& method_table() {
+    static const std::unordered_map<std::string, MethodFn> table = {
+        {"relu",    call_relu},   {"sigmoid", call_sigmoid},
+        {"tanh",    call_tanh},   {"exp",     call_exp},
+        {"log",     call_log},    {"sqrt",    call_sqrt},
+        {"abs",     call_abs},    {"neg",     call_neg},
+        {"sum",     call_sum},    {"mean",    call_mean},
+        {"sin",     call_sin},    {"cos",     call_cos},
+    };
+    return table;
+}
+
+using Env = std::unordered_map<std::string, Variable>;
 
 class ScriptEvaluator {
 public:
-    // `args[i]` must correspond to `arg_names_[i]`.
-    ScriptEvaluator(std::vector<std::string> arg_names, ExprPtr body)
+    ScriptEvaluator(std::vector<std::string> arg_names, std::vector<Stmt> body)
         : arg_names_(std::move(arg_names)), body_(std::move(body)) {}
 
     Variable evaluate(const std::vector<Variable>& args) const {
@@ -299,38 +563,182 @@ public:
                 std::to_string(arg_names_.size()) + ", got " +
                 std::to_string(args.size()));
         }
-        return eval(*body_, args);
+        Env env;
+        for (size_t i = 0; i < arg_names_.size(); ++i) {
+            env.emplace(arg_names_[i], args[i]);
+        }
+        std::optional<Variable> returned;
+        exec_block(body_, env, returned);
+        if (!returned) {
+            throw std::runtime_error("compile_script: execution completed without returning");
+        }
+        return *returned;
     }
 
 private:
     std::vector<std::string> arg_names_;
-    ExprPtr body_;
+    std::vector<Stmt> body_;
 
-    Variable eval(const Expr& e, const std::vector<Variable>& args) const {
-        return std::visit([&](auto&& node) -> Variable { return visit(node, args); }, e.node);
+    // exec_block runs statements in order. Sets `returned` and stops on return.
+    void exec_block(const std::vector<Stmt>& stmts, Env& env,
+                    std::optional<Variable>& returned) const {
+        for (const auto& s : stmts) {
+            if (returned) return;
+            exec_stmt(s, env, returned);
+        }
     }
 
-    // A scalar literal is materialised as a Tensor in whichever dtype/device
-    // the first encountered Variable lives on; if we only see literals before
-    // an ident, we default to Float32/CPU and rely on broadcasting.
-    Variable visit(const NumberExpr& n, const std::vector<Variable>&) const {
+    void exec_stmt(const Stmt& s, Env& env, std::optional<Variable>& returned) const {
+        std::visit([&](auto&& node) { exec_one(node, env, returned); }, s.node);
+    }
+
+    void exec_one(const ReturnStmt& r, Env& env, std::optional<Variable>& returned) const {
+        returned = eval(*r.value, env);
+    }
+
+    void exec_one(const AssignStmt& a, Env& env, std::optional<Variable>&) const {
+        env.insert_or_assign(a.target, eval(*a.value, env));
+    }
+
+    void exec_one(const IfStmt& iff, Env& env, std::optional<Variable>& returned) const {
+        // Eager evaluation of if/else. Rationale: the tracer's trace_if
+        // records both branches inline without building dispatch
+        // subgraphs, so replay always re-runs whichever branch happened
+        // to execute at trace time — meaning jit::cond does not currently
+        // give us dynamic-at-replay dispatch anyway. Eager evaluation
+        // captures only the taken branch's ops, which matches the
+        // standard trace-based JIT semantic ("the branch taken during
+        // tracing is the branch baked into the compiled module").
+        Variable cond_var = eval(*iff.cond, env);
+        bool cond_val = cond_var.tensor().item<float>() != 0.0f;
+        const auto& body = cond_val ? iff.then_body : iff.else_body;
+        exec_block(body, env, returned);
+    }
+
+    void exec_one(const ForStmt& f, Env& env, std::optional<Variable>& returned) const {
+        // Static unrolling: iterate N times, each iteration sees i = 0..N-1
+        // as a scalar Float32 Variable. The traced graph captures the full
+        // unrolled sequence (matching Python semantics for fixed-N loops).
+        for (int64_t i = 0; i < f.count; ++i) {
+            if (returned) return;
+            Variable iv(full({}, static_cast<float>(i), DType::Float32, Device::cpu()), false);
+            env.insert_or_assign(f.var, iv);
+            exec_block(f.body, env, returned);
+        }
+    }
+
+    Variable eval(const Expr& e, const Env& env) const {
+        return std::visit([&](auto&& node) -> Variable { return visit(node, env); }, e.node);
+    }
+
+    Variable visit(const NumberExpr& n, const Env&) const {
         Tensor t = full({}, static_cast<float>(n.value), DType::Float32, Device::cpu());
         return Variable(t, false);
     }
 
-    Variable visit(const IdentExpr& id, const std::vector<Variable>& args) const {
-        for (size_t i = 0; i < arg_names_.size(); ++i) {
-            if (arg_names_[i] == id.name) return args[i];
+    Variable visit(const IdentExpr& id, const Env& env) const {
+        auto it = env.find(id.name);
+        if (it == env.end()) {
+            throw std::runtime_error(
+                "compile_script: unknown identifier '" + id.name + "'");
         }
-        throw std::runtime_error(
-            "compile_script: unknown identifier '" + id.name + "'");
+        return it->second;
     }
 
-    Variable visit(const BinOpExpr& b, const std::vector<Variable>& args) const {
-        Variable lhs = eval(*b.lhs, args);
-        Variable rhs = eval(*b.rhs, args);
+    Variable visit(const MethodCallExpr& m, const Env& env) const {
+        Variable recv = eval(*m.receiver, env);
 
-        // Promote scalar literals to the operand's dtype/device when needed.
+        // Handle argument-taking methods before falling through to the
+        // zero-argument dispatch table.
+        if (!m.args.empty()) {
+            return call_method_with_args(recv, m.method, m.args, env);
+        }
+
+        const auto& table = method_table();
+        auto it = table.find(m.method);
+        if (it == table.end()) {
+            throw std::runtime_error(
+                "compile_script: unknown zero-argument method '." + m.method +
+                "()' (supported: relu, sigmoid, tanh, exp, log, sqrt, abs, "
+                "neg, sum, mean, sin, cos)");
+        }
+        return it->second(recv);
+    }
+
+    // Evaluate an expression that must reduce to a scalar Float32 value.
+    float eval_scalar(const Expr& e, const Env& env) const {
+        Variable v = eval(e, env);
+        Tensor t = v.tensor();
+        if (t.numel() != 1) {
+            throw std::runtime_error(
+                "compile_script: method argument must be a scalar");
+        }
+        if (t.dtype() != DType::Float32) t = t.to(DType::Float32);
+        if (t.device().type != Device::Type::CPU) t = t.to(Device::cpu());
+        return t.data<float>()[0];
+    }
+
+    // Evaluate an expression that must reduce to an integer.
+    int64_t eval_int(const Expr& e, const Env& env) const {
+        Variable v = eval(e, env);
+        Tensor t = v.tensor();
+        if (t.numel() != 1) {
+            throw std::runtime_error(
+                "compile_script: method argument must be a scalar integer");
+        }
+        if (t.device().type != Device::Type::CPU) t = t.to(Device::cpu());
+        if (t.dtype() == DType::Float32) {
+            return static_cast<int64_t>(t.data<float>()[0]);
+        }
+        if (t.dtype() == DType::Float64) {
+            return static_cast<int64_t>(t.data<double>()[0]);
+        }
+        throw std::runtime_error(
+            "compile_script: method int argument must be numeric");
+    }
+
+    Variable call_method_with_args(const Variable& recv,
+                                   const std::string& name,
+                                   const std::vector<ExprPtr>& args,
+                                   const Env& env) const {
+        auto require_args = [&](size_t n, const char* sig) {
+            if (args.size() != n) {
+                throw std::runtime_error(
+                    std::string("compile_script: method '.") + name +
+                    "(" + sig + ")' expects " + std::to_string(n) +
+                    " argument(s), got " + std::to_string(args.size()));
+            }
+        };
+
+        if (name == "pow") {
+            require_args(1, "exponent");
+            float exp_val = eval_scalar(*args[0], env);
+            return Variable(tenzor::pow(recv.tensor(), exp_val),
+                            recv.requires_grad());
+        }
+        if (name == "clamp") {
+            require_args(2, "min, max");
+            float lo = eval_scalar(*args[0], env);
+            float hi = eval_scalar(*args[1], env);
+            return Variable(tenzor::clamp(recv.tensor(), lo, hi),
+                            recv.requires_grad());
+        }
+        if (name == "sum" || name == "mean") {
+            require_args(1, "dim");
+            int64_t dim = eval_int(*args[0], env);
+            Tensor out = (name == "sum") ? tenzor::sum(recv.tensor(), dim)
+                                         : tenzor::mean(recv.tensor(), dim);
+            return Variable(std::move(out), recv.requires_grad());
+        }
+        throw std::runtime_error(
+            "compile_script: unknown method '." + name + "(...)' "
+            "(methods with arguments: pow(exp), clamp(min, max), "
+            "sum(dim), mean(dim))");
+    }
+
+    Variable visit(const BinOpExpr& b, const Env& env) const {
+        Variable lhs = eval(*b.lhs, env);
+        Variable rhs = eval(*b.rhs, env);
         auto normalise = [&](Variable& a, Variable& other) {
             if (a.tensor().numel() == 1 &&
                 (a.tensor().dtype() != other.tensor().dtype() ||
@@ -355,20 +763,30 @@ private:
         }
         return Variable(out, lhs.requires_grad() || rhs.requires_grad());
     }
+
+    Variable visit(const CmpOpExpr& c, const Env& env) const {
+        Variable lhs = eval(*c.lhs, env);
+        Variable rhs = eval(*c.rhs, env);
+        Tensor out;
+        if (c.op == '<')      out = tenzor::lt(lhs.tensor(), rhs.tensor());
+        else                  out = tenzor::gt(lhs.tensor(), rhs.tensor());
+        // Cast bool → float32 so jit::cond's `item<float>` call works on
+        // scalar outputs.
+        out = out.to(DType::Float32);
+        return Variable(out, false);
+    }
 };
 
 // ============================================================================
-// Wrapper nn::Module that the tracer can consume
+// Wrapper nn::Module for the tracer
 // ============================================================================
 
 class ScriptModule : public nn::Module {
 public:
-    ScriptModule(std::vector<std::string> arg_names, ExprPtr body)
+    ScriptModule(std::vector<std::string> arg_names, std::vector<Stmt> body)
         : evaluator_(std::move(arg_names), std::move(body)) {}
 
     Variable forward_impl(const Variable& x) override {
-        // Single-arg path — mirrors the only forward() overload that
-        // CompiledModule exposes for the Variable type.
         return evaluator_.evaluate({x});
     }
 
@@ -376,13 +794,12 @@ private:
     ScriptEvaluator evaluator_;
 };
 
-} // namespace
-
 // ============================================================================
 // Public entry point
 // ============================================================================
 
-auto compile_script(const char* source) -> std::shared_ptr<CompiledModule> {
+auto compile_script_with_dummy(const char* source, const Tensor& dummy)
+    -> std::shared_ptr<CompiledModule> {
     if (source == nullptr) {
         throw std::runtime_error("compile_script: null source");
     }
@@ -394,22 +811,27 @@ auto compile_script(const char* source) -> std::shared_ptr<CompiledModule> {
     FuncDef fn = parser.parse_function();
 
     if (fn.args.size() != 1) {
-        // Multi-arg scripts require the vector-input CompiledModule::forward
-        // overload. The MVP only supports the single-Variable path.
         throw std::runtime_error(
-            "compile_script: MVP supports single-argument functions only "
-            "(got " + std::to_string(fn.args.size()) + " args)");
+            "compile_script: single-argument functions only (got " +
+            std::to_string(fn.args.size()) + " args)");
     }
 
-    auto module = std::make_shared<ScriptModule>(fn.args, fn.body);
-
-    // Synthesize a dummy input shaped to trigger scalar broadcasting — actual
-    // shapes come from the caller's later forward() call. {1} is enough for
-    // elementwise arithmetic to record a representative graph.
-    Tensor dummy = ones({1}, DType::Float32, Device::cpu());
+    auto module = std::make_shared<ScriptModule>(fn.args, std::move(fn.body));
 
     return tenzor::jit::trace(
         std::static_pointer_cast<nn::Module>(module), dummy);
+}
+
+} // namespace
+
+auto compile_script(const char* source) -> std::shared_ptr<CompiledModule> {
+    Tensor dummy = ones({1}, DType::Float32, Device::cpu());
+    return compile_script_with_dummy(source, dummy);
+}
+
+auto compile_script(const char* source, const Tensor& dummy)
+    -> std::shared_ptr<CompiledModule> {
+    return compile_script_with_dummy(source, dummy);
 }
 
 } // namespace tenzor::jit

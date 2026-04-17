@@ -3,6 +3,7 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_bfloat16.h>
+#include <hip/hip_complex.h>
 #ifdef TENZOR_HAS_HIPRAND
 #include <hiprand_kernel.h>
 #endif
@@ -596,6 +597,141 @@ __global__ void abs_kernel_f64(const double* input, double* output, int64_t n) {
     }
 }
 
+/**
+ * @brief Complex64 magnitude: |a + bi| = hypot(a, b). Output is Float32.
+ */
+__global__ void abs_kernel_complex64(const hipFloatComplex* input, float* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = hypotf(hipCrealf(input[idx]), hipCimagf(input[idx]));
+    }
+}
+
+/**
+ * @brief Complex128 magnitude. Output is Float64.
+ */
+__global__ void abs_kernel_complex128(const hipDoubleComplex* input, double* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = hypot(hipCreal(input[idx]), hipCimag(input[idx]));
+    }
+}
+
+/**
+ * @brief Complex64 negate: -(a + bi) = -a - bi.
+ */
+__global__ void neg_kernel_complex64(const hipFloatComplex* input, hipFloatComplex* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = make_hipFloatComplex(-hipCrealf(input[idx]), -hipCimagf(input[idx]));
+    }
+}
+
+/**
+ * @brief Complex128 negate.
+ */
+__global__ void neg_kernel_complex128(const hipDoubleComplex* input, hipDoubleComplex* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = make_hipDoubleComplex(-hipCreal(input[idx]), -hipCimag(input[idx]));
+    }
+}
+
+// Transcendentals on complex numbers.
+// exp(a+bi) = exp(a) * (cos(b) + i*sin(b))
+__global__ void exp_kernel_complex64(const hipFloatComplex* input, hipFloatComplex* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float a = hipCrealf(input[idx]);
+        float b = hipCimagf(input[idx]);
+        float ea = expf(a);
+        output[idx] = make_hipFloatComplex(ea * cosf(b), ea * sinf(b));
+    }
+}
+__global__ void exp_kernel_complex128(const hipDoubleComplex* input, hipDoubleComplex* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        double a = hipCreal(input[idx]);
+        double b = hipCimag(input[idx]);
+        double ea = exp(a);
+        output[idx] = make_hipDoubleComplex(ea * cos(b), ea * sin(b));
+    }
+}
+
+// log(a+bi) = log(hypot(a,b)) + i*atan2(b,a)
+__global__ void log_kernel_complex64(const hipFloatComplex* input, hipFloatComplex* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float a = hipCrealf(input[idx]);
+        float b = hipCimagf(input[idx]);
+        output[idx] = make_hipFloatComplex(logf(hypotf(a, b)), atan2f(b, a));
+    }
+}
+__global__ void log_kernel_complex128(const hipDoubleComplex* input, hipDoubleComplex* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        double a = hipCreal(input[idx]);
+        double b = hipCimag(input[idx]);
+        output[idx] = make_hipDoubleComplex(log(hypot(a, b)), atan2(b, a));
+    }
+}
+
+// sqrt(a+bi) principal branch — Kahan/Hull 1994 cancellation-free formulation.
+__global__ void sqrt_kernel_complex64(const hipFloatComplex* input, hipFloatComplex* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float a = hipCrealf(input[idx]);
+        float b = hipCimagf(input[idx]);
+        if (a == 0.0f && b == 0.0f) {
+            output[idx] = make_hipFloatComplex(0.0f, 0.0f);
+            continue;
+        }
+        float s = sqrtf(0.5f * (fabsf(a) + hypotf(a, b)));
+        float re, im;
+        if (a >= 0.0f) { re = s;                 im = b / (2.0f * s); }
+        else            { re = fabsf(b) / (2.0f * s); im = copysignf(s, b); }
+        output[idx] = make_hipFloatComplex(re, im);
+    }
+}
+__global__ void sqrt_kernel_complex128(const hipDoubleComplex* input, hipDoubleComplex* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        double a = hipCreal(input[idx]);
+        double b = hipCimag(input[idx]);
+        if (a == 0.0 && b == 0.0) {
+            output[idx] = make_hipDoubleComplex(0.0, 0.0);
+            continue;
+        }
+        double s = sqrt(0.5 * (fabs(a) + hypot(a, b)));
+        double re, im;
+        if (a >= 0.0) { re = s;              im = b / (2.0 * s); }
+        else           { re = fabs(b) / (2.0 * s); im = copysign(s, b); }
+        output[idx] = make_hipDoubleComplex(re, im);
+    }
+}
+
+// sin(a+bi) = sin(a)cosh(b) + i*cos(a)sinh(b)
+__global__ void sin_kernel_complex64(const hipFloatComplex* input, hipFloatComplex* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float a = hipCrealf(input[idx]);
+        float b = hipCimagf(input[idx]);
+        output[idx] = make_hipFloatComplex(sinf(a) * coshf(b), cosf(a) * sinhf(b));
+    }
+}
+__global__ void sin_kernel_complex128(const hipDoubleComplex* input, hipDoubleComplex* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        double a = hipCreal(input[idx]);
+        double b = hipCimag(input[idx]);
+        output[idx] = make_hipDoubleComplex(sin(a) * cosh(b), cos(a) * sinh(b));
+    }
+}
+
+// cos(a+bi) = cos(a)cosh(b) - i*sin(a)sinh(b)
+__global__ void cos_kernel_complex64(const hipFloatComplex* input, hipFloatComplex* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        float a = hipCrealf(input[idx]);
+        float b = hipCimagf(input[idx]);
+        output[idx] = make_hipFloatComplex(cosf(a) * coshf(b), -sinf(a) * sinhf(b));
+    }
+}
+__global__ void cos_kernel_complex128(const hipDoubleComplex* input, hipDoubleComplex* output, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        double a = hipCreal(input[idx]);
+        double b = hipCimag(input[idx]);
+        output[idx] = make_hipDoubleComplex(cos(a) * cosh(b), -sin(a) * sinh(b));
+    }
+}
+
 // ============================================================================
 // Mathematical Functions
 // ============================================================================
@@ -1142,6 +1278,11 @@ auto sub_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
         int64_t n = a.numel();
         Tensor result(a_shape_vec, a.dtype(), a.device());
 
+        // Empty-tensor fast path — HIP rejects zero-grid launches
+        // ("invalid configuration argument"). Skip the kernel entirely;
+        // the pre-allocated result is already the correct empty shape.
+        if (n == 0) return result;
+
         dim3 grid, block;
         compute_launch_config_1d(n, grid, block);
 
@@ -1321,6 +1462,9 @@ auto mul_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
     if (detail::have_same_shape(a, b)) {
         int64_t n = a.numel();
         Tensor result(a_shape_vec, a.dtype(), a.device());
+
+        // Empty-tensor fast path — HIP rejects zero-grid launches.
+        if (n == 0) return result;
 
         dim3 grid, block;
         compute_launch_config_1d(n, grid, block);
@@ -1667,6 +1811,14 @@ auto neg_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(neg_kernel_device<hip_bfloat16>, grid, block, 0, stream,
             reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
             reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
+    } else if (input.dtype() == DType::Complex64) {
+        hipLaunchKernelGGL(neg_kernel_complex64, grid, block, 0, stream,
+            reinterpret_cast<const hipFloatComplex*>(input.data<uint8_t>()),
+            reinterpret_cast<hipFloatComplex*>(result.data<uint8_t>()), n);
+    } else if (input.dtype() == DType::Complex128) {
+        hipLaunchKernelGGL(neg_kernel_complex128, grid, block, 0, stream,
+            reinterpret_cast<const hipDoubleComplex*>(input.data<uint8_t>()),
+            reinterpret_cast<hipDoubleComplex*>(result.data<uint8_t>()), n);
     } else {
         throw std::runtime_error("Unsupported dtype for neg operation");
     }
@@ -1684,6 +1836,29 @@ auto neg_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 auto abs_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+
+    // Complex inputs: |z| = hypot(re, im); output is real-valued.
+    if (input.dtype() == DType::Complex64) {
+        Tensor result(shape, DType::Float32, input.device());
+        dim3 grid, block;
+        compute_launch_config_1d(n, grid, block);
+        hipLaunchKernelGGL(abs_kernel_complex64, grid, block, 0, stream,
+            reinterpret_cast<const hipFloatComplex*>(input.data<uint8_t>()),
+            result.data<float>(), n);
+        HIP_CHECK(hipGetLastError());
+        return result;
+    }
+    if (input.dtype() == DType::Complex128) {
+        Tensor result(shape, DType::Float64, input.device());
+        dim3 grid, block;
+        compute_launch_config_1d(n, grid, block);
+        hipLaunchKernelGGL(abs_kernel_complex128, grid, block, 0, stream,
+            reinterpret_cast<const hipDoubleComplex*>(input.data<uint8_t>()),
+            result.data<double>(), n);
+        HIP_CHECK(hipGetLastError());
+        return result;
+    }
+
     Tensor result(shape, input.dtype(), input.device());
 
     dim3 grid, block;
@@ -1741,8 +1916,16 @@ auto sqrt_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(sqrt_kernel_f16, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::Complex64) {
+        hipLaunchKernelGGL(sqrt_kernel_complex64, grid, block, 0, stream,
+            reinterpret_cast<const hipFloatComplex*>(input.data<uint8_t>()),
+            reinterpret_cast<hipFloatComplex*>(result.data<uint8_t>()), n);
+    } else if (input.dtype() == DType::Complex128) {
+        hipLaunchKernelGGL(sqrt_kernel_complex128, grid, block, 0, stream,
+            reinterpret_cast<const hipDoubleComplex*>(input.data<uint8_t>()),
+            reinterpret_cast<hipDoubleComplex*>(result.data<uint8_t>()), n);
     } else {
-        throw std::runtime_error("sqrt operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("sqrt operation only supports Float32, Float64, Float16, Complex64, Complex128 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -1773,8 +1956,16 @@ auto exp_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(exp_kernel_f16, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::Complex64) {
+        hipLaunchKernelGGL(exp_kernel_complex64, grid, block, 0, stream,
+            reinterpret_cast<const hipFloatComplex*>(input.data<uint8_t>()),
+            reinterpret_cast<hipFloatComplex*>(result.data<uint8_t>()), n);
+    } else if (input.dtype() == DType::Complex128) {
+        hipLaunchKernelGGL(exp_kernel_complex128, grid, block, 0, stream,
+            reinterpret_cast<const hipDoubleComplex*>(input.data<uint8_t>()),
+            reinterpret_cast<hipDoubleComplex*>(result.data<uint8_t>()), n);
     } else {
-        throw std::runtime_error("exp operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("exp operation only supports Float32, Float64, Float16, Complex64, Complex128 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -1805,8 +1996,16 @@ auto log_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(log_kernel_f16, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::Complex64) {
+        hipLaunchKernelGGL(log_kernel_complex64, grid, block, 0, stream,
+            reinterpret_cast<const hipFloatComplex*>(input.data<uint8_t>()),
+            reinterpret_cast<hipFloatComplex*>(result.data<uint8_t>()), n);
+    } else if (input.dtype() == DType::Complex128) {
+        hipLaunchKernelGGL(log_kernel_complex128, grid, block, 0, stream,
+            reinterpret_cast<const hipDoubleComplex*>(input.data<uint8_t>()),
+            reinterpret_cast<hipDoubleComplex*>(result.data<uint8_t>()), n);
     } else {
-        throw std::runtime_error("log operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("log operation only supports Float32, Float64, Float16, Complex64, Complex128 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -2168,8 +2367,16 @@ auto sin_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(sin_kernel_f16, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::Complex64) {
+        hipLaunchKernelGGL(sin_kernel_complex64, grid, block, 0, stream,
+            reinterpret_cast<const hipFloatComplex*>(input.data<uint8_t>()),
+            reinterpret_cast<hipFloatComplex*>(result.data<uint8_t>()), n);
+    } else if (input.dtype() == DType::Complex128) {
+        hipLaunchKernelGGL(sin_kernel_complex128, grid, block, 0, stream,
+            reinterpret_cast<const hipDoubleComplex*>(input.data<uint8_t>()),
+            reinterpret_cast<hipDoubleComplex*>(result.data<uint8_t>()), n);
     } else {
-        throw std::runtime_error("sin operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("sin operation only supports Float32, Float64, Float16, Complex64, Complex128 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -2196,8 +2403,16 @@ auto cos_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(cos_kernel_f16, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::Complex64) {
+        hipLaunchKernelGGL(cos_kernel_complex64, grid, block, 0, stream,
+            reinterpret_cast<const hipFloatComplex*>(input.data<uint8_t>()),
+            reinterpret_cast<hipFloatComplex*>(result.data<uint8_t>()), n);
+    } else if (input.dtype() == DType::Complex128) {
+        hipLaunchKernelGGL(cos_kernel_complex128, grid, block, 0, stream,
+            reinterpret_cast<const hipDoubleComplex*>(input.data<uint8_t>()),
+            reinterpret_cast<hipDoubleComplex*>(result.data<uint8_t>()), n);
     } else {
-        throw std::runtime_error("cos operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("cos operation only supports Float32, Float64, Float16, Complex64, Complex128 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());

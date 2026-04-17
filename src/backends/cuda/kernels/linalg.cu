@@ -187,7 +187,8 @@ __global__ void zero_triangle_f64(double* data, int n, int nbatch, bool upper) {
     }
 }
 
-/// CUDA kernel to extract R (upper triangle) from QR factorization result.
+/// Extract R (upper triangle) from col-major QR result into row-major R.
+/// a_data is col-major (m × n_cols); r_data is row-major (k × n_cols).
 __global__ void extract_r_f32(const float* a_data, float* r_data,
                                int m, int n_cols, int k, int nbatch) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -201,7 +202,8 @@ __global__ void extract_r_f32(const float* a_data, float* r_data,
 
     const float* a_mat = a_data + b * m * n_cols;
     float* r_mat = r_data + b * k * n_cols;
-    r_mat[i * n_cols + j] = (j >= i) ? a_mat[i * n_cols + j] : 0.0f;
+    // col-major read: a_mat[j*m + i]
+    r_mat[i * n_cols + j] = (j >= i) ? a_mat[j * m + i] : 0.0f;
 }
 
 __global__ void extract_r_f64(const double* a_data, double* r_data,
@@ -217,10 +219,10 @@ __global__ void extract_r_f64(const double* a_data, double* r_data,
 
     const double* a_mat = a_data + b * m * n_cols;
     double* r_mat = r_data + b * k * n_cols;
-    r_mat[i * n_cols + j] = (j >= i) ? a_mat[i * n_cols + j] : 0.0;
+    r_mat[i * n_cols + j] = (j >= i) ? a_mat[j * m + i] : 0.0;
 }
 
-/// CUDA kernel to copy Q columns from householder result.
+/// Copy Q from col-major orgqr result (m × k) into row-major Q (m × k).
 __global__ void copy_q_columns_f32(const float* a_data, float* q_data,
                                     int m, int n_cols, int k, int nbatch) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -234,7 +236,8 @@ __global__ void copy_q_columns_f32(const float* a_data, float* q_data,
 
     const float* a_mat = a_data + b * m * n_cols;
     float* q_mat = q_data + b * m * k;
-    q_mat[i * k + j] = a_mat[i * n_cols + j];
+    // col-major read: a_mat[j*m + i]
+    q_mat[i * k + j] = a_mat[j * m + i];
 }
 
 __global__ void copy_q_columns_f64(const double* a_data, double* q_data,
@@ -250,7 +253,7 @@ __global__ void copy_q_columns_f64(const double* a_data, double* q_data,
 
     const double* a_mat = a_data + b * m * n_cols;
     double* q_mat = q_data + b * m * k;
-    q_mat[i * k + j] = a_mat[i * n_cols + j];
+    q_mat[i * k + j] = a_mat[j * m + i];
 }
 
 /// CUDA kernel to split a row-major packed LU matrix into separate L (unit
@@ -434,8 +437,13 @@ auto linalg_inv_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
 // ============================================================================
 
 auto linalg_solve_kernel(const Tensor& A, const Tensor& B, cudaStream_t stream) -> Tensor {
-    auto work_a = A.contiguous().clone();
-    auto work_b = B.contiguous().clone();
+    // cuSolver interprets inputs column-major. Tenzor stores row-major.
+    // Transposing via .transpose(-1,-2).contiguous() produces row-major
+    // storage of A^T, which cuSolver reads as col-major equal to A. Solve
+    // then writes X into work_b's memory in col-major; transpose back to
+    // hand the caller a row-major result.
+    auto work_a = tenzor::transpose(A.contiguous(), -1, -2).contiguous();
+    auto work_b = tenzor::transpose(B.contiguous(), -1, -2).contiguous();
     auto [n, ndim_a] = check_square(work_a);
     int64_t nbatch = batch_size(work_a);
 
@@ -493,7 +501,8 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, cudaStream_t stream) 
 
     // (Phase 7.2) Redundant trailing sync removed; check_cusolver_info above
     // already performs a synchronous cudaMemcpy for d_info each iteration.
-    return work_b;
+    // Convert X from col-major back to the caller's row-major layout.
+    return tenzor::transpose(work_b, -1, -2).contiguous();
 }
 
 // ============================================================================
@@ -658,7 +667,6 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, cudaStream_t stream)
 
 auto linalg_qr_kernel(const Tensor& A, cudaStream_t stream)
     -> std::tuple<Tensor, Tensor> {
-    auto work = A.contiguous().clone();
     auto shape = A.shape();
     auto a_ndim = static_cast<int64_t>(shape.size());
     if (a_ndim < 2) throw std::invalid_argument("linalg::qr: input must be at least 2D");
@@ -666,6 +674,13 @@ auto linalg_qr_kernel(const Tensor& A, cudaStream_t stream)
     int64_t m = shape[a_ndim - 2];
     int64_t n_cols = shape[a_ndim - 1];
     int64_t k = std::min(m, n_cols);
+
+    // cuSolver geqrf operates column-major. Transposing row-major A
+    // (shape m×n) into row-major A^T (shape n×m) and handing that buffer
+    // to cuSolver makes cuSolver see col-major A with the correct m rows
+    // and n cols. The extract_r / copy_q_columns helpers then read the
+    // result as col-major and write row-major outputs.
+    auto work = tenzor::transpose(A.contiguous(), -1, -2).contiguous();
     int64_t nbatch = batch_size(work);
 
     std::vector<int64_t> batch_dims;
@@ -687,43 +702,37 @@ auto linalg_qr_kernel(const Tensor& A, cudaStream_t stream)
         float* q_data = Q.data<float>();
         float* r_data = R.data<float>();
 
-        // Allocate tau on device (via caching allocator)
         backend::CachedMemoryGuard tau_guard(k * sizeof(float));
         float* d_tau = static_cast<float*>(tau_guard.get());
 
         for (int64_t b = 0; b < nbatch; b++) {
             float* a_mat = a_data + b * m * n_cols;
 
-            // cuSOLVER geqrf works in column-major. For row-major m×n,
-            // we pass n_cols as m and m as n (treating as A^T in col-major).
             int lwork = 0;
-            CUSOLVER_CHECK(cusolverDnSgeqrf_bufferSize(handle, n_cols, m, a_mat, n_cols, &lwork));
+            CUSOLVER_CHECK(cusolverDnSgeqrf_bufferSize(handle, m, n_cols, a_mat, m, &lwork));
             DeviceWorkspace workspace(lwork * sizeof(float));
 
-            CUSOLVER_CHECK(cusolverDnSgeqrf(handle, n_cols, m,
-                a_mat, n_cols, d_tau,
+            CUSOLVER_CHECK(cusolverDnSgeqrf(handle, m, n_cols,
+                a_mat, m, d_tau,
                 static_cast<float*>(workspace.ptr), lwork, d_info.ptr));
             check_cusolver_info(d_info.ptr, "qr");
 
-            // Extract R from upper triangle
             int threads = 256;
             int total_r = k * n_cols;
             int blocks = (total_r + threads - 1) / threads;
             extract_r_f32<<<blocks, threads, 0, stream>>>(
                 a_mat, r_data + b * k * n_cols, m, n_cols, k, 1);
 
-            // Generate Q using orgqr
             int lwork_q = 0;
-            CUSOLVER_CHECK(cusolverDnSorgqr_bufferSize(handle, n_cols, k, k,
-                a_mat, n_cols, d_tau, &lwork_q));
+            CUSOLVER_CHECK(cusolverDnSorgqr_bufferSize(handle, m, k, k,
+                a_mat, m, d_tau, &lwork_q));
             DeviceWorkspace workspace_q(lwork_q * sizeof(float));
 
-            CUSOLVER_CHECK(cusolverDnSorgqr(handle, n_cols, k, k,
-                a_mat, n_cols, d_tau,
+            CUSOLVER_CHECK(cusolverDnSorgqr(handle, m, k, k,
+                a_mat, m, d_tau,
                 static_cast<float*>(workspace_q.ptr), lwork_q, d_info.ptr));
             check_cusolver_info(d_info.ptr, "qr");
 
-            // Copy Q columns
             int total_q = m * k;
             blocks = (total_q + threads - 1) / threads;
             copy_q_columns_f32<<<blocks, threads, 0, stream>>>(
@@ -741,11 +750,11 @@ auto linalg_qr_kernel(const Tensor& A, cudaStream_t stream)
             double* a_mat = a_data + b * m * n_cols;
 
             int lwork = 0;
-            CUSOLVER_CHECK(cusolverDnDgeqrf_bufferSize(handle, n_cols, m, a_mat, n_cols, &lwork));
+            CUSOLVER_CHECK(cusolverDnDgeqrf_bufferSize(handle, m, n_cols, a_mat, m, &lwork));
             DeviceWorkspace workspace(lwork * sizeof(double));
 
-            CUSOLVER_CHECK(cusolverDnDgeqrf(handle, n_cols, m,
-                a_mat, n_cols, d_tau,
+            CUSOLVER_CHECK(cusolverDnDgeqrf(handle, m, n_cols,
+                a_mat, m, d_tau,
                 static_cast<double*>(workspace.ptr), lwork, d_info.ptr));
             check_cusolver_info(d_info.ptr, "qr");
 
@@ -756,12 +765,12 @@ auto linalg_qr_kernel(const Tensor& A, cudaStream_t stream)
                 a_mat, r_data + b * k * n_cols, m, n_cols, k, 1);
 
             int lwork_q = 0;
-            CUSOLVER_CHECK(cusolverDnDorgqr_bufferSize(handle, n_cols, k, k,
-                a_mat, n_cols, d_tau, &lwork_q));
+            CUSOLVER_CHECK(cusolverDnDorgqr_bufferSize(handle, m, k, k,
+                a_mat, m, d_tau, &lwork_q));
             DeviceWorkspace workspace_q(lwork_q * sizeof(double));
 
-            CUSOLVER_CHECK(cusolverDnDorgqr(handle, n_cols, k, k,
-                a_mat, n_cols, d_tau,
+            CUSOLVER_CHECK(cusolverDnDorgqr(handle, m, k, k,
+                a_mat, m, d_tau,
                 static_cast<double*>(workspace_q.ptr), lwork_q, d_info.ptr));
             check_cusolver_info(d_info.ptr, "qr");
 
@@ -951,7 +960,12 @@ auto linalg_cholesky_kernel(const Tensor& A, bool upper, cudaStream_t stream) ->
     auto handle = CuSOLVERHandlePool::get(stream);
     DeviceInt d_info;
 
-    cublasFillMode_t uplo_mode = upper ? CUBLAS_FILL_MODE_UPPER : CUBLAS_FILL_MODE_LOWER;
+    // cuSolver uses column-major; Tenzor uses row-major. For a symmetric
+    // input A we have A_row == A_col, but the output triangle mapping is
+    // inverted: col-major LOWER = row-major UPPER and vice versa. So we
+    // feed cuSolver the opposite uplo and let zero_triangle keep the
+    // user-requested row-major triangle.
+    cublasFillMode_t uplo_mode = upper ? CUBLAS_FILL_MODE_LOWER : CUBLAS_FILL_MODE_UPPER;
 
     if (A.dtype() == DType::Float32) {
         float* data = work.data<float>();

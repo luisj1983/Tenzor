@@ -117,6 +117,16 @@ target_link_libraries(test_batchnorm3d_multidtype PRIVATE tenzor_core GTest::gte
 add_executable(test_normalization_multidtype layers/test_normalization_multidtype.cpp)
 target_link_libraries(test_normalization_multidtype PRIVATE tenzor_core GTest::gtest_main)
 
+# Standalone LayerNorm tests (complements test_normalization_multidtype)
+add_executable(test_layernorm_multidtype layers/test_layernorm_multidtype.cpp)
+target_link_libraries(test_layernorm_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_layernorm_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Standalone MultiheadAttention layer tests (complements test_mha_functional)
+add_executable(test_multihead_attention_multidtype layers/test_multihead_attention_multidtype.cpp)
+target_link_libraries(test_multihead_attention_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_multihead_attention_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
 # Flatten layer multi-dtype tests
 add_executable(test_flatten_multidtype layers/test_flatten_multidtype.cpp)
 target_link_libraries(test_flatten_multidtype PRIVATE tenzor_core GTest::gtest_main)

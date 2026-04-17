@@ -55,4 +55,44 @@ TEST_P(Conv1dMultiDTypeTest, MultipleKernelSizes) {
     }
 }
 
+// Backward — exercises Conv1dBackwardInput, Conv1dBackwardWeight,
+// Conv1dBackwardBias kernels. The optimizer-style sum().backward() pattern
+// populates .grad() on the input tensor and the conv's parameters.
+TEST_P(Conv1dMultiDTypeTest, BackwardProducesGradients) {
+    auto conv = nn::Conv1d(2, 4, 3, 1, 1, 1, 1, /*bias=*/true);
+    convert_model(conv);
+
+    auto input = createInput({1, 2, 8}, /*requires_grad=*/true);
+    auto output = conv.forward(input);
+    auto loss = tenzor::sum(output);
+    loss.backward();
+
+    ASSERT_TRUE(input.has_grad()) << "input gradient must be populated";
+    auto g = input.grad().value();
+    EXPECT_EQ(g.shape()[0], 1);
+    EXPECT_EQ(g.shape()[1], 2);
+    EXPECT_EQ(g.shape()[2], 8);
+    expectDevice(g);
+
+    // Both weight and bias parameters should see gradients
+    for (const auto& [name, p] : conv.named_parameters()) {
+        ASSERT_TRUE(p->has_grad()) << "parameter " << name << " missing grad";
+    }
+}
+
+TEST_P(Conv1dMultiDTypeTest, BackwardWithStridePadding) {
+    auto conv = nn::Conv1d(3, 6, 5, 2, 2);
+    convert_model(conv);
+
+    auto input = createInput({2, 3, 12}, /*requires_grad=*/true);
+    auto output = conv.forward(input);
+    auto loss = tenzor::sum(output);
+    loss.backward();
+
+    ASSERT_TRUE(input.has_grad());
+    EXPECT_EQ(input.grad().value().shape()[0], 2);
+    EXPECT_EQ(input.grad().value().shape()[1], 3);
+    EXPECT_EQ(input.grad().value().shape()[2], 12);
+}
+
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(Conv1dMultiDTypeTest);

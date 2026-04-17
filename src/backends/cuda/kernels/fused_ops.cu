@@ -3635,6 +3635,39 @@ __global__ void fused_adadelta_step_kernel(
     param[idx] = param[idx] - T(lr) * delta;
 }
 
+// Float16 / BFloat16 kernel: read half → compute in float → write back half.
+// Runs directly on the original tensor storage so the optimizer sees the
+// update without needing any host-side rebind.
+template <typename HalfT>
+__global__ void fused_adadelta_step_half_kernel(
+    HalfT* __restrict__ param,
+    const HalfT* __restrict__ grad,
+    HalfT* __restrict__ square_avg,
+    HalfT* __restrict__ acc_delta,
+    float rho, float eps, float lr, float weight_decay,
+    int64_t n) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+
+    float g = static_cast<float>(grad[idx]);
+    float p = static_cast<float>(param[idx]);
+    if (weight_decay != 0.0f) {
+        g = g + weight_decay * p;
+    }
+
+    float sq = static_cast<float>(square_avg[idx]);
+    sq = rho * sq + (1.0f - rho) * g * g;
+    square_avg[idx] = static_cast<HalfT>(sq);
+
+    float ad = static_cast<float>(acc_delta[idx]);
+    float std_val = sqrtf(sq + eps);
+    float delta = sqrtf(ad + eps) / std_val * g;
+
+    acc_delta[idx] = static_cast<HalfT>(rho * ad + (1.0f - rho) * delta * delta);
+    param[idx] = static_cast<HalfT>(p - lr * delta);
+}
+
 auto fused_adadelta_step_cuda(
     Tensor& param,
     const Tensor& grad,
@@ -3655,6 +3688,26 @@ auto fused_adadelta_step_cuda(
     } else if (param.dtype() == DType::Float64) {
         fused_adadelta_step_kernel<double><<<num_blocks, block_size, 0, stream>>>(
             param.data<double>(), grad.data<double>(), square_avg.data<double>(), acc_delta.data<double>(),
+            rho, eps, lr, weight_decay, n);
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+    } else if (param.dtype() == DType::Float16) {
+        // grad may be passed in Float32 (optimizer often does not cast grads
+        // to match param dtype); accept either.
+        Tensor grad_h = (grad.dtype() == DType::Float16) ? grad : grad.to(DType::Float16);
+        fused_adadelta_step_half_kernel<__half><<<num_blocks, block_size, 0, stream>>>(
+            reinterpret_cast<__half*>(param.data<Float16>()),
+            reinterpret_cast<const __half*>(grad_h.data<Float16>()),
+            reinterpret_cast<__half*>(square_avg.data<Float16>()),
+            reinterpret_cast<__half*>(acc_delta.data<Float16>()),
+            rho, eps, lr, weight_decay, n);
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+    } else if (param.dtype() == DType::BFloat16) {
+        Tensor grad_h = (grad.dtype() == DType::BFloat16) ? grad : grad.to(DType::BFloat16);
+        fused_adadelta_step_half_kernel<__nv_bfloat16><<<num_blocks, block_size, 0, stream>>>(
+            reinterpret_cast<__nv_bfloat16*>(param.data<BFloat16>()),
+            reinterpret_cast<const __nv_bfloat16*>(grad_h.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(square_avg.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(acc_delta.data<BFloat16>()),
             rho, eps, lr, weight_decay, n);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {

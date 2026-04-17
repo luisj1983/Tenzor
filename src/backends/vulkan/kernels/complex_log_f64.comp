@@ -1,0 +1,34 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Complex128 log. Magnitude done in double for precision, angle in float
+// since GLSL atan only accepts float.
+
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { double data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { double data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= num_elements) return;
+    double a = data_in[idx * 2u];
+    double b = data_in[idx * 2u + 1u];
+    double ar = abs(a);
+    double ai = abs(b);
+    double m = max(ar, ai);
+    double mag;
+    if (m == 0.0lf) {
+        mag = 0.0lf;
+    } else {
+        double r = ar / m;
+        double i = ai / m;
+        mag = m * sqrt(r * r + i * i);
+    }
+    data_out[idx * 2u]      = double(log(float(mag)));
+    data_out[idx * 2u + 1u] = double(atan(float(b), float(a)));
+}

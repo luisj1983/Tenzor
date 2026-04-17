@@ -591,6 +591,136 @@ __global__ void abs_kernel_f64(const double* input, double* output, int64_t n) {
     }
 }
 
+// Negate for Complex64: -(a + bi) = -a - bi.
+__global__ void neg_kernel_complex64(const cuFloatComplex* input, cuFloatComplex* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = make_cuFloatComplex(-cuCrealf(input[idx]), -cuCimagf(input[idx]));
+    }
+}
+
+// Negate for Complex128.
+__global__ void neg_kernel_complex128(const cuDoubleComplex* input, cuDoubleComplex* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = make_cuDoubleComplex(-cuCreal(input[idx]), -cuCimag(input[idx]));
+    }
+}
+
+// Absolute value for Complex64: |a + bi| = hypot(a, b). Output is Float32.
+__global__ void abs_kernel_complex64(const cuFloatComplex* input, float* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = hypotf(cuCrealf(input[idx]), cuCimagf(input[idx]));
+    }
+}
+
+// Absolute value for Complex128: output is Float64.
+__global__ void abs_kernel_complex128(const cuDoubleComplex* input, double* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = hypot(cuCreal(input[idx]), cuCimag(input[idx]));
+    }
+}
+
+// Transcendentals on complex numbers.
+// exp(a+bi) = exp(a) * (cos(b) + i*sin(b))
+__global__ void exp_kernel_complex64(const cuFloatComplex* input, cuFloatComplex* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        float a = cuCrealf(input[idx]);
+        float b = cuCimagf(input[idx]);
+        float ea = expf(a);
+        output[idx] = make_cuFloatComplex(ea * cosf(b), ea * sinf(b));
+    }
+}
+__global__ void exp_kernel_complex128(const cuDoubleComplex* input, cuDoubleComplex* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        double a = cuCreal(input[idx]);
+        double b = cuCimag(input[idx]);
+        double ea = exp(a);
+        output[idx] = make_cuDoubleComplex(ea * cos(b), ea * sin(b));
+    }
+}
+
+// log(a+bi) = log(hypot(a,b)) + i*atan2(b,a)
+__global__ void log_kernel_complex64(const cuFloatComplex* input, cuFloatComplex* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        float a = cuCrealf(input[idx]);
+        float b = cuCimagf(input[idx]);
+        output[idx] = make_cuFloatComplex(logf(hypotf(a, b)), atan2f(b, a));
+    }
+}
+__global__ void log_kernel_complex128(const cuDoubleComplex* input, cuDoubleComplex* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        double a = cuCreal(input[idx]);
+        double b = cuCimag(input[idx]);
+        output[idx] = make_cuDoubleComplex(log(hypot(a, b)), atan2(b, a));
+    }
+}
+
+// sqrt(a+bi) principal branch — Kahan/Hull 1994 cancellation-free formulation.
+// Let s = sqrt((|a| + hypot(a,b)) / 2).
+//   a >= 0:  sqrt(z) = s + i*b/(2s)
+//   a <  0:  sqrt(z) = |b|/(2s) + i*copysign(s, b)
+__global__ void sqrt_kernel_complex64(const cuFloatComplex* input, cuFloatComplex* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        float a = cuCrealf(input[idx]);
+        float b = cuCimagf(input[idx]);
+        if (a == 0.0f && b == 0.0f) {
+            output[idx] = make_cuFloatComplex(0.0f, 0.0f);
+            continue;
+        }
+        float s = sqrtf(0.5f * (fabsf(a) + hypotf(a, b)));
+        float re, im;
+        if (a >= 0.0f) { re = s;                 im = b / (2.0f * s); }
+        else            { re = fabsf(b) / (2.0f * s); im = copysignf(s, b); }
+        output[idx] = make_cuFloatComplex(re, im);
+    }
+}
+__global__ void sqrt_kernel_complex128(const cuDoubleComplex* input, cuDoubleComplex* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        double a = cuCreal(input[idx]);
+        double b = cuCimag(input[idx]);
+        if (a == 0.0 && b == 0.0) {
+            output[idx] = make_cuDoubleComplex(0.0, 0.0);
+            continue;
+        }
+        double s = sqrt(0.5 * (fabs(a) + hypot(a, b)));
+        double re, im;
+        if (a >= 0.0) { re = s;              im = b / (2.0 * s); }
+        else           { re = fabs(b) / (2.0 * s); im = copysign(s, b); }
+        output[idx] = make_cuDoubleComplex(re, im);
+    }
+}
+
+// sin(a+bi) = sin(a)cosh(b) + i*cos(a)sinh(b)
+__global__ void sin_kernel_complex64(const cuFloatComplex* input, cuFloatComplex* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        float a = cuCrealf(input[idx]);
+        float b = cuCimagf(input[idx]);
+        output[idx] = make_cuFloatComplex(sinf(a) * coshf(b), cosf(a) * sinhf(b));
+    }
+}
+__global__ void sin_kernel_complex128(const cuDoubleComplex* input, cuDoubleComplex* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        double a = cuCreal(input[idx]);
+        double b = cuCimag(input[idx]);
+        output[idx] = make_cuDoubleComplex(sin(a) * cosh(b), cos(a) * sinh(b));
+    }
+}
+
+// cos(a+bi) = cos(a)cosh(b) - i*sin(a)sinh(b)
+__global__ void cos_kernel_complex64(const cuFloatComplex* input, cuFloatComplex* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        float a = cuCrealf(input[idx]);
+        float b = cuCimagf(input[idx]);
+        output[idx] = make_cuFloatComplex(cosf(a) * coshf(b), -sinf(a) * sinhf(b));
+    }
+}
+__global__ void cos_kernel_complex128(const cuDoubleComplex* input, cuDoubleComplex* output, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        double a = cuCreal(input[idx]);
+        double b = cuCimag(input[idx]);
+        output[idx] = make_cuDoubleComplex(cos(a) * cosh(b), -sin(a) * sinh(b));
+    }
+}
+
 // ============================================================================
 // FP16 Unary Operations
 // ============================================================================
@@ -1673,6 +1803,16 @@ auto neg_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
             reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
         CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Complex64) {
+        neg_kernel_complex64<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const cuFloatComplex*>(input.data<uint8_t>()),
+            reinterpret_cast<cuFloatComplex*>(result.data<uint8_t>()), n);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Complex128) {
+        neg_kernel_complex128<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const cuDoubleComplex*>(input.data<uint8_t>()),
+            reinterpret_cast<cuDoubleComplex*>(result.data<uint8_t>()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Unsupported dtype for neg operation");
     }
@@ -1686,6 +1826,29 @@ auto neg_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
 auto abs_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+
+    // Complex inputs: |z| = hypot(re, im), output is real-valued.
+    if (input.dtype() == DType::Complex64) {
+        Tensor result(shape, DType::Float32, input.device());
+        dim3 grid, block;
+        compute_launch_config_1d(n, grid, block);
+        abs_kernel_complex64<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const cuFloatComplex*>(input.data<uint8_t>()),
+            result.data<float>(), n);
+        CUDA_CHECK(cudaGetLastError());
+        return result;
+    }
+    if (input.dtype() == DType::Complex128) {
+        Tensor result(shape, DType::Float64, input.device());
+        dim3 grid, block;
+        compute_launch_config_1d(n, grid, block);
+        abs_kernel_complex128<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const cuDoubleComplex*>(input.data<uint8_t>()),
+            result.data<double>(), n);
+        CUDA_CHECK(cudaGetLastError());
+        return result;
+    }
+
     Tensor result(shape, input.dtype(), input.device());
 
     dim3 grid, block;
@@ -1747,8 +1910,18 @@ auto sqrt_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
             reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
         CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Complex64) {
+        sqrt_kernel_complex64<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const cuFloatComplex*>(input.data<uint8_t>()),
+            reinterpret_cast<cuFloatComplex*>(result.data<uint8_t>()), n);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Complex128) {
+        sqrt_kernel_complex128<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const cuDoubleComplex*>(input.data<uint8_t>()),
+            reinterpret_cast<cuDoubleComplex*>(result.data<uint8_t>()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
-        throw std::runtime_error("sqrt operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
+        throw std::runtime_error("sqrt operation only supports Float32, Float64, Float16, BFloat16, Complex64, Complex128 dtypes");
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -1781,8 +1954,18 @@ auto exp_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
             reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
         CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Complex64) {
+        exp_kernel_complex64<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const cuFloatComplex*>(input.data<uint8_t>()),
+            reinterpret_cast<cuFloatComplex*>(result.data<uint8_t>()), n);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Complex128) {
+        exp_kernel_complex128<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const cuDoubleComplex*>(input.data<uint8_t>()),
+            reinterpret_cast<cuDoubleComplex*>(result.data<uint8_t>()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
-        throw std::runtime_error("exp operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
+        throw std::runtime_error("exp operation only supports Float32, Float64, Float16, BFloat16, Complex64, Complex128 dtypes");
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -1815,8 +1998,18 @@ auto log_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
             reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
         CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Complex64) {
+        log_kernel_complex64<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const cuFloatComplex*>(input.data<uint8_t>()),
+            reinterpret_cast<cuFloatComplex*>(result.data<uint8_t>()), n);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Complex128) {
+        log_kernel_complex128<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const cuDoubleComplex*>(input.data<uint8_t>()),
+            reinterpret_cast<cuDoubleComplex*>(result.data<uint8_t>()), n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
-        throw std::runtime_error("log operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
+        throw std::runtime_error("log operation only supports Float32, Float64, Float16, BFloat16, Complex64, Complex128 dtypes");
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -2054,8 +2247,72 @@ auto name##_kernel(const Tensor& input, cudaStream_t stream) -> Tensor { \
     return result; \
 }
 
-DEFINE_TRIG_KERNEL(sin)
-DEFINE_TRIG_KERNEL(cos)
+// sin/cos: explicit definitions so Complex64/Complex128 can be added
+// alongside the standard float paths. Other trig ops (tan/asin/acos/atan/
+// sinh/cosh) stick with the DEFINE_TRIG_KERNEL macro because their complex
+// branches aren't implemented here.
+auto sin_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        Tensor f32_input = input.to(DType::Float32);
+        Tensor f32_result = sin_kernel(f32_input, stream);
+        return f32_result.to(orig);
+    }
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+    if (input.dtype() == DType::Float32) {
+        sin_kernel_impl<<<grid, block, 0, stream>>>(input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        sin_kernel_impl<<<grid, block, 0, stream>>>(input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Complex64) {
+        sin_kernel_complex64<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const cuFloatComplex*>(input.data<uint8_t>()),
+            reinterpret_cast<cuFloatComplex*>(result.data<uint8_t>()), n);
+    } else if (input.dtype() == DType::Complex128) {
+        sin_kernel_complex128<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const cuDoubleComplex*>(input.data<uint8_t>()),
+            reinterpret_cast<cuDoubleComplex*>(result.data<uint8_t>()), n);
+    } else {
+        throw std::runtime_error("sin operation only supports floating point and complex dtypes");
+    }
+    CUDA_CHECK(cudaGetLastError());
+    return result;
+}
+
+auto cos_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        Tensor f32_input = input.to(DType::Float32);
+        Tensor f32_result = cos_kernel(f32_input, stream);
+        return f32_result.to(orig);
+    }
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+    if (input.dtype() == DType::Float32) {
+        cos_kernel_impl<<<grid, block, 0, stream>>>(input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        cos_kernel_impl<<<grid, block, 0, stream>>>(input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Complex64) {
+        cos_kernel_complex64<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const cuFloatComplex*>(input.data<uint8_t>()),
+            reinterpret_cast<cuFloatComplex*>(result.data<uint8_t>()), n);
+    } else if (input.dtype() == DType::Complex128) {
+        cos_kernel_complex128<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const cuDoubleComplex*>(input.data<uint8_t>()),
+            reinterpret_cast<cuDoubleComplex*>(result.data<uint8_t>()), n);
+    } else {
+        throw std::runtime_error("cos operation only supports floating point and complex dtypes");
+    }
+    CUDA_CHECK(cudaGetLastError());
+    return result;
+}
+
 DEFINE_TRIG_KERNEL(tan)
 DEFINE_TRIG_KERNEL(asin)
 DEFINE_TRIG_KERNEL(acos)

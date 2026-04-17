@@ -84,6 +84,30 @@ auto Variable::mutable_grad() -> std::optional<Tensor>& {
     return impl_->grad_;
 }
 
+auto Variable::grad_variable() const -> const std::optional<Variable>& {
+    if (!impl_) {
+        throw std::runtime_error("Cannot access grad_variable of uninitialized Variable");
+    }
+    using OptVar = std::optional<Variable>;
+    if (!impl_->grad_with_graph_cache_storage_) {
+        impl_->grad_with_graph_cache_storage_.reset(
+            reinterpret_cast<char*>(new OptVar{}));
+    }
+    auto* cache = reinterpret_cast<OptVar*>(
+        impl_->grad_with_graph_cache_storage_.get());
+    if (impl_->grad_with_graph_impl_) {
+        if (!cache->has_value() ||
+            (*cache)->impl_ != impl_->grad_with_graph_impl_) {
+            Variable v;
+            v.impl_ = impl_->grad_with_graph_impl_;
+            *cache = std::move(v);
+        }
+    } else {
+        cache->reset();
+    }
+    return *cache;
+}
+
 auto Variable::has_grad() const -> bool {
     if (!impl_) return false;
     if (impl_->thread_safe_.load(std::memory_order_acquire)) {

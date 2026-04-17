@@ -43,6 +43,10 @@ public:
         return {result};
     }
 
+    // Embedding is an index-scatter — linear in the gradient — so the
+    // second derivative is structurally zero.
+    TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
+
 private:
     int64_t num_embeddings_;
     int64_t embedding_dim_;

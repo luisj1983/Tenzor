@@ -14,6 +14,7 @@
 #include <tenzor/jit/compile.hpp>
 #include <tenzor/jit/compiler.hpp>
 #include <tenzor/jit/graph.hpp>
+#include <tenzor/jit/script.hpp>
 #include <tenzor/jit/serialization.hpp>
 #include <tenzor/jit/tracer.hpp>
 #include <tenzor/lazy/lazy_tensor.hpp>
@@ -100,6 +101,15 @@ void register_jit(py::module_& m) {
              "Check if tracing is active")
         .def("clear", &tenzor::jit::Tracer::clear,
              "Clear all recorded operations")
+        .def("graph_break_count", &tenzor::jit::Tracer::graph_break_count,
+             "Number of graph breaks recorded during the current (or last)\n"
+             "trace session. Non-zero indicates operations that couldn't be\n"
+             "captured in the traced graph — use to diagnose why a model\n"
+             "falls back to eager execution.")
+        .def("record_graph_break", &tenzor::jit::Tracer::record_graph_break,
+             py::arg("reason"),
+             "Record a graph break with a human-readable reason. Used by\n"
+             "the tracer itself; exposed for tests and advanced debugging.")
         .def_static("get_instance", &tenzor::jit::Tracer::get_instance,
              py::return_value_policy::reference,
              "Get thread-local tracer instance");
@@ -213,6 +223,24 @@ void register_jit(py::module_& m) {
     py::arg("fullgraph") = false,
     py::arg("mode") = "default",
     "Compile a function for automatic graph capture (alias for jit.compile).");
+
+    // compile_script — Python-subset scripting frontend
+    jit.def("compile_script", [](const std::string& source) {
+        return tenzor::jit::compile_script(source.c_str());
+    },
+    py::arg("source"),
+    "Compile a Python-subset script into a CompiledModule.\n"
+    "MVP grammar: single `def forward(x): return EXPR` with arithmetic on x,\n"
+    "float/int literals, +, -, *, /, and parentheses. Throws on parse error.\n"
+    "Uses a default CPU+Float32 {1}-element dummy for tracing.");
+
+    jit.def("compile_script", [](const std::string& source, const tenzor::Tensor& dummy) {
+        return tenzor::jit::compile_script(source.c_str(), dummy);
+    },
+    py::arg("source"), py::arg("dummy"),
+    "Overload that specialises the compiled module for the supplied dummy\n"
+    "input's dtype, device, and shape. Use this when compiling for non-CPU\n"
+    "or non-Float32 inputs.");
 
     // =========================================================================
     // Lazy Tensor API

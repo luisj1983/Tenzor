@@ -1,0 +1,29 @@
+#version 450
+
+// Complex64 abs: |a + bi| = hypot(a, b). Output is Float32.
+// Input:  [re0, im0, re1, im1, ...]  (Complex64 pairs)
+// Output: [|z0|, |z1|, ...]          (Float32)
+
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { float data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { float data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= num_elements) return;
+    float re = data_in[idx * 2u];
+    float im = data_in[idx * 2u + 1u];
+    // Scale-free hypot to avoid overflow on large magnitudes.
+    float ar = abs(re);
+    float ai = abs(im);
+    float m = max(ar, ai);
+    if (m == 0.0) { data_out[idx] = 0.0; return; }
+    float r = ar / m;
+    float i = ai / m;
+    data_out[idx] = m * sqrt(r * r + i * i);
+}

@@ -1,4 +1,5 @@
 #include "vulkan_ops_common.hpp"
+#include <unordered_set>
 
 namespace tenzor {
 
@@ -434,10 +435,70 @@ auto VulkanBackend::dispatchUnaryOp(const std::string& op_name,
     if (input.numel() == 0) {
         auto input_shape = input.shape();
         std::vector<int64_t> output_shape(input_shape.begin(), input_shape.end());
-        return Tensor(output_shape, input.dtype(), input.device());
+        // abs(complex) produces a real-valued output even for empty inputs.
+        DType empty_out_dtype = input.dtype();
+        if (op_name == "abs" && input.dtype() == DType::Complex64)  empty_out_dtype = DType::Float32;
+        if (op_name == "abs" && input.dtype() == DType::Complex128) empty_out_dtype = DType::Float64;
+        return Tensor(output_shape, empty_out_dtype, input.device());
     }
 
     int32_t device_id = input.device().index;
+
+    // Complex-input path for abs/neg/exp/log/sqrt/sin/cos. The generic `math`
+    // and `trigonometric` shaders interpret memory as float and would corrupt
+    // interleaved complex pairs; dispatch to dedicated complex_* shaders
+    // instead.
+    static const std::unordered_set<std::string> kComplexOps = {
+        "abs", "neg", "exp", "log", "sqrt", "sin", "cos"
+    };
+    if (kComplexOps.count(op_name) &&
+        (input.dtype() == DType::Complex64 || input.dtype() == DType::Complex128)) {
+        bool is_f64 = (input.dtype() == DType::Complex128);
+        int64_t numel = input.numel();
+        auto input_shape = input.shape();
+        std::vector<int64_t> output_shape(input_shape.begin(), input_shape.end());
+
+        // abs emits a real tensor; neg/exp/log/sqrt/sin/cos stay complex.
+        DType out_dtype = input.dtype();
+        if (op_name == "abs") out_dtype = is_f64 ? DType::Float64 : DType::Float32;
+        Tensor output(output_shape, out_dtype, input.device());
+
+        std::string shader_name = "complex_" + op_name;
+        if (is_f64) shader_name += "_f64";
+
+        auto* pipeline = getPipeline(shader_name, device_id);
+
+        size_t in_bytes  = static_cast<size_t>(numel) * 2 * (is_f64 ? 8 : 4);
+        size_t out_bytes = (op_name == "abs")
+            ? static_cast<size_t>(numel) * (is_f64 ? 8 : 4)
+            : in_bytes;
+
+        const void* buffer_in  = input.data_ptr();
+        const void* buffer_out = output.data_ptr();
+
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, buffer_in}, {1, buffer_out}
+        };
+        std::vector<size_t> sizes = {in_bytes, out_bytes};
+
+        VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+            device_id, pipeline, bindings, sizes);
+
+        VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+
+        struct { uint32_t num_elements; } pc{ static_cast<uint32_t>(numel) };
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+
+        uint32_t workgroups = div_wg(numel, devices_[device_id].workgroupSize);
+        vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+        insertComputeOnlyBarrier(cmdBuffer);
+        endSingleTimeCommands(cmdBuffer, device_id);
+        return output;
+    }
 
     // Create output tensor (convert span to vector)
     auto input_shape = input.shape();
@@ -745,6 +806,13 @@ auto VulkanBackend::dispatchUnaryOpWithParam(const std::string& op_name,
 
 auto VulkanBackend::dispatchTrigonometricOp(const std::string& op_name,
                                              const Tensor& input) -> Tensor {
+    // Complex sin/cos need dedicated shaders because the generic
+    // trigonometric shader treats memory as real-valued floats.
+    if ((op_name == "sin" || op_name == "cos") &&
+        (input.dtype() == DType::Complex64 || input.dtype() == DType::Complex128)) {
+        return dispatchUnaryOp(op_name, input);
+    }
+
     // Map operation name to opcode (see trigonometric.comp shader)
     // 0=sin, 1=cos, 2=tan, 3=asin, 4=acos, 5=atan
     uint32_t opcode = 0;

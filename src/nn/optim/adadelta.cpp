@@ -69,12 +69,16 @@ auto Adadelta::step_impl() -> void {
         const auto& param_data_orig = param->tensor();
         auto original_device = param_data_orig.device();
 
-        // Vulkan fast path: fused kernel avoids GPU→CPU→GPU round-trip
+        // Vulkan fast path: fused kernel avoids GPU→CPU→GPU round-trip.
+        // Input order matches the CUDA/CPU contract [param, grad, square_avg,
+        // acc_delta]; the Vulkan dispatch remaps to shader-binding order
+        // internally. Previous [grad, param, ...] order was a mismatch with
+        // dispatchFusedAdadeltaStep's expected layout.
         if (original_device.type == Device::Type::Vulkan &&
             grad_orig.device().type == Device::Type::Vulkan) {
 
             std::vector<Tensor> inputs = {
-                grad_orig, param->tensor(), square_avg_[i], acc_delta_[i]
+                param->tensor(), grad_orig, square_avg_[i], acc_delta_[i]
             };
 
             NewOpAttributes attrs;

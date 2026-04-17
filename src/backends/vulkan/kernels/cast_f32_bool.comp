@@ -1,0 +1,26 @@
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
+
+// Cast Float32 to Bool
+// Semantics: result = (input != 0.0). NaN is considered non-zero (true).
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuffer {
+    float data[];
+} input_buf;
+
+layout(set = 0, binding = 1) writeonly buffer OutputBuffer {
+    uint8_t data[];
+} output_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.num_elements) return;
+    float v = input_buf.data[idx];
+    output_buf.data[idx] = (v != 0.0) ? uint8_t(1) : uint8_t(0);
+}

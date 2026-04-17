@@ -1,0 +1,21 @@
+#version 450
+
+// Complex64 cos: cos(a+bi) = cos(a)*cosh(b) - i*sin(a)*sinh(b)
+
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { float data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { float data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= num_elements) return;
+    float a = data_in[idx * 2u];
+    float b = data_in[idx * 2u + 1u];
+    data_out[idx * 2u]      =  cos(a) * cosh(b);
+    data_out[idx * 2u + 1u] = -sin(a) * sinh(b);
+}

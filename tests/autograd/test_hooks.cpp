@@ -175,6 +175,87 @@ TEST_P(HooksTest, RemoveModuleHook) {
 }
 
 // ============================================================================
+// Phase 7 expansion: exception safety + leak + stress tests
+// ============================================================================
+
+// Hook that throws must not leave the autograd graph in a corrupt state.
+// After catching the exception we should still be able to run another
+// forward+backward with no residual effect from the aborted hook.
+TEST_P(HooksTest, HookThrowDoesNotCorruptGraph) {
+    auto a = Variable(ones({2, 2}, DType::Float32, device), true);
+
+    a.register_hook([](const Tensor&) -> Tensor {
+        throw std::runtime_error("hook-intentional");
+    });
+
+    auto b = a * 2.0f;
+    bool caught = false;
+    try {
+        b.backward(ones({2, 2}, DType::Float32, device));
+    } catch (const std::exception&) {
+        caught = true;
+    }
+    EXPECT_TRUE(caught) << "throwing hook must propagate";
+
+    // Register a NEW variable with a well-behaved hook. If the throwing
+    // hook left anything registered or broke the tape, this will crash
+    // or see the stale hook's effects.
+    auto c = Variable(ones({2, 2}, DType::Float32, device), true);
+    int counter = 0;
+    c.register_hook([&counter](const Tensor& g) {
+        counter++;
+        return g;
+    });
+    auto d = c * 3.0f;
+    d.backward(ones({2, 2}, DType::Float32, device));
+    EXPECT_EQ(counter, 1) << "recovery hook must fire exactly once";
+}
+
+// Registering and immediately removing many hooks should not leak memory
+// or leave stale hooks attached. This is a cheap stress check (1000
+// hooks — 10k would slow the suite) that would catch an obvious leak.
+TEST_P(HooksTest, RepeatedRegisterRemoveDoesNotAccumulate) {
+    auto a = Variable(ones({4}, DType::Float32, device), true);
+
+    // Baseline: register 1 hook, backward once, observe 1 call.
+    int calls = 0;
+    auto hook_id = a.register_hook([&calls](const Tensor& g) {
+        calls++;
+        return g;
+    });
+    // Register+unregister 1000 additional no-op hooks.
+    for (int i = 0; i < 1000; ++i) {
+        auto id = a.register_hook([](const Tensor& g) { return g; });
+        a.unregister_hook(id);
+    }
+
+    auto b = a * 2.0f;  // `a` appears once in the forward graph
+    b.backward(ones({4}, DType::Float32, device));
+    EXPECT_EQ(calls, 1) << "after 1000 register/removes only the surviving hook should fire";
+
+    // Clean up.
+    a.unregister_hook(hook_id);
+}
+
+// Multiple hooks must fire in registration order — guarded against a
+// data-structure-reordering regression.
+TEST_P(HooksTest, HooksFireInRegistrationOrder) {
+    auto a = Variable(ones({2}, DType::Float32, device), true);
+
+    std::vector<int> sequence;
+    a.register_hook([&sequence](const Tensor& g) { sequence.push_back(1); return g; });
+    a.register_hook([&sequence](const Tensor& g) { sequence.push_back(2); return g; });
+    a.register_hook([&sequence](const Tensor& g) { sequence.push_back(3); return g; });
+
+    auto b = a * 2.0f;
+    b.backward(ones({2}, DType::Float32, device));
+    ASSERT_EQ(sequence.size(), 3u);
+    EXPECT_EQ(sequence[0], 1);
+    EXPECT_EQ(sequence[1], 2);
+    EXPECT_EQ(sequence[2], 3);
+}
+
+// ============================================================================
 // Instantiate for all available backends
 // ============================================================================
 

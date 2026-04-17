@@ -1,0 +1,23 @@
+#version 450
+
+// Complex64 exp: exp(a+bi) = exp(a) * (cos(b) + i*sin(b))
+// Input/output:  interleaved [re0, im0, re1, im1, ...]
+
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { float data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { float data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;  // number of COMPLEX elements
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= num_elements) return;
+    float a = data_in[idx * 2u];
+    float b = data_in[idx * 2u + 1u];
+    float ea = exp(a);
+    data_out[idx * 2u]      = ea * cos(b);
+    data_out[idx * 2u + 1u] = ea * sin(b);
+}

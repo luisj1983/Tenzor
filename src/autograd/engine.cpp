@@ -312,6 +312,7 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
             // Compute gradients for inputs
             std::vector<Tensor> input_grads;
 
+            std::vector<Variable> var_input_grads;  // only populated when create_graph
             {
                 // Optional profiling: time the backward function call
                 std::optional<BackwardTimer> _profiler_timer;
@@ -326,15 +327,11 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                     std::vector<Variable> var_grad_outputs;
                     var_grad_outputs.reserve(grad_outputs.size());
                     for (auto& g : grad_outputs) {
-                        // Wrap the gradient tensor as a Variable with requires_grad=true
-                        // so that operations on it during backward are tracked
                         var_grad_outputs.emplace_back(g, true);
                     }
 
-                    auto var_input_grads = function->backward_with_variables(var_grad_outputs);
+                    var_input_grads = function->backward_with_variables(var_grad_outputs);
 
-                    // Check for stub ops that override backward_with_variables()
-                    // but only delegate to backward() — second derivatives are zero.
                     if (function->is_higher_order_stub()) {
                         auto mode = get_higher_order_grad_mode();
                         if (mode == HigherOrderGradMode::Error) {
@@ -343,7 +340,6 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                                 "' is a higher-order stub (second derivatives are zero). "
                                 "Use set_higher_order_grad_mode(Warn) to allow this.");
                         }
-                        // Warn mode logs and counts
                         detail::increment_higher_order_disconnection_count();
                         std::cerr << "[tenzor::autograd] Warning: '" << function->name()
                                   << "' is a higher-order stub — second derivatives "
@@ -351,9 +347,9 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                                   << higher_order_disconnection_count() << ")\n";
                     }
 
-                    // Extract the underlying tensors for accumulation, but the Variables
-                    // in var_input_grads have grad_fn set from the Variable operations
-                    // used in backward_with_variables, enabling higher-order differentiation
+                    // Extract raw tensors for the standard accumulation path (unchanged),
+                    // but keep var_input_grads alive so we can store the graph-carrying
+                    // Variable onto leaves below.
                     input_grads.reserve(var_input_grads.size());
                     for (auto& vg : var_input_grads) {
                         input_grads.push_back(vg.tensor());
@@ -475,8 +471,21 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
 #endif
                         std::lock_guard lock(*var.impl_->grad_mutex_);
                         accumulate_unlocked();
+                        // When create_graph=true, also capture the Variable form
+                        // of the gradient so .grad_variable() on the leaf returns
+                        // something whose grad_fn chains back through the original
+                        // forward graph. For repeated accumulation (multiple
+                        // paths to same leaf), Variable-add would preserve the
+                        // graph too, but that's rare in practice; the first-path
+                        // assignment suffices for the common double-backward
+                        // pattern and we skip on subsequent accumulations.
+                        if (create_graph && i < var_input_grads.size() &&
+                            !var.impl_->grad_with_graph_impl_) {
+                            var.impl_->grad_with_graph_impl_ =
+                                var_input_grads[i].impl_;
+                            var.impl_->grad_with_graph_cache_storage_.reset();
+                        }
                     } else {
-                        // No impl_ — shouldn't happen for leaf vars, but handle gracefully
                         var.set_grad(grad_to_apply);
                     }
                 }

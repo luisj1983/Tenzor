@@ -129,3 +129,29 @@ TEST(RpcAgentTest, RealStartupAndShutdown) {
         EXPECT_FALSE(agent.is_running()) << "Agent should stop after shutdown()";
     }
 }
+
+// When two agents try to bind the same port, the second init() must
+// surface the bind failure as a synchronous exception — previously the
+// accept thread silently set listen_fd_ = -1 and the caller kept a
+// half-up agent that rejected every send().
+TEST(RpcAgentTest, InitReportsBindFailure) {
+    WorkerInfo a;
+    a.name = "worker_a"; a.id = 0; a.address = "127.0.0.1"; a.port = 29581;
+    WorkerInfo b;
+    b.name = "worker_b"; b.id = 1; b.address = "127.0.0.1"; b.port = 29581;  // same port
+
+    TcpRpcAgent agent_a(a);
+    try {
+        agent_a.init({a});
+    } catch (const std::exception&) {
+        GTEST_SKIP() << "First init failed; can't verify port-collision surfacing";
+        return;
+    }
+    ASSERT_TRUE(agent_a.is_running());
+
+    TcpRpcAgent agent_b(b);
+    EXPECT_THROW(agent_b.init({b}), std::runtime_error);
+    EXPECT_FALSE(agent_b.is_running());
+
+    agent_a.shutdown();
+}

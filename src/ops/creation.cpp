@@ -466,8 +466,24 @@ auto randn(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
             }
             break;
         }
+        case DType::Complex64: {
+            std::normal_distribution<float> dist(0.0f, 1.0f);
+            auto* ptr = static_cast<std::complex<float>*>(data);
+            for (size_t i = 0; i < numel; ++i) {
+                ptr[i] = {dist(gen), dist(gen)};
+            }
+            break;
+        }
+        case DType::Complex128: {
+            std::normal_distribution<double> dist(0.0, 1.0);
+            auto* ptr = static_cast<std::complex<double>*>(data);
+            for (size_t i = 0; i < numel; ++i) {
+                ptr[i] = {dist(gen), dist(gen)};
+            }
+            break;
+        }
         default:
-            throw std::runtime_error("Unsupported dtype for randn() - only Float32, Float64, Float16, and BFloat16 are supported");
+            throw std::runtime_error("Unsupported dtype for randn() - supported: Float32, Float64, Float16, BFloat16, Complex64, Complex128");
     }
     return tensor;
 }

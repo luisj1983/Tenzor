@@ -59,4 +59,17 @@ namespace tenzor::jit {
  */
 auto compile_script(const char* source) -> std::shared_ptr<CompiledModule>;
 
+/**
+ * @brief Overload that specializes the compiled module for a given dummy input.
+ *
+ * The default `compile_script(source)` traces with a CPU+Float32 {1}-shape
+ * dummy, which limits the resulting CompiledModule to that dtype/device. Pass
+ * a matching `dummy` here (same dtype and device as your intended runtime
+ * inputs) to specialise the traced graph for that combination. Shape does
+ * not need to match exactly — the graph relies on broadcasting at runtime
+ * — but dtype and device are captured.
+ */
+auto compile_script(const char* source, const Tensor& dummy)
+    -> std::shared_ptr<CompiledModule>;
+
 } // namespace tenzor::jit

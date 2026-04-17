@@ -235,8 +235,107 @@ auto Tracer::end_trace(const std::vector<Variable>& inputs,
     }
     graph->set_inputs(graph_inputs);
 
+    // trace_if and trace_loop record the branch/body ops INLINE before the
+    // control-flow op itself. To give the graph executor real subgraph
+    // dispatch, we bundle those inlined slices into sub-Graphs and skip
+    // them in the main graph.
+    //
+    // The attrs stored on If ops: then_ops_start / then_ops_end /
+    //                             else_ops_start / else_ops_end.
+    // On Loop: body_ops_start / body_ops_end.
+    std::vector<bool> skip(ops_.size(), false);
+    for (size_t i = 0; i < ops_.size(); ++i) {
+        const auto& op = ops_[i];
+        if (op.type == OpType::If) {
+            auto a = op.int_attrs.find("then_ops_start");
+            auto b = op.int_attrs.find("then_ops_end");
+            auto c = op.int_attrs.find("else_ops_end");
+            if (a != op.int_attrs.end() && b != op.int_attrs.end() &&
+                c != op.int_attrs.end()) {
+                int64_t ts = a->second, te = b->second, ee = c->second;
+                for (int64_t k = ts; k < te && k >= 0 && (size_t)k < ops_.size(); ++k) skip[k] = true;
+                for (int64_t k = te; k < ee && k >= 0 && (size_t)k < ops_.size(); ++k) skip[k] = true;
+            }
+        } else if (op.type == OpType::Loop) {
+            auto a = op.int_attrs.find("body_ops_start");
+            auto b = op.int_attrs.find("body_ops_end");
+            if (a != op.int_attrs.end() && b != op.int_attrs.end()) {
+                int64_t s = a->second, e = b->second;
+                for (int64_t k = s; k < e && k >= 0 && (size_t)k < ops_.size(); ++k) skip[k] = true;
+            }
+        }
+    }
+
+    auto build_subgraph = [&](int64_t start, int64_t end,
+                              const std::vector<std::string>& carried_ids,
+                              const std::vector<std::string>& output_ids)
+            -> std::shared_ptr<Graph> {
+        auto sub = std::make_shared<Graph>();
+        std::unordered_map<std::string, std::shared_ptr<Value>> sub_values;
+
+        // Carried inputs become sub-graph inputs.
+        std::vector<std::shared_ptr<Value>> sub_inputs;
+        for (const auto& id : carried_ids) {
+            const auto& info = tensor_info_[id];
+            auto v = sub->create_value(id, info.shape, info.dtype, info.device);
+            sub_values[id] = v;
+            sub_inputs.push_back(v);
+        }
+        sub->set_inputs(sub_inputs);
+
+        // Replay the ops slice inside the sub-graph.
+        for (int64_t k = start; k < end && k >= 0 && (size_t)k < ops_.size(); ++k) {
+            const auto& op = ops_[k];
+            auto node = sub->create_node(op.type);
+            for (const auto& iid : op.inputs) {
+                auto it = sub_values.find(iid);
+                if (it != sub_values.end()) {
+                    node->add_input(it->second);
+                } else {
+                    const auto& info = tensor_info_[iid];
+                    auto v = sub->create_value(iid, info.shape, info.dtype, info.device);
+                    sub_values[iid] = v;
+                    node->add_input(v);
+                    auto storage_it = tensor_storage_.find(iid);
+                    if (storage_it != tensor_storage_.end()) {
+                        sub->set_constant(iid, storage_it->second);
+                    }
+                }
+            }
+            for (const auto& oid : op.outputs) {
+                const auto& info = tensor_info_[oid];
+                auto v = sub->create_value(oid, info.shape, info.dtype, info.device);
+                v->set_node(node);
+                node->add_output(v);
+                sub_values[oid] = v;
+            }
+            for (const auto& [n, val] : op.attrs)       node->set_attr(n, val);
+            for (const auto& [n, val] : op.int_attrs)   node->set_int_attr(n, val);
+            for (const auto& [n, val] : op.vec_attrs)   node->set_vec_attr(n, val);
+            for (const auto& [n, val] : op.bool_attrs)  node->set_bool_attr(n, val);
+            for (const auto& [n, val] : op.tensor_attrs) node->set_tensor_attr(n, val);
+            sub->add_node(node);
+        }
+
+        // Outputs of the sub-graph are the output tensor IDs the caller
+        // asked to surface. If an output didn't get produced inside the
+        // slice (branch leaves a variable unchanged), fall back to the
+        // matching carried input value.
+        std::vector<std::shared_ptr<Value>> sub_outputs;
+        for (const auto& oid : output_ids) {
+            auto it = sub_values.find(oid);
+            if (it != sub_values.end()) sub_outputs.push_back(it->second);
+        }
+        sub->set_outputs(sub_outputs);
+        sub->topological_sort();
+        sub->infer_types();
+        return sub;
+    };
+
     // Process recorded operations
-    for (const auto& op : ops_) {
+    for (size_t op_idx = 0; op_idx < ops_.size(); ++op_idx) {
+        if (skip[op_idx]) continue;
+        const auto& op = ops_[op_idx];
         // Create node
         auto node = graph->create_node(op.type);
 
@@ -246,17 +345,10 @@ auto Tracer::end_trace(const std::vector<Variable>& inputs,
             if (it != value_map.end()) {
                 node->add_input(it->second);
             } else {
-                // Create value for unknown input (likely a constant or parameter)
                 const auto& info = tensor_info_[input_id];
                 auto value = graph->create_value(input_id, info.shape, info.dtype, info.device);
                 value_map[input_id] = value;
                 node->add_input(value);
-
-                // Phase 6.4: capture the actual Tensor as a graph
-                // constant so Graph::forward can pre-populate its
-                // value_map. Without this, running the graph would
-                // fail with "Input value not available" for every
-                // module parameter.
                 auto storage_it = tensor_storage_.find(input_id);
                 if (storage_it != tensor_storage_.end()) {
                     graph->set_constant(input_id, storage_it->second);
@@ -274,20 +366,40 @@ auto Tracer::end_trace(const std::vector<Variable>& inputs,
         }
 
         // Copy attributes
-        for (const auto& [name, val] : op.attrs) {
-            node->set_attr(name, val);
-        }
-        for (const auto& [name, val] : op.int_attrs) {
-            node->set_int_attr(name, val);
-        }
-        for (const auto& [name, val] : op.vec_attrs) {
-            node->set_vec_attr(name, val);
-        }
-        for (const auto& [name, val] : op.bool_attrs) {
-            node->set_bool_attr(name, val);
-        }
-        for (const auto& [name, val] : op.tensor_attrs) {
-            node->set_tensor_attr(name, val);
+        for (const auto& [name, val] : op.attrs)       node->set_attr(name, val);
+        for (const auto& [name, val] : op.int_attrs)   node->set_int_attr(name, val);
+        for (const auto& [name, val] : op.vec_attrs)   node->set_vec_attr(name, val);
+        for (const auto& [name, val] : op.bool_attrs)  node->set_bool_attr(name, val);
+        for (const auto& [name, val] : op.tensor_attrs) node->set_tensor_attr(name, val);
+
+        // Attach subgraphs for control-flow nodes.
+        if (op.type == OpType::If) {
+            auto ts = op.int_attrs.find("then_ops_start");
+            auto te = op.int_attrs.find("then_ops_end");
+            auto es = op.int_attrs.find("else_ops_start");
+            auto ee = op.int_attrs.find("else_ops_end");
+            if (ts != op.int_attrs.end() && te != op.int_attrs.end() &&
+                es != op.int_attrs.end() && ee != op.int_attrs.end()) {
+                // op.inputs[0] is the condition, inputs[1..] are carried.
+                std::vector<std::string> carried(op.inputs.begin() + 1, op.inputs.end());
+                node->set_then_branch(build_subgraph(
+                    ts->second, te->second, carried, op.outputs));
+                // The else branch produces its own outputs; fall back to
+                // the then-branch output ids if the tracer didn't record
+                // them (older traces).
+                const auto& else_out_ids = op.else_outputs.empty()
+                                               ? op.outputs
+                                               : op.else_outputs;
+                node->set_else_branch(build_subgraph(
+                    es->second, ee->second, carried, else_out_ids));
+            }
+        } else if (op.type == OpType::Loop) {
+            auto bs = op.int_attrs.find("body_ops_start");
+            auto be = op.int_attrs.find("body_ops_end");
+            if (bs != op.int_attrs.end() && be != op.int_attrs.end()) {
+                node->set_body(build_subgraph(
+                    bs->second, be->second, op.inputs, op.outputs));
+            }
         }
 
         graph->add_node(node);
@@ -516,9 +628,14 @@ auto Tracer::trace_if(const Tensor& condition,
     for (const auto& v : then_outputs) {
         output_ids.push_back(register_tensor(v));
     }
+    std::vector<std::string> else_output_ids;
+    for (const auto& v : else_outputs) {
+        else_output_ids.push_back(register_tensor(v));
+    }
 
     // Create the If operation with subgraph info as attributes
     TracedOp if_op(OpType::If, input_ids, output_ids);
+    if_op.else_outputs = std::move(else_output_ids);
     if_op.inputs.insert(if_op.inputs.begin(), cond_id);  // condition is first input
     if_op.int_attrs["then_ops_start"] = static_cast<int64_t>(ops_before_then);
     if_op.int_attrs["then_ops_end"] = static_cast<int64_t>(then_ops_end);

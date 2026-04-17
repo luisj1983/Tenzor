@@ -58,6 +58,21 @@ add_executable(test_pooling3d_multidtype test_pooling3d_multidtype.cpp)
 target_link_libraries(test_pooling3d_multidtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_pooling3d_multidtype LABELS "ops" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
+# MaxUnpool2d/3d (fwd + backward with synthetic indices)
+add_executable(test_maxunpool_multidtype test_maxunpool_multidtype.cpp)
+target_link_libraries(test_maxunpool_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_maxunpool_multidtype LABELS "ops" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# FractionalMaxPool2d/3d (fwd + backward)
+add_executable(test_fractional_maxpool_multidtype test_fractional_maxpool_multidtype.cpp)
+target_link_libraries(test_fractional_maxpool_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_fractional_maxpool_multidtype LABELS "ops" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# In-place arithmetic (add_, sub_, mul_, div_) across all backends and dtypes
+add_executable(test_inplace_arithmetic_multidtype test_inplace_arithmetic_multidtype.cpp)
+target_link_libraries(test_inplace_arithmetic_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_inplace_arithmetic_multidtype LABELS "ops" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
 # Signal processing (STFT, ISTFT, CDist)
 add_executable(test_signal_processing_multidtype test_signal_processing_multidtype.cpp)
 target_link_libraries(test_signal_processing_multidtype PRIVATE tenzor_core GTest::gtest_main)

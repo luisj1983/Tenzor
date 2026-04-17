@@ -132,9 +132,30 @@ auto make_tracing_interceptor(
         // Record the operation
         TracedOp traced(*op_type, std::move(input_ids), std::move(output_ids));
 
-        // Transfer relevant attributes from OpAttributes to TracedOp
-        // This is a best-effort mapping of common attributes
-        // (kernel_size, stride, padding, etc. for conv/pool ops)
+        // Transfer attributes from OpAttributes into the TracedOp's string-keyed
+        // maps so graph.cpp's replay (which looks them up by name) can find
+        // them. Previously the traced op lost all attributes, so ops like Pow
+        // replayed with exponent=0 and mean/sum(dim) replayed with dim=0.
+        auto copy_float = [&](AttrKey k, const char* name) {
+            if (attrs.has(k)) traced.attrs[name] = static_cast<float>(attrs.get_float(k));
+        };
+        auto copy_int = [&](AttrKey k, const char* name) {
+            if (attrs.has(k)) traced.int_attrs[name] = attrs.get_int(k);
+        };
+        copy_float(AttrKey::Exponent, "exponent");
+        copy_float(AttrKey::Alpha,    "alpha");
+        copy_float(AttrKey::Beta,     "beta");
+        copy_float(AttrKey::Min,      "min");
+        copy_float(AttrKey::Max,      "max");
+        copy_float(AttrKey::Eps,      "eps");
+        copy_float(AttrKey::Negative_slope, "negative_slope");
+        copy_int(AttrKey::Dim,         "dim");
+        copy_int(AttrKey::KernelSize,  "kernel_size");
+        copy_int(AttrKey::Stride,      "stride");
+        copy_int(AttrKey::Padding,     "padding");
+        copy_int(AttrKey::Dilation,    "dilation");
+        copy_int(AttrKey::Groups,      "groups");
+
         tracer.record_op(std::move(traced));
 
         return results;

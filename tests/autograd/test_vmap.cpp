@@ -165,4 +165,44 @@ TEST_P(VmapBackendTest, VmapSquare_CrossBackend) {
     EXPECT_LT(max_diff, 1e-5f);
 }
 
+// ============================================================================
+// Phase 7 expansion: nested vmap
+// ============================================================================
+
+// vmap over two axes should produce the same result as two nested vmaps,
+// and a pointwise op ought to come back with both leading dims preserved
+// intact. Catches regressions where the outer vmap collapses an inner
+// vmap's axis.
+TEST_F(VmapTest, NestedVmapPreservesBothDims) {
+    auto data = tenzor::ones({3, 4, 5}, DType::Float32, Device::cpu());
+    // Fill with a recognisable pattern so we can verify per-slice behaviour.
+    auto* ptr = data.data<float>();
+    for (int64_t i = 0; i < data.numel(); ++i) ptr[i] = static_cast<float>(i);
+    Variable input(data, false);
+
+    // Inner lambda squares the per-slice variable; outer vmap batches over
+    // the outermost dim, inner vmap batches over the next dim down.
+    auto inner_square = [](const Variable& x) -> Variable {
+        auto t = x.tensor();
+        return Variable(tenzor::mul(t, t), false);
+    };
+    auto outer = [&inner_square](const Variable& x) -> Variable {
+        return vmap(inner_square, x, 0);
+    };
+
+    auto result = vmap(outer, input, 0);
+    auto result_shape = result.tensor().shape();
+    ASSERT_EQ(result_shape.size(), 3u);
+    EXPECT_EQ(result_shape[0], 3);
+    EXPECT_EQ(result_shape[1], 4);
+    EXPECT_EQ(result_shape[2], 5);
+
+    // Spot-check a couple of known elements.
+    auto cpu = result.tensor().to(Device::cpu());
+    auto* out = cpu.data<float>();
+    EXPECT_FLOAT_EQ(out[0], 0.0f);           // 0² = 0
+    EXPECT_FLOAT_EQ(out[cpu.numel() - 1],
+                    static_cast<float>((data.numel() - 1) * (data.numel() - 1)));
+}
+
 INSTANTIATE_BACKEND_TESTS(VmapBackendTest);

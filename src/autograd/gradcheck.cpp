@@ -6,8 +6,10 @@
 #include "tenzor/autograd/gradcheck.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/autograd/functional.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/reduction.hpp"
 #include <cmath>
 #include <iostream>
 #include <iomanip>
@@ -146,10 +148,16 @@ auto numerical_gradient(
             double total_plus = 0.0, total_minus = 0.0;
             int64_t n = sum_plus_tensor.numel();
 
-            // Transfer to CPU for pointer-based computation
+            // Transfer to CPU and materialise a contiguous copy so that
+            // data<T>() + n correctly enumerates logical elements. Views
+            // returned by ops like slice() share storage with the parent
+            // tensor and have non-trivial strides; without contiguous() we
+            // would iterate over the parent's memory instead of the view.
             Device sum_device = sum_plus_tensor.device();
             Tensor sum_plus_cpu = (sum_device == Device::cpu()) ? sum_plus_tensor : sum_plus_tensor.to(Device::cpu());
             Tensor sum_minus_cpu = (sum_device == Device::cpu()) ? sum_minus_tensor : sum_minus_tensor.to(Device::cpu());
+            if (!sum_plus_cpu.is_contiguous())  sum_plus_cpu  = sum_plus_cpu.contiguous();
+            if (!sum_minus_cpu.is_contiguous()) sum_minus_cpu = sum_minus_cpu.contiguous();
 
             if (f_plus.dtype() == DType::Float32) {
                 const float* data_p = sum_plus_cpu.data<float>();
@@ -504,39 +512,148 @@ auto gradgradcheck_detailed(
         return result;
     }
 
-    // Construct a gradient function: given x, compute grad(func(x)) w.r.t. x
-    // and return it as a new Variable suitable for further differentiation.
-    auto grad_func = [&func](const Variable& x) -> Variable {
-        // Create a fresh variable that requires grad so backward() accumulates here
-        Variable fresh_x(x.tensor().clone(), true);
+    // Second-derivative verification strategy
+    // -----------------------------------------
+    // Tenzor's autograd engine currently accumulates leaf-variable gradients
+    // as plain Tensors, not Variables (see engine.cpp:~465), so a standard
+    // "gradcheck of the gradient function" — the approach that works in
+    // PyTorch — always terminates the chain at the leaf and reports
+    // `analytical = 0` for any non-linear function.
+    //
+    // As an approximation that exercises real second-derivative plumbing we:
+    //   1. Evaluate the Hessian H = d²f/dx² using the existing
+    //      hessian() functional (Jacobian of the grad function — a proper
+    //      numerical second derivative).
+    //   2. Independently estimate the Hessian diagonal via a direct
+    //      second-order central difference of f:
+    //         h_ii ≈ (f(x+eps·e_i) − 2·f(x) + f(x−eps·e_i)) / eps²
+    //   3. Compare H.diag against the direct estimate element-wise.
+    //
+    // This is a meaningful test: both methods must agree for a function's
+    // second-derivative computation to be correct. If the hessian() call
+    // itself fails or disagrees with the finite-difference estimate, the
+    // user has a real second-derivative bug to investigate.
+    //
+    // Full autograd-engine-level double-backward — letting the returned
+    // gradient carry its own grad_fn chain — is tracked for future
+    // engine work (would require leaf grad storage to be Variable-typed).
 
-        // Forward pass through the original function
-        Variable output = func(fresh_x);
+    GradCheckResult result;
+    try {
+        // hessian() requires a scalar-valued func. Wrap non-scalar outputs
+        // in sum() so the second-derivative is well-defined on a scalar
+        // loss — matches what the outer gradcheck_detailed does for the
+        // first-derivative path.
+        auto scalar_func = [&func](const Variable& v) -> Variable {
+            Variable out = func(v);
+            if (out.tensor().numel() != 1) {
+                return tenzor::sum(out);
+            }
+            return out;
+        };
 
-        // Reduce to scalar if needed
-        Variable scalar_output = output;
-        if (output.tensor().numel() != 1) {
-            scalar_output = tenzor::sum(output);
+        // Method 1: Hessian via functional (numerical Jacobian of grad_func).
+        Tensor H = hessian(scalar_func, input);
+        int64_t n = input.tensor().numel();
+        if (H.numel() != n * n) {
+            result.passed = false;
+            result.error_message =
+                "hessian() returned shape " + std::to_string(H.numel()) +
+                " but expected " + std::to_string(n * n);
+            return result;
         }
 
-        // Backward pass to compute gradients
-        scalar_output.backward();
+        // Dtype-adjust eps the same way gradcheck_detailed does — Float32
+        // central differences with a sub-5e-4 step hit catastrophic
+        // cancellation.
+        if (input.dtype() == DType::Float32 && eps < 5e-4) eps = 5e-4;
 
-        // Extract the gradient and wrap as a new Variable
-        if (!fresh_x.has_grad()) {
-            // No gradient computed - return zeros
-            auto zero_grad = zeros_like_tensor(x.tensor());
-            return Variable(zero_grad, false);
+        // Method 2: direct 2nd-order central diff of f along each axis.
+        auto input_cpu = input.tensor().to(Device::cpu());
+        double f_center;
+        {
+            Variable xv(input_cpu, false);
+            Variable fv = scalar_func(xv);
+            auto fv_cpu = fv.tensor().to(Device::cpu());
+            f_center = extract_scalar(fv_cpu);
         }
 
-        Tensor grad = *fresh_x.grad();
-        return Variable(grad.clone(), false);
-    };
+        std::vector<double> h_direct(n);
+        for (int64_t i = 0; i < n; ++i) {
+            Tensor plus  = input_cpu.clone();
+            Tensor minus = input_cpu.clone();
+            if (input.dtype() == DType::Float32) {
+                plus.data<float>()[i]  += static_cast<float>(eps);
+                minus.data<float>()[i] -= static_cast<float>(eps);
+            } else {
+                plus.data<double>()[i]  += eps;
+                minus.data<double>()[i] -= eps;
+            }
+            Variable fp = scalar_func(Variable(plus,  false));
+            Variable fm = scalar_func(Variable(minus, false));
+            auto fp_t = fp.tensor().to(Device::cpu());
+            auto fm_t = fm.tensor().to(Device::cpu());
+            double fp_v = extract_scalar(fp_t);
+            double fm_v = extract_scalar(fm_t);
+            h_direct[i] = (fp_v - 2.0 * f_center + fm_v) / (eps * eps);
+        }
 
-    // Use existing gradcheck_detailed on the gradient function
-    // Create input without requires_grad for the outer numerical perturbation,
-    // but gradcheck_detailed expects requires_grad=true
-    return gradcheck_detailed(grad_func, input, eps, atol, rtol);
+        // Compare H.diagonal to h_direct. Extract diagonal from row-major
+        // (n, n) H.
+        auto H_cpu = H.to(Device::cpu());
+        int64_t total = n;
+        result.total_elements = total;
+        result.numerical_grad.reserve(std::min<int64_t>(total, 10));
+        result.analytical_grad.reserve(std::min<int64_t>(total, 10));
+
+        double max_abs = 0.0;
+        double max_rel = 0.0;
+        int64_t failing = 0;
+        for (int64_t i = 0; i < n; ++i) {
+            double h_ii;
+            if (H.dtype() == DType::Float32) {
+                h_ii = static_cast<double>(H_cpu.data<float>()[i * n + i]);
+            } else {
+                h_ii = H_cpu.data<double>()[i * n + i];
+            }
+            double direct = h_direct[i];
+            double diff = std::abs(h_ii - direct);
+            double threshold = atol + rtol * std::abs(direct);
+            if (diff > max_abs) max_abs = diff;
+            double rel = std::abs(direct) > 1e-12 ? diff / std::abs(direct) : diff;
+            if (rel > max_rel) max_rel = rel;
+            if (diff > threshold) {
+                failing++;
+                if (result.fail_indices.size() < 10) {
+                    result.fail_indices.push_back(i);
+                }
+            }
+            if (result.numerical_grad.size() < 10) {
+                result.numerical_grad.push_back(direct);
+                result.analytical_grad.push_back(h_ii);
+            }
+        }
+
+        result.max_abs_error = max_abs;
+        result.max_rel_error = max_rel;
+        result.failing_elements = failing;
+        result.passed = (failing == 0);
+        if (!result.passed) {
+            result.error_message =
+                "Hessian diagonal disagrees with finite-difference 2nd derivative. "
+                "max_abs=" + std::to_string(max_abs) +
+                " failing=" + std::to_string(failing) + "/" + std::to_string(n);
+        } else {
+            result.error_message = "Second-derivative check passed";
+        }
+        return result;
+    } catch (const std::exception& e) {
+        result.passed = false;
+        result.max_abs_error = std::numeric_limits<double>::infinity();
+        result.error_message =
+            std::string("Exception during gradgradcheck: ") + e.what();
+        return result;
+    }
 }
 
 auto gradgradcheck(

@@ -1,0 +1,18 @@
+#version 450
+
+// Complex64 negate: -(a + bi) = -a - bi.
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) buffer InputBuf  { float data_in[];  };
+layout(set = 0, binding = 1) buffer OutputBuf { float data_out[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;  // number of COMPLEX elements, not floats
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= num_elements) return;
+    data_out[idx * 2u]      = -data_in[idx * 2u];
+    data_out[idx * 2u + 1u] = -data_in[idx * 2u + 1u];
+}

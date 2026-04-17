@@ -118,6 +118,91 @@ TEST_F(ControlFlowIntegrationTest, NativeItemInStrictTraceThrowsWithCondHint) {
     t.clear();
 }
 
+TEST_F(ControlFlowIntegrationTest, CondReplayDispatchesDynamically) {
+    // Trace once with a truthy condition, then replay the compiled graph
+    // with both truthy and falsy conditions. The If node's attached
+    // then_branch / else_branch subgraphs should be dispatched based on
+    // the runtime condition — not baked to the trace-time branch.
+    auto cond_t = ones({1}, DType::Float32, Device::cpu());
+    Variable cond_var(cond_t, false);
+    auto x = Variable(ones({1}, DType::Float32, Device::cpu()), false);
+
+    std::shared_ptr<jit::Graph> graph;
+    Variable result;
+    {
+        jit::TracingGuard guard;
+        result = jit::cond(
+            cond_t,  // truthy at trace time
+            [](const Variable& v) -> Variable { return v + v; },          // then:  v+v  = 2
+            [](const Variable& v) -> Variable { return v * -3.0f; },      // else:  v*-3 = -3
+            x);
+        graph = Tracer::get_instance().end_trace({cond_var, x}, {result});
+    }
+    ASSERT_TRUE(graph);
+
+    // Replay with truthy condition — expect then branch (2).
+    {
+        auto c = Variable(ones({1}, DType::Float32, Device::cpu()), false);
+        auto xin = Variable(ones({1}, DType::Float32, Device::cpu()), false);
+        auto out = graph->forward({c, xin});
+        ASSERT_EQ(out.size(), 1u);
+        EXPECT_NEAR(out[0].tensor().data<float>()[0], 2.0f, 1e-5f);
+    }
+
+    // Replay with falsy condition — expect else branch (-3).
+    {
+        auto c = Variable(zeros({1}, DType::Float32, Device::cpu()), false);
+        auto xin = Variable(ones({1}, DType::Float32, Device::cpu()), false);
+        auto out = graph->forward({c, xin});
+        ASSERT_EQ(out.size(), 1u);
+        EXPECT_NEAR(out[0].tensor().data<float>()[0], -3.0f, 1e-5f);
+    }
+}
+
+TEST_F(ControlFlowIntegrationTest, LoopBodySubgraphAttached) {
+    // Traces a while_loop, end_traces to a Graph, and verifies that the
+    // Loop node has a non-empty body subgraph with the expected tensor
+    // IDs. This asserts the structural outcome of task #62 (body is
+    // attached as a sub-Graph) without depending on the Graph executor's
+    // ONNX-style loop semantic being wired end-to-end.
+    auto x = Variable(zeros({1}, DType::Float32, Device::cpu()), false);
+
+    std::shared_ptr<jit::Graph> graph;
+    {
+        jit::TracingGuard guard;
+        auto result = jit::while_loop(
+            3,
+            [](const std::vector<Variable>&) -> Tensor {
+                return ones({1}, DType::Float32, Device::cpu());
+            },
+            [](const std::vector<Variable>& state) -> std::vector<Variable> {
+                auto one = Variable(ones({1}, DType::Float32, Device::cpu()), false);
+                return {state[0] + one};
+            },
+            {x});
+        ASSERT_EQ(result.size(), 1u);
+        graph = Tracer::get_instance().end_trace({x}, {result[0]});
+    }
+
+    ASSERT_TRUE(graph);
+
+    // Exactly one Loop node should remain in the parent graph; its body
+    // slice should have been lifted into a subgraph.
+    std::shared_ptr<jit::Node> loop_node;
+    for (const auto& n : graph->nodes()) {
+        if (n->op_type() == jit::OpType::Loop) {
+            loop_node = n;
+            break;
+        }
+    }
+    ASSERT_TRUE(loop_node);
+    ASSERT_TRUE(loop_node->body());
+    // The body ran one iteration (state[0] + 1 = 1 Add op), so the
+    // subgraph must contain at least one node.
+    EXPECT_GE(loop_node->body()->nodes().size(), 1u);
+    EXPECT_EQ(loop_node->body()->outputs().size(), 1u);
+}
+
 TEST_F(ControlFlowIntegrationTest, CondOutsideTraceRunsEagerly) {
     // Outside a trace, jit::cond evaluates the condition and calls the
     // selected branch directly. No graph-break reports either.

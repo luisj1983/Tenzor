@@ -2133,8 +2133,22 @@ auto sqrt_kernel(const Tensor& input) -> Tensor {
             }
         }
 
+    } else if (input.dtype() == DType::Complex64) {
+        const auto* in_data = input.data<std::complex<float>>();
+        auto* out_data = result.data<std::complex<float>>();
+        #pragma omp parallel for if(n > 10000)
+        for (size_t i = 0; i < n; ++i) {
+            out_data[i] = std::sqrt(in_data[i]);
+        }
+    } else if (input.dtype() == DType::Complex128) {
+        const auto* in_data = input.data<std::complex<double>>();
+        auto* out_data = result.data<std::complex<double>>();
+        #pragma omp parallel for if(n > 10000)
+        for (size_t i = 0; i < n; ++i) {
+            out_data[i] = std::sqrt(in_data[i]);
+        }
     } else {
-        throw std::runtime_error("sqrt operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("sqrt operation only supports Float32, Float64, Float16, Complex64, Complex128 dtypes");
     }
 
     return result;
@@ -2241,8 +2255,24 @@ auto neg_kernel(const Tensor& input) -> Tensor {
             out_data[i] = -in_data[i];
         }
 
+    } else if (input.dtype() == DType::Complex64) {
+        const auto* in_data  = reinterpret_cast<const std::complex<float>*>(input.data<uint8_t>());
+        auto*       out_data = reinterpret_cast<std::complex<float>*>(result.data<uint8_t>());
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+        for (size_t i = 0; i < n; ++i) {
+            out_data[i] = -in_data[i];
+        }
+
+    } else if (input.dtype() == DType::Complex128) {
+        const auto* in_data  = reinterpret_cast<const std::complex<double>*>(input.data<uint8_t>());
+        auto*       out_data = reinterpret_cast<std::complex<double>*>(result.data<uint8_t>());
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+        for (size_t i = 0; i < n; ++i) {
+            out_data[i] = -in_data[i];
+        }
+
     } else {
-        throw std::runtime_error("neg operation only supports Float32, Float64, Float16, BFloat16, and Int32 dtypes");
+        throw std::runtime_error("neg operation only supports Float32, Float64, Float16, BFloat16, Int32, Complex64, and Complex128 dtypes");
     }
 
     return result;
@@ -2250,8 +2280,29 @@ auto neg_kernel(const Tensor& input) -> Tensor {
 
 auto abs_kernel(const Tensor& input) -> Tensor {
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
-    Tensor result(shape_vec, input.dtype(), input.device());
     size_t n = static_cast<size_t>(input.numel());
+
+    // Complex inputs produce a real-valued magnitude tensor (|z| = sqrt(re² + im²)),
+    // so the output dtype differs from the input. Handle before allocating the
+    // same-dtype result used by the scalar branches below.
+    if (input.dtype() == DType::Complex64) {
+        Tensor result(shape_vec, DType::Float32, input.device());
+        const auto* in_data  = reinterpret_cast<const std::complex<float>*>(input.data<uint8_t>());
+        float* out_data = result.data<float>();
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+        for (size_t i = 0; i < n; ++i) out_data[i] = std::abs(in_data[i]);
+        return result;
+    }
+    if (input.dtype() == DType::Complex128) {
+        Tensor result(shape_vec, DType::Float64, input.device());
+        const auto* in_data  = reinterpret_cast<const std::complex<double>*>(input.data<uint8_t>());
+        double* out_data = result.data<double>();
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+        for (size_t i = 0; i < n; ++i) out_data[i] = std::abs(in_data[i]);
+        return result;
+    }
+
+    Tensor result(shape_vec, input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
@@ -2343,7 +2394,7 @@ auto abs_kernel(const Tensor& input) -> Tensor {
         }
 
     } else {
-        throw std::runtime_error("abs operation only supports Float32, Float64, Float16, and Int32 dtypes");
+        throw std::runtime_error("abs operation only supports Float32, Float64, Float16, Int32, Complex64, and Complex128 dtypes");
     }
 
     return result;
@@ -2692,8 +2743,22 @@ auto log_kernel(const Tensor& input) -> Tensor {
             }
         }
 
+    } else if (input.dtype() == DType::Complex64) {
+        const auto* in_data = input.data<std::complex<float>>();
+        auto* out_data = result.data<std::complex<float>>();
+        #pragma omp parallel for if(n > 10000)
+        for (size_t i = 0; i < n; ++i) {
+            out_data[i] = std::log(in_data[i]);
+        }
+    } else if (input.dtype() == DType::Complex128) {
+        const auto* in_data = input.data<std::complex<double>>();
+        auto* out_data = result.data<std::complex<double>>();
+        #pragma omp parallel for if(n > 10000)
+        for (size_t i = 0; i < n; ++i) {
+            out_data[i] = std::log(in_data[i]);
+        }
     } else {
-        throw std::runtime_error("log operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("log operation only supports Float32, Float64, Float16, Complex64, Complex128 dtypes");
     }
 
     return result;
@@ -2826,8 +2891,22 @@ auto exp_kernel(const Tensor& input) -> Tensor {
             }
         }
 
+    } else if (input.dtype() == DType::Complex64) {
+        const auto* in_data = input.data<std::complex<float>>();
+        auto* out_data = result.data<std::complex<float>>();
+        #pragma omp parallel for if(n > 10000)
+        for (size_t i = 0; i < n; ++i) {
+            out_data[i] = std::exp(in_data[i]);
+        }
+    } else if (input.dtype() == DType::Complex128) {
+        const auto* in_data = input.data<std::complex<double>>();
+        auto* out_data = result.data<std::complex<double>>();
+        #pragma omp parallel for if(n > 10000)
+        for (size_t i = 0; i < n; ++i) {
+            out_data[i] = std::exp(in_data[i]);
+        }
     } else {
-        throw std::runtime_error("exp operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("exp operation only supports Float32, Float64, Float16, Complex64, Complex128 dtypes");
     }
 
     return result;
@@ -3770,6 +3849,20 @@ auto sin_kernel(const Tensor& input) -> Tensor {
             }
             break;
         }
+        case DType::Complex64: {
+            const auto* in_data = input.data<std::complex<float>>();
+            auto* out_data = output.data<std::complex<float>>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) out_data[i] = std::sin(in_data[i]);
+            break;
+        }
+        case DType::Complex128: {
+            const auto* in_data = input.data<std::complex<double>>();
+            auto* out_data = output.data<std::complex<double>>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) out_data[i] = std::sin(in_data[i]);
+            break;
+        }
         default:
             throw std::runtime_error("sin: unsupported dtype");
     }
@@ -3810,6 +3903,20 @@ auto cos_kernel(const Tensor& input) -> Tensor {
             for (int64_t i = 0; i < n; i++) {
                 out_data[i] = std::cos(in_data[i]);
             }
+            break;
+        }
+        case DType::Complex64: {
+            const auto* in_data = input.data<std::complex<float>>();
+            auto* out_data = output.data<std::complex<float>>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) out_data[i] = std::cos(in_data[i]);
+            break;
+        }
+        case DType::Complex128: {
+            const auto* in_data = input.data<std::complex<double>>();
+            auto* out_data = output.data<std::complex<double>>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) out_data[i] = std::cos(in_data[i]);
             break;
         }
         default:
@@ -3867,6 +3974,12 @@ auto acos_kernel(const Tensor& input) -> Tensor {
 }
 
 auto atan_kernel(const Tensor& input) -> Tensor {
+    // Float16/BFloat16: up-cast to Float32, compute, down-cast back.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto f32 = input.to(DType::Float32);
+        return atan_kernel(f32).to(input.dtype());
+    }
+
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
     int64_t n = input.numel();
@@ -4109,6 +4222,21 @@ auto add_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
             }
             break;
         }
+        case DType::BFloat16: {
+            BFloat16* a_data = a.data<BFloat16>();
+            const BFloat16* b_data = b.data<BFloat16>();
+            if (same_shape) {
+                for (int64_t i = 0; i < n; i++) {
+                    a_data[i] = BFloat16(static_cast<float>(a_data[i]) + static_cast<float>(b_data[i]));
+                }
+            } else {
+                detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
+                    [](BFloat16 x, BFloat16 y) {
+                        return BFloat16(static_cast<float>(x) + static_cast<float>(y));
+                    });
+            }
+            break;
+        }
         default:
             throw std::runtime_error("add_inplace: unsupported dtype");
     }
@@ -4197,6 +4325,21 @@ auto sub_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
                 detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
                     [](Float16 x, Float16 y) {
                         return Float16(static_cast<float>(x) - static_cast<float>(y));
+                    });
+            }
+            break;
+        }
+        case DType::BFloat16: {
+            BFloat16* a_data = a.data<BFloat16>();
+            const BFloat16* b_data = b.data<BFloat16>();
+            if (same_shape) {
+                for (int64_t i = 0; i < n; i++) {
+                    a_data[i] = BFloat16(static_cast<float>(a_data[i]) - static_cast<float>(b_data[i]));
+                }
+            } else {
+                detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
+                    [](BFloat16 x, BFloat16 y) {
+                        return BFloat16(static_cast<float>(x) - static_cast<float>(y));
                     });
             }
             break;
@@ -4293,6 +4436,21 @@ auto mul_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
             }
             break;
         }
+        case DType::BFloat16: {
+            BFloat16* a_data = a.data<BFloat16>();
+            const BFloat16* b_data = b.data<BFloat16>();
+            if (same_shape) {
+                for (int64_t i = 0; i < n; i++) {
+                    a_data[i] = BFloat16(static_cast<float>(a_data[i]) * static_cast<float>(b_data[i]));
+                }
+            } else {
+                detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
+                    [](BFloat16 x, BFloat16 y) {
+                        return BFloat16(static_cast<float>(x) * static_cast<float>(y));
+                    });
+            }
+            break;
+        }
         default:
             throw std::runtime_error("mul_inplace: unsupported dtype");
     }
@@ -4381,6 +4539,21 @@ auto div_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
                 detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
                     [](Float16 x, Float16 y) {
                         return Float16(static_cast<float>(x) / static_cast<float>(y));
+                    });
+            }
+            break;
+        }
+        case DType::BFloat16: {
+            BFloat16* a_data = a.data<BFloat16>();
+            const BFloat16* b_data = b.data<BFloat16>();
+            if (same_shape) {
+                for (int64_t i = 0; i < n; i++) {
+                    a_data[i] = BFloat16(static_cast<float>(a_data[i]) / static_cast<float>(b_data[i]));
+                }
+            } else {
+                detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
+                    [](BFloat16 x, BFloat16 y) {
+                        return BFloat16(static_cast<float>(x) / static_cast<float>(y));
                     });
             }
             break;

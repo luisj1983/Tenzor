@@ -184,24 +184,16 @@ auto istft_kernel(const Tensor& input, int64_t n_fft,
     Tensor transposed_contig = transposed.contiguous();
     // transposed_contig: (B, num_frames, freq_bins) Complex64
 
-    // Convert Complex64 → Float32 with trailing-2 dim (OneAPI irfft expects this layout).
-    // Bytes are identical; just relabel via memcpy into a new tensor.
-    Tensor as_f32(std::vector<int64_t>{batch_size, num_frames, freq_bins, 2},
-                  DType::Float32, input.device());
-    queue.memcpy(get_data_ptr<float>(as_f32),
-                 get_data_ptr<const float>(transposed_contig),
-                 batch_size * num_frames * freq_bins * 2 * sizeof(float)).wait();
-
+    // irfft / ifft now require Complex64/Complex128 input directly; the old
+    // Float32-with-trailing-2 layout contract was dropped. Pass the complex
+    // tensor straight through.
     Tensor time_frames;
     if (onesided) {
-        time_frames = irfft_kernel(as_f32, /*dim=*/2, n_fft, "backward", queue);
+        time_frames = irfft_kernel(transposed_contig, /*dim=*/2, n_fft, "backward", queue);
     } else {
-        time_frames = ifft_kernel(as_f32, /*dim=*/2, n_fft, "backward", queue);
-        // ifft_kernel returns (B, num_frames, n_fft, 2); take the real part
-        // (drop trailing dim of 2 by slicing index 0).
-        Tensor real_part = tenzor::slice(time_frames, -1, 0, 1);
-        time_frames = tenzor::reshape(real_part.contiguous(),
-                                       {batch_size, num_frames, n_fft});
+        Tensor ifft_out = ifft_kernel(transposed_contig, /*dim=*/2, n_fft, "backward", queue);
+        // ifft returns Complex64; take the real part.
+        time_frames = tenzor::real(ifft_out);
     }
 
     // Build window

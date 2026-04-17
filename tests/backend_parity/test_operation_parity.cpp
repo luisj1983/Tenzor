@@ -714,6 +714,262 @@ TEST(IndexingOperationParity, IndexFill) {
     }, {input, index}, 1e-6f, 1e-8f, "IndexFill");
 }
 
+// ============================================================================
+// Float64 parity — ported from test_vulkan_parity.cpp and generalized to all
+// backends. Validates that _f64 kernels on every backend match CPU reference.
+// ============================================================================
+
+TEST(Float64Parity, Add) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = randn({32, 32}, DType::Float64, Device::cpu());
+    auto b = randn({32, 32}, DType::Float64, Device::cpu());
+    test_operation_parity([](const std::vector<Tensor>& in) { return in[0] + in[1]; },
+                          {a, b}, 1e-14f, 1e-14f, "F64 Add");
+}
+
+TEST(Float64Parity, Mul) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = randn({32, 32}, DType::Float64, Device::cpu());
+    auto b = randn({32, 32}, DType::Float64, Device::cpu());
+    test_operation_parity([](const std::vector<Tensor>& in) { return in[0] * in[1]; },
+                          {a, b}, 1e-14f, 1e-14f, "F64 Mul");
+}
+
+TEST(Float64Parity, MatMul) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = randn({16, 32}, DType::Float64, Device::cpu());
+    auto b = randn({32, 16}, DType::Float64, Device::cpu());
+    test_operation_parity([](const std::vector<Tensor>& in) { return matmul(in[0], in[1]); },
+                          {a, b}, 1e-10f, 1e-12f, "F64 MatMul");
+}
+
+TEST(Float64Parity, Exp) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = randn({32, 32}, DType::Float64, Device::cpu());
+    test_operation_parity([](const std::vector<Tensor>& in) { return exp(in[0]); },
+                          {a}, 1e-12f, 1e-14f, "F64 Exp");
+}
+
+TEST(Float64Parity, Log) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = abs(randn({32, 32}, DType::Float64, Device::cpu())) + 0.001;
+    test_operation_parity([](const std::vector<Tensor>& in) { return log(in[0]); },
+                          {a}, 1e-6f, 1e-8f, "F64 Log");
+}
+
+TEST(Float64Parity, Tanh) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = randn({32, 32}, DType::Float64, Device::cpu());
+    test_operation_parity([](const std::vector<Tensor>& in) { return tanh(in[0]); },
+                          {a}, 1e-6f, 1e-8f, "F64 Tanh");
+}
+
+TEST(Float64Parity, Sigmoid) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = randn({32, 32}, DType::Float64, Device::cpu());
+    test_operation_parity([](const std::vector<Tensor>& in) { return sigmoid(in[0]); },
+                          {a}, 1e-12f, 1e-14f, "F64 Sigmoid");
+}
+
+TEST(Float64Parity, Sum) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = randn({32, 64}, DType::Float64, Device::cpu());
+    test_operation_parity([](const std::vector<Tensor>& in) { return sum(in[0]); },
+                          {a}, 1e-4f, 1e-6f, "F64 Sum");
+}
+
+TEST(Float64Parity, Mean) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = randn({32, 64}, DType::Float64, Device::cpu());
+    test_operation_parity([](const std::vector<Tensor>& in) { return mean(in[0]); },
+                          {a}, 1e-4f, 1e-6f, "F64 Mean");
+}
+
+TEST(Float64Parity, Clamp) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = randn({32, 32}, DType::Float64, Device::cpu());
+    test_operation_parity([](const std::vector<Tensor>& in) { return clamp(in[0], -1.0f, 1.0f); },
+                          {a}, 0.0f, 0.0f, "F64 Clamp");
+}
+
+TEST(Float64Parity, Sqrt) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = abs(randn({32, 32}, DType::Float64, Device::cpu())) + 0.01;
+    test_operation_parity([](const std::vector<Tensor>& in) { return sqrt(in[0]); },
+                          {a}, 1e-12f, 1e-14f, "F64 Sqrt");
+}
+
+TEST(Float64Parity, Pow) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = abs(randn({32, 32}, DType::Float64, Device::cpu())) + 0.01;
+    test_operation_parity([](const std::vector<Tensor>& in) { return pow(in[0], 2.5); },
+                          {a}, 1e-4f, 1e-6f, "F64 Pow");
+}
+
+TEST(Float64Parity, Transpose) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = randn({16, 32}, DType::Float64, Device::cpu());
+    test_operation_parity([](const std::vector<Tensor>& in) { return transpose(in[0], 0, 1).contiguous(); },
+                          {a}, 0.0f, 0.0f, "F64 Transpose");
+}
+
+TEST(Float64Parity, Cat) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = randn({8, 16}, DType::Float64, Device::cpu());
+    auto b = randn({8, 16}, DType::Float64, Device::cpu());
+    test_operation_parity([](const std::vector<Tensor>& in) { return cat({in[0], in[1]}, 0); },
+                          {a, b}, 0.0f, 0.0f, "F64 Cat");
+}
+
+// ============================================================================
+// Float16 odd-element-count parity — ports test_vulkan_parity.cpp Section 2.
+// Validates packed-buffer rounding edge cases on every backend, since
+// non-multiple-of-4 counts stress CUDA/ROCm vector loads too.
+// ============================================================================
+
+TEST(Float16OddCountParity, Add_7) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = randn({7}, DType::Float32, Device::cpu()).to(DType::Float16);
+    auto b = randn({7}, DType::Float32, Device::cpu()).to(DType::Float16);
+    test_operation_parity([](const std::vector<Tensor>& in) { return in[0] + in[1]; },
+                          {a, b}, 1e-3f, 1e-3f, "F16 Add odd=7");
+}
+
+TEST(Float16OddCountParity, Mul_13) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = randn({13}, DType::Float32, Device::cpu()).to(DType::Float16);
+    auto b = randn({13}, DType::Float32, Device::cpu()).to(DType::Float16);
+    test_operation_parity([](const std::vector<Tensor>& in) { return in[0] * in[1]; },
+                          {a, b}, 1e-3f, 1e-3f, "F16 Mul odd=13");
+}
+
+TEST(Float16OddCountParity, Exp_5) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = randn({5}, DType::Float32, Device::cpu()).to(DType::Float16);
+    test_operation_parity([](const std::vector<Tensor>& in) { return exp(in[0]); },
+                          {a}, 1e-2f, 1e-3f, "F16 Exp odd=5");
+}
+
+TEST(Float16OddCountParity, Sigmoid_9) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = randn({9}, DType::Float32, Device::cpu()).to(DType::Float16);
+    test_operation_parity([](const std::vector<Tensor>& in) { return sigmoid(in[0]); },
+                          {a}, 1e-3f, 1e-3f, "F16 Sigmoid odd=9");
+}
+
+TEST(Float16OddCountParity, Sum_15) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = randn({15}, DType::Float32, Device::cpu()).to(DType::Float16);
+    test_operation_parity([](const std::vector<Tensor>& in) { return sum(in[0]); },
+                          {a}, 1e-2f, 1e-2f, "F16 Sum odd=15");
+}
+
+TEST(Float16OddCountParity, MatMul_OddDims) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = randn({7, 8}, DType::Float32, Device::cpu()).to(DType::Float16);
+    auto b = randn({8, 5}, DType::Float32, Device::cpu()).to(DType::Float16);
+    test_operation_parity([](const std::vector<Tensor>& in) { return matmul(in[0], in[1]); },
+                          {a, b}, 1e-2f, 1e-2f, "F16 MatMul 7x8@8x5");
+}
+
+TEST(Float16OddCountParity, Clamp_3) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = randn({3}, DType::Float32, Device::cpu()).to(DType::Float16);
+    test_operation_parity([](const std::vector<Tensor>& in) { return clamp(in[0], -0.5f, 0.5f); },
+                          {a}, 1e-3f, 1e-3f, "F16 Clamp odd=3");
+}
+
+TEST(Float16OddCountParity, Tanh_11) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = randn({11}, DType::Float32, Device::cpu()).to(DType::Float16);
+    test_operation_parity([](const std::vector<Tensor>& in) { return tanh(in[0]); },
+                          {a}, 1e-3f, 1e-3f, "F16 Tanh odd=11");
+}
+
+TEST(Float16OddCountParity, Sub_1) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = randn({1}, DType::Float32, Device::cpu()).to(DType::Float16);
+    auto b = randn({1}, DType::Float32, Device::cpu()).to(DType::Float16);
+    test_operation_parity([](const std::vector<Tensor>& in) { return in[0] - in[1]; },
+                          {a, b}, 1e-3f, 1e-3f, "F16 Sub single");
+}
+
+// ============================================================================
+// Slice-view parity — ports test_vulkan_parity.cpp Section 3. Validates that
+// non-contiguous slice views produce identical results across backends.
+// ============================================================================
+
+TEST(SliceViewParity, SliceAdd) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = randn({32, 64}, DType::Float32, Device::cpu());
+    auto b = randn({16, 64}, DType::Float32, Device::cpu());
+    test_operation_parity([](const std::vector<Tensor>& in) {
+        auto s = in[0].slice(0, 8, 24);
+        return s + in[1];
+    }, {a, b}, 1e-6f, 1e-8f, "Slice Add");
+}
+
+TEST(SliceViewParity, SliceContiguous_F32) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = randn({64, 32}, DType::Float32, Device::cpu());
+    test_operation_parity([](const std::vector<Tensor>& in) {
+        return in[0].slice(0, 16, 48).contiguous();
+    }, {a}, 0.0f, 0.0f, "Slice contiguous F32");
+}
+
+TEST(SliceViewParity, SliceMatMul) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = randn({32, 64}, DType::Float32, Device::cpu());
+    auto b = randn({32, 16}, DType::Float32, Device::cpu());
+    test_operation_parity([](const std::vector<Tensor>& in) {
+        return matmul(in[0].slice(1, 0, 32), in[1]);
+    }, {a, b}, 1e-4f, 1e-5f, "Slice MatMul");
+}
+
+TEST(SliceViewParity, SliceContiguous_F64) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = randn({32, 64}, DType::Float64, Device::cpu());
+    test_operation_parity([](const std::vector<Tensor>& in) {
+        return in[0].slice(0, 4, 20).contiguous();
+    }, {a}, 0.0f, 0.0f, "Slice contiguous F64");
+}
+
+TEST(SliceViewParity, SliceContiguous_F16_OddOffset) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a = randn({32, 64}, DType::Float32, Device::cpu()).to(DType::Float16);
+    test_operation_parity([](const std::vector<Tensor>& in) {
+        return in[0].slice(0, 3, 17).contiguous();
+    }, {a}, 0.0f, 0.0f, "Slice contiguous F16 odd-offset");
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
 

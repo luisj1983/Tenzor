@@ -13,8 +13,9 @@ using namespace tenzor;
 
 /**
  * @file test_missing_ops_parity.cpp
- * @brief Verify 9 previously CUDA-exclusive ops now work on ROCm, OneAPI, Vulkan
- *        via CPU-roundtrip fallbacks. Tests compare GPU output to CPU reference.
+ * @brief Verify previously CUDA-exclusive ops now work on ROCm, OneAPI, Vulkan.
+ *        Tests dispatch to the actual GPU backend and compare output to CPU
+ *        reference.
  */
 
 class MissingOpsParity : public ::testing::Test {
@@ -122,21 +123,14 @@ TEST_F(MissingOpsParity, CDist) {
 
 TEST_F(MissingOpsParity, STFT) {
     testOnGPUBackends([&](Device dev) {
-        // Create signal on CPU, verify STFT works on CPU first
         auto signal = randn({256}, DType::Float32, Device::cpu());
         int64_t n_fft = 64;
 
         auto cpu_ref = tenzor::fft::stft(signal, n_fft);
         EXPECT_GT(cpu_ref.numel(), 0);
 
-        // Now test on GPU (uses CPU fallback)
-        try {
-            auto gpu_result = tenzor::fft::stft(signal.to(dev), n_fft);
-            EXPECT_EQ(cpu_ref.shape().size(), gpu_result.shape().size());
-        } catch (const std::exception& e) {
-            // Some backends may not support STFT fully yet - log and continue
-            GTEST_SKIP() << "STFT on " << dev.to_string() << ": " << e.what();
-        }
+        auto gpu_result = tenzor::fft::stft(signal.to(dev), n_fft);
+        EXPECT_EQ(cpu_ref.shape().size(), gpu_result.shape().size());
     });
 }
 
@@ -145,18 +139,14 @@ TEST_F(MissingOpsParity, STFT_ISTFT_RoundTrip) {
         auto signal = randn({256}, DType::Float32, Device::cpu());
         int64_t n_fft = 64;
 
-        try {
-            auto sig_dev = signal.to(dev);
-            auto spec = tenzor::fft::stft(sig_dev, n_fft);
-            auto recon = tenzor::fft::istft(spec, n_fft, -1, -1, Tensor{},
-                                            /*center=*/true, /*normalized=*/false,
-                                            /*onesided=*/true, 256);
-            EXPECT_EQ(recon.shape().size(), signal.shape().size());
-            EXPECT_EQ(recon.numel(), signal.numel());
-            EXPECT_TRUE(close(signal, recon.to(Device::cpu()), 1e-3));
-        } catch (const std::exception& e) {
-            GTEST_SKIP() << "STFT/ISTFT round-trip on " << dev.to_string() << ": " << e.what();
-        }
+        auto sig_dev = signal.to(dev);
+        auto spec = tenzor::fft::stft(sig_dev, n_fft);
+        auto recon = tenzor::fft::istft(spec, n_fft, -1, -1, Tensor{},
+                                        /*center=*/true, /*normalized=*/false,
+                                        /*onesided=*/true, 256);
+        EXPECT_EQ(recon.shape().size(), signal.shape().size());
+        EXPECT_EQ(recon.numel(), signal.numel());
+        EXPECT_TRUE(close(signal, recon.to(Device::cpu()), 1e-3));
     });
 }
 

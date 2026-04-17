@@ -150,131 +150,115 @@ TEST_P(GradLinalgParityTest, LinearBackward) {
 
 TEST_P(GradLinalgParityTest, AddmmBackward) {
     // addmm may only exist at tensor level, not autograd; wrap in try-catch
-    try {
-        auto c_data = randn({4, 4}, DType::Float32, Device::cpu());
-        auto a_data = randn({4, 8}, DType::Float32, Device::cpu());
-        auto b_data = randn({8, 4}, DType::Float32, Device::cpu());
+    auto c_data = randn({4, 4}, DType::Float32, Device::cpu());
+    auto a_data = randn({4, 8}, DType::Float32, Device::cpu());
+    auto b_data = randn({8, 4}, DType::Float32, Device::cpu());
 
-        // Use matmul + add as equivalent if addmm is not in autograd
-        auto a_cpu = Variable(a_data.clone(), true);
-        auto b_cpu = Variable(b_data.clone(), true);
-        auto c_cpu = Variable(c_data.clone(), true);
-        auto out_cpu = c_cpu + tenzor::matmul(a_cpu, b_cpu);
-        auto loss_cpu = tenzor::sum(out_cpu);
-        loss_cpu.backward();
+    // Use matmul + add as equivalent if addmm is not in autograd
+    auto a_cpu = Variable(a_data.clone(), true);
+    auto b_cpu = Variable(b_data.clone(), true);
+    auto c_cpu = Variable(c_data.clone(), true);
+    auto out_cpu = c_cpu + tenzor::matmul(a_cpu, b_cpu);
+    auto loss_cpu = tenzor::sum(out_cpu);
+    loss_cpu.backward();
 
-        if (device.type == Device::Type::CPU) {
-            ASSERT_TRUE(a_cpu.has_grad());
-            return;
-        }
-
-        auto a_dev = Variable(a_data.to(device), true);
-        auto b_dev = Variable(b_data.to(device), true);
-        auto c_dev = Variable(c_data.to(device), true);
-        auto out_dev = c_dev + tenzor::matmul(a_dev, b_dev);
-        auto loss_dev = tenzor::sum(out_dev);
-        loss_dev.backward();
-        device.synchronize();
-
-        ASSERT_TRUE(a_dev.has_grad());
-        compareGradientWithCPU(a_cpu.grad().value(), a_dev.grad().value(), 1e-5f, 1e-3f);
-        compareGradientWithCPU(b_cpu.grad().value(), b_dev.grad().value(), 1e-5f, 1e-3f);
-        compareGradientWithCPU(c_cpu.grad().value(), c_dev.grad().value(), 1e-5f, 1e-3f);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "AddmmBackward not supported: " << e.what();
+    if (device.type == Device::Type::CPU) {
+        ASSERT_TRUE(a_cpu.has_grad());
+        return;
     }
+
+    auto a_dev = Variable(a_data.to(device), true);
+    auto b_dev = Variable(b_data.to(device), true);
+    auto c_dev = Variable(c_data.to(device), true);
+    auto out_dev = c_dev + tenzor::matmul(a_dev, b_dev);
+    auto loss_dev = tenzor::sum(out_dev);
+    loss_dev.backward();
+    device.synchronize();
+
+    ASSERT_TRUE(a_dev.has_grad());
+    compareGradientWithCPU(a_cpu.grad().value(), a_dev.grad().value(), 1e-5f, 1e-3f);
+    compareGradientWithCPU(b_cpu.grad().value(), b_dev.grad().value(), 1e-5f, 1e-3f);
+    compareGradientWithCPU(c_cpu.grad().value(), c_dev.grad().value(), 1e-5f, 1e-3f);
 }
 
 TEST_P(GradLinalgParityTest, DetBackward) {
-    try {
-        // Create well-conditioned matrix: A = I + 0.1 * randn
-        auto eye_data = tenzor::eye(4, std::nullopt, DType::Float32, Device::cpu());
-        auto noise = randn({4, 4}, DType::Float32, Device::cpu()) * 0.1f;
-        auto x_data = eye_data + noise;
+    // Create well-conditioned matrix: A = I + 0.1 * randn
+    auto eye_data = tenzor::eye(4, std::nullopt, DType::Float32, Device::cpu());
+    auto noise = randn({4, 4}, DType::Float32, Device::cpu()) * 0.1f;
+    auto x_data = eye_data + noise;
 
-        auto x_cpu = Variable(x_data.clone(), true);
-        auto loss_cpu = tenzor::det(x_cpu);
-        loss_cpu.backward();
-        auto x_grad_cpu = x_cpu.grad().value();
+    auto x_cpu = Variable(x_data.clone(), true);
+    auto loss_cpu = tenzor::det(x_cpu);
+    loss_cpu.backward();
+    auto x_grad_cpu = x_cpu.grad().value();
 
-        if (device.type == Device::Type::CPU) {
-            ASSERT_TRUE(x_cpu.has_grad());
-            return;
-        }
-
-        auto x_dev = Variable(x_data.to(device), true);
-        auto loss_dev = tenzor::det(x_dev);
-        loss_dev.backward();
-        device.synchronize();
-
-        ASSERT_TRUE(x_dev.has_grad());
-        compareGradientWithCPU(x_grad_cpu, x_dev.grad().value(), 1e-5f, 1e-3f);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "DetBackward not supported: " << e.what();
+    if (device.type == Device::Type::CPU) {
+        ASSERT_TRUE(x_cpu.has_grad());
+        return;
     }
+
+    auto x_dev = Variable(x_data.to(device), true);
+    auto loss_dev = tenzor::det(x_dev);
+    loss_dev.backward();
+    device.synchronize();
+
+    ASSERT_TRUE(x_dev.has_grad());
+    compareGradientWithCPU(x_grad_cpu, x_dev.grad().value(), 1e-5f, 1e-3f);
 }
 
 TEST_P(GradLinalgParityTest, SolveBackward) {
-    try {
-        auto eye_data = tenzor::eye(4, std::nullopt, DType::Float32, Device::cpu());
-        auto noise_a = randn({4, 4}, DType::Float32, Device::cpu()) * 0.1f;
-        auto a_data = eye_data + noise_a;
-        auto b_data = randn({4, 2}, DType::Float32, Device::cpu());
+    auto eye_data = tenzor::eye(4, std::nullopt, DType::Float32, Device::cpu());
+    auto noise_a = randn({4, 4}, DType::Float32, Device::cpu()) * 0.1f;
+    auto a_data = eye_data + noise_a;
+    auto b_data = randn({4, 2}, DType::Float32, Device::cpu());
 
-        auto a_cpu = Variable(a_data.clone(), true);
-        auto b_cpu = Variable(b_data.clone(), true);
-        auto x_cpu = tenzor::solve(a_cpu, b_cpu);
-        auto loss_cpu = tenzor::sum(x_cpu);
-        loss_cpu.backward();
+    auto a_cpu = Variable(a_data.clone(), true);
+    auto b_cpu = Variable(b_data.clone(), true);
+    auto x_cpu = tenzor::solve(a_cpu, b_cpu);
+    auto loss_cpu = tenzor::sum(x_cpu);
+    loss_cpu.backward();
 
-        if (device.type == Device::Type::CPU) {
-            ASSERT_TRUE(a_cpu.has_grad());
-            return;
-        }
-
-        auto a_dev = Variable(a_data.to(device), true);
-        auto b_dev = Variable(b_data.to(device), true);
-        auto x_dev = tenzor::solve(a_dev, b_dev);
-        auto loss_dev = tenzor::sum(x_dev);
-        loss_dev.backward();
-        device.synchronize();
-
-        ASSERT_TRUE(a_dev.has_grad());
-        compareGradientWithCPU(a_cpu.grad().value(), a_dev.grad().value(), 1e-5f, 1e-3f);
-        compareGradientWithCPU(b_cpu.grad().value(), b_dev.grad().value(), 1e-5f, 1e-3f);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "SolveBackward not supported: " << e.what();
+    if (device.type == Device::Type::CPU) {
+        ASSERT_TRUE(a_cpu.has_grad());
+        return;
     }
+
+    auto a_dev = Variable(a_data.to(device), true);
+    auto b_dev = Variable(b_data.to(device), true);
+    auto x_dev = tenzor::solve(a_dev, b_dev);
+    auto loss_dev = tenzor::sum(x_dev);
+    loss_dev.backward();
+    device.synchronize();
+
+    ASSERT_TRUE(a_dev.has_grad());
+    compareGradientWithCPU(a_cpu.grad().value(), a_dev.grad().value(), 1e-5f, 1e-3f);
+    compareGradientWithCPU(b_cpu.grad().value(), b_dev.grad().value(), 1e-5f, 1e-3f);
 }
 
 TEST_P(GradLinalgParityTest, CholeskyBackward) {
-    try {
-        // Create symmetric positive-definite matrix: A = X^T X + I
-        auto raw = randn({4, 4}, DType::Float32, Device::cpu());
-        auto xtx = tenzor::matmul(raw.transpose(0, 1), raw);
-        auto x_data = xtx + tenzor::eye(4, std::nullopt, DType::Float32, Device::cpu());
+    // Create symmetric positive-definite matrix: A = X^T X + I
+    auto raw = randn({4, 4}, DType::Float32, Device::cpu());
+    auto xtx = tenzor::matmul(raw.transpose(0, 1), raw);
+    auto x_data = xtx + tenzor::eye(4, std::nullopt, DType::Float32, Device::cpu());
 
-        auto x_cpu = Variable(x_data.clone(), true);
-        auto L_cpu = tenzor::cholesky(x_cpu);
-        auto loss_cpu = tenzor::sum(L_cpu);
-        loss_cpu.backward();
+    auto x_cpu = Variable(x_data.clone(), true);
+    auto L_cpu = tenzor::cholesky(x_cpu);
+    auto loss_cpu = tenzor::sum(L_cpu);
+    loss_cpu.backward();
 
-        if (device.type == Device::Type::CPU) {
-            ASSERT_TRUE(x_cpu.has_grad());
-            return;
-        }
-
-        auto x_dev = Variable(x_data.to(device), true);
-        auto L_dev = tenzor::cholesky(x_dev);
-        auto loss_dev = tenzor::sum(L_dev);
-        loss_dev.backward();
-        device.synchronize();
-
-        ASSERT_TRUE(x_dev.has_grad());
-        compareGradientWithCPU(x_cpu.grad().value(), x_dev.grad().value(), 1e-5f, 1e-3f);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "CholeskyBackward not supported: " << e.what();
+    if (device.type == Device::Type::CPU) {
+        ASSERT_TRUE(x_cpu.has_grad());
+        return;
     }
+
+    auto x_dev = Variable(x_data.to(device), true);
+    auto L_dev = tenzor::cholesky(x_dev);
+    auto loss_dev = tenzor::sum(L_dev);
+    loss_dev.backward();
+    device.synchronize();
+
+    ASSERT_TRUE(x_dev.has_grad());
+    compareGradientWithCPU(x_cpu.grad().value(), x_dev.grad().value(), 1e-5f, 1e-3f);
 }
 
 TEST_P(GradLinalgParityTest, BilinearBackward) {

@@ -2158,32 +2158,24 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
         const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
         float* grad_in_ptr = get_data_ptr<float>(grad_input);
 
-        // Initialize grad_input to zero
         queue.fill(grad_in_ptr, 0.0f, input_size);
 
-        // For each output position, route gradient to the stored index
+        // The forward stores max_idx as a full N*C*H*W flat index (see
+        // pooling.cpp:277: `max_idx = ((n*C+c)*H_in+h_in)*W_in+w_in`).
+        // The previous backward reinterpreted it per-channel via
+        // `h_in = max_idx / W_in` and then bounds-checked `h_in < H_in`,
+        // which rejected every idx for n>0 or c>0 — so gradients never
+        // reached the later batches/channels. Scatter directly with the
+        // full flat index instead.
         queue.parallel_for<MaxPool2dBackwardWithIndicesKernelFloat32>(sycl::range<1>(output_size),
             [=](sycl::id<1> flat_idx) {
-                int64_t temp = flat_idx;
-                const int64_t w_out = temp % W_out;
-                temp /= W_out;
-                const int64_t h_out = temp % H_out;
-                temp /= H_out;
-                const int64_t c = temp % C;
-                const int64_t n = temp / C;
-
                 const float grad_val = grad_out_ptr[flat_idx];
                 const int64_t max_idx = idx_ptr[flat_idx];
 
-                // Convert flat index to spatial index
-                const int64_t h_in = max_idx / W_in;
-                const int64_t w_in = max_idx % W_in;
-
-                if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
-                    const int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
+                if (max_idx >= 0 && max_idx < input_size) {
                     sycl::atomic_ref<float, sycl::memory_order::relaxed,
                                    sycl::memory_scope::device,
-                                   sycl::access::address_space::global_space> atomic_grad(grad_in_ptr[input_idx]);
+                                   sycl::access::address_space::global_space> atomic_grad(grad_in_ptr[max_idx]);
                     atomic_grad.fetch_add(grad_val);
                 }
         });
@@ -2196,25 +2188,13 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
 
         queue.parallel_for<MaxPool2dBackwardWithIndicesKernelFloat64>(sycl::range<1>(output_size),
             [=](sycl::id<1> flat_idx) {
-                int64_t temp = flat_idx;
-                const int64_t w_out = temp % W_out;
-                temp /= W_out;
-                const int64_t h_out = temp % H_out;
-                temp /= H_out;
-                const int64_t c = temp % C;
-                const int64_t n = temp / C;
-
                 const double grad_val = grad_out_ptr[flat_idx];
                 const int64_t max_idx = idx_ptr[flat_idx];
 
-                const int64_t h_in = max_idx / W_in;
-                const int64_t w_in = max_idx % W_in;
-
-                if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
-                    const int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
+                if (max_idx >= 0 && max_idx < input_size) {
                     sycl::atomic_ref<double, sycl::memory_order::relaxed,
                                    sycl::memory_scope::device,
-                                   sycl::access::address_space::global_space> atomic_grad(grad_in_ptr[input_idx]);
+                                   sycl::access::address_space::global_space> atomic_grad(grad_in_ptr[max_idx]);
                     atomic_grad.fetch_add(grad_val);
                 }
         });
@@ -2231,25 +2211,12 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
 
         queue.parallel_for<MaxPool2dBackwardWithIndicesKernelFloat16>(sycl::range<1>(output_size),
             [=](sycl::id<1> flat_idx) {
-                int64_t temp = flat_idx;
-                const int64_t w_out = temp % W_out;
-                temp /= W_out;
-                const int64_t h_out = temp % H_out;
-                temp /= H_out;
-                const int64_t c = temp % C;
-                const int64_t n = temp / C;
-
                 const float grad_val = static_cast<float>(grad_out_ptr[flat_idx]);
                 const int64_t max_idx = idx_ptr[flat_idx];
-
-                const int64_t h_in = max_idx / W_in;
-                const int64_t w_in = max_idx % W_in;
-
-                if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
-                    const int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
+                if (max_idx >= 0 && max_idx < input_size) {
                     sycl::atomic_ref<float, sycl::memory_order::relaxed,
                                    sycl::memory_scope::device,
-                                   sycl::access::address_space::global_space> atomic_grad(grad_in_float_ptr[input_idx]);
+                                   sycl::access::address_space::global_space> atomic_grad(grad_in_float_ptr[max_idx]);
                     atomic_grad.fetch_add(grad_val);
                 }
         });
@@ -2271,25 +2238,12 @@ auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& i
 
         queue.parallel_for<MaxPool2dBackwardWithIndicesKernelBFloat16>(sycl::range<1>(output_size),
             [=](sycl::id<1> flat_idx) {
-                int64_t temp = flat_idx;
-                const int64_t w_out = temp % W_out;
-                temp /= W_out;
-                const int64_t h_out = temp % H_out;
-                temp /= H_out;
-                const int64_t c = temp % C;
-                const int64_t n = temp / C;
-
                 const float grad_val = bf16_to_f32(grad_out_ptr[flat_idx]);
                 const int64_t max_idx = idx_ptr[flat_idx];
-
-                const int64_t h_in = max_idx / W_in;
-                const int64_t w_in = max_idx % W_in;
-
-                if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
-                    const int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
+                if (max_idx >= 0 && max_idx < input_size) {
                     sycl::atomic_ref<float, sycl::memory_order::relaxed,
                                    sycl::memory_scope::device,
-                                   sycl::access::address_space::global_space> atomic_grad(grad_in_float_ptr[input_idx]);
+                                   sycl::access::address_space::global_space> atomic_grad(grad_in_float_ptr[max_idx]);
                     atomic_grad.fetch_add(grad_val);
                 }
         });
@@ -3915,8 +3869,61 @@ auto fractional_maxpool2d_forward_kernel(const Tensor& input,
             out_ptr[out_idx] = max_val;
             idx_ptr[out_idx] = max_idx;
         }).wait();
+    } else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        int64_t* idx_ptr = get_data_ptr<int64_t>(indices);
+        const float* sp = dev_samples;
+
+        queue.parallel_for<class FractionalMaxPool2dForwardFloat16>(
+            sycl::range<1>(total_out), [=](sycl::id<1> gid) {
+            int64_t linear = gid;
+            int64_t ow_idx = linear % out_w; linear /= out_w;
+            int64_t oh_idx = linear % out_h; linear /= out_h;
+            int64_t c = linear % C;
+            int64_t n = linear / C;
+
+            float sample_h = sp ? sp[(n * C + c) * 2 + 0] : 0.5f;
+            float sample_w = sp ? sp[(n * C + c) * 2 + 1] : 0.5f;
+            float ratio_h = static_cast<float>(H) / static_cast<float>(out_h);
+            float ratio_w = static_cast<float>(W) / static_cast<float>(out_w);
+
+            int64_t h_start = static_cast<int64_t>(sycl::floor(
+                (oh_idx + sample_h) * ratio_h - sample_h));
+            int64_t h_end = static_cast<int64_t>(sycl::floor(
+                (oh_idx + 1 + sample_h) * ratio_h - sample_h));
+            int64_t w_start = static_cast<int64_t>(sycl::floor(
+                (ow_idx + sample_w) * ratio_w - sample_w));
+            int64_t w_end = static_cast<int64_t>(sycl::floor(
+                (ow_idx + 1 + sample_w) * ratio_w - sample_w));
+
+            h_start = sycl::max(h_start, int64_t{0});
+            h_end = sycl::min(h_end, H);
+            w_start = sycl::max(w_start, int64_t{0});
+            w_end = sycl::min(w_end, W);
+            if (h_end <= h_start) h_end = sycl::min(h_start + 1, H);
+            if (w_end <= w_start) w_end = sycl::min(w_start + 1, W);
+
+            float max_val = -3.4028235e+38f;
+            int64_t max_idx = h_start * W + w_start;
+
+            for (int64_t h = h_start; h < h_end; ++h) {
+                for (int64_t w = w_start; w < w_end; ++w) {
+                    int64_t in_idx = ((n * C + c) * H + h) * W + w;
+                    float val = static_cast<float>(in_ptr[in_idx]);
+                    if (val > max_val) {
+                        max_val = val;
+                        max_idx = h * W + w;
+                    }
+                }
+            }
+
+            int64_t out_idx = ((n * C + c) * out_h + oh_idx) * out_w + ow_idx;
+            out_ptr[out_idx] = sycl::half(max_val);
+            idx_ptr[out_idx] = max_idx;
+        }).wait();
     } else {
-        throw std::runtime_error("FractionalMaxPool2d forward OneAPI: unsupported dtype (Float32/Float64 supported)");
+        throw std::runtime_error("FractionalMaxPool2d forward OneAPI: unsupported dtype (Float32/Float64/Float16 supported)");
     }
 
     return {output, indices};
@@ -3989,6 +3996,31 @@ auto fractional_maxpool2d_backward_kernel(const Tensor& grad_output,
         // Copy accumulator back to double
         queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) {
             gi[i] = static_cast<double>(acc[i]);
+        }).wait();
+        sycl::free(acc, queue);
+    } else if (grad_output.dtype() == DType::Float16) {
+        sycl::half* gi = get_data_ptr<sycl::half>(grad_input);
+        const sycl::half* go = get_data_ptr<const sycl::half>(grad_output);
+        const int64_t* idx = get_data_ptr<const int64_t>(indices);
+
+        queue.fill(gi, sycl::half(0.0f), in_size).wait();
+
+        float* acc = sycl::malloc_device<float>(in_size, queue);
+        queue.fill(acc, 0.0f, in_size).wait();
+
+        queue.parallel_for<class FractionalMaxPool2dBackwardFloat16>(
+            sycl::range<1>(out_size), [=](sycl::id<1> gid) {
+            int64_t linear = gid;
+            int64_t nc = linear / out_spatial;
+            int64_t max_idx = idx[linear];
+            sycl::atomic_ref<float, sycl::memory_order::relaxed,
+                             sycl::memory_scope::device,
+                             sycl::access::address_space::global_space> ar(acc[nc * in_spatial + max_idx]);
+            ar.fetch_add(static_cast<float>(go[linear]));
+        }).wait();
+
+        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) {
+            gi[i] = sycl::half(acc[i]);
         }).wait();
         sycl::free(acc, queue);
     } else {
@@ -4143,8 +4175,65 @@ auto fractional_maxpool3d_forward_kernel(const Tensor& input,
             out_ptr[out_idx] = max_val;
             idx_ptr[out_idx] = max_idx;
         }).wait();
+    } else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        int64_t* idx_ptr = get_data_ptr<int64_t>(indices);
+        const float* sp = dev_samples;
+
+        queue.parallel_for<class FractionalMaxPool3dForwardFloat16>(
+            sycl::range<1>(total_out), [=](sycl::id<1> gid) {
+            int64_t linear = gid;
+            int64_t ow_idx = linear % out_w; linear /= out_w;
+            int64_t oh_idx = linear % out_h; linear /= out_h;
+            int64_t od_idx = linear % out_d; linear /= out_d;
+            int64_t c = linear % C;
+            int64_t n = linear / C;
+
+            float sample_d = sp ? sp[(n * C + c) * 3 + 0] : 0.5f;
+            float sample_h = sp ? sp[(n * C + c) * 3 + 1] : 0.5f;
+            float sample_w = sp ? sp[(n * C + c) * 3 + 2] : 0.5f;
+
+            float ratio_d = static_cast<float>(D) / static_cast<float>(out_d);
+            float ratio_h = static_cast<float>(H) / static_cast<float>(out_h);
+            float ratio_w = static_cast<float>(W) / static_cast<float>(out_w);
+
+            int64_t d_start = static_cast<int64_t>(sycl::floor((od_idx + sample_d) * ratio_d - sample_d));
+            int64_t d_end   = static_cast<int64_t>(sycl::floor((od_idx + 1 + sample_d) * ratio_d - sample_d));
+            int64_t h_start = static_cast<int64_t>(sycl::floor((oh_idx + sample_h) * ratio_h - sample_h));
+            int64_t h_end   = static_cast<int64_t>(sycl::floor((oh_idx + 1 + sample_h) * ratio_h - sample_h));
+            int64_t w_start = static_cast<int64_t>(sycl::floor((ow_idx + sample_w) * ratio_w - sample_w));
+            int64_t w_end   = static_cast<int64_t>(sycl::floor((ow_idx + 1 + sample_w) * ratio_w - sample_w));
+
+            d_start = sycl::max(d_start, int64_t{0}); d_end = sycl::min(d_end, D);
+            h_start = sycl::max(h_start, int64_t{0}); h_end = sycl::min(h_end, H);
+            w_start = sycl::max(w_start, int64_t{0}); w_end = sycl::min(w_end, W);
+            if (d_end <= d_start) d_end = sycl::min(d_start + 1, D);
+            if (h_end <= h_start) h_end = sycl::min(h_start + 1, H);
+            if (w_end <= w_start) w_end = sycl::min(w_start + 1, W);
+
+            float max_val = -3.4028235e+38f;
+            int64_t max_idx = (d_start * H + h_start) * W + w_start;
+
+            for (int64_t d = d_start; d < d_end; ++d) {
+                for (int64_t h = h_start; h < h_end; ++h) {
+                    for (int64_t w = w_start; w < w_end; ++w) {
+                        int64_t in_idx = (((n * C + c) * D + d) * H + h) * W + w;
+                        float val = static_cast<float>(in_ptr[in_idx]);
+                        if (val > max_val) {
+                            max_val = val;
+                            max_idx = (d * H + h) * W + w;
+                        }
+                    }
+                }
+            }
+
+            int64_t out_idx = (((n * C + c) * out_d + od_idx) * out_h + oh_idx) * out_w + ow_idx;
+            out_ptr[out_idx] = sycl::half(max_val);
+            idx_ptr[out_idx] = max_idx;
+        }).wait();
     } else {
-        throw std::runtime_error("FractionalMaxPool3d forward OneAPI: unsupported dtype (Float32/Float64 supported)");
+        throw std::runtime_error("FractionalMaxPool3d forward OneAPI: unsupported dtype (Float32/Float64/Float16 supported)");
     }
 
     return {output, indices};
@@ -4217,6 +4306,31 @@ auto fractional_maxpool3d_backward_kernel(const Tensor& grad_output,
             gi[i] = static_cast<double>(acc[i]);
         }).wait();
         sycl::free(acc, queue);
+    } else if (grad_output.dtype() == DType::Float16) {
+        sycl::half* gi = get_data_ptr<sycl::half>(grad_input);
+        const sycl::half* go = get_data_ptr<const sycl::half>(grad_output);
+        const int64_t* idx = get_data_ptr<const int64_t>(indices);
+
+        queue.fill(gi, sycl::half(0.0f), in_size).wait();
+
+        float* acc = sycl::malloc_device<float>(in_size, queue);
+        queue.fill(acc, 0.0f, in_size).wait();
+
+        queue.parallel_for<class FractionalMaxPool3dBackwardFloat16>(
+            sycl::range<1>(out_size), [=](sycl::id<1> gid) {
+            int64_t linear = gid;
+            int64_t nc = linear / out_spatial;
+            int64_t max_idx = idx[linear];
+            sycl::atomic_ref<float, sycl::memory_order::relaxed,
+                             sycl::memory_scope::device,
+                             sycl::access::address_space::global_space> ar(acc[nc * in_spatial + max_idx]);
+            ar.fetch_add(static_cast<float>(go[linear]));
+        }).wait();
+
+        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) {
+            gi[i] = sycl::half(acc[i]);
+        }).wait();
+        sycl::free(acc, queue);
     } else {
         throw std::runtime_error("FractionalMaxPool3d backward OneAPI: unsupported dtype");
     }
@@ -4278,8 +4392,24 @@ auto max_unpool2d_forward_kernel(const Tensor& input, const Tensor& indices,
                 out_ptr[nc * out_spatial + idx] = in_ptr[linear];
             }
         }).wait();
+    } else if (input.dtype() == DType::Float16) {
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        const int64_t* idx_ptr = get_data_ptr<const int64_t>(indices);
+
+        queue.fill(out_ptr, sycl::half(0.0f), out_size).wait();
+
+        queue.parallel_for<class MaxUnpool2dForwardFloat16>(
+            sycl::range<1>(in_size), [=](sycl::id<1> gid) {
+            int64_t linear = gid;
+            int64_t nc = linear / in_spatial;
+            int64_t idx = idx_ptr[linear];
+            if (idx >= 0 && idx < out_spatial) {
+                out_ptr[nc * out_spatial + idx] = in_ptr[linear];
+            }
+        }).wait();
     } else {
-        throw std::runtime_error("MaxUnpool2d forward OneAPI: unsupported dtype (Float32/Float64 supported)");
+        throw std::runtime_error("MaxUnpool2d forward OneAPI: unsupported dtype (Float32/Float64/Float16 supported)");
     }
 
     return output;
@@ -4336,6 +4466,22 @@ auto max_unpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indic
                 gi[linear] = go[nc * out_spatial + idx];
             } else {
                 gi[linear] = 0.0;
+            }
+        }).wait();
+    } else if (grad_output.dtype() == DType::Float16) {
+        sycl::half* gi = get_data_ptr<sycl::half>(grad_input);
+        const sycl::half* go = get_data_ptr<const sycl::half>(grad_output);
+        const int64_t* idx_ptr = get_data_ptr<const int64_t>(indices);
+
+        queue.parallel_for<class MaxUnpool2dBackwardFloat16>(
+            sycl::range<1>(in_size), [=](sycl::id<1> gid) {
+            int64_t linear = gid;
+            int64_t nc = linear / in_spatial;
+            int64_t idx = idx_ptr[linear];
+            if (idx >= 0 && idx < out_spatial) {
+                gi[linear] = go[nc * out_spatial + idx];
+            } else {
+                gi[linear] = sycl::half(0.0f);
             }
         }).wait();
     } else {
@@ -4398,8 +4544,24 @@ auto max_unpool3d_forward_kernel(const Tensor& input, const Tensor& indices,
                 out_ptr[nc * out_spatial + idx] = in_ptr[linear];
             }
         }).wait();
+    } else if (input.dtype() == DType::Float16) {
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        const int64_t* idx_ptr = get_data_ptr<const int64_t>(indices);
+
+        queue.fill(out_ptr, sycl::half(0.0f), out_size).wait();
+
+        queue.parallel_for<class MaxUnpool3dForwardFloat16>(
+            sycl::range<1>(in_size), [=](sycl::id<1> gid) {
+            int64_t linear = gid;
+            int64_t nc = linear / in_spatial;
+            int64_t idx = idx_ptr[linear];
+            if (idx >= 0 && idx < out_spatial) {
+                out_ptr[nc * out_spatial + idx] = in_ptr[linear];
+            }
+        }).wait();
     } else {
-        throw std::runtime_error("MaxUnpool3d forward OneAPI: unsupported dtype (Float32/Float64 supported)");
+        throw std::runtime_error("MaxUnpool3d forward OneAPI: unsupported dtype (Float32/Float64/Float16 supported)");
     }
 
     return output;
@@ -4458,6 +4620,22 @@ auto max_unpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indic
                 gi[linear] = go[nc * out_spatial + idx];
             } else {
                 gi[linear] = 0.0;
+            }
+        }).wait();
+    } else if (grad_output.dtype() == DType::Float16) {
+        sycl::half* gi = get_data_ptr<sycl::half>(grad_input);
+        const sycl::half* go = get_data_ptr<const sycl::half>(grad_output);
+        const int64_t* idx_ptr = get_data_ptr<const int64_t>(indices);
+
+        queue.parallel_for<class MaxUnpool3dBackwardFloat16>(
+            sycl::range<1>(in_size), [=](sycl::id<1> gid) {
+            int64_t linear = gid;
+            int64_t nc = linear / in_spatial;
+            int64_t idx = idx_ptr[linear];
+            if (idx >= 0 && idx < out_spatial) {
+                gi[linear] = go[nc * out_spatial + idx];
+            } else {
+                gi[linear] = sycl::half(0.0f);
             }
         }).wait();
     } else {

@@ -387,20 +387,24 @@ auto linalg_inv_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 // LinalgSolve - Solve Ax=B via LU (getrf + getrs)
 // ============================================================================
 auto linalg_solve_kernel(const Tensor& A, const Tensor& B, sycl::queue& queue) -> Tensor {
-    auto a_shape = A.shape();
+    // row_to_col_major reads via raw pointer and ignores strides, so views
+    // (e.g. A.transpose(-1,-2)) produce wrong results unless forced contiguous.
+    auto A_cont = A.contiguous();
+    auto B_cont = B.contiguous();
+    auto a_shape = A_cont.shape();
     int64_t n = a_shape[a_shape.size() - 1];
-    auto b_shape = B.shape();
+    auto b_shape = B_cont.shape();
     int64_t nrhs = (b_shape.size() > 1) ? b_shape[b_shape.size() - 1] : 1;
 
-    if (A.dtype() == DType::Float32) {
+    if (A_cont.dtype() == DType::Float32) {
         SyclDeviceBuffer<float> d_a(n * n, queue);
         SyclDeviceBuffer<float> d_b(n * nrhs, queue);
         SyclDeviceBuffer<std::int64_t> d_ipiv(n, queue);
 
         row_to_col_major<float, SyclTransposeSolveAF32>(
-            d_a.get(), get_data_ptr<const float>(A), n, n, queue);
+            d_a.get(), get_data_ptr<const float>(A_cont), n, n, queue);
         row_to_col_major<float, SyclTransposeSolveBF32>(
-            d_b.get(), get_data_ptr<const float>(B), n, nrhs, queue);
+            d_b.get(), get_data_ptr<const float>(B_cont), n, nrhs, queue);
 
         auto sp_rf = ::oneapi::mkl::lapack::getrf_scratchpad_size<float>(queue, n, n, n);
         SyclDeviceBuffer<float> scratch_rf(sp_rf, queue);
@@ -411,20 +415,20 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, sycl::queue& queue) -
         ::oneapi::mkl::lapack::getrs(queue, ::oneapi::mkl::transpose::nontrans, n, nrhs, d_a.get(), n, d_ipiv.get(), d_b.get(), n, scratch_rs.get(), sp_rs).wait();
 
         std::vector<int64_t> out_shape(b_shape.begin(), b_shape.end());
-        Tensor output(out_shape, A.dtype(), A.device());
+        Tensor output(out_shape, A_cont.dtype(), A_cont.device());
         col_to_row_major<float, SyclTransposeSolveBackF32>(
             get_data_ptr<float>(output), d_b.get(), n, nrhs, queue);
 
         return output;
-    } else if (A.dtype() == DType::Float64) {
+    } else if (A_cont.dtype() == DType::Float64) {
         SyclDeviceBuffer<double> d_a(n * n, queue);
         SyclDeviceBuffer<double> d_b(n * nrhs, queue);
         SyclDeviceBuffer<std::int64_t> d_ipiv(n, queue);
 
         row_to_col_major<double, SyclTransposeSolveAF64>(
-            d_a.get(), get_data_ptr<const double>(A), n, n, queue);
+            d_a.get(), get_data_ptr<const double>(A_cont), n, n, queue);
         row_to_col_major<double, SyclTransposeSolveBF64>(
-            d_b.get(), get_data_ptr<const double>(B), n, nrhs, queue);
+            d_b.get(), get_data_ptr<const double>(B_cont), n, nrhs, queue);
 
         auto sp_rf = ::oneapi::mkl::lapack::getrf_scratchpad_size<double>(queue, n, n, n);
         SyclDeviceBuffer<double> scratch_rf(sp_rf, queue);
@@ -435,7 +439,7 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, sycl::queue& queue) -
         ::oneapi::mkl::lapack::getrs(queue, ::oneapi::mkl::transpose::nontrans, n, nrhs, d_a.get(), n, d_ipiv.get(), d_b.get(), n, scratch_rs.get(), sp_rs).wait();
 
         std::vector<int64_t> out_shape(b_shape.begin(), b_shape.end());
-        Tensor output(out_shape, A.dtype(), A.device());
+        Tensor output(out_shape, A_cont.dtype(), A_cont.device());
         col_to_row_major<double, SyclTransposeSolveBackF64>(
             get_data_ptr<double>(output), d_b.get(), n, nrhs, queue);
 
