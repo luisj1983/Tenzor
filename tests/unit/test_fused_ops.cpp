@@ -199,12 +199,9 @@ TEST_F(FusedOpsTest, FusedBatchNormReLU_CustomEpsilon) {
 // Fused Softmax + CrossEntropy Tests
 // ==============================================================================
 
-// Re-enabled then re-disabled: FusedSoftmaxCrossEntropy_NoReduction segfaults
-// (exit code 139) when called without the ops:: namespace prefix that the
-// parity test in test_vision_fused_parity.cpp uses. The unit test fixture's
-// FusedOpsTest creates tensors differently (no Device::cpu() explicit).
-// Needs investigation — keeping as DISABLED_ so the failure is visible.
-TEST_F(FusedOpsTest, DISABLED_FusedSoftmaxCrossEntropy_MeanReduction) {
+// Root cause was CPU kernel ignoring reduction attribute (always mean).
+// Fixed in fused_ops.cpp to respect AttrKey::Reduction for all modes.
+TEST_F(FusedOpsTest, FusedSoftmaxCrossEntropy_MeanReduction) {
     auto logits = randn({32, 10});
     auto targets = randint(0, 10, {32}, DType::Int64);
 
@@ -218,7 +215,7 @@ TEST_F(FusedOpsTest, DISABLED_FusedSoftmaxCrossEntropy_MeanReduction) {
     ASSERT_GE(loss_val, 0.0f);
 }
 
-TEST_F(FusedOpsTest, DISABLED_FusedSoftmaxCrossEntropy_SumReduction) {
+TEST_F(FusedOpsTest, FusedSoftmaxCrossEntropy_SumReduction) {
     auto logits = randn({16, 5});
     auto targets = randint(0, 5, {16}, DType::Int64);
 
@@ -228,7 +225,7 @@ TEST_F(FusedOpsTest, DISABLED_FusedSoftmaxCrossEntropy_SumReduction) {
     ASSERT_GE(loss.data<float>()[0], 0.0f);
 }
 
-TEST_F(FusedOpsTest, DISABLED_FusedSoftmaxCrossEntropy_NoReduction) {
+TEST_F(FusedOpsTest, FusedSoftmaxCrossEntropy_NoReduction) {
     auto logits = randn({8, 100});
     auto targets = randint(0, 100, {8}, DType::Int64);
 
@@ -244,7 +241,7 @@ TEST_F(FusedOpsTest, DISABLED_FusedSoftmaxCrossEntropy_NoReduction) {
     }
 }
 
-TEST_F(FusedOpsTest, DISABLED_FusedSoftmaxCrossEntropy_NumericalStability) {
+TEST_F(FusedOpsTest, FusedSoftmaxCrossEntropy_NumericalStability) {
     // Large logits to test numerical stability
     auto logits = randn({4, 3}) * 100.0f;
     auto targets = randint(0, 3, {4}, DType::Int64);

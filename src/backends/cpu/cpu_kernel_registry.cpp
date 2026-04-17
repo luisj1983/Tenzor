@@ -372,7 +372,7 @@ namespace cpu {
     auto fused_linear_relu_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias) -> Tensor;
     auto fused_conv2d_relu_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
     auto fused_batchnorm_relu_kernel(const Tensor& input, const Tensor& running_mean, const Tensor& running_var, const Tensor& weight, const Tensor& bias, float eps) -> Tensor;
-    auto fused_softmax_cross_entropy_kernel(const Tensor& logits, const Tensor& targets, bool compute_grad) -> std::vector<Tensor>;
+    auto fused_softmax_cross_entropy_kernel(const Tensor& logits, const Tensor& targets, bool compute_grad, const std::string& reduction = "mean") -> std::vector<Tensor>;
     auto fused_add_relu_kernel(const Tensor& a, const Tensor& b) -> Tensor;
     auto fused_gelu_kernel(const Tensor& input) -> Tensor;
     auto fused_layer_norm_kernel(const Tensor& input, const std::vector<int64_t>& normalized_shape, const Tensor& weight, const Tensor& bias, float eps) -> std::tuple<Tensor, Tensor, Tensor>;
@@ -1955,7 +1955,8 @@ void register_cpu_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::FusedSoftmaxCrossEntropy, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         bool compute_grad = attrs.get_bool(AttrKey::ComputeGrad, true);
-        return cpu::fused_softmax_cross_entropy_kernel(inputs[0], inputs[1], compute_grad);
+        std::string reduction = std::string(attrs.get_string(AttrKey::Reduction, "mean"));
+        return cpu::fused_softmax_cross_entropy_kernel(inputs[0], inputs[1], compute_grad, reduction);
     });
 
     TENZOR_REGISTER_BINARY_KERNEL(table, FusedAddReLU, cpu::fused_add_relu_kernel);

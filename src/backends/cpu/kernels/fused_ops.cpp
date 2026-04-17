@@ -327,7 +327,8 @@ auto fused_batchnorm_relu_kernel(
 auto fused_softmax_cross_entropy_kernel(
     const Tensor& logits,
     const Tensor& targets,
-    bool compute_grad
+    bool compute_grad,
+    const std::string& reduction
 ) -> std::vector<Tensor> {
     int64_t batch_size = logits.shape()[0];
     int64_t num_classes = logits.shape()[1];
@@ -380,11 +381,15 @@ auto fused_softmax_cross_entropy_kernel(
                     grad_row[j] = std::exp(row[j] - max_logit) * inv_sum_exp;
                 }
                 grad_row[target] -= 1.0f;
-                // Normalize by batch size for mean reduction
-                float scale = 1.0f / static_cast<float>(batch_size);
-                for (int64_t j = 0; j < num_classes; ++j) {
-                    grad_row[j] *= scale;
+                // Scale gradient based on reduction mode
+                if (reduction == "mean") {
+                    float scale = 1.0f / static_cast<float>(batch_size);
+                    for (int64_t j = 0; j < num_classes; ++j) {
+                        grad_row[j] *= scale;
+                    }
                 }
+                // "sum": scale=1.0 (no scaling needed)
+                // "none": per-sample gradients (no scaling needed)
             }
         }
         // Check for out-of-range targets (from OpenMP region)
@@ -430,9 +435,11 @@ auto fused_softmax_cross_entropy_kernel(
                     grad_row[j] = std::exp(row[j] - max_logit) * inv_sum_exp;
                 }
                 grad_row[target] -= 1.0;
-                double scale = 1.0 / static_cast<double>(batch_size);
-                for (int64_t j = 0; j < num_classes; ++j) {
-                    grad_row[j] *= scale;
+                if (reduction == "mean") {
+                    double scale = 1.0 / static_cast<double>(batch_size);
+                    for (int64_t j = 0; j < num_classes; ++j) {
+                        grad_row[j] *= scale;
+                    }
                 }
             }
         }
@@ -457,14 +464,22 @@ auto fused_softmax_cross_entropy_kernel(
             for (int64_t i = 0; i < batch_size * num_classes; ++i)
                 lf32[i] = static_cast<float>(src[i]);
         }
-        auto result = fused_softmax_cross_entropy_kernel(logits_f32, targets, compute_grad);
+        auto result = fused_softmax_cross_entropy_kernel(logits_f32, targets, compute_grad, reduction);
         return result;
     } else {
         throw std::runtime_error("fused_softmax_cross_entropy: unsupported dtype");
     }
 
-    // Apply mean reduction to loss (matching CUDA behavior)
-    Tensor loss = tenzor::mean(losses);
+    // Apply reduction to per-sample losses
+    Tensor loss;
+    if (reduction == "mean") {
+        loss = tenzor::mean(losses);
+    } else if (reduction == "sum") {
+        loss = tenzor::sum(losses);
+    } else {
+        // "none" — return per-sample losses
+        loss = losses;
+    }
 
     if (compute_grad) {
         return {loss, grad_logits};

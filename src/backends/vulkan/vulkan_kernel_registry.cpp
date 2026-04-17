@@ -1984,12 +1984,16 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // ========================================================================
     // Fused Softmax + Cross Entropy
     // ========================================================================
-    table.register_kernel(OpId::FusedSoftmaxCrossEntropy, [](std::span<const Tensor> inputs, [[maybe_unused]] const OpAttributes& attrs) {
+    table.register_kernel(OpId::FusedSoftmaxCrossEntropy, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // Compose: softmax -> cross_entropy
         auto vk = get_vulkan_backend();
         int64_t dim = -1; // Softmax over last dim (class dim)
         auto log_probs = vk->dispatchLogSoftmax(inputs[0], dim);
-        int64_t reduction = 1; // mean by default
+        // Map reduction string to integer: 0=none, 1=mean, 2=sum
+        std::string reduction_str = std::string(attrs.get_string(AttrKey::Reduction, "mean"));
+        int64_t reduction = 1; // mean
+        if (reduction_str == "none") reduction = 0;
+        else if (reduction_str == "sum") reduction = 2;
         auto loss = vk->dispatchCrossEntropy(log_probs, inputs[1], reduction);
         return std::vector<Tensor>{loss};
     });

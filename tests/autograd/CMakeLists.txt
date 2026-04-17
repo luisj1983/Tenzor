@@ -72,6 +72,11 @@ add_executable(test_gradcheck_missing test_gradcheck_missing.cpp)
 target_link_libraries(test_gradcheck_missing PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_gradcheck_missing LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
+# Comprehensive gradcheck coverage for all autograd ops
+add_executable(test_gradcheck_comprehensive test_gradcheck_comprehensive.cpp)
+target_link_libraries(test_gradcheck_comprehensive PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_gradcheck_comprehensive LABELS "autograd" DISCOVERY_TIMEOUT 120 DISCOVERY_MODE PRE_TEST)
+
 tenzor_discover_tests(test_autograd_additional LABELS "autograd" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_hooks LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_inplace_autograd LABELS "autograd" DISCOVERY_TIMEOUT 60)

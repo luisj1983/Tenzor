@@ -153,15 +153,19 @@ TEST_F(ONNXImportTest, DataTypeConversion) {
     EXPECT_NE(int_type, bool_type);
 }
 
-TEST_F(ONNXImportTest, DISABLED_DataTypeToTenzor) {
-    // Note: onnx_dtype_to_tenzor function is declared but not implemented yet
-    // TODO: Enable this test when the function is implemented
-    // EXPECT_NO_THROW(onnx_dtype_to_tenzor(ONNXDataType::FLOAT));
-    // EXPECT_NO_THROW(onnx_dtype_to_tenzor(ONNXDataType::INT32));
-    // EXPECT_NO_THROW(onnx_dtype_to_tenzor(ONNXDataType::INT64));
-    // EXPECT_NO_THROW(onnx_dtype_to_tenzor(ONNXDataType::FLOAT16));
-    // EXPECT_NO_THROW(onnx_dtype_to_tenzor(ONNXDataType::DOUBLE));
-    SUCCEED(); // Placeholder until function is implemented
+TEST_F(ONNXImportTest, DataTypeToTenzor) {
+    // onnx_to_dtype is declared in tenzor/onnx/types.hpp and implemented
+    // in src/onnx/importer.cpp — verify all supported type conversions.
+    EXPECT_EQ(onnx_to_dtype(ONNXDataType::FLOAT), DType::Float32);
+    EXPECT_EQ(onnx_to_dtype(ONNXDataType::DOUBLE), DType::Float64);
+    EXPECT_EQ(onnx_to_dtype(ONNXDataType::FLOAT16), DType::Float16);
+    EXPECT_EQ(onnx_to_dtype(ONNXDataType::BFLOAT16), DType::BFloat16);
+    EXPECT_EQ(onnx_to_dtype(ONNXDataType::INT8), DType::Int8);
+    EXPECT_EQ(onnx_to_dtype(ONNXDataType::INT16), DType::Int16);
+    EXPECT_EQ(onnx_to_dtype(ONNXDataType::INT32), DType::Int32);
+    EXPECT_EQ(onnx_to_dtype(ONNXDataType::INT64), DType::Int64);
+    EXPECT_EQ(onnx_to_dtype(ONNXDataType::UINT8), DType::UInt8);
+    EXPECT_EQ(onnx_to_dtype(ONNXDataType::BOOL), DType::Bool);
 }
 
 // ============================================================================

@@ -299,3 +299,47 @@ tenzor_discover_tests(test_sam_swa LABELS "nn" DISCOVERY_TIMEOUT 60)
 
 # tests/nn/test_data_parallel.cpp orphan removed: rotted include paths (tenzor/nn/modules/ no longer exists)
 # tests/nn/test_distributed.cpp orphan removed: requires rccl/rccl.h via TENZOR_USE_ROCM that isn't installed
+
+# ============================================================================
+# Previously untested layers
+# ============================================================================
+
+add_executable(test_glu layers/test_glu.cpp)
+target_link_libraries(test_glu PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_glu LABELS "nn" DISCOVERY_TIMEOUT 60)
+
+add_executable(test_drop_path layers/test_drop_path.cpp)
+target_link_libraries(test_drop_path PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_drop_path LABELS "nn" DISCOVERY_TIMEOUT 60)
+
+add_executable(test_dropout3d layers/test_dropout3d.cpp)
+target_link_libraries(test_dropout3d PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_dropout3d LABELS "nn" DISCOVERY_TIMEOUT 60)
+
+add_executable(test_window_attention layers/test_window_attention.cpp)
+target_link_libraries(test_window_attention PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_window_attention LABELS "nn" DISCOVERY_TIMEOUT 60)
+
+add_executable(test_fold layers/test_fold.cpp)
+target_link_libraries(test_fold PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_fold LABELS "nn" DISCOVERY_TIMEOUT 60)
+
+add_executable(test_cosine_similarity_layer layers/test_cosine_similarity_layer.cpp)
+target_link_libraries(test_cosine_similarity_layer PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_cosine_similarity_layer LABELS "nn" DISCOVERY_TIMEOUT 60)
+
+add_executable(test_sparse_linear layers/test_sparse_linear.cpp)
+target_link_libraries(test_sparse_linear PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_sparse_linear LABELS "nn" DISCOVERY_TIMEOUT 60)
+
+add_executable(test_sparse_embedding layers/test_sparse_embedding.cpp)
+target_link_libraries(test_sparse_embedding PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_sparse_embedding LABELS "nn" DISCOVERY_TIMEOUT 60)
+
+add_executable(test_fused_mbconv layers/test_fused_mbconv.cpp)
+target_link_libraries(test_fused_mbconv PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_fused_mbconv LABELS "nn" DISCOVERY_TIMEOUT 60)
+
+add_executable(test_lazy_backward layers/test_lazy_backward.cpp)
+target_link_libraries(test_lazy_backward PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_lazy_backward LABELS "nn" DISCOVERY_TIMEOUT 60)

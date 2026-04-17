@@ -417,13 +417,45 @@ TEST(NumericalStability, Attention_LongSequence) {
 // ============================================================================
 
 TEST(NumericalStability, Gradient_VerySmallValues) {
-    // TODO: Tensor gradient API not yet available - use Variable for autograd
-    GTEST_SKIP() << "Tensor gradient API not available";
+    tenzor::initialize();
+    set_grad_enabled(true);
+
+    // exp(very_small) ~ 1.0, so gradient d/dx exp(x) = exp(x) ~ 1.0
+    auto data = full({16}, 1e-20f, DType::Float32, Device::cpu());
+    Variable x(data, /*requires_grad=*/true);
+    auto y = exp(x);
+    auto loss = sum(y);
+    loss.backward();
+
+    auto grad = x.grad().value();
+    const float* g = grad.data<float>();
+    for (int64_t i = 0; i < grad.numel(); ++i) {
+        EXPECT_FALSE(std::isnan(g[i])) << "gradient is NaN at index " << i;
+        EXPECT_FALSE(std::isinf(g[i])) << "gradient is Inf at index " << i;
+        // exp(1e-20) ~ 1.0
+        EXPECT_NEAR(g[i], 1.0f, 1e-4f) << "gradient should be ~1.0 at index " << i;
+    }
 }
 
 TEST(NumericalStability, Gradient_VeryLargeValues) {
-    // TODO: Tensor gradient API not yet available - use Variable for autograd
-    GTEST_SKIP() << "Tensor gradient API not available";
+    tenzor::initialize();
+    set_grad_enabled(true);
+
+    // tanh saturates for large values: tanh(1000) ~ 1.0, gradient ~ 0.0
+    auto data = full({16}, 1000.0f, DType::Float32, Device::cpu());
+    Variable x(data, /*requires_grad=*/true);
+    auto y = tanh(x);
+    auto loss = sum(y);
+    loss.backward();
+
+    auto grad = x.grad().value();
+    const float* g = grad.data<float>();
+    for (int64_t i = 0; i < grad.numel(); ++i) {
+        EXPECT_FALSE(std::isnan(g[i])) << "gradient is NaN at index " << i;
+        EXPECT_FALSE(std::isinf(g[i])) << "gradient is Inf at index " << i;
+        // tanh'(1000) = 1 - tanh(1000)^2 ~ 0.0
+        EXPECT_NEAR(g[i], 0.0f, 1e-6f) << "gradient should be ~0.0 at index " << i;
+    }
 }
 
 // ============================================================================

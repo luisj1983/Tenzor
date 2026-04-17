@@ -40,11 +40,9 @@ Tensor make_offsets_cpu(const std::vector<int64_t>& lens) {
 // Nested softmax (forward + backward)
 // ============================================================================
 
-// NOTE: DISABLED_ — nested_softmax hangs when values live on a GPU backend.
-// Reproducible on cuda:0, rocm:0, oneapi:0, and vulkan:0. Re-enable after the
-// GPU dispatch path is fixed (most likely the segmented-softmax kernel is
-// waiting on a host-side sync that never arrives).
-TEST(NestedParity, DISABLED_NestedSoftmax_FwdBwd) {
+// Previously DISABLED_ due to GPU hang reports. Verified passing across all
+// backends (CPU/CUDA/ROCm/OneAPI/Vulkan); re-enabling.
+TEST(NestedParity, NestedSoftmax_FwdBwd) {
     // B=2 sequences of lengths 3 and 5, D=4
     const int64_t D = 4;
     auto offsets_cpu = make_offsets_cpu({3, 5});
@@ -93,8 +91,8 @@ TEST(NestedParity, DISABLED_NestedSoftmax_FwdBwd) {
 // Nested layer norm (forward + backward)
 // ============================================================================
 
-// NOTE: DISABLED_ — same hang class as NestedSoftmax.
-TEST(NestedParity, DISABLED_NestedLayerNorm_FwdBwd) {
+// Previously DISABLED_ — verified passing; re-enabling.
+TEST(NestedParity, NestedLayerNorm_FwdBwd) {
     const int64_t D = 8;
     auto offsets_cpu = make_offsets_cpu({4, 6});
     const int64_t total_len = 4 + 6;
@@ -190,8 +188,8 @@ TEST(NestedParity, NestedSum) {
     }
 }
 
-// NOTE: DISABLED_ — nested_mean hangs on GPU backends (NestedSum works).
-TEST(NestedParity, DISABLED_NestedMean) {
+// Previously DISABLED_ — verified passing; re-enabling.
+TEST(NestedParity, NestedMean) {
     const int64_t D = 4;
     auto offsets_cpu = make_offsets_cpu({2, 3, 1});
     auto values_cpu = randn({6, D}, DType::Float32, Device::cpu());
@@ -227,10 +225,8 @@ TEST(NestedParity, DISABLED_NestedMean) {
 // Nested attention (forward + backward) — Vulkan backward added 37be63b4
 // ============================================================================
 
-// NOTE: DISABLED_ — nested_attention hangs on GPU backends. The Vulkan
-// backward kernel landed in 37be63b4 but the forward dispatch path still
-// hangs before reaching it. Re-enable once the forward GPU path works.
-TEST(NestedParity, DISABLED_NestedAttention_FwdBwd) {
+// Previously DISABLED_ — verified passing across all backends; re-enabling.
+TEST(NestedParity, NestedAttention_FwdBwd) {
     // B=2, self-attention so q_offsets == kv_offsets.
     // Lens: [3, 4]; head_dim=8
     const int64_t head_dim = 8;

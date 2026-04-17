@@ -2796,11 +2796,9 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // =========================================================================
     table.register_kernel(OpId::FusedSoftmaxCrossEntropy, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [logits, targets]
-        bool compute_grad = attrs.get_bool(AttrKey::ComputeGrad, true);
-        auto [loss, grad_logits] = cuda::fused_softmax_cross_entropy_cuda(inputs[0], inputs[1], compute_grad);
-        if (compute_grad) {
-            return std::vector<Tensor>{loss, grad_logits};
-        }
+        // Use the reduction-aware overload that returns a single reduced loss tensor
+        std::string reduction = std::string(attrs.get_string(AttrKey::Reduction, "mean"));
+        auto loss = cuda::fused_softmax_cross_entropy_cuda(inputs[0], inputs[1], reduction);
         return std::vector<Tensor>{loss};
     });
 

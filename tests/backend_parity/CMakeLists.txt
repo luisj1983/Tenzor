@@ -46,6 +46,12 @@ endfunction()
 # Operation parity tests (40+ math and reduction operations)
 add_parity_test(test_operation_parity test_operation_parity.cpp)
 
+# Extended operation parity tests (indexing, shape, cumulative, advanced math)
+add_parity_test(test_operation_parity_extended test_operation_parity_extended.cpp)
+
+# Multi-dtype parity tests (Float16, BFloat16, Float64 across key ops)
+add_parity_test(test_operation_parity_multidtype test_operation_parity_multidtype.cpp)
+
 # Stride parity tests — exercises each op with non-contiguous inputs to catch
 # kernels that read strides from shape instead of the tensor's actual strides.
 add_parity_test(test_stride_parity test_stride_parity.cpp)
