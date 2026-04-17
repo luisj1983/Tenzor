@@ -225,3 +225,71 @@ tenzor_discover_tests(test_autograd_features LABELS "autograd" DISCOVERY_TIMEOUT
 add_executable(test_autograd_thread_safety test_autograd_thread_safety.cpp)
 target_link_libraries(test_autograd_thread_safety PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_autograd_thread_safety LABELS "autograd" DISCOVERY_TIMEOUT 120 DISCOVERY_MODE PRE_TEST)
+
+# Phase 1.4: Autograd infrastructure tests
+add_executable(test_profiler test_profiler.cpp)
+target_link_libraries(test_profiler PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_profiler LABELS "autograd" DISCOVERY_TIMEOUT 60)
+
+add_executable(test_inference_mode_guard test_inference_mode_guard.cpp)
+target_link_libraries(test_inference_mode_guard PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_inference_mode_guard LABELS "autograd" DISCOVERY_TIMEOUT 60)
+
+# Phase 4.1 Batch A: Multi-backend autograd tests
+add_executable(test_hooks_multidtype test_hooks_multidtype.cpp)
+target_link_libraries(test_hooks_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_hooks_multidtype LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_retain_grad_warning_multidtype test_retain_grad_warning_multidtype.cpp)
+target_link_libraries(test_retain_grad_warning_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_retain_grad_warning_multidtype LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_anomaly_detection_multidtype test_anomaly_detection_multidtype.cpp)
+target_link_libraries(test_anomaly_detection_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_anomaly_detection_multidtype LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_hardshrink_threshold_multidtype test_hardshrink_threshold_multidtype.cpp)
+target_link_libraries(test_hardshrink_threshold_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_hardshrink_threshold_multidtype LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_autograd_thread_safety_multidtype test_autograd_thread_safety_multidtype.cpp)
+target_link_libraries(test_autograd_thread_safety_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_autograd_thread_safety_multidtype LABELS "autograd" DISCOVERY_TIMEOUT 120 DISCOVERY_MODE PRE_TEST)
+
+# Phase 4.1 Batch C: Multi-backend higher-order tests
+add_executable(test_higher_order_gradients_multidtype test_higher_order_gradients_multidtype.cpp)
+target_link_libraries(test_higher_order_gradients_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_higher_order_gradients_multidtype LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_higher_order_nn_multidtype test_higher_order_nn_multidtype.cpp)
+target_link_libraries(test_higher_order_nn_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_higher_order_nn_multidtype LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_higher_order_activations_multidtype test_higher_order_activations_multidtype.cpp)
+target_link_libraries(test_higher_order_activations_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_higher_order_activations_multidtype LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_autograd_features_multidtype test_autograd_features_multidtype.cpp)
+target_link_libraries(test_autograd_features_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_autograd_features_multidtype LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Phase 4.1 Batch B: Multi-backend gradcheck tests
+add_executable(test_gradcheck_multidtype test_gradcheck_multidtype.cpp)
+target_link_libraries(test_gradcheck_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_gradcheck_multidtype LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_gradcheck_comprehensive_multidtype test_gradcheck_comprehensive_multidtype.cpp)
+target_link_libraries(test_gradcheck_comprehensive_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_gradcheck_comprehensive_multidtype LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_gradcheck_extended_multidtype test_gradcheck_extended_multidtype.cpp)
+target_link_libraries(test_gradcheck_extended_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_gradcheck_extended_multidtype LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_gradcheck_missing_multidtype test_gradcheck_missing_multidtype.cpp)
+target_link_libraries(test_gradcheck_missing_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_gradcheck_missing_multidtype LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_autograd_additional_multidtype test_autograd_additional_multidtype.cpp)
+target_link_libraries(test_autograd_additional_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_autograd_additional_multidtype LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)

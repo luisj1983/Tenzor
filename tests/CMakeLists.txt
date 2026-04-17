@@ -451,6 +451,11 @@ target_link_libraries(minimal_swin_debug PRIVATE tenzor_core GTest::gtest_main)
 add_executable(check_float32_gradients check_float32_gradients.cpp)
 target_link_libraries(check_float32_gradients PRIVATE tenzor_core)
 
+# Phase 1.5: Metrics extended tests
+add_executable(test_metrics_extended unit/test_metrics_extended.cpp)
+target_link_libraries(test_metrics_extended PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_metrics_extended LABELS "unit" DISCOVERY_TIMEOUT 60)
+
 # ============================================================================
 # CUDA root-level tests
 # ============================================================================

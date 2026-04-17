@@ -481,7 +481,7 @@ TEST_F(ElectraTest, AllTokensUsedForTraining) {
 // Performance Tests
 // ============================================================================
 
-TEST_F(ElectraTest, DISABLED_BenchmarkInference) {
+TEST_F(ElectraTest, BenchmarkInference) {
     // Disabled by default - enable for performance testing
     auto config = ElectraConfig::base();
     ElectraForSequenceClassification model(config, 2);

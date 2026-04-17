@@ -1913,6 +1913,136 @@ auto GroupNorm::reset_parameters() -> void {
 // InstanceNorm2d Implementation
 // ============================================================================
 
+// Wrapper backward for InstanceNorm1d: reshapes 3D grad_output to 4D,
+// delegates to the 4D InstanceNorm backward kernel, reshapes grad_input back to 3D.
+class InstanceNorm1dBackwardFn : public Function {
+public:
+    InstanceNorm1dBackwardFn(bool affine, double eps, int64_t num_features,
+                             int64_t L, std::vector<Tensor> tensors_to_save)
+        : affine_(affine), eps_(eps), num_features_(num_features), L_(L) {
+        save_for_backward(std::move(tensors_to_save));
+    }
+
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
+        throw std::runtime_error("InstanceNorm1dBackwardFn::forward should not be called");
+    }
+
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        auto& grad_output_3d = grad_outputs[0];  // (N, C, L)
+        auto saved = saved_tensors();
+        auto& input_4d = saved[0];     // (N, C, L, 1)
+        auto& mean = saved[1];         // (N, C)
+        auto& rstd = saved[2];         // (N, C)
+        auto& weight = saved[3];       // (C)
+
+        auto original_device = grad_output_3d.device();
+        auto original_dtype = grad_output_3d.dtype();
+
+        auto shape = grad_output_3d.shape();
+        int64_t N = shape[0], C = shape[1];
+
+        // Reshape grad_output from 3D to 4D
+        Tensor grad_output_4d = grad_output_3d.reshape({N, C, L_, 1});
+
+        std::vector<Tensor> inputs_vec;
+        if (original_device.type != Device::Type::CPU) {
+            inputs_vec = {grad_output_4d.contiguous(), input_4d.contiguous(),
+                         weight.contiguous(), mean.contiguous(), rstd.contiguous()};
+        } else {
+            inputs_vec = {grad_output_4d.to(Device::cpu()).contiguous(),
+                         input_4d.to(Device::cpu()).contiguous(),
+                         weight.to(Device::cpu()).contiguous(),
+                         mean.to(Device::cpu()).contiguous(),
+                         rstd.to(Device::cpu()).contiguous()};
+        }
+        auto results = dispatch<OpId::InstanceNormBackward>(inputs_vec);
+
+        // Reshape grad_input from 4D back to 3D
+        Tensor grad_input = results[0].reshape({N, C, L_});
+        if (original_device.type == Device::Type::CPU) {
+            return {grad_input.to(original_dtype).to(original_device).contiguous(),
+                    results[1].to(original_dtype).to(original_device).contiguous(),
+                    results[2].to(original_dtype).to(original_device).contiguous()};
+        }
+        return {grad_input, results[1], results[2]};
+    }
+
+    auto name() const -> std::string override { return "InstanceNorm1dBackwardFn"; }
+    auto supports_higher_order() const -> bool override { return false; }
+
+private:
+    bool affine_;
+    double eps_;
+    int64_t num_features_;
+    int64_t L_;
+};
+
+// Wrapper backward for InstanceNorm3d: reshapes 5D grad_output to 4D,
+// delegates to the 4D InstanceNorm backward, reshapes grad_input back to 5D.
+class InstanceNorm3dBackwardFn : public Function {
+public:
+    InstanceNorm3dBackwardFn(bool affine, double eps, int64_t num_features,
+                             int64_t D, int64_t H, int64_t W,
+                             std::vector<Tensor> tensors_to_save)
+        : affine_(affine), eps_(eps), num_features_(num_features),
+          D_(D), H_(H), W_(W) {
+        save_for_backward(std::move(tensors_to_save));
+    }
+
+    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
+        throw std::runtime_error("InstanceNorm3dBackwardFn::forward should not be called");
+    }
+
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        auto& grad_output_5d = grad_outputs[0];  // (N, C, D, H, W)
+        auto saved = saved_tensors();
+        auto& input_4d = saved[0];     // (N, C, D*H, W)
+        auto& mean = saved[1];         // (N, C)
+        auto& rstd = saved[2];         // (N, C)
+        auto& weight = saved[3];       // (C)
+
+        auto original_device = grad_output_5d.device();
+        auto original_dtype = grad_output_5d.dtype();
+
+        auto shape = grad_output_5d.shape();
+        int64_t N = shape[0], C = shape[1];
+
+        // Reshape grad_output from 5D to 4D
+        Tensor grad_output_4d = grad_output_5d.reshape({N, C, D_ * H_, W_});
+
+        std::vector<Tensor> inputs_vec;
+        if (original_device.type != Device::Type::CPU) {
+            inputs_vec = {grad_output_4d.contiguous(), input_4d.contiguous(),
+                         weight.contiguous(), mean.contiguous(), rstd.contiguous()};
+        } else {
+            inputs_vec = {grad_output_4d.to(Device::cpu()).contiguous(),
+                         input_4d.to(Device::cpu()).contiguous(),
+                         weight.to(Device::cpu()).contiguous(),
+                         mean.to(Device::cpu()).contiguous(),
+                         rstd.to(Device::cpu()).contiguous()};
+        }
+        auto results = dispatch<OpId::InstanceNormBackward>(inputs_vec);
+
+        // Reshape grad_input from 4D back to 5D
+        Tensor grad_input = results[0].reshape({N, C, D_, H_, W_});
+        if (original_device.type == Device::Type::CPU) {
+            return {grad_input.to(original_dtype).to(original_device).contiguous(),
+                    results[1].to(original_dtype).to(original_device).contiguous(),
+                    results[2].to(original_dtype).to(original_device).contiguous()};
+        }
+        return {grad_input, results[1], results[2]};
+    }
+
+    auto name() const -> std::string override { return "InstanceNorm3dBackwardFn"; }
+    auto supports_higher_order() const -> bool override { return false; }
+
+private:
+    bool affine_;
+    double eps_;
+    int64_t num_features_;
+    int64_t D_, H_, W_;
+};
+
 // InstanceNorm autograd function
 class InstanceNormBackwardFn : public Function {
 public:
@@ -2215,12 +2345,13 @@ auto InstanceNorm1d::forward_impl(const Variable& input) -> Variable {
     if (input.requires_grad() || (affine_ && parameters_["weight"]->requires_grad())) {
         auto result = Variable(output, true);
 
+        // Save 4D input for backward (backward kernel expects 4D)
         std::vector<Tensor> tensors_to_save = {
             input_4d, saved_mean, saved_rstd, weight_tensor
         };
 
-        auto grad_fn = std::make_shared<InstanceNormBackwardFn>(
-            affine_, eps_, num_features_, std::move(tensors_to_save));
+        auto grad_fn = std::make_shared<InstanceNorm1dBackwardFn>(
+            affine_, eps_, num_features_, L, std::move(tensors_to_save));
 
         result.set_grad_fn(grad_fn);
 
@@ -2285,12 +2416,10 @@ auto InstanceNorm3d::forward_impl(const Variable& input) -> Variable {
 
     int64_t N = shape[0], C = shape[1], D = shape[2], H = shape[3], W = shape[4];
 
-    // Reshape (N, C, D, H, W) -> (N, C, D*H, W) to use InstanceNorm2d
-    Variable reshaped(input.tensor().reshape({N, C, D * H, W}), input.requires_grad());
-    Variable result = in2d_.forward(reshaped);
-
-    // Reshape back to (N, C, D, H, W)
-    return Variable(result.tensor().reshape({N, C, D, H, W}), result.requires_grad());
+    // Use tenzor::reshape (autograd-aware) to maintain computation graph
+    auto reshaped = tenzor::reshape(input, {N, C, D * H, W});
+    auto result = in2d_.forward(reshaped);
+    return tenzor::reshape(result, {N, C, D, H, W});
 }
 
 // ============================================================================

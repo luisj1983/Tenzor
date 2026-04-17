@@ -343,3 +343,226 @@ tenzor_discover_tests(test_fused_mbconv LABELS "nn" DISCOVERY_TIMEOUT 60)
 add_executable(test_lazy_backward layers/test_lazy_backward.cpp)
 target_link_libraries(test_lazy_backward PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_lazy_backward LABELS "nn" DISCOVERY_TIMEOUT 60)
+
+# ============================================================================
+# Phase 1.1: Previously untested NN layers
+# ============================================================================
+
+# InstanceNorm1d/2d/3d multi-backend tests
+add_executable(test_instance_norm_multidtype layers/test_instance_norm_multidtype.cpp)
+target_link_libraries(test_instance_norm_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_instance_norm_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# ALiBi multi-backend tests
+add_executable(test_alibi_multidtype layers/test_alibi_multidtype.cpp)
+target_link_libraries(test_alibi_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_alibi_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# ============================================================================
+# Phase 1.2: Detection head tests
+# ============================================================================
+
+# RPNHead multi-backend tests
+add_executable(test_rpn_head_multidtype layers/test_rpn_head_multidtype.cpp)
+target_link_libraries(test_rpn_head_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_rpn_head_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# RoIHead multi-backend tests
+add_executable(test_roi_head_multidtype layers/test_roi_head_multidtype.cpp)
+target_link_libraries(test_roi_head_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_roi_head_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# MaskHead multi-backend tests
+add_executable(test_mask_head_multidtype layers/test_mask_head_multidtype.cpp)
+target_link_libraries(test_mask_head_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_mask_head_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Phase 1.3: Quantization tests
+add_executable(test_awq_quantizer quantization/test_awq_quantizer.cpp)
+target_link_libraries(test_awq_quantizer PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_awq_quantizer LABELS "nn" DISCOVERY_TIMEOUT 60)
+
+add_executable(test_gptq_quantizer quantization/test_gptq_quantizer.cpp)
+target_link_libraries(test_gptq_quantizer PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_gptq_quantizer LABELS "nn" DISCOVERY_TIMEOUT 60)
+
+add_executable(test_observers_extended quantization/test_observers_extended.cpp)
+target_link_libraries(test_observers_extended PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_observers_extended LABELS "nn" DISCOVERY_TIMEOUT 60)
+
+# ============================================================================
+# Phase 4.4: Multi-backend conversions for NN tests
+# ============================================================================
+
+# NN Root
+add_executable(test_functional_multidtype test_functional_multidtype.cpp)
+target_link_libraries(test_functional_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_functional_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_mha_functional_multidtype test_mha_functional_multidtype.cpp)
+target_link_libraries(test_mha_functional_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_mha_functional_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_parametrize_multidtype test_parametrize_multidtype.cpp)
+target_link_libraries(test_parametrize_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_parametrize_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_serialization_multidtype test_serialization_multidtype.cpp)
+target_link_libraries(test_serialization_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_serialization_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_safetensors_multidtype test_safetensors_multidtype.cpp)
+target_link_libraries(test_safetensors_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_safetensors_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_pytorch_loader_multidtype test_pytorch_loader_multidtype.cpp)
+target_link_libraries(test_pytorch_loader_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_pytorch_loader_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_quantized_inference_multidtype test_quantized_inference_multidtype.cpp)
+target_link_libraries(test_quantized_inference_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_quantized_inference_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# NN Layers
+add_executable(test_channel_shuffle_multidtype layers/test_channel_shuffle_multidtype.cpp)
+target_link_libraries(test_channel_shuffle_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_channel_shuffle_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_cosine_similarity_layer_multidtype layers/test_cosine_similarity_layer_multidtype.cpp)
+target_link_libraries(test_cosine_similarity_layer_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_cosine_similarity_layer_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_dropout3d_multidtype layers/test_dropout3d_multidtype.cpp)
+target_link_libraries(test_dropout3d_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_dropout3d_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_drop_path_multidtype layers/test_drop_path_multidtype.cpp)
+target_link_libraries(test_drop_path_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_drop_path_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_fold_multidtype layers/test_fold_multidtype.cpp)
+target_link_libraries(test_fold_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_fold_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_glu_multidtype layers/test_glu_multidtype.cpp)
+target_link_libraries(test_glu_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_glu_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_gated_activations_multidtype layers/test_gated_activations_multidtype.cpp)
+target_link_libraries(test_gated_activations_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_gated_activations_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_fused_mbconv_multidtype layers/test_fused_mbconv_multidtype.cpp)
+target_link_libraries(test_fused_mbconv_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_fused_mbconv_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_hrm_multidtype layers/test_hrm_multidtype.cpp)
+target_link_libraries(test_hrm_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_hrm_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_lazy_backward_multidtype layers/test_lazy_backward_multidtype.cpp)
+target_link_libraries(test_lazy_backward_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_lazy_backward_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_moe_multidtype layers/test_moe_multidtype.cpp)
+target_link_libraries(test_moe_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_moe_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_sliding_window_attention_multidtype layers/test_sliding_window_attention_multidtype.cpp)
+target_link_libraries(test_sliding_window_attention_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_sliding_window_attention_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_sparse_embedding_multidtype layers/test_sparse_embedding_multidtype.cpp)
+target_link_libraries(test_sparse_embedding_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_sparse_embedding_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_sparse_linear_multidtype layers/test_sparse_linear_multidtype.cpp)
+target_link_libraries(test_sparse_linear_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_sparse_linear_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_sync_batchnorm_multidtype layers/test_sync_batchnorm_multidtype.cpp)
+target_link_libraries(test_sync_batchnorm_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_sync_batchnorm_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_window_attention_multidtype layers/test_window_attention_multidtype.cpp)
+target_link_libraries(test_window_attention_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_window_attention_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# NN Optim
+add_executable(test_adamax_multidtype optim/test_adamax_multidtype.cpp)
+target_link_libraries(test_adamax_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_adamax_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_lbfgs_multidtype optim/test_lbfgs_multidtype.cpp)
+target_link_libraries(test_lbfgs_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_lbfgs_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_lion_multidtype optim/test_lion_multidtype.cpp)
+target_link_libraries(test_lion_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_lion_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_nadam_multidtype optim/test_nadam_multidtype.cpp)
+target_link_libraries(test_nadam_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_nadam_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_sam_swa_multidtype optim/test_sam_swa_multidtype.cpp)
+target_link_libraries(test_sam_swa_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_sam_swa_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_schedulers_multidtype optim/test_schedulers_multidtype.cpp)
+target_link_libraries(test_schedulers_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_schedulers_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_gradient_utils_multidtype optim/test_gradient_utils_multidtype.cpp)
+target_link_libraries(test_gradient_utils_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_gradient_utils_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# NN Distributed multi-dtype
+add_executable(test_fsdp_multidtype test_fsdp_multidtype.cpp)
+target_link_libraries(test_fsdp_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_fsdp_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_pipeline_parallel_multidtype test_pipeline_parallel_multidtype.cpp)
+target_link_libraries(test_pipeline_parallel_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_pipeline_parallel_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_tensor_parallel_multidtype test_tensor_parallel_multidtype.cpp)
+target_link_libraries(test_tensor_parallel_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_tensor_parallel_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_offload_multidtype test_offload_multidtype.cpp)
+target_link_libraries(test_offload_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_offload_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# NN Optim ZeRO multi-dtype
+add_executable(test_zero_stage1_multidtype optim/test_zero_stage1_multidtype.cpp)
+target_link_libraries(test_zero_stage1_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_zero_stage1_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_zero_stage2_multidtype optim/test_zero_stage2_multidtype.cpp)
+target_link_libraries(test_zero_stage2_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_zero_stage2_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_zero_stage3_multidtype optim/test_zero_stage3_multidtype.cpp)
+target_link_libraries(test_zero_stage3_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_zero_stage3_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_zero_stage1_distributed_multidtype optim/test_zero_stage1_distributed_multidtype.cpp)
+target_link_libraries(test_zero_stage1_distributed_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_zero_stage1_distributed_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_zero_stage1_integration_multidtype optim/test_zero_stage1_integration_multidtype.cpp)
+target_link_libraries(test_zero_stage1_integration_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_zero_stage1_integration_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_zero_stage2_integration_multidtype optim/test_zero_stage2_integration_multidtype.cpp)
+target_link_libraries(test_zero_stage2_integration_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_zero_stage2_integration_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_zero_stage3_integration_multidtype optim/test_zero_stage3_integration_multidtype.cpp)
+target_link_libraries(test_zero_stage3_integration_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_zero_stage3_integration_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_zero_profiling_multidtype optim/test_zero_profiling_multidtype.cpp)
+target_link_libraries(test_zero_profiling_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_zero_profiling_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)

@@ -514,7 +514,7 @@ TEST_F(VulkanOpsTest, IndexSelect) {
 // Performance Benchmarks
 // ============================================================================
 
-TEST_F(VulkanOpsTest, DISABLED_BenchmarkLargeConv2d) {
+TEST_F(VulkanOpsTest, BenchmarkLargeConv2d) {
     // Large convolution for performance testing
     Tensor input({32, 64, 128, 128}, DType::Float32, vulkan_device);
     Tensor weight({128, 64, 3, 3}, DType::Float32, vulkan_device);
@@ -536,7 +536,7 @@ TEST_F(VulkanOpsTest, DISABLED_BenchmarkLargeConv2d) {
     std::cout << "Conv2d time: " << duration.count() << "ms\n";
 }
 
-TEST_F(VulkanOpsTest, DISABLED_BenchmarkLargeMatmul) {
+TEST_F(VulkanOpsTest, BenchmarkLargeMatmul) {
     // Large matrix multiplication
     Tensor a({1024, 1024}, DType::Float32, vulkan_device);
     Tensor b({1024, 1024}, DType::Float32, vulkan_device);

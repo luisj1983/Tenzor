@@ -693,7 +693,7 @@ tenzor_discover_tests(test_chunk_multidtype DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_gradient_checkpoint_multidtype DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_model_checkpoint_multidtype DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_transforms_multidtype DISCOVERY_TIMEOUT 60)
-tenzor_discover_tests(test_async_ops_multidtype DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_async_ops_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_dataloader_multidtype DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_dtype_edge_cases_multidtype DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_sparse DISCOVERY_TIMEOUT 60)
@@ -818,3 +818,139 @@ tenzor_discover_tests(test_training_metrics LABELS "unit" DISCOVERY_TIMEOUT 60)
 add_executable(test_image_io test_image_io.cpp)
 target_link_libraries(test_image_io PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_image_io LABELS "unit" DISCOVERY_TIMEOUT 60)
+
+# ============================================================================
+# Batch A - Linalg + Math Multi-DType Tests
+# ============================================================================
+
+# Linalg core multi-dtype (det, inv, solve, cholesky, qr, svd, eigh)
+add_executable(test_linalg_multidtype test_linalg_multidtype.cpp)
+target_link_libraries(test_linalg_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_linalg_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Linalg extended multi-dtype (vector_norm, matrix_norm, vecdot, ldl)
+add_executable(test_linalg_extended_multidtype test_linalg_extended_multidtype.cpp)
+target_link_libraries(test_linalg_extended_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_linalg_extended_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Linalg lstsq/pinv/matrix_exp multi-dtype
+add_executable(test_linalg_lstsq_pinv_matexp_multidtype test_linalg_lstsq_pinv_matexp_multidtype.cpp)
+target_link_libraries(test_linalg_lstsq_pinv_matexp_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_linalg_lstsq_pinv_matexp_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Matrix construction multi-dtype (kron, block_diag, vander, combinations)
+add_executable(test_matrix_construction_multidtype test_matrix_construction_multidtype.cpp)
+target_link_libraries(test_matrix_construction_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_matrix_construction_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Special math multi-dtype (gamma, lgamma, beta, bessel, erfinv, sinc)
+add_executable(test_unit_special_math_multidtype test_special_math_multidtype.cpp)
+target_link_libraries(test_unit_special_math_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_unit_special_math_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Complex arithmetic multi-dtype (creation, add, mul, div, abs, exp, sqrt)
+add_executable(test_complex_arithmetic_multidtype test_complex_arithmetic_multidtype.cpp)
+target_link_libraries(test_complex_arithmetic_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_complex_arithmetic_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# FFT multi-dtype (fft, ifft, rfft, irfft, batched, padding)
+add_executable(test_fft_multidtype test_fft_multidtype.cpp)
+target_link_libraries(test_fft_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_fft_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# FFT shift/hfft multi-dtype (fftshift, ifftshift, hfft, ihfft)
+add_executable(test_fft_shift_hfft_multidtype test_fft_shift_hfft_multidtype.cpp)
+target_link_libraries(test_fft_shift_hfft_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_fft_shift_hfft_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# ============================================================================
+# Batch B - Operations + Sparse Multi-DType Tests
+# ============================================================================
+
+# Scatter variants multi-dtype (select_scatter, slice_scatter, diagonal_scatter)
+add_executable(test_scatter_variants_multidtype test_scatter_variants_multidtype.cpp)
+target_link_libraries(test_scatter_variants_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_scatter_variants_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Sparse multi-dtype (COO, CSR, to_dense, SpMM, SpMV, add, coalesce)
+add_executable(test_sparse_multidtype test_sparse_multidtype.cpp)
+target_link_libraries(test_sparse_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_sparse_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Sparse autograd multi-dtype (SpMM/SpMV/SparseAdd backward)
+add_executable(test_sparse_autograd_multidtype test_sparse_autograd_multidtype.cpp)
+target_link_libraries(test_sparse_autograd_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_sparse_autograd_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Hardtanh activation multi-dtype
+add_executable(test_hardtanh_multidtype test_hardtanh_multidtype.cpp)
+target_link_libraries(test_hardtanh_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_hardtanh_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Data loading multi-dtype (TensorDataset, TransformedDataset, ConcatDataset)
+add_executable(test_data_loading_multidtype test_data_loading_multidtype.cpp)
+target_link_libraries(test_data_loading_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_data_loading_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# ============================================================================
+# Batch C - Models + Optimizers Multi-DType Tests
+# ============================================================================
+
+# ASGD optimizer multi-dtype
+add_executable(test_asgd_multidtype test_asgd_multidtype.cpp)
+target_link_libraries(test_asgd_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_asgd_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Rprop optimizer multi-dtype
+add_executable(test_rprop_multidtype test_rprop_multidtype.cpp)
+target_link_libraries(test_rprop_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_rprop_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Fusion optimizer multi-dtype (graph construction, pattern matching)
+add_executable(test_fusion_optimizer_multidtype test_fusion_optimizer_multidtype.cpp)
+target_link_libraries(test_fusion_optimizer_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_fusion_optimizer_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# JIT script multi-dtype (compilation, evaluation)
+add_executable(test_jit_script_multidtype test_jit_script_multidtype.cpp)
+target_link_libraries(test_jit_script_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_jit_script_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Autograd HVP/VHP multi-dtype (Hessian-vector products)
+add_executable(test_autograd_hvp_vhp_multidtype test_autograd_hvp_vhp_multidtype.cpp)
+target_link_libraries(test_autograd_hvp_vhp_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_autograd_hvp_vhp_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# ============================================================================
+# Batch D - Distributed Multi-DType Tests
+# ============================================================================
+
+# DataParallel multi-dtype (multi-device forward, construction)
+add_executable(test_data_parallel_multidtype test_data_parallel_multidtype.cpp)
+target_link_libraries(test_data_parallel_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_data_parallel_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Device multi-dtype (device creation, tensor transfer, roundtrip)
+add_executable(test_device_multidtype test_device_multidtype.cpp)
+target_link_libraries(test_device_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_device_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Image I/O multi-dtype (tensor creation from image, shape preservation, roundtrip)
+add_executable(test_image_io_multidtype test_image_io_multidtype.cpp)
+target_link_libraries(test_image_io_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_image_io_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Backend ops parameterized multi-dtype (add, sub, mul, div, matmul, reductions, transforms)
+add_executable(test_backend_ops_parameterized_multidtype test_backend_ops_parameterized_multidtype.cpp)
+target_link_libraries(test_backend_ops_parameterized_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_backend_ops_parameterized_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# DataParallel single-GPU multi-dtype (wrapping, forward, shape, gradient flow)
+add_executable(test_data_parallel_single_gpu_multidtype test_data_parallel_single_gpu_multidtype.cpp)
+target_link_libraries(test_data_parallel_single_gpu_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_data_parallel_single_gpu_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# DDP unused params multi-dtype (API verification, GradBucket, buffer simulation)
+add_executable(test_ddp_unused_params_multidtype test_ddp_unused_params_multidtype.cpp)
+target_link_libraries(test_ddp_unused_params_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_ddp_unused_params_multidtype LABELS "unit" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
