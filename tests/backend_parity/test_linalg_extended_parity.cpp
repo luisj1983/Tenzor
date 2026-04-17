@@ -42,7 +42,7 @@ TEST(LinalgExtendedParity, Pinv) {
             EXPECT_TENSORS_CLOSE(A, reconstructed.to(Device::cpu()),
                                  1e-3f, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "pinv skipped on " << backend_name(backend)
+            ADD_FAILURE() << "pinv failed on " << backend_name(backend)
                       << ": " << e.what() << std::endl;
         }
     }
@@ -71,7 +71,7 @@ TEST(LinalgExtendedParity, LstSq_Residual) {
             SCOPED_TRACE(std::string("lstsq on ") + backend_name(backends[i]));
             EXPECT_TENSORS_CLOSE(ref_sol, sol.to(Device::cpu()), 1e-3f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "lstsq skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "lstsq failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }

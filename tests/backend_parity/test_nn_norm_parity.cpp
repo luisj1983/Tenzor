@@ -44,7 +44,7 @@ TEST(NNNormParity, InstanceNorm1d) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, output, 1e-4f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "InstanceNorm1d skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "InstanceNorm1d failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -74,7 +74,7 @@ TEST(NNNormParity, InstanceNorm2d) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, output, 1e-4f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "InstanceNorm2d skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "InstanceNorm2d failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -104,7 +104,7 @@ TEST(NNNormParity, InstanceNorm3d) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, output, 1e-3f, 1e-4f);
         } catch (const std::exception& e) {
-            std::cerr << "InstanceNorm3d skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "InstanceNorm3d failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -138,7 +138,7 @@ TEST(NNNormParity, RMSNorm) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, output, 1e-4f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "RMSNorm skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "RMSNorm failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -173,7 +173,7 @@ TEST(NNNormParity, LocalResponseNorm) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, output, 1e-4f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "LocalResponseNorm skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "LocalResponseNorm failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -218,7 +218,7 @@ TEST(NNNormParity, BatchNorm2d_NoAffine) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, output, 1e-4f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "BatchNorm2d_NoAffine skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "BatchNorm2d_NoAffine failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -252,7 +252,7 @@ TEST(NNNormParity, LayerNorm_MultiDim) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, output, 1e-4f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "LayerNorm_MultiDim skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "LayerNorm_MultiDim failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -299,7 +299,7 @@ TEST(NNNormParity, SyncBatchNorm) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, output, 1e-4f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "SyncBatchNorm skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "SyncBatchNorm failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }

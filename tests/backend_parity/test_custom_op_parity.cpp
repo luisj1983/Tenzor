@@ -39,7 +39,7 @@ TEST(CustomOpParity, Affine_MultiBackend) {
                                         dev.type, kernel);
             registered_any = true;
         } catch (const std::exception& e) {
-            std::cerr << "register_custom_op skipped on "
+            ADD_FAILURE() << "register_custom_op failed on "
                       << backend_name(dev) << ": " << e.what() << std::endl;
         }
     }
@@ -60,7 +60,7 @@ TEST(CustomOpParity, Affine_MultiBackend) {
             EXPECT_TENSORS_CLOSE(ref, out.tensor().to(Device::cpu()),
                                  1e-5f, 1e-7f);
         } catch (const std::exception& e) {
-            std::cerr << "CustomOp dispatch skipped on "
+            ADD_FAILURE() << "CustomOp dispatch failed on "
                       << backend_name(backends[i]) << ": " << e.what()
                       << std::endl;
         }
@@ -89,7 +89,7 @@ TEST(CustomOpParity, Squared_Backward_MultiBackend) {
                 "parity::squared_with_bwd", dev.type, forward, backward);
             registered_any = true;
         } catch (const std::exception& e) {
-            std::cerr << "register_custom_op_with_backward skipped on "
+            ADD_FAILURE() << "register_custom_op_with_backward failed on "
                       << backend_name(dev) << ": " << e.what() << std::endl;
         }
     }
@@ -120,7 +120,7 @@ TEST(CustomOpParity, Squared_Backward_MultiBackend) {
                                  x_dev.grad().value().to(Device::cpu()),
                                  1e-4f, 1e-6f);
         } catch (const std::exception& e) {
-            std::cerr << "CustomOp+bwd dispatch skipped on "
+            ADD_FAILURE() << "CustomOp+bwd dispatch failed on "
                       << backend_name(backends[i]) << ": " << e.what()
                       << std::endl;
         }

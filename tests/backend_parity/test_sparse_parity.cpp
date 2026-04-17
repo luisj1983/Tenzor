@@ -269,7 +269,7 @@ TEST(SparseParity, DenseToSparse_Roundtrip_AllBackends) {
             SCOPED_TRACE(std::string("to_sparse roundtrip on ") + backend_name(dev));
             EXPECT_TENSORS_CLOSE(dense, back.to(Device::cpu()), 1e-5f, 1e-7f);
         } catch (const std::exception& e) {
-            std::cerr << "to_sparse skipped on " << backend_name(dev) << ": "
+            ADD_FAILURE() << "to_sparse failed on " << backend_name(dev) << ": "
                       << e.what() << std::endl;
         }
     }
@@ -314,7 +314,7 @@ TEST(SparseParity, SpGEMM) {
             EXPECT_TENSORS_CLOSE(ref_dense, C_dense.to(Device::cpu()),
                                  1e-4f, 1e-6f);
         } catch (const std::exception& e) {
-            std::cerr << "spgemm skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "spgemm failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -349,7 +349,7 @@ TEST(SparseParity, SparseTriangularSolve) {
                          + backend_name(backends[i]));
             EXPECT_TENSORS_CLOSE(ref, x.to(Device::cpu()), 1e-3f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "sparse_triangular_solve skipped on "
+            ADD_FAILURE() << "sparse_triangular_solve failed on "
                       << backend_name(backends[i]) << ": " << e.what()
                       << std::endl;
         }
@@ -389,7 +389,7 @@ TEST(SparseParity, SparseTriangularSolve_Matrix) {
                          + backend_name(backends[i]));
             EXPECT_TENSORS_CLOSE(ref, X.to(Device::cpu()), 1e-3f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "sparse_triangular_solve_matrix skipped on "
+            ADD_FAILURE() << "sparse_triangular_solve_matrix failed on "
                       << backend_name(backends[i]) << ": " << e.what()
                       << std::endl;
         }

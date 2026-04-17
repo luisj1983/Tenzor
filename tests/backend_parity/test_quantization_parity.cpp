@@ -305,7 +305,7 @@ TEST(QuantizationParity, AWQ_BackendInputParity) {
                 EXPECT_TENSORS_CLOSE(ref.zeros, out.zeros.to(Device::cpu()),
                                      1e-4f, 1e-6f);
             } catch (const std::exception& e) {
-                std::cerr << "AWQ skipped on " << backend_name(backends[i])
+                ADD_FAILURE() << "AWQ failed on " << backend_name(backends[i])
                           << ": " << e.what() << std::endl;
             }
         }
@@ -377,7 +377,7 @@ TEST(QuantizationParity, GPTQ_BackendInputParity) {
                 EXPECT_TENSORS_CLOSE(ref.scales, out.scales.to(Device::cpu()),
                                      1e-3f, 1e-5f);
             } catch (const std::exception& e) {
-                std::cerr << "GPTQ skipped on " << backend_name(backends[i])
+                ADD_FAILURE() << "GPTQ failed on " << backend_name(backends[i])
                           << ": " << e.what() << std::endl;
             }
         }

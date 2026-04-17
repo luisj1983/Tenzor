@@ -134,6 +134,27 @@ inline std::vector<OpId> get_required_ops() {
 
         // Embedding backward (forward is already in the floor above)
         OpId::EmbeddingBackward,
+
+        // ====================================================================
+        // Extended training floor (added Phase 1.5)
+        // ====================================================================
+
+        // Conv2d backward (training requires these — forward-only is insufficient)
+        OpId::Conv2dBackwardInput, OpId::Conv2dBackwardWeight,
+        OpId::Conv2dBackwardBias,
+
+        // Dropout (every training model uses this)
+        OpId::Dropout, OpId::DropoutBackward,
+
+        // Scatter (critical for embedding gradients and GNN workloads)
+        OpId::ScatterAdd,
+
+        // TopK and Sort (beam search, NMS, metric computation)
+        OpId::TopK, OpId::Sort,
+
+        // Creation ops (fundamental — backend is broken without these)
+        OpId::Zeros, OpId::Ones, OpId::Full, OpId::Rand, OpId::Randn,
+        OpId::Arange, OpId::Eye,
     };
 }
 

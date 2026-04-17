@@ -167,7 +167,7 @@ TEST(NNActivationParity, PReLU) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, output, 1e-5f, 1e-7f);
         } catch (const std::exception& e) {
-            std::cerr << "PReLU skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "PReLU failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }

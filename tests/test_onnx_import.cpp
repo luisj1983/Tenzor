@@ -153,7 +153,7 @@ TEST_F(ONNXImportTest, DataTypeConversion) {
     EXPECT_NE(int_type, bool_type);
 }
 
-TEST_F(ONNXImportTest, DataTypeToTenzor) {
+TEST_F(ONNXImportTest, DISABLED_DataTypeToTenzor) {
     // Note: onnx_dtype_to_tenzor function is declared but not implemented yet
     // TODO: Enable this test when the function is implemented
     // EXPECT_NO_THROW(onnx_dtype_to_tenzor(ONNXDataType::FLOAT));

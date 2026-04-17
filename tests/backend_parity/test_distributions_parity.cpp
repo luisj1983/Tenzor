@@ -45,7 +45,7 @@ TEST(DistributionsParity, Normal_LogProb) {
                          + backend_name(backends[i]));
             EXPECT_TENSORS_CLOSE(ref, got.to(Device::cpu()), 1e-4f, 1e-6f);
         } catch (const std::exception& e) {
-            std::cerr << "Normal.log_prob skipped on "
+            ADD_FAILURE() << "Normal.log_prob failed on "
                       << backend_name(backends[i]) << ": " << e.what()
                       << std::endl;
         }
@@ -76,7 +76,7 @@ TEST(DistributionsParity, Normal_Entropy) {
                          + backend_name(backends[i]));
             EXPECT_TENSORS_CLOSE(ref, got.to(Device::cpu()), 1e-4f, 1e-6f);
         } catch (const std::exception& e) {
-            std::cerr << "Normal.entropy skipped on "
+            ADD_FAILURE() << "Normal.entropy failed on "
                       << backend_name(backends[i]) << ": " << e.what()
                       << std::endl;
         }
@@ -112,7 +112,7 @@ TEST(DistributionsParity, Uniform_LogProb) {
                          + backend_name(backends[i]));
             EXPECT_TENSORS_CLOSE(ref, got.to(Device::cpu()), 1e-4f, 1e-6f);
         } catch (const std::exception& e) {
-            std::cerr << "Uniform.log_prob skipped on "
+            ADD_FAILURE() << "Uniform.log_prob failed on "
                       << backend_name(backends[i]) << ": " << e.what()
                       << std::endl;
         }
@@ -143,7 +143,7 @@ TEST(DistributionsParity, Uniform_Entropy) {
                          + backend_name(backends[i]));
             EXPECT_TENSORS_CLOSE(ref, got.to(Device::cpu()), 1e-4f, 1e-6f);
         } catch (const std::exception& e) {
-            std::cerr << "Uniform.entropy skipped on "
+            ADD_FAILURE() << "Uniform.entropy failed on "
                       << backend_name(backends[i]) << ": " << e.what()
                       << std::endl;
         }
@@ -178,7 +178,7 @@ TEST(DistributionsParity, Exponential_LogProb) {
                          + backend_name(backends[i]));
             EXPECT_TENSORS_CLOSE(ref, got.to(Device::cpu()), 1e-4f, 1e-6f);
         } catch (const std::exception& ex) {
-            std::cerr << "Exponential.log_prob skipped on "
+            ADD_FAILURE() << "Exponential.log_prob failed on "
                       << backend_name(backends[i]) << ": " << ex.what()
                       << std::endl;
         }

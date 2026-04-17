@@ -128,7 +128,7 @@ TEST(IndexingParity, MaskedSelect) {
                 << "MaskedSelect size mismatch on " << backend_name(backend);
             EXPECT_TENSORS_CLOSE(ref_sorted, result_sorted, 0.0f, 0.0f);
         } catch (const std::exception& e) {
-            std::cerr << "MaskedSelect skipped on " << backend_name(backend)
+            ADD_FAILURE() << "MaskedSelect failed on " << backend_name(backend)
                       << ": " << e.what() << std::endl;
         }
     }
@@ -215,7 +215,7 @@ TEST(IndexingParity, Nonzero) {
                 EXPECT_TENSORS_CLOSE(ref_s, res_s, 0.0f, 0.0f);
             }
         } catch (const std::exception& e) {
-            std::cerr << "Nonzero skipped on " << backend_name(backend)
+            ADD_FAILURE() << "Nonzero failed on " << backend_name(backend)
                       << ": " << e.what() << std::endl;
         }
     }

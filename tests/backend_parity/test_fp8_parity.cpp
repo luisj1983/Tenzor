@@ -45,7 +45,7 @@ TEST(FP8Parity, QuantizeDequantize_E4M3_Roundtrip) {
             EXPECT_LT(rel_err, 0.20f)
                 << "Relative error exceeds 20% (likely native/emulated divergence)";
         } catch (const std::exception& e) {
-            std::cerr << "FP8_E4M3 skipped on " << backend_name(dev) << ": "
+            ADD_FAILURE() << "FP8_E4M3 failed on " << backend_name(dev) << ": "
                       << e.what() << std::endl;
         }
     }
@@ -76,7 +76,7 @@ TEST(FP8Parity, QuantizeDequantize_E5M2_Roundtrip) {
             // FP8_E5M2 has 2 mantissa bits → relative error up to ~0.25
             EXPECT_LT(rel_err, 0.35f);
         } catch (const std::exception& e) {
-            std::cerr << "FP8_E5M2 skipped on " << backend_name(dev) << ": "
+            ADD_FAILURE() << "FP8_E5M2 failed on " << backend_name(dev) << ": "
                       << e.what() << std::endl;
         }
     }

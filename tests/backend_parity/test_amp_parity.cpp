@@ -48,7 +48,7 @@ TEST(AMPParity, ScaleLossMatches) {
                          + backend_name(backends[i]));
             EXPECT_NEAR(got, ref_scaled, std::abs(ref_scaled) * 1e-4f);
         } catch (const std::exception& e) {
-            std::cerr << "GradScaler.scale skipped on "
+            ADD_FAILURE() << "GradScaler.scale failed on "
                       << backend_name(backends[i]) << ": " << e.what()
                       << std::endl;
         }
@@ -91,7 +91,7 @@ TEST(AMPParity, ScaledBackwardMatches) {
             EXPECT_TENSORS_CLOSE(ref_grad, x.grad().value().to(Device::cpu()),
                                  1e-3f, 1e-4f);
         } catch (const std::exception& e) {
-            std::cerr << "GradScaler backward skipped on "
+            ADD_FAILURE() << "GradScaler backward failed on "
                       << backend_name(backends[i]) << ": " << e.what()
                       << std::endl;
         }

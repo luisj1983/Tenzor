@@ -278,6 +278,11 @@ add_executable(test_pipeline_parallel test_pipeline_parallel.cpp)
 target_link_libraries(test_pipeline_parallel PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_pipeline_parallel LABELS "nn" DISCOVERY_TIMEOUT 60)
 
+# Missing activation layers (Hardsigmoid, Softmin, Softshrink, Tanhshrink)
+add_executable(test_activation_missing_multidtype layers/test_activation_missing_multidtype.cpp)
+target_link_libraries(test_activation_missing_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_activation_missing_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
 tenzor_discover_tests(test_gated_activations LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_moe LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_sliding_window_attention LABELS "nn" DISCOVERY_TIMEOUT 60)

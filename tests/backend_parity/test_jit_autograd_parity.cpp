@@ -65,7 +65,7 @@ TEST(JITAutogradParity, LinearChain_Backward) {
                                      x_dev.grad().value().to(Device::cpu()),
                                      1e-3f, 1e-4f);
             } catch (const std::exception& e) {
-                std::cerr << "LinearChain_Backward skipped on "
+                ADD_FAILURE() << "LinearChain_Backward failed on "
                           << backend_name(backends[i]) << ": " << e.what()
                           << std::endl;
             }
@@ -121,7 +121,7 @@ TEST(JITAutogradParity, LayerNormMLP_Backward) {
                                      x_dev.grad().value().to(Device::cpu()),
                                      1e-3f, 1e-3f);
             } catch (const std::exception& e) {
-                std::cerr << "LayerNormMLP_Backward skipped on "
+                ADD_FAILURE() << "LayerNormMLP_Backward failed on "
                           << backend_name(backends[i]) << ": " << e.what()
                           << std::endl;
             }

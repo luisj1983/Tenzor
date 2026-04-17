@@ -40,7 +40,7 @@ TEST(Phase5Parity, ALiBi_Bias) {
             SCOPED_TRACE(std::string("ALiBi on ") + backend_name(backends[i]));
             EXPECT_TENSORS_CLOSE(ref, bias.to(Device::cpu()), 1e-5f, 1e-7f);
         } catch (const std::exception& e) {
-            std::cerr << "ALiBi skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "ALiBi failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -80,7 +80,7 @@ TEST(Phase5Parity, RoPE_Forward) {
             SCOPED_TRACE(std::string("RoPE on ") + backend_name(backends[i]));
             EXPECT_TENSORS_CLOSE(ref, out.to(Device::cpu()), 1e-4f, 1e-6f);
         } catch (const std::exception& e) {
-            std::cerr << "RoPE skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "RoPE failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -107,7 +107,7 @@ TEST(Phase5Parity, RoPE_WithOffset) {
                          + backend_name(backends[i]));
             EXPECT_TENSORS_CLOSE(ref, out.to(Device::cpu()), 1e-4f, 1e-6f);
         } catch (const std::exception& e) {
-            std::cerr << "RoPE+offset skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "RoPE+offset failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -135,7 +135,7 @@ TEST(Phase5Parity, HannWindow) {
                          + backend_name(backends[i]));
             EXPECT_TENSORS_CLOSE(ref, win.to(Device::cpu()), 1e-5f, 1e-7f);
         } catch (const std::exception& e) {
-            std::cerr << "hann_window skipped on "
+            ADD_FAILURE() << "hann_window failed on "
                       << backend_name(backends[i]) << ": " << e.what()
                       << std::endl;
         }
@@ -159,7 +159,7 @@ TEST(Phase5Parity, HammingWindow) {
                          + backend_name(backends[i]));
             EXPECT_TENSORS_CLOSE(ref, win.to(Device::cpu()), 1e-5f, 1e-7f);
         } catch (const std::exception& e) {
-            std::cerr << "hamming_window skipped on "
+            ADD_FAILURE() << "hamming_window failed on "
                       << backend_name(backends[i]) << ": " << e.what()
                       << std::endl;
         }

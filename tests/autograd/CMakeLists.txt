@@ -66,6 +66,12 @@ tenzor_discover_tests(test_higher_order_nn LABELS "autograd" DISCOVERY_TIMEOUT 6
 tenzor_discover_tests(test_gradcheck LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_gradcheck_direct LABELS "autograd" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_gradcheck_extended LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Gradchecks for previously untested autograd functions
+add_executable(test_gradcheck_missing test_gradcheck_missing.cpp)
+target_link_libraries(test_gradcheck_missing PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_gradcheck_missing LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
 tenzor_discover_tests(test_autograd_additional LABELS "autograd" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_hooks LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_inplace_autograd LABELS "autograd" DISCOVERY_TIMEOUT 60)

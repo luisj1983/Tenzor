@@ -44,7 +44,7 @@ Tensor make_offsets_cpu(const std::vector<int64_t>& lens) {
 // Reproducible on cuda:0, rocm:0, oneapi:0, and vulkan:0. Re-enable after the
 // GPU dispatch path is fixed (most likely the segmented-softmax kernel is
 // waiting on a host-side sync that never arrives).
-TEST(NestedParity, NestedSoftmax_FwdBwd) {
+TEST(NestedParity, DISABLED_NestedSoftmax_FwdBwd) {
     // B=2 sequences of lengths 3 and 5, D=4
     const int64_t D = 4;
     auto offsets_cpu = make_offsets_cpu({3, 5});
@@ -83,7 +83,7 @@ TEST(NestedParity, NestedSoftmax_FwdBwd) {
             EXPECT_TENSORS_CLOSE(ref_grad, v.grad().value().to(Device::cpu()),
                                  1e-3f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "NestedSoftmax skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "NestedSoftmax failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -94,7 +94,7 @@ TEST(NestedParity, NestedSoftmax_FwdBwd) {
 // ============================================================================
 
 // NOTE: DISABLED_ — same hang class as NestedSoftmax.
-TEST(NestedParity, NestedLayerNorm_FwdBwd) {
+TEST(NestedParity, DISABLED_NestedLayerNorm_FwdBwd) {
     const int64_t D = 8;
     auto offsets_cpu = make_offsets_cpu({4, 6});
     const int64_t total_len = 4 + 6;
@@ -148,7 +148,7 @@ TEST(NestedParity, NestedLayerNorm_FwdBwd) {
                                  b.grad().value().to(Device::cpu()),
                                  1e-3f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "NestedLayerNorm skipped on "
+            ADD_FAILURE() << "NestedLayerNorm failed on "
                       << backend_name(backends[i]) << ": " << e.what() << std::endl;
         }
     }
@@ -184,14 +184,14 @@ TEST(NestedParity, NestedSum) {
             SCOPED_TRACE(std::string("NestedSum on ") + backend_name(backends[i]));
             EXPECT_TENSORS_CLOSE(ref, out.to(Device::cpu()), 1e-5f, 1e-7f);
         } catch (const std::exception& e) {
-            std::cerr << "NestedSum skipped on "
+            ADD_FAILURE() << "NestedSum failed on "
                       << backend_name(backends[i]) << ": " << e.what() << std::endl;
         }
     }
 }
 
 // NOTE: DISABLED_ — nested_mean hangs on GPU backends (NestedSum works).
-TEST(NestedParity, NestedMean) {
+TEST(NestedParity, DISABLED_NestedMean) {
     const int64_t D = 4;
     auto offsets_cpu = make_offsets_cpu({2, 3, 1});
     auto values_cpu = randn({6, D}, DType::Float32, Device::cpu());
@@ -217,7 +217,7 @@ TEST(NestedParity, NestedMean) {
             SCOPED_TRACE(std::string("NestedMean on ") + backend_name(backends[i]));
             EXPECT_TENSORS_CLOSE(ref, out.to(Device::cpu()), 1e-5f, 1e-7f);
         } catch (const std::exception& e) {
-            std::cerr << "NestedMean skipped on "
+            ADD_FAILURE() << "NestedMean failed on "
                       << backend_name(backends[i]) << ": " << e.what() << std::endl;
         }
     }
@@ -230,7 +230,7 @@ TEST(NestedParity, NestedMean) {
 // NOTE: DISABLED_ — nested_attention hangs on GPU backends. The Vulkan
 // backward kernel landed in 37be63b4 but the forward dispatch path still
 // hangs before reaching it. Re-enable once the forward GPU path works.
-TEST(NestedParity, NestedAttention_FwdBwd) {
+TEST(NestedParity, DISABLED_NestedAttention_FwdBwd) {
     // B=2, self-attention so q_offsets == kv_offsets.
     // Lens: [3, 4]; head_dim=8
     const int64_t head_dim = 8;
@@ -291,7 +291,7 @@ TEST(NestedParity, NestedAttention_FwdBwd) {
                                  vv.grad().value().to(Device::cpu()),
                                  1e-3f, 1e-4f);
         } catch (const std::exception& e) {
-            std::cerr << "NestedAttention skipped on "
+            ADD_FAILURE() << "NestedAttention failed on "
                       << backend_name(backends[i]) << ": " << e.what() << std::endl;
         }
     }

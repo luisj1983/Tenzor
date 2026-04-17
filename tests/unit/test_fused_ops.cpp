@@ -199,58 +199,63 @@ TEST_F(FusedOpsTest, FusedBatchNormReLU_CustomEpsilon) {
 // Fused Softmax + CrossEntropy Tests
 // ==============================================================================
 
-// TEST_F(FusedOpsTest, FusedSoftmaxCrossEntropy_MeanReduction) {
-//     auto logits = randn({32, 10});
-//     auto targets = randint(0, 10, {32}, DType::Int64);
-// 
-//     auto loss = fused_softmax_cross_entropy(logits, targets, "mean");
-// 
-//     // Loss should be a scalar
-//     ASSERT_EQ(loss.numel(), 1);
-// 
-//     // Loss should be non-negative
-//     float loss_val = loss.data<float>()[0];
-//     ASSERT_GE(loss_val, 0.0f);
-// }
+// Re-enabled then re-disabled: FusedSoftmaxCrossEntropy_NoReduction segfaults
+// (exit code 139) when called without the ops:: namespace prefix that the
+// parity test in test_vision_fused_parity.cpp uses. The unit test fixture's
+// FusedOpsTest creates tensors differently (no Device::cpu() explicit).
+// Needs investigation — keeping as DISABLED_ so the failure is visible.
+TEST_F(FusedOpsTest, DISABLED_FusedSoftmaxCrossEntropy_MeanReduction) {
+    auto logits = randn({32, 10});
+    auto targets = randint(0, 10, {32}, DType::Int64);
 
-// TEST_F(FusedOpsTest, FusedSoftmaxCrossEntropy_SumReduction) {
-//     auto logits = randn({16, 5});
-//     auto targets = randint(0, 5, {16}, DType::Int64);
-// 
-//     auto loss = fused_softmax_cross_entropy(logits, targets, "sum");
-// 
-//     ASSERT_EQ(loss.numel(), 1);
-//     ASSERT_GE(loss.data<float>()[0], 0.0f);
-// }
+    auto loss = fused_softmax_cross_entropy(logits, targets, "mean");
 
-// TEST_F(FusedOpsTest, FusedSoftmaxCrossEntropy_NoReduction) {
-//     auto logits = randn({8, 100});
-//     auto targets = randint(0, 100, {8}, DType::Int64);
-// 
-//     auto losses = fused_softmax_cross_entropy(logits, targets, "none");
-// 
-//     // Should return per-sample losses
-//     ASSERT_EQ(losses.shape()[0], 8);
-// 
-//     // All losses should be non-negative
-//     const float* data = losses.data<float>();
-//     for (int64_t i = 0; i < losses.numel(); ++i) {
-//         ASSERT_GE(data[i], 0.0f);
-//     }
-// }
+    // Loss should be a scalar
+    ASSERT_EQ(loss.numel(), 1);
 
-// TEST_F(FusedOpsTest, FusedSoftmaxCrossEntropy_NumericalStability) {
-//     // Large logits to test numerical stability
-//     auto logits = randn({4, 3}) * 100.0f;
-//     auto targets = randint(0, 3, {4}, DType::Int64);
-// 
-//     auto loss = fused_softmax_cross_entropy(logits, targets, "mean");
-// 
-//     // Should not produce NaN or Inf
-//     float loss_val = loss.data<float>()[0];
-//     ASSERT_FALSE(std::isnan(loss_val));
-//     ASSERT_FALSE(std::isinf(loss_val));
-// }
+    // Loss should be non-negative
+    float loss_val = loss.data<float>()[0];
+    ASSERT_GE(loss_val, 0.0f);
+}
+
+TEST_F(FusedOpsTest, DISABLED_FusedSoftmaxCrossEntropy_SumReduction) {
+    auto logits = randn({16, 5});
+    auto targets = randint(0, 5, {16}, DType::Int64);
+
+    auto loss = fused_softmax_cross_entropy(logits, targets, "sum");
+
+    ASSERT_EQ(loss.numel(), 1);
+    ASSERT_GE(loss.data<float>()[0], 0.0f);
+}
+
+TEST_F(FusedOpsTest, DISABLED_FusedSoftmaxCrossEntropy_NoReduction) {
+    auto logits = randn({8, 100});
+    auto targets = randint(0, 100, {8}, DType::Int64);
+
+    auto losses = fused_softmax_cross_entropy(logits, targets, "none");
+
+    // Should return per-sample losses
+    ASSERT_EQ(losses.shape()[0], 8);
+
+    // All losses should be non-negative
+    const float* data = losses.data<float>();
+    for (int64_t i = 0; i < losses.numel(); ++i) {
+        ASSERT_GE(data[i], 0.0f);
+    }
+}
+
+TEST_F(FusedOpsTest, DISABLED_FusedSoftmaxCrossEntropy_NumericalStability) {
+    // Large logits to test numerical stability
+    auto logits = randn({4, 3}) * 100.0f;
+    auto targets = randint(0, 3, {4}, DType::Int64);
+
+    auto loss = fused_softmax_cross_entropy(logits, targets, "mean");
+
+    // Should not produce NaN or Inf
+    float loss_val = loss.data<float>()[0];
+    ASSERT_FALSE(std::isnan(loss_val));
+    ASSERT_FALSE(std::isinf(loss_val));
+}
 
 // ==============================================================================
 // Fused Add + ReLU Tests

@@ -225,7 +225,7 @@ TEST(VisionFusedParity, NMS) {
                 EXPECT_EQ(r[k], o[k]) << "nms index " << k << " differs";
             }
         } catch (const std::exception& e) {
-            std::cerr << "nms skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "nms failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -266,7 +266,7 @@ TEST(VisionFusedParity, ROIAlign) {
             SCOPED_TRACE(std::string("ROIAlign on ") + backend_name(backends[i]));
             EXPECT_TENSORS_CLOSE(ref, out.to(Device::cpu()), 1e-4f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "ROIAlign skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "ROIAlign failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -299,10 +299,63 @@ TEST(VisionFusedParity, FusedAddReLU) {
         {a, b}, 1e-5f, 1e-7f, "fused_add_relu");
 }
 
-// NOTE: FusedBatchNormReLU has an OpId entry (op_id.hpp:270) but no public
-// free-function wrapper in include/tenzor/ops/fused_ops.hpp. Parity coverage
-// would need to go through the dispatch layer directly — out of scope for
-// this task.
+// ============================================================================
+// Fused ops — additional coverage (Phase 1.5)
+// ============================================================================
+
+TEST(VisionFusedParity, FusedConv2dSwish) {
+    auto input = randn({1, 3, 8, 8}, DType::Float32, Device::cpu());
+    auto weight = randn({8, 3, 3, 3}, DType::Float32, Device::cpu());
+    auto bias = randn({8}, DType::Float32, Device::cpu());
+
+    test_operation_parity(
+        [](const std::vector<Tensor>& ins) {
+            return ops::fused_conv2d_swish(ins[0], ins[1], &ins[2], 1, 1);
+        },
+        {input, weight, bias}, 1e-3f, 1e-5f, "fused_conv2d_swish");
+}
+
+TEST(VisionFusedParity, FusedBatchNormReLU) {
+    int64_t C = 8;
+    auto input = randn({2, C, 4, 4}, DType::Float32, Device::cpu());
+    auto mean = randn({C}, DType::Float32, Device::cpu());
+    auto var = tenzor::add(tenzor::abs(randn({C}, DType::Float32, Device::cpu())), 0.1f);
+    auto weight = randn({C}, DType::Float32, Device::cpu());
+    auto bn_bias = randn({C}, DType::Float32, Device::cpu());
+
+    test_operation_parity(
+        [](const std::vector<Tensor>& ins) {
+            return ops::fused_batchnorm_relu(ins[0], ins[1], ins[2], ins[3], ins[4]);
+        },
+        {input, mean, var, weight, bn_bias}, 1e-4f, 1e-6f, "fused_batchnorm_relu");
+}
+
+TEST(VisionFusedParity, FusedGELU) {
+    auto input = randn({8, 16}, DType::Float32, Device::cpu());
+    test_operation_parity(
+        [](const std::vector<Tensor>& ins) {
+            return ops::fused_gelu(ins[0]);
+        },
+        {input}, 1e-5f, 1e-6f, "fused_gelu");
+}
+
+TEST(VisionFusedParity, FusedLayerNorm) {
+    auto input = randn({4, 8, 32}, DType::Float32, Device::cpu());
+    auto weight = randn({32}, DType::Float32, Device::cpu());
+    auto ln_bias = randn({32}, DType::Float32, Device::cpu());
+
+    test_operation_parity(
+        [](const std::vector<Tensor>& ins) {
+            return ops::fused_layer_norm(ins[0], {32}, ins[1], ins[2]);
+        },
+        {input, weight, ln_bias}, 1e-4f, 1e-6f, "fused_layer_norm");
+}
+
+// NOTE: FusedAttention has an OpId entry but no public free-function wrapper
+// in include/tenzor/ops/fused_ops.hpp. Parity coverage would need to go
+// through the dispatch layer directly — out of scope for this task.
+// Similarly, fused_sgd_step / fused_adam_step are CUDA-only backend APIs
+// (include/tenzor/backend/fused_ops.hpp) without general dispatch wrappers.
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

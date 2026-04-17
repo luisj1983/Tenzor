@@ -79,7 +79,7 @@ TEST(SamplingParity, Bernoulli_EmpiricalProbability) {
             EXPECT_NEAR(mean, 0.3f, 0.02f)
                 << "Empirical mean deviates more than 4-sigma from analytic";
         } catch (const std::exception& e) {
-            std::cerr << "Bernoulli skipped on " << backend_name(dev)
+            ADD_FAILURE() << "Bernoulli failed on " << backend_name(dev)
                       << ": " << e.what() << std::endl;
         }
     }
@@ -104,7 +104,7 @@ TEST(SamplingParity, Poisson_EmpiricalMean) {
             SCOPED_TRACE(std::string("Poisson on ") + backend_name(dev));
             EXPECT_NEAR(mean, 5.0f, 0.14f);
         } catch (const std::exception& e) {
-            std::cerr << "Poisson skipped on " << backend_name(dev)
+            ADD_FAILURE() << "Poisson failed on " << backend_name(dev)
                       << ": " << e.what() << std::endl;
         }
     }
@@ -129,7 +129,7 @@ TEST(SamplingParity, Exponential_EmpiricalMean) {
             SCOPED_TRACE(std::string("Exponential on ") + backend_name(dev));
             EXPECT_NEAR(mean, 0.5f, 0.03f);
         } catch (const std::exception& e) {
-            std::cerr << "Exponential skipped on " << backend_name(dev)
+            ADD_FAILURE() << "Exponential failed on " << backend_name(dev)
                       << ": " << e.what() << std::endl;
         }
     }
@@ -172,7 +172,7 @@ TEST(SamplingParity, Multinomial_CategoryFrequencies) {
                     << ", true=" << p_true;
             }
         } catch (const std::exception& e) {
-            std::cerr << "Multinomial skipped on " << backend_name(dev)
+            ADD_FAILURE() << "Multinomial failed on " << backend_name(dev)
                       << ": " << e.what() << std::endl;
         }
     }
@@ -196,7 +196,7 @@ TEST(SamplingParity, NormalSample_EmpiricalMomentss) {
             EXPECT_NEAR(mean, 0.0f, 0.04f);
             EXPECT_NEAR(var_val, 1.0f, 0.06f);
         } catch (const std::exception& e) {
-            std::cerr << "randn skipped on " << backend_name(dev) << ": "
+            ADD_FAILURE() << "randn failed on " << backend_name(dev) << ": "
                       << e.what() << std::endl;
         }
     }
@@ -222,7 +222,7 @@ TEST(SamplingParity, Uniform_EmpiricalMoments) {
             EXPECT_GE(min_val, 0.0f);
             EXPECT_LE(max_val, 1.0f);
         } catch (const std::exception& e) {
-            std::cerr << "rand skipped on " << backend_name(dev) << ": "
+            ADD_FAILURE() << "rand failed on " << backend_name(dev) << ": "
                       << e.what() << std::endl;
         }
     }

@@ -257,8 +257,8 @@ void pool_grad_parity(PoolT make_pool,
                                  v.grad().value().to(Device::cpu()),
                                  1e-3f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << name << " skipped on " << backend_name(backends[i])
-                      << ": " << e.what() << std::endl;
+            ADD_FAILURE() << name << " failed on " << backend_name(backends[i])
+                      << ": " << e.what();
         }
     }
 }
@@ -341,7 +341,7 @@ TEST(NNPoolingParity, FractionalMaxPool3d) {
             EXPECT_TENSORS_CLOSE(ref, out.tensor().to(Device::cpu()),
                                  1e-4f, 1e-6f);
         } catch (const std::exception& e) {
-            std::cerr << "FractionalMaxPool3d skipped on "
+            ADD_FAILURE() << "FractionalMaxPool3d failed on "
                       << backend_name(backends[i]) << ": " << e.what()
                       << std::endl;
         }
@@ -394,7 +394,7 @@ TEST(NNPoolingParity, MaxUnpool2d) {
             EXPECT_TENSORS_CLOSE(ref, un.tensor().to(Device::cpu()),
                                  1e-5f, 1e-7f);
         } catch (const std::exception& e) {
-            std::cerr << "MaxUnpool2d skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "MaxUnpool2d failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }

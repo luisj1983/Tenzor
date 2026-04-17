@@ -69,7 +69,7 @@ TEST(GradTransformParity, JVP) {
             EXPECT_TENSORS_CLOSE(ref_tangent, t.to(Device::cpu()),
                                  1e-4f, 1e-6f);
         } catch (const std::exception& e) {
-            std::cerr << "jvp skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "jvp failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -109,7 +109,7 @@ TEST(GradTransformParity, VJP) {
             EXPECT_TENSORS_CLOSE(ref_grad, g.to(Device::cpu()),
                                  1e-4f, 1e-6f);
         } catch (const std::exception& e) {
-            std::cerr << "vjp skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "vjp failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -140,7 +140,7 @@ TEST(GradTransformParity, Jacobian) {
             SCOPED_TRACE(std::string("jacobian on ") + backend_name(backends[i]));
             EXPECT_TENSORS_CLOSE(ref, out.to(Device::cpu()), 1e-4f, 1e-6f);
         } catch (const std::exception& e) {
-            std::cerr << "jacobian skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "jacobian failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -174,7 +174,7 @@ TEST(GradTransformParity, Hessian) {
             SCOPED_TRACE(std::string("hessian on ") + backend_name(backends[i]));
             EXPECT_TENSORS_CLOSE(ref, out.to(Device::cpu()), 1e-3f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "hessian skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "hessian failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -210,7 +210,7 @@ TEST(GradTransformParity, HVP) {
             SCOPED_TRACE(std::string("hvp on ") + backend_name(backends[i]));
             EXPECT_TENSORS_CLOSE(ref_hv, hv.to(Device::cpu()), 1e-3f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "hvp skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "hvp failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -243,7 +243,7 @@ TEST(GradTransformParity, Vmap_Basic) {
             EXPECT_TENSORS_CLOSE(ref, out.tensor().to(Device::cpu()),
                                  1e-4f, 1e-6f);
         } catch (const std::exception& e) {
-            std::cerr << "vmap skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "vmap failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }

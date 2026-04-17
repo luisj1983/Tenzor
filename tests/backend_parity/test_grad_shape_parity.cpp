@@ -137,7 +137,14 @@ TEST_P(GradShapeParityTest, GatherBackward) {
     auto [grad_cpu, idx_data] = run_test(Device::cpu());
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(true);
+        ASSERT_EQ(grad_cpu.dim(), 2);
+        ASSERT_EQ(grad_cpu.size(0), 4);
+        ASSERT_EQ(grad_cpu.size(1), 8);
+        Tensor grad_abs_sum = tenzor::sum(tenzor::abs(grad_cpu));
+        const float* grad_ptr = grad_abs_sum.data<float>();
+        ASSERT_NE(grad_ptr, nullptr);
+        float grad_sum = grad_ptr[0];
+        ASSERT_GT(grad_sum, 0.0f);
         return;
     }
 
@@ -175,7 +182,14 @@ TEST_P(GradShapeParityTest, ScatterAddBackward) {
     auto grad_cpu = run(Device::cpu());
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(true);
+        ASSERT_EQ(grad_cpu.dim(), 2);
+        ASSERT_EQ(grad_cpu.size(0), 4);
+        ASSERT_EQ(grad_cpu.size(1), 4);
+        Tensor grad_abs_sum = tenzor::sum(tenzor::abs(grad_cpu));
+        const float* grad_ptr = grad_abs_sum.data<float>();
+        ASSERT_NE(grad_ptr, nullptr);
+        float grad_sum = grad_ptr[0];
+        ASSERT_GT(grad_sum, 0.0f);
         return;
     }
 

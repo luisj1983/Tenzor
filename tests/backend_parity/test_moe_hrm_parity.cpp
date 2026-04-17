@@ -55,7 +55,7 @@ TEST(MoEHRMParity, MixtureOfExperts_Forward) {
             // MoE has routing indeterminism at boundaries; rel tolerance 1e-2.
             EXPECT_TENSORS_CLOSE(ref, out.to(Device::cpu()), 1e-2f, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "MoE skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "MoE failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -108,7 +108,7 @@ TEST(MoEHRMParity, HRM_Forward) {
             SCOPED_TRACE(std::string("HRM on ") + backend_name(backends[i]));
             EXPECT_TENSORS_CLOSE(ref, out.to(Device::cpu()), 1e-2f, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "HRM skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "HRM failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }

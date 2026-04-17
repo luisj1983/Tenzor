@@ -40,7 +40,7 @@ TEST(NNConvParity, Conv1d_Basic) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "Conv1d_Basic skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "Conv1d_Basic failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -69,7 +69,7 @@ TEST(NNConvParity, Conv1d_Stride) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "Conv1d_Stride skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "Conv1d_Stride failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -98,7 +98,7 @@ TEST(NNConvParity, Conv1d_Padding) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "Conv1d_Padding skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "Conv1d_Padding failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -131,7 +131,7 @@ TEST(NNConvParity, Conv3d_Basic) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "Conv3d_Basic skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "Conv3d_Basic failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -160,7 +160,7 @@ TEST(NNConvParity, Conv3d_Stride) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref_output, output, 1e-3f, 1e-4f);
         } catch (const std::exception& e) {
-            std::cerr << "Conv3d_Stride skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "Conv3d_Stride failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -197,7 +197,7 @@ TEST(NNConvParity, ConvTranspose1d) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "ConvTranspose1d skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "ConvTranspose1d failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -230,7 +230,7 @@ TEST(NNConvParity, ConvTranspose3d) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "ConvTranspose3d skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "ConvTranspose3d failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -264,7 +264,7 @@ TEST(NNConvParity, Conv2d_Groups2) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "Conv2d_Groups2 skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "Conv2d_Groups2 failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -294,7 +294,7 @@ TEST(NNConvParity, Conv1d_Groups) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "Conv1d_Groups skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "Conv1d_Groups failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -340,7 +340,7 @@ TEST(NNConvParity, DeformableConv2d) {
                 backends[i].synchronize();
                 EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
             } catch (const std::exception& e) {
-                std::cerr << "DeformableConv2d skipped on " << backend_name(backends[i])
+                ADD_FAILURE() << "DeformableConv2d failed on " << backend_name(backends[i])
                           << ": " << e.what() << std::endl;
             }
         }
@@ -377,7 +377,7 @@ TEST(NNConvParity, Conv2d_NoBias) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "Conv2d_NoBias skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "Conv2d_NoBias failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -412,7 +412,7 @@ TEST(NNConvParity, DepthwiseConv2d) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "DepthwiseConv2d skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "DepthwiseConv2d failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -446,7 +446,7 @@ TEST(NNConvParity, ConvTranspose2d) {
             SCOPED_TRACE(std::string("ConvTranspose2d on ") + backend_name(backends[i]));
             EXPECT_TENSORS_CLOSE(ref_output, output, 1e-3f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "ConvTranspose2d skipped on " << backend_name(backends[i])
+            ADD_FAILURE() << "ConvTranspose2d failed on " << backend_name(backends[i])
                       << ": " << e.what() << std::endl;
         }
     }
@@ -505,8 +505,8 @@ void conv_grad_parity(ConvT make_conv,
                                      1e-3f, 1e-4f);
             }
         } catch (const std::exception& e) {
-            std::cerr << name << " skipped on "
-                      << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << name << " failed on "
+                      << backend_name(backends[i]) << ": " << e.what();
         }
     }
 }
