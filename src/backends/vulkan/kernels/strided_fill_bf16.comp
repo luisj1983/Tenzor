@@ -1,7 +1,13 @@
 #version 450
 
-// Strided Fill for BFloat16: fill a tensor with a value, respecting non-contiguous strides
-// BF16 packed buffers (2 BFloat16 per uint32), value passed as float in push constants
+// Strided Fill for BFloat16: fill a tensor with a value, respecting
+// non-contiguous strides.
+//
+// BF16 data is packed 2 elements per uint32. Per the same race-condition
+// analysis as strided_fill_f16.comp, a naive read-modify-write of the
+// 32-bit word to update one of its two halves races when two threads
+// target adjacent elements in the same word. Use atomicCompSwap to merge
+// each half safely.
 layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Data { uint data[]; };
@@ -14,22 +20,34 @@ layout(push_constant) uniform PushConstants {
     uint shape_stride[16]; // shape_stride[2*d] = shape[d], shape_stride[2*d+1] = stride[d]
 } params;
 
-// Write a single bfloat16 element to packed uint buffer
-void writeBF16(uint element_idx, float val) {
-    uint word_idx = element_idx / 2;
-    uint word_offset = element_idx % 2;
-    uint bits = ((floatBitsToUint(val) + 0x7FFFu + ((floatBitsToUint(val) >> 16) & 1u)) >> 16);
-    uint existing = data[word_idx];
-    uint mask = 0xFFFFu << (word_offset * 16);
-    data[word_idx] = (existing & ~mask) | (bits << (word_offset * 16));
+// Merge a 16-bit value into one half of a uint32 using an atomic CAS loop.
+// `val_bits` must already be in the lower 16 bits.
+void atomicWriteHalf(uint word_idx, uint word_offset, uint val_bits) {
+    uint shift = word_offset * 16u;
+    uint mask = 0xFFFFu << shift;
+    uint new_half = (val_bits & 0xFFFFu) << shift;
+
+    uint prev = data[word_idx];
+    while (true) {
+        uint desired = (prev & ~mask) | new_half;
+        uint observed = atomicCompSwap(data[word_idx], prev, desired);
+        if (observed == prev) return;  // CAS succeeded
+        prev = observed;               // someone raced; retry with the latest value
+    }
+}
+
+// IEEE Float32 → BF16 bits via round-to-nearest-even.
+uint float_to_bf16_bits(float val) {
+    uint f = floatBitsToUint(val);
+    return ((f + 0x7FFFu + ((f >> 16) & 1u)) >> 16) & 0xFFFFu;
 }
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= params.n_elements) return;
 
-    // Decompose flat index into multi-dim coordinates, compute strided offset
-    uint physical_offset = 0;
+    // Decompose flat index into multi-dim coordinates, compute strided offset.
+    uint physical_offset = 0u;
     uint rem = idx;
     for (int d = int(params.ndim) - 1; d >= 0; d--) {
         uint dim_size = params.shape_stride[2 * d];
@@ -39,5 +57,7 @@ void main() {
         physical_offset += coord * dim_stride;
     }
 
-    writeBF16(physical_offset, params.fill_value);
+    uint word_idx = physical_offset / 2u;
+    uint word_offset = physical_offset % 2u;
+    atomicWriteHalf(word_idx, word_offset, float_to_bf16_bits(params.fill_value));
 }

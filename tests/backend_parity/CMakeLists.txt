@@ -46,6 +46,14 @@ endfunction()
 # Operation parity tests (40+ math and reduction operations)
 add_parity_test(test_operation_parity test_operation_parity.cpp)
 
+# Stride parity tests — exercises each op with non-contiguous inputs to catch
+# kernels that read strides from shape instead of the tensor's actual strides.
+add_parity_test(test_stride_parity test_stride_parity.cpp)
+
+# BFloat16 parity tests — exercises each op with BF16 inputs to catch
+# dispatchers that silently fall through to the F32 shader and corrupt data.
+add_parity_test(test_bf16_parity test_bf16_parity.cpp)
+
 # Neural network operation parity tests (30+ NN operations)
 add_parity_test(test_nn_parity test_nn_parity.cpp)
 
@@ -218,6 +226,8 @@ add_custom_target(test_parity_full
     COMMAND ${CMAKE_CTEST_COMMAND} -L "backend_parity" --output-on-failure
     DEPENDS
         test_operation_parity
+        test_stride_parity
+        test_bf16_parity
         test_nn_parity
         test_gradient_parity
         test_dtype_parity

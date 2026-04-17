@@ -729,8 +729,11 @@ auto VulkanBackend::dispatchUnaryOpWithParam(const std::string& op_name,
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, push_constants_size, push_constants_ptr);
 
-    // For F16 packed-pair shader, each thread processes 2 elements
-    uint32_t num_work_items = (shader_name == "math_f16") ? static_cast<uint32_t>((input.numel() + 1) / 2) : static_cast<uint32_t>(input.numel());
+    // For F16 / BF16 packed-pair shaders, each thread processes 2 elements
+    const bool packed_pair = (shader_name == "math_f16" || shader_name == "math_bf16");
+    uint32_t num_work_items = packed_pair
+        ? static_cast<uint32_t>((input.numel() + 1) / 2)
+        : static_cast<uint32_t>(input.numel());
     uint32_t workgroups = div_wg(num_work_items, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
@@ -757,6 +760,7 @@ auto VulkanBackend::dispatchTrigonometricOp(const std::string& op_name,
     std::string shader_name = "trigonometric";
     if (input.dtype() == DType::Float16) shader_name = "trigonometric_f16";
     else if (input.dtype() == DType::Float64) shader_name = "trigonometric_f64";
+    else if (input.dtype() == DType::BFloat16) shader_name = "trigonometric_bf16";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     auto shape = input.shape();
@@ -778,7 +782,9 @@ auto VulkanBackend::dispatchTrigonometricOp(const std::string& op_name,
     // Calculate buffer sizes
     size_t buffer_size_in = input.numel() * input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
-    if (input.dtype() == DType::Float16) {
+    const bool is_packed_half = (input.dtype() == DType::Float16 ||
+                                 input.dtype() == DType::BFloat16);
+    if (is_packed_half) {
         size_t in_pairs = (input.numel() + 1) / 2;
         size_t out_pairs = (output.numel() + 1) / 2;
         buffer_size_in = in_pairs * 4;
@@ -803,9 +809,10 @@ auto VulkanBackend::dispatchTrigonometricOp(const std::string& op_name,
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    // For F16, each thread processes 2 elements
-    uint32_t num_work_items = (input.dtype() == DType::Float16) ?
-        static_cast<uint32_t>((input.numel() + 1) / 2) : static_cast<uint32_t>(input.numel());
+    // For packed-pair F16 / BF16, each thread processes 2 elements
+    uint32_t num_work_items = is_packed_half
+        ? static_cast<uint32_t>((input.numel() + 1) / 2)
+        : static_cast<uint32_t>(input.numel());
     uint32_t workgroups = div_wg(num_work_items, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
@@ -833,6 +840,7 @@ auto VulkanBackend::dispatchHyperbolicOp(const std::string& op_name,
     std::string shader_name = "hyperbolic";
     if (input.dtype() == DType::Float16) shader_name = "hyperbolic_f16";
     else if (input.dtype() == DType::Float64) shader_name = "hyperbolic_f64";
+    else if (input.dtype() == DType::BFloat16) shader_name = "hyperbolic_bf16";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     auto shape = input.shape();
@@ -854,7 +862,9 @@ auto VulkanBackend::dispatchHyperbolicOp(const std::string& op_name,
     // Calculate buffer sizes
     size_t buffer_size_in = input.numel() * input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
-    if (input.dtype() == DType::Float16) {
+    const bool is_packed_half = (input.dtype() == DType::Float16 ||
+                                 input.dtype() == DType::BFloat16);
+    if (is_packed_half) {
         size_t in_pairs = (input.numel() + 1) / 2;
         size_t out_pairs = (output.numel() + 1) / 2;
         buffer_size_in = in_pairs * 4;
@@ -879,9 +889,10 @@ auto VulkanBackend::dispatchHyperbolicOp(const std::string& op_name,
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    // For F16, each thread processes 2 elements
-    uint32_t num_work_items = (input.dtype() == DType::Float16) ?
-        static_cast<uint32_t>((input.numel() + 1) / 2) : static_cast<uint32_t>(input.numel());
+    // For packed-pair F16 / BF16, each thread processes 2 elements
+    uint32_t num_work_items = is_packed_half
+        ? static_cast<uint32_t>((input.numel() + 1) / 2)
+        : static_cast<uint32_t>(input.numel());
     uint32_t workgroups = div_wg(num_work_items, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
@@ -957,6 +968,9 @@ auto VulkanBackend::dispatchComparisonOp(const std::string& op_name,
         case DType::Float16:
             shader_name = "comparison_f16";
             break;
+        case DType::BFloat16:
+            shader_name = "comparison_bf16";
+            break;
         default:
             // Float32 uses the default comparison shader
             shader_name = "comparison";
@@ -997,14 +1011,13 @@ auto VulkanBackend::dispatchComparisonOp(const std::string& op_name,
     size_t buffer_size_a = a.numel() * a.dtype_size();
     size_t buffer_size_b = b.numel() * b.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
-    if (a.dtype() == DType::Float16) {
-        // Round up to 4-byte boundary for uint32 shader access (2 Float16 per uint32)
+    if (a.dtype() == DType::Float16 || a.dtype() == DType::BFloat16) {
+        // Round up to 4-byte boundary for uint32 shader access (2 halves per uint32)
         size_t a_pairs = (a.numel() + 1) / 2;
         size_t b_pairs = (b.numel() + 1) / 2;
         buffer_size_a = a_pairs * 4;
         buffer_size_b = b_pairs * 4;
-        // Output is Bool (uint8_t per element), NOT packed Float16
-        // Keep buffer_size_out as output.numel() * output.dtype_size()
+        // Output is Bool (uint8_t per element), NOT packed — keep as-is
     }
 
     // Allocate and write descriptor set

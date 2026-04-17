@@ -311,11 +311,15 @@ auto VulkanBackend::dispatchNorm(const Tensor& input, float p, int64_t dim, bool
 auto VulkanBackend::dispatchProd(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
     int32_t device_id = input.device().index;
 
-    // Int64 has no native prod shader; convert to Float64, compute, convert back
+    // Types without a dedicated prod shader: upcast, compute in a wider type,
+    // then downcast. Without this, BFloat16 buffers are silently reinterpreted
+    // as Float32 by the generic prod_reduction shader, producing garbage.
     DType orig_dtype = input.dtype();
     Tensor prod_input = input;
     if (orig_dtype == DType::Int64) {
         prod_input = input.to(DType::Float64);
+    } else if (orig_dtype == DType::BFloat16 || orig_dtype == DType::Float16) {
+        prod_input = input.to(DType::Float32);
     }
 
     // Select correct pipeline based on dtype

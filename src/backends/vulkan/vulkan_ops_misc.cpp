@@ -2099,7 +2099,15 @@ auto VulkanBackend::dispatchStridedFill(Tensor& input, float value) -> void {
     int32_t device_id = input.device().index;
     bool is_f64 = (input.dtype() == DType::Float64);
     bool is_f16 = (input.dtype() == DType::Float16);
-    std::string shader = is_f64 ? "strided_fill_f64" : (is_f16 ? "strided_fill_f16" : "strided_fill");
+    bool is_bf16 = (input.dtype() == DType::BFloat16);
+    // The generic `strided_fill` shader writes 32-bit floats; for BFloat16
+    // buffers that smears two BF16 slots per store and produces [0, v, 0, v]
+    // patterns. Dispatch to the dedicated BF16 shader instead.
+    std::string shader =
+        is_f64 ? "strided_fill_f64"
+        : is_f16 ? "strided_fill_f16"
+        : is_bf16 ? "strided_fill_bf16"
+        : "strided_fill";
     auto* pipeline = getPipeline(shader, device_id);
 
     int64_t numel = input.numel();

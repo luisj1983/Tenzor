@@ -188,13 +188,51 @@ auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> V
 NLLLoss::NLLLoss(Reduction reduction) : reduction_(reduction) {}
 
 auto NLLLoss::forward(const Variable& input, const Tensor& target) -> Variable {
-    // Negative log likelihood
-    // Assumes input is already log probabilities
-    // Convert target to match input dtype
-    auto target_float = target.to(input.tensor().dtype());
-    auto target_var = Variable(target_float, false);
-    auto weighted = target_var * input;
-    auto loss_per_sample = sum(weighted, 1, false);
+    // Negative log likelihood from log-probabilities.
+    //
+    // Accept both forms of target, matching CrossEntropyLoss::forward:
+    //   - one-hot encoded floating-point, shape [N, C]
+    //   - class indices Int64/Int32, shape [N]
+    //
+    // Previously this silently multiplied a non-broadcastable (N,)
+    // class-index tensor against the (N, C) log-probabilities, which raised
+    // "mul: shapes [N] and [N,C] are not broadcast-compatible" whenever
+    // PyTorch-style targets were passed.
+    auto num_classes = input.tensor().shape()[1];
+
+    const bool is_float_target =
+        (target.dtype() == DType::Float32 || target.dtype() == DType::Float64 ||
+         target.dtype() == DType::Float16) && target.ndim() == 2;
+
+    Variable one_hot_var;
+    if (is_float_target) {
+        // Already one-hot (or soft-labelled) with shape [N, C].
+        if (target.dtype() != input.tensor().dtype()) {
+            one_hot_var = Variable(target.to(input.tensor().dtype()), false);
+        } else {
+            one_hot_var = Variable(target, false);
+        }
+    } else {
+        // Class-index path: dispatch OneHot on the input's device so we
+        // avoid a GPU→CPU→GPU round-trip.
+        NewOpAttributes oh_attrs;
+        oh_attrs.set(AttrKey::NumClasses, num_classes);
+
+        Tensor target_dev = (target.device() == input.tensor().device())
+            ? target
+            : target.to(input.tensor().device());
+        std::vector<Tensor> oh_inputs = {target_dev};
+        auto oh_results = dispatch(OpId::OneHot, oh_inputs, oh_attrs);
+        Tensor one_hot = oh_results[0];
+
+        if (one_hot.dtype() != input.tensor().dtype()) {
+            one_hot = one_hot.to(input.tensor().dtype());
+        }
+        one_hot_var = Variable(one_hot, false);
+    }
+
+    auto weighted = input * one_hot_var;                 // [N, C]
+    auto loss_per_sample = sum(weighted, 1, false);      // [N]
     auto neg_loss = neg(loss_per_sample);
 
     switch (reduction_) {

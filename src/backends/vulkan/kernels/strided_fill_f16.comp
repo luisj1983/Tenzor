@@ -1,8 +1,21 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 
-// Strided Fill for Float16: fill a tensor with a value, respecting non-contiguous strides
-// F16 packed buffers (2 Float16 per uint32), value passed as float in push constants
+// Strided Fill for Float16: fill a tensor with a value, respecting
+// non-contiguous strides.
+//
+// F16 data is packed 2 elements per uint32. The previous implementation
+// did a naive read-modify-write of a 32-bit word to update one of its
+// two halves. When two threads targeted adjacent elements (one low half,
+// one high half) in the same word they raced: each read the same initial
+// value, each computed its new half, and whichever wrote last silently
+// overwrote the other's update. The symptom was "every other element is
+// stale" fills like `[v, 0, v, 0, ...]`.
+//
+// Fix: use atomic compare-and-swap (atomicCompSwap) to merge our half
+// into the word. Any contending thread's write is seen in the reload and
+// folded into the next attempt. This is race-safe regardless of how the
+// strides map physical slots.
 layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Data { uint data[]; };
@@ -15,22 +28,33 @@ layout(push_constant) uniform PushConstants {
     uint shape_stride[16]; // shape_stride[2*d] = shape[d], shape_stride[2*d+1] = stride[d]
 } params;
 
-// Write a single float16 element to packed uint buffer
-void writeF16(uint element_idx, float val) {
-    uint word_idx = element_idx / 2;
-    uint word_offset = element_idx % 2;
-    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
-    uint existing = data[word_idx];
-    uint mask = 0xFFFFu << (word_offset * 16);
-    data[word_idx] = (existing & ~mask) | (bits << (word_offset * 16));
+// Merge a 16-bit value into one half of a uint32 using an atomic CAS loop.
+// `val_bits` must already be in the lower 16 bits.
+void atomicWriteHalf(uint word_idx, uint word_offset, uint val_bits) {
+    uint shift = word_offset * 16u;
+    uint mask = 0xFFFFu << shift;
+    uint new_half = (val_bits & 0xFFFFu) << shift;
+
+    uint prev = data[word_idx];
+    while (true) {
+        uint desired = (prev & ~mask) | new_half;
+        uint observed = atomicCompSwap(data[word_idx], prev, desired);
+        if (observed == prev) return;  // CAS succeeded
+        prev = observed;               // someone raced; retry with the latest value
+    }
+}
+
+// Convert a float to F16 bits in the lower 16 bits of a uint.
+uint float_to_f16_bits(float val) {
+    return packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
 }
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= params.n_elements) return;
 
-    // Decompose flat index into multi-dim coordinates, compute strided offset
-    uint physical_offset = 0;
+    // Decompose flat index into multi-dim coordinates, compute strided offset.
+    uint physical_offset = 0u;
     uint rem = idx;
     for (int d = int(params.ndim) - 1; d >= 0; d--) {
         uint dim_size = params.shape_stride[2 * d];
@@ -40,5 +64,7 @@ void main() {
         physical_offset += coord * dim_stride;
     }
 
-    writeF16(physical_offset, params.fill_value);
+    uint word_idx = physical_offset / 2u;
+    uint word_offset = physical_offset % 2u;
+    atomicWriteHalf(word_idx, word_offset, float_to_f16_bits(params.fill_value));
 }

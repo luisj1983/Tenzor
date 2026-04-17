@@ -153,22 +153,21 @@ auto NTXentLoss::forward(const Variable& z_i, const Variable& z_j) -> Variable {
     // labels = [N, N+1, ..., 2N-1, 0, 1, ..., N-1]
     int64_t total = 2 * batch_size;
 
-    // Create the diagonal mask: fill diagonal with -inf
-    Tensor mask = zeros({total, total}, z_i.dtype(), z_i.device());
-    if (mask.device().type == Device::Type::CPU) {
-        float* mask_data = mask.data<float>();
+    // Create the diagonal mask: fill diagonal with -inf.
+    //
+    // Previously this path hardcoded `mask.data<float>()`, which throws a
+    // "type mismatch: requested type does not match tensor dtype" error
+    // whenever z_i has any non-Float32 dtype (e.g. Float64, BFloat16).
+    // Build the mask in Float32 on CPU, then cast/transfer to the target
+    // dtype and device — correct for every floating dtype we support.
+    Tensor cpu_mask_f32 = zeros({total, total}, DType::Float32, Device::cpu());
+    {
+        float* mask_data = cpu_mask_f32.data<float>();
         for (int64_t i = 0; i < total; ++i) {
             mask_data[i * total + i] = -std::numeric_limits<float>::infinity();
         }
-    } else {
-        // For GPU: create on CPU then transfer
-        Tensor cpu_mask = zeros({total, total}, z_i.dtype(), Device::cpu());
-        float* mask_data = cpu_mask.data<float>();
-        for (int64_t i = 0; i < total; ++i) {
-            mask_data[i * total + i] = -std::numeric_limits<float>::infinity();
-        }
-        mask = cpu_mask.to(z_i.device());
     }
+    Tensor mask = cpu_mask_f32.to(z_i.dtype()).to(z_i.device());
 
     Variable mask_var(mask, false);
     logits = logits + mask_var;

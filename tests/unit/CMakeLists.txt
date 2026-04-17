@@ -322,11 +322,6 @@ target_link_libraries(test_efficientnet PRIVATE tenzor_core GTest::gtest_main)
 add_executable(test_vit test_vit.cpp)
 target_link_libraries(test_vit PRIVATE tenzor_core GTest::gtest_main)
 
-# Swin Transformer tests (DISABLED - needs API fixes)
-# add_executable(test_swin_transformer test_swin_transformer.cpp)
-# target_link_libraries(test_swin_transformer PRIVATE tenzor_core GTest::gtest_main)
-# tenzor_discover_tests(test_swin_transformer DISCOVERY_TIMEOUT 60)
-
 # ConvNeXt tests
 add_executable(test_convnext test_convnext.cpp)
 target_link_libraries(test_convnext PRIVATE tenzor_core GTest::gtest_main)
@@ -338,11 +333,6 @@ target_link_libraries(test_convnext_multidtype PRIVATE tenzor_core GTest::gtest_
 # MobileNet V2/V3 tests
 add_executable(test_mobilenet_v2_v3 test_mobilenet_v2_v3.cpp)
 target_link_libraries(test_mobilenet_v2_v3 PRIVATE tenzor_core GTest::gtest_main)
-
-# Vision Components tests (DISABLED - depends on Swin)
-# add_executable(test_vision_components test_vision_components.cpp)
-# target_link_libraries(test_vision_components PRIVATE tenzor_core GTest::gtest_main)
-# tenzor_discover_tests(test_vision_components DISCOVERY_TIMEOUT 60)
 
 # ============================================================================
 # Phase 9 Model Tests - NLP Models
@@ -399,6 +389,10 @@ target_link_libraries(test_jit PRIVATE tenzor_core GTest::gtest_main)
 # JIT multi-dtype tests
 add_executable(test_jit_multidtype test_jit_multidtype.cpp)
 target_link_libraries(test_jit_multidtype PRIVATE tenzor_core GTest::gtest_main)
+
+# JIT script (compile_script) tests — MVP parser / evaluator coverage.
+add_executable(test_jit_script test_jit_script.cpp)
+target_link_libraries(test_jit_script PRIVATE tenzor_core GTest::gtest_main)
 
 # Pruning tests
 add_executable(test_pruning test_pruning.cpp)
@@ -672,6 +666,7 @@ tenzor_discover_tests(test_deeplabv3plus_multidtype DISCOVERY_TIMEOUT 60 DISCOVE
 tenzor_discover_tests(test_detection_ops DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_jit DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_jit_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_jit_script DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_pruning DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_pruning_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_distillation DISCOVERY_TIMEOUT 60)

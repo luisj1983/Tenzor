@@ -55,12 +55,16 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
 
     int32_t device_id = input.device().index;
 
-    // Select shader based on dtype
+    // Select shader based on dtype. BF16 needs its own shader — without
+    // the bf16 branch it silently falls through to the F32 shader, which
+    // interprets the BF16 packed buffer as Float32 and corrupts results.
     std::string shader_name = "conv2d_forward";
     if (input.dtype() == DType::Float64) {
         shader_name = "conv2d_forward_f64";
     } else if (input.dtype() == DType::Float16) {
         shader_name = "conv2d_forward_f16";
+    } else if (input.dtype() == DType::BFloat16) {
+        shader_name = "conv2d_forward_bf16";
     }
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -74,11 +78,18 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
     const void* buffer_output = output.data_ptr();
     const void* buffer_bias = has_bias ? bias->data_ptr() : buffer_output;
 
-    // Calculate buffer sizes
-    size_t buffer_size_input = input.numel() * input.dtype_size();
-    size_t buffer_size_weight = weight.numel() * weight.dtype_size();
-    size_t buffer_size_output = output.numel() * output.dtype_size();
-    size_t buffer_size_bias = has_bias ? (bias->numel() * bias->dtype_size()) : 4;
+    // Calculate buffer sizes. For packed 16-bit types (Float16, BFloat16),
+    // round up to 4-byte boundary since the shaders access uint32 words.
+    const bool is_packed_half = (input.dtype() == DType::Float16 ||
+                                 input.dtype() == DType::BFloat16);
+    auto buf_sz = [&](int64_t numel, size_t elem_sz) -> size_t {
+        if (is_packed_half) return static_cast<size_t>((numel + 1) / 2) * 4;
+        return static_cast<size_t>(numel) * elem_sz;
+    };
+    size_t buffer_size_input = buf_sz(input.numel(), input.dtype_size());
+    size_t buffer_size_weight = buf_sz(weight.numel(), weight.dtype_size());
+    size_t buffer_size_output = buf_sz(output.numel(), output.dtype_size());
+    size_t buffer_size_bias = has_bias ? buf_sz(bias->numel(), bias->dtype_size()) : 4;
 
     // Setup descriptor set bindings (input, weight, bias, output)
     std::vector<std::pair<uint32_t, const void*>> bindings = {

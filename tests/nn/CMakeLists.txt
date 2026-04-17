@@ -10,6 +10,14 @@ target_link_libraries(test_dropout PRIVATE tenzor_core GTest::gtest_main)
 add_executable(test_batchnorm2d layers/test_batchnorm2d.cpp)
 target_link_libraries(test_batchnorm2d PRIVATE tenzor_core GTest::gtest_main)
 
+# BatchNorm1d tests
+add_executable(test_batchnorm1d layers/test_batchnorm1d.cpp)
+target_link_libraries(test_batchnorm1d PRIVATE tenzor_core GTest::gtest_main)
+
+# BatchNorm3d tests
+add_executable(test_batchnorm3d layers/test_batchnorm3d.cpp)
+target_link_libraries(test_batchnorm3d PRIVATE tenzor_core GTest::gtest_main)
+
 # Conv2d tests
 add_executable(test_conv2d layers/test_conv2d.cpp)
 target_link_libraries(test_conv2d PRIVATE tenzor_core GTest::gtest_main)
@@ -100,6 +108,12 @@ target_link_libraries(test_dropout_multidtype PRIVATE tenzor_core GTest::gtest_m
 add_executable(test_batchnorm2d_multidtype layers/test_batchnorm2d_multidtype.cpp)
 target_link_libraries(test_batchnorm2d_multidtype PRIVATE tenzor_core GTest::gtest_main)
 
+add_executable(test_batchnorm1d_multidtype layers/test_batchnorm1d_multidtype.cpp)
+target_link_libraries(test_batchnorm1d_multidtype PRIVATE tenzor_core GTest::gtest_main)
+
+add_executable(test_batchnorm3d_multidtype layers/test_batchnorm3d_multidtype.cpp)
+target_link_libraries(test_batchnorm3d_multidtype PRIVATE tenzor_core GTest::gtest_main)
+
 add_executable(test_normalization_multidtype layers/test_normalization_multidtype.cpp)
 target_link_libraries(test_normalization_multidtype PRIVATE tenzor_core GTest::gtest_main)
 
@@ -140,6 +154,8 @@ target_link_libraries(test_sliding_window_attention PRIVATE tenzor_core GTest::g
 # ============================================================================
 tenzor_discover_tests(test_dropout LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_batchnorm2d LABELS "nn" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_batchnorm1d LABELS "nn" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_batchnorm3d LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_conv2d LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_conv2d_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_pooling LABELS "nn" DISCOVERY_TIMEOUT 60)
@@ -163,6 +179,8 @@ tenzor_discover_tests(test_offload LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_pooling_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_dropout_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_batchnorm2d_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_batchnorm1d_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+tenzor_discover_tests(test_batchnorm3d_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_normalization_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_flatten_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_channel_shuffle LABELS "nn" DISCOVERY_TIMEOUT 60)

@@ -1273,9 +1273,37 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::BatchNorm2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // Dispatch convention (matches CUDA cuDNN path and the caller in
+        // src/nn/layers/batchnorm.cpp::BatchNorm2dBackward::backward):
+        //   inputs = [grad_output, input, gamma, saved_mean, saved_inv_var]
+        //
+        // The rocm::batchnorm2d_backward function signature is
+        //   (grad_output, input, mean, variance, gamma, epsilon, stream)
+        // so we must re-order, and convert invstd back to raw variance
+        // (variance = 1/invstd^2 - epsilon) since the kernel internally
+        // redoes rsqrt(variance + epsilon).
+        //
+        // Previously this dispatch passed inputs positionally, which
+        // silently sent `gamma` where the kernel expected `mean`,
+        // `mean` where it expected `variance`, and `invstd` where it
+        // expected `gamma` — producing garbage stats and NaN gradients.
         float epsilon = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
+        const Tensor& grad_output = inputs[0];
+        const Tensor& input       = inputs[1];
+        const Tensor& gamma       = inputs[2];
+        const Tensor& saved_mean  = inputs[3];
+        const Tensor& invstd      = inputs[4];
+
+        // variance = 1/invstd^2 - epsilon, computed in the invstd's dtype
+        auto one = tenzor::ones_like(invstd);
+        auto inv_var = invstd * invstd;                        // 1/(var+eps)
+        auto var_plus_eps = one / inv_var;                     // var + eps
+        auto eps_t = tenzor::full_like(invstd, epsilon);
+        auto variance = var_plus_eps - eps_t;
+
         auto [grad_input, grad_gamma, grad_beta] = rocm::batchnorm2d_backward(
-            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], epsilon, get_hip_stream(attrs));
+            grad_output, input, saved_mean, variance, gamma,
+            epsilon, get_hip_stream(attrs));
         return std::vector<Tensor>{grad_input, grad_gamma, grad_beta};
     });
 

@@ -1028,13 +1028,31 @@ auto BatchNorm1d::forward_impl(const Variable& input) -> Variable {
     Device original_device = input.tensor().device();
     Tensor input_work = input.tensor();
 
+    // FP16/BF16 forward upcast: compute in Float32 to prevent overflow /
+    // underflow in mean / variance reductions. Without this, squaring many
+    // Float16 values and summing quickly saturates Float16's ~6.5e4 range,
+    // producing garbage stats on backends (notably Vulkan) whose reductions
+    // don't internally widen. Mirrors the BN2d forward upcast path above.
+    DType orig_dtype = input_work.dtype();
+    const bool needs_upcast =
+        (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    if (needs_upcast) {
+        input_work = input_work.to(DType::Float32);
+    }
+
     Tensor batch_mean, batch_var;
 
     if (training_) {
-        // Compute mean and variance over N and L dimensions
-        // Reshape to [N*L, C] for easier computation
+        // Compute mean and variance over N and L dimensions.
+        //
+        // Input (N, C, L) is stored as data[n*C*L + c*L + l], so reshaping
+        // directly to (N*L, C) would scramble channels. Permute to
+        // (N, L, C) first so that channels end up as the trailing
+        // dimension — the subsequent contiguous+reshape then gives the
+        // expected (N*L, C) layout where row j is one per-channel sample.
         Tensor reshaped_input = shape.size() == 3 ?
-            input_work.reshape({N * L, C}).contiguous() : input_work.contiguous();
+            input_work.permute({0, 2, 1}).contiguous().reshape({N * L, C}) :
+            input_work.contiguous();
 
         // Compute mean: average over batch dimension (N*L)
         batch_mean = mean(reshaped_input, 0, false);
@@ -1078,7 +1096,14 @@ auto BatchNorm1d::forward_impl(const Variable& input) -> Variable {
         }
     }
 
-    // Normalize
+    // Normalize. All intermediates must match input_work.dtype() — when we
+    // upcasted above, affine weight/bias (stored at original dtype) need
+    // to be cast to Float32 before mixing with upcasted tensors.
+    const DType compute_dtype = input_work.dtype();
+    auto to_compute = [&](const Tensor& t) -> Tensor {
+        return t.dtype() == compute_dtype ? t : t.to(compute_dtype);
+    };
+
     Tensor output;
     if (shape.size() == 3) {
         auto mean_broadcast = batch_mean.unsqueeze(0).unsqueeze(2).contiguous();
@@ -1088,8 +1113,10 @@ auto BatchNorm1d::forward_impl(const Variable& input) -> Variable {
         auto normalized = ((input_work - mean_broadcast) * invstd).contiguous();
 
         if (affine_ && cached_weight_ && cached_bias_) {
-            auto weight_broadcast = cached_weight_->tensor().unsqueeze(0).unsqueeze(2).contiguous();
-            auto bias_broadcast = cached_bias_->tensor().unsqueeze(0).unsqueeze(2).contiguous();
+            auto weight_broadcast =
+                to_compute(cached_weight_->tensor()).unsqueeze(0).unsqueeze(2).contiguous();
+            auto bias_broadcast =
+                to_compute(cached_bias_->tensor()).unsqueeze(0).unsqueeze(2).contiguous();
             output = (normalized * weight_broadcast + bias_broadcast).contiguous();
         } else {
             output = normalized;
@@ -1102,12 +1129,19 @@ auto BatchNorm1d::forward_impl(const Variable& input) -> Variable {
         auto normalized = ((input_work - mean_broadcast) * invstd).contiguous();
 
         if (affine_ && cached_weight_ && cached_bias_) {
-            auto weight_broadcast = cached_weight_->tensor().unsqueeze(0).contiguous();
-            auto bias_broadcast = cached_bias_->tensor().unsqueeze(0).contiguous();
+            auto weight_broadcast =
+                to_compute(cached_weight_->tensor()).unsqueeze(0).contiguous();
+            auto bias_broadcast =
+                to_compute(cached_bias_->tensor()).unsqueeze(0).contiguous();
             output = (normalized * weight_broadcast + bias_broadcast).contiguous();
         } else {
             output = normalized;
         }
+    }
+
+    // Restore the caller's dtype (Float16/BFloat16) if we upcasted for stability.
+    if (needs_upcast) {
+        output = output.to(orig_dtype);
     }
 
     // Set up autograd if needed
@@ -1193,12 +1227,16 @@ auto BatchNorm3d::forward_impl(const Variable& input) -> Variable {
 
     int64_t N = shape[0], C = shape[1], D = shape[2], H = shape[3], W = shape[4];
 
-    // Reshape (N, C, D, H, W) -> (N, C, D*H, W) to use BatchNorm2d
-    Variable reshaped(input.tensor().reshape({N, C, D * H, W}), input.requires_grad());
+    // Reshape (N, C, D, H, W) -> (N, C, D*H, W) to use BatchNorm2d.
+    // Use ::tenzor::reshape (the autograd Variable overload declared in
+    // tenzor/autograd/ops.hpp) so the grad_fn chain is preserved —
+    // constructing a raw Variable(tensor, requires_grad) would drop the
+    // upstream chain and silently break .backward() on the final output.
+    Variable reshaped = ::tenzor::reshape(input, {N, C, D * H, W});
     Variable result = bn2d_.forward(reshaped);
 
-    // Reshape back to (N, C, D, H, W)
-    return Variable(result.tensor().reshape({N, C, D, H, W}), result.requires_grad());
+    // Reshape back to (N, C, D, H, W), again autograd-aware.
+    return ::tenzor::reshape(result, {N, C, D, H, W});
 }
 
 } // namespace tenzor::nn

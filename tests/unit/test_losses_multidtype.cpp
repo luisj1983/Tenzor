@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "../backend_test_fixture.hpp"
+#include <tenzor/nn/functional.hpp>
 #include <cmath>
 
 using namespace tenzor;
@@ -578,6 +579,132 @@ TEST_P(LossMultiDTypeTest, L1LossGradientRequired) {
     auto loss = l1_loss(pred, target, Reduction::Mean);
 
     EXPECT_TRUE(loss.requires_grad()) << "Failed on " << device.to_string();
+}
+
+// ============================================================================
+// Backward Gradient Tests — verify .backward() actually populates .grad()
+// ============================================================================
+
+TEST_P(LossMultiDTypeTest, MSELoss_BackwardGradient) {
+    auto pred = Variable(createFull({2, 3}, 2.0), true);
+    auto target = Variable(createFull({2, 3}, 1.0), false);
+
+    auto loss = mse_loss(pred, target, Reduction::Mean);
+    EXPECT_EQ(loss.tensor().dtype(), dtype);
+
+    EXPECT_NO_THROW(loss.backward());
+    ASSERT_TRUE(pred.grad().has_value());
+    // grad of MSE wrt pred is 2*(pred-target)/N; on 2x3 with diff=1 → 2/6 = 0.333...
+    auto grad_cpu = pred.grad().value().to(Device::cpu()).to(DType::Float32);
+    auto grad_data = grad_cpu.data<float>();
+    for (int64_t i = 0; i < grad_cpu.numel(); ++i) {
+        EXPECT_NEAR(grad_data[i], 2.0f / 6.0f, 1e-3f) << "on " << device.to_string();
+    }
+}
+
+TEST_P(LossMultiDTypeTest, L1Loss_BackwardGradient) {
+    auto pred = Variable(createFull({2, 3}, 3.0), true);
+    auto target = Variable(createFull({2, 3}, 1.0), false);
+
+    auto loss = l1_loss(pred, target, Reduction::Mean);
+    EXPECT_EQ(loss.tensor().dtype(), dtype);
+
+    EXPECT_NO_THROW(loss.backward());
+    ASSERT_TRUE(pred.grad().has_value());
+    // grad of L1 wrt pred is sign(pred-target)/N; pred>target → +1/6
+    auto grad_cpu = pred.grad().value().to(Device::cpu()).to(DType::Float32);
+    auto grad_data = grad_cpu.data<float>();
+    for (int64_t i = 0; i < grad_cpu.numel(); ++i) {
+        EXPECT_NEAR(grad_data[i], 1.0f / 6.0f, 1e-3f) << "on " << device.to_string();
+    }
+}
+
+TEST_P(LossMultiDTypeTest, BCELoss_BackwardGradient) {
+    auto pred = Variable(createFull({2, 3}, 0.6), true);
+    auto target = Variable(createFull({2, 3}, 1.0), false);
+
+    auto loss = bce_loss(pred, target, Reduction::Mean);
+    EXPECT_EQ(loss.tensor().dtype(), dtype);
+
+    EXPECT_NO_THROW(loss.backward());
+    ASSERT_TRUE(pred.grad().has_value());
+    // grad of BCE wrt pred: -(t/p - (1-t)/(1-p))/N; t=1,p=0.6 → -(1/0.6)/6 ≈ -0.2778
+    auto grad_cpu = pred.grad().value().to(Device::cpu()).to(DType::Float32);
+    auto grad_data = grad_cpu.data<float>();
+    for (int64_t i = 0; i < grad_cpu.numel(); ++i) {
+        EXPECT_NEAR(grad_data[i], -1.0f / (0.6f * 6.0f), 1e-3f)
+            << "on " << device.to_string() << " at idx " << i;
+    }
+}
+
+TEST_P(LossMultiDTypeTest, CrossEntropy_BackwardGradient) {
+    // Logits for 2 samples × 3 classes; targets are class indices.
+    auto logits = Variable(createFull({2, 3}, 0.0), true);
+    // Target: class index 1 for both samples.
+    auto target = zeros({2}, DType::Int64, device);
+    auto target_cpu = target.to(Device::cpu());
+    auto target_data = target_cpu.data<int64_t>();
+    target_data[0] = 1;
+    target_data[1] = 1;
+    target = target_cpu.to(device);
+
+    auto loss = cross_entropy(logits, target, Reduction::Mean);
+    EXPECT_EQ(loss.tensor().dtype(), dtype);
+
+    EXPECT_NO_THROW(loss.backward());
+    ASSERT_TRUE(logits.grad().has_value());
+
+    // For uniform logits, softmax = 1/3 uniformly; grad_i = (softmax_i - onehot_i)/N.
+    auto grad_cpu = logits.grad().value().to(Device::cpu()).to(DType::Float32);
+    auto grad_data = grad_cpu.data<float>();
+    // Class 0, 2 → softmax - 0 = 1/3; divided by N=2 → 1/6
+    // Class 1 (target) → softmax - 1 = -2/3; divided by N=2 → -1/3
+    for (int64_t n = 0; n < 2; ++n) {
+        EXPECT_NEAR(grad_data[n * 3 + 0],  1.0f / 6.0f, 1e-3f);
+        EXPECT_NEAR(grad_data[n * 3 + 1], -1.0f / 3.0f, 1e-3f);
+        EXPECT_NEAR(grad_data[n * 3 + 2],  1.0f / 6.0f, 1e-3f);
+    }
+}
+
+TEST_P(LossMultiDTypeTest, NLLLoss_BackwardGradient) {
+    // NLL expects log-probabilities. Uniform log-probs = log(1/3).
+    auto log_probs = Variable(createFull({2, 3}, std::log(1.0 / 3.0)), true);
+    // Target: class 0 for both samples.
+    auto target = zeros({2}, DType::Int64, device);
+
+    auto loss = nll_loss(log_probs, target, Reduction::Mean);
+    EXPECT_EQ(loss.tensor().dtype(), dtype);
+
+    EXPECT_NO_THROW(loss.backward());
+    ASSERT_TRUE(log_probs.grad().has_value());
+
+    // grad of NLL wrt log_probs: -onehot(target)/N
+    auto grad_cpu = log_probs.grad().value().to(Device::cpu()).to(DType::Float32);
+    auto grad_data = grad_cpu.data<float>();
+    for (int64_t n = 0; n < 2; ++n) {
+        EXPECT_NEAR(grad_data[n * 3 + 0], -0.5f, 1e-4f);  // target=0 class
+        EXPECT_NEAR(grad_data[n * 3 + 1],  0.0f, 1e-6f);
+        EXPECT_NEAR(grad_data[n * 3 + 2],  0.0f, 1e-6f);
+    }
+}
+
+TEST_P(LossMultiDTypeTest, SmoothL1Loss_BackwardGradient) {
+    // SmoothL1 is |x|-0.5 for |x|>1 (linear grad), 0.5*x^2 for |x|<=1 (linear grad x).
+    auto pred = Variable(createFull({2, 3}, 0.5), true);   // |diff|=0.5 < 1 → quadratic region
+    auto target = Variable(createFull({2, 3}, 0.0), false);
+
+    auto loss = tenzor::nn::functional::smooth_l1_loss(pred, target, Reduction::Mean);
+    EXPECT_EQ(loss.tensor().dtype(), dtype);
+
+    EXPECT_NO_THROW(loss.backward());
+    ASSERT_TRUE(pred.grad().has_value());
+
+    // In quadratic region, d/dpred[0.5*(pred-target)^2] / N = (pred-target)/N = 0.5/6
+    auto grad_cpu = pred.grad().value().to(Device::cpu()).to(DType::Float32);
+    auto grad_data = grad_cpu.data<float>();
+    for (int64_t i = 0; i < grad_cpu.numel(); ++i) {
+        EXPECT_NEAR(grad_data[i], 0.5f / 6.0f, 1e-3f) << "on " << device.to_string();
+    }
 }
 
 // ============================================================================

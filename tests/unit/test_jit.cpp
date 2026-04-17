@@ -81,25 +81,20 @@ protected:
 // ============================================================================
 
 TEST_F(JITTest, TraceSimpleModel) {
-    GTEST_SKIP() << "JIT API incomplete - test disabled";
-    /* DISABLED - JIT API mismatch
     auto model = std::make_shared<SimpleLinearModel>();
 
     // Create example input
     Tensor input_tensor({2, 10}, DType::Float32, Device::cpu());
     input_tensor.fill_(1.0f);
+
+    // Trace returns a CompiledModule when called with a Tensor argument.
+    auto traced = jit::trace(model, input_tensor);
+    ASSERT_NE(traced, nullptr);
+
     Variable input(input_tensor, false);
-
-    // Trace the model
-    auto traced = trace(model, input);
-
-    EXPECT_NE(traced, nullptr);
-
-    // Run traced model
-    auto output = model->forward(input);
+    auto output = traced->forward(input);
     EXPECT_EQ(output.tensor().shape()[0], 2);
     EXPECT_EQ(output.tensor().shape()[1], 5);
-    */
 }
 
 

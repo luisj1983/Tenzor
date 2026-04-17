@@ -53,8 +53,16 @@ auto GraphWriter::write_metadata(const Graph& graph) -> void {
 
 auto GraphWriter::write_values(const Graph& graph) -> void {
     // Collect every Value reachable via (a) node outputs, (b) graph
-    // inputs (which have no producing node), and (c) graph outputs
-    // (in case something exotic landed there without a producer).
+    // inputs (which have no producing node), (c) graph outputs
+    // (in case something exotic landed there without a producer), and
+    // (d) *node inputs* — captured module parameters (e.g. Linear
+    // weight / bias) are referenced as node inputs but have no producing
+    // node and are not members of graph.inputs(). Without including
+    // them here, read_values() never creates Value records for those
+    // IDs, and then read_nodes() silently drops the parameter inputs
+    // because graph.get_value() returns null — leaving the loaded
+    // Linear node with only 1 input instead of 3, which makes forward()
+    // throw "Output value not computed" downstream.
     // Deduplicated by Value ID — the same Value can be referenced
     // from multiple places.
     std::unordered_map<std::string, std::shared_ptr<Value>> seen;
@@ -63,6 +71,9 @@ auto GraphWriter::write_values(const Graph& graph) -> void {
     for (const auto& node : graph.nodes()) {
         for (const auto& output : node->outputs()) {
             seen.emplace(output->id(), output);
+        }
+        for (const auto& input : node->inputs()) {
+            seen.emplace(input->id(), input);
         }
     }
 

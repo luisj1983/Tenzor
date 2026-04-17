@@ -505,3 +505,198 @@ TEST(SchedulerTest, GetLRAlias) {
     EXPECT_DOUBLE_EQ(scheduler.get_lr(), scheduler.get_last_lr());
     EXPECT_NEAR(scheduler.get_lr(), 0.25, 1e-9);
 }
+
+//==============================================================================
+// MultiStepLR Tests
+//==============================================================================
+
+TEST(SchedulerTest, MultiStepLR_DecaysOnlyAtMilestones) {
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
+    auto optimizer = SGD(params, 1.0);
+
+    auto scheduler = MultiStepLR(optimizer, {3, 6, 9}, 0.5);
+
+    EXPECT_DOUBLE_EQ(scheduler.get_last_lr(), 1.0);
+
+    // Epoch 1, 2: no decay
+    scheduler.step();
+    EXPECT_DOUBLE_EQ(scheduler.get_last_lr(), 1.0);
+    scheduler.step();
+    EXPECT_DOUBLE_EQ(scheduler.get_last_lr(), 1.0);
+
+    // Epoch 3: first milestone - decay to 0.5
+    scheduler.step();
+    EXPECT_NEAR(scheduler.get_last_lr(), 0.5, 1e-9);
+
+    // Epoch 4, 5: stay at 0.5
+    scheduler.step();
+    EXPECT_NEAR(scheduler.get_last_lr(), 0.5, 1e-9);
+    scheduler.step();
+    EXPECT_NEAR(scheduler.get_last_lr(), 0.5, 1e-9);
+
+    // Epoch 6: second milestone - decay to 0.25
+    scheduler.step();
+    EXPECT_NEAR(scheduler.get_last_lr(), 0.25, 1e-9);
+
+    // Epochs 7, 8 stay, 9 decays to 0.125
+    scheduler.step();
+    scheduler.step();
+    EXPECT_NEAR(scheduler.get_last_lr(), 0.25, 1e-9);
+    scheduler.step();
+    EXPECT_NEAR(scheduler.get_last_lr(), 0.125, 1e-9);
+}
+
+TEST(SchedulerTest, MultiStepLR_NoMilestonesKeepsBaseLR) {
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
+    auto optimizer = SGD(params, 0.1);
+
+    auto scheduler = MultiStepLR(optimizer, {}, 0.5);
+
+    EXPECT_DOUBLE_EQ(scheduler.get_last_lr(), 0.1);
+    for (int i = 0; i < 5; ++i) {
+        scheduler.step();
+        EXPECT_NEAR(scheduler.get_last_lr(), 0.1, 1e-9);
+    }
+}
+
+//==============================================================================
+// PolynomialLR Tests
+//==============================================================================
+
+TEST(SchedulerTest, PolynomialLR_LinearDecay) {
+    // power=1.0 → linear decay from base_lr to end_lr
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
+    auto optimizer = SGD(params, 1.0);
+
+    const int total_iters = 10;
+    const double end_lr = 0.0;
+    auto scheduler = PolynomialLR(optimizer, total_iters, end_lr, 1.0);
+
+    EXPECT_NEAR(scheduler.get_last_lr(), 1.0, 1e-9);
+
+    for (int e = 1; e <= total_iters; ++e) {
+        scheduler.step();
+        double expected =
+            (1.0 - end_lr) * std::pow(1.0 - static_cast<double>(e) / total_iters, 1.0) + end_lr;
+        EXPECT_NEAR(scheduler.get_last_lr(), expected, 1e-9) << "epoch " << e;
+    }
+
+    // Past total_iters the math clamps at end_lr.
+    scheduler.step();
+    EXPECT_NEAR(scheduler.get_last_lr(), end_lr, 1e-9);
+}
+
+TEST(SchedulerTest, PolynomialLR_QuadraticDecay) {
+    // power=2.0 → quadratic decay
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
+    auto optimizer = SGD(params, 2.0);
+
+    const int total_iters = 5;
+    const double end_lr = 0.1;
+    const double power = 2.0;
+    auto scheduler = PolynomialLR(optimizer, total_iters, end_lr, power);
+
+    for (int e = 1; e <= total_iters; ++e) {
+        scheduler.step();
+        double expected =
+            (2.0 - end_lr) * std::pow(1.0 - static_cast<double>(e) / total_iters, power) + end_lr;
+        EXPECT_NEAR(scheduler.get_last_lr(), expected, 1e-9) << "epoch " << e;
+    }
+}
+
+//==============================================================================
+// LambdaLR Tests
+//==============================================================================
+
+TEST(SchedulerTest, LambdaLR_InverseTimeDecay) {
+    // lr_lambda(e) = 1 / (1 + 0.1 * e)
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
+    auto optimizer = SGD(params, 0.5);
+
+    auto lambda_fn = [](int e) { return 1.0 / (1.0 + 0.1 * e); };
+    auto scheduler = LambdaLR(optimizer, lambda_fn);
+
+    EXPECT_NEAR(scheduler.get_last_lr(), 0.5 * lambda_fn(0), 1e-9);
+
+    for (int e = 1; e <= 10; ++e) {
+        scheduler.step();
+        EXPECT_NEAR(scheduler.get_last_lr(), 0.5 * lambda_fn(e), 1e-9) << "epoch " << e;
+    }
+}
+
+TEST(SchedulerTest, LambdaLR_ConstantLambda) {
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
+    auto optimizer = SGD(params, 0.3);
+
+    auto scheduler = LambdaLR(optimizer, [](int) { return 2.0; });
+
+    // base_lr * 2.0 = 0.6 every epoch
+    for (int e = 0; e < 5; ++e) {
+        EXPECT_NEAR(scheduler.get_last_lr(), 0.6, 1e-9) << "epoch " << e;
+        scheduler.step();
+    }
+}
+
+//==============================================================================
+// LinearWarmupScheduler Tests
+//==============================================================================
+
+TEST(SchedulerTest, LinearWarmupScheduler_RampsLinearly) {
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
+    auto optimizer = SGD(params, 1.0);
+
+    const int64_t warmup = 5;
+    const double start_factor = 0.1;
+
+    // Base scheduler: keep LR constant once warmup completes (StepLR with
+    // milestone that never triggers).
+    auto base = std::make_shared<StepLR>(optimizer, 10000, 1.0);
+    LinearWarmupScheduler scheduler(optimizer, base, warmup, start_factor);
+
+    // Step 0: LR = base_lr * start_factor (0.1)
+    EXPECT_NEAR(scheduler.get_last_lr(), 1.0 * start_factor, 1e-9);
+
+    for (int64_t step = 1; step <= warmup; ++step) {
+        scheduler.step();
+        if (step < warmup) {
+            double alpha = static_cast<double>(step) / warmup;
+            double expected = start_factor + (1.0 - start_factor) * alpha;
+            EXPECT_NEAR(scheduler.get_last_lr(), expected, 1e-9)
+                << "warmup step " << step;
+        } else {
+            // After warmup completes, LR should reach base_lr (1.0)
+            EXPECT_NEAR(scheduler.get_last_lr(), 1.0, 1e-9);
+        }
+    }
+
+    // After warmup, base scheduler takes over — StepLR with step_size=10000
+    // keeps LR at 1.0.
+    for (int64_t step = 0; step < 3; ++step) {
+        scheduler.step();
+        EXPECT_NEAR(scheduler.get_last_lr(), 1.0, 1e-9) << "post-warmup step " << step;
+    }
+}
+
+TEST(SchedulerTest, LinearWarmupScheduler_InWarmupFlag) {
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
+    auto optimizer = SGD(params, 0.5);
+
+    auto base = std::make_shared<StepLR>(optimizer, 1000, 1.0);
+    LinearWarmupScheduler scheduler(optimizer, base, /*warmup_steps=*/3, /*start_factor=*/0.0);
+
+    EXPECT_TRUE(scheduler.in_warmup());
+    scheduler.step();
+    EXPECT_TRUE(scheduler.in_warmup());
+    scheduler.step();
+    EXPECT_TRUE(scheduler.in_warmup());
+    scheduler.step();
+    EXPECT_FALSE(scheduler.in_warmup());
+}

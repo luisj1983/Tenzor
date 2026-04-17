@@ -9,6 +9,7 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/autograd/function.hpp"
 #include <stdexcept>
 #include <string>
 #include <cmath>
@@ -424,6 +425,75 @@ auto ctc_loss_single(
     return {loss, grad};
 }
 
+// ---------------------------------------------------------------------------
+// CTCLossBackward — attaches a pre-computed gradient tensor produced by the
+// forward's CPU dynamic-programming pass. The reference implementation in
+// CTCLoss::forward already computes d(loss)/d(log_probs) for each batch
+// element; we just need to scale it by the scalar (or per-sample) upstream
+// gradient and return it so autograd.backward() stops dropping it on the
+// floor.
+//
+// The "scale" stored here is the same scale that the forward applied to the
+// aggregated loss (1/total_target_len for "mean", 1.0 for "sum"), so that
+// d(reduced_loss)/d(log_probs) = scale * raw_grad. For reduction="none",
+// each batch sample's grad row must be multiplied by the corresponding
+// grad_output[n] — handled in backward() below.
+// ---------------------------------------------------------------------------
+class CTCLossBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+        (void)inputs;
+        return {};  // Never invoked through Function::forward path.
+    }
+
+    // grad_outputs[0] is d(L_total)/d(reduced_loss).
+    //   - reduction="mean"/"sum": scalar tensor.
+    //   - reduction="none"      : shape [N].
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        Tensor grad_input = raw_grad_.clone();  // (T, N, C) float32 on CPU
+
+        auto T = grad_input.shape()[0];
+        auto N = grad_input.shape()[1];
+        auto C = grad_input.shape()[2];
+
+        if (is_per_sample_) {
+            // reduction="none": multiply grad_input[:, n, :] by g_out[n].
+            auto g_cpu = grad_outputs[0].to(Device::cpu()).to(DType::Float32).contiguous();
+            const float* g = g_cpu.data<float>();
+            float* d = grad_input.data<float>();
+            for (int64_t t = 0; t < T; ++t) {
+                for (int64_t n = 0; n < N; ++n) {
+                    const float scale = g[n];
+                    for (int64_t c = 0; c < C; ++c) {
+                        d[t * N * C + n * C + c] *= scale;
+                    }
+                }
+            }
+        } else {
+            // reduction="mean"/"sum": multiply by scalar (scale_ already baked
+            // in by the forward).
+            auto g_cpu = grad_outputs[0].to(Device::cpu()).to(DType::Float32).contiguous();
+            const float scalar_g = g_cpu.numel() > 0 ? g_cpu.data<float>()[0] : 1.0f;
+            float* d = grad_input.data<float>();
+            for (int64_t i = 0; i < grad_input.numel(); ++i) {
+                d[i] *= scalar_g * scale_;
+            }
+        }
+
+        // Restore the caller's device and dtype so accumulation into
+        // log_probs.grad() works without a second conversion.
+        return {grad_input.to(orig_dtype_).to(orig_device_)};
+    }
+
+    auto name() const -> std::string override { return "CTCLossBackward"; }
+
+    Tensor raw_grad_;             // (T, N, C) float32 on CPU — from forward DP pass
+    bool is_per_sample_ = false;  // reduction="none" → true
+    float scale_ = 1.0f;          // 1/total_target_len for "mean", 1.0 for "sum"
+    DType orig_dtype_ = DType::Float32;
+    Device orig_device_ = Device::cpu();
+};
+
 } // anonymous namespace
 
 CTCLoss::CTCLoss(const std::string& reduction, int64_t blank, bool zero_infinity)
@@ -506,13 +576,40 @@ auto CTCLoss::forward(const Variable& log_probs, const Tensor& targets,
     Device original_device = log_probs.tensor().device();
     DType original_dtype = log_probs.tensor().dtype();
 
+    // Pack the gradient tensor once; used below for both reductions.
+    Tensor grad_tensor({T_max, N, C}, DType::Float32, Device::cpu());
+    std::memcpy(grad_tensor.data<float>(), all_grads.data(),
+                all_grads.size() * sizeof(float));
+
+    const bool needs_grad = log_probs.requires_grad() && is_grad_enabled();
+
+    auto attach_grad_fn = [&](Variable& out, bool per_sample, float scale) {
+        if (!needs_grad) return;
+        auto grad_fn = std::make_shared<CTCLossBackward>();
+        grad_fn->raw_grad_ = grad_tensor;
+        grad_fn->is_per_sample_ = per_sample;
+        grad_fn->scale_ = scale;
+        grad_fn->orig_dtype_ = original_dtype;
+        grad_fn->orig_device_ = original_device;
+
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        if (log_probs.grad_fn()) next_funcs.push_back(log_probs.grad_fn());
+        grad_fn->set_next_functions(next_funcs);
+        grad_fn->set_input_variables({log_probs});
+
+        out.set_grad_fn(grad_fn);
+    };
+
     if (reduction_ == "none") {
         auto loss_tensor = Tensor({N}, DType::Float32, Device::cpu());
         std::memcpy(loss_tensor.data<float>(), losses.data(), N * sizeof(float));
-        return Variable(loss_tensor.to(original_dtype).to(original_device), log_probs.requires_grad());
+        Variable out(loss_tensor.to(original_dtype).to(original_device), needs_grad);
+        attach_grad_fn(out, /*per_sample=*/true, /*scale=*/1.0f);
+        return out;
     }
 
     float total_loss = 0.0f;
+    float scale = 1.0f;  // d(reduced_loss)/d(per-sample-grad-sum)
     if (reduction_ == "sum") {
         for (int64_t n = 0; n < N; ++n) {
             total_loss += losses[n];
@@ -525,12 +622,15 @@ auto CTCLoss::forward(const Variable& log_probs, const Tensor& targets,
         }
         if (total_target_len > 0.0f) {
             total_loss /= total_target_len;
+            scale = 1.0f / total_target_len;
         }
     }
 
     auto loss_tensor = Tensor({1}, DType::Float32, Device::cpu());
     loss_tensor.data<float>()[0] = total_loss;
-    return Variable(loss_tensor.to(original_dtype).to(original_device), log_probs.requires_grad());
+    Variable out(loss_tensor.to(original_dtype).to(original_device), needs_grad);
+    attach_grad_fn(out, /*per_sample=*/false, scale);
+    return out;
 }
 
 //==============================================================================
@@ -923,53 +1023,127 @@ auto gaussian_nll_loss(const Variable& input, const Variable& target,
 MultiLabelMarginLoss::MultiLabelMarginLoss(Reduction reduction)
     : reduction_(reduction) {}
 
-auto MultiLabelMarginLoss::forward(const Variable& input, const Tensor& target) -> Variable {
-    // Multi-label margin loss implementation using tensor ops
-    // target is (N, C) with class indices and -1 sentinels
-    // For each sample: sum over targets y_j, sum over non-targets k:
-    //   max(0, 1 - (x[y_j] - x[k])) / C
+// ---------------------------------------------------------------------------
+// MultiLabelMarginLossBackward — stores the raw per-element gradient
+// d(sum_of_per_sample_losses)/d(input), shape (N, C). The forward computes
+// it alongside the loss. Reduction scaling is applied by attaching the
+// built-in mean/sum autograd ops after the per-sample loss Variable.
+// ---------------------------------------------------------------------------
+class MultiLabelMarginLossBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+        (void)inputs;
+        return {};
+    }
 
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        // grad_outputs[0]: d(loss_reduced)/d(per_sample_loss), shape (N,).
+        // We owe d(loss_reduced)/d(input), shape (N, C):
+        //     grad_input[b, c] = grad_outputs[0][b] * raw_grad_[b, c]
+        auto g_cpu = grad_outputs[0].to(Device::cpu()).to(DType::Float32).contiguous();
+        const float* g = g_cpu.data<float>();
+        const int64_t N = raw_grad_.shape()[0];
+        const int64_t C = raw_grad_.shape()[1];
+
+        Tensor out({N, C}, DType::Float32, Device::cpu());
+        const float* r = raw_grad_.data<float>();
+        float* o = out.data<float>();
+        for (int64_t b = 0; b < N; ++b) {
+            const float gb = g[b];
+            for (int64_t c = 0; c < C; ++c) {
+                o[b * C + c] = gb * r[b * C + c];
+            }
+        }
+        return {out.to(orig_dtype_).to(orig_device_)};
+    }
+
+    auto name() const -> std::string override { return "MultiLabelMarginLossBackward"; }
+
+    Tensor raw_grad_;              // (N, C) float32 on CPU
+    DType orig_dtype_ = DType::Float32;
+    Device orig_device_ = Device::cpu();
+};
+
+auto MultiLabelMarginLoss::forward(const Variable& input, const Tensor& target) -> Variable {
+    // Multi-label margin loss. target is (N, C) with class indices and -1 sentinels.
+    //   per_sample_loss[b] = (1/C) * sum_{j: y_j >= 0} sum_{k: k not in targets}
+    //                         max(0, 1 - (x[b, y_j] - x[b, k]))
+    //
+    // For active margin terms (margin > 0):
+    //   d(sample_loss)/d(x[b, y_j]) += -1/C
+    //   d(sample_loss)/d(x[b, k])   += +1/C
     auto input_t = input.tensor();
     int64_t batch_size = input_t.shape()[0];
     int64_t n_classes = input_t.shape()[1];
 
-    // Compute on CPU for correctness (this op is rarely in the hot path)
-    auto cpu_input = input_t.to(Device::cpu());
+    // Compute on CPU for correctness (rarely in the hot path).
+    auto cpu_input = input_t.to(Device::cpu()).to(DType::Float32);
     auto cpu_target = target.to(Device::cpu());
     auto cpu_loss = tenzor::zeros({batch_size}, DType::Float32, Device::cpu());
+    auto cpu_grad = tenzor::zeros({batch_size, n_classes}, DType::Float32, Device::cpu());
 
     const float* in_data = cpu_input.data<float>();
     const int64_t* tgt_data = cpu_target.data<int64_t>();
     float* loss_data = cpu_loss.data<float>();
+    float* grad_data = cpu_grad.data<float>();
+
+    const float inv_C = 1.0f / static_cast<float>(n_classes);
 
     for (int64_t b = 0; b < batch_size; b++) {
+        // Build a bitmap of which classes are targets for this sample.
+        std::vector<bool> is_target(n_classes, false);
+        for (int64_t t = 0; t < n_classes; t++) {
+            int64_t yt = tgt_data[b * n_classes + t];
+            if (yt < 0) break;
+            if (yt >= 0 && yt < n_classes) is_target[yt] = true;
+        }
+
         float sample_loss = 0.0f;
         for (int64_t j = 0; j < n_classes; j++) {
             int64_t y_j = tgt_data[b * n_classes + j];
             if (y_j < 0) break;
             float x_yj = in_data[b * n_classes + y_j];
             for (int64_t k = 0; k < n_classes; k++) {
-                bool is_target = false;
-                for (int64_t t = 0; t < n_classes; t++) {
-                    int64_t yt = tgt_data[b * n_classes + t];
-                    if (yt < 0) break;
-                    if (yt == k) { is_target = true; break; }
-                }
-                if (is_target) continue;
+                if (is_target[k]) continue;
                 float margin = 1.0f - (x_yj - in_data[b * n_classes + k]);
-                if (margin > 0.0f) sample_loss += margin;
+                if (margin > 0.0f) {
+                    sample_loss += margin;
+                    grad_data[b * n_classes + y_j] -= inv_C;
+                    grad_data[b * n_classes + k]   += inv_C;
+                }
             }
         }
-        loss_data[b] = sample_loss / static_cast<float>(n_classes);
+        loss_data[b] = sample_loss * inv_C;
     }
 
-    auto result = cpu_loss.to(input_t.device());
-    auto loss_var = Variable(result, input.requires_grad());
+    const Device original_device = input_t.device();
+    const DType  original_dtype  = input_t.dtype();
+    auto per_sample_tensor = cpu_loss.to(original_dtype).to(original_device);
 
+    const bool needs_grad = input.requires_grad() && is_grad_enabled();
+    Variable loss_var(per_sample_tensor, needs_grad);
+
+    if (needs_grad) {
+        auto grad_fn = std::make_shared<MultiLabelMarginLossBackward>();
+        grad_fn->raw_grad_ = cpu_grad;
+        grad_fn->orig_dtype_ = original_dtype;
+        grad_fn->orig_device_ = original_device;
+
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        if (input.grad_fn()) next_funcs.push_back(input.grad_fn());
+        grad_fn->set_next_functions(next_funcs);
+        grad_fn->set_input_variables({input});
+
+        loss_var.set_grad_fn(grad_fn);
+    }
+
+    // Reduction over the per-sample Variable — uses the standard autograd mean/sum
+    // which will multiply the upstream scalar gradient back into (N,), meeting
+    // our custom grad_fn at the right shape.
     switch (reduction_) {
         case Reduction::Mean: return mean(loss_var);
-        case Reduction::Sum: return sum(loss_var);
-        default: return loss_var;
+        case Reduction::Sum:  return sum(loss_var);
+        default:              return loss_var;
     }
 }
 

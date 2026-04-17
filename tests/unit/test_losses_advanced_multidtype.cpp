@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/loss/losses.hpp>
+#include <tenzor/nn/loss/contrastive.hpp>
 #include <tenzor/nn/activations/activations.hpp>
 #include <cmath>
 
@@ -600,6 +601,148 @@ TEST_P(LossAdvancedMultiDTypeTest, HuberLoss_BackwardGradient) {
     EXPECT_EQ(loss.tensor().dtype(), dtype);
     EXPECT_NO_THROW(loss.backward());
     EXPECT_TRUE(input.grad().has_value());
+}
+
+//==============================================================================
+// Backward Gradient Tests — losses flagged by the review as lacking backward
+// coverage. Any test that fails here is surfacing a real autograd bug in that
+// loss's grad_fn (do not wrap in GTEST_SKIP — the failure is the signal).
+//==============================================================================
+
+TEST_P(LossAdvancedMultiDTypeTest, BCEWithLogitsLoss_BackwardGradient) {
+    auto logits = Variable(createFull({2, 3}, 0.2), true);
+    auto target = Variable(createFull({2, 3}, 1.0), false);
+
+    auto criterion = BCEWithLogitsLoss(Reduction::Mean);
+    auto loss = criterion(logits, target);
+
+    EXPECT_EQ(loss.tensor().dtype(), dtype);
+    EXPECT_NO_THROW(loss.backward());
+    EXPECT_TRUE(logits.grad().has_value());
+}
+
+TEST_P(LossAdvancedMultiDTypeTest, CTCLoss_BackwardGradient) {
+    // CTC shapes:
+    //   log_probs:       (T, N, C)   — T=4 time-steps, N=2 batch, C=3 classes
+    //   targets:         (N, S_max)  — per-sample target sequences
+    //   input_lengths:   (N,)        — length of each input sequence
+    //   target_lengths:  (N,)        — length of each target sequence
+    auto log_probs = Variable(createFull({4, 2, 3}, std::log(1.0 / 3.0)), true);
+
+    // IMPORTANT: targets must be 2D (N, S_max). A 1D tensor would cause
+    // CTCLoss::forward to mis-infer S_max from the sole dim and then read
+    // past end of buffer for sample n=1.
+    auto targets = tenzor::zeros({2, 2}, DType::Int64, device);
+    auto input_lengths = tenzor::zeros({2}, DType::Int64, device);
+    auto target_lengths = tenzor::zeros({2}, DType::Int64, device);
+    {
+        auto il_cpu = input_lengths.to(Device::cpu());
+        auto tl_cpu = target_lengths.to(Device::cpu());
+        il_cpu.data<int64_t>()[0] = 4; il_cpu.data<int64_t>()[1] = 4;
+        tl_cpu.data<int64_t>()[0] = 2; tl_cpu.data<int64_t>()[1] = 2;
+        input_lengths = il_cpu.to(device);
+        target_lengths = tl_cpu.to(device);
+
+        auto t_cpu = targets.to(Device::cpu());
+        // Sample 0 targets: (1, 2); sample 1 targets: (1, 2).
+        t_cpu.data<int64_t>()[0] = 1; t_cpu.data<int64_t>()[1] = 2;
+        t_cpu.data<int64_t>()[2] = 1; t_cpu.data<int64_t>()[3] = 2;
+        targets = t_cpu.to(device);
+    }
+
+    auto criterion = CTCLoss(Reduction::Mean, /*blank=*/0);
+    auto loss = criterion(log_probs, targets, input_lengths, target_lengths);
+
+    EXPECT_EQ(loss.tensor().dtype(), dtype);
+    EXPECT_NO_THROW(loss.backward());
+    EXPECT_TRUE(log_probs.grad().has_value());
+}
+
+TEST_P(LossAdvancedMultiDTypeTest, TripletMarginWithDistanceLoss_BackwardGradient) {
+    auto anchor   = Variable(createFull({4, 8}, 0.0), true);
+    auto positive = Variable(createFull({4, 8}, 0.1), false);
+    auto negative = Variable(createFull({4, 8}, 1.0), false);
+
+    TripletMarginWithDistanceLoss::DistanceFunction dist_fn =
+        [](const Variable& a, const Variable& b) -> Variable {
+            // Euclidean distance per row. Use Variable arithmetic
+            // throughout so the grad_fn chain is preserved — reaching
+            // through .tensor() and wrapping in a new Variable would
+            // drop the chain and hide real autograd issues.
+            auto diff = a - b;
+            auto sq = diff * diff;
+            auto summed = tenzor::sum(sq, /*dim=*/1, /*keepdim=*/false);
+            return tenzor::sqrt(summed);
+        };
+
+    auto criterion = TripletMarginWithDistanceLoss(dist_fn, /*margin=*/1.0,
+                                                    /*swap=*/false, Reduction::Mean);
+    auto loss = criterion(anchor, positive, negative);
+
+    EXPECT_EQ(loss.tensor().dtype(), dtype);
+    EXPECT_NO_THROW(loss.backward());
+    EXPECT_TRUE(anchor.grad().has_value());
+}
+
+TEST_P(LossAdvancedMultiDTypeTest, MultiLabelMarginLoss_BackwardGradient) {
+    // MultiLabelMargin expects (N, C) input and (N, C) long target where -1
+    // terminates a sample's positive class list.
+    auto input = Variable(createFull({2, 4}, 0.0), true);
+    auto target = tenzor::zeros({2, 4}, DType::Int64, device);
+    {
+        auto t_cpu = target.to(Device::cpu());
+        auto* d = t_cpu.data<int64_t>();
+        // sample 0: class 1, then -1 terminator (followed by padding)
+        d[0] = 1; d[1] = -1; d[2] = -1; d[3] = -1;
+        // sample 1: class 0
+        d[4] = 0; d[5] = -1; d[6] = -1; d[7] = -1;
+        target = t_cpu.to(device);
+    }
+
+    auto criterion = MultiLabelMarginLoss(Reduction::Mean);
+    auto loss = criterion(input, target);
+
+    EXPECT_EQ(loss.tensor().dtype(), dtype);
+    EXPECT_NO_THROW(loss.backward());
+    EXPECT_TRUE(input.grad().has_value());
+}
+
+TEST_P(LossAdvancedMultiDTypeTest, InfoNCELoss_BackwardGradient) {
+    auto queries = Variable(createFull({4, 8}, 0.1), true);
+    auto keys    = Variable(createFull({4, 8}, 0.2), false);
+
+    auto criterion = InfoNCELoss(/*temperature=*/0.07, Reduction::Mean);
+    auto loss = criterion(queries, keys);
+
+    EXPECT_EQ(loss.tensor().dtype(), dtype);
+    EXPECT_NO_THROW(loss.backward());
+    EXPECT_TRUE(queries.grad().has_value());
+}
+
+TEST_P(LossAdvancedMultiDTypeTest, NTXentLoss_BackwardGradient) {
+    auto z_i = Variable(createFull({4, 8}, 0.1), true);
+    auto z_j = Variable(createFull({4, 8}, 0.2), false);
+
+    auto criterion = NTXentLoss(/*temperature=*/0.5, Reduction::Mean);
+    auto loss = criterion(z_i, z_j);
+
+    EXPECT_EQ(loss.tensor().dtype(), dtype);
+    EXPECT_NO_THROW(loss.backward());
+    EXPECT_TRUE(z_i.grad().has_value());
+}
+
+TEST_P(LossAdvancedMultiDTypeTest, TripletLoss_BackwardGradient) {
+    auto anchor   = Variable(createFull({4, 8}, 0.0), true);
+    auto positive = Variable(createFull({4, 8}, 0.1), false);
+    auto negative = Variable(createFull({4, 8}, 1.0), false);
+
+    auto criterion = TripletLoss(/*margin=*/1.0, /*p=*/2.0, /*swap=*/false,
+                                 Reduction::Mean);
+    auto loss = criterion(anchor, positive, negative);
+
+    EXPECT_EQ(loss.tensor().dtype(), dtype);
+    EXPECT_NO_THROW(loss.backward());
+    EXPECT_TRUE(anchor.grad().has_value());
 }
 
 //==============================================================================

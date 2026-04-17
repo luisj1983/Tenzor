@@ -662,18 +662,18 @@ auto VulkanBackend::dispatchExpand(const Tensor& input_in, const std::vector<int
     // Select correct pipeline based on dtype
     bool is_float64 = (input.dtype() == DType::Float64);
     bool is_float16 = (input.dtype() == DType::Float16);
+    bool is_bfloat16 = (input.dtype() == DType::BFloat16);
     bool is_int64   = (input.dtype() == DType::Int64);
     std::string shader_name;
     if (is_float64) {
         shader_name = "expand_f64";
     } else if (is_float16) {
         shader_name = "expand_f16";
+    } else if (is_bfloat16) {
+        shader_name = "expand_bf16";
     } else if (is_int64) {
         shader_name = "expand_i64";
     } else {
-        // Default 4-byte shader (Float32 / Int32 / Bool pad). Bool buffer is
-        // uint8; Bool outputs are stored as uint8 and should NOT use this path
-        // (handled by callers via cast where needed).
         shader_name = "expand";
     }
 
@@ -684,12 +684,12 @@ auto VulkanBackend::dispatchExpand(const Tensor& input_in, const std::vector<int
 
     const void* buffer_in = input.data_ptr();
     const void* buffer_out = output.data_ptr();
-    // For Float16, the shader works with uint32 (packed pairs), so descriptor size needs
-    // to cover the full uint32 reads/writes
+    // For Float16 / BFloat16, the shader works with uint32 (packed pairs),
+    // so descriptor size needs to cover the full uint32 reads/writes.
+    const bool is_packed_half = (is_float16 || is_bfloat16);
     size_t buffer_size_in = input.numel() * input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
-    if (is_float16) {
-        // Round up to 4-byte boundary (minimum uint32 size for shader access)
+    if (is_packed_half) {
         size_t in_pairs = (input.numel() + 1) / 2;
         size_t out_pairs = (output.numel() + 1) / 2;
         buffer_size_in = in_pairs * 4;
@@ -744,8 +744,10 @@ auto VulkanBackend::dispatchExpand(const Tensor& input_in, const std::vector<int
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    // Float16 shader processes 2 elements per thread
-    uint32_t num_items = is_float16 ? ((output.numel() + 1) / 2) : output.numel();
+    // Packed-pair shaders process 2 elements per thread
+    uint32_t num_items = is_packed_half
+        ? static_cast<uint32_t>((output.numel() + 1) / 2)
+        : static_cast<uint32_t>(output.numel());
     uint32_t workgroups = div_wg(num_items, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
@@ -918,7 +920,15 @@ auto VulkanBackend::dispatchClamp(const Tensor& input, float min_value, float ma
     int32_t device_id = input.device().index;
     bool is_float64 = (input.dtype() == DType::Float64);
     bool is_float16 = (input.dtype() == DType::Float16);
-    std::string shader_name = is_float64 ? "clamp_f64" : (is_float16 ? "clamp_f16" : "clamp");
+    bool is_bfloat16 = (input.dtype() == DType::BFloat16);
+    // BF16 has its own dedicated shader — without this branch BF16 buffers
+    // would fall through to the generic 32-bit `clamp` shader which smears
+    // two BF16 slots per store and returns garbage like [0, v, 0, v].
+    std::string shader_name =
+        is_float64 ? "clamp_f64"
+        : is_float16 ? "clamp_f16"
+        : is_bfloat16 ? "clamp_bf16"
+        : "clamp";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     // Create output tensor
@@ -929,8 +939,8 @@ auto VulkanBackend::dispatchClamp(const Tensor& input, float min_value, float ma
     const void* buffer_in = input.data_ptr();
     const void* buffer_out = output.data_ptr();
     size_t buffer_size_in, buffer_size_out;
-    if (is_float16) {
-        // Float16 packed as 2 elements per uint32 — round up to 4-byte boundary
+    if (is_float16 || is_bfloat16) {
+        // F16 / BF16 are packed 2 elements per uint32 — round up to 4-byte boundary
         size_t num_pairs_in = (input.numel() + 1) / 2;
         size_t num_pairs_out = (output.numel() + 1) / 2;
         buffer_size_in = num_pairs_in * 4;

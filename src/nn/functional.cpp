@@ -594,33 +594,27 @@ auto nll_loss(const Variable& input, const Tensor& target,
 
 auto smooth_l1_loss(const Variable& input, const Variable& target,
                     Reduction reduction, double beta) -> Variable {
-    // smooth_l1: 0.5 * x^2 / beta if |x| < beta, else |x| - 0.5 * beta
+    // Branchless Smooth-L1 (Huber) loss so autograd flows through.
+    // The previous implementation used a raw tenzor::where on Tensors and
+    // wrapped the result in a fresh Variable, which silently dropped the
+    // grad_fn chain and left pred.grad() empty after backward().
+    //
+    //   loss = 0.5 * min(|diff|, beta)^2 / beta + max(|diff| - beta, 0)
+    // When |diff| < beta : 0.5 * |diff|^2 / beta + 0
+    // When |diff| ≥ beta : 0.5 * beta + |diff| - beta = |diff| - 0.5*beta
+    //
+    // All operations below are Variable ops with registered grad_fns, so
+    // backward() propagates correctly into both input and target.
     auto diff = input - target;
     auto abs_diff = tenzor::abs(diff);
+    auto clamped_abs = tenzor::clamp(abs_diff, 0.0f, static_cast<float>(beta));
+    auto excess = abs_diff - clamped_abs;
+    auto loss_unreduced =
+        (clamped_abs * clamped_abs * 0.5f) / static_cast<float>(beta) + excess;
 
-    auto beta_t = tenzor::full(
-        std::vector<int64_t>(abs_diff.shape().begin(), abs_diff.shape().end()),
-        static_cast<float>(beta), abs_diff.dtype(), abs_diff.tensor().device());
-    auto half_beta = tenzor::full(
-        std::vector<int64_t>(abs_diff.shape().begin(), abs_diff.shape().end()),
-        static_cast<float>(0.5 * beta), abs_diff.dtype(), abs_diff.tensor().device());
-
-    // condition: |x| < beta
-    auto cond = tenzor::lt(abs_diff.tensor(), beta_t);
-
-    // quadratic branch: 0.5 * x^2 / beta
-    auto quad = diff * diff * static_cast<float>(0.5 / beta);
-
-    // linear branch: |x| - 0.5 * beta
-    auto lin = abs_diff - Variable(half_beta, false);
-
-    auto loss = Variable(
-        tenzor::where(cond, quad.tensor(), lin.tensor()),
-        input.requires_grad());
-
-    if (reduction == Reduction::Mean) return tenzor::mean(loss);
-    if (reduction == Reduction::Sum) return tenzor::sum(loss);
-    return loss;
+    if (reduction == Reduction::Mean) return tenzor::mean(loss_unreduced);
+    if (reduction == Reduction::Sum) return tenzor::sum(loss_unreduced);
+    return loss_unreduced;
 }
 
 // ============================================================================
