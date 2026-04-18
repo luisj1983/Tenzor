@@ -18,14 +18,16 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
-#include <vector>
-#include <string>
-#include <functional>
 #include <cmath>
-#include <iostream>
-#include <ranges>
+#include <cstdlib>
+#include <functional>
 #include <iomanip>
+#include <iostream>
 #include <random>
+#include <ranges>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace tenzor {
 namespace testing {
@@ -44,7 +46,41 @@ namespace testing {
  * @param index Device index (default: 0)
  * @return true if the backend is available and functional
  */
+// Returns true if `backend` appears in the comma-separated $TENZOR_SKIP_BACKENDS list.
+// Consulted by is_backend_available() and the SKIP_IF_NO_* macros so a single
+// env setting silences a backend across every parity test without a rebuild.
+inline bool is_backend_skipped_by_env(std::string_view backend) {
+    const char* raw = std::getenv("TENZOR_SKIP_BACKENDS");
+    if (!raw || !*raw) return false;
+    std::string_view list{raw};
+    size_t start = 0;
+    while (start <= list.size()) {
+        size_t end = list.find(',', start);
+        if (end == std::string_view::npos) end = list.size();
+        auto token = list.substr(start, end - start);
+        while (!token.empty() && (token.front() == ' ' || token.front() == '\t')) token.remove_prefix(1);
+        while (!token.empty() && (token.back() == ' ' || token.back() == '\t')) token.remove_suffix(1);
+        if (!token.empty() && token == backend) return true;
+        start = end + 1;
+    }
+    return false;
+}
+
+inline std::string_view device_type_to_backend_name(Device::Type t) {
+    switch (t) {
+        case Device::Type::CPU:    return "cpu";
+        case Device::Type::CUDA:   return "cuda";
+        case Device::Type::Vulkan: return "vulkan";
+        case Device::Type::OneAPI: return "oneapi";
+        case Device::Type::ROCm:   return "rocm";
+    }
+    return "";
+}
+
 inline bool is_backend_available(Device::Type backend_type, int32_t index = 0) {
+    if (is_backend_skipped_by_env(device_type_to_backend_name(backend_type))) {
+        return false;
+    }
     try {
         Device test_device{backend_type, index};
         auto t = zeros({2, 2}, DType::Float32, test_device);

@@ -1,6 +1,8 @@
 #include "tenzor/autograd/function.hpp"
 #include "function_helpers.hpp"
 #include <cassert>
+#include <cstdlib>
+#include <string>
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
@@ -601,17 +603,44 @@ auto CholeskyInverseBackward::backward_with_variables(std::vector<Variable> grad
 }
 
 // LinalgLDLFactorBackward: complex structured backprop
-// For now, use numerical differentiation approach via saved factors
+//
+// Mathematical status: the closed-form backward through LDL = P L D L^T P^T
+// (with pivoting from Bunch-Kaufman) is tractable but involves multiple
+// triangular-projection operations; see Giles "Extended Matrix Backward"
+// (2008) and Walter "Structured Matrix Differentiation" (2010). A correct
+// implementation is multi-file work that needs its own dedicated test
+// suite against SciPy/PyTorch references and is out of scope for this
+// autograd completeness pass.
+//
+// Current behavior: returns zero gradient. Silent zeros are dangerous when
+// users plug LDL into a loss that's downstream of other differentiable ops
+// — they'll see "training proceeds" but gradients through the factorization
+// are missing. Set `TENZOR_STRICT_LINALG_GRAD=1` to surface this as a
+// runtime error instead, so CI catches accidental use of LDL in a gradient
+// chain. Users needing gradients should use `ldl_solve` which has a proper
+// backward, or compute through `cholesky` for symmetric positive definite
+// matrices.
 auto LinalgLDLFactorBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
     throw std::runtime_error("LinalgLDLFactorBackward::forward should not be called directly");
 }
 
+namespace {
+inline bool strict_linalg_grad_mode() {
+    const char* v = std::getenv("TENZOR_STRICT_LINALG_GRAD");
+    return v && *v && std::string(v) != "0" && std::string(v) != "false";
+}
+}
+
 auto LinalgLDLFactorBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
-    // LDL factorization backward is very complex (structured symmetric backprop).
-    // For now, return zeros (non-differentiable through the factorization).
-    // Users needing gradients through LDL should use the solve path.
     require_saved_tensors(1);
     const auto& A = saved_tensors_[0];
+    if (strict_linalg_grad_mode()) {
+        throw std::runtime_error(
+            "LDL factorization backward is not implemented (returns zero "
+            "gradient by default). TENZOR_STRICT_LINALG_GRAD=1 surfaces this "
+            "as an error. Use ldl_solve() for gradient flow through linear "
+            "systems, or cholesky() for SPD inputs.");
+    }
     return {zeros_like(A)};
 }
 
@@ -649,8 +678,20 @@ auto LinalgHouseholderBackward::backward(std::vector<Tensor> /*grad_outputs*/) -
     require_saved_tensors(2);
     const auto& input = saved_tensors_[0];
     const auto& tau = saved_tensors_[1];
-    // Householder product backward is complex and rarely needed in gradient flows.
-    // Return zeros for now (covered by the STRUCTURAL_ZERO_STUB).
+    // Householder product Q = H_k ... H_1 (H_i = I - tau_i v_i v_i^T)
+    // has a closed-form but notoriously complex backward — PyTorch tracked
+    // this as an outstanding issue for several years. Returns zeros by
+    // default. Set TENZOR_STRICT_LINALG_GRAD=1 to have this throw instead
+    // of silently producing zero gradients, which is useful for catching
+    // accidental use in a gradient chain. Users needing QR-like gradient
+    // flow should use tenzor::qr() (which has a real backward).
+    if (strict_linalg_grad_mode()) {
+        throw std::runtime_error(
+            "Householder-product backward is not implemented (returns zero "
+            "gradient by default). TENZOR_STRICT_LINALG_GRAD=1 surfaces this "
+            "as an error. Use qr() for Q/R differentiation, or compute "
+            "gradients through the post-QR path.");
+    }
     return {zeros_like(input), zeros_like(tau)};
 }
 

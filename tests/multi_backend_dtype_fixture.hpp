@@ -29,11 +29,13 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/autograd/variable.hpp>
 #include <tenzor/core/dtype.hpp>
-#include <tuple>
-#include <vector>
-#include <string>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <string>
+#include <string_view>
+#include <tuple>
+#include <vector>
 
 namespace tenzor {
 namespace testing {
@@ -183,6 +185,26 @@ inline Device getDeviceFromName(const std::string& backend_name) {
  *
  * Handles both legacy format ("cuda") and indexed format ("cuda:1").
  */
+// Returns true if `backend` appears in the comma-separated $TENZOR_SKIP_BACKENDS list.
+// Matching is on the base backend name; lower-case, whitespace-trimmed tokens.
+inline bool isBackendSkippedByEnv(const std::string& backend) {
+    const char* raw = std::getenv("TENZOR_SKIP_BACKENDS");
+    if (!raw || !*raw) return false;
+    std::string_view target{backend};
+    std::string_view list{raw};
+    size_t start = 0;
+    while (start <= list.size()) {
+        size_t end = list.find(',', start);
+        if (end == std::string_view::npos) end = list.size();
+        auto token = list.substr(start, end - start);
+        while (!token.empty() && (token.front() == ' ' || token.front() == '\t')) token.remove_prefix(1);
+        while (!token.empty() && (token.back() == ' ' || token.back() == '\t')) token.remove_suffix(1);
+        if (!token.empty() && token == target) return true;
+        start = end + 1;
+    }
+    return false;
+}
+
 inline bool isBackendNameAvailable(const std::string& backend_name) {
     auto base = parseBackendName(backend_name);
     auto index = parseDeviceIndex(backend_name);
@@ -281,6 +303,13 @@ protected:
 
         auto [backend_name, dtype] = GetParam();
         dtype_ = dtype;
+
+        // Honor TENZOR_SKIP_BACKENDS opt-out first — matches on the base
+        // backend name, so "cuda:1" is covered by "cuda".
+        if (isBackendSkippedByEnv(parseBackendName(backend_name))) {
+            GTEST_SKIP() << parseBackendName(backend_name)
+                         << " excluded via TENZOR_SKIP_BACKENDS";
+        }
 
         // Check backend availability and skip if not available
         if (!isBackendNameAvailable(backend_name)) {
@@ -728,13 +757,30 @@ inline bool MultiDTypeTest::initialized_ = false;
 // ============================================================================
 
 /**
- * @brief Standard float dtypes for most tests
+ * @brief Standard float dtypes for most tests.
+ *
+ * Defaults to Float32/Float64/Float16 to keep the default parity test
+ * matrix at 3 dtypes × 5 backends = 15 cases. Define TENZOR_TEST_BFLOAT16
+ * at build time (e.g. `cmake -DTENZOR_TEST_BFLOAT16=ON`) to additionally
+ * include BFloat16 in every multi-dtype parity test — useful for
+ * BF16-specialised CI runs. Setting this flag globally doubles the number
+ * of `INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS` instantiations so it is an
+ * intentional opt-in rather than the default (the full suite takes 15+ hrs
+ * already and a 4-dtype default would be disproportionate).
  */
+#ifdef TENZOR_TEST_BFLOAT16
+#define FLOAT_DTYPES \
+    ::testing::Values(DType::Float32, DType::Float64, DType::Float16, DType::BFloat16)
+#else
 #define FLOAT_DTYPES \
     ::testing::Values(DType::Float32, DType::Float64, DType::Float16)
+#endif
 
 /**
- * @brief All float dtypes including BFloat16
+ * @brief All float dtypes including BFloat16 — unconditional.
+ *
+ * Use when a test specifically needs BFloat16 coverage regardless of the
+ * build-time default.
  */
 #define ALL_FLOAT_DTYPES \
     ::testing::Values(DType::Float32, DType::Float64, DType::Float16, DType::BFloat16)

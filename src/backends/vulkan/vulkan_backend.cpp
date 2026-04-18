@@ -353,6 +353,8 @@ void VulkanBackend::createLogicalDevices() {
         bool hasFloatControls = false;
         bool hasAtomicFloat = false;
         bool hasAtomicInt64 = false;
+        bool hasFloat16Int8 = false;
+        bool hasStorage16Bit = false;
         for (const auto& ext : availableExtensions) {
             if (strcmp(ext.extensionName, VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME) == 0) {
                 hasFloatControls = true;
@@ -362,6 +364,19 @@ void VulkanBackend::createLogicalDevices() {
             }
             if (strcmp(ext.extensionName, "VK_KHR_shader_atomic_int64") == 0) {
                 hasAtomicInt64 = true;
+            }
+            // Required for shaders that declare the Float16 SPIR-V capability.
+            // Before this was enabled, F16 shaders ran with silently-undefined
+            // behavior on some drivers (RADV produced wrong results for
+            // odd-numel avg_pool2d_f16 outputs).
+            if (strcmp(ext.extensionName, "VK_KHR_shader_float16_int8") == 0) {
+                hasFloat16Int8 = true;
+            }
+            // 16-bit buffer storage is needed if F16 values are read from
+            // SSBOs (which our packed-F16 shaders do). Strictly required
+            // alongside VK_KHR_shader_float16_int8 for the full F16 path.
+            if (strcmp(ext.extensionName, "VK_KHR_16bit_storage") == 0) {
+                hasStorage16Bit = true;
             }
         }
 
@@ -375,6 +390,12 @@ void VulkanBackend::createLogicalDevices() {
         }
         if (hasAtomicInt64) {
             deviceExtensions.push_back("VK_KHR_shader_atomic_int64");
+        }
+        if (hasFloat16Int8) {
+            deviceExtensions.push_back("VK_KHR_shader_float16_int8");
+        }
+        if (hasStorage16Bit) {
+            deviceExtensions.push_back("VK_KHR_16bit_storage");
         }
 
         // Query float controls properties to check for denorm preservation support
@@ -420,6 +441,30 @@ void VulkanBackend::createLogicalDevices() {
             hasAtomicInt64 = (atomicInt64Features.shaderBufferInt64Atomics == VK_TRUE);
         }
 
+        // Query shaderFloat16 + 16bit storage buffer support. Both must be
+        // enabled when the extension is available, otherwise shaders that
+        // declare the Float16 SPIR-V capability (our *_f16 compute shaders)
+        // run with undefined behavior on some drivers.
+        VkPhysicalDeviceFloat16Int8FeaturesKHR f16i8Features{};
+        f16i8Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT16_INT8_FEATURES_KHR;
+        f16i8Features.pNext = nullptr;
+        VkPhysicalDevice16BitStorageFeaturesKHR storage16Features{};
+        storage16Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES_KHR;
+        storage16Features.pNext = nullptr;
+        if (hasFloat16Int8 || hasStorage16Bit) {
+            VkPhysicalDeviceFeatures2 features2{};
+            features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            if (hasFloat16Int8) { f16i8Features.pNext = &storage16Features; features2.pNext = &f16i8Features; }
+            else                { features2.pNext = &storage16Features; }
+            vkGetPhysicalDeviceFeatures2(ctx.physicalDevice, &features2);
+            // Disable if not actually supported by the driver
+            hasFloat16Int8 = hasFloat16Int8 && (f16i8Features.shaderFloat16 == VK_TRUE);
+            hasStorage16Bit = hasStorage16Bit && (storage16Features.storageBuffer16BitAccess == VK_TRUE);
+            // Re-null pNext so the device-creation chain below can re-use these structs.
+            f16i8Features.pNext = nullptr;
+            storage16Features.pNext = nullptr;
+        }
+
         // Device creation
         VkDeviceCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -430,7 +475,8 @@ void VulkanBackend::createLogicalDevices() {
         createInfo.ppEnabledExtensionNames = deviceExtensions.empty() ? nullptr : deviceExtensions.data();
         createInfo.enabledLayerCount = 0;
 
-        // Chain features if any extensions need features enabled via pNext
+        // Chain features if any extensions need features enabled via pNext.
+        // Order: features2 → [int64] → [atomicFloat] → [f16i8] → [storage16].
         VkPhysicalDeviceFeatures2 features2Chain{};
         bool useFeatures2 = false;
 
@@ -441,16 +487,44 @@ void VulkanBackend::createLogicalDevices() {
         }
 
         if (hasAtomicInt64) {
-            // Chain atomic int64 features (prepend to pNext chain)
             atomicInt64Features.pNext = useFeatures2 ? static_cast<void*>(&atomicFloatFeatures) : nullptr;
+            useFeatures2 = true;
+        }
+
+        // Append f16 + 16bit-storage features to the chain. Setting these to
+        // VK_TRUE before device creation is the fix for the previously-silent
+        // Float16 UB: shaders that declare the Float16 SPIR-V capability (our
+        // *_f16 compute shaders) now run with the feature properly enabled.
+        if (hasFloat16Int8) {
+            f16i8Features.shaderFloat16 = VK_TRUE;
+            f16i8Features.pNext = useFeatures2
+                ? (hasAtomicInt64 ? static_cast<void*>(&atomicInt64Features)
+                                  : static_cast<void*>(&atomicFloatFeatures))
+                : nullptr;
+            useFeatures2 = true;
+        }
+        if (hasStorage16Bit) {
+            storage16Features.storageBuffer16BitAccess = VK_TRUE;
+            // Chain below the f16 features if both are present, else below
+            // whichever was at the top.
+            void* next = nullptr;
+            if (hasFloat16Int8) next = &f16i8Features;
+            else if (hasAtomicInt64) next = &atomicInt64Features;
+            else if (hasAtomicFloat) next = &atomicFloatFeatures;
+            storage16Features.pNext = next;
             useFeatures2 = true;
         }
 
         if (useFeatures2) {
             features2Chain.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
             features2Chain.features = deviceFeatures;
-            features2Chain.pNext = hasAtomicInt64 ? static_cast<void*>(&atomicInt64Features)
-                                                  : static_cast<void*>(&atomicFloatFeatures);
+            // Head of the pNext chain is whichever struct is top-most.
+            void* head = nullptr;
+            if (hasStorage16Bit)       head = &storage16Features;
+            else if (hasFloat16Int8)   head = &f16i8Features;
+            else if (hasAtomicInt64)   head = &atomicInt64Features;
+            else /* hasAtomicFloat */  head = &atomicFloatFeatures;
+            features2Chain.pNext = head;
             createInfo.pNext = &features2Chain;
             createInfo.pEnabledFeatures = nullptr;  // Must be null when using pNext chain
         }

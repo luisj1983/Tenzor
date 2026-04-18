@@ -161,6 +161,48 @@ TEST_F(HRMTest, RMSNormNormalization) {
     EXPECT_LT(max_diff.item<float>(), 0.01f);
 }
 
+// Stablemax previously extracted input.tensor() and returned a Variable
+// with no grad_fn — backward() produced no gradient. Rewritten to use
+// Variable-level ops; this test locks in that backward flows through.
+TEST_F(HRMTest, StablemaxPropagatesGradient) {
+    Variable x(randn({2, 5}, DType::Float32, Device::cpu()), /*requires_grad=*/true);
+    auto y = stablemax(x, -1, 1e-6);
+    auto loss = tenzor::sum(y);
+    loss.backward();
+
+    ASSERT_TRUE(x.has_grad())
+        << "stablemax must propagate gradient (was severed pre-fix)";
+    auto g = x.grad().value().to(Device::cpu()).contiguous();
+    const float* gp = g.data<float>();
+    float max_abs = 0.0f;
+    for (int64_t i = 0; i < g.numel(); ++i) {
+        max_abs = std::max(max_abs, std::abs(gp[i]));
+    }
+    EXPECT_GT(max_abs, 0.0f)
+        << "stablemax gradient identically zero — graph still severed";
+}
+
+// Stablemax output must be a valid probability distribution: non-negative,
+// sums to ≈ 1 along the normalised dimension (modulo the eps term).
+TEST_F(HRMTest, StablemaxOutputIsProbability) {
+    Variable x(randn({3, 7}, DType::Float32, Device::cpu()), /*requires_grad=*/false);
+    auto y = stablemax(x, -1, 1e-8);
+
+    auto y_cpu = y.tensor().to(Device::cpu()).contiguous();
+    const float* yp = y_cpu.data<float>();
+    for (int64_t i = 0; i < y_cpu.numel(); ++i) {
+        EXPECT_GE(yp[i], 0.0f) << "stablemax output should be non-negative";
+    }
+
+    auto row_sums = tenzor::sum(y.tensor(), /*dim=*/1, /*keepdim=*/false);
+    auto row_sums_cpu = row_sums.to(Device::cpu()).contiguous();
+    const float* rp = row_sums_cpu.data<float>();
+    for (int64_t i = 0; i < row_sums_cpu.numel(); ++i) {
+        EXPECT_NEAR(rp[i], 1.0f, 1e-4f)
+            << "stablemax rows should sum to ~1 (within eps tolerance)";
+    }
+}
+
 // ============================================================================
 // GatedLinearUnit Tests
 // ============================================================================

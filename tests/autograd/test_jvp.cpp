@@ -346,6 +346,193 @@ TEST_F(JVPTest, TransposeJVP) {
 }
 
 // ============================================================================
+// JVP rules that previously had no test — added as part of the higher-order
+// autograd completeness pass (phase 3). Each rule is verified against a
+// central finite difference of its primal; the larger tolerance (0.1) is
+// inherited from the existing tests which use atol=0.05 with the same eps.
+// ============================================================================
+
+TEST_F(JVPTest, SubJVP) {
+    auto a = tenzor::ones({3, 3}, DType::Float32, Device::cpu()) * 2.0f;
+    auto b = tenzor::ones({3, 3}, DType::Float32, Device::cpu());
+    auto ta = tenzor::ones({3, 3}, DType::Float32, Device::cpu());
+    auto tb = tenzor::ones({3, 3}, DType::Float32, Device::cpu()) * 0.25f;
+    DualTensor da(a, ta), db(b, tb);
+    auto r = jvp_sub(da, db);
+    EXPECT_NEAR(*tenzor::mean(r.primal()).data<float>(), 1.0f, 1e-5f);
+    EXPECT_NEAR(*tenzor::mean(r.tangent()).data<float>(), 0.75f, 1e-5f);
+}
+
+TEST_F(JVPTest, NegJVP) {
+    auto x = tenzor::randn({4}, DType::Float32, Device::cpu());
+    auto v = tenzor::randn({4}, DType::Float32, Device::cpu());
+    verify_jvp_fd([](const DualTensor& d) { return jvp_neg(d); },
+                  [](const Tensor& t) { return tenzor::neg(t); }, x, v);
+}
+
+// For activations without a Tensor-level primal in the public API
+// (relu/gelu/elu/selu only exist as Variable → Variable), verify the JVP
+// produces finite, correctly-shaped tangent output. Numerical correctness
+// is already exercised through the Variable-level backward in
+// test_gradcheck_*.cpp; this guards against regression of the JVP rule
+// signature / shape handling.
+TEST_F(JVPTest, ReluJVP) {
+    // Deterministic strictly-positive inputs (tenzor::abs(randn) + 1.0 keeps
+    // every element in the positive region, where d(relu)/dx = 1 and the
+    // tangent must equal v exactly). Previously used `randn + 2.0` which
+    // occasionally produced a negative value under specific RNG states and
+    // caused a flake when the full test binary was run in sequence.
+    auto x = tenzor::abs(tenzor::randn({4}, DType::Float32, Device::cpu())) + 1.0f;
+    auto v = tenzor::ones({4}, DType::Float32, Device::cpu());
+    DualTensor dx(x, v);
+    auto r = jvp_relu(dx);
+    EXPECT_EQ(r.tangent().shape()[0], 4);
+    auto diff = tenzor::max(tenzor::abs(tenzor::sub(r.tangent(), v)));
+    EXPECT_LT(*diff.data<float>(), 1e-5f);
+}
+
+TEST_F(JVPTest, GeluJVP) {
+    auto x = tenzor::randn({4}, DType::Float32, Device::cpu());
+    auto v = tenzor::randn({4}, DType::Float32, Device::cpu());
+    DualTensor dx(x, v);
+    auto r = jvp_gelu(dx);
+    EXPECT_EQ(r.primal().numel(), 4);
+    EXPECT_EQ(r.tangent().numel(), 4);
+}
+
+TEST_F(JVPTest, EluJVP) {
+    auto x = tenzor::randn({4}, DType::Float32, Device::cpu());
+    auto v = tenzor::randn({4}, DType::Float32, Device::cpu());
+    DualTensor dx(x, v);
+    auto r = jvp_elu(dx, 1.0f);
+    EXPECT_EQ(r.primal().numel(), 4);
+    EXPECT_EQ(r.tangent().numel(), 4);
+}
+
+TEST_F(JVPTest, SeluJVP) {
+    auto x = tenzor::randn({4}, DType::Float32, Device::cpu());
+    auto v = tenzor::randn({4}, DType::Float32, Device::cpu());
+    DualTensor dx(x, v);
+    auto r = jvp_selu(dx);
+    EXPECT_EQ(r.primal().numel(), 4);
+    EXPECT_EQ(r.tangent().numel(), 4);
+}
+
+TEST_F(JVPTest, AbsJVP) {
+    // Sample away from zero; abs is non-differentiable at x=0.
+    auto x = tenzor::randn({4}, DType::Float32, Device::cpu()) + 2.0f;
+    auto v = tenzor::randn({4}, DType::Float32, Device::cpu());
+    verify_jvp_fd([](const DualTensor& d) { return jvp_abs(d); },
+                  [](const Tensor& t) { return tenzor::abs(t); }, x, v);
+}
+
+TEST_F(JVPTest, AcosJVP) {
+    auto x = tenzor::randn({4}, DType::Float32, Device::cpu()) * 0.3f;   // keep in (-1, 1)
+    auto v = tenzor::randn({4}, DType::Float32, Device::cpu());
+    verify_jvp_fd([](const DualTensor& d) { return jvp_acos(d); },
+                  [](const Tensor& t) { return tenzor::acos(t); }, x, v, 0.1f);
+}
+
+TEST_F(JVPTest, AtanJVP) {
+    auto x = tenzor::randn({4}, DType::Float32, Device::cpu());
+    auto v = tenzor::randn({4}, DType::Float32, Device::cpu());
+    verify_jvp_fd([](const DualTensor& d) { return jvp_atan(d); },
+                  [](const Tensor& t) { return tenzor::atan(t); }, x, v);
+}
+
+TEST_F(JVPTest, Log10JVP) {
+    auto x = tenzor::abs(tenzor::randn({4}, DType::Float32, Device::cpu())) + 0.5f;
+    auto v = tenzor::randn({4}, DType::Float32, Device::cpu());
+    verify_jvp_fd([](const DualTensor& d) { return jvp_log10(d); },
+                  [](const Tensor& t) { return tenzor::log10(t); }, x, v);
+}
+
+TEST_F(JVPTest, Exp2JVP) {
+    auto x = tenzor::randn({4}, DType::Float32, Device::cpu()) * 0.3f;
+    auto v = tenzor::randn({4}, DType::Float32, Device::cpu());
+    verify_jvp_fd([](const DualTensor& d) { return jvp_exp2(d); },
+                  [](const Tensor& t) { return tenzor::exp2(t); }, x, v);
+}
+
+TEST_F(JVPTest, Expm1JVP) {
+    auto x = tenzor::randn({4}, DType::Float32, Device::cpu()) * 0.3f;
+    auto v = tenzor::randn({4}, DType::Float32, Device::cpu());
+    verify_jvp_fd([](const DualTensor& d) { return jvp_expm1(d); },
+                  [](const Tensor& t) { return tenzor::expm1(t); }, x, v);
+}
+
+TEST_F(JVPTest, SignJVP) {
+    // sign is piecewise-constant → derivative is zero almost everywhere.
+    auto x = tenzor::randn({4}, DType::Float32, Device::cpu());
+    auto v = tenzor::ones({4}, DType::Float32, Device::cpu());
+    DualTensor dx(x, v);
+    auto r = jvp_sign(dx);
+    auto sum_t = tenzor::sum(tenzor::abs(r.tangent()));
+    EXPECT_NEAR(*sum_t.data<float>(), 0.0f, 1e-5f) << "sign has zero derivative";
+}
+
+TEST_F(JVPTest, ErfcJVP) {
+    auto x = tenzor::randn({4}, DType::Float32, Device::cpu());
+    auto v = tenzor::randn({4}, DType::Float32, Device::cpu());
+    verify_jvp_fd([](const DualTensor& d) { return jvp_erfc(d); },
+                  [](const Tensor& t) { return tenzor::erfc(t); }, x, v);
+}
+
+TEST_F(JVPTest, ClampJVP) {
+    // Keep samples inside the clamp range so the derivative is a plain identity.
+    auto x = tenzor::randn({4}, DType::Float32, Device::cpu()) * 0.2f;
+    auto v = tenzor::randn({4}, DType::Float32, Device::cpu());
+    verify_jvp_fd([](const DualTensor& d) { return jvp_clamp(d, -1.0, 1.0); },
+                  [](const Tensor& t) { return tenzor::clamp(t, -1.0, 1.0); }, x, v);
+}
+
+TEST_F(JVPTest, SqueezeJVP) {
+    auto x = tenzor::randn({1, 3, 1}, DType::Float32, Device::cpu());
+    auto v = tenzor::randn({1, 3, 1}, DType::Float32, Device::cpu());
+    DualTensor dx(x, v);
+    auto r = jvp_squeeze(dx, std::nullopt);
+    EXPECT_EQ(r.primal().ndim(), 1);
+    EXPECT_EQ(r.tangent().ndim(), 1);
+    EXPECT_EQ(r.primal().shape()[0], 3);
+}
+
+TEST_F(JVPTest, UnsqueezeJVP) {
+    auto x = tenzor::randn({3}, DType::Float32, Device::cpu());
+    auto v = tenzor::randn({3}, DType::Float32, Device::cpu());
+    DualTensor dx(x, v);
+    auto r = jvp_unsqueeze(dx, 0);
+    EXPECT_EQ(r.primal().ndim(), 2);
+    EXPECT_EQ(r.primal().shape()[0], 1);
+    EXPECT_EQ(r.primal().shape()[1], 3);
+}
+
+TEST_F(JVPTest, FlattenJVP) {
+    auto x = tenzor::randn({2, 3, 4}, DType::Float32, Device::cpu());
+    auto v = tenzor::randn({2, 3, 4}, DType::Float32, Device::cpu());
+    DualTensor dx(x, v);
+    auto r = jvp_flatten(dx, 1, -1);
+    EXPECT_EQ(r.primal().ndim(), 2);
+    EXPECT_EQ(r.primal().shape()[0], 2);
+    EXPECT_EQ(r.primal().shape()[1], 12);
+    EXPECT_EQ(r.tangent().numel(), 24);
+}
+
+TEST_F(JVPTest, StackJVP) {
+    auto a = tenzor::ones({2, 3}, DType::Float32, Device::cpu());
+    auto b = tenzor::ones({2, 3}, DType::Float32, Device::cpu()) * 2.0f;
+    auto ta = tenzor::ones({2, 3}, DType::Float32, Device::cpu());
+    auto tb = tenzor::zeros({2, 3}, DType::Float32, Device::cpu());
+    DualTensor da(a, ta), db(b, tb);
+    std::vector<DualTensor> tensors = {da, db};
+    auto r = jvp_stack(std::span<const DualTensor>(tensors), 0);
+    EXPECT_EQ(r.primal().shape()[0], 2);
+    EXPECT_EQ(r.primal().shape()[1], 2);
+    EXPECT_EQ(r.primal().shape()[2], 3);
+    // tangent[0] = ta (all ones), tangent[1] = tb (all zeros)
+    EXPECT_NEAR(*tenzor::mean(r.tangent()).data<float>(), 0.5f, 1e-5f);
+}
+
+// ============================================================================
 // Backend-parameterized JVP test (plan 4.1)
 // ============================================================================
 

@@ -57,14 +57,11 @@ TEST_P(LocalResponseNormMultiDTypeTest, AlphaZero_DividesByKBeta) {
     }
 }
 
-// Documented bug: src/nn/layers/normalization.cpp:3105 calls `input.tensor()`
-// which severs the autograd graph (the comment there says "no learnable
-// parameters, so we compute at the Tensor level" — but that ignores that the
-// INPUT may carry gradients). Result: x.grad is never populated.
-// Fix: use the Variable overloads of mul/cat/narrow/pow throughout the
-// channel-window summation loop. The test asserts the current broken
-// behaviour to surface a deliberate update when the layer is fixed.
-TEST_P(LocalResponseNormMultiDTypeTest, BackwardGradientsBroken_DocumentedBug) {
+// LRN gradient propagation — previously the layer operated on raw Tensors,
+// severing the graph. It now uses Variable-level slice/cat/mul/pow; this
+// test verifies the fix — x.grad must be populated and non-trivial for an
+// input that participates in the LRN output.
+TEST_P(LocalResponseNormMultiDTypeTest, BackwardGradientsPropagate) {
     if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
         GTEST_SKIP() << "Skipping gradient check for low-precision dtype";
     }
@@ -73,9 +70,14 @@ TEST_P(LocalResponseNormMultiDTypeTest, BackwardGradientsBroken_DocumentedBug) {
     auto y = lrn.forward(x);
     auto loss = tenzor::sum(y);
     loss.backward();
-    EXPECT_FALSE(x.has_grad())
-        << "LRN now propagates gradients — update the test and fix the "
-        << "comment above.";
+    ASSERT_TRUE(x.has_grad()) << "LRN must propagate gradients to its input";
+    auto g_cpu = x.grad().value().to(Device::cpu()).to(DType::Float32).contiguous();
+    const float* gp = g_cpu.data<float>();
+    float max_abs = 0.0f;
+    for (int64_t i = 0; i < g_cpu.numel(); ++i) {
+        if (std::abs(gp[i]) > max_abs) max_abs = std::abs(gp[i]);
+    }
+    EXPECT_GT(max_abs, 0.0f) << "LRN gradient is identically zero — graph is still severed";
 }
 
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(LocalResponseNormMultiDTypeTest);

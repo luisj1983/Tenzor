@@ -720,11 +720,13 @@ public:
         auto input_shape = input.shape();
         auto weight_shape = weight.shape();
 
-        // grad_input: Use regular conv2d forward with grad_output as input
-        // The backward of ConvTranspose2d w.r.t. input is a regular Conv2d:
-        //   grad_input = Conv2d(grad_output, weight, stride=stride, padding=padding)
-        // The weight layout [in_ch, out_ch, kH, kW] matches Conv2d weight [C_out, C_in, kH, kW]
-        // where C_out=in_ch (channels of grad_input) and C_in=out_ch (channels of grad_output).
+        // grad_input: adjoint of ConvTranspose2d is a regular Conv2d of
+        // grad_output against the same weight (the weight is
+        // [C_in, C_out, kH, kW] for ConvTranspose; when used as a Conv2d
+        // weight [C_out_eff, C_in_eff, ...] the channel roles swap to match
+        // grad_input ← grad_output). No spatial flip is needed: the Conv2d
+        // kernel already implements the mathematical adjoint for
+        // cross-correlation convention.
         NewOpAttributes conv_attrs;
         conv_attrs.set(AttrKey::Stride, stride_);
         conv_attrs.set(AttrKey::Padding, padding_);
@@ -1123,6 +1125,25 @@ private:
     int64_t dilation_;
     int64_t groups_;
 };
+
+namespace internal {
+auto make_conv3d_backward(int64_t stride, int64_t padding, int64_t dilation,
+                          int64_t groups,
+                          std::vector<::tenzor::Tensor> tensors_to_save)
+    -> std::shared_ptr<::tenzor::Function> {
+    return std::make_shared<Conv3dBackward>(
+        stride, padding, dilation, groups, std::move(tensors_to_save));
+}
+auto make_conv_transpose2d_backward(int64_t stride, int64_t padding,
+                                    int64_t output_padding, int64_t dilation,
+                                    int64_t groups,
+                                    std::vector<::tenzor::Tensor> tensors_to_save)
+    -> std::shared_ptr<::tenzor::Function> {
+    return std::make_shared<ConvTranspose2dBackward>(
+        stride, padding, output_padding, dilation, groups,
+        std::move(tensors_to_save));
+}
+} // namespace internal
 
 Conv3d::Conv3d(int64_t in_channels, int64_t out_channels, int64_t kernel_size,
               int64_t stride, int64_t padding, int64_t dilation,

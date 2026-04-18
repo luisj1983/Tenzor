@@ -1,10 +1,11 @@
 #include "tenzor/nn/layers/pooling.hpp"
-#include "tenzor/ops/creation.hpp"
-#include "tenzor/ops/math.hpp"
 #include "tenzor/autograd/function.hpp"
+#include "tenzor/autograd/ops.hpp"
 #include "tenzor/backend/dispatch.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
+#include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/math.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <limits>
@@ -1636,19 +1637,18 @@ auto LPPool1d::forward_impl(const Variable& input) -> Variable {
         throw std::invalid_argument("LPPool1d expects 3D input [batch, channels, length]");
     }
 
-    // LPPool: (avg_pool(|x|^p))^(1/p)
-    // This is equivalent to (sum(|x|^p, kernel) / kernel_size)^(1/p)
-    Tensor input_t = input.tensor();
-    auto x_abs = tenzor::abs(input_t);
-    auto x_pow = tenzor::pow(x_abs, static_cast<float>(norm_type_));
+    // LPPool: (avg_pool(|x|^p))^(1/p) — Variable-level throughout so
+    // backward() actually populates input.grad. The prior implementation
+    // called input.tensor() up front and re-wrapped intermediate Variables
+    // with requires_grad=false, severing the graph.
+    auto x_abs = ::tenzor::abs(input);
+    auto x_pow = ::tenzor::pow(x_abs, static_cast<float>(norm_type_));
 
-    // Apply average pooling on |x|^p
     AvgPool1d avg_pool(kernel_size_, stride_, /*padding=*/0);
-    auto pooled = avg_pool.forward(Variable(x_pow));
+    auto pooled = avg_pool.forward(x_pow);
 
-    // Take the p-th root
     float inv_p = 1.0f / static_cast<float>(norm_type_);
-    return Variable(tenzor::pow(pooled.tensor(), inv_p));
+    return ::tenzor::pow(pooled, inv_p);
 }
 
 // ============================================================================
@@ -1673,16 +1673,15 @@ auto LPPool2d::forward_impl(const Variable& input) -> Variable {
         throw std::invalid_argument("LPPool2d expects 4D input [batch, channels, height, width]");
     }
 
-    // LPPool: (avg_pool(|x|^p))^(1/p)
-    Tensor input_t = input.tensor();
-    auto x_abs = tenzor::abs(input_t);
-    auto x_pow = tenzor::pow(x_abs, static_cast<float>(norm_type_));
+    // LPPool: (avg_pool(|x|^p))^(1/p) — Variable-level (see LPPool1d comment).
+    auto x_abs = ::tenzor::abs(input);
+    auto x_pow = ::tenzor::pow(x_abs, static_cast<float>(norm_type_));
 
     AvgPool2d avg_pool(kernel_size_.first, stride_.first, /*padding=*/0);
-    auto pooled = avg_pool.forward(Variable(x_pow));
+    auto pooled = avg_pool.forward(x_pow);
 
     float inv_p = 1.0f / static_cast<float>(norm_type_);
-    return Variable(tenzor::pow(pooled.tensor(), inv_p));
+    return ::tenzor::pow(pooled, inv_p);
 }
 
 } // namespace tenzor::nn

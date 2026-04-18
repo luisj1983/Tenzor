@@ -7,12 +7,13 @@
  */
 
 #include "tenzor/nn/layers/hrm.hpp"
+#include "tenzor/autograd/ops.hpp"
 #include "tenzor/nn/activations/activations.hpp"
+#include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
-#include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
-#include "tenzor/ops/indexing.hpp"
 #include <cmath>
 #include <numeric>
 #include <random>
@@ -96,29 +97,22 @@ void truncated_normal_init(Tensor& tensor, double mean, double std,
 
 Variable stablemax(const Variable& input, int64_t dim, double eps) {
     // Stablemax: exp(x - max(x)) / (sum(exp(x - max(x))) + eps)
-    // The eps term in denominator prevents division by very small numbers
+    // The eps term in denominator prevents division by very small numbers.
+    //
+    // Implementation runs entirely on Variable-level ops so backward() flows
+    // through to `input`. The previous implementation extracted
+    // `input.tensor()` up front and returned a fresh Variable with no
+    // grad_fn, silently severing the graph.
 
-    auto x = input.tensor();
-
-    // Handle negative dimension
     if (dim < 0) {
-        dim = x.ndim() + dim;
+        dim = static_cast<int64_t>(input.shape().size()) + dim;
     }
 
-    // Compute max for numerical stability
-    auto x_max = tenzor::max(x, {dim}, true);
-
-    // Subtract max and compute exp
-    auto x_shifted = x - x_max;
-    auto exp_x = tenzor::exp(x_shifted);
-
-    // Sum with eps for stability
-    auto sum_exp = tenzor::sum(exp_x, {dim}, true) + static_cast<float>(eps);
-
-    // Normalize
-    auto result = exp_x / sum_exp;
-
-    return Variable(result, input.requires_grad());
+    auto x_max = ::tenzor::max(input, dim, /*keepdim=*/true);
+    auto x_shifted = input - x_max;
+    auto exp_x = ::tenzor::exp(x_shifted);
+    auto sum_exp = ::tenzor::sum(exp_x, dim, /*keepdim=*/true) + static_cast<float>(eps);
+    return exp_x / sum_exp;
 }
 
 Variable stablemax_cross_entropy(const Variable& input, const Variable& target,
@@ -201,20 +195,20 @@ auto GatedLinearUnit::forward_impl(const Variable& input) -> Variable {
     Variable activated_gate;
     switch (gate_type_) {
         case GateType::SiLU: {
-            // SiLU: x * sigmoid(x)
-            auto sigmoid_gate = sigmoid(gate);
+            // SiLU: x * nn::sigmoid(x)
+            auto sigmoid_gate = nn::sigmoid(gate);
             activated_gate = Variable(gate.tensor() * sigmoid_gate.tensor(), gate.requires_grad());
             break;
         }
         case GateType::GELU:
-            activated_gate = gelu(gate);
+            activated_gate = nn::gelu(gate);
             break;
         case GateType::ReLU:
-            activated_gate = relu(gate);
+            activated_gate = nn::relu(gate);
             break;
         case GateType::Sigmoid:
         default:
-            activated_gate = sigmoid(gate);
+            activated_gate = nn::sigmoid(gate);
             break;
     }
 
@@ -449,7 +443,7 @@ auto AdaptiveComputationalTime::compute_halt_prob(const Variable& state) -> Vari
     auto logits = halt_proj_->forward(state);  // (batch, seq_len, 1)
     // Squeeze last dimension
     auto squeezed = Variable(tenzor::squeeze(logits.tensor(), -1), logits.requires_grad());
-    auto probs = sigmoid(squeezed);  // (batch, seq_len)
+    auto probs = nn::sigmoid(squeezed);  // (batch, seq_len)
 
     return probs;
 }
@@ -510,8 +504,8 @@ auto QLearningACT::compute_q_values(const Variable& state)
     // Use nn::sigmoid for Variable inputs
     auto q_halt_var = Variable(q_halt, q_values.requires_grad());
     auto q_continue_var = Variable(q_continue, q_values.requires_grad());
-    auto q_halt_bounded = sigmoid(q_halt_var);
-    auto q_continue_bounded = sigmoid(q_continue_var);
+    auto q_halt_bounded = nn::sigmoid(q_halt_var);
+    auto q_continue_bounded = nn::sigmoid(q_continue_var);
 
     return std::make_pair(q_halt_bounded, q_continue_bounded);
 }
@@ -757,7 +751,7 @@ auto HRM::apply_output_activation(const Variable& logits) -> Variable {
         return stablemax(logits, -1, config_.stablemax_eps);
     } else {
         // Standard softmax
-        return softmax(logits, -1);
+        return nn::softmax(logits, -1);
     }
 }
 

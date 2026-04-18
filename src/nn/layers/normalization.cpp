@@ -3100,21 +3100,17 @@ auto LocalResponseNorm::forward_impl(const Variable& input) -> Variable {
     int64_t C = input_shape[1];
     int64_t half = size_ / 2;
 
-    // Operate on raw Tensors for the LRN computation.
-    // LRN has no learnable parameters, so we compute at the Tensor level.
-    Tensor x_t = input.tensor();
-    Tensor x_sq = x_t * x_t;
+    // Compute the channel-window sum at the Variable level so backward()
+    // through LRN actually populates input.grad. The previous implementation
+    // operated on raw Tensors ("LRN has no learnable parameters") which
+    // severed the graph at the input edge — the test
+    // tests/nn/layers/test_local_response_norm_multidtype.cpp asserts the
+    // broken behaviour as a reminder; update that test once this lands.
+    auto dev = input.tensor().device();
+    auto dt = input.tensor().dtype();
 
-    auto device = x_t.device();
-    auto dtype = x_t.dtype();
-
-    // Accumulator for channel-sliding sum of x^2
-    Tensor sum_sq = x_sq;  // j=0 contribution
-
-    // Use a function pointer to the tensor-level cat to avoid name resolution
-    // picking the autograd Variable overload in namespace tenzor.
-    using TensorCatFn = auto(*)(std::span<const Tensor>, int64_t) -> Tensor;
-    TensorCatFn tensor_cat = static_cast<TensorCatFn>(&::tenzor::cat);
+    Variable x_sq = input * input;
+    Variable sum_sq = x_sq;  // j=0 contribution
 
     for (int64_t j = -half; j <= half; ++j) {
         if (j == 0) continue;
@@ -3123,36 +3119,29 @@ auto LocalResponseNorm::forward_impl(const Variable& input) -> Variable {
         int64_t slice_len = C - std::abs(j);
         if (slice_len <= 0) continue;
 
-        Tensor sliced = x_sq.slice(1, src_start, src_start + slice_len);
+        Variable sliced = ::tenzor::slice(x_sq, 1, src_start, src_start + slice_len);
 
-        // Build zero-padded shifted version via cat
-        Tensor shifted;
+        auto pad_shape = std::vector<int64_t>(input_shape.begin(), input_shape.end());
+        pad_shape[1] = std::abs(j);
+        Variable pad(tenzor::zeros(pad_shape, dt, dev), false);
+
+        std::vector<Variable> parts;
         if (j > 0) {
-            // Pad at end: shifted = [sliced | zeros]
-            auto pad_shape = std::vector<int64_t>(input_shape.begin(), input_shape.end());
-            pad_shape[1] = j;
-            Tensor pad = tenzor::zeros(pad_shape, dtype, device);
-            Tensor parts[] = {sliced, pad};
-            shifted = tensor_cat(std::span<const Tensor>(parts, 2), 1);
+            parts = {sliced, pad};
         } else {
-            // Pad at start: shifted = [zeros | sliced]
-            auto pad_shape = std::vector<int64_t>(input_shape.begin(), input_shape.end());
-            pad_shape[1] = -j;
-            Tensor pad = tenzor::zeros(pad_shape, dtype, device);
-            Tensor parts[] = {pad, sliced};
-            shifted = tensor_cat(std::span<const Tensor>(parts, 2), 1);
+            parts = {pad, sliced};
         }
+        Variable shifted = ::tenzor::cat(parts, 1);
 
         sum_sq = sum_sq + shifted;
     }
 
-    // Compute divisor: (k + alpha/size * sum_sq)^beta
+    // divisor = (k + alpha/size * sum_sq) ^ beta  — all Variable-level
     float alpha_over_size = static_cast<float>(alpha_) / static_cast<float>(size_);
-    Tensor divisor = tenzor::pow(
-        sum_sq * alpha_over_size + static_cast<float>(k_),
-        static_cast<float>(beta_));
+    auto pow_base = sum_sq * alpha_over_size + static_cast<float>(k_);
+    auto divisor = ::tenzor::pow(pow_base, static_cast<float>(beta_));
 
-    return Variable(x_t / divisor, input.requires_grad());
+    return input / divisor;
 }
 
 } // namespace tenzor::nn

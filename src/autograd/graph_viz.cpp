@@ -16,10 +16,16 @@ auto make_dot(const Variable& root,
     out << "  rankdir=BT;\n";  // Bottom to top (loss at top)
     out << "  node [shape=box, style=filled, fontsize=10];\n\n";
 
-    // Build param lookup: grad_fn pointer → param name
+    // Build param lookup keyed by the underlying tensor data pointer. Keying
+    // by `&var` (the Variable's address inside the params map) was broken:
+    // the Variables appearing on a Function's input list are copies that
+    // live at different addresses from the ones the caller stored in
+    // `params`, so the lookup below always missed and leaf nodes fell back
+    // to the generic "param" label. Variables wrapping the same Tensor share
+    // storage, so data_ptr() is a stable identity key.
     std::unordered_map<const void*, std::string> param_names;
     for (auto& [name, var] : params) {
-        param_names[static_cast<const void*>(&var)] = name;
+        param_names[var.tensor().data_ptr()] = name;
     }
 
     // BFS traversal of the computation graph
@@ -78,8 +84,8 @@ auto make_dot(const Variable& root,
                 uintptr_t var_id = reinterpret_cast<uintptr_t>(&input_var);
                 std::string label = "param";
 
-                // Check if this is a named parameter
-                auto it = param_names.find(static_cast<const void*>(&input_var));
+                // Check if this is a named parameter (keyed by storage identity)
+                auto it = param_names.find(input_var.tensor().data_ptr());
                 if (it != param_names.end()) {
                     label = it->second;
                 }

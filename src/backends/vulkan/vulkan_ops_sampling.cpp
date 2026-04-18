@@ -39,6 +39,7 @@ struct CDistPC {
     uint32_t R;
     uint32_t M;
     uint32_t total;
+    float    p;      // Lp norm exponent; shader specializes p=1.0 and p=2.0.
 };
 
 struct HistogramPC {
@@ -165,7 +166,7 @@ auto VulkanBackend::dispatchBucketize(const Tensor& input, const Tensor& boundar
     return dispatchCast(output, DType::Int64);
 }
 
-auto VulkanBackend::dispatchCDist(const Tensor& x1, const Tensor& x2) -> Tensor {
+auto VulkanBackend::dispatchCDist(const Tensor& x1, const Tensor& x2, double p) -> Tensor {
     DType orig_dtype = x1.dtype();
     Tensor a = (orig_dtype == DType::Float32) ? x1.contiguous() : dispatchCast(x1.contiguous(), DType::Float32);
     Tensor b = (x2.dtype() == DType::Float32) ? x2.contiguous() : dispatchCast(x2.contiguous(), DType::Float32);
@@ -191,7 +192,7 @@ auto VulkanBackend::dispatchCDist(const Tensor& x1, const Tensor& x2) -> Tensor 
 
     CDistPC pc{static_cast<uint32_t>(B), static_cast<uint32_t>(P),
                static_cast<uint32_t>(R), static_cast<uint32_t>(M),
-               static_cast<uint32_t>(total)};
+               static_cast<uint32_t>(total), static_cast<float>(p)};
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, a.data_ptr()},

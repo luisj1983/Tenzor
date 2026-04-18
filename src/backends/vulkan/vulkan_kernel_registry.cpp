@@ -2682,8 +2682,9 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         });
 
     table.register_single_output_kernel(OpId::CDist,
-        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
-            return get_vulkan_backend()->dispatchCDist(inputs[0], inputs[1]);
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            double p = attrs.get_float(AttrKey::DistP, 2.0);
+            return get_vulkan_backend()->dispatchCDist(inputs[0], inputs[1], p);
         });
 
     // =========================================================================

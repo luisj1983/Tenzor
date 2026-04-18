@@ -1368,25 +1368,37 @@ auto sddmm(const SparseTensor& mask, const Tensor& A, const Tensor& B) -> Sparse
         csr_mask = csr_mask.to_csr();
     }
 
+    // The sddmm kernel below is CPU-only: it calls `.data<T>()` and
+    // dereferences in an OpenMP loop. When A/B are on a non-CPU device
+    // that pointer is a device address; dereferencing it from the host
+    // either segfaults or (on the CUDA driver) enters an error-retry loop
+    // that never returns — which was surfaced as the "sddmm hangs on GPU"
+    // bug by the multi-backend test migration. Move inputs to CPU for the
+    // compute and stage the result back to whichever device the caller
+    // gave us, so sddmm works on every backend (CPU kernel internally).
+    Device src_device = A.device();
+    Tensor A_cpu = (A.device() == Device::cpu()) ? A.contiguous() : A.to(Device::cpu()).contiguous();
+    Tensor B_cpu = (B.device() == Device::cpu()) ? B.contiguous() : B.to(Device::cpu()).contiguous();
+    Tensor crow_cpu = (csr_mask.crow_indices().device() == Device::cpu())
+        ? csr_mask.crow_indices() : csr_mask.crow_indices().to(Device::cpu());
+    Tensor col_cpu = (csr_mask.col_indices().device() == Device::cpu())
+        ? csr_mask.col_indices() : csr_mask.col_indices().to(Device::cpu());
+
     const int64_t K = a_shape[1];
-    Tensor values;
+    Tensor values_cpu;
     if (A.dtype() == DType::Float32) {
-        values = cpu_sddmm_csr<float>(csr_mask.crow_indices(),
-                                      csr_mask.col_indices(),
-                                      A.contiguous(), B.contiguous(),
-                                      M, N, K);
+        values_cpu = cpu_sddmm_csr<float>(crow_cpu, col_cpu, A_cpu, B_cpu, M, N, K);
     } else if (A.dtype() == DType::Float64) {
-        values = cpu_sddmm_csr<double>(csr_mask.crow_indices(),
-                                       csr_mask.col_indices(),
-                                       A.contiguous(), B.contiguous(),
-                                       M, N, K);
+        values_cpu = cpu_sddmm_csr<double>(crow_cpu, col_cpu, A_cpu, B_cpu, M, N, K);
     } else {
         throw std::runtime_error("sddmm: unsupported dtype " +
                                  std::string(dtype_name(A.dtype())));
     }
 
-    // Build the result CSR using the same row_ptr / col_ind as the mask
-    // but with the freshly-computed dot-product values.
+    // Build the result CSR on the source device so callers don't have to
+    // re-home it. The crow/col indices already live on src_device via
+    // csr_mask; values is the only newly-computed tensor.
+    Tensor values = (src_device == Device::cpu()) ? values_cpu : values_cpu.to(src_device);
     return SparseTensor::sparse_csr(csr_mask.crow_indices(),
                                     csr_mask.col_indices(),
                                     values,

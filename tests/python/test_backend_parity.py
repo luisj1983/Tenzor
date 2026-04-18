@@ -1,47 +1,52 @@
 #!/usr/bin/env python3
-"""Backend parity tests: verify CPU vs CUDA produce numerically close results.
+"""Backend parity: every non-CPU backend must match CPU numerically.
 
-Uses pure Tenzor ops for comparison (no numpy dependency).
-All tests are skipped if CUDA is not available.
+Parameterized over all backends via the ``device`` fixture from
+``conftest.py``; unavailable backends are skipped automatically (via the
+fixture) and any listed in ``TENZOR_SKIP_BACKENDS`` are also skipped.
+The CPU case is trivially skipped since there's no other side to compare.
 """
 
-import sys
-import os
-
-build_python_dir = os.path.join(os.path.dirname(__file__), '../../build/python')
-sys.path.insert(0, build_python_dir)
+import pytest
 
 import tenzor.tenzor_core as tz
 
-# Default tolerances by operation category
-ELEMWISE_RTOL = 1e-5
-ELEMWISE_ATOL = 1e-5
-MATMUL_RTOL = 1e-4
-MATMUL_ATOL = 1e-4
-REDUCTION_RTOL = 1e-5
-REDUCTION_ATOL = 1e-5
-NN_RTOL = 1e-4
-NN_ATOL = 1e-4
+from tolerances import (
+    ELEMWISE_ATOL, ELEMWISE_RTOL,
+    MATMUL_ATOL, MATMUL_RTOL,
+    NN_ATOL, NN_RTOL,
+    REDUCTION_ATOL, REDUCTION_RTOL,
+)
 
-HAS_CUDA = False
+# All non-CPU backends we want to compare against CPU. CPU-vs-CPU is skipped
+# inside _resolve_device below since it's trivially equal.
+NON_CPU_BACKENDS = ["cuda", "vulkan", "oneapi", "rocm"]
 
 
-def _close(a_cpu, a_cuda, rtol=ELEMWISE_RTOL, atol=ELEMWISE_ATOL):
-    """Check that CPU and CUDA results are numerically close using Tenzor ops."""
+def _resolve_device(device_name):
+    """Turn a backend-name string into a tz.Device. Skips CPU (self-parity
+    would be vacuous) and any backend that's unavailable (defence-in-depth —
+    the ``device`` fixture already skips these)."""
+    if device_name == "cpu":
+        pytest.skip("parity compares CPU against GPU backends")
+    ctor = {
+        "cuda":   tz.Device.cuda,
+        "vulkan": tz.Device.vulkan,
+        "oneapi": tz.Device.oneapi,
+        "rocm":   tz.Device.rocm,
+    }[device_name]
+    return ctor(0)
+
+
+def _close(a_cpu, a_other, rtol=ELEMWISE_RTOL, atol=ELEMWISE_ATOL):
+    """CPU and other-device results are numerically close (Tenzor-only)."""
     a = a_cpu.to(tz.Device.cpu()).to(tz.dtype.float32).contiguous()
-    b = a_cuda.to(tz.Device.cpu()).to(tz.dtype.float32).contiguous()
-
-    a_shape = a.shape
-    b_shape = b.shape
-    assert a_shape == b_shape, f"Shape mismatch: {a_shape} vs {b_shape}"
-
-    # Compute |a - b| <= atol + rtol * |b|  (element-wise)
+    b = a_other.to(tz.Device.cpu()).to(tz.dtype.float32).contiguous()
+    assert a.shape == b.shape, f"Shape mismatch: {a.shape} vs {b.shape}"
     diff = tz.abs(a - b)
     threshold = atol + rtol * tz.abs(b)
-    # max(diff - threshold) should be <= 0 for all elements
     excess = tz.max(diff - threshold)
     max_abs_diff = tz.max(diff)
-
     assert excess.item() <= 0, (
         f"Numerical mismatch: max abs diff = {max_abs_diff.item():.2e}, "
         f"rtol={rtol}, atol={atol}"
@@ -52,22 +57,28 @@ def _close(a_cpu, a_cuda, rtol=ELEMWISE_RTOL, atol=ELEMWISE_ATOL):
 # Creation ops
 # ---------------------------------------------------------------------------
 
-def test_zeros_parity():
+@pytest.mark.parametrize("device", NON_CPU_BACKENDS, indirect=True)
+def test_zeros_parity(device):
+    dev = _resolve_device(device)
     a = tz.zeros([4, 4], tz.dtype.float32, tz.Device.cpu())
-    b = tz.zeros([4, 4], tz.dtype.float32, tz.Device.cuda(0))
+    b = tz.zeros([4, 4], tz.dtype.float32, dev)
     _close(a, b, atol=0, rtol=0)
 
 
-def test_ones_parity():
+@pytest.mark.parametrize("device", NON_CPU_BACKENDS, indirect=True)
+def test_ones_parity(device):
+    dev = _resolve_device(device)
     a = tz.ones([4, 4], tz.dtype.float32, tz.Device.cpu())
-    b = tz.ones([4, 4], tz.dtype.float32, tz.Device.cuda(0))
+    b = tz.ones([4, 4], tz.dtype.float32, dev)
     _close(a, b, atol=0, rtol=0)
 
 
-def test_randn_shape_parity():
+@pytest.mark.parametrize("device", NON_CPU_BACKENDS, indirect=True)
+def test_randn_shape_parity(device):
     """randn uses different RNG per device, so only check shape."""
+    dev = _resolve_device(device)
     a = tz.randn([8, 8], tz.dtype.float32, tz.Device.cpu())
-    b = tz.randn([8, 8], tz.dtype.float32, tz.Device.cuda(0))
+    b = tz.randn([8, 8], tz.dtype.float32, dev)
     assert a.shape == b.shape
 
 
@@ -75,144 +86,129 @@ def test_randn_shape_parity():
 # Arithmetic ops
 # ---------------------------------------------------------------------------
 
-def test_add_parity():
+@pytest.mark.parametrize("device", NON_CPU_BACKENDS, indirect=True)
+def test_add_parity(device):
+    dev = _resolve_device(device)
     x = tz.randn([4, 4], tz.dtype.float32)
     y = tz.randn([4, 4], tz.dtype.float32)
     z_cpu = x + y
-    z_cuda = x.to(tz.Device.cuda(0)) + y.to(tz.Device.cuda(0))
-    _close(z_cpu, z_cuda)
+    z_other = x.to(dev) + y.to(dev)
+    _close(z_cpu, z_other)
 
 
-def test_sub_parity():
+@pytest.mark.parametrize("device", NON_CPU_BACKENDS, indirect=True)
+def test_sub_parity(device):
+    dev = _resolve_device(device)
     x = tz.randn([4, 4], tz.dtype.float32)
     y = tz.randn([4, 4], tz.dtype.float32)
     z_cpu = x - y
-    z_cuda = x.to(tz.Device.cuda(0)) - y.to(tz.Device.cuda(0))
-    _close(z_cpu, z_cuda)
+    z_other = x.to(dev) - y.to(dev)
+    _close(z_cpu, z_other)
 
 
-def test_mul_parity():
+@pytest.mark.parametrize("device", NON_CPU_BACKENDS, indirect=True)
+def test_mul_parity(device):
+    dev = _resolve_device(device)
     x = tz.randn([4, 4], tz.dtype.float32)
     y = tz.randn([4, 4], tz.dtype.float32)
     z_cpu = x * y
-    z_cuda = x.to(tz.Device.cuda(0)) * y.to(tz.Device.cuda(0))
-    _close(z_cpu, z_cuda)
+    z_other = x.to(dev) * y.to(dev)
+    _close(z_cpu, z_other)
 
 
-def test_div_parity():
+@pytest.mark.parametrize("device", NON_CPU_BACKENDS, indirect=True)
+def test_div_parity(device):
+    dev = _resolve_device(device)
     x = tz.randn([4, 4], tz.dtype.float32)
     y = tz.randn([4, 4], tz.dtype.float32) + 1.0  # avoid div-by-zero
     z_cpu = x / y
-    z_cuda = x.to(tz.Device.cuda(0)) / y.to(tz.Device.cuda(0))
-    _close(z_cpu, z_cuda)
+    z_other = x.to(dev) / y.to(dev)
+    _close(z_cpu, z_other)
 
 
-def test_matmul_parity():
+@pytest.mark.parametrize("device", NON_CPU_BACKENDS, indirect=True)
+def test_matmul_parity(device):
+    dev = _resolve_device(device)
     x = tz.randn([4, 8], tz.dtype.float32)
     y = tz.randn([8, 4], tz.dtype.float32)
     z_cpu = tz.matmul(x, y)
-    z_cuda = tz.matmul(x.to(tz.Device.cuda(0)), y.to(tz.Device.cuda(0)))
-    _close(z_cpu, z_cuda, rtol=MATMUL_RTOL, atol=MATMUL_ATOL)
+    z_other = tz.matmul(x.to(dev), y.to(dev))
+    _close(z_cpu, z_other, rtol=MATMUL_RTOL, atol=MATMUL_ATOL)
 
 
 # ---------------------------------------------------------------------------
 # Reduction ops
 # ---------------------------------------------------------------------------
 
-def test_sum_parity():
+@pytest.mark.parametrize("device", NON_CPU_BACKENDS, indirect=True)
+def test_sum_parity(device):
+    dev = _resolve_device(device)
     x = tz.randn([4, 4], tz.dtype.float32)
     s_cpu = tz.sum(x)
-    s_cuda = tz.sum(x.to(tz.Device.cuda(0)))
-    _close(s_cpu, s_cuda, rtol=REDUCTION_RTOL, atol=REDUCTION_ATOL)
+    s_other = tz.sum(x.to(dev))
+    _close(s_cpu, s_other, rtol=REDUCTION_RTOL, atol=REDUCTION_ATOL)
 
 
-def test_mean_parity():
+@pytest.mark.parametrize("device", NON_CPU_BACKENDS, indirect=True)
+def test_mean_parity(device):
+    dev = _resolve_device(device)
     x = tz.randn([4, 4], tz.dtype.float32)
     m_cpu = tz.mean(x)
-    m_cuda = tz.mean(x.to(tz.Device.cuda(0)))
-    _close(m_cpu, m_cuda, rtol=REDUCTION_RTOL, atol=REDUCTION_ATOL)
+    m_other = tz.mean(x.to(dev))
+    _close(m_cpu, m_other, rtol=REDUCTION_RTOL, atol=REDUCTION_ATOL)
 
 
 # ---------------------------------------------------------------------------
-# Activation ops (using nn modules since functions aren't all top-level)
+# Activation ops
 # ---------------------------------------------------------------------------
 
-def test_sigmoid_parity():
+@pytest.mark.parametrize("device", NON_CPU_BACKENDS, indirect=True)
+def test_sigmoid_parity(device):
+    dev = _resolve_device(device)
     x = tz.randn([4, 4], tz.dtype.float32)
-    y_cpu = tz.sigmoid(x)
-    y_cuda = tz.sigmoid(x.to(tz.Device.cuda(0)))
-    _close(y_cpu, y_cuda)
+    _close(tz.sigmoid(x), tz.sigmoid(x.to(dev)))
 
 
-def test_tanh_parity():
+@pytest.mark.parametrize("device", NON_CPU_BACKENDS, indirect=True)
+def test_tanh_parity(device):
+    dev = _resolve_device(device)
     x = tz.randn([4, 4], tz.dtype.float32)
-    y_cpu = tz.tanh(x)
-    y_cuda = tz.tanh(x.to(tz.Device.cuda(0)))
-    _close(y_cpu, y_cuda)
+    _close(tz.tanh(x), tz.tanh(x.to(dev)))
 
 
-def test_exp_parity():
+@pytest.mark.parametrize("device", NON_CPU_BACKENDS, indirect=True)
+def test_exp_parity(device):
+    dev = _resolve_device(device)
     x = tz.randn([4, 4], tz.dtype.float32)
-    y_cpu = tz.exp(x)
-    y_cuda = tz.exp(x.to(tz.Device.cuda(0)))
-    _close(y_cpu, y_cuda)
+    _close(tz.exp(x), tz.exp(x.to(dev)))
 
 
-def test_log_parity():
+@pytest.mark.parametrize("device", NON_CPU_BACKENDS, indirect=True)
+def test_log_parity(device):
+    dev = _resolve_device(device)
     x = tz.abs(tz.randn([4, 4], tz.dtype.float32)) + 0.01  # positive values
-    y_cpu = tz.log(x)
-    y_cuda = tz.log(x.to(tz.Device.cuda(0)))
-    _close(y_cpu, y_cuda)
+    _close(tz.log(x), tz.log(x.to(dev)))
 
 
-def test_sqrt_parity():
+@pytest.mark.parametrize("device", NON_CPU_BACKENDS, indirect=True)
+def test_sqrt_parity(device):
+    dev = _resolve_device(device)
     x = tz.abs(tz.randn([4, 4], tz.dtype.float32)) + 0.01
-    y_cpu = tz.sqrt(x)
-    y_cuda = tz.sqrt(x.to(tz.Device.cuda(0)))
-    _close(y_cpu, y_cuda)
+    _close(tz.sqrt(x), tz.sqrt(x.to(dev)))
 
 
 # ---------------------------------------------------------------------------
 # NN layer parity
 # ---------------------------------------------------------------------------
 
-def test_linear_parity():
+@pytest.mark.parametrize("device", NON_CPU_BACKENDS, indirect=True)
+def test_linear_parity(device):
+    dev = _resolve_device(device)
     linear = tz.nn.Linear(4, 2)
     x_cpu = tz.Variable(tz.randn([2, 4], tz.dtype.float32), False)
     y_cpu = linear(x_cpu)
-
-    # Move the SAME module to CUDA so weights are identical
-    linear.to(tz.Device.cuda(0))
-    x_cuda = tz.Variable(x_cpu.data.to(tz.Device.cuda(0)), False)
-    y_cuda = linear(x_cuda)
-
-    _close(y_cpu.data, y_cuda.data, rtol=NN_RTOL, atol=NN_ATOL)
-
-
-# ---------------------------------------------------------------------------
-# Runner
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    tz.initialize()
-
-    HAS_CUDA = tz.cuda_is_available()
-    if not HAS_CUDA:
-        print("CUDA not available — skipping all parity tests")
-        sys.exit(0)
-
-    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
-    passed = 0
-    failed = 0
-    for t in tests:
-        try:
-            t()
-            print(f"  PASS: {t.__name__}")
-            passed += 1
-        except Exception as e:
-            print(f"  FAIL: {t.__name__}: {e}")
-            failed += 1
-
-    print(f"\n{passed} passed, {failed} failed")
-    if failed:
-        sys.exit(1)
+    # Move the SAME module so weights are identical
+    linear.to(dev)
+    x_other = tz.Variable(x_cpu.data.to(dev), False)
+    y_other = linear(x_other)
+    _close(y_cpu.data, y_other.data, rtol=NN_RTOL, atol=NN_ATOL)

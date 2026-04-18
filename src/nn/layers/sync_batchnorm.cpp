@@ -7,12 +7,13 @@
  */
 
 #include "tenzor/nn/layers/sync_batchnorm.hpp"
+#include "tenzor/autograd/function.hpp"
+#include "tenzor/autograd/ops.hpp"
+#include "tenzor/autograd/variable.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
-#include "tenzor/autograd/variable.hpp"
-#include "tenzor/autograd/function.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <utility>
@@ -136,20 +137,76 @@ public:
     }
 
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
-        std::vector<Tensor> tensor_grads;
-        tensor_grads.reserve(grad_outputs.size());
-        for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
-        auto results = backward(std::move(tensor_grads));
-        std::vector<Variable> var_results;
-        var_results.reserve(results.size());
-        const bool rg = !grad_outputs.empty() && grad_outputs[0].requires_grad();
-        for (auto& t : results) var_results.emplace_back(t, rg);
-        return var_results;
+        // Variable-level BN backward so create_graph=true produces a real
+        // 2nd-order graph. For world_size == 1 this is identical math to
+        // BatchNorm2d::backward_with_variables. For world_size > 1 the
+        // grad-side reductions would need to be all-reduced across workers;
+        // expressing an all-reduce inside the autograd graph is not yet
+        // supported, so we fall through to the tensor-level backward in
+        // that case (graph disconnects, flagged via is_higher_order_stub()
+        // below for the distributed path).
+        if (world_size_ > 1 || !all_reduce_fn_) {
+            std::vector<Tensor> tensor_grads;
+            tensor_grads.reserve(grad_outputs.size());
+            for (auto& v : grad_outputs) tensor_grads.push_back(v.tensor());
+            auto results = backward(std::move(tensor_grads));
+            std::vector<Variable> var_results;
+            var_results.reserve(results.size());
+            const bool rg = !grad_outputs.empty() && grad_outputs[0].requires_grad();
+            for (auto& t : results) var_results.emplace_back(t, rg);
+            return var_results;
+        }
+
+        // --- Single-process path: same shape handling as BatchNorm2d bwv ---
+        auto& grad_out = grad_outputs[0];
+        auto saved = saved_tensors();
+        Variable input_var(saved[0], false);
+        Variable mean_var(saved[1], false);
+        Variable invstd_var(saved[2], false);
+        Variable weight_var(saved[3], false);
+
+        auto shape = input_var.shape();
+        int64_t N = shape[0];
+        int64_t C = shape[1];
+        int64_t H = shape[2];
+        int64_t W = shape[3];
+        int64_t spatial = H * W;
+        int64_t batch = N * spatial;
+
+        auto mean_bc = unsqueeze(unsqueeze(unsqueeze(mean_var, 0), 2), 3);
+        auto invstd_bc = unsqueeze(unsqueeze(unsqueeze(invstd_var, 0), 2), 3);
+        auto x_hat = (input_var - mean_bc) * invstd_bc;
+
+        Variable weight_bc = affine_
+            ? unsqueeze(unsqueeze(unsqueeze(weight_var, 0), 2), 3)
+            : Variable(ones({1, C, 1, 1}, input_var.dtype(), input_var.device()), false);
+
+        auto grad_x_hat = grad_out * weight_bc;
+        auto grad_x_hat_r = reshape(grad_x_hat, {N, C, spatial});
+        auto x_hat_r = reshape(x_hat, {N, C, spatial});
+
+        auto sum_g = sum(sum(grad_x_hat_r, 0, true), 2, true);
+        auto mean_gxh = sum_g / static_cast<float>(batch);
+        auto sum_gxh = sum(sum(grad_x_hat_r * x_hat_r, 0, true), 2, true);
+        auto mean_gxh_xh = sum_gxh / static_cast<float>(batch);
+
+        auto invstd_r = unsqueeze(unsqueeze(invstd_var, 0), -1);
+        auto grad_input_r = (grad_x_hat_r - mean_gxh - x_hat_r * mean_gxh_xh) * invstd_r;
+        auto grad_input = reshape(grad_input_r, {N, C, H, W});
+
+        if (!affine_) return {grad_input};
+
+        auto go_xhat = reshape(grad_out * x_hat, {N, C, spatial});
+        auto grad_gamma = sum(sum(go_xhat, 0, false), 1, false);
+        auto go_r = reshape(grad_out, {N, C, spatial});
+        auto grad_beta = sum(sum(go_r, 0, false), 1, false);
+        return {grad_input, grad_gamma, grad_beta};
     }
 
-    // P4.2d: passthrough BN backward; second derivative is zero.
     auto supports_higher_order() const -> bool override { return true; }
-    auto is_higher_order_stub() const -> bool override { return true; }
+    // Single-process path has a proper Variable-level 2nd-derivative graph;
+    // the distributed (world_size > 1) path still disconnects.
+    auto is_higher_order_stub() const -> bool override { return world_size_ > 1; }
 
 private:
     bool affine_;

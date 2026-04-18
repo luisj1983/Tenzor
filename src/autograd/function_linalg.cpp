@@ -27,6 +27,62 @@
 
 namespace tenzor {
 
+namespace {
+
+// The backward engine collapses all grads accumulated on a function into a
+// single entry in `grad_outputs`, so a tuple-returning linalg op whose caller
+// only differentiates one of its outputs (e.g. `sum(S)` from `svd`) will
+// arrive here with grad_outputs.size() == 1 while the math expects one slot
+// per tuple component. This helper fills the missing slots with zeros shaped
+// like the corresponding saved forward output and routes the single incoming
+// grad to the slot whose shape matches it. If no shape matches, the grad is
+// placed in `default_slot` (used by slogdet, whose two outputs have the same
+// shape but whose sign gradient is mathematically zero anyway).
+//
+// When the engine grows real per-output-slot accumulation this helper can
+// collapse to a plain index operation. For now it keeps gradcheck on tuple-
+// output linalg ops honest.
+inline auto pad_tuple_grad_outputs(
+        std::vector<Tensor> grad_outputs,
+        const std::vector<Tensor>& slot_prototypes,
+        size_t default_slot = 0) -> std::vector<Tensor> {
+    const size_t expected = slot_prototypes.size();
+    if (grad_outputs.size() == expected) return grad_outputs;
+
+    std::vector<Tensor> out;
+    out.reserve(expected);
+    for (size_t i = 0; i < expected; ++i) {
+        const auto& proto = slot_prototypes[i];
+        out.push_back(zeros(std::vector<int64_t>(proto.shape().begin(), proto.shape().end()),
+                             proto.dtype(), proto.device()));
+    }
+    if (grad_outputs.size() == 1) {
+        const auto& g = grad_outputs.front();
+        auto matches = [&](const Tensor& proto) {
+            if (proto.ndim() != g.ndim()) return false;
+            for (int64_t d = 0; d < g.ndim(); ++d) {
+                if (proto.shape()[d] != g.shape()[d]) return false;
+            }
+            return true;
+        };
+        size_t slot = default_slot;
+        bool found = false;
+        for (size_t i = 0; i < expected; ++i) {
+            if (matches(slot_prototypes[i])) { slot = i; found = true; break; }
+        }
+        if (!found && g.numel() != slot_prototypes[slot].numel()) {
+            // Mismatched shape and no prototype matches — fall through with
+            // zeros; the backward will produce a zero input-gradient which
+            // is the correct answer in the "no gradient flowed" sense.
+            return out;
+        }
+        out[slot] = g;
+    }
+    return out;
+}
+
+} // anonymous namespace
+
 // =========================================================================
 // Linear Algebra Backward Functions
 // =========================================================================
@@ -229,10 +285,16 @@ auto SlogdetBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 }
 
 auto SlogdetBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    // grad_outputs[0] = dL/d(sign) -- ignored (zero gradient)
-    // grad_outputs[1] = dL/d(logabsdet)
-    const auto& grad_logabsdet = grad_outputs[1];
+    // Slogdet returns (sign, logabsdet) with identical shapes. A lone incoming
+    // grad is assumed to be grad_logabsdet since sign is piecewise-constant
+    // (mathematically zero gradient). saved_tensors_[0] carries A^{-1}, not
+    // the forward outputs, so we reconstruct prototypes from A^{-1}'s leading
+    // batch shape.
     const auto& inv_A = saved_tensors_[0];     // A^{-1}, (..., N, N)
+    std::vector<int64_t> out_shape(inv_A.shape().begin(), inv_A.shape().end() - 2);
+    auto proto = zeros(out_shape, inv_A.dtype(), inv_A.device());
+    grad_outputs = pad_tuple_grad_outputs(std::move(grad_outputs), {proto, proto}, /*default_slot=*/1);
+    const auto& grad_logabsdet = grad_outputs[1];
 
     auto ndim = inv_A.ndim();
     auto inv_At = transpose(inv_A, ndim - 2, ndim - 1);
@@ -260,13 +322,13 @@ auto SvdBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 }
 
 auto SvdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    const auto& grad_U = grad_outputs[0];     // dL/dU, (..., M, K)
-    const auto& grad_S = grad_outputs[1];     // dL/dS, (..., K)
-    const auto& grad_Vh = grad_outputs[2];    // dL/dVh, (..., K, N)
-
     const auto& U = saved_tensors_[0];        // U, (..., M, K)
     const auto& S = saved_tensors_[1];        // S, (..., K)
     const auto& Vh = saved_tensors_[2];       // Vh, (..., K, N)
+    grad_outputs = pad_tuple_grad_outputs(std::move(grad_outputs), {U, S, Vh});
+    const auto& grad_U = grad_outputs[0];     // dL/dU, (..., M, K)
+    const auto& grad_S = grad_outputs[1];     // dL/dS, (..., K)
+    const auto& grad_Vh = grad_outputs[2];    // dL/dVh, (..., K, N)
 
     auto ndim = U.ndim();
     auto K = S.shape()[S.ndim() - 1];
@@ -369,11 +431,18 @@ auto QrBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 }
 
 auto QrBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    const auto& grad_Q = grad_outputs[0];   // dL/dQ, (..., M, N)
-    const auto& grad_R = grad_outputs[1];   // dL/dR, (..., N, N)
-
-    const auto& Q = saved_tensors_[0];      // Q, (..., M, N)
-    const auto& R = saved_tensors_[1];      // R, (..., N, N)
+    // Force contiguous layout on the saved forwards and incoming grads: the
+    // tuple-padding helper above fabricates zero-tensors, and any caller may
+    // have produced a non-contiguous view of grad_R. The backward formula
+    // below assumes row-major element access via matmul; a non-contiguous
+    // grad_R would be re-interpreted in column-major and yield a transposed
+    // analytical gradient (the "ana[j,i] = num[i,j]" failure mode seen in
+    // gradcheck when we hand it a non-contiguous input).
+    const auto Q = saved_tensors_[0].contiguous();   // Q, (..., M, N)
+    const auto R = saved_tensors_[1].contiguous();   // R, (..., N, N)
+    grad_outputs = pad_tuple_grad_outputs(std::move(grad_outputs), {Q, R});
+    const auto grad_Q = grad_outputs[0].contiguous();   // dL/dQ, (..., M, N)
+    const auto grad_R = grad_outputs[1].contiguous();   // dL/dR, (..., N, N)
 
     auto ndim = R.ndim();
     auto Rt = transpose(R, ndim - 2, ndim - 1);
@@ -399,7 +468,11 @@ auto QrBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tenso
     auto solve_result = tenzor::linalg::solve(R, rhs_t);
     auto grad_A = transpose(solve_result, solve_result.ndim() - 2, solve_result.ndim() - 1);
 
-    return {grad_A};
+    // Materialise a contiguous row-major view — `transpose` returns a strided
+    // view, which gradcheck's element-wise pointer walk interprets as
+    // column-major, producing a spurious shape-correct-but-values-transposed
+    // comparison failure.
+    return {grad_A.contiguous()};
 }
 
 // EighBackward implementation
@@ -412,11 +485,11 @@ auto EighBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 }
 
 auto EighBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    const auto& grad_W = grad_outputs[0];   // dL/dW, (..., N)
-    const auto& grad_V = grad_outputs[1];   // dL/dV, (..., N, N)
-
     const auto& W = saved_tensors_[0];      // eigenvalues, (..., N)
     const auto& V = saved_tensors_[1];      // eigenvectors, (..., N, N)
+    grad_outputs = pad_tuple_grad_outputs(std::move(grad_outputs), {W, V});
+    const auto& grad_W = grad_outputs[0];   // dL/dW, (..., N)
+    const auto& grad_V = grad_outputs[1];   // dL/dV, (..., N, N)
 
     auto N = W.shape()[W.ndim() - 1];
 

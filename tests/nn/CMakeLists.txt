@@ -66,6 +66,11 @@ target_link_libraries(test_nadam PRIVATE tenzor_core GTest::gtest_main)
 add_executable(test_adamax optim/test_adamax.cpp)
 target_link_libraries(test_adamax PRIVATE tenzor_core GTest::gtest_main)
 
+# AdamW optimizer (Adam + decoupled weight decay) — dedicated unit tests.
+# Before this target, AdamW was only covered by an integration test.
+add_executable(test_adamw optim/test_adamw.cpp)
+target_link_libraries(test_adamw PRIVATE tenzor_core GTest::gtest_main)
+
 # ZeRO Stage 2 Optimizer tests (Phase 5 - Gradient Partitioning)
 add_executable(test_zero_stage2 optim/test_zero_stage2.cpp)
 target_link_libraries(test_zero_stage2 PRIVATE tenzor_core GTest::gtest_main)
@@ -121,6 +126,11 @@ target_link_libraries(test_normalization_multidtype PRIVATE tenzor_core GTest::g
 add_executable(test_layernorm_multidtype layers/test_layernorm_multidtype.cpp)
 target_link_libraries(test_layernorm_multidtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_layernorm_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Distance layer tests (CosineSimilarity, PairwiseDistance) — multi-backend.
+add_executable(test_distance_layers layers/test_distance_layers.cpp)
+target_link_libraries(test_distance_layers PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_distance_layers LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
 # Standalone MultiheadAttention layer tests (complements test_mha_functional)
 add_executable(test_multihead_attention_multidtype layers/test_multihead_attention_multidtype.cpp)
@@ -178,6 +188,7 @@ tenzor_discover_tests(test_lion LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_lbfgs LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_nadam LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_adamax LABELS "nn" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_adamw LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_zero_stage2 LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_zero_stage2_integration LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_zero_stage3 LABELS "nn" DISCOVERY_TIMEOUT 60)

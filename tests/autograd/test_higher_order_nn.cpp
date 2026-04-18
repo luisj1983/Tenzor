@@ -13,6 +13,7 @@
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/nn/layers/conv.hpp"
 #include "tenzor/nn/layers/rnn.hpp"
+#include "tenzor/nn/layers/sync_batchnorm.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
@@ -121,6 +122,37 @@ TEST_P(HigherOrderNNTest, GRU_InnerLoop_Gradient) {
         EXPECT_TRUE(input.grad().has_value());
     } catch (const std::runtime_error& e) {
         GTEST_SKIP() << "GRU double backward not supported: " << e.what();
+    }
+}
+
+// ============================================================================
+// SyncBatchNorm Double Backward (single-process path)
+// ============================================================================
+
+TEST_P(HigherOrderNNTest, SyncBatchNorm_DoubleBackward) {
+    // Single-process SyncBN (world_size=1) now has a Variable-level backward
+    // so create_graph=true produces a real second-order graph — distributed
+    // path still disconnects (flagged via is_higher_order_stub).
+    auto identity_all_reduce = [](const Tensor& t) { return t; };
+    nn::SyncBatchNorm sbn(4, identity_all_reduce, /*world_size=*/1);
+    sbn.train();
+    sbn.to(device);  // move running stats + weight/bias onto the test device
+
+    auto input = Variable(randn({2, 4, 3, 3}, DType::Float32, device), true);
+    auto output = sbn.forward(input);
+    auto loss = tenzor::sum(output);
+
+    try {
+        loss.backward(std::nullopt, false, /*create_graph=*/true);
+        ASSERT_TRUE(input.grad_variable().has_value())
+            << "SyncBatchNorm with create_graph=true must populate grad_variable()";
+        Variable grad_var = input.grad_variable().value();
+        auto grad_norm = tenzor::sum(grad_var * grad_var);
+        grad_norm.backward();
+        EXPECT_TRUE(input.grad().has_value());
+    } catch (const std::runtime_error& e) {
+        // Backend not implementing BN at all on this device should skip.
+        GTEST_SKIP() << "SyncBatchNorm unavailable: " << e.what();
     }
 }
 

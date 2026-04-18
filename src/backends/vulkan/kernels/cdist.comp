@@ -1,9 +1,13 @@
 #version 450
 
-// CDist (pairwise L2 distance) for 3D batched inputs:
+// CDist (pairwise Lp distance) for 3D batched inputs:
 //   x1: (B, P, M), x2: (B, R, M)  →  out: (B, P, R)
 //
-// 2D inputs are treated as B=1 by the host dispatcher.
+// 2D inputs are treated as B=1 by the host dispatcher. `p` is pushed as a
+// float constant. p=2.0 and p=1.0 take fast paths that skip the generic
+// pow() so the common Manhattan/Euclidean cases stay cheap. Previously
+// this kernel hardcoded L2 regardless of `p`; multi-backend migration
+// tests surfaced the silent-wrong-answer bug.
 
 layout(local_size_x_id = 0) in;
 
@@ -17,13 +21,13 @@ layout(push_constant) uniform PushConstants {
     uint R;
     uint M;
     uint total;  // B*P*R
+    float p;     // Lp norm exponent; p=1 Manhattan, p=2 Euclidean
 } params;
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= params.total) return;
 
-    // Decode (b, p, r)
     uint r  = idx % params.R;
     uint p  = (idx / params.R) % params.P;
     uint b  = idx / (params.R * params.P);
@@ -32,9 +36,22 @@ void main() {
     uint b_off = b * params.R * params.M + r * params.M;
 
     float sum = 0.0;
-    for (uint m = 0; m < params.M; ++m) {
-        float diff = x1[a_off + m] - x2[b_off + m];
-        sum += diff * diff;
+    if (params.p == 2.0) {
+        for (uint m = 0; m < params.M; ++m) {
+            float diff = x1[a_off + m] - x2[b_off + m];
+            sum += diff * diff;
+        }
+        out_data[idx] = sqrt(sum);
+    } else if (params.p == 1.0) {
+        for (uint m = 0; m < params.M; ++m) {
+            sum += abs(x1[a_off + m] - x2[b_off + m]);
+        }
+        out_data[idx] = sum;
+    } else {
+        for (uint m = 0; m < params.M; ++m) {
+            float diff = abs(x1[a_off + m] - x2[b_off + m]);
+            sum += pow(diff, params.p);
+        }
+        out_data[idx] = pow(sum, 1.0 / params.p);
     }
-    out_data[idx] = sqrt(sum);
 }

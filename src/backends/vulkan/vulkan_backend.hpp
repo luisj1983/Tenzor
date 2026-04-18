@@ -308,7 +308,7 @@ public:
     // Sampling / statistics (vulkan_ops_sampling.cpp)
     auto dispatchBernoulli(const Tensor& probs) -> Tensor;
     auto dispatchBucketize(const Tensor& input, const Tensor& boundaries, bool right) -> Tensor;
-    auto dispatchCDist(const Tensor& x1, const Tensor& x2) -> Tensor;
+    auto dispatchCDist(const Tensor& x1, const Tensor& x2, double p) -> Tensor;
     auto dispatchTrapezoid(const Tensor& y, int64_t dim, double dx, const Tensor* x_ptr) -> Tensor;
     auto dispatchCumulativeTrapezoid(const Tensor& y, int64_t dim, double dx, const Tensor* x_ptr) -> Tensor;
     auto dispatchGradient(const Tensor& input, int64_t dim, double spacing) -> Tensor;

@@ -2,8 +2,10 @@
 
 #include <gtest/gtest.h>
 #include "tenzor/tenzor.hpp"
-#include <string>
+#include <cstdlib>
 #include <mutex>
+#include <string>
+#include <string_view>
 
 namespace tenzor {
 namespace testing {
@@ -30,6 +32,26 @@ inline Device::Type nameToDeviceType(const std::string& name) {
     if (name == "oneapi") return Device::Type::OneAPI;
     if (name == "rocm") return Device::Type::ROCm;
     throw std::runtime_error("Unknown backend name: " + name);
+}
+
+// Returns true if `backend` appears in the comma-separated $TENZOR_SKIP_BACKENDS list.
+// Matching is on the base backend name ("cuda"), not "cuda:0". Case-sensitive, lower-case.
+inline bool isBackendSkippedByEnv(const std::string& backend) {
+    const char* raw = std::getenv("TENZOR_SKIP_BACKENDS");
+    if (!raw || !*raw) return false;
+    std::string_view target{backend};
+    std::string_view list{raw};
+    size_t start = 0;
+    while (start <= list.size()) {
+        size_t end = list.find(',', start);
+        if (end == std::string_view::npos) end = list.size();
+        auto token = list.substr(start, end - start);
+        while (!token.empty() && (token.front() == ' ' || token.front() == '\t')) token.remove_prefix(1);
+        while (!token.empty() && (token.back() == ' ' || token.back() == '\t')) token.remove_suffix(1);
+        if (!token.empty() && token == target) return true;
+        start = end + 1;
+    }
+    return false;
 }
 
 inline std::string formatBackendTestName(const std::string& backend) {
@@ -74,6 +96,10 @@ protected:
         std::string backend_param = GetParam();
         auto base = detail::parseBackendName(backend_param);
         auto index = detail::parseDeviceIndex(backend_param);
+
+        if (detail::isBackendSkippedByEnv(base)) {
+            GTEST_SKIP() << base << " excluded via TENZOR_SKIP_BACKENDS";
+        }
 
         if (base == "cpu") {
             device = Device::cpu();

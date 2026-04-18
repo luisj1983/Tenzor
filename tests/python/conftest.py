@@ -53,7 +53,13 @@ def pytest_configure(config):
 # pull it in implicitly via ``@pytest.mark.parametrize("device", ALL_DEVICES,
 # indirect=True)`` (the ``device`` fixture below handles the availability
 # skip).
-ALL_DEVICES = ["cpu", "cuda", "vulkan", "oneapi", "rocm"]
+_SKIP_BACKENDS = {
+    s.strip() for s in os.getenv("TENZOR_SKIP_BACKENDS", "").split(",") if s.strip()
+}
+ALL_DEVICES = [
+    d for d in ["cpu", "cuda", "vulkan", "oneapi", "rocm"]
+    if d not in _SKIP_BACKENDS
+]
 
 # CPU + any GPU backends actually present on the host. Handy when you want
 # to skip a test entirely unless there's at least one GPU.
@@ -63,7 +69,7 @@ AVAILABLE_DEVICES = ["cpu"] + [
         ("vulkan", lambda: tz.vulkan_is_available()),
         ("oneapi", lambda: tz.oneapi_is_available()),
         ("rocm",   lambda: tz.rocm_is_available()),
-    ) if check()
+    ) if check() and name not in _SKIP_BACKENDS
 ]
 
 
@@ -82,6 +88,8 @@ def device(request):
             x = tz.randn([3], device=device)
     """
     dev = request.param
+    if dev in _SKIP_BACKENDS:
+        pytest.skip(f"{dev} excluded via TENZOR_SKIP_BACKENDS")
     if dev == "cuda" and not tz.cuda_is_available():
         pytest.skip("CUDA not available")
     elif dev == "vulkan" and not tz.vulkan_is_available():

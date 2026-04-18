@@ -64,12 +64,12 @@ TEST(GraphViz, DotStartsWithDigraphHeader) {
         << dot.substr(0, 80);
 }
 
-// Documented gap: the `params` map argument to make_dot() is currently
-// ignored — the produced DOT contains generic node IDs (`node_<addr>`) but
-// not the user-provided parameter names. The named-parameter labelling
-// feature is documented in graph_viz.hpp:31-32 but not wired through to the
-// DOT emitter. Test is disabled so it surfaces in ctest as a known gap.
-TEST(GraphViz, DISABLED_NamedParametersAppearInDot) {
+// Previously the `params` map was keyed by the address of the Variables
+// stored in the map, which never matched the addresses of the copies
+// appearing on the autograd graph's input_variables(), so named parameter
+// labels silently fell through to the generic "param" label. The lookup
+// now uses tensor data_ptr() identity which survives Variable copies.
+TEST(GraphViz, NamedParametersAppearInDot) {
     Variable x(randn({4, 1}, DType::Float32, Device::cpu()), true);
     Variable W(randn({3, 4}, DType::Float32, Device::cpu()), true);
     Variable b(randn({3, 1}, DType::Float32, Device::cpu()), true);

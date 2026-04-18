@@ -454,7 +454,42 @@ __global__ void cdist_l2_kernel_impl(const float* x1, const float* x2,
     output[(b * P + p) * R + r] = sqrtf(sum);
 }
 
-auto cdist_kernel(const Tensor& x1, const Tensor& x2, double /*p*/,
+__global__ void cdist_l1_kernel_impl(const float* x1, const float* x2,
+                                      float* output,
+                                      int64_t B, int64_t P, int64_t R, int64_t M) {
+    int64_t b = blockIdx.z;
+    int64_t p = blockIdx.y * blockDim.y + threadIdx.y;
+    int64_t r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= B || p >= P || r >= R) return;
+
+    const float* a_b = x1 + b * P * M;
+    const float* b_b = x2 + b * R * M;
+    float sum = 0.0f;
+    for (int64_t m = 0; m < M; ++m) {
+        sum += fabsf(a_b[p * M + m] - b_b[r * M + m]);
+    }
+    output[(b * P + p) * R + r] = sum;
+}
+
+__global__ void cdist_lp_kernel_impl(const float* x1, const float* x2,
+                                      float* output, float p,
+                                      int64_t B, int64_t P, int64_t R, int64_t M) {
+    int64_t b = blockIdx.z;
+    int64_t p_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    int64_t r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= B || p_idx >= P || r >= R) return;
+
+    const float* a_b = x1 + b * P * M;
+    const float* b_b = x2 + b * R * M;
+    float sum = 0.0f;
+    for (int64_t m = 0; m < M; ++m) {
+        float diff = fabsf(a_b[p_idx * M + m] - b_b[r * M + m]);
+        sum += powf(diff, p);
+    }
+    output[(b * P + p_idx) * R + r] = powf(sum, 1.0f / p);
+}
+
+auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
                   hipStream_t stream) -> Tensor {
     auto a = x1.contiguous();
     auto b = x2.contiguous();
@@ -481,9 +516,20 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double /*p*/,
     dim3 blocks(static_cast<unsigned>((R + 15) / 16),
                 static_cast<unsigned>((P + 15) / 16),
                 static_cast<unsigned>(B));
-    hipLaunchKernelGGL(cdist_l2_kernel_impl,
-        blocks, threads, 0, stream,
-        a.data<float>(), b.data<float>(), result.data<float>(), B, P, R, M);
+    if (p == 2.0) {
+        hipLaunchKernelGGL(cdist_l2_kernel_impl,
+            blocks, threads, 0, stream,
+            a.data<float>(), b.data<float>(), result.data<float>(), B, P, R, M);
+    } else if (p == 1.0) {
+        hipLaunchKernelGGL(cdist_l1_kernel_impl,
+            blocks, threads, 0, stream,
+            a.data<float>(), b.data<float>(), result.data<float>(), B, P, R, M);
+    } else {
+        hipLaunchKernelGGL(cdist_lp_kernel_impl,
+            blocks, threads, 0, stream,
+            a.data<float>(), b.data<float>(), result.data<float>(),
+            static_cast<float>(p), B, P, R, M);
+    }
     HIP_CHECK(hipGetLastError());
     return result;
 }

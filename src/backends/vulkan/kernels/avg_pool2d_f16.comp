@@ -1,12 +1,23 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
 
-// Average Pooling 2D Forward Pass for Float16
-// Reads packed F16 pairs, computes in float32 for stability
+// Average Pooling 2D Forward Pass for Float16.
+//
+// Reads inputs via typed float16_t[] SSBO access (GL_EXT_shader_16bit_storage)
+// so loads are exactly 2 bytes per F16 element and never coalesce into a
+// uint32 that straddles the logical tensor end. Writes outputs via a
+// pair-packed uint32[] view; one thread handles TWO packed output elements
+// so the final store is always a full-word write (caller pads the output
+// buffer by one F16 when `logical_numel` is odd, see dispatchAvgPool2d).
+//
+// Both quirks surfaced only after enabling VK_KHR_shader_float16_int8 and
+// VK_KHR_16bit_storage in the device creation (we queried shaderFloat16
+// support but never enabled the feature; validation-layer confirmed).
 layout(local_size_x_id = 0) in;
 
-layout(binding = 0) buffer Input { uint input_data[]; };    // Packed F16 (N, C, H, W)
-layout(binding = 1) buffer Output { uint output_data[]; };  // Packed F16 (N, C, H_out, W_out)
+layout(binding = 0) buffer Input  { float16_t input_data[]; };
+layout(binding = 1) buffer Output { uint      output_data[]; };
 
 layout(push_constant) uniform PushConstants {
     uint n_elements;
@@ -25,34 +36,14 @@ layout(push_constant) uniform PushConstants {
     uint count_include_pad;
 } params;
 
-float16_t readF16Element(uint flat_idx) {
-    uint word_idx = flat_idx / 2;
-    uint half_idx = flat_idx % 2;
-    uint packed = input_data[word_idx];
-    uint bits = (packed >> (half_idx * 16)) & 0xFFFFu;
-    return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
+uint packF16Pair(float16_t v0, float16_t v1) {
+    uint bits0 = packHalf2x16(vec2(float(v0), 0.0)).x & 0xFFFFu;
+    uint bits1 = packHalf2x16(vec2(float(v1), 0.0)).x & 0xFFFFu;
+    return bits0 | (bits1 << 16);
 }
 
-void writeF16Element(uint flat_idx, float16_t val) {
-    uint word_idx = flat_idx / 2;
-    uint half_offset = (flat_idx % 2) * 16;
-    uint new_bits = packHalf2x16(vec2(float(val), 0.0)) & 0xFFFFu;
-    uint mask = 0xFFFFu << half_offset;
-
-    uint old_word = output_data[word_idx];
-    for (int attempt = 0; attempt < 1024; ++attempt) {
-        uint new_word = (old_word & ~mask) | (new_bits << half_offset);
-        uint result = atomicCompSwap(output_data[word_idx], old_word, new_word);
-        if (result == old_word) return;
-        old_word = result;
-    }
-}
-
-void main() {
-    uint idx = gl_GlobalInvocationID.x;
-    if (idx >= params.n_elements) return;
-
-    uint temp = idx;
+float compute_avg(uint flat_idx) {
+    uint temp = flat_idx;
     uint w_out = temp % params.out_width;
     temp /= params.out_width;
     uint h_out = temp % params.out_height;
@@ -65,30 +56,35 @@ void main() {
 
     float sum = 0.0;
     uint count = 0;
-
     for (uint kh = 0; kh < params.kernel_h; kh++) {
         for (uint kw = 0; kw < params.kernel_w; kw++) {
             int h_in = h_start + int(kh);
             int w_in = w_start + int(kw);
-
             if (h_in >= 0 && h_in < int(params.in_height) &&
                 w_in >= 0 && w_in < int(params.in_width)) {
                 uint input_idx = n * params.channels * params.in_height * params.in_width +
-                                c * params.in_height * params.in_width +
-                                uint(h_in) * params.in_width +
-                                uint(w_in);
-                sum += float(readF16Element(input_idx));
+                                 c * params.in_height * params.in_width +
+                                 uint(h_in) * params.in_width + uint(w_in);
+                // 16-bit typed load — each read is exactly 2 bytes, no
+                // uint32 coalesce, so the final-odd-element input read is
+                // always in-bounds regardless of buffer allocation parity.
+                sum += float(input_data[input_idx]);
                 count++;
             } else if (params.count_include_pad != 0) {
                 count++;
             }
         }
     }
+    return count > 0 ? sum / float(count) : 0.0;
+}
 
-    float result = 0.0;
-    if (count > 0) {
-        result = sum / float(count);
-    }
+void main() {
+    uint pair_idx = gl_GlobalInvocationID.x;
+    uint idx0 = pair_idx * 2;
+    uint idx1 = idx0 + 1;
+    if (idx0 >= params.n_elements) return;
 
-    writeF16Element(idx, float16_t(result));
+    float v0 = compute_avg(idx0);
+    float v1 = (idx1 < params.n_elements) ? compute_avg(idx1) : 0.0;
+    output_data[pair_idx] = packF16Pair(float16_t(v0), float16_t(v1));
 }

@@ -63,9 +63,19 @@ make test_parity_gradients  # Gradient tests only
 - ✅ **CUDA**: NVIDIA GPU backend
 - ✅ **OneAPI**: Intel GPU/CPU backend
 - ✅ **Vulkan**: Cross-platform GPU backend
-- ❌ **ROCm**: Excluded (causes system crashes)
+- ✅ **ROCm**: AMD GPU backend — included in `STANDARD_BACKENDS`. Set
+  `TENZOR_SKIP_BACKENDS=rocm` on hosts where the driver is unstable.
 
 Tests automatically skip unavailable backends.
+
+### Opting out of backends at runtime
+
+Set `TENZOR_SKIP_BACKENDS` to a comma-separated list of backend names
+(e.g. `TENZOR_SKIP_BACKENDS=rocm,vulkan`) to skip those backends without
+recompiling. Every parity fixture (`BackendTest`, `MultiBackendDTypeTest`,
+the `SKIP_IF_NO_*` macros, and the Python `device` fixture in
+`tests/python/conftest.py`) honors the same variable, so one setting
+silences a backend across the whole suite.
 
 ## Documentation
 

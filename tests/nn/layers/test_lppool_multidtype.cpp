@@ -57,14 +57,9 @@ TEST_P(LPPool1dMultiDTypeTest, ForwardL2_KnownValue) {
     EXPECT_NEAR(out_cpu.data<float>()[0], 3.5355339f, atol() * 10.0f);
 }
 
-// Documented bug: src/nn/layers/pooling.cpp:1641 calls `input.tensor()` to
-// extract the raw tensor, which severs the autograd graph. As a result, x.grad
-// is never populated even when the layer is invoked with requires_grad=true.
-// Fixing this requires using the Variable overloads of abs/pow/avg_pool inside
-// LPPool1d::forward_impl (or implementing a custom AutogradFunction).
-// The test asserts the current (broken) behaviour so that fixing the layer
-// will surface as a deliberate test update rather than a silent regression.
-TEST_P(LPPool1dMultiDTypeTest, BackwardGradientsBroken_DocumentedBug) {
+// LPPool1d now uses Variable-level abs/pow/avg_pool throughout; this test
+// verifies x.grad is populated and non-trivial after backward.
+TEST_P(LPPool1dMultiDTypeTest, BackwardGradientsPropagate) {
     if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
         GTEST_SKIP() << "Skipping gradcheck for low-precision dtype";
     }
@@ -73,9 +68,12 @@ TEST_P(LPPool1dMultiDTypeTest, BackwardGradientsBroken_DocumentedBug) {
     auto y = pool.forward(x);
     auto loss = tenzor::sum(y);
     loss.backward();
-    EXPECT_FALSE(x.has_grad())
-        << "LPPool1d now propagates gradients — update the test to assert "
-        << "non-zero grads and remove this DocumentedBug comment.";
+    ASSERT_TRUE(x.has_grad());
+    auto g = x.grad().value().to(Device::cpu()).to(DType::Float32).contiguous();
+    const float* gp = g.data<float>();
+    float max_abs = 0.0f;
+    for (int64_t i = 0; i < g.numel(); ++i) max_abs = std::max(max_abs, std::abs(gp[i]));
+    EXPECT_GT(max_abs, 0.0f) << "LPPool1d gradient identically zero — graph severed";
 }
 
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(LPPool1dMultiDTypeTest);
@@ -109,11 +107,16 @@ TEST_P(LPPool2dMultiDTypeTest, ForwardShape_L1_Square) {
 
 TEST_P(LPPool2dMultiDTypeTest, ForwardL2_AllOnes) {
     // L2 pool of all-ones with kernel 3x3 ⇒ each output = sqrt(9/9) = 1.
-    // Documented gap: Vulkan LPPool2d on Float16 produces 0 instead of 1
-    // (likely the abs/pow path skips zero-protection for the avg_pool input).
-    if (device().type == Device::Type::Vulkan && dtype() == DType::Float16) {
-        GTEST_SKIP() << "Vulkan LPPool2d Float16 returns 0; investigate kernel";
-    }
+    // Previously failed on Vulkan+Float16 for odd-numel outputs because:
+    //   (1) the backend queried `shaderFloat16` support but never enabled
+    //       the feature on the logical device, leaving F16 compute-shader
+    //       behavior undefined (validation layer confirmed), and
+    //   (2) the avg_pool2d_f16 shader used atomicCompSwap over packed-pair
+    //       uint32 words, which straddled the tensor end for odd numel.
+    // Fixed by enabling VK_KHR_shader_float16_int8 + VK_KHR_16bit_storage
+    // at device creation, converting the shader to pair-write + typed 16-
+    // bit input loads, and padding the output buffer by one F16 when the
+    // logical element count is odd.
     LPPool2d pool(2, 3, 1);
     auto x = Variable(ones({1, 1, 5, 5}, dtype(), device()), false);
     auto y = pool.forward(x);
@@ -123,8 +126,8 @@ TEST_P(LPPool2dMultiDTypeTest, ForwardL2_AllOnes) {
     }
 }
 
-// Same documented autograd-break bug as LPPool1d above — see comment there.
-TEST_P(LPPool2dMultiDTypeTest, BackwardGradientsBroken_DocumentedBug) {
+// LPPool2d now uses Variable-level abs/pow/avg_pool throughout.
+TEST_P(LPPool2dMultiDTypeTest, BackwardGradientsPropagate) {
     if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
         GTEST_SKIP() << "Skipping gradcheck for low-precision dtype";
     }
@@ -133,9 +136,12 @@ TEST_P(LPPool2dMultiDTypeTest, BackwardGradientsBroken_DocumentedBug) {
     auto y = pool.forward(x);
     auto loss = tenzor::sum(y);
     loss.backward();
-    EXPECT_FALSE(x.has_grad())
-        << "LPPool2d now propagates gradients — update the test and fix the "
-        << "comment above.";
+    ASSERT_TRUE(x.has_grad());
+    auto g = x.grad().value().to(Device::cpu()).to(DType::Float32).contiguous();
+    const float* gp = g.data<float>();
+    float max_abs = 0.0f;
+    for (int64_t i = 0; i < g.numel(); ++i) max_abs = std::max(max_abs, std::abs(gp[i]));
+    EXPECT_GT(max_abs, 0.0f) << "LPPool2d gradient identically zero — graph severed";
 }
 
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(LPPool2dMultiDTypeTest);

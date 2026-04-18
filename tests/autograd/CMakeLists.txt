@@ -19,6 +19,18 @@ add_executable(test_higher_order_activations test_higher_order_activations.cpp)
 target_link_libraries(test_higher_order_activations PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_higher_order_activations LABELS "autograd" DISCOVERY_TIMEOUT 60)
 
+# Contract between HigherOrderGradMode and stub backwards — prevents silent
+# graph disconnection when an op regresses from real bwv to stub. Phase 3.
+add_executable(test_higher_order_contract test_higher_order_contract.cpp)
+target_link_libraries(test_higher_order_contract PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_higher_order_contract LABELS "autograd" DISCOVERY_TIMEOUT 60)
+
+# TENZOR_STRICT_LINALG_GRAD contract — surfaces LDL/Householder zero-grad
+# stubs as runtime errors instead of silent miscomputations.
+add_executable(test_strict_linalg_grad test_strict_linalg_grad.cpp)
+target_link_libraries(test_strict_linalg_grad PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_strict_linalg_grad LABELS "autograd" DISCOVERY_TIMEOUT 60)
+
 # Hardshrink / Threshold implementations (P2.6b)
 add_executable(test_hardshrink_threshold test_hardshrink_threshold.cpp)
 target_link_libraries(test_hardshrink_threshold PRIVATE tenzor_core GTest::gtest_main)
