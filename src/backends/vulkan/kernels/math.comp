@@ -334,8 +334,8 @@ void main() {
         case 49: // ldexp (binary): x * 2^n (n is val_b as int)
             result[idx] = floatBitsToUint(val_a * exp2(val_b));
             break;
-        case 50: // frac (unary): x - floor(x)
-            result[idx] = floatBitsToUint(val_a - floor(val_a));
+        case 50: // frac (unary): x - trunc(x) — sign-preserving (PyTorch convention)
+            result[idx] = floatBitsToUint(val_a - trunc(val_a));
             break;
         case 51: // log_sigmoid (unary): log(1 / (1 + exp(-x))) = -log(1 + exp(-x))
             result[idx] = floatBitsToUint(-log(1.0 + exp(-val_a)));

@@ -185,3 +185,79 @@ Same as main Tenzor project.
 **Date**: October 24, 2025
 **Total Lines**: ~4,200
 **Total Tests**: 300+
+
+---
+
+## Golden-tensor fallback (single-backend hosts)
+
+Parity tests historically skipped when only one backend was available. The
+golden-tensor path lets CI produce signal on CPU-only jobs by comparing
+against a pre-recorded reference tensor.
+
+Binary format, helpers, and the fingerprint scheme are documented in
+`golden_util.hpp`. Directory: `tests/backend_parity/golden/`.
+
+### Recording goldens
+
+On a multi-backend host (e.g. CPU + CUDA, CPU + ROCm):
+
+```sh
+TENZOR_RECORD_GOLDENS=1 ctest -R "backend_parity" -j1 -V
+```
+
+New `.gold` files appear in `tests/backend_parity/golden/`. Review the diff
+and commit them alongside any parity-test change that affected inputs.
+
+### Replaying goldens
+
+Nothing required — running `ctest` without `TENZOR_RECORD_GOLDENS` consults
+the committed goldens whenever only one backend is available.
+
+### Enforcement
+
+- `TENZOR_REQUIRE_MULTI_BACKEND=1` turns "no golden on CPU-only host" from a
+  skip into a hard failure. Use this in CI jobs where a GPU is supposed to
+  be present.
+- `TENZOR_SKIP_BACKENDS=cuda,rocm,...` excludes named backends from the
+  available set without a rebuild.
+
+### When to re-record
+
+If a parity test's inputs change (different shape, seed, or dtype), its
+fingerprint changes, the old golden becomes orphaned, and the new test
+path falls back to the skip arm. Re-record on a multi-backend host.
+
+---
+
+## Skip-reason taxonomy
+
+The `SkipReason` enum in `../multi_backend_dtype_fixture.hpp` is the
+machine-readable vocabulary for every skip that isn't pure backend-availability.
+`scripts/count_skips.py` tallies them and ships a `--max-untagged N` CI gate.
+
+Use `SKIP_WITH_REASON(::tenzor::testing::SkipReason::Kind, "detail")` instead
+of raw `GTEST_SKIP()`.
+
+Categories:
+
+- `BackendUnavailable` — device absent.
+- `BackendExcludedByEnv` — `TENZOR_SKIP_BACKENDS`.
+- `NumericalDivergence` — algorithm exceeds FP16 precision.
+- `DtypeUnsupportedOnBackend` — kernel doesn't register the dtype.
+- `ComplexFP16Unrepresentable` — no Float16 complex type.
+- `GradcheckFDPrecision` — finite-difference noise dominates at FP16.
+- `KernelNotImplemented` — feature is genuinely TODO.
+- `RequiresMultiGPU` — multi-device distributed coverage.
+- `KnownBug` — tracked by issue number.
+
+---
+
+## Adding a new parity test
+
+1. Drop a `.cpp` into `tests/backend_parity/` using `BackendTest` (single-dtype)
+   or `MultiBackendDTypeTest` (per-dtype).
+2. Register it with `add_parity_test(<name> <file>.cpp)` in `CMakeLists.txt`.
+3. Use `test_operation_parity` / `test_operation_parity_single` /
+   `test_operation_parity_cross_backend` — the helpers route goldens automatically.
+4. Run once under `TENZOR_RECORD_GOLDENS=1` on a multi-backend host to seed
+   the golden directory, then commit.

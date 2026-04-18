@@ -27,13 +27,12 @@ namespace optim {
 // =============================================================================
 
 ZeROStage1Optimizer::ZeROStage1Optimizer(
-    std::unique_ptr<Optimizer> base_optimizer,
+    std::shared_ptr<Optimizer> base_optimizer,
     const ZeROStage1Config& config
 ) : Optimizer(base_optimizer ? base_optimizer->parameters() : std::vector<std::shared_ptr<Variable>>{}),
     base_optimizer_(std::move(base_optimizer)),
     config_(config) {
 
-    // Validation
     if (!base_optimizer_) {
         throw std::invalid_argument("base_optimizer cannot be null");
     }
@@ -44,23 +43,16 @@ ZeROStage1Optimizer::ZeROStage1Optimizer(
         throw std::invalid_argument("world_size must be > 0");
     }
 
-    // Initialize distributed communication if not provided
     if (!config_.process_group && distributed::is_initialized()) {
         config_.process_group = distributed::DistributedContext::get_process_group();
     }
-    // Note: If world_size > 1 but process_group is null, communication operations
-    // will be skipped. This allows testing with multi-rank configs without requiring
-    // actual distributed initialization.
 
-    // Partition parameters across ranks
     partition_parameters();
 
-    // Initialize offload engine BEFORE optimizer states (so states can be offloaded)
     if (config_.offload_to_cpu) {
         initialize_offload_engine();
     }
 
-    // Initialize optimizer states (will offload to CPU if offload_engine_ is available)
     initialize_optimizer_states();
 }
 
@@ -907,12 +899,11 @@ auto ZeROStage1Optimizer::offload_states_to_cpu() -> void {
 // =============================================================================
 
 ZeROStage2Optimizer::ZeROStage2Optimizer(
-    std::unique_ptr<Optimizer> base_optimizer,
+    std::shared_ptr<Optimizer> base_optimizer,
     const ZeROStage2Config& config
 ) : ZeROStage1Optimizer(std::move(base_optimizer), config),
     stage2_config_(config) {
 
-    // Create gradient buckets for efficient communication
     if (stage2_config_.gradient_bucketing) {
         create_gradient_buckets();
     }
@@ -1433,25 +1424,13 @@ private:
 };
 
 ZeROStage3Optimizer::ZeROStage3Optimizer(
-    std::unique_ptr<Optimizer> base_optimizer,
+    std::shared_ptr<Optimizer> base_optimizer,
     const Stage3Config& config
 ) : ZeROStage2Optimizer(std::move(base_optimizer), config),
     stage3_config_(config),
     registered_model_(nullptr) {
 
-    // Initialize performance stats
     perf_stats_ = PerformanceStats{};
-
-    // Initialize CUDA streams for communication/compute overlap
-    // Note: CUDAStream is used if available, but we keep the code flexible
-    // if (stage3_config_.use_separate_streams) {
-    //     gather_stream_ = core::CUDAStream(stage3_config_.gather_stream_priority);
-    //     scatter_stream_ = core::CUDAStream(stage3_config_.gather_stream_priority);
-    // }
-
-    // Initialize prefetch scheduler
-    // Note: PrefetchScheduler is defined later in the file, so we can't initialize it here
-    // It will be initialized on first use if needed
     prefetch_scheduler_ = nullptr;
 }
 

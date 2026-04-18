@@ -1003,6 +1003,36 @@ auto ONNXExporter::export_batchnorm1d(const Tensor& input, const Tensor& scale,
     export_batchnorm2d(input, scale, bias, mean, var, eps, output, output_name);
 }
 
+auto ONNXExporter::export_layernorm(const Tensor& input, const Tensor& scale,
+                                     const Tensor& bias, int64_t axis, double eps,
+                                     const Tensor& output,
+                                     const std::string& output_name) -> void {
+    // ONNX LayerNormalization (opset 17+). If the target opset is older, fall
+    // back to the BatchNormalization form which matches LayerNorm semantics
+    // when the input is reshaped to (N, C) — callers on pre-17 opsets should
+    // route through the graph-based LayerNorm OpId path instead.
+    ONNXExportNode node("LayerNormalization", context_.generate_name("layernorm"));
+
+    std::string input_name = get_tensor_name(input, "ln_input");
+
+    std::string scale_name = context_.generate_name("ln_scale");
+    add_initializer_tensor(scale, scale_name);
+
+    std::string bias_name = context_.generate_name("ln_bias");
+    add_initializer_tensor(bias, bias_name);
+
+    node.add_input(input_name);
+    node.add_input(scale_name);
+    node.add_input(bias_name);
+    node.add_output(output_name);
+
+    node.set_attr("axis", axis);
+    node.set_attr("epsilon", static_cast<float>(eps));
+
+    graph_.add_node(node);
+    context_.register_tensor(output, output_name);
+}
+
 auto ONNXExporter::export_groupnorm(const Tensor& input, const Tensor& weight,
                                      const Tensor& bias, int64_t num_groups, double eps,
                                      const Tensor& output,
@@ -3832,6 +3862,52 @@ auto trace_custom_module(ONNXExporter& exporter,
         if (name.find("bias") != std::string::npos) {
             has_bias = true;
             bias_param = param;
+        }
+    }
+
+    // BatchNorm / LayerNorm have 1D weight + 1D bias. We distinguish between
+    // them via the presence of non-parameter buffers: BatchNorm registers
+    // running_mean/running_var as buffers, LayerNorm does not.
+    if (has_weight && weight_param && weight_param->tensor().shape().size() == 1) {
+        std::shared_ptr<Variable> running_mean;
+        std::shared_ptr<Variable> running_var;
+        for (const auto& [bname, buf] : module->named_buffers()) {
+            if (bname.find("running_mean") != std::string::npos) running_mean = buf;
+            if (bname.find("running_var") != std::string::npos) running_var = buf;
+        }
+
+        if (running_mean && running_var && has_bias && bias_param) {
+            // BatchNorm — ONNX's BatchNormalization takes
+            // (input, scale, bias, mean, var). Default eps of 1e-5 matches
+            // the nn::BatchNorm default; if the module carries a custom eps
+            // it would need a named hook, which this tracer doesn't inspect.
+            exporter.export_batchnorm2d(
+                input.tensor(),
+                weight_param->tensor(),
+                bias_param->tensor(),
+                running_mean->tensor(),
+                running_var->tensor(),
+                /*eps=*/1e-5,
+                output.tensor(),
+                output_name
+            );
+            return;
+        }
+
+        // LayerNorm: 1D weight + optional 1D bias, no running stats. Delegate
+        // to the dedicated export_layernorm helper (added alongside this
+        // BN/LN tracer fix).
+        if (has_bias && bias_param) {
+            exporter.export_layernorm(
+                input.tensor(),
+                weight_param->tensor(),
+                bias_param->tensor(),
+                /*axis=*/-1,
+                /*eps=*/1e-5,
+                output.tensor(),
+                output_name
+            );
+            return;
         }
     }
 

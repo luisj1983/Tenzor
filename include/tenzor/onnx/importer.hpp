@@ -147,6 +147,7 @@ private:
     // Layer conversion
     auto convert_conv(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
     auto convert_batch_normalization(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
+    auto convert_layer_normalization(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
 
     // Activation functions
     auto convert_relu(const ONNXImportNode& node) -> void;

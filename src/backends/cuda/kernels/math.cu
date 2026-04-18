@@ -8068,11 +8068,16 @@ Tensor betainc_dispatch(std::span<const Tensor> inputs, const OpAttributes& attr
 // New element-wise ops: Frac, Heaviside, NanToNum
 // ============================================================================
 
+// frac is sign-preserving: frac(x) = x - trunc(x). The previous
+// implementation used floor(x), which always returns a non-negative
+// fractional part (frac(-2.75) → 0.25 instead of -0.75) and diverged from
+// CPU + PyTorch semantics. Use truncf/trunc so negative inputs round toward
+// zero, matching the CPU reference and ROCm/OneAPI kernels.
 __global__ void frac_kernel_f32(const float* in, float* out, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = in[idx] - floorf(in[idx]); }
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = in[idx] - truncf(in[idx]); }
 }
 __global__ void frac_kernel_f64(const double* in, double* out, int64_t n) {
-    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = in[idx] - floor(in[idx]); }
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { out[idx] = in[idx] - trunc(in[idx]); }
 }
 auto frac_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     int64_t n = input.numel();

@@ -379,6 +379,13 @@ add_executable(test_alibi_multidtype layers/test_alibi_multidtype.cpp)
 target_link_libraries(test_alibi_multidtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_alibi_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
+# FlexAttention multi-backend tests (forward-only; backward deferred — the
+# backward pass requires native GPU flash-attention-style kernels which live
+# in the Phase 3 follow-up of the test-completion plan).
+add_executable(test_flex_attention_multidtype layers/test_flex_attention_multidtype.cpp)
+target_link_libraries(test_flex_attention_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_flex_attention_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
 # LPPool1d / LPPool2d multi-backend multi-dtype tests (Phase 2 gap fill)
 add_executable(test_lppool_multidtype layers/test_lppool_multidtype.cpp)
 target_link_libraries(test_lppool_multidtype PRIVATE tenzor_core GTest::gtest_main)

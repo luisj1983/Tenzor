@@ -28,7 +28,8 @@ using namespace tenzor::ops;
 #define skipIfHalf() \
     do { \
         if (dtype() == DType::Float16 || dtype() == DType::BFloat16) { \
-            GTEST_SKIP() << "Fused ops require higher precision for comparison"; \
+            SKIP_WITH_REASON(::tenzor::testing::SkipReason::NumericalDivergence, \
+                             "Fused op dispatch test compares unfused/fused outputs tighter than FP16 tolerance"); \
         } \
     } while (0)
 

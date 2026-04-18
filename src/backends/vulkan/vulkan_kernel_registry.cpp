@@ -2889,7 +2889,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchUnaryOp("frac", inputs[0])};
     });
     table.register_kernel(OpId::Heaviside, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchBinaryOp("heaviside", inputs[0], inputs[1])};
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchHeaviside(inputs[0], inputs[1])};
     });
     table.register_kernel(OpId::LogSigmoid, [](std::span<const Tensor> inputs, const OpAttributes&) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchUnaryOp("log_sigmoid", inputs[0])};

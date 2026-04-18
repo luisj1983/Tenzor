@@ -245,9 +245,9 @@ void main() {
             res0 = float(fa0 * exp2(fb0));
             res1 = float(fa1 * exp2(fb1));
             break;
-        case 50: // frac (unary)
-            res0 = float(fa0 - floor(fa0));
-            res1 = float(fa1 - floor(fa1));
+        case 50: // frac (unary): x - trunc(x) — sign-preserving (PyTorch convention)
+            res0 = float(fa0 - trunc(fa0));
+            res1 = float(fa1 - trunc(fa1));
             break;
         case 51: // log_sigmoid (unary)
             res0 = float(-log(1.0 + exp(-fa0)));

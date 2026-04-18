@@ -15,6 +15,7 @@
 #include "../../include/tenzor/nn/layers/linear.hpp"
 #include "../../include/tenzor/nn/layers/conv.hpp"
 #include "../../include/tenzor/nn/layers/batchnorm.hpp"
+#include "../../include/tenzor/nn/layers/normalization.hpp"
 #include "../../include/tenzor/nn/layers/pooling.hpp"
 #include "../../include/tenzor/nn/layers/flatten.hpp"
 #include "../../include/tenzor/nn/activations/activations.hpp"
@@ -581,6 +582,8 @@ auto ONNXImporter::convert_node(const ONNXImportNode& node) -> std::optional<std
         return convert_conv(node);
     } else if (node.op_type == "BatchNormalization") {
         return convert_batch_normalization(node);
+    } else if (node.op_type == "LayerNormalization") {
+        return convert_layer_normalization(node);
     }
 
     // Activation functions (in-place)
@@ -883,6 +886,27 @@ auto ONNXImporter::convert_conv(const ONNXImportNode& node) -> std::shared_ptr<n
     } else {
         throw std::runtime_error("Unsupported convolution dimension: " + std::to_string(kernel_shape.size()));
     }
+}
+
+auto ONNXImporter::convert_layer_normalization(const ONNXImportNode& node) -> std::shared_ptr<nn::Module> {
+    // ONNX LayerNormalization inputs: X, Scale, Bias (bias optional per spec;
+    // we only support the bias-present form the exporter emits).
+    auto scale = get_input(node.inputs[1]);
+    auto bias  = get_input(node.inputs[2]);
+    float eps  = node.get_attr("epsilon").value_or(ONNXAttribute{}).get_float(1e-5f);
+
+    // Scale shape is the normalized_shape. Our LayerNorm constructor takes
+    // that as a vector of ints.
+    std::vector<int64_t> normalized_shape(scale.shape().begin(), scale.shape().end());
+    auto ln = std::make_shared<nn::LayerNorm>(normalized_shape, static_cast<double>(eps),
+                                              /*elementwise_affine=*/true);
+
+    auto params = ln->named_parameters();
+    for (auto& [name, param] : params) {
+        if (name == "weight") param->tensor() = scale;
+        else if (name == "bias") param->tensor() = bias;
+    }
+    return ln;
 }
 
 auto ONNXImporter::convert_batch_normalization(const ONNXImportNode& node) -> std::shared_ptr<nn::Module> {

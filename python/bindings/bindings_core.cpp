@@ -424,7 +424,9 @@ void register_core(py::module_& m) {
         .value("complex128", tenzor::DType::Complex128)
         .value("qint8", tenzor::DType::QInt8)
         .value("quint8", tenzor::DType::QUInt8)
-        .value("qint4x2", tenzor::DType::QInt4x2);
+        .value("qint4x2", tenzor::DType::QInt4x2)
+        .value("fp8_e4m3", tenzor::DType::FP8_E4M3)
+        .value("fp8_e5m2", tenzor::DType::FP8_E5M2);
 
     // Quantization functions
     m.def("quantize_per_tensor", &tenzor::quantize_per_tensor,
@@ -433,6 +435,14 @@ void register_core(py::module_& m) {
           "Quantize a float tensor to int8/uint8 with scale and zero_point");
 
     // FP8 scaling utilities
+    // The per-tensor scaling params returned by quantize_to_fp8. Expose its
+    // three fields so round-trip tests can read `params.scale`.
+    py::class_<tenzor::FP8ScalingParams>(m, "FP8ScalingParams",
+        "Per-tensor FP8 quantization parameters")
+        .def_readwrite("scale", &tenzor::FP8ScalingParams::scale)
+        .def_readwrite("amax", &tenzor::FP8ScalingParams::amax)
+        .def_readwrite("fp8_dtype", &tenzor::FP8ScalingParams::fp8_dtype);
+
     m.def("fp8_max_value", &tenzor::fp8_max_value,
           py::arg("fp8_dtype"),
           R"doc(Get maximum representable value for an FP8 data type.

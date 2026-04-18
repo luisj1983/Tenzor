@@ -371,8 +371,8 @@ void main() {
         case 49: // ldexp (binary): x * 2^n (n is val_b as int)
             result[idx] = val_a * exp_double(val_b * 0.6931471805599453);
             break;
-        case 50: // frac (unary): x - floor(x)
-            result[idx] = val_a - floor(val_a);
+        case 50: // frac (unary): x - trunc(x) — sign-preserving (PyTorch convention)
+            result[idx] = val_a - trunc(val_a);
             break;
         case 51: // log_sigmoid (unary): -log(1 + exp(-x))
             result[idx] = -log_double(1.0 + exp_double(-val_a));

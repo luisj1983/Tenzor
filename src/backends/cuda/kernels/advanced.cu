@@ -3109,6 +3109,9 @@ auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim, bool keepdim,
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     const auto& shape = input_cont.shape();
     const int64_t ndim = input_cont.ndim();
+    // Normalize negative dim (default -1 at the registry level means "last
+    // dim"). Matches the CPU convention in advanced.cpp:1207.
+    if (dim < 0) dim += ndim;
     const int64_t dim_size = shape[dim];
     const auto dtype = input_cont.dtype();
     const auto device = input_cont.device();
@@ -3207,6 +3210,7 @@ auto quantile_kernel(const Tensor& input, double q, int64_t dim, bool keepdim,
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     const auto& shape = input_cont.shape();
     const int64_t ndim = input_cont.ndim();
+    if (dim < 0) dim += ndim;  // Normalize (see kthvalue_kernel for rationale)
     const int64_t dim_size = shape[dim];
     const auto dtype = input_cont.dtype();
     const auto device = input_cont.device();
@@ -3336,6 +3340,7 @@ auto nanquantile_kernel(const Tensor& input, double q, int64_t dim, bool keepdim
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     const auto& shape = input_cont.shape();
     const int64_t ndim = input_cont.ndim();
+    if (dim < 0) dim += ndim;  // Normalize (see kthvalue_kernel for rationale)
     const int64_t dim_size = shape[dim];
     const auto dtype = input_cont.dtype();
     const auto device = input_cont.device();

@@ -196,10 +196,16 @@ FP8_E4M3::FP8_E4M3(float f) {
         int32_t new_exp = static_cast<int32_t>(exp) - 127 + 7;
 
         if (new_exp >= 0xF) {
-            // Overflow: clamp to max finite value (exp=0xE, mantissa=0x7 = 448)
-            // E4M3 reserves exp=0xF + mantissa!=0 for NaN
-            h_exp = 0xE;
-            h_mantissa = 0x7;
+            // Overflow: clamp to E4M3's true max finite value, which is
+            // exp=0xF, mantissa=0x6 = 2^(15-7) * (1 + 6/8) = 448. Only
+            // mantissa=0x7 at exp=0xF is reserved for NaN — mantissa=0x0..0x6
+            // are valid finite numbers (256, 288, 320, 352, 384, 416, 448).
+            // The previous "mantissa=0x7 at exp=0xE" (= 240) was a PyTorch
+            // saturation convention that diverges from NVIDIA's native E4M3,
+            // and "mantissa=0x0 at exp=0xF" (= 256) was an intermediate
+            // off-by-6 fix. This uses the correct bit pattern.
+            h_exp = 0xF;
+            h_mantissa = 0x6;
         } else if (new_exp <= 0) {
             // Denormalized E4M3 or underflow
             if (new_exp >= -3) {
@@ -246,21 +252,19 @@ FP8_E4M3::operator float() const {
             f_exp = 127 - 7 - e;
             f_mantissa = (m & 0x7) << 20;
         }
-    } else if (exp == 0xF && mantissa != 0) {
-        // NaN
+    } else if (exp == 0xF && mantissa == 0x7) {
+        // NaN — only this exact bit pattern (exp=0xF AND mantissa=0x7) is
+        // reserved for NaN in NVIDIA's E4M3. All other mantissa values at
+        // exp=0xF are valid finite numbers (the max finite is 0xF / 0x6 = 448).
         f_exp = 0xFF;
-        f_mantissa = mantissa << 20;
+        f_mantissa = 0x700000;
     } else {
-        // Normalized (exp=0xF with mantissa=0 is also a valid number in E4M3: 448)
-        if (exp == 0xF && mantissa == 0) {
-            // This is the maximum finite value, not infinity
-            // exp=15-7=8 -> float32 exp = 8+127 = 135
-            f_exp = exp - 7 + 127;
-            f_mantissa = 0;
-        } else {
-            f_exp = exp - 7 + 127;
-            f_mantissa = mantissa << 20;
-        }
+        // Normalized. exp=0xF with mantissa < 0x7 is legal finite — no
+        // special case needed because the general exp-rebias formula
+        // handles it (f_exp = 15-7+127 = 135, 2^8 * (1 + mantissa/8) covers
+        // 256, 288, ..., 448 as mantissa walks 0..6).
+        f_exp = exp - 7 + 127;
+        f_mantissa = mantissa << 20;
     }
 
     uint32_t f_bits = (f_sign << 31) | (f_exp << 23) | f_mantissa;

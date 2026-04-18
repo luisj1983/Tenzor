@@ -1,0 +1,29 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+#extension GL_ARB_gpu_shader_fp64 : enable
+
+// Replace NaN, +Inf, -Inf with specified values (fp64 variant).
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuffer { double data[]; } input_buf;
+layout(set = 0, binding = 1) writeonly buffer OutputBuffer { double data[]; } output_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+    double nan_val;
+    double posinf_val;
+    double neginf_val;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.num_elements) return;
+    double x = input_buf.data[idx];
+    if (isnan(x)) {
+        output_buf.data[idx] = pc.nan_val;
+    } else if (isinf(x)) {
+        output_buf.data[idx] = (x > 0.0) ? pc.posinf_val : pc.neginf_val;
+    } else {
+        output_buf.data[idx] = x;
+    }
+}

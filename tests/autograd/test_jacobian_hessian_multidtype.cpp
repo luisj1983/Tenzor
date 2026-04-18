@@ -25,7 +25,8 @@ using namespace tenzor::testing;
 #define skipIfHalf() \
     do { \
         if (dtype() == DType::Float16 || dtype() == DType::BFloat16) { \
-            GTEST_SKIP() << "Jacobian/Hessian requires higher precision"; \
+            SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, \
+                             "Jacobian/Hessian rely on finite differences — FP16 precision insufficient"); \
         } \
     } while (0)
 

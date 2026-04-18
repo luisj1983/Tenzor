@@ -18,6 +18,7 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include "golden_util.hpp"
 #include <cmath>
 #include <cstdlib>
 #include <functional>
@@ -666,7 +667,40 @@ void test_operation_parity_backends(Op operation,
     }
 
     if (backends.size() < 2) {
-        GTEST_SKIP() << "Need at least 2 backends for parity testing";
+        // Golden fallback: on a single-backend host, compare the lone backend's
+        // result against a recorded golden instead of skipping outright.
+        if (backends.empty()) {
+            GTEST_SKIP() << "No backends available";
+            return;
+        }
+        const auto& backend = backends[0];
+        std::vector<Tensor> backend_inputs;
+        backend_inputs.reserve(inputs.size());
+        for (const auto& t : inputs) backend_inputs.push_back(t.to(backend));
+        auto result = operation(backend_inputs);
+        backend.synchronize();
+
+        if (golden::recording_enabled() && backend.type == Device::Type::CPU) {
+            golden::maybe_record(test_name, inputs, result);
+            return;
+        }
+        if (auto golden_result = golden::maybe_load(test_name, inputs)) {
+            if (!tensors_close(result, *golden_result, rtol, atol)) {
+                float max_diff = max_abs_diff(result, *golden_result);
+                FAIL() << test_name << " golden parity failed:\n"
+                       << "  Backend: " << backend_name(backend) << "\n"
+                       << "  Max absolute difference: " << std::scientific << max_diff << "\n"
+                       << "  Tolerance: rtol=" << rtol << ", atol=" << atol;
+            }
+            return;
+        }
+        if (golden::require_multi_backend()) {
+            FAIL() << test_name << ": only 1 backend available and no golden recorded.\n"
+                   << "  Record from a multi-backend host with TENZOR_RECORD_GOLDENS=1.";
+        }
+        GTEST_SKIP() << "Need at least 2 backends for parity testing"
+                     << " (or a recorded golden — set TENZOR_RECORD_GOLDENS=1 on a "
+                     << "multi-backend host to record)";
         return;
     }
 
@@ -705,6 +739,15 @@ void test_operation_parity_backends(Op operation,
     const auto& reference = results[0];
     const auto& reference_backend = used_backends[0];
 
+    // Persist reference outputs for future single-backend runs when the
+    // caller has opted in via TENZOR_RECORD_GOLDENS. We intentionally record
+    // the CPU result rather than any GPU result so the golden is always the
+    // reference the parity test treats as ground truth.
+    if (golden::recording_enabled() &&
+        reference_backend.type == Device::Type::CPU) {
+        golden::maybe_record(test_name, inputs, reference);
+    }
+
     for (size_t i = 1; i < results.size(); ++i) {
         const auto& result = results[i];
         const auto& backend = used_backends[i];
@@ -731,7 +774,16 @@ void test_operation_parity_backends(Op operation,
  * all backends — the loop is performed by GoogleTest's TEST_P parameterization
  * instead, which gives one ctest entry per (op, backend) combination.
  *
- * If `target` is CPU, only verifies the op runs without throwing.
+ * Golden-tensor fallback: when `target` is CPU we used to be a no-op. We now
+ * also consult a recorded golden (if present) and compare — this gives signal
+ * even on single-backend CI hosts. Record goldens on a multi-backend host by
+ * running with TENZOR_RECORD_GOLDENS=1 in the environment; recording uses the
+ * CPU result as reference.
+ *
+ * Env vars consulted:
+ *   TENZOR_RECORD_GOLDENS=1       — record the CPU output; no compare.
+ *   TENZOR_REQUIRE_MULTI_BACKEND=1 — if target==CPU and no golden exists, FAIL
+ *                                   instead of silently passing.
  */
 template<typename Op>
 void test_operation_parity_single(Op operation,
@@ -741,9 +793,33 @@ void test_operation_parity_single(Op operation,
                                   float atol = 1e-8f,
                                   const std::string& test_name = "Operation") {
     auto cpu_result = operation(cpu_inputs);
+
+    // Always record when requested — the CPU result is the canonical reference.
+    if (golden::recording_enabled() && target.type == Device::Type::CPU) {
+        golden::maybe_record(test_name, cpu_inputs, cpu_result);
+    }
+
     if (target.type == Device::Type::CPU) {
+        // On CPU-only hosts we'd otherwise be a no-op. Compare against a
+        // recorded golden if one exists. If not, either FAIL (when the caller
+        // has asked for strict multi-backend coverage) or silently pass.
+        if (auto golden_result = golden::maybe_load(test_name, cpu_inputs)) {
+            if (!tensors_close(cpu_result, *golden_result, rtol, atol)) {
+                float max_diff = max_abs_diff(cpu_result, *golden_result);
+                FAIL() << test_name << " golden parity failed (CPU vs recorded):\n"
+                       << "  Max absolute difference: " << std::scientific << max_diff << "\n"
+                       << "  Tolerance: rtol=" << rtol << ", atol=" << atol << "\n"
+                       << "  To re-record: TENZOR_RECORD_GOLDENS=1 ctest -R <test>";
+            }
+            return;
+        }
+        if (golden::require_multi_backend()) {
+            FAIL() << test_name << " has no recorded golden and no GPU backend is available.\n"
+                   << "  Record one from a multi-backend host with TENZOR_RECORD_GOLDENS=1.";
+        }
         return;
     }
+    // Run on the target backend and compare against CPU.
     std::vector<Tensor> target_inputs;
     target_inputs.reserve(cpu_inputs.size());
     for (const auto& t : cpu_inputs) target_inputs.push_back(t.to(target));
@@ -756,6 +832,44 @@ void test_operation_parity_single(Op operation,
                << "  Test backend: " << backend_name(target) << "\n"
                << "  Max absolute difference: " << std::scientific << max_diff << "\n"
                << "  Tolerance: rtol=" << rtol << ", atol=" << atol;
+        return;
+    }
+
+    // Cross-backend check: also compare the target against every other
+    // *non-CPU* backend that happens to be available on this host. The CPU
+    // reference was already compared above, so we only add new pairings.
+    // This turns every TEST_P into a full matrix of (target × other) pair
+    // checks — catching e.g. CUDA-vs-ROCm or Vulkan-vs-OneAPI divergence
+    // that the CPU pivot would miss.
+    //
+    // We catch per-backend exceptions (the other backend may not support
+    // the op) and emit a plain cerr warning rather than failing — failures
+    // here would be noise from feature-availability differences, not
+    // genuine parity issues.
+    auto all_backends = get_available_backends();
+    for (const auto& other : all_backends) {
+        if (other.type == Device::Type::CPU) continue;
+        if (other.type == target.type && other.index == target.index) continue;
+        try {
+            std::vector<Tensor> other_inputs;
+            other_inputs.reserve(cpu_inputs.size());
+            for (const auto& t : cpu_inputs) other_inputs.push_back(t.to(other));
+            auto other_result = operation(other_inputs);
+            other.synchronize();
+            if (!tensors_close(target_result, other_result, rtol, atol)) {
+                float max_diff = max_abs_diff(target_result, other_result);
+                FAIL() << test_name << " cross-backend parity failed:\n"
+                       << "  Backend A: " << backend_name(target) << "\n"
+                       << "  Backend B: " << backend_name(other) << "\n"
+                       << "  Max absolute difference: " << std::scientific << max_diff << "\n"
+                       << "  Tolerance: rtol=" << rtol << ", atol=" << atol;
+            }
+        } catch (const std::exception& e) {
+            // Other backend doesn't support the op — not a parity bug, just
+            // a feature gap. Surface as a warning so the tally is visible.
+            std::cerr << "[parity] " << test_name << ": cross-backend skipped on "
+                      << backend_name(other) << " (" << e.what() << ")\n";
+        }
     }
 }
 

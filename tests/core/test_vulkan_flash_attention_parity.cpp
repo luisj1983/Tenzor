@@ -69,7 +69,7 @@ TEST_F(VulkanFlashAttentionParity, MinimalDumpOutput) {
         auto probe = zeros({1}, DType::Float32, Device{Device::Type::Vulkan, 0});
         (void)probe;
     } catch (...) {
-        GTEST_SKIP();
+        GTEST_SKIP() << "[SkipReason::BackendUnavailable] Vulkan device probe failed";
     }
 
     const int64_t B = 1, H = 1, S = 16, D = 16;

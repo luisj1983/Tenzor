@@ -5744,12 +5744,16 @@ auto frac_kernel(const Tensor& input) -> Tensor {
     auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
     int64_t n = input.numel();
 
+    // frac is sign-preserving: frac(x) = x - trunc(x). Matches PyTorch's
+    // convention and the fixed CUDA / ROCm / Vulkan / OneAPI kernels. Using
+    // floor here was a long-standing API divergence (frac(-2.75) returned
+    // 0.25 instead of -0.75) that this project is fixing across backends.
     TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "frac", [&]() {
         const scalar_t* in_data = input.data<scalar_t>();
         scalar_t* out_data = output.data<scalar_t>();
         _Pragma("omp parallel for if(n > 10000)")
         for (int64_t i = 0; i < n; i++) {
-            out_data[i] = in_data[i] - std::floor(in_data[i]);
+            out_data[i] = in_data[i] - std::trunc(in_data[i]);
         }
     });
     return output;

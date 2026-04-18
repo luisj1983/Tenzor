@@ -6091,11 +6091,14 @@ auto betainc_kernel(const Tensor& a, const Tensor& b, const Tensor& x, hipStream
 // New Phase 4 ops
 // ============================================================================
 
+// frac is sign-preserving (x - trunc(x)), not x - floor(x). See the CUDA
+// kernel comment in src/backends/cuda/kernels/math.cu for the rationale —
+// the same bug was present here.
 __global__ void frac_kernel_f32(const float* in, float* out, int64_t n) {
-    HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] - floorf(in[idx]); }
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] - truncf(in[idx]); }
 }
 __global__ void frac_kernel_f64(const double* in, double* out, int64_t n) {
-    HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] - floor(in[idx]); }
+    HIP_KERNEL_LOOP(idx, n) { out[idx] = in[idx] - trunc(in[idx]); }
 }
 auto frac_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     int64_t n = input.numel();
@@ -7755,6 +7758,7 @@ auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim, bool keepdim,
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     const auto& shape = input_cont.shape();
     const int64_t ndim = input_cont.ndim();
+    if (dim < 0) dim += ndim;  // Normalize (matches CPU + CUDA convention)
     const int64_t dim_size = shape[dim];
     const auto dtype = input_cont.dtype();
     const auto device = input_cont.device();
@@ -7908,6 +7912,7 @@ static auto quantile_nanquantile_impl(const Tensor& input, double q, int64_t dim
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
     const auto& shape = input_cont.shape();
     const int64_t ndim = input_cont.ndim();
+    if (dim < 0) dim += ndim;  // Normalize (matches CPU + CUDA convention)
     const int64_t dim_size = shape[dim];
     const auto dtype = input_cont.dtype();
     const auto device = input_cont.device();

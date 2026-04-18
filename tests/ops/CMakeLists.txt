@@ -158,6 +158,38 @@ add_executable(test_untested_ops_multidtype test_untested_ops_multidtype.cpp)
 target_link_libraries(test_untested_ops_multidtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_untested_ops_multidtype LABELS "ops" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
+# OpIds flagged by scripts/audit_op_coverage.py as having zero test references
+# (Frac, Heaviside, NanToNum, Nextafter, Gcd/Lcm, Addcmul/Addcdiv, Rad2Deg,
+# Signbit, LogAddExp2, XLogY, Xlog1py, Entr, IsNan/IsInf/IsFinite, MaskedScatter,
+# TrilIndices/TriuIndices, Ldexp, Frexp).
+add_executable(test_missing_ops_multidtype test_missing_ops_multidtype.cpp)
+target_link_libraries(test_missing_ops_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_missing_ops_multidtype LABELS "ops" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Linalg OpIds flagged as untested: Det, SLogDet, Inv, Cholesky, QR, SVD, Eigh,
+# LU, Solve, SolveTriangular, CholeskySolve, CholeskyInverse, MatrixExp, Pinv,
+# MatrixNorm, VectorNorm, VecDot, Pdist, Geqrf, Ormqr, HouseholderProduct,
+# MatrixRank, LDLFactor, LDLSolve.
+add_executable(test_linalg_missing_multidtype test_linalg_missing_multidtype.cpp)
+target_link_libraries(test_linalg_missing_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_linalg_missing_multidtype LABELS "ops" DISCOVERY_TIMEOUT 120 DISCOVERY_MODE PRE_TEST)
+
+# 1D/3D pool + Conv3d + ConvTranspose + MaxUnpool + DeformableConv2d OpIds.
+add_executable(test_pool_conv_missing_multidtype test_pool_conv_missing_multidtype.cpp)
+target_link_libraries(test_pool_conv_missing_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_pool_conv_missing_multidtype LABELS "ops" DISCOVERY_TIMEOUT 120 DISCOVERY_MODE PRE_TEST)
+
+# Stats / FFT / indexing / diag / scatter / misc OpIds.
+add_executable(test_stats_misc_missing_multidtype test_stats_misc_missing_multidtype.cpp)
+target_link_libraries(test_stats_misc_missing_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_stats_misc_missing_multidtype LABELS "ops" DISCOVERY_TIMEOUT 120 DISCOVERY_MODE PRE_TEST)
+
+# Final 29 untested OpIds (BatchNorm internals, ComplexTensor, EmbeddingBag,
+# GeluInplace, Sparse softmax / SpGEMM, Nested, Fused optimizer/graph, etc.).
+add_executable(test_final_untested_multidtype test_final_untested_multidtype.cpp)
+target_link_libraries(test_final_untested_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_final_untested_multidtype LABELS "ops" DISCOVERY_TIMEOUT 120 DISCOVERY_MODE PRE_TEST)
+
 # Previously untested OpIds: StridedFill, EmbeddingWithBoundsCheck, HasInfNan, Cast
 add_executable(test_dispatch_ops_multidtype test_dispatch_ops_multidtype.cpp)
 target_link_libraries(test_dispatch_ops_multidtype PRIVATE tenzor_core GTest::gtest_main)

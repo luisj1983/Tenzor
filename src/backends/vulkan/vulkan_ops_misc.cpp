@@ -3229,6 +3229,12 @@ auto VulkanBackend::dispatchLerp(const Tensor& start, const Tensor& end,
 
 
 // Addcmul: result = input + value * tensor1 * tensor2
+//
+// fp32 path uses the addcmul.comp shader; fp64 path uses addcmul_f64.comp
+// which has a doubled push-constant layout (8-byte scalar multiplier).
+// Half precision (Float16/BFloat16) is promoted via the generic Float32
+// path by the caller contract — the Tenzor autograd functions cast before
+// calling here.
 auto VulkanBackend::dispatchAddcmul(const Tensor& input, const Tensor& tensor1,
                                      const Tensor& tensor2, float value) -> Tensor {
     if (input.numel() == 0) {
@@ -3237,19 +3243,42 @@ auto VulkanBackend::dispatchAddcmul(const Tensor& input, const Tensor& tensor1,
         return Tensor(output_shape, input.dtype(), input.device());
     }
 
+    // Float16 / BFloat16 have no dedicated shader — promote to Float32,
+    // compute, then narrow back. Keeps the fp32 shader as the single
+    // implementation for every non-fp64 dtype.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto out_f32 = dispatchAddcmul(input.to(DType::Float32),
+                                        tensor1.to(DType::Float32),
+                                        tensor2.to(DType::Float32), value);
+        return out_f32.to(input.dtype());
+    }
+
     int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("addcmul", device_id);
+    bool is_f64 = (input.dtype() == DType::Float64);
+    auto* pipeline = getPipeline(is_f64 ? "addcmul_f64" : "addcmul", device_id);
 
     auto inp_shape = input.shape();
     std::vector<int64_t> output_shape(inp_shape.begin(), inp_shape.end());
     Tensor output(output_shape, input.dtype(), input.device());
 
-    struct PushConstants {
-        uint32_t n;
-        float value;
-    } push_constants;
-    push_constants.n = static_cast<uint32_t>(input.numel());
-    push_constants.value = value;
+    // fp32 and fp64 variants share the (uint32 n, scalar value) layout but
+    // with different scalar widths. We pack a 16-byte struct either way to
+    // satisfy alignment (the fp64 shader aligns its `double` to 8).
+    struct PushConstantsF32 { uint32_t n; float value; uint32_t pad0; uint32_t pad1; };
+    struct PushConstantsF64 { uint32_t n; uint32_t pad; double value; };
+
+    size_t pc_size = is_f64 ? sizeof(PushConstantsF64) : sizeof(PushConstantsF32);
+    union {
+        PushConstantsF32 f32;
+        PushConstantsF64 f64;
+    } push_constants = {};
+    if (is_f64) {
+        push_constants.f64.n = static_cast<uint32_t>(input.numel());
+        push_constants.f64.value = static_cast<double>(value);
+    } else {
+        push_constants.f32.n = static_cast<uint32_t>(input.numel());
+        push_constants.f32.value = value;
+    }
 
     size_t buffer_size = input.numel() * input.dtype_size();
 
@@ -3267,7 +3296,7 @@ auto VulkanBackend::dispatchAddcmul(const Tensor& input, const Tensor& tensor1,
                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT,
-                      0, sizeof(PushConstants), &push_constants);
+                      0, static_cast<uint32_t>(pc_size), &push_constants);
 
     uint32_t workgroups = div_wg(input.numel(), devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
@@ -3279,6 +3308,8 @@ auto VulkanBackend::dispatchAddcmul(const Tensor& input, const Tensor& tensor1,
 }
 
 // Addcdiv: result = input + value * tensor1 / tensor2
+//
+// See dispatchAddcmul for the fp32/fp64 push-constant layout rationale.
 auto VulkanBackend::dispatchAddcdiv(const Tensor& input, const Tensor& tensor1,
                                      const Tensor& tensor2, float value) -> Tensor {
     if (input.numel() == 0) {
@@ -3287,19 +3318,32 @@ auto VulkanBackend::dispatchAddcdiv(const Tensor& input, const Tensor& tensor1,
         return Tensor(output_shape, input.dtype(), input.device());
     }
 
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        auto out_f32 = dispatchAddcdiv(input.to(DType::Float32),
+                                        tensor1.to(DType::Float32),
+                                        tensor2.to(DType::Float32), value);
+        return out_f32.to(input.dtype());
+    }
+
     int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("addcdiv", device_id);
+    bool is_f64 = (input.dtype() == DType::Float64);
+    auto* pipeline = getPipeline(is_f64 ? "addcdiv_f64" : "addcdiv", device_id);
 
     auto inp_shape = input.shape();
     std::vector<int64_t> output_shape(inp_shape.begin(), inp_shape.end());
     Tensor output(output_shape, input.dtype(), input.device());
 
-    struct PushConstants {
-        uint32_t n;
-        float value;
-    } push_constants;
-    push_constants.n = static_cast<uint32_t>(input.numel());
-    push_constants.value = value;
+    struct PushConstantsF32 { uint32_t n; float value; uint32_t pad0; uint32_t pad1; };
+    struct PushConstantsF64 { uint32_t n; uint32_t pad; double value; };
+    size_t pc_size = is_f64 ? sizeof(PushConstantsF64) : sizeof(PushConstantsF32);
+    union { PushConstantsF32 f32; PushConstantsF64 f64; } push_constants = {};
+    if (is_f64) {
+        push_constants.f64.n = static_cast<uint32_t>(input.numel());
+        push_constants.f64.value = static_cast<double>(value);
+    } else {
+        push_constants.f32.n = static_cast<uint32_t>(input.numel());
+        push_constants.f32.value = value;
+    }
 
     size_t buffer_size = input.numel() * input.dtype_size();
 
@@ -3317,7 +3361,7 @@ auto VulkanBackend::dispatchAddcdiv(const Tensor& input, const Tensor& tensor1,
                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT,
-                      0, sizeof(PushConstants), &push_constants);
+                      0, static_cast<uint32_t>(pc_size), &push_constants);
 
     uint32_t workgroups = div_wg(input.numel(), devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
@@ -4014,18 +4058,38 @@ auto VulkanBackend::dispatchNanToNum(const Tensor& input,
     std::vector<int64_t> output_shape(s.begin(), s.end());
     Tensor output(output_shape, input.dtype(), input.device());
 
-    auto* pipeline = getPipeline("nan_to_num", device_id);
+    bool is_f64 = (input.dtype() == DType::Float64);
+    auto* pipeline = getPipeline(is_f64 ? "nan_to_num_f64" : "nan_to_num", device_id);
 
-    struct PushConstants {
+    // fp32 and fp64 variants share (uint32 num_elements, N*scalar) push-
+    // constants. 16-byte alignment for the fp64 struct comes from the
+    // doubles; we reserve enough space and write the proper bit pattern.
+    struct PushConstantsF32 {
         uint32_t num_elements;
         float nan_val;
         float posinf_val;
         float neginf_val;
-    } pc;
-    pc.num_elements = static_cast<uint32_t>(input.numel());
-    pc.nan_val      = nan_val;
-    pc.posinf_val   = posinf_val;
-    pc.neginf_val   = neginf_val;
+    };
+    struct PushConstantsF64 {
+        uint32_t num_elements;
+        uint32_t pad;
+        double nan_val;
+        double posinf_val;
+        double neginf_val;
+    };
+    size_t pc_size = is_f64 ? sizeof(PushConstantsF64) : sizeof(PushConstantsF32);
+    union { PushConstantsF32 f32; PushConstantsF64 f64; } pc = {};
+    if (is_f64) {
+        pc.f64.num_elements = static_cast<uint32_t>(input.numel());
+        pc.f64.nan_val      = static_cast<double>(nan_val);
+        pc.f64.posinf_val   = static_cast<double>(posinf_val);
+        pc.f64.neginf_val   = static_cast<double>(neginf_val);
+    } else {
+        pc.f32.num_elements = static_cast<uint32_t>(input.numel());
+        pc.f32.nan_val      = nan_val;
+        pc.f32.posinf_val   = posinf_val;
+        pc.f32.neginf_val   = neginf_val;
+    }
 
     size_t buf_size = input.numel() * input.dtype_size();
     std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -4041,7 +4105,7 @@ auto VulkanBackend::dispatchNanToNum(const Tensor& input,
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
     vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                      0, sizeof(pc), &pc);
+                      0, static_cast<uint32_t>(pc_size), &pc);
 
     uint32_t workgroups = div_wg(input.numel(), devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
@@ -4095,6 +4159,64 @@ auto VulkanBackend::dispatchBitwiseBinaryOp(const std::string& shader_name,
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
+}
+
+// ============================================================================
+// Heaviside — uses the dedicated heaviside.comp shader with 3 buffers
+// (input, values, output) + num_elements push constant. Wired separately
+// from dispatchBinaryOp because that routes through math.comp's opcode
+// switch which doesn't have a heaviside case. Float32 only at the shader
+// layer; Float16/BFloat16 are promoted by the caller.
+// ============================================================================
+auto VulkanBackend::dispatchHeaviside(const Tensor& input, const Tensor& values) -> Tensor {
+    if (input.numel() == 0) {
+        auto s = input.shape();
+        return Tensor(std::vector<int64_t>(s.begin(), s.end()),
+                      input.dtype(), input.device());
+    }
+
+    // The shader operates on Float32. Promote half types and cast the
+    // result back on the caller's behalf.
+    Tensor input_f32 = input.dtype() == DType::Float32
+        ? input : input.to(DType::Float32);
+    Tensor values_f32 = values.dtype() == DType::Float32
+        ? values : values.to(DType::Float32);
+
+    int32_t device_id = input_f32.device().index;
+    auto s = input_f32.shape();
+    std::vector<int64_t> output_shape(s.begin(), s.end());
+    Tensor output(output_shape, DType::Float32, input_f32.device());
+
+    auto* pipeline = getPipeline("heaviside", device_id);
+
+    struct PushConstants { uint32_t num_elements; } pc;
+    pc.num_elements = static_cast<uint32_t>(input_f32.numel());
+
+    size_t buf_size = input_f32.numel() * sizeof(float);
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, input_f32.data_ptr()},
+        {1, values_f32.data_ptr()},
+        {2, output.data_ptr()},
+    };
+    std::vector<size_t> sizes = {buf_size, buf_size, buf_size};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(pc), &pc);
+
+    uint32_t workgroups = div_wg(input_f32.numel(), devices_[device_id].workgroupSize);
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+    insertComputeOnlyBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    // Narrow back to the caller's dtype if we promoted.
+    return input.dtype() == DType::Float32 ? output : output.to(input.dtype());
 }
 
 // ============================================================================

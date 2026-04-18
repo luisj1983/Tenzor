@@ -384,7 +384,13 @@ auto remainder(const Tensor& a, const Tensor& b) -> Tensor;
 auto lerp(const Tensor& start, const Tensor& end, const Tensor& weight) -> Tensor;
 auto lerp(const Tensor& start, const Tensor& end, double weight) -> Tensor;
 
-/** @brief Fractional part: x - floor(x) */
+/**
+ * @brief Sign-preserving fractional part: frac(x) = x - trunc(x).
+ *
+ * Matches PyTorch's torch.frac convention — frac(-2.75) == -0.75, not 0.25.
+ * Previously documented (and implemented) as x - floor(x), which disagreed
+ * with PyTorch; all five backends were updated together.
+ */
 auto frac(const Tensor& input) -> Tensor;
 
 /** @brief Heaviside step function. Returns 0 where x<0, values where x==0, 1 where x>0. */

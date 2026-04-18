@@ -19,10 +19,14 @@ using namespace tenzor::testing;
 // statement returns from the TEST_P body rather than from a helper
 // method — otherwise the test continues and fails on the first op
 // that doesn't support Float16.
+// TODO: BatchNorm supports FP32-accumulation-with-FP16-storage on CUDA/ROCm
+// and we should split this skip into a tolerance-loosening branch once the
+// dispatch tests are hooked up to per-dtype tolerance. See plan Phase 2a.
 #define skipIfHalf() \
     do { \
         if (dtype() == DType::Float16 || dtype() == DType::BFloat16) { \
-            GTEST_SKIP() << "BatchNorm dispatch tests require higher precision"; \
+            SKIP_WITH_REASON(::tenzor::testing::SkipReason::NumericalDivergence, \
+                             "BatchNorm dispatch test uses FP32 tolerance — narrow in Phase 2"); \
         } \
     } while (0)
 

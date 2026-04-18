@@ -1,0 +1,42 @@
+name: Coverage Gates
+
+# Runs the two coverage audits as lightweight PR gates. Neither requires a
+# GPU — the audits only grep source. They guard against silent regressions
+# in test coverage (new untagged skips, new untested OpIds).
+
+on:
+  pull_request:
+    paths:
+      - 'include/tenzor/ops/op_id.hpp'
+      - 'tests/**'
+      - 'scripts/count_skips.py'
+      - 'scripts/audit_op_coverage.py'
+  push:
+    branches: [main]
+
+jobs:
+  skip-budget:
+    name: Skip-budget gate (count_skips.py)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tally test skips
+        # Zero UNTAGGED after Phase 33. Keep the gate at a small value so a
+        # single new skip won't break the build, but anything more than a
+        # handful surfaces as a regression.
+        run: |
+          python3 scripts/count_skips.py --max-untagged 10
+
+  op-coverage:
+    name: OpId coverage matrix (audit_op_coverage.py)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Report OpId coverage
+        run: |
+          python3 scripts/audit_op_coverage.py --json op-coverage.json
+      - name: Upload coverage JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-coverage
+          path: op-coverage.json

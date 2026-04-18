@@ -490,6 +490,27 @@ public:
                             const std::string& output_name) -> void;
 
     /**
+     * @brief Export a LayerNorm layer as ONNX LayerNormalization (opset 17+).
+     *
+     * Added as part of the tracer fix for custom modules with 1D weight+bias
+     * and no running-stats buffers. Older opsets decompose via a ReduceMean
+     * + sub + pow + mean + sqrt sequence; that's handled by the generic
+     * LayerNorm OpId path, which callers who need pre-17 support should use.
+     *
+     * @param input Input tensor
+     * @param scale Gamma (weight) of shape (C,)
+     * @param bias Beta (bias) of shape (C,)
+     * @param axis Axis to normalize over (default: -1)
+     * @param eps Epsilon for numerical stability
+     * @param output Output tensor (same shape as input)
+     * @param output_name ONNX-side name for the output value
+     */
+    auto export_layernorm(const Tensor& input, const Tensor& scale,
+                          const Tensor& bias, int64_t axis, double eps,
+                          const Tensor& output,
+                          const std::string& output_name) -> void;
+
+    /**
      * @brief Export GroupNorm layer
      *
      * For opset >= 18, exports as ONNX GroupNormalization.

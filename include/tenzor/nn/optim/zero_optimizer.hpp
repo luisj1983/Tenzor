@@ -106,14 +106,19 @@ struct ZeROStage1Config {
 class ZeROStage1Optimizer : public Optimizer {
 public:
     /**
-     * @brief Construct ZeRO Stage 1 optimizer
+     * @brief Construct ZeRO Stage 1 optimizer.
      *
-     * @param base_optimizer Base optimizer (Adam, SGD, etc.) - ownership transferred
+     * Takes shared ownership of the base optimizer so pybind11 can keep a
+     * concurrent reference alive. C++ callers can pass either a
+     * `shared_ptr<Optimizer>` directly or `std::move(unique_ptr<Optimizer>)` —
+     * `shared_ptr`'s implicit `unique_ptr&&` conversion handles both.
+     *
+     * @param base_optimizer Base optimizer (Adam, SGD, etc.)
      * @param config ZeRO configuration
      * @throws std::invalid_argument if rank >= world_size or base_optimizer is null
      */
     ZeROStage1Optimizer(
-        std::unique_ptr<Optimizer> base_optimizer,
+        std::shared_ptr<Optimizer> base_optimizer,
         const ZeROStage1Config& config
     );
 
@@ -314,7 +319,11 @@ protected:
     };
 
     // Core components
-    std::unique_ptr<Optimizer> base_optimizer_;     ///< Wrapped optimizer
+    // Stored as shared_ptr so Python bindings can pass a shared_ptr<Optimizer>
+    // without the unsafe raw-ownership transfer that a unique_ptr would require.
+    // C++ callers that use the unique_ptr constructor below still work — a
+    // shared_ptr is trivially constructible from a moved unique_ptr.
+    std::shared_ptr<Optimizer> base_optimizer_;     ///< Wrapped optimizer
     ZeROStage1Config config_;                       ///< Configuration
     std::vector<StatePartition> partitions_;        ///< State partitions for all ranks
     std::shared_ptr<core::OffloadEngine> offload_engine_;  ///< CPU offload engine
@@ -541,14 +550,16 @@ struct ZeROStage2Config : public ZeROStage1Config {
 class ZeROStage2Optimizer : public ZeROStage1Optimizer {
 public:
     /**
-     * @brief Construct ZeRO Stage 2 optimizer
+     * @brief Construct ZeRO Stage 2 optimizer. Accepts
+     * `shared_ptr<Optimizer>` or `std::move(unique_ptr<Optimizer>)` — see
+     * ZeROStage1Optimizer's constructor comment for rationale.
      *
-     * @param base_optimizer Base optimizer (Adam, SGD, etc.) - ownership transferred
+     * @param base_optimizer Base optimizer (Adam, SGD, etc.)
      * @param config ZeRO Stage 2 configuration
      * @throws std::invalid_argument if rank >= world_size or base_optimizer is null
      */
     ZeROStage2Optimizer(
-        std::unique_ptr<Optimizer> base_optimizer,
+        std::shared_ptr<Optimizer> base_optimizer,
         const ZeROStage2Config& config
     );
 
@@ -929,14 +940,16 @@ public:
     // ========================================================================
 
     /**
-     * @brief Construct ZeRO Stage 3 optimizer
+     * @brief Construct ZeRO Stage 3 optimizer. Accepts
+     * `shared_ptr<Optimizer>` or `std::move(unique_ptr<Optimizer>)` — see
+     * ZeROStage1Optimizer's constructor comment for rationale.
      *
      * @param base_optimizer The underlying optimizer (Adam, AdamW, SGD, etc.)
      * @param config Stage 3 configuration
      * @throws std::invalid_argument if rank >= world_size or base_optimizer is null
      */
     ZeROStage3Optimizer(
-        std::unique_ptr<Optimizer> base_optimizer,
+        std::shared_ptr<Optimizer> base_optimizer,
         const Stage3Config& config
     );
 

@@ -171,11 +171,11 @@ TEST_P(DeformableConv2dTest, MaskModulatesOutput) {
 // ============================================================================
 
 TEST_P(DeformableConv2dTest, NNLayerForward) {
-    if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "NN layer test currently runs on CPU only";
-    }
-
+    // DeformableConv2d has kernels on every backend (CPU, CUDA, ROCm, Vulkan,
+    // OneAPI). The CPU-only gate was legacy from a time when the GPU paths
+    // were under construction; the parity helper below verifies equivalence.
     nn::DeformableConv2d dcn(4, 8, 3, 1, 1);
+    dcn.to(device);
     auto input = Variable(randn({1, 4, 8, 8}, DType::Float32, device), true);
     auto offset = Variable(zeros({1, 18, 8, 8}, DType::Float32, device), false);
 

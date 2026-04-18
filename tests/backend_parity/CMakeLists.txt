@@ -13,6 +13,11 @@ include_directories(
     ${GTEST_INCLUDE_DIRS}
 )
 
+# Path to the on-disk golden-tensor directory. Baked into each parity test
+# binary at compile time; overridable at runtime via $TENZOR_GOLDEN_DIR.
+set(TENZOR_GOLDEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/golden" CACHE PATH
+    "Directory containing recorded parity goldens")
+
 # Helper function to create a parity test executable
 function(add_parity_test TEST_NAME SOURCE_FILE)
     add_executable(${TEST_NAME} ${SOURCE_FILE})
@@ -22,6 +27,10 @@ function(add_parity_test TEST_NAME SOURCE_FILE)
         GTest::gtest
         GTest::gtest_main
         ${CMAKE_THREAD_LIBS_INIT}
+    )
+
+    target_compile_definitions(${TEST_NAME} PRIVATE
+        TENZOR_TEST_GOLDEN_DIR="${TENZOR_GOLDEN_DIR}"
     )
 
     # Add test to CTest
@@ -90,8 +99,14 @@ add_parity_test(test_fft_parity test_fft_parity.cpp)
 # Sparse parity tests
 add_parity_test(test_sparse_parity test_sparse_parity.cpp)
 
+# Sparse parity with realistic density patterns (random, banded, block-diag)
+add_parity_test(test_sparse_real_patterns test_sparse_real_patterns.cpp)
+
 # Quantization parity tests
 add_parity_test(test_quantization_parity test_quantization_parity.cpp)
+
+# Real-int8 quantized-kernel parity (QuantizedLinear across backends)
+add_parity_test(test_quantized_kernel_parity test_quantized_kernel_parity.cpp)
 
 # Nested tensor parity tests (nested_softmax, layer_norm, attention fwd+bwd)
 add_parity_test(test_nested_parity test_nested_parity.cpp)

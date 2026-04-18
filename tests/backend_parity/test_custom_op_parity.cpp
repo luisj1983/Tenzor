@@ -96,7 +96,10 @@ TEST_P(CustomOpParity, Squared_Backward_MultiBackend) {
                       << backend_name(dev) << ": " << e.what() << std::endl;
         }
     }
-    if (!registered_any) GTEST_SKIP();
+    // Tag inline so scripts/count_skips.py classifies without needing the
+    // SKIP_WITH_REASON macro header.
+    if (!registered_any) GTEST_SKIP() <<
+        "[SkipReason::KernelNotImplemented] Custom op failed to register on any backend";
 
     auto input_cpu = randn({8}, DType::Float32, Device::cpu());
 

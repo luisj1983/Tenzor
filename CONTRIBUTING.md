@@ -303,6 +303,32 @@ doxygen Doxyfile
 - **Issues**: [GitHub Issues](https://github.com/leelee222/tenzor/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/leelee222/tenzor/discussions)
 
+## Adding a new op: coverage checklist
+
+When you introduce a new `OpId`, make sure every item below is in your PR
+before requesting review. The two audit scripts ship in `scripts/` and are
+invoked in CI; use them locally to preview coverage deltas.
+
+1. **Implementation** in `src/ops/` or `src/nn/` as appropriate.
+2. **Kernel registration** on every backend the op supports: `src/backends/
+   {cpu,cuda,rocm,vulkan,oneapi}/<backend>_kernel_registry.cpp`.
+3. **Unit test** in `tests/ops/` that covers the op's happy path for every
+   supported dtype via `MultiBackendDTypeTest`.
+4. **Parity test** in `tests/backend_parity/` using `test_operation_parity`
+   / `test_operation_parity_single`. If the op is non-obvious, also record
+   goldens so single-backend CI verifies it (see
+   `tests/backend_parity/README.md`).
+5. **Python binding** in the appropriate `python/bindings/bindings_*.cpp`
+   submodule + a functional test in `tests/python/`.
+6. **ONNX mapping** in the exporter and a coverage entry in
+   `tests/python/test_onnx_operator_coverage.py` (if the op is expressible
+   in ONNX).
+7. **Audit** — `scripts/audit_op_coverage.py` and `scripts/count_skips.py`
+   locally. Neither should regress (the CI job enforces this).
+
+For behavior changes on an existing op, still run both audit scripts and
+re-record any affected goldens.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the MIT License.

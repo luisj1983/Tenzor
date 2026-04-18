@@ -240,17 +240,21 @@ auto flex_attention(
         scale = 1.0f / std::sqrt(static_cast<float>(D));
     }
 
-    // The implementation below uses host-side raw-pointer loops. Move GPU
-    // tensors (including the block mask) to CPU, run the reference
-    // computation, then move the result back. Previously the code assumed
-    // CPU memory and crashed on CUDA/ROCm.
+    // The implementation below uses host-side raw-pointer loops over Float32.
+    // Inputs on GPU are moved to CPU, and Float64 / Float16 / BFloat16 inputs
+    // are promoted to Float32 for the computation. The result is cast back to
+    // the original dtype (and device) at the end. This keeps a single reference
+    // code path while matching the dtype contract the caller expects.
     Device original_device = query.device();
-    auto q_contig = original_device.type == Device::Type::CPU
-        ? query.contiguous() : query.to(Device::cpu()).contiguous();
-    auto k_contig = original_device.type == Device::Type::CPU
-        ? key.contiguous() : key.to(Device::cpu()).contiguous();
-    auto v_contig = original_device.type == Device::Type::CPU
-        ? value.contiguous() : value.to(Device::cpu()).contiguous();
+    DType original_dtype = query.dtype();
+    auto to_f32_cpu = [](const Tensor& t) {
+        Tensor cpu = t.device().type == Device::Type::CPU ? t : t.to(Device::cpu());
+        return cpu.dtype() == DType::Float32 ? cpu.contiguous()
+                                             : cpu.to(DType::Float32).contiguous();
+    };
+    auto q_contig = to_f32_cpu(query);
+    auto k_contig = to_f32_cpu(key);
+    auto v_contig = to_f32_cpu(value);
 
     // If the BlockMask's underlying tensor lives on a device, build a CPU
     // copy for the host-side is_active() reads below. The BlockMask type
@@ -262,8 +266,9 @@ auto flex_attention(
                                      block_mask.block_size());
     }
 
-    // Allocate output on CPU (for the raw-pointer math); move back at end.
-    auto output = zeros({B, H, S, D}, query.dtype(), Device::cpu());
+    // Allocate the working-precision (Float32) output on CPU. The final cast
+    // back to `original_dtype` happens after the raw-pointer loops complete.
+    auto output = zeros({B, H, S, D}, DType::Float32, Device::cpu());
     const float neg_inf = -std::numeric_limits<float>::infinity();
 
     // Raw pointers into contiguous (B, H, S, D) layout.
@@ -424,7 +429,12 @@ auto flex_attention(
         } // head loop
     } // batch loop
 
-    // Restore the original device if callers passed GPU inputs.
+    // Narrow back to the caller's dtype before restoring device placement.
+    // Promoting at the output boundary keeps the inner loop at Float32
+    // precision while preserving the caller-visible contract.
+    if (original_dtype != DType::Float32) {
+        output = output.to(original_dtype);
+    }
     if (original_device.type != Device::Type::CPU) {
         return output.to(original_device);
     }

@@ -44,6 +44,51 @@ namespace testing {
 using Variable = tenzor::Variable;
 
 // ============================================================================
+// Skip Reason Taxonomy
+// ============================================================================
+/**
+ * Machine-readable reasons a parity/unit test may skip. Passed to SKIP_WITH_REASON
+ * so scripts/count_skips.py can trend skip-by-category over time. If you reach
+ * for "untagged" you are almost certainly wrong — find or add the right enum.
+ */
+enum class SkipReason {
+    BackendUnavailable,           // device genuinely absent on host
+    BackendExcludedByEnv,         // TENZOR_SKIP_BACKENDS
+    NumericalDivergence,          // algorithm loses precision below Float32
+    DtypeUnsupportedOnBackend,    // kernel explicitly doesn't register dtype
+    ComplexFP16Unrepresentable,   // no Float16 complex type
+    GradcheckFDPrecision,         // finite-difference noise dominates at FP16
+    KernelNotImplemented,         // feature is genuinely TODO
+    RequiresMultiGPU,             // multi-device distributed coverage
+    KnownBug,                     // track with issue #; do not paper over
+};
+
+inline const char* skip_reason_string(SkipReason r) {
+    switch (r) {
+        case SkipReason::BackendUnavailable:         return "BackendUnavailable";
+        case SkipReason::BackendExcludedByEnv:       return "BackendExcludedByEnv";
+        case SkipReason::NumericalDivergence:        return "NumericalDivergence";
+        case SkipReason::DtypeUnsupportedOnBackend:  return "DtypeUnsupportedOnBackend";
+        case SkipReason::ComplexFP16Unrepresentable: return "ComplexFP16Unrepresentable";
+        case SkipReason::GradcheckFDPrecision:       return "GradcheckFDPrecision";
+        case SkipReason::KernelNotImplemented:       return "KernelNotImplemented";
+        case SkipReason::RequiresMultiGPU:           return "RequiresMultiGPU";
+        case SkipReason::KnownBug:                   return "KnownBug";
+    }
+    return "Unknown";
+}
+
+/**
+ * Emit a skip with a structured reason. The reason name appears in the skip
+ * message so count_skips.py can tally categories via a simple grep.
+ *
+ * Usage:
+ *   SKIP_WITH_REASON(SkipReason::GradcheckFDPrecision, "randn LU precision");
+ */
+#define SKIP_WITH_REASON(reason, detail) \
+    GTEST_SKIP() << "[" << ::tenzor::testing::skip_reason_string(reason) << "] " << detail
+
+// ============================================================================
 // Backend Name Parsing Utilities
 // ============================================================================
 
@@ -301,6 +346,21 @@ protected:
             initialized_ = true;
         }
 
+        // Deterministic RNG seed per test — keeps randn() output stable across
+        // process invocations so recorded golden tensors stay valid.
+        {
+            const auto* info = ::testing::UnitTest::GetInstance()->current_test_info();
+            std::string key = info ? std::string(info->test_suite_name()) + "."
+                                       + info->name()
+                                   : std::string("default");
+            uint32_t seed = 0x811c9dc5u;
+            for (char c : key) {
+                seed ^= static_cast<uint32_t>(static_cast<unsigned char>(c));
+                seed *= 0x01000193u;
+            }
+            tenzor::manual_seed(seed);
+        }
+
         auto [backend_name, dtype] = GetParam();
         dtype_ = dtype;
 
@@ -311,8 +371,17 @@ protected:
                          << " excluded via TENZOR_SKIP_BACKENDS";
         }
 
-        // Check backend availability and skip if not available
+        // Check backend availability. If TENZOR_REQUIRE_MULTI_BACKEND=1 is
+        // set in the environment, an unavailable non-CPU backend becomes a
+        // hard FAIL instead of a skip — surfaces broken CI environments.
+        // TENZOR_SKIP_BACKENDS wins over this, already handled above.
         if (!isBackendNameAvailable(backend_name)) {
+            const char* req = std::getenv("TENZOR_REQUIRE_MULTI_BACKEND");
+            if (req && *req && *req != '0' &&
+                parseBackendName(backend_name) != "cpu") {
+                FAIL() << backend_name << " required by "
+                          "TENZOR_REQUIRE_MULTI_BACKEND but unavailable";
+            }
             GTEST_SKIP() << backend_name << " backend not available";
         }
 
@@ -633,6 +702,21 @@ protected:
         if (!initialized_) {
             tenzor::initialize();
             initialized_ = true;
+        }
+
+        // Deterministic RNG seed per test — keeps randn() output stable across
+        // process invocations so recorded golden tensors stay valid.
+        {
+            const auto* info = ::testing::UnitTest::GetInstance()->current_test_info();
+            std::string key = info ? std::string(info->test_suite_name()) + "."
+                                       + info->name()
+                                   : std::string("default");
+            uint32_t seed = 0x811c9dc5u;
+            for (char c : key) {
+                seed ^= static_cast<uint32_t>(static_cast<unsigned char>(c));
+                seed *= 0x01000193u;
+            }
+            tenzor::manual_seed(seed);
         }
 
         device_ = Device::cpu();

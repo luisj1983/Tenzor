@@ -606,7 +606,7 @@ TEST_P(LossAdvancedMultiDTypeTest, HuberLoss_BackwardGradient) {
 //==============================================================================
 // Backward Gradient Tests — losses flagged by the review as lacking backward
 // coverage. Any test that fails here is surfacing a real autograd bug in that
-// loss's grad_fn (do not wrap in GTEST_SKIP — the failure is the signal).
+// loss's grad_fn (do not skip the failure — the failure is the signal).
 //==============================================================================
 
 TEST_P(LossAdvancedMultiDTypeTest, BCEWithLogitsLoss_BackwardGradient) {

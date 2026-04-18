@@ -5155,21 +5155,25 @@ auto frac_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     int64_t n = input.numel();
     if (n == 0) return result;
 
+    // frac is sign-preserving (x - trunc(x)), not x - floor(x). See the CUDA
+    // kernel's comment in src/backends/cuda/kernels/math.cu — the same bug
+    // was present here.
     if (input.dtype() == DType::Float32) {
         const float* in = input.data<float>(); float* out = result.data<float>();
         queue.parallel_for<FracKernelF32>(sycl::range<1>(n), [=](sycl::id<1> idx) {
-            float x = in[idx]; out[idx] = x - sycl::floor(x);
+            float x = in[idx]; out[idx] = x - sycl::trunc(x);
         }).wait();
     } else if (input.dtype() == DType::Float64) {
         const double* in = input.data<double>(); double* out = result.data<double>();
         queue.parallel_for<FracKernelF64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
-            double x = in[idx]; out[idx] = x - sycl::floor(x);
+            double x = in[idx]; out[idx] = x - sycl::trunc(x);
         }).wait();
     } else { throw std::runtime_error("frac: unsupported dtype"); }
     return result;
 }
 
 struct HeavisideKernelF32 {};
+struct HeavisideKernelF64 {};
 
 auto heaviside_kernel(const Tensor& input, const Tensor& values, sycl::queue& queue) -> Tensor {
     if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
@@ -5187,11 +5191,18 @@ auto heaviside_kernel(const Tensor& input, const Tensor& values, sycl::queue& qu
             float x = in[idx];
             out[idx] = (x < 0.0f) ? 0.0f : (x == 0.0f ? val[idx] : 1.0f);
         }).wait();
-    } else { throw std::runtime_error("heaviside: unsupported dtype (use Float32)"); }
+    } else if (input.dtype() == DType::Float64) {
+        const double* in = input.data<double>(); const double* val = values.data<double>(); double* out = result.data<double>();
+        queue.parallel_for<HeavisideKernelF64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            double x = in[idx];
+            out[idx] = (x < 0.0) ? 0.0 : (x == 0.0 ? val[idx] : 1.0);
+        }).wait();
+    } else { throw std::runtime_error("heaviside: unsupported dtype"); }
     return result;
 }
 
 struct NanToNumKernelF32 {};
+struct NanToNumKernelF64 {};
 
 auto nan_to_num_kernel(const Tensor& input, double nan_v, double posinf_v, double neginf_v, sycl::queue& queue) -> Tensor {
     if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
@@ -5210,6 +5221,18 @@ auto nan_to_num_kernel(const Tensor& input, double nan_v, double posinf_v, doubl
         float nf = (neginf_v <= static_cast<double>(std::numeric_limits<float>::lowest())) ? std::numeric_limits<float>::lowest() : static_cast<float>(neginf_v);
         queue.parallel_for<NanToNumKernelF32>(sycl::range<1>(n), [=](sycl::id<1> idx) {
             float x = in[idx];
+            if (sycl::isnan(x)) out[idx] = nv;
+            else if (sycl::isinf(x) && x > 0) out[idx] = pv;
+            else if (sycl::isinf(x) && x < 0) out[idx] = nf;
+            else out[idx] = x;
+        }).wait();
+    } else if (input.dtype() == DType::Float64) {
+        const double* in = input.data<double>(); double* out = result.data<double>();
+        double nv = nan_v;
+        double pv = posinf_v;
+        double nf = neginf_v;
+        queue.parallel_for<NanToNumKernelF64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            double x = in[idx];
             if (sycl::isnan(x)) out[idx] = nv;
             else if (sycl::isinf(x) && x > 0) out[idx] = pv;
             else if (sycl::isinf(x) && x < 0) out[idx] = nf;

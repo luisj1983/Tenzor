@@ -1,6 +1,10 @@
 #version 450
 
-// Frac: x - floor(x)
+// Frac is sign-preserving: frac(x) = x - trunc(x). GLSL's built-in fract(x)
+// is equivalent to x - floor(x) and gives the wrong answer for negative
+// inputs (e.g. fract(-2.75) = 0.25 instead of the expected -0.75). Compute
+// it explicitly via trunc to stay consistent with the CPU / CUDA / ROCm /
+// OneAPI implementations and the PyTorch convention.
 layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) readonly buffer InputBuffer { float data[]; } input_buf;
@@ -11,5 +15,6 @@ layout(push_constant) uniform PushConstants { uint num_elements; } pc;
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= pc.num_elements) return;
-    output_buf.data[idx] = fract(input_buf.data[idx]);
+    float v = input_buf.data[idx];
+    output_buf.data[idx] = v - trunc(v);
 }

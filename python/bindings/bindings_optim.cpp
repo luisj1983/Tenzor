@@ -19,6 +19,8 @@
 #include <tenzor/nn/optim/sparse_adam.hpp>
 #include <tenzor/nn/optim/adam_atan2.hpp>
 #include <tenzor/nn/optim/rprop.hpp>
+#include <tenzor/nn/optim/lbfgs.hpp>
+#include <tenzor/nn/optim/zero_optimizer.hpp>
 #include <tenzor/nn/optim/asgd.hpp>
 #include <tenzor/nn/optim/sam.hpp>
 #include <tenzor/nn/optim/swa.hpp>
@@ -317,6 +319,93 @@ void register_optim(py::module_& m) {
              "Get optimizer state dictionary")
         .def("load_state_dict", &tenzor::optim::Rprop::load_state_dict,
              py::arg("state"), "Load optimizer state dictionary");
+
+    // LBFGS: quasi-Newton optimizer for small, precisely-convergent problems.
+    // Requires a closure because line search needs to re-evaluate f + grad.
+    py::enum_<tenzor::optim::LBFGSLineSearch>(optim, "LBFGSLineSearch",
+        "Line-search strategy for LBFGS optimizer")
+        .value("Armijo", tenzor::optim::LBFGSLineSearch::Armijo)
+        .value("StrongWolfe", tenzor::optim::LBFGSLineSearch::StrongWolfe)
+        .export_values();
+
+    py::class_<tenzor::optim::LBFGS, tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::LBFGS>>(optim, "LBFGS",
+        "Limited-memory BFGS optimizer (quasi-Newton with history size)")
+        .def(py::init<std::vector<std::shared_ptr<tenzor::Variable>>, double, int, int, double, double, int, tenzor::optim::LBFGSLineSearch>(),
+             py::arg("params"),
+             py::arg("lr") = 1.0,
+             py::arg("max_iter") = 20,
+             py::arg("max_eval") = -1,
+             py::arg("tolerance_grad") = 1e-7,
+             py::arg("tolerance_change") = 1e-9,
+             py::arg("history_size") = 100,
+             py::arg("line_search") = tenzor::optim::LBFGSLineSearch::StrongWolfe)
+        .def("step", [](tenzor::optim::LBFGS& self, std::function<tenzor::Variable()> closure) {
+            return self.step(closure);
+        }, py::arg("closure"),
+           "Perform an L-BFGS step. Closure must recompute loss and call loss.backward().")
+        .def("zero_grad", &tenzor::optim::LBFGS::zero_grad)
+        .def("set_lr", &tenzor::optim::LBFGS::set_lr, py::arg("lr"))
+        .def("get_lr", &tenzor::optim::LBFGS::get_lr)
+        .def("state_dict", &tenzor::optim::LBFGS::state_dict)
+        .def("load_state_dict", &tenzor::optim::LBFGS::load_state_dict, py::arg("state"));
+
+    // --- ZeRO optimizers (stages 1, 2, 3) ---
+    // C++ now exposes a `std::shared_ptr<Optimizer>` overload on each ZeRO
+    // constructor (alongside the original unique_ptr one). The Python binding
+    // routes through the shared_ptr form, which lets pybind11 keep its own
+    // shared_ptr reference alive concurrently with the ZeRO wrapper's. No
+    // ownership transfer required; no risk of double-free.
+    py::class_<tenzor::optim::ZeROStage1Config>(optim, "ZeROStage1Config",
+        "Configuration for ZeROStage1Optimizer")
+        .def(py::init<>())
+        .def_readwrite("world_size", &tenzor::optim::ZeROStage1Config::world_size)
+        .def_readwrite("rank", &tenzor::optim::ZeROStage1Config::rank)
+        .def_readwrite("offload_to_cpu", &tenzor::optim::ZeROStage1Config::offload_to_cpu)
+        .def_readwrite("cpu_offload_threshold", &tenzor::optim::ZeROStage1Config::cpu_offload_threshold)
+        .def_readwrite("overlap_comm", &tenzor::optim::ZeROStage1Config::overlap_comm)
+        .def_readwrite("pin_memory", &tenzor::optim::ZeROStage1Config::pin_memory);
+
+    py::class_<tenzor::optim::ZeROStage2Config, tenzor::optim::ZeROStage1Config>(
+        optim, "ZeROStage2Config", "Configuration for ZeROStage2Optimizer")
+        .def(py::init<>())
+        .def_readwrite("gradient_bucket_size", &tenzor::optim::ZeROStage2Config::gradient_bucket_size)
+        .def_readwrite("reduce_scatter_in_backward", &tenzor::optim::ZeROStage2Config::reduce_scatter_in_backward)
+        .def_readwrite("gradient_bucketing", &tenzor::optim::ZeROStage2Config::gradient_bucketing);
+
+    py::class_<tenzor::optim::Stage3Config, tenzor::optim::ZeROStage2Config>(
+        optim, "ZeROStage3Config", "Configuration for ZeROStage3Optimizer")
+        .def(py::init<>());
+
+    // ZeRO Stage 1 — safe shared_ptr path. Python can still hold a separate
+    // reference to the base optimizer after wrapping (e.g. to read its state
+    // dict); both references share ownership via the C++ shared_ptr field.
+    py::class_<tenzor::optim::ZeROStage1Optimizer, std::shared_ptr<tenzor::optim::ZeROStage1Optimizer>>(
+        optim, "ZeROStage1Optimizer", "ZeRO Stage 1: optimizer state partitioning")
+        .def(py::init<std::shared_ptr<tenzor::optim::Optimizer>,
+                      const tenzor::optim::ZeROStage1Config&>(),
+             py::arg("base_optimizer"), py::arg("config"))
+        .def("step", [](tenzor::optim::ZeROStage1Optimizer& self) { self.step(); })
+        .def("zero_grad", &tenzor::optim::ZeROStage1Optimizer::zero_grad)
+        .def("state_dict", &tenzor::optim::ZeROStage1Optimizer::state_dict)
+        .def("load_state_dict", &tenzor::optim::ZeROStage1Optimizer::load_state_dict,
+             py::arg("state"));
+
+    // Stage 2 and 3 are aliased to Stage 1's binding for construction — they
+    // share the same `base_optimizer + config` signature, only the config
+    // type differs. The class is exposed so Python can type-check the handle.
+    py::class_<tenzor::optim::ZeROStage2Optimizer, tenzor::optim::ZeROStage1Optimizer,
+               std::shared_ptr<tenzor::optim::ZeROStage2Optimizer>>(
+        optim, "ZeROStage2Optimizer", "ZeRO Stage 2: gradient + optimizer state partitioning")
+        .def(py::init<std::shared_ptr<tenzor::optim::Optimizer>,
+                      const tenzor::optim::ZeROStage2Config&>(),
+             py::arg("base_optimizer"), py::arg("config"));
+
+    py::class_<tenzor::optim::ZeROStage3Optimizer, tenzor::optim::ZeROStage2Optimizer,
+               std::shared_ptr<tenzor::optim::ZeROStage3Optimizer>>(
+        optim, "ZeROStage3Optimizer", "ZeRO Stage 3: parameter + gradient + optimizer state partitioning")
+        .def(py::init<std::shared_ptr<tenzor::optim::Optimizer>,
+                      const tenzor::optim::Stage3Config&>(),
+             py::arg("base_optimizer"), py::arg("config"));
 
     // Learning rate schedulers
     auto lr_scheduler = optim.def_submodule("lr_scheduler", "Learning rate scheduling");

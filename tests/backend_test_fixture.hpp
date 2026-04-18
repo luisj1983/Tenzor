@@ -87,11 +87,38 @@ protected:
     Device device;
     static std::once_flag init_flag;
 
+    // Set TENZOR_REQUIRE_MULTI_BACKEND=1 in CI to turn every "backend not
+    // available" skip below into a hard FAIL. Use this in jobs where a GPU
+    // backend is supposed to be present — a silent skip would hide the
+    // broken environment. TENZOR_SKIP_BACKENDS still wins: an explicit opt-
+    // out skip never escalates to a failure regardless of the require flag.
+    static bool require_multi_backend() {
+        const char* v = std::getenv("TENZOR_REQUIRE_MULTI_BACKEND");
+        return v && *v && *v != '0';
+    }
+
     void SetUp() override {
         // Initialize Tenzor library and load backends (thread-safe, exactly once)
         std::call_once(init_flag, []() {
             tenzor::initialize();
         });
+
+        // Deterministic RNG seed per test. Parity tests that use randn() would
+        // otherwise produce different inputs on every process invocation, which
+        // makes recorded golden tensors mismatch the next run's inputs. Seeding
+        // per (suite, test) gives each test a stable but unique input sequence.
+        {
+            const auto* info = ::testing::UnitTest::GetInstance()->current_test_info();
+            std::string key = info ? std::string(info->test_suite_name()) + "."
+                                       + info->name()
+                                   : std::string("default");
+            uint32_t seed = 0x811c9dc5u;
+            for (char c : key) {
+                seed ^= static_cast<uint32_t>(static_cast<unsigned char>(c));
+                seed *= 0x01000193u;
+            }
+            tenzor::manual_seed(seed);
+        }
 
         std::string backend_param = GetParam();
         auto base = detail::parseBackendName(backend_param);
@@ -106,7 +133,12 @@ protected:
         } else {
             auto type = detail::nameToDeviceType(base);
             if (!isBackendAvailable(type, index)) {
-                GTEST_SKIP() << backend_param << " not available";
+                if (require_multi_backend()) {
+                    FAIL() << backend_param << " required by "
+                              "TENZOR_REQUIRE_MULTI_BACKEND but unavailable";
+                } else {
+                    GTEST_SKIP() << backend_param << " not available";
+                }
             }
             device = Device{type, index};
         }

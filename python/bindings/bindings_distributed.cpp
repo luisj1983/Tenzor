@@ -11,8 +11,11 @@
 #include <tenzor/distributed/ddp.hpp>
 #include <tenzor/distributed/fsdp.hpp>
 #include <tenzor/distributed/gradient_compression.hpp>
+#include <tenzor/distributed/pipeline_parallel.hpp>
 #include <tenzor/distributed/rpc/rpc.hpp>
 #include <tenzor/distributed/rpc/function_registry.hpp>
+#include <tenzor/distributed/sequence_parallel.hpp>
+#include <tenzor/distributed/tensor_parallel.hpp>
 #include <tenzor/nn/module.hpp>
 
 namespace py = pybind11;
@@ -77,8 +80,104 @@ void register_distributed(py::module_& m) {
         .def("all_reduce", &tenzor::distributed::ProcessGroup::all_reduce,
             "All-reduce operation",
             py::arg("tensor"), py::arg("op") = tenzor::distributed::ReduceOp::SUM)
+        .def("reduce", &tenzor::distributed::ProcessGroup::reduce,
+            "Reduce tensor to a single destination rank",
+            py::arg("tensor"), py::arg("dst_rank"),
+            py::arg("op") = tenzor::distributed::ReduceOp::SUM)
+        // gather / all_gather / reduce_scatter: the underlying C++ signatures
+        // take `std::vector<Tensor>&` for the output. pybind11's default STL
+        // caster copies that list at entry and does NOT propagate C++-side
+        // reassignments back to Python. Gloo's implementations reassign output
+        // slots (e.g. `output[src] = zeros_like(tensor); recv into it`), so
+        // the Python list never observed the received data. Wrap these to
+        // take the output by value and return the filled vector — Python
+        // callers then assign the return value back.
+        .def("gather", [](tenzor::distributed::ProcessGroup& self,
+                           const tenzor::Tensor& tensor,
+                           std::vector<tenzor::Tensor> output,
+                           int dst_rank) -> std::vector<tenzor::Tensor> {
+            self.gather(tensor, output, dst_rank);
+            return output;
+        }, py::arg("tensor"), py::arg("output"), py::arg("dst_rank"),
+           "Gather per-rank tensors onto dst_rank. Returns the filled output "
+           "list; other ranks return the unmodified placeholder.")
+        .def("scatter", &tenzor::distributed::ProcessGroup::scatter,
+            "Scatter per-rank tensors from a source rank to each rank",
+            py::arg("tensors"), py::arg("output"), py::arg("src_rank"))
+        .def("all_gather", [](tenzor::distributed::ProcessGroup& self,
+                               const tenzor::Tensor& tensor,
+                               std::vector<tenzor::Tensor> output)
+                               -> std::vector<tenzor::Tensor> {
+            self.all_gather(tensor, output);
+            return output;
+        }, py::arg("tensor"), py::arg("output"),
+           "All-gather: returns the filled output list (Python callers must "
+           "re-bind the return value; the passed list is not mutated).")
+        .def("reduce_scatter", &tenzor::distributed::ProcessGroup::reduce_scatter,
+            "Reduce-scatter: each rank ends up with one slice of the reduction",
+            py::arg("tensors"), py::arg("output"),
+            py::arg("op") = tenzor::distributed::ReduceOp::SUM)
         .def("barrier", &tenzor::distributed::ProcessGroup::barrier,
             "Barrier synchronization");
+
+    // --- Tensor-parallel linear layers ---
+    // Split Linear by column (output features) or row (input features)
+    // across a ProcessGroup. Use ColumnParallel → RowParallel for MLPs;
+    // the ParallelAttention wrapper composes both for attention blocks.
+    py::class_<tenzor::distributed::ColumnParallelLinear, tenzor::nn::Module,
+               std::shared_ptr<tenzor::distributed::ColumnParallelLinear>>(
+        distributed, "ColumnParallelLinear",
+        "Column-parallel Linear: weight split across output-feature dim")
+        .def(py::init<int64_t, int64_t, tenzor::distributed::ProcessGroup&,
+                      bool, bool>(),
+             py::arg("in_features"), py::arg("out_features"),
+             py::arg("process_group"),
+             py::arg("bias") = true, py::arg("gather_output") = true)
+        .def_property_readonly("in_features",
+            &tenzor::distributed::ColumnParallelLinear::in_features)
+        .def_property_readonly("out_features",
+            &tenzor::distributed::ColumnParallelLinear::out_features)
+        .def_property_readonly("local_out_features",
+            &tenzor::distributed::ColumnParallelLinear::local_out_features);
+
+    py::class_<tenzor::distributed::RowParallelLinear, tenzor::nn::Module,
+               std::shared_ptr<tenzor::distributed::RowParallelLinear>>(
+        distributed, "RowParallelLinear",
+        "Row-parallel Linear: weight split across input-feature dim")
+        .def(py::init<int64_t, int64_t, tenzor::distributed::ProcessGroup&,
+                      bool, bool>(),
+             py::arg("in_features"), py::arg("out_features"),
+             py::arg("process_group"),
+             py::arg("bias") = true, py::arg("input_is_parallel") = true);
+
+    py::class_<tenzor::distributed::ParallelAttention, tenzor::nn::Module,
+               std::shared_ptr<tenzor::distributed::ParallelAttention>>(
+        distributed, "ParallelAttention",
+        "Multi-head attention with heads sharded across a ProcessGroup")
+        .def(py::init<int64_t, int64_t, tenzor::distributed::ProcessGroup&>(),
+             py::arg("embed_dim"), py::arg("num_heads"), py::arg("process_group"));
+
+    // --- Pipeline / Sequence parallel ---
+    // Pipeline stages are typically built from user code so we expose the
+    // base PipelineStage class; full scheduler bindings require task-graph
+    // wiring that is beyond the Python surface today.
+    py::class_<tenzor::distributed::PipelineStage,
+               std::shared_ptr<tenzor::distributed::PipelineStage>>(
+        distributed, "PipelineStage",
+        "One stage of a pipeline-parallel execution graph")
+        .def(py::init<std::shared_ptr<tenzor::nn::Module>, int, int>(),
+             py::arg("module"), py::arg("stage_id"), py::arg("num_stages"),
+             "Wrap a module as a pipeline stage. stage_id is this rank's "
+             "position (0..num_stages-1); num_stages is the total pipeline depth.")
+        .def("forward", &tenzor::distributed::PipelineStage::forward,
+             py::arg("input"),
+             "Run the local sub-module's forward pass. Send/recv across "
+             "stages is handled by a scheduler, not this method.");
+
+    py::class_<tenzor::distributed::SequenceParallel,
+               std::shared_ptr<tenzor::distributed::SequenceParallel>>(
+        distributed, "SequenceParallel",
+        "Sequence-parallel scatter/gather helpers for activations");
 
     py::class_<tenzor::distributed::DistributedDataParallel>(distributed, "DistributedDataParallel")
         .def(py::init<tenzor::nn::Module&, tenzor::distributed::ProcessGroup&, size_t>(),

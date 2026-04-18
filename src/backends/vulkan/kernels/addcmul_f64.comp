@@ -1,0 +1,22 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+#extension GL_ARB_gpu_shader_fp64 : enable
+
+// Addcmul fp64 variant: result = input + value * tensor1 * tensor2
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer InputBuf { double input_buf[]; };
+layout(binding = 1) buffer Tensor1Buf { double tensor1_buf[]; };
+layout(binding = 2) buffer Tensor2Buf { double tensor2_buf[]; };
+layout(binding = 3) buffer Output { double result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of elements
+    double value;    // Scalar multiplier
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n) return;
+    result[idx] = input_buf[idx] + params.value * tensor1_buf[idx] * tensor2_buf[idx];
+}

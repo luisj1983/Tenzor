@@ -22,7 +22,8 @@ using namespace tenzor::testing;
 #define skipIfHalf() \
     do { \
         if (dtype() == DType::Float16 || dtype() == DType::BFloat16) { \
-            GTEST_SKIP() << "RNN cells require higher precision than Float16"; \
+            SKIP_WITH_REASON(::tenzor::testing::SkipReason::NumericalDivergence, \
+                             "RNN cell recurrence accumulates error beyond FP16 tolerance"); \
         } \
     } while (0)
 

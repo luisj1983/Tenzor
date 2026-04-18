@@ -21,7 +21,8 @@ using namespace tenzor::testing;
 #define skipIfHalf() \
     do { \
         if (dtype() == DType::Float16 || dtype() == DType::BFloat16) { \
-            GTEST_SKIP() << "Gradcheck needs higher precision than Float16"; \
+            SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, \
+                             "Gradcheck's finite-difference step is dominated by FP16 rounding"); \
         } \
     } while (0)
 

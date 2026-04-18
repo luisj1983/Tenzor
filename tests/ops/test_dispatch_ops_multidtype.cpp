@@ -26,7 +26,8 @@ using namespace tenzor::testing;
 #define skipIfHalf() \
     do { \
         if (dtype() == DType::Float16 || dtype() == DType::BFloat16) { \
-            GTEST_SKIP() << "Test requires Float32/Float64 precision"; \
+            SKIP_WITH_REASON(::tenzor::testing::SkipReason::NumericalDivergence, \
+                             "Dispatch op test uses Inf/NaN checks that aren't stable in FP16"); \
         } \
     } while (0)
 

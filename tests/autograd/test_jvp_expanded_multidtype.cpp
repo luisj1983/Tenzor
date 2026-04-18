@@ -26,7 +26,8 @@ using namespace tenzor::testing;
 #define skipIfHalf() \
     do { \
         if (dtype() == DType::Float16 || dtype() == DType::BFloat16) { \
-            GTEST_SKIP() << "JVP requires higher precision than Float16"; \
+            SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, \
+                             "JVP finite-difference noise dominates at Float16"); \
         } \
     } while (0)
 

@@ -3435,7 +3435,15 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         return rocm::adaptive_avgpool2d_backward_hip(inputs[0], inputs[1], get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::AdaptiveMaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        return rocm::adaptive_maxpool2d_backward_hip(inputs[0], inputs[1], inputs[2], get_hip_stream(attrs));
+        // Autograd supplies (grad_output, indices) — matches the CPU / CUDA
+        // registration contract. The ROCm kernel reads the input shape + dtype
+        // via a placeholder tensor constructed from AttrKey::InputShape; the
+        // underlying kernel only uses its .shape() / .dtype() / .device().
+        auto input_shape_vec = attrs.get_int_list(AttrKey::InputShape);
+        std::vector<int64_t> shape(input_shape_vec.begin(), input_shape_vec.end());
+        Tensor input_placeholder(shape, inputs[0].dtype(), inputs[0].device());
+        return rocm::adaptive_maxpool2d_backward_hip(
+            inputs[0], inputs[1], input_placeholder, get_hip_stream(attrs));
     });
 
     // --- Vision Operations -----------------------------------------------------
