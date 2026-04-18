@@ -10,16 +10,19 @@
 #include <gtest/gtest.h>
 #include <iostream>
 #include <tenzor/tenzor.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
+
+class NNActivationParity : public BackendTest {};
 // ============================================================================
 // Functional activations — tested via test_operation_parity
 // ============================================================================
 
-TEST(NNActivationParity, SELU) {
+TEST_P(NNActivationParity, SELU) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -31,7 +34,7 @@ TEST(NNActivationParity, SELU) {
     }, {input}, 1e-5f, 1e-7f, "SELU");
 }
 
-TEST(NNActivationParity, Mish) {
+TEST_P(NNActivationParity, Mish) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -43,7 +46,7 @@ TEST(NNActivationParity, Mish) {
     }, {input}, 1e-5f, 1e-7f, "Mish");
 }
 
-TEST(NNActivationParity, Softplus) {
+TEST_P(NNActivationParity, Softplus) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -55,7 +58,7 @@ TEST(NNActivationParity, Softplus) {
     }, {input}, 1e-5f, 1e-7f, "Softplus");
 }
 
-TEST(NNActivationParity, LogSigmoid) {
+TEST_P(NNActivationParity, LogSigmoid) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -67,7 +70,7 @@ TEST(NNActivationParity, LogSigmoid) {
     }, {input}, 1e-5f, 1e-7f, "LogSigmoid");
 }
 
-TEST(NNActivationParity, Hardshrink) {
+TEST_P(NNActivationParity, Hardshrink) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -79,7 +82,7 @@ TEST(NNActivationParity, Hardshrink) {
     }, {input}, 1e-5f, 1e-7f, "Hardshrink");
 }
 
-TEST(NNActivationParity, Hardswish) {
+TEST_P(NNActivationParity, Hardswish) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -91,7 +94,7 @@ TEST(NNActivationParity, Hardswish) {
     }, {input}, 1e-5f, 1e-7f, "Hardswish");
 }
 
-TEST(NNActivationParity, Hardtanh) {
+TEST_P(NNActivationParity, Hardtanh) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -103,7 +106,7 @@ TEST(NNActivationParity, Hardtanh) {
     }, {input}, 1e-5f, 1e-7f, "Hardtanh");
 }
 
-TEST(NNActivationParity, CELU) {
+TEST_P(NNActivationParity, CELU) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -115,7 +118,7 @@ TEST(NNActivationParity, CELU) {
     }, {input}, 1e-5f, 1e-7f, "CELU");
 }
 
-TEST(NNActivationParity, Threshold) {
+TEST_P(NNActivationParity, Threshold) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -127,7 +130,7 @@ TEST(NNActivationParity, Threshold) {
     }, {input}, 1e-5f, 1e-7f, "Threshold");
 }
 
-TEST(NNActivationParity, Softsign) {
+TEST_P(NNActivationParity, Softsign) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -143,7 +146,7 @@ TEST(NNActivationParity, Softsign) {
 // Module-based activations — tested via the NN layer loop pattern
 // ============================================================================
 
-TEST(NNActivationParity, PReLU) {
+TEST_P(NNActivationParity, PReLU) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -173,7 +176,7 @@ TEST(NNActivationParity, PReLU) {
     }
 }
 
-TEST(NNActivationParity, RReLU_Eval) {
+TEST_P(NNActivationParity, RReLU_Eval) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -186,6 +189,9 @@ TEST(NNActivationParity, RReLU_Eval) {
         return nn::rrelu(x, 1.0 / 8.0, 1.0 / 3.0, /*training=*/false).tensor();
     }, {input}, 1e-5f, 1e-7f, "RReLU_Eval");
 }
+
+INSTANTIATE_BACKEND_TESTS(NNActivationParity);
+
 
 
 

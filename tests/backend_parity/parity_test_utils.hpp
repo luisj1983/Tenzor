@@ -688,13 +688,84 @@ void test_operation_parity_backends(Op operation,
 }
 
 /**
- * @brief Test operation parity across all available backends.
+ * @brief Single-backend parity check (used by TEST_P-style refactored tests).
  *
- * @param operation Function that takes input tensors and returns result
- * @param inputs Input tensors (on CPU)
- * @param rtol Relative tolerance
- * @param atol Absolute tolerance
- * @param test_name Test name for error reporting
+ * Runs `operation` on CPU and on `target`, then compares results within
+ * tolerance. Unlike test_operation_parity_backends() this does NOT loop over
+ * all backends — the loop is performed by GoogleTest's TEST_P parameterization
+ * instead, which gives one ctest entry per (op, backend) combination.
+ *
+ * If `target` is CPU, only verifies the op runs without throwing.
+ */
+template<typename Op>
+void test_operation_parity_single(Op operation,
+                                  const std::vector<Tensor>& cpu_inputs,
+                                  const Device& target,
+                                  float rtol = 1e-5f,
+                                  float atol = 1e-8f,
+                                  const std::string& test_name = "Operation") {
+    auto cpu_result = operation(cpu_inputs);
+    if (target.type == Device::Type::CPU) {
+        return;
+    }
+    std::vector<Tensor> target_inputs;
+    target_inputs.reserve(cpu_inputs.size());
+    for (const auto& t : cpu_inputs) target_inputs.push_back(t.to(target));
+    auto target_result = operation(target_inputs);
+    target.synchronize();
+    if (!tensors_close(cpu_result, target_result, rtol, atol)) {
+        float max_diff = max_abs_diff(cpu_result, target_result);
+        FAIL() << test_name << " single-backend parity failed:\n"
+               << "  Reference: cpu\n"
+               << "  Test backend: " << backend_name(target) << "\n"
+               << "  Max absolute difference: " << std::scientific << max_diff << "\n"
+               << "  Tolerance: rtol=" << rtol << ", atol=" << atol;
+    }
+}
+
+/**
+ * @brief Cross-backend parity (compare every available pair, not CPU-as-ref).
+ */
+template<typename Op>
+void test_operation_parity_cross_backend(Op operation,
+                                         const std::vector<Tensor>& inputs,
+                                         std::vector<Device> backends = {},
+                                         float rtol = 1e-5f,
+                                         float atol = 1e-8f,
+                                         const std::string& test_name = "Operation") {
+    if (backends.empty()) backends = get_available_backends();
+    if (backends.size() < 2) { GTEST_SKIP() << "Need 2+ backends"; return; }
+    std::vector<Tensor> results;
+    std::vector<Device> used;
+    for (const auto& backend : backends) {
+        try {
+            std::vector<Tensor> backend_inputs;
+            backend_inputs.reserve(inputs.size());
+            for (const auto& input : inputs) backend_inputs.push_back(input.to(backend));
+            auto result = operation(backend_inputs);
+            backend.synchronize();
+            results.push_back(result);
+            used.push_back(backend);
+        } catch (const std::exception& e) {
+            std::cerr << "Backend " << backend_name(backend) << " failed: " << e.what() << "\n";
+        }
+    }
+    if (results.size() < 2) { GTEST_SKIP() << "Need 2+ successful"; return; }
+    for (size_t i = 0; i < results.size(); ++i) {
+        for (size_t j = i + 1; j < results.size(); ++j) {
+            if (!tensors_close(results[i], results[j], rtol, atol)) {
+                FAIL() << test_name << " cross-backend parity failed:\n"
+                       << "  A: " << backend_name(used[i]) << "\n"
+                       << "  B: " << backend_name(used[j]) << "\n"
+                       << "  Max diff: " << std::scientific
+                       << max_abs_diff(results[i], results[j]);
+            }
+        }
+    }
+}
+
+/**
+ * @brief Test operation parity across all available backends.
  */
 template<typename Op>
 void test_operation_parity(Op operation,

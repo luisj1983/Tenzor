@@ -11,16 +11,19 @@
 #include <gtest/gtest.h>
 #include <iostream>
 #include <tenzor/tenzor.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
+
+class IndexingParity : public BackendTest {};
 // ============================================================================
 // Indexing Operations Parity Tests (14 tests)
 // ============================================================================
 
-TEST(IndexingParity, IndexSelect_Dim0) {
+TEST_P(IndexingParity, IndexSelect_Dim0) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -32,7 +35,7 @@ TEST(IndexingParity, IndexSelect_Dim0) {
     }, {input, idx}, 0, 0, "IndexSelect_Dim0");
 }
 
-TEST(IndexingParity, Gather_Dim0) {
+TEST_P(IndexingParity, Gather_Dim0) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -44,7 +47,7 @@ TEST(IndexingParity, Gather_Dim0) {
     }, {input, idx}, 0, 0, "Gather_Dim0");
 }
 
-TEST(IndexingParity, Gather_Dim1) {
+TEST_P(IndexingParity, Gather_Dim1) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -56,7 +59,7 @@ TEST(IndexingParity, Gather_Dim1) {
     }, {input, idx}, 0, 0, "Gather_Dim1");
 }
 
-TEST(IndexingParity, Scatter_Dim0) {
+TEST_P(IndexingParity, Scatter_Dim0) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -69,7 +72,7 @@ TEST(IndexingParity, Scatter_Dim0) {
     }, {input, src, idx}, 0, 0, "Scatter_Dim0");
 }
 
-TEST(IndexingParity, ScatterAdd) {
+TEST_P(IndexingParity, ScatterAdd) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -82,7 +85,7 @@ TEST(IndexingParity, ScatterAdd) {
     }, {input, src, idx}, 0, 0, "ScatterAdd");
 }
 
-TEST(IndexingParity, MaskedFill) {
+TEST_P(IndexingParity, MaskedFill) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -95,7 +98,7 @@ TEST(IndexingParity, MaskedFill) {
     }, {input, mask}, 0, 0, "MaskedFill");
 }
 
-TEST(IndexingParity, MaskedSelect) {
+TEST_P(IndexingParity, MaskedSelect) {
     // Output size varies by backend ordering is not guaranteed, so we
     // compare sorted results manually across backends.
     auto backends = get_available_backends();
@@ -134,7 +137,7 @@ TEST(IndexingParity, MaskedSelect) {
     }
 }
 
-TEST(IndexingParity, Where) {
+TEST_P(IndexingParity, Where) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -148,7 +151,7 @@ TEST(IndexingParity, Where) {
     }, {condition, x, y}, 0, 0, "Where");
 }
 
-TEST(IndexingParity, Take) {
+TEST_P(IndexingParity, Take) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -160,7 +163,7 @@ TEST(IndexingParity, Take) {
     }, {input, idx}, 0, 0, "Take");
 }
 
-TEST(IndexingParity, Put) {
+TEST_P(IndexingParity, Put) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -173,7 +176,7 @@ TEST(IndexingParity, Put) {
     }, {input, idx, source}, 0, 0, "Put");
 }
 
-TEST(IndexingParity, Nonzero) {
+TEST_P(IndexingParity, Nonzero) {
     // Output order may differ across backends, so sort before comparison.
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
@@ -221,7 +224,7 @@ TEST(IndexingParity, Nonzero) {
     }
 }
 
-TEST(IndexingParity, OneHot) {
+TEST_P(IndexingParity, OneHot) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -232,7 +235,7 @@ TEST(IndexingParity, OneHot) {
     }, {input}, 0, 0, "OneHot");
 }
 
-TEST(IndexingParity, IndexSelect_Dim1) {
+TEST_P(IndexingParity, IndexSelect_Dim1) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -244,7 +247,7 @@ TEST(IndexingParity, IndexSelect_Dim1) {
     }, {input, idx}, 0, 0, "IndexSelect_Dim1");
 }
 
-TEST(IndexingParity, Where_Broadcast) {
+TEST_P(IndexingParity, Where_Broadcast) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -257,6 +260,9 @@ TEST(IndexingParity, Where_Broadcast) {
         return where(inputs[0], inputs[1], inputs[2]);
     }, {condition, x, y}, 0, 0, "Where_Broadcast");
 }
+
+INSTANTIATE_BACKEND_TESTS(IndexingParity);
+
 
 
 

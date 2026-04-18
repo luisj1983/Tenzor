@@ -11,11 +11,14 @@
 #include <gtest/gtest.h>
 #include <iostream>
 #include <tenzor/tenzor.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
+
+class JITAutogradParity : public BackendTest {};
 namespace {
 void copy_params(nn::Module& src, nn::Module& dst) {
     auto src_params = src.parameters();
@@ -27,7 +30,7 @@ void copy_params(nn::Module& src, nn::Module& dst) {
 }  // namespace
 
 // Fixed via ROCm cascading fixes (mul/add/sub/div non-contig + contiguous UAF).
-TEST(JITAutogradParity, LinearChain_Backward) {
+TEST_P(JITAutogradParity, LinearChain_Backward) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -83,7 +86,7 @@ TEST(JITAutogradParity, LinearChain_Backward) {
 }
 
 // Fixed alongside LinearChain_Backward.
-TEST(JITAutogradParity, LayerNormMLP_Backward) {
+TEST_P(JITAutogradParity, LayerNormMLP_Backward) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -137,6 +140,9 @@ TEST(JITAutogradParity, LayerNormMLP_Backward) {
         GTEST_SKIP() << e.what();
     }
 }
+
+INSTANTIATE_BACKEND_TESTS(JITAutogradParity);
+
 
 int main(int argc, char** argv) {
     // Force full IEEE 754 FP32 on CUDA matmul (disable TF32 tensor cores)

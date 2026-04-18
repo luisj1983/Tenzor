@@ -14,16 +14,19 @@
 #include <tenzor/ops/fused_ops.hpp>
 #include <tenzor/ops/detection.hpp>
 #include <tenzor/nn/detection/roi_ops.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
+
+class VisionFusedParity : public BackendTest {};
 // ============================================================================
 // Vision helpers
 // ============================================================================
 
-TEST(VisionFusedParity, Unfold_4D) {
+TEST_P(VisionFusedParity, Unfold_4D) {
     auto input = randn({1, 3, 16, 16}, DType::Float32, Device::cpu());
     test_operation_parity(
         [](const std::vector<Tensor>& ins) {
@@ -38,7 +41,7 @@ TEST(VisionFusedParity, Unfold_4D) {
 // comma-separated OutputSize string and derives C from input shape).
 // Previously Vulkan returned an empty 0-element tensor. Fix in
 // src/backends/vulkan/vulkan_ops_math.cpp::dispatchCol2Im.
-TEST(VisionFusedParity, Fold_4D) {
+TEST_P(VisionFusedParity, Fold_4D) {
     // Unfold a reference (1, 3, 16, 16), then fold back — shape math:
     // unfold(stride=1, padding=1, k=3) -> (1, 27, 256); fold(out_hw={16,16})
     auto img = randn({1, 3, 16, 16}, DType::Float32, Device::cpu());
@@ -53,7 +56,7 @@ TEST(VisionFusedParity, Fold_4D) {
         {unfolded_cpu}, 1e-4f, 1e-6f, "fold");
 }
 
-TEST(VisionFusedParity, Interpolate_Nearest) {
+TEST_P(VisionFusedParity, Interpolate_Nearest) {
     auto input = randn({1, 3, 8, 8}, DType::Float32, Device::cpu());
     test_operation_parity(
         [](const std::vector<Tensor>& ins) {
@@ -62,7 +65,7 @@ TEST(VisionFusedParity, Interpolate_Nearest) {
         {input}, 1e-5f, 1e-7f, "interpolate nearest");
 }
 
-TEST(VisionFusedParity, Interpolate_Bilinear) {
+TEST_P(VisionFusedParity, Interpolate_Bilinear) {
     auto input = randn({1, 3, 8, 8}, DType::Float32, Device::cpu());
     test_operation_parity(
         [](const std::vector<Tensor>& ins) {
@@ -71,7 +74,7 @@ TEST(VisionFusedParity, Interpolate_Bilinear) {
         {input}, 1e-4f, 1e-6f, "interpolate bilinear");
 }
 
-TEST(VisionFusedParity, GridSample_Bilinear) {
+TEST_P(VisionFusedParity, GridSample_Bilinear) {
     // Input (N=1, C=3, H=8, W=8), grid (N=1, H_out=8, W_out=8, 2)
     auto input = randn({1, 3, 8, 8}, DType::Float32, Device::cpu());
     // Identity-ish grid: sample a 8x8 output linearly from [-1, 1]
@@ -87,7 +90,7 @@ TEST(VisionFusedParity, GridSample_Bilinear) {
         {input}, 1e-4f, 1e-6f, "grid_sample");
 }
 
-TEST(VisionFusedParity, AffineGrid) {
+TEST_P(VisionFusedParity, AffineGrid) {
     auto theta = randn({2, 2, 3}, DType::Float32, Device::cpu());
     test_operation_parity(
         [](const std::vector<Tensor>& ins) {
@@ -100,7 +103,7 @@ TEST(VisionFusedParity, AffineGrid) {
 // Fused ops
 // ============================================================================
 
-TEST(VisionFusedParity, FusedLinearReLU) {
+TEST_P(VisionFusedParity, FusedLinearReLU) {
     auto input = randn({8, 32}, DType::Float32, Device::cpu());
     auto weight = randn({16, 32}, DType::Float32, Device::cpu());
     auto bias = randn({16}, DType::Float32, Device::cpu());
@@ -112,7 +115,7 @@ TEST(VisionFusedParity, FusedLinearReLU) {
         {input, weight, bias}, 1e-4f, 1e-6f, "fused_linear_relu");
 }
 
-TEST(VisionFusedParity, FusedConv2dReLU) {
+TEST_P(VisionFusedParity, FusedConv2dReLU) {
     auto input = randn({1, 3, 8, 8}, DType::Float32, Device::cpu());
     auto weight = randn({8, 3, 3, 3}, DType::Float32, Device::cpu());
     auto bias = randn({8}, DType::Float32, Device::cpu());
@@ -134,7 +137,7 @@ TEST(VisionFusedParity, FusedConv2dReLU) {
 // standalone and via `--gtest_filter=*FusedConv2dSigmoid*`. (Note: the
 // non-fused `FusedConv2dReLU` test still hangs inside this binary — a
 // pre-existing issue unrelated to the sigmoid fix; tracked separately.)
-TEST(VisionFusedParity, FusedConv2dSigmoid) {
+TEST_P(VisionFusedParity, FusedConv2dSigmoid) {
     auto input = randn({1, 3, 8, 8}, DType::Float32, Device::cpu());
     auto weight = randn({8, 3, 3, 3}, DType::Float32, Device::cpu());
     auto bias = randn({8}, DType::Float32, Device::cpu());
@@ -146,7 +149,7 @@ TEST(VisionFusedParity, FusedConv2dSigmoid) {
         {input, weight, bias}, 1e-3f, 1e-5f, "fused_conv2d_sigmoid");
 }
 
-TEST(VisionFusedParity, FusedConv2dTanh) {
+TEST_P(VisionFusedParity, FusedConv2dTanh) {
     auto input = randn({1, 3, 8, 8}, DType::Float32, Device::cpu());
     auto weight = randn({8, 3, 3, 3}, DType::Float32, Device::cpu());
     auto bias = randn({8}, DType::Float32, Device::cpu());
@@ -162,7 +165,7 @@ TEST(VisionFusedParity, FusedConv2dTanh) {
 // Detection ops — ROIAlign, NMS, BoxIoU
 // ============================================================================
 
-TEST(VisionFusedParity, BoxIoU) {
+TEST_P(VisionFusedParity, BoxIoU) {
     // Boxes in (x1, y1, x2, y2) format. Use deterministic values so no test
     // flake from RNG — parity must match exactly since box_iou is deterministic.
     auto boxes1 = zeros({3, 4}, DType::Float32, Device::cpu());
@@ -182,7 +185,7 @@ TEST(VisionFusedParity, BoxIoU) {
         {boxes1, boxes2}, 1e-5f, 1e-7f, "box_iou");
 }
 
-TEST(VisionFusedParity, NMS) {
+TEST_P(VisionFusedParity, NMS) {
     // 5 boxes, 3 should survive NMS with threshold 0.5.
     auto boxes = zeros({5, 4}, DType::Float32, Device::cpu());
     auto* b = boxes.data<float>();
@@ -231,7 +234,7 @@ TEST(VisionFusedParity, NMS) {
     }
 }
 
-TEST(VisionFusedParity, ROIAlign) {
+TEST_P(VisionFusedParity, ROIAlign) {
     // 1 image, 8 channels, 16x16 feature map; 3 ROIs of shape (5,) each.
     // ROI format: (batch_index, x1, y1, x2, y2)
     auto features = randn({1, 8, 16, 16}, DType::Float32, Device::cpu());
@@ -276,7 +279,7 @@ TEST(VisionFusedParity, ROIAlign) {
 // Additional fused ops — FusedSoftmaxCrossEntropy, FusedAddReLU
 // ============================================================================
 
-TEST(VisionFusedParity, FusedSoftmaxCrossEntropy) {
+TEST_P(VisionFusedParity, FusedSoftmaxCrossEntropy) {
     auto logits = randn({8, 10}, DType::Float32, Device::cpu());
     auto targets = zeros({8}, DType::Int64, Device::cpu());
     auto* t = targets.data<int64_t>();
@@ -289,7 +292,7 @@ TEST(VisionFusedParity, FusedSoftmaxCrossEntropy) {
         {logits, targets}, 1e-4f, 1e-6f, "fused_softmax_cross_entropy");
 }
 
-TEST(VisionFusedParity, FusedAddReLU) {
+TEST_P(VisionFusedParity, FusedAddReLU) {
     auto a = randn({8, 16}, DType::Float32, Device::cpu());
     auto b = randn({8, 16}, DType::Float32, Device::cpu());
     test_operation_parity(
@@ -303,7 +306,7 @@ TEST(VisionFusedParity, FusedAddReLU) {
 // Fused ops — additional coverage (Phase 1.5)
 // ============================================================================
 
-TEST(VisionFusedParity, FusedConv2dSwish) {
+TEST_P(VisionFusedParity, FusedConv2dSwish) {
     auto input = randn({1, 3, 8, 8}, DType::Float32, Device::cpu());
     auto weight = randn({8, 3, 3, 3}, DType::Float32, Device::cpu());
     auto bias = randn({8}, DType::Float32, Device::cpu());
@@ -315,7 +318,7 @@ TEST(VisionFusedParity, FusedConv2dSwish) {
         {input, weight, bias}, 1e-3f, 1e-5f, "fused_conv2d_swish");
 }
 
-TEST(VisionFusedParity, FusedBatchNormReLU) {
+TEST_P(VisionFusedParity, FusedBatchNormReLU) {
     int64_t C = 8;
     auto input = randn({2, C, 4, 4}, DType::Float32, Device::cpu());
     auto mean = randn({C}, DType::Float32, Device::cpu());
@@ -330,7 +333,7 @@ TEST(VisionFusedParity, FusedBatchNormReLU) {
         {input, mean, var, weight, bn_bias}, 1e-4f, 1e-6f, "fused_batchnorm_relu");
 }
 
-TEST(VisionFusedParity, FusedGELU) {
+TEST_P(VisionFusedParity, FusedGELU) {
     auto input = randn({8, 16}, DType::Float32, Device::cpu());
     test_operation_parity(
         [](const std::vector<Tensor>& ins) {
@@ -339,7 +342,7 @@ TEST(VisionFusedParity, FusedGELU) {
         {input}, 1e-5f, 1e-6f, "fused_gelu");
 }
 
-TEST(VisionFusedParity, FusedLayerNorm) {
+TEST_P(VisionFusedParity, FusedLayerNorm) {
     auto input = randn({4, 8, 32}, DType::Float32, Device::cpu());
     auto weight = randn({32}, DType::Float32, Device::cpu());
     auto ln_bias = randn({32}, DType::Float32, Device::cpu());
@@ -356,6 +359,9 @@ TEST(VisionFusedParity, FusedLayerNorm) {
 // through the dispatch layer directly — out of scope for this task.
 // Similarly, fused_sgd_step / fused_adam_step are CUDA-only backend APIs
 // (include/tenzor/backend/fused_ops.hpp) without general dispatch wrappers.
+
+INSTANTIATE_BACKEND_TESTS(VisionFusedParity);
+
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

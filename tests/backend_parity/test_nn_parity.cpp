@@ -8,16 +8,19 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
+
+class NNOperationParity : public BackendTest {};
 // ============================================================================
 // Convolution Operations
 // ============================================================================
 
-TEST(NNOperationParity, Conv2d_Basic) {
+TEST_P(NNOperationParity, Conv2d_Basic) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -43,7 +46,7 @@ TEST(NNOperationParity, Conv2d_Basic) {
     }
 }
 
-TEST(NNOperationParity, Conv2d_Stride2) {
+TEST_P(NNOperationParity, Conv2d_Stride2) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -67,7 +70,7 @@ TEST(NNOperationParity, Conv2d_Stride2) {
     }
 }
 
-TEST(NNOperationParity, Conv2d_Padding2) {
+TEST_P(NNOperationParity, Conv2d_Padding2) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -91,7 +94,7 @@ TEST(NNOperationParity, Conv2d_Padding2) {
     }
 }
 
-TEST(NNOperationParity, Conv2d_Dilation) {
+TEST_P(NNOperationParity, Conv2d_Dilation) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -115,7 +118,7 @@ TEST(NNOperationParity, Conv2d_Dilation) {
     }
 }
 
-TEST(NNOperationParity, Conv2d_Groups) {
+TEST_P(NNOperationParity, Conv2d_Groups) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -139,7 +142,7 @@ TEST(NNOperationParity, Conv2d_Groups) {
     }
 }
 
-TEST(NNOperationParity, ConvTranspose2d) {
+TEST_P(NNOperationParity, ConvTranspose2d) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -167,7 +170,7 @@ TEST(NNOperationParity, ConvTranspose2d) {
 // Pooling Operations
 // ============================================================================
 
-TEST(NNOperationParity, MaxPool2d_2x2) {
+TEST_P(NNOperationParity, MaxPool2d_2x2) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -179,7 +182,7 @@ TEST(NNOperationParity, MaxPool2d_2x2) {
     }, {input}, 1e-7f, 1e-9f, "MaxPool2d_2x2");
 }
 
-TEST(NNOperationParity, MaxPool2d_3x3_Stride2) {
+TEST_P(NNOperationParity, MaxPool2d_3x3_Stride2) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -191,7 +194,7 @@ TEST(NNOperationParity, MaxPool2d_3x3_Stride2) {
     }, {input}, 1e-7f, 1e-9f, "MaxPool2d_3x3_Stride2");
 }
 
-TEST(NNOperationParity, AvgPool2d_2x2) {
+TEST_P(NNOperationParity, AvgPool2d_2x2) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -207,7 +210,7 @@ TEST(NNOperationParity, AvgPool2d_2x2) {
     }, {input}, 1e-5f, 1e-6f, "AvgPool2d_2x2");
 }
 
-TEST(NNOperationParity, AdaptiveAvgPool2d) {
+TEST_P(NNOperationParity, AdaptiveAvgPool2d) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -219,7 +222,7 @@ TEST(NNOperationParity, AdaptiveAvgPool2d) {
     }, {input}, 1e-6f, 1e-8f, "AdaptiveAvgPool2d");
 }
 
-TEST(NNOperationParity, AdaptiveMaxPool2d) {
+TEST_P(NNOperationParity, AdaptiveMaxPool2d) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -235,7 +238,7 @@ TEST(NNOperationParity, AdaptiveMaxPool2d) {
 // Normalization Operations
 // ============================================================================
 
-TEST(NNOperationParity, BatchNorm2d_Train) {
+TEST_P(NNOperationParity, BatchNorm2d_Train) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -261,7 +264,7 @@ TEST(NNOperationParity, BatchNorm2d_Train) {
     }
 }
 
-TEST(NNOperationParity, BatchNorm2d_Eval) {
+TEST_P(NNOperationParity, BatchNorm2d_Eval) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -296,7 +299,7 @@ TEST(NNOperationParity, BatchNorm2d_Eval) {
     }
 }
 
-TEST(NNOperationParity, LayerNorm) {
+TEST_P(NNOperationParity, LayerNorm) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -320,7 +323,7 @@ TEST(NNOperationParity, LayerNorm) {
     }
 }
 
-TEST(NNOperationParity, GroupNorm) {
+TEST_P(NNOperationParity, GroupNorm) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -348,7 +351,7 @@ TEST(NNOperationParity, GroupNorm) {
 // Activation Functions
 // ============================================================================
 
-TEST(NNOperationParity, ReLU) {
+TEST_P(NNOperationParity, ReLU) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -360,7 +363,7 @@ TEST(NNOperationParity, ReLU) {
     }, {input}, 1e-7f, 1e-9f, "ReLU");
 }
 
-TEST(NNOperationParity, ReLU6) {
+TEST_P(NNOperationParity, ReLU6) {
     // ReLU6 can be implemented as clamp(relu(x), 0, 6) but no dedicated nn::relu6
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
@@ -374,7 +377,7 @@ TEST(NNOperationParity, ReLU6) {
     }, {input}, 1e-7f, 1e-9f, "ReLU6");
 }
 
-TEST(NNOperationParity, LeakyReLU) {
+TEST_P(NNOperationParity, LeakyReLU) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -386,7 +389,7 @@ TEST(NNOperationParity, LeakyReLU) {
     }, {input}, 1e-6f, 1e-8f, "LeakyReLU");
 }
 
-TEST(NNOperationParity, ELU) {
+TEST_P(NNOperationParity, ELU) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -402,7 +405,7 @@ TEST(NNOperationParity, ELU) {
     }, {input}, 1e-5f, 1e-6f, "ELU");
 }
 
-TEST(NNOperationParity, GELU) {
+TEST_P(NNOperationParity, GELU) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -414,7 +417,7 @@ TEST(NNOperationParity, GELU) {
     }, {input}, 1e-5f, 1e-7f, "GELU");
 }
 
-TEST(NNOperationParity, Swish) {
+TEST_P(NNOperationParity, Swish) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -426,7 +429,7 @@ TEST(NNOperationParity, Swish) {
     }, {input}, 1e-6f, 1e-8f, "Swish");
 }
 
-TEST(NNOperationParity, Softmax_Dim1) {
+TEST_P(NNOperationParity, Softmax_Dim1) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -438,7 +441,7 @@ TEST(NNOperationParity, Softmax_Dim1) {
     }, {input}, 1e-6f, 1e-8f, "Softmax Dim1");
 }
 
-TEST(NNOperationParity, LogSoftmax) {
+TEST_P(NNOperationParity, LogSoftmax) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -454,7 +457,7 @@ TEST(NNOperationParity, LogSoftmax) {
 // Dropout (eval mode - should be identity)
 // ============================================================================
 
-TEST(NNOperationParity, Dropout_Eval) {
+TEST_P(NNOperationParity, Dropout_Eval) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -471,7 +474,7 @@ TEST(NNOperationParity, Dropout_Eval) {
 // Embedding
 // ============================================================================
 
-TEST(NNOperationParity, Embedding) {
+TEST_P(NNOperationParity, Embedding) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -499,7 +502,7 @@ TEST(NNOperationParity, Embedding) {
 // Loss Functions
 // ============================================================================
 
-TEST(NNOperationParity, MSELoss) {
+TEST_P(NNOperationParity, MSELoss) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -514,7 +517,7 @@ TEST(NNOperationParity, MSELoss) {
     }, {pred, target}, 1e-6f, 1e-8f, "MSELoss");
 }
 
-TEST(NNOperationParity, L1Loss) {
+TEST_P(NNOperationParity, L1Loss) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -529,7 +532,7 @@ TEST(NNOperationParity, L1Loss) {
     }, {pred, target}, 1e-6f, 1e-8f, "L1Loss");
 }
 
-TEST(NNOperationParity, CrossEntropyLoss) {
+TEST_P(NNOperationParity, CrossEntropyLoss) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -543,7 +546,7 @@ TEST(NNOperationParity, CrossEntropyLoss) {
     }, {pred, target}, 1e-5f, 1e-7f, "CrossEntropyLoss");
 }
 
-TEST(NNOperationParity, BCELoss) {
+TEST_P(NNOperationParity, BCELoss) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -558,7 +561,7 @@ TEST(NNOperationParity, BCELoss) {
     }, {pred, target}, 1e-5f, 1e-7f, "BCELoss");
 }
 
-TEST(NNOperationParity, BCEWithLogitsLoss) {
+TEST_P(NNOperationParity, BCEWithLogitsLoss) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -573,7 +576,7 @@ TEST(NNOperationParity, BCEWithLogitsLoss) {
     }, {pred, target}, 1e-5f, 1e-7f, "BCEWithLogitsLoss");
 }
 
-TEST(NNOperationParity, SmoothL1Loss) {
+TEST_P(NNOperationParity, SmoothL1Loss) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -595,7 +598,7 @@ TEST(NNOperationParity, SmoothL1Loss) {
 // forward wrap-around semantics and the autograd gradient routing through
 // the padding op on every available backend.
 
-TEST(NNOperationParity, CircularPad1d_FwdBwd) {
+TEST_P(NNOperationParity, CircularPad1d_FwdBwd) {
     // Input: (N=2, C=3, W=6); pad 2 on each side => W=10
     auto input = randn({2, 3, 6}, DType::Float32, Device::cpu());
 
@@ -612,7 +615,7 @@ TEST(NNOperationParity, CircularPad1d_FwdBwd) {
         "CircularPad1d");
 }
 
-TEST(NNOperationParity, CircularPad2d_FwdBwd) {
+TEST_P(NNOperationParity, CircularPad2d_FwdBwd) {
     // Input: (N=2, C=3, H=4, W=5); pad 1 on each side
     auto input = randn({2, 3, 4, 5}, DType::Float32, Device::cpu());
 
@@ -626,7 +629,7 @@ TEST(NNOperationParity, CircularPad2d_FwdBwd) {
         "CircularPad2d");
 }
 
-TEST(NNOperationParity, CircularPad3d_FwdBwd) {
+TEST_P(NNOperationParity, CircularPad3d_FwdBwd) {
     // Input: (N=1, C=2, D=3, H=4, W=4); symmetric pad 1
     auto input = randn({1, 2, 3, 4, 4}, DType::Float32, Device::cpu());
 
@@ -639,6 +642,9 @@ TEST(NNOperationParity, CircularPad3d_FwdBwd) {
         1e-5f, 1e-7f, 1e-4f, 1e-6f, {},
         "CircularPad3d");
 }
+
+INSTANTIATE_BACKEND_TESTS(NNOperationParity);
+
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

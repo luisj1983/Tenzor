@@ -9,11 +9,14 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/ops/linalg.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
+
+class LinalgExtendedParity : public BackendTest {};
 // Property-based pinv parity test.
 //
 // Direct value comparison of pinv(A) across backends is not portable: each
@@ -23,7 +26,7 @@ using namespace tenzor::testing;
 // The pseudoinverse is mathematically unique though — A·pinv(A)·A == A holds
 // for any valid pinv by the Moore–Penrose definition. Test that property on
 // each backend rather than cross-backend values.
-TEST(LinalgExtendedParity, Pinv) {
+TEST_P(LinalgExtendedParity, Pinv) {
     auto A = randn({8, 6}, DType::Float32, Device::cpu());
 
     auto backends = get_available_backends();
@@ -48,7 +51,7 @@ TEST(LinalgExtendedParity, Pinv) {
     }
 }
 
-TEST(LinalgExtendedParity, LstSq_Residual) {
+TEST_P(LinalgExtendedParity, LstSq_Residual) {
     // Overdetermined system: A(8x4) x = B(8x2). lstsq returns (solution, residuals).
     auto A = randn({8, 4}, DType::Float32, Device::cpu());
     auto B = randn({8, 2}, DType::Float32, Device::cpu());
@@ -77,13 +80,16 @@ TEST(LinalgExtendedParity, LstSq_Residual) {
     }
 }
 
-TEST(LinalgExtendedParity, MatrixExp) {
+TEST_P(LinalgExtendedParity, MatrixExp) {
     // Small, well-conditioned matrix so matrix_exp converges reliably.
     auto A = randn({4, 4}, DType::Float32, Device::cpu()) * 0.1f;
     test_operation_parity([](const std::vector<Tensor>& ins) {
         return tenzor::linalg::matrix_exp(ins[0]);
     }, {A}, 1e-3f, 1e-5f, "matrix_exp");
 }
+
+INSTANTIATE_BACKEND_TESTS(LinalgExtendedParity);
+
 
 int main(int argc, char** argv) {
     try {

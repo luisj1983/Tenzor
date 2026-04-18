@@ -11,255 +11,219 @@
 #include <gtest/gtest.h>
 #include <iostream>
 #include <tenzor/tenzor.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
+
+class ExtendedMathParity : public BackendTest {};
 // ============================================================================
 // Unary Extended Math Operations
 // ============================================================================
 
-TEST(ExtendedMathParity, Log2) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ExtendedMathParity, Log2) {
 
     auto a = generate_uniform_tensor({32, 32}, 0.1f, 10.0f, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return log2(inputs[0]);
-    }, {a}, 1e-5f, 1e-7f, "Log2");
+    }, {a}, device, 1e-5f, 1e-7f, "Log2");
 }
 
-TEST(ExtendedMathParity, Log10) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ExtendedMathParity, Log10) {
 
     auto a = generate_uniform_tensor({32, 32}, 0.1f, 10.0f, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return log10(inputs[0]);
-    }, {a}, 1e-5f, 1e-7f, "Log10");
+    }, {a}, device, 1e-5f, 1e-7f, "Log10");
 }
 
-TEST(ExtendedMathParity, Log1p) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ExtendedMathParity, Log1p) {
 
     auto a = generate_uniform_tensor({32, 32}, -0.5f, 10.0f, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return log1p(inputs[0]);
-    }, {a}, 1e-5f, 1e-7f, "Log1p");
+    }, {a}, device, 1e-5f, 1e-7f, "Log1p");
 }
 
-TEST(ExtendedMathParity, Exp2) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ExtendedMathParity, Exp2) {
 
     auto a = generate_uniform_tensor({32, 32}, -5.0f, 5.0f, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return exp2(inputs[0]);
-    }, {a}, 1e-5f, 1e-7f, "Exp2");
+    }, {a}, device, 1e-5f, 1e-7f, "Exp2");
 }
 
-TEST(ExtendedMathParity, Expm1) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ExtendedMathParity, Expm1) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return expm1(inputs[0]);
-    }, {a}, 1e-5f, 1e-7f, "Expm1");
+    }, {a}, device, 1e-5f, 1e-7f, "Expm1");
 }
 
-TEST(ExtendedMathParity, Erf) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ExtendedMathParity, Erf) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return erf(inputs[0]);
-    }, {a}, 1e-4f, 1e-6f, "Erf");
+    }, {a}, device, 1e-4f, 1e-6f, "Erf");
 }
 
-TEST(ExtendedMathParity, Erfc) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ExtendedMathParity, Erfc) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return erfc(inputs[0]);
-    }, {a}, 1e-4f, 1e-6f, "Erfc");
+    }, {a}, device, 1e-4f, 1e-6f, "Erfc");
 }
 
-TEST(ExtendedMathParity, Rsqrt) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ExtendedMathParity, Rsqrt) {
 
     auto a = generate_uniform_tensor({32, 32}, 0.1f, 10.0f, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return rsqrt(inputs[0]);
-    }, {a}, 1e-5f, 1e-7f, "Rsqrt");
+    }, {a}, device, 1e-5f, 1e-7f, "Rsqrt");
 }
 
-TEST(ExtendedMathParity, Square) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ExtendedMathParity, Square) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return square(inputs[0]);
-    }, {a}, 1e-5f, 1e-7f, "Square");
+    }, {a}, device, 1e-5f, 1e-7f, "Square");
 }
 
-TEST(ExtendedMathParity, Reciprocal) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ExtendedMathParity, Reciprocal) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu()) + 2.0f;
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return reciprocal(inputs[0]);
-    }, {a}, 1e-5f, 1e-7f, "Reciprocal");
+    }, {a}, device, 1e-5f, 1e-7f, "Reciprocal");
 }
 
-TEST(ExtendedMathParity, Floor) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ExtendedMathParity, Floor) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return floor(inputs[0]);
-    }, {a}, 0.0f, 0.0f, "Floor");
+    }, {a}, device, 0.0f, 0.0f, "Floor");
 }
 
-TEST(ExtendedMathParity, Ceil) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ExtendedMathParity, Ceil) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return ceil(inputs[0]);
-    }, {a}, 0.0f, 0.0f, "Ceil");
+    }, {a}, device, 0.0f, 0.0f, "Ceil");
 }
 
-TEST(ExtendedMathParity, Round) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ExtendedMathParity, Round) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return round(inputs[0]);
-    }, {a}, 0.0f, 0.0f, "Round");
+    }, {a}, device, 0.0f, 0.0f, "Round");
 }
 
-TEST(ExtendedMathParity, Trunc) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ExtendedMathParity, Trunc) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
 
     // trunc(x) = sign(x) * floor(abs(x))
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return sign(inputs[0]) * floor(abs(inputs[0]));
-    }, {a}, 0.0f, 0.0f, "Trunc");
+    }, {a}, device, 0.0f, 0.0f, "Trunc");
 }
 
-TEST(ExtendedMathParity, Frac) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ExtendedMathParity, Frac) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return frac(inputs[0]);
-    }, {a}, 1e-5f, 1e-7f, "Frac");
+    }, {a}, device, 1e-5f, 1e-7f, "Frac");
 }
 
-TEST(ExtendedMathParity, Erfinv) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ExtendedMathParity, Erfinv) {
 
     auto a = generate_uniform_tensor({32, 32}, -0.9f, 0.9f, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return erfinv(inputs[0]);
-    }, {a}, 1e-3f, 1e-4f, "Erfinv");
+    }, {a}, device, 1e-3f, 1e-4f, "Erfinv");
 }
 
 // ============================================================================
 // Binary Extended Math Operations
 // ============================================================================
 
-TEST(ExtendedMathParity, Atan2) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ExtendedMathParity, Atan2) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
     auto b = randn({32, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return atan2(inputs[0], inputs[1]);
-    }, {a, b}, 1e-5f, 1e-7f, "Atan2");
+    }, {a, b}, device, 1e-5f, 1e-7f, "Atan2");
 }
 
-TEST(ExtendedMathParity, Fmod) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ExtendedMathParity, Fmod) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
     auto b = randn({32, 32}, DType::Float32, Device::cpu()) + 2.0f;
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return fmod(inputs[0], inputs[1]);
-    }, {a, b}, 1e-5f, 1e-7f, "Fmod");
+    }, {a, b}, device, 1e-5f, 1e-7f, "Fmod");
 }
 
-TEST(ExtendedMathParity, Remainder) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ExtendedMathParity, Remainder) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
     auto b = randn({32, 32}, DType::Float32, Device::cpu()) + 2.0f;
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return remainder(inputs[0], inputs[1]);
-    }, {a, b}, 1e-5f, 1e-7f, "Remainder");
+    }, {a, b}, device, 1e-5f, 1e-7f, "Remainder");
 }
 
-TEST(ExtendedMathParity, Copysign) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ExtendedMathParity, Copysign) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
     auto b = randn({32, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return copysign(inputs[0], inputs[1]);
-    }, {a, b}, 0.0f, 0.0f, "Copysign");
+    }, {a, b}, device, 0.0f, 0.0f, "Copysign");
 }
 
-TEST(ExtendedMathParity, Hypot) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ExtendedMathParity, Hypot) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
     auto b = randn({32, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return hypot(inputs[0], inputs[1]);
-    }, {a, b}, 1e-5f, 1e-7f, "Hypot");
+    }, {a, b}, device, 1e-5f, 1e-7f, "Hypot");
 }
+
+INSTANTIATE_BACKEND_TESTS(ExtendedMathParity);
+
 
 
 

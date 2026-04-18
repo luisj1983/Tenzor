@@ -12,14 +12,17 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/ops/custom_op.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
+
+class CustomOpParity : public BackendTest {};
 // Register the same `f(x) = 2x + 1` custom op on each available backend, then
 // dispatch it on tensors living on each backend and compare results.
-TEST(CustomOpParity, Affine_MultiBackend) {
+TEST_P(CustomOpParity, Affine_MultiBackend) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -68,7 +71,7 @@ TEST(CustomOpParity, Affine_MultiBackend) {
 }
 
 // Custom op with backward — verify both forward and gradient match.
-TEST(CustomOpParity, Squared_Backward_MultiBackend) {
+TEST_P(CustomOpParity, Squared_Backward_MultiBackend) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -126,6 +129,9 @@ TEST(CustomOpParity, Squared_Backward_MultiBackend) {
         }
     }
 }
+
+INSTANTIATE_BACKEND_TESTS(CustomOpParity);
+
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

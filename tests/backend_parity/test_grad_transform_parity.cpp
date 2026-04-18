@@ -14,11 +14,14 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/autograd/functional.hpp>
 #include <tenzor/autograd/vmap.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
+
+class GradTransformParity : public BackendTest {};
 namespace {
 
 // Simple scalar-valued test function: f(x) = sum(x^2). Jacobian is 2x, Hessian
@@ -39,7 +42,7 @@ Variable f_elem_sq(const Variable& x) {
 // JVP
 // ============================================================================
 
-TEST(GradTransformParity, JVP) {
+TEST_P(GradTransformParity, JVP) {
     auto input_cpu = randn({4}, DType::Float32, Device::cpu());
     auto tangent_cpu = randn({4}, DType::Float32, Device::cpu());
 
@@ -79,7 +82,7 @@ TEST(GradTransformParity, JVP) {
 // VJP
 // ============================================================================
 
-TEST(GradTransformParity, VJP) {
+TEST_P(GradTransformParity, VJP) {
     auto input_cpu = randn({4}, DType::Float32, Device::cpu());
     auto cotangent_cpu = ones({4}, DType::Float32, Device::cpu());
 
@@ -119,7 +122,7 @@ TEST(GradTransformParity, VJP) {
 // Jacobian
 // ============================================================================
 
-TEST(GradTransformParity, Jacobian) {
+TEST_P(GradTransformParity, Jacobian) {
     auto input_cpu = randn({4}, DType::Float32, Device::cpu());
 
     auto backends = get_available_backends();
@@ -153,7 +156,7 @@ TEST(GradTransformParity, Jacobian) {
 // Fixed via ROCm cascading fixes (mul non-contig + contiguous UAF).
 // Standalone verification: CUDA, Vulkan, OneAPI all pass; ROCm skip gracefully
 // if it fails. Test wraps the call in try/catch via test_operation_parity.
-TEST(GradTransformParity, Hessian) {
+TEST_P(GradTransformParity, Hessian) {
     auto input_cpu = randn({3}, DType::Float32, Device::cpu());
 
     auto backends = get_available_backends();
@@ -185,7 +188,7 @@ TEST(GradTransformParity, Hessian) {
 // ============================================================================
 
 // Fixed alongside Hessian.
-TEST(GradTransformParity, HVP) {
+TEST_P(GradTransformParity, HVP) {
     auto input_cpu = randn({3}, DType::Float32, Device::cpu());
     auto v_cpu = ones({3}, DType::Float32, Device::cpu());
 
@@ -220,7 +223,7 @@ TEST(GradTransformParity, HVP) {
 // vmap
 // ============================================================================
 
-TEST(GradTransformParity, Vmap_Basic) {
+TEST_P(GradTransformParity, Vmap_Basic) {
     // Input: (B=4, D=3); batched through f_elem_sq.
     auto input_cpu = randn({4, 3}, DType::Float32, Device::cpu());
 
@@ -248,6 +251,9 @@ TEST(GradTransformParity, Vmap_Basic) {
         }
     }
 }
+
+INSTANTIATE_BACKEND_TESTS(GradTransformParity);
+
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

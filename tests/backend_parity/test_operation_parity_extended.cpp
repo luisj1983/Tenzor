@@ -10,16 +10,19 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/backend/fast_dispatch.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
+
+class ExtendedParity : public BackendTest {};
 // ============================================================================
 // Indexing Operations
 // ============================================================================
 
-TEST(ExtendedParity, Gather) {
+TEST_P(ExtendedParity, Gather) {
 auto input = randn({8, 16}, DType::Float32, Device::cpu());
     auto index = randint(0, 16, {8, 4}, DType::Int64, Device::cpu());
 
@@ -31,7 +34,7 @@ auto input = randn({8, 16}, DType::Float32, Device::cpu());
     }, {input}, 1e-6f, 1e-8f, "Gather");
 }
 
-TEST(ExtendedParity, IndexSelect) {
+TEST_P(ExtendedParity, IndexSelect) {
 auto input = randn({16, 8}, DType::Float32, Device::cpu());
     auto idx = zeros({4}, DType::Int64, Device::cpu());
     idx.data<int64_t>()[0] = 0; idx.data<int64_t>()[1] = 3;
@@ -45,7 +48,7 @@ auto input = randn({16, 8}, DType::Float32, Device::cpu());
     }, {input}, 1e-6f, 1e-8f, "IndexSelect");
 }
 
-TEST(ExtendedParity, ScatterAdd) {
+TEST_P(ExtendedParity, ScatterAdd) {
 auto input = zeros({4, 8}, DType::Float32, Device::cpu());
     auto src = randn({4, 4}, DType::Float32, Device::cpu());
     auto index = randint(0, 8, {4, 4}, DType::Int64, Device::cpu());
@@ -58,7 +61,7 @@ auto input = zeros({4, 8}, DType::Float32, Device::cpu());
     }, {input}, 1e-5f, 1e-7f, "ScatterAdd");
 }
 
-TEST(ExtendedParity, Where) {
+TEST_P(ExtendedParity, Where) {
 auto x = randn({8, 8}, DType::Float32, Device::cpu());
     auto y = randn({8, 8}, DType::Float32, Device::cpu());
     auto cond = zeros({8, 8}, DType::Bool, Device::cpu());
@@ -75,7 +78,7 @@ auto x = randn({8, 8}, DType::Float32, Device::cpu());
 // Shape / Manipulation Operations
 // ============================================================================
 
-TEST(ExtendedParity, Roll) {
+TEST_P(ExtendedParity, Roll) {
 auto input = randn({8, 16}, DType::Float32, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
@@ -87,7 +90,7 @@ auto input = randn({8, 16}, DType::Float32, Device::cpu());
     }, {input}, 0.0f, 0.0f, "Roll");
 }
 
-TEST(ExtendedParity, Flip) {
+TEST_P(ExtendedParity, Flip) {
 auto input = randn({8, 16}, DType::Float32, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
@@ -96,7 +99,7 @@ auto input = randn({8, 16}, DType::Float32, Device::cpu());
     }, {input}, 0.0f, 0.0f, "Flip");
 }
 
-TEST(ExtendedParity, Tril) {
+TEST_P(ExtendedParity, Tril) {
 auto input = randn({8, 8}, DType::Float32, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
@@ -107,7 +110,7 @@ auto input = randn({8, 8}, DType::Float32, Device::cpu());
     }, {input}, 0.0f, 0.0f, "Tril");
 }
 
-TEST(ExtendedParity, Triu) {
+TEST_P(ExtendedParity, Triu) {
 auto input = randn({8, 8}, DType::Float32, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
@@ -118,7 +121,7 @@ auto input = randn({8, 8}, DType::Float32, Device::cpu());
     }, {input}, 0.0f, 0.0f, "Triu");
 }
 
-TEST(ExtendedParity, Diag) {
+TEST_P(ExtendedParity, Diag) {
 auto input = randn({8}, DType::Float32, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
@@ -129,7 +132,7 @@ auto input = randn({8}, DType::Float32, Device::cpu());
     }, {input}, 0.0f, 0.0f, "Diag");
 }
 
-TEST(ExtendedParity, Trace) {
+TEST_P(ExtendedParity, Trace) {
 auto input = randn({8, 8}, DType::Float32, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
@@ -142,7 +145,7 @@ auto input = randn({8, 8}, DType::Float32, Device::cpu());
 // Cumulative Operations
 // ============================================================================
 
-TEST(ExtendedParity, Cumsum) {
+TEST_P(ExtendedParity, Cumsum) {
 auto input = randn({16, 8}, DType::Float32, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
@@ -153,7 +156,7 @@ auto input = randn({16, 8}, DType::Float32, Device::cpu());
     }, {input}, 1e-5f, 1e-7f, "Cumsum");
 }
 
-TEST(ExtendedParity, Cumprod) {
+TEST_P(ExtendedParity, Cumprod) {
 // Small values to prevent overflow
     auto input = full({8, 4}, 0.9f, DType::Float32, Device::cpu());
 
@@ -169,7 +172,7 @@ TEST(ExtendedParity, Cumprod) {
 // Advanced Operations
 // ============================================================================
 
-TEST(ExtendedParity, TopK) {
+TEST_P(ExtendedParity, TopK) {
 auto input = randn({8, 32}, DType::Float32, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
@@ -181,7 +184,7 @@ auto input = randn({8, 32}, DType::Float32, Device::cpu());
     }, {input}, 1e-6f, 1e-8f, "TopK");
 }
 
-TEST(ExtendedParity, Sort) {
+TEST_P(ExtendedParity, Sort) {
 auto input = randn({8, 16}, DType::Float32, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
@@ -192,7 +195,7 @@ auto input = randn({8, 16}, DType::Float32, Device::cpu());
     }, {input}, 1e-6f, 1e-8f, "Sort");
 }
 
-TEST(ExtendedParity, Unique) {
+TEST_P(ExtendedParity, Unique) {
 auto input = randint(0, 10, {32}, DType::Int64, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
@@ -205,7 +208,7 @@ auto input = randint(0, 10, {32}, DType::Int64, Device::cpu());
 // Special Math Operations
 // ============================================================================
 
-TEST(ExtendedParity, Erf) {
+TEST_P(ExtendedParity, Erf) {
 auto input = randn({16, 16}, DType::Float32, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
@@ -213,7 +216,7 @@ auto input = randn({16, 16}, DType::Float32, Device::cpu());
     }, {input}, 1e-5f, 1e-7f, "Erf");
 }
 
-TEST(ExtendedParity, Erfc) {
+TEST_P(ExtendedParity, Erfc) {
 auto input = randn({16, 16}, DType::Float32, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
@@ -221,7 +224,7 @@ auto input = randn({16, 16}, DType::Float32, Device::cpu());
     }, {input}, 1e-5f, 1e-7f, "Erfc");
 }
 
-TEST(ExtendedParity, Lgamma) {
+TEST_P(ExtendedParity, Lgamma) {
 // Positive values for lgamma
     auto input = tenzor::add(tenzor::abs(randn({16, 16}, DType::Float32, Device::cpu())),
                               full({16, 16}, 0.5f, DType::Float32, Device::cpu()));
@@ -231,7 +234,7 @@ TEST(ExtendedParity, Lgamma) {
     }, {input}, 1e-4f, 1e-6f, "Lgamma");
 }
 
-TEST(ExtendedParity, Digamma) {
+TEST_P(ExtendedParity, Digamma) {
 auto input = tenzor::add(tenzor::abs(randn({16, 16}, DType::Float32, Device::cpu())),
                               full({16, 16}, 1.0f, DType::Float32, Device::cpu()));
 
@@ -240,7 +243,7 @@ auto input = tenzor::add(tenzor::abs(randn({16, 16}, DType::Float32, Device::cpu
     }, {input}, 1e-4f, 1e-6f, "Digamma");
 }
 
-TEST(ExtendedParity, Log2) {
+TEST_P(ExtendedParity, Log2) {
 auto input = tenzor::add(tenzor::abs(randn({16, 16}, DType::Float32, Device::cpu())),
                               full({16, 16}, 0.1f, DType::Float32, Device::cpu()));
 
@@ -249,7 +252,7 @@ auto input = tenzor::add(tenzor::abs(randn({16, 16}, DType::Float32, Device::cpu
     }, {input}, 1e-5f, 1e-7f, "Log2");
 }
 
-TEST(ExtendedParity, Log10) {
+TEST_P(ExtendedParity, Log10) {
 auto input = tenzor::add(tenzor::abs(randn({16, 16}, DType::Float32, Device::cpu())),
                               full({16, 16}, 0.1f, DType::Float32, Device::cpu()));
 
@@ -258,7 +261,7 @@ auto input = tenzor::add(tenzor::abs(randn({16, 16}, DType::Float32, Device::cpu
     }, {input}, 1e-5f, 1e-7f, "Log10");
 }
 
-TEST(ExtendedParity, Expm1) {
+TEST_P(ExtendedParity, Expm1) {
 auto input = randn({16, 16}, DType::Float32, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
@@ -266,7 +269,7 @@ auto input = randn({16, 16}, DType::Float32, Device::cpu());
     }, {input}, 1e-5f, 1e-7f, "Expm1");
 }
 
-TEST(ExtendedParity, Sinc) {
+TEST_P(ExtendedParity, Sinc) {
 auto input = randn({16, 16}, DType::Float32, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
@@ -278,7 +281,7 @@ auto input = randn({16, 16}, DType::Float32, Device::cpu());
 // Bitwise Operations
 // ============================================================================
 
-TEST(ExtendedParity, BitwiseAnd) {
+TEST_P(ExtendedParity, BitwiseAnd) {
 auto a = randint(0, 255, {16, 16}, DType::Int32, Device::cpu());
     auto b = randint(0, 255, {16, 16}, DType::Int32, Device::cpu());
 
@@ -287,7 +290,7 @@ auto a = randint(0, 255, {16, 16}, DType::Int32, Device::cpu());
     }, {a, b}, 0.0f, 0.0f, "BitwiseAnd");
 }
 
-TEST(ExtendedParity, BitwiseOr) {
+TEST_P(ExtendedParity, BitwiseOr) {
 auto a = randint(0, 255, {16, 16}, DType::Int32, Device::cpu());
     auto b = randint(0, 255, {16, 16}, DType::Int32, Device::cpu());
 
@@ -300,7 +303,7 @@ auto a = randint(0, 255, {16, 16}, DType::Int32, Device::cpu());
 // Multi-DType Parity (key ops across Float32, Float64)
 // ============================================================================
 
-TEST(ExtendedParity, MatMul_Float64) {
+TEST_P(ExtendedParity, MatMul_Float64) {
 auto a = randn({8, 16}, DType::Float64, Device::cpu());
     auto b = randn({16, 8}, DType::Float64, Device::cpu());
 
@@ -309,7 +312,7 @@ auto a = randn({8, 16}, DType::Float64, Device::cpu());
     }, {a, b}, 1e-12f, 1e-14f, "MatMul_Float64");
 }
 
-TEST(ExtendedParity, Softmax_Float64) {
+TEST_P(ExtendedParity, Softmax_Float64) {
 auto input = randn({8, 16}, DType::Float64, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
@@ -320,7 +323,7 @@ auto input = randn({8, 16}, DType::Float64, Device::cpu());
     }, {input}, 1e-12f, 1e-14f, "Softmax_Float64");
 }
 
-TEST(ExtendedParity, Add_Float64) {
+TEST_P(ExtendedParity, Add_Float64) {
     auto a = randn({16, 16}, DType::Float64, Device::cpu());
     auto b = randn({16, 16}, DType::Float64, Device::cpu());
 
@@ -333,7 +336,7 @@ TEST(ExtendedParity, Add_Float64) {
 // FFT Operations
 // ============================================================================
 
-TEST(ExtendedParity, FFT) {
+TEST_P(ExtendedParity, FFT) {
     auto input = randn({16}, DType::Float32, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
@@ -342,7 +345,7 @@ TEST(ExtendedParity, FFT) {
     }, {input}, 1e-4f, 1e-6f, "FFT");
 }
 
-TEST(ExtendedParity, IFFT) {
+TEST_P(ExtendedParity, IFFT) {
     auto input = randn({16}, DType::Float32, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
@@ -351,7 +354,7 @@ TEST(ExtendedParity, IFFT) {
     }, {input}, 1e-4f, 1e-6f, "IFFT");
 }
 
-TEST(ExtendedParity, RFFT) {
+TEST_P(ExtendedParity, RFFT) {
     auto input = randn({16}, DType::Float32, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
@@ -360,7 +363,7 @@ TEST(ExtendedParity, RFFT) {
     }, {input}, 1e-4f, 1e-6f, "RFFT");
 }
 
-TEST(ExtendedParity, IRFFT) {
+TEST_P(ExtendedParity, IRFFT) {
     auto input = randn({16}, DType::Float32, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
@@ -373,7 +376,7 @@ TEST(ExtendedParity, IRFFT) {
 // Sparse Operations
 // ============================================================================
 
-TEST(ExtendedParity, SparseSpMM) {
+TEST_P(ExtendedParity, SparseSpMM) {
     // CSR sparse matrix: 4x4 identity (simple case)
     auto crow = zeros({5}, DType::Int64, Device::cpu());
     crow.data<int64_t>()[0] = 0; crow.data<int64_t>()[1] = 1;
@@ -403,7 +406,7 @@ TEST(ExtendedParity, SparseSpMM) {
 // Additional Missing Operations
 // ============================================================================
 
-TEST(ExtendedParity, Scatter) {
+TEST_P(ExtendedParity, Scatter) {
     auto input = randn({4, 8}, DType::Float32, Device::cpu());
     auto src = randn({4, 3}, DType::Float32, Device::cpu());
     auto index = randint(0, 8, {4, 3}, DType::Int64, Device::cpu());
@@ -416,7 +419,7 @@ TEST(ExtendedParity, Scatter) {
     }, {input}, 1e-6f, 1e-8f, "Scatter");
 }
 
-TEST(ExtendedParity, SparseSpMV) {
+TEST_P(ExtendedParity, SparseSpMV) {
     // CSR sparse identity 4x4, multiply by vector
     auto crow = zeros({5}, DType::Int64, Device::cpu());
     crow.data<int64_t>()[0] = 0; crow.data<int64_t>()[1] = 1;
@@ -442,7 +445,7 @@ TEST(ExtendedParity, SparseSpMV) {
     }, {vec}, 1e-5f, 1e-7f, "SparseSpMV");
 }
 
-TEST(ExtendedParity, SparseAdd) {
+TEST_P(ExtendedParity, SparseAdd) {
     auto crow = zeros({5}, DType::Int64, Device::cpu());
     crow.data<int64_t>()[0] = 0; crow.data<int64_t>()[1] = 1;
     crow.data<int64_t>()[2] = 2; crow.data<int64_t>()[3] = 3;
@@ -467,7 +470,7 @@ TEST(ExtendedParity, SparseAdd) {
     }, {dense}, 1e-5f, 1e-7f, "SparseAdd");
 }
 
-TEST(ExtendedParity, Logcumsumexp) {
+TEST_P(ExtendedParity, Logcumsumexp) {
     auto input = randn({8, 16}, DType::Float32, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
@@ -478,7 +481,7 @@ TEST(ExtendedParity, Logcumsumexp) {
     }, {input}, 1e-4f, 1e-6f, "Logcumsumexp");
 }
 
-TEST(ExtendedParity, IndexAdd) {
+TEST_P(ExtendedParity, IndexAdd) {
     auto input = zeros({8, 4}, DType::Float32, Device::cpu());
     auto idx = zeros({3}, DType::Int64, Device::cpu());
     idx.data<int64_t>()[0] = 1; idx.data<int64_t>()[1] = 3; idx.data<int64_t>()[2] = 5;
@@ -492,7 +495,7 @@ TEST(ExtendedParity, IndexAdd) {
     }, {input}, 1e-5f, 1e-7f, "IndexAdd");
 }
 
-TEST(ExtendedParity, Bucketize) {
+TEST_P(ExtendedParity, Bucketize) {
     auto input = randn({16}, DType::Float32, Device::cpu());
     // Create sorted boundaries manually
     auto boundaries = randn({8}, DType::Float32, Device::cpu());
@@ -507,7 +510,7 @@ TEST(ExtendedParity, Bucketize) {
     }, {input}, 0.0f, 0.0f, "Bucketize");
 }
 
-TEST(ExtendedParity, SearchSorted) {
+TEST_P(ExtendedParity, SearchSorted) {
     auto sorted_data = randn({16}, DType::Float32, Device::cpu());
     OpAttributes sort_attrs;
     sort_attrs.set(AttrKey::Dim, int64_t(0));
@@ -520,6 +523,9 @@ TEST(ExtendedParity, SearchSorted) {
         return dispatch<OpId::SearchSorted>(ins)[0];
     }, {values}, 0.0f, 0.0f, "SearchSorted");
 }
+
+INSTANTIATE_BACKEND_TESTS(ExtendedParity);
+
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

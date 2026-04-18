@@ -10,200 +10,174 @@
 #include <gtest/gtest.h>
 #include <iostream>
 #include <tenzor/tenzor.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
+
+class ShapeOpsParity : public BackendTest {};
 // ============================================================================
 // Shape/View Operations Parity Tests (16 operations, exact match)
 // ============================================================================
 
-TEST(ShapeOpsParity, Reshape) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ShapeOpsParity, Reshape) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return reshape(inputs[0], {16, 64});
-    }, {a}, 0, 0, "Reshape");
+    }, {a}, device, 0, 0, "Reshape");
 }
 
-TEST(ShapeOpsParity, Transpose2D) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ShapeOpsParity, Transpose2D) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return transpose(inputs[0], 0, 1);
-    }, {a}, 0, 0, "Transpose2D");
+    }, {a}, device, 0, 0, "Transpose2D");
 }
 
-TEST(ShapeOpsParity, Permute3D) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ShapeOpsParity, Permute3D) {
 
     auto a = randn({4, 8, 16}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return permute(inputs[0], {2, 0, 1});
-    }, {a}, 0, 0, "Permute3D");
+    }, {a}, device, 0, 0, "Permute3D");
 }
 
-TEST(ShapeOpsParity, Permute4D) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ShapeOpsParity, Permute4D) {
 
     auto a = randn({2, 3, 4, 5}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return permute(inputs[0], {3, 1, 0, 2});
-    }, {a}, 0, 0, "Permute4D");
+    }, {a}, device, 0, 0, "Permute4D");
 }
 
-TEST(ShapeOpsParity, Squeeze) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ShapeOpsParity, Squeeze) {
 
     auto a = randn({1, 32, 1, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return squeeze(inputs[0]);
-    }, {a}, 0, 0, "Squeeze");
+    }, {a}, device, 0, 0, "Squeeze");
 }
 
-TEST(ShapeOpsParity, SqueezeDim) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ShapeOpsParity, SqueezeDim) {
 
     auto a = randn({32, 1, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return squeeze(inputs[0], 1);
-    }, {a}, 0, 0, "SqueezeDim");
+    }, {a}, device, 0, 0, "SqueezeDim");
 }
 
-TEST(ShapeOpsParity, Unsqueeze) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ShapeOpsParity, Unsqueeze) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return unsqueeze(inputs[0], 0);
-    }, {a}, 0, 0, "Unsqueeze");
+    }, {a}, device, 0, 0, "Unsqueeze");
 }
 
-TEST(ShapeOpsParity, Flatten) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ShapeOpsParity, Flatten) {
 
     auto a = randn({2, 4, 8, 16}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return flatten(inputs[0], 1, 2);
-    }, {a}, 0, 0, "Flatten");
+    }, {a}, device, 0, 0, "Flatten");
 }
 
-TEST(ShapeOpsParity, StackDim0) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ShapeOpsParity, StackDim0) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
     auto b = randn({32, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         std::vector<Tensor> to_stack = {inputs[0], inputs[1]};
         return stack(to_stack, 0);
-    }, {a, b}, 0, 0, "Stack_Dim0");
+    }, {a, b}, device, 0, 0, "Stack_Dim0");
 }
 
-TEST(ShapeOpsParity, StackDim1) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ShapeOpsParity, StackDim1) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
     auto b = randn({32, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         std::vector<Tensor> to_stack = {inputs[0], inputs[1]};
         return stack(to_stack, 1);
-    }, {a, b}, 0, 0, "Stack_Dim1");
+    }, {a, b}, device, 0, 0, "Stack_Dim1");
 }
 
-TEST(ShapeOpsParity, Split) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ShapeOpsParity, Split) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         auto parts = split(inputs[0], 8, 0);
         return parts[0];
-    }, {a}, 0, 0, "Split");
+    }, {a}, device, 0, 0, "Split");
 }
 
-TEST(ShapeOpsParity, Chunk) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ShapeOpsParity, Chunk) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         auto parts = chunk(inputs[0], 4, 1);
         return parts[2];
-    }, {a}, 0, 0, "Chunk");
+    }, {a}, device, 0, 0, "Chunk");
 }
 
-TEST(ShapeOpsParity, CatDim0) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ShapeOpsParity, CatDim0) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
     auto b = randn({32, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         std::vector<Tensor> v = {inputs[0], inputs[1]};
         return cat(v, 0);
-    }, {a, b}, 0, 0, "Cat_Dim0");
+    }, {a, b}, device, 0, 0, "Cat_Dim0");
 }
 
-TEST(ShapeOpsParity, CatDim1) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ShapeOpsParity, CatDim1) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
     auto b = randn({32, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         std::vector<Tensor> v = {inputs[0], inputs[1]};
         return cat(v, 1);
-    }, {a, b}, 0, 0, "Cat_Dim1");
+    }, {a, b}, device, 0, 0, "Cat_Dim1");
 }
 
-TEST(ShapeOpsParity, Repeat) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ShapeOpsParity, Repeat) {
 
     auto a = randn({8, 8}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return repeat(inputs[0], {2, 3});
-    }, {a}, 0, 0, "Repeat");
+    }, {a}, device, 0, 0, "Repeat");
 }
 
-TEST(ShapeOpsParity, Expand) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ShapeOpsParity, Expand) {
 
     auto a = randn({1, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return expand(inputs[0], {16, 32});
-    }, {a}, 0, 0, "Expand");
+    }, {a}, device, 0, 0, "Expand");
 }
+
+INSTANTIATE_BACKEND_TESTS(ShapeOpsParity);
+
 
 
 

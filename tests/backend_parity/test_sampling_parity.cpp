@@ -16,17 +16,20 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/ops/advanced.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 #include <cmath>
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
+
+class SamplingParity : public BackendTest {};
 // ============================================================================
 // Tier 1 — deterministic
 // ============================================================================
 
-TEST(SamplingParity, Bucketize_Deterministic) {
+TEST_P(SamplingParity, Bucketize_Deterministic) {
     // Deterministic: bucketize(input, boundaries) -> bucket indices.
     auto input = randn({4, 16}, DType::Float32, Device::cpu());
     auto boundaries_cpu = zeros({5}, DType::Float32, Device::cpu());
@@ -43,7 +46,7 @@ TEST(SamplingParity, Bucketize_Deterministic) {
         {input}, 0.0f, 0.0f, "bucketize");
 }
 
-TEST(SamplingParity, Histogram_Deterministic) {
+TEST_P(SamplingParity, Histogram_Deterministic) {
     auto input = randn({1024}, DType::Float32, Device::cpu());
 
     test_operation_parity(
@@ -59,7 +62,7 @@ TEST(SamplingParity, Histogram_Deterministic) {
 // Tier 2 — stochastic, statistical-moment parity
 // ============================================================================
 
-TEST(SamplingParity, Bernoulli_EmpiricalProbability) {
+TEST_P(SamplingParity, Bernoulli_EmpiricalProbability) {
     // With p=0.3, empirical mean should approach 0.3 for N=10000.
     // Std of mean = sqrt(p*(1-p)/N) ~= 0.0046; use 4-sigma tolerance ~= 0.02.
     auto probs = Tensor({1, 10000}, DType::Float32, Device::cpu());
@@ -85,7 +88,7 @@ TEST(SamplingParity, Bernoulli_EmpiricalProbability) {
     }
 }
 
-TEST(SamplingParity, Poisson_EmpiricalMean) {
+TEST_P(SamplingParity, Poisson_EmpiricalMean) {
     // For Poisson(rate), E[X] = rate. With rate=5, N=4000 samples, std of
     // mean = sqrt(5/4000) ~= 0.035. Use 4-sigma ~= 0.14.
     auto rates = Tensor({1, 4000}, DType::Float32, Device::cpu());
@@ -110,7 +113,7 @@ TEST(SamplingParity, Poisson_EmpiricalMean) {
     }
 }
 
-TEST(SamplingParity, Exponential_EmpiricalMean) {
+TEST_P(SamplingParity, Exponential_EmpiricalMean) {
     // For Exponential(rate), E[X] = 1/rate. With rate=2, N=4000, std of
     // mean = 1/(rate*sqrt(N)) = 1/(2*63.2) ~= 0.0079. Use 4-sigma ~= 0.03.
     auto rates = Tensor({1, 4000}, DType::Float32, Device::cpu());
@@ -135,7 +138,7 @@ TEST(SamplingParity, Exponential_EmpiricalMean) {
     }
 }
 
-TEST(SamplingParity, Multinomial_CategoryFrequencies) {
+TEST_P(SamplingParity, Multinomial_CategoryFrequencies) {
     // Drawing 10000 samples from a 4-category distribution with weights
     // [0.1, 0.2, 0.3, 0.4]. Empirical frequency of each category should
     // approach its probability within a few sigmas.
@@ -178,7 +181,7 @@ TEST(SamplingParity, Multinomial_CategoryFrequencies) {
     }
 }
 
-TEST(SamplingParity, NormalSample_EmpiricalMomentss) {
+TEST_P(SamplingParity, NormalSample_EmpiricalMomentss) {
     // randn produces N(0, 1). With N=10000, std of mean ≈ 0.01; 4-sigma ≈ 0.04.
     // Variance should be close to 1 with tolerance 4*sqrt(2/(N-1)) ≈ 0.057.
     const int64_t N = 10000;
@@ -202,7 +205,7 @@ TEST(SamplingParity, NormalSample_EmpiricalMomentss) {
     }
 }
 
-TEST(SamplingParity, Uniform_EmpiricalMoments) {
+TEST_P(SamplingParity, Uniform_EmpiricalMoments) {
     // rand() produces U(0, 1). E[X] = 0.5, Var[X] = 1/12 ≈ 0.0833.
     // Std of mean = sqrt((1/12)/N) ≈ 0.0029 for N=10000 → 4-sigma ≈ 0.012.
     const int64_t N = 10000;
@@ -227,6 +230,9 @@ TEST(SamplingParity, Uniform_EmpiricalMoments) {
         }
     }
 }
+
+INSTANTIATE_BACKEND_TESTS(SamplingParity);
+
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

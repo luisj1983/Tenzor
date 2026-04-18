@@ -11,17 +11,20 @@
 #include <tenzor/nn/quantization/quantize.hpp>
 #include <tenzor/nn/quantization/awq.hpp>
 #include <tenzor/nn/quantization/gptq.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 using namespace tenzor::nn::quantization;
 
+
+class QuantizationParity : public BackendTest {};
 // ============================================================================
 // Quantization Simulation Parity
 // ============================================================================
 
-TEST(QuantizationParity, QuantDequant_Roundtrip) {
+TEST_P(QuantizationParity, QuantDequant_Roundtrip) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -36,7 +39,7 @@ TEST(QuantizationParity, QuantDequant_Roundtrip) {
     }, {input}, 1e-5f, 1e-6f, "Quantization roundtrip simulation");
 }
 
-TEST(QuantizationParity, SymmetricQuantization) {
+TEST_P(QuantizationParity, SymmetricQuantization) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -59,7 +62,7 @@ TEST(QuantizationParity, SymmetricQuantization) {
 // Actual Quantization API Tests
 // ============================================================================
 
-TEST(QuantizationParity, PerTensorSymmetric_Int8) {
+TEST_P(QuantizationParity, PerTensorSymmetric_Int8) {
     auto input = randn({4, 16}, DType::Float32, Device::cpu());
 
     auto qt = quantize_per_tensor_symmetric(input, QuantDType::INT8);
@@ -76,7 +79,7 @@ TEST(QuantizationParity, PerTensorSymmetric_Int8) {
         << "Per-tensor symmetric INT8 roundtrip should have < 2% relative error";
 }
 
-TEST(QuantizationParity, PerTensorAsymmetric_Int8) {
+TEST_P(QuantizationParity, PerTensorAsymmetric_Int8) {
     // Asymmetric input (all positive)
     auto input = tenzor::abs(randn({4, 16}, DType::Float32, Device::cpu()));
 
@@ -92,7 +95,7 @@ TEST(QuantizationParity, PerTensorAsymmetric_Int8) {
         << "Per-tensor asymmetric INT8 roundtrip should have < 2% relative error";
 }
 
-TEST(QuantizationParity, QuantizedTensor_Properties) {
+TEST_P(QuantizationParity, QuantizedTensor_Properties) {
     auto input = randn({8, 8}, DType::Float32, Device::cpu());
     auto qt = quantize_per_tensor_symmetric(input, QuantDType::INT8);
 
@@ -103,7 +106,7 @@ TEST(QuantizationParity, QuantizedTensor_Properties) {
     EXPECT_EQ(qt.params().dtype, QuantDType::INT8);
 }
 
-TEST(QuantizationParity, DequantRoundtripPreservesShape) {
+TEST_P(QuantizationParity, DequantRoundtripPreservesShape) {
     auto input = randn({2, 3, 4}, DType::Float32, Device::cpu());
     auto qt = quantize_per_tensor_symmetric(input, QuantDType::INT8);
     auto recovered = qt.dequantize();
@@ -116,7 +119,7 @@ TEST(QuantizationParity, DequantRoundtripPreservesShape) {
     }
 }
 
-TEST(QuantizationParity, SymmetricQuantization_Backend) {
+TEST_P(QuantizationParity, SymmetricQuantization_Backend) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -131,6 +134,9 @@ TEST(QuantizationParity, SymmetricQuantization_Backend) {
         return clamped * scale;
     }, {input}, 1e-4f, 1e-5f, "Symmetric quantization across backends");
 }
+
+INSTANTIATE_BACKEND_TESTS(QuantizationParity);
+
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
@@ -157,7 +163,7 @@ int main(int argc, char** argv) {
 // Per-Channel Quantization Tests
 // ============================================================================
 
-TEST(QuantizationParity, PerChannelSymmetricQuantize) {
+TEST_P(QuantizationParity, PerChannelSymmetricQuantize) {
     // Quantize a weight tensor per-channel and verify roundtrip accuracy
     auto weights = randn({64, 32}, DType::Float32, Device::cpu());
 
@@ -185,7 +191,7 @@ TEST(QuantizationParity, PerChannelSymmetricQuantize) {
     EXPECT_LE(pc_error, pt_error * 1.01f);  // 1% tolerance for numerical noise
 }
 
-TEST(QuantizationParity, PerChannelAsymmetricQuantize) {
+TEST_P(QuantizationParity, PerChannelAsymmetricQuantize) {
     auto weights = randn({32, 16}, DType::Float32, Device::cpu());
 
     auto q_weights = quantize_per_channel_asymmetric(weights, /*axis=*/0);
@@ -200,7 +206,7 @@ TEST(QuantizationParity, PerChannelAsymmetricQuantize) {
     EXPECT_EQ(dequantized.shape()[1], 16);
 }
 
-TEST(QuantizationParity, PerChannelConv2dWeights) {
+TEST_P(QuantizationParity, PerChannelConv2dWeights) {
     // Conv2d weights are [out_channels, in_channels, kH, kW]
     auto weights = randn({16, 3, 3, 3}, DType::Float32, Device::cpu());
 
@@ -234,7 +240,7 @@ using tenzor::nn::quantization::AWQQuantizer;
 using tenzor::nn::quantization::GPTQConfig;
 using tenzor::nn::quantization::GPTQQuantizer;
 
-TEST(QuantizationParity, AWQ_Roundtrip) {
+TEST_P(QuantizationParity, AWQ_Roundtrip) {
     // out_features=32, in_features=64; calibration has 16 samples
     auto weight = randn({32, 64}, DType::Float32, Device::cpu());
     auto calib = randn({16, 64}, DType::Float32, Device::cpu());
@@ -273,7 +279,7 @@ TEST(QuantizationParity, AWQ_Roundtrip) {
 // Fixed: AWQ::quantize_layer used raw host-pointer loops on device-resident
 // weight/act_scales. Added explicit CPU migration of all tensors at the top
 // of the routine and a device restore at the end (src/nn/quantization/awq.cpp).
-TEST(QuantizationParity, AWQ_BackendInputParity) {
+TEST_P(QuantizationParity, AWQ_BackendInputParity) {
     // Run AWQ on CPU inputs and then on inputs moved to each available GPU
     // backend; the resulting scales/zeros should match (bit-for-bit because
     // the input floats are identical).
@@ -314,7 +320,7 @@ TEST(QuantizationParity, AWQ_BackendInputParity) {
     }
 }
 
-TEST(QuantizationParity, GPTQ_Roundtrip) {
+TEST_P(QuantizationParity, GPTQ_Roundtrip) {
     auto weight = randn({32, 64}, DType::Float32, Device::cpu());
     auto calib = randn({32, 64}, DType::Float32, Device::cpu());
 
@@ -344,7 +350,7 @@ TEST(QuantizationParity, GPTQ_Roundtrip) {
 }
 
 // Fixed alongside AWQ via CPU migration in src/nn/quantization/gptq.cpp.
-TEST(QuantizationParity, GPTQ_BackendInputParity) {
+TEST_P(QuantizationParity, GPTQ_BackendInputParity) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 

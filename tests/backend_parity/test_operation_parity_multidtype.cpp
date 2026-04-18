@@ -9,16 +9,19 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/backend/fast_dispatch.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
+
+class MultiDTypeParity : public BackendTest {};
 // ============================================================================
 // Float16 Parity
 // ============================================================================
 
-TEST(MultiDTypeParity, Add_Float16) {
+TEST_P(MultiDTypeParity, Add_Float16) {
     auto a = randn({16, 16}, DType::Float16, Device::cpu());
     auto b = randn({16, 16}, DType::Float16, Device::cpu());
 
@@ -27,7 +30,7 @@ TEST(MultiDTypeParity, Add_Float16) {
     }, {a, b}, 1e-2f, 1e-3f, "Add_Float16");
 }
 
-TEST(MultiDTypeParity, Mul_Float16) {
+TEST_P(MultiDTypeParity, Mul_Float16) {
     auto a = randn({16, 16}, DType::Float16, Device::cpu());
     auto b = randn({16, 16}, DType::Float16, Device::cpu());
 
@@ -36,7 +39,7 @@ TEST(MultiDTypeParity, Mul_Float16) {
     }, {a, b}, 1e-2f, 1e-3f, "Mul_Float16");
 }
 
-TEST(MultiDTypeParity, MatMul_Float16) {
+TEST_P(MultiDTypeParity, MatMul_Float16) {
     auto a = randn({8, 16}, DType::Float16, Device::cpu());
     auto b = randn({16, 8}, DType::Float16, Device::cpu());
 
@@ -45,7 +48,7 @@ TEST(MultiDTypeParity, MatMul_Float16) {
     }, {a, b}, 1e-1f, 1e-2f, "MatMul_Float16");
 }
 
-TEST(MultiDTypeParity, Softmax_Float16) {
+TEST_P(MultiDTypeParity, Softmax_Float16) {
     auto input = randn({8, 16}, DType::Float16, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
@@ -60,7 +63,7 @@ TEST(MultiDTypeParity, Softmax_Float16) {
 // BFloat16 Parity
 // ============================================================================
 
-TEST(MultiDTypeParity, Add_BFloat16) {
+TEST_P(MultiDTypeParity, Add_BFloat16) {
     auto a = randn({16, 16}, DType::BFloat16, Device::cpu());
     auto b = randn({16, 16}, DType::BFloat16, Device::cpu());
 
@@ -69,7 +72,7 @@ TEST(MultiDTypeParity, Add_BFloat16) {
     }, {a, b}, 1e-1f, 1e-2f, "Add_BFloat16");
 }
 
-TEST(MultiDTypeParity, Mul_BFloat16) {
+TEST_P(MultiDTypeParity, Mul_BFloat16) {
     auto a = randn({16, 16}, DType::BFloat16, Device::cpu());
     auto b = randn({16, 16}, DType::BFloat16, Device::cpu());
 
@@ -78,7 +81,7 @@ TEST(MultiDTypeParity, Mul_BFloat16) {
     }, {a, b}, 1e-1f, 1e-2f, "Mul_BFloat16");
 }
 
-TEST(MultiDTypeParity, MatMul_BFloat16) {
+TEST_P(MultiDTypeParity, MatMul_BFloat16) {
     auto a = randn({8, 16}, DType::BFloat16, Device::cpu());
     auto b = randn({16, 8}, DType::BFloat16, Device::cpu());
 
@@ -87,7 +90,7 @@ TEST(MultiDTypeParity, MatMul_BFloat16) {
     }, {a, b}, 5e-1f, 1e-1f, "MatMul_BFloat16");
 }
 
-TEST(MultiDTypeParity, Softmax_BFloat16) {
+TEST_P(MultiDTypeParity, Softmax_BFloat16) {
     auto input = randn({8, 16}, DType::BFloat16, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
@@ -102,7 +105,7 @@ TEST(MultiDTypeParity, Softmax_BFloat16) {
 // Float64 Parity (additional ops beyond the extended file)
 // ============================================================================
 
-TEST(MultiDTypeParity, Mul_Float64) {
+TEST_P(MultiDTypeParity, Mul_Float64) {
     auto a = randn({16, 16}, DType::Float64, Device::cpu());
     auto b = randn({16, 16}, DType::Float64, Device::cpu());
 
@@ -111,7 +114,7 @@ TEST(MultiDTypeParity, Mul_Float64) {
     }, {a, b}, 1e-14f, 0.0f, "Mul_Float64");
 }
 
-TEST(MultiDTypeParity, Exp_Float64) {
+TEST_P(MultiDTypeParity, Exp_Float64) {
     auto input = randn({16, 16}, DType::Float64, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
@@ -119,7 +122,7 @@ TEST(MultiDTypeParity, Exp_Float64) {
     }, {input}, 1e-12f, 1e-14f, "Exp_Float64");
 }
 
-TEST(MultiDTypeParity, Sum_Float64) {
+TEST_P(MultiDTypeParity, Sum_Float64) {
     auto input = randn({32, 32}, DType::Float64, Device::cpu());
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
@@ -131,7 +134,7 @@ TEST(MultiDTypeParity, Sum_Float64) {
 // Conv2d Parity (multiple dtypes)
 // ============================================================================
 
-TEST(MultiDTypeParity, Conv2d_Float32) {
+TEST_P(MultiDTypeParity, Conv2d_Float32) {
     auto input = randn({1, 3, 8, 8}, DType::Float32, Device::cpu());
     auto weight = randn({8, 3, 3, 3}, DType::Float32, Device::cpu());
 
@@ -150,7 +153,7 @@ TEST(MultiDTypeParity, Conv2d_Float32) {
 // BatchNorm Parity (Float32)
 // ============================================================================
 
-TEST(MultiDTypeParity, BatchNorm2d_Float32) {
+TEST_P(MultiDTypeParity, BatchNorm2d_Float32) {
     auto input = randn({2, 8, 4, 4}, DType::Float32, Device::cpu());
     auto weight = ones({8}, DType::Float32, Device::cpu());
     auto bias = zeros({8}, DType::Float32, Device::cpu());
@@ -177,7 +180,7 @@ TEST(MultiDTypeParity, BatchNorm2d_Float32) {
 // Conv2d multi-dtype
 // ============================================================================
 
-TEST(MultiDTypeParity, Conv2d_Float64) {
+TEST_P(MultiDTypeParity, Conv2d_Float64) {
     auto input = randn({1, 3, 8, 8}, DType::Float64, Device::cpu());
     auto weight = randn({8, 3, 3, 3}, DType::Float64, Device::cpu());
 
@@ -196,7 +199,7 @@ TEST(MultiDTypeParity, Conv2d_Float64) {
 // BatchNorm multi-dtype
 // ============================================================================
 
-TEST(MultiDTypeParity, BatchNorm2d_Float64) {
+TEST_P(MultiDTypeParity, BatchNorm2d_Float64) {
     auto input = randn({2, 8, 4, 4}, DType::Float64, Device::cpu());
     auto weight = ones({8}, DType::Float64, Device::cpu());
     auto bias = zeros({8}, DType::Float64, Device::cpu());
@@ -219,7 +222,7 @@ TEST(MultiDTypeParity, BatchNorm2d_Float64) {
     }, {input}, 1e-10f, 1e-12f, "BatchNorm2d_Float64");
 }
 
-TEST(MultiDTypeParity, BatchNorm2d_Float16) {
+TEST_P(MultiDTypeParity, BatchNorm2d_Float16) {
     auto input = randn({2, 8, 4, 4}, DType::Float16, Device::cpu());
     auto weight = ones({8}, DType::Float16, Device::cpu());
     auto bias = zeros({8}, DType::Float16, Device::cpu());
@@ -241,6 +244,9 @@ TEST(MultiDTypeParity, BatchNorm2d_Float16) {
         return dispatch<OpId::BatchNorm2dForward>(ins, attrs)[0];
     }, {input}, 1e-1f, 1e-2f, "BatchNorm2d_Float16");
 }
+
+INSTANTIATE_BACKEND_TESTS(MultiDTypeParity);
+
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

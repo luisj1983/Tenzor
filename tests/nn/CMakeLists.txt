@@ -368,6 +368,29 @@ add_executable(test_alibi_multidtype layers/test_alibi_multidtype.cpp)
 target_link_libraries(test_alibi_multidtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_alibi_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
+# LPPool1d / LPPool2d multi-backend multi-dtype tests (Phase 2 gap fill)
+add_executable(test_lppool_multidtype layers/test_lppool_multidtype.cpp)
+target_link_libraries(test_lppool_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_lppool_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# LocalResponseNorm multi-backend multi-dtype tests (Phase 2 gap fill)
+add_executable(test_local_response_norm_multidtype layers/test_local_response_norm_multidtype.cpp)
+target_link_libraries(test_local_response_norm_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_local_response_norm_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Phase 3 promotions: layers previously in backend_parity only
+add_executable(test_activations_extended_multidtype layers/test_activations_extended_multidtype.cpp)
+target_link_libraries(test_activations_extended_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_activations_extended_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_convtranspose_extended_multidtype layers/test_convtranspose_extended_multidtype.cpp)
+target_link_libraries(test_convtranspose_extended_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_convtranspose_extended_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_upsample_unflatten_multidtype layers/test_upsample_unflatten_multidtype.cpp)
+target_link_libraries(test_upsample_unflatten_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_upsample_unflatten_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
 # ============================================================================
 # Phase 1.2: Detection head tests
 # ============================================================================

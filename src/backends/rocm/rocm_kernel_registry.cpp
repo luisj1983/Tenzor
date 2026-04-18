@@ -3538,10 +3538,19 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::FusedGelu, [](std::span<const Tensor> inputs, [[maybe_unused]] const OpAttributes& attrs) -> Tensor {
         return rocm::fused_gelu_hip(inputs[0]);
     });
+    // FusedConv2dReLU: 3 inputs [input, weight, bias?]. Compose conv2d + relu;
+    // do NOT call fused_conv_batchnorm_relu_hip here — that op needs 5 inputs
+    // (input, weight, bias, bn_running_mean, bn_running_var) and is registered
+    // as FusedConv2dBnReLU. Mirroring the FusedConv2dSigmoid path below.
     table.register_single_output_kernel(OpId::FusedConv2dReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
-        return rocm::fused_conv_batchnorm_relu_hip(inputs[0], inputs[1], inputs[2],
-                                                    inputs[3], inputs[4], eps);
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
+        Tensor result = rocm::conv2d_forward_kernel(inputs[0], inputs[1], bias,
+            stride, padding, dilation, groups, get_hip_stream(attrs));
+        return rocm::relu_kernel(result, get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::FusedConv2dSigmoid, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t stride = attrs.get_int(AttrKey::Stride, 1);

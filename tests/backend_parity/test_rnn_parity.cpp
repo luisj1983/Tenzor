@@ -8,16 +8,19 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
+
+class RNNParity : public BackendTest {};
 // ============================================================================
 // LSTM Forward Parity (via Module::forward single-input)
 // ============================================================================
 
-TEST(RNNParity, LSTM_Forward) {
+TEST_P(RNNParity, LSTM_Forward) {
     auto backends = get_available_backends_all_devices();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -47,7 +50,7 @@ TEST(RNNParity, LSTM_Forward) {
 // GRU Forward Parity (via Module::forward single-input)
 // ============================================================================
 
-TEST(RNNParity, GRU_Forward) {
+TEST_P(RNNParity, GRU_Forward) {
     auto backends = get_available_backends_all_devices();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -69,6 +72,9 @@ TEST(RNNParity, GRU_Forward) {
         return result;
     }, {input}, backends, 5e-2f, 5e-2f, "GRU Forward");
 }
+
+INSTANTIATE_BACKEND_TESTS(RNNParity);
+
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

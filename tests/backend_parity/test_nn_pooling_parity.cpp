@@ -9,16 +9,19 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/functional.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
+
+class NNPoolingParity : public BackendTest {};
 // ============================================================================
 // 1D Pooling Tests
 // ============================================================================
 
-TEST(NNPoolingParity, MaxPool1d) {
+TEST_P(NNPoolingParity, MaxPool1d) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -30,7 +33,7 @@ TEST(NNPoolingParity, MaxPool1d) {
     }, {input}, 1e-7f, 1e-9f, "MaxPool1d");
 }
 
-TEST(NNPoolingParity, AvgPool1d) {
+TEST_P(NNPoolingParity, AvgPool1d) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -46,7 +49,7 @@ TEST(NNPoolingParity, AvgPool1d) {
 // 3D Pooling Tests
 // ============================================================================
 
-TEST(NNPoolingParity, MaxPool3d) {
+TEST_P(NNPoolingParity, MaxPool3d) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -58,7 +61,7 @@ TEST(NNPoolingParity, MaxPool3d) {
     }, {input}, 1e-7f, 1e-9f, "MaxPool3d");
 }
 
-TEST(NNPoolingParity, AvgPool3d) {
+TEST_P(NNPoolingParity, AvgPool3d) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -74,7 +77,7 @@ TEST(NNPoolingParity, AvgPool3d) {
 // 1D Adaptive Pooling Tests
 // ============================================================================
 
-TEST(NNPoolingParity, AdaptiveAvgPool1d) {
+TEST_P(NNPoolingParity, AdaptiveAvgPool1d) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -86,7 +89,7 @@ TEST(NNPoolingParity, AdaptiveAvgPool1d) {
     }, {input}, 1e-6f, 1e-8f, "AdaptiveAvgPool1d");
 }
 
-TEST(NNPoolingParity, AdaptiveMaxPool1d) {
+TEST_P(NNPoolingParity, AdaptiveMaxPool1d) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -102,7 +105,7 @@ TEST(NNPoolingParity, AdaptiveMaxPool1d) {
 // 3D Adaptive Pooling Tests
 // ============================================================================
 
-TEST(NNPoolingParity, AdaptiveAvgPool3d) {
+TEST_P(NNPoolingParity, AdaptiveAvgPool3d) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -114,7 +117,7 @@ TEST(NNPoolingParity, AdaptiveAvgPool3d) {
     }, {input}, 1e-6f, 1e-8f, "AdaptiveAvgPool3d");
 }
 
-TEST(NNPoolingParity, AdaptiveMaxPool3d) {
+TEST_P(NNPoolingParity, AdaptiveMaxPool3d) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -130,7 +133,7 @@ TEST(NNPoolingParity, AdaptiveMaxPool3d) {
 // LP Pooling Tests
 // ============================================================================
 
-TEST(NNPoolingParity, LPPool1d) {
+TEST_P(NNPoolingParity, LPPool1d) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -142,7 +145,7 @@ TEST(NNPoolingParity, LPPool1d) {
     }, {input}, 1e-5f, 1e-6f, "LPPool1d");
 }
 
-TEST(NNPoolingParity, LPPool2d) {
+TEST_P(NNPoolingParity, LPPool2d) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -158,7 +161,7 @@ TEST(NNPoolingParity, LPPool2d) {
 // MaxPool2d Variant Tests
 // ============================================================================
 
-TEST(NNPoolingParity, MaxPool2d_Stride3) {
+TEST_P(NNPoolingParity, MaxPool2d_Stride3) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -170,7 +173,7 @@ TEST(NNPoolingParity, MaxPool2d_Stride3) {
     }, {input}, 1e-7f, 1e-9f, "MaxPool2d_Stride3");
 }
 
-TEST(NNPoolingParity, AvgPool2d_Padded) {
+TEST_P(NNPoolingParity, AvgPool2d_Padded) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -184,7 +187,7 @@ TEST(NNPoolingParity, AvgPool2d_Padded) {
     }, {input}, 1e-5f, 1e-6f, "AvgPool2d_Padded");
 }
 
-TEST(NNPoolingParity, FractionalMaxPool2d) {
+TEST_P(NNPoolingParity, FractionalMaxPool2d) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -204,7 +207,7 @@ TEST(NNPoolingParity, FractionalMaxPool2d) {
     }
 }
 
-TEST(NNPoolingParity, MaxPool2d_WithPadding) {
+TEST_P(NNPoolingParity, MaxPool2d_WithPadding) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -265,18 +268,18 @@ void pool_grad_parity(PoolT make_pool,
 }  // namespace
 
 // 1D pool backward
-TEST(NNPoolingParity, MaxPool1d_Backward) {
+TEST_P(NNPoolingParity, MaxPool1d_Backward) {
     pool_grad_parity([] { return nn::MaxPool1d(2); }, {1, 3, 16}, "MaxPool1d_bwd");
 }
 // Fixed via ROCm contiguous UAF + mul/add/sub/div non-contig fixes.
-TEST(NNPoolingParity, AvgPool1d_Backward) {
+TEST_P(NNPoolingParity, AvgPool1d_Backward) {
     pool_grad_parity([] { return nn::AvgPool1d(2); }, {1, 3, 16}, "AvgPool1d_bwd");
 }
-TEST(NNPoolingParity, AdaptiveMaxPool1d_Backward) {
+TEST_P(NNPoolingParity, AdaptiveMaxPool1d_Backward) {
     pool_grad_parity([] { return nn::AdaptiveMaxPool1d(4); }, {1, 3, 16},
                      "AdaptiveMaxPool1d_bwd");
 }
-TEST(NNPoolingParity, AdaptiveAvgPool1d_Backward) {
+TEST_P(NNPoolingParity, AdaptiveAvgPool1d_Backward) {
     pool_grad_parity([] { return nn::AdaptiveAvgPool1d(4); }, {1, 3, 16},
                      "AdaptiveAvgPool1d_bwd");
 }
@@ -285,35 +288,35 @@ TEST(NNPoolingParity, AdaptiveAvgPool1d_Backward) {
 // Fixed: Vulkan pool3d dispatches defaulted kernel_d/h/w to 0 when the Module
 // sent scalar KernelSize; added scalar-fallback reads in vulkan_ops_pooling.cpp.
 // Also fixed Vulkan max_pool3d_backward shaders reading Int32 indices as float.
-TEST(NNPoolingParity, MaxPool3d_Backward) {
+TEST_P(NNPoolingParity, MaxPool3d_Backward) {
     pool_grad_parity([] { return nn::MaxPool3d(2); }, {1, 2, 4, 4, 4},
                      "MaxPool3d_bwd");
 }
-TEST(NNPoolingParity, AvgPool3d_Backward) {
+TEST_P(NNPoolingParity, AvgPool3d_Backward) {
     pool_grad_parity([] { return nn::AvgPool3d(2); }, {1, 2, 4, 4, 4},
                      "AvgPool3d_bwd");
 }
-TEST(NNPoolingParity, AdaptiveMaxPool3d_Backward) {
+TEST_P(NNPoolingParity, AdaptiveMaxPool3d_Backward) {
     pool_grad_parity([] { return nn::AdaptiveMaxPool3d(2, 2, 2); },
                      {1, 2, 4, 4, 4}, "AdaptiveMaxPool3d_bwd");
 }
-TEST(NNPoolingParity, AdaptiveAvgPool3d_Backward) {
+TEST_P(NNPoolingParity, AdaptiveAvgPool3d_Backward) {
     pool_grad_parity([] { return nn::AdaptiveAvgPool3d(2, 2, 2); },
                      {1, 2, 4, 4, 4}, "AdaptiveAvgPool3d_bwd");
 }
 
 // 2D pool backward (was absent from prior coverage)
-TEST(NNPoolingParity, MaxPool2d_Backward) {
+TEST_P(NNPoolingParity, MaxPool2d_Backward) {
     pool_grad_parity([] { return nn::MaxPool2d(2); }, {1, 3, 8, 8},
                      "MaxPool2d_bwd");
 }
-TEST(NNPoolingParity, AvgPool2d_Backward) {
+TEST_P(NNPoolingParity, AvgPool2d_Backward) {
     pool_grad_parity([] { return nn::AvgPool2d(2); }, {1, 3, 8, 8},
                      "AvgPool2d_bwd");
 }
 
 // FractionalMaxPool3d forward (free function in nn::functional)
-TEST(NNPoolingParity, FractionalMaxPool3d) {
+TEST_P(NNPoolingParity, FractionalMaxPool3d) {
     auto input = randn({1, 2, 4, 4, 4}, DType::Float32, Device::cpu());
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
@@ -356,7 +359,7 @@ TEST(NNPoolingParity, FractionalMaxPool3d) {
 // Previously DISABLED_ due to a GPU hang; verified passing across
 // CPU/CUDA/OneAPI/Vulkan/ROCm standalone and in-binary after the expand-
 // kernel stride fix landed.
-TEST(NNPoolingParity, MaxUnpool2d) {
+TEST_P(NNPoolingParity, MaxUnpool2d) {
     // Pooled output shape: (1, 2, 2, 2). Indices shape must match.
     auto pooled = randn({1, 2, 2, 2}, DType::Float32, Device::cpu());
     // Indices: choose the (0, 0) within-kernel position for every 2x2 window.
@@ -403,6 +406,9 @@ TEST(NNPoolingParity, MaxUnpool2d) {
 // ============================================================================
 // Main
 // ============================================================================
+
+INSTANTIATE_BACKEND_TESTS(NNPoolingParity);
+
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

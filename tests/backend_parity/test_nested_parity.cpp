@@ -14,12 +14,15 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/autograd/nested_ops.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 using namespace tenzor::autograd;
 
+
+class NestedParity : public BackendTest {};
 namespace {
 
 // Helper: build an int64 offsets tensor on the CPU for batch sizes `lens`.
@@ -42,7 +45,7 @@ Tensor make_offsets_cpu(const std::vector<int64_t>& lens) {
 
 // Previously DISABLED_ due to GPU hang reports. Verified passing across all
 // backends (CPU/CUDA/ROCm/OneAPI/Vulkan); re-enabling.
-TEST(NestedParity, NestedSoftmax_FwdBwd) {
+TEST_P(NestedParity, NestedSoftmax_FwdBwd) {
     // B=2 sequences of lengths 3 and 5, D=4
     const int64_t D = 4;
     auto offsets_cpu = make_offsets_cpu({3, 5});
@@ -92,7 +95,7 @@ TEST(NestedParity, NestedSoftmax_FwdBwd) {
 // ============================================================================
 
 // Previously DISABLED_ — verified passing; re-enabling.
-TEST(NestedParity, NestedLayerNorm_FwdBwd) {
+TEST_P(NestedParity, NestedLayerNorm_FwdBwd) {
     const int64_t D = 8;
     auto offsets_cpu = make_offsets_cpu({4, 6});
     const int64_t total_len = 4 + 6;
@@ -156,7 +159,7 @@ TEST(NestedParity, NestedLayerNorm_FwdBwd) {
 // Nested sum / mean reductions
 // ============================================================================
 
-TEST(NestedParity, NestedSum) {
+TEST_P(NestedParity, NestedSum) {
     const int64_t D = 4;
     auto offsets_cpu = make_offsets_cpu({2, 3, 1});
     auto values_cpu = randn({6, D}, DType::Float32, Device::cpu());
@@ -189,7 +192,7 @@ TEST(NestedParity, NestedSum) {
 }
 
 // Previously DISABLED_ — verified passing; re-enabling.
-TEST(NestedParity, NestedMean) {
+TEST_P(NestedParity, NestedMean) {
     const int64_t D = 4;
     auto offsets_cpu = make_offsets_cpu({2, 3, 1});
     auto values_cpu = randn({6, D}, DType::Float32, Device::cpu());
@@ -226,7 +229,7 @@ TEST(NestedParity, NestedMean) {
 // ============================================================================
 
 // Previously DISABLED_ — verified passing across all backends; re-enabling.
-TEST(NestedParity, NestedAttention_FwdBwd) {
+TEST_P(NestedParity, NestedAttention_FwdBwd) {
     // B=2, self-attention so q_offsets == kv_offsets.
     // Lens: [3, 4]; head_dim=8
     const int64_t head_dim = 8;
@@ -292,6 +295,9 @@ TEST(NestedParity, NestedAttention_FwdBwd) {
         }
     }
 }
+
+INSTANTIATE_BACKEND_TESTS(NestedParity);
+
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

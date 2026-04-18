@@ -10,16 +10,19 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/sparse/sparse_tensor.hpp>
 #include <tenzor/sparse/sparse_ops.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
+
+class SparseParity : public BackendTest {};
 // ============================================================================
 // Sparse-Dense Interaction Parity
 // ============================================================================
 
-TEST(SparseParity, IdentityMatmul) {
+TEST_P(SparseParity, IdentityMatmul) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -32,7 +35,7 @@ TEST(SparseParity, IdentityMatmul) {
     }, {identity, dense}, 1e-5f, 1e-6f, "Identity @ Dense (sparse-like)");
 }
 
-TEST(SparseParity, SparsePatternMatmul) {
+TEST_P(SparseParity, SparsePatternMatmul) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -78,7 +81,7 @@ static auto make_test_csr() -> SparseTensor {
     return SparseTensor::sparse_csr(crow, cols, vals, {3, 3});
 }
 
-TEST(SparseParity, SpMM_CSR_Small) {
+TEST_P(SparseParity, SpMM_CSR_Small) {
     auto sparse = make_test_csr();
     auto dense = randn({3, 4}, DType::Float32, Device::cpu());
 
@@ -91,7 +94,7 @@ TEST(SparseParity, SpMM_CSR_Small) {
     EXPECT_LT(max_err, 1e-5f) << "SpMM should match dense matmul";
 }
 
-TEST(SparseParity, SpMV) {
+TEST_P(SparseParity, SpMV) {
     auto sparse = make_test_csr();
     auto vec = randn({3}, DType::Float32, Device::cpu());
 
@@ -104,7 +107,7 @@ TEST(SparseParity, SpMV) {
     EXPECT_LT(max_err, 1e-5f) << "SpMV should match dense matvec";
 }
 
-TEST(SparseParity, SparseToDenseRoundtrip) {
+TEST_P(SparseParity, SparseToDenseRoundtrip) {
     // Create dense → sparse → dense, verify equality
     auto original = zeros({4, 4}, DType::Float32, Device::cpu());
     auto data = original.data<float>();
@@ -117,7 +120,7 @@ TEST(SparseParity, SparseToDenseRoundtrip) {
     EXPECT_LT(max_err, 1e-7f) << "Dense→Sparse→Dense roundtrip should be exact";
 }
 
-TEST(SparseParity, SparseScalarMul) {
+TEST_P(SparseParity, SparseScalarMul) {
     auto crow = zeros({3}, DType::Int64, Device::cpu());
     crow.data<int64_t>()[0] = 0; crow.data<int64_t>()[1] = 1; crow.data<int64_t>()[2] = 2;
 
@@ -135,7 +138,7 @@ TEST(SparseParity, SparseScalarMul) {
     EXPECT_NEAR(scaled_dense.data<float>()[3], 14.0f, 1e-6f);
 }
 
-TEST(SparseParity, SparseAddSparseDense) {
+TEST_P(SparseParity, SparseAddSparseDense) {
     auto identity = eye(4, 4, DType::Float32, Device::cpu());
     auto sparse = SparseTensor::from_dense(identity);
     auto dense = ones({4, 4}, DType::Float32, Device::cpu());
@@ -152,7 +155,7 @@ TEST(SparseParity, SparseAddSparseDense) {
 // CUDA SparseAdd Tests — verifies on-device kernel matches CPU reference
 // ============================================================================
 
-TEST(SparseParity, SparseAddCUDA_Float32) {
+TEST_P(SparseParity, SparseAddCUDA_Float32) {
     if (!has_cuda()) GTEST_SKIP() << "CUDA not available";
 
     auto sparse = make_test_csr();
@@ -170,7 +173,7 @@ TEST(SparseParity, SparseAddCUDA_Float32) {
     EXPECT_LT(max_err, 1e-5f) << "CUDA SparseAdd Float32 should match CPU";
 }
 
-TEST(SparseParity, SparseAddCUDA_Float64) {
+TEST_P(SparseParity, SparseAddCUDA_Float64) {
     if (!has_cuda()) GTEST_SKIP() << "CUDA not available";
 
     // Larger matrix to exercise more threads
@@ -188,7 +191,7 @@ TEST(SparseParity, SparseAddCUDA_Float64) {
     EXPECT_LT(max_err, 1e-12) << "CUDA SparseAdd Float64 should match CPU";
 }
 
-TEST(SparseParity, SparseAddCUDA_EmptySparse) {
+TEST_P(SparseParity, SparseAddCUDA_EmptySparse) {
     if (!has_cuda()) GTEST_SKIP() << "CUDA not available";
 
     // Empty sparse (all zeros) + dense should return dense unchanged
@@ -204,7 +207,7 @@ TEST(SparseParity, SparseAddCUDA_EmptySparse) {
     EXPECT_LT(max_err, 1e-6f) << "SparseAdd with empty sparse should return dense unchanged";
 }
 
-TEST(SparseParity, SparseAddCUDA_FullRank) {
+TEST_P(SparseParity, SparseAddCUDA_FullRank) {
     if (!has_cuda()) GTEST_SKIP() << "CUDA not available";
 
     // Fully dense sparse matrix (every element nonzero) + dense
@@ -227,7 +230,7 @@ TEST(SparseParity, SparseAddCUDA_FullRank) {
     EXPECT_LT(max_err, 1e-5f) << "CUDA SparseAdd with full-rank sparse should match CPU";
 }
 
-TEST(SparseParity, FormatConversion_COO_CSR) {
+TEST_P(SparseParity, FormatConversion_COO_CSR) {
     auto original = eye(4, 4, DType::Float32, Device::cpu());
     auto sparse_coo = SparseTensor::from_dense(original, SparseLayout::COO);
     auto sparse_csr = sparse_coo.to_csr();
@@ -237,7 +240,7 @@ TEST(SparseParity, FormatConversion_COO_CSR) {
     EXPECT_LT(max_err, 1e-7f) << "COO→CSR→Dense should preserve values";
 }
 
-TEST(SparseParity, EmptySparseTensor) {
+TEST_P(SparseParity, EmptySparseTensor) {
     // Sparse tensor with no nonzero elements — create via from_dense of zeros
     auto zero_matrix = zeros({4, 4}, DType::Float32, Device::cpu());
     auto sparse = SparseTensor::from_dense(zero_matrix);
@@ -251,7 +254,7 @@ TEST(SparseParity, EmptySparseTensor) {
 // SpGEMM, DenseToSparse, sparse triangular solve (plan Phase 3.5)
 // ============================================================================
 
-TEST(SparseParity, DenseToSparse_Roundtrip_AllBackends) {
+TEST_P(SparseParity, DenseToSparse_Roundtrip_AllBackends) {
     // Sparse pattern we control: 4x4 with two nonzeros per row.
     auto dense = zeros({4, 4}, DType::Float32, Device::cpu());
     auto* d = dense.data<float>();
@@ -281,7 +284,7 @@ TEST(SparseParity, DenseToSparse_Roundtrip_AllBackends) {
 // spgemm_kernel` directly, and by routing spgemm through the SYCL-native
 // Int64 path instead of the dense-intermediate oneMKL path whose helpers
 // assume Int32 CSR indices.
-TEST(SparseParity, SpGEMM) {
+TEST_P(SparseParity, SpGEMM) {
     // A: 4x5 sparse, B: 5x3 sparse; product C = A @ B is 4x3 sparse.
     auto A_dense = zeros({4, 5}, DType::Float32, Device::cpu());
     auto B_dense = zeros({5, 3}, DType::Float32, Device::cpu());
@@ -320,7 +323,7 @@ TEST(SparseParity, SpGEMM) {
     }
 }
 
-TEST(SparseParity, SparseTriangularSolve) {
+TEST_P(SparseParity, SparseTriangularSolve) {
     // Build lower-triangular sparse L with nonzero diagonal; solve L @ x = b.
     auto L_dense = zeros({4, 4}, DType::Float32, Device::cpu());
     auto* l = L_dense.data<float>();
@@ -360,7 +363,7 @@ TEST(SparseParity, SparseTriangularSolve) {
 // exposes a single `sparse_triangular_solve(L, b)` which works for both the
 // vector (b is [N, 1]) and matrix-RHS (b is [N, K]) cases. The test above
 // covers the vector case; extend to matrix-RHS below.
-TEST(SparseParity, SparseTriangularSolve_Matrix) {
+TEST_P(SparseParity, SparseTriangularSolve_Matrix) {
     auto L_dense = zeros({4, 4}, DType::Float32, Device::cpu());
     auto* l = L_dense.data<float>();
     l[0]=2.0f;  l[5]=3.0f;  l[10]=4.0f; l[15]=5.0f;
@@ -395,6 +398,9 @@ TEST(SparseParity, SparseTriangularSolve_Matrix) {
         }
     }
 }
+
+INSTANTIATE_BACKEND_TESTS(SparseParity);
+
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

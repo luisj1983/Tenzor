@@ -13,16 +13,19 @@
 #include <tenzor/ops/windows.hpp>
 #include <tenzor/nn/layers/alibi.hpp>
 #include <tenzor/nn/layers/rope.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
+
+class Phase5Parity : public BackendTest {};
 // ============================================================================
 // ALiBi — positional bias used additively with attention scores
 // ============================================================================
 
-TEST(Phase5Parity, ALiBi_Bias) {
+TEST_P(Phase5Parity, ALiBi_Bias) {
     // Construct ALiBi with 4 heads and ask for a (seq_q, seq_k) bias. Since
     // bias generation is deterministic and device-dependent via the device
     // argument, we check that each backend produces the same result as CPU.
@@ -59,7 +62,7 @@ TEST(Phase5Parity, ALiBi_Bias) {
 //      stride/shape buffers before the async kernel launched using them;
 //      fixed by calling hipStreamSynchronize(stream) before the guards go
 //      out of scope in src/backends/rocm/kernels/transform.hip.cpp.
-TEST(Phase5Parity, RoPE_Forward) {
+TEST_P(Phase5Parity, RoPE_Forward) {
     // dim=8, max_seq_len=16. Input: (batch=2, seq=8, head_dim=8).
     nn::RoPE rope_cpu(8, 16);
     auto input = randn({2, 8, 8}, DType::Float32, Device::cpu());
@@ -87,7 +90,7 @@ TEST(Phase5Parity, RoPE_Forward) {
 }
 
 // Fixed alongside RoPE_Forward (same ROCm mul/contiguous bug chain).
-TEST(Phase5Parity, RoPE_WithOffset) {
+TEST_P(Phase5Parity, RoPE_WithOffset) {
     nn::RoPE rope_cpu(8, 32);
     auto input = randn({2, 4, 8}, DType::Float32, Device::cpu());
     // With offset=10, positions 0..3 map to global 10..13.
@@ -117,7 +120,7 @@ TEST(Phase5Parity, RoPE_WithOffset) {
 // Windows ops (hann, hamming, blackman, bartlett, kaiser)
 // ============================================================================
 
-TEST(Phase5Parity, HannWindow) {
+TEST_P(Phase5Parity, HannWindow) {
     // Window generation produces a deterministic 1D tensor; since it doesn't
     // take an input tensor, we compare reference-vs-per-backend by asking for
     // the window on each device directly.
@@ -142,7 +145,7 @@ TEST(Phase5Parity, HannWindow) {
     }
 }
 
-TEST(Phase5Parity, HammingWindow) {
+TEST_P(Phase5Parity, HammingWindow) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -165,6 +168,9 @@ TEST(Phase5Parity, HammingWindow) {
         }
     }
 }
+
+INSTANTIATE_BACKEND_TESTS(Phase5Parity);
+
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

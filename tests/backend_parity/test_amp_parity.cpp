@@ -12,12 +12,15 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/amp/grad_scaler.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
-TEST(AMPParity, ScaleLossMatches) {
+
+class AMPParity : public BackendTest {};
+TEST_P(AMPParity, ScaleLossMatches) {
     // Single-input scalar loss: y = sum(x^2). scale(loss) should produce the
     // same scaled scalar on every backend.
     auto input_cpu = randn({8}, DType::Float32, Device::cpu());
@@ -55,7 +58,7 @@ TEST(AMPParity, ScaleLossMatches) {
     }
 }
 
-TEST(AMPParity, ScaledBackwardMatches) {
+TEST_P(AMPParity, ScaledBackwardMatches) {
     // After backward on a scaled loss, the gradient magnitude should equal
     // scale * true_grad. Verify that the scaled input gradient matches across
     // backends (the unscaled path is what Optimizer.step would walk, but the
@@ -97,6 +100,9 @@ TEST(AMPParity, ScaledBackwardMatches) {
         }
     }
 }
+
+INSTANTIATE_BACKEND_TESTS(AMPParity);
+
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

@@ -9,114 +9,104 @@
 #include <gtest/gtest.h>
 #include <iostream>
 #include <tenzor/tenzor.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
+
+class ComparisonParity : public BackendTest {};
 // ============================================================================
 // Comparison Operations Parity Tests
 // ============================================================================
 
-TEST(ComparisonParity, Eq) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ComparisonParity, Eq) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
     auto b = randn({32, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return inputs[0] == inputs[1];
-    }, {a, b}, 0.0f, 0.0f, "Eq");
+    }, {a, b}, device, 0.0f, 0.0f, "Eq");
 }
 
-TEST(ComparisonParity, Ne) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ComparisonParity, Ne) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
     auto b = randn({32, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return inputs[0] != inputs[1];
-    }, {a, b}, 0.0f, 0.0f, "Ne");
+    }, {a, b}, device, 0.0f, 0.0f, "Ne");
 }
 
-TEST(ComparisonParity, Lt) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ComparisonParity, Lt) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
     auto b = randn({32, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return inputs[0] < inputs[1];
-    }, {a, b}, 0.0f, 0.0f, "Lt");
+    }, {a, b}, device, 0.0f, 0.0f, "Lt");
 }
 
-TEST(ComparisonParity, Le) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ComparisonParity, Le) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
     auto b = randn({32, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return inputs[0] <= inputs[1];
-    }, {a, b}, 0.0f, 0.0f, "Le");
+    }, {a, b}, device, 0.0f, 0.0f, "Le");
 }
 
-TEST(ComparisonParity, Gt) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ComparisonParity, Gt) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
     auto b = randn({32, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return inputs[0] > inputs[1];
-    }, {a, b}, 0.0f, 0.0f, "Gt");
+    }, {a, b}, device, 0.0f, 0.0f, "Gt");
 }
 
-TEST(ComparisonParity, Ge) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ComparisonParity, Ge) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
     auto b = randn({32, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return inputs[0] >= inputs[1];
-    }, {a, b}, 0.0f, 0.0f, "Ge");
+    }, {a, b}, device, 0.0f, 0.0f, "Ge");
 }
 
 // ============================================================================
 // Broadcast Comparison Tests
 // ============================================================================
 
-TEST(ComparisonParity, Eq_Broadcast) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ComparisonParity, Eq_Broadcast) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
     auto b = randn({1, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return inputs[0] == inputs[1];
-    }, {a, b}, 0.0f, 0.0f, "Eq_Broadcast");
+    }, {a, b}, device, 0.0f, 0.0f, "Eq_Broadcast");
 }
 
-TEST(ComparisonParity, Lt_Broadcast) {
-    auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+TEST_P(ComparisonParity, Lt_Broadcast) {
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
     auto b = randn({1, 32}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return inputs[0] < inputs[1];
-    }, {a, b}, 0.0f, 0.0f, "Lt_Broadcast");
+    }, {a, b}, device, 0.0f, 0.0f, "Lt_Broadcast");
 }
+
+INSTANTIATE_BACKEND_TESTS(ComparisonParity);
+
 
 
 

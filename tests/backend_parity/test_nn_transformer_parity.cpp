@@ -10,16 +10,19 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/gqa_attention.hpp>
 #include <tenzor/nn/layers/flex_attention.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
+
+class NNTransformerParity : public BackendTest {};
 // ============================================================================
 // Transformer / Attention Parity Tests
 // ============================================================================
 
-TEST(NNTransformerParity, TransformerEncoderLayer) {
+TEST_P(NNTransformerParity, TransformerEncoderLayer) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -49,7 +52,7 @@ TEST(NNTransformerParity, TransformerEncoderLayer) {
     }
 }
 
-TEST(NNTransformerParity, TransformerDecoderLayer) {
+TEST_P(NNTransformerParity, TransformerDecoderLayer) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -82,7 +85,7 @@ TEST(NNTransformerParity, TransformerDecoderLayer) {
     }
 }
 
-TEST(NNTransformerParity, TransformerEncoder) {
+TEST_P(NNTransformerParity, TransformerEncoder) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -114,7 +117,7 @@ TEST(NNTransformerParity, TransformerEncoder) {
     }
 }
 
-TEST(NNTransformerParity, MultiheadAttention) {
+TEST_P(NNTransformerParity, MultiheadAttention) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -153,7 +156,7 @@ TEST(NNTransformerParity, MultiheadAttention) {
     }
 }
 
-TEST(NNTransformerParity, PositionalEncoding) {
+TEST_P(NNTransformerParity, PositionalEncoding) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -187,7 +190,7 @@ TEST(NNTransformerParity, PositionalEncoding) {
 // confirms CPU flex_attention completes in milliseconds; the original "hang"
 // was accumulated OneAPI backend-initialization time exceeding a short test
 // timeout. The test now runs across all available backends.
-TEST(NNTransformerParity, FlexAttention) {
+TEST_P(NNTransformerParity, FlexAttention) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -227,7 +230,7 @@ TEST(NNTransformerParity, FlexAttention) {
 // strides when the input was a non-contiguous view (repeat_kv feeds it the
 // result of permute+unsqueeze). Fix: materialize input to contiguous in
 // each backend's expand_kernel.
-TEST(NNTransformerParity, SlidingWindowAttention) {
+TEST_P(NNTransformerParity, SlidingWindowAttention) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -268,7 +271,7 @@ TEST(NNTransformerParity, SlidingWindowAttention) {
     }
 }
 
-TEST(NNTransformerParity, GroupedQueryAttention) {
+TEST_P(NNTransformerParity, GroupedQueryAttention) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -312,6 +315,9 @@ TEST(NNTransformerParity, GroupedQueryAttention) {
 // ============================================================================
 // Main
 // ============================================================================
+
+INSTANTIATE_BACKEND_TESTS(NNTransformerParity);
+
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

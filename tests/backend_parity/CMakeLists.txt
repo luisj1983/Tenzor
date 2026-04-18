@@ -117,6 +117,9 @@ add_parity_test(test_phase5_parity test_phase5_parity.cpp)
 # Phase 5.1: distributions parity (log_prob / entropy / mean / variance)
 add_parity_test(test_distributions_parity test_distributions_parity.cpp)
 
+# Cross-backend (non-CPU-reference) parity — compares all available pairs
+add_parity_test(test_cross_backend_pairs test_cross_backend_pairs.cpp)
+
 # Phase 5.3: FP8 parity (hardware-dependent; graceful skip via try/catch)
 add_parity_test(test_fp8_parity test_fp8_parity.cpp)
 

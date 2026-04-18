@@ -8,16 +8,19 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
+
+class NNConvParity : public BackendTest {};
 // ============================================================================
 // Conv1d Tests
 // ============================================================================
 
-TEST(NNConvParity, Conv1d_Basic) {
+TEST_P(NNConvParity, Conv1d_Basic) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -46,7 +49,7 @@ TEST(NNConvParity, Conv1d_Basic) {
     }
 }
 
-TEST(NNConvParity, Conv1d_Stride) {
+TEST_P(NNConvParity, Conv1d_Stride) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -75,7 +78,7 @@ TEST(NNConvParity, Conv1d_Stride) {
     }
 }
 
-TEST(NNConvParity, Conv1d_Padding) {
+TEST_P(NNConvParity, Conv1d_Padding) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -108,7 +111,7 @@ TEST(NNConvParity, Conv1d_Padding) {
 // Conv3d Tests
 // ============================================================================
 
-TEST(NNConvParity, Conv3d_Basic) {
+TEST_P(NNConvParity, Conv3d_Basic) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -137,7 +140,7 @@ TEST(NNConvParity, Conv3d_Basic) {
     }
 }
 
-TEST(NNConvParity, Conv3d_Stride) {
+TEST_P(NNConvParity, Conv3d_Stride) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -170,7 +173,7 @@ TEST(NNConvParity, Conv3d_Stride) {
 // Transposed Convolution Tests
 // ============================================================================
 
-TEST(NNConvParity, ConvTranspose1d) {
+TEST_P(NNConvParity, ConvTranspose1d) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -203,7 +206,7 @@ TEST(NNConvParity, ConvTranspose1d) {
     }
 }
 
-TEST(NNConvParity, ConvTranspose3d) {
+TEST_P(NNConvParity, ConvTranspose3d) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -240,7 +243,7 @@ TEST(NNConvParity, ConvTranspose3d) {
 // Grouped Convolution Tests
 // ============================================================================
 
-TEST(NNConvParity, Conv2d_Groups2) {
+TEST_P(NNConvParity, Conv2d_Groups2) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -270,7 +273,7 @@ TEST(NNConvParity, Conv2d_Groups2) {
     }
 }
 
-TEST(NNConvParity, Conv1d_Groups) {
+TEST_P(NNConvParity, Conv1d_Groups) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -304,7 +307,7 @@ TEST(NNConvParity, Conv1d_Groups) {
 // DeformableConv2d Test
 // ============================================================================
 
-TEST(NNConvParity, DeformableConv2d) {
+TEST_P(NNConvParity, DeformableConv2d) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -353,7 +356,7 @@ TEST(NNConvParity, DeformableConv2d) {
 // Conv2d No-Bias Test
 // ============================================================================
 
-TEST(NNConvParity, Conv2d_NoBias) {
+TEST_P(NNConvParity, Conv2d_NoBias) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -387,7 +390,7 @@ TEST(NNConvParity, Conv2d_NoBias) {
 // Depthwise Conv2d Test
 // ============================================================================
 
-TEST(NNConvParity, DepthwiseConv2d) {
+TEST_P(NNConvParity, DepthwiseConv2d) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -423,7 +426,7 @@ TEST(NNConvParity, DepthwiseConv2d) {
 // convs.  Phase 3.2 gap-fill.
 // ============================================================================
 
-TEST(NNConvParity, ConvTranspose2d) {
+TEST_P(NNConvParity, ConvTranspose2d) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -512,21 +515,21 @@ void conv_grad_parity(ConvT make_conv,
 }
 }  // namespace
 
-TEST(NNConvParity, Conv2d_Backward) {
+TEST_P(NNConvParity, Conv2d_Backward) {
     conv_grad_parity(
         [] { return nn::Conv2d(3, 8, 3, 1, 1); },
         {1, 3, 8, 8},
         "Conv2d_Backward");
 }
 
-TEST(NNConvParity, Conv1d_Backward) {
+TEST_P(NNConvParity, Conv1d_Backward) {
     conv_grad_parity(
         [] { return nn::Conv1d(3, 8, 3, 1, 1); },
         {1, 3, 16},
         "Conv1d_Backward");
 }
 
-TEST(NNConvParity, Conv3d_Backward) {
+TEST_P(NNConvParity, Conv3d_Backward) {
     conv_grad_parity(
         [] { return nn::Conv3d(2, 4, 3, 1, 1); },
         {1, 2, 4, 4, 4},
@@ -536,6 +539,9 @@ TEST(NNConvParity, Conv3d_Backward) {
 // ============================================================================
 // Main
 // ============================================================================
+
+INSTANTIATE_BACKEND_TESTS(NNConvParity);
+
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

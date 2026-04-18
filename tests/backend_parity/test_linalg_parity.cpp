@@ -18,11 +18,14 @@
 #include <iostream>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/ops/linalg.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
+
+class LinalgParity : public BackendTest {};
 // ============================================================================
 // Helper: create a well-conditioned matrix (A + k*I) to ensure invertibility
 // ============================================================================
@@ -53,7 +56,7 @@ static Tensor make_symmetric(int64_t n, uint64_t seed = 400) {
 // Determinant
 // ============================================================================
 
-TEST(LinalgParity, Det) {
+TEST_P(LinalgParity, Det) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -84,7 +87,7 @@ TEST(LinalgParity, Det) {
 // Inverse — verify A @ inv(A) ~= I
 // ============================================================================
 
-TEST(LinalgParity, Inv) {
+TEST_P(LinalgParity, Inv) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -120,7 +123,7 @@ TEST(LinalgParity, Inv) {
 // Solve — verify A @ x ~= b
 // ============================================================================
 
-TEST(LinalgParity, Solve) {
+TEST_P(LinalgParity, Solve) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -158,7 +161,7 @@ TEST(LinalgParity, Solve) {
 // SVD — verify A ~= U @ diag(S) @ Vh (don't compare U/V directly)
 // ============================================================================
 
-TEST(LinalgParity, SVD) {
+TEST_P(LinalgParity, SVD) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -198,7 +201,7 @@ TEST(LinalgParity, SVD) {
 // QR — verify A ~= Q @ R (don't compare Q/R individually)
 // ============================================================================
 
-TEST(LinalgParity, QR) {
+TEST_P(LinalgParity, QR) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -234,7 +237,7 @@ TEST(LinalgParity, QR) {
 // Compare eigenvalues directly; verify eigenvectors via reconstruction only
 // ============================================================================
 
-TEST(LinalgParity, Eigh) {
+TEST_P(LinalgParity, Eigh) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -277,7 +280,7 @@ TEST(LinalgParity, Eigh) {
 // Cholesky — verify L @ L^T ~= A for positive-definite input
 // ============================================================================
 
-TEST(LinalgParity, Cholesky) {
+TEST_P(LinalgParity, Cholesky) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -317,7 +320,7 @@ TEST(LinalgParity, Cholesky) {
 // lu() returns (L, U, pivots); we verify L @ U ~= A (pivoted)
 // ============================================================================
 
-TEST(LinalgParity, LU) {
+TEST_P(LinalgParity, LU) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -357,7 +360,7 @@ TEST(LinalgParity, LU) {
 // Addmm — beta*input + alpha*(mat1 @ mat2)
 // ============================================================================
 
-TEST(LinalgParity, Addmm) {
+TEST_P(LinalgParity, Addmm) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -374,7 +377,7 @@ TEST(LinalgParity, Addmm) {
 // Addmv — beta*input + alpha*(mat @ vec)
 // ============================================================================
 
-TEST(LinalgParity, Addmv) {
+TEST_P(LinalgParity, Addmv) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -391,7 +394,7 @@ TEST(LinalgParity, Addmv) {
 // Baddbmm — batched beta*input + alpha*(batch1 @ batch2)
 // ============================================================================
 
-TEST(LinalgParity, Baddbmm) {
+TEST_P(LinalgParity, Baddbmm) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -408,7 +411,7 @@ TEST(LinalgParity, Baddbmm) {
 // SolveTriangular — solve with triangular matrix
 // ============================================================================
 
-TEST(LinalgParity, SolveTriangular) {
+TEST_P(LinalgParity, SolveTriangular) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -445,6 +448,9 @@ TEST(LinalgParity, SolveTriangular) {
 }
 
 // Pinv, LstSq, MatrixExp moved to test_linalg_extended_parity.cpp (plan 3.6).
+
+INSTANTIATE_BACKEND_TESTS(LinalgParity);
+
 
 int main(int argc, char** argv) {
     try {

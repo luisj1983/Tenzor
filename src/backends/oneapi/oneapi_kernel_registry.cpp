@@ -2809,7 +2809,14 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             auto& queue = get_q(inputs);
             Tensor conv_out = oneapi::conv2d_forward(inputs[0], inputs[1], bias,
                 stride, padding, dilation, groups, queue);
-            return oneapi::relu_kernel(conv_out, queue);
+            // Drain the outer SYCL queue between conv2d_forward (oneDNN
+            // interop stream) and relu_kernel (raw SYCL kernel). Without this
+            // the two race on conv_out's USM memory and the test hangs in-binary.
+            // Same fix as FusedConv2dSigmoid below.
+            queue.wait();
+            Tensor relu_out = oneapi::relu_kernel(conv_out, queue);
+            queue.wait();
+            return relu_out;
         });
 
     table.register_single_output_kernel(OpId::FusedConv2dSigmoid,
@@ -2847,7 +2854,10 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             auto& queue = get_q(inputs);
             Tensor conv_out = oneapi::conv2d_forward(inputs[0], inputs[1], bias,
                 stride, padding, dilation, groups, queue);
-            return oneapi::tanh_kernel(conv_out, queue);
+            queue.wait();
+            Tensor tanh_out = oneapi::tanh_kernel(conv_out, queue);
+            queue.wait();
+            return tanh_out;
         });
 
     table.register_single_output_kernel(OpId::FusedConv2dSwish,
@@ -2860,7 +2870,10 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             auto& queue = get_q(inputs);
             Tensor conv_out = oneapi::conv2d_forward(inputs[0], inputs[1], bias,
                 stride, padding, dilation, groups, queue);
-            return oneapi::swish_kernel(conv_out, queue);
+            queue.wait();
+            Tensor swish_out = oneapi::swish_kernel(conv_out, queue);
+            queue.wait();
+            return swish_out;
         });
 
     // =========================================================================

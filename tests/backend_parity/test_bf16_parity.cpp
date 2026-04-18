@@ -23,6 +23,7 @@
 #include <tenzor/backend/fast_dispatch.hpp>
 #include <tenzor/ops/op_id.hpp>
 #include <tenzor/backend/op_attributes.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 #include <cmath>
@@ -31,6 +32,8 @@
 using namespace tenzor;
 using namespace tenzor::testing;
 
+
+class BF16Parity : public BackendTest {};
 namespace {
 
 // BF16-specific tolerances. BFloat16 has 8-bit mantissa (7 explicit bits),
@@ -120,7 +123,7 @@ void test_bf16_op(Op op,
 // ============================================================================
 
 #define BF16_UNARY_TEST(TestName, OpExpr)                                     \
-    TEST(BF16Parity, TestName) {                                              \
+    TEST_P(BF16Parity, TestName) {                                              \
         auto a = tenzor::abs(randn({32, 32}, DType::Float32, Device::cpu()))  \
                  + 0.5f;                                                      \
         test_bf16_op(                                                         \
@@ -141,7 +144,7 @@ BF16_UNARY_TEST(Ceil,       tenzor::ceil(in[0]))
 // (CPU: half-away-from-zero, Vulkan: half-to-nearest-even). Both are valid.
 // Avoid exact .5 by adding a small offset so the test checks data integrity
 // rather than rounding-mode semantics.
-TEST(BF16Parity, Round) {
+TEST_P(BF16Parity, Round) {
     // Force values well away from x.5 boundaries by flooring to integers
     // and adding 0.25. E.g., {0.25, 1.25, 2.25, ...} always rounds down.
     auto raw = tenzor::abs(randn({32, 32}, DType::Float32, Device::cpu())) * 3.0f;
@@ -166,7 +169,7 @@ BF16_UNARY_TEST(Sinh, tenzor::sinh(in[0]))
 BF16_UNARY_TEST(Cosh, tenzor::cosh(in[0]))
 
 // Clamp
-TEST(BF16Parity, Clamp) {
+TEST_P(BF16Parity, Clamp) {
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
     test_bf16_op(
         [](const std::vector<Tensor>& in) -> Tensor {
@@ -180,7 +183,7 @@ TEST(BF16Parity, Clamp) {
 // ============================================================================
 
 #define BF16_BINARY_TEST(TestName, OpExpr)                                    \
-    TEST(BF16Parity, TestName) {                                              \
+    TEST_P(BF16Parity, TestName) {                                              \
         auto a = randn({16, 16}, DType::Float32, Device::cpu());              \
         auto b = randn({16, 16}, DType::Float32, Device::cpu()) + 2.0f;      \
         test_bf16_op(                                                         \
@@ -207,7 +210,7 @@ BF16_UNARY_TEST(Prod, tenzor::prod(in[0]))
 // MatMul
 // ============================================================================
 
-TEST(BF16Parity, MatMul) {
+TEST_P(BF16Parity, MatMul) {
     auto a = randn({8, 16}, DType::Float32, Device::cpu());
     auto b = randn({16, 8}, DType::Float32, Device::cpu());
     test_bf16_op(
@@ -221,7 +224,7 @@ TEST(BF16Parity, MatMul) {
 // Activations (via nn::functional — exercises activation kernel dispatch)
 // ============================================================================
 
-TEST(BF16Parity, ReLU) {
+TEST_P(BF16Parity, ReLU) {
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
     test_bf16_op(
         [](const std::vector<Tensor>& in) -> Tensor {
@@ -230,7 +233,7 @@ TEST(BF16Parity, ReLU) {
         {a}, "ReLU");
 }
 
-TEST(BF16Parity, Sigmoid) {
+TEST_P(BF16Parity, Sigmoid) {
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
     test_bf16_op(
         [](const std::vector<Tensor>& in) -> Tensor {
@@ -239,7 +242,7 @@ TEST(BF16Parity, Sigmoid) {
         {a}, "Sigmoid");
 }
 
-TEST(BF16Parity, GeLU) {
+TEST_P(BF16Parity, GeLU) {
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
     test_bf16_op(
         [](const std::vector<Tensor>& in) -> Tensor {
@@ -248,7 +251,7 @@ TEST(BF16Parity, GeLU) {
         {a}, "GeLU");
 }
 
-TEST(BF16Parity, Softmax) {
+TEST_P(BF16Parity, Softmax) {
     auto a = randn({8, 16}, DType::Float32, Device::cpu());
     test_bf16_op(
         [](const std::vector<Tensor>& in) -> Tensor {
@@ -261,7 +264,7 @@ TEST(BF16Parity, Softmax) {
 // Shape / data-movement ops (exercise permute, expand, cat, etc.)
 // ============================================================================
 
-TEST(BF16Parity, Transpose) {
+TEST_P(BF16Parity, Transpose) {
     auto a = randn({16, 32}, DType::Float32, Device::cpu());
     test_bf16_op(
         [](const std::vector<Tensor>& in) -> Tensor {
@@ -270,7 +273,7 @@ TEST(BF16Parity, Transpose) {
         {a}, "Transpose");
 }
 
-TEST(BF16Parity, Permute) {
+TEST_P(BF16Parity, Permute) {
     auto a = randn({4, 8, 16}, DType::Float32, Device::cpu());
     test_bf16_op(
         [](const std::vector<Tensor>& in) -> Tensor {
@@ -279,7 +282,7 @@ TEST(BF16Parity, Permute) {
         {a}, "Permute");
 }
 
-TEST(BF16Parity, Cat) {
+TEST_P(BF16Parity, Cat) {
     auto a = randn({8, 8}, DType::Float32, Device::cpu());
     auto b = randn({8, 8}, DType::Float32, Device::cpu());
     test_bf16_op(
@@ -289,7 +292,7 @@ TEST(BF16Parity, Cat) {
         {a, b}, "Cat");
 }
 
-TEST(BF16Parity, Expand) {
+TEST_P(BF16Parity, Expand) {
     auto a = randn({1, 16}, DType::Float32, Device::cpu());
     test_bf16_op(
         [](const std::vector<Tensor>& in) -> Tensor {
@@ -298,7 +301,7 @@ TEST(BF16Parity, Expand) {
         {a}, "Expand");
 }
 
-TEST(BF16Parity, Fill) {
+TEST_P(BF16Parity, Fill) {
     // Exercises dispatchFill / dispatchStridedFill for BF16
     test_bf16_op(
         [](const std::vector<Tensor>& in) -> Tensor {
@@ -313,7 +316,7 @@ TEST(BF16Parity, Fill) {
 // Comparison ops
 // ============================================================================
 
-TEST(BF16Parity, ComparisonGt) {
+TEST_P(BF16Parity, ComparisonGt) {
     auto a = randn({16, 16}, DType::Float32, Device::cpu());
     auto b = randn({16, 16}, DType::Float32, Device::cpu());
     test_bf16_op(
@@ -327,7 +330,7 @@ TEST(BF16Parity, ComparisonGt) {
 // Conv2d forward (critical for vision models)
 // ============================================================================
 
-TEST(BF16Parity, Conv2dForward) {
+TEST_P(BF16Parity, Conv2dForward) {
     auto input = randn({1, 1, 8, 8}, DType::Float32, Device::cpu());
     auto weight = randn({1, 1, 3, 3}, DType::Float32, Device::cpu());
     test_bf16_op(
@@ -345,6 +348,9 @@ TEST(BF16Parity, Conv2dForward) {
 // ============================================================================
 // Custom main — initialize tenzor before any test runs.
 // ============================================================================
+
+INSTANTIATE_BACKEND_TESTS(BF16Parity);
+
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

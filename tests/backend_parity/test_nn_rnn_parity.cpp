@@ -8,16 +8,19 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
+
+class NNRNNParity : public BackendTest {};
 // ============================================================================
 // Cell-level tests
 // ============================================================================
 
-TEST(NNRNNParity, LSTMCell) {
+TEST_P(NNRNNParity, LSTMCell) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -54,7 +57,7 @@ TEST(NNRNNParity, LSTMCell) {
     }
 }
 
-TEST(NNRNNParity, GRUCell) {
+TEST_P(NNRNNParity, GRUCell) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -85,7 +88,7 @@ TEST(NNRNNParity, GRUCell) {
     }
 }
 
-TEST(NNRNNParity, RNNCell) {
+TEST_P(NNRNNParity, RNNCell) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -120,7 +123,7 @@ TEST(NNRNNParity, RNNCell) {
 // Full-sequence multi-layer tests
 // ============================================================================
 
-TEST(NNRNNParity, LSTM_MultiLayer) {
+TEST_P(NNRNNParity, LSTM_MultiLayer) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -149,7 +152,7 @@ TEST(NNRNNParity, LSTM_MultiLayer) {
     }
 }
 
-TEST(NNRNNParity, GRU_MultiLayer) {
+TEST_P(NNRNNParity, GRU_MultiLayer) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -178,7 +181,7 @@ TEST(NNRNNParity, GRU_MultiLayer) {
     }
 }
 
-TEST(NNRNNParity, RNN) {
+TEST_P(NNRNNParity, RNN) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -206,7 +209,7 @@ TEST(NNRNNParity, RNN) {
     }
 }
 
-TEST(NNRNNParity, LSTM_Bidirectional) {
+TEST_P(NNRNNParity, LSTM_Bidirectional) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -236,7 +239,7 @@ TEST(NNRNNParity, LSTM_Bidirectional) {
     }
 }
 
-TEST(NNRNNParity, LSTM_Dropout_Eval) {
+TEST_P(NNRNNParity, LSTM_Dropout_Eval) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -272,7 +275,7 @@ TEST(NNRNNParity, LSTM_Dropout_Eval) {
 // Sequential cell unrolling tests
 // ============================================================================
 
-TEST(NNRNNParity, LSTMCell_Sequence) {
+TEST_P(NNRNNParity, LSTMCell_Sequence) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -322,7 +325,7 @@ TEST(NNRNNParity, LSTMCell_Sequence) {
     }
 }
 
-TEST(NNRNNParity, GRUCell_Sequence) {
+TEST_P(NNRNNParity, GRUCell_Sequence) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -369,6 +372,9 @@ TEST(NNRNNParity, GRUCell_Sequence) {
         }
     }
 }
+
+INSTANTIATE_BACKEND_TESTS(NNRNNParity);
+
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

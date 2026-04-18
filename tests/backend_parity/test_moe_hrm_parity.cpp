@@ -10,11 +10,14 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/moe.hpp>
 #include <tenzor/nn/layers/hrm.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
+
+class MoEHRMParity : public BackendTest {};
 // ============================================================================
 // Mixture of Experts
 // ============================================================================
@@ -26,7 +29,7 @@ using namespace tenzor::testing;
 // for Int64 inputs, corrupting the `eq(idx_col, expert_scalar)` mask in
 // MoE's routing path. Fixed by adding `expand_i64.comp` and routing Int64
 // tensors to it in `vulkan_ops_memory.cpp::dispatchExpand`.
-TEST(MoEHRMParity, MixtureOfExperts_Forward) {
+TEST_P(MoEHRMParity, MixtureOfExperts_Forward) {
     // Small config: input_dim=16, hidden_dim=32, num_experts=4, top_k=2.
     nn::MixtureOfExperts moe_cpu(16, 32, 4, 2, 1.25, 0.01, 0.0);
     moe_cpu.eval();
@@ -65,7 +68,7 @@ TEST(MoEHRMParity, MixtureOfExperts_Forward) {
 // HRM (Hierarchical Reasoning Module)
 // ============================================================================
 
-TEST(MoEHRMParity, HRM_Forward) {
+TEST_P(MoEHRMParity, HRM_Forward) {
     nn::HRMConfig cfg;
     cfg.d_model = 32;
     cfg.n_heads = 4;
@@ -113,6 +116,9 @@ TEST(MoEHRMParity, HRM_Forward) {
         }
     }
 }
+
+INSTANTIATE_BACKEND_TESTS(MoEHRMParity);
+
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

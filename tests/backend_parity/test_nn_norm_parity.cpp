@@ -11,16 +11,19 @@
 #include <iostream>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/sync_batchnorm.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
+
+class NNNormParity : public BackendTest {};
 // ============================================================================
 // Instance Normalization
 // ============================================================================
 
-TEST(NNNormParity, InstanceNorm1d) {
+TEST_P(NNNormParity, InstanceNorm1d) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -50,7 +53,7 @@ TEST(NNNormParity, InstanceNorm1d) {
     }
 }
 
-TEST(NNNormParity, InstanceNorm2d) {
+TEST_P(NNNormParity, InstanceNorm2d) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -80,7 +83,7 @@ TEST(NNNormParity, InstanceNorm2d) {
     }
 }
 
-TEST(NNNormParity, InstanceNorm3d) {
+TEST_P(NNNormParity, InstanceNorm3d) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -114,7 +117,7 @@ TEST(NNNormParity, InstanceNorm3d) {
 // RMSNorm
 // ============================================================================
 
-TEST(NNNormParity, RMSNorm) {
+TEST_P(NNNormParity, RMSNorm) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -148,7 +151,7 @@ TEST(NNNormParity, RMSNorm) {
 // LocalResponseNorm
 // ============================================================================
 
-TEST(NNNormParity, LocalResponseNorm) {
+TEST_P(NNNormParity, LocalResponseNorm) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -183,7 +186,7 @@ TEST(NNNormParity, LocalResponseNorm) {
 // BatchNorm2d without affine parameters
 // ============================================================================
 
-TEST(NNNormParity, BatchNorm2d_NoAffine) {
+TEST_P(NNNormParity, BatchNorm2d_NoAffine) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -228,7 +231,7 @@ TEST(NNNormParity, BatchNorm2d_NoAffine) {
 // LayerNorm with multi-dimensional normalized shape
 // ============================================================================
 
-TEST(NNNormParity, LayerNorm_MultiDim) {
+TEST_P(NNNormParity, LayerNorm_MultiDim) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -262,7 +265,7 @@ TEST(NNNormParity, LayerNorm_MultiDim) {
 // SyncBatchNorm (single-GPU: behaves like regular BatchNorm)
 // ============================================================================
 
-TEST(NNNormParity, SyncBatchNorm) {
+TEST_P(NNNormParity, SyncBatchNorm) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -304,6 +307,9 @@ TEST(NNNormParity, SyncBatchNorm) {
         }
     }
 }
+
+INSTANTIATE_BACKEND_TESTS(NNNormParity);
+
 
 
 

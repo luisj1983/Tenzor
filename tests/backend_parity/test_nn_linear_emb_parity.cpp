@@ -10,16 +10,19 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/lazy_linear.hpp>
 #include <tenzor/nn/layers/lazy_conv.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
+
+class NNLinearEmbParity : public BackendTest {};
 // ============================================================================
 // Linear layers
 // ============================================================================
 
-TEST(NNLinearEmbParity, Linear_Basic) {
+TEST_P(NNLinearEmbParity, Linear_Basic) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -46,7 +49,7 @@ TEST(NNLinearEmbParity, Linear_Basic) {
     }
 }
 
-TEST(NNLinearEmbParity, Linear_NoBias) {
+TEST_P(NNLinearEmbParity, Linear_NoBias) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -73,7 +76,7 @@ TEST(NNLinearEmbParity, Linear_NoBias) {
     }
 }
 
-TEST(NNLinearEmbParity, Bilinear) {
+TEST_P(NNLinearEmbParity, Bilinear) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -107,7 +110,7 @@ TEST(NNLinearEmbParity, Bilinear) {
 // EmbeddingBag
 // ============================================================================
 
-TEST(NNLinearEmbParity, EmbeddingBag_Sum) {
+TEST_P(NNLinearEmbParity, EmbeddingBag_Sum) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -145,7 +148,7 @@ TEST(NNLinearEmbParity, EmbeddingBag_Sum) {
     }
 }
 
-TEST(NNLinearEmbParity, EmbeddingBag_Mean) {
+TEST_P(NNLinearEmbParity, EmbeddingBag_Mean) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -183,7 +186,7 @@ TEST(NNLinearEmbParity, EmbeddingBag_Mean) {
 // LazyLinear
 // ============================================================================
 
-TEST(NNLinearEmbParity, LazyLinear) {
+TEST_P(NNLinearEmbParity, LazyLinear) {
     auto backends = get_available_backends();
     if (backends.size() < 2) GTEST_SKIP();
 
@@ -279,7 +282,7 @@ void lazy_conv_parity_test(
 }
 }  // namespace
 
-TEST(NNLinearEmbParity, LazyConv1d) {
+TEST_P(NNLinearEmbParity, LazyConv1d) {
     lazy_conv_parity_test(
         [] { return nn::LazyConv1d(/*out=*/8, /*k=*/3, /*stride=*/1, /*pad=*/1); },
         /*warmup_shape=*/{1, 4, 16},
@@ -287,7 +290,7 @@ TEST(NNLinearEmbParity, LazyConv1d) {
         "LazyConv1d");
 }
 
-TEST(NNLinearEmbParity, LazyConv2d) {
+TEST_P(NNLinearEmbParity, LazyConv2d) {
     lazy_conv_parity_test(
         [] { return nn::LazyConv2d(/*out=*/8, /*k=*/3, /*stride=*/1, /*pad=*/1); },
         /*warmup_shape=*/{1, 4, 8, 8},
@@ -295,13 +298,16 @@ TEST(NNLinearEmbParity, LazyConv2d) {
         "LazyConv2d");
 }
 
-TEST(NNLinearEmbParity, LazyConv3d) {
+TEST_P(NNLinearEmbParity, LazyConv3d) {
     lazy_conv_parity_test(
         [] { return nn::LazyConv3d(/*out=*/4, /*k=*/3, /*stride=*/1, /*pad=*/1); },
         /*warmup_shape=*/{1, 2, 4, 4, 4},
         /*test_shape=*/{1, 2, 4, 4, 4},
         "LazyConv3d");
 }
+
+INSTANTIATE_BACKEND_TESTS(NNLinearEmbParity);
+
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

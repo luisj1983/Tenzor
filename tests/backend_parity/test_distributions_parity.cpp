@@ -10,17 +10,20 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/distributions/distribution.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
+
+class DistributionsParity : public BackendTest {};
 namespace D = tenzor::distributions;
 
 // ============================================================================
 // Normal distribution
 // ============================================================================
 
-TEST(DistributionsParity, Normal_LogProb) {
+TEST_P(DistributionsParity, Normal_LogProb) {
     auto loc = randn({8}, DType::Float32, Device::cpu());
     auto scale = rand({8}, DType::Float32, Device::cpu()) + 0.5f;  // strictly positive
     auto value = randn({8}, DType::Float32, Device::cpu());
@@ -52,7 +55,7 @@ TEST(DistributionsParity, Normal_LogProb) {
     }
 }
 
-TEST(DistributionsParity, Normal_Entropy) {
+TEST_P(DistributionsParity, Normal_Entropy) {
     auto loc = randn({8}, DType::Float32, Device::cpu());
     auto scale = rand({8}, DType::Float32, Device::cpu()) + 0.5f;
 
@@ -87,7 +90,7 @@ TEST(DistributionsParity, Normal_Entropy) {
 // Uniform distribution
 // ============================================================================
 
-TEST(DistributionsParity, Uniform_LogProb) {
+TEST_P(DistributionsParity, Uniform_LogProb) {
     auto low = zeros({8}, DType::Float32, Device::cpu());
     auto high = ones({8}, DType::Float32, Device::cpu());
     auto value = rand({8}, DType::Float32, Device::cpu());
@@ -119,7 +122,7 @@ TEST(DistributionsParity, Uniform_LogProb) {
     }
 }
 
-TEST(DistributionsParity, Uniform_Entropy) {
+TEST_P(DistributionsParity, Uniform_Entropy) {
     auto low = zeros({8}, DType::Float32, Device::cpu()) - 2.0f;
     auto high = ones({8}, DType::Float32, Device::cpu()) * 3.0f;
 
@@ -154,7 +157,7 @@ TEST(DistributionsParity, Uniform_Entropy) {
 // Exponential distribution
 // ============================================================================
 
-TEST(DistributionsParity, Exponential_LogProb) {
+TEST_P(DistributionsParity, Exponential_LogProb) {
     auto rate = rand({8}, DType::Float32, Device::cpu()) + 0.5f;
     auto value = rand({8}, DType::Float32, Device::cpu()) + 0.1f;
 
@@ -184,6 +187,9 @@ TEST(DistributionsParity, Exponential_LogProb) {
         }
     }
 }
+
+INSTANTIATE_BACKEND_TESTS(DistributionsParity);
+
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

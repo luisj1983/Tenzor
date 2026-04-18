@@ -22,6 +22,7 @@ set(CUDA_BACKEND_SOURCES
     kernels/transform.cu
     kernels/batchnorm.cu
     kernels/conv2d.cu
+    kernels/conv3d.cu
     kernels/lstm.cu
     kernels/gru.cu
     kernels/indexing.cu

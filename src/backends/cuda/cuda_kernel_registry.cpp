@@ -2348,6 +2348,80 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         auto t3 = tenzor::sum(t2, 2);          // (N, C)
         return tenzor::sum(t3, 0);              // (C,)
     });
+#else
+    // -------------------------------------------------------------------------
+    // Conv3d / ConvTranspose3d fallback registrations (no cuDNN).
+    // Direct-convolution kernels in src/backends/cuda/kernels/conv3d.cu.
+    // -------------------------------------------------------------------------
+    table.register_single_output_kernel(OpId::Conv3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        return cuda::conv3d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
+    });
+    table.register_kernel(OpId::Conv3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        auto [grad_input, grad_weight, grad_bias] = cuda::conv3d_backward_kernel(
+            inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, true, false, false, get_cuda_stream(attrs));
+        return {grad_input};
+    });
+    table.register_kernel(OpId::Conv3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        auto [grad_input, grad_weight, grad_bias] = cuda::conv3d_backward_kernel(
+            inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups, false, true, false, get_cuda_stream(attrs));
+        return {grad_weight};
+    });
+    table.register_kernel(OpId::Conv3dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes&) -> std::vector<Tensor> {
+        const Tensor& grad_output = inputs[0]; // (N, C, D, H, W)
+        auto t1 = tenzor::sum(grad_output, 4); // (N, C, D, H)
+        auto t2 = tenzor::sum(t1, 3);          // (N, C, D)
+        auto t3 = tenzor::sum(t2, 2);          // (N, C)
+        auto grad_bias = tenzor::sum(t3, 0);   // (C,)
+        return {grad_bias};
+    });
+
+    table.register_single_output_kernel(OpId::ConvTranspose3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        return cuda::conv_transpose3d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, output_padding, dilation, groups, get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::ConvTranspose3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        return cuda::conv_transpose3d_backward_input_kernel(
+            inputs[0], inputs[1], inputs[2], stride, padding, output_padding, dilation, groups, get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::ConvTranspose3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        return cuda::conv_transpose3d_backward_weight_kernel(
+            inputs[0], inputs[1], inputs[2], stride, padding, output_padding, dilation, groups, get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::ConvTranspose3dBackwardBias, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        const Tensor& grad_output = inputs[0]; // (N, C, D, H, W)
+        auto t1 = tenzor::sum(grad_output, 4); // (N, C, D, H)
+        auto t2 = tenzor::sum(t1, 3);          // (N, C, D)
+        auto t3 = tenzor::sum(t2, 2);          // (N, C)
+        return tenzor::sum(t3, 0);              // (C,)
+    });
 #endif // TENZOR_HAS_CUDNN (Conv3d/ConvTranspose3d)
 
     // =========================================================================

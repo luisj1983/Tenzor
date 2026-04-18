@@ -13,12 +13,15 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/ops/fp8_scaling.hpp>
+#include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
 
-TEST(FP8Parity, QuantizeDequantize_E4M3_Roundtrip) {
+
+class FP8Parity : public BackendTest {};
+TEST_P(FP8Parity, QuantizeDequantize_E4M3_Roundtrip) {
     // Use values in a moderate range so FP8_E4M3 (max ~448) doesn't saturate.
     auto input = randn({8, 16}, DType::Float32, Device::cpu()) * 2.0f;
 
@@ -51,7 +54,7 @@ TEST(FP8Parity, QuantizeDequantize_E4M3_Roundtrip) {
     }
 }
 
-TEST(FP8Parity, QuantizeDequantize_E5M2_Roundtrip) {
+TEST_P(FP8Parity, QuantizeDequantize_E5M2_Roundtrip) {
     auto input = randn({8, 16}, DType::Float32, Device::cpu()) * 2.0f;
 
     auto backends = get_available_backends();
@@ -82,7 +85,7 @@ TEST(FP8Parity, QuantizeDequantize_E5M2_Roundtrip) {
     }
 }
 
-TEST(FP8Parity, NativeQueryPerBackend) {
+TEST_P(FP8Parity, NativeQueryPerBackend) {
     // Informational: report which backends claim native FP8. Always passes.
     auto backends = get_available_backends();
     for (const auto& dev : backends) {
@@ -92,6 +95,9 @@ TEST(FP8Parity, NativeQueryPerBackend) {
     }
     SUCCEED();
 }
+
+INSTANTIATE_BACKEND_TESTS(FP8Parity);
+
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
