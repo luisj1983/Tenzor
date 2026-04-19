@@ -755,6 +755,80 @@ TEST_P(GRUMultiDTypeTest, CrossDTypeConsistency) {
 }
 
 // ============================================================================
+// Backward correctness — verify input.grad() is populated and non-zero.
+// ============================================================================
+
+TEST_P(GRUCellMultiDTypeTest, GRUCellBackwardGradPopulated) {
+    nn::GRUCell cell(8, 16);
+    cell.to(device);
+
+    auto input = Variable(randn({4, 8}, dtype, device), true);
+    auto h0    = Variable(randn({4, 16}, dtype, device), true);
+    auto h1 = cell.forward(input, h0);
+    sum(h1).backward();
+
+    ASSERT_TRUE(input.has_grad()) << device.to_string();
+    ASSERT_TRUE(h0.has_grad())    << device.to_string();
+    EXPECT_EQ(input.grad()->numel(), input.tensor().numel());
+    EXPECT_EQ(h0.grad()->numel(),    h0.tensor().numel());
+
+    auto g_max = max(abs(input.grad()->to(Device::cpu()).to(DType::Float32)));
+    EXPECT_GT(g_max.item<float>(), 0.0f)
+        << "input grad all-zero on " << device.to_string();
+}
+
+TEST_P(GRUMultiDTypeTest, GRUBackwardGradPopulated) {
+    nn::GRU gru(8, 16);
+    gru.to(device);
+
+    auto input = Variable(randn({5, 4, 8}, dtype, device), true);
+    auto [output, h_n] = gru.forward(input, Variable{});
+    sum(output).backward();
+
+    ASSERT_TRUE(input.has_grad()) << device.to_string();
+    EXPECT_EQ(input.grad()->numel(), input.tensor().numel());
+
+    auto g_max = max(abs(input.grad()->to(Device::cpu()).to(DType::Float32)));
+    EXPECT_GT(g_max.item<float>(), 0.0f)
+        << "input grad all-zero on " << device.to_string();
+}
+
+TEST_P(GRUMultiDTypeTest, GRUBackwardWeightsUpdated) {
+    nn::GRU gru(4, 8);
+    gru.to(device);
+
+    auto input = Variable(randn({3, 2, 4}, dtype, device), false);
+    auto [output, h_n] = gru.forward(input, Variable{});
+    sum(output).backward();
+
+    int populated = 0;
+    for (auto& [name, param] : gru.named_parameters()) {
+        if (param->has_grad()) {
+            auto g_max = max(abs(param->grad()->to(Device::cpu()).to(DType::Float32)));
+            if (g_max.item<float>() > 0.0f) ++populated;
+        }
+    }
+    EXPECT_GT(populated, 0)
+        << "no GRU weight gradient populated on " << device.to_string();
+}
+
+TEST_P(GRUMultiDTypeTest, GRUBidirectionalBackward) {
+    nn::GRU gru(4, 8, /*num_layers=*/1, /*bias=*/true,
+                /*batch_first=*/false, /*dropout=*/0.0,
+                /*bidirectional=*/true);
+    gru.to(device);
+
+    auto input = Variable(randn({3, 2, 4}, dtype, device), true);
+    auto [output, h_n] = gru.forward(input, Variable{});
+    sum(output).backward();
+
+    ASSERT_TRUE(input.has_grad()) << device.to_string();
+    auto g_max = max(abs(input.grad()->to(Device::cpu()).to(DType::Float32)));
+    EXPECT_GT(g_max.item<float>(), 0.0f)
+        << "bidirectional grad all-zero on " << device.to_string();
+}
+
+// ============================================================================
 // Test Instantiation
 // ============================================================================
 

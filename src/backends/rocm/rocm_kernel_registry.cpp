@@ -9,6 +9,7 @@
 #include "tenzor/backend/dispatch_table.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/kernel_registry.hpp"
+#include <sstream>
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/math.hpp"
@@ -1701,7 +1702,8 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::GroupNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t num_groups = attrs.get_int(AttrKey::Groups, 1);
+        // Accept NumGroups (layer convention) or Groups (functional fallback).
+        int64_t num_groups = attrs.get_int(AttrKey::NumGroups, attrs.get_int(AttrKey::Groups, 1));
         const Tensor* weight = inputs.size() > 4 ? &inputs[4] : nullptr;
         auto [grad_input, grad_weight, grad_bias] = rocm::group_norm_backward_kernel(
             inputs[0], inputs[1], inputs[2], inputs[3], num_groups, weight, get_hip_stream(attrs));
@@ -3133,7 +3135,10 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         return rocm::transpose_kernel(inputs[0], dim0, dim1, get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Permute, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        auto dims = attrs.get_int_list(AttrKey::Shape);
+        // Permute dispatcher sets AttrKey::Dims (plural comma-separated string),
+        // matching the convention used by Flip and Transpose. Reading AttrKey::Shape
+        // would silently default to empty list and produce wrong axis order.
+        auto dims = attrs.get_int_list(AttrKey::Dims);
         return rocm::permute_kernel(inputs[0], dims, get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Squeeze, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -3158,7 +3163,9 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         return rocm::repeat_kernel(inputs[0], repeats, get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Tile, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        auto reps = attrs.get_int_list(AttrKey::Repeats);
+        // Tile dispatcher sets AttrKey::Reps (not Repeats — Repeats is for
+        // OpId::Repeat). Reading the wrong key defaulted to empty list.
+        auto reps = attrs.get_int_list(AttrKey::Reps);
         return rocm::tile_kernel(inputs[0], reps, get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Stack, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -3168,8 +3175,23 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         return results[0];
     });
     table.register_single_output_kernel(OpId::Flip, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
-        return rocm::flip_kernel(inputs[0], dim, get_hip_stream(attrs));
+        // Phase 27-followup #40 fix: tenzor::flip sets AttrKey::Dims
+        // (plural comma-separated string), not AttrKey::Dim. The wrong key
+        // defaulted to 0 and flipped axis 0 regardless of the requested
+        // dim. Parse and flip each dim in turn.
+        auto dims_sv = attrs.get_string(AttrKey::Dims, "0");
+        std::string dims_str(dims_sv);
+        Tensor result = inputs[0];
+        auto stream = get_hip_stream(attrs);
+        std::istringstream ss(dims_str);
+        std::string token;
+        while (std::getline(ss, token, ',')) {
+            if (!token.empty()) {
+                int64_t dim = std::stoll(token);
+                result = rocm::flip_kernel(result, dim, stream);
+            }
+        }
+        return result;
     });
     table.register_single_output_kernel(OpId::Roll, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t shift = attrs.get_int(AttrKey::Shift, 0);

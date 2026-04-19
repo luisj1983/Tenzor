@@ -6,6 +6,30 @@
 add_executable(test_autograd_edge_cases test_autograd_edge_cases.cpp)
 target_link_libraries(test_autograd_edge_cases PRIVATE tenzor_core GTest::gtest_main)
 
+# Phase 4 — gradcheck across backends for critical ops. Small inputs so
+# per-element finite-difference perturbation stays fast on GPUs.
+add_executable(test_gradcheck_multibackend test_gradcheck_multibackend.cpp)
+target_link_libraries(test_gradcheck_multibackend PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_gradcheck_multibackend LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Phase 8 — numerical edge-case gradcheck (sqrt(eps), log(eps), log1p(-0.9),
+# reciprocal(small), abs near 0, etc.). Audit-flagged gap.
+add_executable(test_gradcheck_edge_cases_numeric test_gradcheck_edge_cases_numeric.cpp)
+target_link_libraries(test_gradcheck_edge_cases_numeric PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_gradcheck_edge_cases_numeric LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Phase 8-followup #28 — multi-backend scatter / scatter_add gradcheck.
+add_executable(test_gradcheck_scatter_multidtype test_gradcheck_scatter_multidtype.cpp)
+target_link_libraries(test_gradcheck_scatter_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_gradcheck_scatter_multidtype LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Phase 8-followup #28 — regression guard for higher-order gradient stubs.
+# Asserts that ops marked is_higher_order_stub=true produce a defined,
+# finite first-order gradient (the stub passes through structurally).
+add_executable(test_higher_order_stubs_regression test_higher_order_stubs_regression.cpp)
+target_link_libraries(test_higher_order_stubs_regression PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_higher_order_stubs_regression LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
 # Higher order gradients
 add_executable(test_higher_order_gradients test_higher_order_gradients.cpp)
 target_link_libraries(test_higher_order_gradients PRIVATE tenzor_core GTest::gtest_main)

@@ -1504,20 +1504,24 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::LayerNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // inputs: [grad_output, input, weight, mean, rstd]
+        // Standard input order from LayerNormBackward dispatcher
+        // (src/nn/layers/normalization.cpp:461): [grad_output, input, mean, inv_std, weight].
+        // Kernel signature is (grad_out, input, normalized_shape, mean, rstd, weight).
         auto normalized_shape = attrs.get_int_list(AttrKey::NormalizedShape);
-        return cpu::layer_norm_backward_kernel(inputs[0], inputs[1], normalized_shape, inputs[3], inputs[4], inputs[2]);
+        return cpu::layer_norm_backward_kernel(inputs[0], inputs[1], normalized_shape, inputs[2], inputs[3], inputs[4]);
     });
 
     table.register_kernel(OpId::GroupNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t num_groups = attrs.get_int(AttrKey::Groups, 1);
+        // GroupNorm layer sets NumGroups; functional::group_norm previously set
+        // Groups. Accept either to avoid silent num_groups=1 default.
+        int64_t num_groups = attrs.get_int(AttrKey::NumGroups, attrs.get_int(AttrKey::Groups, 1));
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         return cpu::group_norm_kernel_with_stats(inputs[0], num_groups, inputs[1], inputs[2], eps);
     });
 
     table.register_kernel(OpId::GroupNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [grad_output, input, weight, mean, rstd]
-        int64_t num_groups = attrs.get_int(AttrKey::Groups, 1);
+        int64_t num_groups = attrs.get_int(AttrKey::NumGroups, attrs.get_int(AttrKey::Groups, 1));
         return cpu::group_norm_backward_kernel(inputs[0], inputs[1], num_groups, inputs[3], inputs[4], inputs[2]);
     });
 
@@ -2687,7 +2691,9 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
         bool causal = attrs.get_bool(AttrKey::Causal, false);
         float dropout_p = static_cast<float>(attrs.get_float(AttrKey::DropoutP, 0.0));
-        bool is_training = attrs.get_bool(AttrKey::Training, false);
+        // FlashAttention dispatchers (functional::sdpa, attention layer) set
+        // IsTraining; older callers may set Training. Accept either.
+        bool is_training = attrs.get_bool(AttrKey::IsTraining, attrs.get_bool(AttrKey::Training, false));
         return std::vector<Tensor>{cpu::flash_attention_forward(inputs[0], inputs[1], inputs[2], scale, causal, dropout_p, is_training)};
     });
 

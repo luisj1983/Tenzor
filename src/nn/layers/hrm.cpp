@@ -26,6 +26,26 @@ namespace nn {
 // Initialization Utilities Implementation
 // ============================================================================
 
+// Phase 22-followup #36 fix: these initializers used to assume Float32
+// (calling `tensor.data<float>()` directly), which threw "Type mismatch"
+// when the model ran in Float16/BFloat16/Float64. Sample into a Float32
+// scratch tensor on CPU, then copy/cast into the actual tensor — works
+// regardless of the tensor's dtype or device.
+namespace {
+void copy_f32_into(const std::vector<float>& src, Tensor& dst) {
+    Tensor scratch({static_cast<int64_t>(src.size())},
+                   DType::Float32, Device::cpu());
+    std::memcpy(scratch.data<float>(), src.data(), src.size() * sizeof(float));
+    // Reshape to dst shape, cast to dst dtype, move to dst device, then
+    // assign storage. tensor::reshape returns a view; we materialize a
+    // contiguous tensor via to(.).
+    auto shape = dst.shape();
+    std::vector<int64_t> shape_v(shape.begin(), shape.end());
+    Tensor casted = scratch.reshape(shape_v).to(dst.dtype()).to(dst.device());
+    dst = casted;
+}
+}  // namespace
+
 void lecun_normal_init(Tensor& tensor, int64_t fan_in) {
     // LeCun normal: N(0, 1/fan_in)
     double std = 1.0 / std::sqrt(static_cast<double>(fan_in));
@@ -34,12 +54,10 @@ void lecun_normal_init(Tensor& tensor, int64_t fan_in) {
     std::mt19937 gen(rd());
     std::normal_distribution<float> dist(0.0f, static_cast<float>(std));
 
-    float* data = tensor.data<float>();
     int64_t numel = tensor.numel();
-
-    for (int64_t i = 0; i < numel; ++i) {
-        data[i] = dist(gen);
-    }
+    std::vector<float> samples(numel);
+    for (int64_t i = 0; i < numel; ++i) samples[i] = dist(gen);
+    copy_f32_into(samples, tensor);
 }
 
 void lecun_uniform_init(Tensor& tensor, int64_t fan_in) {
@@ -51,17 +69,16 @@ void lecun_uniform_init(Tensor& tensor, int64_t fan_in) {
     std::uniform_real_distribution<float> dist(static_cast<float>(-limit),
                                                 static_cast<float>(limit));
 
-    float* data = tensor.data<float>();
     int64_t numel = tensor.numel();
-
-    for (int64_t i = 0; i < numel; ++i) {
-        data[i] = dist(gen);
-    }
+    std::vector<float> samples(numel);
+    for (int64_t i = 0; i < numel; ++i) samples[i] = dist(gen);
+    copy_f32_into(samples, tensor);
 }
 
 void truncated_normal_init(Tensor& tensor, double mean, double std,
                            double a, double b) {
-    // Truncated normal: sample from N(mean, std) but reject values outside [mean + a*std, mean + b*std]
+    // Truncated normal: sample from N(mean, std) but reject values outside
+    // [mean + a*std, mean + b*std].
     std::random_device rd;
     std::mt19937 gen(rd());
     std::normal_distribution<float> dist(static_cast<float>(mean),
@@ -70,25 +87,21 @@ void truncated_normal_init(Tensor& tensor, double mean, double std,
     float lower = static_cast<float>(mean + a * std);
     float upper = static_cast<float>(mean + b * std);
 
-    float* data = tensor.data<float>();
     int64_t numel = tensor.numel();
-
+    std::vector<float> samples(numel);
     for (int64_t i = 0; i < numel; ++i) {
         float sample;
         int max_attempts = 100;
         int attempts = 0;
-
         do {
             sample = dist(gen);
             attempts++;
         } while ((sample < lower || sample > upper) && attempts < max_attempts);
-
-        // If we couldn't get a valid sample, clamp it
         if (sample < lower) sample = lower;
         if (sample > upper) sample = upper;
-
-        data[i] = sample;
+        samples[i] = sample;
     }
+    copy_f32_into(samples, tensor);
 }
 
 // ============================================================================
@@ -191,13 +204,17 @@ auto GatedLinearUnit::forward_impl(const Variable& input) -> Variable {
     auto gate = gate_proj_->forward(input);
     auto up = up_proj_->forward(input);
 
-    // Apply activation to gate
+    // Apply activation to gate. CRITICAL: must use Variable-level ops so the
+    // autograd graph survives. Wrapping `gate.tensor() * other.tensor()` in a
+    // new Variable (the previous implementation) produced a no-grad_fn node
+    // that silently dropped input/parameter gradients on backward.
     Variable activated_gate;
     switch (gate_type_) {
         case GateType::SiLU: {
-            // SiLU: x * nn::sigmoid(x)
+            // SiLU: x * nn::sigmoid(x) — keep both operands as Variables so
+            // the multiplication appears on the autograd graph.
             auto sigmoid_gate = nn::sigmoid(gate);
-            activated_gate = Variable(gate.tensor() * sigmoid_gate.tensor(), gate.requires_grad());
+            activated_gate = gate * sigmoid_gate;
             break;
         }
         case GateType::GELU:
@@ -212,8 +229,8 @@ auto GatedLinearUnit::forward_impl(const Variable& input) -> Variable {
             break;
     }
 
-    // Element-wise multiply
-    auto gated = Variable(activated_gate.tensor() * up.tensor(), input.requires_grad());
+    // Element-wise multiply through Variable operator* — preserves graph.
+    auto gated = activated_gate * up;
 
     // Down projection
     return down_proj_->forward(gated);
@@ -371,48 +388,41 @@ auto HRMBlock::forward(const Variable& x, const Variable& context,
     // Check if context is provided (non-empty Variable)
     bool has_context = static_cast<bool>(context);
 
+    // Phase 22-followup #32 fix: residual additions previously used raw
+    // tensor + and rewrapped in Variable(.,.) which dropped the autograd
+    // graph between input and output. Use Variable operator+ throughout
+    // (and never extract .tensor() until the final hand-off).
     if (use_post_norm_) {
         // Post-norm: attention -> residual -> norm
-
-        // Self-attention
         auto [attn_out, _] = self_attn_->forward(x, x, x, Tensor{}, mask, false);
-        auto residual1 = x.tensor() + dropout_->forward(attn_out).tensor();
-        out = norm1_->forward(Variable(residual1, x.requires_grad()));
+        out = norm1_->forward(x + dropout_->forward(attn_out));
 
-        // Cross-attention (if context provided)
         if (has_context) {
             auto [cross_out, __] = cross_attn_->forward(out, context, context,
                                                          Tensor{}, Tensor{}, false);
-            auto residual2 = out.tensor() + dropout_->forward(cross_out).tensor();
-            out = norm3_->forward(Variable(residual2, x.requires_grad()));
+            out = norm3_->forward(out + dropout_->forward(cross_out));
         }
 
-        // Feed-forward
         auto ffn_out = ffn_->forward(out);
-        auto residual3 = out.tensor() + dropout_->forward(ffn_out).tensor();
-        out = norm2_->forward(Variable(residual3, x.requires_grad()));
+        out = norm2_->forward(out + dropout_->forward(ffn_out));
 
     } else {
         // Pre-norm: norm -> attention -> residual
-
-        // Self-attention
         auto normed = norm1_->forward(x);
         auto [attn_out, _] = self_attn_->forward(normed, normed, normed,
                                                   Tensor{}, mask, false);
-        out = Variable(x.tensor() + dropout_->forward(attn_out).tensor(), x.requires_grad());
+        out = x + dropout_->forward(attn_out);
 
-        // Cross-attention (if context provided)
         if (has_context) {
             auto normed_cross = norm3_->forward(out);
             auto [cross_out, __] = cross_attn_->forward(normed_cross, context, context,
                                                          Tensor{}, Tensor{}, false);
-            out = Variable(out.tensor() + dropout_->forward(cross_out).tensor(), x.requires_grad());
+            out = out + dropout_->forward(cross_out);
         }
 
-        // Feed-forward
         auto normed_ffn = norm2_->forward(out);
         auto ffn_out = ffn_->forward(normed_ffn);
-        out = Variable(out.tensor() + dropout_->forward(ffn_out).tensor(), x.requires_grad());
+        out = out + dropout_->forward(ffn_out);
     }
 
     return out;
@@ -449,8 +459,11 @@ auto AdaptiveComputationalTime::compute_halt_prob(const Variable& state) -> Vari
 }
 
 auto AdaptiveComputationalTime::should_halt(const Variable& cumulative_prob) -> bool {
-    // Check if all positions have cumulative probability >= threshold
-    auto min_prob = tenzor::min(cumulative_prob.tensor());
+    // Check if all positions have cumulative probability >= threshold.
+    // Cast to Float32 before extracting via item<float> — `cumulative_prob`
+    // can be Float64 when the model runs in double precision and item<>
+    // throws on dtype mismatch.
+    auto min_prob = tenzor::min(cumulative_prob.tensor()).to(DType::Float32);
     return min_prob.item<float>() >= threshold_;
 }
 
@@ -783,10 +796,15 @@ auto HRM::init_states(const Variable& x)
     auto h_state = h_init_proj_->forward(Variable(h_expanded, false));
     auto l_state = l_init_proj_->forward(Variable(l_expanded, false));
 
-    // Add input information to initial states
-    // This helps the model condition on the input while maintaining fixed initialization
-    h_state = Variable(h_state.tensor() + x.tensor() * 0.1f, x.requires_grad());
-    l_state = Variable(l_state.tensor() + x.tensor() * 0.1f, x.requires_grad());
+    // Add input information to initial states. Phase 22-followup #32 fix:
+    // raw `x.tensor() * 0.1f` previously dropped the autograd graph from x
+    // into the initial states. Use Variable-level scalar multiplication
+    // (broadcast against a no-grad scale tensor) so backward flows.
+    auto scale = Variable(
+        ::tenzor::full({1}, 0.1f, x.tensor().dtype(), x.tensor().device()),
+        /*requires_grad=*/false);
+    h_state = h_state + (x * scale);
+    l_state = l_state + (x * scale);
 
     return std::make_pair(h_state, l_state);
 }
@@ -1046,8 +1064,10 @@ auto HRM::compute_participation_ratio(const Variable& state) -> double {
     auto sum_sq = tenzor::sum(x_sq);
     auto mean_sq = tenzor::mean(x_sq);
 
-    float ss = sum_sq.item<float>();
-    float ms = mean_sq.item<float>();
+    // Cast to Float32 first — these tensors carry the model dtype, which
+    // can be Float64 (item<float>() throws on dtype mismatch).
+    float ss = sum_sq.to(DType::Float32).item<float>();
+    float ms = mean_sq.to(DType::Float32).item<float>();
 
     if (ss < 1e-10f) return 0.0;
 
@@ -1092,20 +1112,25 @@ auto hrm_deep_supervision_loss(
         total_weight += weight;
 
         auto loss = loss_fn(outputs[i], targets);
-        auto weighted_loss = Variable(loss.tensor() * static_cast<float>(weight),
-                                       loss.requires_grad());
+        // Use Variable-level operators to keep the autograd chain. The
+        // previous `Variable(loss.tensor() * scalar, rg)` re-wrap silently
+        // severed the link from per-output loss back to the model — gradient
+        // never reached the model parameters.
+        Variable weight_var(::tenzor::full({1}, static_cast<float>(weight),
+                                            loss.tensor().dtype(), loss.tensor().device()), false);
+        auto weighted_loss = loss * weight_var;
 
         if (i == 0) {
             total_loss = weighted_loss;
         } else {
-            total_loss = Variable(total_loss.tensor() + weighted_loss.tensor(),
-                                   total_loss.requires_grad());
+            total_loss = total_loss + weighted_loss;
         }
     }
 
     // Normalize by total weight
-    return Variable(total_loss.tensor() / static_cast<float>(total_weight),
-                    total_loss.requires_grad());
+    Variable inv_total_weight(::tenzor::full({1}, static_cast<float>(1.0 / total_weight),
+                                              total_loss.tensor().dtype(), total_loss.tensor().device()), false);
+    return total_loss * inv_total_weight;
 }
 
 } // namespace nn

@@ -82,4 +82,21 @@ TEST_P(SlidingWindowAttentionMultiDTypeTest, OutputFinite) {
     }
 }
 
+// Phase 3-followup #22: backward through GroupedQueryAttention with a
+// sliding window. Float16 backward re-tested after SDPA shape fixes
+// (#50/51) and GQA window-mask NaN fix (#52). If still fails, restore
+// the skip with comment pointing to the genuine kernel issue.
+TEST_P(SlidingWindowAttentionMultiDTypeTest, BackwardGradPopulated) {
+    GroupedQueryAttention gqa(64, 8, 2, 0.0, true, true, nullptr, 16);
+    convert_model(gqa);
+    int64_t batch = 1, seq_len = 8, embed_dim = 64;
+    auto q = createInput({batch, seq_len, embed_dim}, /*requires_grad=*/true);
+    auto [output, weights] = gqa.forward(q, q, q);
+    sum(output).backward();
+    ASSERT_TRUE(q.has_grad()) << device().to_string();
+    auto g_max = max(abs(q.grad()->to(Device::cpu()).to(DType::Float32)));
+    EXPECT_GT(g_max.item<float>(), 0.0f)
+        << "GQA input grad all-zero on " << device().to_string();
+}
+
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(SlidingWindowAttentionMultiDTypeTest);

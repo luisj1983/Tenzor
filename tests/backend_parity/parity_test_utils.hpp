@@ -360,6 +360,14 @@ inline bool tensors_close(const Tensor& a, const Tensor& b,
     auto a_cpu = a.device().type == Device::Type::CPU ? a : a.to(Device::cpu());
     auto b_cpu = b.device().type == Device::Type::CPU ? b : b.to(Device::cpu());
 
+    // Materialize contiguous copies so element-by-element pointer iteration
+    // walks logical positions, not the underlying storage. Without this,
+    // non-contiguous views (e.g. transpose/permute outputs) compare by raw
+    // memory layout and produce false negatives across backends whose
+    // contiguous() materialization happens at different points.
+    if (!a_cpu.is_contiguous()) a_cpu = a_cpu.contiguous();
+    if (!b_cpu.is_contiguous()) b_cpu = b_cpu.contiguous();
+
     // For Float16/BFloat16, promote to Float32 for comparison since
     // data<float16>() would require half-precision comparison math.
     if (a_cpu.dtype() == DType::Float16 || a_cpu.dtype() == DType::BFloat16) {

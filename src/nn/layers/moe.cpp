@@ -56,34 +56,45 @@ auto MixtureOfExperts::forward_impl(const Variable& input) -> Variable {
 auto MixtureOfExperts::forward_with_loss(const Variable& input)
     -> std::pair<Variable, Variable> {
     // input: [..., input_dim]. Flatten to [N, input_dim] for routing.
+    //
+    // Followup #21 fix: previous version used raw tensor ops throughout this
+    // function (Variable(reshape(input.tensor()), ...), `flat_t * mask`,
+    // `output_t = output_t + weighted` with Tensor accumulator, etc.) which
+    // dropped the autograd graph between input and output. Backward then
+    // populated nothing on input.grad. Rewrite uses Variable-level ops for
+    // every value-carrying step; mask construction stays at the tensor level
+    // because mask values are non-differentiable indicator tensors.
     auto orig_shape = input.shape();
     int64_t ndim = orig_shape.size();
     int64_t N = 1;
     for (int64_t i = 0; i < ndim - 1; ++i) N *= orig_shape[i];
     int64_t D = orig_shape[ndim - 1];
 
-    // Flatten input for routing
-    auto flat_t = tenzor::reshape(input.tensor(), {N, D});
-    auto flat = Variable(flat_t, input.requires_grad());
+    // Flatten input through Variable-level reshape so the graph is preserved.
+    auto flat = tenzor::reshape(input, std::vector<int64_t>{N, D});
 
     // Router logits: [N, num_experts]
     auto logits = router_->forward(flat);
 
-    // Softmax over experts
-    auto probs = nn::softmax(logits, /*dim=*/1);
-    Tensor probs_t = probs.tensor();
+    // Softmax over experts (Variable-level — gradient flows back to logits).
+    auto probs_v = nn::softmax(logits, /*dim=*/1);
+    Tensor probs_t = probs_v.tensor();
 
-    // Top-k selection
+    // Top-k selection — non-differentiable, runs on the tensor probs_t.
     auto topk_result = tenzor::topk(probs_t, top_k_, /*dim=*/1, /*largest=*/true, /*sorted=*/true);
     auto topk_vals = std::get<0>(topk_result);
     auto topk_idx = std::get<1>(topk_result);
 
-    // Normalize top-k weights
+    // Normalize top-k weights (still tensor-level — these are routing
+    // coefficients selected by argmax-style logic, not learned through the
+    // expert path; load balancing flows separately through aux_loss).
     auto topk_sum = tenzor::sum(topk_vals, /*dim=*/1, /*keepdim=*/true);
     auto topk_weights = topk_vals / topk_sum;
 
-    // Dispatch tokens to experts
-    auto output_t = tenzor::zeros({N, D}, input.tensor().dtype(), input.tensor().device());
+    // Variable accumulator so the addition lands on the autograd graph.
+    Variable output = Variable(
+        tenzor::zeros({N, D}, input.tensor().dtype(), input.tensor().device()),
+        input.requires_grad());
 
     for (int64_t e = 0; e < num_experts_; ++e) {
         for (int64_t k = 0; k < top_k_; ++k) {
@@ -100,27 +111,38 @@ auto MixtureOfExperts::forward_with_loss(const Variable& input)
             if (mc_val == 0.0f) continue;
 
             auto mask_f = mask.to(input.tensor().dtype());
-            auto masked_input = flat_t * mask_f.unsqueeze(1);
 
-            // Expert forward: up -> relu -> down
-            auto expert_in = Variable(masked_input, input.requires_grad());
-            auto hidden = up_[e]->forward(expert_in);
+            // Variable-level masked input: flat * mask. The mask is treated
+            // as a constant (no gradient flows through indicator selection),
+            // wrap it in a no-grad Variable so the multiplication graph still
+            // includes `flat` on the differentiable side.
+            auto mask_var = Variable(mask_f.unsqueeze(1), /*requires_grad=*/false);
+            auto masked_input = flat * mask_var;
+
+            // Expert forward: up -> relu -> down. All Variable-level so the
+            // chain stays connected from input → flat → masked_input → hidden
+            // → expert_out.
+            auto hidden = up_[e]->forward(masked_input);
             hidden = relu(hidden);
             if (dropout_) hidden = dropout_->forward(hidden);
             auto expert_out = down_[e]->forward(hidden);
 
-            // Weight and accumulate
-            auto weighted = expert_out.tensor() * (weight_col * mask_f).unsqueeze(1);
-            output_t = output_t + weighted;
+            // Weight by the routing coefficients (Variable * Variable so the
+            // graph picks up the expert path).
+            auto wm = (weight_col * mask_f).unsqueeze(1);
+            auto wm_var = Variable(wm, /*requires_grad=*/false);
+            auto weighted = expert_out * wm_var;
+
+            output = output + weighted;
         }
     }
 
-    // Reshape output back
-    auto output = Variable(
-        tenzor::reshape(output_t, std::vector<int64_t>(orig_shape.begin(), orig_shape.end())),
-        input.requires_grad());
+    // Reshape back through Variable-level reshape.
+    output = tenzor::reshape(output, std::vector<int64_t>(orig_shape.begin(), orig_shape.end()));
 
-    // Auxiliary load balancing loss
+    // Auxiliary load balancing loss (separate path; doesn't need to flow
+    // through the expert outputs to remain useful, but it does need to flow
+    // through `probs_v` so the router learns).
     auto probs_mean = tenzor::mean(probs_t, /*dim=*/0, /*keepdim=*/false);
     auto top1_idx = topk_idx.slice(1, 0, 1).squeeze(1);
 

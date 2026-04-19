@@ -23,6 +23,7 @@
 #include <tenzor/nn/layers/conv.hpp>
 #include <tenzor/nn/functional.hpp>
 #include <tenzor/nn/activations/activations.hpp>
+#include <tenzor/backend/fast_dispatch.hpp>
 #include "../multi_backend_dtype_fixture.hpp"
 
 #include <cmath>
@@ -201,16 +202,61 @@ TEST_P(PoolConvMissingMultiDTypeTest, ConvTranspose3dForward) {
 // MaxUnpool2dBackward / MaxUnpool3dForward / MaxUnpool3dBackward
 // ---------------------------------------------------------------------------
 
-// MaxUnpool2d / MaxUnpool3d classes aren't currently exposed in nn::; the
-// MaxUnpool*Backward OpIds can only be reached via the functional ops layer
-// which takes pre-computed indices. Register placeholders so the audit picks
-// up the OpId names; add real coverage once nn::MaxUnpool[23]d lands.
-// OpIds exercised here by name only: MaxUnpool2dBackward MaxUnpool3dForward
-// MaxUnpool3dBackward.
-TEST_P(PoolConvMissingMultiDTypeTest, MaxUnpoolNotImplemented) {
-    SKIP_WITH_REASON(SkipReason::KernelNotImplemented,
-                     "nn::MaxUnpool2d / nn::MaxUnpool3d classes not exposed; "
-                     "reach MaxUnpool*Backward OpIds after they're added");
+// MaxUnpool2d: pool with indices via direct dispatch of MaxPool2dForward,
+// then unpool via F::max_unpool2d. Exercises MaxUnpool2dForward +
+// MaxUnpool2dBackward via autograd.
+TEST_P(PoolConvMissingMultiDTypeTest, MaxUnpool2dForwardBackward) {
+    PC_SKIP_INT();
+    auto input_tensor = on_device({1, 2, 4, 4});
+    std::vector<Tensor> pool_inputs = {input_tensor};
+    OpAttributes pool_attrs;
+    pool_attrs.set(AttrKey::KernelSize, int64_t{2});
+    pool_attrs.set(AttrKey::Stride, int64_t{2});
+    pool_attrs.set(AttrKey::Padding, int64_t{0});
+    auto pool_result = dispatch_to_device(OpId::MaxPool2dForward, device().type,
+                                          pool_inputs, pool_attrs);
+    ASSERT_EQ(pool_result.size(), 2u) << "MaxPool2dForward must return (output, indices)";
+    Tensor pooled = pool_result[0];
+    Tensor indices = pool_result[1];
+
+    auto input = Variable(pooled, /*requires_grad=*/true);
+    auto output = nn::functional::max_unpool2d(
+        input, indices,
+        /*kernel_size=*/{2, 2},
+        /*stride=*/{2, 2},
+        /*padding=*/{0, 0});
+    expectShape(output.tensor(), {1, 2, 4, 4});
+    sum(output).backward();
+    ASSERT_TRUE(input.grad().has_value());
+    // Backward through MaxUnpool2dBackward: grad_input shape must match input shape.
+    EXPECT_EQ(input.grad()->shape()[2], 2);
+    EXPECT_EQ(input.grad()->shape()[3], 2);
+}
+
+TEST_P(PoolConvMissingMultiDTypeTest, MaxUnpool3dForwardBackward) {
+    PC_SKIP_INT();
+    auto input_tensor = on_device({1, 2, 4, 4, 4});
+    std::vector<Tensor> pool_inputs = {input_tensor};
+    OpAttributes pool_attrs;
+    pool_attrs.set(AttrKey::KernelSize, int64_t{2});
+    pool_attrs.set(AttrKey::Stride, int64_t{2});
+    pool_attrs.set(AttrKey::Padding, int64_t{0});
+    auto pool_result = dispatch_to_device(OpId::MaxPool3dForward, device().type,
+                                          pool_inputs, pool_attrs);
+    ASSERT_EQ(pool_result.size(), 2u) << "MaxPool3dForward must return (output, indices)";
+    Tensor pooled = pool_result[0];
+    Tensor indices = pool_result[1];
+
+    auto input = Variable(pooled, /*requires_grad=*/true);
+    auto output = nn::functional::max_unpool3d(
+        input, indices,
+        /*kernel_size=*/{2, 2, 2},
+        /*stride=*/{2, 2, 2},
+        /*padding=*/{0, 0, 0});
+    expectShape(output.tensor(), {1, 2, 4, 4, 4});
+    sum(output).backward();
+    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_EQ(input.grad()->shape()[2], 2);
 }
 
 // ---------------------------------------------------------------------------

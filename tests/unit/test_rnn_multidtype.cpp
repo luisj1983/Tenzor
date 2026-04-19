@@ -317,6 +317,72 @@ TEST_P(RNNMultiDTypeTest, RNNInvalidDropout) {
 }
 
 // ============================================================================
+// Backward correctness — verify input.grad() is populated and non-zero. The
+// existing RNNGradientFlow test only checks EXPECT_NO_THROW which is too weak.
+// ============================================================================
+
+TEST_P(RNNMultiDTypeTest, RNNCellBackwardGradPopulated) {
+    nn::RNNCell cell(8, 16, "tanh");
+    convert_model(cell);
+    Variable input = createInput({4, 8}, true);
+    Variable h0    = createInput({4, 16}, true);
+    auto h1 = cell.forward(input, h0);
+    sum(h1).backward();
+
+    ASSERT_TRUE(input.has_grad());
+    ASSERT_TRUE(h0.has_grad());
+    EXPECT_EQ(input.grad()->numel(), input.tensor().numel());
+    EXPECT_EQ(h0.grad()->numel(),    h0.tensor().numel());
+
+    auto g_max = max(abs(input.grad()->to(Device::cpu()).to(DType::Float32)));
+    EXPECT_GT(g_max.item<float>(), 0.0f) << "input grad all-zero on " << device().to_string();
+}
+
+TEST_P(RNNMultiDTypeTest, RNNBackwardGradPopulated) {
+    nn::RNN rnn(8, 16);
+    convert_model(rnn);
+    Variable input = createInput({5, 4, 8}, true);
+    auto [output, h_n] = rnn.forward(input, Variable{});
+    sum(output).backward();
+
+    ASSERT_TRUE(input.has_grad());
+    EXPECT_EQ(input.grad()->numel(), input.tensor().numel());
+
+    auto g_max = max(abs(input.grad()->to(Device::cpu()).to(DType::Float32)));
+    EXPECT_GT(g_max.item<float>(), 0.0f) << "input grad all-zero on " << device().to_string();
+}
+
+TEST_P(RNNMultiDTypeTest, RNNBackwardWeightsUpdated) {
+    nn::RNN rnn(4, 8);
+    convert_model(rnn);
+    Variable input = createInput({3, 2, 4}, false);
+    auto [output, h_n] = rnn.forward(input, Variable{});
+    sum(output).backward();
+
+    int populated = 0;
+    for (auto& [name, param] : rnn.named_parameters()) {
+        if (param->has_grad()) {
+            auto g_max = max(abs(param->grad()->to(Device::cpu()).to(DType::Float32)));
+            if (g_max.item<float>() > 0.0f) ++populated;
+        }
+    }
+    EXPECT_GT(populated, 0) << "no RNN weight gradient populated on " << device().to_string();
+}
+
+TEST_P(RNNMultiDTypeTest, RNNBidirectionalBackward) {
+    nn::RNN rnn(4, 8, /*num_layers=*/1, /*nonlinearity=*/"tanh", /*bias=*/true,
+                /*batch_first=*/false, /*dropout=*/0.0, /*bidirectional=*/true);
+    convert_model(rnn);
+    Variable input = createInput({3, 2, 4}, true);
+    auto [output, h_n] = rnn.forward(input, Variable{});
+    sum(output).backward();
+
+    ASSERT_TRUE(input.has_grad());
+    auto g_max = max(abs(input.grad()->to(Device::cpu()).to(DType::Float32)));
+    EXPECT_GT(g_max.item<float>(), 0.0f) << "bidirectional grad all-zero on " << device().to_string();
+}
+
+// ============================================================================
 // Test Instantiation
 // ============================================================================
 

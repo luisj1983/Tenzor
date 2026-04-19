@@ -261,10 +261,15 @@ auto MultiheadAttention::scaled_dot_product_attention(
     // Note: Only enabled in inference mode - cuDNN SDPA doesn't build autograd graph
     // need_weights must be false (cuDNN SDPA path doesn't compute attention weights)
     bool is_fp16 = query.dtype() == DType::Float16 || query.dtype() == DType::BFloat16;
+    // ROCm's fused_attention_hip kernel doesn't accept a causal flag (#46) — if
+    // is_causal is requested, fall through to the manual BMM path which builds
+    // an explicit triu mask. CUDA cuDNN SDPA handles causal natively.
+    bool device_supports_causal = (query.device().type != Device::Type::ROCm) || !is_causal_;
     bool can_use_cudnn_sdpa = !need_weights &&
         is_fp16 &&
         is_op_supported(OpId::FusedAttention, query.device().type) &&
         (head_dim == 32 || head_dim == 64 || head_dim == 128 || head_dim == 256) &&
+        device_supports_causal &&
         !is_training();  // Only use cuDNN SDPA in inference mode
 
     if (can_use_cudnn_sdpa) {
@@ -276,12 +281,28 @@ auto MultiheadAttention::scaled_dot_product_attention(
             Tensor k_contig = key.tensor().is_contiguous() ? key.tensor() : key.tensor().contiguous();
             Tensor v_contig = value.tensor().is_contiguous() ? value.tensor() : value.tensor().contiguous();
 
+            // ROCm's fused_attention_hip kernel expects 3D [B*H, L, E]; CUDA's
+            // cuDNN SDPA accepts 4D directly. Collapse batch+heads on ROCm so
+            // it doesn't reinterpret shape[0]/shape[1] as B/H. Output reshaped
+            // back to 4D after dispatch. Without this the kernel returns shape
+            // [B, H, L] (E dropped), causing merge_heads permute to throw.
+            bool needs_3d_collapse = (query.device().type == Device::Type::ROCm);
+            if (needs_3d_collapse) {
+                q_contig = tenzor::reshape(q_contig, {batch_size * num_heads, seq_len_q, head_dim});
+                k_contig = tenzor::reshape(k_contig, {batch_size * num_heads, seq_len_k, head_dim});
+                v_contig = tenzor::reshape(v_contig, {batch_size * num_heads, seq_len_k, head_dim});
+            }
+
             // Use dispatch to call cuDNN SDPA - pass 4D tensors directly
             OpAttributes attrs;
             attrs.set(AttrKey::Scale, static_cast<double>(scale_f));
             attrs.set(AttrKey::UseCudnnSdpa, true);
             std::vector<Tensor> fused_inputs = {q_contig, k_contig, v_contig};
             Tensor output = dispatch<OpId::FusedAttention>(fused_inputs, attrs)[0];
+
+            if (needs_3d_collapse) {
+                output = tenzor::reshape(output, {batch_size, num_heads, seq_len_q, head_dim});
+            }
 
             Variable attended(output, false);
             Tensor empty_weights({0}, output.dtype(), output.device());

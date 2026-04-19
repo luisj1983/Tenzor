@@ -166,13 +166,15 @@ auto LSTMCell::forward_with_precomputed_ih(const Tensor& gates_ih, const Variabl
     auto o_t = nn::sigmoid(Variable(o_gate_tensor, true));
 
     // Update cell state: c_t = f_t ⊙ c_{t-1} + i_t ⊙ g_t
-    auto f_c = Variable(f_t.tensor() * c.tensor(), true);
-    auto i_g = Variable(i_t.tensor() * g_t.tensor(), true);
-    auto c_new = Variable(f_c.tensor() + i_g.tensor(), true);
+    // Use Variable-level operators so backward propagates through the
+    // gating graph. Previously this re-wrapped raw tensor results which
+    // silently severed the autograd chain — see the
+    // raw-tensor-op-breaks-autograd-graph memory.
+    auto c_new = f_t * c + i_t * g_t;
 
     // Update hidden state: h_t = o_t ⊙ tanh(c_t)
     auto c_tanh = nn::tanh(c_new);
-    auto h_new = Variable(o_t.tensor() * c_tanh.tensor(), true);
+    auto h_new = o_t * c_tanh;
 
     return {h_new, c_new};
 }
@@ -248,7 +250,10 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
         batch_size = input_shape[0];
         seq_len = input_shape[1];
         feat_size = input_shape[2];
-        x = Variable(x.tensor().transpose(0, 1), x.requires_grad());
+        // Use Variable-level transpose so backward propagates through the
+        // batch_first→sequence_first reshape. Previously the raw-tensor
+        // re-wrap silently severed the chain to the user's input.
+        x = ::tenzor::transpose(x, 0, 1);
     } else {
         seq_len = input_shape[0];
         batch_size = input_shape[1];

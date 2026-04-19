@@ -47,6 +47,27 @@ TEST_P(UpsampleMultiDTypeTest, BilinearScaleFactor2_4D) {
     expectShape(y.tensor(), {1, 3, 16, 16});
 }
 
+// Phase 3 addition: backward gradient population.
+TEST_P(UpsampleMultiDTypeTest, NearestBackwardGradPopulated) {
+    Upsample up(std::nullopt, 2.0, "nearest", false);
+    auto x = Variable(randn({1, 2, 4, 4}, dtype(), device()), true);
+    auto y = up.forward(x);
+    sum(y).backward();
+    ASSERT_TRUE(x.has_grad()) << device().to_string();
+    auto g_max = max(abs(x.grad()->to(Device::cpu()).to(DType::Float32)));
+    EXPECT_GT(g_max.item<float>(), 0.0f);
+}
+
+TEST_P(UpsampleMultiDTypeTest, BilinearBackwardGradPopulated) {
+    Upsample up(std::nullopt, 2.0, "bilinear", false);
+    auto x = Variable(randn({1, 2, 4, 4}, dtype(), device()), true);
+    auto y = up.forward(x);
+    sum(y).backward();
+    ASSERT_TRUE(x.has_grad()) << device().to_string();
+    auto g_max = max(abs(x.grad()->to(Device::cpu()).to(DType::Float32)));
+    EXPECT_GT(g_max.item<float>(), 0.0f);
+}
+
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(UpsampleMultiDTypeTest);
 
 // ============================================================================
@@ -83,6 +104,19 @@ TEST_P(UnflattenMultiDTypeTest, ValuesPreserved) {
     for (int64_t i = 0; i < 4; ++i) {
         EXPECT_NEAR(out_cpu.data<float>()[i], static_cast<float>(i), atol() * 10.0f);
     }
+}
+
+// Phase 3 addition: backward through Unflatten (it's a reshape — gradient
+// must reshape back).
+TEST_P(UnflattenMultiDTypeTest, BackwardGradPopulated) {
+    Unflatten unflat(1, {2, 2});
+    auto x = Variable(randn({2, 4}, dtype(), device()), true);
+    auto y = unflat.forward(x);
+    sum(y).backward();
+    ASSERT_TRUE(x.has_grad());
+    EXPECT_EQ(x.grad()->numel(), x.tensor().numel());
+    auto g_max = max(abs(x.grad()->to(Device::cpu()).to(DType::Float32)));
+    EXPECT_GT(g_max.item<float>(), 0.0f);
 }
 
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(UnflattenMultiDTypeTest);

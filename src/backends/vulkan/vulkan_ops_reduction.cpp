@@ -205,7 +205,13 @@ auto VulkanBackend::dispatchArgmin(const Tensor& input, int64_t dim, bool keepdi
     return output;
 }
 
-auto VulkanBackend::dispatchVariance(const Tensor& input, int64_t dim, bool unbiased, bool keepdim) -> Tensor {
+auto VulkanBackend::dispatchVariance(const Tensor& input_orig, int64_t dim, bool unbiased, bool keepdim) -> Tensor {
+    // Var = E[(x - mean)^2]; the underlying dispatchReduction/dispatchBinaryOp
+    // calls treat the buffer as flat row-major (the same stride-from-shape
+    // pattern as Vulkan softmax). Materialize a contiguous input so
+    // non-contiguous views (transpose/permute/slice) don't read the wrong
+    // memory and produce CPU-vs-Vulkan parity failures along an axis.
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     std::vector<int64_t> out_shape;
     auto input_shape = input.shape();
 

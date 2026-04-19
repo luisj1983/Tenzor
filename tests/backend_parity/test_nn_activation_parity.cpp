@@ -190,6 +190,38 @@ TEST_P(NNActivationParity, RReLU_Eval) {
     }, {input}, 1e-5f, 1e-7f, "RReLU_Eval");
 }
 
+// Phase 6-followup #27: gradient parity for the activations covered above.
+// test_gradient_parity compares both forward output AND per-input gradient
+// across backends. Catches backward kernels that diverge between backends.
+
+TEST_P(NNActivationParity, SELU_GradientParity) {
+    auto input = randn({16, 32}, DType::Float32, Device::cpu());
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable { return nn::selu(in[0]); },
+        {input}, {}, 1e-5f, 1e-7f, 1e-4f, 1e-5f, {}, "SELU_Grad");
+}
+
+TEST_P(NNActivationParity, Mish_GradientParity) {
+    auto input = randn({16, 32}, DType::Float32, Device::cpu());
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable { return nn::mish(in[0]); },
+        {input}, {}, 1e-5f, 1e-7f, 1e-4f, 1e-5f, {}, "Mish_Grad");
+}
+
+TEST_P(NNActivationParity, Softplus_GradientParity) {
+    auto input = randn({16, 32}, DType::Float32, Device::cpu());
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable { return softplus(in[0]); },
+        {input}, {}, 1e-5f, 1e-7f, 1e-4f, 1e-5f, {}, "Softplus_Grad");
+}
+
+TEST_P(NNActivationParity, LogSigmoid_GradientParity) {
+    auto input = randn({16, 32}, DType::Float32, Device::cpu());
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable { return nn::log_sigmoid(in[0]); },
+        {input}, {}, 1e-5f, 1e-7f, 1e-4f, 1e-5f, {}, "LogSigmoid_Grad");
+}
+
 INSTANTIATE_BACKEND_TESTS(NNActivationParity);
 
 

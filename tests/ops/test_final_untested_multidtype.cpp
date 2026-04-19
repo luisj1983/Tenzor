@@ -130,20 +130,31 @@ TEST_P(FinalUntestedMultiDTypeTest, GeluInplace) {
 
 TEST_P(FinalUntestedMultiDTypeTest, NumericalGradient) {
     FU_FLOAT_ONLY();
-    if (device().type != Device::Type::CPU) {
-        SKIP_WITH_REASON(SkipReason::KernelNotImplemented,
-                         "numerical_gradient is a CPU-only helper");
-    }
-    // Invoke the helper with a simple y = x * x function; compare to analytic
-    // 2x.  This exercises the NumericalGradient OpId.
-    auto x = Variable(on_device({4}), /*requires_grad=*/true);
+    // numerical_gradient is a CPU-only helper but works on Variables of any
+    // device by copying into the helper's CPU workspace internally. We verify
+    // it works for any input device by constructing the Variable on the test
+    // device and confirming the helper returns a usable gradient tensor.
+    auto x_cpu = randn({4}, dtype(), Device::cpu());
+    auto x = Variable(x_cpu.to(device()), /*requires_grad=*/true);
     auto grad = tenzor::numerical_gradient(
         [](const Variable& in) -> Variable {
+            // The lambda must produce a graph node on the same device as `in`;
+            // (in * in) does this since arithmetic preserves device.
             return in * in;
         },
         x, /*eps=*/1e-3);
-    // Shape of grad should match x.
+    // Shape of grad must match x. Compare the gradient to the analytical 2x
+    // (after moving everything to CPU for the comparison).
     EXPECT_EQ(grad.shape()[0], 4);
+    auto grad_cpu = grad.to(Device::cpu()).contiguous();
+    auto x_actual_cpu = x.tensor().to(Device::cpu()).contiguous();
+    if (dtype() == DType::Float32) {
+        for (int64_t i = 0; i < 4; ++i) {
+            float expected = 2.0f * x_actual_cpu.data<float>()[i];
+            EXPECT_NEAR(grad_cpu.data<float>()[i], expected, 1e-2)
+                << "i=" << i;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -152,12 +163,11 @@ TEST_P(FinalUntestedMultiDTypeTest, NumericalGradient) {
 
 TEST_P(FinalUntestedMultiDTypeTest, SparseSoftmaxLogSoftmax) {
     FU_FLOAT_ONLY();
-    if (device().type != Device::Type::CPU) {
-        SKIP_WITH_REASON(SkipReason::KernelNotImplemented,
-                         "sparse softmax non-CPU path may require native library");
-    }
+    // sparse_softmax/log_softmax handle GPU input by copying to CPU
+    // internally for the per-row reduction (see src/sparse/sparse_ops.cpp:1412).
+    // Run on all backends to verify the GPU→CPU→GPU round-trip path.
     auto dense = on_device({4, 4});
-    auto csr = SparseTensor::from_dense(dense);
+    auto csr = SparseTensor::from_dense(dense).to_csr();
     auto smax = sparse::sparse_softmax(csr);
     auto lsmax = sparse::sparse_log_softmax(csr);
     EXPECT_EQ(smax.shape()[0], 4);
@@ -166,12 +176,12 @@ TEST_P(FinalUntestedMultiDTypeTest, SparseSoftmaxLogSoftmax) {
 
 TEST_P(FinalUntestedMultiDTypeTest, SparseSpGEMM) {
     FU_FLOAT_ONLY();
-    if (device().type != Device::Type::CPU) {
-        SKIP_WITH_REASON(SkipReason::KernelNotImplemented,
-                         "SpGEMM routes through backend-specific libraries");
-    }
-    auto a = SparseTensor::from_dense(on_device({4, 4}));
-    auto b = SparseTensor::from_dense(on_device({4, 4}));
+    // GPU SpGEMM dispatches to backend sparse libraries (cuSPARSE / rocSPARSE
+    // / oneMKL / Vulkan compute). CPU uses cpu_spgemm_typed. Run on all
+    // backends; if a backend's sparse library is missing the dispatch will
+    // throw a clear "no GPU kernel registered" message.
+    auto a = SparseTensor::from_dense(on_device({4, 4})).to_csr();
+    auto b = SparseTensor::from_dense(on_device({4, 4})).to_csr();
     auto c = sparse::spgemm(a, b);
     EXPECT_EQ(c.shape()[0], 4);
 }

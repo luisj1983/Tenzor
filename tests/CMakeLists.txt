@@ -225,6 +225,16 @@ target_include_directories(test_checkpoint_leaf_fix PRIVATE ${PROJECT_SOURCE_DIR
 add_test(NAME CheckpointLeafFix COMMAND test_checkpoint_leaf_fix)
 set_tests_properties(CheckpointLeafFix PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT})
 
+# Phase 9-followup #29: tolerance audit. Advisory check (not strict by
+# default — fixing the 261 existing unjustified loose tolerances is its own
+# workstream). Adds a CTest entry so devs can spot-run it; --strict in CI
+# turns each unjustified tolerance into a build failure.
+add_test(NAME ToleranceAudit
+    COMMAND ${CMAKE_COMMAND} -E env
+            python3 ${PROJECT_SOURCE_DIR}/scripts/audit_tolerances.py
+                --root ${PROJECT_SOURCE_DIR}/tests)
+set_tests_properties(ToleranceAudit PROPERTIES TIMEOUT 60 LABELS "audit")
+
 # Manual KLDiv debug test
 add_executable(test_kldiv_manual test_kldiv_manual.cpp)
 target_link_libraries(test_kldiv_manual PRIVATE tenzor_core GTest::gtest_main)

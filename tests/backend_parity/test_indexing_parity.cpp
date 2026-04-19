@@ -261,6 +261,67 @@ TEST_P(IndexingParity, Where_Broadcast) {
     }, {condition, x, y}, 0, 0, "Where_Broadcast");
 }
 
+// Phase 6-followup #27: gradient parity for indexing ops, hand-rolled
+// because test_gradient_parity assumes all inputs are differentiable
+// Variables. Index tensors are non-differentiable, so we manually move
+// per backend, run forward+backward, and compare grads.
+namespace {
+template <typename Op>
+void index_grad_parity(Op op, Tensor input, Tensor idx,
+                       const std::string& test_name) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    Tensor ref_grad;
+    Device ref_backend = backends[0];
+    for (size_t i = 0; i < backends.size(); ++i) {
+        auto in_dev = Variable(input.clone().to(backends[i]), true);
+        auto idx_dev = idx.to(backends[i]);
+        auto out = op(in_dev, idx_dev);
+        sum(out).backward();
+        backends[i].synchronize();
+        ASSERT_TRUE(in_dev.has_grad()) << test_name << " on " << backend_name(backends[i]);
+        auto g_cpu = in_dev.grad()->to(Device::cpu()).contiguous();
+        if (i == 0) {
+            ref_grad = g_cpu;
+            continue;
+        }
+        ASSERT_TRUE(tensors_close(ref_grad, g_cpu, 1e-4f, 1e-5f))
+            << test_name << " backward parity failed: " << backend_name(ref_backend)
+            << " vs " << backend_name(backends[i]);
+    }
+}
+}  // namespace
+
+TEST_P(IndexingParity, DISABLED_IndexSelect_Dim0_GradientParity) {
+    auto input = randn({16, 8}, DType::Float32, Device::cpu());
+    auto idx = randint(0, 16, {6}, DType::Int64, Device::cpu());
+    index_grad_parity(
+        [](const Variable& in, const Tensor& idx_dev) {
+            return index_select(in, 0, idx_dev);
+        },
+        input, idx, "IndexSelect_Dim0_Grad");
+}
+
+TEST_P(IndexingParity, DISABLED_Gather_Dim0_GradientParity) {
+    auto input = randn({8, 8}, DType::Float32, Device::cpu());
+    auto idx = randint(0, 8, {4, 8}, DType::Int64, Device::cpu());
+    index_grad_parity(
+        [](const Variable& in, const Tensor& idx_dev) {
+            return gather(in, 0, idx_dev);
+        },
+        input, idx, "Gather_Dim0_Grad");
+}
+
+TEST_P(IndexingParity, DISABLED_Gather_Dim1_GradientParity) {
+    auto input = randn({8, 8}, DType::Float32, Device::cpu());
+    auto idx = randint(0, 8, {8, 4}, DType::Int64, Device::cpu());
+    index_grad_parity(
+        [](const Variable& in, const Tensor& idx_dev) {
+            return gather(in, 1, idx_dev);
+        },
+        input, idx, "Gather_Dim1_Grad");
+}
+
 INSTANTIATE_BACKEND_TESTS(IndexingParity);
 
 

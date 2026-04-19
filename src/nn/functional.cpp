@@ -7,6 +7,7 @@
  */
 
 #include "tenzor/nn/functional.hpp"
+#include "tenzor/nn/layers/normalization.hpp"  // for internal::make_layer_norm_backward
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
@@ -110,6 +111,25 @@ auto conv2d(const Variable& input, const Variable& weight,
     std::vector<Tensor> inputs_vec = {input.tensor(), weight.tensor()};
     if (bias.has_value()) {
         inputs_vec.push_back(bias->tensor());
+    }
+
+    // Asymmetric stride/padding/dilation: most backend Conv2d kernels (CPU,
+    // CUDA, ROCm, OneAPI) only read the singular AttrKey::{Stride,Padding,
+    // Dilation} and ignore per-axis {StrideH/W,PaddingH/W,DilationH/W}.
+    // Silently using the H value for both axes produces wrong output. Guard
+    // here until the kernels accept per-axis values. (#47)
+    bool asymmetric = (stride.first != stride.second) ||
+                      (padding.first != padding.second) ||
+                      (dilation.first != dilation.second);
+    if (asymmetric) {
+        throw std::invalid_argument(
+            "F::conv2d: asymmetric stride/padding/dilation is not yet supported "
+            "by the backend Conv2d kernels. Got stride=(" +
+            std::to_string(stride.first) + "," + std::to_string(stride.second) +
+            "), padding=(" + std::to_string(padding.first) + "," +
+            std::to_string(padding.second) + "), dilation=(" +
+            std::to_string(dilation.first) + "," + std::to_string(dilation.second) +
+            "). Tracked in followup #47.");
     }
 
     NewOpAttributes attrs;
@@ -537,9 +557,23 @@ auto layer_norm(const Variable& input,
                 const std::optional<Variable>& weight,
                 const std::optional<Variable>& bias,
                 double eps) -> Variable {
+    // Backend FusedLayerNorm kernels (CPU/CUDA/ROCm/Vulkan/OneAPI) all read
+    // inputs[1] (weight) and inputs[2] (bias) unconditionally. Synthesize an
+    // identity affine here when weight/bias are absent so the inputs span
+    // always has 3 elements regardless of which backend dispatches.
     std::vector<Tensor> inputs_vec = {input.tensor()};
-    if (weight.has_value()) inputs_vec.push_back(weight->tensor());
-    if (bias.has_value()) inputs_vec.push_back(bias->tensor());
+    if (weight.has_value()) {
+        inputs_vec.push_back(weight->tensor());
+    } else {
+        inputs_vec.push_back(::tenzor::ones(
+            normalized_shape, input.tensor().dtype(), input.tensor().device()));
+    }
+    if (bias.has_value()) {
+        inputs_vec.push_back(bias->tensor());
+    } else {
+        inputs_vec.push_back(::tenzor::zeros(
+            normalized_shape, input.tensor().dtype(), input.tensor().device()));
+    }
 
     // Build normalized_shape as comma-separated string attribute
     std::string shape_str;
@@ -553,7 +587,76 @@ auto layer_norm(const Variable& input,
     attrs.set(AttrKey::Eps, eps);
 
     auto result = dispatch(OpId::FusedLayerNorm, inputs_vec, attrs);
-    return Variable(result[0], input.requires_grad());
+    Variable output(result[0], input.requires_grad());
+
+    // Phase 24-followup #38 fix: previously this functional returned a
+    // Variable with no grad_fn — backward through F::layer_norm produced
+    // zero gradients silently. Wire up nn::LayerNormBackward (defined in
+    // src/nn/layers/normalization.cpp) so backward flows. FusedLayerNorm
+    // returns 3 tensors on CPU/CUDA/OneAPI ([output, mean, inv_std]) but
+    // only 1 on Vulkan/ROCm. For the latter, compute mean/inv_std via
+    // tensor ops so the backward path still has the saved stats it needs.
+    if (input.requires_grad() && ::tenzor::is_grad_enabled()) {
+        Tensor mean_t, rstd_t;
+        if (result.size() >= 3) {
+            mean_t = result[1];
+            rstd_t = result[2];
+        } else {
+            // Compute mean/inv_std manually for backends whose FusedLayerNorm
+            // doesn't return them (Vulkan, ROCm). Reduce over last
+            // normalized_shape.size() dims.
+            const Tensor& inp_t = input.tensor();
+            int64_t input_ndim = inp_t.ndim();
+            int64_t reduce_start = input_ndim - static_cast<int64_t>(normalized_shape.size());
+            // Compute over the trailing dims by flattening to [batch, N].
+            int64_t N = 1;
+            for (auto d : normalized_shape) N *= d;
+            int64_t batch = inp_t.numel() / N;
+            std::vector<int64_t> flat_shape{batch, N};
+            Tensor inp_flat = ::tenzor::reshape(inp_t, flat_shape);
+            // mean over last dim, keeping shape [batch]
+            Tensor mean_flat = ::tenzor::mean(inp_flat, /*dim=*/1, /*keepdim=*/false);
+            // var = mean(x^2) - mean^2
+            Tensor sq = ::tenzor::mul(inp_flat, inp_flat);
+            Tensor mean_sq = ::tenzor::mean(sq, /*dim=*/1, /*keepdim=*/false);
+            Tensor mu_sq = ::tenzor::mul(mean_flat, mean_flat);
+            Tensor var = ::tenzor::sub(mean_sq, mu_sq);
+            Tensor var_eps = ::tenzor::add(var, ::tenzor::full(
+                std::vector<int64_t>{batch}, eps, var.dtype(), var.device()));
+            Tensor std_t = ::tenzor::sqrt(var_eps);
+            Tensor ones_b = ::tenzor::ones({batch}, std_t.dtype(), std_t.device());
+            Tensor rstd_flat = ::tenzor::div(ones_b, std_t);
+            // Reshape to original batch dims (input's leading dims minus normalized).
+            std::vector<int64_t> stat_shape;
+            for (int64_t i = 0; i < reduce_start; ++i) stat_shape.push_back(inp_t.shape()[i]);
+            if (stat_shape.empty()) stat_shape.push_back(1);
+            mean_t = ::tenzor::reshape(mean_flat, stat_shape);
+            rstd_t = ::tenzor::reshape(rstd_flat, stat_shape);
+            (void)reduce_start;  // suppress unused warning if loop body skipped
+        }
+
+        bool elementwise_affine = weight.has_value();
+        int64_t normalized_size = 1;
+        for (auto d : normalized_shape) normalized_size *= d;
+        std::vector<Tensor> tensors_to_save = {
+            input.tensor(), mean_t, rstd_t, inputs_vec[1]
+        };
+        auto grad_fn = internal::make_layer_norm_backward(
+            elementwise_affine, eps, normalized_size,
+            std::move(tensors_to_save));
+        output.set_grad_fn(grad_fn);
+        std::vector<std::shared_ptr<::tenzor::Function>> next_funcs;
+        if (auto fn = input.grad_fn()) next_funcs.push_back(fn);
+        if (weight.has_value()) {
+            if (auto fn = weight->grad_fn()) next_funcs.push_back(fn);
+        }
+        grad_fn->set_next_functions(std::move(next_funcs));
+        std::vector<Variable> input_vars{input};
+        if (weight.has_value()) input_vars.push_back(*weight);
+        if (bias.has_value()) input_vars.push_back(*bias);
+        grad_fn->set_input_variables(std::move(input_vars));
+    }
+    return output;
 }
 
 // ============================================================================
@@ -603,7 +706,10 @@ auto group_norm(const Variable& input, int64_t num_groups,
     if (bias.has_value()) inputs_vec.push_back(bias->tensor());
 
     NewOpAttributes attrs;
-    attrs.set(AttrKey::Groups, num_groups);
+    // Use NumGroups (matches GroupNorm layer convention in normalization.cpp).
+    // Backends accept either NumGroups or Groups for compatibility, but the
+    // layer-side dispatch path (which is the common case) sets NumGroups.
+    attrs.set(AttrKey::NumGroups, num_groups);
     attrs.set(AttrKey::Eps, eps);
 
     auto result = dispatch(OpId::GroupNorm, inputs_vec, attrs);
@@ -746,11 +852,48 @@ auto scaled_dot_product_attention(
                             query.tensor().dtype() == DType::Float16 ||
                             query.tensor().dtype() == DType::BFloat16);
 
-    if (is_4d && no_mask && supported_dtype) {
+    // CUDA fused_attention_cuda and ROCm fused_attention_hip kernels read the
+    // Causal attr but discard it — they don't apply triangular masking. So for
+    // is_causal=true on those backends, fall through to the manual BMM path
+    // which builds an explicit triu mask. CPU and Vulkan FlashAttention do
+    // honor causal. (#46/#49)
+    auto dev_t = query.tensor().device().type;
+    bool device_supports_causal = (dev_t == Device::Type::CPU ||
+                                   dev_t == Device::Type::Vulkan);
+    bool causal_path_ok = !opts.is_causal || device_supports_causal;
+
+    // FlashAttention dropout is currently only honored by the CPU kernel
+    // (the GPU FlashAttention/FusedAttention kernels ignore DropoutP/IsTraining).
+    // For dropout_p > 0 on a GPU backend, fall through to the manual BMM path
+    // which applies dropout as a separate Variable-level op. (#49)
+    bool device_supports_dropout = (dev_t == Device::Type::CPU);
+    bool dropout_path_ok = (opts.dropout_p <= 0.0) || device_supports_dropout;
+
+    if (is_4d && no_mask && supported_dtype && causal_path_ok && dropout_path_ok) {
         try {
             Tensor q_contig = query.tensor().is_contiguous() ? query.tensor() : query.tensor().contiguous();
             Tensor k_contig = key.tensor().is_contiguous() ? key.tensor() : key.tensor().contiguous();
             Tensor v_contig = value.tensor().is_contiguous() ? value.tensor() : value.tensor().contiguous();
+
+            // Backend FlashAttention kernels disagree on input rank: CPU's
+            // flash_attention_forward expects 4D [B, H, L, E], but CUDA's
+            // fused_attention_cuda and ROCm's fused_attention_hip expect 3D
+            // [B*H, L, E] (collapsed batch+heads). Normalize to 3D for GPU
+            // dispatch and reshape the output back. Without this the GPU
+            // kernels produce output of shape [B, H, L] (E silently dropped).
+            auto q_shape = q_contig.shape();
+            int64_t B = q_shape[0], H = q_shape[1], L = q_shape[2], E = q_shape[3];
+            auto dev = q_contig.device().type;
+            bool needs_3d_collapse = (dev != Device::Type::CPU);
+            if (needs_3d_collapse) {
+                q_contig = tenzor::reshape(q_contig, {B * H, L, E});
+                int64_t Lk = k_contig.shape()[2];
+                int64_t Ek = k_contig.shape()[3];
+                k_contig = tenzor::reshape(k_contig, {B * H, Lk, Ek});
+                int64_t Lv = v_contig.shape()[2];
+                int64_t Ev = v_contig.shape()[3];
+                v_contig = tenzor::reshape(v_contig, {B * H, Lv, Ev});
+            }
 
             OpAttributes attrs;
             attrs.set(AttrKey::Scale, static_cast<double>(scale));
@@ -763,6 +906,10 @@ auto scaled_dot_product_attention(
             std::vector<Tensor> flash_inputs = {q_contig, k_contig, v_contig};
             Tensor output = dispatch<OpId::FlashAttention>(flash_inputs, attrs)[0];
 
+            if (needs_3d_collapse) {
+                output = tenzor::reshape(output, {B, H, L, E});
+            }
+
             return Variable(output, query.requires_grad() || key.requires_grad() || value.requires_grad());
         } catch (const std::exception&) {
             // Fall through to manual path if FlashAttention kernel unavailable
@@ -770,9 +917,14 @@ auto scaled_dot_product_attention(
     }
 
     // Manual attention path: Q @ K^T / sqrt(d_k)
-    auto kt = Variable(tenzor::transpose(key.tensor(), -2, -1), key.requires_grad());
+    // Use Variable-level operators throughout so backward propagates through
+    // transpose, scale, and mask additions. Previously these wrapped raw
+    // tensor results which silently severed the autograd chain.
+    auto kt = ::tenzor::transpose(key, -2, -1);
     auto scores = tenzor::matmul(query, kt);
-    auto scaled = Variable(scores.tensor() * scale, scores.requires_grad());
+    Variable scale_var(::tenzor::full({1}, scale,
+                                       scores.tensor().dtype(), scores.tensor().device()), false);
+    auto scaled = scores * scale_var;
 
     // Causal mask: use triu to build mask on-device (no CPU fallback).
     // Always use Float32 for the mask to avoid overflow in half-precision
@@ -786,12 +938,13 @@ auto scaled_dot_product_attention(
         if (query.tensor().dtype() != DType::Float32) {
             mask = mask.to(query.tensor().dtype());
         }
-        scaled = Variable(scaled.tensor() + mask, scaled.requires_grad());
+        Variable mask_var(mask, false);
+        scaled = scaled + mask_var;
     }
 
     // Optional attention mask
     if (opts.attn_mask.has_value()) {
-        scaled = Variable(scaled.tensor() + opts.attn_mask->tensor(), scaled.requires_grad());
+        scaled = scaled + *opts.attn_mask;
     }
 
     // Softmax along last dimension
@@ -799,15 +952,20 @@ auto scaled_dot_product_attention(
 
     // Dropout (if requested). Callers should set dropout_p = 0 during
     // inference — this is a free function without training-mode state.
+    // Use Variable-level operators here so backward propagates through the
+    // mask multiplication (the previous `Variable(attn.tensor()*..., rg)`
+    // pattern would silently sever the autograd chain — see the
+    // raw-tensor-op-breaks-autograd-graph memory).
     if (opts.dropout_p > 0.0) {
         auto drop_mask = tenzor::rand(
             std::vector<int64_t>(attn.tensor().shape().begin(), attn.tensor().shape().end()),
             attn.tensor().dtype(), attn.tensor().device());
         auto threshold = tenzor::full({1}, static_cast<float>(opts.dropout_p),
                                       attn.tensor().dtype(), attn.tensor().device());
-        auto keep = Variable(tenzor::gt(drop_mask, threshold), false);
-        attn = Variable(attn.tensor() * keep.tensor() * static_cast<float>(1.0 / (1.0 - opts.dropout_p)),
-                        attn.requires_grad());
+        Variable keep(tenzor::gt(drop_mask, threshold).to(attn.tensor().dtype()), false);
+        Variable scale_var(tenzor::full({1}, static_cast<float>(1.0 / (1.0 - opts.dropout_p)),
+                                        attn.tensor().dtype(), attn.tensor().device()), false);
+        attn = attn * keep * scale_var;
     }
 
     // attn @ V

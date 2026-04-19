@@ -68,4 +68,33 @@ TEST_P(FunctionalMultiDTypeTest, LinearOutputShape) {
     EXPECT_EQ(output.shape()[1], 4);
 }
 
+// Regression: F::group_norm previously set AttrKey::Groups but several
+// backends only read AttrKey::NumGroups, silently defaulting num_groups
+// to 1 and producing identical output to LayerNorm. Standardized on
+// NumGroups (matching the GroupNorm layer); backends accept either now.
+// This test forces num_groups > 1 to detect a regression.
+TEST_P(FunctionalMultiDTypeTest, GroupNormFunctionalNumGroupsTwo) {
+    // 4 channels split into 2 groups means each group covers 2 channels.
+    // If num_groups silently defaulted to 1 (LayerNorm), the per-group
+    // mean would equal the global mean and group-1's normalized values
+    // would not match the expected per-group normalization.
+    auto x = createInput({1, 4}, false);
+    Variable weight(createOnes({4}), false);
+    Variable bias(createZeros({4}), false);
+    auto out = F::group_norm(x, /*num_groups=*/2, weight, bias, 1e-5);
+
+    // For 4-channel input split into 2 groups (2 channels each), each
+    // group is normalized independently. Verify the per-group mean of
+    // the output is ~0 (within tolerance), which only holds when
+    // num_groups was actually used.
+    auto out_cpu = out.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
+    auto* d = out_cpu.data<float>();
+    float g0_mean = (d[0] + d[1]) / 2.0f;
+    float g1_mean = (d[2] + d[3]) / 2.0f;
+    // Use dtype-aware tolerance — group-normalized per-group mean should
+    // be near zero in any dtype.
+    EXPECT_NEAR(g0_mean, 0.0f, std::max(atol(), 5e-3f));
+    EXPECT_NEAR(g1_mean, 0.0f, std::max(atol(), 5e-3f));
+}
+
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(FunctionalMultiDTypeTest);

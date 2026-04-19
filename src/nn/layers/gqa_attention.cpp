@@ -178,11 +178,19 @@ auto GroupedQueryAttention::scaled_dot_product_attention(
                        .reshape({1, seq_len_k});
         auto dist = tenzor::abs(row_idx.to(DType::Float32) - col_idx.to(DType::Float32));
         float half_window = static_cast<float>(window_size_ / 2);
-        // gt returns a boolean mask; cast to float and multiply by -1e9
+        // Use `where` to avoid the 0 * (-1e9 in Float16) = 0 * -inf = NaN
+        // pattern that the previous boolean-cast-multiply produced. For
+        // Float16, -1e9 overflows to -inf, so the mask had NaN at
+        // positions where outside=False (0 * -inf = NaN). where() picks
+        // the right operand directly without arithmetic on the mask.
         auto threshold = tenzor::full(std::vector<int64_t>(dist.shape().begin(), dist.shape().end()),
                                      static_cast<double>(half_window), DType::Float32, query.device());
         auto outside = tenzor::gt(dist, threshold);
-        auto window_mask = outside.to(query.dtype()) * full({1}, -1e9, query.dtype(), query.device());
+        auto neg_large = full(std::vector<int64_t>(dist.shape().begin(), dist.shape().end()),
+                              -1e9, query.dtype(), query.device());
+        auto zero_mask = zeros(std::vector<int64_t>(dist.shape().begin(), dist.shape().end()),
+                               query.dtype(), query.device());
+        auto window_mask = where(outside, neg_large, zero_mask);
         // window_mask is [seq_len_q, seq_len_k], broadcasts to [batch, heads, L, S]
         Variable window_var(window_mask, false);
         scores = scores + window_var;

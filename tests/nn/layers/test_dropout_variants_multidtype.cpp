@@ -168,6 +168,37 @@ TEST_P(DropoutVariantsMultiDTypeTest, VariationalDropoutResetMask) {
 }
 
 // ============================================================================
+// Phase 3 additions: backward gradient population in eval mode (deterministic).
+// In training mode dropout's stochastic mask makes gradient comparisons noisy;
+// eval mode gives the deterministic identity path so we can verify the
+// backward implementation forwards gradients through.
+// ============================================================================
+
+TEST_P(DropoutVariantsMultiDTypeTest, AlphaDropoutEvalBackwardGradPopulated) {
+    AlphaDropout alpha_dropout(0.5);
+    convert_model(alpha_dropout);
+    alpha_dropout.eval();
+    Variable input = createInput({4, 8}, true);
+    auto output = alpha_dropout.forward(input);
+    sum(output).backward();
+    ASSERT_TRUE(input.has_grad()) << device().to_string();
+    auto g_max = max(abs(input.grad()->to(Device::cpu()).to(DType::Float32)));
+    EXPECT_GT(g_max.item<float>(), 0.0f);
+}
+
+TEST_P(DropoutVariantsMultiDTypeTest, VariationalDropoutEvalBackwardGradPopulated) {
+    VariationalDropout vd(0.5);
+    convert_model(vd);
+    vd.eval();
+    Variable input = createInput({4, 8}, true);
+    auto output = vd.forward(input);
+    sum(output).backward();
+    ASSERT_TRUE(input.has_grad()) << device().to_string();
+    auto g_max = max(abs(input.grad()->to(Device::cpu()).to(DType::Float32)));
+    EXPECT_GT(g_max.item<float>(), 0.0f);
+}
+
+// ============================================================================
 // Test Instantiation
 // ============================================================================
 

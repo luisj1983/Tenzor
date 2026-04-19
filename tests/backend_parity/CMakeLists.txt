@@ -75,6 +75,11 @@ add_parity_test(test_nn_parity test_nn_parity.cpp)
 # Gradient parity tests with numerical gradient checking
 add_parity_test(test_gradient_parity test_gradient_parity.cpp)
 
+# Phase 6 — cross-backend backward parity for the highest-impact ops, using
+# the test_gradient_parity helper. Catches backward kernels that diverge
+# between backends (which the many forward-only parity files cannot detect).
+add_parity_test(test_gradient_parity_critical test_gradient_parity_critical.cpp)
+
 # Data type parity tests (Float32, Float64, Int32, Int64)
 add_parity_test(test_dtype_parity test_dtype_parity.cpp)
 

@@ -1838,7 +1838,23 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
 }
 
 // Softmax wrapper with temperature scaling
-auto softmax_kernel(const Tensor& input, int64_t dim, hipStream_t stream, float temperature = 1.0f) -> Tensor {
+auto softmax_kernel(const Tensor& input_orig, int64_t dim, hipStream_t stream, float temperature = 1.0f) -> Tensor {
+    // The kernel below assumes the softmax axis is contiguous and treats
+    // the rest of memory as flat batches. That mapping is only correct when
+    // `dim` is the LAST axis. For other dims, transpose to put the softmax
+    // axis last, recurse, transpose back. Without this, softmax(dim=0) on a
+    // (16,16) input reads rows where it should read columns.
+    auto orig_shape_span = input_orig.shape();
+    int64_t orig_ndim = static_cast<int64_t>(orig_shape_span.size());
+    int64_t norm_dim = (dim < 0) ? orig_ndim + dim : dim;
+    int64_t last = orig_ndim - 1;
+    if (orig_ndim > 0 && norm_dim != last) {
+        Tensor transposed = input_orig.transpose(norm_dim, last).contiguous();
+        Tensor result = softmax_kernel(transposed, /*dim=*/last, stream, temperature);
+        return result.transpose(norm_dim, last).contiguous();
+    }
+
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
 
@@ -1853,8 +1869,8 @@ auto softmax_kernel(const Tensor& input, int64_t dim, hipStream_t stream, float 
         throw std::invalid_argument("Dimension out of range for softmax");
     }
 
-    // For simplicity, assume softmax over last dimension (reshape if needed)
-    // Calculate batch size and dimension size
+    // After the transpose-to-last normalization above, dim is always the
+    // last axis. Calculate batch size and dim size accordingly.
     int64_t batch_size = 1;
     for (int64_t i = 0; i < dim; ++i) {
         batch_size *= shape[i];
@@ -1960,7 +1976,20 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
 }
 
 // Log Softmax wrapper
-auto log_softmax_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Tensor {
+auto log_softmax_kernel(const Tensor& input_orig, int64_t dim, hipStream_t stream) -> Tensor {
+    // Same dim-must-be-last assumption as softmax_kernel above. Normalize
+    // by transposing dim to last when needed.
+    auto orig_shape_span = input_orig.shape();
+    int64_t orig_ndim = static_cast<int64_t>(orig_shape_span.size());
+    int64_t norm_dim = (dim < 0) ? orig_ndim + dim : dim;
+    int64_t last_axis = orig_ndim - 1;
+    if (orig_ndim > 0 && norm_dim != last_axis) {
+        Tensor transposed = input_orig.transpose(norm_dim, last_axis).contiguous();
+        Tensor result = log_softmax_kernel(transposed, /*dim=*/last_axis, stream);
+        return result.transpose(norm_dim, last_axis).contiguous();
+    }
+
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
 

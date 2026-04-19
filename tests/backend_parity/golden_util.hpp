@@ -27,13 +27,16 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <optional>
+#include <system_error>
 #include <string>
 #include <vector>
 
@@ -212,12 +215,49 @@ inline std::string maybe_record(std::string_view test_name,
 
 /**
  * Try to load a previously recorded golden for (test_name, inputs-fingerprint).
+ *
+ * Phase 9 hardening: prints a loud warning to stderr each time a golden is
+ * loaded so CI logs make stale-golden usage visible (the substitution that
+ * the audit flagged as "silently masking divergence"). Also enforces an age
+ * limit: if the golden file is older than the configurable threshold (default
+ * 30 days, override via TENZOR_GOLDEN_MAX_AGE_DAYS), refuse to load and force
+ * the test to skip — stale goldens are no better than no goldens.
  */
 inline std::optional<Tensor> maybe_load(std::string_view test_name,
                                         const std::vector<Tensor>& inputs) {
     uint64_t fp = fingerprint_inputs(test_name, inputs);
     std::string path = golden_path(test_name, fp);
-    return read_golden(path);
+
+    // Staleness guard: refuse goldens older than max-age days.
+    int max_age_days = 30;
+    if (const char* v = std::getenv("TENZOR_GOLDEN_MAX_AGE_DAYS")) {
+        try { max_age_days = std::max(1, std::stoi(v)); } catch (...) {}
+    }
+    std::error_code ec;
+    auto ftime = std::filesystem::last_write_time(path, ec);
+    if (!ec) {
+        auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+            ftime - std::filesystem::file_time_type::clock::now()
+                  + std::chrono::system_clock::now());
+        auto age = std::chrono::system_clock::now() - sctp;
+        auto age_days = std::chrono::duration_cast<std::chrono::hours>(age).count() / 24;
+        if (age_days > max_age_days) {
+            std::cerr << "[GOLDEN STALE] " << path << " is " << age_days
+                      << " days old (max=" << max_age_days
+                      << "). Refusing to use; record fresh goldens with "
+                         "TENZOR_RECORD_GOLDENS=1.\n";
+            return std::nullopt;
+        }
+    }
+
+    auto loaded = read_golden(path);
+    if (loaded) {
+        std::cerr << "[GOLDEN FALLBACK] " << test_name
+                  << " using recorded golden at " << path
+                  << " — only one backend was available. Set "
+                     "TENZOR_REQUIRE_MULTI_BACKEND=1 to fail fast in CI.\n";
+    }
+    return loaded;
 }
 
 } // namespace golden

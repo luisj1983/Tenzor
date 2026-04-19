@@ -8,6 +8,7 @@
  */
 
 #include "tenzor/backend/dispatch_table.hpp"
+#include <sstream>
 #include "tenzor/backend/kernel_registry.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
@@ -1033,7 +1034,16 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::RMSNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t normalized_shape = attrs.get_int(AttrKey::NormalizedShape, inputs[0].shape().back());
+        // The dispatcher (src/nn/layers/normalization.cpp:RMSNormBackward)
+        // stores AttrKey::NormalizedShape as a string via std::to_string.
+        // get_int would silently return 0 for a string-typed value, and
+        // Vulkan's dispatchRMSNormBackward then computes
+        // batch_size = input.numel() / 0 → SIGFPE. Parse via int_list and
+        // fall back to the input's last dim if unset. (#55)
+        auto ns_list = attrs.get_int_list(AttrKey::NormalizedShape);
+        int64_t normalized_shape = ns_list.empty() ? inputs[0].shape().back()
+                                                    : ns_list.front();
+        if (normalized_shape <= 0) normalized_shape = inputs[0].shape().back();
         auto [grad_input, grad_weight] = get_vulkan_backend()->dispatchRMSNormBackward(
             inputs[0], inputs[1], inputs[2], inputs[3], normalized_shape);
         return std::vector<Tensor>{grad_input, grad_weight};
@@ -1933,8 +1943,22 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // Flip Operation
     // ========================================================================
     table.register_single_output_kernel(OpId::Flip, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim = attrs.get_int(AttrKey::Dim, 0);
-        return get_vulkan_backend()->dispatchFlip(inputs[0], dim);
+        // Phase 27-followup #40 fix: tenzor::flip sets AttrKey::Dims
+        // (plural comma-separated string), not AttrKey::Dim (int). Reading
+        // the wrong key defaulted to 0 and flipped axis 0 regardless of the
+        // requested dim. Parse the dim list and flip each in turn.
+        auto dims_sv = attrs.get_string(AttrKey::Dims, "0");
+        std::string dims_str(dims_sv);
+        Tensor result = inputs[0];
+        std::istringstream ss(dims_str);
+        std::string token;
+        while (std::getline(ss, token, ',')) {
+            if (!token.empty()) {
+                int64_t dim = std::stoll(token);
+                result = get_vulkan_backend()->dispatchFlip(result, dim);
+            }
+        }
+        return result;
     });
 
     // ========================================================================

@@ -407,6 +407,28 @@ TEST_P(NNPoolingParity, MaxUnpool2d) {
 // Main
 // ============================================================================
 
+// Phase 6-followup #27: gradient parity for pooling — backward kernels are
+// where stride/index handling commonly diverges between backends.
+TEST_P(NNPoolingParity, AvgPool1d_GradientParity) {
+    auto input = randn({1, 8, 16}, DType::Float32, Device::cpu());
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable {
+            nn::AvgPool1d pool(2, 2);
+            return pool.forward(in[0]);
+        },
+        {input}, {}, 1e-5f, 1e-6f, 1e-4f, 1e-5f, {}, "AvgPool1d_Grad");
+}
+
+TEST_P(NNPoolingParity, AvgPool3d_GradientParity) {
+    auto input = randn({1, 4, 8, 8, 8}, DType::Float32, Device::cpu());
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable {
+            nn::AvgPool3d pool(2, 2, 0);
+            return pool.forward(in[0]);
+        },
+        {input}, {}, 1e-5f, 1e-6f, 1e-4f, 1e-5f, {}, "AvgPool3d_Grad");
+}
+
 INSTANTIATE_BACKEND_TESTS(NNPoolingParity);
 
 

@@ -379,6 +379,31 @@ add_executable(test_alibi_multidtype layers/test_alibi_multidtype.cpp)
 target_link_libraries(test_alibi_multidtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_alibi_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
+# Phase 2.2: layers previously without dedicated multi-backend test files.
+add_executable(test_identity_multidtype layers/test_identity_multidtype.cpp)
+target_link_libraries(test_identity_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_identity_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_circular_pad_multidtype layers/test_circular_pad_multidtype.cpp)
+target_link_libraries(test_circular_pad_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_circular_pad_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_patch_embedding_multidtype layers/test_patch_embedding_multidtype.cpp)
+target_link_libraries(test_patch_embedding_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_patch_embedding_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_distance_layers_multidtype layers/test_distance_layers_multidtype.cpp)
+target_link_libraries(test_distance_layers_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_distance_layers_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_deformable_conv2d_layer_multidtype layers/test_deformable_conv2d_layer_multidtype.cpp)
+target_link_libraries(test_deformable_conv2d_layer_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_deformable_conv2d_layer_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+add_executable(test_transformer_layer_multidtype layers/test_transformer_layer_multidtype.cpp)
+target_link_libraries(test_transformer_layer_multidtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_transformer_layer_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
 # FlexAttention multi-backend tests (forward-only; backward deferred — the
 # backward pass requires native GPU flash-attention-style kernels which live
 # in the Phase 3 follow-up of the test-completion plan).

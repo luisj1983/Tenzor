@@ -142,4 +142,39 @@ TEST_P(ActivationsExtendedMultiDTypeTest, RReLU_FunctionalPositivePassthrough) {
     }
 }
 
+// Phase 3 additions: backward gradient population for the activations covered
+// in this file. Without these, a backward kernel returning zero or NaN would
+// silently pass.
+
+TEST_P(ActivationsExtendedMultiDTypeTest, CELU_BackwardGradPopulated) {
+    nn::CELU celu;
+    Variable input = createInput({4, 8}, true);
+    auto out = celu.forward(input);
+    sum(out).backward();
+    ASSERT_TRUE(input.has_grad()) << device().to_string();
+    auto g_max = max(abs(input.grad()->to(Device::cpu()).to(DType::Float32)));
+    EXPECT_GT(g_max.item<float>(), 0.0f);
+}
+
+TEST_P(ActivationsExtendedMultiDTypeTest, PReLU_BackwardGradPopulated) {
+    nn::PReLU prelu(/*num_parameters=*/1);
+    convert_model(prelu);
+    Variable input = createInput({4, 8}, true);
+    auto out = prelu.forward(input);
+    sum(out).backward();
+    ASSERT_TRUE(input.has_grad());
+    auto g_max = max(abs(input.grad()->to(Device::cpu()).to(DType::Float32)));
+    EXPECT_GT(g_max.item<float>(), 0.0f);
+}
+
+TEST_P(ActivationsExtendedMultiDTypeTest, Softsign_BackwardGradPopulated) {
+    nn::Softsign softsign;
+    Variable input = createInput({4, 8}, true);
+    auto out = softsign.forward(input);
+    sum(out).backward();
+    ASSERT_TRUE(input.has_grad());
+    auto g_max = max(abs(input.grad()->to(Device::cpu()).to(DType::Float32)));
+    EXPECT_GT(g_max.item<float>(), 0.0f);
+}
+
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(ActivationsExtendedMultiDTypeTest);

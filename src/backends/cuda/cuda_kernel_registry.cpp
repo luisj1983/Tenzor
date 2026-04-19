@@ -2655,7 +2655,8 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // =========================================================================
     table.register_kernel(OpId::GroupNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [input, weight, bias]
-        int64_t num_groups = attrs.get_int(AttrKey::NumGroups, 1);
+        // Accept NumGroups (layer convention) or Groups (functional fallback).
+        int64_t num_groups = attrs.get_int(AttrKey::NumGroups, attrs.get_int(AttrKey::Groups, 1));
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         auto [output, mean, inv_std] = cuda::group_norm_forward_kernel(
             inputs[0], inputs[1], inputs[2], num_groups, eps, get_cuda_stream(attrs));
@@ -2663,7 +2664,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     });
     table.register_kernel(OpId::GroupNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [grad_output, input, weight, mean, inv_std]
-        int64_t num_groups = attrs.get_int(AttrKey::NumGroups, 1);
+        int64_t num_groups = attrs.get_int(AttrKey::NumGroups, attrs.get_int(AttrKey::Groups, 1));
         auto [grad_input, grad_weight, grad_bias] = cuda::group_norm_backward_kernel(
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], num_groups, get_cuda_stream(attrs));
         return std::vector<Tensor>{grad_input, grad_weight, grad_bias};

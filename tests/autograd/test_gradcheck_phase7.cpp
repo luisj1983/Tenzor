@@ -120,22 +120,13 @@ TEST(GradCheckPhase7, CholeskySolve_VsRHS) {
 // Conv gradcheck — small inputs with Float64 for numerical stability
 // ============================================================================
 
-// Documented bug: Conv1d gradcheck disagrees with finite differences. The
-// Conv2d path passes the same test, suggesting Conv1d's wrap-via-Conv2d
-// implementation has a backward grad miscomputation when collapsing the
-// unsqueezed height dim. (See also Phase 3 finding that ConvTranspose1d
-// mis-applies padding to the unsqueezed dim — same wrapper class of bugs.)
 TEST(GradCheckPhase7, Conv1d_Float64) {
     Variable input(randn({1, 2, 6}, DType::Float64, Device::cpu()), true);
     Variable weight(randn({3, 2, 3}, DType::Float64, Device::cpu()) * 0.3, false);
     auto f = [&weight](const Variable& x) -> Variable {
         return tenzor::sum(nn::functional::conv1d(x, weight, std::nullopt, 1, 0, 1, 1));
     };
-    // eps=1e-4 (not 1e-6): sum-of-conv-output has analytical gradient equal
-    // to a constant per channel, but the central-difference estimator at
-    // 1e-6 eats more precision than 5e-4 tolerates for this accumulation
-    // shape. 1e-4 matches the auto-bump gradcheck applies to Float32.
-    bool ok = gradcheck(f, input, 1e-4, 5e-4, 5e-4);
+    bool ok = gradcheck(f, input, 1e-6, 1e-7, 1e-6);
     EXPECT_TRUE(ok) << "Conv1d gradcheck failed";
 }
 
@@ -150,12 +141,10 @@ TEST(GradCheckPhase7, Conv2d_Float64) {
             std::pair<int64_t,int64_t>{1,1},  // dilation
             1));
     };
-    bool ok = gradcheck(f, input, 1e-6, 5e-4, 5e-4);
+    bool ok = gradcheck(f, input, 1e-6, 1e-7, 1e-6);
     EXPECT_TRUE(ok) << "Conv2d gradcheck failed";
 }
 
-// Documented bug: Conv3d gradcheck mismatches finite differences (Conv2d
-// passes). Same backward grad path likely; investigate after Conv1d.
 TEST(GradCheckPhase7, Conv3d_Float64) {
     Variable input(randn({1, 2, 3, 3, 3}, DType::Float64, Device::cpu()), true);
     Variable weight(randn({2, 2, 2, 2, 2}, DType::Float64, Device::cpu()) * 0.3, false);
@@ -163,24 +152,37 @@ TEST(GradCheckPhase7, Conv3d_Float64) {
         return tenzor::sum(nn::functional::conv3d(x, weight, std::nullopt,
                                       {1, 1, 1}, {0, 0, 0}, {1, 1, 1}, 1));
     };
-    bool ok = gradcheck(f, input, 1e-4, 5e-4, 5e-4);
+    bool ok = gradcheck(f, input, 1e-6, 1e-7, 1e-6);
     EXPECT_TRUE(ok) << "Conv3d gradcheck failed";
 }
 
-// Documented bug: ConvTranspose1d gradcheck mismatches. Same wrapper bug
-// noted in Phase 3 — the unsqueezed dim is mishandled.
 TEST(GradCheckPhase7, ConvTranspose1d_Float64) {
     Variable input(randn({1, 2, 4}, DType::Float64, Device::cpu()), true);
     Variable weight(randn({2, 3, 3}, DType::Float64, Device::cpu()) * 0.3, false);
     auto f = [&weight](const Variable& x) -> Variable {
         return tenzor::sum(nn::functional::conv_transpose1d(x, weight, std::nullopt, 1, 0, 0, 1, 1));
     };
-    // ConvTranspose1d collapses via an unsqueezed H=1 path; the finite-
-    // difference noise is RNG-sensitive and occasionally nudges over a
-    // 5e-4 tolerance when per-seed weight magnitudes align. Tolerance of
-    // 2e-3 keeps the check meaningful while removing the flake.
-    bool ok = gradcheck(f, input, 1e-4, 2e-3, 2e-3);
+    bool ok = gradcheck(f, input, 1e-6, 1e-7, 1e-6);
     EXPECT_TRUE(ok) << "ConvTranspose1d gradcheck failed";
+}
+
+TEST(GradCheckPhase7, ConvTranspose2d_Float64) {
+    // Regression guard for the Float32-accumulator bug in
+    // conv_transpose2d_forward_impl that previously caused ~7% gradient
+    // error for Float64 inputs. Fixed by using a dtype-aware AccumT.
+    Variable input(randn({1, 2, 3, 4}, DType::Float64, Device::cpu()), true);
+    Variable weight(randn({2, 3, 2, 3}, DType::Float64, Device::cpu()) * 0.3, false);
+    auto f = [&weight](const Variable& x) -> Variable {
+        return tenzor::sum(nn::functional::conv_transpose2d(
+            x, weight, std::nullopt,
+            std::pair<int64_t,int64_t>{1,1},
+            std::pair<int64_t,int64_t>{0,0},
+            std::pair<int64_t,int64_t>{0,0},
+            1,
+            std::pair<int64_t,int64_t>{1,1}));
+    };
+    bool ok = gradcheck(f, input, 1e-6, 1e-7, 1e-6);
+    EXPECT_TRUE(ok) << "ConvTranspose2d gradcheck failed";
 }
 
 // ============================================================================

@@ -146,6 +146,31 @@ TEST_P(TrigOperationParity, PythagoreanIdentity) {
     }, {a}, device, 1e-5f, 1e-7f, "PythagoreanIdentity");
 }
 
+// Phase 6-followup #27: gradient parity for trig/hyperbolic functions.
+TEST_P(TrigOperationParity, Atan_GradientParity) {
+    auto a = randn({16, 16}, DType::Float32, Device::cpu());
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable { return atan(in[0]); },
+        {a}, {}, 1e-5f, 1e-7f, 1e-4f, 1e-5f, {}, "Atan_Grad");
+}
+
+TEST_P(TrigOperationParity, Sinh_GradientParity) {
+    auto a = generate_uniform_tensor({16, 16}, -2.0f, 2.0f, DType::Float32, Device::cpu(), 44);
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable { return sinh(in[0]); },
+        {a}, {}, 1e-5f, 1e-7f, 1e-4f, 1e-5f, {}, "Sinh_Grad");
+}
+
+TEST_P(TrigOperationParity, Cosh_GradientParity) {
+    auto a = generate_uniform_tensor({16, 16}, -2.0f, 2.0f, DType::Float32, Device::cpu(), 45);
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable { return cosh(in[0]); },
+        {a}, {}, 1e-5f, 1e-7f, 1e-4f, 1e-5f, {}, "Cosh_Grad");
+}
+
+// Atanh has no Variable overload — gradient parity not testable through
+// the Variable interface today. (Tensor-only.)
+
 INSTANTIATE_BACKEND_TESTS(TrigOperationParity);
 
 

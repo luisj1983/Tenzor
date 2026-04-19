@@ -286,6 +286,24 @@ TEST_P(SpecialMathParity, BetaInc) {
     }, {a, b, x}, device, 1e-3f, 1e-4f, "betainc");
 }
 
+// Phase 6-followup #27: gradient parity for special math.
+TEST_P(SpecialMathParity, Lgamma_GradientParity) {
+    auto a = generate_uniform_tensor({16, 16}, 0.5f, 5.0f, DType::Float32, Device::cpu());
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable { return lgamma(in[0]); },
+        {a}, {}, 1e-5f, 1e-6f, 1e-4f, 1e-5f, {}, "Lgamma_Grad");
+}
+
+// Sinc gradient parity needs slightly looser tolerances — sinc has a
+// removable singularity at x=0 that backends (especially OneAPI / ROCm)
+// approximate differently.
+TEST_P(SpecialMathParity, Sinc_GradientParity) {
+    auto a = randn({16, 16}, DType::Float32, Device::cpu());
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable { return sinc(in[0]); },
+        {a}, {}, 1e-4f, 1e-5f, 1e-2f, 1e-3f, {}, "Sinc_Grad");
+}
+
 INSTANTIATE_BACKEND_TESTS(SpecialMathParity);
 
 

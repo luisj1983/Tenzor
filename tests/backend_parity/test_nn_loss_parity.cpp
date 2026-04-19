@@ -253,6 +253,32 @@ TEST_P(NNLossParity, DiceLoss) {
 // Main
 // ============================================================================
 
+// Phase 6-followup #27: gradient parity for losses. Loss backward kernels
+// often have their own implementation per backend; this catches divergence.
+TEST_P(NNLossParity, HuberLoss_GradientParity) {
+    auto pred = randn({4, 8}, DType::Float32, Device::cpu());
+    auto target = randn({4, 8}, DType::Float32, Device::cpu());
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable {
+            nn::HuberLoss loss;
+            return loss.forward(in[0], in[1]);
+        },
+        {pred, target}, {}, 1e-5f, 1e-7f, 1e-4f, 1e-5f, {}, "HuberLoss_Grad");
+}
+
+TEST_P(NNLossParity, KLDivLoss_GradientParity) {
+    auto pred = randn({4, 8}, DType::Float32, Device::cpu());
+    auto target_logits = randn({4, 8}, DType::Float32, Device::cpu());
+    auto target = nn::softmax(Variable(target_logits, false), 1).tensor();
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable {
+            nn::KLDivLoss loss;
+            auto log_probs = nn::log_softmax(in[0], 1);
+            return loss.forward(log_probs, in[1]);
+        },
+        {pred, target}, {}, 1e-4f, 1e-5f, 1e-3f, 1e-4f, {}, "KLDivLoss_Grad");
+}
+
 INSTANTIATE_BACKEND_TESTS(NNLossParity);
 
 

@@ -444,5 +444,16 @@ private:
     double k_;       ///< Additive constant
 };
 
+// Factory for the LayerNormBackward grad_fn (defined in normalization.cpp).
+// Used by F::layer_norm in functional.cpp to wire up backward properly —
+// the functional path otherwise returns a Variable without a grad_fn and
+// silently drops gradients.
+namespace internal {
+auto make_layer_norm_backward(bool elementwise_affine, double eps,
+                              int64_t normalized_size,
+                              std::vector<::tenzor::Tensor> tensors_to_save)
+    -> std::shared_ptr<::tenzor::Function>;
+}  // namespace internal
+
 } // namespace nn
 } // namespace tenzor

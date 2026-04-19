@@ -92,4 +92,32 @@ TEST_P(GatedActivationsMultiDTypeTest, OutputValuesFinite) {
     }
 }
 
+// Phase 3 addition (Phase 3-followup #20 fix): GeGLU/ReGLU forward used raw
+// tensor multiplication, dropping the autograd graph and producing zero
+// input gradients. Fixed in src/nn/layers/hrm.cpp by switching to
+// Variable-level operator*.
+TEST_P(GatedActivationsMultiDTypeTest, GeGLU_BackwardGradPopulated) {
+    GeGLU geglu(32, 64);
+    convert_model(geglu);
+    auto input = createInput({2, 4, 32}, true);
+    auto output = geglu.forward(input);
+    sum(output).backward();
+    ASSERT_TRUE(input.has_grad()) << device().to_string();
+    auto g_max = max(abs(input.grad()->to(Device::cpu()).to(DType::Float32)));
+    EXPECT_GT(g_max.item<float>(), 0.0f);
+}
+
+TEST_P(GatedActivationsMultiDTypeTest, ReGLU_BackwardGradPopulated) {
+    ReGLU reglu(32, 64);
+    convert_model(reglu);
+    // ReGLU sets negatives to zero — make sure inputs are positive enough
+    // that some gradient flows through (not all halves zeroed).
+    auto input = Variable((randn({2, 4, 32}, dtype(), device()) + 1.0f), true);
+    auto output = reglu.forward(input);
+    sum(output).backward();
+    ASSERT_TRUE(input.has_grad()) << device().to_string();
+    auto g_max = max(abs(input.grad()->to(Device::cpu()).to(DType::Float32)));
+    EXPECT_GT(g_max.item<float>(), 0.0f);
+}
+
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(GatedActivationsMultiDTypeTest);

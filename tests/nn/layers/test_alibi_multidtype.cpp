@@ -207,6 +207,25 @@ TEST_P(ALiBiMultiDTypeTest, DifferentHeadCountsSlopes) {
 }
 
 // ============================================================================
+// Phase 3 addition: ALiBi forward is identity-passthrough, so backward must
+// produce a gradient identical to grad_output. Verify it actually does.
+// ============================================================================
+
+TEST_P(ALiBiMultiDTypeTest, BackwardIsIdentity) {
+    ALiBi alibi(4);
+    Variable input = createInput({2, 4, 8, 8}, /*requires_grad=*/true);
+    auto output = alibi.forward(input);
+    sum(output).backward();
+    ASSERT_TRUE(input.has_grad()) << device().to_string();
+    EXPECT_EQ(input.grad()->numel(), input.tensor().numel());
+    auto g = input.grad()->to(Device::cpu()).to(DType::Float32).contiguous();
+    // Gradient of sum(passthrough(x)) w.r.t. x is 1 everywhere.
+    for (int64_t i = 0; i < g.numel(); ++i) {
+        EXPECT_NEAR(g.data<float>()[i], 1.0f, 1e-2f);
+    }
+}
+
+// ============================================================================
 // Test Instantiation
 // ============================================================================
 

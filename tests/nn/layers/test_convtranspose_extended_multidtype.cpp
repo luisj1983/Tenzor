@@ -60,6 +60,18 @@ TEST_P(ConvTranspose1dMultiDTypeTest, ForwardShape_NoBias) {
     expectShape(y.tensor(), {1, 4, 18});
 }
 
+// Phase 3 addition: backward gradient population.
+TEST_P(ConvTranspose1dMultiDTypeTest, BackwardGradPopulated) {
+    nn::ConvTranspose1d conv(2, 3, 3);
+    conv.to(device());
+    auto x = Variable(randn({1, 2, 5}, dtype(), device()), true);
+    auto y = conv.forward(x);
+    sum(y).backward();
+    ASSERT_TRUE(x.has_grad()) << device().to_string();
+    auto g_max = max(abs(x.grad()->to(Device::cpu()).to(DType::Float32)));
+    EXPECT_GT(g_max.item<float>(), 0.0f);
+}
+
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(ConvTranspose1dMultiDTypeTest);
 
 // ============================================================================
@@ -99,6 +111,18 @@ TEST_P(ConvTranspose3dMultiDTypeTest, ForwardShape_NoBias) {
     auto y = conv.forward(x);
     // out = (6 - 1) * 1 - 2*1 + (3-1) + 0 + 1 = 6
     expectShape(y.tensor(), {1, 3, 6, 6, 6});
+}
+
+// Phase 3 addition: backward gradient population.
+TEST_P(ConvTranspose3dMultiDTypeTest, BackwardGradPopulated) {
+    nn::ConvTranspose3d conv(2, 3, 3);
+    conv.to(device());
+    auto x = Variable(randn({1, 2, 4, 4, 4}, dtype(), device()), true);
+    auto y = conv.forward(x);
+    sum(y).backward();
+    ASSERT_TRUE(x.has_grad()) << device().to_string();
+    auto g_max = max(abs(x.grad()->to(Device::cpu()).to(DType::Float32)));
+    EXPECT_GT(g_max.item<float>(), 0.0f);
 }
 
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(ConvTranspose3dMultiDTypeTest);

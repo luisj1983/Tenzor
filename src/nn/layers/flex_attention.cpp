@@ -12,6 +12,8 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/indexing.hpp"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -129,22 +131,37 @@ auto causal_score_mod() -> ScoreModFn {
         const int64_t q_len = score.size(0);
         const int64_t kv_len = score.size(1);
 
-        // Build element-level causal mask within this block tile
-        auto mask_tensor = zeros({q_len, kv_len}, score.dtype(), score.device());
-        auto* mask_ptr = static_cast<float*>(mask_tensor.data_ptr());
-        const float neg_inf = -std::numeric_limits<float>::infinity();
+        // Build element-level causal mask using tensor ops so we stay on
+        // the right device with the right dtype. Previous implementation
+        // allocated `mask_tensor` with `score.dtype()` (could be Float16)
+        // and `score.device()` (could be GPU) but accessed via
+        // `static_cast<float*>(mask_tensor.data_ptr())`. For Float16 each
+        // write corrupted 2 storage elements; for GPU, dereferencing a
+        // device pointer on host crashed. (#54)
+        //
+        // For Float16 we use -1e4 (fits in Float16 range, ~max negative
+        // before overflow), for other dtypes -inf. softmax(-inf)=0 and
+        // softmax(-1e4 + anything reasonable)≈0 so behavior matches.
+        bool use_neg_inf = (score.dtype() != DType::Float16);
+        double mask_val = use_neg_inf
+            ? -std::numeric_limits<double>::infinity()
+            : -1e4;
 
-        for (int64_t qi = 0; qi < q_len; ++qi) {
-            const int64_t q_pos = q_start + qi;
-            for (int64_t kvi = 0; kvi < kv_len; ++kvi) {
-                const int64_t kv_pos = kv_start + kvi;
-                if (kv_pos > q_pos) {
-                    mask_ptr[qi * kv_len + kvi] = neg_inf;
-                }
-            }
-        }
+        Tensor row_idx = arange(q_start, q_start + q_len, 1,
+                                DType::Int32, score.device())
+                        .reshape({q_len, 1});
+        Tensor col_idx = arange(kv_start, kv_start + kv_len, 1,
+                                DType::Int32, score.device())
+                        .reshape({1, kv_len});
+        Tensor row_exp = expand(row_idx, std::vector<int64_t>{q_len, kv_len});
+        Tensor col_exp = expand(col_idx, std::vector<int64_t>{q_len, kv_len});
+        Tensor mask_bool = gt(col_exp, row_exp);  // true where future token
 
-        // Add the mask to the scores (additive masking)
+        Tensor neg_large = full({q_len, kv_len}, mask_val,
+                                score.dtype(), score.device());
+        Tensor zeros_t = zeros({q_len, kv_len}, score.dtype(), score.device());
+        Tensor mask_tensor = where(mask_bool, neg_large, zeros_t);
+
         return add(score, mask_tensor);
     };
 }

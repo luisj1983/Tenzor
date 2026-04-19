@@ -644,6 +644,19 @@ private:
     int64_t normalized_size_;
 };
 
+// Factory exposed via normalization.hpp for use by F::layer_norm in
+// functional.cpp. Phase 24-followup #38 fix.
+namespace internal {
+auto make_layer_norm_backward(bool elementwise_affine, double eps,
+                              int64_t normalized_size,
+                              std::vector<::tenzor::Tensor> tensors_to_save)
+    -> std::shared_ptr<::tenzor::Function> {
+    return std::make_shared<LayerNormBackward>(elementwise_affine, eps,
+                                                normalized_size,
+                                                std::move(tensors_to_save));
+}
+}  // namespace internal
+
 LayerNorm::LayerNorm(std::vector<int64_t> normalized_shape,
                      double eps,
                      bool elementwise_affine)
@@ -2456,6 +2469,15 @@ public:
             auto rm = rrms_orig.contiguous();
             auto wt = weight_orig.contiguous();
 
+            // Ensure all tensors share input's dtype — backend kernels
+            // typically reinterpret pointers to a single dtype and would
+            // throw "Type mismatch" if go/rm/wt differ from inp. Same root
+            // cause as the RMSNorm forward fix.
+            DType in_dt = inp.dtype();
+            if (go.dtype() != in_dt) go = go.to(in_dt);
+            if (rm.dtype() != in_dt) rm = rm.to(in_dt);
+            if (wt.dtype() != in_dt) wt = wt.to(in_dt);
+
             NewOpAttributes attrs;
             attrs.set(AttrKey::NormalizedShape, std::to_string(normalized_size_));
             std::vector<Tensor> inputs_vec = {go, inp, rm, wt};
@@ -2740,6 +2762,13 @@ auto RMSNorm::forward_impl(const Variable& input) -> Variable {
         Tensor weight_dev = cached_weight_ ? cached_weight_->tensor() : weight_.tensor();
         if (weight_dev.device() != original_device) {
             weight_dev = weight_dev.to(original_device);
+        }
+        // Ensure weight dtype matches input dtype — backends like ROCm's
+        // fused_rms_norm_hip take the Float32 fast-path when input is
+        // Float32 and then call weight.data<float>(), throwing if weight
+        // is still Float16/BFloat16. Also matches CPU/CUDA expectations.
+        if (weight_dev.dtype() != input.tensor().dtype()) {
+            weight_dev = weight_dev.to(input.tensor().dtype());
         }
 
         NewOpAttributes attrs;

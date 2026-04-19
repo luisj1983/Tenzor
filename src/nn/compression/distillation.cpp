@@ -275,7 +275,9 @@ auto attention_transfer_loss(
     auto diff = student_norm - teacher_norm;
     auto squared_diff = diff * diff;
 
-    return Variable(squared_diff.tensor(), student_fp32.requires_grad());
+    // Return the Variable directly — re-wrapping squared_diff.tensor()
+    // would silently sever the autograd chain back to student.
+    return squared_diff;
 }
 
 auto relational_distillation_loss(
@@ -295,7 +297,9 @@ auto relational_distillation_loss(
     auto diff = student_fp32 - teacher_fp32;
     auto mse = diff * diff;
 
-    return Variable(mse.tensor(), student_fp32.requires_grad());
+    // Return the Variable directly — re-wrapping mse.tensor() would
+    // silently sever the autograd chain back to student.
+    return mse;
 }
 
 // =============================================================================
@@ -537,7 +541,11 @@ auto cosine_similarity_loss(
     auto teacher_norm = teacher_squared;  // Should be sqrt(sum(squared))
 
     auto cosine_sim = dot_product / (student_norm * teacher_norm);
-    auto loss = Variable(cosine_sim.tensor() * -1.0f + 1.0f, student_fp32.requires_grad());
+    // loss = 1 - cosine_sim, computed via Variable-level ops so backward
+    // propagates back through cosine_sim to student. Previously the
+    // re-wrap into Variable(.,.) silently severed the autograd chain.
+    auto neg_cos = cosine_sim * (-1.0);
+    auto loss = neg_cos + 1.0;
 
     return loss;
 }

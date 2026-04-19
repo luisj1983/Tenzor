@@ -2414,7 +2414,8 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::GroupNorm,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t num_groups = attrs.get_int(AttrKey::NumGroups, 1);
+            // Accept NumGroups (layer convention) or Groups (functional fallback).
+            int64_t num_groups = attrs.get_int(AttrKey::NumGroups, attrs.get_int(AttrKey::Groups, 1));
             float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
             const Tensor* weight = inputs.size() > 1 ? &inputs[1] : nullptr;
             const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
@@ -2423,7 +2424,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::GroupNormBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            int64_t num_groups = attrs.get_int(AttrKey::NumGroups, 1);
+            int64_t num_groups = attrs.get_int(AttrKey::NumGroups, attrs.get_int(AttrKey::Groups, 1));
             return oneapi::group_norm_backward_kernel(inputs[0], inputs[1], inputs[2],
                                                       inputs[3], inputs[4], num_groups, get_q(inputs));
         });

@@ -555,19 +555,42 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
 // Warp-level atomic helper: reduces values within a warp that target the same
 // output offset, then one thread per unique target does a single atomicAdd.
 // This reduces atomic contention by up to 32x under high-conflict patterns.
+//
+// CUDA correctness notes (#42):
+// 1. The caller is invoked from inside a TENZOR_CUDA_KERNEL_LOOP grid-stride
+//    loop. Threads with idx >= n simply skip the body and never call this
+//    function, so we cannot use FULL_MASK in shuffles — only __activemask()
+//    is safe (the set of lanes that are at this instruction).
+// 2. The earlier version used `break` to exit the for-loop once a lane's
+//    offset was processed. Other lanes that hadn't yet matched continued the
+//    loop, calling more shuffles, but the broken-out lanes couldn't
+//    participate — deadlock. Use a per-lane `done` flag so processed lanes
+//    stay in the loop and continue participating.
+// 3. The position-based advance `peer_offset = 32 - __clz(match_mask)` skips
+//    over unprocessed lanes that sit between matching groups (e.g.,
+//    [A, A, B, A] would skip past lane 2's B). Use ballot+ffs to find the
+//    next unprocessed lane.
 template<typename T>
 __device__ void warp_reduce_atomic_add(T* output, int64_t output_offset, T value) {
-    constexpr unsigned FULL_MASK = 0xFFFFFFFFu;
+    unsigned active_mask = __activemask();
     unsigned lane = threadIdx.x & 31;
+    bool done = false;
 
     // Find lanes in this warp targeting the same output_offset
     // Use ballot to group matching lanes
     for (unsigned peer_offset = 0; peer_offset < 32; ) {
-        // Broadcast the target offset from the lowest active lane
-        int64_t leader_offset = __shfl_sync(FULL_MASK, output_offset, peer_offset);
-        unsigned match_mask = __ballot_sync(FULL_MASK, output_offset == leader_offset);
+        // Skip if peer_offset isn't an active lane
+        if (((active_mask >> peer_offset) & 1u) == 0) {
+            ++peer_offset;
+            continue;
+        }
+        // Broadcast the target offset from the leader lane
+        int64_t leader_offset = __shfl_sync(active_mask, output_offset, peer_offset);
+        // Only consider active+unprocessed lanes that match the leader.
+        unsigned match_mask = __ballot_sync(active_mask,
+                                            !done && output_offset == leader_offset);
 
-        if (output_offset == leader_offset) {
+        if (!done && output_offset == leader_offset) {
             // Warp-level reduction via shuffle
             T reduced = value;
             for (int delta = 16; delta > 0; delta >>= 1) {
@@ -634,10 +657,12 @@ __device__ void warp_reduce_atomic_add(T* output, int64_t output_offset, T value
                     atomicAdd(&output[output_offset], reduced);
                 }
             }
-            break;
+            done = true;
         }
-        // Advance past all lanes matching this leader
-        peer_offset = 32 - __clz(match_mask);
+        // Find the next active+unprocessed lane to use as leader.
+        unsigned undone_mask = __ballot_sync(active_mask, !done);
+        if (undone_mask == 0) break;
+        peer_offset = __ffs(undone_mask) - 1;
     }
 }
 
@@ -672,7 +697,32 @@ __global__ void scatter_add_kernel_impl(
                                 scatter_idx * inner_size +
                                 inner_idx;
 
-        warp_reduce_atomic_add(output, output_offset, src[idx]);
+        // Use plain atomicAdd. The previous warp_reduce_atomic_add helper
+        // had multiple subtle bugs (FULL_MASK shuffles inside a grid-stride
+        // loop where some lanes are inactive, position-based advance that
+        // skipped non-contiguous unprocessed lanes) that caused either
+        // hangs or off-by-N missed accumulations on CUDA. Plain atomicAdd
+        // is correct in all cases — the warp-reduce optimization can be
+        // re-introduced later with proper __activemask handling. (#42)
+        if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
+            atomicAdd(&output[output_offset], src[idx]);
+        } else if constexpr (std::is_same_v<T, int32_t>) {
+            atomicAdd(reinterpret_cast<int*>(&output[output_offset]),
+                      static_cast<int>(src[idx]));
+        } else if constexpr (std::is_same_v<T, int64_t>) {
+            unsigned long long* addr = reinterpret_cast<unsigned long long*>(&output[output_offset]);
+            unsigned long long old_val = atomicCAS(addr, 0ULL, 0ULL);
+            unsigned long long assumed;
+            T add_val = src[idx];
+            do {
+                assumed = old_val;
+                unsigned long long desired = static_cast<unsigned long long>(
+                    static_cast<int64_t>(assumed) + add_val);
+                old_val = atomicCAS(addr, assumed, desired);
+            } while (assumed != old_val);
+        } else {
+            atomicAdd(&output[output_offset], src[idx]);
+        }
     }
 }
 

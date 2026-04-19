@@ -1136,24 +1136,30 @@ __global__ void fused_rms_norm_kernel(
     const T* batch_in = input + b * norm_size;
     T* batch_out = output + b * norm_size;
 
-    // Use vectorized loads when possible (float4 = 4 floats at once)
-    const int vec_size = 4;
-    int64_t vec_norm_size = norm_size / vec_size;
-
-    // Compute sum of squares with vectorized loads
+    // Phase 22-followup #37 fix: the float4 vectorization is hardcoded to
+    // 4-byte lanes, which is wrong for T=double (8-byte lanes). For double
+    // it would reinterpret_cast a double buffer as float4*, reading half the
+    // elements with the wrong type and producing NaN. Only use the float4
+    // path when T=float; double takes the scalar path. Also use rsqrt (not
+    // rsqrtf) for double precision.
     T sum_sq = 0;
-
-    // Vectorized portion
-    const float4* batch_in_vec = reinterpret_cast<const float4*>(batch_in);
-    for (int64_t i = threadIdx.x; i < vec_norm_size; i += blockDim.x) {
-        float4 v = batch_in_vec[i];
-        sum_sq += v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w;
-    }
-
-    // Handle remainder
-    for (int64_t i = vec_norm_size * vec_size + threadIdx.x; i < norm_size; i += blockDim.x) {
-        T val = batch_in[i];
-        sum_sq += val * val;
+    if constexpr (std::is_same_v<T, float>) {
+        const int vec_size = 4;
+        int64_t vec_norm_size = norm_size / vec_size;
+        const float4* batch_in_vec = reinterpret_cast<const float4*>(batch_in);
+        for (int64_t i = threadIdx.x; i < vec_norm_size; i += blockDim.x) {
+            float4 v = batch_in_vec[i];
+            sum_sq += v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w;
+        }
+        for (int64_t i = vec_norm_size * vec_size + threadIdx.x; i < norm_size; i += blockDim.x) {
+            T val = batch_in[i];
+            sum_sq += val * val;
+        }
+    } else {
+        for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+            T val = batch_in[i];
+            sum_sq += val * val;
+        }
     }
 
     // Warp-level reduction using shuffle
@@ -1181,34 +1187,45 @@ __global__ void fused_rms_norm_kernel(
         }
     }
 
-    // Broadcast rrms to all threads
+    // Broadcast rrms to all threads. Use type-appropriate rsqrt.
     __shared__ T shared_rrms;
     if (threadIdx.x == 0) {
-        T mean_sq = sum_sq / norm_size;
-        shared_rrms = rsqrtf(mean_sq + eps);
+        T mean_sq = sum_sq / static_cast<T>(norm_size);
+        if constexpr (std::is_same_v<T, double>) {
+            shared_rrms = rsqrt(mean_sq + eps);
+        } else {
+            shared_rrms = rsqrtf(mean_sq + eps);
+        }
         rrms_out[b] = shared_rrms;
     }
     __syncthreads();
     T rrms = shared_rrms;
 
-    // Apply normalization with vectorized stores
-    float4* batch_out_vec = reinterpret_cast<float4*>(batch_out);
-    const float4* weight_vec = reinterpret_cast<const float4*>(weight);
+    // Apply normalization with type-appropriate vectorized stores.
+    if constexpr (std::is_same_v<T, float>) {
+        const int vec_size = 4;
+        int64_t vec_norm_size = norm_size / vec_size;
+        float4* batch_out_vec = reinterpret_cast<float4*>(batch_out);
+        const float4* batch_in_vec = reinterpret_cast<const float4*>(batch_in);
+        const float4* weight_vec = reinterpret_cast<const float4*>(weight);
 
-    for (int64_t i = threadIdx.x; i < vec_norm_size; i += blockDim.x) {
-        float4 v = batch_in_vec[i];
-        float4 w = weight_vec[i];
-        float4 out;
-        out.x = v.x * rrms * w.x;
-        out.y = v.y * rrms * w.y;
-        out.z = v.z * rrms * w.z;
-        out.w = v.w * rrms * w.w;
-        batch_out_vec[i] = out;
-    }
-
-    // Handle remainder
-    for (int64_t i = vec_norm_size * vec_size + threadIdx.x; i < norm_size; i += blockDim.x) {
-        batch_out[i] = batch_in[i] * rrms * weight[i];
+        for (int64_t i = threadIdx.x; i < vec_norm_size; i += blockDim.x) {
+            float4 v = batch_in_vec[i];
+            float4 w = weight_vec[i];
+            float4 out;
+            out.x = v.x * rrms * w.x;
+            out.y = v.y * rrms * w.y;
+            out.z = v.z * rrms * w.z;
+            out.w = v.w * rrms * w.w;
+            batch_out_vec[i] = out;
+        }
+        for (int64_t i = vec_norm_size * vec_size + threadIdx.x; i < norm_size; i += blockDim.x) {
+            batch_out[i] = batch_in[i] * rrms * weight[i];
+        }
+    } else {
+        for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+            batch_out[i] = batch_in[i] * rrms * weight[i];
+        }
     }
 }
 
@@ -1225,6 +1242,17 @@ auto fused_rms_norm_cuda(
     const Tensor& weight,
     float eps
 ) -> std::tuple<Tensor, Tensor> {
+    // Float16/BFloat16: upcast to Float32, compute, downcast output. The
+    // template kernel only instantiates for float/double; reduced-precision
+    // dtypes lose accuracy in the running sum anyway. Match ROCm behavior.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        auto in_f32 = input.to(DType::Float32);
+        auto wt_f32 = weight.to(DType::Float32);
+        auto [out_f32, rrms_f32] = fused_rms_norm_cuda(in_f32, wt_f32, eps);
+        return std::make_tuple(out_f32.to(orig), rrms_f32);
+    }
+
     auto shape = input.shape();
     int64_t norm_size = shape.back();
 
@@ -1251,8 +1279,22 @@ auto fused_rms_norm_cuda(
             eps
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::Float64) {
+        // Float64 dispatch — template kernel is dtype-generic so just
+        // instantiate with double. Eps stays float (small enough that the
+        // narrowing into the kernel is fine).
+        fused_rms_norm_kernel<double, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+            input.data<double>(),
+            weight.data<double>(),
+            output.data<double>(),
+            rrms.data<double>(),
+            batch_size,
+            norm_size,
+            static_cast<double>(eps)
+        );
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
-        throw std::runtime_error("fused_rms_norm_cuda: Only Float32 supported");
+        throw std::runtime_error("fused_rms_norm_cuda: dtype not supported (need Float32 or Float64)");
     }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
@@ -1355,8 +1397,20 @@ auto fused_rms_norm_backward_cuda(
             norm_size
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::Float64) {
+        fused_rms_norm_backward_kernel<double, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+            grad_output.data<double>(),
+            input.data<double>(),
+            weight.data<double>(),
+            rrms.data<double>(),
+            grad_input.data<double>(),
+            grad_weight.data<double>(),
+            batch_size,
+            norm_size
+        );
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
-        throw std::runtime_error("fused_rms_norm_backward_cuda: Only Float32 supported");
+        throw std::runtime_error("fused_rms_norm_backward_cuda: dtype not supported (need Float32 or Float64)");
     }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();

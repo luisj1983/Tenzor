@@ -3,7 +3,25 @@
 namespace tenzor {
 
 // Softmax and loss operations implementation
-auto VulkanBackend::dispatchSoftmax(const Tensor& input, int64_t dim) -> Tensor {
+auto VulkanBackend::dispatchSoftmax(const Tensor& input_orig, int64_t dim) -> Tensor {
+    // The shader's batch_size = product(shape[0..dim)) and num_classes =
+    // shape[dim] assume softmax is applied to the LAST dimension (the
+    // innermost contiguous axis). For dim != last_dim the flat-buffer
+    // dispatch reads down the wrong axis and produces wrong results.
+    // Normalize: if dim isn't the last axis, transpose to put it last,
+    // recurse with dim=-1, then transpose back. Also materialize a
+    // contiguous copy so non-contiguous strided views work.
+    auto orig_shape_span = input_orig.shape();
+    int64_t ndim = static_cast<int64_t>(orig_shape_span.size());
+    int64_t norm_dim = (dim < 0) ? ndim + dim : dim;
+    int64_t last = ndim - 1;
+    if (norm_dim != last) {
+        Tensor transposed = input_orig.transpose(norm_dim, last).contiguous();
+        Tensor result = dispatchSoftmax(transposed, /*dim=*/last);
+        return result.transpose(norm_dim, last).contiguous();
+    }
+
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     auto input_shape = input.shape();
     int32_t device_id = input.device().index;
 
@@ -98,7 +116,21 @@ auto VulkanBackend::dispatchSoftmax(const Tensor& input, int64_t dim) -> Tensor 
     return fp16_saturate_if_needed(*this, output);
 }
 
-auto VulkanBackend::dispatchLogSoftmax(const Tensor& input, int64_t dim) -> Tensor {
+auto VulkanBackend::dispatchLogSoftmax(const Tensor& input_orig, int64_t dim) -> Tensor {
+    // Same dim-handling concern as dispatchSoftmax — the shader's
+    // batch_size/num_classes assume softmax over the last axis. Normalize
+    // by transposing the requested dim to the last position when needed.
+    auto orig_shape_span = input_orig.shape();
+    int64_t ndim = static_cast<int64_t>(orig_shape_span.size());
+    int64_t norm_dim = (dim < 0) ? ndim + dim : dim;
+    int64_t last = ndim - 1;
+    if (norm_dim != last) {
+        Tensor transposed = input_orig.transpose(norm_dim, last).contiguous();
+        Tensor result = dispatchLogSoftmax(transposed, /*dim=*/last);
+        return result.transpose(norm_dim, last).contiguous();
+    }
+
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     auto input_shape = input.shape();
     int32_t device_id = input.device().index;
 

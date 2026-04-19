@@ -8,6 +8,7 @@
 
 #include <gtest/gtest.h>
 #include <iostream>
+#include <sstream>
 #include <tenzor/tenzor.hpp>
 #include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
@@ -148,6 +149,88 @@ TEST_P(CumulativeParity, CumMin) {
         auto [vals, idxs] = cummin(inputs[0], 1);
         return vals;
     }, {a}, device, 0.0f, 0.0f, "CumMin");
+}
+
+// Phase 6-followup #27: gradient parity for cumulative reductions.
+// Backward of cumsum is reverse-cumsum; easy to mis-implement per backend.
+TEST_P(CumulativeParity, CumSum_Dim0_GradientParity) {
+    auto a = randn({4, 6}, DType::Float32, Device::cpu());
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable {
+            return cumsum(in[0], 0);
+        },
+        {a}, {}, 1e-5f, 1e-7f, 1e-4f, 1e-5f, {}, "CumSum_Dim0_Grad");
+}
+
+// Regression guard for #40: ensure cumsum(dim=1) of ones produces
+// [1,2,3,4,5,6] on every backend (was broken on Vulkan/ROCm because their
+// Flip kernel registrations read AttrKey::Dim instead of AttrKey::Dims and
+// the cumsum backward path uses flip+cumsum+flip).
+TEST_P(CumulativeParity, CumSumDim1_OnesRegression) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a_cpu = ones({2, 6}, DType::Float32, Device::cpu());
+    auto cs_cpu = tensor_cumsum(a_cpu, 1);
+    // Expect [[1,2,3,4,5,6], [1,2,3,4,5,6]]
+    for (size_t i = 1; i < backends.size(); ++i) {
+        auto a_dev = a_cpu.to(backends[i]);
+        auto cs_dev = tensor_cumsum(a_dev, 1);
+        backends[i].synchronize();
+        auto cs_dev_cpu = cs_dev.to(Device::cpu()).contiguous();
+        auto cs_cpu_c = cs_cpu.contiguous();
+        double max_abs = 0.0;
+        for (int64_t k = 0; k < cs_cpu_c.numel(); ++k) {
+            double diff = std::abs(cs_cpu_c.data<float>()[k]
+                                   - cs_dev_cpu.data<float>()[k]);
+            if (diff > max_abs) max_abs = diff;
+        }
+        std::ostringstream debug;
+        debug << " dev[0..5]=";
+        for (int k = 0; k < 6; ++k) {
+            debug << cs_dev_cpu.data<float>()[k] << ",";
+        }
+        EXPECT_LT(max_abs, 1e-5) << "cumsum(dim=1, ones) on " << backend_name(backends[i])
+            << " differs from CPU max_abs=" << max_abs
+            << debug.str();
+    }
+}
+
+// Regression guard for #40: ensure flip(dim=1) reverses correctly on every
+// backend. Was broken on Vulkan/ROCm because their OpId::Flip dispatched
+// via AttrKey::Dim (singular int, default 0) instead of AttrKey::Dims
+// (plural string).
+TEST_P(CumulativeParity, FlipDim1_Regression) {
+    auto backends = get_available_backends();
+    if (backends.size() < 2) GTEST_SKIP();
+    auto a_cpu = randn({4, 6}, DType::Float32, Device::cpu());
+    auto flipped_cpu = flip(a_cpu, std::vector<int64_t>{1});
+    for (size_t i = 1; i < backends.size(); ++i) {
+        auto a_dev = a_cpu.to(backends[i]);
+        auto flipped_dev = flip(a_dev, std::vector<int64_t>{1});
+        backends[i].synchronize();
+        auto flipped_dev_cpu = flipped_dev.to(Device::cpu()).contiguous();
+        auto flipped_cpu_c = flipped_cpu.contiguous();
+        double max_abs = 0.0;
+        for (int64_t k = 0; k < flipped_cpu_c.numel(); ++k) {
+            double diff = std::abs(flipped_cpu_c.data<float>()[k]
+                                   - flipped_dev_cpu.data<float>()[k]);
+            if (diff > max_abs) max_abs = diff;
+        }
+        EXPECT_LT(max_abs, 1e-5) << "flip(dim=1) on " << backend_name(backends[i])
+            << " differs from CPU max_abs=" << max_abs;
+    }
+}
+
+// CumSum_Dim1 backward gradient differs by ~5.0 across all backends — the
+// backward (reverse-cumsum) likely doesn't honor dim=1 properly. Filed as
+// followup #40 — root cause traced to GPU flip kernel returning input.
+TEST_P(CumulativeParity, CumSum_Dim1_GradientParity) {
+    auto a = randn({4, 6}, DType::Float32, Device::cpu());
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable {
+            return cumsum(in[0], 1);
+        },
+        {a}, {}, 1e-5f, 1e-7f, 1e-4f, 1e-5f, {}, "CumSum_Dim1_Grad");
 }
 
 INSTANTIATE_BACKEND_TESTS(CumulativeParity);

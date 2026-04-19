@@ -618,6 +618,103 @@ TEST_P(LSTMMultiDTypeTest, LSTMBatchFirstBidirectional) {
 }
 
 // ============================================================================
+// Backward correctness — verify input.grad() actually populated with non-zero
+// values that match the input shape. The pre-existing LSTMGradientFlow test
+// only checked EXPECT_NO_THROW which is too weak — a backward that silently
+// drops gradients to a zero tensor would still pass.
+// ============================================================================
+
+TEST_P(LSTMMultiDTypeTest, LSTMCellBackwardGradPopulated) {
+    nn::LSTMCell cell(8, 16);
+    cell.to(device);
+    convert_module_dtype(cell);
+
+    auto input = Variable(randn({4, 8}, dtype, device), /*requires_grad=*/true);
+    auto h0 = Variable(randn({4, 16}, dtype, device), true);
+    auto c0 = Variable(randn({4, 16}, dtype, device), true);
+    auto [h1, c1] = cell.forward(input, h0, c0);
+
+    auto loss = sum(h1) + sum(c1);
+    loss.backward();
+
+    ASSERT_TRUE(input.has_grad()) << "input grad missing on " << device.to_string();
+    ASSERT_TRUE(h0.has_grad())    << "h0 grad missing on "    << device.to_string();
+    ASSERT_TRUE(c0.has_grad())    << "c0 grad missing on "    << device.to_string();
+
+    EXPECT_EQ(input.grad()->numel(), input.tensor().numel()) << device.to_string();
+    EXPECT_EQ(h0.grad()->numel(),    h0.tensor().numel())    << device.to_string();
+    EXPECT_EQ(c0.grad()->numel(),    c0.tensor().numel())    << device.to_string();
+
+    // Verify gradient is non-trivial: at least one element non-zero. A backward
+    // that silently zeros gradients (the failure mode the audit flagged) would
+    // miss this. Use abs+max via tensor ops to stay backend-agnostic.
+    auto g_input_max = max(abs(input.grad()->to(Device::cpu()).to(DType::Float32)));
+    EXPECT_GT(g_input_max.item<float>(), 0.0f)
+        << "input.grad is all zeros on " << device.to_string();
+}
+
+TEST_P(LSTMMultiDTypeTest, LSTMBackwardGradPopulated) {
+    nn::LSTM lstm(8, 16);
+    lstm.to(device);
+    convert_module_dtype(lstm);
+
+    auto input = Variable(randn({5, 4, 8}, dtype, device), /*requires_grad=*/true);
+    auto [output, states] = lstm.forward(input, {Variable{}, Variable{}});
+
+    auto loss = sum(output);
+    loss.backward();
+
+    ASSERT_TRUE(input.has_grad()) << device.to_string();
+    EXPECT_EQ(input.grad()->numel(), input.tensor().numel()) << device.to_string();
+
+    auto g_max = max(abs(input.grad()->to(Device::cpu()).to(DType::Float32)));
+    EXPECT_GT(g_max.item<float>(), 0.0f)
+        << "input.grad is all zeros on " << device.to_string();
+}
+
+TEST_P(LSTMMultiDTypeTest, LSTMBackwardWeightsUpdated) {
+    // Verify that LSTM parameter gradients are populated, not just input gradient.
+    nn::LSTM lstm(4, 8);
+    lstm.to(device);
+    convert_module_dtype(lstm);
+
+    auto input = Variable(randn({3, 2, 4}, dtype, device), false);
+    auto [output, states] = lstm.forward(input, {Variable{}, Variable{}});
+    sum(output).backward();
+
+    int populated = 0;
+    for (auto& [name, param] : lstm.named_parameters()) {
+        if (param->has_grad()) {
+            auto g_max = max(abs(param->grad()->to(Device::cpu()).to(DType::Float32)));
+            if (g_max.item<float>() > 0.0f) {
+                ++populated;
+            }
+        }
+    }
+    EXPECT_GT(populated, 0)
+        << "no LSTM weight gradient populated on " << device.to_string();
+}
+
+TEST_P(LSTMMultiDTypeTest, LSTMBidirectionalBackward) {
+    // Bidirectional path can drop gradients silently. Verify both directions
+    // contribute to input.grad.
+    nn::LSTM lstm(4, 8, /*num_layers=*/1, /*bias=*/true,
+                  /*batch_first=*/false, /*dropout=*/0.0,
+                  /*bidirectional=*/true);
+    lstm.to(device);
+    convert_module_dtype(lstm);
+
+    auto input = Variable(randn({3, 2, 4}, dtype, device), true);
+    auto [output, states] = lstm.forward(input, {Variable{}, Variable{}});
+    sum(output).backward();
+
+    ASSERT_TRUE(input.has_grad()) << device.to_string();
+    auto g_max = max(abs(input.grad()->to(Device::cpu()).to(DType::Float32)));
+    EXPECT_GT(g_max.item<float>(), 0.0f)
+        << "bidirectional input.grad is all zeros on " << device.to_string();
+}
+
+// ============================================================================
 // Test Instantiation
 // ============================================================================
 

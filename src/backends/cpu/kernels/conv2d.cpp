@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <type_traits>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -1591,8 +1592,10 @@ void conv_transpose2d_forward_impl(
         int64_t oc = c % out_channels_per_group;  // Output channel within group
         int64_t in_start = g * in_channels_per_group;
 
-        // Initialize accumulator
-        float sum = 0.0f;
+        // Accumulator type: double for T=double (preserve Float64 precision),
+        // float otherwise (Float32 path + Float16/BFloat16 with float accum).
+        using AccumT = std::conditional_t<std::is_same_v<T, double>, double, float>;
+        AccumT sum = AccumT(0);
 
         // Gather from all input positions that contribute to this output position
         for (int64_t ic = 0; ic < in_channels_per_group; ++ic) {
@@ -1619,14 +1622,14 @@ void conv_transpose2d_forward_impl(
                             int64_t input_idx = b * (in_channels * in_h * in_w) +
                                                (in_start + ic) * (in_h * in_w) +
                                                ih * in_w + iw;
-                            float input_val = static_cast<float>(input_data[input_idx]);
+                            AccumT input_val = static_cast<AccumT>(input_data[input_idx]);
 
                             // Get weight value
                             // Weight shape: (in_channels, out_channels/groups, kernel_h, kernel_w)
                             int64_t weight_idx = (in_start + ic) * (out_channels_per_group * kernel_h * kernel_w) +
                                                 oc * (kernel_h * kernel_w) +
                                                 kh * kernel_w + kw;
-                            float weight_val = static_cast<float>(weight_data[weight_idx]);
+                            AccumT weight_val = static_cast<AccumT>(weight_data[weight_idx]);
 
                             sum += input_val * weight_val;
                         }
@@ -1637,7 +1640,7 @@ void conv_transpose2d_forward_impl(
 
         // Add bias if present
         if (bias != nullptr) {
-            sum += static_cast<float>(bias->data<T>()[c]);
+            sum += static_cast<AccumT>(bias->data<T>()[c]);
         }
 
         output_data[idx] = T(sum);
@@ -1711,14 +1714,17 @@ void depthwise_conv2d_impl(const T* in_data, const T* w_data, const T* b_data, T
                             int64_t N, int64_t C, int64_t H, int64_t W,
                             int64_t kH, int64_t kW, int64_t H_out, int64_t W_out,
                             int64_t stride, int64_t padding, int64_t dilation) {
+    // Accumulate in double for Float64 inputs to preserve full precision;
+    // otherwise accumulate in float (fine for Float32 and promotes half types).
+    using AccumT = std::conditional_t<std::is_same_v<T, double>, double, float>;
     int64_t depthwise_numel = N * C * H_out * W_out;
     #pragma omp parallel for collapse(4) if(depthwise_numel > OmpThresholds::medium())
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
             for (int64_t oh = 0; oh < H_out; ++oh) {
                 for (int64_t ow = 0; ow < W_out; ++ow) {
-                    float sum = 0.0f;
-                    float compensation = 0.0f;  // Kahan compensation
+                    AccumT sum = AccumT(0);
+                    AccumT compensation = AccumT(0);  // Kahan compensation
 
                     for (int64_t kh = 0; kh < kH; ++kh) {
                         for (int64_t kw = 0; kw < kW; ++kw) {
@@ -1726,10 +1732,10 @@ void depthwise_conv2d_impl(const T* in_data, const T* w_data, const T* b_data, T
                             int64_t w = ow * stride - padding + kw * dilation;
 
                             if (h >= 0 && h < H && w >= 0 && w < W) {
-                                float product = static_cast<float>(in_data[((n * C + c) * H + h) * W + w]) *
-                                       static_cast<float>(w_data[(c * 1 + 0) * kH * kW + kh * kW + kw]);
-                                float y = product - compensation;
-                                float t = sum + y;
+                                AccumT product = static_cast<AccumT>(in_data[((n * C + c) * H + h) * W + w]) *
+                                       static_cast<AccumT>(w_data[(c * 1 + 0) * kH * kW + kh * kW + kw]);
+                                AccumT y = product - compensation;
+                                AccumT t = sum + y;
                                 compensation = (t - sum) - y;
                                 sum = t;
                             }
@@ -1737,7 +1743,7 @@ void depthwise_conv2d_impl(const T* in_data, const T* w_data, const T* b_data, T
                     }
 
                     if (b_data) {
-                        float y = static_cast<float>(b_data[c]) - compensation;
+                        AccumT y = static_cast<AccumT>(b_data[c]) - compensation;
                         sum = sum + y;
                     }
 
@@ -2026,7 +2032,12 @@ static void deformable_conv2d_forward_impl(
                 int64_t g = oc / out_channels_per_group;
 
                 for (int64_t ow = 0; ow < W_out; ++ow) {
-                    float sum = 0.0f;
+                    // Accumulate in double for Float64 inputs (preserves
+                    // gradient precision under finite-difference gradcheck);
+                    // float otherwise. Position arithmetic stays float —
+                    // subpixel offsets don't need double.
+                    using AccumT = std::conditional_t<std::is_same_v<T, double>, double, float>;
+                    AccumT sum = AccumT(0);
 
                     for (int64_t ic_local = 0; ic_local < channels_per_group; ++ic_local) {
                         int64_t ic = g * channels_per_group + ic_local;
@@ -2056,22 +2067,22 @@ static void deformable_conv2d_forward_impl(
                                 float h_loc = h_base + h_off;
                                 float w_loc = w_base + w_off;
 
-                                float val = static_cast<float>(
+                                AccumT val = static_cast<AccumT>(
                                     bilinear_interpolate(input_plane, H, W, h_loc, w_loc));
 
                                 if (use_mask) {
                                     const T* mask_plane = mask + (n * offset_groups * kH * kW +
                                         (mask_idx + k_linear)) * H_out * W_out;
-                                    val *= static_cast<float>(mask_plane[oh * W_out + ow]);
+                                    val *= static_cast<AccumT>(mask_plane[oh * W_out + ow]);
                                 }
 
-                                sum += val * static_cast<float>(weight_plane[k_linear]);
+                                sum += val * static_cast<AccumT>(weight_plane[k_linear]);
                             }
                         }
                     }
 
                     if (bias) {
-                        sum += static_cast<float>(bias[oc]);
+                        sum += static_cast<AccumT>(bias[oc]);
                     }
 
                     output[(n * C_out + oc) * H_out * W_out + oh * W_out + ow] = static_cast<T>(sum);
@@ -2214,7 +2225,8 @@ static void deformable_conv2d_backward_weight_impl(
                     int64_t k_linear = kh * kW + kw;
                     int64_t offset_idx = og * 2 * kH * kW;
                     int64_t mask_idx = og * kH * kW;
-                    float sum = 0.0f;
+                    using AccumT = std::conditional_t<std::is_same_v<T, double>, double, float>;
+                    AccumT sum = AccumT(0);
 
                     for (int64_t n = 0; n < N; ++n) {
                         const T* input_plane = input + (n * C_in + ic) * H * W;
@@ -2232,16 +2244,16 @@ static void deformable_conv2d_backward_weight_impl(
                                 float h_loc = h_base + static_cast<float>(off_h_plane[oh * W_out + ow]);
                                 float w_loc = w_base + static_cast<float>(off_w_plane[oh * W_out + ow]);
 
-                                float val = static_cast<float>(
+                                AccumT val = static_cast<AccumT>(
                                     bilinear_interpolate(input_plane, H, W, h_loc, w_loc));
 
                                 if (use_mask) {
                                     const T* mask_plane = mask + (n * offset_groups * kH * kW +
                                         (mask_idx + k_linear)) * H_out * W_out;
-                                    val *= static_cast<float>(mask_plane[oh * W_out + ow]);
+                                    val *= static_cast<AccumT>(mask_plane[oh * W_out + ow]);
                                 }
 
-                                float go = static_cast<float>(
+                                AccumT go = static_cast<AccumT>(
                                     grad_output[(n * C_out + oc) * H_out * W_out + oh * W_out + ow]);
                                 sum += go * val;
                             }

@@ -176,6 +176,52 @@ TEST_P(ShapeOpsParity, Expand) {
     }, {a}, device, 0, 0, "Expand");
 }
 
+// Phase 6-followup #27: gradient parity for shape ops. Backward of these
+// is essentially a reverse view operation; backend kernels for the
+// metadata-only path are simple but a stride bug would still surface.
+TEST_P(ShapeOpsParity, Reshape_GradientParity) {
+    auto a = randn({4, 6}, DType::Float32, Device::cpu());
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable {
+            return reshape(in[0], std::vector<int64_t>{2, 12});
+        },
+        {a}, {}, 1e-5f, 1e-7f, 1e-4f, 1e-5f, {}, "Reshape_Grad");
+}
+
+TEST_P(ShapeOpsParity, Transpose_GradientParity) {
+    auto a = randn({4, 6}, DType::Float32, Device::cpu());
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable {
+            return transpose(in[0], 0, 1);
+        },
+        {a}, {}, 1e-5f, 1e-7f, 1e-4f, 1e-5f, {}, "Transpose_Grad");
+}
+
+TEST_P(ShapeOpsParity, Permute_GradientParity) {
+    auto a = randn({2, 3, 4}, DType::Float32, Device::cpu());
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable {
+            return permute(in[0], std::vector<int64_t>{2, 0, 1});
+        },
+        {a}, {}, 1e-5f, 1e-7f, 1e-4f, 1e-5f, {}, "Permute_Grad");
+}
+
+TEST_P(ShapeOpsParity, Flatten_GradientParity) {
+    auto a = randn({2, 3, 4}, DType::Float32, Device::cpu());
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable { return flatten(in[0]); },
+        {a}, {}, 1e-5f, 1e-7f, 1e-4f, 1e-5f, {}, "Flatten_Grad");
+}
+
+TEST_P(ShapeOpsParity, Unsqueeze_GradientParity) {
+    auto a = randn({4, 6}, DType::Float32, Device::cpu());
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable {
+            return unsqueeze(in[0], 1);
+        },
+        {a}, {}, 1e-5f, 1e-7f, 1e-4f, 1e-5f, {}, "Unsqueeze_Grad");
+}
+
 INSTANTIATE_BACKEND_TESTS(ShapeOpsParity);
 
 

@@ -222,6 +222,58 @@ TEST_P(ExtendedMathParity, Hypot) {
     }, {a, b}, device, 1e-5f, 1e-7f, "Hypot");
 }
 
+// Phase 6-followup #27: gradient parity for extended math.
+TEST_P(ExtendedMathParity, Log2_GradientParity) {
+    auto a = generate_uniform_tensor({16, 16}, 0.5f, 5.0f, DType::Float32, Device::cpu());
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable { return log2(in[0]); },
+        {a}, {}, 1e-5f, 1e-7f, 1e-4f, 1e-5f, {}, "Log2_Grad");
+}
+
+TEST_P(ExtendedMathParity, Log10_GradientParity) {
+    auto a = generate_uniform_tensor({16, 16}, 0.5f, 5.0f, DType::Float32, Device::cpu());
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable { return log10(in[0]); },
+        {a}, {}, 1e-5f, 1e-7f, 1e-4f, 1e-5f, {}, "Log10_Grad");
+}
+
+TEST_P(ExtendedMathParity, Log1p_GradientParity) {
+    auto a = generate_uniform_tensor({16, 16}, -0.5f, 5.0f, DType::Float32, Device::cpu());
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable { return log1p(in[0]); },
+        {a}, {}, 1e-5f, 1e-7f, 1e-4f, 1e-5f, {}, "Log1p_Grad");
+}
+
+TEST_P(ExtendedMathParity, Exp2_GradientParity) {
+    auto a = generate_uniform_tensor({16, 16}, -2.0f, 2.0f, DType::Float32, Device::cpu());
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable { return exp2(in[0]); },
+        {a}, {}, 1e-5f, 1e-7f, 1e-4f, 1e-5f, {}, "Exp2_Grad");
+}
+
+TEST_P(ExtendedMathParity, Expm1_GradientParity) {
+    auto a = generate_uniform_tensor({16, 16}, -2.0f, 2.0f, DType::Float32, Device::cpu());
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable { return expm1(in[0]); },
+        {a}, {}, 1e-5f, 1e-7f, 1e-4f, 1e-5f, {}, "Expm1_Grad");
+}
+
+TEST_P(ExtendedMathParity, Erf_GradientParity) {
+    // Slightly looser fwd tol — erf approximations differ across backends
+    // by ~5e-7 (sub-Float32-precision but exceeds 1e-7 atol).
+    auto a = randn({16, 16}, DType::Float32, Device::cpu());
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable { return erf(in[0]); },
+        {a}, {}, 1e-5f, 1e-6f, 1e-4f, 1e-5f, {}, "Erf_Grad");
+}
+
+TEST_P(ExtendedMathParity, Erfc_GradientParity) {
+    auto a = randn({16, 16}, DType::Float32, Device::cpu());
+    test_gradient_parity(
+        [](const std::vector<Variable>& in) -> Variable { return erfc(in[0]); },
+        {a}, {}, 1e-5f, 1e-6f, 1e-4f, 1e-5f, {}, "Erfc_Grad");
+}
+
 INSTANTIATE_BACKEND_TESTS(ExtendedMathParity);
 
 

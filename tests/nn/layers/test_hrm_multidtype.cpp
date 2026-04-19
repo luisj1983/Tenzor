@@ -115,4 +115,36 @@ TEST_P(HRMMultiDTypeTest, HRMParametersNonEmpty) {
     EXPECT_FALSE(params.empty());
 }
 
+// Phase 3-followup #22 / #32: HRM uses one-step gradient training and
+// intentionally detaches hidden states between iterations (see hrm.cpp:877:
+// "CRITICAL: Detach hidden states for approximate gradient (O(1) memory)").
+// Input gradient is therefore expected to be zero/missing BY DESIGN — only
+// the final run_h_cycle's parameters get gradient. Verify that parameter
+// gradients ARE populated, which is what one-step training requires.
+TEST_P(HRMMultiDTypeTest, HRMBackwardWeightsUpdated) {
+    // (Float16 skip removed — re-test after Vulkan RMSNormBackward fix #55)
+    auto config = make_config();
+    HRM hrm(config);
+    convert_model(hrm);
+    auto input = createInput({1, 8, 64}, /*requires_grad=*/false);
+    auto output = hrm.forward(input);
+    sum(output).backward();
+    int populated = 0;
+    for (auto& [name, param] : hrm.named_parameters()) {
+        if (param->has_grad()) {
+            auto g_cpu_f32 = param->grad()->to(Device::cpu()).to(DType::Float32).contiguous();
+            // Reduce in user code to keep the dtype stable: max(abs(...))
+            // would return whatever dtype was passed, and item<float>() then
+            // throws on Float64. Iterate manually instead.
+            float local_max = 0.0f;
+            for (int64_t i = 0; i < g_cpu_f32.numel(); ++i) {
+                local_max = std::max(local_max, std::abs(g_cpu_f32.data<float>()[i]));
+            }
+            if (local_max > 0.0f) ++populated;
+        }
+    }
+    EXPECT_GT(populated, 0)
+        << "no HRM parameter received gradient on " << device().to_string();
+}
+
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(HRMMultiDTypeTest);

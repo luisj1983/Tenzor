@@ -87,4 +87,16 @@ TEST_P(ChannelShuffleMultiDTypeTest, ThreeDimensionalInput) {
     EXPECT_EQ(output.shape()[2], 8);
 }
 
+// Phase 3 addition: verify backward populates gradient.
+TEST_P(ChannelShuffleMultiDTypeTest, BackwardGradPopulated) {
+    nn::ChannelShuffle cs(2);
+    Variable input = createInput({1, 4, 8, 8}, /*requires_grad=*/true);
+    auto out = cs.forward(input);
+    sum(out).backward();
+    ASSERT_TRUE(input.has_grad()) << device().to_string();
+    EXPECT_EQ(input.grad()->numel(), input.tensor().numel());
+    auto g_max = max(abs(input.grad()->to(Device::cpu()).to(DType::Float32)));
+    EXPECT_GT(g_max.item<float>(), 0.0f);
+}
+
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(ChannelShuffleMultiDTypeTest);

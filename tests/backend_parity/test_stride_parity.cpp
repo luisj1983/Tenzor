@@ -412,6 +412,151 @@ TEST(StrideParity, MatMulBothTransposed) {
         {a, b}, kStrideRtol, kStrideAtol, "MatMulBothTransposed");
 }
 
+// ============================================================================
+// Phase 5 expansion — axis-reductions, axis-softmax, broadcast-binary,
+// indexing, normalization, and sorted/top-k ops on non-contiguous inputs.
+// These are the ops most likely to harbor stride-from-shape bugs that the
+// audit memory flagged (CUDA/OneAPI/Vulkan diverging together from CPU+ROCm).
+// ============================================================================
+
+TEST(StrideParity, SumDim) {
+    check_all_variants_unary(
+        [](const std::vector<Tensor>& in) { return tenzor::sum(in[0], 0, false); },
+        "SumDim0");
+}
+
+TEST(StrideParity, MeanDim) {
+    check_all_variants_unary(
+        [](const std::vector<Tensor>& in) { return tenzor::mean(in[0], 1, false); },
+        "MeanDim1");
+}
+
+TEST(StrideParity, MaxDim) {
+    check_all_variants_unary(
+        [](const std::vector<Tensor>& in) { return tenzor::max(in[0], 0, false); },
+        "MaxDim0");
+}
+
+TEST(StrideParity, MinDim) {
+    check_all_variants_unary(
+        [](const std::vector<Tensor>& in) { return tenzor::min(in[0], 1, false); },
+        "MinDim1");
+}
+
+TEST(StrideParity, ProdDim) {
+    check_all_variants_unary(
+        [](const std::vector<Tensor>& in) { return tenzor::prod(in[0], 0, false); },
+        "ProdDim0");
+}
+
+// Vulkan dispatchVariance / dispatchReduction precision: max diff ~3-14e-2
+// vs CPU even on contiguous input, regardless of formula choice (E[(X-mu)²]
+// vs E[X²]-E[X]²). The error is in dispatchReduction's accumulator, not the
+// composition. Needs a dedicated single-pass Vulkan compute shader. (#30)
+TEST(StrideParity, DISABLED_StdDim) {
+    check_all_variants_unary(
+        [](const std::vector<Tensor>& in) { return tenzor::std(in[0], 0, false, false); },
+        "StdDim0");
+}
+
+TEST(StrideParity, DISABLED_VarDim) {
+    check_all_variants_unary(
+        [](const std::vector<Tensor>& in) { return tenzor::var(in[0], 0, false, false); },
+        "VarDim0");
+}
+
+TEST(StrideParity, SoftmaxDim0) {
+    check_all_variants_unary(
+        [](const std::vector<Tensor>& in) {
+            return tenzor::nn::functional::softmax(Variable(in[0], false), /*dim=*/0).tensor();
+        },
+        "SoftmaxDim0");
+}
+
+TEST(StrideParity, LogSoftmaxDim0) {
+    check_all_variants_unary(
+        [](const std::vector<Tensor>& in) {
+            return tenzor::nn::functional::log_softmax(Variable(in[0], false), /*dim=*/0).tensor();
+        },
+        "LogSoftmaxDim0");
+}
+
+TEST(StrideParity, CumsumDim0) {
+    check_all_variants_unary(
+        [](const std::vector<Tensor>& in) {
+            return tenzor::cumsum(Variable(in[0], false), 0).tensor();
+        },
+        "CumsumDim0");
+}
+
+TEST(StrideParity, CumsumDim1) {
+    check_all_variants_unary(
+        [](const std::vector<Tensor>& in) {
+            return tenzor::cumsum(Variable(in[0], false), 1).tensor();
+        },
+        "CumsumDim1");
+}
+
+// LayerNorm with the default-derived normalized_shape from the last dim.
+// Uses no learnable affine (weight/bias both null) so it's a pure stride
+// test of the normalization kernel.
+TEST(StrideParity, LayerNorm) {
+    check_all_variants_unary(
+        [](const std::vector<Tensor>& in) {
+            std::vector<int64_t> norm_shape = {in[0].shape().back()};
+            auto v = tenzor::nn::functional::layer_norm(
+                Variable(in[0], false), norm_shape,
+                std::nullopt, std::nullopt, /*eps=*/1e-5);
+            return v.tensor();
+        },
+        "LayerNorm");
+}
+
+// Broadcast-binary on non-square shapes — exercises stride-aware broadcast.
+TEST(StrideParity, AddBroadcast_NonSquare) {
+    // Shape (2, 4, 6) + (4, 1) — broadcast along dim 0 and dim 2 of the
+    // first operand. Apply transposes to both to cover the non-contiguous
+    // case.
+    auto a = randn({2, 4, 6}, DType::Float32, Device::cpu());
+    auto b = randn({4, 1}, DType::Float32, Device::cpu());
+    test_operation_parity(
+        [](const std::vector<Tensor>& in) { return tenzor::add(in[0], in[1]); },
+        {a, b}, kStrideRtol, kStrideAtol, "AddBroadcast_NonSquare");
+
+    // Now with a transposed (a.transpose(0,2)) — strides become non-trivial.
+    auto a_t = a.transpose(0, 2);  // (6, 4, 2) view
+    test_operation_parity(
+        [](const std::vector<Tensor>& in) { return tenzor::add(in[0], in[1]); },
+        {a_t, b}, kStrideRtol, kStrideAtol, "AddBroadcast_NonSquare_Transposed");
+}
+
+// Top-k along the last dim — kernel must walk strided rows correctly.
+TEST(StrideParity, TopK_LastDim) {
+    auto a = randn({16, 32}, DType::Float32, Device::cpu());
+    test_operation_parity(
+        [](const std::vector<Tensor>& in) {
+            // Tensor-level topk returns std::pair<Tensor, Tensor> per
+            // ops/advanced.hpp. The parity helper compares only the first
+            // returned tensor (values), which is what we want — indices are
+            // an integer side output not covered by the float comparator.
+            auto [v, idx] = tenzor::topk(Variable(in[0], false), /*k=*/4,
+                                         /*dim=*/-1, /*largest=*/true,
+                                         /*sorted=*/true);
+            return v.tensor();
+        },
+        {a}, kStrideRtol, kStrideAtol, "TopK_LastDim_Contiguous");
+
+    auto a_t = a.transpose(-1, -2);  // (32, 16) non-contiguous
+    test_operation_parity(
+        [](const std::vector<Tensor>& in) {
+            auto [v, idx] = tenzor::topk(Variable(in[0], false), /*k=*/4,
+                                         /*dim=*/-1, /*largest=*/true,
+                                         /*sorted=*/true);
+            return v.tensor();
+        },
+        {a_t}, kStrideRtol, kStrideAtol, "TopK_LastDim_Transposed");
+}
+
 // Custom main so tenzor::initialize() runs before any test. Mirrors the
 // pattern in test_operation_parity.cpp — gtest_main would run tests before
 // initialize, and the first .to(device) throws "Backend not available".

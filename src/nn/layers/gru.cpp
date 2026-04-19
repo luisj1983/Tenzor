@@ -217,7 +217,10 @@ auto GRU::forward(const Variable& input, const Variable& hx,
         batch_size = input_shape[0];
         seq_len = input_shape[1];
         feat_size = input_shape[2];
-        x = Variable(x.tensor().transpose(0, 1), x.requires_grad());
+        // Use Variable-level transpose so backward propagates through the
+        // batch_first→sequence_first reshape (the raw tensor re-wrap
+        // silently severed the chain to the user's input).
+        x = ::tenzor::transpose(x, 0, 1);
     } else {
         seq_len = input_shape[0];
         batch_size = input_shape[1];

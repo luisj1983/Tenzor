@@ -89,4 +89,24 @@ TEST_P(MoEMultiDTypeTest, OutputFinite) {
     }
 }
 
+// Phase 3 addition (Phase 3-followup #21 fix): MoE forward used raw tensor
+// ops + Tensor accumulator throughout, dropping the autograd graph from
+// input → expert outputs. Fixed in src/nn/layers/moe.cpp by switching to
+// Variable-level reshape + accumulator + masking.
+TEST_P(MoEMultiDTypeTest, BackwardGradPopulated) {
+    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
+        // topk dispatches by dtype and rejects half-precision routing
+        // probabilities. MoE inherently requires Float32/Float64 routing.
+        GTEST_SKIP() << "MoE routing requires Float32/Float64 (topk dtype constraint)";
+    }
+    MixtureOfExperts moe(16, 32, 4, 2);
+    convert_model(moe);
+    auto input = createInput({4, 16}, true);
+    auto output = moe.forward(input);
+    sum(output).backward();
+    ASSERT_TRUE(input.has_grad()) << device().to_string();
+    auto g_max = max(abs(input.grad()->to(Device::cpu()).to(DType::Float32)));
+    EXPECT_GT(g_max.item<float>(), 0.0f);
+}
+
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(MoEMultiDTypeTest);
