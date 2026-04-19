@@ -228,13 +228,16 @@ auto histogram_kernel(const Tensor& input, int64_t bins,
 
     if (n > 0) {
         const float local_min = static_cast<float>(min_val);
+        const float local_max = static_cast<float>(max_val);
         const int64_t local_bins = bins;
         queue.parallel_for<HistogramKernelTag>(sycl::range<1>(n), [=](sycl::id<1> idx_) {
             int64_t i = static_cast<int64_t>(idx_);
             float val = in_ptr[i];
+            // Match CPU semantics: drop out-of-range samples.
+            if (val < local_min || val > local_max) return;
             int64_t bin = static_cast<int64_t>((val - local_min) / bin_width);
-            if (bin < 0) bin = 0;
             if (bin >= local_bins) bin = local_bins - 1;
+            if (bin < 0) bin = 0;
             sycl::atomic_ref<int64_t, sycl::memory_order::relaxed,
                               sycl::memory_scope::device,
                               sycl::access::address_space::global_space>

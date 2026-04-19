@@ -30,7 +30,7 @@ TEST_P(LinalgExtendedParity, Pinv) {
     auto A = randn({8, 6}, DType::Float32, Device::cpu());
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("linalg extended parity");
 
     for (const auto& backend : backends) {
         try {
@@ -57,7 +57,7 @@ TEST_P(LinalgExtendedParity, LstSq_Residual) {
     auto B = randn({8, 2}, DType::Float32, Device::cpu());
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("linalg extended parity");
 
     Tensor ref_sol;
     try {

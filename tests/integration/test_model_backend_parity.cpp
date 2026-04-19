@@ -33,7 +33,7 @@ static void copy_params(nn::Module& src, nn::Module& dst) {
 
 TEST(ModelBackendParity, SimpleMLP) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("model backend parity");
 
     try {
         nn::Linear fc1(64, 32);
@@ -82,7 +82,7 @@ TEST(ModelBackendParity, SimpleMLP) {
 
 TEST(ModelBackendParity, LeNet5) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("model backend parity");
 
     try {
         nn::Conv2d conv1(1, 6, 5);     // (1,6,28,28)
@@ -151,7 +151,7 @@ TEST(ModelBackendParity, LeNet5) {
 
 TEST(ModelBackendParity, TransformerEncoder1Layer) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("model backend parity");
 
     try {
         int64_t d_model = 64, nhead = 4;
@@ -193,7 +193,7 @@ TEST(ModelBackendParity, TransformerEncoder1Layer) {
 
 TEST(ModelBackendParity, LSTMSeq2Seq) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("model backend parity");
 
     try {
         int64_t input_size = 32, hidden_size = 64, num_layers = 1;
@@ -237,7 +237,7 @@ TEST(ModelBackendParity, LSTMSeq2Seq) {
 
 TEST(ModelBackendParity, EncoderDecoder) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("model backend parity");
 
     try {
         // Encoder

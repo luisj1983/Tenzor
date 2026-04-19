@@ -1066,32 +1066,45 @@ auto pad(const Variable& input, const std::vector<int64_t>& pad_sizes,
     auto& inp = input.tensor();
 
     if (mode == "constant") {
-        // Build padded shape
-        std::vector<int64_t> new_shape(shape.begin(), shape.end());
-        for (int64_t i = 0; i < n_pad_dims; ++i) {
-            auto dim_idx = ndim - 1 - i;
-            new_shape[dim_idx] += pad_sizes[2 * i] + pad_sizes[2 * i + 1];
-        }
+        // Build constant padding as a sequence of cats: pre-pad zeros on
+        // each axis, then the input, then post-pad zeros. Each cat is an
+        // autograd-aware op, so gradients flow back through the input
+        // Variable. The earlier memcpy-through-narrow path dropped grad_fn
+        // and silently zeroed any tensor that consumed this output during
+        // backward — same pattern as our known "raw-tensor-op breaks
+        // autograd graph" bugs.
+        auto dtype = inp.dtype();
+        auto device = inp.device();
 
-        auto output = tenzor::full(new_shape, value, inp.dtype(), inp.device());
-
-        // Use narrow to get a view into the padded output, then copy input data
-        Tensor dst = output;
+        Variable result = input;
         for (int64_t i = 0; i < n_pad_dims; ++i) {
             auto dim_idx = ndim - 1 - i;
             auto pad_before = pad_sizes[2 * i];
-            dst = dst.narrow(dim_idx, pad_before, shape[dim_idx]);
-        }
+            auto pad_after  = pad_sizes[2 * i + 1];
+            if (pad_before == 0 && pad_after == 0) continue;
 
-        if (dst.is_contiguous() && inp.is_contiguous() && dst.numel() == inp.numel()) {
-            std::memcpy(dst.data_ptr(), inp.data_ptr(),
-                        inp.numel() * dtype_size(inp.dtype()));
-        } else {
-            std::memcpy(dst.data_ptr(), inp.data_ptr(),
-                        inp.numel() * dtype_size(inp.dtype()));
+            auto cur_shape = result.tensor().shape();
+            std::vector<Variable> parts;
+            if (pad_before > 0) {
+                auto pad_shape = std::vector<int64_t>(cur_shape.begin(), cur_shape.end());
+                pad_shape[dim_idx] = pad_before;
+                parts.push_back(Variable(
+                    tenzor::full(std::move(pad_shape),
+                                 static_cast<float>(value), dtype, device),
+                    false));
+            }
+            parts.push_back(result);
+            if (pad_after > 0) {
+                auto pad_shape = std::vector<int64_t>(cur_shape.begin(), cur_shape.end());
+                pad_shape[dim_idx] = pad_after;
+                parts.push_back(Variable(
+                    tenzor::full(std::move(pad_shape),
+                                 static_cast<float>(value), dtype, device),
+                    false));
+            }
+            result = cat(parts, dim_idx);
         }
-
-        return Variable(output, input.requires_grad());
+        return result;
     }
 
     // reflect / replicate / circular: use index_select per padded dimension

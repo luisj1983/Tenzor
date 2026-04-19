@@ -26,7 +26,7 @@ TEST_P(AMPParity, ScaleLossMatches) {
     auto input_cpu = randn({8}, DType::Float32, Device::cpu());
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("amp parity");
 
     float ref_scaled;
     try {
@@ -66,7 +66,7 @@ TEST_P(AMPParity, ScaledBackwardMatches) {
     auto input_cpu = randn({8}, DType::Float32, Device::cpu());
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("amp parity");
 
     Tensor ref_grad;
     try {

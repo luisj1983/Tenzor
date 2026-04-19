@@ -14,6 +14,8 @@
 #include "../../include/tenzor/utils/error.hpp"
 #include "../../include/tenzor/nn/layers/linear.hpp"
 #include "../../include/tenzor/nn/layers/conv.hpp"
+#include "../../include/tenzor/nn/layers/padding.hpp"
+#include "../../include/tenzor/nn/module.hpp"
 #include "../../include/tenzor/nn/layers/batchnorm.hpp"
 #include "../../include/tenzor/nn/layers/normalization.hpp"
 #include "../../include/tenzor/nn/layers/pooling.hpp"
@@ -580,6 +582,8 @@ auto ONNXImporter::convert_node(const ONNXImportNode& node) -> std::optional<std
         return convert_gemm(node);
     } else if (node.op_type == "Conv") {
         return convert_conv(node);
+    } else if (node.op_type == "ConvTranspose") {
+        return convert_conv_transpose(node);
     } else if (node.op_type == "BatchNormalization") {
         return convert_batch_normalization(node);
     } else if (node.op_type == "LayerNormalization") {
@@ -817,6 +821,33 @@ auto ONNXImporter::convert_flatten(const ONNXImportNode& node) -> void {
 // Neural Network Layers
 // ============================================================================
 
+// Load weight/bias tensors into a freshly-constructed Conv* module.
+// Separated out since every Conv/ConvTranspose path does the same thing.
+namespace {
+auto load_conv_params(nn::Module& m, const Tensor& weight,
+                      const std::optional<Tensor>& bias) -> void {
+    auto params = m.named_parameters();
+    for (auto& [name, param] : params) {
+        if (name == "weight") {
+            param->tensor() = weight;
+        } else if (name == "bias" && bias.has_value()) {
+            param->tensor() = bias.value();
+        }
+    }
+}
+
+// ONNX "pads" layout for an N-D spatial op is
+// [begin_d0, begin_d1, ..., begin_dN-1, end_d0, end_d1, ..., end_dN-1].
+// Returns true when every begin[i] == end[i] (symmetric).
+auto pads_are_symmetric(const std::vector<int64_t>& pads, size_t ndim) -> bool {
+    if (pads.size() != ndim * 2) return false;
+    for (size_t i = 0; i < ndim; ++i) {
+        if (pads[i] != pads[i + ndim]) return false;
+    }
+    return true;
+}
+}  // namespace
+
 auto ONNXImporter::convert_conv(const ONNXImportNode& node) -> std::shared_ptr<nn::Module> {
     auto weight = get_input(node.inputs[1]);
     std::optional<Tensor> bias;
@@ -824,68 +855,198 @@ auto ONNXImporter::convert_conv(const ONNXImportNode& node) -> std::shared_ptr<n
         bias = get_input(node.inputs[2]);
     }
 
-    // Get convolution attributes
+    // Weight shape: [out_channels, in_channels/groups, *kernel]
+    auto weight_shape = weight.shape();
+    size_t spatial_dims = weight_shape.size() - 2;
+    if (spatial_dims < 1 || spatial_dims > 3) {
+        throw std::runtime_error("ONNX Conv: unsupported weight rank " +
+                                 std::to_string(weight_shape.size()));
+    }
+
     auto kernel_shape = node.get_attr("kernel_shape")->get_ints();
-    auto strides = node.get_attr("strides").value_or(ONNXAttribute{}).get_ints({1, 1});
-    auto pads = node.get_attr("pads").value_or(ONNXAttribute{}).get_ints({0, 0, 0, 0});
-    auto dilations = node.get_attr("dilations").value_or(ONNXAttribute{}).get_ints({1, 1});
+    std::vector<int64_t> default_ones(spatial_dims, 1);
+    std::vector<int64_t> default_pads(spatial_dims * 2, 0);
+    auto strides = node.get_attr("strides").value_or(ONNXAttribute{}).get_ints(default_ones);
+    auto pads = node.get_attr("pads").value_or(ONNXAttribute{}).get_ints(default_pads);
+    auto dilations = node.get_attr("dilations").value_or(ONNXAttribute{}).get_ints(default_ones);
     int64_t groups = node.get_attr("group").value_or(ONNXAttribute{}).get_int(1);
 
-    // Weight shape: [out_channels, in_channels/groups, kernel_h, kernel_w]
-    auto weight_shape = weight.shape();
+    // auto_pad: NOTSET uses `pads` as-is. SAME_UPPER/SAME_LOWER and VALID
+    // would need the input shape at import time; we leave these unsupported
+    // until the exporter emits SAME_*, which it doesn't as of today.
+    auto auto_pad = node.get_attr("auto_pad").value_or(ONNXAttribute{}).get_string("NOTSET");
+    if (auto_pad != "NOTSET" && auto_pad != "VALID") {
+        throw std::runtime_error("ONNX Conv: auto_pad=" + auto_pad +
+                                 " not supported (only NOTSET/VALID). "
+                                 "Re-export with explicit pads.");
+    }
+    if (auto_pad == "VALID") {
+        pads.assign(spatial_dims * 2, 0);
+    }
+    if (pads.size() != spatial_dims * 2) {
+        throw std::runtime_error("ONNX Conv: pads attribute has " +
+                                 std::to_string(pads.size()) + " entries, expected " +
+                                 std::to_string(spatial_dims * 2));
+    }
+
     int64_t out_channels = weight_shape[0];
     int64_t in_channels = weight_shape[1] * groups;
 
-    // Check if Conv1d or Conv2d
-    if (kernel_shape.size() == 1) {
-        // Conv1d
-        auto conv = std::make_shared<nn::Conv1d>(
+    bool symmetric = pads_are_symmetric(pads, spatial_dims);
+
+    // Build the Conv module, using zero padding when we need an explicit
+    // ConstantPad prefix for asymmetric pads.
+    std::shared_ptr<nn::Module> conv;
+    std::shared_ptr<nn::Module> pre_pad;
+
+    if (spatial_dims == 1) {
+        int64_t conv_pad = symmetric ? pads[0] : 0;
+        if (!symmetric) {
+            pre_pad = std::make_shared<nn::ConstantPad1d>(pads[0], pads[1]);
+        }
+        conv = std::make_shared<nn::Conv1d>(
             in_channels, out_channels, kernel_shape[0],
-            strides[0], pads[0], dilations[0], groups, bias.has_value()
-        );
-
-        // Load pretrained weights from ONNX
-        auto params = conv->named_parameters();
-        for (auto& [name, param] : params) {
-            if (name == "weight") {
-                param->tensor() = weight;
-            } else if (name == "bias" && bias.has_value()) {
-                param->tensor() = bias.value();
-            }
+            strides[0], conv_pad, dilations[0], groups, bias.has_value());
+    } else if (spatial_dims == 2) {
+        std::pair<int64_t, int64_t> kpair = {kernel_shape[0], kernel_shape[1]};
+        std::pair<int64_t, int64_t> spair = {strides[0], strides[1]};
+        std::pair<int64_t, int64_t> dpair = {dilations[0], dilations[1]};
+        std::pair<int64_t, int64_t> ppair = symmetric
+            ? std::pair<int64_t, int64_t>{pads[0], pads[1]}
+            : std::pair<int64_t, int64_t>{0, 0};
+        if (!symmetric) {
+            // ONNX 2-D pads layout: [begin_h, begin_w, end_h, end_w]
+            pre_pad = std::make_shared<nn::ConstantPad2d>(
+                /*pad_left=*/pads[1], /*pad_right=*/pads[3],
+                /*pad_top=*/pads[0], /*pad_bottom=*/pads[2]);
         }
-
-        return conv;
-    } else if (kernel_shape.size() == 2) {
-        // Conv2d
-        // Convert padding format from [top, left, bottom, right] to [h, w]
-        int64_t pad_h = pads[0];
-
-        // Assume square kernel if both dims are same, otherwise use first dimension
-        int64_t kernel_size = kernel_shape[0]; // Assuming square kernels
-        int64_t stride = strides[0];  // Assuming same stride in both dims
-        int64_t padding = pad_h;      // Assuming same padding
-        int64_t dilation = dilations[0]; // Assuming same dilation
-
-        auto conv = std::make_shared<nn::Conv2d>(
-            in_channels, out_channels,
-            kernel_size, stride, padding, dilation,
-            groups, bias.has_value()
-        );
-
-        // Load pretrained weights from ONNX
-        auto params = conv->named_parameters();
-        for (auto& [name, param] : params) {
-            if (name == "weight") {
-                param->tensor() = weight;
-            } else if (name == "bias" && bias.has_value()) {
-                param->tensor() = bias.value();
-            }
+        conv = std::make_shared<nn::Conv2d>(
+            in_channels, out_channels, kpair, spair, ppair, dpair,
+            groups, bias.has_value());
+    } else {  // spatial_dims == 3
+        // Conv3d only supports a scalar kernel/stride/pad/dilation. Accept
+        // ONNX models with isotropic params; otherwise emit a clear error.
+        if (kernel_shape[0] != kernel_shape[1] || kernel_shape[1] != kernel_shape[2]) {
+            throw std::runtime_error("ONNX Conv3d: non-cubic kernel_shape not supported");
         }
-
-        return conv;
-    } else {
-        throw std::runtime_error("Unsupported convolution dimension: " + std::to_string(kernel_shape.size()));
+        if (strides[0] != strides[1] || strides[1] != strides[2]) {
+            throw std::runtime_error("ONNX Conv3d: non-isotropic strides not supported");
+        }
+        if (dilations[0] != dilations[1] || dilations[1] != dilations[2]) {
+            throw std::runtime_error("ONNX Conv3d: non-isotropic dilations not supported");
+        }
+        bool isotropic_pad = symmetric && pads[0] == pads[1] && pads[1] == pads[2];
+        int64_t conv_pad = isotropic_pad ? pads[0] : 0;
+        if (!isotropic_pad) {
+            // ConstantPad3d layout: [left, right, top, bottom, front, back]
+            // ONNX 3-D pads layout:  [begin_d, begin_h, begin_w, end_d, end_h, end_w]
+            // (depth=front/back, height=top/bottom, width=left/right)
+            pre_pad = std::make_shared<nn::ConstantPad3d>(std::vector<int64_t>{
+                /*left=*/pads[2], /*right=*/pads[5],
+                /*top=*/pads[1], /*bottom=*/pads[4],
+                /*front=*/pads[0], /*back=*/pads[3]});
+        }
+        conv = std::make_shared<nn::Conv3d>(
+            in_channels, out_channels, kernel_shape[0],
+            strides[0], conv_pad, dilations[0], groups, bias.has_value());
     }
+
+    load_conv_params(*conv, weight, bias);
+
+    if (pre_pad) {
+        auto seq = std::make_shared<nn::Sequential>();
+        seq->add_module(pre_pad);
+        seq->add_module(conv);
+        return seq;
+    }
+    return conv;
+}
+
+auto ONNXImporter::convert_conv_transpose(const ONNXImportNode& node)
+    -> std::shared_ptr<nn::Module> {
+    auto weight = get_input(node.inputs[1]);
+    std::optional<Tensor> bias;
+    if (node.inputs.size() > 2) {
+        bias = get_input(node.inputs[2]);
+    }
+
+    // ConvTranspose weight layout: [in_channels, out_channels/groups, *kernel]
+    auto weight_shape = weight.shape();
+    size_t spatial_dims = weight_shape.size() - 2;
+    if (spatial_dims < 1 || spatial_dims > 3) {
+        throw std::runtime_error("ONNX ConvTranspose: unsupported weight rank " +
+                                 std::to_string(weight_shape.size()));
+    }
+
+    auto kernel_shape = node.get_attr("kernel_shape")->get_ints();
+    std::vector<int64_t> default_ones(spatial_dims, 1);
+    std::vector<int64_t> default_zeros(spatial_dims, 0);
+    std::vector<int64_t> default_pads(spatial_dims * 2, 0);
+    auto strides = node.get_attr("strides").value_or(ONNXAttribute{}).get_ints(default_ones);
+    auto pads = node.get_attr("pads").value_or(ONNXAttribute{}).get_ints(default_pads);
+    auto dilations = node.get_attr("dilations").value_or(ONNXAttribute{}).get_ints(default_ones);
+    auto output_padding = node.get_attr("output_padding")
+                              .value_or(ONNXAttribute{}).get_ints(default_zeros);
+    int64_t groups = node.get_attr("group").value_or(ONNXAttribute{}).get_int(1);
+
+    auto auto_pad = node.get_attr("auto_pad").value_or(ONNXAttribute{}).get_string("NOTSET");
+    if (auto_pad != "NOTSET" && auto_pad != "VALID") {
+        throw std::runtime_error("ONNX ConvTranspose: auto_pad=" + auto_pad +
+                                 " not supported (only NOTSET/VALID).");
+    }
+    if (auto_pad == "VALID") {
+        pads.assign(spatial_dims * 2, 0);
+    }
+
+    if (!pads_are_symmetric(pads, spatial_dims)) {
+        throw std::runtime_error(
+            "ONNX ConvTranspose: asymmetric pads are not representable through "
+            "Tenzor ConvTranspose. Re-export with symmetric padding.");
+    }
+
+    int64_t in_channels = weight_shape[0];
+    int64_t out_channels = weight_shape[1] * groups;
+
+    // Tenzor ConvTranspose {1,2,3}d accept scalar kernel/stride/pad/dilation/output_padding.
+    auto assert_isotropic = [&](const std::vector<int64_t>& v, const char* what) {
+        for (size_t i = 1; i < v.size(); ++i) {
+            if (v[i] != v[0]) {
+                throw std::runtime_error(
+                    std::string("ONNX ConvTranspose: anisotropic ") + what +
+                    " not supported (need scalar).");
+            }
+        }
+    };
+    assert_isotropic(kernel_shape, "kernel_shape");
+    assert_isotropic(strides, "strides");
+    assert_isotropic(dilations, "dilations");
+    assert_isotropic(output_padding, "output_padding");
+
+    int64_t k = kernel_shape[0];
+    int64_t s = strides[0];
+    int64_t d = dilations[0];
+    int64_t p = pads[0];
+    int64_t op = output_padding.empty() ? 0 : output_padding[0];
+
+    std::shared_ptr<nn::Module> conv;
+    if (spatial_dims == 1) {
+        conv = std::make_shared<nn::ConvTranspose1d>(
+            in_channels, out_channels, k, s, p, op, groups, bias.has_value());
+    } else if (spatial_dims == 2) {
+        // Tenzor ConvTranspose2d ctor: (in, out, k, stride, padding, output_padding, groups, bias).
+        // Dilation is not exposed on ConvTranspose2d; reject non-default dilation.
+        if (d != 1) {
+            throw std::runtime_error("ONNX ConvTranspose2d: dilation != 1 not supported");
+        }
+        conv = std::make_shared<nn::ConvTranspose2d>(
+            in_channels, out_channels, k, s, p, op, groups, bias.has_value());
+    } else {  // spatial_dims == 3
+        conv = std::make_shared<nn::ConvTranspose3d>(
+            in_channels, out_channels, k, s, p, op, d, groups, bias.has_value());
+    }
+
+    load_conv_params(*conv, weight, bias);
+    return conv;
 }
 
 auto ONNXImporter::convert_layer_normalization(const ONNXImportNode& node) -> std::shared_ptr<nn::Module> {

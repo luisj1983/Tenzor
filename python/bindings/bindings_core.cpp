@@ -848,10 +848,14 @@ Returns:
             py::call_guard<py::gil_scoped_release>())
         // Copy / randomization.
         .def("copy_", [](tenzor::Tensor& self, const tenzor::Tensor& src) -> tenzor::Tensor& {
-                // Mirror torch.Tensor.copy_: the source is copied into
-                // self, with dtype/device conversion as needed. Shapes
-                // must be broadcastable; for now we require exact match
-                // to keep the semantics simple.
+                // In-place copy: src data is written into self's existing
+                // storage so other aliases of self (e.g. a Parameter's
+                // stored tensor) observe the new values. The previous
+                // implementation did `self = converted` which reassigned
+                // the receiver's impl pointer while leaving aliased
+                // tensors pointing at the original buffer — silently
+                // broke `parameter.tensor().copy_(...)` used throughout
+                // the parity tests and the ONNX import weight-copy path.
                 auto ss = self.shape();
                 auto xs = src.shape();
                 if (ss.size() != xs.size() ||
@@ -866,9 +870,59 @@ Returns:
                 if (converted.device() != self.device()) {
                     converted = converted.to(self.device());
                 }
-                self = converted; return self;
+                if (!converted.is_contiguous()) {
+                    converted = converted.contiguous();
+                }
+                size_t nbytes = static_cast<size_t>(self.numel()) * self.dtype_size();
+                if (nbytes == 0) return self;
+
+                if (self.is_contiguous()) {
+                    // Fast path: direct device-local byte copy.
+                    if (self.device().type == tenzor::Device::Type::CPU) {
+                        std::memcpy(self.data_ptr(), converted.data_ptr(), nbytes);
+                    } else {
+                        auto* backend = tenzor::backend_registry().get_backend(self.device().type);
+                        if (!backend) {
+                            throw std::runtime_error(
+                                "Tensor.copy_: no backend registered for device");
+                        }
+                        backend->copy(self.data_ptr(), converted.data_ptr(), nbytes,
+                                      tenzor::CopyKind::DeviceToDevice);
+                    }
+                } else {
+                    // Non-contiguous destination: fall back to elementwise
+                    // via fill-style dispatch. We materialize converted
+                    // into a contiguous buffer, then write element-by-
+                    // element respecting self's strides. The existing
+                    // tensor assignment op is not strided-aware either,
+                    // so we do this via a scalar loop on CPU only.
+                    if (self.device().type != tenzor::Device::Type::CPU) {
+                        throw std::runtime_error(
+                            "Tensor.copy_: non-contiguous destination only "
+                            "supported on CPU; call .contiguous() first");
+                    }
+                    auto iter_shape = std::vector<int64_t>(ss.begin(), ss.end());
+                    int64_t n = self.numel();
+                    int64_t ndim = static_cast<int64_t>(iter_shape.size());
+                    auto strides_self = self.strides();
+                    const uint8_t* src_bytes = static_cast<const uint8_t*>(converted.data_ptr());
+                    uint8_t* dst_bytes = static_cast<uint8_t*>(self.data_ptr());
+                    size_t elt = self.dtype_size();
+                    for (int64_t lin = 0; lin < n; ++lin) {
+                        int64_t rem = lin;
+                        int64_t dst_off = 0;
+                        for (int64_t d = ndim - 1; d >= 0; --d) {
+                            int64_t idx = rem % iter_shape[d];
+                            rem /= iter_shape[d];
+                            dst_off += idx * strides_self[d];
+                        }
+                        std::memcpy(dst_bytes + dst_off * elt,
+                                    src_bytes + lin * elt, elt);
+                    }
+                }
+                return self;
             }, py::arg("src"),
-            "Copy src into self (with dtype/device conversion). Returns self.",
+            "Copy src into self in-place (with dtype/device conversion). Returns self.",
             py::call_guard<py::gil_scoped_release>())
         .def("normal_", [](tenzor::Tensor& self, double mean, double std) -> tenzor::Tensor& {
                 auto shape_vec = std::vector<int64_t>(self.shape().begin(), self.shape().end());

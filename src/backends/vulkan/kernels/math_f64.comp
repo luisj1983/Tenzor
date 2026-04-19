@@ -141,6 +141,13 @@ double log_double(double x) {
 
 // Double-precision pow approximation
 double pow_double(double base, double exp_val) {
+    // Fast paths for common integer exponents keep x^n finite when x<0
+    // (PowBackward of x^n feeds pow(x, n-1) back in).
+    if (exp_val == 1.0) return base;
+    if (exp_val == 0.0) return 1.0;
+    if (exp_val == 2.0) return base * base;
+    if (exp_val == 3.0) return base * base * base;
+    if (exp_val == -1.0) return 1.0 / base;
     if (base <= 0.0) {
         if (base == 0.0) return 0.0;
         return 0.0;  // Negative base with non-integer exp is undefined

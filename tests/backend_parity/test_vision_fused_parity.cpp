@@ -204,7 +204,7 @@ TEST_P(VisionFusedParity, NMS) {
 
     // NMS returns Int64 indices — strict equality, not tolerance.
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("vision fused parity");
 
     Tensor ref;
     try {
@@ -245,7 +245,7 @@ TEST_P(VisionFusedParity, ROIAlign) {
     r[10]=0; r[11]=0; r[12]=0; r[13]=14.0f; r[14]=14.0f;
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("vision fused parity");
 
     Tensor ref;
     try {
@@ -285,11 +285,16 @@ TEST_P(VisionFusedParity, FusedSoftmaxCrossEntropy) {
     auto* t = targets.data<int64_t>();
     for (int64_t i = 0; i < 8; ++i) t[i] = i % 10;
 
+    // CPU returns shape [], GPU backends return shape [1]; reshape to [1]
+    // so parity comparison doesn't bail on the leading shape check.
+    // atol=1e-5 (not 1e-6) because the mean reduces log-sum-exp across 10
+    // classes and backends pick slightly different summation paths.
     test_operation_parity(
         [](const std::vector<Tensor>& ins) {
-            return ops::fused_softmax_cross_entropy(ins[0], ins[1], "mean");
+            return ops::fused_softmax_cross_entropy(ins[0], ins[1], "mean")
+                .reshape({1});
         },
-        {logits, targets}, 1e-4f, 1e-6f, "fused_softmax_cross_entropy");
+        {logits, targets}, 1e-4f, 1e-5f, "fused_softmax_cross_entropy");
 }
 
 TEST_P(VisionFusedParity, FusedAddReLU) {

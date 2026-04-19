@@ -34,7 +34,7 @@ static void copy_params(nn::Module& src, nn::Module& dst) {
 
 TEST(JITBackendParity, LinearChain) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("jit backend parity");
 
     try {
         nn::Linear l1(32, 16);
@@ -74,7 +74,7 @@ TEST(JITBackendParity, LinearChain) {
 
 TEST(JITBackendParity, Conv2dBNReLU) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("jit backend parity");
 
     try {
         nn::Conv2d conv(3, 16, 3, 1, 1);
@@ -119,7 +119,7 @@ TEST(JITBackendParity, Conv2dBNReLU) {
 
 TEST(JITBackendParity, AttentionBlock) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("jit backend parity");
 
     try {
         int64_t batch = 2, seq = 8, d = 16;
@@ -162,7 +162,7 @@ TEST(JITBackendParity, AttentionBlock) {
 
 TEST(JITBackendParity, ResNetBottleneck) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("jit backend parity");
 
     try {
         int64_t in_ch = 16, mid_ch = 4, out_ch = 16;
@@ -225,7 +225,7 @@ TEST(JITBackendParity, ResNetBottleneck) {
 
 TEST(JITBackendParity, LSTMSequence) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("jit backend parity");
 
     try {
         int64_t input_size = 16, hidden_size = 32, batch = 2, seq_len = 4;
@@ -277,7 +277,7 @@ TEST(JITBackendParity, LSTMSequence) {
 
 TEST(JITBackendParity, SoftmaxCrossEntropy) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("jit backend parity");
 
     try {
         int64_t batch = 4, num_classes = 10;
@@ -313,7 +313,7 @@ TEST(JITBackendParity, SoftmaxCrossEntropy) {
 
 TEST(JITBackendParity, LayerNormMLP) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("jit backend parity");
 
     try {
         int64_t dim = 32;
@@ -361,7 +361,7 @@ TEST(JITBackendParity, LayerNormMLP) {
 
 TEST(JITBackendParity, EmbeddingLookup) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("jit backend parity");
 
     try {
         int64_t vocab = 64, emb_dim = 16, hidden = 8;
@@ -411,7 +411,7 @@ TEST(JITBackendParity, EmbeddingLookup) {
 
 TEST(JITBackendParity, MultiHeadAttentionBlock) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("jit backend parity");
 
     try {
         int64_t d_model = 32, nhead = 4, seq = 8, batch = 2;
@@ -463,7 +463,7 @@ TEST(JITBackendParity, MultiHeadAttentionBlock) {
 
 TEST(JITBackendParity, ConvPool) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("jit backend parity");
 
     try {
         nn::Conv2d conv(3, 8, 3, 1, 1);   // Output: (1, 8, 8, 8)

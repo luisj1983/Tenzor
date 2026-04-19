@@ -74,9 +74,12 @@ void im2col_cpu(
     int64_t width,
     int64_t kernel_h,
     int64_t kernel_w,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t pad_h,
+    int64_t pad_w,
+    int64_t dil_h,
+    int64_t dil_w,
     int64_t out_h,
     int64_t out_w
 ) {
@@ -90,9 +93,9 @@ void im2col_cpu(
                 T* col_ptr = output + ((b * out_h + oh) * out_w + ow) * col_width;
                 for (int64_t c = 0; c < channels; ++c) {
                     for (int64_t kh_idx = 0; kh_idx < kernel_h; ++kh_idx) {
-                        int64_t ih = oh * stride - padding + kh_idx * dilation;
+                        int64_t ih = oh * stride_h - pad_h + kh_idx * dil_h;
                         for (int64_t kw_idx = 0; kw_idx < kernel_w; ++kw_idx) {
-                            int64_t iw = ow * stride - padding + kw_idx * dilation;
+                            int64_t iw = ow * stride_w - pad_w + kw_idx * dil_w;
                             if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
                                 *col_ptr++ = input[((b * channels + c) * height + ih) * width + iw];
                             } else {
@@ -104,6 +107,22 @@ void im2col_cpu(
             }
         }
     }
+}
+
+// Scalar-stride/pad/dilation backward-compat wrapper. Delegates to the
+// per-axis implementation above.
+template<typename T>
+void im2col_cpu(
+    const T* input, T* output,
+    int64_t batch, int64_t channels, int64_t height, int64_t width,
+    int64_t kernel_h, int64_t kernel_w,
+    int64_t stride, int64_t padding, int64_t dilation,
+    int64_t out_h, int64_t out_w
+) {
+    im2col_cpu(input, output, batch, channels, height, width,
+               kernel_h, kernel_w,
+               stride, stride, padding, padding, dilation, dilation,
+               out_h, out_w);
 }
 
 // ============================================================================
@@ -124,9 +143,12 @@ void col2im_cpu(
     int64_t width,
     int64_t kernel_h,
     int64_t kernel_w,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t pad_h,
+    int64_t pad_w,
+    int64_t dil_h,
+    int64_t dil_w,
     int64_t out_h,
     int64_t out_w
 ) {
@@ -146,31 +168,29 @@ void col2im_cpu(
             for (int64_t kh = 0; kh < kernel_h; ++kh) {
                 for (int64_t kw = 0; kw < kernel_w; ++kw) {
                     // Precompute valid oh range for this kernel row position.
-                    // Constraint: 0 <= oh * stride - padding + kh * dilation < height
-                    // => oh >= ceil((padding - kh * dilation) / stride)  [if numerator > 0]
-                    // => oh <  ceil((height + padding - kh * dilation) / stride)
-                    int64_t offset_h = padding - kh * dilation;
+                    // Constraint: 0 <= oh * stride_h - pad_h + kh * dil_h < height
+                    int64_t offset_h = pad_h - kh * dil_h;
                     int64_t oh_start = std::max<int64_t>(0,
-                        (offset_h > 0) ? (offset_h + stride - 1) / stride : -((-offset_h) / stride));
+                        (offset_h > 0) ? (offset_h + stride_h - 1) / stride_h : -((-offset_h) / stride_h));
                     int64_t oh_end = std::min(out_h,
-                        (height + offset_h + stride - 1) / stride);
+                        (height + offset_h + stride_h - 1) / stride_h);
 
-                    int64_t offset_w = padding - kw * dilation;
+                    int64_t offset_w = pad_w - kw * dil_w;
                     int64_t ow_start = std::max<int64_t>(0,
-                        (offset_w > 0) ? (offset_w + stride - 1) / stride : -((-offset_w) / stride));
+                        (offset_w > 0) ? (offset_w + stride_w - 1) / stride_w : -((-offset_w) / stride_w));
                     int64_t ow_end = std::min(out_w,
-                        (width + offset_w + stride - 1) / stride);
+                        (width + offset_w + stride_w - 1) / stride_w);
 
                     int64_t col_col = c * kernel_h * kernel_w + kh * kernel_w + kw;
                     int64_t col_row_base = b * out_h * out_w;
                     int64_t col_stride = channels * kernel_h * kernel_w;
 
                     for (int64_t oh = oh_start; oh < oh_end; ++oh) {
-                        int64_t ih = oh * stride - offset_h;
+                        int64_t ih = oh * stride_h - offset_h;
                         int64_t col_row_oh = (col_row_base + oh * out_w) * col_stride + col_col;
 
                         for (int64_t ow = ow_start; ow < ow_end; ++ow) {
-                            int64_t iw = ow * stride - offset_w;
+                            int64_t iw = ow * stride_w - offset_w;
                             out_slice[ih * width + iw] += col[col_row_oh + ow * col_stride];
                         }
                     }
@@ -178,6 +198,21 @@ void col2im_cpu(
             }
         }
     }
+}
+
+// Scalar-stride/pad/dilation backward-compat wrapper.
+template<typename T>
+void col2im_cpu(
+    const T* col, T* output,
+    int64_t batch, int64_t channels, int64_t height, int64_t width,
+    int64_t kernel_h, int64_t kernel_w,
+    int64_t stride, int64_t padding, int64_t dilation,
+    int64_t out_h, int64_t out_w
+) {
+    col2im_cpu(col, output, batch, channels, height, width,
+               kernel_h, kernel_w,
+               stride, stride, padding, padding, dilation, dilation,
+               out_h, out_w);
 }
 
 // ============================================================================
@@ -662,18 +697,27 @@ static bool conv2d_forward_onednn(
 }
 #endif
 
-// Template helper for dtype-generic conv2d forward
+// Template helper for dtype-generic conv2d forward. Accepts per-axis
+// stride / padding / dilation so non-square conv configs work natively.
 template<typename T>
 void conv2d_forward_impl(
     const Tensor& input,
     const Tensor& weight,
     const Tensor* bias,
     Tensor& output,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t pad_h,
+    int64_t pad_w,
+    int64_t dil_h,
+    int64_t dil_w,
     int64_t groups
 ) {
+    // Alias names used by the Winograd / 1x1 fast paths below that require
+    // isotropic configs. Keeping these lets us avoid rewriting those blocks.
+    int64_t stride = stride_h;
+    int64_t padding = pad_h;
+    int64_t dilation = dil_h;
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
 
@@ -691,6 +735,10 @@ void conv2d_forward_impl(
     int64_t out_h = out_shape[2];
     int64_t out_w = out_shape[3];
 
+    // Fast paths (Winograd, 1x1, 3x3 specializations) below are square-only;
+    // fall through to the general im2col+GEMM path for any anisotropic config.
+    bool symmetric = (stride_h == stride_w) && (pad_h == pad_w) && (dil_h == dil_w);
+
     // Initialize output to zeros
     std::memset(output.data<T>(), 0, output.numel() * sizeof(T));
 
@@ -701,7 +749,7 @@ void conv2d_forward_impl(
     // Fast path for 1x1 convolutions (skip im2col, direct GEMM)
     // 1x1 conv is essentially a per-pixel fully-connected layer
     // =========================================================================
-    if (kernel_h == 1 && kernel_w == 1 && stride == 1 && padding == 0 && dilation == 1) {
+    if (symmetric && kernel_h == 1 && kernel_w == 1 && stride == 1 && padding == 0 && dilation == 1) {
         // For 1x1 convs: treat as GEMM without im2col
         // Input viewed as (batch, in_channels, H*W) -> transpose to (batch, H*W, in_channels)
         // Weight viewed as (out_channels, in_channels)
@@ -757,7 +805,7 @@ void conv2d_forward_impl(
     // Winograd F(2x2, 3x3) fast path for 3x3 convolutions
     // Reduces multiplications from 9 to 4 per 2x2 output tile
     // =========================================================================
-    if (kernel_h == 3 && kernel_w == 3 && stride == 1 && dilation == 1 && groups == 1) {
+    if (symmetric && kernel_h == 3 && kernel_w == 3 && stride == 1 && dilation == 1 && groups == 1) {
         const T* input_data = input.data<T>();
         const T* weight_data = weight.data<T>();
         T* output_data = output.data<T>();
@@ -959,9 +1007,9 @@ void conv2d_forward_impl(
                 width,
                 kernel_h,
                 kernel_w,
-                stride,
-                padding,
-                dilation,
+                stride_h, stride_w,
+                pad_h, pad_w,
+                dil_h, dil_w,
                 out_h,
                 out_w
             );
@@ -1032,15 +1080,36 @@ void conv2d_forward_impl(
     }
 }
 
+// Scalar-stride/pad/dilation wrapper for conv2d_forward_impl
+template<typename T>
+void conv2d_forward_impl(
+    const Tensor& input, const Tensor& weight, const Tensor* bias, Tensor& output,
+    int64_t stride, int64_t padding, int64_t dilation, int64_t groups
+) {
+    conv2d_forward_impl<T>(input, weight, bias, output,
+                           stride, stride, padding, padding, dilation, dilation,
+                           groups);
+}
+
 auto conv2d_forward_kernel(
     const Tensor& input_orig,    // (batch, in_channels, height, width)
     const Tensor& weight_orig,   // (out_channels, in_channels, kernel_h, kernel_w)
     const Tensor* bias,          // (out_channels) or nullptr
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t pad_h,
+    int64_t pad_w,
+    int64_t dil_h,
+    int64_t dil_w,
     int64_t groups
 ) -> Tensor {
+    // When stride/pad/dilation are isotropic we can hit the oneDNN/Winograd
+    // fast paths below; otherwise fall through to the general im2col+GEMM
+    // which handles per-axis values.
+    bool symmetric = (stride_h == stride_w) && (pad_h == pad_w) && (dil_h == dil_w);
+    int64_t stride   = stride_h;
+    int64_t padding  = pad_h;
+    int64_t dilation = dil_h;
     // im2col assumes contiguous row-major layout — make contiguous if needed
     Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     Tensor weight = weight_orig.is_contiguous() ? weight_orig : weight_orig.contiguous();
@@ -1056,24 +1125,27 @@ auto conv2d_forward_kernel(
     int64_t kernel_h = weight_shape[2];
     int64_t kernel_w = weight_shape[3];
 
-    // Calculate output dimensions
-    int64_t out_h = calculate_output_size(height, kernel_h, stride, padding, dilation);
-    int64_t out_w = calculate_output_size(width, kernel_w, stride, padding, dilation);
+    // Calculate output dimensions — per-axis so rectangular configs
+    // produce the right shape.
+    int64_t out_h = calculate_output_size(height, kernel_h, stride_h, pad_h, dil_h);
+    int64_t out_w = calculate_output_size(width,  kernel_w, stride_w, pad_w, dil_w);
 
     // Create output tensor with correct dtype
     std::vector<int64_t> output_shape = {batch, out_channels, out_h, out_w};
     Tensor output(output_shape, input.dtype(), input.device());
 
 #ifdef TENZOR_USE_ONEDNN
-    // Try oneDNN-accelerated convolution first (3-8x faster for Float32)
-    if (conv2d_forward_onednn(input, weight, bias, output, stride, padding, dilation, groups)) {
+    // oneDNN supports per-axis stride/pad/dilation; the wrapper still takes
+    // scalars so only the isotropic case can use it today. Route rectangular
+    // configs through the im2col+GEMM path below.
+    if (symmetric && conv2d_forward_onednn(input, weight, bias, output, stride, padding, dilation, groups)) {
         return output;
     }
     // Fall through to im2col+GEMM if oneDNN not applicable
 #endif
 
-    // Try Winograd for eligible 3x3 stride-1 convolutions (Float32 only)
-    if (input.dtype() == DType::Float32) {
+    // Try Winograd for eligible 3x3 stride-1 convolutions (Float32, isotropic only)
+    if (symmetric && input.dtype() == DType::Float32) {
         bool used_winograd = false;
         int64_t pad_val = static_cast<int64_t>(padding);
 
@@ -1111,13 +1183,13 @@ auto conv2d_forward_kernel(
 
     // Dispatch based on dtype
     if (input.dtype() == DType::Float32) {
-        conv2d_forward_impl<float>(input, weight, bias, output, stride, padding, dilation, groups);
+        conv2d_forward_impl<float>(input, weight, bias, output,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups);
     } else if (input.dtype() == DType::Float64) {
-        conv2d_forward_impl<double>(input, weight, bias, output, stride, padding, dilation, groups);
+        conv2d_forward_impl<double>(input, weight, bias, output,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups);
     } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         // Half-precision on CPU: compute in Float32 for performance.
-        // Scalar half-precision GEMM is 10-100x slower than optimized Float32 GEMM/oneDNN.
-        // Convert inputs to Float32, compute, then convert output back.
         DType original_dtype = input.dtype();
         auto input_f32 = input.to(DType::Float32);
         auto weight_f32 = weight.to(DType::Float32);
@@ -1132,9 +1204,10 @@ auto conv2d_forward_kernel(
         Tensor output_f32(output_shape, DType::Float32, input.device());
 
 #ifdef TENZOR_USE_ONEDNN
-        if (!conv2d_forward_onednn(input_f32, weight_f32, bias_f32_ptr, output_f32, stride, padding, dilation, groups)) {
+        if (!(symmetric && conv2d_forward_onednn(input_f32, weight_f32, bias_f32_ptr, output_f32, stride, padding, dilation, groups))) {
 #endif
-            conv2d_forward_impl<float>(input_f32, weight_f32, bias_f32_ptr, output_f32, stride, padding, dilation, groups);
+            conv2d_forward_impl<float>(input_f32, weight_f32, bias_f32_ptr, output_f32,
+                stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups);
 #ifdef TENZOR_USE_ONEDNN
         }
 #endif
@@ -1162,6 +1235,16 @@ auto conv2d_forward_kernel(
     return output;
 }
 
+// Backward-compat scalar wrapper for conv2d_forward_kernel.
+auto conv2d_forward_kernel(
+    const Tensor& input_orig, const Tensor& weight_orig, const Tensor* bias,
+    int64_t stride, int64_t padding, int64_t dilation, int64_t groups
+) -> Tensor {
+    return conv2d_forward_kernel(input_orig, weight_orig, bias,
+                                 stride, stride, padding, padding, dilation, dilation,
+                                 groups);
+}
+
 // ============================================================================
 // Conv2d Backward Input CPU Implementation
 // ============================================================================
@@ -1173,9 +1256,12 @@ void conv2d_backward_input_impl(
     const Tensor& weight,
     Tensor& grad_input,
     const std::vector<int64_t>& input_shape,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t pad_h,
+    int64_t pad_w,
+    int64_t dil_h,
+    int64_t dil_w,
     int64_t groups
 ) {
     auto weight_shape = weight.shape();
@@ -1248,9 +1334,9 @@ void conv2d_backward_input_impl(
                 width,
                 kernel_h,
                 kernel_w,
-                stride,
-                padding,
-                dilation,
+                stride_h, stride_w,
+                pad_h, pad_w,
+                dil_h, dil_w,
                 out_h,
                 out_w
             );
@@ -1262,9 +1348,9 @@ auto conv2d_backward_input_kernel(
     const Tensor& grad_output_orig,   // (batch, out_channels, out_h, out_w)
     const Tensor& weight_orig,        // (out_channels, in_channels, kernel_h, kernel_w)
     const std::vector<int64_t>& input_shape,  // (batch, in_channels, height, width)
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
     int64_t groups
 ) -> Tensor {
     // Ensure contiguous layout for pointer-arithmetic kernels
@@ -1276,9 +1362,11 @@ auto conv2d_backward_input_kernel(
 
     // Dispatch based on dtype
     if (grad_output.dtype() == DType::Float32) {
-        conv2d_backward_input_impl<float>(grad_output, weight, grad_input, input_shape, stride, padding, dilation, groups);
+        conv2d_backward_input_impl<float>(grad_output, weight, grad_input, input_shape,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups);
     } else if (grad_output.dtype() == DType::Float64) {
-        conv2d_backward_input_impl<double>(grad_output, weight, grad_input, input_shape, stride, padding, dilation, groups);
+        conv2d_backward_input_impl<double>(grad_output, weight, grad_input, input_shape,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups);
     } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
         // Half-precision on CPU: compute in Float32 for performance
         DType original_dtype = grad_output.dtype();
@@ -1286,7 +1374,8 @@ auto conv2d_backward_input_kernel(
         auto weight_f32 = weight.to(DType::Float32);
         Tensor grad_input_f32(input_shape, DType::Float32, grad_output.device());
 
-        conv2d_backward_input_impl<float>(grad_output_f32, weight_f32, grad_input_f32, input_shape, stride, padding, dilation, groups);
+        conv2d_backward_input_impl<float>(grad_output_f32, weight_f32, grad_input_f32, input_shape,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups);
 
         // Convert Float32 result back to original dtype
         const float* src = grad_input_f32.data<float>();
@@ -1307,6 +1396,16 @@ auto conv2d_backward_input_kernel(
     return grad_input;
 }
 
+// Scalar backward-compat wrapper.
+auto conv2d_backward_input_kernel(
+    const Tensor& grad_output_orig, const Tensor& weight_orig,
+    const std::vector<int64_t>& input_shape,
+    int64_t stride, int64_t padding, int64_t dilation, int64_t groups
+) -> Tensor {
+    return conv2d_backward_input_kernel(grad_output_orig, weight_orig, input_shape,
+        stride, stride, padding, padding, dilation, dilation, groups);
+}
+
 // ============================================================================
 // Conv2d Backward Weight CPU Implementation
 // ============================================================================
@@ -1318,9 +1417,9 @@ void conv2d_backward_weight_impl(
     const Tensor& input,
     Tensor& grad_weight,
     const std::vector<int64_t>& weight_shape,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
     int64_t groups
 ) {
     auto input_shape = input.shape();
@@ -1365,9 +1464,9 @@ void conv2d_backward_weight_impl(
                 width,
                 kernel_h,
                 kernel_w,
-                stride,
-                padding,
-                dilation,
+                stride_h, stride_w,
+                pad_h, pad_w,
+                dil_h, dil_w,
                 out_h,
                 out_w
             );
@@ -1377,13 +1476,26 @@ void conv2d_backward_weight_impl(
         int64_t K = col_rows;
         int64_t N = col_cols;
 
-        // Pack grad_output for this group across batches
-        int64_t grad_out_per_batch = out_h * out_w * out_channels_per_group;
+        // Pack grad_output into GEMM A-matrix shape (K, M) = (out_h*out_w per
+        // batch concatenated, out_channels_per_group). grad_output is NCHW —
+        // its natural layout per-batch is (out_channels_per_group, out_h*out_w),
+        // which is the TRANSPOSE of what gemm_transA_cpu expects. The prior
+        // implementation memcpy'd the NCHW slice directly into grad_out_packed,
+        // producing silently-wrong weight gradients (~20% off on non-trivial
+        // inputs). Do the transpose explicitly.
         std::vector<T> grad_out_packed(col_rows * out_channels_per_group);
+        int64_t spatial = out_h * out_w;
+        #pragma omp parallel for collapse(2) if(batch * out_channels_per_group > 64)
         for (int64_t b = 0; b < batch; ++b) {
-            const T* src = grad_output.data<T>() + (b * out_channels + out_start) * out_h * out_w;
-            T* dst = grad_out_packed.data() + b * grad_out_per_batch;
-            std::memcpy(dst, src, grad_out_per_batch * sizeof(T));
+            for (int64_t oc = 0; oc < out_channels_per_group; ++oc) {
+                const T* src = grad_output.data<T>() +
+                               (b * out_channels + out_start + oc) * spatial;
+                // Destination: row index k = b*spatial + s, column = oc
+                //   grad_out_packed[k * M + oc]
+                for (int64_t s = 0; s < spatial; ++s) {
+                    grad_out_packed[(b * spatial + s) * out_channels_per_group + oc] = src[s];
+                }
+            }
         }
 
         const T* grad_out_ptr = grad_out_packed.data();
@@ -1403,9 +1515,9 @@ auto conv2d_backward_weight_kernel(
     const Tensor& grad_output_orig,   // (batch, out_channels, out_h, out_w)
     const Tensor& input_orig,         // (batch, in_channels, height, width)
     const std::vector<int64_t>& weight_shape,  // (out_channels, in_channels, kernel_h, kernel_w)
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
     int64_t groups
 ) -> Tensor {
     // Ensure contiguous layout for pointer-arithmetic kernels
@@ -1417,9 +1529,11 @@ auto conv2d_backward_weight_kernel(
 
     // Dispatch based on dtype
     if (grad_output.dtype() == DType::Float32) {
-        conv2d_backward_weight_impl<float>(grad_output, input, grad_weight, weight_shape, stride, padding, dilation, groups);
+        conv2d_backward_weight_impl<float>(grad_output, input, grad_weight, weight_shape,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups);
     } else if (grad_output.dtype() == DType::Float64) {
-        conv2d_backward_weight_impl<double>(grad_output, input, grad_weight, weight_shape, stride, padding, dilation, groups);
+        conv2d_backward_weight_impl<double>(grad_output, input, grad_weight, weight_shape,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups);
     } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
         // Half-precision on CPU: compute in Float32 for performance
         DType original_dtype = grad_output.dtype();
@@ -1427,7 +1541,8 @@ auto conv2d_backward_weight_kernel(
         auto input_f32 = input.to(DType::Float32);
         Tensor grad_weight_f32(weight_shape, DType::Float32, grad_output.device());
 
-        conv2d_backward_weight_impl<float>(grad_output_f32, input_f32, grad_weight_f32, weight_shape, stride, padding, dilation, groups);
+        conv2d_backward_weight_impl<float>(grad_output_f32, input_f32, grad_weight_f32, weight_shape,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups);
 
         // Convert Float32 result back to original dtype
         const float* src = grad_weight_f32.data<float>();
@@ -1446,6 +1561,16 @@ auto conv2d_backward_weight_kernel(
     }
 
     return grad_weight;
+}
+
+// Scalar backward-compat wrapper.
+auto conv2d_backward_weight_kernel(
+    const Tensor& grad_output_orig, const Tensor& input_orig,
+    const std::vector<int64_t>& weight_shape,
+    int64_t stride, int64_t padding, int64_t dilation, int64_t groups
+) -> Tensor {
+    return conv2d_backward_weight_kernel(grad_output_orig, input_orig, weight_shape,
+        stride, stride, padding, padding, dilation, dilation, groups);
 }
 
 // ============================================================================

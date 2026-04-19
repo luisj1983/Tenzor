@@ -875,7 +875,13 @@ auto conv3d_backward_kernel(
     } while (0)
 
     switch (input.dtype()) {
-        case DType::Float32:  TENZOR_CONV3D_BWD_DISPATCH(float,           float); break;
+        // Upgrade f32 accumulator to double. Each conv3d_backward_weight
+        // thread sums thousands of grad_output*input pairs; a float
+        // accumulator drifts by O(sqrt(N)) ULPs, which pushes the
+        // cross-backend parity test past its rtol=1e-3 threshold. Using
+        // double here costs some perf per MAC but brings CUDA in line
+        // with the CPU reference.
+        case DType::Float32:  TENZOR_CONV3D_BWD_DISPATCH(float,           double); break;
         case DType::Float64:  TENZOR_CONV3D_BWD_DISPATCH(double,          double); break;
         case DType::Float16:  TENZOR_CONV3D_BWD_DISPATCH(__half,          float); break;
         case DType::BFloat16: TENZOR_CONV3D_BWD_DISPATCH(__nv_bfloat16,   float); break;

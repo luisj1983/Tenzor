@@ -11,6 +11,7 @@
 
 #include "../../include/tenzor/onnx/exporter.hpp"
 #include "../../include/tenzor/nn/quantization/quantized_layers.hpp"
+#include "../../include/tenzor/nn/layers/conv.hpp"
 #include "../../include/tenzor/utils/error.hpp"
 #include "../../include/tenzor/utils/logging.hpp"
 #include <cstring>
@@ -386,11 +387,21 @@ void ONNXExporter::export_model(nn::Module& model,
                             layer_output
                         );
                     } else if (weight_shape.size() == 4) {
-                        // Conv2d layer pattern
+                        // Conv2d layer pattern — read real {stride,padding,dilation,groups}
+                        // off the submodule instead of assuming defaults. The previous
+                        // hardcoded {0,0} padding is why Conv2d(padding=1) round-trip
+                        // diverged even before the importer's own drop bug.
                         std::vector<int64_t> kernel_size = {weight_shape[2], weight_shape[3]};
                         std::vector<int64_t> stride = {1, 1};
                         std::vector<int64_t> padding = {0, 0};
                         std::vector<int64_t> dilation = {1, 1};
+                        int64_t groups = 1;
+                        if (auto* c = dynamic_cast<nn::Conv2d*>(submod.get())) {
+                            stride   = {c->stride_h(),   c->stride_w()};
+                            padding  = {c->padding_h(),  c->padding_w()};
+                            dilation = {c->dilation_h(), c->dilation_w()};
+                            groups   = c->groups();
+                        }
 
                         std::optional<Tensor> bias_tensor;
                         if (has_bias && bias_param) {
@@ -407,7 +418,7 @@ void ONNXExporter::export_model(nn::Module& model,
                             stride,
                             padding,
                             dilation,
-                            1,
+                            groups,
                             sub_output.tensor(),
                             layer_output
                         );
@@ -453,10 +464,18 @@ void ONNXExporter::export_model(nn::Module& model,
                         output_name
                     );
                 } else if (weight_shape.size() == 4) {
+                    // Flat-module Conv2d — same accessor path as the Sequential branch
                     std::vector<int64_t> kernel_size = {weight_shape[2], weight_shape[3]};
                     std::vector<int64_t> stride = {1, 1};
                     std::vector<int64_t> padding = {0, 0};
                     std::vector<int64_t> dilation = {1, 1};
+                    int64_t groups = 1;
+                    if (auto* c = dynamic_cast<const nn::Conv2d*>(&model)) {
+                        stride   = {c->stride_h(),   c->stride_w()};
+                        padding  = {c->padding_h(),  c->padding_w()};
+                        dilation = {c->dilation_h(), c->dilation_w()};
+                        groups   = c->groups();
+                    }
 
                     std::optional<Tensor> bias_tensor;
                     if (has_bias && bias_param) {
@@ -467,7 +486,7 @@ void ONNXExporter::export_model(nn::Module& model,
                         weight_param->tensor(),
                         bias_tensor,
                         kernel_size, stride, padding, dilation,
-                        1,
+                        groups,
                         output_var.tensor(),
                         output_name
                     );
@@ -919,6 +938,72 @@ auto ONNXExporter::export_conv2d(const Tensor& input, const Tensor& weight,
     node.set_attr("dilations", dilation);
     node.set_attr("group", groups);
 
+    graph_.add_node(node);
+    context_.register_tensor(output, output_name);
+}
+
+auto ONNXExporter::export_conv3d(const Tensor& input, const Tensor& weight,
+                                  const std::optional<Tensor>& bias,
+                                  int64_t kernel_size, int64_t stride, int64_t padding,
+                                  int64_t dilation, int64_t groups,
+                                  const Tensor& output,
+                                  const std::string& output_name) -> void {
+    ONNXExportNode node("Conv", context_.generate_name("conv3d"));
+    std::string input_name = get_tensor_name(input, "conv3d_input");
+    std::string weight_name = context_.generate_name("conv3d_weight");
+    add_initializer_tensor(weight, weight_name);
+    node.add_input(input_name);
+    node.add_input(weight_name);
+    if (bias.has_value()) {
+        std::string bias_name = context_.generate_name("conv3d_bias");
+        add_initializer_tensor(bias.value(), bias_name);
+        node.add_input(bias_name);
+    }
+    node.add_output(output_name);
+    // 3-D kernel_shape / strides / dilations, and 6-element pads in ONNX order
+    // [begin_d, begin_h, begin_w, end_d, end_h, end_w].
+    node.set_attr("kernel_shape", std::vector<int64_t>{kernel_size, kernel_size, kernel_size});
+    node.set_attr("strides",      std::vector<int64_t>{stride, stride, stride});
+    node.set_attr("pads",         std::vector<int64_t>{padding, padding, padding, padding, padding, padding});
+    node.set_attr("dilations",    std::vector<int64_t>{dilation, dilation, dilation});
+    node.set_attr("group",        groups);
+    graph_.add_node(node);
+    context_.register_tensor(output, output_name);
+}
+
+auto ONNXExporter::export_conv_transpose(const Tensor& input, const Tensor& weight,
+                                         const std::optional<Tensor>& bias,
+                                         int64_t spatial_rank,
+                                         int64_t kernel_size, int64_t stride, int64_t padding,
+                                         int64_t output_padding, int64_t dilation, int64_t groups,
+                                         const Tensor& output,
+                                         const std::string& output_name) -> void {
+    if (spatial_rank < 1 || spatial_rank > 3) {
+        throw std::runtime_error("export_conv_transpose: spatial_rank must be 1, 2, or 3");
+    }
+    ONNXExportNode node("ConvTranspose", context_.generate_name("convtranspose"));
+    std::string input_name = get_tensor_name(input, "convt_input");
+    std::string weight_name = context_.generate_name("convt_weight");
+    add_initializer_tensor(weight, weight_name);
+    node.add_input(input_name);
+    node.add_input(weight_name);
+    if (bias.has_value()) {
+        std::string bias_name = context_.generate_name("convt_bias");
+        add_initializer_tensor(bias.value(), bias_name);
+        node.add_input(bias_name);
+    }
+    node.add_output(output_name);
+    std::vector<int64_t> ks(spatial_rank, kernel_size);
+    std::vector<int64_t> st(spatial_rank, stride);
+    std::vector<int64_t> dl(spatial_rank, dilation);
+    std::vector<int64_t> op(spatial_rank, output_padding);
+    std::vector<int64_t> pd(spatial_rank * 2, padding);
+    node.set_attr("kernel_shape",   ks);
+    node.set_attr("strides",        st);
+    node.set_attr("pads",           pd);
+    node.set_attr("dilations",      dl);
+    node.set_attr("output_padding", op);
+    node.set_attr("group",          groups);
     graph_.add_node(node);
     context_.register_tensor(output, output_name);
 }
@@ -3931,13 +4016,96 @@ auto trace_custom_module(ONNXExporter& exporter,
             return;
         }
 
+        // ConvTranspose{1,2,3}d and Conv3d need to be dispatched via
+        // dynamic_cast BEFORE the weight-shape-based Conv1d/Conv2d branches.
+        // ConvTranspose1d has a 3-D weight too, so the Conv1d branch would
+        // otherwise grab it and emit a forward Conv.
+        if (auto* ct1 = dynamic_cast<const nn::ConvTranspose1d*>(module.get())) {
+            std::optional<Tensor> bias_tensor;
+            if (has_bias && bias_param) bias_tensor = bias_param->tensor();
+            exporter.export_conv_transpose(
+                input.tensor(), weight_param->tensor(), bias_tensor,
+                /*spatial_rank=*/1,
+                ct1->kernel_size(), ct1->stride(), ct1->padding(),
+                ct1->output_padding(), /*dilation=*/1, ct1->groups(),
+                output.tensor(), output_name);
+            return;
+        }
+        if (auto* ct2 = dynamic_cast<const nn::ConvTranspose2d*>(module.get())) {
+            std::optional<Tensor> bias_tensor;
+            if (has_bias && bias_param) bias_tensor = bias_param->tensor();
+            exporter.export_conv_transpose(
+                input.tensor(), weight_param->tensor(), bias_tensor,
+                /*spatial_rank=*/2,
+                ct2->kernel_size(), ct2->stride(), ct2->padding(),
+                ct2->output_padding(), /*dilation=*/1, ct2->groups(),
+                output.tensor(), output_name);
+            return;
+        }
+        if (auto* c3 = dynamic_cast<const nn::Conv3d*>(module.get())) {
+            std::optional<Tensor> bias_tensor;
+            if (has_bias && bias_param) bias_tensor = bias_param->tensor();
+            exporter.export_conv3d(
+                input.tensor(), weight_param->tensor(), bias_tensor,
+                c3->kernel_size(), c3->stride(), c3->padding(),
+                c3->dilation(), c3->groups(),
+                output.tensor(), output_name);
+            return;
+        }
+        if (auto* ct3 = dynamic_cast<const nn::ConvTranspose3d*>(module.get())) {
+            std::optional<Tensor> bias_tensor;
+            if (has_bias && bias_param) bias_tensor = bias_param->tensor();
+            exporter.export_conv_transpose(
+                input.tensor(), weight_param->tensor(), bias_tensor,
+                /*spatial_rank=*/3,
+                ct3->kernel_size(), ct3->stride(), ct3->padding(),
+                ct3->output_padding(), ct3->dilation(), ct3->groups(),
+                output.tensor(), output_name);
+            return;
+        }
+
+        // Conv1d weight: [out_channels, in_channels/groups, kernel]
+        if (weight_shape.size() == 3) {
+            int64_t kernel_size = weight_shape[2];
+            int64_t stride = 1, padding = 0, dilation = 1, groups = 1;
+            if (auto* c = dynamic_cast<const nn::Conv1d*>(module.get())) {
+                stride   = c->stride();
+                padding  = c->padding();
+                dilation = c->dilation();
+                groups   = c->groups();
+            }
+            std::optional<Tensor> bias_tensor;
+            if (has_bias && bias_param) bias_tensor = bias_param->tensor();
+
+            exporter.export_conv1d(
+                input.tensor(),
+                weight_param->tensor(),
+                bias_tensor,
+                kernel_size, stride, padding, dilation, groups,
+                output.tensor(),
+                output_name
+            );
+            return;
+        }
+
         // Check if this looks like a Conv2d layer (4D weight matrix)
         if (weight_shape.size() == 4) {
             // Conv2d weight shape: [out_channels, in_channels, kernel_h, kernel_w]
             std::vector<int64_t> kernel_size = {weight_shape[2], weight_shape[3]};
-            std::vector<int64_t> stride = {1, 1}; // Assume stride 1
-            std::vector<int64_t> padding = {0, 0}; // Assume no padding
+            std::vector<int64_t> stride = {1, 1};
+            std::vector<int64_t> padding = {0, 0};
             std::vector<int64_t> dilation = {1, 1};
+            int64_t groups = 1;
+            // Read the real attrs off the module when it actually is a Conv2d;
+            // the previous "assume defaults" path silently dropped padding /
+            // stride / dilation / groups and was the root of the Conv2d
+            // round-trip xfail.
+            if (auto* c = dynamic_cast<const nn::Conv2d*>(module.get())) {
+                stride   = {c->stride_h(),   c->stride_w()};
+                padding  = {c->padding_h(),  c->padding_w()};
+                dilation = {c->dilation_h(), c->dilation_w()};
+                groups   = c->groups();
+            }
 
             std::optional<Tensor> bias_tensor;
             if (has_bias && bias_param) {
@@ -3952,7 +4120,7 @@ auto trace_custom_module(ONNXExporter& exporter,
                 stride,
                 padding,
                 dilation,
-                1, // groups
+                groups,
                 output.tensor(),
                 output_name
             );

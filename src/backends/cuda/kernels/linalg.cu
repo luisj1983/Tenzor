@@ -850,8 +850,13 @@ auto linalg_eigh_kernel(const Tensor& A, cudaStream_t stream)
 
     // (Phase 7.2) Redundant trailing sync removed — check_cusolver_info above
     // already performs a synchronous cudaMemcpy per batch iteration.
-    // work now contains eigenvectors (columns of orthogonal matrix)
-    return {W, work};
+    //
+    // cuSOLVER syevd stores eigenvectors as COLUMNS of a COLUMN-MAJOR matrix.
+    // When the same memory is reinterpreted as row-major, each row is an
+    // eigenvector — i.e. we hold V^T. Transpose so callers see row-major V
+    // with eigenvectors as columns (matching CPU/LAPACKE semantics).
+    auto V = tenzor::transpose(work, -2, -1).contiguous();
+    return {W, V};
 }
 
 // ============================================================================
@@ -1196,15 +1201,10 @@ auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
         throw std::invalid_argument("linalg::solve_triangular: unsupported dtype");
     }
 
-    // cuBLAS trsm operates in column-major. Row-major upper-triangular is
-    // column-major lower-triangular and vice versa, so flip the uplo flag.
-    // Also, row-major AX=B with left-side A becomes column-major XA=B
-    // with right-side A. We use the identity: solve row-major left-side
-    // by transposing both to column-major and using right-side trsm,
-    // but it's simpler to transpose A and B to column-major, then use
-    // left-side trsm with flipped uplo.
-    //
-    // Simpler approach: transpose to col-major, solve, transpose back.
+    // cuBLAS trsm operates in column-major. We physically transpose A and B
+    // into column-major storage, so cuBLAS reads back the original logical
+    // matrix (transpose-then-reinterpret is a double negation). Therefore the
+    // uplo flag maps straight through — upper stays upper, lower stays lower.
     auto a_cm = tenzor::transpose(A.contiguous().clone(), -2, -1).contiguous();
     auto b_cm = tenzor::transpose(B.contiguous().clone(), -2, -1).contiguous();
 
@@ -1214,8 +1214,7 @@ auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
     int64_t nrhs = (b_ndim >= 2) ? b_shape[b_ndim - 1] : 1;
     int64_t nbatch = batch_size(a_cm);
 
-    // In column-major, row-major upper becomes lower and vice versa
-    cublasFillMode_t uplo = upper ? CUBLAS_FILL_MODE_LOWER : CUBLAS_FILL_MODE_UPPER;
+    cublasFillMode_t uplo = upper ? CUBLAS_FILL_MODE_UPPER : CUBLAS_FILL_MODE_LOWER;
     cublasDiagType_t diag = unitriangular ? CUBLAS_DIAG_UNIT : CUBLAS_DIAG_NON_UNIT;
 
     auto handle = CuBLASHandlePool::get(stream);

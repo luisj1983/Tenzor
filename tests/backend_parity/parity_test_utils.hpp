@@ -207,6 +207,35 @@ inline std::vector<Device> get_available_backends() {
 }
 
 /**
+ * @brief Gate a parity test on having at least 2 backends available.
+ *
+ * Default behavior: GTEST_SKIP() with the provided reason.
+ * When env var TENZOR_REQUIRE_MULTI_BACKEND=1 is set: FAIL() instead, so CI
+ * environments that are supposed to have a GPU backend hard-fail when the
+ * backend fails to initialize — a silent skip would hide the broken env.
+ *
+ * Usage:
+ *   TEST_P(MyParity, SomeOp) {
+ *       REQUIRE_MULTI_BACKEND_OR_SKIP("SomeOp parity");
+ *       auto backends = get_available_backends();
+ *       ...
+ *   }
+ */
+#define REQUIRE_MULTI_BACKEND_OR_SKIP(reason_msg)                              \
+    do {                                                                       \
+        auto _parity_backends = ::tenzor::testing::get_available_backends();   \
+        if (_parity_backends.size() < 2) {                                     \
+            if (::tenzor::testing::golden::require_multi_backend()) {          \
+                FAIL() << "Multi-backend required (TENZOR_REQUIRE_MULTI_BACKEND=1)" \
+                       << " but only " << _parity_backends.size()              \
+                       << " backend(s) available: " << (reason_msg);           \
+            } else {                                                           \
+                GTEST_SKIP() << "Need >=2 backends: " << (reason_msg);         \
+            }                                                                  \
+        }                                                                      \
+    } while (0)
+
+/**
  * @brief Get list of all available backend Devices with all device indices.
  *
  * Queries device_count() per backend and probes each device.
@@ -892,7 +921,14 @@ void test_operation_parity_cross_backend(Op operation,
                                          float atol = 1e-8f,
                                          const std::string& test_name = "Operation") {
     if (backends.empty()) backends = get_available_backends();
-    if (backends.size() < 2) { GTEST_SKIP() << "Need 2+ backends"; return; }
+    if (backends.size() < 2) {
+        if (golden::require_multi_backend()) {
+            FAIL() << "Multi-backend required (TENZOR_REQUIRE_MULTI_BACKEND=1)"
+                   << " for cross-backend parity: " << test_name;
+        }
+        GTEST_SKIP() << "Need 2+ backends for cross-backend parity: " << test_name;
+        return;
+    }
     std::vector<Tensor> results;
     std::vector<Device> used;
     for (const auto& backend : backends) {
@@ -979,7 +1015,11 @@ void test_gradient_parity(
         backends = get_available_backends();
     }
     if (backends.size() < 2) {
-        GTEST_SKIP() << "Need at least 2 backends for gradient parity testing";
+        if (golden::require_multi_backend()) {
+            FAIL() << "Multi-backend required (TENZOR_REQUIRE_MULTI_BACKEND=1)"
+                   << " for gradient parity: " << test_name;
+        }
+        GTEST_SKIP() << "Need at least 2 backends for gradient parity: " << test_name;
         return;
     }
 

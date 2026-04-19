@@ -449,17 +449,15 @@ TEST(StrideParity, ProdDim) {
         "ProdDim0");
 }
 
-// Vulkan dispatchVariance / dispatchReduction precision: max diff ~3-14e-2
-// vs CPU even on contiguous input, regardless of formula choice (E[(X-mu)²]
-// vs E[X²]-E[X]²). The error is in dispatchReduction's accumulator, not the
-// composition. Needs a dedicated single-pass Vulkan compute shader. (#30)
-TEST(StrideParity, DISABLED_StdDim) {
+// Single-pass Welford Vulkan kernel (welford_variance*.comp) closed the
+// precision gap from issue #30 — these tests were previously disabled.
+TEST(StrideParity, StdDim) {
     check_all_variants_unary(
         [](const std::vector<Tensor>& in) { return tenzor::std(in[0], 0, false, false); },
         "StdDim0");
 }
 
-TEST(StrideParity, DISABLED_VarDim) {
+TEST(StrideParity, VarDim) {
     check_all_variants_unary(
         [](const std::vector<Tensor>& in) { return tenzor::var(in[0], 0, false, false); },
         "VarDim0");

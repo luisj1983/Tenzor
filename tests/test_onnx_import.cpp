@@ -487,6 +487,225 @@ TEST_F(ONNXImportTest, HighLevelImportAPI) {
 }
 
 // ============================================================================
+// 8. Conv importer attribute-coverage tests
+//
+// These construct an ONNXGraphData in memory and call convert_graph()
+// directly. Purpose: exercise importer codepaths that no Tenzor exporter
+// currently emits (asymmetric begin/end pads, Conv3d, ConvTranspose) so
+// we catch importer regressions even without round-trippable tests.
+// ============================================================================
+
+namespace {
+// Small helper: build a raw-data blob of a given element count, filled
+// with deterministic floats.
+auto make_weight_raw(const std::vector<int64_t>& shape, float fill) -> std::vector<uint8_t> {
+    int64_t n = 1;
+    for (auto d : shape) n *= d;
+    std::vector<float> values(static_cast<size_t>(n), fill);
+    std::vector<uint8_t> raw(values.size() * sizeof(float));
+    std::memcpy(raw.data(), values.data(), raw.size());
+    return raw;
+}
+
+auto make_conv_graph_with_pads(const std::vector<int64_t>& weight_shape,
+                               const std::vector<int64_t>& pads,
+                               const std::vector<int64_t>& input_shape) -> ONNXGraphData {
+    ONNXGraphData graph;
+    graph.name = "asymmetric_conv";
+
+    ONNXImportValueInfo in;
+    in.name = "X";
+    in.dtype = ONNXDataType::FLOAT;
+    in.shape = input_shape;
+    graph.inputs.push_back(in);
+
+    ONNXImportValueInfo out;
+    out.name = "Y";
+    out.dtype = ONNXDataType::FLOAT;
+    out.shape = {};
+    graph.outputs.push_back(out);
+
+    ONNXTensorData w;
+    w.name = "W";
+    w.dtype = ONNXDataType::FLOAT;
+    w.shape = weight_shape;
+    w.raw_data = make_weight_raw(weight_shape, 0.25f);
+    graph.initializers["W"] = w;
+
+    ONNXImportNode node;
+    node.op_type = "Conv";
+    node.name = "conv";
+    node.inputs = {"X", "W"};
+    node.outputs = {"Y"};
+
+    size_t spatial = weight_shape.size() - 2;
+    std::vector<int64_t> kernel(weight_shape.begin() + 2, weight_shape.end());
+    std::vector<int64_t> ones(spatial, 1);
+
+    ONNXAttribute kshape; kshape.name = "kernel_shape"; kshape.ints = kernel;
+    ONNXAttribute s;      s.name      = "strides";      s.ints      = ones;
+    ONNXAttribute d;      d.name      = "dilations";    d.ints      = ones;
+    ONNXAttribute p;      p.name      = "pads";         p.ints      = pads;
+    ONNXAttribute g;      g.name      = "group";        g.i         = 1;
+    node.attributes["kernel_shape"] = kshape;
+    node.attributes["strides"]      = s;
+    node.attributes["dilations"]    = d;
+    node.attributes["pads"]         = p;
+    node.attributes["group"]        = g;
+    graph.nodes.push_back(node);
+
+    return graph;
+}
+}  // namespace
+
+// Conv2d with asymmetric begin/end pads — the importer must wrap the Conv
+// in a ConstantPad2d because Tenzor's own Conv2d only supports symmetric
+// padding. This is the exact code path the exporter cannot hit.
+TEST_F(ONNXImportTest, Conv2dAsymmetricPadsWrapsInSequential) {
+    auto graph = make_conv_graph_with_pads(
+        /*weight_shape=*/{4, 3, 3, 3},
+        /*pads=*/{0, 1, 2, 3},   // [begin_h, begin_w, end_h, end_w] — asymmetric
+        /*input_shape=*/{1, 3, 8, 8});
+
+    ONNXImporter importer(false);
+    std::shared_ptr<nn::Module> mod;
+    ASSERT_NO_THROW(mod = importer.convert_graph(graph));
+    ASSERT_NE(mod, nullptr);
+
+    // Run forward to prove the assembled Sequential(ConstantPad2d, Conv2d)
+    // actually composes: output spatial dims must match manual computation.
+    // Input H=W=8, kernel=3, stride=1, dilation=1, pads=[0,1,2,3]:
+    //   H_out = 8 + 0 + 2 - (3-1) = 8
+    //   W_out = 8 + 1 + 3 - (3-1) = 10
+    Tensor x({1, 3, 8, 8}, DType::Float32, Device::cpu());
+    x.fill_(1.0f);
+    Variable v(x, false);
+    Variable y;
+    ASSERT_NO_THROW(y = mod->forward(v));
+    EXPECT_EQ(y.tensor().shape()[0], 1);
+    EXPECT_EQ(y.tensor().shape()[1], 4);
+    EXPECT_EQ(y.tensor().shape()[2], 8);
+    EXPECT_EQ(y.tensor().shape()[3], 10);
+}
+
+// Conv2d with symmetric rectangular pads: the importer must read both
+// entries, not just pads[0]. Reachable via the pair-ctor code path. We
+// verify the importer by reading back padding_h()/padding_w() off the
+// constructed Conv2d; the forward output *shape* is not checked because
+// the Conv2d CPU kernel currently reads only the scalar AttrKey::Padding
+// and ignores AttrKey::PaddingW (a pre-existing attr-key-mismatch bug,
+// tracked separately, matches the "wrong attribute key in dispatch"
+// pattern we already know about).
+// Helper: walk a Sequential returned by convert_graph and return the
+// first Conv2d-like submodule found (including inside nested Sequentials).
+namespace {
+auto find_conv2d(const std::shared_ptr<nn::Module>& m) -> nn::Conv2d* {
+    if (auto* c = dynamic_cast<nn::Conv2d*>(m.get())) return c;
+    for (const auto& [name, child] : m->get_submodules()) {
+        if (auto* c = find_conv2d(child)) return c;
+    }
+    return nullptr;
+}
+}  // namespace
+
+TEST_F(ONNXImportTest, Conv2dRectangularSymmetricPads) {
+    auto graph = make_conv_graph_with_pads(
+        /*weight_shape=*/{4, 3, 3, 3},
+        /*pads=*/{1, 2, 1, 2},   // pad_h=1 on both sides, pad_w=2 on both
+        /*input_shape=*/{1, 3, 8, 8});
+
+    ONNXImporter importer(false);
+    auto mod = importer.convert_graph(graph);
+    ASSERT_NE(mod, nullptr);
+
+    auto* conv = find_conv2d(mod);
+    ASSERT_NE(conv, nullptr) << "Conv2d submodule not found under the imported graph";
+    EXPECT_EQ(conv->padding_h(), 1);
+    EXPECT_EQ(conv->padding_w(), 2);  // this is the entry the old importer dropped
+    EXPECT_EQ(conv->stride_h(), 1);
+    EXPECT_EQ(conv->stride_w(), 1);
+    EXPECT_EQ(conv->dilation_h(), 1);
+    EXPECT_EQ(conv->dilation_w(), 1);
+}
+
+// Conv3d import — previously threw at the unsupported-dims line; should
+// now produce a Conv3d module.
+TEST_F(ONNXImportTest, Conv3dImport) {
+    auto graph = make_conv_graph_with_pads(
+        /*weight_shape=*/{8, 3, 3, 3, 3},
+        /*pads=*/{1, 1, 1, 1, 1, 1},   // symmetric, isotropic
+        /*input_shape=*/{1, 3, 8, 8, 8});
+
+    ONNXImporter importer(false);
+    auto mod = importer.convert_graph(graph);
+    ASSERT_NE(mod, nullptr);
+
+    Tensor x({1, 3, 8, 8, 8}, DType::Float32, Device::cpu());
+    x.fill_(1.0f);
+    Variable v(x, false);
+    Variable y = mod->forward(v);
+    EXPECT_EQ(y.tensor().shape().size(), 5u);
+    // D/H/W all 8 + 2 - 2 = 8
+    EXPECT_EQ(y.tensor().shape()[2], 8);
+    EXPECT_EQ(y.tensor().shape()[3], 8);
+    EXPECT_EQ(y.tensor().shape()[4], 8);
+}
+
+// ConvTranspose2d import — exporter doesn't emit these yet, but the
+// importer should handle them (loading third-party models).
+TEST_F(ONNXImportTest, ConvTranspose2dImport) {
+    // ConvTranspose weight layout: [in_channels, out_channels/groups, kH, kW]
+    ONNXGraphData graph;
+    graph.name = "convtranspose_test";
+
+    ONNXImportValueInfo in;
+    in.name = "X"; in.dtype = ONNXDataType::FLOAT; in.shape = {1, 4, 4, 4};
+    graph.inputs.push_back(in);
+    ONNXImportValueInfo out;
+    out.name = "Y"; out.dtype = ONNXDataType::FLOAT; out.shape = {};
+    graph.outputs.push_back(out);
+
+    ONNXTensorData w;
+    w.name = "W"; w.dtype = ONNXDataType::FLOAT;
+    w.shape = {4, 2, 3, 3};   // 4 in, 2 out, 3x3 kernel
+    w.raw_data = make_weight_raw(w.shape, 0.1f);
+    graph.initializers["W"] = w;
+
+    ONNXImportNode node;
+    node.op_type = "ConvTranspose";
+    node.name = "convt";
+    node.inputs = {"X", "W"};
+    node.outputs = {"Y"};
+
+    ONNXAttribute kshape; kshape.name = "kernel_shape"; kshape.ints = {3, 3};
+    ONNXAttribute s;      s.name      = "strides";      s.ints      = {2, 2};
+    ONNXAttribute d;      d.name      = "dilations";    d.ints      = {1, 1};
+    ONNXAttribute p;      p.name      = "pads";         p.ints      = {1, 1, 1, 1};
+    ONNXAttribute g;      g.name      = "group";        g.i         = 1;
+    node.attributes["kernel_shape"] = kshape;
+    node.attributes["strides"]      = s;
+    node.attributes["dilations"]    = d;
+    node.attributes["pads"]         = p;
+    node.attributes["group"]        = g;
+    graph.nodes.push_back(node);
+
+    ONNXImporter importer(false);
+    std::shared_ptr<nn::Module> mod;
+    ASSERT_NO_THROW(mod = importer.convert_graph(graph));
+    ASSERT_NE(mod, nullptr);
+
+    Tensor x({1, 4, 4, 4}, DType::Float32, Device::cpu());
+    x.fill_(1.0f);
+    Variable v(x, false);
+    Variable y;
+    ASSERT_NO_THROW(y = mod->forward(v));
+    // Output shape: (Hin-1)*s - 2p + k = 3*2 - 2 + 3 = 7
+    EXPECT_EQ(y.tensor().shape()[1], 2);
+    EXPECT_EQ(y.tensor().shape()[2], 7);
+    EXPECT_EQ(y.tensor().shape()[3], 7);
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 

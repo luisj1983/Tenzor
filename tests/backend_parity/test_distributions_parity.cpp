@@ -29,7 +29,7 @@ TEST_P(DistributionsParity, Normal_LogProb) {
     auto value = randn({8}, DType::Float32, Device::cpu());
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("distributions parity");
 
     Tensor ref;
     try {
@@ -60,7 +60,7 @@ TEST_P(DistributionsParity, Normal_Entropy) {
     auto scale = rand({8}, DType::Float32, Device::cpu()) + 0.5f;
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("distributions parity");
 
     Tensor ref;
     try {
@@ -96,7 +96,7 @@ TEST_P(DistributionsParity, Uniform_LogProb) {
     auto value = rand({8}, DType::Float32, Device::cpu());
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("distributions parity");
 
     Tensor ref;
     try {
@@ -127,7 +127,7 @@ TEST_P(DistributionsParity, Uniform_Entropy) {
     auto high = ones({8}, DType::Float32, Device::cpu()) * 3.0f;
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("distributions parity");
 
     Tensor ref;
     try {
@@ -162,7 +162,7 @@ TEST_P(DistributionsParity, Exponential_LogProb) {
     auto value = rand({8}, DType::Float32, Device::cpu()) + 0.1f;
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("distributions parity");
 
     Tensor ref;
     try {

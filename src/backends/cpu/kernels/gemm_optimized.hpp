@@ -389,19 +389,25 @@ inline void pack_b_avx512(
 /**
  * @brief Scalar micro-kernel for non-SIMD fallback
  */
+// Scalar edge micro-kernel. The tile is (M rows × N cols × K reduction);
+// the surrounding A/B/C buffers are slices of larger matrices so the
+// caller must pass the FULL row strides (lda for A, ldb for B, ldc for
+// C). The earlier version implicitly assumed lda==K and ldb==N — which
+// made the (27, 32, 4) edge case (mr=3, nr=16) read the wrong columns
+// of B for k>0, silently corrupting the last 3 rows of the result.
 inline void microkernel_scalar(
     const float* __restrict__ A,
     const float* __restrict__ B,
     float* __restrict__ C,
     int64_t M, int64_t N, int64_t K,
-    int64_t ldc,
+    int64_t lda, int64_t ldb, int64_t ldc,
     float alpha = 1.0f
 ) {
     for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
             float sum = 0.0f;
             for (int64_t k = 0; k < K; ++k) {
-                sum += A[i * K + k] * B[k * N + j];
+                sum += A[i * lda + k] * B[k * ldb + j];
             }
             C[i * ldc + j] += alpha * sum;
         }
@@ -503,12 +509,14 @@ inline void gemm_optimized(
                                     kc, N, alpha
                                 );
                             } else {
-                                // Edge case: use scalar
+                                // Edge case: use scalar with full row strides.
                                 microkernel_scalar(
                                     A + (ic + ir) * K + pc,
                                     B + pc * N + jc + jr,
                                     C + (ic + ir) * N + jc + jr,
-                                    mr, nr, kc, N, alpha
+                                    mr, nr, kc,
+                                    /*lda=*/K, /*ldb=*/N, /*ldc=*/N,
+                                    alpha
                                 );
                             }
                         }
@@ -563,12 +571,14 @@ inline void gemm_optimized(
                                     kc, N, alpha
                                 );
                             } else {
-                                // Edge case: use scalar
+                                // Edge case: use scalar with full row strides.
                                 microkernel_scalar(
                                     A + (ic + ir) * K + pc,
                                     B + pc * N + jc + jr,
                                     C + (ic + ir) * N + jc + jr,
-                                    mr, nr, kc, N, alpha
+                                    mr, nr, kc,
+                                    /*lda=*/K, /*ldb=*/N, /*ldc=*/N,
+                                    alpha
                                 );
                             }
                         }
@@ -695,6 +705,13 @@ inline void gemm_transA_optimized(
     std::memset(C, 0, M * N * sizeof(float));
 
 #ifdef TENZOR_GEMM_AVX2
+    // Computes C[i,j] = sum_k A[k,i] * B[k,j]. Both A and B are accessed with
+    // stride across k (rows), so every lane of the 8-wide AVX load needs to
+    // gather values spaced M (for A) or N (for B) apart. The previous version
+    // loaded B as 8 *consecutive* elements at fixed k (B[k,j..j+7]) which is
+    // along the wrong axis — the FMA then multiplied A[k..k+7, i] by
+    // B[k, j..j+7], producing silently-wrong sums. Conv2d weight gradients
+    // on CPU were ~20% off as a result; fixed by gathering B the same way.
     #pragma omp parallel for collapse(2) if(M * N > OMP_THRESHOLD_GEMM)
     for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
@@ -702,15 +719,18 @@ inline void gemm_transA_optimized(
             int64_t k = 0;
 
             for (; k + 8 <= K; k += 8) {
-                // A is (K x M), so A^T[i, k] = A[k, i]
-                // Need to gather since A^T columns are strided
                 __m256 a = _mm256_set_ps(
                     A[(k+7) * M + i], A[(k+6) * M + i],
                     A[(k+5) * M + i], A[(k+4) * M + i],
                     A[(k+3) * M + i], A[(k+2) * M + i],
                     A[(k+1) * M + i], A[(k+0) * M + i]
                 );
-                __m256 b = _mm256_loadu_ps(B + k * N + j);
+                __m256 b = _mm256_set_ps(
+                    B[(k+7) * N + j], B[(k+6) * N + j],
+                    B[(k+5) * N + j], B[(k+4) * N + j],
+                    B[(k+3) * N + j], B[(k+2) * N + j],
+                    B[(k+1) * N + j], B[(k+0) * N + j]
+                );
                 sum = _mm256_fmadd_ps(a, b, sum);
             }
 

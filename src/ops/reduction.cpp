@@ -100,7 +100,14 @@ auto std(const Tensor& input, std::optional<int64_t> dim, bool keepdim, bool unb
     NewOpAttributes attrs;
     if (dim.has_value()) attrs.set(AttrKey::Dim, *dim);
     attrs.set(AttrKey::Keepdim, keepdim);
+    // Set BOTH AttrKey::Unbiased (bool) and AttrKey::Correction (int):
+    // the CPU kernel reads Correction with default 1 (→ N-1), while the
+    // GPU backends read Unbiased. Without both, cross-backend parity
+    // silently diverges whenever the caller passes unbiased=false —
+    // CPU stays at correction=1 and returns the unbiased estimator,
+    // while the GPU returns the biased one.
     attrs.set(AttrKey::Unbiased, unbiased);
+    attrs.set(AttrKey::Correction, static_cast<int64_t>(unbiased ? 1 : 0));
     std::vector<Tensor> inputs = {promoted};
     return dispatch(OpId::Std, inputs, attrs)[0];
 }
@@ -112,6 +119,7 @@ auto var(const Tensor& input, std::optional<int64_t> dim, bool keepdim, bool unb
     if (dim.has_value()) attrs.set(AttrKey::Dim, *dim);
     attrs.set(AttrKey::Keepdim, keepdim);
     attrs.set(AttrKey::Unbiased, unbiased);
+    attrs.set(AttrKey::Correction, static_cast<int64_t>(unbiased ? 1 : 0));
     std::vector<Tensor> inputs = {promoted};
     return dispatch(OpId::Var, inputs, attrs)[0];
 }

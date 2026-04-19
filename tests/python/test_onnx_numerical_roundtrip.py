@@ -92,26 +92,133 @@ def test_linear_with_bias_roundtrip():
 
 
 def test_conv2d_numerical_roundtrip():
-    """Documented binding bug: ONNX import drops the `padding` attribute on
-    Conv2d, so a Conv2d(3,8,k=3,padding=1) export reloads as Conv2d(3,8,k=3,
-    padding=0) and the output spatial dims shrink by 2 on each axis. Test
-    the no-padding case here so the comparison passes; flag the padding gap
-    via xfail so any future fix to the importer surfaces as a test update.
-    """
     tz.manual_seed(2)
     model = tz.nn.Conv2d(3, 8, kernel_size=3)  # no padding
     sample = tz.Variable(tz.randn([1, 3, 16, 16]), False)
     _roundtrip_and_compare(model, sample, "Conv2d(3,8,k3,no-pad)")
 
 
-@pytest.mark.xfail(reason="ONNX import drops the Conv2d padding attribute "
-                          "(documented bug, not yet fixed)")
 def test_conv2d_with_padding_roundtrip():
-    """xfail — see test_conv2d_numerical_roundtrip docstring."""
+    """Conv2d with symmetric padding — previously xfailed because the
+    importer dropped `pads`; the ONNX importer now honors the full pads
+    attribute."""
     tz.manual_seed(2)
     model = tz.nn.Conv2d(3, 8, kernel_size=3, padding=1)
     sample = tz.Variable(tz.randn([1, 3, 16, 16]), False)
     _roundtrip_and_compare(model, sample, "Conv2d(3,8,k3,pad1)")
+
+
+def test_conv1d_with_padding_roundtrip():
+    tz.manual_seed(4)
+    model = tz.nn.Conv1d(4, 8, kernel_size=3, padding=1)
+    sample = tz.Variable(tz.randn([1, 4, 32]), False)
+    _roundtrip_and_compare(model, sample, "Conv1d(4,8,k3,pad1)")
+
+
+def test_conv2d_with_stride_roundtrip():
+    tz.manual_seed(5)
+    model = tz.nn.Conv2d(3, 8, kernel_size=3, stride=2, padding=1)
+    sample = tz.Variable(tz.randn([1, 3, 16, 16]), False)
+    _roundtrip_and_compare(model, sample, "Conv2d(3,8,k3,s2,pad1)")
+
+
+def test_conv2d_rectangular_padding_roundtrip():
+    """Pair padding (H != W) — exercises the importer's new pair-ctor path
+    that previously truncated to pads[0] for both axes. Also verifies the
+    Conv2d layer's rectangular-padding pre-pad path produces the expected
+    output shape rather than silently dropping pad_w.
+    """
+    tz.manual_seed(6)
+    model = tz.nn.Conv2d(
+        3, 8,
+        kernel_size=(3, 3),
+        stride=(1, 1),
+        padding=(1, 2),   # H=1, W=2 — asymmetric across axes
+        dilation=(1, 1),
+    )
+    sample = tz.Variable(tz.randn([1, 3, 16, 20]), False)
+    # Expected output: H=16+2-2=16, W=20+4-2=22 (NOT 20, which is what
+    # pad_w=1 would give).
+    out = model(sample)
+    assert list(out.tensor().shape) == [1, 8, 16, 22], (
+        f"Rectangular padding should produce [1,8,16,22], got {list(out.tensor().shape)}")
+    _roundtrip_and_compare(model, sample, "Conv2d(3,8,k3x3,pad1x2)")
+
+
+def test_conv2d_rectangular_kernel_roundtrip():
+    """Rectangular kernel + rectangular padding — stride/dilation stay
+    isotropic since backend Conv2d kernels currently read only the scalar
+    AttrKey::Stride/Dilation. The layer errors out on rectangular
+    stride/dilation rather than silently producing wrong output.
+    """
+    tz.manual_seed(7)
+    model = tz.nn.Conv2d(
+        3, 8,
+        kernel_size=(3, 5),
+        stride=(1, 1),
+        padding=(1, 2),
+        dilation=(1, 1),
+    )
+    sample = tz.Variable(tz.randn([1, 3, 16, 20]), False)
+    # H_out = 16 + 2 - 2 = 16, W_out = 20 + 4 - 4 = 20
+    out = model(sample)
+    assert list(out.tensor().shape) == [1, 8, 16, 20], (
+        f"Rectangular kernel should produce [1,8,16,20], got {list(out.tensor().shape)}")
+    _roundtrip_and_compare(model, sample, "Conv2d(k3x5,pad1x2)")
+
+
+def test_conv3d_roundtrip():
+    """Conv3d export + import — both sides had to be implemented for this."""
+    tz.manual_seed(8)
+    model = tz.nn.Conv3d(2, 4, kernel_size=3, stride=1, padding=1)
+    sample = tz.Variable(tz.randn([1, 2, 8, 8, 8]), False)
+    _roundtrip_and_compare(model, sample, "Conv3d(2,4,k3,pad1)")
+
+
+def test_conv_transpose2d_roundtrip():
+    """ConvTranspose2d export + import — previously unimplemented on both sides."""
+    tz.manual_seed(9)
+    model = tz.nn.ConvTranspose2d(4, 2, kernel_size=3, stride=2, padding=1, output_padding=1)
+    sample = tz.Variable(tz.randn([1, 4, 4, 4]), False)
+    _roundtrip_and_compare(model, sample, "ConvTranspose2d(4,2,k3,s2,pad1,op1)")
+
+
+def test_conv_transpose1d_roundtrip():
+    """ConvTranspose1d export + import with non-zero padding. Previously
+    broken because ConvTranspose1d delegated to ConvTranspose2d via scalar
+    AttrKey::Padding that hit the unsqueezed H=1 axis; fixed by trimming
+    the output W axis at the 1D layer after a pad=0 dispatch."""
+    tz.manual_seed(10)
+    model = tz.nn.ConvTranspose1d(4, 2, kernel_size=3, stride=1, padding=1)
+    sample = tz.Variable(tz.randn([1, 4, 8]), False)
+    _roundtrip_and_compare(model, sample, "ConvTranspose1d(4,2,k3,s1,pad1)")
+
+
+def test_conv_transpose3d_roundtrip():
+    tz.manual_seed(11)
+    model = tz.nn.ConvTranspose3d(2, 2, kernel_size=3, stride=2, padding=1, output_padding=1)
+    sample = tz.Variable(tz.randn([1, 2, 4, 4, 4]), False)
+    _roundtrip_and_compare(model, sample, "ConvTranspose3d(2,2,k3,s2,pad1,op1)")
+
+
+def test_conv2d_rectangular_stride_and_dilation_cpu():
+    """Rectangular stride / dilation now works natively on CPU — the CPU
+    kernel was refactored to read per-axis attr keys instead of treating
+    them as a single scalar. The round-trip verifies both export (honours
+    per-axis) and import (produces a Conv2d with the right config)."""
+    tz.manual_seed(12)
+    model = tz.nn.Conv2d(
+        3, 4,
+        kernel_size=(3, 3),
+        stride=(2, 1),
+        padding=(1, 1),
+        dilation=(1, 1),
+    )
+    sample = tz.Variable(tz.randn([1, 3, 16, 20]), False)
+    out = model(sample)
+    # H_out = (16+2-2)/2+1 = 8, W_out = (20+2-2)/1+1 = 20
+    assert list(out.tensor().shape) == [1, 4, 8, 20]
+    _roundtrip_and_compare(model, sample, "Conv2d(k3,s(2,1),p1)")
 
 
 def test_relu_after_linear_roundtrip():

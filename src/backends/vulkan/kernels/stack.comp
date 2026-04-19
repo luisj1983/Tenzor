@@ -1,40 +1,42 @@
 #version 450
 
-// Stack operation: stack tensors along a new dimension
-// Input tensors are passed as a flat concatenation in a single buffer.
-// Each thread copies one element from the correct input position to the output.
+// Stack operation: stack N tensors along a new dimension `dim`.
+// Input tensors arrive in a flat concatenation: input_data[t*E + e] =
+// tensor t, element e (both contiguous).
+//
+// For stack along `dim`, the output shape inserts num_tensors at position
+// `dim`. Decompose the output flat index into (outer, tensor, inner):
+//   outer_size = product of input dims before `dim` (==1 if dim==0)
+//   inner_size = product of input dims from `dim` onward
+// Then: input_offset = tensor*elements_per_tensor + outer*inner_size + inner
+//
+// The previous shader used `tensor_idx = idx / E`, which was only correct
+// for dim=0. For dim>=1 (e.g. StackDim1) it pulled the wrong element and
+// produced ~5.5 absolute error against CPU/CUDA.
 layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input { float input_data[]; };
 layout(binding = 1) buffer Output { float output_data[]; };
 
 layout(push_constant) uniform PushConstants {
-    uint num_tensors;          // Number of input tensors
-    uint elements_per_tensor;  // Elements in each input tensor
-    uint output_numel;         // Total output elements
+    uint num_tensors;
+    uint elements_per_tensor;
+    uint output_numel;
+    uint outer_size;
+    uint inner_size;
 } params;
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= params.output_numel) return;
 
-    // Output layout: tensors are interleaved along the new stack dimension.
-    // For stack(dim=0) of N tensors each of size E:
-    //   output[t * E + e] = input_t[e]
-    // The input buffer stores tensors contiguously:
-    //   input_data[t * E + e] = tensor t, element e
-    //
-    // For the general case, output index maps as:
-    //   tensor_idx = idx / elements_per_tensor
-    //   elem_idx   = idx % elements_per_tensor
-    //   input offset = tensor_idx * elements_per_tensor + elem_idx
+    uint inner = idx % params.inner_size;
+    uint tmp   = idx / params.inner_size;
+    uint tensor_idx = tmp % params.num_tensors;
+    uint outer = tmp / params.num_tensors;
 
-    uint tensor_idx = idx / params.elements_per_tensor;
-    uint elem_idx = idx % params.elements_per_tensor;
-
-    // Bounds check on tensor index
-    if (tensor_idx >= params.num_tensors) return;
-
-    uint input_offset = tensor_idx * params.elements_per_tensor + elem_idx;
+    uint input_offset = tensor_idx * params.elements_per_tensor
+                      + outer * params.inner_size
+                      + inner;
     output_data[idx] = input_data[input_offset];
 }

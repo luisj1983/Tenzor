@@ -47,7 +47,7 @@ TEST_P(GradTransformParity, JVP) {
     auto tangent_cpu = randn({4}, DType::Float32, Device::cpu());
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("grad transform parity");
 
     Tensor ref_out, ref_tangent;
     try {
@@ -87,7 +87,7 @@ TEST_P(GradTransformParity, VJP) {
     auto cotangent_cpu = ones({4}, DType::Float32, Device::cpu());
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("grad transform parity");
 
     Tensor ref_out, ref_grad;
     try {
@@ -126,7 +126,7 @@ TEST_P(GradTransformParity, Jacobian) {
     auto input_cpu = randn({4}, DType::Float32, Device::cpu());
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("grad transform parity");
 
     Tensor ref;
     try {
@@ -160,7 +160,7 @@ TEST_P(GradTransformParity, Hessian) {
     auto input_cpu = randn({3}, DType::Float32, Device::cpu());
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("grad transform parity");
 
     Tensor ref;
     try {
@@ -193,7 +193,7 @@ TEST_P(GradTransformParity, HVP) {
     auto v_cpu = ones({3}, DType::Float32, Device::cpu());
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("grad transform parity");
 
     Tensor ref_hv;
     try {
@@ -228,7 +228,7 @@ TEST_P(GradTransformParity, Vmap_Basic) {
     auto input_cpu = randn({4, 3}, DType::Float32, Device::cpu());
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("grad transform parity");
 
     Tensor ref;
     try {

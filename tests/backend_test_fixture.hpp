@@ -100,6 +100,13 @@ protected:
     void SetUp() override {
         // Initialize Tenzor library and load backends (thread-safe, exactly once)
         std::call_once(init_flag, []() {
+            // Force IEEE 754 FP32 on CUDA matmul — cuBLAS defaults to TF32 on
+            // Ampere+, which silently drops ~13 mantissa bits and blows through
+            // the 1e-4/1e-5 tolerances most parity tests use. Respect the
+            // caller's explicit value if they set it themselves. Applied
+            // globally here so individual parity binaries don't each need a
+            // custom main().
+            setenv("TENZOR_DISABLE_TF32", "1", /*overwrite=*/0);
             tenzor::initialize();
         });
 

@@ -97,6 +97,10 @@ public:
     explicit ONNXImporter(bool verbose = false);
     auto import_from_file(const std::string& filepath) -> std::shared_ptr<nn::Module>;
     auto import_from_bytes(const std::vector<uint8_t>& bytes) -> std::shared_ptr<nn::Module>;
+    // Convert a pre-parsed graph into a Module. Used by tests that hand-build
+    // an ONNX graph to cover codepaths no exporter emits (e.g., asymmetric
+    // begin/end pads that require a ConstantPad2d prefix).
+    auto convert_graph(const ONNXGraphData& graph) -> std::shared_ptr<nn::Module>;
     auto get_model_data() const -> const ONNXModelData&;
     auto set_verbose(bool verbose) -> void;
     auto set_device(Device device) -> void;
@@ -104,7 +108,6 @@ public:
 private:
     auto parse_model(const std::vector<uint8_t>& data) -> ONNXModelData;
     auto validate_model(const ONNXModelData& model) -> void;
-    auto convert_graph(const ONNXGraphData& graph) -> std::shared_ptr<nn::Module>;
     auto load_initializers(const ONNXGraphData& graph) -> void;
     auto convert_node(const ONNXImportNode& node) -> std::optional<std::shared_ptr<nn::Module>>;
 
@@ -146,6 +149,7 @@ private:
 
     // Layer conversion
     auto convert_conv(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
+    auto convert_conv_transpose(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
     auto convert_batch_normalization(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
     auto convert_layer_normalization(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
 

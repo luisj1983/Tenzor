@@ -1,0 +1,102 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Single-pass Welford variance/std.
+//
+// One workgroup per output element. Each thread accumulates a partial
+// (count, mean, M2) in double precision from a strided subset of the
+// reduce dim, then the workgroup merges them pairwise via Chan's
+// parallel algorithm. Final thread writes variance (or std) in Float32.
+//
+// The double accumulators are the whole point: the earlier implementation
+// composed dispatchReduction("mean") + dispatchReduction("sum of squared
+// diffs") with Float32 intermediates written back to main memory, losing
+// 3-14e-2 vs CPU even on contiguous input. A one-shot Welford in double
+// removes that loss. See issue #30.
+
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;            // total number of input elements
+    uint reduce_size;  // length of the reduction dim
+    uint outer_size;   // number of output elements = product of non-reduce dims
+    uint inner_size;   // product of dims after the reduction dim
+    uint unbiased;     // 1 => divide by (N-1), 0 => divide by N
+    uint compute_std;  // 1 => write sqrt(var), 0 => write var
+} params;
+
+shared double shared_mean[WORKGROUP_SIZE];
+shared double shared_m2[WORKGROUP_SIZE];
+shared uint   shared_count[WORKGROUP_SIZE];
+
+void welford_merge(inout double meanA, inout double m2A, inout uint countA,
+                   double meanB, double m2B, uint countB) {
+    if (countB == 0u) return;
+    if (countA == 0u) {
+        meanA = meanB;
+        m2A = m2B;
+        countA = countB;
+        return;
+    }
+    uint n = countA + countB;
+    double delta = meanB - meanA;
+    double nA = double(countA);
+    double nB = double(countB);
+    double nTot = double(n);
+    meanA = meanA + delta * nB / nTot;
+    m2A = m2A + m2B + delta * delta * nA * nB / nTot;
+    countA = n;
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint output_idx = gl_WorkGroupID.x;
+    if (output_idx >= params.outer_size) return;
+
+    uint outer_idx = output_idx / params.inner_size;
+    uint inner_idx = output_idx % params.inner_size;
+    uint base_idx  = outer_idx * params.reduce_size * params.inner_size + inner_idx;
+
+    double local_mean = 0.0lf;
+    double local_m2   = 0.0lf;
+    uint   local_n    = 0u;
+
+    for (uint i = tid; i < params.reduce_size; i += WORKGROUP_SIZE) {
+        uint idx = base_idx + i * params.inner_size;
+        if (idx < params.n) {
+            double x = double(input_data[idx]);
+            local_n += 1u;
+            double delta = x - local_mean;
+            local_mean = local_mean + delta / double(local_n);
+            double delta2 = x - local_mean;
+            local_m2 = local_m2 + delta * delta2;
+        }
+    }
+
+    shared_mean[tid]  = local_mean;
+    shared_m2[tid]    = local_m2;
+    shared_count[tid] = local_n;
+    barrier();
+
+    for (uint s = WORKGROUP_SIZE / 2u; s > 0u; s >>= 1) {
+        if (tid < s) {
+            welford_merge(shared_mean[tid], shared_m2[tid], shared_count[tid],
+                          shared_mean[tid + s], shared_m2[tid + s], shared_count[tid + s]);
+        }
+        barrier();
+    }
+
+    if (tid == 0u) {
+        uint count = shared_count[0];
+        double denom = (params.unbiased != 0u && count > 1u)
+                       ? double(count - 1u)
+                       : double(max(count, 1u));
+        double variance = shared_m2[0] / denom;
+        double result = (params.compute_std != 0u) ? sqrt(variance) : variance;
+        output_data[output_idx] = float(result);
+    }
+}

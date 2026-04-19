@@ -24,7 +24,7 @@ class NNTransformerParity : public BackendTest {};
 
 TEST_P(NNTransformerParity, TransformerEncoderLayer) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn transformer parity");
 
     try {
         nn::TransformerEncoderLayer layer(64, 4);
@@ -54,7 +54,7 @@ TEST_P(NNTransformerParity, TransformerEncoderLayer) {
 
 TEST_P(NNTransformerParity, TransformerDecoderLayer) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn transformer parity");
 
     try {
         nn::TransformerDecoderLayer layer(64, 4);
@@ -87,7 +87,7 @@ TEST_P(NNTransformerParity, TransformerDecoderLayer) {
 
 TEST_P(NNTransformerParity, TransformerEncoder) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn transformer parity");
 
     try {
         auto enc_layer = std::make_shared<nn::TransformerEncoderLayer>(64, 4);
@@ -119,7 +119,7 @@ TEST_P(NNTransformerParity, TransformerEncoder) {
 
 TEST_P(NNTransformerParity, MultiheadAttention) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn transformer parity");
 
     try {
         nn::MultiheadAttention attn(64, 4);
@@ -158,7 +158,7 @@ TEST_P(NNTransformerParity, MultiheadAttention) {
 
 TEST_P(NNTransformerParity, PositionalEncoding) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn transformer parity");
 
     try {
         nn::PositionalEncoding pe(64, 100);
@@ -192,7 +192,7 @@ TEST_P(NNTransformerParity, PositionalEncoding) {
 // timeout. The test now runs across all available backends.
 TEST_P(NNTransformerParity, FlexAttention) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn transformer parity");
 
     constexpr int64_t B = 2, H = 4, S = 32, D = 16;
     constexpr int64_t block_size = 16;
@@ -232,7 +232,7 @@ TEST_P(NNTransformerParity, FlexAttention) {
 // each backend's expand_kernel.
 TEST_P(NNTransformerParity, SlidingWindowAttention) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn transformer parity");
 
     try {
         nn::GroupedQueryAttention gqa(64, 4, 2, 0.0, true, true, nullptr, 4);
@@ -273,7 +273,7 @@ TEST_P(NNTransformerParity, SlidingWindowAttention) {
 
 TEST_P(NNTransformerParity, GroupedQueryAttention) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn transformer parity");
 
     try {
         // d_model=64, num_heads=4, num_kv_heads=2

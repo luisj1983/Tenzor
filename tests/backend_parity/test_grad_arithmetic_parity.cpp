@@ -112,8 +112,12 @@ TEST_P(GradArithmeticParityTest, SubBackward) {
 }
 
 TEST_P(GradArithmeticParityTest, DivBackward) {
+    // Use (b*b + 1) as the divisor so it is always >= 1 regardless of RNG
+    // state. The previous (b + 2.0f) form could shrink to near zero when
+    // randn produced b~-2, which blew the gradient of a/b up past the
+    // 1e-5 atol while the relative error stayed at ~1e-7.
     testBinaryGradient([](const Variable& a, const Variable& b) {
-        return tenzor::sum(a / (b + 2.0f));
+        return tenzor::sum(a / (b * b + 1.0f));
     }, {4, 4});
 }
 

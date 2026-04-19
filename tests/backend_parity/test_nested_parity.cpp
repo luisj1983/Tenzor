@@ -53,7 +53,7 @@ TEST_P(NestedParity, NestedSoftmax_FwdBwd) {
     auto values_cpu = randn({total_len, D}, DType::Float32, Device::cpu());
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nested parity");
 
     // Reference on CPU
     Tensor ref_out, ref_grad;
@@ -104,7 +104,7 @@ TEST_P(NestedParity, NestedLayerNorm_FwdBwd) {
     auto bias_cpu = zeros({D}, DType::Float32, Device::cpu());
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nested parity");
 
     Tensor ref_out, ref_grad_values, ref_grad_weight, ref_grad_bias;
     try {
@@ -165,7 +165,7 @@ TEST_P(NestedParity, NestedSum) {
     auto values_cpu = randn({6, D}, DType::Float32, Device::cpu());
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nested parity");
 
     Tensor ref;
     try {
@@ -198,7 +198,7 @@ TEST_P(NestedParity, NestedMean) {
     auto values_cpu = randn({6, D}, DType::Float32, Device::cpu());
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nested parity");
 
     Tensor ref;
     try {
@@ -242,7 +242,7 @@ TEST_P(NestedParity, NestedAttention_FwdBwd) {
     auto v_cpu = randn({total_len, head_dim}, DType::Float32, Device::cpu());
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nested parity");
 
     Tensor ref_out, ref_q_grad, ref_k_grad, ref_v_grad;
     try {

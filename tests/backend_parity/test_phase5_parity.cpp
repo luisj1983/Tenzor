@@ -33,7 +33,7 @@ TEST_P(Phase5Parity, ALiBi_Bias) {
     auto ref = alibi_cpu.get_bias(8, 8, Device::cpu(), DType::Float32);
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("phase5 parity");
 
     for (size_t i = 1; i < backends.size(); ++i) {
         try {
@@ -71,7 +71,7 @@ TEST_P(Phase5Parity, RoPE_Forward) {
     auto ref = rope_cpu.forward(Variable(input, false), 0).tensor();
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("phase5 parity");
 
     for (size_t i = 1; i < backends.size(); ++i) {
         try {
@@ -97,7 +97,7 @@ TEST_P(Phase5Parity, RoPE_WithOffset) {
     auto ref = rope_cpu.forward(Variable(input, false), /*offset=*/10).tensor();
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("phase5 parity");
 
     for (size_t i = 1; i < backends.size(); ++i) {
         try {
@@ -125,7 +125,7 @@ TEST_P(Phase5Parity, HannWindow) {
     // take an input tensor, we compare reference-vs-per-backend by asking for
     // the window on each device directly.
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("phase5 parity");
 
     const int64_t N = 64;
     auto ref = tenzor::hann_window(N, true, DType::Float32, Device::cpu());
@@ -147,7 +147,7 @@ TEST_P(Phase5Parity, HannWindow) {
 
 TEST_P(Phase5Parity, HammingWindow) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("phase5 parity");
 
     const int64_t N = 64;
     auto ref = tenzor::hamming_window(N, true, 0.54, 0.46,

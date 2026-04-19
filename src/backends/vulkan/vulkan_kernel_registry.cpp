@@ -2926,15 +2926,18 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchNanToNum(inputs[0], nan_val, posinf_val, neginf_val)};
     });
 
-    // Bitwise ops (int32 only on Vulkan)
+    // Bitwise ops (int32 only on Vulkan). These have their own standalone
+    // int32 shaders and must go through dispatchBitwiseBinaryOp — the generic
+    // dispatchBinaryOp routes through math.comp's opcode switch which does
+    // not have bitwise cases and throws "Unknown binary operation".
     table.register_kernel(OpId::BitwiseAnd, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchBinaryOp("bitwise_and", inputs[0], inputs[1])};
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_and", inputs[0], inputs[1])};
     });
     table.register_kernel(OpId::BitwiseOr, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchBinaryOp("bitwise_or", inputs[0], inputs[1])};
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_or", inputs[0], inputs[1])};
     });
     table.register_kernel(OpId::BitwiseXor, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchBinaryOp("bitwise_xor", inputs[0], inputs[1])};
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchBitwiseBinaryOp("bitwise_xor", inputs[0], inputs[1])};
     });
     table.register_kernel(OpId::BitwiseNot, [](std::span<const Tensor> inputs, const OpAttributes&) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchUnaryOp("bitwise_not", inputs[0])};

@@ -471,9 +471,16 @@ auto VulkanBackend::dispatchNestedFromPadded(const Tensor& padded, const Tensor&
     return output;
 }
 
-auto VulkanBackend::dispatchCrossEntropy(const Tensor& log_probs, const Tensor& targets,
+auto VulkanBackend::dispatchCrossEntropy(const Tensor& log_probs, const Tensor& targets_in,
                                          int64_t reduction) -> Tensor {
     int32_t device_id = log_probs.device().index;
+
+    // All cross_entropy shaders read `int targets[]` (32-bit). Callers pass
+    // Int64 targets (PyTorch convention), which would halve the effective
+    // stride and feed wrong class indices into the shader.
+    Tensor targets = (targets_in.dtype() == DType::Int64)
+        ? targets_in.to(DType::Int32)
+        : targets_in;
 
     // Select shader based on dtype
     bool is_float64 = (log_probs.dtype() == DType::Float64);
@@ -536,8 +543,18 @@ auto VulkanBackend::dispatchCrossEntropy(const Tensor& log_probs, const Tensor& 
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
 
-    // Dispatch one workgroup per batch element
-    uint32_t workgroups = static_cast<uint32_t>(batch_size);
+    // When reducing (mean or sum) we must dispatch exactly one workgroup:
+    // every workgroup currently writes losses[0] with its own reduced sum
+    // (which, for workgroups past the first, is 0 — they race and typically
+    // lose, leaving losses[0] = 0). For reduction=0 we still want enough
+    // workgroups to cover the batch with one thread per sample.
+    uint32_t workgroups;
+    if (reduction == 0) {
+        uint32_t wg_size = devices_[device_id].workgroupSize;
+        workgroups = static_cast<uint32_t>((batch_size + wg_size - 1) / wg_size);
+    } else {
+        workgroups = 1;
+    }
     if (workgroups == 0) workgroups = 1;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 

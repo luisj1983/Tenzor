@@ -38,7 +38,7 @@ TEST_P(MoEHRMParity, MixtureOfExperts_Forward) {
     auto ref = moe_cpu.forward(Variable(input, false)).tensor();
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("moe/hrm parity");
 
     for (size_t i = 1; i < backends.size(); ++i) {
         try {
@@ -93,7 +93,7 @@ TEST_P(MoEHRMParity, HRM_Forward) {
     }
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("moe/hrm parity");
 
     for (size_t i = 1; i < backends.size(); ++i) {
         try {

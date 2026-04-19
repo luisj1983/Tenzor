@@ -70,7 +70,7 @@ TEST_P(SamplingParity, Bernoulli_EmpiricalProbability) {
     for (int64_t i = 0; i < probs.numel(); ++i) p[i] = 0.3f;
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("sampling parity");
 
     for (const auto& dev : backends) {
         try {
@@ -96,7 +96,7 @@ TEST_P(SamplingParity, Poisson_EmpiricalMean) {
     for (int64_t i = 0; i < rates.numel(); ++i) r[i] = 5.0f;
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("sampling parity");
 
     for (const auto& dev : backends) {
         try {
@@ -121,7 +121,7 @@ TEST_P(SamplingParity, Exponential_EmpiricalMean) {
     for (int64_t i = 0; i < rates.numel(); ++i) r[i] = 2.0f;
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("sampling parity");
 
     for (const auto& dev : backends) {
         try {
@@ -148,7 +148,7 @@ TEST_P(SamplingParity, Multinomial_CategoryFrequencies) {
 
     const int64_t N = 10000;
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("sampling parity");
 
     for (const auto& dev : backends) {
         try {
@@ -186,7 +186,7 @@ TEST_P(SamplingParity, NormalSample_EmpiricalMomentss) {
     // Variance should be close to 1 with tolerance 4*sqrt(2/(N-1)) ≈ 0.057.
     const int64_t N = 10000;
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("sampling parity");
 
     for (const auto& dev : backends) {
         try {
@@ -210,7 +210,7 @@ TEST_P(SamplingParity, Uniform_EmpiricalMoments) {
     // Std of mean = sqrt((1/12)/N) ≈ 0.0029 for N=10000 → 4-sigma ≈ 0.012.
     const int64_t N = 10000;
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("sampling parity");
 
     for (const auto& dev : backends) {
         try {

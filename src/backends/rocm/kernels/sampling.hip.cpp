@@ -328,13 +328,15 @@ auto bucketize_kernel(const Tensor& input, const Tensor& boundaries,
 
 __global__ void histogram_kernel_impl(const float* input, int64_t* counts,
                                        int64_t n, int64_t num_bins,
-                                       float min_val, float bin_width) {
+                                       float min_val, float max_val, float bin_width) {
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n) return;
     float val = input[tid];
+    // Match CPU semantics: drop out-of-range samples.
+    if (val < min_val || val > max_val) return;
     int64_t bin = static_cast<int64_t>((val - min_val) / bin_width);
-    if (bin < 0) bin = 0;
     if (bin >= num_bins) bin = num_bins - 1;
+    if (bin < 0) bin = 0;
     atomicAdd(reinterpret_cast<unsigned long long*>(&counts[bin]),
               static_cast<unsigned long long>(1));
 }
@@ -416,7 +418,7 @@ auto histogram_kernel(const Tensor& input, int64_t bins,
         hipLaunchKernelGGL(histogram_kernel_impl,
             dim3(blocks_n), dim3(threads), 0, stream,
             in_contig.data<float>(), counts.data<int64_t>(),
-            n, bins, static_cast<float>(min_val), bin_width);
+            n, bins, static_cast<float>(min_val), static_cast<float>(max_val), bin_width);
     }
 
     Tensor edges({bins + 1}, DType::Float32, in_contig.device());

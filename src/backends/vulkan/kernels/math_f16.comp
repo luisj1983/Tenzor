@@ -93,8 +93,16 @@ void main() {
             res1 = abs(val_a1);
             break;
         case 9: // pow (unary with parameter)
-            res0 = float16_t(pow(float(val_a0), params.param));
-            res1 = float16_t(pow(float(val_a1), params.param));
+            // Fast paths keep x^n finite for x<0 (GLSL pow returns NaN there).
+            if (params.param == 1.0) { res0 = val_a0; res1 = val_a1; }
+            else if (params.param == 0.0) { res0 = float16_t(1.0); res1 = float16_t(1.0); }
+            else if (params.param == 2.0) { res0 = val_a0 * val_a0; res1 = val_a1 * val_a1; }
+            else if (params.param == 3.0) { res0 = val_a0 * val_a0 * val_a0; res1 = val_a1 * val_a1 * val_a1; }
+            else if (params.param == -1.0) { res0 = float16_t(1.0) / val_a0; res1 = float16_t(1.0) / val_a1; }
+            else {
+                res0 = float16_t(pow(float(val_a0), params.param));
+                res1 = float16_t(pow(float(val_a1), params.param));
+            }
             break;
         case 10: // sign (unary)
             res0 = float16_t(sign(float(val_a0)));

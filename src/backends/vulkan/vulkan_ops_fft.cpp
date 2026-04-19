@@ -153,14 +153,27 @@ auto VulkanBackend::dispatchStack(std::span<const Tensor> inputs, int64_t dim) -
         endSingleTimeCommands(cmdBuffer, device_id);
     }
 
+    // outer_size = product of input dims before `dim`;
+    // inner_size = product of input dims from `dim` onward.
+    // Together with num_tensors and elements_per_tensor they let the shader
+    // map any output index to the right (tensor, outer, inner) triple for
+    // an arbitrary stack axis.
+    uint32_t outer_size = 1;
+    for (int64_t d = 0; d < dim; ++d) outer_size *= static_cast<uint32_t>(first_shape[d]);
+    uint32_t inner_size = static_cast<uint32_t>(elements_per_tensor) / outer_size;
+
     struct {
         uint32_t num_tensors;
         uint32_t elements_per_tensor;
         uint32_t output_numel;
+        uint32_t outer_size;
+        uint32_t inner_size;
     } pushConstants;
     pushConstants.num_tensors = static_cast<uint32_t>(num_tensors);
     pushConstants.elements_per_tensor = static_cast<uint32_t>(elements_per_tensor);
     pushConstants.output_numel = static_cast<uint32_t>(output_numel);
+    pushConstants.outer_size = outer_size;
+    pushConstants.inner_size = inner_size;
 
     const void* buffer_in = concat_input.data_ptr();
     const void* buffer_out = output.data_ptr();
@@ -195,6 +208,13 @@ auto VulkanBackend::dispatchTake(const Tensor& input, const Tensor& indices) -> 
         return Tensor({0}, input.dtype(), input.device());
     }
 
+    // All take shaders read `int indices[]` (32-bit). If we get Int64 on the
+    // wire the 4-byte stride would misalign every other element, so cast
+    // down to Int32 once on the device.
+    Tensor idx = (indices.dtype() == DType::Int64)
+        ? indices.to(DType::Int32)
+        : indices;
+
     // BFloat16/Float16: use native packed shader (indices stay int)
     if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         bool is_bf16_take = (input.dtype() == DType::BFloat16);
@@ -207,15 +227,15 @@ auto VulkanBackend::dispatchTake(const Tensor& input, const Tensor& indices) -> 
 
         struct { uint32_t numel; uint32_t num_indices; } pc;
         pc.numel = static_cast<uint32_t>(input.numel());
-        pc.num_indices = static_cast<uint32_t>(indices.numel());
+        pc.num_indices = static_cast<uint32_t>(idx.numel());
 
         // F16 packed buffer sizes: round up to 4-byte boundaries
         size_t in_size = (static_cast<size_t>(input.numel()) + 1) / 2 * 4;
-        size_t idx_size = indices.numel() * indices.dtype_size();
+        size_t idx_size = idx.numel() * idx.dtype_size();
         size_t out_size = (static_cast<size_t>(output.numel()) + 1) / 2 * 4;
 
         std::vector<std::pair<uint32_t, const void*>> bindings = {
-            {0, input.data_ptr()}, {1, indices.data_ptr()}, {2, output.data_ptr()}
+            {0, input.data_ptr()}, {1, idx.data_ptr()}, {2, output.data_ptr()}
         };
         std::vector<size_t> sizes = {in_size, idx_size, out_size};
 
@@ -225,7 +245,7 @@ auto VulkanBackend::dispatchTake(const Tensor& input, const Tensor& indices) -> 
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                                pipeline->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-        vkCmdDispatch(cmd, div_wg(indices.numel(), devices_[device_id].workgroupSize), 1, 1);
+        vkCmdDispatch(cmd, div_wg(idx.numel(), devices_[device_id].workgroupSize), 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
 
@@ -246,14 +266,14 @@ auto VulkanBackend::dispatchTake(const Tensor& input, const Tensor& indices) -> 
         uint32_t num_indices;
     } pushConstants;
     pushConstants.numel = static_cast<uint32_t>(input.numel());
-    pushConstants.num_indices = static_cast<uint32_t>(indices.numel());
+    pushConstants.num_indices = static_cast<uint32_t>(idx.numel());
 
     const void* buffer_in = input.data_ptr();
-    const void* buffer_idx = indices.data_ptr();
+    const void* buffer_idx = idx.data_ptr();
     const void* buffer_out = output.data_ptr();
 
     size_t in_size = input.numel() * input.dtype_size();
-    size_t idx_size = indices.numel() * indices.dtype_size();
+    size_t idx_size = idx.numel() * idx.dtype_size();
     size_t out_size = output.numel() * output.dtype_size();
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -273,7 +293,7 @@ auto VulkanBackend::dispatchTake(const Tensor& input, const Tensor& indices) -> 
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
 
-    uint32_t workgroups = div_wg(indices.numel(), devices_[device_id].workgroupSize);
+    uint32_t workgroups = div_wg(idx.numel(), devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     insertComputeOnlyBarrier(cmdBuffer);
@@ -441,12 +461,19 @@ auto VulkanBackend::dispatchTile(const Tensor& input, const std::vector<int64_t>
     return output;
 }
 
-auto VulkanBackend::dispatchPut(const Tensor& input, const Tensor& indices,
+auto VulkanBackend::dispatchPut(const Tensor& input, const Tensor& indices_in,
                                  const Tensor& source, bool accumulate) -> Tensor {
     // Clone input to output (put modifies output in-place)
     Tensor output = dispatchClone(input);
 
-    if (indices.numel() == 0) return output;
+    if (indices_in.numel() == 0) return output;
+
+    // put shaders read `int indices[]` (32-bit). If the caller passed Int64
+    // we must cast down; otherwise the 4-byte stride misaligns every other
+    // element just like take did.
+    Tensor indices = (indices_in.dtype() == DType::Int64)
+        ? indices_in.to(DType::Int32)
+        : indices_in;
 
     // BFloat16/Float16: use native packed shader with CAS atomics
     if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {

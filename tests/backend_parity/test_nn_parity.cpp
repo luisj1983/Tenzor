@@ -22,7 +22,7 @@ class NNOperationParity : public BackendTest {};
 
 TEST_P(NNOperationParity, Conv2d_Basic) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     nn::Conv2d conv(3, 16, 3, 1, 1);  // 3x3, stride 1, pad 1
     auto input = randn({1, 3, 8, 8}, DType::Float32, Device::cpu());
@@ -48,7 +48,7 @@ TEST_P(NNOperationParity, Conv2d_Basic) {
 
 TEST_P(NNOperationParity, Conv2d_Stride2) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     nn::Conv2d conv(3, 16, 3, 2, 1);  // stride 2
     auto input = randn({1, 3, 16, 16}, DType::Float32, Device::cpu());
@@ -72,7 +72,7 @@ TEST_P(NNOperationParity, Conv2d_Stride2) {
 
 TEST_P(NNOperationParity, Conv2d_Padding2) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     nn::Conv2d conv(3, 16, 5, 1, 2);  // 5x5, pad 2
     auto input = randn({1, 3, 8, 8}, DType::Float32, Device::cpu());
@@ -96,7 +96,7 @@ TEST_P(NNOperationParity, Conv2d_Padding2) {
 
 TEST_P(NNOperationParity, Conv2d_Dilation) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     nn::Conv2d conv(3, 16, 3, 1, 2, 2);  // dilation=2, pad=2
     auto input = randn({1, 3, 16, 16}, DType::Float32, Device::cpu());
@@ -120,7 +120,7 @@ TEST_P(NNOperationParity, Conv2d_Dilation) {
 
 TEST_P(NNOperationParity, Conv2d_Groups) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     nn::Conv2d conv(16, 16, 3, 1, 1, 1, 16);  // depthwise: groups=16
     auto input = randn({1, 16, 8, 8}, DType::Float32, Device::cpu());
@@ -144,7 +144,7 @@ TEST_P(NNOperationParity, Conv2d_Groups) {
 
 TEST_P(NNOperationParity, ConvTranspose2d) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     nn::ConvTranspose2d conv(16, 3, 4, 2, 1);  // upsample 2x
     auto input = randn({1, 16, 8, 8}, DType::Float32, Device::cpu());
@@ -172,7 +172,7 @@ TEST_P(NNOperationParity, ConvTranspose2d) {
 
 TEST_P(NNOperationParity, MaxPool2d_2x2) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     auto input = randn({1, 16, 8, 8}, DType::Float32, Device::cpu());
 
@@ -184,7 +184,7 @@ TEST_P(NNOperationParity, MaxPool2d_2x2) {
 
 TEST_P(NNOperationParity, MaxPool2d_3x3_Stride2) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     auto input = randn({1, 16, 16, 16}, DType::Float32, Device::cpu());
 
@@ -196,7 +196,7 @@ TEST_P(NNOperationParity, MaxPool2d_3x3_Stride2) {
 
 TEST_P(NNOperationParity, AvgPool2d_2x2) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     auto input = randn({1, 16, 8, 8}, DType::Float32, Device::cpu());
 
@@ -212,7 +212,7 @@ TEST_P(NNOperationParity, AvgPool2d_2x2) {
 
 TEST_P(NNOperationParity, AdaptiveAvgPool2d) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     auto input = randn({1, 16, 16, 16}, DType::Float32, Device::cpu());
 
@@ -224,7 +224,7 @@ TEST_P(NNOperationParity, AdaptiveAvgPool2d) {
 
 TEST_P(NNOperationParity, AdaptiveMaxPool2d) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     auto input = randn({1, 16, 8, 8}, DType::Float32, Device::cpu());
 
@@ -240,7 +240,7 @@ TEST_P(NNOperationParity, AdaptiveMaxPool2d) {
 
 TEST_P(NNOperationParity, BatchNorm2d_Train) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     nn::BatchNorm2d bn(16);
     bn.train();
@@ -266,7 +266,7 @@ TEST_P(NNOperationParity, BatchNorm2d_Train) {
 
 TEST_P(NNOperationParity, BatchNorm2d_Eval) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     nn::BatchNorm2d bn(16);
     // Run a training forward to populate running stats
@@ -301,7 +301,7 @@ TEST_P(NNOperationParity, BatchNorm2d_Eval) {
 
 TEST_P(NNOperationParity, LayerNorm) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     nn::LayerNorm ln({64});
     auto input = randn({4, 64}, DType::Float32, Device::cpu());
@@ -325,7 +325,7 @@ TEST_P(NNOperationParity, LayerNorm) {
 
 TEST_P(NNOperationParity, GroupNorm) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     nn::GroupNorm gn(4, 16);  // 4 groups, 16 channels
     auto input = randn({2, 16, 8, 8}, DType::Float32, Device::cpu());
@@ -353,7 +353,7 @@ TEST_P(NNOperationParity, GroupNorm) {
 
 TEST_P(NNOperationParity, ReLU) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     auto input = randn({32, 64}, DType::Float32, Device::cpu());
 
@@ -366,7 +366,7 @@ TEST_P(NNOperationParity, ReLU) {
 TEST_P(NNOperationParity, ReLU6) {
     // ReLU6 can be implemented as clamp(relu(x), 0, 6) but no dedicated nn::relu6
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     auto input = randn({32, 64}, DType::Float32, Device::cpu());
 
@@ -379,7 +379,7 @@ TEST_P(NNOperationParity, ReLU6) {
 
 TEST_P(NNOperationParity, LeakyReLU) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     auto input = randn({32, 64}, DType::Float32, Device::cpu());
 
@@ -391,7 +391,7 @@ TEST_P(NNOperationParity, LeakyReLU) {
 
 TEST_P(NNOperationParity, ELU) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     auto input = randn({32, 64}, DType::Float32, Device::cpu());
 
@@ -407,7 +407,7 @@ TEST_P(NNOperationParity, ELU) {
 
 TEST_P(NNOperationParity, GELU) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     auto input = randn({32, 64}, DType::Float32, Device::cpu());
 
@@ -419,7 +419,7 @@ TEST_P(NNOperationParity, GELU) {
 
 TEST_P(NNOperationParity, Swish) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     auto input = randn({32, 64}, DType::Float32, Device::cpu());
 
@@ -431,7 +431,7 @@ TEST_P(NNOperationParity, Swish) {
 
 TEST_P(NNOperationParity, Softmax_Dim1) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     auto input = randn({32, 64}, DType::Float32, Device::cpu());
 
@@ -443,7 +443,7 @@ TEST_P(NNOperationParity, Softmax_Dim1) {
 
 TEST_P(NNOperationParity, LogSoftmax) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     auto input = randn({32, 64}, DType::Float32, Device::cpu());
 
@@ -459,7 +459,7 @@ TEST_P(NNOperationParity, LogSoftmax) {
 
 TEST_P(NNOperationParity, Dropout_Eval) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     auto input = randn({32, 64}, DType::Float32, Device::cpu());
 
@@ -476,7 +476,7 @@ TEST_P(NNOperationParity, Dropout_Eval) {
 
 TEST_P(NNOperationParity, Embedding) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     nn::Embedding emb(100, 32);  // 100 tokens, 32 dims
     auto indices = (rand({4, 8}, DType::Float32, Device::cpu()) * 100).to(DType::Int64);
@@ -504,7 +504,7 @@ TEST_P(NNOperationParity, Embedding) {
 
 TEST_P(NNOperationParity, MSELoss) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     auto pred = randn({32, 64}, DType::Float32, Device::cpu());
     auto target = randn({32, 64}, DType::Float32, Device::cpu());
@@ -519,7 +519,7 @@ TEST_P(NNOperationParity, MSELoss) {
 
 TEST_P(NNOperationParity, L1Loss) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     auto pred = randn({32, 64}, DType::Float32, Device::cpu());
     auto target = randn({32, 64}, DType::Float32, Device::cpu());
@@ -534,7 +534,7 @@ TEST_P(NNOperationParity, L1Loss) {
 
 TEST_P(NNOperationParity, CrossEntropyLoss) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     auto pred = randn({32, 10}, DType::Float32, Device::cpu());
     auto target = (rand({32}, DType::Float32, Device::cpu()) * 10).to(DType::Int64);
@@ -548,7 +548,7 @@ TEST_P(NNOperationParity, CrossEntropyLoss) {
 
 TEST_P(NNOperationParity, BCELoss) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     auto pred = sigmoid(randn({32, 64}, DType::Float32, Device::cpu()));
     auto target = rand({32, 64}, DType::Float32, Device::cpu());
@@ -563,7 +563,7 @@ TEST_P(NNOperationParity, BCELoss) {
 
 TEST_P(NNOperationParity, BCEWithLogitsLoss) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     auto pred = randn({32, 64}, DType::Float32, Device::cpu());
     auto target = rand({32, 64}, DType::Float32, Device::cpu());
@@ -578,7 +578,7 @@ TEST_P(NNOperationParity, BCEWithLogitsLoss) {
 
 TEST_P(NNOperationParity, SmoothL1Loss) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn parity");
 
     auto pred = randn({32, 64}, DType::Float32, Device::cpu());
     auto target = randn({32, 64}, DType::Float32, Device::cpu());

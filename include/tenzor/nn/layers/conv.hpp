@@ -216,6 +216,16 @@ public:
                ", bias=" + (parameters_.count("bias") ? "True" : "False");
     }
 
+    // Accessors used by ONNX export (and anywhere else that needs to
+    // introspect the Conv1d's shape configuration).
+    auto in_channels() const -> int64_t { return in_channels_; }
+    auto out_channels() const -> int64_t { return out_channels_; }
+    auto kernel_size() const -> int64_t { return kernel_size_; }
+    auto stride() const -> int64_t { return stride_; }
+    auto padding() const -> int64_t { return padding_; }
+    auto dilation() const -> int64_t { return dilation_; }
+    auto groups() const -> int64_t { return groups_; }
+
 private:
     int64_t in_channels_;   ///< Number of input channels
     int64_t out_channels_;  ///< Number of output channels
@@ -308,6 +318,15 @@ public:
                ", output_padding=" + std::to_string(output_padding_) +
                ", bias=" + (parameters_.count("bias") ? "True" : "False");
     }
+
+    // Accessors for ONNX export and introspection.
+    auto in_channels() const -> int64_t { return in_channels_; }
+    auto out_channels() const -> int64_t { return out_channels_; }
+    auto kernel_size() const -> int64_t { return kernel_size_; }
+    auto stride() const -> int64_t { return stride_; }
+    auto padding() const -> int64_t { return padding_; }
+    auto output_padding() const -> int64_t { return output_padding_; }
+    auto groups() const -> int64_t { return groups_; }
 
 private:
     int64_t in_channels_;       ///< Number of input channels
@@ -422,6 +441,15 @@ public:
                ", bias=" + (parameters_.count("bias") ? "True" : "False");
     }
 
+    auto in_channels() const -> int64_t { return in_channels_; }
+    auto out_channels() const -> int64_t { return out_channels_; }
+    auto kernel_size() const -> int64_t { return kernel_size_; }
+    auto stride() const -> int64_t { return stride_; }
+    auto padding() const -> int64_t { return padding_; }
+    auto output_padding() const -> int64_t { return output_padding_; }
+    auto dilation() const -> int64_t { return dilation_; }
+    auto groups() const -> int64_t { return groups_; }
+
 private:
     int64_t in_channels_;
     int64_t out_channels_;
@@ -474,6 +502,14 @@ public:
                ", output_padding=" + std::to_string(output_padding_) +
                ", bias=" + (parameters_.count("bias") ? "True" : "False");
     }
+
+    auto in_channels() const -> int64_t { return in_channels_; }
+    auto out_channels() const -> int64_t { return out_channels_; }
+    auto kernel_size() const -> int64_t { return kernel_size_; }
+    auto stride() const -> int64_t { return stride_; }
+    auto padding() const -> int64_t { return padding_; }
+    auto output_padding() const -> int64_t { return output_padding_; }
+    auto groups() const -> int64_t { return groups_; }
 
 private:
     int64_t in_channels_;

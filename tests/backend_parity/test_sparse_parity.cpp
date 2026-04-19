@@ -24,7 +24,7 @@ class SparseParity : public BackendTest {};
 
 TEST_P(SparseParity, IdentityMatmul) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("sparse parity");
 
     // Identity matrix @ dense vector — exercises sparse-like paths
     auto identity = eye(8, 8, DType::Float32, Device::cpu());
@@ -37,7 +37,7 @@ TEST_P(SparseParity, IdentityMatmul) {
 
 TEST_P(SparseParity, SparsePatternMatmul) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("sparse parity");
 
     // Mostly-zero matrix @ dense — tests numerical accumulation with many zeros
     auto sparse_like = zeros({8, 8}, DType::Float32, Device::cpu());
@@ -261,7 +261,7 @@ TEST_P(SparseParity, DenseToSparse_Roundtrip_AllBackends) {
     d[0]=1.0f; d[5]=2.0f; d[10]=3.0f; d[15]=4.0f; d[1]=0.5f; d[6]=0.25f;
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("sparse parity");
 
     for (const auto& dev : backends) {
         try {
@@ -294,7 +294,7 @@ TEST_P(SparseParity, SpGEMM) {
     b[0]=1; b[4]=2; b[8]=3;
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("sparse parity");
 
     Tensor ref_dense;
     try {
@@ -332,7 +332,7 @@ TEST_P(SparseParity, SparseTriangularSolve) {
     auto b_dense = ones({4, 1}, DType::Float32, Device::cpu());
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("sparse parity");
 
     Tensor ref;
     try {
@@ -371,7 +371,7 @@ TEST_P(SparseParity, SparseTriangularSolve_Matrix) {
     auto B_dense = randn({4, 3}, DType::Float32, Device::cpu());
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("sparse parity");
 
     Tensor ref;
     try {

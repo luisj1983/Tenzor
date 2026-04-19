@@ -192,6 +192,30 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
+    // Float32 backward is now two passes: pass 1 accumulated grad_gamma/
+    // grad_beta; pass 2 uses those per-channel sums to compute grad_input
+    // with the correct batchnorm training-mode formula.
+    // (Float16 / Float64 paths still handle grad_input inside their own
+    // specialized shaders — they retain the single-pass layout.)
+    if (input.dtype() == DType::Float32) {
+        auto* bn_input_pipeline = getPipeline("batchnorm2d_backward_grad_input", device_id);
+        VkDescriptorSet bn_input_ds = allocateAndWriteDescriptorSet(
+            device_id, bn_input_pipeline, bindings, sizes);
+
+        VkCommandBuffer bn_input_cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(bn_input_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                          bn_input_pipeline->pipeline());
+        vkCmdBindDescriptorSets(bn_input_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                bn_input_pipeline->layout(), 0, 1, &bn_input_ds, 0, nullptr);
+        vkCmdPushConstants(bn_input_cmd, bn_input_pipeline->layout(),
+                           VK_SHADER_STAGE_COMPUTE_BIT,
+                           0, sizeof(PushConstants), &push_constants);
+        uint32_t bn_input_wg = div_wg(n_elements, devices_[device_id].workgroupSize);
+        vkCmdDispatch(bn_input_cmd, bn_input_wg, 1, 1);
+        insertComputeOnlyBarrier(bn_input_cmd);
+        endSingleTimeCommands(bn_input_cmd, device_id);
+    }
+
     // Float64: pass 2 — reduce partial buffers into final grad_gamma/grad_beta
     if (is_f64_bn) {
         auto* reduce_pipeline = getPipeline("reduce_partial_sums_f64", device_id);
@@ -1150,9 +1174,15 @@ auto VulkanBackend::dispatchGroupNormBackward(const Tensor& grad_output, const T
 }
 
 // Embedding Backward - GPU implementation
-auto VulkanBackend::dispatchEmbeddingBackward(const Tensor& grad_output, const Tensor& indices,
+auto VulkanBackend::dispatchEmbeddingBackward(const Tensor& grad_output, const Tensor& indices_in,
                                                 int64_t num_embeddings, int64_t embedding_dim) -> Tensor {
     int32_t device_id = grad_output.device().index;
+    // All embedding_backward shaders read `int indices[]` (32-bit). If the
+    // caller passed Int64 the 4-byte stride halves the effective indices and
+    // scatter accumulations land in the wrong rows of grad_weight.
+    Tensor indices = (indices_in.dtype() == DType::Int64)
+        ? indices_in.to(DType::Int32)
+        : indices_in;
     int64_t num_indices = indices.numel();
 
     // For Float16, upcast to Float32 for numerical stability

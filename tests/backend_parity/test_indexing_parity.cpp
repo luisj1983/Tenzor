@@ -25,7 +25,7 @@ class IndexingParity : public BackendTest {};
 
 TEST_P(IndexingParity, IndexSelect_Dim0) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("indexing parity");
 
     auto input = generate_uniform_tensor({32, 32}, -1.0f, 1.0f, DType::Float32, Device::cpu());
     auto idx = randint(0, 32, {8}, DType::Int64, Device::cpu());
@@ -37,7 +37,7 @@ TEST_P(IndexingParity, IndexSelect_Dim0) {
 
 TEST_P(IndexingParity, Gather_Dim0) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("indexing parity");
 
     auto input = generate_uniform_tensor({32, 32}, -1.0f, 1.0f, DType::Float32, Device::cpu());
     auto idx = randint(0, 32, {8, 32}, DType::Int64, Device::cpu());
@@ -49,7 +49,7 @@ TEST_P(IndexingParity, Gather_Dim0) {
 
 TEST_P(IndexingParity, Gather_Dim1) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("indexing parity");
 
     auto input = generate_uniform_tensor({32, 32}, -1.0f, 1.0f, DType::Float32, Device::cpu());
     auto idx = randint(0, 32, {32, 8}, DType::Int64, Device::cpu());
@@ -59,13 +59,24 @@ TEST_P(IndexingParity, Gather_Dim1) {
     }, {input, idx}, 0, 0, "Gather_Dim1");
 }
 
+// Build an index tensor of shape {rows, cols} whose values along axis 0 are
+// unique per column. Without this, random indices along the scatter axis can
+// collide and scatter's "last-writer-wins" semantics becomes non-deterministic
+// across backends (thread ordering differs on GPU).
+static Tensor make_unique_indices_dim0(int64_t rows, int64_t cols, int64_t dim_size) {
+    auto noise = randn({dim_size, cols}, DType::Float32, Device::cpu());
+    auto [_sorted, perm] = sort(Variable(noise, false), 0);
+    // perm has shape {dim_size, cols} with unique entries per column in [0, dim_size).
+    return narrow(perm, 0, 0, rows).contiguous();
+}
+
 TEST_P(IndexingParity, Scatter_Dim0) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("indexing parity");
 
     auto input = zeros({32, 32}, DType::Float32, Device::cpu());
     auto src = generate_uniform_tensor({8, 32}, -1.0f, 1.0f, DType::Float32, Device::cpu());
-    auto idx = randint(0, 32, {8, 32}, DType::Int64, Device::cpu());
+    auto idx = make_unique_indices_dim0(/*rows=*/8, /*cols=*/32, /*dim_size=*/32);
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
         return scatter(inputs[0], 0, inputs[2], inputs[1]);
@@ -74,20 +85,21 @@ TEST_P(IndexingParity, Scatter_Dim0) {
 
 TEST_P(IndexingParity, ScatterAdd) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("indexing parity");
 
     auto input = zeros({32, 32}, DType::Float32, Device::cpu());
     auto src = generate_uniform_tensor({8, 32}, -1.0f, 1.0f, DType::Float32, Device::cpu());
     auto idx = randint(0, 32, {8, 32}, DType::Int64, Device::cpu());
 
+    // Accumulation order across backends differs, so allow float32 ulp noise.
     test_operation_parity([](const std::vector<Tensor>& inputs) {
         return scatter_add(inputs[0], 0, inputs[2], inputs[1]);
-    }, {input, src, idx}, 0, 0, "ScatterAdd");
+    }, {input, src, idx}, 1e-5f, 1e-6f, "ScatterAdd");
 }
 
 TEST_P(IndexingParity, MaskedFill) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("indexing parity");
 
     auto input = generate_uniform_tensor({32, 32}, -1.0f, 1.0f, DType::Float32, Device::cpu());
     auto mask_src = randn({32, 32}, DType::Float32, Device::cpu());
@@ -102,7 +114,7 @@ TEST_P(IndexingParity, MaskedSelect) {
     // Output size varies by backend ordering is not guaranteed, so we
     // compare sorted results manually across backends.
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("indexing parity");
 
     auto input = generate_uniform_tensor({32, 32}, -1.0f, 1.0f, DType::Float32, Device::cpu());
     auto mask_src = randn({32, 32}, DType::Float32, Device::cpu());
@@ -129,7 +141,8 @@ TEST_P(IndexingParity, MaskedSelect) {
 
             EXPECT_EQ(ref_sorted.numel(), result_sorted.numel())
                 << "MaskedSelect size mismatch on " << backend_name(backend);
-            EXPECT_TENSORS_CLOSE(ref_sorted, result_sorted, 0.0f, 0.0f);
+            EXPECT_TRUE(tensors_close(ref_sorted, result_sorted, 0.0f, 0.0f))
+                << "MaskedSelect value mismatch on " << backend_name(backend);
         } catch (const std::exception& e) {
             ADD_FAILURE() << "MaskedSelect failed on " << backend_name(backend)
                       << ": " << e.what() << std::endl;
@@ -139,7 +152,7 @@ TEST_P(IndexingParity, MaskedSelect) {
 
 TEST_P(IndexingParity, Where) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("indexing parity");
 
     auto cond_src = randn({32, 32}, DType::Float32, Device::cpu());
     auto condition = gt(cond_src, zeros({32, 32}, DType::Float32, Device::cpu()));
@@ -153,7 +166,7 @@ TEST_P(IndexingParity, Where) {
 
 TEST_P(IndexingParity, Take) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("indexing parity");
 
     auto input = generate_uniform_tensor({32, 32}, -1.0f, 1.0f, DType::Float32, Device::cpu());
     auto idx = randint(0, 1024, {64}, DType::Int64, Device::cpu());
@@ -165,10 +178,14 @@ TEST_P(IndexingParity, Take) {
 
 TEST_P(IndexingParity, Put) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("indexing parity");
 
     auto input = generate_uniform_tensor({32, 32}, -1.0f, 1.0f, DType::Float32, Device::cpu());
-    auto idx = randint(0, 1024, {16}, DType::Int64, Device::cpu());
+    // Put with duplicate indices is last-writer-wins — non-deterministic on
+    // atomics across backends. Use the first 16 entries of a permutation so
+    // every index is unique along the flat axis.
+    auto perm = randperm(1024, Device::cpu());
+    auto idx = narrow(perm, 0, 0, 16).contiguous();
     auto source = generate_uniform_tensor({16}, -5.0f, 5.0f, DType::Float32, Device::cpu(), 99999);
 
     test_operation_parity([](const std::vector<Tensor>& inputs) {
@@ -179,7 +196,7 @@ TEST_P(IndexingParity, Put) {
 TEST_P(IndexingParity, Nonzero) {
     // Output order may differ across backends, so sort before comparison.
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("indexing parity");
 
     // Create input with some zeros: uniform in [-1, 1], then zero out small values
     auto input = generate_uniform_tensor({32, 32}, -1.0f, 1.0f, DType::Float32, Device::cpu());
@@ -226,7 +243,7 @@ TEST_P(IndexingParity, Nonzero) {
 
 TEST_P(IndexingParity, OneHot) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("indexing parity");
 
     auto input = randint(0, 10, {16}, DType::Int64, Device::cpu());
 
@@ -237,7 +254,7 @@ TEST_P(IndexingParity, OneHot) {
 
 TEST_P(IndexingParity, IndexSelect_Dim1) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("indexing parity");
 
     auto input = generate_uniform_tensor({32, 32}, -1.0f, 1.0f, DType::Float32, Device::cpu());
     auto idx = randint(0, 32, {4}, DType::Int64, Device::cpu());
@@ -249,7 +266,7 @@ TEST_P(IndexingParity, IndexSelect_Dim1) {
 
 TEST_P(IndexingParity, Where_Broadcast) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("indexing parity");
 
     auto cond_src = randn({32, 1}, DType::Float32, Device::cpu());
     auto condition = gt(cond_src, zeros({32, 1}, DType::Float32, Device::cpu()));
@@ -270,7 +287,7 @@ template <typename Op>
 void index_grad_parity(Op op, Tensor input, Tensor idx,
                        const std::string& test_name) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("indexing parity");
     Tensor ref_grad;
     Device ref_backend = backends[0];
     for (size_t i = 0; i < backends.size(); ++i) {
@@ -292,7 +309,7 @@ void index_grad_parity(Op op, Tensor input, Tensor idx,
 }
 }  // namespace
 
-TEST_P(IndexingParity, DISABLED_IndexSelect_Dim0_GradientParity) {
+TEST_P(IndexingParity, IndexSelect_Dim0_GradientParity) {
     auto input = randn({16, 8}, DType::Float32, Device::cpu());
     auto idx = randint(0, 16, {6}, DType::Int64, Device::cpu());
     index_grad_parity(
@@ -302,7 +319,7 @@ TEST_P(IndexingParity, DISABLED_IndexSelect_Dim0_GradientParity) {
         input, idx, "IndexSelect_Dim0_Grad");
 }
 
-TEST_P(IndexingParity, DISABLED_Gather_Dim0_GradientParity) {
+TEST_P(IndexingParity, Gather_Dim0_GradientParity) {
     auto input = randn({8, 8}, DType::Float32, Device::cpu());
     auto idx = randint(0, 8, {4, 8}, DType::Int64, Device::cpu());
     index_grad_parity(
@@ -312,7 +329,7 @@ TEST_P(IndexingParity, DISABLED_Gather_Dim0_GradientParity) {
         input, idx, "Gather_Dim0_Grad");
 }
 
-TEST_P(IndexingParity, DISABLED_Gather_Dim1_GradientParity) {
+TEST_P(IndexingParity, Gather_Dim1_GradientParity) {
     auto input = randn({8, 8}, DType::Float32, Device::cpu());
     auto idx = randint(0, 8, {8, 4}, DType::Int64, Device::cpu());
     index_grad_parity(

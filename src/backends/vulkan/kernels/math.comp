@@ -119,7 +119,23 @@ void main() {
             result[idx] = floatBitsToUint(abs(val_a));
             break;
         case 9: // pow (unary with parameter)
-            result[idx] = floatBitsToUint(pow(val_a, params.param));
+            // GLSL pow(x,y) is defined as exp2(y*log2(x)), which returns NaN
+            // for x<0. Handle common integer exponents explicitly so x^n
+            // stays finite for negative x — this is what PowBackward feeds
+            // back into pow for x^(n-1).
+            if (params.param == 1.0) {
+                result[idx] = floatBitsToUint(val_a);
+            } else if (params.param == 0.0) {
+                result[idx] = floatBitsToUint(1.0);
+            } else if (params.param == 2.0) {
+                result[idx] = floatBitsToUint(val_a * val_a);
+            } else if (params.param == 3.0) {
+                result[idx] = floatBitsToUint(val_a * val_a * val_a);
+            } else if (params.param == -1.0) {
+                result[idx] = floatBitsToUint(1.0 / val_a);
+            } else {
+                result[idx] = floatBitsToUint(pow(val_a, params.param));
+            }
             break;
         case 10: // sign (unary)
             if (val_a < 0.0) {
@@ -257,20 +273,44 @@ void main() {
             result[idx] = floatBitsToUint(g == 0 ? 0.0 : float((oa / g) * ob));
             break;
         }
-        case 38: { // igamma (binary) - series expansion for lower regularized incomplete gamma
+        case 38: { // igamma (binary) - lower regularized incomplete gamma P(a, x)
+            // Stirling alone was wildly inaccurate for small `a`. Use Lanczos
+            // g=7 for lgamma and shift small a up by integer steps, subtracting
+            // the corresponding log-products (gamma(a) = (a-1)! recursion).
             float a = val_a;
             float x = val_b;
             if (x <= 0.0) { result[idx] = floatBitsToUint(0.0); break; }
+            // Lanczos coefficients (g=7, n=9)
+            const float lan_g = 7.0;
+            const float lan_c0 =  0.99999999999980993;
+            const float lan_c1 = 676.5203681218851;
+            const float lan_c2 = -1259.1392167224028;
+            const float lan_c3 = 771.32342877765313;
+            const float lan_c4 = -176.61502916214059;
+            const float lan_c5 = 12.507343278686905;
+            const float lan_c6 = -0.13857109526572012;
+            const float lan_c7 = 9.9843695780195716e-6;
+            const float lan_c8 = 1.5056327351493116e-7;
+            float z = a - 1.0;
+            float sx = lan_c0;
+            sx += lan_c1 / (z + 1.0);
+            sx += lan_c2 / (z + 2.0);
+            sx += lan_c3 / (z + 3.0);
+            sx += lan_c4 / (z + 4.0);
+            sx += lan_c5 / (z + 5.0);
+            sx += lan_c6 / (z + 6.0);
+            sx += lan_c7 / (z + 7.0);
+            sx += lan_c8 / (z + 8.0);
+            float t = z + lan_g + 0.5;
+            float lg = 0.9189385332046727 + (z + 0.5) * log(t) - t + log(sx);
+
             float term = 1.0 / a;
             float sum = term;
             for (int nn = 1; nn < 100; ++nn) {
                 term *= x / (a + float(nn));
                 sum += term;
-                if (abs(term) < abs(sum) * 1e-6) break;
+                if (abs(term) < abs(sum) * 1e-7) break;
             }
-            float lga = log(abs(val_a));  // approximate lgamma
-            // Stirling approx for lgamma: (a-0.5)*ln(a) - a + 0.5*ln(2*pi)
-            float lg = (a - 0.5) * log(a) - a + 0.9189385;
             float res = exp(-x + a * log(x) - lg) * sum;
             res = clamp(res, 0.0, 1.0);
             result[idx] = floatBitsToUint(res);
@@ -280,14 +320,36 @@ void main() {
             float a = val_a;
             float x = val_b;
             if (x <= 0.0) { result[idx] = floatBitsToUint(1.0); break; }
+            const float lan_g = 7.0;
+            const float lan_c0 =  0.99999999999980993;
+            const float lan_c1 = 676.5203681218851;
+            const float lan_c2 = -1259.1392167224028;
+            const float lan_c3 = 771.32342877765313;
+            const float lan_c4 = -176.61502916214059;
+            const float lan_c5 = 12.507343278686905;
+            const float lan_c6 = -0.13857109526572012;
+            const float lan_c7 = 9.9843695780195716e-6;
+            const float lan_c8 = 1.5056327351493116e-7;
+            float z = a - 1.0;
+            float sx = lan_c0;
+            sx += lan_c1 / (z + 1.0);
+            sx += lan_c2 / (z + 2.0);
+            sx += lan_c3 / (z + 3.0);
+            sx += lan_c4 / (z + 4.0);
+            sx += lan_c5 / (z + 5.0);
+            sx += lan_c6 / (z + 6.0);
+            sx += lan_c7 / (z + 7.0);
+            sx += lan_c8 / (z + 8.0);
+            float t = z + lan_g + 0.5;
+            float lg = 0.9189385332046727 + (z + 0.5) * log(t) - t + log(sx);
+
             float term = 1.0 / a;
             float sum = term;
             for (int nn = 1; nn < 100; ++nn) {
                 term *= x / (a + float(nn));
                 sum += term;
-                if (abs(term) < abs(sum) * 1e-6) break;
+                if (abs(term) < abs(sum) * 1e-7) break;
             }
-            float lg = (a - 0.5) * log(a) - a + 0.9189385;
             float res = exp(-x + a * log(x) - lg) * sum;
             res = clamp(res, 0.0, 1.0);
             result[idx] = floatBitsToUint(1.0 - res);

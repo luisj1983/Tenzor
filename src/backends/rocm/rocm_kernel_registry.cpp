@@ -1375,27 +1375,31 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         return {result[0]};
     });
 
-    // Conv3d operations
-    // Conv3dBackwardInput: inputs = {grad_output, input, weight}
+    // Conv3d operations — same scalar-attr fix as the forward above:
+    // the nn::Conv3d layer sets scalar AttrKey::{Stride,Padding,Dilation};
+    // expand to per-axis triples for the HIP kernel.
     table.register_kernel(OpId::Conv3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto stride = attrs.get_int_list(AttrKey::Stride);
-        auto padding = attrs.get_int_list(AttrKey::Padding);
-        auto dilation = attrs.get_int_list(AttrKey::Dilation);
+        int64_t s = attrs.get_int(AttrKey::Stride, 1);
+        int64_t p = attrs.get_int(AttrKey::Padding, 0);
+        int64_t d = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        std::vector<int64_t> stride   = {s, s, s};
+        std::vector<int64_t> padding  = {p, p, p};
+        std::vector<int64_t> dilation = {d, d, d};
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
-        // inputs[0]=grad_output, inputs[2]=weight
         return std::vector<Tensor>{rocm::conv3d_backward_input_hip(inputs[0], inputs[2], input_shape,
             stride, padding, dilation, groups, get_hip_stream(attrs))};
     });
 
-    // Conv3dBackwardWeight: inputs = {grad_output, input, weight}
     table.register_kernel(OpId::Conv3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto stride = attrs.get_int_list(AttrKey::Stride);
-        auto padding = attrs.get_int_list(AttrKey::Padding);
-        auto dilation = attrs.get_int_list(AttrKey::Dilation);
+        int64_t s = attrs.get_int(AttrKey::Stride, 1);
+        int64_t p = attrs.get_int(AttrKey::Padding, 0);
+        int64_t d = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        std::vector<int64_t> stride   = {s, s, s};
+        std::vector<int64_t> padding  = {p, p, p};
+        std::vector<int64_t> dilation = {d, d, d};
         auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
-        // inputs[0]=grad_output, inputs[1]=input
         return std::vector<Tensor>{rocm::conv3d_backward_weight_hip(inputs[0], inputs[1], weight_shape,
             stride, padding, dilation, groups, get_hip_stream(attrs))};
     });
@@ -1404,22 +1408,28 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{rocm::conv3d_backward_bias_hip(inputs[0], get_hip_stream(attrs))};
     });
 
-    // ConvTranspose3d operations
+    // ConvTranspose3d operations — scalar-attr expand like Conv3d above.
     table.register_kernel(OpId::ConvTranspose3dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto stride = attrs.get_int_list(AttrKey::Stride);
-        auto padding = attrs.get_int_list(AttrKey::Padding);
-        auto dilation = attrs.get_int_list(AttrKey::Dilation);
+        int64_t s = attrs.get_int(AttrKey::Stride, 1);
+        int64_t p = attrs.get_int(AttrKey::Padding, 0);
+        int64_t d = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        std::vector<int64_t> stride   = {s, s, s};
+        std::vector<int64_t> padding  = {p, p, p};
+        std::vector<int64_t> dilation = {d, d, d};
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
         return std::vector<Tensor>{rocm::conv_transpose3d_backward_input_hip(inputs[0], inputs[2], input_shape,
             stride, padding, dilation, groups, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::ConvTranspose3dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        auto stride = attrs.get_int_list(AttrKey::Stride);
-        auto padding = attrs.get_int_list(AttrKey::Padding);
-        auto dilation = attrs.get_int_list(AttrKey::Dilation);
+        int64_t s = attrs.get_int(AttrKey::Stride, 1);
+        int64_t p = attrs.get_int(AttrKey::Padding, 0);
+        int64_t d = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        std::vector<int64_t> stride   = {s, s, s};
+        std::vector<int64_t> padding  = {p, p, p};
+        std::vector<int64_t> dilation = {d, d, d};
         auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
         return std::vector<Tensor>{rocm::conv_transpose3d_backward_weight_hip(inputs[0], inputs[1], weight_shape,
             stride, padding, dilation, groups, get_hip_stream(attrs))};
@@ -3317,10 +3327,19 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             stride, padding, dilation, groups, get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Conv3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        auto stride = attrs.get_int_list(AttrKey::Stride);
-        auto padding = attrs.get_int_list(AttrKey::Padding);
-        auto dilation = attrs.get_int_list(AttrKey::Dilation);
+        // nn::Conv3d sets AttrKey::{Stride,Padding,Dilation} as scalar ints;
+        // the ROCm kernel expects per-axis vectors. The previous lambda
+        // used attrs.get_int_list which silently returned an empty vector
+        // on a scalar attr, causing the kernel to fall back to defaults
+        // (e.g. stride=1) and produce wrong output whenever the layer
+        // specified non-default values. Read scalars and expand to triples.
+        int64_t s = attrs.get_int(AttrKey::Stride, 1);
+        int64_t p = attrs.get_int(AttrKey::Padding, 0);
+        int64_t d = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        std::vector<int64_t> stride   = {s, s, s};
+        std::vector<int64_t> padding  = {p, p, p};
+        std::vector<int64_t> dilation = {d, d, d};
         Tensor bias = inputs.size() > 2 ? inputs[2] : Tensor();
         return rocm::conv3d_forward_hip(inputs[0], inputs[1], bias,
             stride, padding, dilation, groups, get_hip_stream(attrs));
@@ -3341,11 +3360,18 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::ConvTranspose3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        auto stride = attrs.get_int_list(AttrKey::Stride);
-        auto padding = attrs.get_int_list(AttrKey::Padding);
-        auto output_padding = attrs.get_int_list(AttrKey::OutputPadding);
-        auto dilation = attrs.get_int_list(AttrKey::Dilation);
+        // Same scalar-attr mismatch as Conv3d above — nn::ConvTranspose3d
+        // sets scalar Stride/Padding/OutputPadding/Dilation; expand to
+        // triples for the ROCm kernel.
+        int64_t s  = attrs.get_int(AttrKey::Stride, 1);
+        int64_t p  = attrs.get_int(AttrKey::Padding, 0);
+        int64_t op = attrs.get_int(AttrKey::OutputPadding, 0);
+        int64_t d  = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        std::vector<int64_t> stride         = {s, s, s};
+        std::vector<int64_t> padding        = {p, p, p};
+        std::vector<int64_t> output_padding = {op, op, op};
+        std::vector<int64_t> dilation       = {d, d, d};
         Tensor bias = inputs.size() > 2 ? inputs[2] : Tensor();
         return rocm::conv_transpose3d_forward_hip(inputs[0], inputs[1], bias,
             stride, padding, output_padding, dilation, groups, get_hip_stream(attrs));

@@ -47,6 +47,7 @@ struct HistogramPC {
     uint32_t num_bins;
     float min_val;
     float bin_width;
+    float max_val;
 };
 
 struct HistogramddPC {
@@ -256,7 +257,8 @@ auto VulkanBackend::dispatchHistogram(const Tensor& input, int64_t bins,
         HistogramPC pc{static_cast<uint32_t>(n),
                        static_cast<uint32_t>(bins),
                        static_cast<float>(min_val),
-                       bin_width};
+                       bin_width,
+                       static_cast<float>(max_val)};
         std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, in_f32.data_ptr()},
             {1, counts_i32.data_ptr()},

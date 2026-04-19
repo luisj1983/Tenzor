@@ -664,6 +664,9 @@ auto VulkanBackend::dispatchExpand(const Tensor& input_in, const std::vector<int
     bool is_float16 = (input.dtype() == DType::Float16);
     bool is_bfloat16 = (input.dtype() == DType::BFloat16);
     bool is_int64   = (input.dtype() == DType::Int64);
+    bool is_u8      = (input.dtype() == DType::Bool ||
+                       input.dtype() == DType::Int8 ||
+                       input.dtype() == DType::UInt8);
     std::string shader_name;
     if (is_float64) {
         shader_name = "expand_f64";
@@ -673,6 +676,8 @@ auto VulkanBackend::dispatchExpand(const Tensor& input_in, const std::vector<int
         shader_name = "expand_bf16";
     } else if (is_int64) {
         shader_name = "expand_i64";
+    } else if (is_u8) {
+        shader_name = "expand_u8";
     } else {
         shader_name = "expand";
     }
@@ -694,6 +699,12 @@ auto VulkanBackend::dispatchExpand(const Tensor& input_in, const std::vector<int
         size_t out_pairs = (output.numel() + 1) / 2;
         buffer_size_in = in_pairs * 4;
         buffer_size_out = out_pairs * 4;
+    }
+    if (is_u8) {
+        // 1-byte storage must round up to 4-byte boundary so robust buffer
+        // access doesn't zero out the trailing bytes of the last word.
+        buffer_size_in  = (buffer_size_in  + 3u) & ~size_t(3);
+        buffer_size_out = (buffer_size_out + 3u) & ~size_t(3);
     }
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {

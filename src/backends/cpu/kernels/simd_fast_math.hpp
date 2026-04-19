@@ -12,6 +12,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <cmath>
 #include <limits>
 
@@ -869,6 +870,25 @@ inline void pow_batch_avx2(const float* input, float* output, size_t n, float ex
     const size_t simd_end = (n / 8) * 8;
 
     // Fast paths for common integer exponents
+    if (exponent == 1.0f) {
+        // pow(x, 1) = x — identity. The general exp(log(x)) path silently
+        // produces NaN for x<0 and imprecise values near zero, which breaks
+        // PowBackward for x^n when the backward computes pow(x, n-1).
+        if (output != input) {
+            std::memcpy(output, input, n * sizeof(float));
+        }
+        return;
+    }
+    if (exponent == 0.0f) {
+        // pow(x, 0) = 1 for any x (including 0, per IEEE 754).
+        __m256 one = _mm256_set1_ps(1.0f);
+        #pragma omp parallel for schedule(static) if(n > OMP_THRESHOLD)
+        for (size_t i = 0; i < simd_end; i += 8) {
+            _mm256_storeu_ps(output + i, one);
+        }
+        for (size_t i = simd_end; i < n; ++i) output[i] = 1.0f;
+        return;
+    }
     if (exponent == 2.0f) {
         // pow(x, 2) = x * x
         #pragma omp parallel for schedule(static) if(n > OMP_THRESHOLD)
@@ -1055,6 +1075,23 @@ inline void pow_batch_avx512(const float* input, float* output, size_t n, float 
     const size_t simd_end = (n / 16) * 16;
 
     // Fast paths for common integer exponents
+    if (exponent == 1.0f) {
+        // pow(x, 1) = x — identity. See the AVX2 variant for the rationale:
+        // general exp(log(x)) destroys PowBackward for x^n at x<=0.
+        if (output != input) {
+            std::memcpy(output, input, n * sizeof(float));
+        }
+        return;
+    }
+    if (exponent == 0.0f) {
+        __m512 one = _mm512_set1_ps(1.0f);
+        #pragma omp parallel for schedule(static) if(n > OMP_THRESHOLD)
+        for (size_t i = 0; i < simd_end; i += 16) {
+            _mm512_storeu_ps(output + i, one);
+        }
+        for (size_t i = simd_end; i < n; ++i) output[i] = 1.0f;
+        return;
+    }
     if (exponent == 2.0f) {
         // pow(x, 2) = x * x
         #pragma omp parallel for schedule(static) if(n > OMP_THRESHOLD)

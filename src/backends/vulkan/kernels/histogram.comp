@@ -13,6 +13,7 @@ layout(push_constant) uniform PushConstants {
     uint num_bins;
     float min_val;
     float bin_width;
+    float max_val;
 } params;
 
 void main() {
@@ -20,8 +21,12 @@ void main() {
     if (idx >= params.n) return;
 
     float val = input_data[idx];
+    // Match CPU semantics: drop out-of-range samples rather than clamping
+    // them into the end bins. The earlier clamp inflated edge-bin counts
+    // by the number of values outside [min, max].
+    if (val < params.min_val || val > params.max_val) return;
     int bin = int((val - params.min_val) / params.bin_width);
-    if (bin < 0) bin = 0;
     if (bin >= int(params.num_bins)) bin = int(params.num_bins) - 1;
+    if (bin < 0) bin = 0;
     atomicAdd(counts[bin], 1);
 }

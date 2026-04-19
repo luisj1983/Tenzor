@@ -87,7 +87,7 @@ TEST_P(QuantizedKernelParity, ForwardMatchesFloatReferenceWithinINT8Error) {
 
 TEST_P(QuantizedKernelParity, CrossBackendParity) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP() << "needs >=2 backends";
+    REQUIRE_MULTI_BACKEND_OR_SKIP("needs >=2 backends");
 
     auto [fp, q] = make_pair(32, 16);
     auto input = randn({4, 32}, DType::Float32, Device::cpu());

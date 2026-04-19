@@ -23,7 +23,7 @@ using namespace tenzor::testing;
 
 TEST(NumericalStability, VerySmallValues_Add) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
 
     auto a = full({32, 32}, 1e-10f, DType::Float32, Device::cpu());
     auto b = full({32, 32}, 1e-10f, DType::Float32, Device::cpu());
@@ -35,7 +35,7 @@ TEST(NumericalStability, VerySmallValues_Add) {
 
 TEST(NumericalStability, VerySmallValues_Mul) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
 
     auto a = full({32, 32}, 1e-8f, DType::Float32, Device::cpu());
     auto b = full({32, 32}, 1e-8f, DType::Float32, Device::cpu());
@@ -47,7 +47,7 @@ TEST(NumericalStability, VerySmallValues_Mul) {
 
 TEST(NumericalStability, VerySmallValues_Div) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
 
     auto a = full({32, 32}, 1e-10f, DType::Float32, Device::cpu());
     auto b = full({32, 32}, 1e-5f, DType::Float32, Device::cpu());
@@ -59,7 +59,7 @@ TEST(NumericalStability, VerySmallValues_Div) {
 
 TEST(NumericalStability, VerySmallValues_Log) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
 
     auto a = full({32, 32}, 1e-5f, DType::Float32, Device::cpu());
 
@@ -70,7 +70,7 @@ TEST(NumericalStability, VerySmallValues_Log) {
 
 TEST(NumericalStability, VerySmallValues_Exp) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
 
     auto a = full({32, 32}, -20.0f, DType::Float32, Device::cpu());
 
@@ -85,7 +85,7 @@ TEST(NumericalStability, VerySmallValues_Exp) {
 
 TEST(NumericalStability, VeryLargeValues_Add) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
 
     auto a = full({32, 32}, 1e8f, DType::Float32, Device::cpu());
     auto b = full({32, 32}, 1e8f, DType::Float32, Device::cpu());
@@ -97,7 +97,7 @@ TEST(NumericalStability, VeryLargeValues_Add) {
 
 TEST(NumericalStability, VeryLargeValues_Mul) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
 
     auto a = full({32, 32}, 1e10f, DType::Float32, Device::cpu());
     auto b = full({32, 32}, 1e-5f, DType::Float32, Device::cpu());
@@ -109,7 +109,7 @@ TEST(NumericalStability, VeryLargeValues_Mul) {
 
 TEST(NumericalStability, VeryLargeValues_Exp) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
 
     // Large exp input (but not so large it overflows)
     auto a = full({32, 32}, 10.0f, DType::Float32, Device::cpu());
@@ -125,7 +125,7 @@ TEST(NumericalStability, VeryLargeValues_Exp) {
 
 TEST(NumericalStability, MixedMagnitudes_Add) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
 
     auto a = full({32, 32}, 1e8f, DType::Float32, Device::cpu());
     auto b = full({32, 32}, 1e-8f, DType::Float32, Device::cpu());
@@ -137,7 +137,7 @@ TEST(NumericalStability, MixedMagnitudes_Add) {
 
 TEST(NumericalStability, MixedMagnitudes_MatMul) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
 
     auto a = full({32, 32}, 1e4f, DType::Float32, Device::cpu());
     auto b = full({32, 32}, 1e-4f, DType::Float32, Device::cpu());
@@ -153,7 +153,7 @@ TEST(NumericalStability, MixedMagnitudes_MatMul) {
 
 TEST(NumericalStability, DenormalizedNumbers) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
 
     // Create denormalized numbers (very close to zero)
     float denorm = std::numeric_limits<float>::min() / 2.0f;
@@ -170,7 +170,7 @@ TEST(NumericalStability, DenormalizedNumbers) {
 
 TEST(NumericalStability, NaN_Propagation) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
 
@@ -183,7 +183,7 @@ TEST(NumericalStability, NaN_Propagation) {
 
 TEST(NumericalStability, NaN_InOperation) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
 
     auto a = randn({32, 32}, DType::Float32, Device::cpu());
 
@@ -199,7 +199,7 @@ TEST(NumericalStability, NaN_InOperation) {
 
 TEST(NumericalStability, Infinity_Division) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
 
     auto a = full({32, 32}, 1e30f, DType::Float32, Device::cpu());
     auto b = full({32, 32}, 1e-30f, DType::Float32, Device::cpu());
@@ -211,7 +211,7 @@ TEST(NumericalStability, Infinity_Division) {
 
 TEST(NumericalStability, Infinity_Exp) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
 
     auto a = full({32, 32}, 100.0f, DType::Float32, Device::cpu());
 
@@ -226,7 +226,7 @@ TEST(NumericalStability, Infinity_Exp) {
 
 TEST(NumericalStability, PrecisionLoss_Accumulation) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
 
     auto a = full({1000, 1000}, 1e-7f, DType::Float32, Device::cpu());
 
@@ -238,7 +238,7 @@ TEST(NumericalStability, PrecisionLoss_Accumulation) {
 
 TEST(NumericalStability, PrecisionLoss_Cancellation) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
 
     auto a = full({32, 32}, 1e8f, DType::Float32, Device::cpu());
     auto b = full({32, 32}, 1e8f + 1.0f, DType::Float32, Device::cpu());
@@ -255,7 +255,7 @@ TEST(NumericalStability, PrecisionLoss_Cancellation) {
 
 TEST(NumericalStability, Softmax_LargeValues) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
 
     // Large values in softmax should not overflow
     auto a = full({32, 64}, 100.0f, DType::Float32, Device::cpu());
@@ -268,7 +268,7 @@ TEST(NumericalStability, Softmax_LargeValues) {
 
 TEST(NumericalStability, LogSoftmax_StableComputation) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
 
     auto a = randn({32, 64}, DType::Float32, Device::cpu()) * 10.0f;
 
@@ -464,7 +464,7 @@ TEST(NumericalStability, Gradient_VeryLargeValues) {
 
 TEST(NumericalStability, DetectUnderflow) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
 
     // Multiply very small numbers
     auto a = full({32, 32}, 1e-20f, DType::Float32, Device::cpu());
@@ -477,7 +477,7 @@ TEST(NumericalStability, DetectUnderflow) {
 
 TEST(NumericalStability, DetectOverflow) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
 
     // Multiply large numbers (but keep within float32 range)
     auto a = full({32, 32}, 1e15f, DType::Float32, Device::cpu());
@@ -497,7 +497,7 @@ TEST(NumericalStability, DetectOverflow) {
 
 TEST(NumericalStability, FP16Saturation_MatMul) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
 
     // Create FP16 tensors with large values that will overflow FP16 range
     // when multiplied: 256 * 256 * inner_dim values near 256 = well over 65504
@@ -514,7 +514,7 @@ TEST(NumericalStability, FP16Saturation_MatMul) {
 
 TEST(NumericalStability, FP16Saturation_Add) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("numerical stability parity");
 
     // Create FP16 tensors with large values near the FP16 max.
     // Adding two values near 65504 should saturate, not produce Inf.

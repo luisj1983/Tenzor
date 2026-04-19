@@ -263,22 +263,60 @@ Conv2d::Conv2d(int64_t in_channels, int64_t out_channels,
     }
 }
 
-auto Conv2d::forward_impl(const Variable& input) -> Variable {
-    auto input_shape = input.shape();
+auto Conv2d::forward_impl(const Variable& input_orig) -> Variable {
+    auto input_shape = input_orig.shape();
     if (input_shape.size() != 4) {
         throw std::invalid_argument("Conv2d expects 4D input [batch, channels, height, width]");
     }
 
     int64_t in_channels = input_shape[1];
-    int64_t height = input_shape[2];
-    int64_t width = input_shape[3];
 
     if (in_channels != in_channels_) {
         throw std::invalid_argument("Input channels mismatch");
     }
 
-    int64_t out_h = calculate_output_size(height, kernel_h_, stride_h_, padding_h_, dilation_h_);
-    int64_t out_w = calculate_output_size(width, kernel_w_, stride_w_, padding_w_, dilation_w_);
+    // CPU Conv2d reads per-axis attr keys and handles rectangular configs
+    // natively. Other backends still read scalar AttrKey::Padding/Stride/
+    // Dilation; on those a rectangular config would silently apply the
+    // H-value to both axes. For rectangular padding specifically we can
+    // transparently pre-pad via functional::pad (autograd-tracked) on any
+    // backend; for rectangular stride/dilation on non-CPU backends we
+    // throw rather than silently produce wrong output.
+    const bool is_cpu = input_orig.tensor().device() == Device::cpu();
+    if (!is_cpu && stride_h_ != stride_w_) {
+        throw std::runtime_error(
+            "Conv2d: rectangular stride (stride_h=" + std::to_string(stride_h_) +
+            ", stride_w=" + std::to_string(stride_w_) + ") on non-CPU backends "
+            "is not yet supported. Non-CPU backend kernels still read a single "
+            "scalar stride.");
+    }
+    if (!is_cpu && dilation_h_ != dilation_w_) {
+        throw std::runtime_error(
+            "Conv2d: rectangular dilation (dilation_h=" + std::to_string(dilation_h_) +
+            ", dilation_w=" + std::to_string(dilation_w_) + ") on non-CPU backends "
+            "is not yet supported.");
+    }
+
+    Variable input = input_orig;
+    int64_t effective_pad_h = padding_h_;
+    int64_t effective_pad_w = padding_w_;
+    if (padding_h_ != padding_w_ && !is_cpu) {
+        // Non-CPU backends: pre-pad with (pad_h, pad_w) and dispatch
+        // Conv2d with padding=0. CPU kernel handles per-axis padding
+        // natively so we skip the pre-pad there.
+        input = ::tenzor::nn::functional::pad(
+            input_orig,
+            std::vector<int64_t>{padding_w_, padding_w_, padding_h_, padding_h_},
+            "constant", 0.0);
+        effective_pad_h = 0;
+        effective_pad_w = 0;
+    }
+
+    auto post_pad_shape = input.shape();
+    int64_t height = post_pad_shape[2];
+    int64_t width = post_pad_shape[3];
+    int64_t out_h = calculate_output_size(height, kernel_h_, stride_h_, effective_pad_h, dilation_h_);
+    int64_t out_w = calculate_output_size(width, kernel_w_, stride_w_, effective_pad_w, dilation_w_);
 
     if (out_h <= 0 || out_w <= 0) {
         throw std::runtime_error(
@@ -316,15 +354,18 @@ auto Conv2d::forward_impl(const Variable& input) -> Variable {
         inputs_vec.push_back(*bias_ptr);
     }
 
-    // Pass both paired and single-value keys for backward compat with backends
+    // Pass both paired and single-value keys for backward compat with backends.
+    // When rectangular padding has already been baked in via pre-pad above,
+    // the conv op itself sees padding=0; the pair keys are likewise zero so
+    // any pair-aware backend reads the same effective values.
     NewOpAttributes forward_attrs;
     forward_attrs.set(AttrKey::Stride, stride_h_);
-    forward_attrs.set(AttrKey::Padding, padding_h_);
+    forward_attrs.set(AttrKey::Padding, effective_pad_h);
     forward_attrs.set(AttrKey::Dilation, dilation_h_);
     forward_attrs.set(AttrKey::StrideH, stride_h_);
     forward_attrs.set(AttrKey::StrideW, stride_w_);
-    forward_attrs.set(AttrKey::PaddingH, padding_h_);
-    forward_attrs.set(AttrKey::PaddingW, padding_w_);
+    forward_attrs.set(AttrKey::PaddingH, effective_pad_h);
+    forward_attrs.set(AttrKey::PaddingW, effective_pad_w);
     forward_attrs.set(AttrKey::DilationH, dilation_h_);
     forward_attrs.set(AttrKey::DilationW, dilation_w_);
     forward_attrs.set(AttrKey::Groups, groups_);
@@ -1814,9 +1855,16 @@ auto ConvTranspose1d::forward_impl(const Variable& input) -> Variable {
         inputs_vec.push_back(*bias_ptr);
     }
 
+    // ConvTranspose2d kernel applies the scalar padding to BOTH H and W.
+    // For our unsqueezed H=1 axis we need pad_h=0, pad_w=padding_. Since
+    // the kernel has no per-axis keys today, dispatch with scalar pad=0
+    // and trim the W axis of the output after the fact (ConvTranspose
+    // "padding" semantically trims output edges). Backward still sees
+    // the original padding_ via ConvTranspose1dBackward, so gradients
+    // flow correctly.
     NewOpAttributes forward_attrs;
     forward_attrs.set(AttrKey::Stride, stride_);
-    forward_attrs.set(AttrKey::Padding, padding_);
+    forward_attrs.set(AttrKey::Padding, static_cast<int64_t>(0));
     forward_attrs.set(AttrKey::OutputPadding, output_padding_);
     forward_attrs.set(AttrKey::Dilation, static_cast<int64_t>(1));
     forward_attrs.set(AttrKey::Groups, groups_);
@@ -1826,8 +1874,21 @@ auto ConvTranspose1d::forward_impl(const Variable& input) -> Variable {
         forward_attrs);
     Tensor output_4d = output_result[0];
 
-    // Squeeze back: [N, C_out, 1, L_out] -> [N, C_out, L_out]
+    // Squeeze back: [N, C_out, 1, L_full] -> [N, C_out, L_full]
     Tensor output = output_4d.squeeze(2);
+
+    if (padding_ > 0) {
+        int64_t L_full = output.shape()[2];
+        int64_t L_trimmed = L_full - 2 * padding_;
+        if (L_trimmed <= 0) {
+            throw std::runtime_error(
+                "Invalid ConvTranspose1d configuration: output length after "
+                "padding trim is non-positive (L_full=" + std::to_string(L_full) +
+                ", padding=" + std::to_string(padding_) + ")");
+        }
+        output = tenzor::slice(output, /*dim=*/2, /*start=*/padding_,
+                               /*end=*/padding_ + L_trimmed);
+    }
     if (output.dtype() != original_dtype) {
         output = output.to(original_dtype);
     }

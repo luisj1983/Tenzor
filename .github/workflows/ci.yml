@@ -245,6 +245,10 @@ jobs:
         run: ninja -C build
 
       - name: Run GPU tests
+        env:
+          # Hard-fail instead of silent-skip when a backend-parity test can't
+          # find >=2 backends; silent skips hid broken GPU init before.
+          TENZOR_REQUIRE_MULTI_BACKEND: '1'
         run: |
           cd build
           ctest -R "cuda|vulkan" -j4 \
@@ -297,6 +301,8 @@ jobs:
         run: ninja -C build
 
       - name: Run Vulkan tests
+        env:
+          TENZOR_REQUIRE_MULTI_BACKEND: '1'
         run: |
           cd build
           ctest -R "vulkan" -j1 \
@@ -431,6 +437,8 @@ jobs:
             --timeout 300
 
       - name: Run cross-backend parity tests (MPS subset)
+        env:
+          TENZOR_REQUIRE_MULTI_BACKEND: '1'
         run: |
           cd build
           ctest --output-on-failure -j1 \
@@ -768,10 +776,14 @@ jobs:
 
       - name: Run CUDA backend tests
         working-directory: build
+        env:
+          TENZOR_REQUIRE_MULTI_BACKEND: '1'
         run: ctest -R "cuda|Cuda" --output-on-failure -j1
 
       - name: Run ROCm backend tests
         working-directory: build
+        env:
+          TENZOR_REQUIRE_MULTI_BACKEND: '1'
         run: ctest -R "rocm|Rocm|hip|Hip" --output-on-failure -j1
 
   # =========================================================================

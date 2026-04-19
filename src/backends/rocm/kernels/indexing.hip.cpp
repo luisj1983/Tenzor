@@ -75,35 +75,35 @@ __device__ __forceinline__ hip_bfloat16 atomicAddHelper<hip_bfloat16>(hip_bfloat
 // Gather Operation
 // ==============================================================================
 
+// Gather with PyTorch semantics: output shape == index shape.
+// For dim d: out[i0..i_{d-1}, p, i_{d+1}..] = input[i0..i_{d-1}, index[i0..p..], i_{d+1}..]
 template<typename T>
 __global__ void gather_kernel(
     const T* input,
     const int64_t* indices,
     T* output,
-    int64_t input_size,
-    int64_t indices_size,
+    int64_t /*input_size*/,
+    int64_t /*indices_numel_unused*/,
     int64_t inner_size,
-    int64_t dim_size
+    int64_t dim_size,
+    int64_t index_dim_size,
+    int64_t total_output
 ) {
-    int64_t total_elements = indices_size * inner_size;
-
-    HIP_KERNEL_LOOP(idx, total_elements) {
+    HIP_KERNEL_LOOP(idx, total_output) {
         int64_t inner_idx = idx % inner_size;
-        int64_t indices_idx = idx / inner_size;
+        int64_t temp = idx / inner_size;
+        int64_t index_pos = temp % index_dim_size;
+        int64_t outer_idx = temp / index_dim_size;
 
-        int64_t index = indices[indices_idx];
+        int64_t index_offset = outer_idx * index_dim_size * inner_size +
+                               index_pos * inner_size + inner_idx;
+        int64_t gather_idx = indices[index_offset];
+        if (gather_idx < 0) gather_idx += dim_size;
+        if (gather_idx < 0 || gather_idx >= dim_size) continue;
 
-        // Handle negative indices
-        if (index < 0) {
-            index += dim_size;
-        }
-
-        // Bounds checking
-        if (index >= 0 && index < dim_size) {
-            int64_t input_idx = indices_idx / indices_size * dim_size * inner_size +
-                               index * inner_size + inner_idx;
-            output[idx] = input[input_idx];
-        }
+        int64_t input_offset = outer_idx * dim_size * inner_size +
+                               gather_idx * inner_size + inner_idx;
+        output[idx] = input[input_offset];
     }
 }
 
@@ -142,10 +142,11 @@ auto gather_hip(
     }
 
     int64_t indices_size = indices.numel();
-    int64_t total_elements = indices_size * inner_size;
+    int64_t index_dim_size = indices_shape[dim];
+    int64_t total_output = output.numel();
 
     int threads = 256;
-    int blocks = (total_elements + threads - 1) / threads;
+    int blocks = static_cast<int>((total_output + threads - 1) / threads);
 
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(gather_kernel<float>,
@@ -153,11 +154,8 @@ auto gather_hip(
             input.data<float>(),
             indices.data<int64_t>(),
             output.data<float>(),
-            input.numel(),
-            indices_size,
-            inner_size,
-            dim_size
-        );
+            input.numel(), indices_size, inner_size, dim_size,
+            index_dim_size, total_output);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(gather_kernel<double>,
@@ -165,11 +163,8 @@ auto gather_hip(
             input.data<double>(),
             indices.data<int64_t>(),
             output.data<double>(),
-            input.numel(),
-            indices_size,
-            inner_size,
-            dim_size
-        );
+            input.numel(), indices_size, inner_size, dim_size,
+            index_dim_size, total_output);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int32) {
         hipLaunchKernelGGL(gather_kernel<int32_t>,
@@ -177,11 +172,8 @@ auto gather_hip(
             input.data<int32_t>(),
             indices.data<int64_t>(),
             output.data<int32_t>(),
-            input.numel(),
-            indices_size,
-            inner_size,
-            dim_size
-        );
+            input.numel(), indices_size, inner_size, dim_size,
+            index_dim_size, total_output);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int64) {
         hipLaunchKernelGGL(gather_kernel<int64_t>,
@@ -189,11 +181,8 @@ auto gather_hip(
             input.data<int64_t>(),
             indices.data<int64_t>(),
             output.data<int64_t>(),
-            input.numel(),
-            indices_size,
-            inner_size,
-            dim_size
-        );
+            input.numel(), indices_size, inner_size, dim_size,
+            index_dim_size, total_output);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(gather_kernel<__half>,
@@ -201,11 +190,8 @@ auto gather_hip(
             reinterpret_cast<const __half*>(input.data<Float16>()),
             indices.data<int64_t>(),
             reinterpret_cast<__half*>(output.data<Float16>()),
-            input.numel(),
-            indices_size,
-            inner_size,
-            dim_size
-        );
+            input.numel(), indices_size, inner_size, dim_size,
+            index_dim_size, total_output);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::BFloat16) {
         hipLaunchKernelGGL(gather_kernel<hip_bfloat16>,
@@ -213,11 +199,8 @@ auto gather_hip(
             reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
             indices.data<int64_t>(),
             reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
-            input.numel(),
-            indices_size,
-            inner_size,
-            dim_size
-        );
+            input.numel(), indices_size, inner_size, dim_size,
+            index_dim_size, total_output);
         HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("gather_hip: Unsupported dtype");
@@ -1487,10 +1470,11 @@ auto gather_hip(
     }
 
     int64_t indices_size = indices.numel();
-    int64_t total_elements = indices_size * inner_size;
+    int64_t index_dim_size = indices_shape[dim];
+    int64_t total_output = output.numel();
 
     int threads = 256;
-    int blocks = (total_elements + threads - 1) / threads;
+    int blocks = static_cast<int>((total_output + threads - 1) / threads);
 
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(gather_kernel<float>,
@@ -1498,11 +1482,8 @@ auto gather_hip(
             input.data<float>(),
             indices.data<int64_t>(),
             output.data<float>(),
-            input.numel(),
-            indices_size,
-            inner_size,
-            dim_size
-        );
+            input.numel(), indices_size, inner_size, dim_size,
+            index_dim_size, total_output);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(gather_kernel<double>,
@@ -1510,11 +1491,8 @@ auto gather_hip(
             input.data<double>(),
             indices.data<int64_t>(),
             output.data<double>(),
-            input.numel(),
-            indices_size,
-            inner_size,
-            dim_size
-        );
+            input.numel(), indices_size, inner_size, dim_size,
+            index_dim_size, total_output);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int32) {
         hipLaunchKernelGGL(gather_kernel<int32_t>,
@@ -1522,11 +1500,8 @@ auto gather_hip(
             input.data<int32_t>(),
             indices.data<int64_t>(),
             output.data<int32_t>(),
-            input.numel(),
-            indices_size,
-            inner_size,
-            dim_size
-        );
+            input.numel(), indices_size, inner_size, dim_size,
+            index_dim_size, total_output);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Int64) {
         hipLaunchKernelGGL(gather_kernel<int64_t>,
@@ -1534,11 +1509,8 @@ auto gather_hip(
             input.data<int64_t>(),
             indices.data<int64_t>(),
             output.data<int64_t>(),
-            input.numel(),
-            indices_size,
-            inner_size,
-            dim_size
-        );
+            input.numel(), indices_size, inner_size, dim_size,
+            index_dim_size, total_output);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(gather_kernel<__half>,
@@ -1546,11 +1518,8 @@ auto gather_hip(
             reinterpret_cast<const __half*>(input.data<Float16>()),
             indices.data<int64_t>(),
             reinterpret_cast<__half*>(output.data<Float16>()),
-            input.numel(),
-            indices_size,
-            inner_size,
-            dim_size
-        );
+            input.numel(), indices_size, inner_size, dim_size,
+            index_dim_size, total_output);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::BFloat16) {
         hipLaunchKernelGGL(gather_kernel<hip_bfloat16>,
@@ -1558,11 +1527,8 @@ auto gather_hip(
             reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
             indices.data<int64_t>(),
             reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
-            input.numel(),
-            indices_size,
-            inner_size,
-            dim_size
-        );
+            input.numel(), indices_size, inner_size, dim_size,
+            index_dim_size, total_output);
         HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("gather_hip: Unsupported dtype");

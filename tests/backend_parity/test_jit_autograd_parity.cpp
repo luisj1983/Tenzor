@@ -32,7 +32,7 @@ void copy_params(nn::Module& src, nn::Module& dst) {
 // Fixed via ROCm cascading fixes (mul/add/sub/div non-contig + contiguous UAF).
 TEST_P(JITAutogradParity, LinearChain_Backward) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("jit autograd parity");
 
     try {
         nn::Linear l1(32, 16);
@@ -88,7 +88,7 @@ TEST_P(JITAutogradParity, LinearChain_Backward) {
 // Fixed alongside LinearChain_Backward.
 TEST_P(JITAutogradParity, LayerNormMLP_Backward) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("jit autograd parity");
 
     try {
         nn::Linear l1(16, 16);

@@ -1401,6 +1401,12 @@ public:
 
             OpAttributes attrs;
             attrs.set(AttrKey::NumGroups, num_groups_);
+            // Canonical input order for all backend registries:
+            //   [grad_output, input, mean, rstd, weight]
+            // CPU and CUDA registries previously read this as
+            // [grad_output, input, weight, mean, rstd] (legacy), silently
+            // producing garbage xhat because rstd was used as weight and
+            // weight was used as mean. Fixed in both backends.
             std::vector<Tensor> inputs_vec = {go, inp, mn, rs, wt};
             auto results = dispatch<OpId::GroupNormBackward>(inputs_vec, attrs);
 

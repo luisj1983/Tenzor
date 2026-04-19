@@ -55,7 +55,7 @@ void main() {
         }
     } else {
         // Pass 2: Sum workgroup counts (single workgroup)
-        uint n_workgroups = (params.n_elements + 255) / 256;
+        uint n_workgroups = (params.n_elements + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
 
         uint local_sum = 0;
         for (uint i = tid; i < n_workgroups; i += WORKGROUP_SIZE) {

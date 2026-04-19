@@ -2843,6 +2843,26 @@ auto expand_kernel(const Tensor& input_in, const std::vector<int64_t>& shape, vo
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()),
             meta, input_ndim, output_ndim, n);
         CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Bool) {
+        expand_kernel_device<<<grid, block, 0, stream>>>(
+            input.data<bool>(), result.data<bool>(),
+            meta, input_ndim, output_ndim, n);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Int8) {
+        expand_kernel_device<<<grid, block, 0, stream>>>(
+            input.data<int8_t>(), result.data<int8_t>(),
+            meta, input_ndim, output_ndim, n);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::UInt8) {
+        expand_kernel_device<<<grid, block, 0, stream>>>(
+            input.data<uint8_t>(), result.data<uint8_t>(),
+            meta, input_ndim, output_ndim, n);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Int16) {
+        expand_kernel_device<<<grid, block, 0, stream>>>(
+            input.data<int16_t>(), result.data<int16_t>(),
+            meta, input_ndim, output_ndim, n);
+        CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Unsupported dtype for expand operation");
     }

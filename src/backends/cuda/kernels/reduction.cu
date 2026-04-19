@@ -3939,6 +3939,13 @@ __global__ void sum_reduce_pow_kernel(const T* input, T* output, int64_t n, T ex
     }
 }
 
+// Elementwise sqrt — used by std per-dim path (var_kernel + sqrt).
+template<typename T>
+__global__ void elementwise_sqrt_kernel(const T* input, T* output, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) output[idx] = T(sqrt(double(input[idx])));
+}
+
 // Public API for standard deviation
 auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction, cudaStream_t stream) -> Tensor {
     auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
@@ -3948,10 +3955,25 @@ auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
     const auto& device = input.device();
     const auto& input_shape = input.shape();
 
-    // For now, only support full reduction (dim=INT64_MIN or dim=-1)
-    // INT64_MIN is the sentinel for "reduce all dimensions"
+    // Per-dim reduction: reuse var_kernel (which supports it) and take sqrt.
+    // CPU/ROCm/OneAPI/Vulkan all implement std this way; CUDA was missing the
+    // path which stopped StdBackward from flowing gradients.
     if (dim != INT64_MIN && dim != -1) {
-        throw std::runtime_error("std: only full reduction is currently supported for CUDA");
+        auto var_result = var_kernel(input, dim, keepdim, correction, stream);
+        // sqrt element-wise into a new tensor
+        auto out_shape_vec = std::vector<int64_t>(var_result.shape().begin(), var_result.shape().end());
+        Tensor out(out_shape_vec, var_result.dtype(), var_result.device());
+        int64_t n = var_result.numel();
+        constexpr int BLOCK = 256;
+        int blocks = (n + BLOCK - 1) / BLOCK;
+        TENZOR_DISPATCH_FLOATING_TYPES(dtype, "std_sqrt", [&]() {
+            auto* vd = var_result.data<scalar_t>();
+            auto* od = out.data<scalar_t>();
+            elementwise_sqrt_kernel<scalar_t><<<blocks, BLOCK, 0, stream>>>(vd, od, n);
+            CUDA_CHECK(cudaGetLastError());
+        });
+        CUDA_PEEK_AND_THROW(stream, "std_kernel_perdim");
+        return out;
     }
 
     // Compute output shape

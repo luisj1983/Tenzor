@@ -142,6 +142,16 @@ auto make_tracing_interceptor(
         auto copy_int = [&](AttrKey k, const char* name) {
             if (attrs.has(k)) traced.int_attrs[name] = attrs.get_int(k);
         };
+        // For 2-D conv-family ops the eager side sets both a scalar (e.g.
+        // AttrKey::Padding = padding_h_) and a pair (PaddingH/PaddingW).
+        // The scalar alone drops the W axis; record the pair as a vec so
+        // consumers that want rectangular configs (e.g. the ONNX exporter's
+        // JIT→ONNX Conv2d translator) find it.
+        auto copy_hw_pair = [&](AttrKey kh, AttrKey kw, const char* name) {
+            if (attrs.has(kh) && attrs.has(kw)) {
+                traced.vec_attrs[name] = {attrs.get_int(kh), attrs.get_int(kw)};
+            }
+        };
         copy_float(AttrKey::Exponent, "exponent");
         copy_float(AttrKey::Alpha,    "alpha");
         copy_float(AttrKey::Beta,     "beta");
@@ -155,6 +165,10 @@ auto make_tracing_interceptor(
         copy_int(AttrKey::Padding,     "padding");
         copy_int(AttrKey::Dilation,    "dilation");
         copy_int(AttrKey::Groups,      "groups");
+        copy_hw_pair(AttrKey::KernelSizeH, AttrKey::KernelSizeW, "kernel_size");
+        copy_hw_pair(AttrKey::StrideH,     AttrKey::StrideW,     "stride");
+        copy_hw_pair(AttrKey::PaddingH,    AttrKey::PaddingW,    "padding");
+        copy_hw_pair(AttrKey::DilationH,   AttrKey::DilationW,   "dilation");
 
         tracer.record_op(std::move(traced));
 

@@ -25,7 +25,7 @@ class NNNormParity : public BackendTest {};
 
 TEST_P(NNNormParity, InstanceNorm1d) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn norm parity");
 
     nn::InstanceNorm1d in1d(16);
     in1d.eval();
@@ -55,7 +55,7 @@ TEST_P(NNNormParity, InstanceNorm1d) {
 
 TEST_P(NNNormParity, InstanceNorm2d) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn norm parity");
 
     nn::InstanceNorm2d in2d(16);
     in2d.eval();
@@ -85,7 +85,7 @@ TEST_P(NNNormParity, InstanceNorm2d) {
 
 TEST_P(NNNormParity, InstanceNorm3d) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn norm parity");
 
     nn::InstanceNorm3d in3d(16);
     in3d.eval();
@@ -119,7 +119,7 @@ TEST_P(NNNormParity, InstanceNorm3d) {
 
 TEST_P(NNNormParity, RMSNorm) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn norm parity");
 
     nn::RMSNorm rms(32);
     rms.eval();
@@ -153,7 +153,7 @@ TEST_P(NNNormParity, RMSNorm) {
 
 TEST_P(NNNormParity, LocalResponseNorm) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn norm parity");
 
     nn::LocalResponseNorm lrn(5);
     lrn.eval();
@@ -188,7 +188,7 @@ TEST_P(NNNormParity, LocalResponseNorm) {
 
 TEST_P(NNNormParity, BatchNorm2d_NoAffine) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn norm parity");
 
     // affine=false: no learnable weight/bias, only running stats
     nn::BatchNorm2d bn(16, 1e-5, 0.1, /*affine=*/false);
@@ -233,7 +233,7 @@ TEST_P(NNNormParity, BatchNorm2d_NoAffine) {
 
 TEST_P(NNNormParity, LayerNorm_MultiDim) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn norm parity");
 
     nn::LayerNorm ln({8, 32});
     ln.eval();
@@ -267,7 +267,7 @@ TEST_P(NNNormParity, LayerNorm_MultiDim) {
 
 TEST_P(NNNormParity, SyncBatchNorm) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn norm parity");
 
     // Identity all-reduce (single process): no-op
     auto identity_all_reduce = [](Tensor& /*tensor*/) {};

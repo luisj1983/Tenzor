@@ -677,11 +677,23 @@ auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor {
             case DType::Float64:
                 expand_impl(static_cast<double*>(nullptr));
                 break;
+            case DType::Int8:
+                expand_impl(static_cast<int8_t*>(nullptr));
+                break;
+            case DType::UInt8:
+                expand_impl(static_cast<uint8_t*>(nullptr));
+                break;
+            case DType::Int16:
+                expand_impl(static_cast<int16_t*>(nullptr));
+                break;
             case DType::Int32:
                 expand_impl(static_cast<int32_t*>(nullptr));
                 break;
             case DType::Int64:
                 expand_impl(static_cast<int64_t*>(nullptr));
+                break;
+            case DType::Bool:
+                expand_impl(static_cast<bool*>(nullptr));
                 break;
             default:
                 throw std::runtime_error("Unsupported dtype for expand");

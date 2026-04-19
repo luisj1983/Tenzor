@@ -24,7 +24,7 @@ class CustomOpParity : public BackendTest {};
 // dispatch it on tensors living on each backend and compare results.
 TEST_P(CustomOpParity, Affine_MultiBackend) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("custom op parity");
 
     // Kernel body is identical per backend — it just uses tenzor ops which
     // dispatch to the right backend at call time.
@@ -73,7 +73,7 @@ TEST_P(CustomOpParity, Affine_MultiBackend) {
 // Custom op with backward — verify both forward and gradient match.
 TEST_P(CustomOpParity, Squared_Backward_MultiBackend) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("custom op parity");
 
     auto forward = [](std::span<const Tensor> inputs,
                       const OpAttributes&) -> Tensor {

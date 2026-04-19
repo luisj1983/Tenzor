@@ -24,19 +24,23 @@ class NNActivationParity : public BackendTest {};
 
 TEST_P(NNActivationParity, SELU) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn activation parity");
 
     auto input = randn({32, 64}, DType::Float32, Device::cpu());
 
+    // atol=1e-7 is too tight for SELU at x near 0: lambda*alpha*(exp(x)-1)
+    // approaches 0 and different backends' exp() implementations can disagree
+    // by ~1.5e-7 on the absolute value. rtol catches proportional error on
+    // non-zero outputs.
     test_operation_parity([](const std::vector<Tensor>& inputs) {
         auto x = Variable(inputs[0], false);
         return nn::selu(x).tensor();
-    }, {input}, 1e-5f, 1e-7f, "SELU");
+    }, {input}, 1e-5f, 1e-6f, "SELU");
 }
 
 TEST_P(NNActivationParity, Mish) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn activation parity");
 
     auto input = randn({32, 64}, DType::Float32, Device::cpu());
 
@@ -48,7 +52,7 @@ TEST_P(NNActivationParity, Mish) {
 
 TEST_P(NNActivationParity, Softplus) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn activation parity");
 
     auto input = randn({32, 64}, DType::Float32, Device::cpu());
 
@@ -60,7 +64,7 @@ TEST_P(NNActivationParity, Softplus) {
 
 TEST_P(NNActivationParity, LogSigmoid) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn activation parity");
 
     auto input = randn({32, 64}, DType::Float32, Device::cpu());
 
@@ -72,7 +76,7 @@ TEST_P(NNActivationParity, LogSigmoid) {
 
 TEST_P(NNActivationParity, Hardshrink) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn activation parity");
 
     auto input = randn({32, 64}, DType::Float32, Device::cpu());
 
@@ -84,7 +88,7 @@ TEST_P(NNActivationParity, Hardshrink) {
 
 TEST_P(NNActivationParity, Hardswish) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn activation parity");
 
     auto input = randn({32, 64}, DType::Float32, Device::cpu());
 
@@ -96,7 +100,7 @@ TEST_P(NNActivationParity, Hardswish) {
 
 TEST_P(NNActivationParity, Hardtanh) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn activation parity");
 
     auto input = randn({32, 64}, DType::Float32, Device::cpu());
 
@@ -108,7 +112,7 @@ TEST_P(NNActivationParity, Hardtanh) {
 
 TEST_P(NNActivationParity, CELU) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn activation parity");
 
     auto input = randn({32, 64}, DType::Float32, Device::cpu());
 
@@ -120,7 +124,7 @@ TEST_P(NNActivationParity, CELU) {
 
 TEST_P(NNActivationParity, Threshold) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn activation parity");
 
     auto input = randn({32, 64}, DType::Float32, Device::cpu());
 
@@ -132,7 +136,7 @@ TEST_P(NNActivationParity, Threshold) {
 
 TEST_P(NNActivationParity, Softsign) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn activation parity");
 
     auto input = randn({32, 64}, DType::Float32, Device::cpu());
 
@@ -148,7 +152,7 @@ TEST_P(NNActivationParity, Softsign) {
 
 TEST_P(NNActivationParity, PReLU) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn activation parity");
 
     nn::PReLU prelu(1);
     prelu.eval();
@@ -178,7 +182,7 @@ TEST_P(NNActivationParity, PReLU) {
 
 TEST_P(NNActivationParity, RReLU_Eval) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn activation parity");
 
     auto input = randn({32, 64}, DType::Float32, Device::cpu());
 

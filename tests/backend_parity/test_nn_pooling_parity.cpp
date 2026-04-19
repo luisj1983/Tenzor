@@ -23,7 +23,7 @@ class NNPoolingParity : public BackendTest {};
 
 TEST_P(NNPoolingParity, MaxPool1d) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
 
     auto input = randn({1, 16, 32}, DType::Float32, Device::cpu());
 
@@ -35,7 +35,7 @@ TEST_P(NNPoolingParity, MaxPool1d) {
 
 TEST_P(NNPoolingParity, AvgPool1d) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
 
     auto input = randn({1, 16, 32}, DType::Float32, Device::cpu());
 
@@ -51,7 +51,7 @@ TEST_P(NNPoolingParity, AvgPool1d) {
 
 TEST_P(NNPoolingParity, MaxPool3d) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
 
     auto input = randn({1, 16, 8, 8, 8}, DType::Float32, Device::cpu());
 
@@ -63,7 +63,7 @@ TEST_P(NNPoolingParity, MaxPool3d) {
 
 TEST_P(NNPoolingParity, AvgPool3d) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
 
     auto input = randn({1, 16, 8, 8, 8}, DType::Float32, Device::cpu());
 
@@ -79,7 +79,7 @@ TEST_P(NNPoolingParity, AvgPool3d) {
 
 TEST_P(NNPoolingParity, AdaptiveAvgPool1d) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
 
     auto input = randn({1, 16, 32}, DType::Float32, Device::cpu());
 
@@ -91,7 +91,7 @@ TEST_P(NNPoolingParity, AdaptiveAvgPool1d) {
 
 TEST_P(NNPoolingParity, AdaptiveMaxPool1d) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
 
     auto input = randn({1, 16, 32}, DType::Float32, Device::cpu());
 
@@ -107,7 +107,7 @@ TEST_P(NNPoolingParity, AdaptiveMaxPool1d) {
 
 TEST_P(NNPoolingParity, AdaptiveAvgPool3d) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
 
     auto input = randn({1, 16, 8, 8, 8}, DType::Float32, Device::cpu());
 
@@ -119,7 +119,7 @@ TEST_P(NNPoolingParity, AdaptiveAvgPool3d) {
 
 TEST_P(NNPoolingParity, AdaptiveMaxPool3d) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
 
     auto input = randn({1, 16, 8, 8, 8}, DType::Float32, Device::cpu());
 
@@ -135,7 +135,7 @@ TEST_P(NNPoolingParity, AdaptiveMaxPool3d) {
 
 TEST_P(NNPoolingParity, LPPool1d) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
 
     auto input = randn({1, 16, 32}, DType::Float32, Device::cpu());
 
@@ -147,7 +147,7 @@ TEST_P(NNPoolingParity, LPPool1d) {
 
 TEST_P(NNPoolingParity, LPPool2d) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
 
     auto input = randn({1, 16, 8, 8}, DType::Float32, Device::cpu());
 
@@ -163,7 +163,7 @@ TEST_P(NNPoolingParity, LPPool2d) {
 
 TEST_P(NNPoolingParity, MaxPool2d_Stride3) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
 
     auto input = randn({1, 16, 16, 16}, DType::Float32, Device::cpu());
 
@@ -175,7 +175,7 @@ TEST_P(NNPoolingParity, MaxPool2d_Stride3) {
 
 TEST_P(NNPoolingParity, AvgPool2d_Padded) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
 
     // AvgPool2d does not expose a count_include_pad option in this
     // codebase, so we test with padding instead.
@@ -189,7 +189,7 @@ TEST_P(NNPoolingParity, AvgPool2d_Padded) {
 
 TEST_P(NNPoolingParity, FractionalMaxPool2d) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
 
     // FractionalMaxPool2d may not exist as a module class in this codebase.
     // Wrap the entire test in try/catch to skip gracefully.
@@ -209,7 +209,7 @@ TEST_P(NNPoolingParity, FractionalMaxPool2d) {
 
 TEST_P(NNPoolingParity, MaxPool2d_WithPadding) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
 
     auto input = randn({1, 16, 8, 8}, DType::Float32, Device::cpu());
 
@@ -231,7 +231,7 @@ void pool_grad_parity(PoolT make_pool,
                       const char* name) {
     auto input = randn(input_shape, DType::Float32, Device::cpu());
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
 
     Tensor ref_out, ref_grad;
     try {
@@ -319,7 +319,7 @@ TEST_P(NNPoolingParity, AvgPool2d_Backward) {
 TEST_P(NNPoolingParity, FractionalMaxPool3d) {
     auto input = randn({1, 2, 4, 4, 4}, DType::Float32, Device::cpu());
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
 
     Tensor ref;
     try {
@@ -374,7 +374,7 @@ TEST_P(NNPoolingParity, MaxUnpool2d) {
     }
 
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
 
     Tensor ref;
     try {

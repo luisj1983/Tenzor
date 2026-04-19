@@ -29,7 +29,11 @@ void main() {
             // Cross entropy: -log(p[target])
             loss_val = -log_probs[idx * params.num_classes + uint(target)];
         }
-        losses[idx] = loss_val;
+        // See cross_entropy.comp: only write per-sample loss when no
+        // reduction is requested, otherwise the [1]-shape output is OOB.
+        if (params.reduction == 0) {
+            losses[idx] = loss_val;
+        }
     }
 
     // Reduction
@@ -37,9 +41,9 @@ void main() {
         shared_sum[tid] = (idx < params.batch_size) ? loss_val : float64_t(0.0);
         barrier();
 
-        // Parallel reduction
+        // Parallel reduction — use WORKGROUP_SIZE spec constant, not 256.
         for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
-            if (tid < s && (tid + s) < 256) {
+            if (tid < s) {
                 shared_sum[tid] += shared_sum[tid + s];
             }
             barrier();

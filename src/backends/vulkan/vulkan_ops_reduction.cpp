@@ -205,78 +205,118 @@ auto VulkanBackend::dispatchArgmin(const Tensor& input, int64_t dim, bool keepdi
     return output;
 }
 
-auto VulkanBackend::dispatchVariance(const Tensor& input_orig, int64_t dim, bool unbiased, bool keepdim) -> Tensor {
-    // Var = E[(x - mean)^2]; the underlying dispatchReduction/dispatchBinaryOp
-    // calls treat the buffer as flat row-major (the same stride-from-shape
-    // pattern as Vulkan softmax). Materialize a contiguous input so
-    // non-contiguous views (transpose/permute/slice) don't read the wrong
-    // memory and produce CPU-vs-Vulkan parity failures along an axis.
+// Shared single-pass Welford dispatch used by dispatchVariance/dispatchStd.
+// The previous two-pass (mean then E[(x-mean)^2]) implementation wrote Float32
+// intermediates back to VRAM between passes, losing 3-14e-2 vs CPU on
+// contiguous inputs even when the formula itself was exact. A single-pass
+// Welford with double-precision shared accumulators matches the CPU and CUDA
+// references. See issue #30 and tests/backend_parity/test_stride_parity.cpp.
+auto VulkanBackend::dispatchVarianceWelford(
+    const Tensor& input_orig, int64_t dim, bool unbiased, bool keepdim,
+    bool compute_std) -> Tensor {
     Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
-    std::vector<int64_t> out_shape;
     auto input_shape = input.shape();
-
-    // Check if this is a full reduction (dim < 0 means reduce all elements)
     bool full_reduction = (dim < 0);
 
-    // For dispatchReduction, use INT64_MIN to signal full reduction
-    int64_t reduction_dim = full_reduction ? INT64_MIN : dim;
+    // Normalize the reduction axis onto the canonical [outer | reduce | inner]
+    // layout the shader expects. Full reduction collapses the whole tensor
+    // into a single output element; per-dim reduction keeps the surrounding
+    // axes.
+    std::vector<int64_t> out_shape;
+    uint32_t reduce_size;
+    uint32_t inner_size = 1;
+    uint32_t outer_size;
 
     if (full_reduction) {
-        // Full reduction: output is scalar (empty shape) or [1,1,...] if keepdim
+        reduce_size = static_cast<uint32_t>(input.numel());
+        outer_size = 1;
         if (keepdim) {
             out_shape.assign(input_shape.size(), 1);
         } else {
-            out_shape = {};  // Scalar
+            out_shape = {};
         }
     } else {
+        int64_t norm_dim = dim;
+        if (norm_dim < 0) norm_dim += static_cast<int64_t>(input_shape.size());
+        reduce_size = static_cast<uint32_t>(input_shape[norm_dim]);
+        for (size_t i = static_cast<size_t>(norm_dim) + 1; i < input_shape.size(); ++i) {
+            inner_size *= static_cast<uint32_t>(input_shape[i]);
+        }
         out_shape = std::vector<int64_t>(input_shape.begin(), input_shape.end());
         if (keepdim) {
-            out_shape[dim] = 1;
+            out_shape[norm_dim] = 1;
         } else {
-            out_shape.erase(out_shape.begin() + dim);
+            out_shape.erase(out_shape.begin() + norm_dim);
         }
+        int64_t out_numel = 1;
+        for (auto d : out_shape) out_numel *= d;
+        outer_size = static_cast<uint32_t>(out_numel == 0 ? 1 : out_numel);
     }
 
-    // Compute variance using the formula: Var(X) = E[(X - mean)^2]
-    // 1. Compute mean (with keepdim=true for broadcasting)
-    Tensor mean = dispatchReduction("mean", input, reduction_dim, true);
+    Tensor output(out_shape.empty() ? std::vector<int64_t>{} : out_shape,
+                  input.dtype(), input.device());
 
-    // 2. Compute (X - mean)
-    Tensor diff = dispatchBinaryOp("sub", input, mean);
-
-    // 3. Square the differences
-    Tensor squared_diff = dispatchBinaryOp("mul", diff, diff);
-
-    // 4. Compute sum of squared differences
-    Tensor sum_squared = dispatchReduction("sum", squared_diff, reduction_dim, keepdim);
-
-    // 5. Divide by N or N-1
-    uint32_t reduce_size = full_reduction ? static_cast<uint32_t>(input.numel()) : static_cast<uint32_t>(input_shape[dim]);
-    double divisor = unbiased ? static_cast<double>(reduce_size - 1) : static_cast<double>(reduce_size);
-
-    // Create a scalar tensor with the divisor matching the output shape
-    // This ensures broadcasting preserves the correct output shape
-    auto sum_shape = sum_squared.shape();
-    std::vector<int64_t> divisor_shape(sum_shape.begin(), sum_shape.end());
-    if (divisor_shape.empty()) {
-        divisor_shape = {1};
+    if (input.numel() == 0) {
+        return output;
     }
-    Tensor divisor_tensor = dispatchFull(divisor_shape, static_cast<float>(divisor), input.dtype());
 
-    // Divide variance by divisor and reshape to match expected output
-    Tensor result = dispatchBinaryOp("div", sum_squared, divisor_tensor);
+    int32_t device_id = input.device().index;
+    const char* shader_name = (input.dtype() == DType::Float64) ? "welford_variance_f64"
+                            : (input.dtype() == DType::Float16) ? "welford_variance_f16"
+                            : (input.dtype() == DType::BFloat16) ? "welford_variance_bf16"
+                            : "welford_variance";
+    auto* pipeline = getPipeline(shader_name, device_id);
 
-    // If the output should be a scalar but broadcast made it [1], reshape to scalar
-    if (full_reduction && !keepdim && result.shape().size() > 0) {
-        return result.reshape({});
+    size_t buffer_size_in = input.numel() * input.dtype_size();
+    size_t buffer_size_out = output.numel() * output.dtype_size();
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        // Packed 2x16 per uint32: round up to the nearest pair.
+        buffer_size_in = ((input.numel() + 1) / 2) * 4;
+        buffer_size_out = ((output.numel() + 1) / 2) * 4;
     }
-    return result;
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, input.data_ptr()}, {1, output.data_ptr()}
+    };
+    std::vector<size_t> sizes = {buffer_size_in, buffer_size_out};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    struct PushConstants {
+        uint32_t n;
+        uint32_t reduce_size;
+        uint32_t outer_size;
+        uint32_t inner_size;
+        uint32_t unbiased;
+        uint32_t compute_std;
+    } pc{};
+    pc.n = static_cast<uint32_t>(input.numel());
+    pc.reduce_size = reduce_size;
+    pc.outer_size = outer_size;
+    pc.inner_size = inner_size;
+    pc.unbiased = unbiased ? 1u : 0u;
+    pc.compute_std = compute_std ? 1u : 0u;
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmdBuffer, outer_size, 1, 1);
+    insertComputeOnlyBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchVariance(const Tensor& input, int64_t dim, bool unbiased, bool keepdim) -> Tensor {
+    return dispatchVarianceWelford(input, dim, unbiased, keepdim, /*compute_std=*/false);
 }
 
 auto VulkanBackend::dispatchStd(const Tensor& input, int64_t dim, bool unbiased, bool keepdim) -> Tensor {
-    // Standard deviation is just sqrt of variance
-    Tensor variance = dispatchVariance(input, dim, unbiased, keepdim);
-    return dispatchUnaryOp("sqrt", variance);
+    return dispatchVarianceWelford(input, dim, unbiased, keepdim, /*compute_std=*/true);
 }
 
 auto VulkanBackend::dispatchNorm(const Tensor& input, float p, int64_t dim, bool keepdim) -> Tensor {
@@ -921,7 +961,12 @@ auto VulkanBackend::dispatchDiag(const Tensor& input, int64_t diagonal) -> Tenso
     }
 }
 
-auto VulkanBackend::dispatchFlip(const Tensor& input, int64_t dim) -> Tensor {
+auto VulkanBackend::dispatchFlip(const Tensor& input_orig, int64_t dim) -> Tensor {
+    // The flip compute shaders index the input buffer as flat row-major
+    // using stride-from-shape. A non-contiguous input (e.g. a slice or
+    // transpose) would therefore read the wrong elements. Materialize a
+    // contiguous copy up front — same fix pattern as dispatchVariance.
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     auto input_shape = input.shape();
 
     if (input.numel() == 0) {

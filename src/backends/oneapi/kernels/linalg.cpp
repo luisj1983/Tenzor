@@ -1228,10 +1228,10 @@ auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
     auto b_shape = B.shape();
     int64_t nrhs = (b_shape.size() > 1) ? b_shape[b_shape.size() - 1] : 1;
 
-    // oneMKL trsm works in column-major. Convert row-major to col-major,
-    // solve, convert back.
-    // In column-major, row-major upper becomes lower and vice versa.
-    auto mkl_uplo = upper ? ::oneapi::mkl::uplo::lower : ::oneapi::mkl::uplo::upper;
+    // oneMKL trsm works in column-major. row_to_col_major physically
+    // transposes the storage, which is a double negation (transpose +
+    // col-major-reinterpret cancel out), so uplo maps straight through.
+    auto mkl_uplo = upper ? ::oneapi::mkl::uplo::upper : ::oneapi::mkl::uplo::lower;
     auto mkl_diag = unitriangular ? ::oneapi::mkl::diag::unit : ::oneapi::mkl::diag::nonunit;
 
     if (A.dtype() == DType::Float32) {

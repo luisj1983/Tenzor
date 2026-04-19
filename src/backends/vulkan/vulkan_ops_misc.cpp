@@ -911,38 +911,61 @@ auto VulkanBackend::dispatchWhere(const Tensor& condition, const Tensor& x, cons
     auto x_shape = x.shape();
     auto y_shape = y.shape();
 
-    // Validate shapes match
+    // Validate shapes match (caller is expected to broadcast beforehand)
     if (cond_shape.size() != x_shape.size() || cond_shape.size() != y_shape.size()) {
         throw std::invalid_argument("where: all tensors must have same number of dimensions");
     }
-
     for (size_t i = 0; i < cond_shape.size(); ++i) {
         if (cond_shape[i] != x_shape[i] || cond_shape[i] != y_shape[i]) {
             throw std::invalid_argument("where: all tensors must have same shape");
         }
     }
 
-    // Use element-wise operations to implement where on GPU
-    // where(cond, x, y) = cond * x + (1 - cond) * y
-    // This works if condition is 0 or 1
-
-    // Convert condition to the same dtype as x to preserve output dtype
+    // Native shader path (Float32 only — fast and numerically exact).
+    // For other dtypes we promote to Float32 and cast back at the end.
     DType target_dtype = x.dtype();
-    Tensor cond_typed = condition.dtype() == target_dtype ? condition : condition.to(target_dtype);
+    Tensor cond_u8  = (condition.dtype() == DType::Bool) ? condition : condition.to(DType::Bool);
+    Tensor x_f32    = (target_dtype == DType::Float32) ? x : x.to(DType::Float32);
+    Tensor y_f32    = (y.dtype() == DType::Float32) ? y : y.to(DType::Float32);
 
-    // Compute: cond * x
-    Tensor term1 = dispatchBinaryOp("mul", cond_typed, x);
+    // Ensure contiguous for direct buffer indexing
+    if (!cond_u8.is_contiguous()) cond_u8 = cond_u8.contiguous();
+    if (!x_f32.is_contiguous())   x_f32   = x_f32.contiguous();
+    if (!y_f32.is_contiguous())   y_f32   = y_f32.contiguous();
 
-    // Compute: (1 - cond)
-    std::vector<int64_t> cond_shape_vec(cond_shape.begin(), cond_shape.end());
-    Tensor one_tensor = dispatchFull(cond_shape_vec, 1.0f, target_dtype);
-    Tensor inv_cond = dispatchBinaryOp("sub", one_tensor, cond_typed);
+    int32_t device_id = x.device().index;
+    auto* pipeline = getPipeline("where", device_id);
 
-    // Compute: (1 - cond) * y
-    Tensor term2 = dispatchBinaryOp("mul", inv_cond, y);
+    std::vector<int64_t> out_shape(cond_shape.begin(), cond_shape.end());
+    Tensor out_f32(out_shape, DType::Float32, x.device());
 
-    // Compute: term1 + term2
-    return dispatchBinaryOp("add", term1, term2);
+    uint32_t n = static_cast<uint32_t>(out_f32.numel());
+    struct { uint32_t num_elements; } pc;
+    pc.num_elements = n;
+
+    size_t f32_size  = static_cast<size_t>(n) * sizeof(float);
+    size_t bool_size = static_cast<size_t>(n) * sizeof(uint8_t);
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, cond_u8.data_ptr()},
+        {1, x_f32.data_ptr()},
+        {2, y_f32.data_ptr()},
+        {3, out_f32.data_ptr()},
+    };
+    std::vector<size_t> sizes = {bool_size, f32_size, f32_size, f32_size};
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(n, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+
+    return (target_dtype == DType::Float32) ? out_f32 : out_f32.to(target_dtype);
 }
 
 // ============================================================================
@@ -2720,6 +2743,19 @@ auto VulkanBackend::dispatchCumSum(const Tensor& input, int64_t dim) -> Tensor {
                                  std::to_string(ndim) + " dimensions)");
     }
 
+    // No native int shaders — the default path reads int bytes as float and
+    // silently produces zero (int 1 reinterpreted as float = denormal ~0).
+    // Promote to Float32, cumsum, cast back. NMS relied on this path for
+    // its prefix-sum compaction; empty output = int cumsum returning 0s.
+    DType src_dtype = input.dtype();
+    if (src_dtype == DType::Int32 || src_dtype == DType::Int64 ||
+        src_dtype == DType::Int16 || src_dtype == DType::Int8 ||
+        src_dtype == DType::UInt8 || src_dtype == DType::Bool) {
+        auto f32 = input.to(DType::Float32);
+        auto out_f32 = dispatchCumSum(f32, dim);
+        return out_f32.to(src_dtype);
+    }
+
     int32_t device_id = input.device().index;
     bool is_f64 = (input.dtype() == DType::Float64);
     bool is_f16 = (input.dtype() == DType::Float16);
@@ -2790,6 +2826,18 @@ auto VulkanBackend::dispatchCumProd(const Tensor& input, int64_t dim) -> Tensor 
         throw std::runtime_error("cumprod: dimension out of range (got " +
                                  std::to_string(dim) + " for tensor with " +
                                  std::to_string(ndim) + " dimensions)");
+    }
+
+    // Same int-dtype fall-through issue as dispatchCumSum: the default float
+    // shader reads int bytes as float and yields denormal/NaN garbage.
+    // Promote to Float32, compute, cast back.
+    DType src_dtype = input.dtype();
+    if (src_dtype == DType::Int32 || src_dtype == DType::Int64 ||
+        src_dtype == DType::Int16 || src_dtype == DType::Int8 ||
+        src_dtype == DType::UInt8 || src_dtype == DType::Bool) {
+        auto f32 = input.to(DType::Float32);
+        auto out_f32 = dispatchCumProd(f32, dim);
+        return out_f32.to(src_dtype);
     }
 
     int32_t device_id = input.device().index;
@@ -4228,6 +4276,17 @@ auto VulkanBackend::dispatchCumMax(const Tensor& input, int64_t dim) -> std::pai
     int64_t ndim = static_cast<int64_t>(in_shape.size());
     if (dim < 0) dim += ndim;
 
+    // Same int-dtype fall-through as cumsum/cumprod: only Float32/Float64
+    // shaders exist. Promote integer inputs so bytes aren't reinterpreted.
+    DType src_dtype = input.dtype();
+    if (src_dtype == DType::Int32 || src_dtype == DType::Int64 ||
+        src_dtype == DType::Int16 || src_dtype == DType::Int8 ||
+        src_dtype == DType::UInt8 || src_dtype == DType::Bool) {
+        auto f32 = input.to(DType::Float32);
+        auto [v_f32, idx] = dispatchCumMax(f32, dim);
+        return {v_f32.to(src_dtype), idx};
+    }
+
     int32_t device_id = input.device().index;
     bool is_f64 = (input.dtype() == DType::Float64);
     std::string shader = is_f64 ? "cummax_f64" : "cummax";
@@ -4281,6 +4340,16 @@ auto VulkanBackend::dispatchCumMin(const Tensor& input, int64_t dim) -> std::pai
     auto in_shape = input.shape();
     int64_t ndim = static_cast<int64_t>(in_shape.size());
     if (dim < 0) dim += ndim;
+
+    // Same int-dtype fall-through — only Float32/Float64 shaders exist.
+    DType src_dtype = input.dtype();
+    if (src_dtype == DType::Int32 || src_dtype == DType::Int64 ||
+        src_dtype == DType::Int16 || src_dtype == DType::Int8 ||
+        src_dtype == DType::UInt8 || src_dtype == DType::Bool) {
+        auto f32 = input.to(DType::Float32);
+        auto [v_f32, idx] = dispatchCumMin(f32, dim);
+        return {v_f32.to(src_dtype), idx};
+    }
 
     int32_t device_id = input.device().index;
     bool is_f64 = (input.dtype() == DType::Float64);

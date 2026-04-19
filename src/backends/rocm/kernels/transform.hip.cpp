@@ -452,7 +452,13 @@ __global__ void flip_kernel_impl(
     }
 }
 
-auto flip_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Tensor {
+auto flip_kernel(const Tensor& input_orig, int64_t dim, hipStream_t stream) -> Tensor {
+    // The kernel below uses stride-from-shape addressing (outer*dim_size +
+    // flipped)*inner_size, i.e. it assumes contiguous row-major layout. If
+    // the input is a non-contiguous view (slice, transpose, permute), the
+    // raw data_ptr would not match that layout and the flip would read the
+    // wrong elements. Materialize a contiguous copy first.
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     auto input_shape = input.shape();
     Tensor result(std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                   input.dtype(), input.device());
@@ -493,8 +499,22 @@ auto flip_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Tensor
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
             input.data<int64_t>(), result.data<int64_t>(),
             outer_size, dim_size, inner_size);
+    } else if (input.dtype() == DType::Float16) {
+        // Reinterpret as uint16 — flip is a pure data-movement op, no
+        // arithmetic, so dtype is irrelevant beyond element size.
+        hipLaunchKernelGGL(flip_kernel_impl<uint16_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const uint16_t*>(input.data_ptr()),
+            reinterpret_cast<uint16_t*>(result.data_ptr()),
+            outer_size, dim_size, inner_size);
+    } else if (input.dtype() == DType::BFloat16) {
+        hipLaunchKernelGGL(flip_kernel_impl<uint16_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const uint16_t*>(input.data_ptr()),
+            reinterpret_cast<uint16_t*>(result.data_ptr()),
+            outer_size, dim_size, inner_size);
     } else {
-        throw std::runtime_error("Flip only supports Float32, Float64, Int32, and Int64 dtypes");
+        throw std::runtime_error("Flip only supports Float16/32/64, BFloat16, and Int32/64 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -549,7 +569,6 @@ __global__ void repeat_kernel_impl(
     int64_t total_elements
 ) {
     HIP_GRID_STRIDE_LOOP(idx, total_elements) {
-        // Convert output index to coordinates
         int64_t temp = idx;
         int64_t input_offset = 0;
         int64_t input_stride = 1;
@@ -558,10 +577,13 @@ __global__ void repeat_kernel_impl(
             int64_t coord = temp % output_shape[d];
             temp /= output_shape[d];
 
-            // Map to input coordinate (wrap around)
-            int64_t input_coord = coord % input_shape[d];
+            // Map output coord to input coord via integer division by the
+            // repeat factor (interleave semantics). The previous modulus-by-
+            // input_shape mapping is the "tile" semantics, which produces a
+            // different layout and diverges from the CPU/CUDA/Vulkan
+            // implementations that this test treats as ground truth.
+            int64_t input_coord = coord / repeats[d];
 
-            // Compute input offset
             input_offset += input_coord * input_stride;
             input_stride *= input_shape[d];
         }
@@ -690,18 +712,28 @@ auto tile_kernel(const Tensor& input, const std::vector<int64_t>& reps, hipStrea
 // Stack Kernel - stack tensors along new dimension
 // ==============================================================================
 
+// Stack along arbitrary dim: decompose output flat idx into
+// (outer, tensor, inner) using outer_size/inner_size of the input shape.
+// The previous `tensor_idx = idx / tensor_size` mapping only held for
+// dim=0; for dim>=1 it selected the wrong input tensor for each output
+// position, producing ~5.5 absolute error vs CPU on {32,32} StackDim1.
 template<typename T>
 __global__ void stack_kernel_impl(
     const T* const* inputs,
     T* output,
     int64_t num_tensors,
-    int64_t tensor_size
+    int64_t tensor_size,
+    int64_t outer_size,
+    int64_t inner_size
 ) {
     int64_t total_elements = num_tensors * tensor_size;
 
     HIP_GRID_STRIDE_LOOP(idx, total_elements) {
-        int64_t tensor_idx = idx / tensor_size;
-        int64_t elem_idx = idx % tensor_size;
+        int64_t inner = idx % inner_size;
+        int64_t tmp = idx / inner_size;
+        int64_t tensor_idx = tmp % num_tensors;
+        int64_t outer = tmp / num_tensors;
+        int64_t elem_idx = outer * inner_size + inner;
         output[idx] = inputs[tensor_idx][elem_idx];
     }
 }
@@ -744,38 +776,45 @@ auto stack_kernel(const std::vector<Tensor>& tensors, int64_t dim, hipStream_t s
     int64_t total_elements = tensors.size() * tensor_size;
     int num_blocks = get_num_blocks(total_elements);
 
+    // Pre-compute outer/inner sizes for stack-along-arbitrary-dim.
+    int64_t outer_size = 1;
+    for (int64_t d = 0; d < dim; ++d) outer_size *= first_shape[d];
+    int64_t inner_size = tensor_size / outer_size;
+
+    int64_t n_tensors_i = static_cast<int64_t>(tensors.size());
+
     if (first.dtype() == DType::Float32) {
         hipLaunchKernelGGL(stack_kernel_impl<float>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
             (const float* const*)d_input_ptrs, output.data<float>(),
-            static_cast<int64_t>(tensors.size()), tensor_size);
+            n_tensors_i, tensor_size, outer_size, inner_size);
     } else if (first.dtype() == DType::Float64) {
         hipLaunchKernelGGL(stack_kernel_impl<double>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
             (const double* const*)d_input_ptrs, output.data<double>(),
-            static_cast<int64_t>(tensors.size()), tensor_size);
+            n_tensors_i, tensor_size, outer_size, inner_size);
     } else if (first.dtype() == DType::Int32) {
         hipLaunchKernelGGL(stack_kernel_impl<int32_t>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
             (const int32_t* const*)d_input_ptrs, output.data<int32_t>(),
-            static_cast<int64_t>(tensors.size()), tensor_size);
+            n_tensors_i, tensor_size, outer_size, inner_size);
     } else if (first.dtype() == DType::Int64) {
         hipLaunchKernelGGL(stack_kernel_impl<int64_t>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
             (const int64_t* const*)d_input_ptrs, output.data<int64_t>(),
-            static_cast<int64_t>(tensors.size()), tensor_size);
+            n_tensors_i, tensor_size, outer_size, inner_size);
     } else if (first.dtype() == DType::Float16) {
         hipLaunchKernelGGL(stack_kernel_impl<__half>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
             (const __half* const*)d_input_ptrs,
             reinterpret_cast<__half*>(output.data<Float16>()),
-            static_cast<int64_t>(tensors.size()), tensor_size);
+            n_tensors_i, tensor_size, outer_size, inner_size);
     } else if (first.dtype() == DType::BFloat16) {
         hipLaunchKernelGGL(stack_kernel_impl<hip_bfloat16>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
             (const hip_bfloat16* const*)d_input_ptrs,
             reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
-            static_cast<int64_t>(tensors.size()), tensor_size);
+            n_tensors_i, tensor_size, outer_size, inner_size);
     } else {
         HIP_CHECK(hipFree(d_input_ptrs));
         throw std::runtime_error("stack_kernel: unsupported dtype");
@@ -939,6 +978,26 @@ auto expand_kernel(const Tensor& input, const std::vector<int64_t>& new_shape, v
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
             reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
             reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
+            d_input_shape, d_input_strides, d_output_shape, ndim, total_elements);
+    } else if (input.dtype() == DType::Bool) {
+        hipLaunchKernelGGL(expand_kernel_impl<bool>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<bool>(), output.data<bool>(),
+            d_input_shape, d_input_strides, d_output_shape, ndim, total_elements);
+    } else if (input.dtype() == DType::Int8) {
+        hipLaunchKernelGGL(expand_kernel_impl<int8_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<int8_t>(), output.data<int8_t>(),
+            d_input_shape, d_input_strides, d_output_shape, ndim, total_elements);
+    } else if (input.dtype() == DType::UInt8) {
+        hipLaunchKernelGGL(expand_kernel_impl<uint8_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<uint8_t>(), output.data<uint8_t>(),
+            d_input_shape, d_input_strides, d_output_shape, ndim, total_elements);
+    } else if (input.dtype() == DType::Int16) {
+        hipLaunchKernelGGL(expand_kernel_impl<int16_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<int16_t>(), output.data<int16_t>(),
             d_input_shape, d_input_strides, d_output_shape, ndim, total_elements);
     } else {
         HIP_CHECK(hipFree(d_input_shape));

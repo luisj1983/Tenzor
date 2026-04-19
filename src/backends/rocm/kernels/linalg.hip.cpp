@@ -989,8 +989,11 @@ auto linalg_eigh_kernel(const Tensor& A, hipStream_t stream)
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
     backend::rocm::RocmCachingAllocator::get().free(d_e);
-    // work now contains eigenvectors (columns of orthogonal matrix)
-    return {W, work};
+    // rocSOLVER syevd writes eigenvectors as COLUMNS of a COLUMN-MAJOR matrix.
+    // Reinterpreted as row-major this gives V^T; transpose so the caller
+    // sees row-major V with eigenvectors as columns (matches CPU/LAPACKE).
+    auto V = tenzor::transpose(work, -2, -1).contiguous();
+    return {W, V};
 }
 
 // ============================================================================
@@ -1598,8 +1601,9 @@ auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
             upper, unitriangular, stream).to(A.dtype());
     }
 
-    // rocBLAS trsm operates in column-major. Transpose to column-major,
-    // solve, then transpose back.
+    // rocBLAS trsm operates in column-major. We physically transpose A and B
+    // into column-major storage, which is a double negation (transpose +
+    // reinterpret-as-col-major cancel out), so uplo maps straight through.
     auto a_cm = tenzor::transpose(A.contiguous().clone(), -2, -1).contiguous();
     auto b_cm = tenzor::transpose(B.contiguous().clone(), -2, -1).contiguous();
 
@@ -1609,8 +1613,7 @@ auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
     int64_t nrhs = (b_ndim >= 2) ? b_shape[b_ndim - 1] : 1;
     int64_t nbatch = batch_size(a_cm);
 
-    // In column-major, row-major upper becomes lower and vice versa
-    rocblas_fill uplo = upper ? rocblas_fill_lower : rocblas_fill_upper;
+    rocblas_fill uplo = upper ? rocblas_fill_upper : rocblas_fill_lower;
     rocblas_diagonal diag = unitriangular ? rocblas_diagonal_unit : rocblas_diagonal_non_unit;
 
     auto handle = RocSOLVERHandlePool::get(stream);

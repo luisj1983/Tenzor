@@ -22,7 +22,7 @@ class RNNParity : public BackendTest {};
 
 TEST_P(RNNParity, LSTM_Forward) {
     auto backends = get_available_backends_all_devices();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("rnn parity");
 
     int64_t input_size = 8;
     int64_t hidden_size = 16;
@@ -52,7 +52,7 @@ TEST_P(RNNParity, LSTM_Forward) {
 
 TEST_P(RNNParity, GRU_Forward) {
     auto backends = get_available_backends_all_devices();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("rnn parity");
 
     int64_t input_size = 8;
     int64_t hidden_size = 16;

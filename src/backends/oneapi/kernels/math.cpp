@@ -3228,7 +3228,9 @@ auto repeat_kernel(const Tensor& input_in, const std::vector<int64_t>& repeats, 
                 // Convert output index to input index using modular arithmetic
                 for (int64_t d = 0; d < ndim; ++d) {
                     int64_t coord = (out_idx / out_strides_acc[d]) % out_shape_acc[d];
-                    int64_t in_coord = coord % shape_acc[d];
+                    // Interleave semantics: match CPU/CUDA/Vulkan. Using
+                    // `coord % input_shape[d]` (tile) diverges from CPU.
+                    int64_t in_coord = coord / (out_shape_acc[d] / shape_acc[d]);
                     in_idx += in_coord * in_strides_acc[d];
                 }
 
@@ -3257,7 +3259,9 @@ auto repeat_kernel(const Tensor& input_in, const std::vector<int64_t>& repeats, 
 
                 for (int64_t d = 0; d < ndim; ++d) {
                     int64_t coord = (out_idx / out_strides_acc[d]) % out_shape_acc[d];
-                    int64_t in_coord = coord % shape_acc[d];
+                    // Interleave semantics: match CPU/CUDA/Vulkan. Using
+                    // `coord % input_shape[d]` (tile) diverges from CPU.
+                    int64_t in_coord = coord / (out_shape_acc[d] / shape_acc[d]);
                     in_idx += in_coord * in_strides_acc[d];
                 }
 
@@ -3286,7 +3290,9 @@ auto repeat_kernel(const Tensor& input_in, const std::vector<int64_t>& repeats, 
 
                 for (int64_t d = 0; d < ndim; ++d) {
                     int64_t coord = (out_idx / out_strides_acc[d]) % out_shape_acc[d];
-                    int64_t in_coord = coord % shape_acc[d];
+                    // Interleave semantics: match CPU/CUDA/Vulkan. Using
+                    // `coord % input_shape[d]` (tile) diverges from CPU.
+                    int64_t in_coord = coord / (out_shape_acc[d] / shape_acc[d]);
                     in_idx += in_coord * in_strides_acc[d];
                 }
 

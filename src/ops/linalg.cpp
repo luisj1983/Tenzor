@@ -1241,6 +1241,16 @@ auto lstsq(const Tensor& A, const Tensor& B) -> std::tuple<Tensor, Tensor> {
 #if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)
     throw_no_lapack("lstsq");
 #else
+    // No GPU lstsq backend exists yet; materialize CPU copies, compute via
+    // LAPACK, then move results back to the original device. Without this the
+    // op throws "prepare_matrix: expected CPU tensor" the moment anyone calls
+    // it on a non-CPU tensor.
+    auto original_device = A.device();
+    if (original_device.type != Device::Type::CPU) {
+        auto [x_cpu, res_cpu] = lstsq(A.to(Device::cpu()), B.to(Device::cpu()));
+        return {x_cpu.to(original_device), res_cpu.to(original_device)};
+    }
+
     auto a_shape = A.shape();
     auto b_shape = B.shape();
     if (a_shape.size() != 2) {

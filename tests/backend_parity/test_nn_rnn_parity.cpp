@@ -22,7 +22,7 @@ class NNRNNParity : public BackendTest {};
 
 TEST_P(NNRNNParity, LSTMCell) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn rnn parity");
 
     nn::LSTMCell cell(32, 64);
     auto input = randn({4, 32}, DType::Float32, Device::cpu());
@@ -59,7 +59,7 @@ TEST_P(NNRNNParity, LSTMCell) {
 
 TEST_P(NNRNNParity, GRUCell) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn rnn parity");
 
     nn::GRUCell cell(32, 64);
     auto input = randn({4, 32}, DType::Float32, Device::cpu());
@@ -90,7 +90,7 @@ TEST_P(NNRNNParity, GRUCell) {
 
 TEST_P(NNRNNParity, RNNCell) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn rnn parity");
 
     nn::RNNCell cell(32, 64);
     auto input = randn({4, 32}, DType::Float32, Device::cpu());
@@ -125,7 +125,7 @@ TEST_P(NNRNNParity, RNNCell) {
 
 TEST_P(NNRNNParity, LSTM_MultiLayer) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn rnn parity");
 
     // input_size=32, hidden_size=64, num_layers=2
     nn::LSTM layer(32, 64, 2);
@@ -154,7 +154,7 @@ TEST_P(NNRNNParity, LSTM_MultiLayer) {
 
 TEST_P(NNRNNParity, GRU_MultiLayer) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn rnn parity");
 
     // input_size=32, hidden_size=64, num_layers=2
     nn::GRU layer(32, 64, 2);
@@ -183,7 +183,7 @@ TEST_P(NNRNNParity, GRU_MultiLayer) {
 
 TEST_P(NNRNNParity, RNN) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn rnn parity");
 
     nn::RNN layer(32, 64);
     auto input = randn({8, 4, 32}, DType::Float32, Device::cpu());
@@ -211,7 +211,7 @@ TEST_P(NNRNNParity, RNN) {
 
 TEST_P(NNRNNParity, LSTM_Bidirectional) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn rnn parity");
 
     // input_size=32, hidden_size=64, num_layers=1, bias=true, batch_first=false,
     // dropout=0.0, bidirectional=true
@@ -241,7 +241,7 @@ TEST_P(NNRNNParity, LSTM_Bidirectional) {
 
 TEST_P(NNRNNParity, LSTM_Dropout_Eval) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn rnn parity");
 
     // input_size=32, hidden_size=64, num_layers=2, bias=true, batch_first=false,
     // dropout=0.5, bidirectional=false
@@ -277,7 +277,7 @@ TEST_P(NNRNNParity, LSTM_Dropout_Eval) {
 
 TEST_P(NNRNNParity, LSTMCell_Sequence) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn rnn parity");
 
     nn::LSTMCell cell(32, 64);
 
@@ -327,7 +327,7 @@ TEST_P(NNRNNParity, LSTMCell_Sequence) {
 
 TEST_P(NNRNNParity, GRUCell_Sequence) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn rnn parity");
 
     nn::GRUCell cell(32, 64);
 

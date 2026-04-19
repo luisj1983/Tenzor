@@ -24,7 +24,7 @@ class NNLinearEmbParity : public BackendTest {};
 
 TEST_P(NNLinearEmbParity, Linear_Basic) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn linear/emb parity");
 
     nn::Linear layer(64, 32);
     auto input = randn({4, 64}, DType::Float32, Device::cpu());
@@ -51,7 +51,7 @@ TEST_P(NNLinearEmbParity, Linear_Basic) {
 
 TEST_P(NNLinearEmbParity, Linear_NoBias) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn linear/emb parity");
 
     nn::Linear layer(64, 32, false);
     auto input = randn({4, 64}, DType::Float32, Device::cpu());
@@ -78,7 +78,7 @@ TEST_P(NNLinearEmbParity, Linear_NoBias) {
 
 TEST_P(NNLinearEmbParity, Bilinear) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn linear/emb parity");
 
     nn::Bilinear layer(32, 32, 16);
     auto input1 = randn({4, 32}, DType::Float32, Device::cpu());
@@ -112,7 +112,7 @@ TEST_P(NNLinearEmbParity, Bilinear) {
 
 TEST_P(NNLinearEmbParity, EmbeddingBag_Sum) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn linear/emb parity");
 
     // num_embeddings=100, embedding_dim=32, max_norm=0, norm_type=2, scale_grad=false, mode="sum"
     nn::EmbeddingBag layer(100, 32, 0.0, 2.0, false, "sum");
@@ -150,7 +150,7 @@ TEST_P(NNLinearEmbParity, EmbeddingBag_Sum) {
 
 TEST_P(NNLinearEmbParity, EmbeddingBag_Mean) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn linear/emb parity");
 
     nn::EmbeddingBag layer(100, 32, 0.0, 2.0, false, "mean");
 
@@ -188,7 +188,7 @@ TEST_P(NNLinearEmbParity, EmbeddingBag_Mean) {
 
 TEST_P(NNLinearEmbParity, LazyLinear) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn linear/emb parity");
 
     nn::LazyLinear layer(32);
     auto input = randn({4, 64}, DType::Float32, Device::cpu());
@@ -238,7 +238,7 @@ void lazy_conv_parity_test(
     const char* name)
 {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn linear/emb parity");
 
     auto ref_layer = make_layer();
     // Materialize on CPU first so parameters exist to clone.

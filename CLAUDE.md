@@ -31,6 +31,16 @@ ctest -R "cpu_float32"                       # CPU Float32 tests only
 ctest -R "Linear.*cpu"                       # Linear layer CPU tests
 ```
 
+### Backend parity env vars
+
+- `TENZOR_REQUIRE_MULTI_BACKEND=1` — in any test run that expects ≥2 backends
+  (e.g. CI jobs that build a GPU backend), export this to turn the usual
+  "skip if only one backend available" into a hard FAIL. Without it, a
+  backend that silently fails to initialize looks like a clean skip.
+- `TENZOR_SKIP_BACKENDS=cuda,rocm` — explicit opt-out, always wins over
+  `TENZOR_REQUIRE_MULTI_BACKEND`. Use to exclude a known-bad backend from a
+  single run without touching code.
+
 ## Python Development
 
 ```bash

@@ -123,8 +123,9 @@ auto VulkanBackend::dispatchNMS(const Tensor& boxes, const Tensor& scores, float
     push_constants.N = static_cast<uint32_t>(N);
     push_constants.iou_threshold = iou_threshold;
 
-    uint32_t workgroups = div_wg(static_cast<uint64_t>(N), devices_[device_id].workgroupSize);
-
+    // The NMS shader is now sequential (local_size_x = 1, single-threaded
+    // loop over all boxes). Dispatch exactly one workgroup/one thread so
+    // we don't spin up parallel copies that each race on `suppressed`.
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -133,7 +134,7 @@ auto VulkanBackend::dispatchNMS(const Tensor& boxes, const Tensor& scores, float
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+    vkCmdDispatch(cmdBuffer, 1, 1, 1);
 
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);

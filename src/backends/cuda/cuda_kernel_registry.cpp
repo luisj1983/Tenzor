@@ -2663,10 +2663,12 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{output, mean, inv_std};
     });
     table.register_kernel(OpId::GroupNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // inputs: [grad_output, input, weight, mean, inv_std]
+        // Canonical input order across all backends:
+        //   [grad_output, input, mean, rstd, weight]
+        // Kernel signature is (grad_output, input, weight, mean, inv_std).
         int64_t num_groups = attrs.get_int(AttrKey::NumGroups, attrs.get_int(AttrKey::Groups, 1));
         auto [grad_input, grad_weight, grad_bias] = cuda::group_norm_backward_kernel(
-            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], num_groups, get_cuda_stream(attrs));
+            inputs[0], inputs[1], inputs[4], inputs[2], inputs[3], num_groups, get_cuda_stream(attrs));
         return std::vector<Tensor>{grad_input, grad_weight, grad_bias};
     });
     table.register_kernel(OpId::InstanceNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {

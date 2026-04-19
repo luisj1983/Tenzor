@@ -520,6 +520,9 @@ public:
     auto dispatchArgSort(const Tensor& input, int64_t dim, bool descending) -> Tensor;
     auto dispatchVariance(const Tensor& input, int64_t dim, bool unbiased, bool keepdim) -> Tensor;
     auto dispatchStd(const Tensor& input, int64_t dim, bool unbiased, bool keepdim) -> Tensor;
+    // Single-pass Welford implementation backing both variance and std.
+    auto dispatchVarianceWelford(const Tensor& input, int64_t dim, bool unbiased,
+                                 bool keepdim, bool compute_std) -> Tensor;
     auto dispatchNorm(const Tensor& input, float p, int64_t dim, bool keepdim) -> Tensor;
     auto dispatchProd(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto dispatchAll(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
@@ -530,7 +533,7 @@ public:
     auto dispatchTriuTril(const std::string& op_name, const Tensor& input,
                           int64_t diagonal) -> Tensor;
     auto dispatchDiag(const Tensor& input, int64_t diagonal) -> Tensor;
-    auto dispatchFlip(const Tensor& input, int64_t dim) -> Tensor;
+    auto dispatchFlip(const Tensor& input_orig, int64_t dim) -> Tensor;
     auto dispatchRoll(const Tensor& input, int64_t shift, int64_t dim) -> Tensor;
     auto dispatchTrace(const Tensor& input) -> Tensor;
     auto dispatchCountNonzero(const Tensor& input) -> Tensor;

@@ -3,6 +3,7 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/transform.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/shape.hpp"
 #include <cstdint>
@@ -68,7 +69,60 @@ auto masked_fill(const Tensor& input, const Tensor& mask, float value) -> Tensor
 }
 
 auto where(const Tensor& condition, const Tensor& x, const Tensor& y) -> Tensor {
-    std::vector<Tensor> inputs = {condition, x, y};
+    // Backend kernels historically require all three tensors to have
+    // identical shape (the CPU path throws outright, Vulkan rejects
+    // dim-count mismatch). Broadcasting — e.g. condition[32,1] with
+    // x,y[32,32] — therefore failed everywhere. Materialize the common
+    // broadcast shape here so each backend still sees equal-shape
+    // inputs but callers don't have to pre-broadcast manually.
+    auto cs = condition.shape();
+    auto xs = x.shape();
+    auto ys = y.shape();
+    bool same_shape =
+        cs.size() == xs.size() && cs.size() == ys.size() &&
+        std::equal(cs.begin(), cs.end(), xs.begin()) &&
+        std::equal(cs.begin(), cs.end(), ys.begin());
+
+    if (same_shape) {
+        std::vector<Tensor> inputs = {condition, x, y};
+        return dispatch(OpId::Where, inputs)[0];
+    }
+
+    // NumPy/PyTorch broadcasting rules, right-aligned: the common rank
+    // is max(rank(cond), rank(x), rank(y)); each axis is the max of
+    // the (1-padded) extents, and size-1 is broadcastable.
+    int64_t ndim = static_cast<int64_t>(
+        std::max({cs.size(), xs.size(), ys.size()}));
+    auto extent_at = [&](auto s, int64_t axis) -> int64_t {
+        int64_t offset = ndim - static_cast<int64_t>(s.size());
+        return (axis < offset) ? int64_t{1} : s[axis - offset];
+    };
+    std::vector<int64_t> out_shape(ndim);
+    for (int64_t a = 0; a < ndim; ++a) {
+        int64_t ec = extent_at(cs, a);
+        int64_t ex = extent_at(xs, a);
+        int64_t ey = extent_at(ys, a);
+        int64_t want = std::max({ec, ex, ey});
+        auto ok = [&](int64_t e) { return e == want || e == 1; };
+        if (!ok(ec) || !ok(ex) || !ok(ey)) {
+            throw std::invalid_argument(
+                "where: shapes are not broadcastable");
+        }
+        out_shape[a] = want;
+    }
+    auto shape_eq = [&](auto s, const std::vector<int64_t>& target) {
+        return s.size() == target.size() &&
+               std::equal(s.begin(), s.end(), target.begin());
+    };
+    Tensor cond_b = shape_eq(cs, out_shape) ? condition : broadcast_to(condition, out_shape);
+    Tensor x_b    = shape_eq(xs, out_shape) ? x         : broadcast_to(x, out_shape);
+    Tensor y_b    = shape_eq(ys, out_shape) ? y         : broadcast_to(y, out_shape);
+    // broadcast_to may return a non-contiguous view; backend kernels
+    // like the CPU where generally assume contiguous strides.
+    if (!cond_b.is_contiguous()) cond_b = contiguous(cond_b);
+    if (!x_b.is_contiguous())    x_b    = contiguous(x_b);
+    if (!y_b.is_contiguous())    y_b    = contiguous(y_b);
+    std::vector<Tensor> inputs = {cond_b, x_b, y_b};
     return dispatch(OpId::Where, inputs)[0];
 }
 

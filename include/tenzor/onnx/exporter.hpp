@@ -472,6 +472,29 @@ public:
                        const std::string& output_name) -> void;
 
     /**
+     * @brief Export Conv3d layer. ONNX uses the same "Conv" op type; the
+     *        spatial rank is inferred from the length of kernel_shape.
+     */
+    auto export_conv3d(const Tensor& input, const Tensor& weight,
+                       const std::optional<Tensor>& bias,
+                       int64_t kernel_size, int64_t stride, int64_t padding,
+                       int64_t dilation, int64_t groups,
+                       const Tensor& output,
+                       const std::string& output_name) -> void;
+
+    /**
+     * @brief Export ConvTranspose{1,2,3}d layer. ONNX op type is
+     *        "ConvTranspose". `spatial_rank` is 1, 2, or 3.
+     */
+    auto export_conv_transpose(const Tensor& input, const Tensor& weight,
+                               const std::optional<Tensor>& bias,
+                               int64_t spatial_rank,
+                               int64_t kernel_size, int64_t stride, int64_t padding,
+                               int64_t output_padding, int64_t dilation, int64_t groups,
+                               const Tensor& output,
+                               const std::string& output_name) -> void;
+
+    /**
      * @brief Export BatchNorm2d layer
      */
     auto export_batchnorm2d(const Tensor& input, const Tensor& scale,

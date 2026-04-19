@@ -1,0 +1,53 @@
+#version 450
+
+// Batch Normalization 2D Backward — Pass 2: compute grad_input.
+// Consumes grad_gamma / grad_beta produced by pass 1. Using the identity
+//   grad_gamma[c] = sum_grad_norm (sum of grad_out * normalized over N*H*W)
+//   grad_beta[c]  = sum_grad       (sum of grad_out)
+// the input gradient is
+//   grad_in = gamma * invstd * (grad_out - sum_grad/N - normalized * sum_grad_norm/N)
+// with N = batch * spatial_size.
+
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+
+layout(binding = 0) buffer GradOutput { float grad_output[]; };
+layout(binding = 1) buffer Input      { float input_data[]; };
+layout(binding = 2) buffer Mean       { float mean_data[]; };
+layout(binding = 3) buffer InvStd     { float invstd_data[]; };
+layout(binding = 4) buffer Gamma      { float gamma_data[]; };
+layout(binding = 5) buffer GradInput  { float grad_input[]; };
+layout(binding = 6) buffer GradGamma  { float grad_gamma[]; };   // sum_grad_norm per channel
+layout(binding = 7) buffer GradBeta   { float grad_beta[]; };    // sum_grad per channel
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint batch;
+    uint channels;
+    uint spatial_size;
+    float eps;
+    uint has_gamma;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    uint temp = idx;
+    temp /= params.spatial_size;
+    uint c = temp % params.channels;
+
+    float x = input_data[idx];
+    float grad_out = grad_output[idx];
+    float mean = mean_data[c];
+    float inv_std = invstd_data[c];
+    float normalized = (x - mean) * inv_std;
+
+    float N = float(params.batch * params.spatial_size);
+    float mean_grad = grad_beta[c] / N;
+    float mean_grad_norm = grad_gamma[c] / N;
+
+    float gamma = (params.has_gamma != 0u) ? gamma_data[c] : 1.0;
+    float grad_normalized = grad_out - mean_grad - normalized * mean_grad_norm;
+    grad_input[idx] = gamma * inv_std * grad_normalized;
+}

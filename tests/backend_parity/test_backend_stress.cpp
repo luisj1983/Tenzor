@@ -20,7 +20,7 @@ using namespace tenzor::testing;
 
 TEST(BackendStress, LargeTensor_1GB) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("backend_stress parity");
 
     // ~1GB tensor (256M float32 elements)
     auto a = randn({16384, 16384}, DType::Float32, Device::cpu());
@@ -33,7 +33,7 @@ TEST(BackendStress, LargeTensor_1GB) {
 
 TEST(BackendStress, LargeTensor_MatMul) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("backend_stress parity");
 
     // Large matrix multiplication: 2048 x 2048
     auto a = randn({2048, 2048}, DType::Float32, Device::cpu());
@@ -46,7 +46,7 @@ TEST(BackendStress, LargeTensor_MatMul) {
 
 TEST(BackendStress, LargeBatch_Conv2d) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("backend_stress parity");
 
     // Large batch Conv2d: test that matmul + add (core of conv) works at scale
     auto a = randn({8, 64, 32, 32}, DType::Float32, Device::cpu());
@@ -63,7 +63,7 @@ TEST(BackendStress, LargeBatch_Conv2d) {
 
 TEST(BackendStress, ManySmallOperations_Sequential) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("backend_stress parity");
 
     auto x = randn({32, 32}, DType::Float32, Device::cpu());
 
@@ -79,7 +79,7 @@ TEST(BackendStress, ManySmallOperations_Sequential) {
 
 TEST(BackendStress, ManySmallOperations_Chained) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("backend_stress parity");
 
     auto x = randn({16, 16}, DType::Float32, Device::cpu());
 
@@ -99,7 +99,7 @@ TEST(BackendStress, ManySmallOperations_Chained) {
 
 TEST(BackendStress, DeepGraph_100Layers) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("backend_stress parity");
 
     auto x = randn({8, 64}, DType::Float32, Device::cpu());
     std::vector<Tensor> weights;
@@ -121,7 +121,7 @@ TEST(BackendStress, DeepGraph_100Layers) {
 
 TEST(BackendStress, DeepGraph_Residual) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("backend_stress parity");
 
     auto x = randn({16, 128}, DType::Float32, Device::cpu());
     auto w1 = randn({128, 128}, DType::Float32, Device::cpu());
@@ -149,7 +149,7 @@ TEST(BackendStress, DeepGraph_Residual) {
 
 TEST(BackendStress, MemoryPressure_ManyTensors) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("backend_stress parity");
 
     std::vector<Tensor> tensors;
 
@@ -172,7 +172,7 @@ TEST(BackendStress, MemoryPressure_ManyTensors) {
 
 TEST(BackendStress, MemoryPressure_AllocDealloc) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("backend_stress parity");
 
     auto x = randn({64, 64}, DType::Float32, Device::cpu());
 
@@ -194,7 +194,7 @@ TEST(BackendStress, MemoryPressure_AllocDealloc) {
 
 TEST(BackendStress, ComplexChain_MathOps) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("backend_stress parity");
 
     // Complex chain: matmul → add → relu-like (clamp)
     auto a = randn({32, 64}, DType::Float32, Device::cpu());
@@ -210,7 +210,7 @@ TEST(BackendStress, ComplexChain_MathOps) {
 
 TEST(BackendStress, ComplexChain_Reductions) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("backend_stress parity");
 
     auto input = randn({32, 128}, DType::Float32, Device::cpu());
 
@@ -302,7 +302,7 @@ TEST(BackendStress, Performance_MatMul_Large_Benchmark) {
 
 TEST(BackendStress, StabilityUnderLoad_Repeated) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("backend_stress parity");
 
     auto x = randn({64, 64}, DType::Float32, Device::cpu());
 

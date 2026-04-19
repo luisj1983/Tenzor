@@ -146,8 +146,8 @@ To debug:
 Example:
 ```cpp
 TEST(MathOperationParity, NewOperation) {
+    REQUIRE_MULTI_BACKEND_OR_SKIP("NewOperation parity");
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
 
     auto input = randn({32, 32}, DType::Float32, Device::cpu());
 
@@ -156,6 +156,11 @@ TEST(MathOperationParity, NewOperation) {
     }, {input}, 1e-5f, 1e-7f, "New Operation");
 }
 ```
+
+`REQUIRE_MULTI_BACKEND_OR_SKIP(reason)` normally skips the test when fewer than 2
+backends are available, but escalates to a hard `FAIL()` when the env var
+`TENZOR_REQUIRE_MULTI_BACKEND=1` is set. CI jobs that build a GPU backend should
+export that variable so a silently broken backend cannot pass as "skipped".
 
 ## Integration
 

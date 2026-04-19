@@ -589,6 +589,15 @@ auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
     size_t input_buffer_size = (max_offset + 1) * input.dtype_size();
     size_t output_buffer_size = total_elements * input.dtype_size();
 
+    // The strided_copy_f16/bf16/u8/i8 shaders access the buffer as uint32
+    // words (2x fp16, 4x u8). A sub-dword binding makes Vulkan robust
+    // buffer access return zero for any word that isn't fully in range —
+    // which silently drops the last packed element when the slice length
+    // is odd or lands at an odd offset. Round both buffer sizes up to the
+    // next 4-byte boundary so every word the shader touches is in-bounds.
+    input_buffer_size  = (input_buffer_size  + 3u) & ~size_t(3);
+    output_buffer_size = (output_buffer_size + 3u) & ~size_t(3);
+
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_in},
         {1, buffer_out}

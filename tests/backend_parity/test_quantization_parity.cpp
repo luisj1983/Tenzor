@@ -26,7 +26,7 @@ class QuantizationParity : public BackendTest {};
 
 TEST_P(QuantizationParity, QuantDequant_Roundtrip) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("quantization parity");
 
     auto input = randn({4, 16}, DType::Float32, Device::cpu());
 
@@ -41,7 +41,7 @@ TEST_P(QuantizationParity, QuantDequant_Roundtrip) {
 
 TEST_P(QuantizationParity, SymmetricQuantization) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("quantization parity");
 
     auto input = randn({8, 8}, DType::Float32, Device::cpu());
 
@@ -121,7 +121,7 @@ TEST_P(QuantizationParity, DequantRoundtripPreservesShape) {
 
 TEST_P(QuantizationParity, SymmetricQuantization_Backend) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("quantization parity");
 
     auto input = randn({8, 8}, DType::Float32, Device::cpu());
 
@@ -284,7 +284,7 @@ TEST_P(QuantizationParity, AWQ_BackendInputParity) {
     // backend; the resulting scales/zeros should match (bit-for-bit because
     // the input floats are identical).
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("quantization parity");
 
     auto weight = randn({16, 32}, DType::Float32, Device::cpu());
     auto calib = randn({8, 32}, DType::Float32, Device::cpu());
@@ -352,7 +352,7 @@ TEST_P(QuantizationParity, GPTQ_Roundtrip) {
 // Fixed alongside AWQ via CPU migration in src/nn/quantization/gptq.cpp.
 TEST_P(QuantizationParity, GPTQ_BackendInputParity) {
     auto backends = get_available_backends();
-    if (backends.size() < 2) GTEST_SKIP();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("quantization parity");
 
     auto weight = randn({16, 32}, DType::Float32, Device::cpu());
     auto calib = randn({16, 32}, DType::Float32, Device::cpu());

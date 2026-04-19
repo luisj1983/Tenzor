@@ -41,6 +41,34 @@ inline void compute_launch_config_conv3d(int64_t n, dim3& grid, dim3& block) {
     grid = dim3(static_cast<unsigned int>((n + block_size - 1) / block_size), 1, 1);
 }
 
+// Post-GEMM transpose: the rocBLAS call in the Conv3d forward produces
+// a result laid out as (batch*D_out*H_out*W_out, out_channels_per_group)
+// row-major = NDHWC — the output tensor is NCDHW, so we reshuffle.
+// Matches the 2-D conv_nhwc_to_nchw_kernel in conv2d.hip.cpp.
+template<typename T>
+__global__ void conv3d_ndhwc_to_ncdhw_kernel(
+    const T* __restrict__ ndhwc,
+    T* __restrict__ ncdhw_out,
+    int64_t batch, int64_t D_out, int64_t H_out, int64_t W_out,
+    int64_t out_channels, int64_t channels_per_group, int64_t channel_offset
+) {
+    int64_t total_spatial = batch * D_out * H_out * W_out;
+    int64_t total = total_spatial * channels_per_group;
+    HIP_KERNEL_LOOP_CONV3D(idx, total) {
+        int64_t c = idx % channels_per_group;
+        int64_t spatial_idx = idx / channels_per_group;
+        int64_t b = spatial_idx / (D_out * H_out * W_out);
+        int64_t dhw = spatial_idx % (D_out * H_out * W_out);
+        int64_t d = dhw / (H_out * W_out);
+        int64_t hw = dhw % (H_out * W_out);
+        int64_t h = hw / W_out;
+        int64_t w = hw % W_out;
+        int64_t global_c = channel_offset + c;
+        int64_t ncdhw_idx = (((b * out_channels + global_c) * D_out + d) * H_out + h) * W_out + w;
+        ncdhw_out[ncdhw_idx] = ndhwc[idx];
+    }
+}
+
 // ============================================================================
 // im3col HIP Kernel: Convert 5D input (N,C,D,H,W) to 2D for Conv3d GEMM
 // ============================================================================
@@ -336,13 +364,16 @@ auto conv3d_forward_hip(
 
             float alpha = 1.0f, beta = 0.0f;
             const float* weight_ptr = weight.data<float>() + out_start * C_in_per_group * kD * kH * kW;
-            float* output_ptr = output.data<float>() + out_start * D_out * H_out * W_out;
 
-            // Row-major: output(M,N_gemm) = col(M,K) @ weight(N_gemm,K)^T
-            // rocBLAS uses column-major, so we compute the transpose:
-            //   C^T(N_gemm,M) = weight(N_gemm,K) @ col(M,K)^T
-            // rocBLAS params: op_a=Transpose, op_b=None,
-            //   m=N_gemm, n=M, k=K, A=weight(lda=K), B=col(ldb=K), C=output(ldc=N_gemm)
+            // rocBLAS's output layout (N_gemm, M) col-major is equivalent
+            // to (M, N_gemm) row-major, i.e. NDHWC-ordered. The Conv3d
+            // output tensor is NCDHW — write to a temp buffer and
+            // post-transpose into NCDHW. Writing straight into the NCDHW
+            // pointer (the previous implementation) silently corrupted
+            // the layout, making outputs differ from CPU by up to ~7.
+            HipBuffer gemm_out_buf(M * N_gemm * sizeof(float));
+            float* gemm_out = gemm_out_buf.as<float>();
+
             ROCBLAS_CHECK(rocblas_sgemm(
                 handle,
                 rocblas_operation_transpose, rocblas_operation_none,
@@ -351,8 +382,16 @@ auto conv3d_forward_hip(
                 weight_ptr, K,
                 col_buffer, K,
                 &beta,
-                output_ptr, N_gemm
+                gemm_out, N_gemm
             ));
+
+            dim3 t_grid, t_block;
+            compute_launch_config_conv3d(M * N_gemm, t_grid, t_block);
+            conv3d_ndhwc_to_ncdhw_kernel<float><<<t_grid, t_block, 0, stream>>>(
+                gemm_out, output.data<float>(),
+                N, D_out, H_out, W_out, C_out, C_out_per_group, out_start
+            );
+            HIP_CHECK(hipGetLastError());
 
         } else if (dtype == DType::Float64) {
             HipBuffer col_buf(col_rows * col_cols * sizeof(double));
@@ -371,7 +410,9 @@ auto conv3d_forward_hip(
 
             double alpha = 1.0, beta = 0.0;
             const double* weight_ptr = weight.data<double>() + out_start * C_in_per_group * kD * kH * kW;
-            double* output_ptr = output.data<double>() + out_start * D_out * H_out * W_out;
+
+            HipBuffer gemm_out_buf(M * N_gemm * sizeof(double));
+            double* gemm_out = gemm_out_buf.as<double>();
 
             ROCBLAS_CHECK(rocblas_dgemm(
                 handle,
@@ -381,8 +422,16 @@ auto conv3d_forward_hip(
                 weight_ptr, K,
                 col_buffer, K,
                 &beta,
-                output_ptr, N_gemm
+                gemm_out, N_gemm
             ));
+
+            dim3 t_grid, t_block;
+            compute_launch_config_conv3d(M * N_gemm, t_grid, t_block);
+            conv3d_ndhwc_to_ncdhw_kernel<double><<<t_grid, t_block, 0, stream>>>(
+                gemm_out, output.data<double>(),
+                N, D_out, H_out, W_out, C_out, C_out_per_group, out_start
+            );
+            HIP_CHECK(hipGetLastError());
 
         } else if (dtype == DType::Float16) {
             static_assert(sizeof(Float16) == sizeof(__half) && alignof(Float16) == alignof(__half),
@@ -405,7 +454,9 @@ auto conv3d_forward_hip(
             rocblas_half beta_h{static_cast<uint16_t>(0x0000)};   // 0.0 in FP16
 
             const rocblas_half* weight_ptr = reinterpret_cast<const rocblas_half*>(weight.data<Float16>()) + out_start * C_in_per_group * kD * kH * kW;
-            rocblas_half* output_ptr = reinterpret_cast<rocblas_half*>(output.data<Float16>()) + out_start * D_out * H_out * W_out;
+
+            HipBuffer gemm_out_buf(M * N_gemm * sizeof(__half));
+            __half* gemm_out = gemm_out_buf.as<__half>();
 
             ROCBLAS_CHECK(rocblas_hgemm(
                 handle,
@@ -415,8 +466,17 @@ auto conv3d_forward_hip(
                 weight_ptr, K,
                 reinterpret_cast<const rocblas_half*>(col_buffer), K,
                 &beta_h,
-                output_ptr, N_gemm
+                reinterpret_cast<rocblas_half*>(gemm_out), N_gemm
             ));
+
+            dim3 t_grid, t_block;
+            compute_launch_config_conv3d(M * N_gemm, t_grid, t_block);
+            conv3d_ndhwc_to_ncdhw_kernel<__half><<<t_grid, t_block, 0, stream>>>(
+                gemm_out,
+                reinterpret_cast<__half*>(output.data<Float16>()),
+                N, D_out, H_out, W_out, C_out, C_out_per_group, out_start
+            );
+            HIP_CHECK(hipGetLastError());
 
         } else {
             throw std::runtime_error("Conv3d: unsupported dtype (only Float32, Float64, Float16)");
