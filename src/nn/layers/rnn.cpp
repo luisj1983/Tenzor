@@ -76,22 +76,31 @@ auto RNNCell::forward(const Variable& input, const Variable& hx) -> Variable {
 }
 
 auto RNNCell::forward_with_precomputed_ih(const Tensor& precomputed_ih, const Variable& hx) -> Variable {
+    // `precomputed_ih` is a raw Tensor: the input-gate contribution (W_ih @ input
+    // + b_ih) computed by the caller. The caller has already decided not to
+    // retain autograd through the input side — this signature takes Tensor, not
+    // Variable. The recurrent / hidden-side grad chain through `hx` and
+    // `hidden_layer_`'s weights must still be preserved, though.
+    //
+    // Previously: `Variable(precomputed_ih + h_out.tensor(), true)` did a raw
+    // Tensor add and wrapped in a fresh Variable with no grad_fn — silently
+    // severing the hidden-side backward path. Rewritten to use Variable-level
+    // addition so the grad_fn chain is intact.
     int64_t batch_size = precomputed_ih.shape()[0];
 
-    // Initialize hidden state if not provided
     Variable h = hx;
     if (!h.is_initialized() || h.tensor().numel() == 0) {
         h = Variable(zeros({batch_size, hidden_size_},
                           precomputed_ih.dtype(), precomputed_ih.device()), false);
     }
 
-    // Compute hidden-to-hidden transformation
-    auto h_out = hidden_layer_->forward(h);
+    auto h_out = hidden_layer_->forward(h);  // Variable with grad_fn
 
-    // Combine: precomputed_ih + W_hh @ h
-    auto combined = Variable(precomputed_ih + h_out.tensor(), true);
+    // Wrap the precomputed input-side contribution as a non-autograd constant;
+    // Variable+Variable addition keeps h_out's grad_fn on the result.
+    Variable precomputed_ih_var(precomputed_ih, false);
+    auto combined = precomputed_ih_var + h_out;
 
-    // Apply activation
     if (nonlinearity_ == "tanh") {
         return nn::tanh(combined);
     } else { // relu

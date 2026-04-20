@@ -88,6 +88,12 @@ inline const char* skip_reason_string(SkipReason r) {
 #define SKIP_WITH_REASON(reason, detail) \
     GTEST_SKIP() << "[" << ::tenzor::testing::skip_reason_string(reason) << "] " << detail
 
+// HONOR_BACKEND_ENV_VARS is defined in backend_test_fixture.hpp so it is
+// reachable from custom fixtures that declare their own local
+// `BackendDTypeParam` struct. (Importing this header's canonical
+// `BackendDTypeParam` tuple alias via `using namespace tenzor::testing` would
+// collide with those local structs.)
+
 // ============================================================================
 // Backend Name Parsing Utilities
 // ============================================================================

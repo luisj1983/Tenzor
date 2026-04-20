@@ -67,7 +67,62 @@ inline std::string formatBackendTestName(const std::string& backend) {
     return result;
 }
 
+/// Probe whether a backend name ("cuda", "cuda:0", "vulkan") is available.
+/// Returns true for "cpu" unconditionally; for other backends attempts a
+/// trivial allocation on the target device to confirm the backend loaded.
+inline bool isBackendNameAvailable(const std::string& backend_name) {
+    auto base = parseBackendName(backend_name);
+    auto index = parseDeviceIndex(backend_name);
+    if (base == "cpu") return true;
+    try {
+        Device test_device{nameToDeviceType(base), index};
+        auto t = zeros({2, 2}, DType::Float32, test_device);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 } // namespace detail
+
+// ----------------------------------------------------------------------------
+// HONOR_BACKEND_ENV_VARS: canonical env-var handling for custom-fixture SetUp()
+// ----------------------------------------------------------------------------
+// Call from a SetUp() that resolves its own backend name from GetParam() —
+// i.e., any custom BackendDTypeParam fixture that does not inherit
+// BackendTest / MultiBackendDTypeTest. Invoke with the backend-name string
+// AFTER reading GetParam() and BEFORE constructing the Device. It:
+//   1. Honors TENZOR_SKIP_BACKENDS (matches on base name, skips this case).
+//   2. For non-CPU backends that are genuinely unavailable, escalates to
+//      FAIL when TENZOR_REQUIRE_MULTI_BACKEND=1 is set, else GTEST_SKIP.
+//   3. Otherwise returns normally so SetUp continues.
+// The macro form is required because GTEST_SKIP/FAIL use `return` internally
+// and must execute in the test method's scope, not a nested function.
+// Defined here (backend_test_fixture.hpp) rather than multi_backend_dtype_
+// fixture.hpp so it is reachable from custom fixtures that declare their own
+// local `BackendDTypeParam` struct — pulling in the canonical fixture's
+// `BackendDTypeParam` tuple alias would conflict with those locals.
+#define HONOR_BACKEND_ENV_VARS(backend_name_str)                              \
+    do {                                                                      \
+        std::string __tenzor_base =                                           \
+            ::tenzor::testing::detail::parseBackendName(backend_name_str);    \
+        if (::tenzor::testing::detail::isBackendSkippedByEnv(__tenzor_base)) {\
+            GTEST_SKIP() << __tenzor_base                                     \
+                         << " excluded via TENZOR_SKIP_BACKENDS";             \
+        }                                                                     \
+        if (!::tenzor::testing::detail::isBackendNameAvailable(               \
+                backend_name_str)) {                                          \
+            const char* __tenzor_req =                                        \
+                std::getenv("TENZOR_REQUIRE_MULTI_BACKEND");                  \
+            if (__tenzor_req && *__tenzor_req && *__tenzor_req != '0' &&      \
+                __tenzor_base != "cpu") {                                     \
+                FAIL() << backend_name_str                                    \
+                       << " required by TENZOR_REQUIRE_MULTI_BACKEND"         \
+                          " but unavailable";                                 \
+            }                                                                 \
+            GTEST_SKIP() << backend_name_str << " backend not available";     \
+        }                                                                     \
+    } while (0)
 
 /**
  * @brief Base test fixture for backend parity testing

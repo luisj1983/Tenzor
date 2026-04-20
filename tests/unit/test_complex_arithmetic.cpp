@@ -335,6 +335,11 @@ TEST_P(ComplexArithmeticTest, ComplexMatmul) {
 // ============================================================================
 // Instantiate for CPU backend
 // ============================================================================
+// Complex arithmetic is currently only exercised on CPU here. When the
+// complex-dtype kernels land on CUDA/ROCm/Vulkan/OneAPI, add matching
+// INSTANTIATE_TEST_SUITE_P(<Backend>, ...) blocks. Do not fold them into a
+// single multi-backend instantiation until every kernel the tests call is
+// registered on that backend — otherwise the instantiation silently skips.
 
 INSTANTIATE_TEST_SUITE_P(
     CPU, ComplexArithmeticTest,

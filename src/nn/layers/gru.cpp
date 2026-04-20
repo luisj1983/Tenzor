@@ -108,50 +108,46 @@ auto GRUCell::forward(const Variable& input, const Variable& hx) -> Variable {
 }
 
 auto GRUCell::forward_with_precomputed_ih(const Tensor& gates_ih, const Variable& hx) -> Variable {
+    // `gates_ih` is a raw Tensor: the input-gate contributions (for the three
+    // GRU gates concatenated) computed by the caller without retaining
+    // autograd on the input side. The recurrent / hidden-side grad chain
+    // through `hx` and `weight_hh_` must still be preserved.
+    //
+    // Previously the whole body ran on raw Tensors, extracting .tensor() on
+    // every intermediate and wrapping the final h_new in Variable(..., true)
+    // with no grad_fn. Backward populated nothing on hx/weight_hh_. Rewritten
+    // to use Variable-level chunk/sigmoid/tanh/arithmetic throughout.
     int64_t batch_size = gates_ih.shape()[0];
 
-    // Initialize hidden state if not provided
     Variable h = hx;
     if (!h.is_initialized() || h.tensor().numel() == 0) {
         h = Variable(zeros({batch_size, hidden_size_},
                           gates_ih.dtype(), gates_ih.device()), false);
     }
 
-    // Compute hidden-to-hidden gates
-    auto gates_hh = weight_hh_->forward(h);
-    auto gates_hh_t = gates_hh.tensor().contiguous();
+    // Variable-level hidden-to-hidden gate computation.
+    auto gates_hh = weight_hh_->forward(h);  // Variable, carries grad_fn
 
-    // Split gates into 3 chunks
-    auto ih_chunks = chunk(gates_ih.contiguous(), 3, 1);  // [r_i, z_i, n_i]
-    auto hh_chunks = chunk(gates_hh_t, 3, 1);             // [r_h, z_h, n_h]
+    // Wrap gates_ih as a non-autograd constant (caller opted out of input-side
+    // grad). No autograd-aware chunk yet, so split 3*H-wide gate tensors with
+    // autograd-aware slice — same pattern as the standard RNN per-timestep
+    // path and as our LSTMCell::forward_with_precomputed_ih rewrite.
+    Variable gates_ih_var(gates_ih, false);
+    const int64_t H = hidden_size_;
+    auto r_i = ::tenzor::slice(gates_ih_var, 1, 0,     H);
+    auto z_i = ::tenzor::slice(gates_ih_var, 1, H,   2*H);
+    auto n_i = ::tenzor::slice(gates_ih_var, 1, 2*H, 3*H);
+    auto r_h = ::tenzor::slice(gates_hh,     1, 0,     H);
+    auto z_h = ::tenzor::slice(gates_hh,     1, H,   2*H);
+    auto n_h = ::tenzor::slice(gates_hh,     1, 2*H, 3*H);
 
-    auto r_i = ih_chunks[0];
-    auto z_i = ih_chunks[1];
-    auto n_i = ih_chunks[2];
-    auto r_h = hh_chunks[0];
-    auto z_h = hh_chunks[1];
-    auto n_h = hh_chunks[2];
+    // Gates. Variable + Variable + sigmoid/tanh keeps the graph connected.
+    auto r_t = nn::sigmoid(r_i + r_h);
+    auto z_t = nn::sigmoid(z_i + z_h);
+    auto n_t = nn::tanh(n_i + r_t * n_h);
 
-    // Compute reset gate: r_t = σ(r_i + r_h)
-    auto r_t = nn::sigmoid(Variable(r_i + r_h, true));
-
-    // Compute update gate: z_t = σ(z_i + z_h)
-    auto z_t = nn::sigmoid(Variable(z_i + z_h, true));
-
-    // Compute new gate: n_t = tanh(n_i + r_t ⊙ n_h)
-    auto n_h_reset = r_t.tensor() * n_h;
-    auto n_t = nn::tanh(Variable(n_i + n_h_reset, true));
-
-    // Compute new hidden state: h_t = (1 - z_t) ⊙ n_t + z_t ⊙ h_{t-1}
-    auto z_tensor = z_t.tensor();
-    auto n_tensor = n_t.tensor();
-    auto h_tensor = h.tensor();
-
-    // h_new = n_t + z_t * (h - n_t)
-    auto h_minus_n = h_tensor - n_tensor;
-    auto h_new_tensor = n_tensor + z_tensor * h_minus_n;
-
-    return Variable(h_new_tensor, true);
+    // h_new = (1 - z_t) * n_t + z_t * h   ≡   n_t + z_t * (h - n_t)
+    return n_t + z_t * (h - n_t);
 }
 
 // ============================================================================

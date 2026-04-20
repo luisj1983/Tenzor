@@ -62,6 +62,8 @@ protected:
             tolerance = 1e-5;
         }
 
+        HONOR_BACKEND_ENV_VARS(param.backend_name);
+
         if (param.backend_name == "cpu") {
             device = Device::cpu();
         }

@@ -182,6 +182,42 @@ TEST_F(HRMTest, StablemaxPropagatesGradient) {
         << "stablemax gradient identically zero — graph still severed";
 }
 
+// stablemax_cross_entropy previously extracted probs.tensor() and built the
+// loss on the host, wrapping mean in a fresh Variable with no grad_fn — same
+// graph-sever pattern as stablemax itself. Rewritten to use the OneHot +
+// Variable-arithmetic path from CrossEntropyLoss. This test locks in that
+// backward flows through to the logits.
+TEST_F(HRMTest, StablemaxCrossEntropyPropagatesGradient) {
+    const int64_t B = 4, C = 6;
+    Variable logits(randn({B, C}, DType::Float32, Device::cpu()),
+                    /*requires_grad=*/true);
+
+    // Int64 class-index target path.
+    Tensor target_tensor({B}, DType::Int64, Device::cpu());
+    auto* tp = target_tensor.data<int64_t>();
+    for (int64_t i = 0; i < B; ++i) {
+        tp[i] = i % C;
+    }
+    Variable target(target_tensor, /*requires_grad=*/false);
+
+    auto loss = stablemax_cross_entropy(logits, target, 1e-8);
+    loss.backward();
+
+    ASSERT_TRUE(logits.has_grad())
+        << "stablemax_cross_entropy must propagate gradient to logits";
+    auto g = logits.grad().value().to(Device::cpu()).contiguous();
+    ASSERT_EQ(g.numel(), logits.tensor().numel());
+    const float* gp = g.data<float>();
+    float max_abs = 0.0f;
+    for (int64_t i = 0; i < g.numel(); ++i) {
+        EXPECT_FALSE(std::isnan(gp[i])) << "grad[" << i << "] is NaN";
+        EXPECT_FALSE(std::isinf(gp[i])) << "grad[" << i << "] is Inf";
+        max_abs = std::max(max_abs, std::abs(gp[i]));
+    }
+    EXPECT_GT(max_abs, 0.0f)
+        << "stablemax_cross_entropy gradient identically zero — graph severed";
+}
+
 // Stablemax output must be a valid probability distribution: non-negative,
 // sums to ≈ 1 along the normalised dimension (modulo the eps term).
 TEST_F(HRMTest, StablemaxOutputIsProbability) {

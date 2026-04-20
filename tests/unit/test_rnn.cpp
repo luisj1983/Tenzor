@@ -77,6 +77,41 @@ TEST_P(RNNCellTestFixture, InvalidNonlinearity) {
     }, std::invalid_argument) << "Failed on " << device.to_string();
 }
 
+// forward_with_precomputed_ih took a raw Tensor for the input-side gate and
+// previously did `Variable(precomputed_ih + h_out.tensor(), true)` — a raw
+// Tensor add wrapped in a fresh Variable with no grad_fn. That silently
+// severed the hidden-side autograd chain: hx and weight_hh produced zero
+// gradients. Rewritten to use Variable-level arithmetic; this test locks the
+// fix in.
+TEST_P(RNNCellTestFixture, PrecomputedIhPropagatesHiddenGradient) {
+    nn::RNNCell cell(10, 20, "tanh");
+    cell.to(device);
+
+    // Precomputed input-side gate as raw Tensor (caller opted out of input
+    // autograd — that's the contract of this API).
+    auto precomputed_ih = randn({5, 20}, DType::Float32, device);
+    Variable hx(randn({5, 20}, DType::Float32, device), /*requires_grad=*/true);
+
+    auto out = cell.forward_with_precomputed_ih(precomputed_ih, hx);
+    auto loss = tenzor::sum(out);
+    loss.backward();
+
+    ASSERT_TRUE(hx.has_grad())
+        << "forward_with_precomputed_ih must propagate grad back to hx on "
+        << device.to_string();
+    auto g = hx.grad().value().to(Device::cpu()).contiguous();
+    const float* gp = g.data<float>();
+    float max_abs = 0.0f;
+    for (int64_t i = 0; i < g.numel(); ++i) {
+        EXPECT_FALSE(std::isnan(gp[i])) << "grad NaN at " << i
+                                         << " on " << device.to_string();
+        max_abs = std::max(max_abs, std::abs(gp[i]));
+    }
+    EXPECT_GT(max_abs, 0.0f)
+        << "hx grad identically zero — hidden-side autograd severed on "
+        << device.to_string();
+}
+
 INSTANTIATE_BACKEND_TESTS(RNNCellTestFixture);
 
 // ============================================================================

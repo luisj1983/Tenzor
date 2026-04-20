@@ -215,6 +215,11 @@ TEST_P(FFTTest, Length1FFT) {
 // ============================================================================
 // Instantiate for CPU backend
 // ============================================================================
+// FFT is only exercised on CPU here. When fft/ifft/rfft/irfft kernels land on
+// CUDA (cuFFT), ROCm (rocFFT), Vulkan, or OneAPI (oneMKL), add matching
+// INSTANTIATE_TEST_SUITE_P(<Backend>, ...) blocks below — do NOT collapse into
+// a single multi-backend instantiation until every op the tests call is
+// registered on that backend, or the instantiation will silently skip.
 
 INSTANTIATE_TEST_SUITE_P(
     CPU, FFTTest,

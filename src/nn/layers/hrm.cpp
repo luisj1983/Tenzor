@@ -8,10 +8,13 @@
 
 #include "tenzor/nn/layers/hrm.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/nn/activations/activations.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/math.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
 #include <cmath>
@@ -130,46 +133,64 @@ Variable stablemax(const Variable& input, int64_t dim, double eps) {
 
 Variable stablemax_cross_entropy(const Variable& input, const Variable& target,
                                   double eps) {
-    // Compute stablemax cross-entropy loss
-    // input: (batch, num_classes) logits
-    // target: (batch,) class indices
+    // Stablemax cross-entropy loss.
+    //   input:  (batch, num_classes) logits, autograd-enabled
+    //   target: (batch,) class indices (Int32/Int64), or (batch, num_classes)
+    //           one-hot / soft labels (float).
+    //
+    // Previous implementation extracted `probs.tensor()` and built the loss
+    // on the host in a vector<float>, wrapping the mean in a fresh Variable
+    // with no grad_fn — which silently zeroed `input.grad()`. Matches the
+    // pattern in feedback_raw_tensor_op_bug.md.
+    //
+    // Fixed: everything runs on Variable-level ops so backward() flows back
+    // through `stablemax` to `input`. The one-hot construction reuses the
+    // OneHot dispatch path from CrossEntropyLoss::forward, keeping the
+    // computation on the input's device.
 
-    auto batch_size = input.shape()[0];
-    auto num_classes = input.shape()[1];
+    const auto num_classes = input.shape()[1];
 
-    // Compute stablemax probabilities
+    // stablemax already preserves the graph; log() is autograd-aware.
     auto probs = stablemax(input, -1, eps);
+    auto log_probs = ::tenzor::log(probs + static_cast<float>(eps));  // [B, C]
 
-    // Gather the probabilities for correct classes
-    // For each sample, get prob[target[i]]
-    auto target_tensor = target.tensor();
-    auto probs_tensor = probs.tensor();
+    // Build a [B, C] one-hot / soft-label Variable that doesn't require grad.
+    const auto& target_tensor_raw = target.tensor();
+    const bool is_float_target =
+        (target_tensor_raw.dtype() == DType::Float32 ||
+         target_tensor_raw.dtype() == DType::Float64 ||
+         target_tensor_raw.dtype() == DType::Float16) &&
+        target_tensor_raw.ndim() == 2;
 
-    // Compute negative log likelihood
-    std::vector<float> losses(batch_size);
-
-    for (int64_t i = 0; i < batch_size; ++i) {
-        int64_t cls = static_cast<int64_t>(target_tensor.data<float>()[i]);
-        if (target_tensor.dtype() == DType::Int64) {
-            cls = target_tensor.data<int64_t>()[i];
-        } else if (target_tensor.dtype() == DType::Int32) {
-            cls = static_cast<int64_t>(target_tensor.data<int32_t>()[i]);
+    Variable one_hot_var;
+    if (is_float_target) {
+        Tensor t = target_tensor_raw;
+        if (t.device() != input.tensor().device()) {
+            t = t.to(input.tensor().device());
         }
-
-        // Get probability for this class
-        float prob = probs_tensor.data<float>()[i * num_classes + cls];
-
-        // Negative log likelihood with numerical stability
-        losses[i] = -std::log(std::max(prob, static_cast<float>(eps)));
+        if (t.dtype() != input.tensor().dtype()) {
+            t = t.to(input.tensor().dtype());
+        }
+        one_hot_var = Variable(t, false);
+    } else {
+        NewOpAttributes oh_attrs;
+        oh_attrs.set(AttrKey::NumClasses, num_classes);
+        Tensor target_dev = (target_tensor_raw.device() == input.tensor().device())
+            ? target_tensor_raw
+            : target_tensor_raw.to(input.tensor().device());
+        std::vector<Tensor> oh_inputs = {target_dev};
+        auto oh_results = dispatch(OpId::OneHot, oh_inputs, oh_attrs);
+        Tensor one_hot = oh_results[0];
+        if (one_hot.dtype() != input.tensor().dtype()) {
+            one_hot = one_hot.to(input.tensor().dtype());
+        }
+        one_hot_var = Variable(one_hot, false);
     }
 
-    // Create loss tensor and compute mean
-    Tensor loss_tensor({batch_size}, DType::Float32, input.tensor().device());
-    std::memcpy(loss_tensor.data<float>(), losses.data(), batch_size * sizeof(float));
-
-    auto mean_loss = tenzor::mean(loss_tensor);
-
-    return Variable(mean_loss, input.requires_grad());
+    // NLL = -mean( sum(log_probs * one_hot, dim=1) ); keeps graph intact.
+    auto weighted = log_probs * one_hot_var;                // [B, C]
+    auto per_sample = ::tenzor::sum(weighted, 1, false);    // [B]
+    return ::tenzor::mean(::tenzor::neg(per_sample));       // scalar
 }
 
 // RMSNorm is now implemented in normalization.cpp

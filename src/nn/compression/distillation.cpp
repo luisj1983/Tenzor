@@ -5,6 +5,7 @@
 
 #include "tenzor/nn/compression/distillation.hpp"
 #include "tenzor/nn/activations/activations.hpp"
+#include "tenzor/nn/utils/variable_cast.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/autograd/ops.hpp"
@@ -28,12 +29,13 @@ auto temperature_softmax(
         throw std::runtime_error("Temperature must be positive");
     }
 
-    // Only convert Float16 to Float32 for numerical stability
-    // Preserve Float32 and Float64 as-is
-    Variable logits_processed = logits;
-    if (logits.tensor().dtype() == DType::Float16) {
-        logits_processed = Variable(logits.tensor().to(DType::Float32), logits.requires_grad());
-    }
+    // Only convert Float16 to Float32 for numerical stability.
+    // Previously this did `Variable(logits.tensor().to(Float32), rg)`, which
+    // creates a fresh leaf Variable with no grad_fn — severing backward to
+    // `logits`. Use the autograd-aware `variable_cast` that wires a
+    // TypeCastBackward node and converts grads back to Float16 on the way
+    // through.
+    Variable logits_processed = nn::variable_cast(logits, DType::Float32);
 
     // Scale logits by temperature: logits / T
     // Lower temperature → sharper distribution
@@ -56,12 +58,11 @@ auto temperature_log_softmax(
         throw std::runtime_error("Temperature must be positive");
     }
 
-    // Only convert Float16 to Float32 for numerical stability
-    // Preserve Float32 and Float64 as-is
-    Variable logits_processed = logits;
-    if (logits.tensor().dtype() == DType::Float16) {
-        logits_processed = Variable(logits.tensor().to(DType::Float32), logits.requires_grad());
-    }
+    // Only convert Float16 to Float32 for numerical stability.
+    // See temperature_softmax above for the autograd-sever history this fix
+    // addresses — the raw `Variable(...tensor().to(Float32), rg)` pattern was
+    // replaced with autograd-aware `variable_cast`.
+    Variable logits_processed = nn::variable_cast(logits, DType::Float32);
 
     // Scale logits by temperature: logits / T
     Variable scaled_logits = logits_processed / temperature;
@@ -86,17 +87,15 @@ auto distillation_loss(
     float T = config.temperature;
     float alpha = config.alpha;
 
-    // Only cast Float16 to Float32 for numerical stability
-    // Preserve Float32 and Float64 as-is
-    auto student_dtype = student_logits.tensor().dtype();
-    Variable student_logits_cast = (student_dtype == DType::Float16)
-        ? Variable(student_logits.tensor().to(DType::Float32), student_logits.requires_grad())
-        : student_logits;
+    // Only cast Float16 to Float32 for numerical stability.
+    // Student side: autograd-aware cast so backward reaches the student params.
+    // Teacher side: no-grad wrap (teacher is a frozen reference).
+    Variable student_logits_cast = nn::variable_cast(student_logits, DType::Float32);
 
     auto teacher_dtype = teacher_logits.tensor().dtype();
     Variable teacher_logits_cast = (teacher_dtype == DType::Float16)
         ? Variable(teacher_logits.tensor().to(DType::Float32), false)
-        : Variable(teacher_logits.tensor(), false);  // Ensure teacher never needs gradients
+        : Variable(teacher_logits.tensor(), false);  // Teacher never needs gradients
 
     // Compute soft target loss (KL divergence)
     Variable soft_loss;
@@ -224,8 +223,9 @@ auto feature_distillation_loss(
     const Variable& teacher_features,
     const std::string& loss_type
 ) -> Variable {
-    // Cast to Float32 for consistent dtype
-    Variable student_fp32(student_features.tensor().to(DType::Float32), student_features.requires_grad());
+    // Cast to Float32 for consistent dtype. Student needs autograd-aware cast
+    // so backward reaches the student params; teacher is a frozen reference.
+    Variable student_fp32 = nn::variable_cast(student_features, DType::Float32);
     Variable teacher_fp32(teacher_features.tensor().to(DType::Float32), false);
 
     if (loss_type == "mse") {
@@ -252,8 +252,9 @@ auto attention_transfer_loss(
     const Variable& student_features,
     const Variable& teacher_features
 ) -> Variable {
-    // Cast to Float32 for consistent dtype
-    Variable student_fp32(student_features.tensor().to(DType::Float32), student_features.requires_grad());
+    // Cast to Float32 for consistent dtype. Student needs autograd-aware cast
+    // so backward reaches the student params; teacher is a frozen reference.
+    Variable student_fp32 = nn::variable_cast(student_features, DType::Float32);
     Variable teacher_fp32(teacher_features.tensor().to(DType::Float32), false);
 
     // Compute attention maps: sum of squared activations
@@ -414,92 +415,37 @@ auto kl_divergence(
     const Variable& targets,
     const std::string& reduction
 ) -> Variable {
-    // KL(P||Q) = sum(P * log(P/Q)) = sum(P * (log P - log Q))
-    // Here: P = targets, Q = predictions
-    // Since we have log Q, we compute: sum(P * (log P - log Q))
+    // KL(P||Q) element-wise = P * (log P − log Q).
+    //
+    // Previous implementation computed the entire KL sum host-side in a
+    // manual loop over raw tensor data, then wrapped the result in
+    // `Variable(kl_tensor, log_predictions_cast.requires_grad())` — a fresh
+    // leaf Variable with NO grad_fn. Backward flowed nothing back to
+    // log_predictions, silently zeroing student gradients through the
+    // distillation soft-target loss. Rewritten to use Variable-level ops
+    // throughout so autograd reaches the student params.
+    //
+    // p = 0 safety: clamp p to [eps, 1] before log so log(p) never diverges.
+    // The `p * (log(p) - log_q)` term then becomes `0 * (log(eps) - log_q) = 0`
+    // exactly where p = 0, matching the original semantics. For very small
+    // p ∈ (0, eps], the error is bounded by p * |log(eps) - log(p)| which is
+    // < 1e-10 * 23 ≈ 2e-9 — well below float precision.
 
-    // Only cast Float16 to Float32 for numerical stability
-    // Preserve Float32 and Float64 as-is
-    auto pred_dtype = log_predictions.tensor().dtype();
-    Variable log_predictions_cast = (pred_dtype == DType::Float16)
-        ? Variable(log_predictions.tensor().to(DType::Float32), log_predictions.requires_grad())
-        : log_predictions;
+    Variable log_q = nn::variable_cast(log_predictions, DType::Float32);
 
     auto target_dtype = targets.tensor().dtype();
-    Variable targets_cast = (target_dtype == DType::Float16)
+    Variable p = (target_dtype == DType::Float16)
         ? Variable(targets.tensor().to(DType::Float32), false)
-        : Variable(targets.tensor(), false);  // Targets don't need gradients
+        : Variable(targets.tensor(), false);
 
-    // KL(P||Q) = sum(P * (log P - log Q))
-    // Handle edge case: when P = 0, use convention that 0 * log(0) = 0
-    // We compute this element-wise to avoid nan from log(0)
-
-    int64_t numel = targets_cast.tensor().numel();
-    auto result_shape = std::vector<int64_t>(targets_cast.tensor().shape().begin(),
-                                             targets_cast.tensor().shape().end());
-    DType compute_dtype = log_predictions_cast.tensor().dtype();
-    Device target_device = targets_cast.tensor().device();
-
-    // Move tensors to CPU for data access, compute, then transfer result
-    Tensor targets_cpu = targets_cast.tensor();
-    if (target_device != Device::cpu()) {
-        targets_cpu = targets_cast.tensor().to(Device::cpu());
-    }
-    Tensor log_preds_cpu = log_predictions_cast.tensor();
-    if (log_predictions_cast.tensor().device() != Device::cpu()) {
-        log_preds_cpu = log_predictions_cast.tensor().to(Device::cpu());
-    }
-
-    // Create result tensor on CPU
-    Tensor kl_cpu(result_shape, compute_dtype, Device::cpu());
-
-    if (compute_dtype == DType::Float64) {
-        const double* p_data = targets_cpu.data<double>();
-        const double* log_q_data = log_preds_cpu.data<double>();
-        double* kl_data = kl_cpu.data<double>();
-
-        constexpr double EPSILON = 1e-10;
-        for (int64_t i = 0; i < numel; ++i) {
-            double p = p_data[i];
-            double log_q = log_q_data[i];
-
-            if (p > EPSILON) {
-                double log_p = std::log(p);
-                // Clamp to non-negative: KL divergence is always >= 0
-                // Small negative values can occur due to floating point precision
-                kl_data[i] = std::max(0.0, p * (log_p - log_q));
-            } else {
-                kl_data[i] = 0.0;
-            }
-        }
-    } else {
-        // Float32 (including converted Float16)
-        const float* p_data = targets_cpu.data<float>();
-        const float* log_q_data = log_preds_cpu.data<float>();
-        float* kl_data = kl_cpu.data<float>();
-
-        constexpr float EPSILON = 1e-10f;
-        for (int64_t i = 0; i < numel; ++i) {
-            float p = p_data[i];
-            float log_q = log_q_data[i];
-
-            if (p > EPSILON) {
-                float log_p = std::log(p);
-                // Clamp to non-negative: KL divergence is always >= 0
-                // Small negative values can occur due to floating point precision
-                kl_data[i] = std::max(0.0f, p * (log_p - log_q));
-            } else {
-                kl_data[i] = 0.0f;
-            }
-        }
-    }
-
-    // Transfer result back to original device if needed
-    Tensor kl_tensor = (target_device == Device::cpu())
-        ? kl_cpu
-        : kl_cpu.to(target_device);
-
-    Variable kl(kl_tensor, log_predictions_cast.requires_grad());
+    constexpr float EPSILON = 1e-10f;
+    auto p_safe = ::tenzor::clamp(p, EPSILON, 1.0f);   // autograd-aware (p has no grad)
+    auto log_p = ::tenzor::log(p_safe);                // autograd-aware
+    auto per_element = p * (log_p - log_q);            // autograd flows through log_q
+    // Clamp element-wise negatives (fp-precision noise) to 0. relu is
+    // autograd-aware and piecewise-linear; grad passes through positive
+    // elements and zero through the clamped ones.
+    auto kl = nn::relu(per_element);
 
     // Apply reduction
     if (reduction == "none") {
@@ -513,7 +459,7 @@ auto kl_divergence(
     } else if (reduction == "batchmean") {
         // Sum over elements, divide by batch size
         auto total = sum(kl);
-        int64_t batch_size = targets_cast.tensor().shape()[0];
+        int64_t batch_size = p.tensor().shape()[0];
         return total / static_cast<float>(batch_size);
     } else {
         throw std::runtime_error("Unknown reduction type: " + reduction);
@@ -524,8 +470,9 @@ auto cosine_similarity_loss(
     const Variable& student_features,
     const Variable& teacher_features
 ) -> Variable {
-    // Cast to Float32 for consistent dtype
-    Variable student_fp32(student_features.tensor().to(DType::Float32), student_features.requires_grad());
+    // Cast to Float32 for consistent dtype. Student needs autograd-aware cast
+    // so backward reaches the student params; teacher is a frozen reference.
+    Variable student_fp32 = nn::variable_cast(student_features, DType::Float32);
     Variable teacher_fp32(teacher_features.tensor().to(DType::Float32), false);
 
     // Cosine similarity: dot(a, b) / (norm(a) * norm(b))

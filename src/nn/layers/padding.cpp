@@ -88,6 +88,14 @@ auto pad_dim_reflect(const Variable& input, int64_t dim, int64_t pad_before,
 }
 
 /// Helper: pad a single dimension using replication (edge values).
+///
+/// Previous implementation called `Variable(expand(edge.tensor(), ...), rg)`
+/// and `Variable(contiguous(expanded.tensor()), rg)` — both extracted the
+/// underlying tensor and wrapped in a fresh Variable with no grad_fn,
+/// discarding the autograd chain back to `input`. Backward then accumulated
+/// only the middle-part gradient, silently dropping contributions from the
+/// replicated edges. Bumped the test from shape/dtype presence to a
+/// non-zero-magnitude check that locks the fix in place.
 auto pad_dim_replicate(const Variable& input, int64_t dim, int64_t pad_before,
                        int64_t pad_after) -> Variable {
     if (pad_before == 0 && pad_after == 0) return input;
@@ -97,17 +105,14 @@ auto pad_dim_replicate(const Variable& input, int64_t dim, int64_t pad_before,
     std::vector<Variable> parts;
 
     if (pad_before > 0) {
-        // Replicate: repeat the first element pad_before times
+        // Slice the first row along `dim` then expand it to `pad_before`
+        // copies — both ops are autograd-aware, so the grad_fn chain back
+        // to `input` is preserved.
         auto edge = slice(input, dim, 0, 1);
-        std::vector<int64_t> rep_shape(shape.size(), 1);
-        rep_shape[dim] = pad_before;
-        // expand broadcasts to the desired shape
         auto edge_shape = std::vector<int64_t>(shape.begin(), shape.end());
         edge_shape[dim] = pad_before;
-        auto expanded = Variable(expand(edge.tensor(), edge_shape), input.requires_grad());
-        // Need contiguous copy for cat
-        auto contiguous_expanded = Variable(contiguous(expanded.tensor()), input.requires_grad());
-        parts.push_back(contiguous_expanded);
+        auto expanded = ::tenzor::expand(edge, edge_shape);
+        parts.push_back(expanded);
     }
 
     parts.push_back(input);
@@ -117,9 +122,8 @@ auto pad_dim_replicate(const Variable& input, int64_t dim, int64_t pad_before,
         auto edge = slice(input, dim, dim_size - 1, dim_size);
         auto edge_shape = std::vector<int64_t>(shape.begin(), shape.end());
         edge_shape[dim] = pad_after;
-        auto expanded = Variable(expand(edge.tensor(), edge_shape), input.requires_grad());
-        auto contiguous_expanded = Variable(contiguous(expanded.tensor()), input.requires_grad());
-        parts.push_back(contiguous_expanded);
+        auto expanded = ::tenzor::expand(edge, edge_shape);
+        parts.push_back(expanded);
     }
 
     return cat(parts, dim);

@@ -415,7 +415,7 @@ TEST_P(PaddingMultiDTypeTest, ReplicationPad1d_GradientFlow) {
     std::vector<int64_t> out_shape_vec(out_shape.begin(), out_shape.end());
     auto grad_output = tenzor::ones(out_shape_vec, dtype(), device());
 
-    EXPECT_NO_THROW({ output.backward(grad_output); });
+    output.backward(grad_output);
 
     ASSERT_TRUE(input.grad().has_value());
     auto grad = input.grad().value();
@@ -423,6 +423,48 @@ TEST_P(PaddingMultiDTypeTest, ReplicationPad1d_GradientFlow) {
     EXPECT_EQ(grad.shape()[1], 3);
     EXPECT_EQ(grad.shape()[2], 10);
     EXPECT_EQ(grad.dtype(), dtype());
+
+    // Previously this test accepted any non-null grad, hiding a real sever:
+    // expand() was called on raw tensors so the replicated-edge branch of
+    // pad_dim_replicate dropped its grad_fn. Gradients accumulated only
+    // through the middle `input` part of the cat — edges were silently
+    // zeroed. Lock the fix with the TESTING.md triad.
+    auto grad_f32 = grad.to(Device::cpu()).to(DType::Float32);
+    auto* gp = grad_f32.data<float>();
+    float max_abs = 0.0f;
+    for (int64_t i = 0; i < grad_f32.numel(); ++i) {
+        ASSERT_FALSE(std::isnan(gp[i])) << "grad[" << i << "] is NaN";
+        ASSERT_FALSE(std::isinf(gp[i])) << "grad[" << i << "] is Inf";
+        max_abs = std::max(max_abs, std::abs(gp[i]));
+    }
+    EXPECT_GT(max_abs, 0.0f)
+        << "ReplicationPad1d grad identically zero — autograd chain severed";
+}
+
+// Mathematical invariant: with pad_before=2 on a [1,1,4] input of ones and
+// grad_output of ones, the first input element contributes to output positions
+// 0, 1 (replicated edges) AND position 2 (itself) — so its grad is 3. The
+// raw-tensor expand bug produced a grad of 1 for that element (only the
+// middle-cat part flowed through). Float32 on CPU pins the invariant exactly;
+// every backend flows through the same autograd chain.
+TEST(ReplicationPadRegression, ReplicationPad1d_ReplicatedEdgesContributeToGrad) {
+    tenzor::initialize();
+    auto pad = ReplicationPad1d(/*pad_before=*/2, /*pad_after=*/0);
+    Variable input(tenzor::ones({1, 1, 4}, DType::Float32, Device::cpu()),
+                   /*requires_grad=*/true);
+    auto output = pad.forward(input);
+
+    auto grad_output = tenzor::ones({1, 1, 6}, DType::Float32, Device::cpu());
+    output.backward(grad_output);
+
+    ASSERT_TRUE(input.grad().has_value());
+    auto g = input.grad().value().to(Device::cpu()).contiguous();
+    ASSERT_EQ(g.numel(), 4);
+    const float* gp = g.data<float>();
+    EXPECT_FLOAT_EQ(gp[0], 3.0f) << "first element must accumulate 3 (self + 2 replicated edges)";
+    EXPECT_FLOAT_EQ(gp[1], 1.0f);
+    EXPECT_FLOAT_EQ(gp[2], 1.0f);
+    EXPECT_FLOAT_EQ(gp[3], 1.0f);
 }
 
 // ============================================================================

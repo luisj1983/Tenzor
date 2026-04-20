@@ -78,6 +78,44 @@ TEST_P(LSTMCellTestFixture, CellStateEvolution) {
     EXPECT_EQ(h3.shape()[1], 20) << "Failed on " << device.to_string();
 }
 
+// forward_with_precomputed_ih previously only fixed the c_new/h_new ops at
+// the bottom, but still did `gates_ih + gates_hh.tensor()` (raw Tensor add,
+// strips grad_fn from gates_hh) and `chunk(gates_tensor, ...)` (raw chunk),
+// severing the grad chain back to hx/cx/weight_hh_. Rewritten to use
+// Variable-level add + autograd-aware slice for the gate split. This test
+// locks in the recurrent-grad invariant.
+TEST_P(LSTMCellTestFixture, PrecomputedIhPropagatesHiddenCellGradient) {
+    nn::LSTMCell cell(10, 20);
+    cell.to(device);
+
+    // 4*hidden = 80 wide for LSTM gates.
+    auto gates_ih = randn({5, 80}, DType::Float32, device);
+    Variable hx(randn({5, 20}, DType::Float32, device), /*requires_grad=*/true);
+    Variable cx(randn({5, 20}, DType::Float32, device), /*requires_grad=*/true);
+
+    auto [h_new, c_new] = cell.forward_with_precomputed_ih(gates_ih, hx, cx);
+    auto loss = tenzor::sum(h_new) + tenzor::sum(c_new);
+    loss.backward();
+
+    ASSERT_TRUE(hx.has_grad()) << "hx missing grad on " << device.to_string();
+    ASSERT_TRUE(cx.has_grad()) << "cx missing grad on " << device.to_string();
+
+    auto check_nonzero = [&](const Variable& v, const char* name) {
+        auto g = v.grad().value().to(Device::cpu()).contiguous();
+        const float* gp = g.data<float>();
+        float max_abs = 0.0f;
+        for (int64_t i = 0; i < g.numel(); ++i) {
+            EXPECT_FALSE(std::isnan(gp[i])) << name << " grad NaN";
+            max_abs = std::max(max_abs, std::abs(gp[i]));
+        }
+        EXPECT_GT(max_abs, 0.0f)
+            << name << " grad identically zero — LSTMCell recurrent-side autograd severed on "
+            << device.to_string();
+    };
+    check_nonzero(hx, "hx");
+    check_nonzero(cx, "cx");
+}
+
 INSTANTIATE_BACKEND_TESTS(LSTMCellTestFixture);
 
 // ============================================================================

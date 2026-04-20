@@ -823,6 +823,86 @@ TEST_F(DistillationTest, NumericalStabilityAllZeros) {
 }
 
 // =============================================================================
+// Float16 autograd-chain regression
+// =============================================================================
+//
+// temperature_softmax/temperature_log_softmax/distillation_loss/kl_divergence
+// previously cast Float16 inputs to Float32 via
+//   `Variable(x.tensor().to(Float32), x.requires_grad())`
+// which creates a fresh leaf Variable with no grad_fn — silently severing the
+// student's autograd chain. Rewritten to use autograd-aware `variable_cast`.
+// These tests lock in the fix: backward must produce a non-zero grad on the
+// original Float16 input.
+
+TEST_F(DistillationTest, TemperatureSoftmaxF16PreservesAutogradChain) {
+    auto logits_f16 = randn({2, 5}, DType::Float16, Device::cpu());
+    Variable logits(logits_f16, /*requires_grad=*/true);
+    auto out = temperature_softmax(logits, 2.0f, -1);
+    // sum(softmax(x)) is constant (rows sum to 1) so its grad would be zero
+    // for mathematical reasons unrelated to autograd. Use sum(out * out) so
+    // the loss actually depends on the logits.
+    auto loss = tenzor::sum(out * out);
+    loss.backward();
+
+    ASSERT_TRUE(logits.has_grad())
+        << "temperature_softmax severed autograd for Float16 input";
+    auto g_f32 = logits.grad().value().to(Device::cpu()).to(DType::Float32);
+    const float* gp = g_f32.data<float>();
+    float max_abs = 0.0f;
+    for (int64_t i = 0; i < g_f32.numel(); ++i) {
+        max_abs = std::max(max_abs, std::abs(gp[i]));
+    }
+    EXPECT_GT(max_abs, 0.0f)
+        << "temperature_softmax gradient zero on Float16 — graph severed";
+    // TypeCastBackward converts grads back to Float16 to match input dtype.
+    EXPECT_EQ(logits.grad().value().dtype(), DType::Float16)
+        << "grad dtype must match input dtype (Float16) via TypeCastBackward";
+}
+
+TEST_F(DistillationTest, TemperatureLogSoftmaxF16PreservesAutogradChain) {
+    auto logits_f16 = randn({2, 5}, DType::Float16, Device::cpu());
+    Variable logits(logits_f16, /*requires_grad=*/true);
+    auto out = temperature_log_softmax(logits, 2.0f, -1);
+    auto loss = tenzor::sum(out);
+    loss.backward();
+
+    ASSERT_TRUE(logits.has_grad());
+    auto g_f32 = logits.grad().value().to(Device::cpu()).to(DType::Float32);
+    const float* gp = g_f32.data<float>();
+    float max_abs = 0.0f;
+    for (int64_t i = 0; i < g_f32.numel(); ++i) {
+        max_abs = std::max(max_abs, std::abs(gp[i]));
+    }
+    EXPECT_GT(max_abs, 0.0f)
+        << "temperature_log_softmax gradient zero on Float16 — graph severed";
+}
+
+TEST_F(DistillationTest, DistillationLossF16StudentGetsGradient) {
+    auto student_f16 = randn({2, 4}, DType::Float16, Device::cpu());
+    auto teacher_f16 = randn({2, 4}, DType::Float16, Device::cpu());
+    Variable student(student_f16, /*requires_grad=*/true);
+    Variable teacher(teacher_f16, /*requires_grad=*/false);
+
+    DistillationConfig cfg;
+    cfg.temperature = 2.0f;
+    cfg.alpha = 1.0f;  // pure KL, no hard-target component
+
+    auto loss = distillation_loss(student, teacher, std::nullopt, cfg);
+    loss.backward();
+
+    ASSERT_TRUE(student.has_grad())
+        << "distillation_loss severed student autograd chain for Float16";
+    auto g_f32 = student.grad().value().to(Device::cpu()).to(DType::Float32);
+    const float* gp = g_f32.data<float>();
+    float max_abs = 0.0f;
+    for (int64_t i = 0; i < g_f32.numel(); ++i) {
+        max_abs = std::max(max_abs, std::abs(gp[i]));
+    }
+    EXPECT_GT(max_abs, 0.0f)
+        << "student grad zero — distillation_loss F16 graph severed";
+}
+
+// =============================================================================
 // Main
 // =============================================================================
 

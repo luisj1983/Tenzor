@@ -77,6 +77,37 @@ TEST_P(GRUCellTest, ParameterCount) {
     EXPECT_EQ(params.size(), 4) << "Failed on " << device.to_string();
 }
 
+// forward_with_precomputed_ih previously ran its whole body on raw Tensors and
+// wrapped the output in Variable(h_new_tensor, true) with no grad_fn — silently
+// zeroing gradients on hx and weight_hh_. Rewritten with Variable-level slice/
+// sigmoid/tanh/arithmetic; this test locks in the recurrent-grad invariant.
+TEST_P(GRUCellTest, PrecomputedIhPropagatesHiddenGradient) {
+    nn::GRUCell cell(10, 20);
+    cell.to(device);
+
+    // 3*hidden = 60 wide for GRU gates.
+    auto gates_ih = randn({5, 60}, DType::Float32, device);
+    Variable hx(randn({5, 20}, DType::Float32, device), /*requires_grad=*/true);
+
+    auto out = cell.forward_with_precomputed_ih(gates_ih, hx);
+    auto loss = tenzor::sum(out);
+    loss.backward();
+
+    ASSERT_TRUE(hx.has_grad())
+        << "GRUCell::forward_with_precomputed_ih must propagate grad to hx on "
+        << device.to_string();
+    auto g = hx.grad().value().to(Device::cpu()).contiguous();
+    const float* gp = g.data<float>();
+    float max_abs = 0.0f;
+    for (int64_t i = 0; i < g.numel(); ++i) {
+        EXPECT_FALSE(std::isnan(gp[i])) << "grad NaN at " << i;
+        max_abs = std::max(max_abs, std::abs(gp[i]));
+    }
+    EXPECT_GT(max_abs, 0.0f)
+        << "hx grad identically zero — GRUCell recurrent-side autograd severed on "
+        << device.to_string();
+}
+
 // ============================================================================
 // GRU Tests
 // ============================================================================

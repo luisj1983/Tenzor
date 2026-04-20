@@ -232,6 +232,11 @@ TEST_P(LinalgTest, DetBatched) {
     EXPECT_NEAR(dp[1], -2.0f, 1e-4f);
 }
 
+// Linalg is exercised on CPU and OneAPI. When cuSOLVER / rocSOLVER / Vulkan
+// kernels for det / solve / inverse / eig / svd / cholesky land, add matching
+// INSTANTIATE_TEST_SUITE_P(CUDA|ROCm|Vulkan, LinalgTest, ...) blocks below.
+// Keep per-backend instantiations separate — folding backends into one Values
+// block silently skips anywhere the op isn't registered.
 INSTANTIATE_TEST_SUITE_P(
     CPU, LinalgTest,
     ::testing::Values("cpu"),

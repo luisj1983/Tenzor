@@ -48,5 +48,20 @@ TEST_F(SparseEmbeddingTest, Backward) {
     auto input = Variable(indices, false);
     auto output = emb.forward(input);
     auto loss = sum(output);
-    EXPECT_NO_THROW(loss.backward());
+    loss.backward();
+
+    // Gradient flows to the weight table (indices are Int64 and cannot carry
+    // grads). TESTING.md triad: has_grad, grad numel == param numel, and the
+    // gradient actually has non-zero magnitude (catches silent-zero backward).
+    ASSERT_TRUE(emb.weight().has_grad());
+    ASSERT_EQ(emb.weight().grad()->numel(), emb.weight().tensor().numel());
+
+    auto grad_data = emb.weight().grad()->data<float>();
+    float max_abs = 0.0f;
+    for (int64_t i = 0; i < emb.weight().grad()->numel(); ++i) {
+        ASSERT_FALSE(std::isnan(grad_data[i]));
+        ASSERT_FALSE(std::isinf(grad_data[i]));
+        max_abs = std::max(max_abs, std::abs(grad_data[i]));
+    }
+    EXPECT_GT(max_abs, 0.0f);
 }

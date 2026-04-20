@@ -129,10 +129,19 @@ auto LSTMCell::forward(const Variable& input, const Variable& hx, const Variable
 
 auto LSTMCell::forward_with_precomputed_ih(const Tensor& gates_ih, const Variable& hx, const Variable& cx)
     -> std::pair<Variable, Variable> {
-
+    // `gates_ih` is a raw Tensor: the input-gate contributions for all four
+    // LSTM gates, concatenated along dim=1. The caller opted out of input-side
+    // autograd (Tensor signature), but the hidden-side / cell-state / weight_hh
+    // grad chain through `hx`/`cx`/`weight_hh_` must still be preserved.
+    //
+    // Previous implementation fixed only the c_new/h_new ops at the bottom,
+    // but still ran `gates_ih + gates_hh.tensor()` (raw Tensor add, strips
+    // grad_fn) and then `chunk(gates_tensor, 4, 1)` (raw Tensor chunk),
+    // severing the chain back to `h`/`weight_hh_`. Gradients on those were
+    // silently zero. Rewritten to keep the gate combination on the Variable
+    // path; c_new/h_new were already correct and are untouched.
     int64_t batch_size = gates_ih.shape()[0];
 
-    // Initialize hidden and cell states if not provided
     Variable h = hx;
     Variable c = cx;
 
@@ -145,37 +154,25 @@ auto LSTMCell::forward_with_precomputed_ih(const Tensor& gates_ih, const Variabl
                           gates_ih.dtype(), gates_ih.device()), false);
     }
 
-    // Compute hidden-to-hidden gates
-    auto gates_hh = weight_hh_->forward(h);
+    auto gates_hh = weight_hh_->forward(h);  // Variable with grad_fn
 
-    // Combine gates: gates = gates_ih + gates_hh
-    auto gates_tensor = (gates_ih + gates_hh.tensor()).contiguous();
+    // Non-autograd constant for the input-side contribution.
+    Variable gates_ih_var(gates_ih, false);
+    auto gates = gates_ih_var + gates_hh;                 // Variable + Variable
 
-    // Split gates into 4 chunks along dimension 1
-    auto gate_chunks = chunk(gates_tensor, 4, 1);
+    // No autograd-aware chunk yet; use slice (which is autograd-aware) to
+    // split the 4*H-wide gate tensor into four H-wide gates. Same pattern
+    // as the standard RNN per-timestep path.
+    const int64_t H = hidden_size_;
+    auto i_t = nn::sigmoid(::tenzor::slice(gates, 1, 0,       H));
+    auto f_t = nn::sigmoid(::tenzor::slice(gates, 1, H,     2*H));
+    auto g_t = nn::tanh   (::tenzor::slice(gates, 1, 2*H,   3*H));
+    auto o_t = nn::sigmoid(::tenzor::slice(gates, 1, 3*H,   4*H));
 
-    auto i_gate_tensor = gate_chunks[0];  // Input gate
-    auto f_gate_tensor = gate_chunks[1];  // Forget gate
-    auto g_gate_tensor = gate_chunks[2];  // Cell gate
-    auto o_gate_tensor = gate_chunks[3];  // Output gate
-
-    // Apply activations
-    auto i_t = nn::sigmoid(Variable(i_gate_tensor, true));
-    auto f_t = nn::sigmoid(Variable(f_gate_tensor, true));
-    auto g_t = nn::tanh(Variable(g_gate_tensor, true));
-    auto o_t = nn::sigmoid(Variable(o_gate_tensor, true));
-
-    // Update cell state: c_t = f_t ⊙ c_{t-1} + i_t ⊙ g_t
-    // Use Variable-level operators so backward propagates through the
-    // gating graph. Previously this re-wrapped raw tensor results which
-    // silently severed the autograd chain — see the
-    // raw-tensor-op-breaks-autograd-graph memory.
+    // Update cell state and hidden state; Variable-level arithmetic preserves
+    // grad_fn back to f_t/i_t/g_t/o_t → gates → gates_hh → weight_hh_/h.
     auto c_new = f_t * c + i_t * g_t;
-
-    // Update hidden state: h_t = o_t ⊙ tanh(c_t)
-    auto c_tanh = nn::tanh(c_new);
-    auto h_new = o_t * c_tanh;
-
+    auto h_new = o_t * nn::tanh(c_new);
     return {h_new, c_new};
 }
 

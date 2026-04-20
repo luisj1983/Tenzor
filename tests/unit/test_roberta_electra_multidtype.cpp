@@ -11,6 +11,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "../backend_test_fixture.hpp"
 #include <tenzor/tenzor.hpp>
 #include "../../include/tenzor/models/roberta.hpp"
 #include "../../include/tenzor/models/electra.hpp"
@@ -52,6 +53,8 @@ protected:
 
         auto param = GetParam();
         dtype = param.dtype;
+
+        HONOR_BACKEND_ENV_VARS(param.backend_name);
 
         if (param.backend_name == "cpu") {
             device = Device::cpu();
