@@ -64,8 +64,11 @@ void test_bf16_op(Op op,
                   const std::vector<Tensor>& cpu_f32_inputs,
                   const std::string& name) {
     auto backends = get_bf16_backends();
+    // Use the shared macro so TENZOR_REQUIRE_MULTI_BACKEND=1 escalates
+    // "only one BF16-capable backend" to a hard failure instead of a silent
+    // skip — matches the policy documented in parity_test_utils.hpp.
     if (backends.size() < 2) {
-        GTEST_SKIP() << "Need >=2 BF16-capable backends for parity";
+        REQUIRE_MULTI_BACKEND_OR_SKIP("BF16 parity");
     }
 
     // Convert inputs to BF16 on CPU — this is the reference.

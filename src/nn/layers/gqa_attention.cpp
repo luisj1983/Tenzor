@@ -256,10 +256,14 @@ auto GroupedQueryAttention::forward(const Variable& query,
 
     // Apply RoPE if configured
     if (rope_) {
-        // RoPE expects (..., seq_len, head_dim) with position offset
-        // Q is (batch, num_heads, seq_len_q, head_dim), K is (batch, num_kv_heads, seq_len_k, head_dim)
-        Q = Variable(rope_->forward(Q, 0).tensor(), Q.requires_grad());
-        K = Variable(rope_->forward(K, 0).tensor(), K.requires_grad());
+        // RoPE expects (..., seq_len, head_dim) with position offset.
+        // Q is (batch, num_heads, seq_len_q, head_dim), K is (batch, num_kv_heads, seq_len_k, head_dim).
+        // Previously wrapped the output in Variable(result.tensor(), requires_grad)
+        // which discarded RoPE's grad_fn and prevented gradients from flowing
+        // through the rotary embedding — rope_->forward returns a Variable
+        // that already carries the correct grad_fn, so use it directly.
+        Q = rope_->forward(Q, 0);
+        K = rope_->forward(K, 0);
     }
 
     // Repeat KV heads to match query head count

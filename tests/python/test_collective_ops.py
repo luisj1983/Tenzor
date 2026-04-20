@@ -27,22 +27,7 @@ def _init():
     tz.manual_seed(0)
 
 
-@pytest.fixture
-def pg():
-    """Initialize a single-rank process group using the Gloo backend stub.
-
-    Some builds may not have Gloo available; the test is skipped cleanly
-    in that case. Multi-rank coverage is in the DDP test suite.
-    """
-    try:
-        tz.distributed.init_process_group(backend="gloo", rank=0, world_size=1)
-    except Exception as exc:
-        pytest.skip(f"init_process_group unavailable: {exc}")
-    yield tz.distributed.get_process_group()
-    try:
-        tz.distributed.destroy_process_group()
-    except Exception:
-        pass
+# `pg` fixture is defined in conftest.py and shared across all distributed tests.
 
 
 def test_reduceop_enum_exposes_all_members():

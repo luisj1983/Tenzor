@@ -475,23 +475,27 @@ TEST_P(RobertaMultiDTypeTest, GradientFlowSequenceClassification) {
 
     // Simple loss: sum of all outputs
     auto loss = sum(logits);
+    // If backward fails, let the exception propagate — the EXPECT_NO_THROW
+    // wrapper was masking real regressions. Also verify at least one grad
+    // is non-zero, not just present (has_grad() returns true even for an
+    // all-zero grad tensor, which is the silent-graph-break symptom).
+    loss.backward();
 
-    // Backward pass
-    EXPECT_NO_THROW({
-        loss.backward();
-    }) << "Backward pass should complete without errors";
-
-    // Check model parameters have gradients
     auto params = model.parameters();
     EXPECT_FALSE(params.empty()) << "Model should have parameters";
 
     int params_with_grad = 0;
+    float max_abs_grad = 0.0f;
     for (const auto& param : params) {
         if (param->has_grad()) {
             params_with_grad++;
+            auto g = max(abs(param->grad()->to(Device::cpu()).to(DType::Float32)));
+            max_abs_grad = std::max(max_abs_grad, g.item<float>());
         }
     }
     EXPECT_GT(params_with_grad, 0) << "At least some parameters should have gradients";
+    EXPECT_GT(max_abs_grad, 0.0f)
+        << "RoBERTa SequenceClassification grads all-zero — autograd graph broken";
 }
 
 TEST_P(RobertaMultiDTypeTest, GradientFlowTokenClassification) {
@@ -509,21 +513,21 @@ TEST_P(RobertaMultiDTypeTest, GradientFlowTokenClassification) {
 
     // Loss: mean of all outputs
     auto loss = mean(logits);
+    loss.backward();
 
-    // Backward pass
-    EXPECT_NO_THROW({
-        loss.backward();
-    });
-
-    // Check gradients exist
     auto params = model.parameters();
     int params_with_grad = 0;
+    float max_abs_grad = 0.0f;
     for (const auto& param : params) {
         if (param->has_grad()) {
             params_with_grad++;
+            auto g = max(abs(param->grad()->to(Device::cpu()).to(DType::Float32)));
+            max_abs_grad = std::max(max_abs_grad, g.item<float>());
         }
     }
     EXPECT_GT(params_with_grad, 0);
+    EXPECT_GT(max_abs_grad, 0.0f)
+        << "RoBERTa TokenClassification grads all-zero";
 }
 
 TEST_P(RobertaMultiDTypeTest, GradientFlowQuestionAnswering) {
@@ -541,21 +545,21 @@ TEST_P(RobertaMultiDTypeTest, GradientFlowQuestionAnswering) {
 
     // Combined loss from both start and end logits
     auto loss = sum(outputs.start_logits) + sum(outputs.end_logits);
+    loss.backward();
 
-    // Backward pass
-    EXPECT_NO_THROW({
-        loss.backward();
-    });
-
-    // Check gradients
     auto params = model.parameters();
     int params_with_grad = 0;
+    float max_abs_grad = 0.0f;
     for (const auto& param : params) {
         if (param->has_grad()) {
             params_with_grad++;
+            auto g = max(abs(param->grad()->to(Device::cpu()).to(DType::Float32)));
+            max_abs_grad = std::max(max_abs_grad, g.item<float>());
         }
     }
     EXPECT_GT(params_with_grad, 0);
+    EXPECT_GT(max_abs_grad, 0.0f)
+        << "RoBERTa QA grads all-zero";
 }
 
 TEST_P(RobertaMultiDTypeTest, GradientFlowWithAttentionMask) {
@@ -572,10 +576,8 @@ TEST_P(RobertaMultiDTypeTest, GradientFlowWithAttentionMask) {
 
     auto loss = sum(logits);
 
-    // Backward should work with masked attention
-    EXPECT_NO_THROW({
-        loss.backward();
-    });
+    // Backward with masked attention — the mask shouldn't break autograd.
+    loss.backward();
 
     auto params = model.parameters();
     int params_with_grad = 0;

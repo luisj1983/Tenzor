@@ -10,6 +10,8 @@
 #include <iostream>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/functional.hpp>
+#include <tenzor/nn/layers/dropout.hpp>
+#include <tenzor/nn/layers/pooling.hpp>
 #include "../backend_test_fixture.hpp"
 
 using namespace tenzor;
@@ -499,6 +501,201 @@ TEST_P(GradNNParityTest, InstanceNormBackward) {
 
     ASSERT_TRUE(x_dev.has_grad());
     compareGradientWithCPU(grad_cpu, x_dev.grad().value(), 1e-5f, 1e-3f);
+}
+
+// ============================================================================
+// D2 expansion — additional layer backward parity tests.
+// ============================================================================
+
+TEST_P(GradNNParityTest, ConvTranspose2dBackward) {
+    auto input_data = randn({2, 4, 6, 6}, DType::Float32, Device::cpu());
+    auto weight_data = randn({4, 3, 3, 3}, DType::Float32, Device::cpu());
+
+    auto x_cpu = Variable(input_data.clone(), true);
+    auto w_cpu = Variable(weight_data.clone(), false);
+    auto out_cpu = tenzor::nn::functional::conv_transpose2d(x_cpu, w_cpu);
+    tenzor::sum(out_cpu).backward();
+    ASSERT_TRUE(x_cpu.has_grad());
+    auto grad_cpu = x_cpu.grad().value();
+
+    if (device.type == Device::Type::CPU) return;
+
+    auto x_dev = Variable(input_data.to(device), true);
+    auto w_dev = Variable(weight_data.to(device), false);
+    auto out_dev = tenzor::nn::functional::conv_transpose2d(x_dev, w_dev);
+    tenzor::sum(out_dev).backward();
+    device.synchronize();
+
+    ASSERT_TRUE(x_dev.has_grad());
+    compareGradientWithCPU(grad_cpu, x_dev.grad().value(), 1e-4f, 1e-3f);
+}
+
+TEST_P(GradNNParityTest, AdaptiveAvgPool2dBackward) {
+    auto input_data = randn({2, 4, 8, 8}, DType::Float32, Device::cpu());
+
+    auto x_cpu = Variable(input_data.clone(), true);
+    auto out_cpu = tenzor::nn::functional::adaptive_avg_pool2d(x_cpu, {4, 4});
+    tenzor::sum(out_cpu).backward();
+    ASSERT_TRUE(x_cpu.has_grad());
+    auto grad_cpu = x_cpu.grad().value();
+
+    if (device.type == Device::Type::CPU) return;
+
+    auto x_dev = Variable(input_data.to(device), true);
+    auto out_dev = tenzor::nn::functional::adaptive_avg_pool2d(x_dev, {4, 4});
+    tenzor::sum(out_dev).backward();
+    device.synchronize();
+
+    ASSERT_TRUE(x_dev.has_grad());
+    compareGradientWithCPU(grad_cpu, x_dev.grad().value(), 1e-5f, 1e-6f);
+}
+
+TEST_P(GradNNParityTest, DropoutEvalBackward) {
+    // Dropout in eval mode is identity; its backward must simply pass through
+    // the incoming gradient. This catches regressions where a backend emits
+    // a mask even in eval.
+    auto input_data = randn({4, 8}, DType::Float32, Device::cpu());
+
+    auto make_dropout_eval = []() {
+        nn::Dropout d(0.5);
+        d.eval();
+        return d;
+    };
+
+    auto x_cpu = Variable(input_data.clone(), true);
+    auto dc_cpu = make_dropout_eval();
+    auto out_cpu = dc_cpu.forward(x_cpu);
+    tenzor::sum(out_cpu).backward();
+    ASSERT_TRUE(x_cpu.has_grad());
+    auto grad_cpu = x_cpu.grad().value();
+
+    if (device.type == Device::Type::CPU) return;
+
+    auto dc_dev = make_dropout_eval();
+    dc_dev.to(device);
+    auto x_dev = Variable(input_data.to(device), true);
+    auto out_dev = dc_dev.forward(x_dev);
+    tenzor::sum(out_dev).backward();
+    device.synchronize();
+
+    ASSERT_TRUE(x_dev.has_grad());
+    compareGradientWithCPU(grad_cpu, x_dev.grad().value(), 0.0f, 0.0f);
+}
+
+// ============================================================================
+// D3 expansion — backward parity for *Backward OpIds that weren't in the
+// original GradNNParityTest set: pool 1D, softmax, log_softmax, gelu.
+// These are common training-path ops where a backend-specific backward
+// divergence would silently produce wrong gradients at scale.
+// ============================================================================
+
+TEST_P(GradNNParityTest, MaxPool1dBackward) {
+    auto input_data = randn({2, 4, 16}, DType::Float32, Device::cpu());
+
+    auto x_cpu = Variable(input_data.clone(), true);
+    ::tenzor::nn::MaxPool1d pool(/*kernel=*/2, /*stride=*/2, /*padding=*/0);
+    auto out_cpu = pool.forward(x_cpu);
+    tenzor::sum(out_cpu).backward();
+    ASSERT_TRUE(x_cpu.has_grad());
+    auto grad_cpu = x_cpu.grad().value();
+
+    if (device.type == Device::Type::CPU) return;
+
+    ::tenzor::nn::MaxPool1d pool_dev(/*kernel=*/2, /*stride=*/2, /*padding=*/0);
+    pool_dev.to(device);
+    auto x_dev = Variable(input_data.to(device), true);
+    auto out_dev = pool_dev.forward(x_dev);
+    tenzor::sum(out_dev).backward();
+    device.synchronize();
+
+    ASSERT_TRUE(x_dev.has_grad());
+    compareGradientWithCPU(grad_cpu, x_dev.grad().value(), 1e-5f, 1e-6f);
+}
+
+TEST_P(GradNNParityTest, AvgPool1dBackward) {
+    auto input_data = randn({2, 4, 16}, DType::Float32, Device::cpu());
+
+    auto x_cpu = Variable(input_data.clone(), true);
+    ::tenzor::nn::AvgPool1d pool(/*kernel=*/2, /*stride=*/2, /*padding=*/0);
+    auto out_cpu = pool.forward(x_cpu);
+    tenzor::sum(out_cpu).backward();
+    ASSERT_TRUE(x_cpu.has_grad());
+    auto grad_cpu = x_cpu.grad().value();
+
+    if (device.type == Device::Type::CPU) return;
+
+    ::tenzor::nn::AvgPool1d pool_dev(/*kernel=*/2, /*stride=*/2, /*padding=*/0);
+    pool_dev.to(device);
+    auto x_dev = Variable(input_data.to(device), true);
+    auto out_dev = pool_dev.forward(x_dev);
+    tenzor::sum(out_dev).backward();
+    device.synchronize();
+
+    ASSERT_TRUE(x_dev.has_grad());
+    compareGradientWithCPU(grad_cpu, x_dev.grad().value(), 1e-5f, 1e-6f);
+}
+
+TEST_P(GradNNParityTest, SoftmaxBackward) {
+    auto input_data = randn({4, 8}, DType::Float32, Device::cpu());
+
+    auto x_cpu = Variable(input_data.clone(), true);
+    auto out_cpu = tenzor::softmax(x_cpu, /*dim=*/-1);
+    // softmax sums to 1 along dim; compose with a non-uniform weight so
+    // sum(loss).backward() isn't identically zero.
+    auto w = randn({4, 8}, DType::Float32, Device::cpu());
+    tenzor::sum(out_cpu * Variable(w, false)).backward();
+    ASSERT_TRUE(x_cpu.has_grad());
+    auto grad_cpu = x_cpu.grad().value();
+
+    if (device.type == Device::Type::CPU) return;
+
+    auto x_dev = Variable(input_data.to(device), true);
+    auto out_dev = tenzor::softmax(x_dev, /*dim=*/-1);
+    tenzor::sum(out_dev * Variable(w.to(device), false)).backward();
+    device.synchronize();
+
+    ASSERT_TRUE(x_dev.has_grad());
+    compareGradientWithCPU(grad_cpu, x_dev.grad().value(), 1e-5f, 1e-5f);
+}
+
+TEST_P(GradNNParityTest, LogSoftmaxBackward) {
+    auto input_data = randn({4, 8}, DType::Float32, Device::cpu());
+
+    auto x_cpu = Variable(input_data.clone(), true);
+    auto out_cpu = tenzor::log_softmax(x_cpu, /*dim=*/-1);
+    tenzor::sum(out_cpu).backward();
+    ASSERT_TRUE(x_cpu.has_grad());
+    auto grad_cpu = x_cpu.grad().value();
+
+    if (device.type == Device::Type::CPU) return;
+
+    auto x_dev = Variable(input_data.to(device), true);
+    auto out_dev = tenzor::log_softmax(x_dev, /*dim=*/-1);
+    tenzor::sum(out_dev).backward();
+    device.synchronize();
+
+    ASSERT_TRUE(x_dev.has_grad());
+    compareGradientWithCPU(grad_cpu, x_dev.grad().value(), 1e-5f, 1e-6f);
+}
+
+TEST_P(GradNNParityTest, GeluBackward) {
+    auto input_data = randn({6, 10}, DType::Float32, Device::cpu());
+
+    auto x_cpu = Variable(input_data.clone(), true);
+    auto out_cpu = tenzor::gelu(x_cpu);
+    tenzor::sum(out_cpu).backward();
+    ASSERT_TRUE(x_cpu.has_grad());
+    auto grad_cpu = x_cpu.grad().value();
+
+    if (device.type == Device::Type::CPU) return;
+
+    auto x_dev = Variable(input_data.to(device), true);
+    auto out_dev = tenzor::gelu(x_dev);
+    tenzor::sum(out_dev).backward();
+    device.synchronize();
+
+    ASSERT_TRUE(x_dev.has_grad());
+    compareGradientWithCPU(grad_cpu, x_dev.grad().value(), 1e-4f, 1e-5f);
 }
 
 INSTANTIATE_BACKEND_TESTS(GradNNParityTest);

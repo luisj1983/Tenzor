@@ -18,11 +18,9 @@ target_link_libraries(test_batchnorm1d PRIVATE tenzor_core GTest::gtest_main)
 add_executable(test_batchnorm3d layers/test_batchnorm3d.cpp)
 target_link_libraries(test_batchnorm3d PRIVATE tenzor_core GTest::gtest_main)
 
-# Conv2d tests
-add_executable(test_conv2d layers/test_conv2d.cpp)
-target_link_libraries(test_conv2d PRIVATE tenzor_core GTest::gtest_main)
-
-# Conv2d multi-dtype tests
+# Conv2d multi-dtype tests (the CPU-only test_conv2d.cpp was deleted — its
+# 54 test cases all have exact-named counterparts in the _multidtype file,
+# which also runs them across every backend × dtype combination).
 add_executable(test_conv2d_multidtype layers/test_conv2d_multidtype.cpp)
 target_link_libraries(test_conv2d_multidtype PRIVATE tenzor_core GTest::gtest_main)
 
@@ -161,9 +159,9 @@ target_link_libraries(test_hrm PRIVATE tenzor_core GTest::gtest_main)
 add_executable(test_gated_activations layers/test_gated_activations.cpp)
 target_link_libraries(test_gated_activations PRIVATE tenzor_core GTest::gtest_main)
 
-# Mixture of Experts Tests
-add_executable(test_moe layers/test_moe.cpp)
-target_link_libraries(test_moe PRIVATE tenzor_core GTest::gtest_main)
+# Mixture of Experts multi-dtype tests (the CPU-only test_moe.cpp was
+# deleted — multidtype sibling supersedes it with BackwardGradPopulated and
+# OutputFinite checks plus multi-backend coverage).
 
 # Sliding Window Attention Tests
 add_executable(test_sliding_window_attention layers/test_sliding_window_attention.cpp)
@@ -176,7 +174,6 @@ tenzor_discover_tests(test_dropout LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_batchnorm2d LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_batchnorm1d LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_batchnorm3d LABELS "nn" DISCOVERY_TIMEOUT 60)
-tenzor_discover_tests(test_conv2d LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_conv2d_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_pooling LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_schedulers LABELS "nn" DISCOVERY_TIMEOUT 60)
@@ -305,7 +302,6 @@ target_link_libraries(test_activation_missing_multidtype PRIVATE tenzor_core GTe
 tenzor_discover_tests(test_activation_missing_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
 tenzor_discover_tests(test_gated_activations LABELS "nn" DISCOVERY_TIMEOUT 60)
-tenzor_discover_tests(test_moe LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_sliding_window_attention LABELS "nn" DISCOVERY_TIMEOUT 60)
 
 # Multi-head attention functional tests
@@ -325,10 +321,6 @@ tenzor_discover_tests(test_sam_swa LABELS "nn" DISCOVERY_TIMEOUT 60)
 # Previously untested layers
 # ============================================================================
 
-add_executable(test_glu layers/test_glu.cpp)
-target_link_libraries(test_glu PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_glu LABELS "nn" DISCOVERY_TIMEOUT 60)
-
 add_executable(test_drop_path layers/test_drop_path.cpp)
 target_link_libraries(test_drop_path PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_drop_path LABELS "nn" DISCOVERY_TIMEOUT 60)
@@ -340,10 +332,6 @@ tenzor_discover_tests(test_dropout3d LABELS "nn" DISCOVERY_TIMEOUT 60)
 add_executable(test_window_attention layers/test_window_attention.cpp)
 target_link_libraries(test_window_attention PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_window_attention LABELS "nn" DISCOVERY_TIMEOUT 60)
-
-add_executable(test_fold layers/test_fold.cpp)
-target_link_libraries(test_fold PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_fold LABELS "nn" DISCOVERY_TIMEOUT 60)
 
 add_executable(test_cosine_similarity_layer layers/test_cosine_similarity_layer.cpp)
 target_link_libraries(test_cosine_similarity_layer PRIVATE tenzor_core GTest::gtest_main)

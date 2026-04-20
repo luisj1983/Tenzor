@@ -635,9 +635,11 @@ auto DeQuantStub::forward_impl(const Variable& input) -> Variable {
     // For now, we pass through assuming the tensor is already in FP32 format
     // This is a limitation of the Variable wrapper not having quantization metadata
 
-    // Direct passthrough since Variable doesn't have QuantizedTensor metadata
-    // In production, this would extract quantization params from Variable metadata
-    return Variable(input.tensor(), input.requires_grad());
+    // Direct passthrough since Variable doesn't have QuantizedTensor metadata.
+    // In production, this would extract quantization params from Variable metadata.
+    // Return the input directly so its grad_fn is preserved — the previous
+    // Variable(input.tensor(), input.requires_grad()) dropped the autograd chain.
+    return input;
 }
 
 auto DeQuantStub::forward_from_quantized(const QuantizedTensor& input) -> Tensor {

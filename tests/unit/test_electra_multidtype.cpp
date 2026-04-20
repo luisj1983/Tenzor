@@ -472,11 +472,21 @@ TEST_P(ElectraMultiDTypeTest, SequenceClassificationGradientFlow) {
 
     // Compute simple loss
     auto loss = sum(logits);
+    loss.backward();
 
-    // Test backward pass
-    EXPECT_NO_THROW({
-        loss.backward();
-    }) << "Gradient flow failed on " << device().to_string();
+    // Strengthened from EXPECT_NO_THROW: verify at least one model parameter
+    // actually received a non-zero gradient. The prior check would pass even
+    // if every gradient silently zeroed out (the documented failure mode of
+    // raw-tensor-op autograd breaks in model code).
+    float max_abs_grad = 0.0f;
+    for (const auto& param : model.parameters()) {
+        if (param->has_grad()) {
+            auto g = max(abs(param->grad()->to(Device::cpu()).to(DType::Float32)));
+            max_abs_grad = std::max(max_abs_grad, g.item<float>());
+        }
+    }
+    EXPECT_GT(max_abs_grad, 0.0f)
+        << "ELECTRA discriminator grads all-zero on " << device().to_string();
 }
 
 // ============================================================================

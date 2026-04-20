@@ -174,22 +174,35 @@ auto alibi_score_mod(const Tensor& slopes) -> ScoreModFn {
         const int64_t q_len = score.size(0);
         const int64_t kv_len = score.size(1);
 
-        // Get the slope for this head
-        const auto* slope_data = static_cast<const float*>(slopes_captured.data_ptr());
-        const float slope = slope_data[h];
+        // Build ALiBi bias: slope * (kv_pos - q_pos) using tensor ops only so
+        // this runs on every backend. The previous implementation read
+        // slopes.data_ptr() and wrote bias.data_ptr() from host code, which
+        // crashes on CUDA/ROCm/Vulkan/OneAPI where device memory is not
+        // host-accessible.
+        Tensor q_pos = arange(static_cast<double>(q_start),
+                              static_cast<double>(q_start + q_len),
+                              1.0, DType::Float32, score.device());        // {q_len}
+        Tensor kv_pos = arange(static_cast<double>(kv_start),
+                               static_cast<double>(kv_start + kv_len),
+                               1.0, DType::Float32, score.device());       // {kv_len}
 
-        // Build ALiBi bias: slope * (kv_pos - q_pos)
-        auto bias = zeros({q_len, kv_len}, score.dtype(), score.device());
-        auto* bias_ptr = static_cast<float*>(bias.data_ptr());
+        // pos_diff[qi, kvi] = (kv_start + kvi) - (q_start + qi)
+        Tensor pos_diff = sub(unsqueeze(kv_pos, 0),                        // {1, kv_len}
+                              unsqueeze(q_pos, 1));                        // {q_len, 1}
 
-        for (int64_t qi = 0; qi < q_len; ++qi) {
-            const int64_t q_pos = q_start + qi;
-            for (int64_t kvi = 0; kvi < kv_len; ++kvi) {
-                const int64_t kv_pos = kv_start + kvi;
-                bias_ptr[qi * kv_len + kvi] = slope * static_cast<float>(kv_pos - q_pos);
-            }
+        // Bring slope scalar onto score's device and dtype.
+        Tensor slope_scalar = select(slopes_captured, 0, h);
+        if (slope_scalar.device() != score.device()) {
+            slope_scalar = slope_scalar.to(score.device());
         }
+        Tensor slope_cast = (slope_scalar.dtype() == score.dtype())
+                                ? slope_scalar
+                                : slope_scalar.to(score.dtype());
 
+        Tensor pos_diff_cast = (pos_diff.dtype() == score.dtype())
+                                   ? pos_diff
+                                   : pos_diff.to(score.dtype());
+        Tensor bias = mul(slope_cast, pos_diff_cast);
         return add(score, bias);
     };
 }

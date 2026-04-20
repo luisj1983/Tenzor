@@ -141,15 +141,15 @@ def test_wrapper_preserves_name_and_wrapped_attribute():
 
 
 def test_multiple_ops_wrapped():
-    # Every op in the curated wrap set from tenzor/__init__.py should
-    # expose the __wrapped_api__ sentinel.
-    wrapped_ops = ["add", "sub", "mul", "div", "matmul", "bmm",
-                   "sum", "mean", "max", "min",
-                   "sqrt", "exp", "log", "abs", "neg"]
-    for name in wrapped_ops:
+    # Every op listed here is in required_ops.hpp and MUST be bound in every
+    # build. A missing op means a binding regression, not an optional feature —
+    # fail loudly rather than silently skip.
+    required_wrapped_ops = ["add", "sub", "mul", "div", "matmul", "bmm",
+                            "sum", "mean", "max", "min",
+                            "sqrt", "exp", "log", "abs", "neg"]
+    for name in required_wrapped_ops:
         op = getattr(tz, name, None)
-        if op is None:
-            pytest.skip(f"tz.{name} not present in this build")
+        assert op is not None, f"tz.{name} missing from bindings (required core op)"
         assert hasattr(op, "__wrapped_api__"), (
             f"tz.{name} should be wrapped by tz.overrides.implements")
 

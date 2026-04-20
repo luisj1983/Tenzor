@@ -286,6 +286,32 @@ auto fused_softmax_cross_entropy(
         );
     }
 
+    // Front-end target-index bounds validation so every backend enforces
+    // identical semantics (CPU kernel previously did this post-hoc via NaN).
+    int64_t num_classes = logits.shape()[1];
+    if (targets.numel() > 0) {
+        int64_t min_target = 0;
+        int64_t max_target = 0;
+        if (targets.dtype() == DType::Int64) {
+            min_target = ::tenzor::min(targets).item<int64_t>();
+            max_target = ::tenzor::max(targets).item<int64_t>();
+        } else if (targets.dtype() == DType::Int32) {
+            min_target = static_cast<int64_t>(::tenzor::min(targets).item<int32_t>());
+            max_target = static_cast<int64_t>(::tenzor::max(targets).item<int32_t>());
+        } else {
+            throw std::runtime_error(
+                "fused_softmax_cross_entropy: targets must be Int32 or Int64"
+            );
+        }
+        if (min_target < 0 || max_target >= num_classes) {
+            throw std::runtime_error(
+                "fused_softmax_cross_entropy: target index out of range [0, " +
+                std::to_string(num_classes) + "); found min=" +
+                std::to_string(min_target) + ", max=" + std::to_string(max_target)
+            );
+        }
+    }
+
     // Prepare inputs for dispatcher
     std::vector<Tensor> inputs = {logits, targets};
 

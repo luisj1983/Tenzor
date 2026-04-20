@@ -487,6 +487,14 @@ public:
 
     auto name() const -> std::string override { return "CTCLossBackward"; }
 
+    // CTCLoss backward captures the full grad tensor (raw_grad_) at forward
+    // time, so from this Function's perspective the grad-output-to-grad-input
+    // mapping is a constant-weight linear transform. Second derivative *through
+    // this node* is structurally zero (the true second derivative w.r.t.
+    // log_probs lives inside the DP pass that filled raw_grad_ and is
+    // intentionally not exposed — PyTorch's CTCLoss takes the same stance).
+    TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
+
     Tensor raw_grad_;             // (T, N, C) float32 on CPU — from forward DP pass
     bool is_per_sample_ = false;  // reduction="none" → true
     float scale_ = 1.0f;          // 1/total_target_len for "mean", 1.0 for "sum"
@@ -1058,6 +1066,12 @@ public:
     }
 
     auto name() const -> std::string override { return "MultiLabelMarginLossBackward"; }
+
+    // MultiLabelMarginLoss is a sum of max(0, 1 - x_y + x_i) terms — piecewise-
+    // linear in the input. Its second derivative is structurally zero at every
+    // differentiable point, so the stub correctly represents the op for
+    // create_graph=true instead of throwing.
+    TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
 
     Tensor raw_grad_;              // (N, C) float32 on CPU
     DType orig_dtype_ = DType::Float32;

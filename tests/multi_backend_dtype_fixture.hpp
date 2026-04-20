@@ -870,13 +870,27 @@ inline bool MultiDTypeTest::initialized_ = false;
     ::testing::Values(DType::Float32, DType::Float64, DType::Float16, DType::BFloat16)
 
 /**
- * @brief Standard backends for testing
+ * @brief Standard backends for testing.
+ *
+ * Hardcoded because `INSTANTIATE_TEST_SUITE_P` is evaluated at static-init
+ * time, BEFORE `tenzor::initialize()` has run — so `getAvailableBackends()`
+ * returns only "cpu" at that point and the test matrix collapses to CPU
+ * for every macro-using test. Keeping the list static ensures every
+ * backend×dtype combination is discovered; the fixture's SetUp() skips
+ * unavailable ones at test time (honoring TENZOR_REQUIRE_MULTI_BACKEND).
+ *
+ * New backend (Metal, WebGPU, etc.): add to this list + teach SetUp how
+ * to construct the Device. That is intentional — adding a backend is a
+ * deliberate act, not a silent auto-discovery.
  */
 #define STANDARD_BACKENDS \
     ::testing::Values("cpu", "cuda", "vulkan", "oneapi", "rocm")
 
 /**
- * @brief All backends including experimental ones
+ * @brief All backends — same as STANDARD_BACKENDS for now; reserved for a
+ * future expansion that enumerates per-device indices (cuda:0, cuda:1, ...)
+ * once a mechanism exists to do so at static-init time without triggering
+ * backend loading.
  */
 #define ALL_BACKENDS \
     ::testing::Values("cpu", "cuda", "vulkan", "oneapi", "rocm")

@@ -50,6 +50,25 @@ protected:
     Device device;
     DType dtype;
 
+    // Small helper to keep per-backend skip logic consistent with the
+    // canonical MultiBackendDTypeTest in multi_backend_dtype_fixture.hpp:
+    // honor TENZOR_SKIP_BACKENDS first, then TENZOR_REQUIRE_MULTI_BACKEND
+    // (hard-FAIL when a non-CPU backend is unavailable in CI).
+    void skipOrFail(const std::string& name, Device::Type type) {
+        const char* skip = std::getenv("TENZOR_SKIP_BACKENDS");
+        if (skip && std::string(skip).find(name) != std::string::npos) {
+            GTEST_SKIP() << name << " excluded via TENZOR_SKIP_BACKENDS";
+        }
+        if (!isBackendAvailable(type)) {
+            const char* req = std::getenv("TENZOR_REQUIRE_MULTI_BACKEND");
+            if (req && *req && *req != '0' && name != "cpu") {
+                FAIL() << name << " required by TENZOR_REQUIRE_MULTI_BACKEND "
+                                  "but unavailable";
+            }
+            GTEST_SKIP() << name << " not available";
+        }
+    }
+
     void SetUp() override {
         tenzor::initialize();
 
@@ -60,27 +79,19 @@ protected:
             device = Device::cpu();
         }
         else if (param.backend_name == "cuda") {
-            if (!isBackendAvailable(Device::Type::CUDA)) {
-                GTEST_SKIP() << "CUDA not available";
-            }
+            skipOrFail("cuda", Device::Type::CUDA);
             device = Device::cuda(0);
         }
         else if (param.backend_name == "vulkan") {
-            if (!isBackendAvailable(Device::Type::Vulkan)) {
-                GTEST_SKIP() << "Vulkan not available";
-            }
+            skipOrFail("vulkan", Device::Type::Vulkan);
             device = Device::vulkan(0);
         }
         else if (param.backend_name == "oneapi") {
-            if (!isBackendAvailable(Device::Type::OneAPI)) {
-                GTEST_SKIP() << "OneAPI not available";
-            }
+            skipOrFail("oneapi", Device::Type::OneAPI);
             device = Device::oneapi(0);
         }
         else if (param.backend_name == "rocm") {
-            if (!isBackendAvailable(Device::Type::ROCm)) {
-                GTEST_SKIP() << "ROCm not available";
-            }
+            skipOrFail("rocm", Device::Type::ROCm);
             device = Device::rocm(0);
         }
     }

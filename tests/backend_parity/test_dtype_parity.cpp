@@ -8,6 +8,7 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include <tenzor/nn/functional.hpp>
 #include <cstdlib>
 #include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
@@ -305,6 +306,57 @@ TEST_P(DTypeParity, PrecisionComparison_TrigFunctions) {
     test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return sin(inputs[0]);
     }, {a_f64}, device, 1e-5f, 1e-6f, "Sin Float64");
+}
+
+// ============================================================================
+// C4: Float64 parity for structured ops (Conv, LayerNorm, Pool).
+// These are the categories flagged by the audit as most likely to harbor
+// Float32-accumulator-in-Float64-codepath bugs. Running the Variable-level
+// forward with Float64 inputs forces each backend's kernel to actually
+// honor the declared dtype end-to-end.
+// ============================================================================
+
+TEST_P(DTypeParity, Float64_Conv2d) {
+    // Small shapes keep parity tolerance tight.
+    auto input_t = randn({2, 3, 8, 8}, DType::Float64, Device::cpu());
+    auto weight_t = randn({4, 3, 3, 3}, DType::Float64, Device::cpu());
+    test_operation_parity_single(
+        [](const std::vector<Tensor>& inputs) {
+            Variable in(inputs[0], false);
+            Variable w(inputs[1], false);
+            return tenzor::nn::functional::conv2d(in, w, std::nullopt, {1, 1}, {1, 1}).tensor();
+        },
+        {input_t, weight_t}, device, 1e-8f, 1e-10f, "Float64 Conv2d");
+}
+
+TEST_P(DTypeParity, Float64_LayerNorm) {
+    auto input_t = randn({4, 16}, DType::Float64, Device::cpu());
+    test_operation_parity_single(
+        [](const std::vector<Tensor>& inputs) {
+            Variable in(inputs[0], false);
+            return tenzor::nn::functional::layer_norm(in, std::vector<int64_t>{16}).tensor();
+        },
+        {input_t}, device, 1e-8f, 1e-10f, "Float64 LayerNorm");
+}
+
+TEST_P(DTypeParity, Float64_MaxPool2d) {
+    auto input_t = randn({2, 3, 8, 8}, DType::Float64, Device::cpu());
+    test_operation_parity_single(
+        [](const std::vector<Tensor>& inputs) {
+            Variable in(inputs[0], false);
+            return tenzor::nn::functional::max_pool2d(in, {2, 2}, {2, 2}).tensor();
+        },
+        {input_t}, device, 0.0f, 0.0f, "Float64 MaxPool2d");
+}
+
+TEST_P(DTypeParity, Float64_AvgPool2d) {
+    auto input_t = randn({2, 3, 8, 8}, DType::Float64, Device::cpu());
+    test_operation_parity_single(
+        [](const std::vector<Tensor>& inputs) {
+            Variable in(inputs[0], false);
+            return tenzor::nn::functional::avg_pool2d(in, {2, 2}, {2, 2}, {0, 0}).tensor();
+        },
+        {input_t}, device, 1e-8f, 1e-10f, "Float64 AvgPool2d");
 }
 
 INSTANTIATE_BACKEND_TESTS(DTypeParity);

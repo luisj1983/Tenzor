@@ -189,6 +189,93 @@ TEST_P(GradCheckMultiBackendTest, GeLU) {
     EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol())) << device().to_string();
 }
 
+TEST_P(GradCheckMultiBackendTest, Neg) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({4}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable { return tenzor::sum(tenzor::neg(v)); };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol())) << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, Abs) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    // abs() has a non-differentiable point at 0; shift away from 0 so
+    // finite-difference doesn't straddle it.
+    auto x = Variable(randn({6}, dtype(), device()) + 2.0f, true);
+    auto f = [](const Variable& v) -> Variable { return tenzor::sum(tenzor::abs(v)); };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol())) << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, Reciprocal) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    // Stay away from 0 — reciprocal blows up.
+    auto x = Variable(randn({6}, dtype(), device()) + 2.0f, true);
+    auto f = [](const Variable& v) -> Variable { return tenzor::sum(tenzor::reciprocal(v)); };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol())) << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, Sin) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({6}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable { return tenzor::sum(tenzor::sin(v)); };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol())) << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, Cos) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({6}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable { return tenzor::sum(tenzor::cos(v)); };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol())) << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, Pow) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    // Positive base; exponent=2 (well-behaved gradient).
+    auto x = Variable(tenzor::abs(randn({6}, dtype(), device())) + 0.5f, true);
+    auto f = [](const Variable& v) -> Variable {
+        return tenzor::sum(tenzor::pow(v, 2.0f));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol())) << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, Transpose) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({3, 5}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable {
+        return tenzor::sum(tenzor::transpose(v, 0, 1));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol())) << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, Reshape) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({6}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable {
+        return tenzor::sum(tenzor::reshape(v, std::vector<int64_t>{2, 3}));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol())) << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, LeakyRelu) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    // All-positive inputs so central-difference stays well clear of the
+    // x=0 non-differentiable kink. LeakyReLU is piecewise-linear, so
+    // gradcheck only needs the active branch to be far from x=0.
+    auto x = Variable(tenzor::abs(randn({8}, dtype(), device())) + 0.5f, true);
+    auto f = [](const Variable& v) -> Variable {
+        return tenzor::sum(nn::functional::leaky_relu(v, 0.1f));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol())) << device().to_string();
+}
+
+TEST_P(GradCheckMultiBackendTest, Softplus) {
+    if (should_skip()) { GTEST_SKIP() << "gradcheck supports only Float32/Float64"; return; }
+    auto x = Variable(randn({6}, dtype(), device()), true);
+    auto f = [](const Variable& v) -> Variable {
+        return tenzor::sum(tenzor::softplus(v));
+    };
+    EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol())) << device().to_string();
+}
+
 // LayerNorm gradcheck — passes on CPU/CUDA/OneAPI Float32/Float64.
 // Re-validated after dispatcher cleanup (Phase 24-followup #38). Vulkan
 // and ROCm still produce wrong analytical gradient compared to numerical

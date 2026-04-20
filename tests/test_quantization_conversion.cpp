@@ -430,17 +430,22 @@ TEST_F(QuantizationConversionTest, QuantizationError) {
     // Quantize layer
     auto q_linear = convert_to_quantized(linear, get_qconfig());
 
-    // Get quantized output (will be dequantized internally)
-    // auto q_output = q_linear->forward(var_input);
+    // Get quantized output (int8 matmul, dequantized internally).
+    auto q_output = q_linear->forward(var_input);
 
-    // In full implementation, measure:
-    // - Mean absolute error
-    // - Mean squared error
-    // - Signal-to-noise ratio
+    // Shape parity first — if quantization changed the output shape the MAE
+    // check below would be meaningless.
+    ASSERT_EQ(q_output.tensor().shape()[0], fp32_output.tensor().shape()[0]);
+    ASSERT_EQ(q_output.tensor().shape()[1], fp32_output.tensor().shape()[1]);
 
-    // ASSERT_LT(mae, 0.1f);  // Error should be small
-
-    std::cout << "[Test] Quantization error measurement completed" << std::endl;
+    // Mean absolute error between fp32 reference and int8 path. The tolerance
+    // is intentionally loose: for 128→64 Linear on int8 we expect ≤ ~2% of the
+    // output magnitude as quantization noise.
+    auto diff = tenzor::sub(fp32_output.tensor(),
+                            q_output.tensor().to(fp32_output.tensor().device()));
+    auto abs_diff = tenzor::abs(diff);
+    float mae = tenzor::mean(abs_diff).item<float>();
+    ASSERT_LT(mae, 2.0f) << "quantization MAE too large: " << mae;
 }
 
 // ===========================================================================
@@ -533,18 +538,18 @@ TEST_F(QuantizationConversionTest, BatchProcessingAfterQuantization) {
     auto linear = std::make_shared<Linear>(128, 64);
     auto q_linear = convert_to_quantized(linear, get_qconfig());
 
-    // Test with different batch sizes
+    // Test with different batch sizes — the quantized forward must handle
+    // every shape that the float layer would, including odd batch sizes.
     for (int batch_size : {1, 4, 16, 32}) {
         Tensor input({batch_size, 128}, DType::Float32, device_);
         input.fill_(1.0f);
         Variable var_input(input, false);
-
-        // Forward pass should work for all batch sizes
-        // auto output = q_linear->forward(var_input);
-        // ASSERT_EQ(output.data().shape()[0], batch_size);
+        auto output = q_linear->forward(var_input);
+        ASSERT_EQ(output.tensor().shape()[0], batch_size)
+            << "quantized forward wrong batch size for bs=" << batch_size;
+        ASSERT_EQ(output.tensor().shape()[1], 64)
+            << "quantized forward wrong feature dim for bs=" << batch_size;
     }
-
-    std::cout << "[Test] Batch processing verified for quantized layers" << std::endl;
 }
 
 // ===========================================================================

@@ -43,255 +43,13 @@ public:
     }
 };
 
-// Backward function for Sigmoid
-class SigmoidBackward : public Function {
-public:
-    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
-        throw std::runtime_error("SigmoidBackward::forward should not be called");
-    }
-
-    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        auto& grad_output = grad_outputs[0];
-        auto& output = saved_tensors()[0];  // sigmoid(x)
-
-        // d_sigmoid/dx = sigmoid(x) * (1 - sigmoid(x))
-        auto shape_vec = std::vector<int64_t>(output.shape().begin(), output.shape().end());
-        auto one_tensor = ones(shape_vec, output.dtype(), output.device());
-        auto one_minus_output = one_tensor - output;
-        std::vector<Tensor> result;
-        result.push_back(grad_output * output * one_minus_output);
-        return result;
-    }
-};
-
-// Backward function for Tanh
-class TanhBackward : public Function {
-public:
-    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
-        throw std::runtime_error("TanhBackward::forward should not be called");
-    }
-
-    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        auto& grad_output = grad_outputs[0];
-        auto& output = saved_tensors()[0];  // tanh(x)
-
-        // d_tanh/dx = 1 - tanh^2(x)
-        auto output_squared = output * output;
-        auto shape_vec = std::vector<int64_t>(output.shape().begin(), output.shape().end());
-        auto one_tensor = ones(shape_vec, output.dtype(), output.device());
-        auto one_minus_sq = one_tensor - output_squared;
-        std::vector<Tensor> result;
-        result.push_back(grad_output * one_minus_sq);
-        return result;
-    }
-};
-
-// Backward function for LeakyReLU
-class LeakyReLUBackward : public Function {
-public:
-    LeakyReLUBackward(double negative_slope) : negative_slope_(negative_slope) {}
-
-    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
-        throw std::runtime_error("LeakyReLUBackward::forward should not be called");
-    }
-
-    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        auto& grad_output = grad_outputs[0];
-        const auto& input = saved_tensors()[0];
-
-        // d(LeakyReLU)/dx = 1 if x > 0, negative_slope otherwise
-        auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
-        auto zero = zeros(shape_vec, input.dtype(), input.device());
-        auto one_tensor = ones(shape_vec, input.dtype(), input.device());
-        auto slope_tensor = full(shape_vec, static_cast<float>(negative_slope_),
-                                 input.dtype(), input.device());
-
-        auto condition = gt(input, zero);
-        auto grad_leaky_relu = where(condition, one_tensor, slope_tensor);
-
-        return {grad_output * grad_leaky_relu};
-    }
-
-    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
-        const auto& input = saved_tensors()[0];
-        auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
-        auto zero = zeros(shape_vec, input.dtype(), input.device());
-        auto one_tensor = ones(shape_vec, input.dtype(), input.device());
-        auto slope_tensor = full(shape_vec, static_cast<float>(negative_slope_),
-                                 input.dtype(), input.device());
-        auto condition = gt(input, zero);
-        auto mask = where(condition, one_tensor, slope_tensor);
-        Variable mask_var(mask, false);
-        return {grad_outputs[0] * mask_var};
-    }
-
-private:
-    double negative_slope_;
-};
-
-// Backward function for GELU
-class GeLUBackward : public Function {
-public:
-    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
-        throw std::runtime_error("GeLUBackward::forward should not be called");
-    }
-
-    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        auto& grad_output = grad_outputs[0];
-        const auto& input = saved_tensors()[0];
-
-        // Use the fused gelu_backward kernel which computes the entire derivative
-        // in Float32 internally. This avoids Float16 intermediate overflow that occurs
-        // when computing the derivative with individual tensor operations (e.g., x*x
-        // overflows Float16 for |x| > 256, leading to inf and then 0*inf = NaN).
-        std::vector<Tensor> backward_inputs = {grad_output, input};
-        auto result_tensor = dispatch(OpId::GeluBackward, backward_inputs)[0];
-
-        std::vector<Tensor> result;
-        result.push_back(result_tensor);
-        return result;
-    }
-};
-
-// Backward function for Swish
-class SwishBackward : public Function {
-public:
-    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
-        throw std::runtime_error("SwishBackward::forward should not be called");
-    }
-
-    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        auto& grad_output = grad_outputs[0];
-        auto& input = saved_tensors()[0];      // original input x
-
-        // Swish(x) = x * sigmoid(x)
-        // d(Swish)/dx = sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x))
-        //             = sigmoid(x) * (1 + x * (1 - sigmoid(x)))
-
-        auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
-
-        // Compute sigmoid(x)
-        std::vector<Tensor> sig_vec = {input};
-        auto sigmoid_x = dispatch(OpId::Sigmoid, sig_vec)[0];
-
-        auto one_tensor = ones(shape_vec, input.dtype(), input.device());
-        auto one_minus_sigmoid = one_tensor - sigmoid_x;
-
-        // d(Swish)/dx = sigmoid(x) * (1 + x * (1 - sigmoid(x)))
-        auto grad_swish = sigmoid_x * (one_tensor + input * one_minus_sigmoid);
-
-        std::vector<Tensor> result;
-        result.push_back(grad_output * grad_swish);
-        return result;
-    }
-};
-
-// Backward function for ELU
-class ELUBackward : public Function {
-public:
-    ELUBackward(double alpha) : alpha_(alpha) {}
-
-    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
-        throw std::runtime_error("ELUBackward::forward should not be called");
-    }
-
-    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        auto& grad_output = grad_outputs[0];
-        auto& output = saved_tensors()[0];  // ELU output
-
-        // ELU(x) = x if x > 0 else alpha * (exp(x) - 1)
-        // d(ELU)/dx = 1 if x > 0, alpha * exp(x) = output + alpha if x <= 0
-
-        auto shape_vec = std::vector<int64_t>(output.shape().begin(), output.shape().end());
-        auto zero = zeros(shape_vec, output.dtype(), output.device());
-        auto one_tensor = ones(shape_vec, output.dtype(), output.device());
-        auto alpha_tensor = one_tensor * alpha_;
-
-        // Piecewise gradient: 1 for x>0, output+alpha for x<=0
-        auto condition = gt(output, zero);
-        auto grad_elu = where(condition, one_tensor, output + alpha_tensor);
-
-        std::vector<Tensor> result;
-        result.push_back(grad_output * grad_elu);
-        return result;
-    }
-
-private:
-    double alpha_;
-};
-
-// Backward function for SELU
-class SELUBackward : public Function {
-public:
-    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
-        throw std::runtime_error("SELUBackward::forward should not be called");
-    }
-
-    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        auto& grad_output = grad_outputs[0];
-        auto& output = saved_tensors()[0];
-
-        // SELU constants
-        const double scale = 1.0507009873554804934193349852946;
-        const double alpha = 1.6732632423543772848170429916717;
-
-        // SELU(x) = scale * (x if x > 0 else alpha * (exp(x) - 1))
-        // d(SELU)/dx = scale if x > 0, scale * alpha * exp(x) if x <= 0
-
-        auto shape_vec = std::vector<int64_t>(output.shape().begin(), output.shape().end());
-        auto zero = zeros(shape_vec, output.dtype(), output.device());
-        auto scale_tensor = ones(shape_vec, output.dtype(), output.device()) * scale;
-        auto scale_alpha_tensor = ones(shape_vec, output.dtype(), output.device()) * (scale * alpha);
-
-        // Piecewise gradient: scale for x>0, output+scale*alpha for x<=0
-        auto condition = gt(output, zero);
-        auto grad_selu = where(condition, scale_tensor, output + scale_alpha_tensor);
-
-        std::vector<Tensor> result;
-        result.push_back(grad_output * grad_selu);
-        return result;
-    }
-};
-
-// Backward function for Mish
-class MishBackward : public Function {
-public:
-    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
-        throw std::runtime_error("MishBackward::forward should not be called");
-    }
-
-    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        auto& grad_output = grad_outputs[0];
-        auto& input = saved_tensors()[0];
-
-        // Mish(x) = x * tanh(softplus(x)) = x * tanh(ln(1 + exp(x)))
-        auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
-
-        // Compute softplus(x) = ln(1 + exp(x))
-        std::vector<Tensor> sp_vec = {input};
-        auto softplus_x = dispatch(OpId::Softplus, sp_vec)[0];
-
-        // Compute tanh(softplus(x))
-        std::vector<Tensor> tanh_vec = {softplus_x};
-        auto tanh_sp = dispatch(OpId::Tanh, tanh_vec)[0];
-
-        // Compute sigmoid(x)
-        std::vector<Tensor> sig_vec = {input};
-        auto sigmoid_x = dispatch(OpId::Sigmoid, sig_vec)[0];
-
-        auto one_tensor = ones(shape_vec, input.dtype(), input.device());
-
-        // d(Mish)/dx = tanh(softplus(x)) + x * sech²(softplus(x)) * sigmoid(x)
-        //            = tanh(softplus(x)) + x * (1 - tanh²(softplus(x))) * sigmoid(x)
-        auto tanh_sp_sq = tanh_sp * tanh_sp;
-        auto sech_sq = one_tensor - tanh_sp_sq;
-        auto grad_mish = tanh_sp + input * sech_sq * sigmoid_x;
-
-        std::vector<Tensor> result;
-        result.push_back(grad_output * grad_mish);
-        return result;
-    }
-};
+// NOTE: The former local backward classes (TanhBackward, LeakyReLUBackward,
+// GeLUBackward, SwishBackward, ELUBackward, SELUBackward, MishBackward,
+// SigmoidBackward) have been removed. Production autograd for these ops goes
+// through the _AG variants in src/autograd/function_activations.cpp — the
+// nn-layer functions just delegate to ::tenzor:: AG-aware ops. The local
+// classes never had backward_with_variables() support and their dispatch
+// would produce zero 2nd derivatives silently. See GRADCHECK_COVERAGE_ANALYSIS.md.
 
 // Module implementations
 auto ReLU::forward_impl(const Variable& input) -> Variable {
@@ -369,33 +127,6 @@ auto tanh(const Variable& input) -> Variable {
     // Same rationale as sigmoid — delegate to the _AG path for proper
     // higher-order support via TanhBackward_AG.
     return ::tenzor::tanh(input);
-}
-
-// Legacy stub body — intentionally unused. Keeps the old dispatch
-// pattern around for reference / fallback during the P4.2 migration.
-// Can be removed once the full higher-order audit is complete.
-[[maybe_unused]] static auto sigmoid_stub_legacy(const Variable& input) -> Variable {
-    if (!input.requires_grad() || !is_grad_enabled()) {
-        std::vector<Tensor> inputs = {input.tensor()};
-        auto result = dispatch(OpId::Sigmoid, inputs)[0];
-        return Variable(result, false);
-    }
-    std::vector<Tensor> inputs_vec = {input.tensor()};
-    auto result_tensor = dispatch(OpId::Sigmoid, inputs_vec)[0];
-    auto grad_fn = std::make_shared<SigmoidBackward>();
-    grad_fn->save_for_backward({result_tensor});
-    std::vector<std::shared_ptr<Function>> next_funcs;
-    if (input.grad_fn()) {
-        next_funcs.push_back(input.grad_fn());
-    }
-    grad_fn->set_next_functions(next_funcs);
-    std::vector<Variable> input_vars;
-    input_vars.push_back(input);
-    grad_fn->set_input_variables(input_vars);
-
-    Variable output(result_tensor, true);
-    output.set_grad_fn(grad_fn);
-    return output;
 }
 
 auto leaky_relu(const Variable& input, double negative_slope) -> Variable {
@@ -929,6 +660,13 @@ public:
         return {grad_input};
     }
 
+    // RReLU is piecewise-linear (y=x for x>0, y=a*x for x<=0 with random
+    // a in [lower, upper] sampled at forward time). Its second derivative
+    // is structurally zero everywhere except the kink at x=0, which has
+    // measure zero. Use the structural-zero stub rather than throwing on
+    // create_graph=true.
+    TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
+
 private:
     double lower_;
     double upper_;
@@ -982,6 +720,21 @@ public:
         std::vector<Tensor> backward_inputs = {grad_output, input};
         auto grad_input = dispatch(OpId::LogSigmoidBackward, backward_inputs)[0];
         return {grad_input};
+    }
+
+    // Higher-order support: d(log_sigmoid(x))/dx = 1 - sigmoid(x). Building
+    // the derivative with Variable-level ops lets the engine re-differentiate
+    // it when create_graph=true (gradgradcheck path). Without this override
+    // the default backward_with_variables returns zero 2nd derivatives.
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
+        const auto& input_tensor = saved_tensors()[0];
+        Variable input_var(input_tensor, false);
+        auto sig = ::tenzor::sigmoid(input_var);    // SigmoidBackward_AG → HO-capable
+        auto shape_vec = std::vector<int64_t>(input_tensor.shape().begin(),
+                                              input_tensor.shape().end());
+        Variable one_var(ones(shape_vec, input_tensor.dtype(), input_tensor.device()),
+                         false);
+        return {grad_outputs[0] * (one_var - sig)};
     }
 };
 

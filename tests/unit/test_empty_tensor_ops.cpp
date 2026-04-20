@@ -141,16 +141,14 @@ TEST_F(EmptyTensorOpsTest, AddEmptyTensors) {
     EXPECT_EQ(c.shape()[1], 4);
 }
 
-// NOTE: Broadcasting empty (0, N) + non-empty (1, N) currently crashes.
-// Skipping test until the underlying broadcasting bug is fixed.
-// TEST_F(EmptyTensorOpsTest, AddEmptyWithBroadcast) {
-//     auto a = zeros({0, 4}, DType::Float32, Device::cpu());
-//     auto b = ones({1, 4}, DType::Float32, Device::cpu());
-//     auto c = add(a, b);
-//     EXPECT_EQ(c.numel(), 0);
-//     EXPECT_EQ(c.shape()[0], 0);
-//     EXPECT_EQ(c.shape()[1], 4);
-// }
+TEST_F(EmptyTensorOpsTest, AddEmptyWithBroadcast) {
+    auto a = zeros({0, 4}, DType::Float32, Device::cpu());
+    auto b = ones({1, 4}, DType::Float32, Device::cpu());
+    auto c = add(a, b);
+    EXPECT_EQ(c.numel(), 0);
+    EXPECT_EQ(c.shape()[0], 0);
+    EXPECT_EQ(c.shape()[1], 4);
+}
 
 TEST_F(EmptyTensorOpsTest, MulEmptyTensors) {
     auto a = zeros({3, 0}, DType::Float32, Device::cpu());

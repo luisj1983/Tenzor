@@ -421,7 +421,9 @@ TEST_P(LSTMMultiDTypeTest, LSTMOutputConsistency) {
 }
 
 TEST_P(LSTMMultiDTypeTest, LSTMGradientFlow) {
-    // Test that gradients can flow through LSTM
+    // Test that gradients actually flow through LSTM — not just "doesn't throw".
+    // A backward that silently drops grad to zero would pass EXPECT_NO_THROW,
+    // which is the failure mode this suite must catch.
     nn::LSTM lstm(10, 20);
 
     lstm.to(device);
@@ -430,17 +432,20 @@ TEST_P(LSTMMultiDTypeTest, LSTMGradientFlow) {
 
     auto [output, states] = lstm.forward(input, {Variable{}, Variable{}});
 
-    // Check that output requires grad
     EXPECT_TRUE(output.requires_grad()) << "Failed on " << device.to_string();
     EXPECT_EQ(output.dtype(), dtype) << "Failed on " << device.to_string();
 
-    // Sum for scalar output
-    auto loss = Variable(sum(output.tensor(), std::nullopt, false), true);
+    // sum(Variable) preserves the autograd graph; Variable(sum(tensor), true)
+    // would break it and silently produce zero gradients.
+    auto loss = sum(output);
+    loss.backward();
 
-    // Backward should not throw
-    EXPECT_NO_THROW({
-        loss.backward();
-    }) << "Failed on " << device.to_string();
+    ASSERT_TRUE(input.has_grad()) << "input.grad missing on " << device.to_string();
+    EXPECT_EQ(input.grad()->numel(), input.tensor().numel()) << device.to_string();
+
+    auto g_max = max(abs(input.grad()->to(Device::cpu()).to(DType::Float32)));
+    EXPECT_GT(g_max.item<float>(), 0.0f)
+        << "input.grad all-zero — autograd graph broken on " << device.to_string();
 }
 
 TEST_P(LSTMMultiDTypeTest, LSTMTrainingMode) {

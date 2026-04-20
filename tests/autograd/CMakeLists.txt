@@ -23,6 +23,13 @@ add_executable(test_gradcheck_scatter_multidtype test_gradcheck_scatter_multidty
 target_link_libraries(test_gradcheck_scatter_multidtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_gradcheck_scatter_multidtype LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
+# E4 — requires_grad=false and detach() path invariants. Pins that non-grad
+# leaves stay ungradded and that detach() blocks backward propagation
+# (distillation / EMA / teacher-student uses this contract).
+add_executable(test_requires_grad_and_detach test_requires_grad_and_detach.cpp)
+target_link_libraries(test_requires_grad_and_detach PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_requires_grad_and_detach LABELS "autograd" DISCOVERY_TIMEOUT 60)
+
 # Phase 8-followup #28 — regression guard for higher-order gradient stubs.
 # Asserts that ops marked is_higher_order_stub=true produce a defined,
 # finite first-order gradient (the stub passes through structurally).

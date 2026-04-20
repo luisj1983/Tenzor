@@ -65,6 +65,10 @@ add_parity_test(test_operation_parity_multidtype test_operation_parity_multidtyp
 # kernels that read strides from shape instead of the tensor's actual strides.
 add_parity_test(test_stride_parity test_stride_parity.cpp)
 
+# C3: stride-variant parity for STRUCTURED ops (Conv, Pool, Norm, MatMul).
+# Companion to test_stride_parity (which covers elementwise math).
+add_parity_test(test_stride_structured_parity test_stride_structured_parity.cpp)
+
 # BFloat16 parity tests — exercises each op with BF16 inputs to catch
 # dispatchers that silently fall through to the F32 shader and corrupt data.
 add_parity_test(test_bf16_parity test_bf16_parity.cpp)

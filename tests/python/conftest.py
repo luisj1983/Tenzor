@@ -118,3 +118,28 @@ def skip_if_no_cuda():
     """Skip test if CUDA is not available."""
     if not tz.cuda_is_available():
         pytest.skip("CUDA not available")
+
+
+# ---------------------------------------------------------------------------
+# Distributed / process-group fixtures
+# ---------------------------------------------------------------------------
+# Consolidated here (was duplicated verbatim in test_collective_ops.py,
+# test_tensor_parallel.py, and test_zero_optimizers.py). The single-rank
+# gloo setup lets per-file tests exercise the distributed API surface
+# without requiring MPI / multi-process infrastructure.
+#
+# The fixture skips only when gloo is genuinely unavailable in this build —
+# missing RANK / WORLD_SIZE env vars are NOT a skip reason, since we pass
+# rank=0 / world_size=1 explicitly.
+@pytest.fixture
+def pg():
+    """Single-rank gloo process group shared across distributed tests."""
+    try:
+        tz.distributed.init_process_group(backend="gloo", rank=0, world_size=1)
+    except Exception as exc:
+        pytest.skip(f"init_process_group unavailable: {exc}")
+    yield tz.distributed.get_process_group()
+    try:
+        tz.distributed.destroy_process_group()
+    except Exception:
+        pass

@@ -24,17 +24,7 @@ def _init():
     tz.manual_seed(0)
 
 
-@pytest.fixture
-def pg():
-    try:
-        tz.distributed.init_process_group(backend="gloo", rank=0, world_size=1)
-    except Exception as exc:
-        pytest.skip(f"init_process_group unavailable: {exc}")
-    yield tz.distributed.get_process_group()
-    try:
-        tz.distributed.destroy_process_group()
-    except Exception:
-        pass
+# `pg` fixture is defined in conftest.py and shared across all distributed tests.
 
 
 def test_column_parallel_linear_constructs(pg):
@@ -84,10 +74,5 @@ def test_column_parallel_forward_shape_matches_linear(pg):
     )
     # Construct an input as a Variable, run forward, check shape.
     x = tz.Variable(tz.randn([1, 8]), False)
-    try:
-        y = layer.forward(x)
-        assert y.shape == [1, 4]
-    except AttributeError:
-        # Older binding may not expose `.forward()` on the wrapper — still a
-        # binding-shape check, skip numerical verification.
-        pytest.skip("ColumnParallelLinear.forward not exposed on binding")
+    y = layer.forward(x)
+    assert y.shape == [1, 4]

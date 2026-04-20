@@ -8,6 +8,7 @@
 
 #include "tenzor/nn/functional.hpp"
 #include "tenzor/nn/layers/normalization.hpp"  // for internal::make_layer_norm_backward
+#include "tenzor/nn/layers/pooling.hpp"        // J7: delegate pool functional to Module
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
@@ -436,16 +437,20 @@ auto max_pool2d(const Variable& input,
     if (stride.first < 0) stride.first = kernel_size.first;
     if (stride.second < 0) stride.second = kernel_size.second;
 
-    NewOpAttributes attrs;
-    attrs.set(AttrKey::KernelSize, kernel_size.first);
-    attrs.set(AttrKey::Stride, stride.first);
-    attrs.set(AttrKey::Padding, padding.first);
-
-    std::vector<Tensor> inputs_vec = {input.tensor()};
-    auto result = dispatch_to_device(OpId::MaxPool2dForward,
-        input.tensor().device().type, inputs_vec, attrs);
-
-    return Variable(result[0], input.requires_grad());
+    // J7: Delegate to the Module so the backward (MaxPool2dBackward) is
+    // wired up. The previous direct-dispatch path built a leaf Variable
+    // without a grad_fn and silently produced zero gradients.
+    //
+    // MaxPool2d Module supports square pooling; this functional signature
+    // takes pairs but the previous code already ignored `.second`, so the
+    // behavior is preserved — non-square pooling was never actually
+    // supported here despite the API shape.
+    ::tenzor::nn::MaxPool2d pool(kernel_size.first,
+                                 stride.first,
+                                 padding.first,
+                                 /*ceil_mode=*/false,
+                                 /*return_indices=*/false);
+    return pool.forward(input);
 }
 
 auto avg_pool2d(const Variable& input,
@@ -461,16 +466,11 @@ auto avg_pool2d(const Variable& input,
     if (stride.first < 0) stride.first = kernel_size.first;
     if (stride.second < 0) stride.second = kernel_size.second;
 
-    NewOpAttributes attrs;
-    attrs.set(AttrKey::KernelSize, kernel_size.first);
-    attrs.set(AttrKey::Stride, stride.first);
-    attrs.set(AttrKey::Padding, padding.first);
-
-    std::vector<Tensor> inputs_vec = {input.tensor()};
-    auto result = dispatch_to_device(OpId::AvgPool2dForward,
-        input.tensor().device().type, inputs_vec, attrs);
-
-    return Variable(result[0], input.requires_grad());
+    // J7: Delegate to the Module (same rationale as max_pool2d above).
+    ::tenzor::nn::AvgPool2d pool(kernel_size.first,
+                                 stride.first,
+                                 padding.first);
+    return pool.forward(input);
 }
 
 auto adaptive_avg_pool2d(const Variable& input,
@@ -1138,22 +1138,17 @@ auto lp_pool1d(const Variable& input, double norm_type, int64_t kernel_size,
 
     if (stride <= 0) stride = kernel_size;
 
-    // |input|^p
+    // |input|^p — Variable-aware so autograd chain is preserved.
     auto abs_pow = tenzor::pow(tenzor::abs(input), static_cast<float>(norm_type));
 
-    // avg_pool1d on the powered values — this gives us sum/kernel_size
-    NewOpAttributes attrs;
-    attrs.set(AttrKey::KernelSize, kernel_size);
-    attrs.set(AttrKey::Stride, stride);
-    attrs.set(AttrKey::Padding, int64_t{0});
+    // B4b: Delegate to nn::AvgPool1d so the AvgPool1dBackward grad_fn is
+    // wired. The previous direct-dispatch path built a leaf Variable that
+    // silently dropped autograd for the entire lp_pool1d chain (mirror of
+    // the J7 bug in functional::avg_pool2d, fixed the same way).
+    ::tenzor::nn::AvgPool1d pool(kernel_size, stride, /*padding=*/0);
+    auto pooled = pool.forward(abs_pow);
 
-    std::vector<Tensor> inputs_vec = {abs_pow.tensor()};
-    auto pooled_t = dispatch_to_device(OpId::AvgPool1dForward,
-        input.tensor().device().type, inputs_vec, attrs);
-
-    // avg_pool gives sum/count. For Lp pool we want (sum/count)^(1/p) = mean^(1/p)
-    // which is the Lp-mean. This matches PyTorch's LPPool behavior.
-    auto pooled = Variable(pooled_t[0], input.requires_grad());
+    // (mean)^(1/p)
     return tenzor::pow(pooled, static_cast<float>(1.0 / norm_type));
 }
 
@@ -1169,16 +1164,16 @@ auto lp_pool2d(const Variable& input, double norm_type,
     if (stride.first <= 0) stride.first = kernel_size.first;
     if (stride.second <= 0) stride.second = kernel_size.second;
 
-    // |input|^p
+    // |input|^p — Variable-aware so autograd chain is preserved end-to-end.
     auto abs_pow = tenzor::pow(tenzor::abs(input), static_cast<float>(norm_type));
 
-    // avg_pool2d on the powered values
-    auto pooled = avg_pool2d(Variable(abs_pow.tensor(), false),
-                             kernel_size, stride, {0, 0});
+    // avg_pool2d on the powered values; pass the Variable directly so its
+    // grad_fn is retained. The previous code wrapped abs_pow.tensor() in a
+    // fresh Variable(t, false) which discarded the graph and zeroed grads.
+    auto pooled = avg_pool2d(abs_pow, kernel_size, stride, {0, 0});
 
-    // (mean)^(1/p)
-    return tenzor::pow(Variable(pooled.tensor(), input.requires_grad()),
-                       static_cast<float>(1.0 / norm_type));
+    // (mean)^(1/p) — pooled is already a Variable with the correct grad_fn.
+    return tenzor::pow(pooled, static_cast<float>(1.0 / norm_type));
 }
 
 // ============================================================================

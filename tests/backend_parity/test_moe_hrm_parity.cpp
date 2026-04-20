@@ -117,6 +117,55 @@ TEST_P(MoEHRMParity, HRM_Forward) {
     }
 }
 
+// ============================================================================
+// D1: MoE backward parity. Complements the forward test above by running
+// loss.backward() on each backend and comparing the gradient of `input`
+// against the CPU reference. MoE's backward is the recorded raw-tensor-op
+// autograd-break hazard — if a backend reverts to that pattern the grad
+// silently zeros out.
+// ============================================================================
+TEST_P(MoEHRMParity, MixtureOfExperts_Backward) {
+    nn::MixtureOfExperts moe_cpu(16, 32, 4, 2, 1.25, 0.01, 0.0);
+    moe_cpu.eval();
+    Variable input_cpu(randn({2, 8, 16}, DType::Float32, Device::cpu()), true);
+    auto out_cpu = moe_cpu.forward(input_cpu);
+    sum(out_cpu).backward();
+    ASSERT_TRUE(input_cpu.has_grad()) << "CPU reference backward produced no grad";
+    auto ref_grad = input_cpu.grad()->contiguous();
+
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("moe backward parity");
+
+    for (size_t i = 1; i < backends.size(); ++i) {
+        try {
+            nn::MixtureOfExperts moe_dev(16, 32, 4, 2, 1.25, 0.01, 0.0);
+            moe_dev.eval();
+            auto params = moe_cpu.parameters();
+            auto dev_params = moe_dev.parameters();
+            for (size_t p = 0; p < params.size(); ++p) {
+                dev_params[p]->tensor() = params[p]->tensor().clone();
+            }
+            moe_dev.to(backends[i]);
+            Variable input_dev(input_cpu.tensor().to(backends[i]), true);
+            auto out_dev = moe_dev.forward(input_dev);
+            sum(out_dev).backward();
+            backends[i].synchronize();
+
+            SCOPED_TRACE(std::string("MoE backward on ") + backend_name(backends[i]));
+            ASSERT_TRUE(input_dev.has_grad())
+                << "backward produced no grad on " << backend_name(backends[i])
+                << " — autograd graph may be broken";
+            auto dev_grad = input_dev.grad()->to(Device::cpu()).contiguous();
+            // Same tolerance as the forward test — routing gates inject
+            // small numerical differences that compound through backward.
+            EXPECT_TENSORS_CLOSE(ref_grad, dev_grad, 1e-2f, 1e-3f);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "MoE backward failed on " << backend_name(backends[i])
+                          << ": " << e.what() << std::endl;
+        }
+    }
+}
+
 INSTANTIATE_BACKEND_TESTS(MoEHRMParity);
 
 

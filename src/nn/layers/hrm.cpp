@@ -451,8 +451,11 @@ auto AdaptiveComputationalTime::compute_halt_prob(const Variable& state) -> Vari
     // Output: (batch, seq_len) halting probability
 
     auto logits = halt_proj_->forward(state);  // (batch, seq_len, 1)
-    // Squeeze last dimension
-    auto squeezed = Variable(tenzor::squeeze(logits.tensor(), -1), logits.requires_grad());
+    // Squeeze last dimension — use the Variable-aware tenzor::squeeze so
+    // the halt-probability gradient flows back to halt_proj_. The previous
+    //   Variable(tenzor::squeeze(logits.tensor(), -1), logits.requires_grad())
+    // discarded logits' grad_fn, silently zeroing gradients to halt_proj_.
+    auto squeezed = ::tenzor::squeeze(logits, -1);
     auto probs = nn::sigmoid(squeezed);  // (batch, seq_len)
 
     return probs;

@@ -415,12 +415,20 @@ TEST_F(FusedOpsTest, FusedLayerNorm_SmallEpsilon) {
 // ==============================================================================
 
 TEST_F(FusedOpsTest, EdgeCase_EmptyTensor) {
+    // Matches PyTorch semantics: empty batch is a valid input for Linear and
+    // produces an empty output of shape (0, out_features) rather than raising.
+    // The previous assertion expected a throw — that was aspirational, not how
+    // the library actually behaves, and trains that use dynamic-batch padding
+    // depend on this being a no-op.
     auto input = zeros({0, 64});
     auto weight = randn({32, 64});
 
-    EXPECT_THROW({
-        fused_linear_relu(input, weight, nullptr);
-    }, std::exception);
+    auto output = fused_linear_relu(input, weight, nullptr);
+
+    ASSERT_EQ(output.shape().size(), 2u);
+    EXPECT_EQ(output.shape()[0], 0);
+    EXPECT_EQ(output.shape()[1], 32);
+    EXPECT_EQ(output.numel(), 0);
 }
 
 TEST_F(FusedOpsTest, EdgeCase_SingleElement) {
@@ -445,15 +453,15 @@ TEST_F(FusedOpsTest, EdgeCase_LargeFeatureDimension) {
     ASSERT_EQ(output.shape()[1], 2048);
 }
 
-// TEST_F(FusedOpsTest, EdgeCase_InvalidTargetIndex) {
-//     auto logits = randn({4, 10});
-//     auto targets = zeros({4}, DType::Int64);
-//     targets.data<int64_t>()[0] = 15;  // Out of range
-// 
-//     EXPECT_THROW({
-//         fused_softmax_cross_entropy(logits, targets, "mean");
-//     }, std::runtime_error);
-// }
+TEST_F(FusedOpsTest, EdgeCase_InvalidTargetIndex) {
+    auto logits = randn({4, 10});
+    auto targets = zeros({4}, DType::Int64);
+    targets.data<int64_t>()[0] = 15;  // Out of range
+
+    EXPECT_THROW({
+        fused_softmax_cross_entropy(logits, targets, "mean");
+    }, std::runtime_error);
+}
 
 // ==============================================================================
 // Performance Baseline Tests (compare fused vs unfused)
@@ -479,17 +487,16 @@ TEST_F(FusedOpsTest, Performance_LinearReLU) {
     assertTensorsClose(fused_output, unfused_output, 1e-3f, 1e-5f);
 }
 
-// Commented out - randint function not implemented
-// TEST_F(FusedOpsTest, Performance_SoftmaxCrossEntropy) {
-//     auto logits = randn({512, 1000});
-//     auto targets = randint(0, 1000, {512}, DType::Int64);
-//
-//     auto fused_loss = fused_softmax_cross_entropy(logits, targets, "mean");
-//
-//     // Verify result is valid
-//     ASSERT_EQ(fused_loss.numel(), 1);
-//     ASSERT_GE(fused_loss.data<float>()[0], 0.0f);
-// }
+TEST_F(FusedOpsTest, Performance_SoftmaxCrossEntropy) {
+    auto logits = randn({512, 1000});
+    auto targets = randint(0, 1000, {512}, DType::Int64);
+
+    auto fused_loss = fused_softmax_cross_entropy(logits, targets, "mean");
+
+    // Verify result is valid
+    ASSERT_EQ(fused_loss.numel(), 1);
+    ASSERT_GE(fused_loss.data<float>()[0], 0.0f);
+}
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

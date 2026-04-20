@@ -157,19 +157,21 @@ class TestBertDepth:
         ids = tz.Variable(
             tz.randint(0, cfg.vocab_size, [1, 8], tz.dtype.int64), False)
         out = model(ids)
-        # Sum to scalar to drive backward across all hidden states.
-        out_t = out.tensor() if hasattr(out, 'tensor') else out
-        out_v = tz.Variable(out_t, True) if not hasattr(out, 'backward') else out
-        # If BERT returned a Variable already, scalar-reduce and backward.
-        loss = out_v.tensor().mean() if hasattr(out_v, 'tensor') else out_v.mean()
-        # Wrap in Variable to backward — fall back gracefully if it doesn't
-        # connect (BERT bindings may not preserve autograd through the head).
-        try:
-            tz.Variable(loss, True).backward()
-        except Exception as e:
-            pytest.skip(f"BERT autograd graph not preserved through Python: {e}")
-        all_finite, _ = _all_grads_finite_and_nonzero(model)
+
+        # BERT forward returns a Variable that carries the full autograd
+        # chain; use Variable-level mean() so backward propagates to every
+        # parameter. The previous revision of this test wrapped out.tensor()
+        # in a fresh Variable(tensor, True), which itself broke the graph
+        # and produced all-zero gradients (masked by a defensive skip).
+        loss = tz.mean(out)
+        loss.backward()
+
+        all_finite, any_nonzero = _all_grads_finite_and_nonzero(model)
         assert all_finite, "BERT produced non-finite gradients"
+        assert any_nonzero, (
+            "BERT produced all-zero gradients — the autograd chain is broken "
+            "somewhere between the model output and its parameters."
+        )
 
 
 if __name__ == "__main__":

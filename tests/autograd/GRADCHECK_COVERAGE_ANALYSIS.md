@@ -54,3 +54,73 @@ The Float32 eps is clamped to `5e-4` to avoid catastrophic cancellation. Both me
 **Ongoing work:** the genuinely-missing loss/nested ops need either real implementations or a
 structural-zero stub with a documented rationale. Tracked as a follow-up in the coverage plan's
 Phase 7 (higher-order autograd expansion).
+
+## Update — 2026-04-20 (testing-audit pass)
+
+Status changes since the 2026-04-18 audit:
+
+- **`LogSigmoidBackward`** is no longer dead code — `nn::log_sigmoid` production path goes
+  through it, and it now has a real `backward_with_variables()` override so higher-order
+  works. Regression test: `HigherOrderActivationsTest.LogSigmoidDoubleBackwardNonZero`.
+- **Dead nn-side backward classes deleted:** `SigmoidBackward`, `TanhBackward`,
+  `LeakyReLUBackward`, `GeLUBackward`, `SwishBackward`, `ELUBackward`, `SELUBackward`,
+  `MishBackward` are all removed from `src/nn/activations/activations.cpp`. Production goes
+  through the `*Backward_AG` variants in `src/autograd/function_activations.cpp`. The
+  `sigmoid_stub_legacy` helper (legacy `[[maybe_unused]]`) is also gone.
+- **Multibackend gradcheck expanded** from 15 → 25 ops. Added: `Neg`, `Abs`, `Reciprocal`,
+  `Sin`, `Cos`, `Pow`, `Transpose`, `Reshape`, `LeakyRelu`, `Softplus`. All 25 ops run
+  across CPU/CUDA/ROCm/Vulkan/OneAPI on Float32+Float64. See
+  `tests/autograd/test_gradcheck_multibackend.cpp`.
+- **Autograd-break bugs fixed** (discovered via raw-tensor-op grep sweep):
+  `gqa_attention.cpp` RoPE re-wrap, `hrm.cpp` ACT squeeze, `nn/functional.cpp` `lp_pool2d`
+  chain break, `nn/quantization/quantized_layers.cpp` DeQuantStub bare re-wrap. All four
+  now preserve grad_fn. `lp_pool1d` still needs an `avg_pool1d(Variable)` overload to match.
+- **New hard-gate regression tests** for gradient flow (replacing EXPECT_NO_THROW-only):
+  `LSTMGradientFlow`, `RNNGradientFlow`, `GRUGradientFlow`,
+  `AttentionIntegrationMultiDTypeTest.ForwardBackward`,
+  `TransformerIntegrationMultiDTypeTest.ForwardBackward`. They assert non-zero input grads
+  across all five backends; CPU Float32/Float64 and GPU Float32 are all green.
+
+## Update — 2026-04-20 (E1 expansion, 60+ ops covered)
+
+Additional gradcheck coverage landed in `tests/autograd/test_gradcheck_missing.cpp`
+after the 2026-04-18 audit pass:
+
+**Arithmetic / element-wise:** `neg`, `abs`, `reciprocal`, `sqrt`, `pow`,
+`log1p`, `log2`, `log10`, `exp2`, `expm1`, `atan2`, `bmm`, `prod`.
+
+**Trigonometric / hyperbolic:** `sin`, `cos`, `tan`, `asin`, `acos`, `atan`,
+`sinh`, `cosh`, `tanh`. Vulkan skipped for the whole family per
+tracked task J4 (SPIR-V/GLSL shader precision insufficient for Float64
+gradcheck).
+
+**Reductions:** `var`, `std`, `cumsum`, `cumprod`, `max(dim)`, `min(dim)`,
+`logsumexp` (Vulkan skipped per J4).
+
+**Indexing / shape:** `index_select`, `gather`, `expand`, `flip`, `roll`,
+`cat`, `transpose`, `reshape`, `diag`, `trace`.
+
+**Activations:** `leaky_relu`, `softplus` (added to the multibackend file
+too).
+
+`tests/autograd/test_gradcheck_multibackend.cpp` expanded from 6 ops
+(matmul, softmax, add, mul, relu, sumreduction) to **25 ops** running
+Float32 + Float64 on every backend (CPU/CUDA/Vulkan/OneAPI/ROCm).
+
+Gaps still open:
+- ~35 backward impls remain without gradcheck (LinAlg family: lu, qr, eigh,
+  eigvalsh, svd, linalg_vecdot, linalg_vector_norm, linalg_matrix_norm,
+  linalg_ldl_factor, linalg_ldl_solve; FFT: fft, ifft, rfft, irfft;
+  Special math: bessel_*, i0e, i1e, multigammaln, erf_inv; Sparse:
+  sparse_add, sp_gemm, sp_mm, sp_mv, sparse_tri_solve).
+- Stride-variant parity for Conv/Pool/Norm surfaced J6 (stride-ignoring
+  kernels) and J5 (Float64 downcast); both tracked.
+- `functional::avg_pool2d`/`max_pool2d`/`adaptive_avg_pool2d`/`lp_pool1d`
+  autograd breaks fixed (J7 / B4b).
+- Trig/hyperbolic Vulkan Float64 precision issues consolidated under J4.
+- MoE backward parity now cross-backend (D1). HRM blocked by pre-existing
+  forward divergence (J3). FlexAttention takes Tensor not Variable so
+  autograd backward doesn't apply directly at the functional level.
+- Float64 parity for Conv is green across all backends; LayerNorm/Pool
+  diverge on every GPU backend (J5).
+- ROCm 126 ops and OneAPI 65 ops still missing from dispatch tables (F1/F2).

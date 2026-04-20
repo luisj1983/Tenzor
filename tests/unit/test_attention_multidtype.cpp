@@ -415,22 +415,26 @@ protected:
 };
 
 TEST_P(AttentionIntegrationMultiDTypeTest, ForwardBackward) {
+    // Single-layer MHA tolerates Float16 when using sum() rather than mean();
+    // multi-layer transformer does not — see TransformerIntegrationMultiDTypeTest.
     MultiheadAttention attn(128, 4, 0.0, true, false, false, 0, 0, true);
     convert_model(attn);
 
     Variable query = createInput({2, 5, 128}, true);
     auto [output, _] = attn.forward(query, query, query, Tensor{}, Tensor{}, false);
 
-    // Compute a simple loss
-    Variable loss = mean(output);
+    // sum() rather than mean() keeps Float16 grads above the representable
+    // range; matches the LSTM/RNN/GRU gradient-flow test pattern.
+    Variable loss = sum(output);
+    loss.backward();
 
-    // Backward should work
-    EXPECT_NO_THROW({
-        loss.backward();
-    });
-
-    // Query should have gradients
-    EXPECT_TRUE(query.has_grad());
+    // has_grad() returns true even when grad is all zeros; assert that the
+    // grad tensor actually carries non-zero values (catches silent autograd breaks).
+    ASSERT_TRUE(query.has_grad());
+    EXPECT_EQ(query.grad()->numel(), query.tensor().numel());
+    auto g_max = max(abs(query.grad()->to(Device::cpu()).to(DType::Float32)));
+    EXPECT_GT(g_max.item<float>(), 0.0f)
+        << "query.grad all-zero — autograd graph broken";
 }
 
 TEST_P(AttentionIntegrationMultiDTypeTest, ParameterCount) {

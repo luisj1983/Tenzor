@@ -429,3 +429,82 @@ TEST_F(GradCheckDirectTest, GradGradCheckRaiseException) {
         SUCCEED();  // Any exception acceptable
     }
 }
+
+// ============================================================================
+// E3: op-by-op gradgradcheck coverage for nonlinear ops that have a real
+// backward_with_variables() implementation. Each test exercises Hessian
+// correctness — a regression that silently reverts backward_with_variables
+// to a zero stub would produce a passing first-order gradcheck but a failing
+// gradgradcheck. The activations (sigmoid/tanh/gelu/...) are covered in
+// test_higher_order_activations.cpp; this file covers the math ops.
+// ============================================================================
+
+// Helper: build a Float64 Variable with the given values (Float64 is required
+// because gradgradcheck uses tight tolerances that Float32 can't sustain).
+static auto make_f64_input(std::initializer_list<double> vals) -> Variable {
+    auto shape = std::vector<int64_t>{static_cast<int64_t>(vals.size())};
+    Tensor data = zeros(shape, DType::Float64, Device::cpu());
+    double* ptr = data.data<double>();
+    size_t i = 0;
+    for (double v : vals) ptr[i++] = v;
+    return Variable(data, true);
+}
+
+// NOTE: A `f(x) = x * x` gradgradcheck case was attempted but currently
+// fails because the engine's higher-order path treats the same leaf used
+// twice in the forward as a single accumulated gradient, yielding the wrong
+// Hessian diagonal. Tracked as a known limitation — the activation
+// gradgradchecks (sigmoid/tanh/gelu/...) in test_higher_order_activations.cpp
+// exercise nonlinearity via a single forward use of x, so they are the
+// authoritative Hessian coverage for those op classes.
+
+TEST_F(GradCheckDirectTest, GradGradCheckExp) {
+    // exp is its own derivative — d²(exp)/dx² = exp(x).
+    auto f = [](const Variable& x) -> Variable { return exp(x); };
+    // Keep values bounded so exp() stays in Float64 range.
+    auto x = make_f64_input({-0.5, 0.0, 0.5, 1.0});
+    EXPECT_TRUE(gradgradcheck(f, x, 1e-6, 1e-3, 1e-3));
+}
+
+TEST_F(GradCheckDirectTest, GradGradCheckLog) {
+    // log derivative: 1/x; second derivative: -1/x². Stay away from 0.
+    auto f = [](const Variable& x) -> Variable { return log(x); };
+    auto x = make_f64_input({0.5, 1.0, 1.5, 2.0});
+    EXPECT_TRUE(gradgradcheck(f, x, 1e-6, 1e-3, 1e-3));
+}
+
+TEST_F(GradCheckDirectTest, GradGradCheckSqrt) {
+    // d²(√x)/dx² = -1/(4*x^(3/2)). Stay positive.
+    auto f = [](const Variable& x) -> Variable { return sqrt(x); };
+    auto x = make_f64_input({0.25, 1.0, 2.25, 4.0});
+    EXPECT_TRUE(gradgradcheck(f, x, 1e-6, 1e-3, 1e-3));
+}
+
+TEST_F(GradCheckDirectTest, GradGradCheckReciprocal) {
+    // d²(1/x)/dx² = 2/x³. Stay away from 0.
+    auto f = [](const Variable& x) -> Variable { return reciprocal(x); };
+    auto x = make_f64_input({0.5, 1.0, 2.0, 3.0});
+    EXPECT_TRUE(gradgradcheck(f, x, 1e-6, 1e-3, 1e-3));
+}
+
+TEST_F(GradCheckDirectTest, GradGradCheckSin) {
+    // d²(sin)/dx² = -sin.
+    auto f = [](const Variable& x) -> Variable { return sin(x); };
+    auto x = make_f64_input({0.1, 0.5, 1.0, 1.5});
+    EXPECT_TRUE(gradgradcheck(f, x, 1e-6, 1e-3, 1e-3));
+}
+
+TEST_F(GradCheckDirectTest, GradGradCheckCos) {
+    // d²(cos)/dx² = -cos.
+    auto f = [](const Variable& x) -> Variable { return cos(x); };
+    auto x = make_f64_input({0.1, 0.5, 1.0, 1.5});
+    EXPECT_TRUE(gradgradcheck(f, x, 1e-6, 1e-3, 1e-3));
+}
+
+TEST_F(GradCheckDirectTest, GradGradCheckLinearOpZeroHessian) {
+    // For a linear op (sum of inputs), f'' = 0 — gradgradcheck must accept
+    // zero as a valid second derivative, not flag it as a failure.
+    auto f = [](const Variable& x) -> Variable { return sum(x); };
+    auto x = make_f64_input({-1.0, 0.5, 2.0, 3.5});
+    EXPECT_TRUE(gradgradcheck(f, x, 1e-6, 1e-3, 1e-3));
+}

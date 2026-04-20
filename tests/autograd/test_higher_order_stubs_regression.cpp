@@ -101,6 +101,81 @@ TEST(HigherOrderStubsRegression, Dropout_Eval_Stub_Passthrough) {
         "Dropout/eval");
 }
 
+TEST(HigherOrderStubsRegression, RReLU_Stub_Passthrough) {
+    // RReLU is piecewise-linear; its 2nd derivative is structurally zero.
+    // This test ensures create_graph=true does not throw after B3 added the
+    // structural-zero stub to RReLUBackward.
+    Variable input(randn({2, 8}, DType::Float32, Device::cpu()), true);
+    check_higher_order_stub_passthrough(input,
+        [](const Variable& x) {
+            // Use eval-time RReLU (training=false) for determinism.
+            return tenzor::nn::rrelu(x, 0.125, 0.333, /*training=*/false);
+        },
+        "RReLU");
+}
+
+TEST(HigherOrderStubsRegression, CTCLoss_Stub_Passthrough) {
+    // CTC's second derivative w.r.t. log_probs is intentionally not exposed
+    // (PyTorch takes the same stance). The stub pins that plain backward
+    // works and that create_graph=true in Warn mode disconnects cleanly.
+    const int64_t T = 4, N = 2, C = 5;
+    Variable log_probs(randn({T, N, C}, DType::Float32, Device::cpu()), true);
+    auto targets = zeros({N, 3}, DType::Int64, Device::cpu());
+    auto input_lengths = zeros({N}, DType::Int64, Device::cpu());
+    auto target_lengths = zeros({N}, DType::Int64, Device::cpu());
+    for (int64_t i = 0; i < N; ++i) {
+        input_lengths.data<int64_t>()[i] = T;
+        target_lengths.data<int64_t>()[i] = 2;
+    }
+    for (int64_t i = 0; i < N * 3; ++i) {
+        targets.data<int64_t>()[i] = 1 + (i % (C - 1));
+    }
+    tenzor::nn::CTCLoss ctc(/*reduction=*/"mean", /*blank=*/0);
+    auto loss = ctc.forward(log_probs, targets, input_lengths, target_lengths);
+    EXPECT_NO_THROW(loss.backward())
+        << "CTCLoss regular backward threw — stub should accept it";
+    ASSERT_TRUE(log_probs.has_grad());
+
+    // Explicit higher-order probe: Warn mode lets the engine disconnect
+    // the stubbed chain without throwing, which is the documented behavior
+    // for non-differentiable-through loss ops.
+    set_higher_order_grad_mode(HigherOrderGradMode::Warn);
+    Variable lp2(randn({T, N, C}, DType::Float32, Device::cpu()), true);
+    auto loss2 = ctc.forward(lp2, targets, input_lengths, target_lengths);
+    EXPECT_NO_THROW(
+        loss2.backward(/*grad=*/{}, /*retain_graph=*/false, /*create_graph=*/true))
+        << "CTCLoss backward threw under Warn mode";
+    set_higher_order_grad_mode(HigherOrderGradMode::Error);
+}
+
+TEST(HigherOrderStubsRegression, MultiLabelMarginLoss_Stub_Passthrough) {
+    // Piecewise-linear hinge loss — structural-zero 2nd derivative stub.
+    const int64_t N = 3, C = 4;
+    Variable input(randn({N, C}, DType::Float32, Device::cpu()), true);
+    auto targets = zeros({N, C}, DType::Int64, Device::cpu());
+    for (int64_t b = 0; b < N; ++b) {
+        targets.data<int64_t>()[b * C + 0] = static_cast<int64_t>(b % C);
+        targets.data<int64_t>()[b * C + 1] = -1;
+        targets.data<int64_t>()[b * C + 2] = -1;
+        targets.data<int64_t>()[b * C + 3] = -1;
+    }
+    tenzor::nn::MultiLabelMarginLoss loss_fn(tenzor::nn::Reduction::Mean);
+    auto loss = loss_fn.forward(input, targets);
+    EXPECT_NO_THROW(loss.backward())
+        << "MultiLabelMarginLoss regular backward threw — stub should accept it";
+    ASSERT_TRUE(input.has_grad());
+
+    // Warn mode + create_graph=true: the stub must allow disconnection
+    // (rather than throwing) since the 2nd derivative is zero anyway.
+    set_higher_order_grad_mode(HigherOrderGradMode::Warn);
+    Variable in2(randn({N, C}, DType::Float32, Device::cpu()), true);
+    auto loss2 = loss_fn.forward(in2, targets);
+    EXPECT_NO_THROW(
+        loss2.backward(/*grad=*/{}, /*retain_graph=*/false, /*create_graph=*/true))
+        << "MultiLabelMarginLoss backward threw under Warn mode";
+    set_higher_order_grad_mode(HigherOrderGradMode::Error);
+}
+
 TEST(HigherOrderStubsRegression, Embedding_Stub_Passthrough) {
     // Embedding is special: input is index tensor (Int64), output is float
     // lookup. Higher-order through embedding flows through the weights, not

@@ -159,6 +159,17 @@ static auto double_backward_magnitude(
     return total;
 }
 
+TEST_F(HigherOrderActivationsTest, LogSigmoidDoubleBackwardNonZero) {
+    // d(log_sigmoid(x))/dx = 1 - sigmoid(x); d²/dx² = -sigmoid(x) * (1 - sigmoid(x))
+    // which is nonzero for x != ±∞. Before LogSigmoidBackward gained
+    // backward_with_variables() the second derivative silently came out zero.
+    double m = double_backward_magnitude(
+        [](const Variable& x) { return tenzor::nn::log_sigmoid(x); });
+    EXPECT_GT(m, 1e-6)
+        << "nn::log_sigmoid second derivative is zero — LogSigmoidBackward "
+           "lost its backward_with_variables override";
+}
+
 TEST_F(HigherOrderActivationsTest, GeLUDoubleBackwardNonZero) {
     double m = double_backward_magnitude(
         [](const Variable& x) { return tenzor::nn::gelu(x, "none"); });

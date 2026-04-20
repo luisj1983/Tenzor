@@ -138,7 +138,11 @@ void register_distributed(py::module_& m) {
         .def_property_readonly("out_features",
             &tenzor::distributed::ColumnParallelLinear::out_features)
         .def_property_readonly("local_out_features",
-            &tenzor::distributed::ColumnParallelLinear::local_out_features);
+            &tenzor::distributed::ColumnParallelLinear::local_out_features)
+        .def("forward",
+             &tenzor::distributed::ColumnParallelLinear::forward_impl,
+             py::arg("input"),
+             "Forward pass: column-parallel matmul + optional all-gather");
 
     py::class_<tenzor::distributed::RowParallelLinear, tenzor::nn::Module,
                std::shared_ptr<tenzor::distributed::RowParallelLinear>>(
@@ -148,14 +152,22 @@ void register_distributed(py::module_& m) {
                       bool, bool>(),
              py::arg("in_features"), py::arg("out_features"),
              py::arg("process_group"),
-             py::arg("bias") = true, py::arg("input_is_parallel") = true);
+             py::arg("bias") = true, py::arg("input_is_parallel") = true)
+        .def("forward",
+             &tenzor::distributed::RowParallelLinear::forward_impl,
+             py::arg("input"),
+             "Forward pass: row-parallel matmul + all-reduce");
 
     py::class_<tenzor::distributed::ParallelAttention, tenzor::nn::Module,
                std::shared_ptr<tenzor::distributed::ParallelAttention>>(
         distributed, "ParallelAttention",
         "Multi-head attention with heads sharded across a ProcessGroup")
         .def(py::init<int64_t, int64_t, tenzor::distributed::ProcessGroup&>(),
-             py::arg("embed_dim"), py::arg("num_heads"), py::arg("process_group"));
+             py::arg("embed_dim"), py::arg("num_heads"), py::arg("process_group"))
+        .def("forward",
+             &tenzor::distributed::ParallelAttention::forward_impl,
+             py::arg("input"),
+             "Forward pass: multi-head attention with sharded heads");
 
     // --- Pipeline / Sequence parallel ---
     // Pipeline stages are typically built from user code so we expose the

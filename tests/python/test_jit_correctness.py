@@ -50,9 +50,10 @@ def test_traced_linear_matches_eager():
     eager_y = model(sample)
 
     graph = tz.jit.trace(model, sample)
-    if graph.num_nodes() == 0:
-        pytest.skip("JIT trace returned an empty graph — binding gap, not "
-                    "a test failure. Filed as a JIT depth issue.")
+    assert graph.num_nodes() > 0, (
+        "JIT trace returned an empty graph — the dispatch interceptor is not "
+        "recording ops. Was TracingGuard wired correctly in bindings_jit.cpp?"
+    )
 
     # Run the traced graph on the SAME input first to verify replay.
     out_list = graph.forward([sample])
@@ -75,8 +76,7 @@ def test_traced_sequential_matches_eager():
     eager_y = model(sample)
 
     graph = tz.jit.trace(model, sample)
-    if graph.num_nodes() == 0:
-        pytest.skip("JIT trace returned an empty graph — binding gap.")
+    assert graph.num_nodes() > 0, "JIT trace returned empty graph"
 
     out_list = graph.forward([sample])
     assert len(out_list) >= 1
@@ -95,20 +95,15 @@ def test_optimized_graph_preserves_output():
     eager_y = model(sample)
 
     graph = tz.jit.trace(model, sample)
-    if graph.num_nodes() == 0:
-        pytest.skip("JIT trace returned an empty graph — binding gap.")
+    assert graph.num_nodes() > 0, "JIT trace returned empty graph"
 
     compiler = tz.jit.Compiler(enable_default_passes=True)
-    try:
-        # optimize() mutates `graph` in place and returns the number of
-        # passes applied (an int) — not a new Graph object.
-        passes_applied = compiler.optimize(graph, max_iterations=5)
-    except Exception as e:
-        pytest.skip(f"JIT optimizer failed: {e}")
+    # optimize() mutates `graph` in place and returns the number of
+    # passes applied (an int) — not a new Graph object.
+    passes_applied = compiler.optimize(graph, max_iterations=5)
 
     out_list = graph.forward([sample])
-    if len(out_list) == 0:
-        pytest.skip("Optimized graph produced no outputs.")
+    assert len(out_list) > 0, "Optimized graph dropped its output"
     assert _allclose(out_list[0], eager_y), (
         f"Optimized JIT graph (after {passes_applied} passes) diverged from "
         f"eager output."
@@ -125,14 +120,15 @@ def test_traced_graph_with_fresh_input():
     fresh_in = tz.randn([1, 8])  # bare tensor; different values
 
     graph = tz.jit.trace(model, trace_in)
-    if graph.num_nodes() == 0:
-        pytest.skip("JIT trace returned an empty graph — binding gap.")
+    assert graph.num_nodes() > 0, "JIT trace returned empty graph"
 
     fresh_var = tz.Variable(fresh_in, False)
     eager_y = model(fresh_var)
     out_list = graph.forward([fresh_var])
-    if len(out_list) == 0:
-        pytest.skip("Traced graph produced no outputs on fresh input.")
+    assert len(out_list) > 0, (
+        "Traced graph dropped output on fresh input — JIT is specializing on "
+        "the trace-time input pointer."
+    )
     assert _allclose(out_list[0], eager_y.tensor()), (
         "Traced graph diverged from eager when fed a fresh input — JIT is "
         "specializing on the trace input rather than treating it as a "

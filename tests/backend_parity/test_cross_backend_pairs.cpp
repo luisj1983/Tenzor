@@ -15,6 +15,8 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include <tenzor/backend/fast_dispatch.hpp>
+#include <tenzor/ops/op_id.hpp>
 #include "parity_test_utils.hpp"
 #include "parity_tolerances.hpp"
 
@@ -118,6 +120,140 @@ TEST(CrossBackendPairs, Slice) {
     test_operation_parity_cross_backend(
         [](const std::vector<Tensor>& ins) { return ins[0].slice(0, 4, 12); },
         {a}, {}, parity::MATH_RTOL, parity::MATH_ATOL, "slice");
+}
+
+// ----------------------------------------------------------------------------
+// Expanded math / element-wise coverage
+// ----------------------------------------------------------------------------
+
+TEST(CrossBackendPairs, Sub) {
+    auto a = randn({64, 64}, DType::Float32, Device::cpu());
+    auto b = randn({64, 64}, DType::Float32, Device::cpu());
+    test_operation_parity_cross_backend(
+        [](const std::vector<Tensor>& ins) { return ins[0] - ins[1]; },
+        {a, b}, {}, parity::MATH_RTOL, parity::MATH_ATOL, "sub");
+}
+
+TEST(CrossBackendPairs, Div) {
+    auto a = randn({64, 64}, DType::Float32, Device::cpu());
+    // Stay away from zero so division is numerically stable across backends.
+    auto b = tenzor::abs(randn({64, 64}, DType::Float32, Device::cpu())) + 0.5f;
+    test_operation_parity_cross_backend(
+        [](const std::vector<Tensor>& ins) { return ins[0] / ins[1]; },
+        {a, b}, {}, parity::MATH_RTOL, parity::MATH_ATOL, "div");
+}
+
+TEST(CrossBackendPairs, Neg) {
+    auto a = randn({64, 64}, DType::Float32, Device::cpu());
+    test_operation_parity_cross_backend(
+        [](const std::vector<Tensor>& ins) { return tenzor::neg(ins[0]); },
+        {a}, {}, parity::MATH_RTOL, parity::MATH_ATOL, "neg");
+}
+
+TEST(CrossBackendPairs, Abs) {
+    auto a = randn({64, 64}, DType::Float32, Device::cpu());
+    test_operation_parity_cross_backend(
+        [](const std::vector<Tensor>& ins) { return tenzor::abs(ins[0]); },
+        {a}, {}, parity::MATH_RTOL, parity::MATH_ATOL, "abs");
+}
+
+TEST(CrossBackendPairs, Sqrt) {
+    auto a = tenzor::abs(randn({64, 64}, DType::Float32, Device::cpu())) + 0.1f;
+    test_operation_parity_cross_backend(
+        [](const std::vector<Tensor>& ins) { return tenzor::sqrt(ins[0]); },
+        {a}, {}, parity::TRANSCENDENTAL_RTOL, parity::TRANSCENDENTAL_ATOL, "sqrt");
+}
+
+TEST(CrossBackendPairs, Sin) {
+    auto a = randn({64, 64}, DType::Float32, Device::cpu());
+    test_operation_parity_cross_backend(
+        [](const std::vector<Tensor>& ins) { return tenzor::sin(ins[0]); },
+        {a}, {}, parity::TRANSCENDENTAL_RTOL, parity::TRANSCENDENTAL_ATOL, "sin");
+}
+
+TEST(CrossBackendPairs, Cos) {
+    auto a = randn({64, 64}, DType::Float32, Device::cpu());
+    // cos() crosses zero near pi/2 + k*pi; CUDA's libdevice and CPU's libm
+    // disagree by ~2e-7 near those crossings in Float32. That's precision
+    // variance, not a backend bug, so use a slightly looser atol than the
+    // generic TRANSCENDENTAL_ATOL.
+    test_operation_parity_cross_backend(
+        [](const std::vector<Tensor>& ins) { return tenzor::cos(ins[0]); },
+        {a}, {}, parity::TRANSCENDENTAL_RTOL, 1e-6f, "cos");
+}
+
+// ----------------------------------------------------------------------------
+// Activations (tensor-level; autograd wrapping is tested separately)
+// ----------------------------------------------------------------------------
+
+TEST(CrossBackendPairs, ReLU) {
+    auto a = randn({64, 64}, DType::Float32, Device::cpu());
+    test_operation_parity_cross_backend(
+        [](const std::vector<Tensor>& ins) {
+            std::vector<Tensor> inv = {ins[0]};
+            return dispatch(OpId::ReLU, inv)[0];
+        },
+        {a}, {}, parity::MATH_RTOL, parity::MATH_ATOL, "relu");
+}
+
+TEST(CrossBackendPairs, Sigmoid) {
+    auto a = randn({64, 64}, DType::Float32, Device::cpu());
+    test_operation_parity_cross_backend(
+        [](const std::vector<Tensor>& ins) {
+            std::vector<Tensor> inv = {ins[0]};
+            return dispatch(OpId::Sigmoid, inv)[0];
+        },
+        {a}, {}, parity::TRANSCENDENTAL_RTOL, parity::TRANSCENDENTAL_ATOL, "sigmoid");
+}
+
+TEST(CrossBackendPairs, Tanh) {
+    auto a = randn({64, 64}, DType::Float32, Device::cpu());
+    test_operation_parity_cross_backend(
+        [](const std::vector<Tensor>& ins) {
+            std::vector<Tensor> inv = {ins[0]};
+            return dispatch(OpId::Tanh, inv)[0];
+        },
+        {a}, {}, parity::TRANSCENDENTAL_RTOL, parity::TRANSCENDENTAL_ATOL, "tanh");
+}
+
+// ----------------------------------------------------------------------------
+// Shape / reshape (no data change — pure metadata ops should be bit-exact)
+// ----------------------------------------------------------------------------
+
+TEST(CrossBackendPairs, Reshape) {
+    auto a = randn({8, 16}, DType::Float32, Device::cpu());
+    test_operation_parity_cross_backend(
+        [](const std::vector<Tensor>& ins) {
+            return ins[0].reshape(std::vector<int64_t>{4, 32});
+        },
+        {a}, {}, parity::MATH_RTOL, parity::MATH_ATOL, "reshape");
+}
+
+TEST(CrossBackendPairs, Transpose) {
+    auto a = randn({8, 16}, DType::Float32, Device::cpu());
+    test_operation_parity_cross_backend(
+        [](const std::vector<Tensor>& ins) {
+            return ins[0].transpose(0, 1);
+        },
+        {a}, {}, parity::MATH_RTOL, parity::MATH_ATOL, "transpose");
+}
+
+// ----------------------------------------------------------------------------
+// Reductions over specific axes (catches attr-key / default-dim bugs)
+// ----------------------------------------------------------------------------
+
+TEST(CrossBackendPairs, MaxAxis) {
+    auto a = randn({32, 64}, DType::Float32, Device::cpu());
+    test_operation_parity_cross_backend(
+        [](const std::vector<Tensor>& ins) { return tenzor::max(ins[0], 1); },
+        {a}, {}, parity::REDUCTION_RTOL, parity::REDUCTION_ATOL, "max_axis1");
+}
+
+TEST(CrossBackendPairs, MinAxis) {
+    auto a = randn({32, 64}, DType::Float32, Device::cpu());
+    test_operation_parity_cross_backend(
+        [](const std::vector<Tensor>& ins) { return tenzor::min(ins[0], 1); },
+        {a}, {}, parity::REDUCTION_RTOL, parity::REDUCTION_ATOL, "min_axis1");
 }
 
 int main(int argc, char** argv) {
