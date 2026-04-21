@@ -484,12 +484,10 @@ auto cholesky(const Tensor& A, bool upper) -> Tensor {
 }
 
 auto norm(const Tensor& A, const std::string& ord) -> Tensor {
-    if (A.device().type != Device::Type::CPU) {
-        throw std::runtime_error("linalg::norm: only CPU tensors supported");
-    }
-
     if (ord == "fro") {
-        // Frobenius norm: sqrt(sum(x^2))
+        // Frobenius norm: sqrt(sum(x^2)). Expressed in pure tensor ops so it
+        // runs device-agnostically (CPU / CUDA / etc.) — no dedicated kernel
+        // needed.
         auto flat = A.contiguous().reshape({A.numel()});
         auto sq = flat * flat;
         auto s = tenzor::sum(sq);
@@ -1534,6 +1532,9 @@ auto matrix_exp(const Tensor& A) -> Tensor {
     // Scaling-and-squaring with Padé-13 approximation (Higham 2005).
     // Thresholds chosen to match scipy.linalg.expm; see table on p.16 of the
     // paper for the justification of theta_13 ≈ 5.37.
+    //
+    // The algorithm is expressed in tensor ops (matmul / add / mul / solve)
+    // that all dispatch per-device, so this runs on CPU and GPU alike.
     auto shape = A.shape();
     if (shape.size() != 2 || shape[0] != shape[1]) {
         throw std::invalid_argument("linalg::matrix_exp: A must be a square matrix");
@@ -1541,31 +1542,22 @@ auto matrix_exp(const Tensor& A) -> Tensor {
     const int64_t n = shape[0];
 
     auto original_dtype = A.dtype();
-    auto work = prepare_matrix(A);
-    auto compute_dtype = work.dtype();
+    const Device dev = A.device();
 
-    // Compute ||A||_1 for the scaling choice.
-    // One-norm is the max absolute column sum.
-    double one_norm = 0.0;
-    if (compute_dtype == DType::Float32) {
-        const float* a = work.data<float>();
-        for (int64_t j = 0; j < n; ++j) {
-            double col_sum = 0.0;
-            for (int64_t i = 0; i < n; ++i) {
-                col_sum += std::abs(static_cast<double>(a[i * n + j]));
-            }
-            if (col_sum > one_norm) one_norm = col_sum;
-        }
-    } else {
-        const double* a = work.data<double>();
-        for (int64_t j = 0; j < n; ++j) {
-            double col_sum = 0.0;
-            for (int64_t i = 0; i < n; ++i) {
-                col_sum += std::abs(a[i * n + j]);
-            }
-            if (col_sum > one_norm) one_norm = col_sum;
-        }
-    }
+    // Upcast Float16 / BFloat16 to Float32 for numerical stability; keep
+    // Float64 as Float64.
+    DType compute_dtype = original_dtype;
+    if (needs_upcast(compute_dtype)) compute_dtype = DType::Float32;
+
+    auto work = A.contiguous();
+    if (work.dtype() != compute_dtype) work = work.to(compute_dtype);
+
+    // Compute ||A||_1 = max over j of sum_i |A[i,j]| using tensor ops so we
+    // stay on-device. Result is a scalar tensor; move to CPU for the branch.
+    Tensor col_sums = tenzor::sum(tenzor::abs(work), /*dim=*/0);
+    Tensor one_norm_t = tenzor::max(col_sums);
+    double one_norm = static_cast<double>(
+        one_norm_t.to(DType::Float64).to(Device::cpu()).data<double>()[0]);
 
     // Choose scaling factor s such that ||A / 2^s||_1 <= theta_13.
     constexpr double theta_13 = 5.371920351148152;
@@ -1585,25 +1577,18 @@ auto matrix_exp(const Tensor& A) -> Tensor {
         182.0,               1.0
     };
 
-    // Build A_scaled = A * scale, identity I.
-    auto A_scaled = mul(work, full({1}, scale, compute_dtype, Device::cpu()));
-    auto I = zeros({n, n}, compute_dtype, Device::cpu());
-    if (compute_dtype == DType::Float32) {
-        float* ip = I.data<float>();
-        for (int64_t i = 0; i < n; ++i) ip[i * n + i] = 1.0f;
-    } else {
-        double* ip = I.data<double>();
-        for (int64_t i = 0; i < n; ++i) ip[i * n + i] = 1.0;
-    }
+    auto scalar_ct = [&](double v) {
+        return full({1}, v, compute_dtype, dev);
+    };
+
+    // Build A_scaled = A * scale, identity I on the compute device.
+    auto A_scaled = mul(work, scalar_ct(scale));
+    auto I = eye(n, std::nullopt, compute_dtype, dev);
 
     // Power series: compute A^2, A^4, A^6 once.
     auto A2 = matmul(A_scaled, A_scaled);
     auto A4 = matmul(A2, A2);
     auto A6 = matmul(A4, A2);
-
-    auto scalar_ct = [&](double v) {
-        return full({1}, v, compute_dtype, Device::cpu());
-    };
 
     // U = A * (A6*(b13 A6 + b11 A4 + b9 A2) + b7 A6 + b5 A4 + b3 A2 + b1 I)
     auto inner_u = A6 * scalar_ct(b[13]) + A4 * scalar_ct(b[11]) + A2 * scalar_ct(b[9]);
@@ -1626,7 +1611,8 @@ auto matrix_exp(const Tensor& A) -> Tensor {
         R = matmul(R, R);
     }
 
-    return maybe_downcast(R, original_dtype);
+    if (R.dtype() != original_dtype) R = R.to(original_dtype);
+    return R;
 }
 
 // =========================================================================

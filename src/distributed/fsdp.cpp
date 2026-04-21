@@ -18,6 +18,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/indexing.hpp"
 #include <algorithm>
 #include <stdexcept>
 #include <numeric>
@@ -122,23 +123,19 @@ auto FSDPUnit::flatten_params() -> void {
     auto device = original_params_[0]->tensor().device();
     auto dtype = original_params_[0]->tensor().dtype();
 
-    // Allocate flat buffer and copy parameter data into it
-    flat_param_ = empty({static_cast<int64_t>(total_numel_)}, dtype, device);
+    // Allocate flat buffer and copy parameter data into it using slice_scatter
+    // — device-agnostic, unlike std::memcpy which is invalid for GPU pointers.
+    flat_param_ = zeros({static_cast<int64_t>(total_numel_)}, dtype, device);
 
     size_t offset = 0;
     for (const auto& param : original_params_) {
         if (!param) continue;
         size_t numel = param->tensor().numel();
-        // Reshape param to 1D and copy into flat buffer
-        Tensor param_flat = param->tensor().reshape({static_cast<int64_t>(numel)});
+        Tensor param_flat = param->tensor().reshape({static_cast<int64_t>(numel)}).contiguous();
 
-        // Copy data into the flat buffer at the correct offset
-        size_t bytes = numel * dtype_size(dtype);
-        std::memcpy(
-            static_cast<char*>(flat_param_.data_ptr()) + offset * dtype_size(dtype),
-            param_flat.data_ptr(),
-            bytes
-        );
+        flat_param_ = slice_scatter(flat_param_, param_flat, /*dim=*/0,
+                                    /*start=*/static_cast<int64_t>(offset),
+                                    /*end=*/static_cast<int64_t>(offset + numel));
         offset += numel;
     }
 
@@ -165,26 +162,19 @@ auto FSDPUnit::shard_params() -> void {
     auto dtype = flat_param_.dtype();
     auto device = flat_param_.device();
 
-    local_shard_ = empty({static_cast<int64_t>(shard_numel_)}, dtype, device);
+    // Start from zeros so the padded tail (when shard extends beyond total_numel)
+    // is already zero without touching raw device memory.
+    local_shard_ = zeros({static_cast<int64_t>(shard_numel_)}, dtype, device);
 
-    // Copy the valid portion of the shard
+    // Copy the valid portion of the shard via slice_scatter (device-agnostic).
     if (actual_shard_numel > 0) {
-        size_t bytes = actual_shard_numel * dtype_size(dtype);
-        std::memcpy(
-            local_shard_.data_ptr(),
-            static_cast<const char*>(flat_param_.data_ptr()) + shard_offset_ * dtype_size(dtype),
-            bytes
-        );
-    }
-
-    // Zero-pad if this rank's shard extends beyond total_numel
-    if (actual_shard_numel < shard_numel_) {
-        size_t pad_bytes = (shard_numel_ - actual_shard_numel) * dtype_size(dtype);
-        std::memset(
-            static_cast<char*>(local_shard_.data_ptr()) + actual_shard_numel * dtype_size(dtype),
-            0,
-            pad_bytes
-        );
+        Tensor valid_src = slice(flat_param_, /*dim=*/0,
+                                 static_cast<int64_t>(shard_offset_),
+                                 static_cast<int64_t>(shard_offset_ + actual_shard_numel))
+                               .contiguous();
+        local_shard_ = slice_scatter(local_shard_, valid_src, /*dim=*/0,
+                                     /*start=*/0,
+                                     /*end=*/static_cast<int64_t>(actual_shard_numel));
     }
 
     if (config_.strategy == ShardingStrategy::FULL_SHARD) {
@@ -214,14 +204,13 @@ auto FSDPUnit::unflatten_params() -> void {
         size_t numel = param_numels_[i];
         const auto& shape = param_shapes_[i];
 
-        // Create a view/copy from the flat buffer
-        size_t bytes = numel * dtype_size(dtype);
-        Tensor param_data = empty(shape, dtype, flat_param_.device());
-        std::memcpy(
-            param_data.data_ptr(),
-            static_cast<const char*>(flat_param_.data_ptr()) + offset * dtype_size(dtype),
-            bytes
-        );
+        // Slice the flat buffer and reshape to the parameter's shape (device-agnostic).
+        Tensor param_data =
+            slice(flat_param_, /*dim=*/0,
+                  static_cast<int64_t>(offset),
+                  static_cast<int64_t>(offset + numel))
+                .contiguous()
+                .reshape(shape);
 
         // Update the parameter's underlying tensor
         param->tensor() = param_data;
@@ -252,14 +241,11 @@ auto FSDPUnit::collect_grads() -> void {
 
         if (param->has_grad()) {
             Tensor grad = param->grad().value();
-            Tensor grad_flat = grad.reshape({static_cast<int64_t>(numel)});
+            Tensor grad_flat = grad.reshape({static_cast<int64_t>(numel)}).contiguous();
 
-            size_t bytes = numel * dtype_size(dtype);
-            std::memcpy(
-                static_cast<char*>(flat_grad_.data_ptr()) + offset * dtype_size(dtype),
-                grad_flat.data_ptr(),
-                bytes
-            );
+            flat_grad_ = slice_scatter(flat_grad_, grad_flat, /*dim=*/0,
+                                       static_cast<int64_t>(offset),
+                                       static_cast<int64_t>(offset + numel));
         }
         offset += numel;
     }
@@ -297,20 +283,20 @@ auto FSDPUnit::scatter_grads_to_params() -> void {
             size_t grad_buf_offset = overlap_start - shard_start;
             size_t param_sub_offset = overlap_start - param_start;
 
-            // Create a gradient tensor for this parameter
-            // Only the overlapping portion has valid data
+            // Create a gradient tensor for this parameter; only the overlapping
+            // portion has valid data. Use slice_scatter for device safety.
             const auto& shape = param_shapes_[i];
-            Tensor grad_full = zeros(shape, dtype, flat_grad_.device());
-            Tensor grad_flat = grad_full.reshape({static_cast<int64_t>(numel)});
+            Tensor grad_flat = zeros({static_cast<int64_t>(numel)}, dtype, flat_grad_.device());
+            Tensor overlap_src =
+                slice(flat_grad_, /*dim=*/0,
+                      static_cast<int64_t>(grad_buf_offset),
+                      static_cast<int64_t>(grad_buf_offset + overlap_numel))
+                    .contiguous();
+            grad_flat = slice_scatter(grad_flat, overlap_src, /*dim=*/0,
+                                      static_cast<int64_t>(param_sub_offset),
+                                      static_cast<int64_t>(param_sub_offset + overlap_numel));
 
-            size_t bytes = overlap_numel * dtype_size(dtype);
-            std::memcpy(
-                static_cast<char*>(grad_flat.data_ptr()) + param_sub_offset * dtype_size(dtype),
-                static_cast<const char*>(flat_grad_.data_ptr()) + grad_buf_offset * dtype_size(dtype),
-                bytes
-            );
-
-            param->set_grad(grad_full);
+            param->set_grad(grad_flat.reshape(shape));
         }
 
         param_offset += numel;
@@ -362,16 +348,13 @@ auto FSDPUnit::all_gather_params() -> void {
     // Concatenate all shards into the flat parameter buffer
     // Total size is shard_numel_ * ws (may be padded beyond total_numel_)
     size_t padded_numel = shard_numel_ * ws;
-    flat_param_ = empty({static_cast<int64_t>(padded_numel)}, dtype, device);
+    flat_param_ = zeros({static_cast<int64_t>(padded_numel)}, dtype, device);
 
     for (int i = 0; i < ws; ++i) {
-        size_t offset_bytes = i * shard_numel_ * dtype_size(dtype);
-        size_t bytes = shard_numel_ * dtype_size(dtype);
-        std::memcpy(
-            static_cast<char*>(flat_param_.data_ptr()) + offset_bytes,
-            gathered[i].data_ptr(),
-            bytes
-        );
+        int64_t off = static_cast<int64_t>(i) * static_cast<int64_t>(shard_numel_);
+        flat_param_ = slice_scatter(flat_param_, gathered[i].contiguous(),
+                                    /*dim=*/0, /*start=*/off,
+                                    /*end=*/off + static_cast<int64_t>(shard_numel_));
     }
 
     params_full_ = true;
@@ -411,14 +394,10 @@ auto FSDPUnit::reduce_scatter_grads() -> void {
     // Split flat gradient into world_size chunks for reduce-scatter input
     std::vector<Tensor> grad_chunks(ws);
     for (int i = 0; i < ws; ++i) {
-        grad_chunks[i] = empty({static_cast<int64_t>(shard_numel_)}, dtype, device);
-        size_t offset_bytes = i * shard_numel_ * dtype_size(dtype);
-        size_t bytes = shard_numel_ * dtype_size(dtype);
-        std::memcpy(
-            grad_chunks[i].data_ptr(),
-            static_cast<const char*>(flat_grad_.data_ptr()) + offset_bytes,
-            bytes
-        );
+        int64_t off = static_cast<int64_t>(i) * static_cast<int64_t>(shard_numel_);
+        grad_chunks[i] = slice(flat_grad_, /*dim=*/0, off,
+                               off + static_cast<int64_t>(shard_numel_))
+                             .contiguous();
     }
 
     // Output: this rank's reduced gradient shard
@@ -453,14 +432,8 @@ auto FSDPUnit::offload_to_cpu() -> void {
         return;
     }
 
-    cpu_shard_ = empty(
-        {static_cast<int64_t>(shard_numel_)},
-        local_shard_.dtype(),
-        Device::cpu()
-    );
-
-    size_t bytes = shard_numel_ * dtype_size(local_shard_.dtype());
-    std::memcpy(cpu_shard_.data_ptr(), local_shard_.data_ptr(), bytes);
+    // Use Tensor::to() for a device-correct host transfer (handles any backend).
+    cpu_shard_ = local_shard_.to(Device::cpu());
 
     // Free GPU shard
     local_shard_ = Tensor{};
@@ -472,14 +445,10 @@ auto FSDPUnit::reload_from_cpu() -> void {
         return;
     }
 
-    auto dtype = cpu_shard_.dtype();
     // Determine target device from original parameters
     auto device = original_params_[0]->tensor().device();
 
-    local_shard_ = empty({static_cast<int64_t>(shard_numel_)}, dtype, device);
-
-    size_t bytes = shard_numel_ * dtype_size(dtype);
-    std::memcpy(local_shard_.data_ptr(), cpu_shard_.data_ptr(), bytes);
+    local_shard_ = cpu_shard_.to(device);
 
     // Free CPU copy
     cpu_shard_ = Tensor{};

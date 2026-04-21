@@ -755,14 +755,16 @@ auto add(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
     }
 
     // Float16 / BFloat16: the CPU path's element-wise accumulate only
-    // handles Float32/Float64/Int. SparseTensor doesn't expose a public
-    // "copy with new values dtype" helper, so we take a short path:
-    // densify the sparse operand (to_dense() now handles half-precision
-    // after the recent coalesce/to_dense widening fixes), then do the
-    // add in Float32 and narrow.
+    // handles Float32/Float64/Int. Densify the sparse operand then add in
+    // Float32 and narrow. Both sides must share the target device — use
+    // the dense operand's device (or sparse's if dense is on CPU) so GPU
+    // dense tensors don't silently get added to CPU sparse densifications.
     if (common_dtype == DType::Float16 || common_dtype == DType::BFloat16) {
-        auto dense_sparse_f32 = sparse.to_dense().to(DType::Float32);
-        auto dense_f32 = dense.to(DType::Float32);
+        Device target_dev = (dense.device().type != Device::Type::CPU)
+                                ? dense.device()
+                                : sparse.device();
+        auto dense_sparse_f32 = sparse.to_dense().to(DType::Float32).to(target_dev);
+        auto dense_f32 = dense.to(DType::Float32).to(target_dev);
         return tenzor::add(dense_sparse_f32, dense_f32).to(common_dtype);
     }
 
@@ -773,11 +775,22 @@ auto add(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
     auto dispatch_gpu_add = [&](Device::Type dev_type) -> std::optional<Tensor> {
         auto& table = DispatchTableRegistry::get_table(dev_type);
         if (!table.has_kernel(OpId::SparseAdd)) return std::nullopt;
-        auto sc = extract_csr_on_device(sparse);
-        Tensor dense_on_dev = (dense.device().type == dev_type)
-                                 ? dense
-                                 : dense.to(Device{dev_type, 0});
-        std::vector<Tensor> inputs = {sc.crow, sc.col, sc.values, dense_on_dev};
+        // Move the sparse tensor to the target device before extracting CSR —
+        // otherwise the CPU→CSR path may invoke ops that reject non-Float32/64
+        // values (e.g. Float16 coalesce), and we'd produce CPU CSR components
+        // that then have to be individually shipped to the device.
+        Device target_dev{dev_type, 0};
+        SparseTensor sparse_on_dev = (sparse.device().type == dev_type)
+                                         ? sparse
+                                         : sparse.to(target_dev);
+        auto sc = extract_csr_on_device(sparse_on_dev);
+        // Guard rail: ensure everything really is on the target device before
+        // dispatching — a belt-and-braces check, as to_csr is device-native.
+        Tensor crow = (sc.crow.device().type == dev_type) ? sc.crow : sc.crow.to(target_dev);
+        Tensor col  = (sc.col.device().type  == dev_type) ? sc.col  : sc.col.to(target_dev);
+        Tensor vals = (sc.values.device().type == dev_type) ? sc.values : sc.values.to(target_dev);
+        Tensor dense_on_dev = (dense.device().type == dev_type) ? dense : dense.to(target_dev);
+        std::vector<Tensor> inputs = {crow, col, vals, dense_on_dev};
         OpAttributes attrs;
         attrs.set(AttrKey::M, sp_shape[0]);
         attrs.set(AttrKey::K, sp_shape.size() > 1 ? sp_shape[1] : int64_t(1));
@@ -837,6 +850,19 @@ auto add(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
         for (int64_t i = 0; i < n; ++i) {
             r[i] += d[i];
         }
+    } else if (result_c.dtype() == DType::Float16 || result_c.dtype() == DType::BFloat16) {
+        // Widen to Float32, sum, narrow back — these dtypes lack natural CPU
+        // arithmetic support in the per-element loop.
+        auto lo = result_c.dtype();
+        auto r32 = result_c.to(DType::Float32).contiguous();
+        auto d32 = dense_c.to(DType::Float32).contiguous();
+        auto* r = r32.data<float>();
+        auto* d = d32.data<float>();
+        #pragma omp parallel for schedule(static) if(n > 65536)
+        for (int64_t i = 0; i < n; ++i) {
+            r[i] += d[i];
+        }
+        return r32.to(lo);
     } else {
         throw std::runtime_error("sparse::add: unsupported dtype " +
             std::string(dtype_name(result_c.dtype())));

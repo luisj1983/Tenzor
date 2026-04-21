@@ -296,24 +296,10 @@ auto RandomHorizontalFlip::operator()(const Tensor& input, const Tensor& target)
         return {input, target};
     }
 
-    int64_t H = shape[shape.size() - 2];
-    int64_t W = shape[shape.size() - 1];
-
-    Tensor output = zeros(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype());
-    int64_t num_planes = output.numel() / (H * W);
-
-    const float* src = static_cast<const float*>(input.data_ptr());
-    float* dst = static_cast<float*>(output.data_ptr());
-
-    for (int64_t plane = 0; plane < num_planes; ++plane) {
-        for (int64_t y = 0; y < H; ++y) {
-            for (int64_t x = 0; x < W; ++x) {
-                dst[plane * H * W + y * W + x] =
-                    src[plane * H * W + y * W + (W - 1 - x)];
-            }
-        }
-    }
-
+    // Horizontal flip reverses the last (width) dimension. Use the tensor op
+    // to stay device-agnostic (CPU/CUDA/etc.).
+    int64_t last_dim = static_cast<int64_t>(shape.size()) - 1;
+    Tensor output = tenzor::flip(input, std::vector<int64_t>{last_dim});
     return {output, target};
 }
 

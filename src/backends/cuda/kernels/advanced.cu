@@ -1747,6 +1747,10 @@ __global__ void cdist_l1_kernel_impl(const float* x1, const float* x2,
 
 auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
                   cudaStream_t stream) -> Tensor {
+    // Compute the kernel in Float32 for numerical stability across lower
+    // precisions, then cast back so the output dtype matches the input dtype.
+    DType out_dtype = x1.dtype();
+
     auto a = x1.contiguous();
     auto b = x2.contiguous();
     if (a.dtype() != DType::Float32) a = a.to(DType::Float32);
@@ -1774,9 +1778,11 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
     std::vector<int64_t> result_shape;
     if (a.ndim() == 2) result_shape = {P, R};
     else               result_shape = {B, P, R};
-    auto result = Tensor(result_shape, DType::Float32, a.device());
+    auto result_f32 = Tensor(result_shape, DType::Float32, a.device());
 
-    if (B == 0 || P == 0 || R == 0) return result;
+    if (B == 0 || P == 0 || R == 0) {
+        return out_dtype == DType::Float32 ? result_f32 : result_f32.to(out_dtype);
+    }
 
     dim3 threads(16, 16, 1);
     dim3 blocks((R + 15) / 16, (P + 15) / 16, B);
@@ -1784,17 +1790,17 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
     // common) to avoid the per-element pow() in the generic kernel.
     if (p == 2.0) {
         cdist_l2_kernel_impl<<<blocks, threads, 0, stream>>>(
-            a.data<float>(), b.data<float>(), result.data<float>(), B, P, R, M);
+            a.data<float>(), b.data<float>(), result_f32.data<float>(), B, P, R, M);
     } else if (p == 1.0) {
         cdist_l1_kernel_impl<<<blocks, threads, 0, stream>>>(
-            a.data<float>(), b.data<float>(), result.data<float>(), B, P, R, M);
+            a.data<float>(), b.data<float>(), result_f32.data<float>(), B, P, R, M);
     } else {
         cdist_lp_kernel_impl<<<blocks, threads, 0, stream>>>(
-            a.data<float>(), b.data<float>(), result.data<float>(),
+            a.data<float>(), b.data<float>(), result_f32.data<float>(),
             static_cast<float>(p), B, P, R, M);
     }
 
-    return result;
+    return out_dtype == DType::Float32 ? result_f32 : result_f32.to(out_dtype);
 }
 
 // ============================================================================
@@ -2859,6 +2865,23 @@ __global__ void fmax_kernel_impl<double>(const double* __restrict__ a, const dou
     }
 }
 
+__global__ void fmax_kernel_f16(const __half* __restrict__ a, const __half* __restrict__ b,
+                                 __half* __restrict__ out, int64_t n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n;
+         idx += blockDim.x * gridDim.x) {
+        out[idx] = __float2half(::fmaxf(__half2float(a[idx]), __half2float(b[idx])));
+    }
+}
+
+__global__ void fmax_kernel_bf16(const __nv_bfloat16* __restrict__ a,
+                                  const __nv_bfloat16* __restrict__ b,
+                                  __nv_bfloat16* __restrict__ out, int64_t n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n;
+         idx += blockDim.x * gridDim.x) {
+        out[idx] = __float2bfloat16(::fmaxf(__bfloat162float(a[idx]), __bfloat162float(b[idx])));
+    }
+}
+
 auto fmax_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
 {
     Tensor a_cont = a.is_contiguous() ? a : a.contiguous();
@@ -2886,6 +2909,18 @@ auto fmax_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tenso
         case DType::Int64:
             fmax_kernel_impl<int64_t><<<grid, block, 0, stream>>>(
                 a_cont.data<int64_t>(), b_cont.data<int64_t>(), output.data<int64_t>(), n);
+            break;
+        case DType::Float16:
+            fmax_kernel_f16<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const __half*>(a_cont.data<Float16>()),
+                reinterpret_cast<const __half*>(b_cont.data<Float16>()),
+                reinterpret_cast<__half*>(output.data<Float16>()), n);
+            break;
+        case DType::BFloat16:
+            fmax_kernel_bf16<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const __nv_bfloat16*>(a_cont.data<BFloat16>()),
+                reinterpret_cast<const __nv_bfloat16*>(b_cont.data<BFloat16>()),
+                reinterpret_cast<__nv_bfloat16*>(output.data<BFloat16>()), n);
             break;
         default:
             throw std::runtime_error("fmax CUDA: unsupported dtype");
@@ -2928,6 +2963,23 @@ __global__ void fmin_kernel_impl<double>(const double* __restrict__ a, const dou
     }
 }
 
+__global__ void fmin_kernel_f16(const __half* __restrict__ a, const __half* __restrict__ b,
+                                 __half* __restrict__ out, int64_t n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n;
+         idx += blockDim.x * gridDim.x) {
+        out[idx] = __float2half(::fminf(__half2float(a[idx]), __half2float(b[idx])));
+    }
+}
+
+__global__ void fmin_kernel_bf16(const __nv_bfloat16* __restrict__ a,
+                                  const __nv_bfloat16* __restrict__ b,
+                                  __nv_bfloat16* __restrict__ out, int64_t n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n;
+         idx += blockDim.x * gridDim.x) {
+        out[idx] = __float2bfloat16(::fminf(__bfloat162float(a[idx]), __bfloat162float(b[idx])));
+    }
+}
+
 auto fmin_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
 {
     Tensor a_cont = a.is_contiguous() ? a : a.contiguous();
@@ -2955,6 +3007,18 @@ auto fmin_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tenso
         case DType::Int64:
             fmin_kernel_impl<int64_t><<<grid, block, 0, stream>>>(
                 a_cont.data<int64_t>(), b_cont.data<int64_t>(), output.data<int64_t>(), n);
+            break;
+        case DType::Float16:
+            fmin_kernel_f16<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const __half*>(a_cont.data<Float16>()),
+                reinterpret_cast<const __half*>(b_cont.data<Float16>()),
+                reinterpret_cast<__half*>(output.data<Float16>()), n);
+            break;
+        case DType::BFloat16:
+            fmin_kernel_bf16<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const __nv_bfloat16*>(a_cont.data<BFloat16>()),
+                reinterpret_cast<const __nv_bfloat16*>(b_cont.data<BFloat16>()),
+                reinterpret_cast<__nv_bfloat16*>(output.data<BFloat16>()), n);
             break;
         default:
             throw std::runtime_error("fmin CUDA: unsupported dtype");

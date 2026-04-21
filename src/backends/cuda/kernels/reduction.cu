@@ -1556,6 +1556,46 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             }
             break;
         }
+        case DType::Complex64:
+        case DType::Complex128: {
+            // Complex sum: reduce real and imaginary parts independently. This
+            // avoids having to define AccumType/operator+ for cuFloatComplex /
+            // cuDoubleComplex in every reduction template. Interleaved layout
+            // (re0, im0, re1, im1, …) lets us treat each component as a
+            // strided real scalar.
+            const bool is64 = (dtype == DType::Complex128);
+            const int64_t n_complex = input.numel();
+            auto run = [&](auto real_tag) {
+                using R = decltype(real_tag);
+                const R* in_re_im = reinterpret_cast<const R*>(input.data_ptr());
+                R* out_re_im     = reinterpret_cast<R*>(output.data_ptr());
+
+                if (dim == INT64_MIN) {
+                    // Full reduction: view input as (n_complex, 2), reduce dim 0.
+                    std::vector<int64_t> view_shape  = {n_complex, int64_t(2)};
+                    std::vector<int64_t> view_strides = {int64_t(2), int64_t(1)};
+                    launch_dim_reduction_sum(
+                        in_re_im, out_re_im,
+                        view_shape, view_strides, /*dim=*/0);
+                } else {
+                    // Dim reduction: add a trailing "2" dim of stride 1, and
+                    // double every other stride so the existing real-valued
+                    // dim-reduction kernel walks real and imaginary lanes
+                    // independently.
+                    std::vector<int64_t> view_shape(input_shape.begin(), input_shape.end());
+                    std::vector<int64_t> view_strides(input_strides.begin(), input_strides.end());
+                    for (auto& s : view_strides) s *= 2;
+                    view_shape.push_back(2);
+                    view_strides.push_back(1);
+                    launch_dim_reduction_sum(
+                        in_re_im, out_re_im,
+                        view_shape, view_strides, normalized_dim);
+                }
+            };
+            if (is64) run(double{});
+            else      run(float{});
+            break;
+        }
         default:
             throw std::runtime_error("sum: unsupported dtype");
     }
@@ -5807,32 +5847,35 @@ Tensor cosine_similarity_dispatch(std::span<const Tensor> inputs, const OpAttrib
 template<typename T>
 __global__ void renorm_compute_norm_kernel(
     const T* input,
-    T* norms,         // one norm per slice
+    T* norms,         // one norm per slice — slice_idx ranges over shape[dim]
     DimMeta meta,
     int64_t ndim,
     int64_t dim,
-    int64_t num_slices,
-    int64_t slice_size,
+    int64_t num_slices,       // == shape[dim]
+    int64_t slice_size,       // == product of shape[d] for d != dim
     float p
 ) {
     int64_t slice_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (slice_idx >= num_slices) return;
 
-    // Compute the starting indices for this slice
+    // Sum |x|^p over all elements with index[dim] == slice_idx, iterating
+    // across the complementary axes. This matches torch.renorm semantics:
+    // each sub-tensor taken at a fixed value of dim has its p-norm clamped
+    // to maxnorm.
     int64_t indices[8] = {};
-    int64_t tmp = slice_idx;
-    for (int64_t d = ndim - 1; d >= 0; d--) {
-        if (d == dim) continue;
-        indices[d] = tmp % meta.shape[d];
-        tmp /= meta.shape[d];
-    }
+    indices[dim] = slice_idx;
 
-    // Compute p-norm for this slice
     T acc = T(0);
-    for (int64_t i = 0; i < slice_size; i++) {
-        indices[dim] = i;
+    for (int64_t flat = 0; flat < slice_size; ++flat) {
+        // Unpack flat index into multi-dim coords for dims != dim.
+        int64_t tmp = flat;
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            if (d == dim) continue;
+            indices[d] = tmp % meta.shape[d];
+            tmp /= meta.shape[d];
+        }
         int64_t in_idx = 0;
-        for (int64_t d = 0; d < ndim; d++) {
+        for (int64_t d = 0; d < ndim; ++d) {
             in_idx += indices[d] * meta.strides[d];
         }
         T val = input[in_idx];
@@ -5863,8 +5906,8 @@ __global__ void renorm_scale_kernel(
     DimMeta meta,
     int64_t ndim,
     int64_t dim,
-    int64_t num_slices,
-    int64_t slice_size,
+    int64_t num_slices,       // == shape[dim]
+    int64_t slice_size,       // == product of shape[d] for d != dim
     float maxnorm
 ) {
     int64_t total = num_slices * slice_size;
@@ -5872,18 +5915,17 @@ __global__ void renorm_scale_kernel(
         int64_t slice_idx = flat_idx / slice_size;
         int64_t within_slice = flat_idx % slice_size;
 
-        // Compute full multi-dim index
         int64_t indices[8] = {};
-        int64_t tmp = slice_idx;
-        for (int64_t d = ndim - 1; d >= 0; d--) {
+        indices[dim] = slice_idx;
+        int64_t tmp = within_slice;
+        for (int64_t d = ndim - 1; d >= 0; --d) {
             if (d == dim) continue;
             indices[d] = tmp % meta.shape[d];
             tmp /= meta.shape[d];
         }
-        indices[dim] = within_slice;
 
         int64_t in_idx = 0;
-        for (int64_t d = 0; d < ndim; d++) {
+        for (int64_t d = 0; d < ndim; ++d) {
             in_idx += indices[d] * meta.strides[d];
         }
 
@@ -5915,12 +5957,14 @@ auto renorm_kernel(const Tensor& input, double p, int64_t dim, double maxnorm, c
         throw std::runtime_error("renorm: dim out of range");
     }
 
-    int64_t slice_size = shape_span[actual_dim];
-
-    // Number of slices = product of all dims except the reduction dim
-    int64_t num_slices = 1;
+    // torch.renorm semantics: there are shape[dim] slices (one per index along
+    // dim), and each slice consists of the product of the other dimensions'
+    // extents. Previously these were swapped (norm computed *along* dim) —
+    // see renorm_compute_norm_kernel above.
+    int64_t num_slices = shape_span[actual_dim];
+    int64_t slice_size = 1;
     for (int64_t d = 0; d < ndim; d++) {
-        if (d != actual_dim) num_slices *= shape_span[d];
+        if (d != actual_dim) slice_size *= shape_span[d];
     }
 
     std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());

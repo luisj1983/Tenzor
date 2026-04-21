@@ -65,18 +65,17 @@ public:
             }
         }
 
-        // Create output tensor and apply channel-wise normalization
-        Tensor normalized = zeros(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype());
-        const float* src = static_cast<const float*>(input.data_ptr());
-        float* dst = static_cast<float*>(normalized.data_ptr());
-        int64_t total = 1;
-        for (auto s : shape) total *= s;
+        // Device-agnostic: build mean/std as [C] tensors on the input's device,
+        // then rely on broadcasting. Avoids raw data_ptr() access which is
+        // invalid for GPU tensors.
         int64_t C = static_cast<int64_t>(num_channels);
-
-        for (int64_t i = 0; i < total; ++i) {
-            int64_t c = i % C;
-            dst[i] = (src[i] - mean_[c]) / std_[c];
+        Tensor mean_t = from_data(mean_.data(), {C}, input.device());
+        Tensor std_t  = from_data(std_.data(),  {C}, input.device());
+        if (input.dtype() != DType::Float32) {
+            mean_t = mean_t.to(input.dtype());
+            std_t  = std_t.to(input.dtype());
         }
+        Tensor normalized = (input - mean_t) / std_t;
 
         return {normalized, target};
     }

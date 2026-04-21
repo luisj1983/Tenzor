@@ -43,6 +43,10 @@ auto CompiledModule::trace(std::shared_ptr<nn::Module> module,
     auto graph = jit::trace(module, example_input);
 
     auto compiled = std::make_shared<CompiledModule>(graph);
+    // Record the device / dtype the graph was traced with so forward() can
+    // trigger a retrace when a mismatched input is supplied later.
+    compiled->traced_device_ = example_input.tensor().device();
+    compiled->traced_dtype_  = example_input.tensor().dtype();
     return compiled;
 }
 
@@ -58,6 +62,14 @@ auto CompiledModule::compute_shape_key(const Variable& input) -> std::string {
         if (i > 0) key += ',';
         key += std::to_string(shape[i]);
     }
+    // Include device+dtype so retracing distinguishes between runs on different
+    // backends / precisions (e.g. CPU Float32 vs CUDA Float64 with identical
+    // shapes). Without this, a compiled graph traced on CPU Float32 silently
+    // replays on CUDA tensors and hits device-mismatch errors at dispatch time.
+    key += '@';
+    key += input.tensor().device().to_string();
+    key += ':';
+    key += std::to_string(static_cast<int>(input.tensor().dtype()));
     return key;
 }
 
@@ -70,6 +82,10 @@ auto CompiledModule::compute_shape_key(const std::vector<Variable>& inputs) -> s
             if (i > 0) key += ',';
             key += std::to_string(shape[i]);
         }
+        key += '@';
+        key += inputs[j].tensor().device().to_string();
+        key += ':';
+        key += std::to_string(static_cast<int>(inputs[j].tensor().dtype()));
     }
     return key;
 }
@@ -92,6 +108,26 @@ auto CompiledModule::forward(const Variable& input) -> Variable {
             }
         }
         graph_->bind_symbolic_shapes(env);
+    }
+
+    // Device/dtype mismatch retrace: if the current graph was traced with a
+    // different device or dtype than the incoming input, retrace using the
+    // actual input. Cached by shape-key (which now encodes device+dtype).
+    if (source_module_ &&
+        (input.tensor().device().type != traced_device_.type ||
+         input.tensor().dtype()       != traced_dtype_)) {
+        auto key = compute_shape_key(input);
+        auto it = shape_cache_.find(key);
+        if (it != shape_cache_.end()) {
+            graph_ = it->second;
+        } else if (static_cast<int>(shape_cache_.size()) < MAX_RETRACES) {
+            auto retraced = CompiledModule::trace(source_module_, input);
+            retraced->optimize_for_inference();
+            shape_cache_[key] = retraced->graph_;
+            graph_ = retraced->graph_;
+        }
+        traced_device_ = input.tensor().device();
+        traced_dtype_  = input.tensor().dtype();
     }
 
     auto results = graph_->forward({input});

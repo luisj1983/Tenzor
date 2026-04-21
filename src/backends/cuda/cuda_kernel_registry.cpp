@@ -48,6 +48,8 @@ inline DType dtype_from_string(std::string_view s, DType default_val = DType::Fl
     if (s == "uint32") return DType::UInt32;
     if (s == "uint64") return DType::UInt64;
     if (s == "bool") return DType::Bool;
+    if (s == "complex64") return DType::Complex64;
+    if (s == "complex128") return DType::Complex128;
     if (s.empty()) return default_val;
     return default_val;
 }

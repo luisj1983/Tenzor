@@ -69,6 +69,8 @@ static auto dtype_to_string(DType dtype) -> std::string {
         case DType::UInt32: return "uint32";
         case DType::UInt64: return "uint64";
         case DType::Bool: return "bool";
+        case DType::Complex64: return "complex64";
+        case DType::Complex128: return "complex128";
         default: return "unknown";
     }
 }

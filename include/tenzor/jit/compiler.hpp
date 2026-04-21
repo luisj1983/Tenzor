@@ -1311,6 +1311,8 @@ private:
     int retrace_count_{0};                                           ///< Number of retraces performed
     static constexpr int MAX_RETRACES = 8;                           ///< Maximum distinct shapes to cache
     std::vector<DynamicDimSpec> dynamic_dims_;                       ///< Dynamic dimension configuration
+    Device traced_device_{Device::cpu()};                            ///< Device used at most recent trace
+    DType  traced_dtype_{DType::Float32};                            ///< DType used at most recent trace
 
     /// Compute cache key from input shapes
     static auto compute_shape_key(const Variable& input) -> std::string;

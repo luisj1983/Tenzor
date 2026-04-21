@@ -25,8 +25,10 @@ auto SAM::first_step() -> void {
         const Tensor& grad = param_ptr->grad().value();
         // Sum of squared elements
         auto norm_sq = sum(grad * grad);
-        // Convert to float for extraction regardless of input dtype
-        grad_norm_sq += static_cast<double>(norm_sq.to(DType::Float64).data<double>()[0]);
+        // Move to CPU before reading host-side; data<T>() on a GPU tensor returns
+        // a device pointer and dereferencing it from host code segfaults.
+        auto norm_sq_cpu = norm_sq.to(DType::Float64).to(Device::cpu());
+        grad_norm_sq += static_cast<double>(norm_sq_cpu.data<double>()[0]);
     }
 
     double grad_norm = std::sqrt(grad_norm_sq) + 1e-12;  // Avoid division by zero

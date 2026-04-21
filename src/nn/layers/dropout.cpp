@@ -509,21 +509,14 @@ auto VariationalDropout::forward_impl(const Variable& input) -> Variable {
         }
 
         // Generate Bernoulli mask in Float32 regardless of the parameter dtype,
-        // then cast to the target dtype. This keeps the loop using a concrete
-        // element type that `data<float>()` can read for every input dtype
-        // (Float16/BFloat16/Float32/Float64).
+        // then cast to the target dtype. Use tensor ops so this works on any
+        // device (CPU/CUDA/etc.) — raw data_ptr access on GPU tensors segfaults.
         const auto target_dtype = input.tensor().dtype();
         const auto target_device = input.tensor().device();
         auto rand_vals = rand(mask_shape, DType::Float32, target_device);
-        auto mask_f32 = zeros(mask_shape, DType::Float32, target_device);
-        auto rand_data = rand_vals.data<float>();
-        auto mask_data = mask_f32.data<float>();
-        int64_t mask_numel = 1;
-        for (auto d : mask_shape) mask_numel *= d;
         const float thresh = static_cast<float>(1.0 - p_);
-        for (int64_t i = 0; i < mask_numel; ++i) {
-            mask_data[i] = (rand_data[i] < thresh) ? 1.0f : 0.0f;
-        }
+        auto thresh_tensor = full(mask_shape, thresh, DType::Float32, target_device);
+        auto mask_f32 = tenzor::lt(rand_vals, thresh_tensor).to(DType::Float32);
         mask_ = (target_dtype == DType::Float32) ? mask_f32 : mask_f32.to(target_dtype);
 
         mask_valid_ = true;

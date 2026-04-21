@@ -997,7 +997,13 @@ __global__ void elu_forward_kernel(const T* input, T* output, int64_t n, float a
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         T x = input[idx];
-        output[idx] = (x > T(0)) ? x : T(alpha * (exp(float(x)) - 1.0f));
+        if constexpr (std::is_same_v<T, double>) {
+            output[idx] = (x > 0.0) ? x : static_cast<double>(alpha) * (exp(x) - 1.0);
+        } else if constexpr (std::is_same_v<T, float>) {
+            output[idx] = (x > 0.0f) ? x : alpha * (expf(x) - 1.0f);
+        } else {
+            output[idx] = (x > T(0)) ? x : T(alpha * (expf(float(x)) - 1.0f));
+        }
     }
 }
 
@@ -1007,7 +1013,18 @@ __global__ void elu_backward_kernel(const T* grad_output, const T* input,
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         T x = input[idx];
-        T grad = (x > T(0)) ? T(1) : T(alpha * exp(float(x)));
+        // Keep exp() in the native precision T — prior code narrowed to float
+        // before the exp, silently dropping Float64 precision and failing
+        // gradcheck at double-precision tolerances.
+        T grad;
+        if constexpr (std::is_same_v<T, double>) {
+            grad = (x > T(0)) ? T(1) : T(static_cast<double>(alpha) * exp(x));
+        } else if constexpr (std::is_same_v<T, float>) {
+            grad = (x > T(0)) ? T(1) : T(alpha * expf(x));
+        } else {
+            // Half / BFloat16: widen to float for numeric stability.
+            grad = (x > T(0)) ? T(1) : T(alpha * expf(float(x)));
+        }
         grad_input[idx] = grad_output[idx] * grad;
     }
 }
@@ -1053,9 +1070,17 @@ template<typename T>
 __global__ void selu_forward_kernel(const T* input, T* output, int64_t n) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
-        float x = float(input[idx]);
-        float result = (x > 0.0f) ? x : SELU_ALPHA * (expf(x) - 1.0f);
-        output[idx] = T(SELU_SCALE * result);
+        if constexpr (std::is_same_v<T, double>) {
+            constexpr double ALPHA = 1.6732632423543772848170429916717;
+            constexpr double SCALE = 1.0507009873554804934193349852946;
+            double x = static_cast<double>(input[idx]);
+            double result = (x > 0.0) ? x : ALPHA * (exp(x) - 1.0);
+            output[idx] = SCALE * result;
+        } else {
+            float x = float(input[idx]);
+            float result = (x > 0.0f) ? x : SELU_ALPHA * (expf(x) - 1.0f);
+            output[idx] = T(SELU_SCALE * result);
+        }
     }
 }
 
@@ -1064,9 +1089,19 @@ __global__ void selu_backward_kernel(const T* grad_output, const T* input,
                                       T* grad_input, int64_t n) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
-        float x = float(input[idx]);
-        float grad = (x > 0.0f) ? SELU_SCALE : SELU_SCALE * SELU_ALPHA * expf(x);
-        grad_input[idx] = T(float(grad_output[idx]) * grad);
+        // Compute in native precision T where possible so Float64 gradcheck
+        // doesn't silently lose precision through a Float32 intermediate.
+        if constexpr (std::is_same_v<T, double>) {
+            double x = static_cast<double>(input[idx]);
+            constexpr double ALPHA = 1.6732632423543772848170429916717;
+            constexpr double SCALE = 1.0507009873554804934193349852946;
+            double grad = (x > 0.0) ? SCALE : SCALE * ALPHA * exp(x);
+            grad_input[idx] = grad_output[idx] * grad;
+        } else {
+            float x = float(input[idx]);
+            float grad = (x > 0.0f) ? SELU_SCALE : SELU_SCALE * SELU_ALPHA * expf(x);
+            grad_input[idx] = T(float(grad_output[idx]) * grad);
+        }
     }
 }
 
@@ -1110,17 +1145,21 @@ template<typename T>
 __global__ void mish_forward_kernel(const T* input, T* output, int64_t n) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
-        float x = float(input[idx]);
-        // Numerically stable softplus
-        float softplus;
-        if (x > 20.0f) {
-            softplus = x;
-        } else if (x < -20.0f) {
-            softplus = expf(x);
+        if constexpr (std::is_same_v<T, double>) {
+            double x = static_cast<double>(input[idx]);
+            double softplus;
+            if (x > 20.0) softplus = x;
+            else if (x < -20.0) softplus = exp(x);
+            else softplus = log1p(exp(x));
+            output[idx] = x * tanh(softplus);
         } else {
-            softplus = log1pf(expf(x));
+            float x = float(input[idx]);
+            float softplus;
+            if (x > 20.0f) softplus = x;
+            else if (x < -20.0f) softplus = expf(x);
+            else softplus = log1pf(expf(x));
+            output[idx] = T(x * tanhf(softplus));
         }
-        output[idx] = T(x * tanhf(softplus));
     }
 }
 
@@ -1129,20 +1168,37 @@ __global__ void mish_backward_kernel(const T* grad_output, const T* input,
                                       T* grad_input, int64_t n) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
-        float x = float(input[idx]);
-        float softplus;
-        if (x > 20.0f) {
-            softplus = x;
-        } else if (x < -20.0f) {
-            softplus = expf(x);
+        if constexpr (std::is_same_v<T, double>) {
+            double x = static_cast<double>(input[idx]);
+            double softplus;
+            if (x > 20.0) {
+                softplus = x;
+            } else if (x < -20.0) {
+                softplus = exp(x);
+            } else {
+                softplus = log1p(exp(x));
+            }
+            double tanh_sp = tanh(softplus);
+            double sigmoid_x = 1.0 / (1.0 + exp(-x));
+            double sech2 = 1.0 - tanh_sp * tanh_sp;
+            double grad = tanh_sp + x * sech2 * sigmoid_x;
+            grad_input[idx] = grad_output[idx] * grad;
         } else {
-            softplus = log1pf(expf(x));
+            float x = float(input[idx]);
+            float softplus;
+            if (x > 20.0f) {
+                softplus = x;
+            } else if (x < -20.0f) {
+                softplus = expf(x);
+            } else {
+                softplus = log1pf(expf(x));
+            }
+            float tanh_sp = tanhf(softplus);
+            float sigmoid_x = 1.0f / (1.0f + expf(-x));
+            float sech2 = 1.0f - tanh_sp * tanh_sp;
+            float grad = tanh_sp + x * sech2 * sigmoid_x;
+            grad_input[idx] = T(float(grad_output[idx]) * grad);
         }
-        float tanh_sp = tanhf(softplus);
-        float sigmoid_x = 1.0f / (1.0f + expf(-x));
-        float sech2 = 1.0f - tanh_sp * tanh_sp;
-        float grad = tanh_sp + x * sech2 * sigmoid_x;
-        grad_input[idx] = T(float(grad_output[idx]) * grad);
     }
 }
 
@@ -1187,16 +1243,28 @@ __global__ void softplus_forward_kernel(const T* input, T* output, int64_t n,
                                          float beta, float threshold) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
-        float x = float(input[idx]) * beta;
-        float result;
-        if (x > threshold) {
-            result = float(input[idx]);
-        } else if (x < -threshold) {
-            result = expf(x) / beta;
+        if constexpr (std::is_same_v<T, double>) {
+            double in = static_cast<double>(input[idx]);
+            double b = static_cast<double>(beta);
+            double th = static_cast<double>(threshold);
+            double x = in * b;
+            double result;
+            if (x > th) result = in;
+            else if (x < -th) result = exp(x) / b;
+            else result = log1p(exp(x)) / b;
+            output[idx] = result;
         } else {
-            result = log1pf(expf(x)) / beta;
+            float x = float(input[idx]) * beta;
+            float result;
+            if (x > threshold) {
+                result = float(input[idx]);
+            } else if (x < -threshold) {
+                result = expf(x) / beta;
+            } else {
+                result = log1pf(expf(x)) / beta;
+            }
+            output[idx] = T(result);
         }
-        output[idx] = T(result);
     }
 }
 
@@ -1206,16 +1274,29 @@ __global__ void softplus_backward_kernel(const T* grad_output, const T* input,
                                           float beta, float threshold) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
-        float x = float(input[idx]) * beta;
-        float sigmoid_x;
-        if (x > threshold) {
-            sigmoid_x = 1.0f;
-        } else if (x < -threshold) {
-            sigmoid_x = expf(x);
+        if constexpr (std::is_same_v<T, double>) {
+            double x = static_cast<double>(input[idx]) * static_cast<double>(beta);
+            double sigmoid_x;
+            if (x > static_cast<double>(threshold)) {
+                sigmoid_x = 1.0;
+            } else if (x < -static_cast<double>(threshold)) {
+                sigmoid_x = exp(x);
+            } else {
+                sigmoid_x = 1.0 / (1.0 + exp(-x));
+            }
+            grad_input[idx] = grad_output[idx] * sigmoid_x;
         } else {
-            sigmoid_x = 1.0f / (1.0f + expf(-x));
+            float x = float(input[idx]) * beta;
+            float sigmoid_x;
+            if (x > threshold) {
+                sigmoid_x = 1.0f;
+            } else if (x < -threshold) {
+                sigmoid_x = expf(x);
+            } else {
+                sigmoid_x = 1.0f / (1.0f + expf(-x));
+            }
+            grad_input[idx] = T(float(grad_output[idx]) * sigmoid_x);
         }
-        grad_input[idx] = T(float(grad_output[idx]) * sigmoid_x);
     }
 }
 

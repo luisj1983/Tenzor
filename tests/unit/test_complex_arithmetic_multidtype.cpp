@@ -38,15 +38,16 @@ TEST_P(ComplexArithmeticMultiDTypeTest, ComplexCreation) {
 
 TEST_P(ComplexArithmeticMultiDTypeTest, ComplexAdd) {
     if (dtype() == DType::Float16) GTEST_SKIP() << "No Float16 complex type";
-    auto a = Tensor({int64_t(2)}, DType::Complex64, device());
-    auto b = Tensor({int64_t(2)}, DType::Complex64, device());
-
-    auto* ap = a.data<std::complex<float>>();
-    ap[0] = {1.0f, 2.0f};
-    ap[1] = {3.0f, 4.0f};
-    auto* bp = b.data<std::complex<float>>();
-    bp[0] = {5.0f, 6.0f};
-    bp[1] = {7.0f, 8.0f};
+    // Fill on CPU then move to the test device — data<>() on a GPU tensor is
+    // a device pointer and dereferencing it from host code segfaults.
+    auto a_cpu = Tensor({int64_t(2)}, DType::Complex64, Device::cpu());
+    auto b_cpu = Tensor({int64_t(2)}, DType::Complex64, Device::cpu());
+    a_cpu.data<std::complex<float>>()[0] = {1.0f, 2.0f};
+    a_cpu.data<std::complex<float>>()[1] = {3.0f, 4.0f};
+    b_cpu.data<std::complex<float>>()[0] = {5.0f, 6.0f};
+    b_cpu.data<std::complex<float>>()[1] = {7.0f, 8.0f};
+    auto a = a_cpu.to(device());
+    auto b = b_cpu.to(device());
 
     auto c = add(a, b).to(Device::cpu());
     auto* cp = c.data<std::complex<float>>();
@@ -58,11 +59,12 @@ TEST_P(ComplexArithmeticMultiDTypeTest, ComplexAdd) {
 
 TEST_P(ComplexArithmeticMultiDTypeTest, ComplexMul) {
     if (dtype() == DType::Float16) GTEST_SKIP() << "No Float16 complex type";
-    auto a = Tensor({int64_t(1)}, DType::Complex64, device());
-    auto b = Tensor({int64_t(1)}, DType::Complex64, device());
-
-    a.data<std::complex<float>>()[0] = {1.0f, 2.0f};
-    b.data<std::complex<float>>()[0] = {3.0f, 4.0f};
+    auto a_cpu = Tensor({int64_t(1)}, DType::Complex64, Device::cpu());
+    auto b_cpu = Tensor({int64_t(1)}, DType::Complex64, Device::cpu());
+    a_cpu.data<std::complex<float>>()[0] = {1.0f, 2.0f};
+    b_cpu.data<std::complex<float>>()[0] = {3.0f, 4.0f};
+    auto a = a_cpu.to(device());
+    auto b = b_cpu.to(device());
 
     auto c = mul(a, b).to(Device::cpu());
     auto* cp = c.data<std::complex<float>>();
@@ -72,8 +74,9 @@ TEST_P(ComplexArithmeticMultiDTypeTest, ComplexMul) {
 
 TEST_P(ComplexArithmeticMultiDTypeTest, ComplexAbs) {
     if (dtype() == DType::Float16) GTEST_SKIP() << "No Float16 complex type";
-    auto a = Tensor({int64_t(1)}, DType::Complex64, device());
-    a.data<std::complex<float>>()[0] = {3.0f, 4.0f};
+    auto a_cpu = Tensor({int64_t(1)}, DType::Complex64, Device::cpu());
+    a_cpu.data<std::complex<float>>()[0] = {3.0f, 4.0f};
+    auto a = a_cpu.to(device());
 
     auto result = abs(a).to(Device::cpu());
     if (result.dtype() == DType::Float32) {
@@ -86,8 +89,9 @@ TEST_P(ComplexArithmeticMultiDTypeTest, ComplexAbs) {
 
 TEST_P(ComplexArithmeticMultiDTypeTest, ComplexExp) {
     if (dtype() == DType::Float16) GTEST_SKIP() << "No Float16 complex type";
-    auto a = Tensor({int64_t(1)}, DType::Complex64, device());
-    a.data<std::complex<float>>()[0] = {0.0f, static_cast<float>(M_PI)};
+    auto a_cpu = Tensor({int64_t(1)}, DType::Complex64, Device::cpu());
+    a_cpu.data<std::complex<float>>()[0] = {0.0f, static_cast<float>(M_PI)};
+    auto a = a_cpu.to(device());
 
     auto c = exp(a).to(Device::cpu());
     auto* cp = c.data<std::complex<float>>();
@@ -97,8 +101,9 @@ TEST_P(ComplexArithmeticMultiDTypeTest, ComplexExp) {
 
 TEST_P(ComplexArithmeticMultiDTypeTest, ComplexSqrt) {
     if (dtype() == DType::Float16) GTEST_SKIP() << "No Float16 complex type";
-    auto a = Tensor({int64_t(1)}, DType::Complex64, device());
-    a.data<std::complex<float>>()[0] = {-1.0f, 0.0f};
+    auto a_cpu = Tensor({int64_t(1)}, DType::Complex64, Device::cpu());
+    a_cpu.data<std::complex<float>>()[0] = {-1.0f, 0.0f};
+    auto a = a_cpu.to(device());
 
     auto c = sqrt(a).to(Device::cpu());
     auto* cp = c.data<std::complex<float>>();
@@ -108,11 +113,12 @@ TEST_P(ComplexArithmeticMultiDTypeTest, ComplexSqrt) {
 
 TEST_P(ComplexArithmeticMultiDTypeTest, ComplexDivNonTrivial) {
     if (dtype() == DType::Float16) GTEST_SKIP() << "No Float16 complex type";
-    auto a = Tensor({int64_t(1)}, DType::Complex64, device());
-    auto b = Tensor({int64_t(1)}, DType::Complex64, device());
-
-    a.data<std::complex<float>>()[0] = {1.0f, 2.0f};
-    b.data<std::complex<float>>()[0] = {3.0f, 4.0f};
+    auto a_cpu = Tensor({int64_t(1)}, DType::Complex64, Device::cpu());
+    auto b_cpu = Tensor({int64_t(1)}, DType::Complex64, Device::cpu());
+    a_cpu.data<std::complex<float>>()[0] = {1.0f, 2.0f};
+    b_cpu.data<std::complex<float>>()[0] = {3.0f, 4.0f};
+    auto a = a_cpu.to(device());
+    auto b = b_cpu.to(device());
 
     auto c = div(a, b).to(Device::cpu());
     auto* cp = c.data<std::complex<float>>();
@@ -122,11 +128,12 @@ TEST_P(ComplexArithmeticMultiDTypeTest, ComplexDivNonTrivial) {
 
 TEST_P(ComplexArithmeticMultiDTypeTest, Complex128MulAccuracy) {
     if (dtype() != DType::Float64) GTEST_SKIP() << "Complex128 test only for Float64";
-    auto a = Tensor({int64_t(1)}, DType::Complex128, device());
-    auto b = Tensor({int64_t(1)}, DType::Complex128, device());
-
-    a.data<std::complex<double>>()[0] = {1e-10, 2e-10};
-    b.data<std::complex<double>>()[0] = {3e-10, 4e-10};
+    auto a_cpu = Tensor({int64_t(1)}, DType::Complex128, Device::cpu());
+    auto b_cpu = Tensor({int64_t(1)}, DType::Complex128, Device::cpu());
+    a_cpu.data<std::complex<double>>()[0] = {1e-10, 2e-10};
+    b_cpu.data<std::complex<double>>()[0] = {3e-10, 4e-10};
+    auto a = a_cpu.to(device());
+    auto b = b_cpu.to(device());
 
     auto c = mul(a, b).to(Device::cpu());
     auto* cp = c.data<std::complex<double>>();

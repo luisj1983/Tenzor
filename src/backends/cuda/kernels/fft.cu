@@ -500,8 +500,14 @@ auto cuda_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 // 1D IRFFT: Complex-to-Real inverse
 // ============================================================================
 
-auto cuda_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
+auto cuda_irfft_kernel(const Tensor& input_raw, int64_t dim, int64_t n,
                        const std::string& norm, cudaStream_t stream) -> Tensor {
+    // Accept real inputs (Float32 / Float64) by widening to the matching
+    // complex dtype first — mirrors the CPU path (cpu/kernels/fft.cpp).
+    Tensor input = input_raw;
+    if (input.dtype() == DType::Float32) input = input.to(DType::Complex64);
+    else if (input.dtype() == DType::Float64) input = input.to(DType::Complex128);
+
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
     bool is_float32 = (input.dtype() == DType::Complex64);

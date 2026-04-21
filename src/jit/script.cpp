@@ -563,6 +563,19 @@ public:
                 std::to_string(arg_names_.size()) + ", got " +
                 std::to_string(args.size()));
         }
+        // Inherit scalar-literal device/dtype from the first input so
+        // `x * 2.0 + 1.0` on a CUDA Float64 tensor emits CUDA Float64
+        // scalars rather than CPU Float32 ones (which would trigger a
+        // device-mismatch failure inside the op dispatch).
+        Device ctx_device = Device::cpu();
+        DType ctx_dtype = DType::Float32;
+        if (!args.empty()) {
+            ctx_device = args[0].tensor().device();
+            ctx_dtype = args[0].tensor().dtype();
+        }
+        ctx_device_ = ctx_device;
+        ctx_dtype_ = ctx_dtype;
+
         Env env;
         for (size_t i = 0; i < arg_names_.size(); ++i) {
             env.emplace(arg_names_[i], args[i]);
@@ -578,6 +591,8 @@ public:
 private:
     std::vector<std::string> arg_names_;
     std::vector<Stmt> body_;
+    mutable Device ctx_device_{Device::cpu()};
+    mutable DType  ctx_dtype_{DType::Float32};
 
     // exec_block runs statements in order. Sets `returned` and stops on return.
     void exec_block(const std::vector<Stmt>& stmts, Env& env,
@@ -621,7 +636,9 @@ private:
         // unrolled sequence (matching Python semantics for fixed-N loops).
         for (int64_t i = 0; i < f.count; ++i) {
             if (returned) return;
-            Variable iv(full({}, static_cast<float>(i), DType::Float32, Device::cpu()), false);
+            Tensor iv_t = full({}, static_cast<float>(i), DType::Float32, ctx_device_);
+            if (ctx_dtype_ != DType::Float32) iv_t = iv_t.to(ctx_dtype_);
+            Variable iv(iv_t, false);
             env.insert_or_assign(f.var, iv);
             exec_block(f.body, env, returned);
         }
@@ -632,7 +649,8 @@ private:
     }
 
     Variable visit(const NumberExpr& n, const Env&) const {
-        Tensor t = full({}, static_cast<float>(n.value), DType::Float32, Device::cpu());
+        Tensor t = full({}, static_cast<float>(n.value), DType::Float32, ctx_device_);
+        if (ctx_dtype_ != DType::Float32) t = t.to(ctx_dtype_);
         return Variable(t, false);
     }
 
@@ -817,9 +835,15 @@ auto compile_script_with_dummy(const char* source, const Tensor& dummy)
     }
 
     auto module = std::make_shared<ScriptModule>(fn.args, std::move(fn.body));
+    auto module_base = std::static_pointer_cast<nn::Module>(module);
 
-    return tenzor::jit::trace(
-        std::static_pointer_cast<nn::Module>(module), dummy);
+    auto compiled = jit::trace(module_base, dummy);
+    // Remember the source module so forward() can retrace on shape / device /
+    // dtype mismatch. The default `compile_script(source)` entry point uses a
+    // CPU Float32 {1} dummy; without retrace, calling forward() with a CUDA or
+    // Float64 input would run the CPU-baked graph and fail.
+    compiled->set_source_module(module_base);
+    return compiled;
 }
 
 } // namespace

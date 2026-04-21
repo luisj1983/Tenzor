@@ -588,8 +588,9 @@ auto trace(std::shared_ptr<nn::Module> module,
     }
 
     Variable input_var(dummy_input, false);
-    auto graph = trace(module, input_var);
-    return std::make_shared<CompiledModule>(graph);
+    // Route through CompiledModule::trace so the traced device/dtype metadata
+    // is captured — otherwise forward() cannot detect device/dtype mismatches.
+    return CompiledModule::trace(module, input_var);
 }
 
 // ============================================================================

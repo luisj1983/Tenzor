@@ -43,6 +43,7 @@ TEST_P(TensorParallelMultiDTypeTest, ColumnParallelOutputShape) {
         dist::Backend::GLOO, 0, 1, "localhost", 29751);
 
     dist::ColumnParallelLinear layer(16, 32, *pg, true, true);
+    convert_model(layer);
 
     auto input = createInput({4, 16}, false);
     Variable output = layer.forward(input);
@@ -67,6 +68,7 @@ TEST_P(TensorParallelMultiDTypeTest, RowParallelOutputShape) {
         dist::Backend::GLOO, 0, 1, "localhost", 29753);
 
     dist::RowParallelLinear layer(32, 16, *pg, true, true);
+    convert_model(layer);
 
     auto input = createInput({4, 32}, false);
     Variable output = layer.forward(input);

@@ -390,16 +390,22 @@ auto gradcheck_detailed(
         // Im(dy/dx) for every real input x.
         if (scalar_output.tensor().dtype() == DType::Complex64 ||
             scalar_output.tensor().dtype() == DType::Complex128) {
-            Tensor seed = ones({}, scalar_output.tensor().dtype(),
-                               scalar_output.tensor().device());
-            Tensor imag_unit = zeros({}, scalar_output.tensor().dtype(),
-                                    scalar_output.tensor().device());
-            if (scalar_output.tensor().dtype() == DType::Complex64) {
-                imag_unit.data<std::complex<float>>()[0] = {0.0f, 1.0f};
+            // Build the (1 + 1i) seed on CPU (host pointer writes are only
+            // valid for CPU tensors), then move it to the scalar output's
+            // device before seeding backward().
+            Device target_dev = scalar_output.tensor().device();
+            DType target_dt = scalar_output.tensor().dtype();
+            Tensor imag_unit_cpu = zeros({}, target_dt, Device::cpu());
+            if (target_dt == DType::Complex64) {
+                imag_unit_cpu.data<std::complex<float>>()[0] = {0.0f, 1.0f};
             } else {
-                imag_unit.data<std::complex<double>>()[0] = {0.0, 1.0};
+                imag_unit_cpu.data<std::complex<double>>()[0] = {0.0, 1.0};
             }
-            seed = tenzor::add(seed, imag_unit);
+            Tensor one_cpu = ones({}, target_dt, Device::cpu());
+            Tensor seed_cpu = tenzor::add(one_cpu, imag_unit_cpu);
+            Tensor seed = (target_dev.type == Device::Type::CPU)
+                              ? seed_cpu
+                              : seed_cpu.to(target_dev);
             scalar_output.backward(seed);
         } else {
             scalar_output.backward();

@@ -1119,8 +1119,19 @@ Tensor cuda_sparse_add_kernel(const SparseTensor& sparse, const Tensor& dense) {
         csr_sparse_add_kernel<double><<<blocks, threads>>>(
             crow.data<int64_t>(), col.data<int64_t>(), vals.data<double>(),
             result.data<double>(), M, K);
+    } else if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        // Widen to Float32 for the element-wise scatter-add, then narrow back.
+        // Float16/BFloat16 lack wide enough add support on older SMs and this
+        // keeps the kernel simple + numerically sane.
+        auto vals_f32 = vals.to(DType::Float32);
+        auto result_f32 = result.to(DType::Float32);
+        csr_sparse_add_kernel<float><<<blocks, threads>>>(
+            crow.data<int64_t>(), col.data<int64_t>(), vals_f32.data<float>(),
+            result_f32.data<float>(), M, K);
+        CUDA_CHECK_SPARSE(cudaGetLastError());
+        result = result_f32.to(dtype);
     } else {
-        throw std::runtime_error("cuda_sparse_add: only Float32 and Float64 supported, got "
+        throw std::runtime_error("cuda_sparse_add: only Float32, Float64, Float16, and BFloat16 supported, got "
             + std::string(dtype_name(dtype)));
     }
     CUDA_CHECK_SPARSE(cudaGetLastError());
@@ -1385,8 +1396,16 @@ Tensor cuda_sparse_add_kernel(const SparseTensor& sparse, const Tensor& dense) {
         csr_sparse_add_kernel<double><<<blocks, threads>>>(
             crow.data<int64_t>(), col.data<int64_t>(), vals.data<double>(),
             result.data<double>(), M, K);
+    } else if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        auto vals_f32 = vals.to(DType::Float32);
+        auto result_f32 = result.to(DType::Float32);
+        csr_sparse_add_kernel<float><<<blocks, threads>>>(
+            crow.data<int64_t>(), col.data<int64_t>(), vals_f32.data<float>(),
+            result_f32.data<float>(), M, K);
+        CUDA_CHECK_SPARSE_FALLBACK(cudaGetLastError());
+        result = result_f32.to(dtype);
     } else {
-        throw std::runtime_error("cuda_sparse_add: only Float32 and Float64 supported, got "
+        throw std::runtime_error("cuda_sparse_add: only Float32, Float64, Float16, and BFloat16 supported, got "
             + std::string(dtype_name(dtype)));
     }
     CUDA_CHECK_SPARSE_FALLBACK(cudaGetLastError());

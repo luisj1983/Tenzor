@@ -120,8 +120,13 @@ TEST_P(HvpVhpMultiDTypeTest, HvpAndVhpAgreeForSymmetricHessian) {
     auto [out_hvp, hv] = hvp(func, x, v);
     auto [out_vhp, vh] = vhp(func, x, v);
 
-    auto hv_data = hv.to(Device::cpu()).to(DType::Float32).data<float>();
-    auto vh_data = vh.to(Device::cpu()).to(DType::Float32).data<float>();
+    // Bind the CPU/Float32 tensors to locals so the temporary returned by
+    // `.to(...)` outlives the .data<float>() pointer — otherwise the pointer
+    // dangles and reads random memory (observed as 10^30-scale garbage).
+    auto hv_cpu = hv.to(Device::cpu()).to(DType::Float32);
+    auto vh_cpu = vh.to(Device::cpu()).to(DType::Float32);
+    const float* hv_data = hv_cpu.data<float>();
+    const float* vh_data = vh_cpu.data<float>();
 
     for (int i = 0; i < 3; ++i) {
         EXPECT_NEAR(hv_data[i], vh_data[i], tol()) << "index " << i;

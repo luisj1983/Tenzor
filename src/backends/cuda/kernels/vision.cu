@@ -86,7 +86,15 @@ __global__ void unfold_kernel(
                                ih * width + iw;
             output[output_idx] = input[input_idx];
         } else {
-            output[output_idx] = T(0);  // Padding with zeros
+            // Zero-initialize in a way that works for fp16/bf16 too (which
+            // may lack an int-taking constructor across all CUDA versions).
+            if constexpr (std::is_same_v<T, __half>) {
+                output[output_idx] = __float2half(0.0f);
+            } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+                output[output_idx] = __float2bfloat16(0.0f);
+            } else {
+                output[output_idx] = T(0);  // Padding with zeros
+            }
         }
     }
 }
@@ -627,16 +635,34 @@ auto unfold_cuda(const Tensor& input,
     dim3 grid, block;
     compute_launch_config_1d(total_elements, grid, block);
 
-    TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "unfold_cuda", [&]() {
-        unfold_kernel<scalar_t><<<grid, block, 0, stream>>>(
-            input.data<scalar_t>(),
-            output.data<scalar_t>(),
+    if (input.dtype() == DType::Float16) {
+        unfold_kernel<__half><<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(output.data_ptr()),
             batch, channels, height, width,
             kernel_size, stride, padding, dilation,
-            out_h, out_w
-        );
+            out_h, out_w);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
-    });
+    } else if (input.dtype() == DType::BFloat16) {
+        unfold_kernel<__nv_bfloat16><<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+            batch, channels, height, width,
+            kernel_size, stride, padding, dilation,
+            out_h, out_w);
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+    } else {
+        TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "unfold_cuda", [&]() {
+            unfold_kernel<scalar_t><<<grid, block, 0, stream>>>(
+                input.data<scalar_t>(),
+                output.data<scalar_t>(),
+                batch, channels, height, width,
+                kernel_size, stride, padding, dilation,
+                out_h, out_w
+            );
+            TENZOR_CUDA_POST_LAUNCH_CHECK();
+        });
+    }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
 

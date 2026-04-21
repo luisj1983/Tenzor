@@ -29,13 +29,18 @@ auto temperature_softmax(
         throw std::runtime_error("Temperature must be positive");
     }
 
-    // Only convert Float16 to Float32 for numerical stability.
-    // Previously this did `Variable(logits.tensor().to(Float32), rg)`, which
-    // creates a fresh leaf Variable with no grad_fn — severing backward to
-    // `logits`. Use the autograd-aware `variable_cast` that wires a
-    // TypeCastBackward node and converts grads back to Float16 on the way
-    // through.
-    Variable logits_processed = nn::variable_cast(logits, DType::Float32);
+    // Only widen Float16 / BFloat16 to Float32 for numerical stability —
+    // Float64 is already more precise than Float32 and widening to Float32
+    // would drop precision below test tolerances.
+    //
+    // Previously the raw `Variable(...tensor().to(Float32), rg)` pattern
+    // severed backward to `logits`; `variable_cast` wires a TypeCastBackward
+    // node so gradients flow back through the cast.
+    const DType lo_dtype = logits.tensor().dtype();
+    const bool widen = (lo_dtype == DType::Float16 || lo_dtype == DType::BFloat16);
+    Variable logits_processed = widen
+        ? nn::variable_cast(logits, DType::Float32)
+        : logits;
 
     // Scale logits by temperature: logits / T
     // Lower temperature → sharper distribution
@@ -46,7 +51,13 @@ auto temperature_softmax(
     // The softmax function already implements:
     // softmax(x) = exp(x - max(x)) / sum(exp(x - max(x)))
     // This prevents overflow/underflow with extreme logits or temperatures
-    return nn::softmax(scaled_logits, dim);
+    Variable result = nn::softmax(scaled_logits, dim);
+
+    // Cast back to the original dtype when we widened for stability.
+    if (widen) {
+        result = nn::variable_cast(result, lo_dtype);
+    }
+    return result;
 }
 
 auto temperature_log_softmax(
@@ -58,11 +69,14 @@ auto temperature_log_softmax(
         throw std::runtime_error("Temperature must be positive");
     }
 
-    // Only convert Float16 to Float32 for numerical stability.
-    // See temperature_softmax above for the autograd-sever history this fix
-    // addresses — the raw `Variable(...tensor().to(Float32), rg)` pattern was
-    // replaced with autograd-aware `variable_cast`.
-    Variable logits_processed = nn::variable_cast(logits, DType::Float32);
+    // Only widen Float16 / BFloat16 to Float32 for numerical stability —
+    // Float64 is already more precise than Float32. See temperature_softmax
+    // for the autograd-sever history this fix addresses.
+    const DType lo_dtype = logits.tensor().dtype();
+    const bool widen = (lo_dtype == DType::Float16 || lo_dtype == DType::BFloat16);
+    Variable logits_processed = widen
+        ? nn::variable_cast(logits, DType::Float32)
+        : logits;
 
     // Scale logits by temperature: logits / T
     Variable scaled_logits = logits_processed / temperature;
@@ -71,7 +85,13 @@ auto temperature_log_softmax(
     // The log_softmax function already implements:
     // log_softmax(x) = x - max(x) - log(sum(exp(x - max(x))))
     // This is more numerically stable than log(softmax(x))
-    return nn::log_softmax(scaled_logits, dim);
+    Variable result = nn::log_softmax(scaled_logits, dim);
+
+    // Cast back to original dtype when we widened for stability.
+    if (widen) {
+        result = nn::variable_cast(result, lo_dtype);
+    }
+    return result;
 }
 
 // =============================================================================

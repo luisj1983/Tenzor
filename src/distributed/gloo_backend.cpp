@@ -385,6 +385,15 @@ auto GlooBackend::broadcast(Tensor& tensor, int src_rank) -> void {
 
 auto GlooBackend::all_reduce(Tensor& tensor, ReduceOp op) -> void {
     validate_cpu_accessible(tensor);
+    // ring_all_reduce only dispatches Float32/Float64. Widen Float16/BFloat16
+    // to Float32 for the reduction, then narrow back in place.
+    auto orig_dtype = tensor.dtype();
+    if (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16) {
+        Tensor wide = tensor.to(DType::Float32);
+        ring_all_reduce(wide, op);
+        tensor = wide.to(orig_dtype);
+        return;
+    }
     ring_all_reduce(tensor, op);
 }
 

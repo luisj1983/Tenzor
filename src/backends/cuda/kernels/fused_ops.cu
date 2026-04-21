@@ -7,6 +7,7 @@
 #include <cub/cub.cuh>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/backend/caching_allocator.hpp"
+#include "tenzor/ops/indexing.hpp"
 #include "cuda_common.cuh"
 #include "../cublas_handle_pool.hpp"
 #include "../cuda_stream_pool.hpp"
@@ -2322,21 +2323,69 @@ auto fused_attention_cuda(
             static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
-        // Fallback to legacy tiled kernel for non-standard head_dim
-        // Legacy kernel uses block-per-tile (not block-per-row), different grid
-        constexpr int LBr = 32;
-        constexpr int LBc = 32;
-        constexpr int LEGACY_BLOCK = 256;
-        dim3 legacy_blocks(batch_heads, (seq_len_q + LBr - 1) / LBr);
-        dim3 legacy_threads(LEGACY_BLOCK);
-        // Shared: Q_tile[Br*HD] + K_tile[Bc*HD] + V_tile[Bc*HD] + S_tile[Br*Bc] + O_acc[Br*HD] + m_i[Br] + l_i[Br]
-        size_t legacy_smem = (LBr * head_dim + 2 * LBc * head_dim + LBr * LBc + LBr * head_dim + 2 * LBr) * sizeof(float);
+        // Non-standard head_dim: pad Q/K/V up to a supported specialized HEAD_DIM
+        // (zeros in the extra columns are numerically identity for dot products),
+        // run the specialized kernel, then slice the output back down.
+        //
+        // The legacy tiled kernel template-parameterizes HEAD_DIM while smem is
+        // sized from runtime head_dim, causing out-of-bounds reads when the two
+        // disagree (observed NaNs for head_dim=4). Padding to a specialized kernel
+        // avoids that template/runtime mismatch entirely.
+        auto pick_padded = [&](int64_t hd) -> int {
+            if (hd <= 32)  return 32;
+            if (hd <= 64)  return 64;
+            if (hd <= 80)  return 80;
+            if (hd <= 96)  return 96;
+            return 128;
+        };
+        int padded_hd = pick_padded(head_dim);
 
-        // Use 32 as HEAD_DIM template param for legacy kernel (it also takes runtime head_dim)
-        flash_attention_forward_kernel<LBr, LBc, 32, LEGACY_BLOCK><<<legacy_blocks, legacy_threads, legacy_smem>>>(
-            Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(), lse_ptr,
-            batch_heads, seq_len_q, seq_len_k, head_dim, scale);
+        auto pad_last = [&](const Tensor& t) -> Tensor {
+            // Pad the last dimension with zeros from head_dim to padded_hd.
+            auto padded = create_cuda_zeros(
+                {t.shape()[0], t.shape()[1], padded_hd}, t.dtype(), t.device());
+            // slice_scatter copies t into padded[..., 0:head_dim] along dim 2.
+            return slice_scatter(padded, t, /*dim=*/2, /*start=*/0,
+                                 /*end=*/static_cast<int64_t>(head_dim));
+        };
+        Tensor Qp = pad_last(Q);
+        Tensor Kp = pad_last(K);
+        Tensor Vp = pad_last(V);
+
+        Tensor padded_output = create_cuda_zeros(
+            {batch_heads, seq_len_q, padded_hd}, Q.dtype(), Q.device());
+
+        auto compute_smem_size_gen = [](int hd) {
+            int k_stride = hd + 4;
+            return (2 * Bc * k_stride + hd + Bc + 8) * sizeof(float);
+        };
+
+        if (padded_hd == 32) {
+            flash_attention_v2_kernel<32, BLOCK_SIZE><<<blocks, threads, compute_smem_size_gen(32)>>>(
+                Qp.data<float>(), Kp.data<float>(), Vp.data<float>(), padded_output.data<float>(),
+                lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
+        } else if (padded_hd == 64) {
+            flash_attention_v2_kernel<64, BLOCK_SIZE><<<blocks, threads, compute_smem_size_gen(64)>>>(
+                Qp.data<float>(), Kp.data<float>(), Vp.data<float>(), padded_output.data<float>(),
+                lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
+        } else if (padded_hd == 80) {
+            flash_attention_v2_kernel<80, BLOCK_SIZE><<<blocks, threads, compute_smem_size_gen(80)>>>(
+                Qp.data<float>(), Kp.data<float>(), Vp.data<float>(), padded_output.data<float>(),
+                lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
+        } else if (padded_hd == 96) {
+            flash_attention_v2_kernel<96, BLOCK_SIZE><<<blocks, threads, compute_smem_size_gen(96)>>>(
+                Qp.data<float>(), Kp.data<float>(), Vp.data<float>(), padded_output.data<float>(),
+                lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
+        } else {
+            flash_attention_v2_kernel<128, BLOCK_SIZE><<<blocks, threads, compute_smem_size_gen(128)>>>(
+                Qp.data<float>(), Kp.data<float>(), Vp.data<float>(), padded_output.data<float>(),
+                lse_ptr, static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
+        }
         TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+        // Slice the padded output back down to head_dim along the last axis.
+        output = slice(padded_output, /*dim=*/2, /*start=*/0,
+                       /*end=*/static_cast<int64_t>(head_dim)).contiguous();
     }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
