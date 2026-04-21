@@ -515,23 +515,84 @@ auto RenormBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 auto RenormBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     require_saved_tensors(2);
     const auto& input = saved_tensors_[0];
-    const auto& output = saved_tensors_[1];  // renorm(input)
-    const auto& grad = grad_outputs[0];
+    const auto& output = saved_tensors_[1];  // y = renorm(input)
+    const auto& grad = grad_outputs[0];       // dL/dy
+
+    // For each slice along dim_ the op is y = s · x with
+    //   s = min(1, maxnorm / ||x||_p),     ||x||_p = (Σ_j |x_j|^p)^{1/p}.
+    // If s == 1 (norm below maxnorm) the map is identity and ∂y/∂x = I.
+    // Otherwise s = maxnorm / ||x||_p and
+    //   ∂y_i/∂x_j = s · δ_ij − s · x_i · sign(x_j)|x_j|^{p-1} / ||x||_p^p.
+    // Back-propagating the chain rule through one slice:
+    //   (∂L/∂x)_j = s · (∂L/∂y)_j
+    //             − clipped · s · sign(x_j)|x_j|^{p-1} · ⟨∂L/∂y, x⟩ / ||x||_p^p.
+    // The previous implementation returned only the first term — it
+    // produced a uniform-per-column gradient that ignored the rank-one
+    // correction active on clipped slices, and gradcheck flagged it.
 
     auto input_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
 
-    // Compute p-norm along all dims except dim_
-    // scale = output / input (where input != 0)
+    // Per-slice scale s = y / x (safe at x==0: y is also 0 there, so we
+    // clamp the divisor to ±eps).
     auto eps_t = full(input_shape, detail::dtype_epsilon(input.dtype()),
                       input.dtype(), input.device());
-    auto safe_input = where(eq(input, zeros(input_shape, input.dtype(), input.device())),
-                            eps_t, input);
-    auto scale = div(output, safe_input);
+    auto zeros_t = zeros(input_shape, input.dtype(), input.device());
+    auto safe_input = where(eq(input, zeros_t), eps_t, input);
+    auto scale_tensor = div(output, safe_input);
 
-    // Simple backward: grad * scale
-    // This gives the correct gradient when the norm is above maxnorm (scaling active)
-    // and when the norm is below maxnorm (scale = 1, identity).
-    return {mul(grad, scale)};
+    // Reduce |x|^p over all dims except dim_ to recover ||x||_p^p per
+    // slice (kept with size-1 dims so broadcasting works).
+    auto abs_x = abs(input);
+    Tensor xp_contrib = (p_ == 2.0)
+        ? mul(abs_x, abs_x)
+        : pow(abs_x, p_);
+    Tensor norm_p_per_slice = xp_contrib;
+    // Sum each non-dim_ dimension while keeping shape via keepdim.
+    for (int64_t d = 0; d < ndim; ++d) {
+        if (d == dim_) continue;
+        norm_p_per_slice = sum(norm_p_per_slice, d, /*keepdim=*/true);
+    }
+
+    // "clipped" indicator broadcast over the slice: 1 where s < 1 − ε.
+    auto one_t = full(std::vector<int64_t>(norm_p_per_slice.shape().begin(), norm_p_per_slice.shape().end()), 1.0,
+                      input.dtype(), input.device());
+    // Per-slice scale value (just pick one element; all entries in the
+    // slice share the same scale by construction).
+    Tensor scale_per_slice = scale_tensor;
+    for (int64_t d = 0; d < ndim; ++d) {
+        if (d == dim_) continue;
+        // A 0-th element slice is sufficient since every entry in the
+        // non-dim_ direction carries the same scale factor.
+        scale_per_slice = sum(scale_per_slice, d, /*keepdim=*/true);
+        auto slice_count = full(std::vector<int64_t>(norm_p_per_slice.shape().begin(), norm_p_per_slice.shape().end()),
+                                static_cast<double>(input_shape[d]),
+                                input.dtype(), input.device());
+        scale_per_slice = div(scale_per_slice, slice_count);
+    }
+    auto clipped = lt(scale_per_slice, sub(one_t, eps_t));  // bool tensor
+    auto clipped_f = clipped.to(input.dtype());
+
+    // inner = ⟨grad, x⟩ reduced over non-dim_ dims (keepdim for broadcast)
+    Tensor inner = mul(grad, input);
+    for (int64_t d = 0; d < ndim; ++d) {
+        if (d == dim_) continue;
+        inner = sum(inner, d, /*keepdim=*/true);
+    }
+
+    // sign(x) · |x|^{p-1} for the correction term.
+    Tensor sgn = sign(input);
+    Tensor corr_factor = (p_ == 2.0)
+        ? input                                 // sign(x)·|x|^{1} == x for p=2
+        : mul(sgn, pow(abs_x, p_ - 1.0));
+    // Avoid 0/0 by clamping norm_p.
+    auto norm_p_safe = add(norm_p_per_slice, eps_t);
+    Tensor correction = mul(div(mul(mul(corr_factor, inner), clipped_f),
+                                norm_p_safe),
+                            scale_per_slice);
+
+    auto grad_in = sub(mul(grad, scale_tensor), correction);
+    return {grad_in};
 }
 
 auto RenormBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
@@ -674,25 +735,203 @@ auto LinalgHouseholderBackward::forward(std::vector<Variable>) -> std::vector<Va
     throw std::runtime_error("LinalgHouseholderBackward::forward should not be called directly");
 }
 
-auto LinalgHouseholderBackward::backward(std::vector<Tensor> /*grad_outputs*/) -> std::vector<Tensor> {
+auto LinalgHouseholderBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     require_saved_tensors(2);
-    const auto& input = saved_tensors_[0];
-    const auto& tau = saved_tensors_[1];
-    // Householder product Q = H_k ... H_1 (H_i = I - tau_i v_i v_i^T)
-    // has a closed-form but notoriously complex backward — PyTorch tracked
-    // this as an outstanding issue for several years. Returns zeros by
-    // default. Set TENZOR_STRICT_LINALG_GRAD=1 to have this throw instead
-    // of silently producing zero gradients, which is useful for catching
-    // accidental use in a gradient chain. Users needing QR-like gradient
-    // flow should use tenzor::qr() (which has a real backward).
-    if (strict_linalg_grad_mode()) {
+    const auto& V_orig = saved_tensors_[0];     // (..., m, k)  Householder reflectors packed column-wise
+    const auto& tau_orig = saved_tensors_[1];   // (..., k)     scalar factors
+    const auto& G_orig = grad_outputs[0];       // (..., m, n)  upstream grad of Q
+
+    // Closed-form backward for Q = H_0 · H_1 · … · H_{k-1},
+    //   H_j = I − τ_j v_j v_jᵀ,   v_j[i<j] = 0,  v_j[j] = 1,  v_j[i>j] = V[i, j].
+    //
+    // Let   P_j = (H_{j-1} … H_0)·G     (gradient propagated "to the left" of H_j)
+    //       B_j = (H_{j+1} … H_{k-1})[:, :n]   (truncated product to the right of H_j)
+    // with the recurrences P_0 = G, P_{j+1} = H_j P_j and B_{-1} = Q_trunc,
+    // B_j = H_j B_{j-1} (both are H_j-symmetric so the inverse is itself).
+    //
+    // Walking each reflector independently gives:
+    //   ∂L/∂τ_j = −(v_jᵀ P_j) · (v_jᵀ B_j)ᵀ
+    //   ∂L/∂v_j = −τ_j · ( P_j (B_jᵀ v_j) + B_j (P_jᵀ v_j) )
+    // The v_j components with i ≤ j are frozen (0 above the diagonal, 1 on the
+    // diagonal), so only the strictly-below-diagonal part of ∂L/∂v_j lands in
+    // ∂L/∂V[:, j].
+    //
+    // This matches LAPACK's sorgqr convention (Q = H(1) H(2) … H(k)) used by
+    // linalg::householder_product above and mirrors the derivation in
+    // Walter & Lehmann (2011) "Algorithmic differentiation of QR".
+
+    const DType orig_dtype = V_orig.dtype();
+    // Widen reduced-precision floats so accumulated rank-one updates don't
+    // lose significance — the recurrence applies k sequential rank-1 edits
+    // to an m×n matrix, each cancelling on the order of the slice norm.
+    const DType compute_dtype =
+        (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16)
+            ? DType::Float32
+            : orig_dtype;
+
+    const Device orig_device = V_orig.device();
+
+    auto to_compute = [&](const Tensor& t) {
+        Tensor out = t.to(Device::cpu());
+        if (out.dtype() != compute_dtype) out = out.to(compute_dtype);
+        if (!out.is_contiguous()) out = out.contiguous();
+        return out;
+    };
+    Tensor V = to_compute(V_orig);
+    Tensor tau = to_compute(tau_orig);
+    Tensor G = to_compute(G_orig);
+
+    auto V_shape = V.shape();
+    const int64_t ndim = static_cast<int64_t>(V_shape.size());
+    if (ndim < 2) {
         throw std::runtime_error(
-            "Householder-product backward is not implemented (returns zero "
-            "gradient by default). TENZOR_STRICT_LINALG_GRAD=1 surfaces this "
-            "as an error. Use qr() for Q/R differentiation, or compute "
-            "gradients through the post-QR path.");
+            "householder_product backward: input must be at least 2D");
     }
-    return {zeros_like(input), zeros_like(tau)};
+    const int64_t m = V_shape[ndim - 2];
+    const int64_t k_reflectors = V_shape[ndim - 1];
+    const int64_t n = G.shape()[G.ndim() - 1];
+
+    int64_t nbatch = 1;
+    for (int64_t d = 0; d < ndim - 2; ++d) nbatch *= V_shape[d];
+
+    std::vector<int64_t> grad_V_shape(V_shape.begin(), V_shape.end());
+    std::vector<int64_t> grad_tau_shape(tau.shape().begin(), tau.shape().end());
+    Tensor grad_V = zeros(grad_V_shape, compute_dtype, Device::cpu());
+    Tensor grad_tau = zeros(grad_tau_shape, compute_dtype, Device::cpu());
+
+    auto kernel = [&]<typename T>(T*) {
+        const T* V_ptr = V.data<T>();
+        const T* tau_ptr = tau.data<T>();
+        const T* G_ptr = G.data<T>();
+        T* gV_ptr = grad_V.data<T>();
+        T* gT_ptr = grad_tau.data<T>();
+
+        const int64_t V_batch_stride = m * k_reflectors;
+        const int64_t tau_batch_stride = k_reflectors;
+        const int64_t G_batch_stride = m * n;
+
+        std::vector<T> P(m * n);
+        // Store every B_j = (H_{j+1} … H_{k-1})[:, :n] so the forward P-walk
+        // can read B_j when it needs it. Compute via a backward pass:
+        //   B_{k-1} = I[:, :n],   B_{j-1} = H_j · B_j.
+        // Using a forward pass starting from Q_trunc only works when every
+        // H_j is its own inverse (τ_j = 2/‖v_j‖², i.e. a true reflector).
+        // Gradcheck feeds arbitrary τ so that assumption fails.
+        std::vector<T> B_store(k_reflectors * m * n);
+        std::vector<T> v_j(m);
+        std::vector<T> u(n), w(n);
+
+        for (int64_t b = 0; b < nbatch; ++b) {
+            const T* Vb = V_ptr + b * V_batch_stride;
+            const T* taub = tau_ptr + b * tau_batch_stride;
+            const T* Gb = G_ptr + b * G_batch_stride;
+            T* gVb = gV_ptr + b * V_batch_stride;
+            T* gTb = gT_ptr + b * tau_batch_stride;
+
+            // --- Backward pass: populate B_store[j] for j = k-1 … 0. ---
+            // Initialise B_{k-1} = I[:, :n].
+            {
+                T* B_last = B_store.data() + (k_reflectors - 1) * m * n;
+                std::fill(B_last, B_last + m * n, T(0));
+                const int64_t limit = std::min(m, n);
+                for (int64_t i = 0; i < limit; ++i) B_last[i * n + i] = T(1);
+            }
+            for (int64_t j = k_reflectors - 2; j >= 0; --j) {
+                T* B_j = B_store.data() + j * m * n;
+                const T* B_jp1 = B_store.data() + (j + 1) * m * n;
+
+                const int64_t jp1 = j + 1;
+                for (int64_t i = 0; i < jp1; ++i) v_j[i] = T(0);
+                v_j[jp1] = T(1);
+                for (int64_t i = jp1 + 1; i < m; ++i) {
+                    v_j[i] = Vb[i * k_reflectors + jp1];
+                }
+                const T tau_jp1 = taub[jp1];
+
+                // B_j = B_{j+1} − τ_{j+1} · v_{j+1} · (v_{j+1}ᵀ B_{j+1})
+                for (int64_t c = 0; c < n; ++c) {
+                    T s = 0;
+                    for (int64_t i = 0; i < m; ++i) s += v_j[i] * B_jp1[i * n + c];
+                    w[c] = s;
+                }
+                for (int64_t i = 0; i < m; ++i) {
+                    const T tv = tau_jp1 * v_j[i];
+                    for (int64_t c = 0; c < n; ++c) {
+                        B_j[i * n + c] = B_jp1[i * n + c] - tv * w[c];
+                    }
+                }
+            }
+
+            // --- Forward pass: walk j = 0 … k-1 with P_j, using stored B_j. ---
+            std::memcpy(P.data(), Gb, m * n * sizeof(T));
+
+            for (int64_t j = 0; j < k_reflectors; ++j) {
+                for (int64_t i = 0; i < j; ++i) v_j[i] = T(0);
+                v_j[j] = T(1);
+                for (int64_t i = j + 1; i < m; ++i) {
+                    v_j[i] = Vb[i * k_reflectors + j];
+                }
+
+                const T tau_j = taub[j];
+                const T* B_j = B_store.data() + j * m * n;
+
+                // u := v_jᵀ P_j
+                for (int64_t c = 0; c < n; ++c) {
+                    T s = 0;
+                    for (int64_t i = 0; i < m; ++i) s += v_j[i] * P[i * n + c];
+                    u[c] = s;
+                }
+                // w := v_jᵀ B_j
+                for (int64_t c = 0; c < n; ++c) {
+                    T s = 0;
+                    for (int64_t i = 0; i < m; ++i) s += v_j[i] * B_j[i * n + c];
+                    w[c] = s;
+                }
+
+                // ∂L/∂τ_j = − u · w
+                T gt = 0;
+                for (int64_t c = 0; c < n; ++c) gt += u[c] * w[c];
+                gTb[j] = -gt;
+
+                // ∂L/∂V[i, j] for i > j = −τ_j · ( Σ_c P[i, c] w[c] + Σ_c B_j[i, c] u[c] )
+                for (int64_t i = j + 1; i < m; ++i) {
+                    T Pw = 0, Bu = 0;
+                    for (int64_t c = 0; c < n; ++c) {
+                        Pw += P[i * n + c] * w[c];
+                        Bu += B_j[i * n + c] * u[c];
+                    }
+                    gVb[i * k_reflectors + j] = -tau_j * (Pw + Bu);
+                }
+
+                // P_{j+1} = H_j P_j = P − τ_j · v_j · (v_jᵀ P) = P − τ_j · v_j · uᵀ
+                for (int64_t i = 0; i < m; ++i) {
+                    const T tv = tau_j * v_j[i];
+                    for (int64_t c = 0; c < n; ++c) {
+                        P[i * n + c] -= tv * u[c];
+                    }
+                }
+            }
+        }
+    };
+
+    if (compute_dtype == DType::Float32) {
+        kernel(static_cast<float*>(nullptr));
+    } else if (compute_dtype == DType::Float64) {
+        kernel(static_cast<double*>(nullptr));
+    } else {
+        throw std::runtime_error(
+            "householder_product backward: unsupported dtype (only Float32/Float64)");
+    }
+
+    auto finalize = [&](Tensor& t, DType target_dtype, Device target_device) {
+        if (t.dtype() != target_dtype) t = t.to(target_dtype);
+        if (t.device().type != target_device.type) t = t.to(target_device);
+        return t;
+    };
+    finalize(grad_V, orig_dtype, orig_device);
+    finalize(grad_tau, orig_dtype, orig_device);
+
+    return {grad_V, grad_tau};
 }
 
 // TensorInvBackward:
@@ -708,26 +947,37 @@ auto TensorInvBackward::backward(std::vector<Tensor> grad_outputs) -> std::vecto
     const auto& Y = saved_tensors_[0];  // tensorinv result
     const auto& grad = grad_outputs[0];
 
-    // Flatten Y to 2D, compute -Y @ grad @ Y, reshape back
+    // Forward: X.shape = [a₁..a_p, b₁..b_q]  with Π a_i == Π b_j  (ind_ = p)
+    //   X_2d = reshape(X, [Π a_i, Π b_j])
+    //   Y_2d = X_2d⁻¹  →  Y.shape = [b₁..b_q, a₁..a_p]
+    //
+    // So in Y the leading dims (count = ndim_X − ind_) correspond to the
+    // "cols" side of the forward reshape, and the trailing dims (count
+    // ind_) correspond to the "rows" side. The old code split Y at ind_,
+    // yielding a non-square Y_2d and a transposed result shape — which
+    // surfaced as the "expected [2,3,6] got [3,6,2]" error.
     auto Y_shape = std::vector<int64_t>(Y.shape().begin(), Y.shape().end());
-    auto grad_shape = std::vector<int64_t>(grad.shape().begin(), grad.shape().end());
+    const int64_t ndim_Y = static_cast<int64_t>(Y_shape.size());
+    const int64_t ind_Y  = ndim_Y - ind_;  // number of leading dims in Y
 
-    // Compute product dimensions
     int64_t rows = 1, cols = 1;
-    for (int64_t i = 0; i < ind_; ++i) rows *= Y_shape[i];
-    for (size_t i = ind_; i < Y_shape.size(); ++i) cols *= Y_shape[i];
+    for (int64_t i = 0; i < ind_Y; ++i)      rows *= Y_shape[i];     // = Π b_j
+    for (int64_t i = ind_Y; i < ndim_Y; ++i) cols *= Y_shape[i];     // = Π a_i
 
+    // For a well-posed tensorinv, rows == cols (square matrix).
     auto Y_2d = reshape(Y, {rows, cols});
-    auto grad_2d = reshape(grad, {cols, rows});
+    auto grad_2d = reshape(grad, {rows, cols});
 
-    auto temp = matmul(matmul(Y_2d, grad_2d), Y_2d);
+    // ∂L/∂X_2d = − X_2d⁻ᵀ · grad_Y · X_2d⁻ᵀ. Using Y_2d = X_2d⁻¹ and
+    // the transpose of Y = X⁻¹:  grad_X_2d = − Y_2dᵀ · grad_Y · Y_2dᵀ.
+    auto Y_2d_t = tenzor::transpose(Y_2d, 0, 1);
+    auto temp = matmul(matmul(Y_2d_t, grad_2d), Y_2d_t);
     auto result_2d = neg(temp);
 
-    // Reshape back to original input shape (which is Y's transposed shape)
-    // tensorinv output shape is inverse of input shape
+    // Reshape back to the input tensor shape [a₁..a_p, b₁..b_q].
     std::vector<int64_t> input_shape;
-    for (size_t i = ind_; i < Y_shape.size(); ++i) input_shape.push_back(Y_shape[i]);
-    for (int64_t i = 0; i < ind_; ++i) input_shape.push_back(Y_shape[i]);
+    for (int64_t i = ind_Y; i < ndim_Y; ++i) input_shape.push_back(Y_shape[i]);  // a's
+    for (int64_t i = 0; i < ind_Y; ++i)      input_shape.push_back(Y_shape[i]);  // b's
 
     return {reshape(result_2d, input_shape)};
 }

@@ -244,6 +244,19 @@ auto SparseTensor::to_dense() const -> Tensor {
         return this->to(Device::cpu()).to_dense().to(orig_device);
     }
 
+    // Float16 / BFloat16 values don't have dispatch branches below
+    // (only Float32/Float64/int variants). Widen a shallow copy of this
+    // SparseTensor to Float32 for the scatter, then cast the dense
+    // result back. The structural buffers (indices, crow/col ptrs,
+    // bsr row_ptr/col_ind) are unchanged — only the values tensor
+    // needs a dtype conversion.
+    if (values_.dtype() == DType::Float16 || values_.dtype() == DType::BFloat16) {
+        const DType orig_dtype = values_.dtype();
+        SparseTensor widened = *this;
+        widened.values_ = values_.to(DType::Float32);
+        return widened.to_dense().to(orig_dtype);
+    }
+
     auto result = zeros(shape_, values_.dtype(), values_.device());
 
     if (layout_ == SparseLayout::COO) {
@@ -553,6 +566,18 @@ auto SparseTensor::coalesce() const -> SparseTensor {
         SparseTensor result = *this;
         result.coalesced_ = true;
         return result;
+    }
+
+    // Float16 / BFloat16 values: the summation loop below is Float32/Float64
+    // only. Widen to Float32 for the accumulate, then cast back — matches
+    // the to_dense() widen-then-narrow pattern.
+    if (values_.dtype() == DType::Float16 || values_.dtype() == DType::BFloat16) {
+        const DType orig_dtype = values_.dtype();
+        SparseTensor widened = *this;
+        widened.values_ = values_.to(DType::Float32);
+        auto coalesced = widened.coalesce();
+        coalesced.values_ = coalesced.values_.to(orig_dtype);
+        return coalesced;
     }
 
     // GPU-native path: sort + reduce_by_key entirely on device using

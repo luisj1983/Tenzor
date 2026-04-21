@@ -8,6 +8,7 @@
 #include "tenzor/utils/profiling.hpp"
 #include <sstream>
 #include <cstring>
+#include <complex>
 #include <limits>
 #ifdef _OPENMP
 #include <omp.h>
@@ -694,6 +695,12 @@ auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor {
                 break;
             case DType::Bool:
                 expand_impl(static_cast<bool*>(nullptr));
+                break;
+            case DType::Complex64:
+                expand_impl(static_cast<std::complex<float>*>(nullptr));
+                break;
+            case DType::Complex128:
+                expand_impl(static_cast<std::complex<double>*>(nullptr));
                 break;
             default:
                 throw std::runtime_error("Unsupported dtype for expand");

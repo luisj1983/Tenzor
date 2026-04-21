@@ -24,14 +24,17 @@ protected:
 };
 
 TEST_F(DTypeCapabilityQueriesTest, Fp8NativeBackends) {
+    // ROCm gained native FP8 Cast kernels in kernels/transform.hip.cpp;
+    // Vulkan ships cast_f32_fp8e*.comp / cast_fp8e*_f32.comp shaders.
+    // Only MPS still falls back via CPU round-trip.
     EXPECT_TRUE(fp8_is_native(Device::Type::CPU));
     EXPECT_TRUE(fp8_is_native(Device::Type::CUDA));
     EXPECT_TRUE(fp8_is_native(Device::Type::OneAPI));
+    EXPECT_TRUE(fp8_is_native(Device::Type::ROCm));
+    EXPECT_TRUE(fp8_is_native(Device::Type::Vulkan));
 }
 
 TEST_F(DTypeCapabilityQueriesTest, Fp8FallbackBackends) {
-    EXPECT_FALSE(fp8_is_native(Device::Type::ROCm));
-    EXPECT_FALSE(fp8_is_native(Device::Type::Vulkan));
     EXPECT_FALSE(fp8_is_native(Device::Type::MPS));
 }
 

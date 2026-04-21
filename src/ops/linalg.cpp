@@ -130,14 +130,17 @@ auto det(const Tensor& A) -> Tensor {
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);
 
-    // Output shape: all dims except last two
+    // Output shape: all dims except last two. For a plain 2D input the
+    // result is a scalar (shape {}), matching torch.linalg.det semantics —
+    // a previous version force-padded to {1}, which surfaced as a "size-1
+    // vs size-0 shape" mismatch in DetShape / SLogDet tests.
     std::vector<int64_t> out_shape;
     auto shape = A.shape();
     for (size_t i = 0; i + 2 < shape.size(); ++i) {
         out_shape.push_back(shape[i]);
     }
-    if (out_shape.empty()) out_shape.push_back(1);
-
+    // out_shape empty ⇒ scalar result; preserve that by passing an empty
+    // shape to zeros() (which materialises a 0-D tensor with numel==1).
     auto result = zeros(out_shape, work.dtype(), Device::cpu());
 
     std::vector<lapack_int> ipiv(n);
@@ -514,12 +517,13 @@ auto slogdet(const Tensor& A) -> std::tuple<Tensor, Tensor> {
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);
 
+    // 2D input ⇒ scalar outputs (shape {}). See det() for rationale; the
+    // same force-to-{1} padding broke SLogDetReturnsSignAndLogabs.
     std::vector<int64_t> out_shape;
     auto shape = A.shape();
     for (size_t i = 0; i + 2 < shape.size(); ++i) {
         out_shape.push_back(shape[i]);
     }
-    if (out_shape.empty()) out_shape.push_back(1);
 
     auto sign_result = zeros(out_shape, work.dtype(), Device::cpu());
     auto logabsdet_result = zeros(out_shape, work.dtype(), Device::cpu());

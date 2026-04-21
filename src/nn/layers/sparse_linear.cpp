@@ -47,18 +47,17 @@ auto SparseLinear::forward_impl(const Variable& input) -> Variable {
     // input: [batch, in_features]
     // sparse_weight_: [out_features, in_features] in CSR
     // output = spmm(sparse_weight, input^T)^T = [batch, out_features]
+    //
+    // Route through the Variable-aware permute / spmm so the autograd
+    // graph sees (input -> permute -> spmm -> permute). A previous
+    // version called inp.permute() on the raw Tensor and wrapped the
+    // result in `Variable(result, requires_grad)` with no grad_fn,
+    // silently dropping the chain — input.grad() then stayed nullopt.
 
-    const auto& inp = input.tensor();
+    auto input_t = tenzor::permute(input, {1, 0});
+    auto result_t = tenzor::spmm(sparse_weight_.value(), input_t);
+    auto output = tenzor::permute(result_t, {1, 0});
 
-    // SpMM: (out_features x in_features) * (in_features x batch) = (out_features x batch)
-    auto input_t = inp.permute({1, 0});
-    auto result_t = sparse::spmm(sparse_weight_.value(), input_t);
-    // Transpose back: (out_features x batch) -> (batch x out_features)
-    auto result = result_t.permute({1, 0});
-
-    Variable output(result, input.requires_grad());
-
-    // Add bias
     if (has_bias_) {
         auto bias_it = parameters_.find("bias");
         if (bias_it != parameters_.end()) {

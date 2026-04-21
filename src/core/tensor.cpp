@@ -395,20 +395,31 @@ auto Tensor::is_pinned() const -> bool {
 
 auto Tensor::shape_info_snapshot() const -> std::shared_ptr<const ShapeInfo> {
     if (!impl_) return nullptr;
-    // Build a fresh immutable snapshot from the current state on every
-    // call. Copies the shape/strides vectors so the returned ShapeInfo
-    // owns its data and is safe to share across threads regardless of
-    // what happens to the source Tensor afterwards. We deliberately
-    // avoid caching: std::atomic_store on std::shared_ptr routes
-    // through libstdc++'s internal spinlock pool and triggers a use-
-    // after-free crash under certain pybind11 copy patterns. The
-    // copy is cheap (ndim ≤ 8 typically) and snapshot is not a hot
-    // path — only called by code explicitly crossing thread boundaries.
-    return std::make_shared<const ShapeInfo>(ShapeInfo{
+    // Fast path: return the cached snapshot if a previous call built one and
+    // no mutator has invalidated it since. The C++20 std::atomic<shared_ptr>
+    // class template does atomic refcount manipulation on the control block;
+    // it replaces the libstdc++ atomic_load/store free functions that used a
+    // hashed spinlock pool and caused a UAF under pybind11 copy patterns.
+    if (auto cached = impl_->shape_info_cache_.load(std::memory_order_acquire)) {
+        return cached;
+    }
+    auto fresh = std::make_shared<const ShapeInfo>(ShapeInfo{
         /* shape   */ impl_->shape,
         /* strides */ impl_->strides,
         /* offset  */ impl_->offset,
     });
+    // CAS install: a concurrent racer may have installed a snapshot between
+    // our load and this store. If so, prefer theirs so every reader that
+    // observes a non-null cache sees the same pointer — the pointer-identity
+    // guarantee the test relies on. A mutator that races in between only
+    // causes the next reader to rebuild.
+    std::shared_ptr<const ShapeInfo> expected{nullptr};
+    if (impl_->shape_info_cache_.compare_exchange_strong(
+            expected, fresh,
+            std::memory_order_acq_rel, std::memory_order_acquire)) {
+        return fresh;
+    }
+    return expected;
 }
 
 auto Tensor::pin_memory() -> Tensor& {
@@ -467,6 +478,7 @@ auto Tensor::mutable_shape() -> std::vector<int64_t>& {
     impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
     impl_->memory_format_cache_.store(-1, std::memory_order_release);
     impl_->version_counter_.fetch_add(1, std::memory_order_release);
+    impl_->shape_info_cache_.store(nullptr, std::memory_order_release);
     return impl_->shape;
 }
 
@@ -475,6 +487,7 @@ auto Tensor::mutable_strides() -> std::vector<int64_t>& {
     impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
     impl_->memory_format_cache_.store(-1, std::memory_order_release);
     impl_->version_counter_.fetch_add(1, std::memory_order_release);
+    impl_->shape_info_cache_.store(nullptr, std::memory_order_release);
     return impl_->strides;
 }
 
@@ -484,6 +497,7 @@ auto Tensor::set_offset(int64_t offset) -> void {
     impl_->is_contiguous_cache_.store(-1, std::memory_order_release);
     impl_->memory_format_cache_.store(-1, std::memory_order_release);
     impl_->version_counter_.fetch_add(1, std::memory_order_release);
+    impl_->shape_info_cache_.store(nullptr, std::memory_order_release);
 }
 
 auto Tensor::invalidate_contiguity_cache() -> void {

@@ -438,31 +438,24 @@ auto unique_consecutive(const Tensor& input, bool return_inverse, bool return_co
 }
 
 auto cov(const Tensor& input, int64_t correction) -> Tensor {
-    // For 1D input: compute variance
-    if (input.ndim() == 1) {
-        auto m = tenzor::mean(input);
-        auto diff = tenzor::sub(input, m);
-        auto n = static_cast<double>(input.shape()[0] - correction);
-        auto dot_result = tenzor::dot(diff, diff);
-        return tenzor::div(dot_result, tenzor::full({}, n, input.dtype(), input.device()));
-    }
-
-    // For 2D input (N, M): each row is a variable, each column is an observation
-    if (input.ndim() != 2) {
+    if (input.ndim() != 1 && input.ndim() != 2) {
         throw std::invalid_argument("cov: input must be 1D or 2D");
     }
+    // Promote 1D -> (1, N). Keeps the output as a (1,1) matrix and
+    // routes all dtypes (Float16/BFloat16 included) through matmul,
+    // which has full dtype coverage — dot_kernel is Float32/Float64-only.
+    Tensor x2d = (input.ndim() == 1)
+        ? input.reshape({1, input.shape()[0]})
+        : input;
 
-    int64_t M = input.shape()[1];
+    int64_t M = x2d.shape()[1];
     auto m_val = static_cast<double>(M - correction);
 
-    // Center: subtract row means
-    auto row_means = tenzor::mean(input, 1, true);  // (N, 1)
-    auto centered = tenzor::sub(input, row_means);   // (N, M)
-
-    // Cov = centered @ centered^T / (M - correction)
-    auto centered_t = tenzor::transpose(centered, 0, 1);  // (M, N)
-    auto product = tenzor::matmul(centered, centered_t);    // (N, N)
-    return tenzor::div(product, tenzor::full({}, m_val, input.dtype(), input.device()));
+    auto row_means = tenzor::mean(x2d, 1, true);             // (N, 1)
+    auto centered = tenzor::sub(x2d, row_means);             // (N, M)
+    auto centered_t = tenzor::transpose(centered, 0, 1);     // (M, N)
+    auto product = tenzor::matmul(centered, centered_t);     // (N, N)
+    return tenzor::div(product, tenzor::full({}, m_val, x2d.dtype(), x2d.device()));
 }
 
 // =========================================================================
@@ -534,19 +527,33 @@ auto gradient(const Tensor& input, int64_t dim, double spacing) -> Tensor {
 // =========================================================================
 
 auto corrcoef(const Tensor& input) -> Tensor {
-    auto c = tenzor::cov(input);
+    // Mathematically corr ∈ [-1, 1], but in Float16/BFloat16 the
+    // sqrt → matmul → div chain accumulates enough round-off that the
+    // result drifts outside the interval. Widen to Float32 for those
+    // dtypes so the bound holds, then cast back — matching the widen-
+    // then-narrow pattern used elsewhere for reduced-precision floats.
+    auto src_dtype = input.dtype();
+    const bool needs_widen = (src_dtype == DType::Float16 ||
+                              src_dtype == DType::BFloat16);
+    Tensor work = needs_widen ? input.to(DType::Float32) : input;
 
-    if (input.ndim() == 1) {
-        return tenzor::full({}, 1.0, input.dtype(), input.device());
+    auto c = tenzor::cov(work);
+
+    if (work.ndim() == 1) {
+        // cov(1D) is (1,1); correlation of a single variable with itself
+        // is 1. Preserve that shape so the result is parallel to the
+        // 2D case (N×N) with N=1.
+        auto r = tenzor::full({1, 1}, 1.0, work.dtype(), work.device());
+        return needs_widen ? r.to(src_dtype) : r;
     }
 
-    // Normalize: corr[i,j] = cov[i,j] / (std[i] * std[j])
-    auto diag_vals = tenzor::diag(c);              // (N,)
-    auto stds = tenzor::sqrt(diag_vals);           // (N,)
-    auto stds_col = tenzor::reshape(stds, {-1, 1}); // (N, 1)
-    auto stds_row = tenzor::reshape(stds, {1, -1}); // (1, N)
+    auto diag_vals = tenzor::diag(c);                // (N,)
+    auto stds = tenzor::sqrt(diag_vals);             // (N,)
+    auto stds_col = tenzor::reshape(stds, {-1, 1});  // (N, 1)
+    auto stds_row = tenzor::reshape(stds, {1, -1});  // (1, N)
     auto norm = tenzor::matmul(stds_col, stds_row);  // (N, N)
-    return tenzor::div(c, norm);
+    auto result = tenzor::div(c, norm);
+    return needs_widen ? result.to(src_dtype) : result;
 }
 
 auto segment_reduce(const Tensor& data, const Tensor& offsets,

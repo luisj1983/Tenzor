@@ -267,6 +267,30 @@ auto YOLOv3::build_fpn_neck() -> void {
 }
 
 auto YOLOv3::forward_impl(const Variable& input) -> Variable {
+    // YOLOv3's 53-layer backbone produces activations that exceed Float16's
+    // 65504 saturation point even with an eval-mode BN warmup — the conv
+    // outputs between BN layers can't be rescued by the BN widen path
+    // alone. Autocast reduced-precision forwards to Float32 and cast the
+    // final output back. This is the conservative approach used by
+    // PyTorch's amp.autocast for deep detection backbones; training-mode
+    // warmup calls benefit too so that the running stats are populated
+    // in a numerically sane range.
+    const DType in_dtype = input.tensor().dtype();
+    const bool autocast = (in_dtype == DType::Float16 || in_dtype == DType::BFloat16);
+    if (autocast) {
+        // Promote module params/buffers to Float32 for the forward, then
+        // restore on the way out so external state observers (parameter
+        // snapshots, state_dict checks) continue to see the user-set
+        // dtype.
+        this->to(DType::Float32);
+        Variable f32_input(input.tensor().to(DType::Float32), input.requires_grad());
+        auto result = forward_impl(f32_input);   // recurse with Float32 input
+        this->to(in_dtype);
+        // Cast the result back. result is already a Variable; keep
+        // requires_grad unchanged (inference path sets it to false).
+        return Variable(result.tensor().to(in_dtype), result.requires_grad());
+    }
+
     auto predictions = forward_raw(input);
 
     // For training, return raw predictions

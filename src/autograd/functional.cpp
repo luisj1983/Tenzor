@@ -2,6 +2,7 @@
 #include "tenzor/autograd/dual.hpp"
 #include "tenzor/autograd/jvp_rules.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/nn/utils/variable_cast.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
@@ -163,6 +164,21 @@ auto hvp(std::function<Variable(const Variable&)> func,
     // 2. Define the gradient function: x -> grad(f(x), x)
     auto input_data = input.tensor();
 
+    // Float16 / BFloat16 finite-difference step (jvp uses eps=1e-4) is
+    // below the dtype's representable resolution, so perturbations get
+    // quantised to zero and the Hessian-vector product collapses to
+    // noise. Widen the probe to Float32 and narrow the result back.
+    const DType orig_dtype = input_data.dtype();
+    const bool widen = (orig_dtype == DType::Float16 ||
+                        orig_dtype == DType::BFloat16);
+
+    // When widening, evaluate `func` at Float32 precision throughout —
+    // the finite-difference step probes how f varies and needs real
+    // sensitivity. If we cast back to Float16 inside func, the perturbed
+    // inputs quantise to the same value as the base point and the
+    // derivative collapses to zero. Callers who genuinely need the
+    // reduced-precision forward semantics can invoke hvp with a Float32
+    // probe directly.
     auto grad_func = [&func](const Variable& x) -> Variable {
         Variable x_grad(x.tensor(), true);
         auto out = func(x_grad);
@@ -178,10 +194,14 @@ auto hvp(std::function<Variable(const Variable&)> func,
         return Variable(grad_val, false);
     };
 
-    // 3. Compute JVP of the gradient function with tangent v -> H @ v
-    Variable inp(input_data, false);
-    auto [_, hvp_result] = jvp(grad_func, inp, v);
+    Tensor probe_input = widen ? input_data.to(DType::Float32) : input_data;
+    Tensor probe_v = widen ? v.to(DType::Float32) : v;
 
+    // 3. Compute JVP of the gradient function with tangent v -> H @ v
+    Variable inp(probe_input, false);
+    auto [_, hvp_result] = jvp(grad_func, inp, probe_v);
+
+    if (widen) hvp_result = hvp_result.to(orig_dtype);
     return {output, hvp_result};
 }
 
@@ -201,25 +221,36 @@ auto vhp(std::function<Variable(const Variable&)> func,
     // Compute the primal output
     auto output = func(input);
 
+    // Half-precision eps=1e-4 is below representable resolution — the
+    // perturbation quantises to zero and vhp_result ≈ 0/0. Widen to
+    // Float32 for the finite-difference step and cast back at the end.
+    const DType orig_dtype = input_data.dtype();
+    const bool widen = (orig_dtype == DType::Float16 ||
+                        orig_dtype == DType::BFloat16);
+
+    Tensor probe_input = widen ? input_data.to(DType::Float32) : input_data;
+    Tensor probe_v = widen ? v.to(DType::Float32) : v;
+
     const double eps = 1e-4;
 
-    // Evaluate gradient at x + eps*v
-    auto perturbed_fwd = tenzor::add(input_data, tenzor::mul(v, eps));
+    // Evaluate gradient at x + eps*v (at probe precision — see hvp above
+    // for why we don't cast back to the caller's dtype inside `func`).
+    auto perturbed_fwd = tenzor::add(probe_input, tenzor::mul(probe_v, eps));
     Variable x_fwd(perturbed_fwd, true);
     auto out_fwd = func(x_fwd);
     out_fwd.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/false);
     Tensor grad_fwd = x_fwd.grad().has_value()
         ? x_fwd.grad().value()
-        : tenzor::zeros_like(input_data);
+        : tenzor::zeros_like(probe_input);
 
     // Evaluate gradient at x - eps*v
-    auto perturbed_bwd = tenzor::sub(input_data, tenzor::mul(v, eps));
+    auto perturbed_bwd = tenzor::sub(probe_input, tenzor::mul(probe_v, eps));
     Variable x_bwd(perturbed_bwd, true);
     auto out_bwd = func(x_bwd);
     out_bwd.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/false);
     Tensor grad_bwd = x_bwd.grad().has_value()
         ? x_bwd.grad().value()
-        : tenzor::zeros_like(input_data);
+        : tenzor::zeros_like(probe_input);
 
     // Central difference
     auto vhp_result = tenzor::mul(
@@ -227,6 +258,7 @@ auto vhp(std::function<Variable(const Variable&)> func,
         1.0 / (2.0 * eps)
     );
 
+    if (widen) vhp_result = vhp_result.to(orig_dtype);
     return {output, vhp_result};
 }
 

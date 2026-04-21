@@ -1,5 +1,6 @@
 #include "tenzor/sparse/sparse_ops.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/math.hpp"
 #include "tenzor/ops/type_promotion.hpp"
 #include "tenzor/backend/dispatch_table.hpp"
 #include <algorithm>
@@ -751,6 +752,18 @@ auto add(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
             : sparse;
         auto dense_promoted = (dense.dtype() != common_dtype) ? dense.to(common_dtype) : dense;
         return add(sparse_promoted, dense_promoted);
+    }
+
+    // Float16 / BFloat16: the CPU path's element-wise accumulate only
+    // handles Float32/Float64/Int. SparseTensor doesn't expose a public
+    // "copy with new values dtype" helper, so we take a short path:
+    // densify the sparse operand (to_dense() now handles half-precision
+    // after the recent coalesce/to_dense widening fixes), then do the
+    // add in Float32 and narrow.
+    if (common_dtype == DType::Float16 || common_dtype == DType::BFloat16) {
+        auto dense_sparse_f32 = sparse.to_dense().to(DType::Float32);
+        auto dense_f32 = dense.to(DType::Float32);
+        return tenzor::add(dense_sparse_f32, dense_f32).to(common_dtype);
     }
 
     auto sp_shape = sparse.shape();

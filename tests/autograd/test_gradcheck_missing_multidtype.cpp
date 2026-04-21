@@ -12,6 +12,7 @@
 #include <tenzor/autograd/gradcheck.hpp>
 #include <tenzor/autograd/variable.hpp>
 #include <tenzor/autograd/ops.hpp>
+#include <tenzor/ops/linalg.hpp>
 #include "../multi_backend_dtype_fixture.hpp"
 
 using namespace tenzor;
@@ -55,11 +56,23 @@ protected:
 TEST_P(GradCheckMissingMultiDTypeTest, CholeskyInverse) {
     if (dtype() == DType::Float16) GTEST_SKIP() << "Gradcheck requires Float32+ precision";
 
+    // cholesky_inverse(L) expects a lower-triangular Cholesky factor L and
+    // returns (L Lᵀ)⁻¹. The previous version passed the full SPD matrix
+    // directly, which the backward kernel correctly treats as "lower
+    // triangular part only" — so perturbing the upper-triangular entries
+    // during gradcheck moved outside the kernel's real parameter space
+    // and produced bogus numerical/analytical mismatches. Use a Cholesky
+    // factor (masked to lower-triangular) so the probe stays on-domain.
     auto spd = make_spd(4);
-    Variable x(spd, true);
+    auto L_tensor = tenzor::tril(tenzor::linalg::cholesky(spd));
+    Variable x(L_tensor, true);
 
     auto f = [](const Variable& v) -> Variable {
-        return cholesky_inverse(v);
+        // Only the lower-triangular part of v is meaningful; mask so
+        // perturbations in the upper triangle don't affect the result
+        // and the analytical/numerical branches agree element-wise.
+        auto L = tenzor::tril(v);
+        return cholesky_inverse(L);
     };
 
     bool passed = gradcheck(f, x, gc_eps(), gc_atol(), gc_rtol());

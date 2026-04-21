@@ -9,8 +9,10 @@
 #include "tenzor/autograd/functional.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include <cmath>
+#include <complex>
 #include <iostream>
 #include <iomanip>
 #include <sstream>
@@ -172,6 +174,27 @@ auto numerical_gradient(
                 for (int64_t j = 0; j < n; ++j) {
                     total_plus += data_p[j];
                     total_minus += data_m[j];
+                }
+            } else if (f_plus.dtype() == DType::Complex64) {
+                // For a real-valued input x producing complex y = f(x),
+                // gradcheck reduces y to a real scalar by summing both
+                // real and imaginary parts. Equivalent to evaluating
+                // ∂(Σ Re(y) + Σ Im(y)) / ∂x so the finite-difference
+                // and analytical branches see the same scalar contraction.
+                const auto* data_p = sum_plus_cpu.data<std::complex<float>>();
+                const auto* data_m = sum_minus_cpu.data<std::complex<float>>();
+                for (int64_t j = 0; j < n; ++j) {
+                    total_plus += static_cast<double>(data_p[j].real())
+                                + static_cast<double>(data_p[j].imag());
+                    total_minus += static_cast<double>(data_m[j].real())
+                                 + static_cast<double>(data_m[j].imag());
+                }
+            } else if (f_plus.dtype() == DType::Complex128) {
+                const auto* data_p = sum_plus_cpu.data<std::complex<double>>();
+                const auto* data_m = sum_minus_cpu.data<std::complex<double>>();
+                for (int64_t j = 0; j < n; ++j) {
+                    total_plus += data_p[j].real() + data_p[j].imag();
+                    total_minus += data_m[j].real() + data_m[j].imag();
                 }
             }
 
@@ -359,8 +382,28 @@ auto gradcheck_detailed(
             scalar_output = tenzor::sum(output);
         }
 
-        // Backward pass
-        scalar_output.backward();
+        // For complex outputs we evaluate the scalar contraction
+        //   L = Σ Re(y_k) + Σ Im(y_k)
+        // which is real-valued. The finite-difference branch sums real+imag
+        // components above; to keep the analytical branch consistent we
+        // seed backward() with grad_L = (1 + 1i) so d/dx L = Re(dy/dx) +
+        // Im(dy/dx) for every real input x.
+        if (scalar_output.tensor().dtype() == DType::Complex64 ||
+            scalar_output.tensor().dtype() == DType::Complex128) {
+            Tensor seed = ones({}, scalar_output.tensor().dtype(),
+                               scalar_output.tensor().device());
+            Tensor imag_unit = zeros({}, scalar_output.tensor().dtype(),
+                                    scalar_output.tensor().device());
+            if (scalar_output.tensor().dtype() == DType::Complex64) {
+                imag_unit.data<std::complex<float>>()[0] = {0.0f, 1.0f};
+            } else {
+                imag_unit.data<std::complex<double>>()[0] = {0.0, 1.0};
+            }
+            seed = tenzor::add(seed, imag_unit);
+            scalar_output.backward(seed);
+        } else {
+            scalar_output.backward();
+        }
 
         // Get analytical gradient
         if (!input_copy.has_grad()) {

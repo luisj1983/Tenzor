@@ -64,6 +64,18 @@ auto topk(const Tensor& input,
         throw std::runtime_error("k must be between 1 and dimension size");
     }
 
+    // Float16 / BFloat16: widen to Float32 for the partial_sort path,
+    // then narrow the values tensor back. Indices are always Int64 so
+    // they pass through unchanged. Half-precision comparisons are
+    // exactly order-preserving when widened to Float32, so the result
+    // is bit-identical to a native half topk modulo the final narrow.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType orig = input.dtype();
+        auto [values_f32, indices] =
+            topk(input.to(DType::Float32), k, dim, largest, sorted);
+        return {values_f32.to(orig), indices};
+    }
+
     // For non-CPU tensors, dispatch to backend kernel
     if (input.device().type != Device::Type::CPU) {
         OpAttributes attrs;
@@ -1042,6 +1054,13 @@ auto combinations(const Tensor& input, int64_t r, bool with_replacement) -> Tens
     int64_t n = input.shape()[0];
     if (r <= 0 || n == 0) {
         return zeros({0, r}, input.dtype(), input.device());
+    }
+    // Float16 / BFloat16 aren't in the direct dispatch below. Widen to
+    // Float32 for the index-select copy and narrow back so the returned
+    // tensor keeps the caller's dtype.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType orig = input.dtype();
+        return combinations(input.to(DType::Float32), r, with_replacement).to(orig);
     }
 
     // Generate combinations on CPU

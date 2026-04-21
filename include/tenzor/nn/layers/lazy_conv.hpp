@@ -136,8 +136,11 @@ private:
      *
      * @param in_channels Inferred input channel count
      * @param device Device to create parameters on
+     * @param dtype DType to create parameters with (defaults to Float32 so
+     *              pre-existing call sites stay source-compatible)
      */
-    auto materialize(int64_t in_channels, Device device) -> void;
+    auto materialize(int64_t in_channels, Device device,
+                     DType dtype = DType::Float32) -> void;
 };
 
 /**
@@ -253,7 +256,8 @@ private:
      * @param in_channels Inferred input channel count
      * @param device Device to create parameters on
      */
-    auto materialize(int64_t in_channels, Device device) -> void;
+    auto materialize(int64_t in_channels, Device device,
+                     DType dtype = DType::Float32) -> void;
 };
 
 /**
@@ -369,7 +373,8 @@ private:
      * @param in_channels Inferred input channel count
      * @param device Device to create parameters on
      */
-    auto materialize(int64_t in_channels, Device device) -> void;
+    auto materialize(int64_t in_channels, Device device,
+                     DType dtype = DType::Float32) -> void;
 };
 
 } // namespace nn

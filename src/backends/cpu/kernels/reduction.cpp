@@ -790,6 +790,27 @@ auto sum_impl<double>(const double* input_data, int64_t n) -> double {
     return parallel_simd_sum_f64(input_data, n);
 }
 
+// Complex specializations avoid OpenMP user-defined reduction — OpenMP's
+// `reduction(+:sum)` clause is not guaranteed to work on std::complex<T>
+// across compiler versions, and the sum path from gradcheck only exercises
+// modest sizes (FFT outputs of a few K elements) so the single-thread sum
+// has no meaningful perf cost here.
+template<>
+auto sum_impl<std::complex<float>>(const std::complex<float>* input_data,
+                                   int64_t n) -> std::complex<float> {
+    std::complex<float> sum{0.0f, 0.0f};
+    for (int64_t i = 0; i < n; ++i) sum += input_data[i];
+    return sum;
+}
+
+template<>
+auto sum_impl<std::complex<double>>(const std::complex<double>* input_data,
+                                    int64_t n) -> std::complex<double> {
+    std::complex<double> sum{0.0, 0.0};
+    for (int64_t i = 0; i < n; ++i) sum += input_data[i];
+    return sum;
+}
+
 // Sum along a specific dimension
 template<typename T>
 void sum_along_dim(const T* input_data,
@@ -1031,6 +1052,32 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             auto* input_data = input.data<int64_t>();
             auto* output_data = output.data<int64_t>();
 
+            if (dim == REDUCE_ALL) {
+                output_data[0] = sum_impl(input_data, input.numel());
+            } else {
+                sum_along_dim(input_data, output_data,
+                            std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                            std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                            dim);
+            }
+            break;
+        }
+        case DType::Complex64: {
+            auto* input_data = input.data<std::complex<float>>();
+            auto* output_data = output.data<std::complex<float>>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = sum_impl(input_data, input.numel());
+            } else {
+                sum_along_dim(input_data, output_data,
+                            std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                            std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                            dim);
+            }
+            break;
+        }
+        case DType::Complex128: {
+            auto* input_data = input.data<std::complex<double>>();
+            auto* output_data = output.data<std::complex<double>>();
             if (dim == REDUCE_ALL) {
                 output_data[0] = sum_impl(input_data, input.numel());
             } else {

@@ -268,17 +268,29 @@ auto TrilBackward::backward_with_variables(std::vector<Variable> grad_outputs) -
 // ============================================================================
 // FFT backward
 // ============================================================================
+// Normalization inversion. For y = FFT(x) with norm ν the Jacobian is
+// the matrix A_ν; its Hermitian adjoint A_ν^H — which is what the chain
+// rule needs — is the IFFT under the *opposite* scaling convention.
+// Concretely: "backward" (unscaled fft, scaled ifft) pairs with "forward"
+// (scaled fft, unscaled ifft); "ortho" is self-adjoint. Using the same
+// norm on both branches (as the old code did) left grad_x short by a
+// factor of N and broke numerical-gradient parity.
+static std::string invert_fft_norm(const std::string& norm) {
+    if (norm == "backward") return "forward";
+    if (norm == "forward") return "backward";
+    return norm;  // "ortho" is self-adjoint
+}
 
 auto FFTBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
     throw std::runtime_error("FFTBackward::forward should not be called");
 }
 
 auto FFTBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    return {fft::ifft(grad_outputs[0], n_, dim_, norm_)};
+    return {fft::ifft(grad_outputs[0], n_, dim_, invert_fft_norm(norm_))};
 }
 
 auto FFTBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    return {fft_autograd::ifft(grad_outputs[0], n_, dim_, norm_)};
+    return {fft_autograd::ifft(grad_outputs[0], n_, dim_, invert_fft_norm(norm_))};
 }
 
 // ============================================================================
@@ -290,11 +302,11 @@ auto IFFTBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 }
 
 auto IFFTBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    return {fft::fft(grad_outputs[0], n_, dim_, norm_)};
+    return {fft::fft(grad_outputs[0], n_, dim_, invert_fft_norm(norm_))};
 }
 
 auto IFFTBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    return {fft_autograd::fft(grad_outputs[0], n_, dim_, norm_)};
+    return {fft_autograd::fft(grad_outputs[0], n_, dim_, invert_fft_norm(norm_))};
 }
 
 // ============================================================================
@@ -307,11 +319,11 @@ auto RFFTBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 
 auto RFFTBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     // irfft needs the original signal length to reconstruct
-    return {fft::irfft(grad_outputs[0], signal_length_, dim_, norm_)};
+    return {fft::irfft(grad_outputs[0], signal_length_, dim_, invert_fft_norm(norm_))};
 }
 
 auto RFFTBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    return {fft_autograd::irfft(grad_outputs[0], signal_length_, dim_, norm_)};
+    return {fft_autograd::irfft(grad_outputs[0], signal_length_, dim_, invert_fft_norm(norm_))};
 }
 
 // ============================================================================
@@ -323,11 +335,11 @@ auto IRFFTBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 }
 
 auto IRFFTBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    return {fft::rfft(grad_outputs[0], std::nullopt, dim_, norm_)};
+    return {fft::rfft(grad_outputs[0], std::nullopt, dim_, invert_fft_norm(norm_))};
 }
 
 auto IRFFTBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    return {fft_autograd::rfft(grad_outputs[0], std::nullopt, dim_, norm_)};
+    return {fft_autograd::rfft(grad_outputs[0], std::nullopt, dim_, invert_fft_norm(norm_))};
 }
 
 } // namespace tenzor

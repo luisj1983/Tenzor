@@ -4909,6 +4909,13 @@ static void minimum_typed(const T* a_data, const T* b_data, T* c_data,
 }
 
 auto minimum_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    // Float16/BFloat16: widen both operands to Float32, compute, cast back.
+    if (a.dtype() == DType::Float16 || a.dtype() == DType::BFloat16) {
+        auto orig_dtype = a.dtype();
+        return minimum_kernel(a.to(DType::Float32), b.to(DType::Float32))
+            .to(orig_dtype);
+    }
+
     detail::validate_elementwise(a, b);
 
     auto shape_a = a.shape();
@@ -4950,6 +4957,14 @@ static void maximum_typed(const T* a_data, const T* b_data, T* c_data,
 }
 
 auto maximum_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    // Float16/BFloat16: widen both operands to Float32, compute, cast back.
+    // The dispatch below only wires Float32/Float64 and integer types.
+    if (a.dtype() == DType::Float16 || a.dtype() == DType::BFloat16) {
+        auto orig_dtype = a.dtype();
+        return maximum_kernel(a.to(DType::Float32), b.to(DType::Float32))
+            .to(orig_dtype);
+    }
+
     detail::validate_elementwise(a, b);
 
     auto shape_a = a.shape();
@@ -5188,9 +5203,15 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p) -> Tensor {
     }
     int64_t batch_size = std::max(batch1, batch2);
 
-    // Ensure Float32
-    Tensor a = (x1.dtype() != DType::Float32) ? x1.to(DType::Float32) : x1;
-    Tensor b = (x2.dtype() != DType::Float32) ? x2.to(DType::Float32) : x2;
+    // Compute in Float64 for Float64 inputs, Float32 for everything
+    // else (Float32 / Float16 / BFloat16 / integer). The result tensor
+    // is built in the compute dtype; reduced-precision floats are cast
+    // back below so the caller sees the input dtype preserved.
+    const DType orig_dtype = x1.dtype();
+    const DType compute_dtype =
+        (orig_dtype == DType::Float64) ? DType::Float64 : DType::Float32;
+    Tensor a = (x1.dtype() != compute_dtype) ? x1.to(compute_dtype) : x1;
+    Tensor b = (x2.dtype() != compute_dtype) ? x2.to(compute_dtype) : x2;
 
     // Output shape
     std::vector<int64_t> out_shape;
@@ -5203,107 +5224,110 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p) -> Tensor {
     out_shape.push_back(P);
     out_shape.push_back(R);
 
-    Tensor result(out_shape, DType::Float32, x1.device());
-    float* out_data = result.data<float>();
-    const float* a_data = a.data<float>();
-    const float* b_data = b.data<float>();
+    Tensor result(out_shape, compute_dtype, x1.device());
 
-    if (p == 2.0) {
-        // Euclidean: ||a-b||^2 = ||a||^2 + ||b||^2 - 2*a*b^T
-        // Compute using expansion for efficiency
-        for (int64_t batch = 0; batch < batch_size; ++batch) {
-            int64_t b1 = (batch1 == 1) ? 0 : batch;
-            int64_t b2 = (batch2 == 1) ? 0 : batch;
+    auto compute = [&]<typename T>(T*) {
+        T* out_data = result.data<T>();
+        const T* a_data = a.data<T>();
+        const T* b_data = b.data<T>();
 
-            const float* a_batch = a_data + b1 * P * M;
-            const float* b_batch = b_data + b2 * R * M;
-            float* o_batch = out_data + batch * P * R;
+        if (p == 2.0) {
+            // Euclidean: ||a-b||^2 = ||a||^2 + ||b||^2 - 2*a*b^T
+            for (int64_t batch = 0; batch < batch_size; ++batch) {
+                int64_t b1 = (batch1 == 1) ? 0 : batch;
+                int64_t b2 = (batch2 == 1) ? 0 : batch;
 
-            // Compute ||a||^2 for each row of a
-            std::vector<float> a_sq(static_cast<size_t>(P));
-            for (int64_t i = 0; i < P; ++i) {
-                float sum = 0.0f;
-                for (int64_t k = 0; k < M; ++k) {
-                    float v = a_batch[i * M + k];
-                    sum += v * v;
-                }
-                a_sq[static_cast<size_t>(i)] = sum;
-            }
+                const T* a_batch = a_data + b1 * P * M;
+                const T* b_batch = b_data + b2 * R * M;
+                T* o_batch = out_data + batch * P * R;
 
-            // Compute ||b||^2 for each row of b
-            std::vector<float> b_sq(static_cast<size_t>(R));
-            for (int64_t j = 0; j < R; ++j) {
-                float sum = 0.0f;
-                for (int64_t k = 0; k < M; ++k) {
-                    float v = b_batch[j * M + k];
-                    sum += v * v;
-                }
-                b_sq[static_cast<size_t>(j)] = sum;
-            }
-
-            // Compute -2 * a * b^T + ||a||^2 + ||b||^2
-            #pragma omp parallel for collapse(2) if(P * R > 4096)
-            for (int64_t i = 0; i < P; ++i) {
-                for (int64_t j = 0; j < R; ++j) {
-                    float dot = 0.0f;
+                std::vector<T> a_sq(static_cast<size_t>(P));
+                for (int64_t i = 0; i < P; ++i) {
+                    T sum = T(0);
                     for (int64_t k = 0; k < M; ++k) {
-                        dot += a_batch[i * M + k] * b_batch[j * M + k];
+                        T v = a_batch[i * M + k];
+                        sum += v * v;
                     }
-                    float dist_sq = a_sq[static_cast<size_t>(i)] + b_sq[static_cast<size_t>(j)] - 2.0f * dot;
-                    // Clamp to avoid negative values from floating point errors
-                    o_batch[i * R + j] = std::sqrt(std::max(0.0f, dist_sq));
+                    a_sq[static_cast<size_t>(i)] = sum;
                 }
-            }
-        }
-    } else {
-        // General p-norm
-        for (int64_t batch = 0; batch < batch_size; ++batch) {
-            int64_t b1 = (batch1 == 1) ? 0 : batch;
-            int64_t b2 = (batch2 == 1) ? 0 : batch;
-
-            const float* a_batch = a_data + b1 * P * M;
-            const float* b_batch = b_data + b2 * R * M;
-            float* o_batch = out_data + batch * P * R;
-
-            float inv_p = (p != 0.0) ? static_cast<float>(1.0 / p) : 0.0f;
-
-            #pragma omp parallel for collapse(2) if(P * R > 4096)
-            for (int64_t i = 0; i < P; ++i) {
+                std::vector<T> b_sq(static_cast<size_t>(R));
                 for (int64_t j = 0; j < R; ++j) {
-                    if (p == std::numeric_limits<double>::infinity()) {
-                        // L-inf norm
-                        float max_val = 0.0f;
+                    T sum = T(0);
+                    for (int64_t k = 0; k < M; ++k) {
+                        T v = b_batch[j * M + k];
+                        sum += v * v;
+                    }
+                    b_sq[static_cast<size_t>(j)] = sum;
+                }
+                #pragma omp parallel for collapse(2) if(P * R > 4096)
+                for (int64_t i = 0; i < P; ++i) {
+                    for (int64_t j = 0; j < R; ++j) {
+                        T dot = T(0);
                         for (int64_t k = 0; k < M; ++k) {
-                            max_val = std::max(max_val, std::abs(a_batch[i * M + k] - b_batch[j * M + k]));
+                            dot += a_batch[i * M + k] * b_batch[j * M + k];
                         }
-                        o_batch[i * R + j] = max_val;
-                    } else if (p == 0.0) {
-                        // L0 norm: count non-zero differences
-                        float count = 0.0f;
-                        for (int64_t k = 0; k < M; ++k) {
-                            if (a_batch[i * M + k] != b_batch[j * M + k]) count += 1.0f;
+                        T dist_sq = a_sq[static_cast<size_t>(i)] + b_sq[static_cast<size_t>(j)]
+                                    - T(2) * dot;
+                        o_batch[i * R + j] = std::sqrt(std::max(T(0), dist_sq));
+                    }
+                }
+            }
+        } else {
+            const T inv_p = (p != 0.0) ? static_cast<T>(1.0 / p) : T(0);
+            const T pf = static_cast<T>(p);
+            for (int64_t batch = 0; batch < batch_size; ++batch) {
+                int64_t b1 = (batch1 == 1) ? 0 : batch;
+                int64_t b2 = (batch2 == 1) ? 0 : batch;
+
+                const T* a_batch = a_data + b1 * P * M;
+                const T* b_batch = b_data + b2 * R * M;
+                T* o_batch = out_data + batch * P * R;
+
+                #pragma omp parallel for collapse(2) if(P * R > 4096)
+                for (int64_t i = 0; i < P; ++i) {
+                    for (int64_t j = 0; j < R; ++j) {
+                        if (p == std::numeric_limits<double>::infinity()) {
+                            T max_val = T(0);
+                            for (int64_t k = 0; k < M; ++k) {
+                                max_val = std::max(max_val,
+                                    static_cast<T>(std::abs(a_batch[i * M + k] - b_batch[j * M + k])));
+                            }
+                            o_batch[i * R + j] = max_val;
+                        } else if (p == 0.0) {
+                            T count = T(0);
+                            for (int64_t k = 0; k < M; ++k) {
+                                if (a_batch[i * M + k] != b_batch[j * M + k]) count += T(1);
+                            }
+                            o_batch[i * R + j] = count;
+                        } else if (p == 1.0) {
+                            T sum = T(0);
+                            for (int64_t k = 0; k < M; ++k) {
+                                sum += static_cast<T>(std::abs(a_batch[i * M + k] - b_batch[j * M + k]));
+                            }
+                            o_batch[i * R + j] = sum;
+                        } else {
+                            T sum = T(0);
+                            for (int64_t k = 0; k < M; ++k) {
+                                sum += static_cast<T>(std::pow(
+                                    std::abs(a_batch[i * M + k] - b_batch[j * M + k]), pf));
+                            }
+                            o_batch[i * R + j] = static_cast<T>(std::pow(sum, inv_p));
                         }
-                        o_batch[i * R + j] = count;
-                    } else if (p == 1.0) {
-                        // L1 norm (Manhattan)
-                        float sum = 0.0f;
-                        for (int64_t k = 0; k < M; ++k) {
-                            sum += std::abs(a_batch[i * M + k] - b_batch[j * M + k]);
-                        }
-                        o_batch[i * R + j] = sum;
-                    } else {
-                        float sum = 0.0f;
-                        float pf = static_cast<float>(p);
-                        for (int64_t k = 0; k < M; ++k) {
-                            sum += std::pow(std::abs(a_batch[i * M + k] - b_batch[j * M + k]), pf);
-                        }
-                        o_batch[i * R + j] = std::pow(sum, inv_p);
                     }
                 }
             }
         }
+    };
+
+    if (compute_dtype == DType::Float64) {
+        compute(static_cast<double*>(nullptr));
+    } else {
+        compute(static_cast<float*>(nullptr));
     }
 
+    if (result.dtype() != orig_dtype) {
+        return result.to(orig_dtype);
+    }
     return result;
 }
 
@@ -5388,18 +5412,57 @@ auto polygamma_kernel(const Tensor& input, int64_t n) -> Tensor {
             return result;
         }
         // For n >= 1: direct summation ψ^(n)(x) = (-1)^(n+1) * n! * Σ 1/(x+k)^(n+1)
+        // converges only as O(1/k^n), so a 100-term truncation leaves a tail of
+        // order 1/100 ≈ 0.01 for n=1 — a huge bias that made the digamma
+        // analytical gradient disagree with finite-difference at Float64. Fix:
+        // shift x by recurrence until x >= 7, accumulating the closed-form
+        // contributions, then evaluate the asymptotic Bernoulli expansion
+        // (which converges super-polynomially for x ≥ 7).
         double fact_n = 1.0;
         for (int64_t k = 1; k <= n; ++k) fact_n *= k;
-        double sign = ((n + 1) % 2 == 0) ? 1.0 : -1.0;
-        double sum = 0.0;
-        // Sum enough terms for convergence
-        int max_terms = 100;
-        for (int k = 0; k < max_terms; ++k) {
-            double term = 1.0 / std::pow(x + k, n + 1);
-            sum += term;
-            if (term < 1e-15 * std::abs(sum)) break;
+        const double sign = ((n + 1) % 2 == 0) ? 1.0 : -1.0;
+
+        // Recurrence: ψ^(n)(x) = ψ^(n)(x+1) + sign * n! / x^(n+1)
+        double recurrence_sum = 0.0;
+        while (x < 7.0) {
+            recurrence_sum += 1.0 / std::pow(x, n + 1);
+            x += 1.0;
         }
-        return sign * fact_n * sum;
+
+        // Asymptotic expansion for large x:
+        //   ψ^(n)(x) ≈ sign * [ (n-1)!/x^n + n!/(2 x^(n+1))
+        //                       + Σ_{k=1..∞} B_{2k} (2k+n-1)! / (2k)! / x^(2k+n) ]
+        // where the leading (n-1)!/x^n is present for n ≥ 1 with a positive
+        // sign multiplier absorbed into `sign` below. We use the first six
+        // Bernoulli terms (B2..B12); at x ≥ 7 the residual is O(1/x^15) which
+        // is well below Float64 precision.
+        double fact_nm1 = (n >= 1) ? fact_n / static_cast<double>(n) : 1.0;
+        double asym = fact_nm1 / std::pow(x, n)
+                    + fact_n / (2.0 * std::pow(x, n + 1));
+
+        static constexpr double B2[6] = {
+             1.0 / 6.0,        // B_2
+            -1.0 / 30.0,       // B_4
+             1.0 / 42.0,       // B_6
+            -1.0 / 30.0,       // B_8
+             5.0 / 66.0,       // B_10
+          -691.0 / 2730.0      // B_12
+        };
+        double fact_2k = 2.0;   // (2k)! starting at k=1: 2! = 2
+        // (2k + n - 1)! = Γ(2k+n)
+        auto factd = [](double m) {
+            double f = 1.0;
+            for (int i = 2; i <= static_cast<int>(m); ++i) f *= i;
+            return f;
+        };
+        for (int k = 1; k <= 6; ++k) {
+            double two_k = 2.0 * k;
+            double num = factd(two_k + n - 1.0);
+            if (k > 1) fact_2k *= (two_k - 1.0) * two_k;
+            asym += B2[k - 1] * num / fact_2k / std::pow(x, two_k + n);
+        }
+
+        return sign * fact_n * (recurrence_sum + asym / fact_n);
     };
 
     return unary_math_kernel(input,
@@ -8019,6 +8082,14 @@ auto renorm_kernel(const Tensor& input, double p, int64_t dim, double maxnorm) -
 // ============================================================================
 auto cosine_similarity_kernel(const Tensor& a, const Tensor& b,
                                int64_t dim, double eps) -> Tensor {
+    // Float16/BFloat16: upcast to Float32 for sqrt+div chain, cast back.
+    if (a.dtype() == DType::Float16 || a.dtype() == DType::BFloat16) {
+        auto orig_dtype = a.dtype();
+        return cosine_similarity_kernel(
+            a.to(DType::Float32), b.to(DType::Float32), dim, eps)
+            .to(orig_dtype);
+    }
+
     auto a_c = a.contiguous();
     auto b_c = b.contiguous();
     auto shape = a_c.shape();

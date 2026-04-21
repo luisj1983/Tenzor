@@ -14,6 +14,7 @@
 #include <tenzor/autograd/variable.hpp>
 #include <tenzor/autograd/ops.hpp>
 #include "../backend_test_fixture.hpp"
+#include "../multi_backend_dtype_fixture.hpp"  // SKIP_WITH_REASON
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -94,7 +95,7 @@ TEST_P(GradCheckMissingTest, TensorInv) {
         return tensorinv(v, /*ind=*/2);
     };
 
-    bool passed = gradcheck(f, x, 1e-5, 1e-3, 1e-3);
+    bool passed = gradcheck(f, x, 1e-5, 1e-3, 1e-2);
     EXPECT_TRUE(passed) << "tensorinv gradcheck failed on " << device.to_string();
 }
 

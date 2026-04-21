@@ -17,15 +17,21 @@ class DTypeCapabilityQueriesMultiDTypeTest : public MultiBackendDTypeTest {};
 
 TEST_P(DTypeCapabilityQueriesMultiDTypeTest, Fp8NativeBackendsConsistent) {
     // These are backend-wide queries (not per-device), so results should
-    // be the same regardless of the current test device.
+    // be the same regardless of the current test device. CPU / CUDA /
+    // OneAPI have FP8 Cast handling in their kernel registries; ROCm
+    // added native Cast kernels in kernels/transform.hip.cpp and Vulkan
+    // ships cast_f32_fp8e*.comp / cast_fp8e*_f32.comp compute shaders —
+    // every non-MPS backend is native.
     EXPECT_TRUE(fp8_is_native(Device::Type::CPU));
     EXPECT_TRUE(fp8_is_native(Device::Type::CUDA));
     EXPECT_TRUE(fp8_is_native(Device::Type::OneAPI));
+    EXPECT_TRUE(fp8_is_native(Device::Type::ROCm));
+    EXPECT_TRUE(fp8_is_native(Device::Type::Vulkan));
 }
 
 TEST_P(DTypeCapabilityQueriesMultiDTypeTest, Fp8FallbackBackendsConsistent) {
-    EXPECT_FALSE(fp8_is_native(Device::Type::ROCm));
-    EXPECT_FALSE(fp8_is_native(Device::Type::Vulkan));
+    // Only MPS lacks a native FP8 Cast kernel today — it still routes
+    // through the CPU round-trip path.
     EXPECT_FALSE(fp8_is_native(Device::Type::MPS));
 }
 
@@ -58,12 +64,10 @@ TEST_P(DTypeCapabilityQueriesMultiDTypeTest, DeviceSupportsDType) {
 
 TEST_P(DTypeCapabilityQueriesMultiDTypeTest, CurrentDeviceFp8Query) {
     bool native = fp8_is_native(device().type);
-    if (device().type == Device::Type::CPU ||
-        device().type == Device::Type::CUDA ||
-        device().type == Device::Type::OneAPI) {
-        EXPECT_TRUE(native) << "Expected fp8 native for " << backend_name();
-    } else {
+    if (device().type == Device::Type::MPS) {
         EXPECT_FALSE(native) << "Expected fp8 fallback for " << backend_name();
+    } else {
+        EXPECT_TRUE(native) << "Expected fp8 native for " << backend_name();
     }
 }
 

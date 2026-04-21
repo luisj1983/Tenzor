@@ -20,7 +20,7 @@ LazyConv1d::LazyConv1d(int64_t out_channels, int64_t kernel_size,
     }
 }
 
-auto LazyConv1d::materialize(int64_t in_channels, Device device) -> void {
+auto LazyConv1d::materialize(int64_t in_channels, Device device, DType dtype) -> void {
     if (in_channels <= 0) {
         throw std::runtime_error("LazyConv1d: inferred in_channels must be positive, got " +
             std::to_string(in_channels));
@@ -31,7 +31,14 @@ auto LazyConv1d::materialize(int64_t in_channels, Device device) -> void {
                                       stride_, padding_, dilation_, groups_, has_bias_);
     register_module("conv", conv_);
 
-    // Move parameters to the correct device if needed
+    // Conv1d is constructed with Float32 Float32-on-CPU weights by default;
+    // match the first input's device *and* dtype so the first forward pass
+    // does not throw a dtype-mismatch when operating on e.g. Float64 inputs.
+    // convert_model() runs before the lazy module has any children to walk,
+    // so this is the only opportunity to sync parameter dtype to the input.
+    if (dtype != DType::Float32) {
+        conv_->to(dtype);
+    }
     if (device.type != Device::Type::CPU) {
         conv_->to(device);
     }
@@ -51,7 +58,7 @@ auto LazyConv1d::forward_impl(const Variable& input) -> Variable {
             throw std::runtime_error("LazyConv1d: input channel dimension must be positive, got " +
                 std::to_string(in_channels));
         }
-        materialize(in_channels, input.tensor().device());
+        materialize(in_channels, input.tensor().device(), input.tensor().dtype());
     } else if (input_shape[1] != in_channels_) {
         throw std::runtime_error(
             "LazyConv1d: input channels (" + std::to_string(input_shape[1]) +
@@ -99,7 +106,7 @@ LazyConv2d::LazyConv2d(int64_t out_channels, int64_t kernel_size,
     }
 }
 
-auto LazyConv2d::materialize(int64_t in_channels, Device device) -> void {
+auto LazyConv2d::materialize(int64_t in_channels, Device device, DType dtype) -> void {
     if (in_channels <= 0) {
         throw std::runtime_error("LazyConv2d: inferred in_channels must be positive, got " +
             std::to_string(in_channels));
@@ -110,7 +117,9 @@ auto LazyConv2d::materialize(int64_t in_channels, Device device) -> void {
                                       stride_, padding_, dilation_, groups_, has_bias_);
     register_module("conv", conv_);
 
-    // Move parameters to the correct device if needed
+    if (dtype != DType::Float32) {
+        conv_->to(dtype);
+    }
     if (device.type != Device::Type::CPU) {
         conv_->to(device);
     }
@@ -130,7 +139,7 @@ auto LazyConv2d::forward_impl(const Variable& input) -> Variable {
             throw std::runtime_error("LazyConv2d: input channel dimension must be positive, got " +
                 std::to_string(in_channels));
         }
-        materialize(in_channels, input.tensor().device());
+        materialize(in_channels, input.tensor().device(), input.tensor().dtype());
     } else if (input_shape[1] != in_channels_) {
         throw std::runtime_error(
             "LazyConv2d: input channels (" + std::to_string(input_shape[1]) +
@@ -178,7 +187,7 @@ LazyConv3d::LazyConv3d(int64_t out_channels, int64_t kernel_size,
     }
 }
 
-auto LazyConv3d::materialize(int64_t in_channels, Device device) -> void {
+auto LazyConv3d::materialize(int64_t in_channels, Device device, DType dtype) -> void {
     if (in_channels <= 0) {
         throw std::runtime_error("LazyConv3d: inferred in_channels must be positive, got " +
             std::to_string(in_channels));
@@ -189,7 +198,9 @@ auto LazyConv3d::materialize(int64_t in_channels, Device device) -> void {
                                       stride_, padding_, dilation_, groups_, has_bias_);
     register_module("conv", conv_);
 
-    // Move parameters to the correct device if needed
+    if (dtype != DType::Float32) {
+        conv_->to(dtype);
+    }
     if (device.type != Device::Type::CPU) {
         conv_->to(device);
     }
@@ -209,7 +220,7 @@ auto LazyConv3d::forward_impl(const Variable& input) -> Variable {
             throw std::runtime_error("LazyConv3d: input channel dimension must be positive, got " +
                 std::to_string(in_channels));
         }
-        materialize(in_channels, input.tensor().device());
+        materialize(in_channels, input.tensor().device(), input.tensor().dtype());
     } else if (input_shape[1] != in_channels_) {
         throw std::runtime_error(
             "LazyConv3d: input channels (" + std::to_string(input_shape[1]) +
