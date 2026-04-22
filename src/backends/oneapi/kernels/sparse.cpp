@@ -32,72 +32,13 @@ namespace oneapi {
 // ============================================================================
 
 auto spmv_kernel(const SparseTensor& A, const Tensor& x, sycl::queue& queue) -> Tensor {
-#ifdef TENZOR_HAS_ONEMKL
-    if (A.layout() != SparseLayout::CSR) {
-        throw std::runtime_error("oneapi spmv_kernel requires CSR format");
-    }
-
-    const auto& shape = A.shape();
-    int64_t m = shape[0];
-    int64_t k = shape[1];
-
-    auto crow = A.crow_indices();
-    auto col = A.col_indices();
-    auto vals = A.values();
-
-    Tensor y({m}, vals.dtype(), vals.device());
-
-    ::oneapi::mkl::sparse::matrix_handle_t handle = nullptr;
-
-    const auto nnz = static_cast<std::int64_t>(A.nnz());
-
-    if (vals.dtype() == DType::Float32) {
-        ::oneapi::mkl::sparse::init_matrix_handle(&handle);
-        ::oneapi::mkl::sparse::set_csr_data(
-            queue, handle,
-            static_cast<std::int64_t>(m),
-            static_cast<std::int64_t>(k),
-            nnz,
-            ::oneapi::mkl::index_base::zero,
-            crow.data<std::int32_t>(),
-            col.data<std::int32_t>(),
-            vals.data<float>()).wait();
-
-        ::oneapi::mkl::sparse::gemv(
-            queue, ::oneapi::mkl::transpose::nontrans,
-            1.0f, handle,
-            x.data<float>(),
-            0.0f,
-            y.data<float>()).wait();
-
-        ::oneapi::mkl::sparse::release_matrix_handle(queue, &handle).wait();
-    } else if (vals.dtype() == DType::Float64) {
-        ::oneapi::mkl::sparse::init_matrix_handle(&handle);
-        ::oneapi::mkl::sparse::set_csr_data(
-            queue, handle,
-            static_cast<std::int64_t>(m),
-            static_cast<std::int64_t>(k),
-            nnz,
-            ::oneapi::mkl::index_base::zero,
-            crow.data<std::int32_t>(),
-            col.data<std::int32_t>(),
-            vals.data<double>()).wait();
-
-        ::oneapi::mkl::sparse::gemv(
-            queue, ::oneapi::mkl::transpose::nontrans,
-            1.0, handle,
-            x.data<double>(),
-            0.0,
-            y.data<double>()).wait();
-
-        ::oneapi::mkl::sparse::release_matrix_handle(queue, &handle).wait();
-    } else {
-        throw std::runtime_error("oneapi spmv_kernel: unsupported dtype (requires Float32 or Float64)");
-    }
-
-    return y;
-#else
-    // SYCL-native CSR SpMV fallback (one work-item per row)
+    // SYCL-native CSR SpMV (one work-item per row).
+    //
+    // NOTE: The oneMKL sparse SYCL API (`set_csr_data`) takes 32-bit `int*`
+    // index pointers, but Tenzor's `SparseTensor` contract mandates Int64
+    // crow/col buffers. Converting would require an extra scratch allocation
+    // per call and defeats the perf win. The native SYCL path below handles
+    // Int64 end-to-end.
     if (A.layout() != SparseLayout::CSR) {
         throw std::runtime_error("oneapi spmv_kernel requires CSR format");
     }
@@ -112,8 +53,8 @@ auto spmv_kernel(const SparseTensor& A, const Tensor& x, sycl::queue& queue) -> 
     Tensor y({m}, vals.dtype(), vals.device());
 
     if (vals.dtype() == DType::Float32) {
-        auto* crow_ptr = crow.data<std::int32_t>();
-        auto* col_ptr = col.data<std::int32_t>();
+        auto* crow_ptr = crow.data<std::int64_t>();
+        auto* col_ptr = col.data<std::int64_t>();
         auto* val_ptr = vals.data<float>();
         auto* x_ptr = x.data<float>();
         auto* y_ptr = y.data<float>();
@@ -122,14 +63,14 @@ auto spmv_kernel(const SparseTensor& A, const Tensor& x, sycl::queue& queue) -> 
             [=](sycl::id<1> idx) {
                 int64_t row = static_cast<int64_t>(idx[0]);
                 float sum = 0.0f;
-                for (std::int32_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
+                for (std::int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
                     sum += val_ptr[j] * x_ptr[col_ptr[j]];
                 }
                 y_ptr[row] = sum;
             }).wait();
     } else if (vals.dtype() == DType::Float64) {
-        auto* crow_ptr = crow.data<std::int32_t>();
-        auto* col_ptr = col.data<std::int32_t>();
+        auto* crow_ptr = crow.data<std::int64_t>();
+        auto* col_ptr = col.data<std::int64_t>();
         auto* val_ptr = vals.data<double>();
         auto* x_ptr = x.data<double>();
         auto* y_ptr = y.data<double>();
@@ -138,7 +79,7 @@ auto spmv_kernel(const SparseTensor& A, const Tensor& x, sycl::queue& queue) -> 
             [=](sycl::id<1> idx) {
                 int64_t row = static_cast<int64_t>(idx[0]);
                 double sum = 0.0;
-                for (std::int32_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
+                for (std::int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
                     sum += val_ptr[j] * x_ptr[col_ptr[j]];
                 }
                 y_ptr[row] = sum;
@@ -148,7 +89,6 @@ auto spmv_kernel(const SparseTensor& A, const Tensor& x, sycl::queue& queue) -> 
     }
 
     return y;
-#endif
 }
 
 // ============================================================================
@@ -156,88 +96,16 @@ auto spmv_kernel(const SparseTensor& A, const Tensor& x, sycl::queue& queue) -> 
 // ============================================================================
 
 auto spmm_kernel(const SparseTensor& A, const Tensor& B, sycl::queue& queue) -> Tensor {
-#ifdef TENZOR_HAS_ONEMKL
+    // SYCL-native CSR SpMM (one work-item per output element).
+    //
+    // See spmv_kernel for why the oneMKL sparse SYCL API is not used here
+    // (Int32 index pointer mismatch with Tenzor's Int64 SparseTensor API).
     if (A.layout() != SparseLayout::CSR) {
         throw std::runtime_error("oneapi spmm_kernel requires CSR format");
     }
 
     const auto& shape = A.shape();
     int64_t m = shape[0];
-    int64_t k = shape[1];
-    int64_t n = B.shape()[1];
-
-    auto crow = A.crow_indices();
-    auto col = A.col_indices();
-    auto vals = A.values();
-
-    Tensor C({m, n}, B.dtype(), vals.device());
-
-    ::oneapi::mkl::sparse::matrix_handle_t handle = nullptr;
-
-    const auto nnz = static_cast<std::int64_t>(A.nnz());
-
-    if (vals.dtype() == DType::Float32) {
-        ::oneapi::mkl::sparse::init_matrix_handle(&handle);
-        ::oneapi::mkl::sparse::set_csr_data(
-            queue, handle,
-            static_cast<std::int64_t>(m),
-            static_cast<std::int64_t>(k),
-            nnz,
-            ::oneapi::mkl::index_base::zero,
-            crow.data<std::int32_t>(),
-            col.data<std::int32_t>(),
-            vals.data<float>()).wait();
-
-        ::oneapi::mkl::sparse::gemm(
-            queue, ::oneapi::mkl::layout::row_major,
-            ::oneapi::mkl::transpose::nontrans,
-            ::oneapi::mkl::transpose::nontrans,
-            1.0f, handle,
-            B.data<float>(), n,
-            static_cast<std::int64_t>(n),
-            0.0f,
-            C.data<float>(),
-            static_cast<std::int64_t>(n)).wait();
-
-        ::oneapi::mkl::sparse::release_matrix_handle(queue, &handle).wait();
-    } else if (vals.dtype() == DType::Float64) {
-        ::oneapi::mkl::sparse::init_matrix_handle(&handle);
-        ::oneapi::mkl::sparse::set_csr_data(
-            queue, handle,
-            static_cast<std::int64_t>(m),
-            static_cast<std::int64_t>(k),
-            nnz,
-            ::oneapi::mkl::index_base::zero,
-            crow.data<std::int32_t>(),
-            col.data<std::int32_t>(),
-            vals.data<double>()).wait();
-
-        ::oneapi::mkl::sparse::gemm(
-            queue, ::oneapi::mkl::layout::row_major,
-            ::oneapi::mkl::transpose::nontrans,
-            ::oneapi::mkl::transpose::nontrans,
-            1.0, handle,
-            B.data<double>(), n,
-            static_cast<std::int64_t>(n),
-            0.0,
-            C.data<double>(),
-            static_cast<std::int64_t>(n)).wait();
-
-        ::oneapi::mkl::sparse::release_matrix_handle(queue, &handle).wait();
-    } else {
-        throw std::runtime_error("oneapi spmm_kernel: unsupported dtype (requires Float32 or Float64)");
-    }
-
-    return C;
-#else
-    // SYCL-native CSR SpMM fallback (one work-item per output element)
-    if (A.layout() != SparseLayout::CSR) {
-        throw std::runtime_error("oneapi spmm_kernel requires CSR format");
-    }
-
-    const auto& shape = A.shape();
-    int64_t m = shape[0];
-    int64_t k = shape[1];
     int64_t n = B.shape()[1];
 
     auto crow = A.crow_indices();
@@ -247,8 +115,8 @@ auto spmm_kernel(const SparseTensor& A, const Tensor& B, sycl::queue& queue) -> 
     Tensor C({m, n}, B.dtype(), vals.device());
 
     if (vals.dtype() == DType::Float32) {
-        auto* crow_ptr = crow.data<std::int32_t>();
-        auto* col_ptr = col.data<std::int32_t>();
+        auto* crow_ptr = crow.data<std::int64_t>();
+        auto* col_ptr = col.data<std::int64_t>();
         auto* val_ptr = vals.data<float>();
         auto* b_ptr = B.data<float>();
         auto* c_ptr = C.data<float>();
@@ -258,14 +126,14 @@ auto spmm_kernel(const SparseTensor& A, const Tensor& B, sycl::queue& queue) -> 
                 int64_t row = static_cast<int64_t>(idx[0]);
                 int64_t c = static_cast<int64_t>(idx[1]);
                 float sum = 0.0f;
-                for (std::int32_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
+                for (std::int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
                     sum += val_ptr[j] * b_ptr[col_ptr[j] * n + c];
                 }
                 c_ptr[row * n + c] = sum;
             }).wait();
     } else if (vals.dtype() == DType::Float64) {
-        auto* crow_ptr = crow.data<std::int32_t>();
-        auto* col_ptr = col.data<std::int32_t>();
+        auto* crow_ptr = crow.data<std::int64_t>();
+        auto* col_ptr = col.data<std::int64_t>();
         auto* val_ptr = vals.data<double>();
         auto* b_ptr = B.data<double>();
         auto* c_ptr = C.data<double>();
@@ -275,7 +143,7 @@ auto spmm_kernel(const SparseTensor& A, const Tensor& B, sycl::queue& queue) -> 
                 int64_t row = static_cast<int64_t>(idx[0]);
                 int64_t c = static_cast<int64_t>(idx[1]);
                 double sum = 0.0;
-                for (std::int32_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
+                for (std::int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
                     sum += val_ptr[j] * b_ptr[col_ptr[j] * n + c];
                 }
                 c_ptr[row * n + c] = sum;
@@ -285,7 +153,6 @@ auto spmm_kernel(const SparseTensor& A, const Tensor& B, sycl::queue& queue) -> 
     }
 
     return C;
-#endif
 }
 
 // ============================================================================
@@ -310,8 +177,8 @@ auto sparse_to_dense_kernel(const SparseTensor& A, sycl::queue& queue) -> Tensor
 
     if (vals.dtype() == DType::Float32) {
         auto* dense_ptr = dense.data<float>();
-        auto* crow_ptr = crow.data<std::int32_t>();
-        auto* col_ptr = col.data<std::int32_t>();
+        auto* crow_ptr = crow.data<std::int64_t>();
+        auto* col_ptr = col.data<std::int64_t>();
         auto* val_ptr = vals.data<float>();
         int64_t total = m * n;
 
@@ -326,20 +193,20 @@ auto sparse_to_dense_kernel(const SparseTensor& A, sycl::queue& queue) -> Tensor
                 int64_t lo = 0, hi = m;
                 while (lo < hi) {
                     int64_t mid = (lo + hi) / 2;
-                    if (crow_ptr[mid + 1] <= static_cast<std::int32_t>(i)) {
+                    if (crow_ptr[mid + 1] <= i) {
                         lo = mid + 1;
                     } else {
                         hi = mid;
                     }
                 }
                 int64_t row = lo;
-                int64_t c = static_cast<int64_t>(col_ptr[i]);
+                int64_t c = col_ptr[i];
                 dense_ptr[row * n + c] = val_ptr[i];
             }).wait();
     } else if (vals.dtype() == DType::Float64) {
         auto* dense_ptr = dense.data<double>();
-        auto* crow_ptr = crow.data<std::int32_t>();
-        auto* col_ptr = col.data<std::int32_t>();
+        auto* crow_ptr = crow.data<std::int64_t>();
+        auto* col_ptr = col.data<std::int64_t>();
         auto* val_ptr = vals.data<double>();
         int64_t total = m * n;
 
@@ -351,14 +218,14 @@ auto sparse_to_dense_kernel(const SparseTensor& A, sycl::queue& queue) -> Tensor
                 int64_t lo = 0, hi = m;
                 while (lo < hi) {
                     int64_t mid = (lo + hi) / 2;
-                    if (crow_ptr[mid + 1] <= static_cast<std::int32_t>(i)) {
+                    if (crow_ptr[mid + 1] <= i) {
                         lo = mid + 1;
                     } else {
                         hi = mid;
                     }
                 }
                 int64_t row = lo;
-                int64_t c = static_cast<int64_t>(col_ptr[i]);
+                int64_t c = col_ptr[i];
                 dense_ptr[row * n + c] = val_ptr[i];
             }).wait();
     } else {
@@ -391,8 +258,8 @@ auto sparse_add_kernel(const SparseTensor& A, const Tensor& B, sycl::queue& queu
 
     if (vals.dtype() == DType::Float32) {
         auto* out_ptr = result.data<float>();
-        auto* crow_ptr = crow.data<std::int32_t>();
-        auto* col_ptr = col.data<std::int32_t>();
+        auto* crow_ptr = crow.data<std::int64_t>();
+        auto* col_ptr = col.data<std::int64_t>();
         auto* val_ptr = vals.data<float>();
 
         queue.parallel_for(sycl::range<1>(static_cast<size_t>(nnz)),
@@ -402,20 +269,20 @@ auto sparse_add_kernel(const SparseTensor& A, const Tensor& B, sycl::queue& queu
                 int64_t lo = 0, hi = m;
                 while (lo < hi) {
                     int64_t mid = (lo + hi) / 2;
-                    if (crow_ptr[mid + 1] <= static_cast<std::int32_t>(i)) {
+                    if (crow_ptr[mid + 1] <= i) {
                         lo = mid + 1;
                     } else {
                         hi = mid;
                     }
                 }
                 int64_t row = lo;
-                int64_t c = static_cast<int64_t>(col_ptr[i]);
+                int64_t c = col_ptr[i];
                 out_ptr[row * n + c] += val_ptr[i];
             }).wait();
     } else if (vals.dtype() == DType::Float64) {
         auto* out_ptr = result.data<double>();
-        auto* crow_ptr = crow.data<std::int32_t>();
-        auto* col_ptr = col.data<std::int32_t>();
+        auto* crow_ptr = crow.data<std::int64_t>();
+        auto* col_ptr = col.data<std::int64_t>();
         auto* val_ptr = vals.data<double>();
 
         queue.parallel_for(sycl::range<1>(static_cast<size_t>(nnz)),
@@ -424,14 +291,14 @@ auto sparse_add_kernel(const SparseTensor& A, const Tensor& B, sycl::queue& queu
                 int64_t lo = 0, hi = m;
                 while (lo < hi) {
                     int64_t mid = (lo + hi) / 2;
-                    if (crow_ptr[mid + 1] <= static_cast<std::int32_t>(i)) {
+                    if (crow_ptr[mid + 1] <= i) {
                         lo = mid + 1;
                     } else {
                         hi = mid;
                     }
                 }
                 int64_t row = lo;
-                int64_t c = static_cast<int64_t>(col_ptr[i]);
+                int64_t c = col_ptr[i];
                 out_ptr[row * n + c] += val_ptr[i];
             }).wait();
     } else {

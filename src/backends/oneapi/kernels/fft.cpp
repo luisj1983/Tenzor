@@ -832,13 +832,17 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
     int64_t ndim = shape.size();
     if (dim < 0) dim += ndim;
 
-    // Input must be a complex dtype. Back-compat for Float32 + trailing-2
-    // layouts is intentionally dropped — rfft_kernel now always returns
-    // Complex64/Complex128, and callers that needed the old contract
-    // will see a clear error.
-    if (input.dtype() != DType::Complex64 && input.dtype() != DType::Complex128) {
+    // Accept real (Float32/Float64) input by promoting to the matching
+    // complex dtype with zero imaginary part — matches the CPU irfft kernel
+    // contract. The top-level `tenzor::fft::irfft` does not promote, so the
+    // backend has to.
+    if (input.dtype() == DType::Float32) {
+        return irfft_kernel(input.to(DType::Complex64), dim, n, norm, queue);
+    } else if (input.dtype() == DType::Float64) {
+        return irfft_kernel(input.to(DType::Complex128), dim, n, norm, queue);
+    } else if (input.dtype() != DType::Complex64 && input.dtype() != DType::Complex128) {
         throw std::runtime_error(
-            "irfft_kernel: expected Complex64 or Complex128 input");
+            "irfft_kernel: expected real or complex input");
     }
 
     int64_t complex_len = shape[dim]; // N/2 + 1

@@ -203,15 +203,27 @@ class SyclTransposeOrmqrBackF32;
 class SyclTransposeOrmqrBackF64;
 
 auto linalg_det_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+    // Float16 / BFloat16: widen to Float32, compute, narrow back.
+    // oneMKL's getrf requires Float32/Float64 scratchpad types and is not
+    // overloaded for half precision; compute in Float32 instead.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType orig_dtype = input.dtype();
+        Tensor result = linalg_det_kernel(input.to(DType::Float32), queue);
+        return result.to(orig_dtype);
+    }
+
     auto shape = input.shape();
     int64_t n = shape[shape.size() - 1];
     int64_t nbatch = 1;
+    // 2D input → scalar output (shape {}). Higher-rank input → output keeps
+    // the leading batch dims. Previous code appended a dummy `1` when the
+    // batch dims were empty, producing shape {1} for 2D inputs — wrong, since
+    // det of a single matrix is a 0D scalar.
     std::vector<int64_t> out_shape;
     for (size_t i = 0; i + 2 < shape.size(); i++) {
         out_shape.push_back(shape[i]);
         nbatch *= shape[i];
     }
-    if (out_shape.empty()) out_shape.push_back(1);
 
     // For batched input, delegate to native SYCL det kernel which handles batching
     if (nbatch > 1) {
@@ -1223,9 +1235,15 @@ auto linalg_cholesky_kernel(const Tensor& input, bool upper, sycl::queue& queue)
 auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
                                      bool upper, bool unitriangular,
                                      sycl::queue& queue) -> Tensor {
-    auto a_shape = A.shape();
+    // row_to_col_major reads via raw pointer and ignores strides, so views
+    // (e.g. A.transpose(-1,-2) that `linalg::cholesky_inverse` feeds in as
+    // L^T) produce wrong results unless the caller's logical layout is
+    // materialized first. `linalg_solve_kernel` already does this; match it.
+    auto A_cont = A.contiguous();
+    auto B_cont = B.contiguous();
+    auto a_shape = A_cont.shape();
     int64_t n = a_shape[a_shape.size() - 1];
-    auto b_shape = B.shape();
+    auto b_shape = B_cont.shape();
     int64_t nrhs = (b_shape.size() > 1) ? b_shape[b_shape.size() - 1] : 1;
 
     // oneMKL trsm works in column-major. row_to_col_major physically
@@ -1234,14 +1252,14 @@ auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
     auto mkl_uplo = upper ? ::oneapi::mkl::uplo::upper : ::oneapi::mkl::uplo::lower;
     auto mkl_diag = unitriangular ? ::oneapi::mkl::diag::unit : ::oneapi::mkl::diag::nonunit;
 
-    if (A.dtype() == DType::Float32) {
+    if (A_cont.dtype() == DType::Float32) {
         SyclDeviceBuffer<float> d_a(n * n, queue);
         SyclDeviceBuffer<float> d_b(n * nrhs, queue);
 
         row_to_col_major<float, SyclTransposeTriSolveAF32>(
-            d_a.get(), get_data_ptr<const float>(A), n, n, queue);
+            d_a.get(), get_data_ptr<const float>(A_cont), n, n, queue);
         row_to_col_major<float, SyclTransposeTriSolveBF32>(
-            d_b.get(), get_data_ptr<const float>(B), n, nrhs, queue);
+            d_b.get(), get_data_ptr<const float>(B_cont), n, nrhs, queue);
 
         float alpha = 1.0f;
         ::oneapi::mkl::blas::trsm(queue, ::oneapi::mkl::side::left, mkl_uplo,
@@ -1249,19 +1267,19 @@ auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
             n, nrhs, alpha, d_a.get(), n, d_b.get(), n).wait();
 
         std::vector<int64_t> out_shape(b_shape.begin(), b_shape.end());
-        Tensor output(out_shape, A.dtype(), A.device());
+        Tensor output(out_shape, A_cont.dtype(), A_cont.device());
         col_to_row_major<float, SyclTransposeTriSolveBackF32>(
             get_data_ptr<float>(output), d_b.get(), n, nrhs, queue);
 
         return output;
-    } else if (A.dtype() == DType::Float64) {
+    } else if (A_cont.dtype() == DType::Float64) {
         SyclDeviceBuffer<double> d_a(n * n, queue);
         SyclDeviceBuffer<double> d_b(n * nrhs, queue);
 
         row_to_col_major<double, SyclTransposeTriSolveAF64>(
-            d_a.get(), get_data_ptr<const double>(A), n, n, queue);
+            d_a.get(), get_data_ptr<const double>(A_cont), n, n, queue);
         row_to_col_major<double, SyclTransposeTriSolveBF64>(
-            d_b.get(), get_data_ptr<const double>(B), n, nrhs, queue);
+            d_b.get(), get_data_ptr<const double>(B_cont), n, nrhs, queue);
 
         double alpha = 1.0;
         ::oneapi::mkl::blas::trsm(queue, ::oneapi::mkl::side::left, mkl_uplo,
@@ -1269,7 +1287,7 @@ auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
             n, nrhs, alpha, d_a.get(), n, d_b.get(), n).wait();
 
         std::vector<int64_t> out_shape(b_shape.begin(), b_shape.end());
-        Tensor output(out_shape, A.dtype(), A.device());
+        Tensor output(out_shape, A_cont.dtype(), A_cont.device());
         col_to_row_major<double, SyclTransposeTriSolveBackF64>(
             get_data_ptr<double>(output), d_b.get(), n, nrhs, queue);
 

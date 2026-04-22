@@ -156,7 +156,15 @@ namespace oneapi {
                                      const Tensor& B, int64_t N, bool upper,
                                      sycl::queue& queue) -> Tensor;
 
-    // oneMKL-backed sparse ops
+    // SYCL-native sparse ops (crow/col indices are Int64)
+    auto spmv_kernel(const SparseTensor& A, const Tensor& x,
+                     sycl::queue& queue) -> Tensor;
+    auto spmm_kernel(const SparseTensor& A, const Tensor& B,
+                     sycl::queue& queue) -> Tensor;
+    auto sparse_to_dense_kernel(const SparseTensor& A,
+                                sycl::queue& queue) -> Tensor;
+    auto sparse_add_kernel(const SparseTensor& A, const Tensor& B,
+                           sycl::queue& queue) -> Tensor;
     auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
                        sycl::queue& queue) -> SparseTensor;
     auto sparse_trsv_kernel(const SparseTensor& L, const Tensor& b, bool upper,
@@ -952,6 +960,8 @@ static DType parse_dtype(const OpAttributes& attrs) {
     if (s == "uint32")  return DType::UInt32;
     if (s == "uint64")  return DType::UInt64;
     if (s == "bool")    return DType::Bool;
+    if (s == "complex64")  return DType::Complex64;
+    if (s == "complex128") return DType::Complex128;
     return DType::Float32;
 }
 
@@ -4283,19 +4293,21 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     // =========================================================================
     // Sparse Tensor Operations (OpIds 460-464)
     //
-    // Wrapper lambdas that reconstruct SparseTensor from CSR components passed
-    // as plain Tensors, then delegate to the existing sparse:: functions which
-    // internally dispatch to oneMKL sparse when inputs are on OneAPI/SYCL.
+    // IMPORTANT: Call the backend-local `oneapi::*_kernel` functions directly.
+    // Calling the top-level `sparse::spmm` / `sparse::spmv` / `sparse::add`
+    // here re-enters the same kernel through the dispatch table and recurses
+    // until stack exhaustion (observed as SEGFAULT on OneAPI sparse parity
+    // tests). Same note as the SparseSpGEMM / SparseTrsv / SparseTrsm
+    // registrations below.
     // =========================================================================
 
-#ifdef TENZOR_HAS_ONEMKL
     // SparseSpMM: sparse(M,K) @ dense(K,N) -> dense(M,N)
     table.register_single_output_kernel(OpId::SparseSpMM,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
-            return sparse::spmm(sp, inputs[3]);
+            return oneapi::spmm_kernel(sp, inputs[3], get_q(inputs));
         });
 
     // SparseSpMV: sparse(M,K) @ vec(K) -> vec(M)
@@ -4304,26 +4316,8 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
-            return sparse::spmv(sp, inputs[3]);
+            return oneapi::spmv_kernel(sp, inputs[3], get_q(inputs));
         });
-#else // !TENZOR_HAS_ONEMKL
-    // SYCL-native CSR SpMM/SpMV fallbacks (no oneMKL dependency)
-    table.register_single_output_kernel(OpId::SparseSpMM,
-        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            int64_t M = attrs.get_int(AttrKey::M);
-            int64_t K = attrs.get_int(AttrKey::K);
-            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
-            return sparse::spmm(sp, inputs[3]);
-        });
-
-    table.register_single_output_kernel(OpId::SparseSpMV,
-        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            int64_t M = attrs.get_int(AttrKey::M);
-            int64_t K = attrs.get_int(AttrKey::K);
-            auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
-            return sparse::spmv(sp, inputs[3]);
-        });
-#endif // TENZOR_HAS_ONEMKL
 
     // SparseToDense: CSR components -> dense tensor
     table.register_single_output_kernel(OpId::SparseToDense,
@@ -4331,7 +4325,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
-            return sp.to_dense();
+            return oneapi::sparse_to_dense_kernel(sp, get_q(inputs));
         });
 
     // DenseToSparse: dense tensor -> CSR components [crow_indices, col_indices, values]
@@ -4347,7 +4341,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
-            return sparse::add(sp, inputs[3]);
+            return oneapi::sparse_add_kernel(sp, inputs[3], get_q(inputs));
         });
 
 #ifdef TENZOR_HAS_ONEMKL

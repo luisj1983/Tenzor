@@ -630,11 +630,22 @@ auto spmm(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
     auto dispatch_gpu_spmm = [&](Device::Type dev_type) -> std::optional<Tensor> {
         auto& table = DispatchTableRegistry::get_table(dev_type);
         if (!table.has_kernel(OpId::SparseSpMM)) return std::nullopt;
-        auto ac = extract_csr_on_device(sparse_compute);
+        // Move the sparse tensor to the target device before extracting CSR —
+        // otherwise the CSR components stay on CPU and the backend kernel
+        // receives a mix of CPU and device pointers, which either fails the
+        // device-consistency check or crashes when dereferenced on-device.
+        Device target_dev{dev_type, 0};
+        SparseTensor sparse_on_dev = (sparse_compute.device().type == dev_type)
+                                         ? sparse_compute
+                                         : sparse_compute.to(target_dev);
+        auto ac = extract_csr_on_device(sparse_on_dev);
+        Tensor crow = (ac.crow.device().type == dev_type) ? ac.crow : ac.crow.to(target_dev);
+        Tensor col  = (ac.col.device().type  == dev_type) ? ac.col  : ac.col.to(target_dev);
+        Tensor vals = (ac.values.device().type == dev_type) ? ac.values : ac.values.to(target_dev);
         Tensor dense_on_dev = (dense_compute.device().type == dev_type)
                                  ? dense_compute
-                                 : dense_compute.to(Device{dev_type, 0});
-        std::vector<Tensor> inputs = {ac.crow, ac.col, ac.values, dense_on_dev};
+                                 : dense_compute.to(target_dev);
+        std::vector<Tensor> inputs = {crow, col, vals, dense_on_dev};
         OpAttributes attrs;
         attrs.set(AttrKey::M, M);
         attrs.set(AttrKey::K, K);
@@ -703,11 +714,20 @@ auto spmv(const SparseTensor& sparse, const Tensor& vec) -> Tensor {
     auto dispatch_gpu_spmv = [&](Device::Type dev_type) -> std::optional<Tensor> {
         auto& table = DispatchTableRegistry::get_table(dev_type);
         if (!table.has_kernel(OpId::SparseSpMV)) return std::nullopt;
-        auto sc = extract_csr_on_device(sparse_compute);
+        // Move sparse to device first so CSR components don't stay on CPU.
+        // See dispatch_gpu_spmm for the full rationale.
+        Device target_dev{dev_type, 0};
+        SparseTensor sparse_on_dev = (sparse_compute.device().type == dev_type)
+                                         ? sparse_compute
+                                         : sparse_compute.to(target_dev);
+        auto sc = extract_csr_on_device(sparse_on_dev);
+        Tensor crow = (sc.crow.device().type == dev_type) ? sc.crow : sc.crow.to(target_dev);
+        Tensor col  = (sc.col.device().type  == dev_type) ? sc.col  : sc.col.to(target_dev);
+        Tensor vals = (sc.values.device().type == dev_type) ? sc.values : sc.values.to(target_dev);
         Tensor vec_on_dev = (vec_compute.device().type == dev_type)
                                 ? vec_compute
-                                : vec_compute.to(Device{dev_type, 0});
-        std::vector<Tensor> inputs = {sc.crow, sc.col, sc.values, vec_on_dev};
+                                : vec_compute.to(target_dev);
+        std::vector<Tensor> inputs = {crow, col, vals, vec_on_dev};
         OpAttributes attrs;
         attrs.set(AttrKey::M, M);
         attrs.set(AttrKey::K, K);

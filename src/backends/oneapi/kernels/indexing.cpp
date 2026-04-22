@@ -254,24 +254,29 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
     // Create output as copy of input
     Tensor output(input_shape, input.dtype(), input.device());
 
-    // Copy input to output first
-    const size_t bytes = input.numel() * input.dtype_size();
+    // Copy input to output first. Force a contiguous source — if `input` is a
+    // non-contiguous view the raw memcpy would read the wrong layout, leaving
+    // non-scattered positions holding stale/unrelated data and causing the
+    // gradcheck's sum() to see non-deterministic output across calls with the
+    // same input.
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    const size_t bytes = input_cont.numel() * input_cont.dtype_size();
     if (input.dtype() == DType::Float32) {
-        const float* in_ptr = get_data_ptr<const float>(input);
+        const float* in_ptr = get_data_ptr<const float>(input_cont);
         float* out_ptr = get_data_ptr<float>(output);
-        queue.memcpy(out_ptr, in_ptr, bytes);
+        queue.memcpy(out_ptr, in_ptr, bytes).wait();
     } else if (input.dtype() == DType::Float64) {
-        const double* in_ptr = get_data_ptr<const double>(input);
+        const double* in_ptr = get_data_ptr<const double>(input_cont);
         double* out_ptr = get_data_ptr<double>(output);
-        queue.memcpy(out_ptr, in_ptr, bytes);
+        queue.memcpy(out_ptr, in_ptr, bytes).wait();
     } else if (input.dtype() == DType::Float16) {
-        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input_cont);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
-        queue.memcpy(out_ptr, in_ptr, bytes);
+        queue.memcpy(out_ptr, in_ptr, bytes).wait();
     } else if (input.dtype() == DType::BFloat16) {
-        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input_cont);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
-        queue.memcpy(out_ptr, in_ptr, bytes);
+        queue.memcpy(out_ptr, in_ptr, bytes).wait();
     }
 
     auto index_shape_span = index.shape();
@@ -290,108 +295,58 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
         index_strides_arr[i] = index_strides[i];
     }
 
-    if (input.dtype() == DType::Float32) {
-        float* output_ptr = get_data_ptr<float>(output);
-        const int64_t* index_ptr = get_data_ptr<const int64_t>(index);
-        const float* src_ptr = get_data_ptr<const float>(src);
+    // Deterministic scatter: one work-item per OUTPUT scatter-dim position.
+    // For each (outer, inner, out_dim) triple, scan forward over the
+    // index's scatter dimension and keep the LAST matching src entry — this
+    // matches PyTorch's "last write wins" semantics and, critically,
+    // produces deterministic output even when the index tensor contains
+    // duplicates (which would race under the previous src-iteration
+    // kernel and break gradcheck numerical/analytical parity).
+    const int64_t index_dim_size = index_shape[dim];
+    const int64_t input_dim_size = input_shape[dim];
 
-        queue.parallel_for<ScatterKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
-            // Compute multi-dimensional index
-            int64_t temp = flat_idx;
-            int64_t output_idx = 0;
+    // Compute outer_size (product of dims before dim) and inner_size (after dim)
+    int64_t outer_size = 1;
+    for (int64_t d = 0; d < dim; ++d) outer_size *= input_shape[d];
+    int64_t inner_size = 1;
+    for (size_t d = dim + 1; d < ndims; ++d) inner_size *= input_shape[d];
 
-            for (size_t d = 0; d < ndims; ++d) {
-                int64_t coord = temp / index_strides_arr[d];
-                temp %= index_strides_arr[d];
+    const int64_t* index_ptr = get_data_ptr<const int64_t>(index);
 
-                if (static_cast<int64_t>(d) == dim) {
-                    int64_t idx_val = index_ptr[flat_idx];
-                    if (idx_val < 0) idx_val += input_shape_arr[d];
-                    output_idx += idx_val * input_strides_arr[d];
-                } else {
-                    output_idx += coord * input_strides_arr[d];
+    auto run = [&]<typename T>() {
+        T* output_ptr = get_data_ptr<T>(output);
+        const T* src_ptr = get_data_ptr<const T>(src);
+        queue.parallel_for(
+            sycl::range<3>(static_cast<size_t>(outer_size),
+                           static_cast<size_t>(input_dim_size),
+                           static_cast<size_t>(inner_size)),
+            [=](sycl::id<3> id) {
+                int64_t o = id[0];
+                int64_t out_d = id[1];
+                int64_t inner = id[2];
+                int64_t out_pos = (o * input_dim_size + out_d) * inner_size + inner;
+
+                // Scan over the index scatter dim; remember the last k whose
+                // idx[o, k, inner] == out_d so the result is deterministic.
+                int64_t last_k = -1;
+                for (int64_t k = 0; k < index_dim_size; ++k) {
+                    int64_t idx_pos = (o * index_dim_size + k) * inner_size + inner;
+                    int64_t v = index_ptr[idx_pos];
+                    if (v < 0) v += input_dim_size;
+                    if (v == out_d) last_k = k;
                 }
-            }
-
-            // Atomic write to avoid race conditions
-            output_ptr[output_idx] = src_ptr[flat_idx];
-        });
-    }
-    else if (input.dtype() == DType::Float64) {
-        double* output_ptr = get_data_ptr<double>(output);
-        const int64_t* index_ptr = get_data_ptr<const int64_t>(index);
-        const double* src_ptr = get_data_ptr<const double>(src);
-
-        queue.parallel_for<ScatterKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
-            int64_t temp = flat_idx;
-            int64_t output_idx = 0;
-
-            for (size_t d = 0; d < ndims; ++d) {
-                int64_t coord = temp / index_strides_arr[d];
-                temp %= index_strides_arr[d];
-
-                if (static_cast<int64_t>(d) == dim) {
-                    int64_t idx_val = index_ptr[flat_idx];
-                    if (idx_val < 0) idx_val += input_shape_arr[d];
-                    output_idx += idx_val * input_strides_arr[d];
-                } else {
-                    output_idx += coord * input_strides_arr[d];
+                if (last_k >= 0) {
+                    int64_t src_pos = (o * index_dim_size + last_k) * inner_size + inner;
+                    output_ptr[out_pos] = src_ptr[src_pos];
                 }
-            }
+                // else: output_ptr[out_pos] already holds the memcpy'd input value
+            }).wait();
+    };
 
-            output_ptr[output_idx] = src_ptr[flat_idx];
-        });
-    }
-    else if (input.dtype() == DType::Float16) {
-        sycl::half* output_ptr = get_data_ptr<sycl::half>(output);
-        const int64_t* index_ptr = get_data_ptr<const int64_t>(index);
-        const sycl::half* src_ptr = get_data_ptr<const sycl::half>(src);
-
-        queue.parallel_for<ScatterKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
-            int64_t temp = flat_idx;
-            int64_t output_idx = 0;
-
-            for (size_t d = 0; d < ndims; ++d) {
-                int64_t coord = temp / index_strides_arr[d];
-                temp %= index_strides_arr[d];
-
-                if (static_cast<int64_t>(d) == dim) {
-                    int64_t idx_val = index_ptr[flat_idx];
-                    if (idx_val < 0) idx_val += input_shape_arr[d];
-                    output_idx += idx_val * input_strides_arr[d];
-                } else {
-                    output_idx += coord * input_strides_arr[d];
-                }
-            }
-
-            output_ptr[output_idx] = src_ptr[flat_idx];
-        });
-    }
-    else if (input.dtype() == DType::BFloat16) {
-        uint16_t* output_ptr = get_data_ptr<uint16_t>(output);
-        const int64_t* index_ptr = get_data_ptr<const int64_t>(index);
-        const uint16_t* src_ptr = get_data_ptr<const uint16_t>(src);
-
-        queue.parallel_for<ScatterKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
-            int64_t temp = flat_idx;
-            int64_t output_idx = 0;
-
-            for (size_t d = 0; d < ndims; ++d) {
-                int64_t coord = temp / index_strides_arr[d];
-                temp %= index_strides_arr[d];
-
-                if (static_cast<int64_t>(d) == dim) {
-                    int64_t idx_val = index_ptr[flat_idx];
-                    if (idx_val < 0) idx_val += input_shape_arr[d];
-                    output_idx += idx_val * input_strides_arr[d];
-                } else {
-                    output_idx += coord * input_strides_arr[d];
-                }
-            }
-
-            output_ptr[output_idx] = src_ptr[flat_idx];
-        });
-    }
+    if (input.dtype() == DType::Float32)  run.template operator()<float>();
+    else if (input.dtype() == DType::Float64) run.template operator()<double>();
+    else if (input.dtype() == DType::Float16) run.template operator()<sycl::half>();
+    else if (input.dtype() == DType::BFloat16) run.template operator()<uint16_t>();
     else {
         throw std::runtime_error("Unsupported dtype for scatter");
     }

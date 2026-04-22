@@ -5,6 +5,7 @@
 
 #include "../../include/tenzor/models/yolo.hpp"
 #include "../../include/tenzor/autograd/ops.hpp"
+#include "../../include/tenzor/nn/utils/variable_cast.hpp"
 #include "../../include/tenzor/ops/detection.hpp"
 #include "../../include/tenzor/ops/transform.hpp"
 #include "../../include/tenzor/ops/math.hpp"
@@ -283,12 +284,16 @@ auto YOLOv3::forward_impl(const Variable& input) -> Variable {
         // snapshots, state_dict checks) continue to see the user-set
         // dtype.
         this->to(DType::Float32);
-        Variable f32_input(input.tensor().to(DType::Float32), input.requires_grad());
+        // Use autograd-aware casts so the Float32 forward stays attached
+        // to the input Variable and the Float16 output stays attached to
+        // the Float32 forward's grad_fn chain. A raw `Variable(t.to(...))`
+        // would drop grad_fn and silently break parameter grad flow
+        // (observed as YOLOMultiDTypeTest.YOLOv3GradientFlow/Float16
+        // reporting 0 / N parameters with gradients).
+        Variable f32_input = nn::variable_cast(input, DType::Float32);
         auto result = forward_impl(f32_input);   // recurse with Float32 input
         this->to(in_dtype);
-        // Cast the result back. result is already a Variable; keep
-        // requires_grad unchanged (inference path sets it to false).
-        return Variable(result.tensor().to(in_dtype), result.requires_grad());
+        return nn::variable_cast(result, in_dtype);
     }
 
     auto predictions = forward_raw(input);

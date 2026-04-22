@@ -976,7 +976,7 @@ auto roi_align_backward_kernel(
 
         // Accumulate in float32 since sycl::half doesn't support atomic operations
         float* accum_ptr = sycl::malloc_device<float>(feat_size, queue);
-        queue.fill(accum_ptr, 0.0f, feat_size);
+        queue.fill(accum_ptr, 0.0f, feat_size).wait();
 
         const float offset = aligned ? 0.5f : 0.0f;
 
@@ -1056,7 +1056,7 @@ auto roi_align_backward_kernel(
                     }
                 }
             }
-        );
+        ).wait();
 
         // Convert float32 accumulation buffer back to half
         queue.parallel_for<ROIAlignBackwardF16ConvertKernel>(

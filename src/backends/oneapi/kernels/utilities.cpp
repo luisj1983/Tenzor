@@ -92,12 +92,13 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, sycl::queue& queue
     }
 
     if (tensors.size() == 1) {
-        // Single tensor, just clone it
-        const void* in_ptr = tensors[0].data_ptr();
-        const size_t bytes = tensors[0].numel() * tensors[0].dtype_size();
+        // Single tensor, just clone it (materialize any view into contiguous storage)
+        Tensor contig = tensors[0].contiguous();
+        const void* in_ptr = contig.data_ptr();
+        const size_t bytes = contig.numel() * contig.dtype_size();
 
-        Tensor output(std::vector<int64_t>(tensors[0].shape().begin(), tensors[0].shape().end()),
-                      tensors[0].dtype(), tensors[0].device());
+        Tensor output(std::vector<int64_t>(contig.shape().begin(), contig.shape().end()),
+                      contig.dtype(), contig.device());
         void* out_ptr = const_cast<void*>(output.data_ptr());
         queue.memcpy(out_ptr, in_ptr, bytes).wait();
         return output;
@@ -147,10 +148,15 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, sycl::queue& queue
     // Calculate strides for efficient indexing
     auto out_strides = calculate_strides(out_shape);
 
-    // For each input tensor, copy its data to the appropriate offset in output
+    // For each input tensor, copy its data to the appropriate offset in output.
+    // The linear `src_idx` computation below assumes the source tensor is
+    // contiguous — call `.contiguous()` to materialize any view (e.g. the
+    // stride-0 result of `expand()` that ReplicationPad uses) into a real
+    // contiguous buffer before reading with linear indexing.
     int64_t offset_in_concat_dim = 0;
 
-    for (const auto& tensor : tensors) {
+    for (const auto& tensor_in : tensors) {
+        Tensor tensor = tensor_in.contiguous();
         auto tensor_shape = tensor.shape();
         const int64_t tensor_size_in_dim = tensor_shape[dim];
 

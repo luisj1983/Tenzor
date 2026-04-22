@@ -1885,6 +1885,21 @@ auto deformable_conv2d_forward_kernel(
     int64_t groups, int64_t offset_groups,
     sycl::queue& queue) -> Tensor {
 
+    // Float16 / BFloat16: widen to Float32, compute, narrow back.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType orig_dtype = input.dtype();
+        auto in32 = input.to(DType::Float32);
+        auto off32 = offset.to(DType::Float32);
+        auto w32 = weight.to(DType::Float32);
+        auto b32 = (bias.numel() > 0) ? bias.to(DType::Float32) : bias;
+        auto m32 = (mask.numel() > 0) ? mask.to(DType::Float32) : mask;
+        Tensor result = deformable_conv2d_forward_kernel(
+            in32, off32, w32, b32, m32,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, queue);
+        return result.to(orig_dtype);
+    }
+
     auto ishape = input.shape();
     auto wshape = weight.shape();
     const int64_t N = ishape[0], C_in = ishape[1], H = ishape[2], W = ishape[3];
@@ -2032,6 +2047,26 @@ auto deformable_conv2d_backward_input_kernel(
     int64_t dil_h, int64_t dil_w,
     int64_t groups, int64_t offset_groups,
     sycl::queue& queue) -> std::vector<Tensor> {
+
+    // Float16 / BFloat16: widen to Float32, compute, narrow back.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType orig_dtype = input.dtype();
+        auto g32 = grad_output.to(DType::Float32);
+        auto i32 = input.to(DType::Float32);
+        auto o32 = offset.to(DType::Float32);
+        auto w32 = weight.to(DType::Float32);
+        auto m32 = (mask.numel() > 0) ? mask.to(DType::Float32) : mask;
+        auto results = deformable_conv2d_backward_input_kernel(
+            g32, i32, o32, w32, m32,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, queue);
+        std::vector<Tensor> narrowed;
+        narrowed.reserve(results.size());
+        for (auto& r : results) {
+            narrowed.push_back(r.numel() > 0 ? r.to(orig_dtype) : r);
+        }
+        return narrowed;
+    }
 
     auto ishape = input.shape();
     auto wshape = weight.shape();
@@ -2268,6 +2303,20 @@ auto deformable_conv2d_backward_weight_kernel(
     int64_t groups, int64_t offset_groups,
     const std::vector<int64_t>& weight_shape,
     sycl::queue& queue) -> Tensor {
+
+    // Float16 / BFloat16: widen to Float32, compute, narrow back.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType orig_dtype = input.dtype();
+        auto g32 = grad_output.to(DType::Float32);
+        auto i32 = input.to(DType::Float32);
+        auto o32 = offset.to(DType::Float32);
+        auto m32 = (mask.numel() > 0) ? mask.to(DType::Float32) : mask;
+        Tensor result = deformable_conv2d_backward_weight_kernel(
+            g32, i32, o32, m32,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, weight_shape, queue);
+        return result.to(orig_dtype);
+    }
 
     auto ishape = input.shape();
     const int64_t N = ishape[0], C_in = ishape[1], H = ishape[2], W = ishape[3];

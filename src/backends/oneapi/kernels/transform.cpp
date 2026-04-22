@@ -1,4 +1,11 @@
+// Backend kernels need the view-creating mutation API (mutable_shape /
+// mutable_strides). Match the CUDA backend, which defines this at the CMake
+// level — here we scope the define to this translation unit.
+#ifndef TENZOR_INTERNAL
+#define TENZOR_INTERNAL
+#endif
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/core/shape.hpp"
 #include <sycl/sycl.hpp>
 #include <cstring>
 #include <numeric>
@@ -81,9 +88,12 @@ inline auto compute_flat_index(const std::vector<int64_t>& indices,
     return flat_idx;
 }
 
-// Reshape kernel - just validates and creates view (no data copy)
+// Reshape kernel — returns a view sharing storage when the input is
+// contiguous, and materializes a contiguous copy otherwise. Previous
+// implementation always memcpy'd to a new buffer, which broke alias
+// detection (`may_alias(a, a.reshape(...))` returned false) and is the
+// wrong semantics for reshape-as-a-view.
 auto reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape, sycl::queue& queue) -> Tensor {
-    // Calculate total elements
     int64_t input_numel = input.numel();
     int64_t output_numel = 1;
     for (auto dim : new_shape) {
@@ -94,18 +104,19 @@ auto reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape, 
         throw std::invalid_argument("Reshape: total number of elements must remain constant");
     }
 
-    // Ensure input is contiguous before memcpy (non-contiguous layout would corrupt data)
+    // Non-contiguous input: materialize then reshape the contiguous copy
+    // (still returns a view of the newly-materialized storage).
     Tensor src = input.is_contiguous() ? input : contiguous_kernel(input, queue);
 
-    Tensor output(new_shape, src.dtype(), src.device());
-
-    // Simple memory copy since data layout is preserved - works for all dtypes
-    const size_t bytes = input_numel * src.dtype_size();
-    const void* in_ptr = src.data_ptr();
-    void* out_ptr = const_cast<void*>(output.data_ptr());
-    queue.memcpy(out_ptr, in_ptr, bytes);
-
-    return output;
+    // Create a view sharing storage: copy the TensorImpl (shares `storage`
+    // intrusive_ptr, copies shape/strides by value), then overwrite shape
+    // and strides for the new shape.
+    Tensor result;
+    TensorAccessor::get_impl_mutable(result) =
+        make_intrusive<TensorImpl>(*TensorAccessor::get_impl(src));
+    result.mutable_shape() = new_shape;
+    result.mutable_strides() = compute_strides(new_shape);
+    return result;
 }
 
 // Transpose kernel - swap two dimensions
@@ -1365,6 +1376,15 @@ auto unfold_kernel(const Tensor& input, int64_t kernel_size, int64_t stride,
         throw std::runtime_error("unfold_kernel: expected 4D input [N, C, H, W]");
     }
 
+    // Float16 / BFloat16: widen to Float32, compute, narrow back.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType orig_dtype = input.dtype();
+        Tensor widened = input.to(DType::Float32);
+        Tensor result = unfold_kernel(widened, kernel_size, stride, padding,
+                                      dilation, queue);
+        return result.to(orig_dtype);
+    }
+
     int64_t N = shape[0], C = shape[1], H = shape[2], W = shape[3];
     int64_t H_out = (H + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
     int64_t W_out = (W + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
@@ -1441,6 +1461,17 @@ auto fold_kernel(const Tensor& input, const std::vector<int64_t>& output_size,
     auto shape = input.shape();
     if (shape.size() != 3) {
         throw std::runtime_error("fold_kernel: expected 3D input [N, C*kH*kW, L]");
+    }
+
+    // Float16 / BFloat16: widen to Float32, compute, narrow back.
+    // sycl::atomic_ref used by the col2im accumulator does not support half
+    // types. Widen/narrow around the Float32 path instead.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType orig_dtype = input.dtype();
+        Tensor widened = input.to(DType::Float32);
+        Tensor result = fold_kernel(widened, output_size, kernel_size, stride,
+                                    padding, dilation, queue);
+        return result.to(orig_dtype);
     }
 
     int64_t N = shape[0];

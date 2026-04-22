@@ -321,6 +321,47 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
             sycl::free(sum_buf, queue);
             return output;
         }
+        else if (in_cont.dtype() == DType::Complex64) {
+            // Complex stored as interleaved (re, im) floats.
+            // Sum real and imag parts separately; SYCL's reduction infrastructure
+            // doesn't have a built-in plus for std::complex.
+            const float* in_ptr = reinterpret_cast<const float*>(in_cont.data_ptr());
+            float* out_ptr = reinterpret_cast<float*>(const_cast<void*>(output.data_ptr()));
+            auto re_buf = sycl::malloc_shared<float>(1, queue);
+            auto im_buf = sycl::malloc_shared<float>(1, queue);
+            re_buf[0] = 0.0f;
+            im_buf[0] = 0.0f;
+            queue.parallel_for(sycl::range<1>(total_size),
+                sycl::reduction(re_buf, sycl::plus<float>()),
+                sycl::reduction(im_buf, sycl::plus<float>()),
+                [=](sycl::id<1> idx, auto& re, auto& im) {
+                    re += in_ptr[2 * idx[0]];
+                    im += in_ptr[2 * idx[0] + 1];
+                }).wait();
+            out_ptr[0] = re_buf[0];
+            out_ptr[1] = im_buf[0];
+            sycl::free(re_buf, queue);
+            sycl::free(im_buf, queue);
+        }
+        else if (in_cont.dtype() == DType::Complex128) {
+            const double* in_ptr = reinterpret_cast<const double*>(in_cont.data_ptr());
+            double* out_ptr = reinterpret_cast<double*>(const_cast<void*>(output.data_ptr()));
+            auto re_buf = sycl::malloc_shared<double>(1, queue);
+            auto im_buf = sycl::malloc_shared<double>(1, queue);
+            re_buf[0] = 0.0;
+            im_buf[0] = 0.0;
+            queue.parallel_for(sycl::range<1>(total_size),
+                sycl::reduction(re_buf, sycl::plus<double>()),
+                sycl::reduction(im_buf, sycl::plus<double>()),
+                [=](sycl::id<1> idx, auto& re, auto& im) {
+                    re += in_ptr[2 * idx[0]];
+                    im += in_ptr[2 * idx[0] + 1];
+                }).wait();
+            out_ptr[0] = re_buf[0];
+            out_ptr[1] = im_buf[0];
+            sycl::free(re_buf, queue);
+            sycl::free(im_buf, queue);
+        }
         else {
             throw std::runtime_error("Unsupported dtype for sum reduction");
         }
@@ -455,6 +496,44 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 out_ptr[outer_idx * inner_size + inner_idx] = sum;
             });
             return bool_output;
+        }
+        else if (in_cont.dtype() == DType::Complex64) {
+            const float* in_ptr = reinterpret_cast<const float*>(in_cont.data_ptr());
+            float* out_ptr = reinterpret_cast<float*>(const_cast<void*>(output.data_ptr()));
+            queue.parallel_for(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+                float re = 0.0f;
+                float im = 0.0f;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    int64_t src = 2 * (base_offset + d * inner_size);
+                    re += in_ptr[src];
+                    im += in_ptr[src + 1];
+                }
+                int64_t dst = 2 * (outer_idx * inner_size + inner_idx);
+                out_ptr[dst]     = re;
+                out_ptr[dst + 1] = im;
+            });
+        }
+        else if (in_cont.dtype() == DType::Complex128) {
+            const double* in_ptr = reinterpret_cast<const double*>(in_cont.data_ptr());
+            double* out_ptr = reinterpret_cast<double*>(const_cast<void*>(output.data_ptr()));
+            queue.parallel_for(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+                double re = 0.0;
+                double im = 0.0;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    int64_t src = 2 * (base_offset + d * inner_size);
+                    re += in_ptr[src];
+                    im += in_ptr[src + 1];
+                }
+                int64_t dst = 2 * (outer_idx * inner_size + inner_idx);
+                out_ptr[dst]     = re;
+                out_ptr[dst + 1] = im;
+            });
         }
         else {
             throw std::runtime_error("Unsupported dtype for sum reduction");

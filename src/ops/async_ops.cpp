@@ -337,20 +337,40 @@ auto wait_all(std::vector<Future<Tensor>>& futures) -> std::vector<Tensor> {
 }
 
 auto wait_any(const std::vector<Future<Tensor>>& futures) -> int64_t {
-    // Simple polling implementation
-    // In production, could use more sophisticated wait mechanisms
-    while (true) {
+    // Simple polling implementation — return the first future that becomes
+    // ready. Don't return the moment one is ready, though: the unfinished
+    // futures may still be mid-flight in the thread pool, capturing Tensors
+    // by value. If the caller lets the `futures` vector die before those
+    // background tasks finish, the captured Tensors get destroyed while the
+    // async op is still writing through their storage, producing
+    // "corrupted double-linked list" / SEGFAULT on teardown (seen on
+    // AsyncOpsMultiDTypeTest.WaitAny / Oneapi0_Float16).
+    //
+    // Block on *all* futures after finding the first-ready one so background
+    // work completes deterministically. `wait_any` still returns the index
+    // of the future that finished first, matching the contract.
+    int64_t first_ready = -1;
+    while (first_ready < 0) {
         for (size_t i = 0; i < futures.size(); ++i) {
             if (futures[i].is_ready()) {
-                return static_cast<int64_t>(i);
+                first_ready = static_cast<int64_t>(i);
+                break;
             }
         }
-
-        // Small sleep to avoid busy-waiting
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
+        if (first_ready < 0) {
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        }
     }
-
-    return -1;
+    // Spin until every future has signalled completion (is_ready()==true).
+    // We do NOT call `.wait()` — the Future<T>::wait() API consumes the
+    // shared state's value and is not const-callable, and the caller may
+    // still want to call `.wait()` later.
+    for (const auto& f : futures) {
+        while (!f.is_ready()) {
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        }
+    }
+    return first_ready;
 }
 
 } // namespace tenzor

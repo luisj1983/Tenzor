@@ -6331,6 +6331,15 @@ auto cummin_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> std:
 
 auto fmax_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor
 {
+    // Float16 / BFloat16: widen to Float32, compute, narrow back.
+    // sycl::fmax is not overloaded for sycl::half in all toolchain versions,
+    // so route through the Float32 path.
+    if (a.dtype() == DType::Float16 || a.dtype() == DType::BFloat16) {
+        const DType orig_dtype = a.dtype();
+        Tensor result = fmax_kernel(a.to(DType::Float32), b.to(DType::Float32), queue);
+        return result.to(orig_dtype);
+    }
+
     Tensor a_cont = a.is_contiguous() ? a : contiguous_kernel(a, queue);
     Tensor b_cont = b.is_contiguous() ? b : contiguous_kernel(b, queue);
     int64_t n = a_cont.numel();
@@ -6377,6 +6386,13 @@ auto fmax_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor
 
 auto fmin_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor
 {
+    // Float16 / BFloat16: widen to Float32, compute, narrow back.
+    if (a.dtype() == DType::Float16 || a.dtype() == DType::BFloat16) {
+        const DType orig_dtype = a.dtype();
+        Tensor result = fmin_kernel(a.to(DType::Float32), b.to(DType::Float32), queue);
+        return result.to(orig_dtype);
+    }
+
     Tensor a_cont = a.is_contiguous() ? a : contiguous_kernel(a, queue);
     Tensor b_cont = b.is_contiguous() ? b : contiguous_kernel(b, queue);
     int64_t n = a_cont.numel();
@@ -6485,6 +6501,11 @@ auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim, bool keepdim,
     Tensor input_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
     const auto& shape = input_cont.shape();
     const int64_t ndim = input_cont.ndim();
+    // Normalize negative dim (dim=-1 ⇒ last axis). The kernel-registry default
+    // for these reductions is -1, meaning "no dim was specified" from the
+    // caller; for 1D inputs this is the only reduction dim, for higher-rank
+    // inputs it maps to the last axis.
+    if (dim < 0) dim += ndim;
     const int64_t dim_size = shape[dim];
     const auto dtype = input_cont.dtype();
     const auto device = input_cont.device();
@@ -6649,6 +6670,11 @@ static auto quantile_impl(const Tensor& input, double q, int64_t dim, bool keepd
     Tensor input_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
     const auto& shape = input_cont.shape();
     const int64_t ndim = input_cont.ndim();
+    // Normalize negative dim (dim=-1 ⇒ last axis). The kernel-registry default
+    // for these reductions is -1, meaning "no dim was specified" from the
+    // caller; for 1D inputs this is the only reduction dim, for higher-rank
+    // inputs it maps to the last axis.
+    if (dim < 0) dim += ndim;
     const int64_t dim_size = shape[dim];
     const auto dtype = input_cont.dtype();
     const auto device = input_cont.device();

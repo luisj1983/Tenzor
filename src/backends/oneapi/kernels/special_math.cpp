@@ -369,19 +369,70 @@ inline double zeta_dev_f64(double s, double a) {
     return result;
 }
 
-// Polygamma ψ^(n)(x)
+// Polygamma ψ^(n)(x) using Hurwitz-zeta recurrence + asymptotic expansion.
+//
+// ψ^(n)(x) = (-1)^(n+1) n! ζ(n+1, x), where
+//   ζ(s, x) = Σ_{k=0}^∞ 1/(x+k)^s.
+//
+// Truncating that series at k=100 leaves a residual tail of order
+// 1/(x+100)^n which for small-to-moderate x fails Float64 gradcheck
+// (~1% error). Instead, use the recurrence
+//   ψ^(n)(x) = ψ^(n)(x+1) + (-1)^n n! / x^(n+1)
+// to shift x above a threshold (x ≥ 10 here), then apply the Bernoulli
+// asymptotic expansion where B_0=1, B_2=1/6, B_4=-1/30, B_6=1/42,
+// B_8=-1/30, B_10=5/66:
+//   ψ^(n)(y) = (-1)^(n+1) [ (n-1)!/y^n + n!/(2 y^{n+1})
+//                        + Σ_{k≥1} B_{2k} (2k+n-1)! / ((2k)! y^{2k+n}) ].
 inline double polygamma_dev_f64(int n, double x) {
     if (n == 0) return digamma_dev_f64(x);
+
     double fact_n = 1.0;
     for (int k = 1; k <= n; ++k) fact_n *= static_cast<double>(k);
     double sign = ((n + 1) % 2 == 0) ? 1.0 : -1.0;
-    double sum = 0.0;
-    for (int k = 0; k < 100; ++k) {
-        double term = sycl::pow(x + k, -static_cast<double>(n + 1));
-        sum += term;
-        if (term < 1e-15 * sycl::fabs(sum)) break;
+
+    // Shift x up by 1 each step, accumulating exact corrections
+    // (-1)^{n+1} n! / x^{n+1}. We want y ≥ 10 to make the asymptotic series
+    // tight enough for Float64 gradcheck (≲1e-12 residual).
+    //
+    // ψ(x+1) = ψ(x) + 1/x ⇒ differentiating n times:
+    //   ψ^(n)(x+1) = ψ^(n)(x) + (-1)^n n! / x^{n+1},
+    // which rearranges to ψ^(n)(x) = ψ^(n)(x+1) + (-1)^{n+1} n! / x^{n+1}.
+    double y = x;
+    double shift_sum = 0.0;
+    const double shift_sign = ((n + 1) % 2 == 0) ? 1.0 : -1.0;  // (-1)^{n+1}
+    for (int k = 0; k < 20 && y < 10.0; ++k) {
+        shift_sum += shift_sign * fact_n * sycl::pow(y, -static_cast<double>(n + 1));
+        y += 1.0;
     }
-    return sign * fact_n * sum;
+
+    // Asymptotic expansion at large y.
+    // Leading two terms: (n-1)!/y^n + n!/(2 y^{n+1}).
+    double fact_nm1 = (n >= 1) ? fact_n / static_cast<double>(n) : 1.0;
+    double y_inv = 1.0 / y;
+    double asymptotic = fact_nm1 * sycl::pow(y_inv, static_cast<double>(n))
+                      + 0.5 * fact_n * sycl::pow(y_inv, static_cast<double>(n + 1));
+
+    // Bernoulli correction terms B_{2k} (2k+n-1)! / ((2k)! y^{2k+n}).
+    // Coefficients computed on the fly so it generalizes past n=1.
+    const double B[] = { 1.0 / 6.0, -1.0 / 30.0, 1.0 / 42.0,
+                         -1.0 / 30.0, 5.0 / 66.0, -691.0 / 2730.0 };
+    double y2_inv = y_inv * y_inv;
+    double y_pow = sycl::pow(y_inv, static_cast<double>(n));  // 1/y^n
+    // Falling factorial (2k+n-1)(2k+n-2)...(n) built iteratively.
+    double ff = 1.0;
+    for (int k = 1; k <= 6; ++k) {
+        // ff starts at (n-1)! after k=0; for k-th term we need (2k+n-1)!/(n-1)!.
+        // Multiply by the next two factors each step: (2k+n-2) and (2k+n-1).
+        ff *= static_cast<double>(2 * k + n - 2);
+        ff *= static_cast<double>(2 * k + n - 1);
+        y_pow *= y2_inv;
+        // (2k)! denominator: 2, 24, 720, 40320, 3628800, 479001600
+        static const double fact_2k[] = { 2.0, 24.0, 720.0, 40320.0,
+                                          3628800.0, 479001600.0 };
+        asymptotic += B[k - 1] * ff * y_pow / fact_2k[k - 1];
+    }
+
+    return shift_sum + sign * asymptotic;
 }
 inline float polygamma_dev_f32(int n, float x) {
     return static_cast<float>(polygamma_dev_f64(n, static_cast<double>(x)));
@@ -1152,14 +1203,62 @@ auto cosine_similarity_kernel(const Tensor& a, const Tensor& b,
 // =========================================================================
 auto renorm_kernel(const Tensor& input, double p, int64_t dim, double maxnorm,
                     sycl::queue& queue) -> Tensor {
-    // Compute p-norm along dim (keepdim=true for broadcasting)
-    auto norm_val = tenzor::norm(input, p, dim, true);
-    // clamp: max(norm, maxnorm)
-    auto maxnorm_tensor = tenzor::full_like(norm_val, maxnorm);
-    auto clamped = tenzor::maximum(norm_val, maxnorm_tensor);
-    // scale = maxnorm / max(norm, maxnorm)
-    auto scale = tenzor::div(maxnorm_tensor, clamped);
-    return tenzor::mul(input, scale);
+    // PyTorch semantics: normalize each sub-tensor obtained by fixing the
+    // index along `dim`. For a (M, N) tensor with dim=0, that's a per-row
+    // normalization (reduce over N, not M). Previous implementation called
+    // `tenzor::norm(input, p, dim, true)` which reduces ALONG `dim` instead
+    // of over all other dims — the inverse of what renorm expects. Rewrite
+    // as an explicit per-slice sweep matching the CPU kernel.
+    auto shape_span = input.shape();
+    std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+
+    int64_t dim_size = shape[dim];
+    int64_t outer = 1;
+    for (int64_t i = 0; i < dim; ++i) outer *= shape[i];
+    int64_t inner = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner *= shape[i];
+
+    Tensor result = input.contiguous();
+    result = tenzor::mul(result, tenzor::full_like(result, 1.0));  // clone
+
+    auto run = [&]<typename T>() {
+        T* data = result.data<T>();
+        const double p_d = p;
+        const double max_d = maxnorm;
+        queue.parallel_for(sycl::range<1>(dim_size), [=](sycl::id<1> idx) {
+            int64_t d = idx[0];
+            // Per-slice p-norm
+            double norm_acc = 0.0;
+            for (int64_t o = 0; o < outer; ++o) {
+                for (int64_t i = 0; i < inner; ++i) {
+                    int64_t pos = (o * dim_size + d) * inner + i;
+                    double v = static_cast<double>(data[pos]);
+                    norm_acc += sycl::pow(sycl::fabs(v), p_d);
+                }
+            }
+            double norm_val = sycl::pow(norm_acc, 1.0 / p_d);
+            if (norm_val > max_d) {
+                double scale = max_d / norm_val;
+                for (int64_t o = 0; o < outer; ++o) {
+                    for (int64_t i = 0; i < inner; ++i) {
+                        int64_t pos = (o * dim_size + d) * inner + i;
+                        data[pos] = static_cast<T>(static_cast<double>(data[pos]) * scale);
+                    }
+                }
+            }
+        }).wait();
+    };
+
+    if (result.dtype() == DType::Float32) {
+        run.template operator()<float>();
+    } else if (result.dtype() == DType::Float64) {
+        run.template operator()<double>();
+    } else {
+        throw std::runtime_error("renorm OneAPI: unsupported dtype");
+    }
+    return result;
 }
 
 } // namespace oneapi

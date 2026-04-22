@@ -482,10 +482,19 @@ auto histogramdd_kernel(const Tensor& input, std::vector<int64_t> bins,
 
 auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
                   sycl::queue& queue) -> Tensor {
+    // Preserve the input dtype on output. Compute in Float64 when either
+    // input is Float64, otherwise compute in Float32 and narrow Float16 /
+    // BFloat16 back at the end.
+    const DType orig_dtype = (x1.dtype() == DType::Float64 || x2.dtype() == DType::Float64)
+                                 ? DType::Float64
+                                 : x1.dtype();
+    const DType compute_dtype = (orig_dtype == DType::Float64) ? DType::Float64
+                                                               : DType::Float32;
+
     auto a = x1.contiguous();
     auto b = x2.contiguous();
-    if (a.dtype() != DType::Float32) a = a.to(DType::Float32);
-    if (b.dtype() != DType::Float32) b = b.to(DType::Float32);
+    if (a.dtype() != compute_dtype) a = a.to(compute_dtype);
+    if (b.dtype() != compute_dtype) b = b.to(compute_dtype);
 
     // Accept 2D (P, M) or 3D (B, P, M); 2D treated as B=1
     int64_t B, P, M, R;
@@ -500,63 +509,118 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
 
     std::vector<int64_t> result_shape = (a.ndim() == 2) ? std::vector<int64_t>{P, R}
                                                          : std::vector<int64_t>{B, P, R};
-    Tensor result(result_shape, DType::Float32, a.device());
-    if (B == 0 || P == 0 || R == 0) return result;
+    Tensor result(result_shape, compute_dtype, a.device());
+    if (B == 0 || P == 0 || R == 0) {
+        return (compute_dtype != orig_dtype) ? result.to(orig_dtype) : result;
+    }
 
-    const float* a_ptr = get_data_ptr<const float>(a);
-    const float* b_ptr = get_data_ptr<const float>(b);
-    float* out_ptr = get_data_ptr<float>(result);
+    if (compute_dtype == DType::Float32) {
+        const float* a_ptr = get_data_ptr<const float>(a);
+        const float* b_ptr = get_data_ptr<const float>(b);
+        float* out_ptr = get_data_ptr<float>(result);
 
-    // Capture p into the kernel with branch specialization at launch time
-    // to avoid the pow() cost for the L1 and L2 paths.
-    const float p_f = static_cast<float>(p);
-    if (p == 2.0) {
-        queue.parallel_for<CDistL2Tag>(sycl::range<3>(B, P, R),
-            [=](sycl::id<3> idx) {
-                int64_t bi = idx[0];
-                int64_t p_idx = idx[1];
-                int64_t r  = idx[2];
-                const float* a_b = a_ptr + bi * P * M;
-                const float* b_b = b_ptr + bi * R * M;
-                float sum = 0.0f;
-                for (int64_t m = 0; m < M; ++m) {
-                    float diff = a_b[p_idx * M + m] - b_b[r * M + m];
-                    sum += diff * diff;
-                }
-                out_ptr[(bi * P + p_idx) * R + r] = sycl::sqrt(sum);
-            });
-    } else if (p == 1.0) {
-        queue.parallel_for<CDistL1Tag>(sycl::range<3>(B, P, R),
-            [=](sycl::id<3> idx) {
-                int64_t bi = idx[0];
-                int64_t p_idx = idx[1];
-                int64_t r  = idx[2];
-                const float* a_b = a_ptr + bi * P * M;
-                const float* b_b = b_ptr + bi * R * M;
-                float sum = 0.0f;
-                for (int64_t m = 0; m < M; ++m) {
-                    sum += sycl::fabs(a_b[p_idx * M + m] - b_b[r * M + m]);
-                }
-                out_ptr[(bi * P + p_idx) * R + r] = sum;
-            });
-    } else {
-        queue.parallel_for<CDistLpTag>(sycl::range<3>(B, P, R),
-            [=](sycl::id<3> idx) {
-                int64_t bi = idx[0];
-                int64_t p_idx = idx[1];
-                int64_t r  = idx[2];
-                const float* a_b = a_ptr + bi * P * M;
-                const float* b_b = b_ptr + bi * R * M;
-                float sum = 0.0f;
-                for (int64_t m = 0; m < M; ++m) {
-                    float diff = sycl::fabs(a_b[p_idx * M + m] - b_b[r * M + m]);
-                    sum += sycl::pow(diff, p_f);
-                }
-                out_ptr[(bi * P + p_idx) * R + r] = sycl::pow(sum, 1.0f / p_f);
-            });
+        // Capture p into the kernel with branch specialization at launch time
+        // to avoid the pow() cost for the L1 and L2 paths.
+        const float p_f = static_cast<float>(p);
+        if (p == 2.0) {
+            queue.parallel_for<CDistL2Tag>(sycl::range<3>(B, P, R),
+                [=](sycl::id<3> idx) {
+                    int64_t bi = idx[0];
+                    int64_t p_idx = idx[1];
+                    int64_t r  = idx[2];
+                    const float* a_b = a_ptr + bi * P * M;
+                    const float* b_b = b_ptr + bi * R * M;
+                    float sum = 0.0f;
+                    for (int64_t m = 0; m < M; ++m) {
+                        float diff = a_b[p_idx * M + m] - b_b[r * M + m];
+                        sum += diff * diff;
+                    }
+                    out_ptr[(bi * P + p_idx) * R + r] = sycl::sqrt(sum);
+                });
+        } else if (p == 1.0) {
+            queue.parallel_for<CDistL1Tag>(sycl::range<3>(B, P, R),
+                [=](sycl::id<3> idx) {
+                    int64_t bi = idx[0];
+                    int64_t p_idx = idx[1];
+                    int64_t r  = idx[2];
+                    const float* a_b = a_ptr + bi * P * M;
+                    const float* b_b = b_ptr + bi * R * M;
+                    float sum = 0.0f;
+                    for (int64_t m = 0; m < M; ++m) {
+                        sum += sycl::fabs(a_b[p_idx * M + m] - b_b[r * M + m]);
+                    }
+                    out_ptr[(bi * P + p_idx) * R + r] = sum;
+                });
+        } else {
+            queue.parallel_for<CDistLpTag>(sycl::range<3>(B, P, R),
+                [=](sycl::id<3> idx) {
+                    int64_t bi = idx[0];
+                    int64_t p_idx = idx[1];
+                    int64_t r  = idx[2];
+                    const float* a_b = a_ptr + bi * P * M;
+                    const float* b_b = b_ptr + bi * R * M;
+                    float sum = 0.0f;
+                    for (int64_t m = 0; m < M; ++m) {
+                        float diff = sycl::fabs(a_b[p_idx * M + m] - b_b[r * M + m]);
+                        sum += sycl::pow(diff, p_f);
+                    }
+                    out_ptr[(bi * P + p_idx) * R + r] = sycl::pow(sum, 1.0f / p_f);
+                });
+        }
+    } else {  // Float64
+        const double* a_ptr = get_data_ptr<const double>(a);
+        const double* b_ptr = get_data_ptr<const double>(b);
+        double* out_ptr = get_data_ptr<double>(result);
+
+        const double p_d = p;
+        if (p == 2.0) {
+            queue.parallel_for<class CDistL2F64Tag>(sycl::range<3>(B, P, R),
+                [=](sycl::id<3> idx) {
+                    int64_t bi = idx[0];
+                    int64_t p_idx = idx[1];
+                    int64_t r  = idx[2];
+                    const double* a_b = a_ptr + bi * P * M;
+                    const double* b_b = b_ptr + bi * R * M;
+                    double sum = 0.0;
+                    for (int64_t m = 0; m < M; ++m) {
+                        double diff = a_b[p_idx * M + m] - b_b[r * M + m];
+                        sum += diff * diff;
+                    }
+                    out_ptr[(bi * P + p_idx) * R + r] = sycl::sqrt(sum);
+                });
+        } else if (p == 1.0) {
+            queue.parallel_for<class CDistL1F64Tag>(sycl::range<3>(B, P, R),
+                [=](sycl::id<3> idx) {
+                    int64_t bi = idx[0];
+                    int64_t p_idx = idx[1];
+                    int64_t r  = idx[2];
+                    const double* a_b = a_ptr + bi * P * M;
+                    const double* b_b = b_ptr + bi * R * M;
+                    double sum = 0.0;
+                    for (int64_t m = 0; m < M; ++m) {
+                        sum += sycl::fabs(a_b[p_idx * M + m] - b_b[r * M + m]);
+                    }
+                    out_ptr[(bi * P + p_idx) * R + r] = sum;
+                });
+        } else {
+            queue.parallel_for<class CDistLpF64Tag>(sycl::range<3>(B, P, R),
+                [=](sycl::id<3> idx) {
+                    int64_t bi = idx[0];
+                    int64_t p_idx = idx[1];
+                    int64_t r  = idx[2];
+                    const double* a_b = a_ptr + bi * P * M;
+                    const double* b_b = b_ptr + bi * R * M;
+                    double sum = 0.0;
+                    for (int64_t m = 0; m < M; ++m) {
+                        double diff = sycl::fabs(a_b[p_idx * M + m] - b_b[r * M + m]);
+                        sum += sycl::pow(diff, p_d);
+                    }
+                    out_ptr[(bi * P + p_idx) * R + r] = sycl::pow(sum, 1.0 / p_d);
+                });
+        }
     }
     queue.wait();
-    return result;
+    return (compute_dtype != orig_dtype) ? result.to(orig_dtype) : result;
 }
 
 // =========================================================================
