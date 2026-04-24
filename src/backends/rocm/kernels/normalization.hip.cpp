@@ -1201,12 +1201,17 @@ auto group_norm_backward_kernel(
     int64_t num_group_instances = N * num_groups;
     int block_size = BLOCK_SIZE;
 
+    // Saved stats from group_norm_forward_with_stats are always Float32.
+    // Cast to input dtype for the typed backward kernel.
+    Tensor mean_typed = (mean.dtype() == input.dtype()) ? mean : mean.to(input.dtype());
+    Tensor rstd_typed = (rstd.dtype() == input.dtype()) ? rstd : rstd.to(input.dtype());
+
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(group_norm_backward_hip_kernel<float>,
             dim3(num_group_instances), dim3(block_size), 0, stream,
             grad_output.data<float>(), input.data<float>(),
             weight ? weight->data<float>() : nullptr,
-            mean.data<float>(), rstd.data<float>(),
+            mean_typed.data<float>(), rstd_typed.data<float>(),
             grad_input.data<float>(), grad_weight.data<float>(), grad_bias.data<float>(),
             N, C, HW, num_groups, channels_per_group);
         HIP_POST_LAUNCH_CHECK();
@@ -1215,7 +1220,7 @@ auto group_norm_backward_kernel(
             dim3(num_group_instances), dim3(block_size), 0, stream,
             grad_output.data<double>(), input.data<double>(),
             weight ? weight->data<double>() : nullptr,
-            mean.data<double>(), rstd.data<double>(),
+            mean_typed.data<double>(), rstd_typed.data<double>(),
             grad_input.data<double>(), grad_weight.data<double>(), grad_bias.data<double>(),
             N, C, HW, num_groups, channels_per_group);
         HIP_POST_LAUNCH_CHECK();

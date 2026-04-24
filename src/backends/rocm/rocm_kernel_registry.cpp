@@ -56,6 +56,8 @@ inline DType dtype_from_string(std::string_view s, DType default_val = DType::Fl
     if (s == "int8") return DType::Int8;
     if (s == "uint8") return DType::UInt8;
     if (s == "bool") return DType::Bool;
+    if (s == "complex64") return DType::Complex64;
+    if (s == "complex128") return DType::Complex128;
     return default_val;
 }
 
@@ -1721,16 +1723,20 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::InstanceNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // nn layer expects {output, saved_mean, saved_rstd}. InstanceNorm is GroupNorm
+        // with num_groups = C, so delegate to the stats-returning forward.
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         const Tensor* weight = inputs.size() > 1 ? &inputs[1] : nullptr;
         const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
-        return std::vector<Tensor>{rocm::instance_norm_kernel(inputs[0], weight, bias, eps, get_hip_stream(attrs))};
+        int64_t C = inputs[0].shape()[1];
+        return rocm::group_norm_forward_with_stats(inputs[0], C, weight, bias, eps, get_hip_stream(attrs));
     });
 
     table.register_kernel(OpId::InstanceNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        const Tensor* weight = inputs.size() > 4 ? &inputs[4] : nullptr;
+        // nn layer passes [grad_output, input, weight, mean, rstd].
+        const Tensor* weight = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         auto [grad_input, grad_weight, grad_bias] = rocm::instance_norm_backward_kernel(
-            inputs[0], inputs[1], inputs[2], inputs[3], weight, get_hip_stream(attrs));
+            inputs[0], inputs[1], inputs[3], inputs[4], weight, get_hip_stream(attrs));
         return std::vector<Tensor>{grad_input, grad_weight, grad_bias};
     });
 
@@ -2697,12 +2703,15 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         });
 
     // SparseTrsv: solve L*x = b.
+    // Uses the standalone HIP kernel even when rocSPARSE is available:
+    // rocSPARSE's SpSV has been observed to hang during the preprocess stage
+    // on small triangular systems in recent ROCm releases.
     table.register_single_output_kernel(OpId::SparseTrsv,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t N = attrs.get_int(AttrKey::N);
             bool upper = attrs.get_bool(AttrKey::Upper, false);
-            auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N});
-            return rocm::rocm_sparse_trsv_kernel(L, inputs[3], upper);
+            return rocm::sparse_trsv_standalone_hip(inputs[0], inputs[1], inputs[2],
+                                                    inputs[3], N, upper, /*stream=*/nullptr);
         });
 
     // SparseTrsm: solve L*X = B (multi-RHS).
@@ -2710,8 +2719,8 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             int64_t N = attrs.get_int(AttrKey::N);
             bool upper = attrs.get_bool(AttrKey::Upper, false);
-            auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N});
-            return rocm::rocm_sparse_trsm_kernel(L, inputs[3], upper);
+            return rocm::sparse_trsm_standalone_hip(inputs[0], inputs[1], inputs[2],
+                                                    inputs[3], N, upper, /*stream=*/nullptr);
         });
 #else
     // Standalone GPU SpGEMM/Trsv/Trsm — no rocSPARSE dependency

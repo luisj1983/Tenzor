@@ -917,16 +917,35 @@ auto expand_kernel(const Tensor& input, const std::vector<int64_t>& new_shape, v
     auto input_strides = input.strides();
     int64_t ndim = new_shape.size();
 
+    int64_t input_ndim = input_shape.size();
+    if (input_ndim > ndim) {
+        throw std::runtime_error(
+            "expand: target shape must have at least as many dimensions as input");
+    }
+
     // Pad input shape/strides if needed
     std::vector<int64_t> padded_input_shape(ndim, 1);
     std::vector<int64_t> padded_input_strides(ndim, 0);
 
-    int64_t input_ndim = input_shape.size();
     int64_t pad_size = ndim - input_ndim;
 
     for (int64_t i = 0; i < input_ndim; ++i) {
         padded_input_shape[pad_size + i] = input_shape[i];
         padded_input_strides[pad_size + i] = input_strides[i];
+    }
+
+    // Validate: each dim must either broadcast (input_dim == 1) or match new_shape.
+    // A "-1" entry in new_shape carries the input dim unchanged.
+    for (int64_t i = 0; i < ndim; ++i) {
+        int64_t in_d = padded_input_shape[i];
+        int64_t out_d = new_shape[i];
+        if (out_d == -1) continue;
+        if (in_d != 1 && in_d != out_d) {
+            throw std::runtime_error(
+                "expand: size mismatch at dim " + std::to_string(i) +
+                " — cannot expand dim of size " + std::to_string(in_d) +
+                " to " + std::to_string(out_d));
+        }
     }
 
     Tensor output(new_shape, input.dtype(), input.device());
@@ -998,6 +1017,25 @@ auto expand_kernel(const Tensor& input, const std::vector<int64_t>& new_shape, v
         hipLaunchKernelGGL(expand_kernel_impl<int16_t>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
             input.data<int16_t>(), output.data<int16_t>(),
+            d_input_shape, d_input_strides, d_output_shape, ndim, total_elements);
+    } else if (input.dtype() == DType::Complex64) {
+        // Complex64 storage is two Float32s (8 bytes total). Since expand
+        // only copies elements, treating each Complex64 as a 64-bit opaque
+        // word is safe and avoids needing a dedicated complex kernel.
+        hipLaunchKernelGGL(expand_kernel_impl<int64_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const int64_t*>(input.data_ptr()),
+            reinterpret_cast<int64_t*>(const_cast<void*>(output.data_ptr())),
+            d_input_shape, d_input_strides, d_output_shape, ndim, total_elements);
+    } else if (input.dtype() == DType::Complex128) {
+        // Complex128 storage is two Float64s (16 bytes total). Expand as
+        // pairs of 8-byte words by treating the trailing two floats as
+        // independent real-valued dimensions.
+        struct __attribute__((aligned(16))) pair64 { int64_t a; int64_t b; };
+        hipLaunchKernelGGL(expand_kernel_impl<pair64>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const pair64*>(input.data_ptr()),
+            reinterpret_cast<pair64*>(const_cast<void*>(output.data_ptr())),
             d_input_shape, d_input_strides, d_output_shape, ndim, total_elements);
     } else {
         HIP_CHECK(hipFree(d_input_shape));
@@ -1308,22 +1346,66 @@ __global__ void cast_kernel_impl(const SrcT* input, DstT* output, int64_t n) {
 }
 
 // Specialization for __half source
+// For floating-point targets we route NaN/±Inf through explicit Float32 bit
+// patterns so the IEEE special values survive round-trips regardless of how
+// HIP's __half2float decides to canonicalise them on a given rocm build.
 template<typename DstT>
 __global__ void cast_from_f16_kernel(const __half* input, DstT* output, int64_t n) {
     HIP_GRID_STRIDE_LOOP(idx, n) {
+        unsigned short bits = *reinterpret_cast<const unsigned short*>(&input[idx]);
+        unsigned short exp = (bits >> 10) & 0x1Fu;
+        unsigned short mant = bits & 0x3FFu;
+        if constexpr (std::is_floating_point_v<DstT>) {
+            if (exp == 0x1Fu) {
+                if (mant != 0u) {
+                    output[idx] = static_cast<DstT>(nanf(""));
+                } else {
+                    float inf_f32 = (bits & 0x8000u) ? -INFINITY : INFINITY;
+                    output[idx] = static_cast<DstT>(inf_f32);
+                }
+                continue;
+            }
+        }
         output[idx] = static_cast<DstT>(__half2float(input[idx]));
     }
 }
 
 // Specialization for __half target
+// Saturating conversion: clamps finite values to ±65504 to prevent overflow
+// producing Inf during later arithmetic, while preserving input NaN and Inf
+// so round-trips through F16 don't silently lose them.
+//
+// NaN / ±Inf are emitted as explicit bit patterns because HIP's __float2half
+// on some ROCm builds does not forward a Float32 NaN through to a Float16
+// NaN — the payload can be lost and the result falls back to a finite value.
+// We also classify via the raw F32 bit pattern rather than isnan/isinf so
+// fast-math compile settings can't optimise the check away.
 template<typename SrcT>
 __global__ void cast_to_f16_kernel(const SrcT* input, __half* output, int64_t n) {
     constexpr float kHalfMax = 65504.0f;
     HIP_GRID_STRIDE_LOOP(idx, n) {
-        // Saturating conversion: clamp to ±65504 to prevent Inf→NaN propagation
         float val = static_cast<float>(input[idx]);
-        val = fminf(fmaxf(val, -kHalfMax), kHalfMax);
-        output[idx] = __float2half(val);
+        unsigned int vb = __float_as_uint(val);
+        unsigned int exp = (vb >> 23) & 0xFFu;
+        unsigned int mant = vb & 0x7FFFFFu;
+        unsigned int sign16 = (vb >> 16) & 0x8000u;
+        unsigned short bits16;
+        if (exp == 0xFFu) {
+            // NaN or Inf in Float32
+            if (mant != 0u) {
+                // Quiet NaN in Float16.
+                bits16 = 0x7E00u;
+            } else {
+                // ±Inf.
+                bits16 = static_cast<unsigned short>(sign16 | 0x7C00u);
+            }
+            __half h;
+            *reinterpret_cast<unsigned short*>(&h) = bits16;
+            output[idx] = h;
+        } else {
+            val = fminf(fmaxf(val, -kHalfMax), kHalfMax);
+            output[idx] = __float2half(val);
+        }
     }
 }
 
@@ -1541,6 +1623,12 @@ auto cast_kernel(const Tensor& input, DType target_dtype, hipStream_t stream) ->
                     dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                     src, result.data<uint8_t>(), n);
                 break;
+            case DType::BFloat16:
+                // F16 and BF16 have disjoint precision/range; route through F32
+                // using the cast_from_f16_kernel<float> → cast_kernel_impl<float, bf16>
+                // pipeline rather than duplicating a direct kernel.
+                return cast_kernel(cast_kernel(input, DType::Float32, stream),
+                                   DType::BFloat16, stream);
             default:
                 throw std::runtime_error("cast: unsupported target dtype for Float16 source");
         }

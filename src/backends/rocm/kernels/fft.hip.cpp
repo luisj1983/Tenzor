@@ -642,6 +642,23 @@ auto rocm_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
         auto result_f32 = rocm_irfft_kernel(input_f32, dim, n, norm, stream);
         return result_f32.to(DType::BFloat16);
     }
+    // Real-to-complex promotion. The CPU and CUDA irfft kernels accept Float32
+    // or Float64 input by first casting to Complex64/Complex128 (imag = 0),
+    // so mirror that here — autograd wires the Float32 forward path through
+    // the same dispatch site.
+    if (input.dtype() == DType::Float32) {
+        auto input_c64 = input.to(DType::Complex64);
+        return rocm_irfft_kernel(input_c64, dim, n, norm, stream);
+    }
+    if (input.dtype() == DType::Float64) {
+        auto input_c128 = input.to(DType::Complex128);
+        return rocm_irfft_kernel(input_c128, dim, n, norm, stream);
+    }
+    if (input.dtype() == DType::Float16) {
+        auto input_c64 = input.to(DType::Float32).to(DType::Complex64);
+        auto result = rocm_irfft_kernel(input_c64, dim, n, norm, stream);
+        return result.to(DType::Float16);
+    }
 
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());

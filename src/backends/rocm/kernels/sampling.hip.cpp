@@ -18,6 +18,10 @@
 namespace tenzor {
 namespace rocm {
 
+// Forward declaration: defined in sort.hip.cpp.
+auto topk_kernel(const Tensor& input, int64_t k, int64_t dim, bool largest,
+                 bool sorted, hipStream_t stream) -> std::pair<Tensor, Tensor>;
+
 #ifndef HIP_CHECK
 #define HIP_CHECK(call) do { \
     hipError_t err = call; \
@@ -234,8 +238,34 @@ __global__ void multinomial_sample_kernel(const float* cdf, int64_t* output,
     output[sid] = lo;
 }
 
+// Gumbel top-k: compute key_i = log(p_i) + (-log(-log(U_i))) per category.
+// A descending sort selects num_samples distinct categories with the correct
+// multinomial-without-replacement distribution.
+__global__ void multinomial_gumbel_keys_kernel(
+    const float* __restrict__ probs, float* __restrict__ keys,
+    int64_t num_categories, uint64_t seed, int64_t batch_idx)
+{
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_categories) return;
+
+    // Per-element PRNG stream. Use a simple splitmix-style mix to produce a
+    // float in (0, 1); standard libraries aren't available device-side.
+    uint64_t state = seed ^ (static_cast<uint64_t>(batch_idx) * 0x9E3779B97F4A7C15ULL)
+                          ^ (static_cast<uint64_t>(tid)       * 0xBF58476D1CE4E5B9ULL);
+    state ^= state >> 30; state *= 0xBF58476D1CE4E5B9ULL;
+    state ^= state >> 27; state *= 0x94D049BB133111EBULL;
+    state ^= state >> 31;
+    // Map to float (0, 1). Avoid exactly 0.
+    float u = static_cast<float>((state >> 40) + 1u) / 16777217.0f;
+    if (u >= 1.0f) u = 0.99999994f;
+    float g = -logf(-logf(u));   // Gumbel noise
+    float p = probs[tid];
+    float log_p = (p > 0.0f) ? logf(p) : -1e30f;
+    keys[tid] = log_p + g;
+}
+
 auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
-                        bool /*replacement*/, hipStream_t stream) -> Tensor {
+                        bool replacement, hipStream_t stream) -> Tensor {
     auto input = probs.contiguous();
     if (input.dtype() != DType::Float32) input = input.to(DType::Float32);
 
@@ -244,10 +274,33 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
 
     int64_t batch_size = input.shape()[0];
     int64_t num_categories = input.shape()[1];
-    Tensor result({batch_size, num_samples}, DType::Int64, input.device());
-    Tensor cdf_buf({batch_size, num_categories}, DType::Float32, input.device());
 
     uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+
+    if (!replacement) {
+        // Gumbel top-k trick: log(p_i) + -log(-log(U_i)), then sort descending.
+        // num_samples must be ≤ num_categories; caller is expected to validate.
+        Tensor keys({batch_size, num_categories}, DType::Float32, input.device());
+        int threads = 256;
+        int blocks_cat = static_cast<int>((num_categories + threads - 1) / threads);
+        for (int64_t b = 0; b < batch_size; ++b) {
+            const float* prob_ptr = input.data<float>() + b * num_categories;
+            float* key_ptr = keys.data<float>() + b * num_categories;
+            hipLaunchKernelGGL(multinomial_gumbel_keys_kernel,
+                dim3(blocks_cat), dim3(threads), 0, stream,
+                prob_ptr, key_ptr, num_categories, seed, b);
+        }
+        HIP_CHECK(hipGetLastError());
+        // keys is 2D (batch_size, num_categories); dim 1 is the categories axis.
+        auto [values, indices] = topk_kernel(keys, num_samples, /*dim=*/1,
+                                             /*largest=*/true, /*sorted=*/true, stream);
+        Tensor result = indices;
+        if (was_1d) result = result.reshape({num_samples});
+        return result;
+    }
+
+    Tensor result({batch_size, num_samples}, DType::Int64, input.device());
+    Tensor cdf_buf({batch_size, num_categories}, DType::Float32, input.device());
 
     for (int64_t b = 0; b < batch_size; ++b) {
         const float* prob_ptr = input.data<float>() + b * num_categories;
@@ -493,6 +546,11 @@ __global__ void cdist_lp_kernel_impl(const float* x1, const float* x2,
 
 auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
                   hipStream_t stream) -> Tensor {
+    // Record the original dtype so we can narrow the Float32 result back.
+    // Previously the function silently returned Float32 regardless of input
+    // dtype, which broke dtype parity for Float64/Float16 tests.
+    const DType orig_dtype = x1.dtype();
+
     auto a = x1.contiguous();
     auto b = x2.contiguous();
     if (a.dtype() != DType::Float32) a = a.to(DType::Float32);
@@ -512,7 +570,9 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
     std::vector<int64_t> result_shape = (a.ndim() == 2) ? std::vector<int64_t>{P, R}
                                                          : std::vector<int64_t>{B, P, R};
     Tensor result(result_shape, DType::Float32, a.device());
-    if (B == 0 || P == 0 || R == 0) return result;
+    if (B == 0 || P == 0 || R == 0) {
+        return (orig_dtype == DType::Float32) ? result : result.to(orig_dtype);
+    }
 
     dim3 threads(16, 16, 1);
     dim3 blocks(static_cast<unsigned>((R + 15) / 16),
@@ -533,7 +593,7 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
             static_cast<float>(p), B, P, R, M);
     }
     HIP_CHECK(hipGetLastError());
-    return result;
+    return (orig_dtype == DType::Float32) ? result : result.to(orig_dtype);
 }
 
 // ============================================================================

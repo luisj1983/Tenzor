@@ -1514,34 +1514,41 @@ auto spgemm_standalone_hip(std::span<const Tensor> inputs, const OpAttributes& a
     throw std::runtime_error("spgemm_standalone_hip: only Float32/Float64");
 }
 
-// Sparse triangular solve with level-set atomics
+// Sparse triangular solve: single-thread sequential kernel.
+//
+// Parallel triangular solve on GPU is tricky: the obvious "one thread per row +
+// atomic spin-wait on dependencies" approach deadlocks under SIMT execution —
+// divergent threads within a warp that spin waiting on a dependency stall the
+// thread that would write the dependency (they're all in the same warp and
+// only one divergent branch runs at a time). One-block-per-row also can't
+// guarantee forward progress when the number of rows exceeds resident block
+// capacity.
+//
+// For correctness across all hardware we run the solve on a single GPU thread.
+// This is sequential (O(nnz)) but bit-correct and matches CPU/CUDA results.
+// rocSPARSE's SpSV has been observed to hang on small triangular systems in
+// recent ROCm releases, so we deliberately do not delegate to it.
 template <typename T>
-__global__ void sparse_trsv_hip_kernel(
+__global__ void sparse_trsv_sequential_kernel(
     const int64_t* __restrict__ crow, const int64_t* __restrict__ col,
     const T* __restrict__ vals, const T* __restrict__ b,
-    T* __restrict__ x, int* __restrict__ solved,
-    int64_t N, bool upper)
+    T* __restrict__ x, int64_t N, bool upper)
 {
-    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= N) return;
-    int64_t row = upper ? (N - 1 - tid) : tid;
-
-    if (tid > 0) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    for (int64_t ii = 0; ii < N; ++ii) {
+        int64_t row = upper ? (N - 1 - ii) : ii;
+        T rhs = b[row];
+        T diag = T(1);
         for (int64_t j = crow[row]; j < crow[row + 1]; ++j) {
             int64_t c = col[j];
-            if (upper ? (c > row) : (c < row))
-                while (atomicOr(&solved[c], 0) == 0) {}
+            if (c == row) {
+                diag = vals[j];
+            } else if (upper ? (c > row) : (c < row)) {
+                rhs -= vals[j] * x[c];
+            }
         }
+        x[row] = rhs / diag;
     }
-
-    T rhs = b[row]; T diag = T(1);
-    for (int64_t j = crow[row]; j < crow[row + 1]; ++j) {
-        int64_t c = col[j];
-        if (c == row) diag = vals[j];
-        else if (upper ? (c > row) : (c < row)) rhs -= vals[j] * x[c];
-    }
-    x[row] = rhs / diag;
-    atomicExch(&solved[row], 1);
 }
 
 auto sparse_trsv_standalone_hip(const Tensor& crow, const Tensor& col_idx,
@@ -1549,25 +1556,20 @@ auto sparse_trsv_standalone_hip(const Tensor& crow, const Tensor& col_idx,
     hipStream_t stream) -> Tensor
 {
     auto x = tenzor::zeros({N}, vals.dtype(), vals.device());
-    int* d_solved; HIP_CHECK_SPARSE_SA(hipMalloc(&d_solved, N * sizeof(int)));
-    HIP_CHECK_SPARSE_SA(hipMemsetAsync(d_solved, 0, N * sizeof(int), stream));
+    if (N == 0) return x;
 
-    constexpr int BLK = 256;
-    int64_t blocks = (N + BLK - 1) / BLK;
     if (vals.dtype() == DType::Float32) {
-        hipLaunchKernelGGL(sparse_trsv_hip_kernel<float>, dim3(blocks), dim3(BLK), 0, stream,
+        hipLaunchKernelGGL(sparse_trsv_sequential_kernel<float>, dim3(1), dim3(1), 0, stream,
             crow.data<int64_t>(), col_idx.data<int64_t>(), vals.data<float>(),
-            b.data<float>(), x.data<float>(), d_solved, N, upper);
+            b.data<float>(), x.data<float>(), N, upper);
     } else if (vals.dtype() == DType::Float64) {
-        hipLaunchKernelGGL(sparse_trsv_hip_kernel<double>, dim3(blocks), dim3(BLK), 0, stream,
+        hipLaunchKernelGGL(sparse_trsv_sequential_kernel<double>, dim3(1), dim3(1), 0, stream,
             crow.data<int64_t>(), col_idx.data<int64_t>(), vals.data<double>(),
-            b.data<double>(), x.data<double>(), d_solved, N, upper);
+            b.data<double>(), x.data<double>(), N, upper);
     } else {
-        hipFree(d_solved);
         throw std::runtime_error("sparse_trsv_standalone_hip: only Float32/Float64");
     }
     HIP_CHECK_SPARSE_SA(hipGetLastError());
-    hipFree(d_solved);
     return x;
 }
 
@@ -1578,7 +1580,9 @@ auto sparse_trsm_standalone_hip(const Tensor& crow, const Tensor& col_idx,
     int64_t K = B.shape()[1];
     auto X = tenzor::zeros({N, K}, vals.dtype(), vals.device());
     for (int64_t k = 0; k < K; ++k) {
-        auto b_col = B.slice(1, k, k + 1).squeeze(1);
+        // B is (N, K) row-major, so column k is a strided view. The trsv kernel
+        // assumes contiguous b, so materialise the slice before solving.
+        auto b_col = B.slice(1, k, k + 1).squeeze(1).contiguous();
         auto x_col = sparse_trsv_standalone_hip(crow, col_idx, vals, b_col, N, upper, stream);
         if (vals.dtype() == DType::Float32) {
             HIP_CHECK_SPARSE_SA(hipMemcpy2DAsync(

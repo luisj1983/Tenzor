@@ -18,6 +18,11 @@
 #include "fp16_saturate.h"
 
 namespace tenzor {
+// Forward declaration: tenzor::expand — broadcasts to a given shape.
+// Pulling in the full transform.hpp would leak host-only names into device
+// code and poison unqualified intrinsic calls.
+auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor;
+
 namespace rocm {
 
 // Forward declaration from transform.hip.cpp (needed for FP8 emulation)
@@ -2059,6 +2064,11 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val, hipStream_t
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
 
+    if (n == 0) {
+        // HIP rejects zero-grid launches with "invalid configuration argument".
+        return result;
+    }
+
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
 
@@ -2998,6 +3008,21 @@ void div_inplace_kernel(Tensor& a, const Tensor& b, hipStream_t stream) {
     int64_t n = a.numel();
     if (n == 0) return;
 
+    // BFloat16 widen-narrow: no native BF16 device division path. Compute in
+    // Float32, then write the result back into `a`'s BF16 storage. The inplace
+    // contract requires `a` itself to be the destination, so we cast-in-place
+    // rather than returning a new tensor.
+    if (a.dtype() == DType::BFloat16) {
+        auto a_f32 = a.to(DType::Float32);
+        auto b_f32 = b.to(DType::Float32);
+        div_inplace_kernel(a_f32, b_f32, stream);
+        auto result_bf16 = a_f32.to(DType::BFloat16);
+        HIP_CHECK(hipMemcpyAsync(a.data_ptr(), result_bf16.data_ptr(),
+                                  n * sizeof(uint16_t), hipMemcpyDeviceToDevice, stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
+        return;
+    }
+
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
 
@@ -3035,7 +3060,7 @@ void div_inplace_kernel(Tensor& a, const Tensor& b, hipStream_t stream) {
             reinterpret_cast<__half*>(a.data<Float16>()),
             reinterpret_cast<const __half*>(b.data<Float16>()), n);
     } else {
-        throw std::runtime_error("div_inplace operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("div_inplace operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -3197,6 +3222,15 @@ __global__ void fill_kernel_device(T* output, T value, int64_t n) {
     }
 }
 
+// Strided fill: write `value` at positions i*stride for i in [0, n).
+// Used to set the real component of an interleaved complex buffer.
+template<typename T>
+__global__ void fill_strided_kernel(T* output, T value, int64_t n, int64_t stride) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx * stride] = value;
+    }
+}
+
 /**
  * @brief Fill kernel launcher - fills tensor with constant value
  * @param tensor Tensor to fill
@@ -3289,6 +3323,18 @@ auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
     } else if (dtype == DType::BFloat16) {
         hipLaunchKernelGGL(fill_kernel_device<hip_bfloat16>, grid, block, 0, stream,
             reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), hip_bfloat16(0.0f), n);
+    } else if (dtype == DType::Complex64) {
+        // Complex64 storage is interleaved (re, im) pairs of float.
+        // Zero both parts by filling 2*n floats with 0.
+        dim3 g2, b2;
+        compute_launch_config_1d(n * 2, g2, b2);
+        hipLaunchKernelGGL(fill_kernel_device<float>, g2, b2, 0, stream,
+            reinterpret_cast<float*>(const_cast<void*>(result.data_ptr())), 0.0f, n * 2);
+    } else if (dtype == DType::Complex128) {
+        dim3 g2, b2;
+        compute_launch_config_1d(n * 2, g2, b2);
+        hipLaunchKernelGGL(fill_kernel_device<double>, g2, b2, 0, stream,
+            reinterpret_cast<double*>(const_cast<void*>(result.data_ptr())), 0.0, n * 2);
     } else {
         throw std::runtime_error("Unsupported dtype for zeros operation");
     }
@@ -3343,6 +3389,23 @@ auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
     } else if (dtype == DType::BFloat16) {
         hipLaunchKernelGGL(fill_kernel_device<hip_bfloat16>, grid, block, 0, stream,
             reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), hip_bfloat16(1.0f), n);
+    } else if (dtype == DType::Complex64) {
+        // ones of Complex64 = (1, 0). Zero-fill the full 2n-float buffer then
+        // stamp real components to 1.0.
+        dim3 g2, b2;
+        compute_launch_config_1d(n * 2, g2, b2);
+        hipLaunchKernelGGL(fill_kernel_device<float>, g2, b2, 0, stream,
+            reinterpret_cast<float*>(const_cast<void*>(result.data_ptr())), 0.0f, n * 2);
+        // Strided fill: real parts at stride 2.
+        hipLaunchKernelGGL(fill_strided_kernel<float>, grid, block, 0, stream,
+            reinterpret_cast<float*>(const_cast<void*>(result.data_ptr())), 1.0f, n, 2);
+    } else if (dtype == DType::Complex128) {
+        dim3 g2, b2;
+        compute_launch_config_1d(n * 2, g2, b2);
+        hipLaunchKernelGGL(fill_kernel_device<double>, g2, b2, 0, stream,
+            reinterpret_cast<double*>(const_cast<void*>(result.data_ptr())), 0.0, n * 2);
+        hipLaunchKernelGGL(fill_strided_kernel<double>, grid, block, 0, stream,
+            reinterpret_cast<double*>(const_cast<void*>(result.data_ptr())), 1.0, n, 2);
     } else {
         throw std::runtime_error("Unsupported dtype for ones operation");
     }
@@ -4270,9 +4333,13 @@ __global__ void isnan_kernel_f64(const double* input, uint8_t* output, int64_t n
 
 __global__ void isnan_kernel_f16(const __half* input, uint8_t* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float val = __half2float(input[idx]);
-        uint32_t bits; memcpy(&bits, &val, sizeof(bits));
-        output[idx] = static_cast<uint8_t>(((bits & 0x7F800000u) == 0x7F800000u) && ((bits & 0x007FFFFFu) != 0) ? 1 : 0);
+        // Examine the raw F16 bit pattern directly. Going through
+        // __half2float on some ROCm builds canonicalises NaN to a finite
+        // value and misses the predicate.
+        uint16_t bits = *reinterpret_cast<const uint16_t*>(&input[idx]);
+        uint16_t exp = (bits >> 10) & 0x1Fu;
+        uint16_t mant = bits & 0x3FFu;
+        output[idx] = static_cast<uint8_t>((exp == 0x1Fu && mant != 0u) ? 1 : 0);
     }
 }
 
@@ -4292,9 +4359,9 @@ __global__ void isinf_kernel_f64(const double* input, uint8_t* output, int64_t n
 
 __global__ void isinf_kernel_f16(const __half* input, uint8_t* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float val = __half2float(input[idx]);
-        uint32_t bits; memcpy(&bits, &val, sizeof(bits));
-        output[idx] = static_cast<uint8_t>(((bits & 0x7FFFFFFFu) == 0x7F800000u) ? 1 : 0);
+        // Direct bit-pattern inspection: F16 has exp=0x1F, mantissa=0.
+        uint16_t bits = *reinterpret_cast<const uint16_t*>(&input[idx]);
+        output[idx] = static_cast<uint8_t>(((bits & 0x7FFFu) == 0x7C00u) ? 1 : 0);
     }
 }
 
@@ -4314,9 +4381,10 @@ __global__ void isfinite_kernel_f64(const double* input, uint8_t* output, int64_
 
 __global__ void isfinite_kernel_f16(const __half* input, uint8_t* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float val = __half2float(input[idx]);
-        uint32_t bits; memcpy(&bits, &val, sizeof(bits));
-        output[idx] = static_cast<uint8_t>(((bits & 0x7F800000u) != 0x7F800000u) ? 1 : 0);
+        // Finite ⇔ F16 exponent is not all-ones.
+        uint16_t bits = *reinterpret_cast<const uint16_t*>(&input[idx]);
+        uint16_t exp = (bits >> 10) & 0x1Fu;
+        output[idx] = static_cast<uint8_t>((exp != 0x1Fu) ? 1 : 0);
     }
 }
 
@@ -4927,8 +4995,30 @@ auto lerp_kernel(const Tensor& a, const Tensor& b, const Tensor& weight, hipStre
     if (a.dtype() != b.dtype() || a.dtype() != weight.dtype()) {
         throw std::runtime_error("lerp: all tensors must have the same dtype");
     }
-    if (a.numel() != b.numel() || a.numel() != weight.numel()) {
-        throw std::runtime_error("lerp: all tensors must have the same number of elements");
+    if (a.numel() != b.numel()) {
+        throw std::runtime_error("lerp: start and end must have the same number of elements");
+    }
+
+    // Broadcast scalar or size-1 weight to match a's shape. `lerp(a, b, scalar)`
+    // wraps the scalar in a size-1 Tensor at the ops layer, so we need to
+    // support both the scalar case and the full per-element weight case.
+    Tensor weight_broad = weight;
+    if (weight.numel() != a.numel()) {
+        if (weight.numel() != 1) {
+            throw std::runtime_error(
+                "lerp: weight must be scalar or have the same number of elements as start/end");
+        }
+        std::vector<int64_t> a_shape(a.shape().begin(), a.shape().end());
+        weight_broad = tenzor::expand(weight, a_shape).contiguous();
+    }
+
+    // BFloat16: route through Float32 — no native kernel for BF16 lerp.
+    if (a.dtype() == DType::BFloat16) {
+        auto a_f32 = a.to(DType::Float32);
+        auto b_f32 = b.to(DType::Float32);
+        auto w_f32 = weight_broad.to(DType::Float32);
+        auto r_f32 = lerp_kernel(a_f32, b_f32, w_f32, stream);
+        return r_f32.to(DType::BFloat16);
     }
 
     int64_t n = a.numel();
@@ -4942,18 +5032,18 @@ auto lerp_kernel(const Tensor& a, const Tensor& b, const Tensor& weight, hipStre
 
     if (a.dtype() == DType::Float32) {
         hipLaunchKernelGGL(lerp_kernel_f32, grid, block, 0, stream,
-            a.data<float>(), b.data<float>(), weight.data<float>(), result.data<float>(), n);
+            a.data<float>(), b.data<float>(), weight_broad.data<float>(), result.data<float>(), n);
     } else if (a.dtype() == DType::Float64) {
         hipLaunchKernelGGL(lerp_kernel_f64, grid, block, 0, stream,
-            a.data<double>(), b.data<double>(), weight.data<double>(), result.data<double>(), n);
+            a.data<double>(), b.data<double>(), weight_broad.data<double>(), result.data<double>(), n);
     } else if (a.dtype() == DType::Float16) {
         hipLaunchKernelGGL(lerp_kernel_f16, grid, block, 0, stream,
             reinterpret_cast<const __half*>(a.data<Float16>()),
             reinterpret_cast<const __half*>(b.data<Float16>()),
-            reinterpret_cast<const __half*>(weight.data<Float16>()),
+            reinterpret_cast<const __half*>(weight_broad.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
     } else {
-        throw std::runtime_error("lerp operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("lerp operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -5388,6 +5478,11 @@ auto angle_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
             input.data<double>(), result.data<double>(), n);
         HIP_CHECK(hipGetLastError());
         return result;
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        // F16/BF16 have no direct ROCm angle kernel; widen to Float32 and cast back.
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = angle_kernel(input_f32, stream);
+        return result_f32.to(input.dtype());
     }
     throw std::runtime_error("angle: unsupported dtype");
 }
@@ -5441,6 +5536,13 @@ auto polar_kernel(const Tensor& abs_t, const Tensor& angle_t, hipStream_t stream
             reinterpret_cast<double*>(result.data_ptr()), n);
         HIP_CHECK(hipGetLastError());
         return result;
+    } else if (abs_t.dtype() == DType::Float16 || abs_t.dtype() == DType::BFloat16) {
+        // Widen to Float32, compute, and cast the Complex64 result to the matching
+        // lower-precision *real* dtype. polar() already promotes F16 → Complex64 in
+        // the CPU backend, so we match that here.
+        auto abs_f32 = abs_t.to(DType::Float32);
+        auto angle_f32 = angle_t.to(DType::Float32);
+        return polar_kernel(abs_f32, angle_f32, stream);
     }
     throw std::runtime_error("polar: only Float32 and Float64 inputs are supported");
 }
@@ -5668,19 +5770,84 @@ __device__ inline double zeta_dev_f64(double s, double a) {
     return result;
 }
 
-// --- Polygamma ψ^(n)(x) — direct asymptotic series for n ≥ 1 ---
+// --- Polygamma ψ^(n)(x) ---
+//
+// ψ^(n)(x) = (-1)^(n+1) n! Σ_{k=0}^∞ 1/(x+k)^(n+1)
+//
+// The straight series converges too slowly for small n (for n=1 the k-th term
+// is ~1/k², so 100 terms leaves a ~1/100 tail), which shows up as a ~0.01
+// shift in trigamma at small x and breaks gradcheck for Digamma. Instead we
+// use the recurrence ψ^(n)(x) = ψ^(n)(x+1) + (-1)^(n+1) n! / x^(n+1) to shift
+// x above a threshold, then apply an asymptotic expansion.
+//
+// Asymptotic expansion for trigamma (n=1):
+//   ψ'(x) ~ 1/x + 1/(2x²) + Σ_{k=1}^∞ B_{2k} / x^{2k+1}
+// with Bernoulli numbers B_2=1/6, B_4=-1/30, B_6=1/42, B_8=-1/30, B_10=5/66.
+//
+// For n ≥ 2 we differentiate the digamma expansion term-wise to get
+//   ψ^(n)(x) ~ (-1)^(n+1) [ (n-1)!/x^n + n!/(2 x^(n+1))
+//                           + Σ_{k=1} B_{2k} (2k+n-1)! / ((2k)! x^(2k+n)) ]
 __device__ inline double polygamma_dev_f64(int n, double x) {
     if (n == 0) return digamma_dev_f64(x);
+
     double fact_n = 1.0;
     for (int k = 1; k <= n; ++k) fact_n *= static_cast<double>(k);
     double sign = ((n + 1) % 2 == 0) ? 1.0 : -1.0;
-    double sum = 0.0;
-    for (int k = 0; k < 100; ++k) {
-        double term = pow(x + k, -static_cast<double>(n + 1));
-        sum += term;
-        if (term < 1e-15 * fabs(sum)) break;
+
+    // Recurrence: shift x up so the asymptotic series converges quickly.
+    constexpr double kShiftTarget = 14.0;
+    double shifted = 0.0;
+    while (x < kShiftTarget) {
+        shifted += pow(x, -static_cast<double>(n + 1));
+        x += 1.0;
     }
-    return sign * fact_n * sum;
+
+    // Asymptotic expansion for large x.
+    double inv_x = 1.0 / x;
+    double inv_x_n = pow(inv_x, static_cast<double>(n));
+    double fact_nm1 = fact_n / static_cast<double>(n);  // (n-1)!
+
+    // Leading terms: (n-1)!/x^n + n!/(2 x^(n+1))
+    double sum_asym = fact_nm1 * inv_x_n + 0.5 * fact_n * inv_x_n * inv_x;
+
+    // Bernoulli correction terms: B_{2k} (2k+n-1)! / ((2k)! x^(2k+n))
+    // First few B_{2k}/(2k)!:
+    //   k=1: B_2 = 1/6  → 1/12
+    //   k=2: B_4 = -1/30 → -1/720
+    //   k=3: B_6 = 1/42 → 1/30240
+    //   k=4: B_8 = -1/30 → -1/1209600
+    //   k=5: B_10 = 5/66 → 1/(479001600/5) = 5/479001600
+    // We only need a handful of terms once x is ≥ 14.
+    constexpr double B_over_fact[5] = {
+        1.0/12.0,
+        -1.0/720.0,
+        1.0/30240.0,
+        -1.0/1209600.0,
+        1.0/47900160.0  // = 5 / 479001600
+    };
+    double inv_x2 = inv_x * inv_x;
+    double power = inv_x_n * inv_x;  // x^-(n+1)
+    double rising = 1.0;             // (n)(n+1)…(n+2k-1) as we accumulate k
+    for (int k = 1; k <= 5; ++k) {
+        rising *= static_cast<double>(n + 2*k - 1) * static_cast<double>(n + 2*k - 2);
+        power *= inv_x2;
+        sum_asym += B_over_fact[k-1] * rising * power;
+    }
+
+    // Unsigned sum = shifted-recurrence part + asymptotic expansion part.
+    //
+    // The recurrence contributes |n! / x^(n+1)| per shifted step in the
+    // unsigned magnitude. For n=0 we return early above, so n≥1 here; the
+    // asymptotic expansion already includes the (n-1)! prefactor, so the
+    // final result is the signed sum times (-1)^(n+1) * n!, with the
+    // pre-scaling factored out of sum_asym.
+    //
+    // Clean breakdown:
+    //   ψ^(n)(x) = (-1)^(n+1) * [ n! * (shifted) + asymp_series(x) ]
+    // where asymp_series for large x is:
+    //   (n-1)!/x^n + n!/(2 x^(n+1)) + Σ B_{2k}(2k+n-1)!/((2k)! x^(2k+n))
+    // which we've built up in sum_asym.
+    return sign * (fact_n * shifted + sum_asym);
 }
 __device__ inline float polygamma_dev_f32(int n, float x) {
     return static_cast<float>(polygamma_dev_f64(n, static_cast<double>(x)));
@@ -6190,18 +6357,34 @@ auto heaviside_kernel(const Tensor& input, const Tensor& values, hipStream_t str
 __global__ void nan_to_num_kernel_f32(const float* input, float* out, int64_t n, float nan_val, float posinf_val, float neginf_val) {
     HIP_KERNEL_LOOP(idx, n) {
         float x = input[idx];
-        if (isnan(x)) out[idx] = nan_val;
-        else if (isinf(x) && x > 0) out[idx] = posinf_val;
-        else if (isinf(x) && x < 0) out[idx] = neginf_val;
+        // Inspect IEEE-754 bits directly. The HIP isnan/isinf intrinsics have
+        // been observed to miscompile under fast-math here.
+        unsigned int bits;
+        memcpy(&bits, &x, sizeof(bits));
+        unsigned int exp = (bits >> 23) & 0xFFu;
+        unsigned int mant = bits & 0x7FFFFFu;
+        bool is_inf = (exp == 0xFFu) && (mant == 0u);
+        bool is_nan = (exp == 0xFFu) && (mant != 0u);
+        bool sign_neg = (bits & 0x80000000u) != 0u;
+        if (is_nan) out[idx] = nan_val;
+        else if (is_inf && !sign_neg) out[idx] = posinf_val;
+        else if (is_inf && sign_neg) out[idx] = neginf_val;
         else out[idx] = x;
     }
 }
 __global__ void nan_to_num_kernel_f64(const double* input, double* out, int64_t n, double nan_val, double posinf_val, double neginf_val) {
     HIP_KERNEL_LOOP(idx, n) {
         double x = input[idx];
-        if (isnan(x)) out[idx] = nan_val;
-        else if (isinf(x) && x > 0) out[idx] = posinf_val;
-        else if (isinf(x) && x < 0) out[idx] = neginf_val;
+        unsigned long long bits;
+        memcpy(&bits, &x, sizeof(bits));
+        unsigned long long exp = (bits >> 52) & 0x7FFull;
+        unsigned long long mant = bits & 0xFFFFFFFFFFFFFull;
+        bool is_inf = (exp == 0x7FFull) && (mant == 0ull);
+        bool is_nan = (exp == 0x7FFull) && (mant != 0ull);
+        bool sign_neg = (bits & 0x8000000000000000ull) != 0ull;
+        if (is_nan) out[idx] = nan_val;
+        else if (is_inf && !sign_neg) out[idx] = posinf_val;
+        else if (is_inf && sign_neg) out[idx] = neginf_val;
         else out[idx] = x;
     }
 }
@@ -7506,6 +7689,14 @@ auto fmax_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor
             hipLaunchKernelGGL(fmax_hip_i64, grid_dim, block_dim, 0, stream,
                 a_cont.data<int64_t>(), b_cont.data<int64_t>(), output.data<int64_t>(), n);
             break;
+        case DType::Float16:
+        case DType::BFloat16: {
+            // No native F16/BF16 fmax kernel — widen to Float32, compute, narrow back.
+            auto a_f32 = a_cont.to(DType::Float32);
+            auto b_f32 = b_cont.to(DType::Float32);
+            auto out_f32 = fmax_kernel(a_f32, b_f32, stream);
+            return out_f32.to(a_cont.dtype());
+        }
         default:
             throw std::runtime_error("fmax ROCm: unsupported dtype");
     }
@@ -7577,6 +7768,13 @@ auto fmin_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor
             hipLaunchKernelGGL(fmin_hip_i64, grid_dim, block_dim, 0, stream,
                 a_cont.data<int64_t>(), b_cont.data<int64_t>(), output.data<int64_t>(), n);
             break;
+        case DType::Float16:
+        case DType::BFloat16: {
+            auto a_f32 = a_cont.to(DType::Float32);
+            auto b_f32 = b_cont.to(DType::Float32);
+            auto out_f32 = fmin_kernel(a_f32, b_f32, stream);
+            return out_f32.to(a_cont.dtype());
+        }
         default:
             throw std::runtime_error("fmin ROCm: unsupported dtype");
     }

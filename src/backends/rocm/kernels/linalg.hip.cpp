@@ -25,9 +25,21 @@
 #include "tenzor/core/device.hpp"
 #include "tenzor/backend/rocm_caching_allocator.hip.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/linalg.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "../rocsolver_handle_pool.hpp"
+
+// Forward-declare the tensor math entry points we need — pulling the full
+// math.hpp into this HIP translation unit makes tenzor::sqrt/abs overloads
+// visible to device code and poisons unqualified sqrt() calls in the
+// shared-memory fallback kernels below.
+namespace tenzor {
+auto add(const Tensor& a, const Tensor& b) -> Tensor;
+auto sub(const Tensor& a, const Tensor& b) -> Tensor;
+auto mul(const Tensor& a, const Tensor& b) -> Tensor;
+auto matmul(const Tensor& a, const Tensor& b) -> Tensor;
+}
 
 #include <rocsolver/rocsolver.h>
 #include <rocblas/rocblas.h>
@@ -310,10 +322,11 @@ auto linalg_det_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);
 
+    // 2D input → scalar ({}) result; batched input → leading dims. Matches
+    // torch.linalg.det: a plain matrix returns a 0-D tensor, not {1}.
     std::vector<int64_t> out_shape;
     auto shape = A.shape();
     for (size_t i = 0; i + 2 < shape.size(); i++) out_shape.push_back(shape[i]);
-    if (out_shape.empty()) out_shape.push_back(1);
 
     auto result = zeros(out_shape, A.dtype(), A.device());
     auto handle = RocSOLVERHandlePool::get(stream);
@@ -2077,21 +2090,94 @@ auto linalg_ldl_solve_kernel(const Tensor& LD, const Tensor& pivots,
 // Householder product — compose from existing ormqr kernel
 // =========================================================================
 auto linalg_householder_kernel(const Tensor& input, const Tensor& tau,
-                                hipStream_t stream) -> Tensor {
+                                [[maybe_unused]] hipStream_t stream) -> Tensor {
+    // Apply Householder reflectors to I[:, :n]: Q = H_0 · H_1 · … · H_{k-1} · I[:m,:n]
+    //
+    // LAPACK's sorgqr (used by the CPU path) produces an m×n matrix — the
+    // first n columns of the full m×m Q. We replicate that with row-major
+    // tensor ops, walking the reflectors right→left (H_{k-1} first) because
+    // the canonical order that matches LAPACK is to accumulate columns of Q
+    // starting from the identity on the right.
+    //
+    // Routing through rocSOLVER ormqr with an identity matrix as C works only
+    // for square m=n inputs (row-major/col-major leading-dimension mismatch
+    // with non-square C), so we mirror the CUDA implementation that sidesteps
+    // cuSOLVER's ormqr for the same reason.
     auto shape = input.shape();
     auto ndim = static_cast<int64_t>(shape.size());
+    if (ndim < 2) {
+        throw std::invalid_argument("linalg::householder_product: input must be at least 2D");
+    }
     int64_t m = shape[ndim - 2];
-
-    auto I = tenzor::eye(m, std::nullopt, input.dtype(), input.device());
-
-    if (ndim > 2) {
-        std::vector<int64_t> eye_shape(shape.begin(), shape.end());
-        eye_shape[ndim - 1] = m;
-        I = tenzor::expand(I, std::move(eye_shape));
-        I = I.contiguous();
+    int64_t n = shape[ndim - 1];
+    int64_t k = tau.shape()[tau.shape().size() - 1];
+    if (k > std::min(m, n)) {
+        throw std::invalid_argument(
+            "linalg::householder_product: tau length must be ≤ min(m, n)");
     }
 
-    return linalg_ormqr_kernel(input, tau, I, true, false, stream);
+    DType dt = input.dtype();
+    Device dev = input.device();
+
+    DType compute_dt = dt;
+    if (dt == DType::Float16 || dt == DType::BFloat16) compute_dt = DType::Float32;
+
+    Tensor V = input.contiguous();
+    Tensor tau_c = tau.contiguous();
+    if (V.dtype() != compute_dt) V = V.to(compute_dt);
+    if (tau_c.dtype() != compute_dt) tau_c = tau_c.to(compute_dt);
+
+    auto I_full = tenzor::eye(m, std::nullopt, compute_dt, dev);
+    Tensor Q = (n == m) ? I_full
+                        : tenzor::slice(I_full, /*dim=*/1, /*start=*/0, /*end=*/n).contiguous();
+    if (ndim > 2) {
+        std::vector<int64_t> batched_shape(shape.begin(), shape.end());
+        Q = tenzor::expand(Q, std::move(batched_shape));
+        Q = Q.contiguous();
+    }
+
+    for (int64_t j = k - 1; j >= 0; --j) {
+        Tensor v_j = tenzor::slice(V, /*dim=*/-1, /*start=*/j, /*end=*/j + 1).contiguous();
+
+        // Mask rows [0..j) to 0 and overwrite row j with 1, keeping rows (j..m) as V[i, j].
+        auto mask_cpu = tenzor::ones({m, int64_t(1)}, compute_dt, Device::cpu());
+        auto overrides_cpu = tenzor::zeros({m, int64_t(1)}, compute_dt, Device::cpu());
+        if (compute_dt == DType::Float32) {
+            float* mm = mask_cpu.data<float>();
+            float* oo = overrides_cpu.data<float>();
+            for (int64_t i = 0; i < j; ++i) { mm[i] = 0.0f; oo[i] = 0.0f; }
+            if (j < m) { mm[j] = 0.0f; oo[j] = 1.0f; }
+        } else {
+            double* mm = mask_cpu.data<double>();
+            double* oo = overrides_cpu.data<double>();
+            for (int64_t i = 0; i < j; ++i) { mm[i] = 0.0; oo[i] = 0.0; }
+            if (j < m) { mm[j] = 0.0; oo[j] = 1.0; }
+        }
+        Tensor mask = mask_cpu.to(dev);
+        Tensor overrides = overrides_cpu.to(dev);
+        if (ndim > 2) {
+            std::vector<int64_t> bshape(shape.begin(), shape.end() - 1);
+            bshape.push_back(1);
+            mask = tenzor::expand(mask, bshape).contiguous();
+            overrides = tenzor::expand(overrides, bshape).contiguous();
+        }
+        v_j = tenzor::add(tenzor::mul(v_j, mask), overrides);
+
+        Tensor tau_j = tenzor::slice(tau_c, /*dim=*/-1, /*start=*/j, /*end=*/j + 1).contiguous();
+
+        Tensor v_jT = tenzor::transpose(v_j, -1, -2);
+        Tensor u = tenzor::matmul(v_jT, Q);
+
+        Tensor outer = tenzor::matmul(v_j, u);
+        std::vector<int64_t> tau_shape(tau_j.shape().begin(), tau_j.shape().end());
+        tau_shape.push_back(1);
+        tau_j = tau_j.reshape(tau_shape);
+        Tensor scaled = tenzor::mul(outer, tau_j);
+        Q = tenzor::sub(Q, scaled);
+    }
+
+    if (Q.dtype() != dt) Q = Q.to(dt);
+    return Q;
 }
 
 } // namespace rocm
@@ -4943,21 +5029,94 @@ auto linalg_ldl_solve_kernel(const Tensor& LD, const Tensor& pivots,
 // Householder product — compose from existing ormqr kernel
 // =========================================================================
 auto linalg_householder_kernel(const Tensor& input, const Tensor& tau,
-                                hipStream_t stream) -> Tensor {
+                                [[maybe_unused]] hipStream_t stream) -> Tensor {
+    // Apply Householder reflectors to I[:, :n]: Q = H_0 · H_1 · … · H_{k-1} · I[:m,:n]
+    //
+    // LAPACK's sorgqr (used by the CPU path) produces an m×n matrix — the
+    // first n columns of the full m×m Q. We replicate that with row-major
+    // tensor ops, walking the reflectors right→left (H_{k-1} first) because
+    // the canonical order that matches LAPACK is to accumulate columns of Q
+    // starting from the identity on the right.
+    //
+    // Routing through rocSOLVER ormqr with an identity matrix as C works only
+    // for square m=n inputs (row-major/col-major leading-dimension mismatch
+    // with non-square C), so we mirror the CUDA implementation that sidesteps
+    // cuSOLVER's ormqr for the same reason.
     auto shape = input.shape();
     auto ndim = static_cast<int64_t>(shape.size());
+    if (ndim < 2) {
+        throw std::invalid_argument("linalg::householder_product: input must be at least 2D");
+    }
     int64_t m = shape[ndim - 2];
-
-    auto I = tenzor::eye(m, std::nullopt, input.dtype(), input.device());
-
-    if (ndim > 2) {
-        std::vector<int64_t> eye_shape(shape.begin(), shape.end());
-        eye_shape[ndim - 1] = m;
-        I = tenzor::expand(I, std::move(eye_shape));
-        I = I.contiguous();
+    int64_t n = shape[ndim - 1];
+    int64_t k = tau.shape()[tau.shape().size() - 1];
+    if (k > std::min(m, n)) {
+        throw std::invalid_argument(
+            "linalg::householder_product: tau length must be ≤ min(m, n)");
     }
 
-    return linalg_ormqr_kernel(input, tau, I, true, false, stream);
+    DType dt = input.dtype();
+    Device dev = input.device();
+
+    DType compute_dt = dt;
+    if (dt == DType::Float16 || dt == DType::BFloat16) compute_dt = DType::Float32;
+
+    Tensor V = input.contiguous();
+    Tensor tau_c = tau.contiguous();
+    if (V.dtype() != compute_dt) V = V.to(compute_dt);
+    if (tau_c.dtype() != compute_dt) tau_c = tau_c.to(compute_dt);
+
+    auto I_full = tenzor::eye(m, std::nullopt, compute_dt, dev);
+    Tensor Q = (n == m) ? I_full
+                        : tenzor::slice(I_full, /*dim=*/1, /*start=*/0, /*end=*/n).contiguous();
+    if (ndim > 2) {
+        std::vector<int64_t> batched_shape(shape.begin(), shape.end());
+        Q = tenzor::expand(Q, std::move(batched_shape));
+        Q = Q.contiguous();
+    }
+
+    for (int64_t j = k - 1; j >= 0; --j) {
+        Tensor v_j = tenzor::slice(V, /*dim=*/-1, /*start=*/j, /*end=*/j + 1).contiguous();
+
+        // Mask rows [0..j) to 0 and overwrite row j with 1, keeping rows (j..m) as V[i, j].
+        auto mask_cpu = tenzor::ones({m, int64_t(1)}, compute_dt, Device::cpu());
+        auto overrides_cpu = tenzor::zeros({m, int64_t(1)}, compute_dt, Device::cpu());
+        if (compute_dt == DType::Float32) {
+            float* mm = mask_cpu.data<float>();
+            float* oo = overrides_cpu.data<float>();
+            for (int64_t i = 0; i < j; ++i) { mm[i] = 0.0f; oo[i] = 0.0f; }
+            if (j < m) { mm[j] = 0.0f; oo[j] = 1.0f; }
+        } else {
+            double* mm = mask_cpu.data<double>();
+            double* oo = overrides_cpu.data<double>();
+            for (int64_t i = 0; i < j; ++i) { mm[i] = 0.0; oo[i] = 0.0; }
+            if (j < m) { mm[j] = 0.0; oo[j] = 1.0; }
+        }
+        Tensor mask = mask_cpu.to(dev);
+        Tensor overrides = overrides_cpu.to(dev);
+        if (ndim > 2) {
+            std::vector<int64_t> bshape(shape.begin(), shape.end() - 1);
+            bshape.push_back(1);
+            mask = tenzor::expand(mask, bshape).contiguous();
+            overrides = tenzor::expand(overrides, bshape).contiguous();
+        }
+        v_j = tenzor::add(tenzor::mul(v_j, mask), overrides);
+
+        Tensor tau_j = tenzor::slice(tau_c, /*dim=*/-1, /*start=*/j, /*end=*/j + 1).contiguous();
+
+        Tensor v_jT = tenzor::transpose(v_j, -1, -2);
+        Tensor u = tenzor::matmul(v_jT, Q);
+
+        Tensor outer = tenzor::matmul(v_j, u);
+        std::vector<int64_t> tau_shape(tau_j.shape().begin(), tau_j.shape().end());
+        tau_shape.push_back(1);
+        tau_j = tau_j.reshape(tau_shape);
+        Tensor scaled = tenzor::mul(outer, tau_j);
+        Q = tenzor::sub(Q, scaled);
+    }
+
+    if (Q.dtype() != dt) Q = Q.to(dt);
+    return Q;
 }
 
 } // namespace rocm

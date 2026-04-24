@@ -679,6 +679,15 @@ auto unique_kernel(const Tensor& input, bool sorted_output, bool return_inverse,
         return {unique_vals.to(DType::BFloat16), inverse, counts};
     }
 
+    // Bool widen: Thrust's hash-on-value path doesn't instantiate cleanly for
+    // bool, so promote to Int32, run the pipeline, and narrow the resulting
+    // unique values back to Bool.
+    if (input.dtype() == DType::Bool) {
+        auto [unique_vals, inverse, counts] = unique_kernel(input.to(DType::Int32),
+            sorted_output, return_inverse, return_counts, stream);
+        return {unique_vals.to(DType::Bool), inverse, counts};
+    }
+
     Tensor flat = input.flatten().contiguous();
 
     switch (input.dtype()) {

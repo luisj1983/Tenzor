@@ -23,6 +23,12 @@
 #include "../rocm_arch_detect.hpp"
 
 namespace tenzor {
+// Forward declarations for tensor entry points used by the Complex sum path.
+// Pulling in math.hpp / creation.hpp directly would make tenzor::sqrt etc.
+// visible to device code and shadow the unqualified ::sqrt used below.
+auto real(const Tensor& input) -> Tensor;
+auto imag(const Tensor& input) -> Tensor;
+auto complex(const Tensor& real_t, const Tensor& imag_t) -> Tensor;
 namespace rocm {
 
 // ============================================================================
@@ -1248,6 +1254,17 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stre
             auto input_f32 = input.to(DType::Float32);
             auto result_f32 = sum_kernel(input_f32, full_reduction ? INT64_MIN : dim, keepdim, stream);
             return result_f32.to(DType::BFloat16);
+        }
+        case DType::Complex64:
+        case DType::Complex128: {
+            // Complex sum: reduce real and imaginary parts independently using
+            // the real-valued sum kernels, then recombine. Matches the CPU
+            // behaviour where Σ c_i = (Σ Re(c_i)) + i·(Σ Im(c_i)).
+            auto real_part = tenzor::real(input);
+            auto imag_part = tenzor::imag(input);
+            auto real_sum = sum_kernel(real_part, full_reduction ? INT64_MIN : dim, keepdim, stream);
+            auto imag_sum = sum_kernel(imag_part, full_reduction ? INT64_MIN : dim, keepdim, stream);
+            return tenzor::complex(real_sum, imag_sum);
         }
         default:
             throw std::runtime_error("sum: unsupported dtype");
