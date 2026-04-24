@@ -55,7 +55,7 @@ int main(int argc, char* argv[]) {
 
     // Training parameters
     float learning_rate = 0.01f;
-    int num_epochs = 500;
+    int num_epochs = 15000;
     int print_every = 50;
 
     showcase::print_section("Training");

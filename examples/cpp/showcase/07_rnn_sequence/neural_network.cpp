@@ -104,7 +104,7 @@ int main(int argc, char* argv[]) {
     std::cout << "\nTotal parameters: " << params.size() << "\n";
 
     // Training parameters
-    int num_epochs = 300;
+    int num_epochs = 15000;
     int print_every = 30;
 
     showcase::print_section("Training");

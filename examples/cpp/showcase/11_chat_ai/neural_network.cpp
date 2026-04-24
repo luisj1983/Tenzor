@@ -1,424 +1,514 @@
 /**
  * @file neural_network.cpp
- * @brief Chat AI using Tenzor's high-level Neural Network API
+ * @brief Chat AI using Tenzor's high-level nn API — tiny decoder-only Transformer
  *
- * This example demonstrates building a character-level sequence-to-sequence
- * chatbot using nn::Module, nn::GRUCell, nn::Linear, and optimizers.
+ * A minimal GPT-style causal language model trained on char-level conversation
+ * data. Demonstrates nn::Embedding, nn::MultiheadAttention (causal),
+ * nn::LayerNorm, nn::Linear, nn::GELU, nn::Dropout, optim::Adam,
+ * nn::CrossEntropyLoss (with label smoothing) and gradient clipping.
  *
- * Architecture: Encoder-Decoder GRU with character-level encoding
- * Training data: Cornell Movie Dialogs Corpus
+ * The model is trained next-token-style over random windows of a concatenated
+ * corpus, then sampled with temperature + top-k for interactive chat.
  *
- * Usage: ./11_chat_ai_neural_network --backend cpu|cuda|vulkan
+ * Usage: ./11_chat_ai_neural_network [--backend cpu|cuda|vulkan|rocm|oneapi]
+ *                                    [--data <path>] [--steps N]
  */
 
 #include "../common.hpp"
-#include <fstream>
-#include <sstream>
-#include <unordered_map>
+
+#include <tenzor/nn/utils/clip_grad.hpp>
+
 #include <algorithm>
+#include <fstream>
+#include <iomanip>
 #include <random>
+#include <sstream>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 using namespace tenzor;
+using namespace tenzor::nn;
 
-// Special tokens
-const char PAD_CHAR = '\0';
-const char SOS_CHAR = '\x01';
-const char EOS_CHAR = '\x02';
+// ============================================================================
+// Char vocabulary (printable ASCII + a couple of control tokens)
+// ============================================================================
 
-/**
- * @brief Character vocabulary for encoding/decoding text
- */
-class CharVocab {
-public:
+struct CharVocab {
+    // Token 0 = PAD, 1 = BOS (conversation start). The remaining printable
+    // ASCII range fills the rest. Newline '\n' is part of printable range we
+    // include so the model can learn turn boundaries.
     CharVocab() {
-        add_char(PAD_CHAR);
-        add_char(SOS_CHAR);
-        add_char(EOS_CHAR);
-        for (char c = ' '; c <= '~'; ++c) {
-            add_char(c);
-        }
+        idx_to_char_.push_back('\0');  // 0 = PAD
+        idx_to_char_.push_back('\x01'); // 1 = BOS
+        char_to_idx_['\0'] = 0;
+        char_to_idx_['\x01'] = 1;
+        for (int c = 0x20; c <= 0x7E; ++c) add(static_cast<char>(c));
+        add('\n');
     }
 
-    void add_char(char c) {
-        if (char_to_idx_.find(c) == char_to_idx_.end()) {
-            int idx = static_cast<int>(idx_to_char_.size());
-            char_to_idx_[c] = idx;
+    void add(char c) {
+        if (!char_to_idx_.count(c)) {
+            char_to_idx_[c] = static_cast<int64_t>(idx_to_char_.size());
             idx_to_char_.push_back(c);
         }
     }
 
-    int encode(char c) const {
+    int64_t encode(char c) const {
         auto it = char_to_idx_.find(c);
-        return (it != char_to_idx_.end()) ? it->second : char_to_idx_.at(' ');
+        return it != char_to_idx_.end() ? it->second : char_to_idx_.at(' ');
     }
 
-    char decode(int idx) const {
-        return (idx >= 0 && idx < static_cast<int>(idx_to_char_.size())) ?
-               idx_to_char_[idx] : ' ';
+    char decode(int64_t i) const {
+        return (i >= 0 && i < static_cast<int64_t>(idx_to_char_.size()))
+               ? idx_to_char_[i] : ' ';
     }
 
-    int size() const { return static_cast<int>(idx_to_char_.size()); }
-    int pad_idx() const { return 0; }
-    int sos_idx() const { return 1; }
-    int eos_idx() const { return 2; }
+    int64_t size()    const { return static_cast<int64_t>(idx_to_char_.size()); }
+    int64_t pad_idx() const { return 0; }
+    int64_t bos_idx() const { return 1; }
+    int64_t nl_idx()  const { return char_to_idx_.at('\n'); }
 
-private:
-    std::unordered_map<char, int> char_to_idx_;
-    std::vector<char> idx_to_char_;
+    std::unordered_map<char, int64_t> char_to_idx_;
+    std::vector<char>                 idx_to_char_;
 };
 
-/**
- * @brief Multi-layer Encoder module using stacked GRUCells
- */
-class Encoder : public nn::Module {
-public:
-    Encoder(int vocab_size, int embed_size, int hidden_size, int num_layers = 2)
-        : vocab_size_(vocab_size), hidden_size_(hidden_size), num_layers_(num_layers) {
+// ============================================================================
+// Data loading — tab-separated question/answer pairs
+// ============================================================================
 
-        embedding_ = std::make_shared<nn::Linear>(vocab_size, embed_size, false);
-        register_module("embedding", embedding_);
-
-        // Create stacked GRU layers
-        for (int i = 0; i < num_layers; ++i) {
-            int input_size = (i == 0) ? embed_size : hidden_size;
-            auto gru = std::make_shared<nn::GRUCell>(input_size, hidden_size);
-            gru_layers_.push_back(gru);
-            register_module("gru_layer_" + std::to_string(i), gru);
-        }
-    }
-
-    auto forward_impl(const Variable& input) -> Variable override {
-        return input;
-    }
-
-    // Returns vector of hidden states, one per layer
-    auto encode(const std::vector<int>& tokens, Device device) -> std::vector<Variable> {
-        // Initialize hidden states for each layer
-        std::vector<Variable> h_states;
-        for (int i = 0; i < num_layers_; ++i) {
-            h_states.push_back(Variable(zeros({1, hidden_size_}, DType::Float32, device), false));
-        }
-
-        for (int token : tokens) {
-            // One-hot encode
-            std::vector<float> one_hot(vocab_size_, 0.0f);
-            one_hot[token] = 1.0f;
-            auto x = Variable(from_data(one_hot.data(), {1, vocab_size_}, device), false);
-
-            // Embed input
-            auto layer_input = embedding_->forward(x);
-
-            // Process through each GRU layer
-            for (int i = 0; i < num_layers_; ++i) {
-                h_states[i] = gru_layers_[i]->forward(layer_input, h_states[i]);
-                layer_input = h_states[i];  // Output becomes input to next layer
-            }
-        }
-
-        return h_states;
-    }
-
-    int hidden_size() const { return hidden_size_; }
-    int num_layers() const { return num_layers_; }
-
-private:
-    int vocab_size_;
-    int hidden_size_;
-    int num_layers_;
-    std::shared_ptr<nn::Linear> embedding_;
-    std::vector<std::shared_ptr<nn::GRUCell>> gru_layers_;
-};
-
-/**
- * @brief Multi-layer Decoder module using stacked GRUCells
- */
-class Decoder : public nn::Module {
-public:
-    Decoder(int vocab_size, int embed_size, int hidden_size, int num_layers = 2)
-        : vocab_size_(vocab_size), hidden_size_(hidden_size), num_layers_(num_layers) {
-
-        embedding_ = std::make_shared<nn::Linear>(vocab_size, embed_size, false);
-        register_module("embedding", embedding_);
-
-        // Create stacked GRU layers
-        for (int i = 0; i < num_layers; ++i) {
-            int input_size = (i == 0) ? embed_size : hidden_size;
-            auto gru = std::make_shared<nn::GRUCell>(input_size, hidden_size);
-            gru_layers_.push_back(gru);
-            register_module("gru_layer_" + std::to_string(i), gru);
-        }
-
-        output_proj_ = std::make_shared<nn::Linear>(hidden_size, vocab_size);
-        register_module("output_proj", output_proj_);
-    }
-
-    auto forward_impl(const Variable& input) -> Variable override {
-        return input;
-    }
-
-    // Step function now takes vector of hidden states (one per layer)
-    auto step(int token, std::vector<Variable>& h_states, Device device) -> Variable {
-        std::vector<float> one_hot(vocab_size_, 0.0f);
-        one_hot[token] = 1.0f;
-        auto x = Variable(from_data(one_hot.data(), {1, vocab_size_}, device), false);
-
-        auto layer_input = embedding_->forward(x);
-
-        // Process through each GRU layer
-        for (int i = 0; i < num_layers_; ++i) {
-            h_states[i] = gru_layers_[i]->forward(layer_input, h_states[i]);
-            layer_input = h_states[i];
-        }
-
-        // Output projection from top layer
-        auto logits = output_proj_->forward(h_states[num_layers_ - 1]);
-        return logits;
-    }
-
-    int vocab_size() const { return vocab_size_; }
-    int hidden_size() const { return hidden_size_; }
-    int num_layers() const { return num_layers_; }
-
-private:
-    int vocab_size_;
-    int hidden_size_;
-    int num_layers_;
-    std::shared_ptr<nn::Linear> embedding_;
-    std::vector<std::shared_ptr<nn::GRUCell>> gru_layers_;
-    std::shared_ptr<nn::Linear> output_proj_;
-};
-
-/**
- * @brief Seq2Seq ChatBot model with multi-layer GRU
- */
-class ChatBot : public nn::Module {
-public:
-    ChatBot(int vocab_size, int embed_size, int hidden_size, int num_layers = 2) {
-        encoder_ = std::make_shared<Encoder>(vocab_size, embed_size, hidden_size, num_layers);
-        decoder_ = std::make_shared<Decoder>(vocab_size, embed_size, hidden_size, num_layers);
-
-        register_module("encoder", encoder_);
-        register_module("decoder", decoder_);
-    }
-
-    auto forward_impl(const Variable& input) -> Variable override {
-        return input;
-    }
-
-    std::shared_ptr<Encoder> encoder() { return encoder_; }
-    std::shared_ptr<Decoder> decoder() { return decoder_; }
-
-private:
-    std::shared_ptr<Encoder> encoder_;
-    std::shared_ptr<Decoder> decoder_;
-};
-
-/**
- * @brief Load Q&A pairs from training file
- */
-std::vector<std::pair<std::string, std::string>> load_training_data(
-    const std::string& filepath, int max_pairs = 100) {
-
+static std::vector<std::pair<std::string, std::string>>
+load_pairs(const std::string& path) {
     std::vector<std::pair<std::string, std::string>> pairs;
-    std::ifstream file(filepath);
-
-    if (!file.is_open()) {
-        pairs.push_back({"hello", "hi there"});
-        pairs.push_back({"how are you", "im good thanks"});
-        pairs.push_back({"whats your name", "im a chatbot"});
-        pairs.push_back({"goodbye", "see you later"});
-        pairs.push_back({"thanks", "youre welcome"});
+    std::ifstream f(path);
+    if (!f.is_open()) {
+        // Built-in fallback — tiny but well-structured
+        pairs = {
+            {"hello", "hi there"}, {"hi", "hello"},
+            {"how are you", "i am good thanks"},
+            {"whats your name", "i am tenzor"},
+            {"thanks", "you are welcome"},
+            {"bye", "goodbye"}, {"goodbye", "see you later"},
+        };
         return pairs;
     }
-
     std::string line;
-    while (std::getline(file, line) && pairs.size() < static_cast<size_t>(max_pairs)) {
-        size_t tab_pos = line.find('\t');
-        if (tab_pos != std::string::npos) {
-            std::string q = line.substr(0, tab_pos);
-            std::string a = line.substr(tab_pos + 1);
-            std::transform(q.begin(), q.end(), q.begin(), ::tolower);
-            std::transform(a.begin(), a.end(), a.begin(), ::tolower);
-            if (q.length() <= 30 && a.length() <= 30) {
-                pairs.push_back({q, a});
-            }
-        }
+    while (std::getline(f, line)) {
+        auto tab = line.find('\t');
+        if (tab == std::string::npos) continue;
+        std::string q = line.substr(0, tab);
+        std::string a = line.substr(tab + 1);
+        std::transform(q.begin(), q.end(), q.begin(), ::tolower);
+        std::transform(a.begin(), a.end(), a.begin(), ::tolower);
+        if (q.empty() || a.empty()) continue;
+        pairs.emplace_back(std::move(q), std::move(a));
     }
-
     return pairs;
 }
 
+// Encode one pair into a single fixed-length int64 sequence:
+//   "u: <q>\nb: <a>\n" followed by PAD tokens to fill `seq_len`.
+// The returned sequence is `seq_len` tokens; caller builds `input` = seq[0:T-1]
+// and `target` = seq[1:T] for next-token training. If a pair is too long we
+// truncate the answer.
+static std::vector<int64_t> encode_pair(const std::string& q, const std::string& a,
+                                        const CharVocab& v, int64_t seq_len) {
+    std::string s = "u: " + q + "\nb: " + a + "\n";
+    if (static_cast<int64_t>(s.size()) > seq_len) s.resize(seq_len);
+    std::vector<int64_t> out(seq_len, v.pad_idx());
+    for (size_t i = 0; i < s.size(); ++i) out[i] = v.encode(s[i]);
+    return out;
+}
+
+// ============================================================================
+// Model — tiny decoder-only Transformer
+// ============================================================================
+
+class GPTBlock : public Module {
+public:
+    GPTBlock(int64_t d_model, int64_t nhead, double dropout)
+        : d_model_(d_model)
+    {
+        // batch_first=true, is_causal=false (mask is passed explicitly every step)
+        attn_ = std::make_shared<MultiheadAttention>(
+            d_model, nhead,
+            /*dropout=*/dropout,
+            /*bias=*/true,
+            /*add_bias_kv=*/false,
+            /*add_zero_attn=*/false,
+            /*kdim=*/0, /*vdim=*/0,
+            /*batch_first=*/true,
+            /*is_causal=*/false);
+        ln1_     = std::make_shared<LayerNorm>(std::vector<int64_t>{d_model});
+        ln2_     = std::make_shared<LayerNorm>(std::vector<int64_t>{d_model});
+        fc1_     = std::make_shared<Linear>(d_model, 4 * d_model);
+        fc2_     = std::make_shared<Linear>(4 * d_model, d_model);
+        act_     = std::make_shared<GELU>();
+        dropout_ = std::make_shared<Dropout>(static_cast<float>(dropout));
+
+        register_module("attn",    attn_);
+        register_module("ln1",     ln1_);
+        register_module("ln2",     ln2_);
+        register_module("fc1",     fc1_);
+        register_module("fc2",     fc2_);
+        register_module("gelu",    act_);
+        register_module("dropout", dropout_);
+    }
+
+    // Pre-norm: x + drop(attn(ln1(x))) ; x + drop(fc2(gelu(fc1(ln2(x)))))
+    Variable forward(const Variable& x, const Tensor& causal_mask) {
+        auto h1 = ln1_->forward(x);
+        auto [att, _w] = attn_->forward(h1, h1, h1,
+                                        /*key_padding_mask=*/Tensor{},
+                                        /*attn_mask=*/causal_mask,
+                                        /*need_weights=*/false);
+        auto r1 = x + dropout_->forward(att);
+        auto h2 = ln2_->forward(r1);
+        auto ff = fc2_->forward(act_->forward(fc1_->forward(h2)));
+        return r1 + dropout_->forward(ff);
+    }
+
+    Variable forward_impl(const Variable& x) override {
+        return forward(x, Tensor{});
+    }
+
+private:
+    int64_t d_model_;
+    std::shared_ptr<MultiheadAttention> attn_;
+    std::shared_ptr<LayerNorm> ln1_, ln2_;
+    std::shared_ptr<Linear>    fc1_, fc2_;
+    std::shared_ptr<GELU>      act_;
+    std::shared_ptr<Dropout>   dropout_;
+};
+
+class ChatGPT : public Module {
+public:
+    ChatGPT(int64_t vocab, int64_t d_model, int64_t nhead,
+            int64_t n_layer, int64_t max_seq_len, double dropout)
+        : vocab_(vocab), d_model_(d_model), max_seq_len_(max_seq_len)
+    {
+        tok_emb_ = std::make_shared<Embedding>(vocab,        d_model);
+        pos_emb_ = std::make_shared<Embedding>(max_seq_len,  d_model);
+        drop_    = std::make_shared<Dropout>(static_cast<float>(dropout));
+        ln_f_    = std::make_shared<LayerNorm>(std::vector<int64_t>{d_model});
+        head_    = std::make_shared<Linear>(d_model, vocab);
+
+        register_module("tok_emb", tok_emb_);
+        register_module("pos_emb", pos_emb_);
+        register_module("drop",    drop_);
+        for (int64_t i = 0; i < n_layer; ++i) {
+            auto b = std::make_shared<GPTBlock>(d_model, nhead, dropout);
+            blocks_.push_back(b);
+            register_module("block_" + std::to_string(i), b);
+        }
+        register_module("ln_f", ln_f_);
+        register_module("head", head_);
+    }
+
+    // input_ids: int64 Variable of shape [B, T]. Returns logits [B, T, V].
+    Variable forward(const Variable& input_ids) {
+        auto shape = input_ids.shape();
+        int64_t T  = shape.back();
+        Device  dev = input_ids.tensor().device();
+
+        // Token + positional embeddings
+        std::vector<int64_t> pos(T);
+        for (int64_t i = 0; i < T; ++i) pos[i] = i;
+        auto pos_t = from_data(pos.data(), {1, T}, dev);
+        Variable pos_v(pos_t, false);
+
+        auto x = tok_emb_->forward(input_ids) + pos_emb_->forward(pos_v);
+        x = drop_->forward(x);
+
+        // One causal mask per forward, reused by all blocks
+        auto mask = create_causal_mask(T, dev, DType::Float32);
+        for (auto& b : blocks_) x = b->forward(x, mask);
+
+        return head_->forward(ln_f_->forward(x));
+    }
+
+    Variable forward_impl(const Variable& input_ids) override {
+        return forward(input_ids);
+    }
+
+    int64_t vocab()       const { return vocab_; }
+    int64_t max_seq_len() const { return max_seq_len_; }
+
+private:
+    int64_t vocab_;
+    int64_t d_model_;
+    int64_t max_seq_len_;
+    std::shared_ptr<Embedding> tok_emb_, pos_emb_;
+    std::shared_ptr<Dropout>   drop_;
+    std::vector<std::shared_ptr<GPTBlock>> blocks_;
+    std::shared_ptr<LayerNorm> ln_f_;
+    std::shared_ptr<Linear>    head_;
+};
+
+// ============================================================================
+// Sampling helpers — temperature + top-k
+// ============================================================================
+
+static int64_t sample_next(const float* logits, int64_t V,
+                           float temperature, int top_k,
+                           std::mt19937& rng) {
+    // Copy into work buffer
+    std::vector<std::pair<float, int64_t>> scored(V);
+    for (int64_t i = 0; i < V; ++i) scored[i] = {logits[i] / std::max(1e-6f, temperature), i};
+
+    // Top-k filter
+    if (top_k > 0 && top_k < V) {
+        std::nth_element(scored.begin(), scored.begin() + top_k, scored.end(),
+                         [](auto& a, auto& b) { return a.first > b.first; });
+        scored.resize(top_k);
+    }
+
+    // Softmax over the kept set (numerically stable)
+    float m = scored[0].first;
+    for (auto& s : scored) m = std::max(m, s.first);
+    double Z = 0.0;
+    for (auto& s : scored) { s.first = std::exp(s.first - m); Z += s.first; }
+    for (auto& s : scored) s.first = static_cast<float>(s.first / Z);
+
+    // Multinomial draw
+    std::uniform_real_distribution<float> U(0.0f, 1.0f);
+    float r = U(rng);
+    float cum = 0.0f;
+    for (auto& s : scored) {
+        cum += s.first;
+        if (r <= cum) return s.second;
+    }
+    return scored.back().second;
+}
+
+// Extract last-timestep logits from [1, T, V] into a CPU buffer.
+static std::vector<float> last_token_logits(const Tensor& logits) {
+    auto cpu = logits.cpu();
+    auto sh  = cpu.shape();          // [1, T, V]
+    int64_t T = sh[1], V = sh[2];
+    const float* p = cpu.data<float>();
+    std::vector<float> out(V);
+    std::copy(p + (T - 1) * V, p + T * V, out.begin());
+    return out;
+}
+
+// ============================================================================
+// Training helpers
+// ============================================================================
+
+struct TrainConfig {
+    int64_t d_model     = 128;
+    int64_t nhead       = 4;
+    int64_t n_layer     = 3;
+    int64_t max_seq_len = 96;
+    int64_t batch_size  = 32;
+    int64_t seq_len     = 64;     // fixed per-pair sequence length
+    int64_t steps       = 1500;
+    int     print_every = 50;
+    // The mixed corpus is ~750 real pairs (curated templates + chatterbot
+    // training data). We keep regularization off and train long enough for
+    // the model to commit to confident templated responses; the real-data
+    // pairs teach English fluency on top of that.
+    float   dropout     = 0.0f;
+    float   lr          = 1e-3f;
+    float   weight_decay= 0.0f;
+    float   grad_clip   = 1.0f;
+    float   label_smooth= 0.0f;
+};
+
+// ============================================================================
+// CLI parsing
+// ============================================================================
+
+struct CliOpts {
+    std::string data  = "data/chat_training_mixed.txt";
+    int64_t     steps = -1;  // -1 => use config default
+};
+
+static CliOpts parse_cli(int argc, char** argv) {
+    CliOpts o;
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if ((a == "--data" || a == "-d") && i + 1 < argc) o.data = argv[++i];
+        else if (a == "--steps" && i + 1 < argc)          o.steps = std::stoll(argv[++i]);
+    }
+    return o;
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
 int main(int argc, char* argv[]) {
     Device device = showcase::get_device_from_args(argc, argv);
+    auto   cli    = parse_cli(argc, argv);
 
     initialize();
-
-    showcase::print_header("Chat AI - Neural Network API (High-Level)", device);
-
     manual_seed(42);
 
-    // Hyperparameters
-    int embed_size = 128;
-    int hidden_size = 256;
-    int num_layers = 2;  // Multi-layer GRU for better learning capacity
-    float learning_rate = 0.03f;
-    int num_epochs = 500;
-    int print_every = 5;
+    showcase::print_header("Chat AI — nn API (Tiny Transformer LM)", device);
 
-    // Build vocabulary
+    TrainConfig cfg;
+    if (cli.steps > 0) cfg.steps = cli.steps;
+
     CharVocab vocab;
-    int vocab_size = vocab.size();
+    const int64_t V = vocab.size();
 
-    std::cout << "Vocabulary size: " << vocab_size << " characters\n";
+    auto pairs = load_pairs(cli.data);
+    if (pairs.empty()) {
+        std::cerr << "No training pairs loaded.\n";
+        return 1;
+    }
 
-    // Load full training data
-    auto data = load_training_data("data/chat_training_large.txt", 950);
-    std::cout << "Training pairs: " << data.size() << "\n\n";
+    // Pre-encode every (q, a) as a padded fixed-length int64 sequence.
+    std::vector<std::vector<int64_t>> encoded;
+    encoded.reserve(pairs.size());
+    for (auto& [q, a] : pairs) {
+        encoded.push_back(encode_pair(q, a, vocab, cfg.seq_len));
+    }
+
+    std::cout << "Training pairs:      " << pairs.size()  << "\n";
+    std::cout << "Sequence length:     " << cfg.seq_len   << "\n";
+    std::cout << "Vocabulary size:     " << V             << " chars\n";
 
     showcase::print_section("Model Architecture");
-    std::cout << "ChatBot (nn::Module based) - " << num_layers << "-layer GRU:\n";
-    std::cout << "  Encoder:\n";
-    std::cout << "    - nn::Linear(" << vocab_size << ", " << embed_size << ") [embedding]\n";
-    for (int i = 0; i < num_layers; ++i) {
-        int in_size = (i == 0) ? embed_size : hidden_size;
-        std::cout << "    - nn::GRUCell(" << in_size << ", " << hidden_size << ") [layer " << i << "]\n";
-    }
-    std::cout << "  Decoder:\n";
-    std::cout << "    - nn::Linear(" << vocab_size << ", " << embed_size << ") [embedding]\n";
-    for (int i = 0; i < num_layers; ++i) {
-        int in_size = (i == 0) ? embed_size : hidden_size;
-        std::cout << "    - nn::GRUCell(" << in_size << ", " << hidden_size << ") [layer " << i << "]\n";
-    }
-    std::cout << "    - nn::Linear(" << hidden_size << ", " << vocab_size << ") [output]\n";
+    std::cout << "Decoder-only Transformer LM\n"
+              << "  d_model:    " << cfg.d_model     << "\n"
+              << "  n_heads:    " << cfg.nhead       << "\n"
+              << "  n_layers:   " << cfg.n_layer     << "\n"
+              << "  seq_len:    " << cfg.seq_len     << "\n"
+              << "  dropout:    " << cfg.dropout     << "\n";
 
-    // Create model with multi-layer GRU
-    auto model = std::make_shared<ChatBot>(vocab_size, embed_size, hidden_size, num_layers);
+    auto model = std::make_shared<ChatGPT>(
+        V, cfg.d_model, cfg.nhead, cfg.n_layer, cfg.max_seq_len, cfg.dropout);
     model->to(device);
 
-    // Get parameters and create optimizer
     auto params = model->parameters();
-    std::cout << "\nTotal parameters: " << params.size() << "\n";
+    std::cout << "Parameter tensors:   " << params.size() << "\n";
 
-    optim::SGD optimizer(params, learning_rate);
+    optim::Adam optimizer(params,
+                          /*lr=*/cfg.lr,
+                          /*beta1=*/0.9, /*beta2=*/0.95,
+                          /*eps=*/1e-9,
+                          /*weight_decay=*/cfg.weight_decay);
+
+    CrossEntropyLoss criterion(Reduction::Mean, cfg.label_smooth);
 
     showcase::print_section("Training");
-    std::cout << "Using nn::Module, nn::GRUCell, and optim::SGD\n\n";
+    std::cout << "Optimizer: Adam (lr=" << cfg.lr
+              << ", wd=" << cfg.weight_decay << ")\n"
+              << "Loss:      CrossEntropy (label_smoothing=" << cfg.label_smooth << ")\n"
+              << "Grad clip: " << cfg.grad_clip << "\n"
+              << "Batch:     " << cfg.batch_size << " × " << cfg.seq_len << " tokens\n"
+              << "Steps:     " << cfg.steps << "\n\n";
 
-    std::random_device rd;
-    std::mt19937 gen(rd());
+    std::mt19937 rng(123);
+    std::uniform_int_distribution<size_t> pair_dist(0, encoded.size() - 1);
 
-    for (int epoch = 0; epoch < num_epochs; ++epoch) {
-        float total_loss = 0.0f;
-        int total_tokens = 0;
+    model->train();
+    const int64_t in_len = cfg.seq_len - 1;  // input is pair[0:T-1], target pair[1:T]
+    std::vector<int64_t> batch_in (cfg.batch_size * in_len);
+    std::vector<int64_t> batch_tgt(cfg.batch_size * in_len);
 
-        model->train();
-        std::shuffle(data.begin(), data.end(), gen);
+    float running = 0.0f;
+    int   running_n = 0;
 
-        for (const auto& [question, answer] : data) {
-            optimizer.zero_grad();
-
-            // Encode question - returns hidden states for all layers
-            std::vector<int> q_tokens;
-            for (char c : question) {
-                q_tokens.push_back(vocab.encode(c));
+    for (int64_t step = 1; step <= cfg.steps; ++step) {
+        // Sample a batch of random (q, a) pairs — each already padded to seq_len
+        for (int64_t b = 0; b < cfg.batch_size; ++b) {
+            const auto& seq = encoded[pair_dist(rng)];
+            for (int64_t t = 0; t < in_len; ++t) {
+                batch_in [b * in_len + t] = seq[t];
+                batch_tgt[b * in_len + t] = seq[t + 1];
             }
-            auto h_states = model->encoder()->encode(q_tokens, device);
-
-            // Decode with teacher forcing
-            std::string target = std::string(1, SOS_CHAR) + answer + std::string(1, EOS_CHAR);
-            Variable loss_sum(zeros({1}, DType::Float32, device), true);
-
-            for (size_t t = 0; t < target.length() - 1; ++t) {
-                int input_token = vocab.encode(target[t]);
-                int target_token = vocab.encode(target[t + 1]);
-
-                auto logits = model->decoder()->step(input_token, h_states, device);
-                auto log_probs = log_softmax(logits, 1);
-
-                // Target one-hot
-                std::vector<float> target_oh(vocab_size, 0.0f);
-                target_oh[target_token] = 1.0f;
-                auto target_var = Variable(from_data(target_oh.data(), {1, vocab_size}, device), false);
-
-                auto target_log_prob = sum(log_probs * target_var);
-                loss_sum = loss_sum - target_log_prob;
-                total_tokens++;
-            }
-
-            // Backward and optimize
-            loss_sum.backward();
-            optimizer.step();
-
-            total_loss += loss_sum.tensor().item<float>();
         }
 
-        if ((epoch + 1) % print_every == 0 || epoch == 0) {
-            float avg_loss = total_loss / total_tokens;
-            std::cout << "Epoch [" << (epoch + 1) << "/" << num_epochs << "] "
-                      << "Loss: " << avg_loss << "\n";
+        auto in_t  = from_data(batch_in.data(),
+                               {cfg.batch_size, in_len}, device);
+        auto tgt_t = from_data(batch_tgt.data(),
+                               {cfg.batch_size * in_len}, device);
+
+        Variable in_v(in_t, false);
+
+        optimizer.zero_grad();
+        auto logits = model->forward(in_v);                          // [B, T, V]
+        auto flat   = reshape(logits, {cfg.batch_size * in_len, V}); // grad-preserving
+        auto loss   = criterion.forward(flat, tgt_t);
+
+        loss.backward();
+        nn::utils::clip_grad_norm_(params, cfg.grad_clip);
+        optimizer.step();
+
+        float lval = loss.tensor().cpu().data<float>()[0];
+        running   += lval;
+        running_n += 1;
+
+        if (step == 1 || step % cfg.print_every == 0 || step == cfg.steps) {
+            float avg = running / std::max(1, running_n);
+            float ppl = std::exp(avg);
+            std::cout << "Step [" << std::setw(5) << step << "/" << cfg.steps << "]  "
+                      << "loss=" << std::fixed << std::setprecision(4) << avg
+                      << "  ppl=" << std::setprecision(2) << ppl << "\n";
+            running = 0.0f; running_n = 0;
         }
     }
 
+    // ========================================================================
     // Interactive chat
+    // ========================================================================
+
+    const float   temperature = 0.2f;
+    const int     top_k       = 3;
+    const int64_t max_gen     = 50;
+    const int64_t NL          = vocab.nl_idx();
+
     showcase::print_section("Interactive Chat");
-    std::cout << "Chat with the trained model! Type 'quit' or 'exit' to stop.\n\n";
+    std::cout << "Chat with the trained model. Type 'quit' or 'exit' to stop.\n"
+              << "(sampling: temperature=" << temperature
+              << ", top-k=" << top_k << ", max " << max_gen << " chars)\n\n";
 
     model->eval();
 
-    std::string user_input;
+    std::string user;
     while (true) {
-        std::cout << "You: ";
-        std::getline(std::cin, user_input);
+        std::cout << "You: " << std::flush;
+        if (!std::getline(std::cin, user)) break;
+        if (user == "quit" || user == "exit") { std::cout << "Goodbye!\n"; break; }
+        if (user.empty()) continue;
+        std::transform(user.begin(), user.end(), user.begin(), ::tolower);
 
-        // Check for exit commands
-        if (user_input == "quit" || user_input == "exit" || user_input.empty()) {
-            std::cout << "\nGoodbye!\n";
-            break;
-        }
+        // Seed context: "u: <user>\nb: "
+        std::string prompt = "u: " + user + "\nb: ";
+        std::vector<int64_t> ctx;
+        ctx.reserve(cfg.max_seq_len);
+        for (char c : prompt) ctx.push_back(vocab.encode(c));
 
-        // Convert to lowercase
-        std::transform(user_input.begin(), user_input.end(), user_input.begin(), ::tolower);
-
-        // Encode user input - returns hidden states for all layers
-        std::vector<int> tokens;
-        for (char c : user_input) {
-            tokens.push_back(vocab.encode(c));
-        }
-        auto h_states = model->encoder()->encode(tokens, device);
-
-        // Decode (greedy)
-        std::string response;
-        int current_token = vocab.sos_idx();
-
-        for (int t = 0; t < 50; ++t) {
-            auto logits = model->decoder()->step(current_token, h_states, device);
-            auto logits_cpu = logits.tensor().cpu();
-            const float* data_ptr = logits_cpu.data<float>();
-
-            int best_idx = 0;
-            float best_val = data_ptr[0];
-            for (int i = 1; i < vocab_size; ++i) {
-                if (data_ptr[i] > best_val) {
-                    best_val = data_ptr[i];
-                    best_idx = i;
-                }
+        std::string reply;
+        for (int64_t step = 0; step < max_gen; ++step) {
+            // Keep context within max_seq_len (drop oldest)
+            int64_t T = static_cast<int64_t>(ctx.size());
+            if (T > cfg.max_seq_len) {
+                ctx.erase(ctx.begin(), ctx.begin() + (T - cfg.max_seq_len));
+                T = cfg.max_seq_len;
             }
+            auto in_t = from_data(ctx.data(), {1, T}, device);
+            Variable in_v(in_t, false);
+            auto logits = model->forward(in_v);
 
-            if (best_idx == vocab.eos_idx()) break;
+            auto last = last_token_logits(logits.tensor());
+            int64_t next = sample_next(last.data(), V, temperature, top_k, rng);
 
-            char c = vocab.decode(best_idx);
-            if (c >= ' ' && c <= '~') {
-                response += c;
-            }
-            current_token = best_idx;
+            // Stop when the bot turn ends (newline) — that's how training data is structured
+            if (next == NL) break;
+            ctx.push_back(next);
+            char c = vocab.decode(next);
+            if (c >= ' ' && c <= '~') reply.push_back(c);
         }
 
-        std::cout << "Bot: " << (response.empty() ? "(no response)" : response) << "\n\n";
+        std::cout << "Bot: " << (reply.empty() ? "(silence)" : reply) << "\n\n";
     }
 
-    std::cout << "\nChat AI solved using Neural Network API!\n";
-    std::cout << "Uses multi-layer stacked nn::GRUCell for deeper learning.\n";
-
+    std::cout << "\nTrained a tiny decoder-only Transformer LM end-to-end using Tenzor's nn API.\n";
     finalize();
     return 0;
 }

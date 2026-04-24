@@ -72,7 +72,7 @@ set_target_properties(tenzor_backend_mps PROPERTIES
     OUTPUT_NAME tenzor_backend_mps
     VERSION ${PROJECT_VERSION}
     SOVERSION ${PROJECT_VERSION_MAJOR}
-    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin
 )
 
 if(TARGET mps_shaders)
