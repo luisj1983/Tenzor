@@ -461,12 +461,49 @@ auto VulkanBackend::dispatchHistogramdd(const Tensor& input,
 }
 
 auto VulkanBackend::dispatchMultinomial(const Tensor& probs, int64_t num_samples,
-                                        bool /*replacement*/) -> Tensor {
+                                        bool replacement) -> Tensor {
     Tensor input = (probs.dtype() == DType::Float32) ? probs.contiguous()
                                                       : dispatchCast(probs.contiguous(), DType::Float32);
 
     bool was_1d = (input.ndim() == 1);
     if (was_1d) input = tenzor::reshape(input, {1, input.numel()});
+
+    // Without-replacement sampling via the Gumbel-max trick:
+    //     key[i] = log(p[i]) + G,  G ~ Gumbel(0,1) via -log(-log(U))
+    // The argsort (descending) of keys gives a sample-without-replacement of
+    // size num_samples from the categorical distribution. This avoids the old
+    // dispatch silently ignoring the replacement flag and emitting duplicates.
+    if (!replacement) {
+        int64_t batch_size = input.shape()[0];
+        int64_t num_categories = input.shape()[1];
+        if (num_samples > num_categories) {
+            throw std::runtime_error(
+                "multinomial: cannot sample " + std::to_string(num_samples) +
+                " values without replacement from " + std::to_string(num_categories) +
+                " categories");
+        }
+
+        // log(p) — log(0) yields -inf, which pushes zero-probability categories
+        // to the end of the sort order. That matches PyTorch semantics.
+        Tensor log_p = dispatchUnaryOp("log", input);
+
+        // Draw U ~ Uniform(0,1), then Gumbel = -log(-log(U)).
+        Tensor u = dispatchRand({batch_size, num_categories}, DType::Float32);
+        Tensor log_u = dispatchUnaryOp("log", u);
+        Tensor neg_log_u = dispatchUnaryOp("neg", log_u);
+        Tensor log_neg_log_u = dispatchUnaryOp("log", neg_log_u);
+        Tensor gumbel = dispatchUnaryOp("neg", log_neg_log_u);
+
+        Tensor keys = dispatchBinaryOp("add", log_p, gumbel);
+
+        auto [sorted_vals, sort_indices] = dispatchSort(keys, /*dim=*/-1, /*descending=*/true);
+        // Take first num_samples indices along the last axis.
+        Tensor picked = dispatchContiguous(
+            sort_indices.slice(1, 0, num_samples, 1));
+
+        if (was_1d) picked = tenzor::reshape(picked, {num_samples});
+        return picked;  // already Int64
+    }
 
     int64_t batch_size = input.shape()[0];
     int64_t num_categories = input.shape()[1];

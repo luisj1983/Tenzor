@@ -18,6 +18,51 @@ layout(push_constant) uniform PushConstants {
 
 const float64_t PI = 3.14159265358979323846lf;
 
+// Double-precision sin/cos via range reduction + polynomial.
+// The prior `float(cos(float(angle)))` shortcut dropped twiddle factors to
+// Float32 precision — each FFT butterfly multiplied that error forward, so
+// gradcheck on an 8-point FFT ended up ~1e-4 off while expecting ~1e-5.
+const float64_t TWO_OVER_PI_F = 0.6366197723675814lf;
+const float64_t PI_OVER_2_HI = 1.5707963267948966lf;
+const float64_t PI_OVER_2_LO = 6.123233995736766e-17lf;
+
+void trig_reduce_f(float64_t x, out float64_t r, out int q) {
+    float64_t j = floor(x * TWO_OVER_PI_F + 0.5lf);
+    q = int(j) & 3;
+    r = x - j * PI_OVER_2_HI;
+    r = r - j * PI_OVER_2_LO;
+}
+float64_t sin_poly_f(float64_t x) {
+    float64_t x2 = x * x;
+    return x * (1.0lf - x2 * (1.0lf/6.0lf - x2 * (1.0lf/120.0lf - x2 * (1.0lf/5040.0lf - x2 / 362880.0lf))));
+}
+float64_t cos_poly_f(float64_t x) {
+    float64_t x2 = x * x;
+    return 1.0lf - x2 * (0.5lf - x2 * (1.0lf/24.0lf - x2 * (1.0lf/720.0lf - x2 / 40320.0lf)));
+}
+float64_t sin_df(float64_t x) {
+    float64_t r; int q;
+    trig_reduce_f(x, r, q);
+    switch (q) {
+        case 0: return sin_poly_f(r);
+        case 1: return cos_poly_f(r);
+        case 2: return -sin_poly_f(r);
+        case 3: return -cos_poly_f(r);
+    }
+    return 0.0lf;
+}
+float64_t cos_df(float64_t x) {
+    float64_t r; int q;
+    trig_reduce_f(x, r, q);
+    switch (q) {
+        case 0: return cos_poly_f(r);
+        case 1: return -sin_poly_f(r);
+        case 2: return -cos_poly_f(r);
+        case 3: return sin_poly_f(r);
+    }
+    return 0.0lf;
+}
+
 void main() {
     uint tid = gl_GlobalInvocationID.x;
     uint n_butterflies = N / 2;
@@ -46,7 +91,7 @@ void main() {
     float64_t angle = -2.0lf * PI * float64_t(pos) / float64_t(stage_stride * 2);
     if (direction == 1) angle = -angle;
 
-    float64_t w_re = float64_t(cos(float(angle))), w_im = float64_t(sin(float(angle)));
+    float64_t w_re = cos_df(angle), w_im = sin_df(angle);
 
     float64_t t_re = a1_re * w_re - a1_im * w_im;
     float64_t t_im = a1_re * w_im + a1_im * w_re;

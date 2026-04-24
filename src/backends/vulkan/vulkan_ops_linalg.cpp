@@ -840,13 +840,19 @@ auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor>
     auto f16_buf = [&](size_t numel) -> size_t { return ((numel + 1) / 2) * 4; };
 
     if (m <= MAX_SMALL_LINALG_SIZE && n <= MAX_SMALL_LINALG_SIZE) {
-        // Small matrix path: single-workgroup shader
-        std::vector<int64_t> q_shape(shape.begin(), shape.end() - 2);
-        q_shape.push_back(m); q_shape.push_back(m);
-        std::vector<int64_t> r_shape(shape.begin(), shape.end());
+        // Small matrix path: single-workgroup shader writes full Q (m×m)
+        // and full R (m×n). The host-facing API returns *reduced* QR to
+        // match the CPU/LAPACK path: Q is (m, k) and R is (k, n) where
+        // k = min(m, n). Without this, lobpcg's orthonormalize() produced
+        // an m×m Q that broke every downstream shape assumption.
+        int64_t k = std::min(m, n);
 
-        Tensor Q(q_shape, input.dtype(), input.device());
-        Tensor R(r_shape, input.dtype(), input.device());
+        std::vector<int64_t> q_full_shape(shape.begin(), shape.end() - 2);
+        q_full_shape.push_back(m); q_full_shape.push_back(m);
+        std::vector<int64_t> r_full_shape(shape.begin(), shape.end());
+
+        Tensor Q_full(q_full_shape, input.dtype(), input.device());
+        Tensor R_full(r_full_shape, input.dtype(), input.device());
 
         std::string shader = is_f64 ? "linalg_qr_f64" : is_f16 ? "linalg_qr_f16" : "linalg_qr";
         auto* pipeline = getPipeline(shader, device_id);
@@ -865,7 +871,7 @@ auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor>
         size_t r_size = in_size;
 
         std::vector<std::pair<uint32_t, const void*>> bindings = {
-            {0, cont.data_ptr()}, {1, Q.data_ptr()}, {2, R.data_ptr()}
+            {0, cont.data_ptr()}, {1, Q_full.data_ptr()}, {2, R_full.data_ptr()}
         };
         std::vector<size_t> sizes = {in_size, q_size, r_size};
         VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
@@ -878,6 +884,14 @@ auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor>
         vkCmdDispatch(cmd, static_cast<uint32_t>(batch_size), 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
+
+        // Reduce to Q (m,k) and R (k,n) via slicing along trailing axes.
+        Tensor Q = (k == m)
+            ? Q_full
+            : dispatchContiguous(Q_full.slice(ndim - 1, 0, k, 1));
+        Tensor R = (k == m)
+            ? R_full
+            : dispatchContiguous(R_full.slice(ndim - 2, 0, k, 1));
 
         return {Q, R};
     }
@@ -945,7 +959,15 @@ auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor>
     insertComputeOnlyBarrier(qr_cmd);
     endSingleTimeCommands(qr_cmd, device_id);
 
-    return {Q, R};
+    // Reduce to Q (m,k) and R (k,n) — match CPU/LAPACK reduced-QR semantics.
+    Tensor Q_red = (k == m)
+        ? Q
+        : dispatchContiguous(Q.slice(ndim - 1, 0, k, 1));
+    Tensor R_red = (k == m)
+        ? R
+        : dispatchContiguous(R.slice(ndim - 2, 0, k, 1));
+
+    return {Q_red, R_red};
 }
 
 // ============================================================================
@@ -1291,6 +1313,42 @@ auto VulkanBackend::dispatchLinalgSVD(const Tensor& input, bool full_matrices) -
             insertTransferToComputeBarrier(cmd);
             endSingleTimeCommands(cmd, device_id);
         }
+    }
+
+    // Sort singular values descending and permute the corresponding columns
+    // of U and rows of Vt to match. LAPACK/CPU return S in non-increasing
+    // order — the Jacobi SVD shader emits them in an arbitrary order so
+    // consumers that assume sorted output (SVD3x3 test, low-rank
+    // approximations) would see wrong values.
+    if (k > 1) {
+        auto [sorted_S, sort_indices] = dispatchSort(S, /*dim=*/-1, /*descending=*/true);
+
+        // U: (..., m, k) — gather columns (last axis) according to sort_indices.
+        Tensor U_t = dispatchTranspose(U, ndim - 2, ndim - 1);  // (..., k, m)
+        Tensor sorted_U_t = dispatchIndexSelect(U_t.contiguous(), ndim - 2, sort_indices);
+        Tensor sorted_U = dispatchTranspose(sorted_U_t, ndim - 2, ndim - 1).contiguous();
+
+        // Vt: (..., n, n) when full_matrices, (..., k, n) otherwise. Either way
+        // the row axis (ndim - 2) of Vt corresponds to singular vectors; the
+        // first k rows are the non-trivial ones. For full_matrices=true we
+        // only permute the first k rows (trailing rows are null-space and
+        // stay in place); equivalently, we gather rows by an index vector
+        // that's [sort_indices, k, k+1, ..., n-1].
+        Tensor sorted_Vt;
+        if (Vt.shape()[ndim - 2] == k) {
+            sorted_Vt = dispatchIndexSelect(Vt.contiguous(), ndim - 2, sort_indices);
+        } else {
+            // Build extended indices [sort_indices ++ identity[k..n-1]] on device.
+            int64_t n_rows = Vt.shape()[ndim - 2];
+            auto tail_cpu = Tensor({n_rows - k}, DType::Int64, Device::cpu());
+            auto* tail_data = tail_cpu.data<int64_t>();
+            for (int64_t i = 0; i < n_rows - k; ++i) tail_data[i] = k + i;
+            Tensor tail = tail_cpu.to(input.device());
+            Tensor combined = dispatchCat({sort_indices, tail}, 0);
+            sorted_Vt = dispatchIndexSelect(Vt.contiguous(), ndim - 2, combined);
+        }
+
+        return {sorted_U, sorted_S, sorted_Vt};
     }
 
     return {U, S, Vt};
@@ -1651,6 +1709,26 @@ auto VulkanBackend::dispatchLinalgEigh(const Tensor& input) -> std::vector<Tenso
             insertComputeOnlyBarrier(cmd);
             endSingleTimeCommands(cmd, device_id);
         }
+    }
+
+    // Sort eigenvalues ascending and permute the eigenvector columns to match.
+    // Matches LAPACK / CPU eigh semantics — LOBPCG / Eigh tests assume
+    // W[0] <= W[1] <= ... <= W[n-1].
+    //
+    // The Jacobi/tridiagonal-QR shaders return W/V in an arbitrary order (the
+    // order in which the sweep converges), which defeats any downstream
+    // algorithm that expects a specific eigenvalue ordering.
+    if (n > 1) {
+        auto [sorted_W, sort_indices] = dispatchSort(W, /*dim=*/-1, /*descending=*/false);
+
+        // Gather V columns according to sort_indices along the last axis.
+        // index_select gathers rows, so transpose last two axes, gather, then
+        // transpose back to restore (…, n, n) with permuted columns.
+        Tensor V_cols_rows = dispatchTranspose(V, ndim - 2, ndim - 1);
+        Tensor sorted_V_rows = dispatchIndexSelect(V_cols_rows.contiguous(), ndim - 2, sort_indices);
+        Tensor sorted_V = dispatchTranspose(sorted_V_rows, ndim - 2, ndim - 1).contiguous();
+
+        return {sorted_W, sorted_V};
     }
 
     return {W, V};
@@ -3310,21 +3388,32 @@ auto VulkanBackend::dispatchSparseTrsm(const Tensor& crow_indices, const Tensor&
 
 auto VulkanBackend::dispatchLinalgSolveTriangular(const Tensor& A, const Tensor& B,
                                                    bool upper, bool unitriangular) -> Tensor {
-    if (A.dtype() != DType::Float32) {
+    // Half-precision dtypes widen to Float32; Float64 uses a dedicated shader
+    // to keep double precision through cholesky_inverse backward.
+    if (A.dtype() != DType::Float32 && A.dtype() != DType::Float64) {
         auto a_f32 = A.to(DType::Float32);
         auto b_f32 = B.to(DType::Float32);
         return dispatchLinalgSolveTriangular(a_f32, b_f32, upper, unitriangular).to(A.dtype());
     }
 
-    int32_t device_id = A.device().index;
-    auto* pipeline = getPipeline("solve_triangular", device_id);
+    // The shader indexes A/B as flat row-major (A_data[i*N+j]), so a
+    // non-contiguous view (e.g. a transpose) would be read with the wrong
+    // strides. cholesky_inverse passes transpose(L) directly, which caused
+    // the second solve to read L instead of L^T and produce zeros in the
+    // upper triangle of the result. Materialize contiguous copies up front.
+    Tensor A_c = A.is_contiguous() ? A : A.contiguous();
+    Tensor B_c = B.is_contiguous() ? B : B.contiguous();
 
-    auto a_shape = A.shape();
-    auto b_shape = B.shape();
+    int32_t device_id = A_c.device().index;
+    bool is_f64 = (A_c.dtype() == DType::Float64);
+    auto* pipeline = getPipeline(is_f64 ? "solve_triangular_f64" : "solve_triangular", device_id);
+
+    auto a_shape = A_c.shape();
+    auto b_shape = B_c.shape();
     uint32_t N = static_cast<uint32_t>(a_shape[a_shape.size() - 1]);
     uint32_t M = (b_shape.size() >= 2) ? static_cast<uint32_t>(b_shape[b_shape.size() - 1]) : 1;
 
-    Tensor output(std::vector<int64_t>(b_shape.begin(), b_shape.end()), B.dtype(), B.device());
+    Tensor output(std::vector<int64_t>(b_shape.begin(), b_shape.end()), B_c.dtype(), B_c.device());
 
     struct { uint32_t N; uint32_t M; uint32_t upper; uint32_t unitriangular; } pc;
     pc.N = N;
@@ -3332,12 +3421,13 @@ auto VulkanBackend::dispatchLinalgSolveTriangular(const Tensor& A, const Tensor&
     pc.upper = upper ? 1 : 0;
     pc.unitriangular = unitriangular ? 1 : 0;
 
-    size_t a_buf = static_cast<size_t>(A.numel()) * sizeof(float);
-    size_t b_buf = static_cast<size_t>(B.numel()) * sizeof(float);
-    size_t x_buf = static_cast<size_t>(output.numel()) * sizeof(float);
+    size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
+    size_t a_buf = static_cast<size_t>(A_c.numel()) * elem_size;
+    size_t b_buf = static_cast<size_t>(B_c.numel()) * elem_size;
+    size_t x_buf = static_cast<size_t>(output.numel()) * elem_size;
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, A.data_ptr()}, {1, B.data_ptr()}, {2, output.data_ptr()}
+        {0, A_c.data_ptr()}, {1, B_c.data_ptr()}, {2, output.data_ptr()}
     };
     std::vector<size_t> sizes = {a_buf, b_buf, x_buf};
 

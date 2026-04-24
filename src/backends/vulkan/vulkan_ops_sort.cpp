@@ -300,8 +300,10 @@ auto VulkanBackend::dispatchSort(const Tensor& input, int64_t dim, bool descendi
     float pad_value = descending ? -std::numeric_limits<float>::infinity()
                                  : std::numeric_limits<float>::infinity();
     if (work_dtype == DType::Int32) {
-        pad_value = descending ? static_cast<float>(std::numeric_limits<int32_t>::min())
-                               : static_cast<float>(std::numeric_limits<int32_t>::max());
+        // Don't use float intermediate: INT32_MAX (2^31-1) can't be represented
+        // exactly as float and static_cast<int32_t> on the overflowing float is
+        // UB (typically INT32_MIN), which breaks ascending int32 sorts.
+        pad_value = 0.0f;  // filled directly below via CPU → device copy
     }
 
     size_t values_bytes = padded_n * elem_size;
@@ -322,7 +324,28 @@ auto VulkanBackend::dispatchSort(const Tensor& input, int64_t dim, bool descendi
     // Allocated once outside the loop to avoid repeated alloc/dealloc which
     // would trigger forced batch submits.
     Tensor pad_template({static_cast<int64_t>(padded_n)}, work_dtype, input.device());
-    pad_template = dispatchFill(pad_template, pad_value);
+    if (work_dtype == DType::Int32) {
+        // Fill the int32 pad with exact INT32_MAX / INT32_MIN by preparing on
+        // the host and uploading — the float-based fill path can't represent
+        // INT32_MAX, and dispatchFill's float→int32 cast would overflow to
+        // INT32_MIN.
+        std::vector<int32_t> pad_host(padded_n,
+            descending ? std::numeric_limits<int32_t>::min()
+                       : std::numeric_limits<int32_t>::max());
+        copy(pad_template.data_ptr(), pad_host.data(),
+             padded_n * sizeof(int32_t), CopyKind::HostToDevice);
+    } else if (work_dtype == DType::Int64) {
+        // Same rationale as Int32 plus dispatchFill's uint32 fill shader only
+        // writes the low 4 bytes of each 8-byte int64 slot — the high half stays
+        // whatever the allocator left behind, corrupting sort comparisons.
+        std::vector<int64_t> pad_host(padded_n,
+            descending ? std::numeric_limits<int64_t>::min()
+                       : std::numeric_limits<int64_t>::max());
+        copy(pad_template.data_ptr(), pad_host.data(),
+             padded_n * sizeof(int64_t), CopyKind::HostToDevice);
+    } else {
+        pad_template = dispatchFill(pad_template, pad_value);
+    }
 
     // Pre-allocate the int64 cast tensor outside the loop.  Allocating it
     // inside would destroy the old one each iteration, which calls deallocate
@@ -896,16 +919,15 @@ auto VulkanBackend::dispatchUnique(const Tensor& input, bool sorted,
         }
 
         // Step 2: Set sentinel: boundary_pos[n_unique] = numel
-        // Create a single-element tensor with value numel, then scatter it to the last position
-        Tensor sentinel = dispatchFull({1}, static_cast<float>(numel), DType::Int64);
-        sentinel = sentinel.to(input.device());
-        // Copy sentinel into boundary_pos[n_unique] via slice assignment workaround:
-        // Use cat to append, but boundary_pos already has size n_unique+1 so just fill last element.
-        // Simpler: use a tiny fill. Create a view and fill via scatter.
+        // Write the trailing int64 directly via a host→device copy. The older
+        // dispatchScatter path misbehaved here because there's no native int64
+        // scatter shader — scatter silently reinterpreted the int64 buffer
+        // as float32 and clobbered the wrong word.
         {
-            Tensor idx_tensor = dispatchFull({1}, static_cast<float>(n_unique), DType::Int64);
-            idx_tensor = idx_tensor.to(input.device());
-            boundary_pos = dispatchScatter(boundary_pos, 0, idx_tensor, sentinel, /*reduction=*/0);
+            int64_t sentinel_val = static_cast<int64_t>(numel);
+            auto* bp_base = static_cast<char*>(boundary_pos.data_ptr());
+            void* slot = bp_base + n_unique * sizeof(int64_t);
+            copy(slot, &sentinel_val, sizeof(int64_t), CopyKind::HostToDevice);
         }
 
         // Step 3: Compute counts as differences of consecutive boundary positions on GPU

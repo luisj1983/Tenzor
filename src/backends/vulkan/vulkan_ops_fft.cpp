@@ -69,10 +69,17 @@ auto VulkanBackend::dispatchStack(std::span<const Tensor> inputs, int64_t dim) -
             endSingleTimeCommands(cmdBuffer, device_id);
         }
 
-        struct { uint32_t num_tensors; uint32_t elements_per_tensor; uint32_t output_numel; } pc;
+        // Match the standard stack.comp push-constant layout — outer_size
+        // and inner_size let the shader handle arbitrary `dim`, not just 0.
+        uint32_t outer_size_p = 1;
+        for (int64_t d = 0; d < dim; ++d) outer_size_p *= static_cast<uint32_t>(first_shape[d]);
+        uint32_t inner_size_p = static_cast<uint32_t>(elements_per_tensor_i) / std::max<uint32_t>(outer_size_p, 1u);
+        struct { uint32_t num_tensors; uint32_t elements_per_tensor; uint32_t output_numel; uint32_t outer_size; uint32_t inner_size; } pc;
         pc.num_tensors = static_cast<uint32_t>(num_tensors_i);
         pc.elements_per_tensor = static_cast<uint32_t>(elements_per_tensor_i);
         pc.output_numel = static_cast<uint32_t>(output_numel_f16);
+        pc.outer_size = outer_size_p;
+        pc.inner_size = inner_size_p;
 
         // F16 packed buffer sizes: round up to 4-byte boundaries
         size_t in_buf_size = (static_cast<size_t>(output_numel_f16) + 1) / 2 * 4;
@@ -1115,8 +1122,12 @@ auto VulkanBackend::dispatchFFT(const Tensor& input, int64_t dim, int64_t n,
 
     // Check if we can handle this on the GPU (guaranteed last dim after transpose above)
     bool can_cooley_tukey = is_power_of_2(signal_len);
-    auto mixed_radix_factors = factorize_fft(signal_len);
-    bool can_mixed_radix = !mixed_radix_factors.empty();
+    // Mixed-radix Stockham shaders produce incorrect results (e.g. FFT of a
+    // unit impulse comes out as [2,0,0,0] instead of [1,1,1,1] for N=4=2*2).
+    // Prefer Bluestein's algorithm, which internally uses the working
+    // Cooley-Tukey path. Leaves the fast path in place for sizes that are
+    // already powers of two.
+    bool can_mixed_radix = false;
 
     // Compute batch size (product of all dims except last)
     int64_t batch_size = 1;
@@ -1222,8 +1233,7 @@ auto VulkanBackend::dispatchIFFT(const Tensor& input, int64_t dim, int64_t n,
     }
 
     bool can_cooley_tukey = is_power_of_2(signal_len);
-    auto mixed_radix_factors = factorize_fft(signal_len);
-    bool can_mixed_radix = !mixed_radix_factors.empty();
+    bool can_mixed_radix = false;  // Mixed-radix Stockham path is buggy; use Bluestein
 
     int64_t batch_size = 1;
     for (int64_t i = 0; i < ndim - 1; ++i) batch_size *= shape[i];
@@ -1332,8 +1342,7 @@ auto VulkanBackend::dispatchRFFT(const Tensor& input, int64_t dim, int64_t n,
     }
 
     bool can_cooley_tukey = is_power_of_2(signal_len);
-    auto mixed_radix_factors_rfft = factorize_fft(signal_len);
-    bool can_mixed_radix = !mixed_radix_factors_rfft.empty();
+    bool can_mixed_radix = false;  // Mixed-radix Stockham path is buggy; use Bluestein
 
     int32_t device_id = input.device().index;
     DType complex_dtype = is_f64 ? DType::Complex128 : DType::Complex64;
@@ -1566,10 +1575,19 @@ auto VulkanBackend::dispatchIRFFT(const Tensor& input, int64_t dim, int64_t n,
         return dispatchTranspose(irfft_result, dim, ndim - 1);
     }
 
+    // Promote real inputs to complex (Hermitian-symmetric reinterpretation).
+    // CPU accepts Float32/Float64 half-spectrum inputs; mirror that here so the
+    // rest of the pipeline sees only Complex64/Complex128.
+    Tensor input_c = input;
+    if (input_c.dtype() == DType::Float32) input_c = dispatchCast(input_c, DType::Complex64);
+    else if (input_c.dtype() == DType::Float64) input_c = dispatchCast(input_c, DType::Complex128);
+    else if (input_c.dtype() == DType::Float16) input_c = dispatchCast(input_c, DType::Complex64);
+    else if (input_c.dtype() == DType::BFloat16) input_c = dispatchCast(input_c, DType::Complex64);
+
     int64_t freq_bins = shape[dim];  // N/2+1
     int64_t output_len = n;
-    bool is_f64 = (input.dtype() == DType::Complex128);
-    bool is_f16 = (input.dtype() == DType::Float16);
+    bool is_f64 = (input_c.dtype() == DType::Complex128);
+    bool is_f16 = (input_c.dtype() == DType::Float16);
 
     if (output_len < 2) {
         throw std::invalid_argument(std::format(
@@ -1578,29 +1596,28 @@ auto VulkanBackend::dispatchIRFFT(const Tensor& input, int64_t dim, int64_t n,
 
     // GPU-side pad or truncate frequency bins when they don't match expected N/2+1
     int64_t expected_bins = output_len / 2 + 1;
-    Tensor working_input = input;
+    Tensor working_input = input_c;
     if (freq_bins != expected_bins) {
         if (expected_bins > freq_bins) {
             // Pad frequency bins with zeros along the FFT dimension on GPU
             std::vector<int64_t> pad_shape(shape.begin(), shape.end());
             pad_shape[dim] = expected_bins - freq_bins;
-            Tensor zeros_pad = dispatchZeros(pad_shape, input.dtype(), input.device());
-            working_input = dispatchCat({input, zeros_pad}, dim);
+            Tensor zeros_pad = dispatchZeros(pad_shape, input_c.dtype(), input_c.device());
+            working_input = dispatchCat({input_c, zeros_pad}, dim);
         } else {
             // Truncate frequency bins to expected_bins
             std::vector<int64_t> starts(ndim, 0);
             std::vector<int64_t> ends(shape.begin(), shape.end());
             std::vector<int64_t> steps(ndim, 1);
             ends[dim] = expected_bins;
-            working_input = dispatchSlice(input, starts, ends, steps);
+            working_input = dispatchSlice(input_c, starts, ends, steps);
         }
         freq_bins = expected_bins;
         shape = working_input.shape();
     }
 
     bool can_cooley_tukey = is_power_of_2(output_len);
-    auto mixed_radix_factors_irfft = factorize_fft(output_len);
-    bool can_mixed_radix = !mixed_radix_factors_irfft.empty();
+    bool can_mixed_radix = false;  // Mixed-radix Stockham path is buggy; use Bluestein
 
     int32_t device_id = input.device().index;
     DType real_dtype = is_f64 ? DType::Float64 : DType::Float32;

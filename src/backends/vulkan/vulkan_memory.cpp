@@ -102,12 +102,16 @@ void VulkanBackend::StagingBufferPool::release(size_t index) {
 // ---------------------------------------------------------------------------
 
 auto VulkanBackend::allocate(size_t bytes, int32_t device_id) -> void* {
-    // Allocate minimum 4 bytes for all requests. This ensures:
+    // Allocate minimum 4 bytes for all requests, and round every allocation
+    // up to a multiple of 4. This ensures:
     // 1. Empty tensors always have valid, tracked Vulkan buffers (no null data_ptr crashes)
-    // 2. Float16 tensors with odd element counts have enough space for uint32 shader access
-    //    (Float16 shaders pack 2 elements per uint32, so a single-element Float16 tensor
-    //    needs 4 bytes, not just 2, to avoid out-of-bounds shader writes)
+    // 2. Float16/BFloat16 tensors with odd element counts have enough space for
+    //    uint32 shader access (half-precision shaders pack 2 elements per uint32,
+    //    so a 9-element Float16 tensor is 18 bytes logically but needs 20 bytes
+    //    of storage to let the shader read/write the trailing uint32 word safely —
+    //    without rounding the CAS-based packed writes corrupt the last element.)
     size_t alloc_bytes = std::max(bytes, static_cast<size_t>(4));
+    alloc_bytes = (alloc_bytes + 3) & ~size_t(3);
 
     if (device_id < 0 || device_id >= device_count()) {
         throw std::invalid_argument("Invalid device ID");

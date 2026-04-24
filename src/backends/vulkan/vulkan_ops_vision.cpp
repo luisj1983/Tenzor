@@ -1,4 +1,5 @@
 #include "vulkan_ops_common.hpp"
+#include <algorithm>
 
 namespace tenzor {
 
@@ -149,10 +150,14 @@ auto VulkanBackend::dispatchNMS(const Tensor& boxes, const Tensor& scores, float
     // 2. Prefix sum on not_suppressed flags (inclusive scan giving compacted positions)
     Tensor prefix = dispatchCumSum(not_suppressed, 0);
 
-    // 3. Read back only the total count (single int32 — minimal scalar readback, not a CPU fallback)
-    Tensor last_scalar = prefix.slice(0, N - 1, N).to(Device::cpu());
+    // 3. Read back only the total count. Reading a sliced view from Vulkan back
+    // to host returned garbage bytes for Int32 (dispatch-path bug in
+    // .slice().to(cpu)). Work around by materializing the entire prefix tensor
+    // to host and indexing in CPU memory — prefix is 1-D Int32 of length N, so
+    // this is at most ~N * 4 bytes of host RAM, which is negligible.
+    Tensor prefix_cpu = prefix.to(Device::cpu());
     synchronize(device_id);
-    int32_t num_kept_i32 = last_scalar.data<int32_t>()[0];
+    int32_t num_kept_i32 = prefix_cpu.data<int32_t>()[N - 1];
     int64_t num_kept = static_cast<int64_t>(num_kept_i32);
 
     if (num_kept == 0) {

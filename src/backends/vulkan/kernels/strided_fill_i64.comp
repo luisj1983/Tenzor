@@ -1,0 +1,39 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+// Strided Fill — Int64 variant. Each element is 8 bytes; shader writes the
+// full 64-bit value via int64_t typed buffer indexing. Without this path the
+// generic float-typed strided_fill stored only 4 bytes per slot and left the
+// top half undefined, so .fill_(N) on Int64 tensors produced garbage 64-bit
+// values on device.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Data { int64_t data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint ndim;
+    uint fill_value_lo;   // Low 32 bits of int64
+    uint fill_value_hi;   // High 32 bits of int64
+    uint shape_stride[16];
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    uint physical_offset = 0;
+    uint rem = idx;
+    for (int d = int(params.ndim) - 1; d >= 0; d--) {
+        uint dim_size = params.shape_stride[2 * d];
+        uint dim_stride = params.shape_stride[2 * d + 1];
+        uint coord = rem % dim_size;
+        rem /= dim_size;
+        physical_offset += coord * dim_stride;
+    }
+
+    // Reconstruct int64 from two uint32 halves.
+    int64_t val = int64_t(params.fill_value_hi);
+    val = (val << 32) | int64_t(params.fill_value_lo);
+    data[physical_offset] = val;
+}

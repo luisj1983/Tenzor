@@ -94,8 +94,16 @@ void main() {
                     if (abs(apq) > 1e-10 * sqrt(abs(app * aqq))) {
                         converged = 0.0;
 
-                        float tau_val = (aqq - app) / (2.0 * apq);
-                        float t = sign(tau_val) / (abs(tau_val) + sqrt(1.0 + tau_val * tau_val));
+                        // Handle app == aqq specially — sign(0) = 0 otherwise
+                        // aborts the rotation for equal-diagonal matrices.
+                        float t;
+                        if (app == aqq) {
+                            t = 1.0;
+                        } else {
+                            float tau_val = (aqq - app) / (2.0 * apq);
+                            float s_t = (tau_val >= 0.0) ? 1.0 : -1.0;
+                            t = s_t / (abs(tau_val) + sqrt(1.0 + tau_val * tau_val));
+                        }
                         float c = 1.0 / sqrt(1.0 + t * t);
                         float s = t * c;
 

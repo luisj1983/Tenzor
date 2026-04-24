@@ -1,0 +1,63 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Permute operation for Complex128: arbitrary dimension reordering.
+// Each element is 16 bytes (2 × float64), so we copy both halves per output
+// element. Same layout as permute_f64 but with 2 float64 reads/writes per slot.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { float64_t input_data[]; };
+layout(binding = 1) buffer Output { float64_t output_data[]; };
+layout(binding = 2) buffer InputShape { int shape[]; };
+layout(binding = 3) buffer InputStrides { int strides[]; };
+layout(binding = 4) buffer PermuteDims { int perm[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Total complex elements
+    uint ndim;
+} params;
+
+void index_to_coords(uint linear_idx, uint ndims, out int coords[8]) {
+    uint remaining = linear_idx;
+    int out_shape[8];
+    for (uint i = 0; i < ndims && i < 8u; i++) {
+        out_shape[i] = max(shape[perm[i]], 1);
+    }
+    for (int i = int(ndims) - 1; i >= 0; i--) {
+        int s = out_shape[i];
+        coords[i] = int(remaining % uint(s));
+        remaining /= uint(s);
+    }
+}
+
+uint coords_to_index(int coords[8], uint ndims, int stride_array[8]) {
+    uint idx = 0;
+    for (uint i = 0; i < ndims; i++) {
+        idx += uint(coords[i] * stride_array[i]);
+    }
+    return idx;
+}
+
+void main() {
+    uint out_idx = gl_GlobalInvocationID.x;
+    if (out_idx >= params.n) return;
+    if (params.ndim > 8u) return;
+
+    int out_coords[8];
+    index_to_coords(out_idx, params.ndim, out_coords);
+
+    int in_coords[8];
+    for (uint i = 0; i < params.ndim; i++) {
+        in_coords[perm[i]] = out_coords[i];
+    }
+
+    int in_strides[8];
+    for (uint i = 0; i < params.ndim; i++) {
+        in_strides[i] = strides[i];
+    }
+    uint in_idx = coords_to_index(in_coords, params.ndim, in_strides);
+
+    // Each complex element occupies two consecutive float64 slots.
+    output_data[out_idx * 2u]      = input_data[in_idx * 2u];
+    output_data[out_idx * 2u + 1u] = input_data[in_idx * 2u + 1u];
+}

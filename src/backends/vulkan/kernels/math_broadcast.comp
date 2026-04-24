@@ -127,6 +127,33 @@ void main() {
             case 3: // div
                 res_bits = floatBitsToUint(val_a / val_b);
                 break;
+            case 23: // atan2 (binary)
+                res_bits = floatBitsToUint(atan(val_a, val_b));
+                break;
+            case 24: // fmod (binary) - truncated remainder
+                res_bits = floatBitsToUint(val_a - trunc(val_a / val_b) * val_b);
+                break;
+            case 25: { // remainder (binary) - IEEE remainder
+                float quot = val_a / val_b;
+                float rounded = round(quot);
+                res_bits = floatBitsToUint(val_a - rounded * val_b);
+                break;
+            }
+            case 26: // minimum (binary)
+                res_bits = floatBitsToUint(min(val_a, val_b));
+                break;
+            case 27: // maximum (binary)
+                res_bits = floatBitsToUint(max(val_a, val_b));
+                break;
+            case 33: // hypot (binary)
+                res_bits = floatBitsToUint(sqrt(val_a * val_a + val_b * val_b));
+                break;
+            case 34: { // copysign (binary)
+                uint sign_b_bit = bits_b & 0x80000000u;
+                uint mag_a_bits = bits_a & 0x7FFFFFFFu;
+                res_bits = sign_b_bit | mag_a_bits;
+                break;
+            }
             case 42: { // fmax (binary) - NaN-propagating max: fmax(NaN, x) = x
                 float res;
                 if (isnan(val_a)) res = val_b;
@@ -179,6 +206,18 @@ void main() {
                 break;
             case 3: // div
                 res = val_a / val_b;
+                break;
+            case 24: // fmod for integers (truncated)
+                res = val_a % val_b;
+                break;
+            case 25: // remainder for integers (truncated)
+                res = val_a % val_b;
+                break;
+            case 26: // minimum
+                res = min(val_a, val_b);
+                break;
+            case 27: // maximum
+                res = max(val_a, val_b);
                 break;
             default:
                 res = 0;

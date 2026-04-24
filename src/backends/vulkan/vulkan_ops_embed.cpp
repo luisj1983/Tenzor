@@ -39,6 +39,15 @@ auto VulkanBackend::dispatchInstanceNorm(const Tensor& input, const Tensor& weig
 
     bool has_affine = (weight.numel() > 0 && bias.numel() > 0);
 
+    // The _f16/_bf16 shader declares weight/bias as Float32 buffers. Always convert the
+    // weight/bias to Float32 before dispatch so the binding stride matches the shader.
+    Tensor weight_f32 = weight;
+    Tensor bias_f32 = bias;
+    if ((is_float16 || is_bfloat16) && has_affine) {
+        if (weight_f32.dtype() != DType::Float32) weight_f32 = weight_f32.to(DType::Float32);
+        if (bias_f32.dtype() != DType::Float32) bias_f32 = bias_f32.to(DType::Float32);
+    }
+
     // Output tensors — mean/rstd are always Float32 for F16 shader
     std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
     Tensor output(out_shape, input.dtype(), input.device());
@@ -63,8 +72,8 @@ auto VulkanBackend::dispatchInstanceNorm(const Tensor& input, const Tensor& weig
     std::vector<size_t> sizes = {input_buf_size, output_buf_size};
 
     if (has_affine) {
-        bindings.push_back({2, weight.data_ptr()});
-        bindings.push_back({3, bias.data_ptr()});
+        bindings.push_back({2, weight_f32.data_ptr()});
+        bindings.push_back({3, bias_f32.data_ptr()});
         sizes.push_back(channel_buf_size);
         sizes.push_back(channel_buf_size);
     } else {
@@ -138,6 +147,13 @@ auto VulkanBackend::dispatchInstanceNormBackward(const Tensor& grad_output, cons
 
     bool has_affine = (weight.numel() > 0);
 
+    // Align weight dtype with shader expectation: F16/BF16 backward shader reads
+    // weight as Float32. Convert if needed so binding strides match.
+    Tensor weight_f32 = weight;
+    if ((is_float16 || is_bfloat16) && has_affine && weight_f32.dtype() != DType::Float32) {
+        weight_f32 = weight_f32.to(DType::Float32);
+    }
+
     size_t elem_size = input.dtype_size();
 
     // Allocate outputs — grad_weight/grad_bias always Float32 for F16 shader
@@ -169,7 +185,7 @@ auto VulkanBackend::dispatchInstanceNormBackward(const Tensor& grad_output, cons
     std::vector<size_t> sizes = {input_buf_size, input_buf_size, nc_buf_size, nc_buf_size};
 
     if (has_affine) {
-        bindings.push_back({4, weight.data_ptr()});
+        bindings.push_back({4, weight_f32.data_ptr()});
         sizes.push_back(channel_buf_size);
     } else {
         bindings.push_back({4, grad_input.data_ptr()});

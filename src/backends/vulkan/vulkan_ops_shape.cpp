@@ -170,8 +170,13 @@ auto VulkanBackend::dispatchTranspose(const Tensor& input, int64_t dim0, int64_t
 
     int32_t device_id = input.device().index;
 
-    // For simple 2D transpose or contiguous case, use optimized path
-    if (ndim == 2 && input.is_contiguous()) {
+    // For simple 2D transpose or contiguous case, use optimized path.
+    // Complex128 has 16 bytes per element — delegate to dispatchPermute which
+    // knows how to pick permute_c128. Otherwise route 8-byte types (Float64,
+    // Complex64) through the transform_f64 shader (treats each element as
+    // one 8-byte slot), and everything else through the 4-byte transform
+    // shader.
+    if (ndim == 2 && input.is_contiguous() && input.dtype() != DType::Complex128) {
         // Use simplified transform shader for 2D case
         // For Float16/BFloat16, convert to Float32, transpose, convert back
         DType orig_dtype = input.dtype();
@@ -180,7 +185,10 @@ auto VulkanBackend::dispatchTranspose(const Tensor& input, int64_t dim0, int64_t
             transpose_input = input.to(DType::Float32);
         }
         std::string shader_name;
-        if (transpose_input.dtype() == DType::Float64) {
+        if (transpose_input.dtype() == DType::Float64
+            || transpose_input.dtype() == DType::Int64
+            || transpose_input.dtype() == DType::Complex64) {
+            // All 8-byte-per-element dtypes share the f64 transform shader.
             shader_name = "transform_f64";
         } else {
             shader_name = "transform";
@@ -288,19 +296,19 @@ auto VulkanBackend::dispatchPermute(const Tensor& input, const std::vector<int64
 
     // Get pipeline - select dtype-specific shader variant
     std::string permute_shader;
-    if (input.dtype() == DType::Float64 || input.dtype() == DType::Int64 ||
+    if (input.dtype() == DType::Complex128) {
+        // 16-byte-per-element shader — each output slot copies two float64 halves.
+        permute_shader = "permute_c128";
+    }
+    else if (input.dtype() == DType::Float64 || input.dtype() == DType::Int64 ||
         input.dtype() == DType::Complex64) {
         // 8-byte types share the f64 shader (uvec2/uint64 layout)
         permute_shader = "permute_f64";
     }
     else if (input.dtype() == DType::Float16) permute_shader = "permute_f16";
     else if (input.dtype() == DType::BFloat16) permute_shader = "permute_bf16";
-    else if (input.dtype() == DType::Complex128) {
-        throw std::runtime_error("Vulkan dispatchPermute: Complex128 not yet supported");
-    }
     else permute_shader = "permute";
     auto* pipeline = getPipeline(permute_shader, device_id);
-    auto& ctx = devices_[device_id];
 
     // Get Vulkan buffers for input and output
     const void* buffer_input = input.data_ptr();
@@ -309,88 +317,38 @@ auto VulkanBackend::dispatchPermute(const Tensor& input, const std::vector<int64
     size_t buffer_size_input = input.numel() * input.dtype_size();
     size_t buffer_size_output = output.numel() * output.dtype_size();
 
-    // Create temporary buffers for shape, strides, and permutation on device
-    // Convert int64_t to int32_t for shader compatibility
+    // Convert int64_t to int32_t for shader compatibility.
     std::vector<int32_t> shape_i32(ndim);
     std::vector<int32_t> strides_i32(ndim);
     std::vector<int32_t> dims_i32(ndim);
-
     for (int32_t i = 0; i < ndim; ++i) {
         shape_i32[i] = static_cast<int32_t>(input_shape[i]);
         strides_i32[i] = static_cast<int32_t>(input_strides[i]);
         dims_i32[i] = static_cast<int32_t>(dims[i]);
     }
 
-    // Allocate temporary device buffers for metadata
     size_t metadata_size = ndim * sizeof(int32_t);
 
-    // Acquire staging buffer from pool to upload metadata
-    size_t staging_idx = acquireStagingBuffer(device_id, metadata_size * 3);
-    auto& staging = stagingPools_[device_id].buffers[staging_idx];
+    // Allocate metadata buffers through the main allocator so their pointers
+    // are tracked — the previous standalone VulkanBuffer path returned raw
+    // VkBuffer handles that allocateAndWriteDescriptorSet's lookup couldn't
+    // resolve, producing "Invalid buffer pointer: buffer not tracked" when
+    // dispatchPermute was invoked from higher-level ops like fft2.
+    void* ptr_shape   = allocate(metadata_size, device_id);
+    void* ptr_strides = allocate(metadata_size, device_id);
+    void* ptr_perm    = allocate(metadata_size, device_id);
 
-    // Map and copy all metadata
-    void* mapped = staging.buffer->map();
-    std::memcpy(static_cast<char*>(mapped), shape_i32.data(), metadata_size);
-    std::memcpy(static_cast<char*>(mapped) + metadata_size, strides_i32.data(), metadata_size);
-    std::memcpy(static_cast<char*>(mapped) + metadata_size * 2, dims_i32.data(), metadata_size);
-    staging.buffer->unmap();
-
-    // Create device-local buffers for metadata
-    auto buffer_shape = std::make_unique<vulkan::VulkanBuffer>(
-        ctx.device, ctx.physicalDevice, metadata_size,
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
-    );
-
-    auto buffer_strides = std::make_unique<vulkan::VulkanBuffer>(
-        ctx.device, ctx.physicalDevice, metadata_size,
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
-    );
-
-    auto buffer_perm = std::make_unique<vulkan::VulkanBuffer>(
-        ctx.device, ctx.physicalDevice, metadata_size,
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
-    );
-
-    // Copy metadata from staging to device buffers
-    VkCommandBuffer copyCmd = beginSingleTimeCommands(device_id);
-
-    VkBufferCopy copyRegion{};
-    copyRegion.size = metadata_size;
-
-    copyRegion.srcOffset = 0;
-    vkCmdCopyBuffer(copyCmd, staging.buffer->buffer(), buffer_shape->buffer(), 1, &copyRegion);
-
-    copyRegion.srcOffset = metadata_size;
-    vkCmdCopyBuffer(copyCmd, staging.buffer->buffer(), buffer_strides->buffer(), 1, &copyRegion);
-
-    copyRegion.srcOffset = metadata_size * 2;
-    vkCmdCopyBuffer(copyCmd, staging.buffer->buffer(), buffer_perm->buffer(), 1, &copyRegion);
-
-    // Insert transfer-to-compute barrier before the compute dispatch reads this data
-    insertTransferToComputeBarrier(copyCmd);
-
-    endSingleTimeCommands(copyCmd, device_id);
-
-    // With batching enabled, force submit now to ensure staging buffer
-    // content is copied to device buffers before staging buffer can be reused.
-    if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
-        submitBatchIfNeeded(device_id, true);  // Force submit the copy commands
-        ensurePendingWorkComplete(device_id);   // Wait for copies to complete
-    }
-
-    // Release staging buffer back to pool for reuse
-    releaseStagingBuffer(device_id, staging_idx);
+    copy(ptr_shape,   shape_i32.data(),   metadata_size, CopyKind::HostToDevice);
+    copy(ptr_strides, strides_i32.data(), metadata_size, CopyKind::HostToDevice);
+    copy(ptr_perm,    dims_i32.data(),    metadata_size, CopyKind::HostToDevice);
 
     // Set up descriptor set with all buffers
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, buffer_input},
         {1, buffer_output},
-        {2, buffer_shape->buffer()},
-        {3, buffer_strides->buffer()},
-        {4, buffer_perm->buffer()}
+        {2, ptr_shape},
+        {3, ptr_strides},
+        {4, ptr_perm}
     };
     std::vector<size_t> sizes = {
         buffer_size_input,
@@ -433,15 +391,15 @@ auto VulkanBackend::dispatchPermute(const Tensor& input, const std::vector<int64
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    // CRITICAL: Force batch submission before temp buffers go out of scope!
-    // buffer_shape, buffer_strides, and buffer_perm are unique_ptrs that will
-    // be destroyed when this function returns. With batching enabled, the
-    // command buffer still references these buffers. We must submit and wait
-    // for completion before destroying them.
+    // Ensure the compute dispatch is done before freeing metadata buffers.
     if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
-        submitBatchIfNeeded(device_id, true);  // Force submit
-        ensurePendingWorkComplete(device_id);   // Wait for GPU
+        submitBatchIfNeeded(device_id, true);
+        ensurePendingWorkComplete(device_id);
     }
+
+    deallocate(ptr_shape);
+    deallocate(ptr_strides);
+    deallocate(ptr_perm);
 
     return output;
 }

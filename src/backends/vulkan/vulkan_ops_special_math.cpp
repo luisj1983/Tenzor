@@ -128,25 +128,35 @@ auto VulkanBackend::dispatchSpecialMathBinary(const Tensor& a, const Tensor& b, 
         return Tensor(shape, orig_dtype, a.device());
     }
 
-    Tensor f32_a = maybe_promote(a, orig_dtype, this);
-    Tensor f32_b = maybe_promote(b, orig_dtype, this);
+    // Float64 has a dedicated shader so we don't round-trip through Float32
+    // (which costs ~16 mantissa bits and breaks Float64 gradcheck on
+    // logaddexp / beta / etc.).
+    bool is_f64 = (orig_dtype == DType::Float64);
 
-    std::vector<int64_t> shape(f32_a.shape().begin(), f32_a.shape().end());
-    Tensor f32_output(shape, DType::Float32, f32_a.device());
+    Tensor work_a = is_f64 ? (a.is_contiguous() ? a : a.contiguous())
+                           : maybe_promote(a, orig_dtype, this);
+    Tensor work_b = is_f64 ? (b.is_contiguous() ? b : b.contiguous())
+                           : maybe_promote(b, orig_dtype, this);
 
-    int32_t device_id = f32_a.device().index;
-    auto* pipeline = getPipeline("special_math_binary", device_id);
+    DType work_dtype = is_f64 ? DType::Float64 : DType::Float32;
+    size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
+
+    std::vector<int64_t> shape(work_a.shape().begin(), work_a.shape().end());
+    Tensor work_output(shape, work_dtype, work_a.device());
+
+    int32_t device_id = work_a.device().index;
+    auto* pipeline = getPipeline(is_f64 ? "special_math_binary_f64" : "special_math_binary", device_id);
 
     BinaryPushConstants pc{};
-    pc.n = static_cast<uint32_t>(f32_a.numel());
+    pc.n = static_cast<uint32_t>(work_a.numel());
     pc.op = opcode;
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, f32_a.data_ptr()},
-        {1, f32_b.data_ptr()},
-        {2, f32_output.data_ptr()},
+        {0, work_a.data_ptr()},
+        {1, work_b.data_ptr()},
+        {2, work_output.data_ptr()},
     };
-    size_t buf_size = f32_a.numel() * sizeof(float);
+    size_t buf_size = work_a.numel() * elem_size;
     std::vector<size_t> sizes = {buf_size, buf_size, buf_size};
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
@@ -159,14 +169,14 @@ auto VulkanBackend::dispatchSpecialMathBinary(const Tensor& a, const Tensor& b, 
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(BinaryPushConstants), &pc);
 
-    uint32_t workgroups = div_wg(static_cast<uint32_t>(f32_a.numel()),
+    uint32_t workgroups = div_wg(static_cast<uint32_t>(work_a.numel()),
                                   devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
     synchronize(device_id);
 
-    return maybe_demote(f32_output, orig_dtype, this);
+    return is_f64 ? work_output : maybe_demote(work_output, orig_dtype, this);
 }
 
 auto VulkanBackend::dispatchSpecialMathTernary(const Tensor& a, const Tensor& b, const Tensor& x) -> Tensor {

@@ -16,6 +16,42 @@ auto VulkanBackend::dispatchZeros(const std::vector<int64_t>& shape, DType dtype
         return dispatchFull(shape, 0.0, dtype);
     }
 
+    // Complex dtypes: zero bits represent zero value in both Complex64 (2x f32) and
+    // Complex128 (2x f64). Compute numel*dtype_size then fill the underlying bytes with zeros.
+    if (dtype == DType::Complex64 || dtype == DType::Complex128) {
+        Tensor output(shape, dtype, device);
+        int64_t numel = 1;
+        for (auto d : shape) numel *= d;
+        if (numel == 0) return output;
+
+        int32_t device_id = device.index;
+        auto* pipeline = getPipeline("fill", device_id);
+
+        const void* buffer_out = output.data_ptr();
+        // One uint32 per real-or-imag-half (two halves per complex element for Complex64,
+        // four halves per complex element for Complex128 when viewed as u32 chunks).
+        size_t buffer_size_out = output.numel() * output.dtype_size();
+        uint32_t n_u32 = static_cast<uint32_t>(buffer_size_out / 4);
+
+        std::vector<std::pair<uint32_t, const void*>> bindings = {{0, buffer_out}};
+        std::vector<size_t> sizes = {buffer_size_out};
+        VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+        struct PushConstants { uint32_t n; float value; } push_constants{n_u32, 0.0f};
+
+        VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(PushConstants), &push_constants);
+        uint32_t workgroups = div_wg(n_u32, devices_[device_id].workgroupSize);
+        vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+        insertComputeOnlyBarrier(cmdBuffer);
+        endSingleTimeCommands(cmdBuffer, device_id);
+        return output;
+    }
+
     // Create tensor with given shape
     Tensor output(shape, dtype, device);
 
@@ -652,6 +688,31 @@ auto VulkanBackend::dispatchClone(const Tensor& input) -> Tensor {
  * @brief Expand tensor to larger size using broadcasting
  */
 auto VulkanBackend::dispatchExpand(const Tensor& input_in, const std::vector<int64_t>& shape) -> Tensor {
+    // Validate broadcast-compatibility up-front, matching cpu::expand_kernel.
+    // Without this, expand(t({2,3}), {4,3}) silently produced a (4,3) tensor
+    // full of garbage because the shader assumed the caller had already
+    // checked shape compatibility.
+    {
+        auto in_shape = input_in.shape();
+        int64_t ndim_out = static_cast<int64_t>(shape.size());
+        int64_t ndim_in  = static_cast<int64_t>(in_shape.size());
+        if (ndim_out < ndim_in) {
+            throw std::runtime_error("expand: target has fewer dimensions than input");
+        }
+        int64_t dim_diff = ndim_out - ndim_in;
+        for (int64_t i = 0; i < ndim_out; ++i) {
+            int64_t in_idx = i - dim_diff;
+            if (in_idx < 0) continue;  // New leading dim
+            int64_t in_dim = in_shape[in_idx];
+            int64_t tgt_dim = shape[i];
+            if (in_dim != tgt_dim && in_dim != 1 && tgt_dim != -1) {
+                throw std::runtime_error("expand: incompatible shapes — cannot expand dim "
+                    + std::to_string(in_idx) + " of size " + std::to_string(in_dim)
+                    + " to size " + std::to_string(tgt_dim));
+            }
+        }
+    }
+
     // The shader below receives input strides computed from the input shape
     // (contiguous assumption). If the caller passed a non-contiguous view
     // (e.g. permute + unsqueeze) those computed strides would not match the
@@ -659,6 +720,31 @@ auto VulkanBackend::dispatchExpand(const Tensor& input_in, const std::vector<int
     // Materialize to contiguous first, matching CPU semantics.
     Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
     int32_t device_id = input.device().index;
+
+    // Complex dtypes: expand by treating the complex element as two adjacent
+    // real values. We recurse into the real-expand path on a "view" where each
+    // complex element is a {…, 2} real pair. The underlying storage layout is
+    // interleaved so expanding the real expanded tensor with an appended 2-dim
+    // broadcasts both real and imaginary parts in lock-step.
+    if (input.dtype() == DType::Complex64 || input.dtype() == DType::Complex128) {
+        auto real_dtype = (input.dtype() == DType::Complex64) ? DType::Float32 : DType::Float64;
+        auto in_shape_v = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+        in_shape_v.push_back(2);
+        Tensor input_real(in_shape_v, real_dtype, input.device());
+        size_t bytes = input.numel() * input.dtype_size();
+        this->copy(input_real.data_ptr(), input.data_ptr(), bytes, CopyKind::DeviceToDevice);
+
+        std::vector<int64_t> target_real_shape(shape.begin(), shape.end());
+        target_real_shape.push_back(2);
+
+        Tensor output_real = dispatchExpand(input_real, target_real_shape);
+
+        Tensor output(shape, input.dtype(), input.device());
+        size_t out_bytes = output.numel() * output.dtype_size();
+        this->copy(output.data_ptr(), output_real.data_ptr(), out_bytes, CopyKind::DeviceToDevice);
+        return output;
+    }
+
     // Select correct pipeline based on dtype
     bool is_float64 = (input.dtype() == DType::Float64);
     bool is_float16 = (input.dtype() == DType::Float16);

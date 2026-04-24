@@ -60,32 +60,43 @@ double exp_d(double x) {
     }
 }
 
-// Double-precision log approximation
+// Double-precision log via IEEE 754 bit extraction + atanh series.
+// The old float-path shortcut (double(log(float(x)))) silently reduced
+// output to Float32 precision, which defeated the point of the _f64 shader
+// and broke Float64 gradcheck on log_softmax.
 double log_d(double x) {
-    // Handle special cases
-    if (x != x) return x;  // NaN propagation
-    if (x <= 0.0) return -1.0 / 0.0;  // -inf for x <= 0
+    if (x != x) return x;
+    if (x < 0.0) return 0.0 / 0.0;
+    if (x == 0.0) return -1.0 / 0.0;
     if (x == 1.0) return 0.0;
-
-    // For values that fit in float range with good precision, use float log
-    if (x >= 1.0e-30 && x <= 1.0e30) {
-        return double(log(float(x)));
-    }
-
-    // For extreme values, use range reduction with bounded loop
-    double ln2 = 0.6931471805599453;
-    int e = 0;
-    double m = x;
-
-    // Normalize to range [1, 2) with bounded iterations
-    // Double precision exponent range is about [-1022, 1023]
-    for (int i = 0; i < 1100 && m >= 2.0; i++) { m *= 0.5; e++; }
-    for (int i = 0; i < 1100 && m < 1.0; i++) { m *= 2.0; e--; }
-
-    // Now m is in [1, 2), compute log(m) using float
-    double log_m = double(log(float(m)));
-
-    return log_m + double(e) * ln2;
+    uvec2 bits = unpackDouble2x32(x);
+    uint hi = bits.y;
+    uint lo = bits.x;
+    int biased_exp = int((hi >> 20u) & 0x7FFu);
+    int exp_val = biased_exp - 1023;
+    uint hi_normalized = (hi & 0x000FFFFFu) | 0x3FF00000u;
+    double m = packDouble2x32(uvec2(lo, hi_normalized));
+    if (m > 1.4142135623730950488) { m *= 0.5; exp_val += 1; }
+    double f = m - 1.0;
+    double s = f / (2.0 + f);
+    double s2 = s * s;
+    double c1 = 0.6666666666666735130;
+    double c2 = 0.3999999999940941908;
+    double c3 = 0.2857142874366239149;
+    double c4 = 0.2222219843214978396;
+    double c5 = 0.1818357216161805012;
+    double c6 = 0.1531383769920937332;
+    double c7 = 0.1479819860511658591;
+    double s4 = s2 * s2;
+    double t1 = c1 + c2 * s2 + c3 * s4;
+    double s6 = s4 * s2;
+    double t2 = c4 + c5 * s2 + c6 * s4 + c7 * s6;
+    double R = t1 + t2 * s6;
+    double log_m = 2.0 * s + s * s2 * R;
+    double ln2_hi = 0.69314718055994530942;
+    double ln2_lo = 2.3190468138462995584e-17;
+    double exp_dbl = double(exp_val);
+    return exp_dbl * ln2_hi + (log_m + exp_dbl * ln2_lo);
 }
 
 void main() {

@@ -45,8 +45,17 @@ void main() {
                     if (abs(apq) > 1e-14lf * sqrt(abs(app * aqq))) {
                         converged = 0.0lf;
 
-                        float64_t tau_val = (aqq - app) / (2.0lf * apq);
-                        float64_t t = sign(tau_val) / (abs(tau_val) + sqrt(1.0lf + tau_val * tau_val));
+                        // Handle app == aqq specially — sign(0) = 0 leaves
+                        // the rotation undefined, missing the 45° rotation
+                        // needed for symmetric equal-diagonal matrices.
+                        float64_t t;
+                        if (app == aqq) {
+                            t = 1.0lf;
+                        } else {
+                            float64_t tau_val = (aqq - app) / (2.0lf * apq);
+                            float64_t s_t = (tau_val >= 0.0lf) ? 1.0lf : -1.0lf;
+                            t = s_t / (abs(tau_val) + sqrt(1.0lf + tau_val * tau_val));
+                        }
                         float64_t c = 1.0lf / sqrt(1.0lf + t * t);
                         float64_t s = t * c;
 

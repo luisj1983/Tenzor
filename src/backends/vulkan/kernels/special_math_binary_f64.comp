@@ -1,0 +1,201 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Special math binary operations (Float64):
+//   0=beta(a,b) = exp(lgamma(a)+lgamma(b)-lgamma(a+b))
+//   1=zeta(s,q) = Σ 1/(q+n)^s + Euler-Maclaurin remainder
+//   2=logaddexp(a,b) = max(a,b) + log1p(exp(-|a-b|))
+//   3=logaddexp2(a,b) = max(a,b) + log2(1 + exp2(-|a-b|))
+//   4=xlogy(x,y) = x==0 ? 0 : x*log(y)
+
+layout(local_size_x_id = 0) in;
+layout(binding = 0) buffer InputA { double a_data[]; };
+layout(binding = 1) buffer InputB { double b_data[]; };
+layout(binding = 2) buffer Output { double out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint op;
+} params;
+
+const double PI_D = 3.14159265358979323846;
+
+// Double-precision exp via range reduction + Horner polynomial.
+double exp_d(double x) {
+    if (x != x) return x;
+    if (x > 709.0) return 1.0e308;
+    if (x < -745.0) return 0.0;
+    double ln2 = 0.6931471805599453;
+    double k_dbl = floor(x / ln2 + 0.5);
+    double r = x - k_dbl * ln2;
+    int k = int(clamp(k_dbl, -1100.0, 1100.0));
+    double exp_r = 1.0 + r * (1.0 + r * (0.5 + r * (1.0/6.0 + r * (1.0/24.0 + r * (1.0/120.0 +
+        r * (1.0/720.0 + r * (1.0/5040.0 + r * (1.0/40320.0 + r * (1.0/362880.0 +
+        r * (1.0/3628800.0 + r * (1.0/39916800.0 + r * (1.0/479001600.0 +
+        r * (1.0/6227020800.0)))))))))))));
+    double pow2 = 1.0;
+    int abs_k = (k >= 0) ? k : -k;
+    double base = 2.0;
+    while (abs_k > 0) {
+        if ((abs_k & 1) != 0) pow2 *= base;
+        base *= base;
+        abs_k >>= 1;
+    }
+    return (k >= 0) ? (exp_r * pow2) : (exp_r / pow2);
+}
+
+// Double-precision log via IEEE 754 bit extraction + atanh series.
+double log_d(double x) {
+    if (x != x) return x;
+    if (x < 0.0) return 0.0 / 0.0;
+    if (x == 0.0) return -1.0 / 0.0;
+    if (x == 1.0) return 0.0;
+    uvec2 bits = unpackDouble2x32(x);
+    uint hi = bits.y;
+    uint lo = bits.x;
+    int biased_exp = int((hi >> 20u) & 0x7FFu);
+    int exp_val = biased_exp - 1023;
+    uint hi_normalized = (hi & 0x000FFFFFu) | 0x3FF00000u;
+    double m = packDouble2x32(uvec2(lo, hi_normalized));
+    if (m > 1.4142135623730950488) { m *= 0.5; exp_val += 1; }
+    double f = m - 1.0;
+    double s = f / (2.0 + f);
+    double s2 = s * s;
+    double c1 = 0.6666666666666735130;
+    double c2 = 0.3999999999940941908;
+    double c3 = 0.2857142874366239149;
+    double c4 = 0.2222219843214978396;
+    double c5 = 0.1818357216161805012;
+    double c6 = 0.1531383769920937332;
+    double c7 = 0.1479819860511658591;
+    double s4 = s2 * s2;
+    double t1 = c1 + c2 * s2 + c3 * s4;
+    double s6 = s4 * s2;
+    double t2 = c4 + c5 * s2 + c6 * s4 + c7 * s6;
+    double R = t1 + t2 * s6;
+    double log_m = 2.0 * s + s * s2 * R;
+    double ln2_hi = 0.69314718055994530942;
+    double ln2_lo = 2.3190468138462995584e-17;
+    double exp_dbl = double(exp_val);
+    return exp_dbl * ln2_hi + (log_m + exp_dbl * ln2_lo);
+}
+
+const double TWO_OVER_PI = 0.6366197723675814;
+const double PI_OVER_2_HI = 1.5707963267948966;
+const double PI_OVER_2_LO = 6.123233995736766e-17;
+
+void trig_reduce(double x, out double r, out int q) {
+    double j = floor(x * TWO_OVER_PI + 0.5);
+    q = int(j) & 3;
+    r = x - j * PI_OVER_2_HI;
+    r = r - j * PI_OVER_2_LO;
+}
+double sin_poly(double x) {
+    double x2 = x * x;
+    return x * (1.0 - x2 * (1.0/6.0 - x2 * (1.0/120.0 - x2 * (1.0/5040.0 - x2 / 362880.0))));
+}
+double cos_poly(double x) {
+    double x2 = x * x;
+    return 1.0 - x2 * (0.5 - x2 * (1.0/24.0 - x2 * (1.0/720.0 - x2 / 40320.0)));
+}
+double sin_d(double x) {
+    if (x != x) return x;
+    double r; int q;
+    trig_reduce(x, r, q);
+    switch (q) {
+        case 0: return sin_poly(r);
+        case 1: return cos_poly(r);
+        case 2: return -sin_poly(r);
+        case 3: return -cos_poly(r);
+    }
+    return 0.0;
+}
+
+// Lanczos lgamma in double precision (g=7, 9 coefficients, same set as
+// special_math_unary_f64 — the 15-coef variant previously used here is from
+// a different Lanczos parameterization and produces wrong results).
+double lgamma_lanczos_d(double x) {
+    double coef[9];
+    coef[0] = 0.99999999999980993;
+    coef[1] = 676.5203681218851;
+    coef[2] = -1259.1392167224028;
+    coef[3] = 771.32342877765313;
+    coef[4] = -176.61502916214059;
+    coef[5] = 12.507343278686905;
+    coef[6] = -0.13857109526572012;
+    coef[7] = 9.9843695780195716e-6;
+    coef[8] = 1.5056327351493116e-7;
+
+    double g = 7.0;
+    double xm = x - 1.0;
+    double a = coef[0];
+    double t = xm + g + 0.5;
+    for (int i = 1; i < 9; ++i) {
+        a += coef[i] / (xm + double(i));
+    }
+    return 0.5 * log_d(2.0 * PI_D) + (xm + 0.5) * log_d(t) - t + log_d(a);
+}
+double lgamma_impl_d(double x) {
+    if (x < 0.5) {
+        double sinpx = sin_d(PI_D * x);
+        if (sinpx == 0.0) return 1.0e308;
+        return log_d(PI_D / abs(sinpx)) - lgamma_lanczos_d(1.0 - x);
+    }
+    return lgamma_lanczos_d(x);
+}
+
+double beta_impl(double a, double b) {
+    return exp_d(lgamma_impl_d(a) + lgamma_impl_d(b) - lgamma_impl_d(a + b));
+}
+
+double zeta_impl(double s, double a) {
+    double result = 0.0;
+    for (int i = 0; i < 12; ++i) {
+        result += exp_d(-s * log_d(a + double(i)));
+    }
+    double aN = a + 12.0;
+    if (s != 1.0) result += exp_d((1.0 - s) * log_d(aN)) / (s - 1.0);
+    result += 0.5 * exp_d(-s * log_d(aN));
+    return result;
+}
+
+// log1p(x) = log(1+x), numerically stable
+double log1p_d(double x) {
+    double u = 1.0 + x;
+    if (u == 1.0) return x;
+    return log_d(u) * (x / (u - 1.0));
+}
+
+double logaddexp_impl(double a, double b) {
+    double m = max(a, b);
+    return m + log1p_d(exp_d(-abs(a - b)));
+}
+
+// log2(x) = log(x)/ln(2), exp2(x) = exp(x*ln(2))
+double logaddexp2_impl(double a, double b) {
+    double m = max(a, b);
+    double ln2 = 0.6931471805599453;
+    return m + log_d(1.0 + exp_d(-abs(a - b) * ln2)) / ln2;
+}
+
+double xlogy_impl(double x, double y) {
+    if (x == 0.0) return 0.0;
+    return x * log_d(y);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n) return;
+    double a = a_data[idx];
+    double b = b_data[idx];
+    double r;
+    switch (params.op) {
+        case 0: r = beta_impl(a, b); break;
+        case 1: r = zeta_impl(a, b); break;
+        case 2: r = logaddexp_impl(a, b); break;
+        case 3: r = logaddexp2_impl(a, b); break;
+        case 4: r = xlogy_impl(a, b); break;
+        default: r = 0.0;
+    }
+    out_data[idx] = r;
+}

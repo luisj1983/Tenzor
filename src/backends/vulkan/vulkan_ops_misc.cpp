@@ -921,38 +921,48 @@ auto VulkanBackend::dispatchWhere(const Tensor& condition, const Tensor& x, cons
         }
     }
 
-    // Native shader path (Float32 only — fast and numerically exact).
-    // For other dtypes we promote to Float32 and cast back at the end.
+    // Native shader paths. Float64 has a dedicated where_f64 shader so we
+    // don't round-trip through Float32 (which would lose ~16 mantissa bits
+    // and break Float64 gradcheck on Where). All other dtypes still promote
+    // to Float32 since their relative error falls within test tolerances.
     DType target_dtype = x.dtype();
-    Tensor cond_u8  = (condition.dtype() == DType::Bool) ? condition : condition.to(DType::Bool);
-    Tensor x_f32    = (target_dtype == DType::Float32) ? x : x.to(DType::Float32);
-    Tensor y_f32    = (y.dtype() == DType::Float32) ? y : y.to(DType::Float32);
+    bool is_f64 = (target_dtype == DType::Float64);
+    Tensor cond_u8 = (condition.dtype() == DType::Bool) ? condition : condition.to(DType::Bool);
 
-    // Ensure contiguous for direct buffer indexing
+    Tensor x_work, y_work;
+    if (is_f64) {
+        x_work = (x.dtype() == DType::Float64) ? x : x.to(DType::Float64);
+        y_work = (y.dtype() == DType::Float64) ? y : y.to(DType::Float64);
+    } else {
+        x_work = (x.dtype() == DType::Float32) ? x : x.to(DType::Float32);
+        y_work = (y.dtype() == DType::Float32) ? y : y.to(DType::Float32);
+    }
+
     if (!cond_u8.is_contiguous()) cond_u8 = cond_u8.contiguous();
-    if (!x_f32.is_contiguous())   x_f32   = x_f32.contiguous();
-    if (!y_f32.is_contiguous())   y_f32   = y_f32.contiguous();
+    if (!x_work.is_contiguous())  x_work  = x_work.contiguous();
+    if (!y_work.is_contiguous())  y_work  = y_work.contiguous();
 
     int32_t device_id = x.device().index;
-    auto* pipeline = getPipeline("where", device_id);
+    auto* pipeline = getPipeline(is_f64 ? "where_f64" : "where", device_id);
 
     std::vector<int64_t> out_shape(cond_shape.begin(), cond_shape.end());
-    Tensor out_f32(out_shape, DType::Float32, x.device());
+    Tensor out_work(out_shape, is_f64 ? DType::Float64 : DType::Float32, x.device());
 
-    uint32_t n = static_cast<uint32_t>(out_f32.numel());
+    uint32_t n = static_cast<uint32_t>(out_work.numel());
     struct { uint32_t num_elements; } pc;
     pc.num_elements = n;
 
-    size_t f32_size  = static_cast<size_t>(n) * sizeof(float);
+    size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
+    size_t data_size = static_cast<size_t>(n) * elem_size;
     size_t bool_size = static_cast<size_t>(n) * sizeof(uint8_t);
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, cond_u8.data_ptr()},
-        {1, x_f32.data_ptr()},
-        {2, y_f32.data_ptr()},
-        {3, out_f32.data_ptr()},
+        {1, x_work.data_ptr()},
+        {2, y_work.data_ptr()},
+        {3, out_work.data_ptr()},
     };
-    std::vector<size_t> sizes = {bool_size, f32_size, f32_size, f32_size};
+    std::vector<size_t> sizes = {bool_size, data_size, data_size, data_size};
 
     VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
@@ -965,7 +975,7 @@ auto VulkanBackend::dispatchWhere(const Tensor& condition, const Tensor& x, cons
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
 
-    return (target_dtype == DType::Float32) ? out_f32 : out_f32.to(target_dtype);
+    return (out_work.dtype() == target_dtype) ? out_work : out_work.to(target_dtype);
 }
 
 // ============================================================================
@@ -1723,6 +1733,10 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
         shader_name = "cast_i8_f32";
     } else if (src_dtype == DType::Float32 && target_dtype == DType::Int8) {
         shader_name = "cast_f32_i8";
+    } else if (src_dtype == DType::UInt8 && target_dtype == DType::Float32) {
+        shader_name = "cast_u8_f32";
+    } else if (src_dtype == DType::Float32 && target_dtype == DType::UInt8) {
+        shader_name = "cast_f32_u8";
     } else if (src_dtype == DType::Bool && target_dtype == DType::Float32) {
         shader_name = "cast_bool_f32";
     } else if (src_dtype == DType::Float32 && target_dtype == DType::Bool) {
@@ -1753,11 +1767,21 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
                target_dtype == DType::BFloat16) {
         // Two-step via Float32: source -> Float32 -> BFloat16
         two_step = true;
-    } else if ((src_dtype == DType::Int8 || src_dtype == DType::Bool) &&
+    } else if ((src_dtype == DType::Int8 || src_dtype == DType::Bool ||
+                src_dtype == DType::UInt8) &&
                (target_dtype == DType::Float64 || target_dtype == DType::Float16 ||
                 target_dtype == DType::BFloat16 ||
                 target_dtype == DType::Int32 || target_dtype == DType::Int64)) {
-        // Two-step via Float32: Int8/Bool -> Float32 -> target
+        // Two-step via Float32: Int8/UInt8/Bool -> Float32 -> target
+        two_step = true;
+    } else if (src_dtype == DType::Float32 && target_dtype == DType::UInt8) {
+        // Already handled above; left for completeness
+        shader_name = "cast_f32_u8";
+    } else if ((target_dtype == DType::UInt8) &&
+               (src_dtype == DType::Float64 || src_dtype == DType::Float16 ||
+                src_dtype == DType::BFloat16 ||
+                src_dtype == DType::Int32 || src_dtype == DType::Int64)) {
+        // Two-step via Float32: source -> Float32 -> UInt8
         two_step = true;
     } else if ((src_dtype == DType::Int32 || src_dtype == DType::Int64) &&
                (target_dtype == DType::Float64 || target_dtype == DType::Float16)) {
@@ -2334,11 +2358,14 @@ auto VulkanBackend::dispatchStridedFill(Tensor& input, float value) -> void {
     bool is_f64 = (input.dtype() == DType::Float64);
     bool is_f16 = (input.dtype() == DType::Float16);
     bool is_bf16 = (input.dtype() == DType::BFloat16);
+    bool is_i64 = (input.dtype() == DType::Int64);
     // The generic `strided_fill` shader writes 32-bit floats; for BFloat16
     // buffers that smears two BF16 slots per store and produces [0, v, 0, v]
-    // patterns. Dispatch to the dedicated BF16 shader instead.
+    // patterns. Dispatch to the dedicated BF16 shader instead. Int64 needs
+    // full 8-byte writes or fill_(v) leaves the high half undefined.
     std::string shader =
         is_f64 ? "strided_fill_f64"
+        : is_i64 ? "strided_fill_i64"
         : is_f16 ? "strided_fill_f16"
         : is_bf16 ? "strided_fill_bf16"
         : "strided_fill";
@@ -2358,8 +2385,9 @@ auto VulkanBackend::dispatchStridedFill(Tensor& input, float value) -> void {
     }
     size_t buffer_size = (max_offset + 1) * input.dtype_size();
 
-    if (is_f64) {
-        // F64 variant: pass fill value as two uint32s
+    if (is_f64 || is_i64) {
+        // 8-byte variants (F64 / I64): pass fill value as two uint32 halves so
+        // the shader can reassemble a full 64-bit word per slot.
         struct {
             uint32_t n_elements;
             uint32_t ndim;
@@ -2370,11 +2398,19 @@ auto VulkanBackend::dispatchStridedFill(Tensor& input, float value) -> void {
         pc.n_elements = static_cast<uint32_t>(numel);
         pc.ndim = static_cast<uint32_t>(ndim);
 
-        double dval = static_cast<double>(value);
-        uint64_t bits;
-        std::memcpy(&bits, &dval, sizeof(bits));
-        pc.fill_value_lo = static_cast<uint32_t>(bits & 0xFFFFFFFF);
-        pc.fill_value_hi = static_cast<uint32_t>(bits >> 32);
+        if (is_f64) {
+            double dval = static_cast<double>(value);
+            uint64_t bits;
+            std::memcpy(&bits, &dval, sizeof(bits));
+            pc.fill_value_lo = static_cast<uint32_t>(bits & 0xFFFFFFFF);
+            pc.fill_value_hi = static_cast<uint32_t>(bits >> 32);
+        } else {
+            int64_t ival = static_cast<int64_t>(value);
+            uint64_t bits;
+            std::memcpy(&bits, &ival, sizeof(bits));
+            pc.fill_value_lo = static_cast<uint32_t>(bits & 0xFFFFFFFF);
+            pc.fill_value_hi = static_cast<uint32_t>(bits >> 32);
+        }
 
         for (int d = 0; d < std::min(ndim, 8); d++) {
             pc.shape_stride[2 * d] = static_cast<uint32_t>(shape[d]);
@@ -2403,7 +2439,20 @@ auto VulkanBackend::dispatchStridedFill(Tensor& input, float value) -> void {
         } pc = {};
         pc.n_elements = static_cast<uint32_t>(numel);
         pc.ndim = static_cast<uint32_t>(ndim);
-        pc.fill_value = value;
+
+        // The shader declares the buffer as `float[]` and stores `fill_value`
+        // directly. For Int32 storage (same 4-byte slot as Float32) we must
+        // pass the exact bit pattern so that Int32(v) reads back correctly,
+        // not float(v)'s IEEE bits. Reinterpret the target bit pattern as a
+        // float so the shader writes those bits verbatim.
+        if (input.dtype() == DType::Int32) {
+            int32_t ival = static_cast<int32_t>(value);
+            uint32_t bits;
+            std::memcpy(&bits, &ival, sizeof(uint32_t));
+            std::memcpy(&pc.fill_value, &bits, sizeof(float));
+        } else {
+            pc.fill_value = value;
+        }
 
         for (int d = 0; d < std::min(ndim, 8); d++) {
             pc.shape_stride[2 * d] = static_cast<uint32_t>(shape[d]);
@@ -3227,6 +3276,32 @@ auto VulkanBackend::dispatchLerp(const Tensor& start, const Tensor& end,
     std::vector<int64_t> output_shape(start_shape.begin(), start_shape.end());
     Tensor output(output_shape, start.dtype(), start.device());
 
+    // Broadcast scalar or partial-shape weight tensor up to start's shape.
+    // The lerp shaders read weight_buf[idx] per-element, so passing a
+    // shape-{1} scalar made every thread past idx=0 read out of the
+    // descriptor range and get 0 (which collapsed the output to `start`).
+    Tensor weight_broadcast = weight;
+    bool shapes_match = (weight.shape().size() == start.shape().size());
+    if (shapes_match) {
+        for (size_t i = 0; i < start.shape().size(); ++i) {
+            if (weight.shape()[i] != start.shape()[i]) { shapes_match = false; break; }
+        }
+    }
+    if (weight.numel() != start.numel() || !shapes_match) {
+        std::vector<int64_t> target_shape(start_shape.begin(), start_shape.end());
+        // Expand requires ndim matching; left-pad weight's shape with 1s.
+        if (static_cast<int64_t>(weight.shape().size()) < static_cast<int64_t>(target_shape.size())) {
+            std::vector<int64_t> padded(target_shape.size(), 1);
+            int64_t offset = static_cast<int64_t>(target_shape.size()) - static_cast<int64_t>(weight.shape().size());
+            for (size_t i = 0; i < weight.shape().size(); ++i) {
+                padded[offset + i] = weight.shape()[i];
+            }
+            weight_broadcast = weight.reshape(padded);
+        }
+        weight_broadcast = dispatchExpand(weight_broadcast, target_shape);
+        weight_broadcast = weight_broadcast.is_contiguous() ? weight_broadcast : weight_broadcast.contiguous();
+    }
+
     struct PushConstants {
         uint32_t n;
     } push_constants;
@@ -3234,7 +3309,7 @@ auto VulkanBackend::dispatchLerp(const Tensor& start, const Tensor& end,
 
     const void* buffer_start = start.data_ptr();
     const void* buffer_end = end.data_ptr();
-    const void* buffer_weight = weight.data_ptr();
+    const void* buffer_weight = weight_broadcast.data_ptr();
     const void* buffer_out = output.data_ptr();
 
     size_t elem_size = start.dtype_size();

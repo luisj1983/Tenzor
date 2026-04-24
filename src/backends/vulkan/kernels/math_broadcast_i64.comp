@@ -67,6 +67,20 @@ void main() {
         case 3: // div
             res = val_a / val_b;
             break;
+        case 24: // fmod / remainder (trunc-based) for integers
+            res = val_a % val_b;
+            break;
+        case 25: { // remainder - IEEE-style (round-half-to-even would be truncation for int)
+            int64_t r = val_a % val_b;
+            res = r;
+            break;
+        }
+        case 26: // minimum
+            res = (val_a < val_b) ? val_a : val_b;
+            break;
+        case 27: // maximum
+            res = (val_a > val_b) ? val_a : val_b;
+            break;
         default:
             res = int64_t(0);
             break;

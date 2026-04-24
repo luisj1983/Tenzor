@@ -1128,34 +1128,10 @@ auto VulkanBackend::dispatchComparisonOp(const std::string& op_name,
 auto VulkanBackend::dispatchReduction(const std::string& op_name,
                                       const Tensor& input_orig,
                                       int64_t dim, bool keepdim) -> Tensor {
-    // Reduction shaders below assume the reduction axis is the LAST one and
-    // index memory as flat (batch, dim_size). For dim != last_dim that
-    // mapping reads the wrong axis. Normalize: transpose dim to last,
-    // recurse, transpose back. Stride bug that previously caused VarDim/
-    // StdDim/SoftmaxDim0/LogSoftmaxDim0 parity failures vs CPU+ROCm.
-    bool full_reduction_outer = (dim == INT64_MIN);
-    if (!full_reduction_outer && input_orig.numel() > 0) {
-        auto orig_shape_span = input_orig.shape();
-        int64_t orig_ndim = static_cast<int64_t>(orig_shape_span.size());
-        int64_t norm_dim = (dim < 0) ? orig_ndim + dim : dim;
-        int64_t last = orig_ndim - 1;
-        if (orig_ndim > 0 && norm_dim != last) {
-            Tensor transposed = input_orig.transpose(norm_dim, last).contiguous();
-            // Recurse with dim=-1; recursion's keepdim semantics are about
-            // the (transposed) last axis, which after the back-transpose
-            // ends up at norm_dim. So pass the same keepdim through.
-            Tensor result = dispatchReduction(op_name, transposed, /*dim=*/-1, keepdim);
-            if (keepdim) {
-                return result.transpose(norm_dim, last).contiguous();
-            }
-            // When keepdim=false the reduced axis is dropped, so the last
-            // axis of `result` corresponds to what was originally axis
-            // `last` (after the transpose moved norm_dim there). The
-            // back-transpose isn't needed since the reduced dim is gone.
-            return result;
-        }
-    }
-
+    // The reduction shaders ([outer | reduce | inner] layout via
+    // inner_size) already handle arbitrary reduction axes on a
+    // contiguous input. The contiguous() below ensures the shader's
+    // assumption holds.
     Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     // Special case: handle empty tensors
     if (input.numel() == 0) {

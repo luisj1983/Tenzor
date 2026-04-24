@@ -14,19 +14,60 @@ layout(push_constant) uniform PushConstants {
     int sign;        // +1 or -1 (forward = -1, inverse = +1)
 };
 
+// Double-precision sin/cos (GLSL built-ins are only float). The chirp table
+// feeds a complex multiply across the entire Bluestein convolution — any
+// float precision loss here multiplies through all downstream FFT stages.
+const double TWO_OVER_PI_D = 0.6366197723675814lf;
+const double PI_OVER_2_HI_D = 1.5707963267948966lf;
+const double PI_OVER_2_LO_D = 6.123233995736766e-17lf;
+
+void trig_reduce_fd(double x, out double r, out int q) {
+    double j = floor(x * TWO_OVER_PI_D + 0.5lf);
+    q = int(j) & 3;
+    r = x - j * PI_OVER_2_HI_D;
+    r = r - j * PI_OVER_2_LO_D;
+}
+double sin_poly_fd(double x) {
+    double x2 = x * x;
+    return x * (1.0lf - x2 * (1.0lf/6.0lf - x2 * (1.0lf/120.0lf - x2 * (1.0lf/5040.0lf - x2 / 362880.0lf))));
+}
+double cos_poly_fd(double x) {
+    double x2 = x * x;
+    return 1.0lf - x2 * (0.5lf - x2 * (1.0lf/24.0lf - x2 * (1.0lf/720.0lf - x2 / 40320.0lf)));
+}
+double sin_fd(double x) {
+    double r; int q;
+    trig_reduce_fd(x, r, q);
+    switch (q) {
+        case 0: return sin_poly_fd(r);
+        case 1: return cos_poly_fd(r);
+        case 2: return -sin_poly_fd(r);
+        case 3: return -cos_poly_fd(r);
+    }
+    return 0.0lf;
+}
+double cos_fd(double x) {
+    double r; int q;
+    trig_reduce_fd(x, r, q);
+    switch (q) {
+        case 0: return cos_poly_fd(r);
+        case 1: return -sin_poly_fd(r);
+        case 2: return -cos_poly_fd(r);
+        case 3: return sin_poly_fd(r);
+    }
+    return 0.0lf;
+}
+
 void main() {
     uint k = gl_GlobalInvocationID.x;
     if (k >= N) return;
 
     double angle = double(sign) * 3.14159265358979323846lf * double(k) * double(k) / double(N);
-    // Reduce angle to [-PI, PI] in double precision before float cast
-    // to preserve precision for large k^2/N values
+    // Reduce angle to [-PI, PI] in double precision to stabilize large k^2/N.
     double TWO_PI = 6.28318530717958647692lf;
     angle = angle - TWO_PI * round(angle / TWO_PI);
-    // GLSL trig functions only work on float; cast down for cos/sin
-    float angle_f = float(angle);
-    double c = double(cos(angle_f));
-    double s = double(sin(angle_f));
+    double c = cos_fd(angle);
+    double s = sin_fd(angle);
 
     uint base = k * 2;
     output_data[base]     = c;

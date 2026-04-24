@@ -68,6 +68,32 @@ void main() {
         case 3: // div
             res = val_a / val_b;
             break;
+        case 23: // atan2 (binary) - approximate via float for broadcast path
+            res = double(atan(float(val_a), float(val_b)));
+            break;
+        case 24: // fmod (binary) - truncated remainder
+            res = val_a - trunc(val_a / val_b) * val_b;
+            break;
+        case 25: { // remainder (binary) - IEEE remainder
+            double quot = val_a / val_b;
+            double rounded = round(quot);
+            res = val_a - rounded * val_b;
+            break;
+        }
+        case 26: // minimum (binary)
+            res = min(val_a, val_b);
+            break;
+        case 27: // maximum (binary)
+            res = max(val_a, val_b);
+            break;
+        case 33: // hypot (binary)
+            res = sqrt(val_a * val_a + val_b * val_b);
+            break;
+        case 34: { // copysign (binary)
+            double mag = abs(val_a);
+            res = (val_b < 0.0 || (val_b == 0.0 && sign(val_b) < 0.0)) ? -mag : mag;
+            break;
+        }
         case 42: // fmax (binary) - NaN-propagating max: fmax(NaN, x) = x
             if (isnan(val_a)) res = val_b;
             else if (isnan(val_b)) res = val_a;

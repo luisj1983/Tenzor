@@ -12,6 +12,12 @@ auto VulkanBackend::dispatchConj(const Tensor& input) -> Tensor {
         return Tensor(out_shape, input.dtype(), input.device());
     }
 
+    // For real (non-complex) dtypes, conjugate is the identity.
+    // Matches CPU kernel semantics (see conj_kernel in cpu/kernels/math.cpp).
+    if (input.dtype() != DType::Complex64 && input.dtype() != DType::Complex128) {
+        return dispatchClone(input);
+    }
+
     // Float16: use native F16 shader (operates on packed complex elements)
     if (input.dtype() == DType::Float16) {
         int32_t device_id = input.device().index;
@@ -97,6 +103,17 @@ auto VulkanBackend::dispatchConj(const Tensor& input) -> Tensor {
 }
 
 auto VulkanBackend::dispatchReal(const Tensor& input) -> Tensor {
+    if (input.numel() == 0) {
+        std::vector<int64_t> out_shape(input.shape().begin(), input.shape().end());
+        return Tensor(out_shape, input.dtype(), input.device());
+    }
+
+    // For real (non-complex) dtypes, real() is the identity.
+    // Matches CPU kernel semantics (see real_kernel in cpu/kernels/math.cpp).
+    if (input.dtype() != DType::Complex64 && input.dtype() != DType::Complex128) {
+        return dispatchClone(input);
+    }
+
     // Complex64/128 fast path: input is a true complex tensor (numel =
     // element count, dtype_size = 2 floats). Output is the same shape but
     // Float32/Float64. Extract real parts by walking the interleaved
@@ -229,6 +246,19 @@ auto VulkanBackend::dispatchReal(const Tensor& input) -> Tensor {
 }
 
 auto VulkanBackend::dispatchImag(const Tensor& input) -> Tensor {
+    if (input.numel() == 0) {
+        std::vector<int64_t> out_shape(input.shape().begin(), input.shape().end());
+        return Tensor(out_shape, input.dtype(), input.device());
+    }
+
+    // For real (non-complex) dtypes, imag() returns a zero tensor of same shape/dtype.
+    // Matches CPU kernel semantics (see imag_kernel in cpu/kernels/math.cpp).
+    if (input.dtype() != DType::Complex64 && input.dtype() != DType::Complex128) {
+        std::vector<int64_t> out_shape(input.shape().begin(), input.shape().end());
+        Tensor output(out_shape, input.dtype(), input.device());
+        return dispatchFill(output, 0.0f);
+    }
+
     // Complex64/128 fast path (mirrors dispatchReal — see comment there).
     // Uses the existing imag / imag_f64 shaders which read the second
     // float of each interleaved (re, im) pair.
@@ -357,6 +387,31 @@ auto VulkanBackend::dispatchImag(const Tensor& input) -> Tensor {
 }
 
 auto VulkanBackend::dispatchAngle(const Tensor& input) -> Tensor {
+    if (input.numel() == 0) {
+        std::vector<int64_t> out_shape(input.shape().begin(), input.shape().end());
+        return Tensor(out_shape, input.dtype(), input.device());
+    }
+
+    // For real (non-complex) dtypes, angle(x) = atan2(0, x).
+    // Matches CPU kernel semantics (see angle_kernel in cpu/kernels/math.cpp).
+    if (input.dtype() != DType::Complex64 && input.dtype() != DType::Complex128) {
+        // Float16/BFloat16: widen to Float32, compute, narrow back (many backend
+        // kernels lack half-precision dispatch paths for binary ops).
+        if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+            DType orig = input.dtype();
+            Tensor x_f32 = input.to(DType::Float32);
+            std::vector<int64_t> out_shape(x_f32.shape().begin(), x_f32.shape().end());
+            Tensor zeros_t(out_shape, DType::Float32, x_f32.device());
+            zeros_t = dispatchFill(zeros_t, 0.0f);
+            Tensor r = dispatchBinaryOp("atan2", zeros_t, x_f32);
+            return r.to(orig);
+        }
+        std::vector<int64_t> out_shape(input.shape().begin(), input.shape().end());
+        Tensor zeros_t(out_shape, input.dtype(), input.device());
+        zeros_t = dispatchFill(zeros_t, 0.0f);
+        return dispatchBinaryOp("atan2", zeros_t, input);
+    }
+
     // Complex64/128 fast path — mirrors dispatchReal. Shape preserved,
     // output dtype is the corresponding real. Reuses existing angle /
     // angle_f64 shaders which read (re, im) pairs.
@@ -483,6 +538,12 @@ auto VulkanBackend::dispatchAngle(const Tensor& input) -> Tensor {
 }
 
 auto VulkanBackend::dispatchPolar(const Tensor& abs, const Tensor& angle) -> Tensor {
+    // Float16/BFloat16: upcast to Float32 and produce Complex64, matching
+    // CPU kernel semantics (polar has no complex-half output dtype).
+    if (abs.dtype() == DType::Float16 || abs.dtype() == DType::BFloat16) {
+        return dispatchPolar(abs.to(DType::Float32), angle.to(DType::Float32));
+    }
+
     // Float32/64 → Complex64/128 fast path — matches CPU semantics.
     // Shape is preserved (not doubled) and dtype promotes to the
     // corresponding complex type. Uses the existing polar / polar_f64

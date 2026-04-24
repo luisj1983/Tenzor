@@ -10,9 +10,11 @@ layout(binding = 0) buffer Input { uint input_data[]; };   // Packed F16 pairs
 layout(binding = 1) buffer Output { uint output_data[]; }; // Packed F16 pairs
 
 layout(push_constant) uniform PushConstants {
-    uint num_tensors;          // Number of input tensors
-    uint elements_per_tensor;  // Elements in each input tensor
-    uint output_numel;         // Total output elements
+    uint num_tensors;
+    uint elements_per_tensor;
+    uint output_numel;
+    uint outer_size;
+    uint inner_size;
 } params;
 
 // Read a single Float16 element from packed uint32 input array
@@ -43,12 +45,18 @@ void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= params.output_numel) return;
 
-    uint tensor_idx = idx / params.elements_per_tensor;
-    uint elem_idx = idx % params.elements_per_tensor;
+    // Decompose the output flat index as (outer, tensor, inner) — matches
+    // stack.comp. Previously this shader used tensor_idx = idx / E which is
+    // only correct for dim=0 and produced transposed data for dim>=1.
+    uint inner = idx % params.inner_size;
+    uint tmp   = idx / params.inner_size;
+    uint tensor_idx = tmp % params.num_tensors;
+    uint outer = tmp / params.num_tensors;
 
-    // Bounds check on tensor index
     if (tensor_idx >= params.num_tensors) return;
 
-    uint input_offset = tensor_idx * params.elements_per_tensor + elem_idx;
+    uint input_offset = tensor_idx * params.elements_per_tensor
+                      + outer * params.inner_size
+                      + inner;
     writeF16(idx, readF16(input_offset));
 }

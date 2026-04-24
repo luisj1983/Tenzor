@@ -87,6 +87,33 @@ float compute_op(float val_a, float val_b) {
         case 1: res = fa - fb; break;
         case 2: res = fa * fb; break;
         case 3: res = fa / fb; break;
+        case 23: res = atan(fa, fb); break;
+        case 24: res = fa - trunc(fa / fb) * fb; break;
+        case 25: res = fa - round(fa / fb) * fb; break;
+        case 26: res = min(fa, fb); break;
+        case 27: res = max(fa, fb); break;
+        case 33: res = sqrt(fa * fa + fb * fb); break;
+        case 34: {
+            uint bits_a = floatBitsToUint(fa) & 0x7FFFFFFFu;
+            uint sign_b = floatBitsToUint(fb) & 0x80000000u;
+            res = uintBitsToFloat(bits_a | sign_b);
+            break;
+        }
+        case 42: {
+            if (isnan(fa)) res = fb;
+            else if (isnan(fb)) res = fa;
+            else res = max(fa, fb);
+            break;
+        }
+        case 43: {
+            if (isnan(fa)) res = fb;
+            else if (isnan(fb)) res = fa;
+            else res = min(fa, fb);
+            break;
+        }
+        case 47: res = pow(fa, fb); break;
+        case 48: res = (fa == 0.0) ? 0.0 : fa * log(1.0 + fb); break;
+        case 49: res = fa * exp2(fb); break;
         default: res = 0.0; break;
     }
     return float(res);

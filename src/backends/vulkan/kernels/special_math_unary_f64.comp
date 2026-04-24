@@ -50,65 +50,124 @@ double exp_d(double x) {
     return (k >= 0) ? (exp_r * pow2) : (exp_r / pow2);
 }
 
-// ----- Double-precision log via range reduction -----
+// ----- Double-precision log via IEEE 754 bit extraction + atanh series -----
+// The earlier Newton-from-float seed occasionally hit 1e-8 error near x=1
+// (float(x) == 1 when x = 1 + tiny) — this implementation is exact at x=1
+// and uses a proper polynomial over [sqrt(2)/2, sqrt(2)).
 double log_d(double x) {
     if (x != x) return x;
-    if (x <= 0.0) return -1.0e308;
+    if (x < 0.0) return 0.0 / 0.0;
+    if (x == 0.0) return -1.0 / 0.0;
     if (x == 1.0) return 0.0;
-
-    // Use float log as initial estimate, then refine
-    double y = double(log(float(x)));
-    // One Newton-Raphson iteration: log(x) = y - 1 + x*exp(-y)
-    double ey = exp_d(-y);
-    y = y - 1.0 + x * ey;
-    // Second iteration for full double precision
-    ey = exp_d(-y);
-    y = y - 1.0 + x * ey;
-    return y;
+    uvec2 bits = unpackDouble2x32(x);
+    uint hi = bits.y;
+    uint lo = bits.x;
+    int biased_exp = int((hi >> 20u) & 0x7FFu);
+    int exp_val = biased_exp - 1023;
+    uint hi_normalized = (hi & 0x000FFFFFu) | 0x3FF00000u;
+    double m = packDouble2x32(uvec2(lo, hi_normalized));
+    if (m > 1.4142135623730950488) { m *= 0.5; exp_val += 1; }
+    double f = m - 1.0;
+    double s = f / (2.0 + f);
+    double s2 = s * s;
+    double c1 = 0.6666666666666735130;
+    double c2 = 0.3999999999940941908;
+    double c3 = 0.2857142874366239149;
+    double c4 = 0.2222219843214978396;
+    double c5 = 0.1818357216161805012;
+    double c6 = 0.1531383769920937332;
+    double c7 = 0.1479819860511658591;
+    double s4 = s2 * s2;
+    double t1 = c1 + c2 * s2 + c3 * s4;
+    double s6 = s4 * s2;
+    double t2 = c4 + c5 * s2 + c6 * s4 + c7 * s6;
+    double R = t1 + t2 * s6;
+    double log_m = 2.0 * s + s * s2 * R;
+    double ln2_hi = 0.69314718055994530942;
+    double ln2_lo = 2.3190468138462995584e-17;
+    double exp_dbl = double(exp_val);
+    return exp_dbl * ln2_hi + (log_m + exp_dbl * ln2_lo);
 }
 
-// ----- Double-precision sqrt -----
+// ----- Double-precision sqrt via Newton iterations from float seed -----
 double sqrt_d(double x) {
     if (x <= 0.0) return 0.0;
     double y = double(sqrt(float(x)));
-    // Newton-Raphson iteration for full precision
+    // Three Newton steps guarantee full-precision doubling each step.
+    y = 0.5 * (y + x / y);
     y = 0.5 * (y + x / y);
     y = 0.5 * (y + x / y);
     return y;
 }
 
-// ----- Double-precision sin/cos (for moderate arguments) -----
+// ----- Double-precision sin/cos via range reduction + polynomial.
+// Previous float shortcuts lost ~16 mantissa bits — digamma's reflection uses
+// sin(pi*x)/cos(pi*x) where float loss shows up as visible gradient error.
+const double TWO_OVER_PI_D = 0.6366197723675814;
+const double PI_OVER_2_HI_D = 1.5707963267948966;
+const double PI_OVER_2_LO_D = 6.123233995736766e-17;
+
+void trig_reduce_local(double x, out double r, out int q) {
+    double j = floor(x * TWO_OVER_PI_D + 0.5);
+    q = int(j) & 3;
+    r = x - j * PI_OVER_2_HI_D;
+    r = r - j * PI_OVER_2_LO_D;
+}
+double sin_poly_local(double x) {
+    double x2 = x * x;
+    return x * (1.0 - x2 * (1.0/6.0 - x2 * (1.0/120.0 - x2 * (1.0/5040.0 - x2 / 362880.0))));
+}
+double cos_poly_local(double x) {
+    double x2 = x * x;
+    return 1.0 - x2 * (0.5 - x2 * (1.0/24.0 - x2 * (1.0/720.0 - x2 / 40320.0)));
+}
 double sin_d(double x) {
-    return double(sin(float(x)));
+    if (x != x) return x;
+    double r; int q;
+    trig_reduce_local(x, r, q);
+    switch (q) {
+        case 0: return sin_poly_local(r);
+        case 1: return cos_poly_local(r);
+        case 2: return -sin_poly_local(r);
+        case 3: return -cos_poly_local(r);
+    }
+    return 0.0;
 }
 double cos_d(double x) {
-    return double(cos(float(x)));
+    if (x != x) return x;
+    double r; int q;
+    trig_reduce_local(x, r, q);
+    switch (q) {
+        case 0: return cos_poly_local(r);
+        case 1: return -sin_poly_local(r);
+        case 2: return -cos_poly_local(r);
+        case 3: return sin_poly_local(r);
+    }
+    return 0.0;
 }
 
-// ----- Lanczos lgamma (double precision, g=7, 15 coefficients) -----
+// ----- Lanczos lgamma (double precision, g=7, 9 coefficients) -----
+// Uses the same coefficient set as the Float32 shader; the 15-coefficient
+// variant that was previously here is from a different Lanczos parameter
+// combination and produced A ≈ 33 instead of 263 for z=0, giving
+// lgamma(1) ≈ -2.08 instead of 0 (and gamma(1) ≈ 0.125).
 double lgamma_lanczos_d(double x) {
-    double coef[15];
-    coef[0]  =  0.99999999999999709182;
-    coef[1]  =  57.156235665862923517;
-    coef[2]  = -59.597960355475491248;
-    coef[3]  =  14.136097974741747174;
-    coef[4]  =  -0.49191381609762019978;
-    coef[5]  =  0.33994649984811888699e-4;
-    coef[6]  =  0.46523628927048575665e-4;
-    coef[7]  = -0.98374475304879564677e-4;
-    coef[8]  =  0.15808870322491248884e-3;
-    coef[9]  = -0.21026444172410612083e-3;
-    coef[10] =  0.21743961811521264320e-3;
-    coef[11] = -0.16431810653676389022e-3;
-    coef[12] =  0.84418223983852743293e-4;
-    coef[13] = -0.26190838401581408670e-4;
-    coef[14] =  0.36899182659531622704e-5;
+    double coef[9];
+    coef[0] = 0.99999999999980993;
+    coef[1] = 676.5203681218851;
+    coef[2] = -1259.1392167224028;
+    coef[3] = 771.32342877765313;
+    coef[4] = -176.61502916214059;
+    coef[5] = 12.507343278686905;
+    coef[6] = -0.13857109526572012;
+    coef[7] = 9.9843695780195716e-6;
+    coef[8] = 1.5056327351493116e-7;
 
     double g = 7.0;
     double xm = x - 1.0;
     double a = coef[0];
     double t = xm + g + 0.5;
-    for (int i = 1; i < 15; ++i) {
+    for (int i = 1; i < 9; ++i) {
         a += coef[i] / (xm + double(i));
     }
     return 0.5 * log_d(2.0 * PI_D) + (xm + 0.5) * log_d(t) - t + log_d(a);
@@ -385,20 +444,74 @@ double spherical_bessel_j0_impl_d(double x) {
 }
 
 // ----- Polygamma (double precision) -----
+// Uses the recurrence  ψ_n(x) = ψ_n(x+1) + (-1)^(n+1) * n! / x^(n+1)
+// to shift x into the regime x >= SHIFT where the asymptotic expansion
+// converges rapidly, then sums the asymptotic series.
+//   ψ_n(x) ≈ (-1)^(n+1) [ (n-1)!/x^n + n!/(2 x^(n+1))
+//                         + Σ_{k>=1} B_{2k} (n+2k-1)! / ((2k)! x^(n+2k)) ]
+// B_{2k} values for k=1..7 are rationals with small integer numerators.
 double polygamma_impl_d(int n, double x) {
     if (n == 0) return digamma_impl_d(x);
     double fact_n = 1.0;
     for (int k = 1; k <= n; ++k) fact_n *= double(k);
     double sgn = ((n + 1) % 2 == 0) ? 1.0 : -1.0;
-    double sum = 0.0;
-    for (int k = 0; k < 200; ++k) {
-        double xk = x + double(k);
-        double term = 1.0;
-        for (int j = 0; j < n + 1; ++j) term /= xk;
-        sum += term;
-        if (term < 1.0e-15 * abs(sum)) break;
+
+    // Shift up so we are in the asymptotic region.
+    const double SHIFT = 8.0;
+    double shifted_term = 0.0;
+    double y = x;
+    while (y < SHIFT) {
+        double p = 1.0;
+        for (int j = 0; j < n + 1; ++j) p *= y;
+        shifted_term += 1.0 / p;
+        y += 1.0;
     }
-    return sgn * fact_n * sum;
+
+    // Asymptotic expansion at x=y.
+    double inv_y = 1.0 / y;
+    double inv_y_n = 1.0;
+    for (int j = 0; j < n; ++j) inv_y_n *= inv_y;       // y^-n
+    double inv_y2 = inv_y * inv_y;                      // y^-2
+
+    // Leading terms
+    double fact_nm1 = (n == 0) ? 0.0 : fact_n / double(n);  // (n-1)!
+    double asy = fact_nm1 * inv_y_n + 0.5 * fact_n * inv_y_n * inv_y;
+
+    // Bernoulli terms: B_{2k} * (n+2k-1)! / ((2k)! * y^(n+2k))
+    // Precompute B_{2k} for k=1..7
+    const double B2[7] = {
+        1.0/6.0, -1.0/30.0, 1.0/42.0, -1.0/30.0,
+        5.0/66.0, -691.0/2730.0, 7.0/6.0
+    };
+    double factor = fact_n;       // (n!)
+    double yk = inv_y_n * inv_y2; // y^{-(n+2)}
+    // f_k = (n+2k-1)! / (2k)!  with f_0 scaffold uses
+    // f_1 = n! / 2, f_{k+1} = f_k * (n+2k)*(n+2k+1) / ((2k+1)(2k+2))
+    double coeff = fact_n * 0.5; // initial f_1 scaffold: (n+1)! / 2 — we apply B_2 next
+    // Actually reset: term_k = B_{2k} * (n+2k-1)! / (2k)! * y^-(n+2k)
+    // Start with k=1: B_2 * n! / 2 * y^-(n+2) = (1/6)*n!/2 * y^-(n+2)
+    double nfact_over_two_fact = fact_n;    // (n+0)! at k=0 step; we'll ratchet
+    // Use running scaling: at step k, running_fact = (n+2k-1)!/(2k)!.
+    // Increment: running_fact_{k+1}/running_fact_k = (n+2k)*(n+2k+1)/((2k+1)*(2k+2))
+    double running = fact_n * 0.5; // (n+1)!/2! when n+2k-1 = n+1 i.e. k=1 -> (n+1)!/2! = fact_n*(n+1)/2
+    // Simpler: compute explicitly each iteration
+    double series = 0.0;
+    double y2 = y * y;
+    double y_pow = inv_y_n * inv_y2;   // y^-(n+2)
+    for (int k = 1; k <= 7; ++k) {
+        // num = (n + 2k - 1)! / (2k)!
+        double num = 1.0;
+        for (int j = 2; j <= n + 2*k - 1; ++j) num *= double(j); // (n+2k-1)!
+        double denom = 1.0;
+        for (int j = 2; j <= 2*k; ++j) denom *= double(j);       // (2k)!
+        double term = B2[k-1] * (num / denom) * y_pow;
+        series += term;
+        if (abs(term) < 1.0e-17 * abs(asy + series)) break;
+        y_pow *= inv_y2;
+    }
+    asy += series;
+
+    return sgn * fact_n * shifted_term + sgn * asy;
 }
 
 void main() {

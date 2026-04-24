@@ -1251,9 +1251,13 @@ VkDescriptorSet VulkanBackend::allocateAndWriteDescriptorSet(
         bufferInfos[i].buffer = buffer;
         bufferInfos[i].offset = offset;
         // Round up to 4-byte boundary (minimum uint32 size for shader access).
-        // Float16 shaders pack 2 elements per uint32, so odd-element-count tensors
-        // need the range rounded up to avoid out-of-bounds descriptor access.
-        bufferInfos[i].range = std::max(bufferSizes[i], static_cast<size_t>(4));
+        // Float16/BFloat16 shaders pack 2 elements per uint32 — a 9-element
+        // Float16 tensor is 18 bytes logically, but the shader still reads/writes
+        // a whole uint32 (4 bytes) at the last word. Without rounding up, the
+        // descriptor range ends mid-word and the final write is OOB.
+        size_t sz = std::max(bufferSizes[i], static_cast<size_t>(4));
+        sz = (sz + 3) & ~size_t(3);
+        bufferInfos[i].range = sz;
 
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].pNext = nullptr;

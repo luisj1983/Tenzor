@@ -47,20 +47,16 @@ double cos_poly(double x) {
     return 1.0 - x2 * (0.5 - x2 * (1.0/24.0 - x2 * (1.0/720.0 - x2 / 40320.0)));
 }
 
-// Double-precision sin
+// Double-precision sin. Always uses range reduction + double-precision
+// polynomial — the earlier `float(sin(float(x)))` fast path silently dropped
+// all results to Float32 precision, which breaks gradcheck on Float64.
 double sin_d(double x) {
     if (x != x) return x;  // NaN
-
-    // For moderate values, float sin is sufficient
-    if (x >= -256.0 && x <= 256.0) {
-        return double(sin(float(x)));
-    }
 
     double r;
     int q;
     trig_reduce(x, r, q);
 
-    // Use quadrant to determine sign and sin/cos
     switch (q) {
         case 0: return sin_poly(r);
         case 1: return cos_poly(r);
@@ -73,10 +69,6 @@ double sin_d(double x) {
 // Double-precision cos
 double cos_d(double x) {
     if (x != x) return x;  // NaN
-
-    if (x >= -256.0 && x <= 256.0) {
-        return double(cos(float(x)));
-    }
 
     double r;
     int q;
@@ -95,36 +87,59 @@ double cos_d(double x) {
 double tan_d(double x) {
     if (x != x) return x;  // NaN
 
-    if (x >= -256.0 && x <= 256.0) {
-        return double(tan(float(x)));
-    }
-
     double s = sin_d(x);
     double c = cos_d(x);
     return s / c;
 }
 
-// Double-precision asin (inverse trig uses float — range is bounded [-1,1])
+// Double-precision asin using identity asin(x) = atan(x / sqrt(1 - x^2))
+double atan_d(double x);  // forward decl
 double asin_d(double x) {
     if (x != x) return x;
-    return double(asin(float(clamp(x, -1.0, 1.0))));
+    double clamped = clamp(x, -1.0, 1.0);
+    double one_minus_xx = 1.0 - clamped * clamped;
+    if (one_minus_xx <= 0.0) return (clamped > 0.0) ? (PI * 0.5) : (-PI * 0.5);
+    return atan_d(clamped / sqrt(one_minus_xx));
 }
 
-// Double-precision acos
+// Double-precision acos = pi/2 - asin
 double acos_d(double x) {
     if (x != x) return x;
-    return double(acos(float(clamp(x, -1.0, 1.0))));
+    return PI * 0.5 - asin_d(x);
 }
 
-// Double-precision atan (input range unbounded but output bounded)
+// Double-precision atan via range-reduction + Maclaurin/Padé on [-tan(pi/8), tan(pi/8)].
+// For |x| > 1 use atan(x) = pi/2 - atan(1/x). Then for |x| > tan(pi/8) use
+// atan(x) = pi/4 + atan((x-1)/(x+1)). What remains is |x| <= tan(pi/8) ~ 0.4142,
+// where a degree-11 odd polynomial gives ~double precision.
 double atan_d(double x) {
     if (x != x) return x;
-    // For values within float range, float atan is fine
-    if (x >= -1.0e30 && x <= 1.0e30) {
-        return double(atan(float(x)));
+
+    double sign = 1.0;
+    double ax = x;
+    if (ax < 0.0) { sign = -1.0; ax = -ax; }
+
+    bool inv = (ax > 1.0);
+    if (inv) ax = 1.0 / ax;
+
+    double add = 0.0;
+    const double TAN_PI_8 = 0.41421356237309503;  // tan(pi/8)
+    if (ax > TAN_PI_8) {
+        // Reduce by pi/4
+        add = PI * 0.25;
+        ax = (ax - 1.0) / (ax + 1.0);
     }
-    // For very large |x|, atan approaches +/- pi/2
-    return (x > 0.0) ? (PI * 0.5) : (-PI * 0.5);
+
+    // Maclaurin series: atan(x) = x - x^3/3 + x^5/5 - x^7/7 + ...
+    double x2 = ax * ax;
+    // Use Horner's method with enough terms for double precision on |x| <= 0.414
+    double p = (1.0/15.0) - x2 * ((1.0/17.0) - x2 * ((1.0/19.0) - x2 * ((1.0/21.0) - x2 * (1.0/23.0))));
+    p = (1.0/5.0) - x2 * ((1.0/7.0) - x2 * ((1.0/9.0) - x2 * ((1.0/11.0) - x2 * ((1.0/13.0) - x2 * p))));
+    double r = ax - ax * x2 * (1.0/3.0 - x2 * p);
+
+    double result = add + r;
+    if (inv) result = PI * 0.5 - result;
+    return sign * result;
 }
 
 void main() {

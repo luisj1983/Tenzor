@@ -45,13 +45,11 @@ double exp_d(double x) {
     return (k >= 0) ? (exp_r * pow2) : (exp_r / pow2);
 }
 
-// Double-precision sinh: (exp(x) - exp(-x)) / 2
+// Double-precision sinh: (exp(x) - exp(-x)) / 2. Always uses exp_d; the
+// previous float-path shortcut for |x|<=87 collapsed results to Float32
+// precision and made Float64 gradcheck fail.
 double sinh_d(double x) {
     if (x != x) return x;  // NaN
-    // For moderate values, use float sinh
-    if (x >= -87.0 && x <= 87.0) {
-        return double(sinh(float(x)));
-    }
     double ep = exp_d(x);
     double em = exp_d(-x);
     return (ep - em) * 0.5;
@@ -60,10 +58,6 @@ double sinh_d(double x) {
 // Double-precision cosh: (exp(x) + exp(-x)) / 2
 double cosh_d(double x) {
     if (x != x) return x;  // NaN
-    // For moderate values, use float cosh
-    if (x >= -87.0 && x <= 87.0) {
-        return double(cosh(float(x)));
-    }
     double ep = exp_d(x);
     double em = exp_d(-x);
     return (ep + em) * 0.5;
@@ -74,10 +68,6 @@ double tanh_d(double x) {
     if (x != x) return x;  // NaN
     if (x > 20.0) return 1.0;
     if (x < -20.0) return -1.0;
-    // For moderate values, use float tanh
-    if (x >= -9.0 && x <= 9.0) {
-        return double(tanh(float(x)));
-    }
     double e2x = exp_d(2.0 * x);
     return (e2x - 1.0) / (e2x + 1.0);
 }

@@ -52,6 +52,8 @@ inline DType dtype_from_string(std::string_view s, DType default_val = DType::Fl
     if (s == "int8") return DType::Int8;
     if (s == "uint8") return DType::UInt8;
     if (s == "bool") return DType::Bool;
+    if (s == "complex64") return DType::Complex64;
+    if (s == "complex128") return DType::Complex128;
     if (s.empty()) return default_val;
     return default_val;
 }
@@ -1766,17 +1768,44 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         int64_t dim = attrs.get_int(AttrKey::Dim, 0);
         double maxnorm = attrs.get_float(AttrKey::MaxNorm, 1.0);
         auto* vk = get_vulkan_backend();
-        // Compute p-norm along dim (keepdim=true to broadcast)
-        Tensor norm = vk->dispatchNorm(inputs[0], static_cast<float>(p), dim, true);
-        // clamp norm below to maxnorm (scale = maxnorm / max(norm, maxnorm))
+
+        // Renorm's "dim" names the axis whose sub-tensors are renormalized —
+        // so the p-norm is computed across every OTHER axis. The previous
+        // code delegated to dispatchNorm(..., dim, keepdim) which reduces
+        // the given dim instead (PyTorch-style norm semantics), giving
+        // garbage norms and NaN gradients through the backward pass.
+        //
+        // Compute ||x||_p per slice with the right reduction axes:
+        //   pow_p = |x|^p
+        //   norm  = (sum over all axes != dim)^(1/p)
+        // Keep all reduced axes as size-1 so the final scale broadcasts back.
+        const Tensor& x = inputs[0];
+        int64_t ndim = static_cast<int64_t>(x.shape().size());
+        int64_t norm_dim = (dim < 0) ? ndim + dim : dim;
+
+        Tensor abs_x = vk->dispatchUnaryOp("abs", x);
+        Tensor pow_p = (p == 2.0)
+            ? vk->dispatchBinaryOp("mul", abs_x, abs_x)
+            : vk->dispatchUnaryOpWithParam("pow", abs_x, static_cast<float>(p));
+        Tensor sum_p = pow_p;
+        for (int64_t d = 0; d < ndim; ++d) {
+            if (d == norm_dim) continue;
+            sum_p = vk->dispatchReduction("sum", sum_p, d, /*keepdim=*/true);
+        }
+        // (1/p)-root. For p=2.0 use sqrt (lossless fast path).
+        Tensor norm;
+        if (p == 2.0) {
+            norm = vk->dispatchUnaryOp("sqrt", sum_p);
+        } else {
+            norm = vk->dispatchUnaryOpWithParam("pow", sum_p, static_cast<float>(1.0 / p));
+        }
+
+        // scale = maxnorm / max(norm, maxnorm). Binary-op name is "maximum"
+        // ("max" is a unary reduction and throws "Unknown binary operation").
         Tensor maxnorm_tensor = vk->dispatchFull({1}, static_cast<float>(maxnorm), norm.dtype());
-        Tensor clamped_norm = vk->dispatchBinaryOp("max", norm, maxnorm_tensor);
+        Tensor clamped_norm = vk->dispatchBinaryOp("maximum", norm, maxnorm_tensor);
         Tensor scale = vk->dispatchBinaryOp("div", maxnorm_tensor, clamped_norm);
-        // Only scale down, not up: where norm > maxnorm apply scale, else keep 1.0
-        // scale is maxnorm / max(norm, maxnorm), which is:
-        //   - maxnorm/norm when norm > maxnorm (scales down)
-        //   - 1.0 when norm <= maxnorm (no change)
-        return vk->dispatchBinaryOp("mul", inputs[0], scale);
+        return vk->dispatchBinaryOp("mul", x, scale);
     });
 
     // ========================================================================
@@ -3010,7 +3039,11 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return get_vulkan_backend()->dispatchIndexFill(inputs[0], dim, inputs[1], value);
     });
 
-    // SelectScatter: clone input, then copy src into the selected slice
+    // SelectScatter: clone input, write src into the single slice [index] along `dim`
+    // Vulkan tensors live in device-local memory, so a host memcpy through
+    // slice.data_ptr() targets a synthetic address and silently no-ops.
+    // Express the scatter as IndexCopy with a 1-element index: that kernel
+    // runs as a real compute dispatch.
     table.register_single_output_kernel(OpId::SelectScatter,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             const auto& input = inputs[0];
@@ -3018,42 +3051,24 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             int64_t dim = attrs.get_int(AttrKey::Dim, 0);
             int64_t index = attrs.get_int(AttrKey::Index, 0);
 
-            auto output = input.clone();
-            int64_t ndim = static_cast<int64_t>(output.shape().size());
+            int64_t ndim = static_cast<int64_t>(input.shape().size());
             if (dim < 0) dim += ndim;
 
-            auto dst_slice = output.slice(dim, index, index + 1, 1);
-            auto dst_sh = dst_slice.shape();
-            auto src_reshaped = src.reshape(std::vector<int64_t>(dst_sh.begin(), dst_sh.end())).contiguous();
+            // Build a length-1 index tensor on the input's device
+            auto idx_cpu = Tensor({int64_t(1)}, DType::Int64, Device::cpu());
+            idx_cpu.data<int64_t>()[0] = index;
+            auto idx = idx_cpu.to(input.device());
 
-            auto n = dst_slice.numel();
-            auto elem_size = static_cast<int64_t>(dtype_size(output.dtype()));
-            auto* dst_ptr = static_cast<char*>(dst_slice.data_ptr());
-            const auto* src_ptr = static_cast<const char*>(src_reshaped.data_ptr());
-            if (dst_slice.is_contiguous()) {
-                std::memcpy(dst_ptr, src_ptr, n * elem_size);
-            } else {
-                auto dst_shape_v = dst_slice.shape();
-                auto dst_strides = dst_slice.strides();
-                int64_t ndims = static_cast<int64_t>(dst_shape_v.size());
-                std::vector<int64_t> coord(ndims, 0);
-                for (int64_t i = 0; i < n; i++) {
-                    int64_t byte_offset = 0;
-                    for (int64_t d = 0; d < ndims; d++) {
-                        byte_offset += coord[d] * dst_strides[d] * elem_size;
-                    }
-                    std::memcpy(dst_ptr + byte_offset, src_ptr + i * elem_size, elem_size);
-                    for (int64_t d = ndims - 1; d >= 0; d--) {
-                        coord[d]++;
-                        if (coord[d] < dst_shape_v[d]) break;
-                        coord[d] = 0;
-                    }
-                }
-            }
-            return output;
+            // IndexCopy expects src's shape to match input's shape, except along
+            // `dim` where it has length index.numel() (here, 1). Unsqueeze src
+            // so the reduced axis exists.
+            auto src_unsq = src.unsqueeze(dim).contiguous();
+            return get_vulkan_backend()->dispatchIndexCopy(input, dim, idx, src_unsq);
         });
 
-    // SliceScatter: clone input, then copy src into the sliced region
+    // SliceScatter: clone input, write src into the strided range [start:end:step]
+    // along `dim`. Same device-memory reasoning as SelectScatter — implemented
+    // as IndexCopy with a computed range of indices so the copy runs on GPU.
     table.register_single_output_kernel(OpId::SliceScatter,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             const auto& input = inputs[0];
@@ -3063,48 +3078,33 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             int64_t end = attrs.get_int(AttrKey::End, -1);
             int64_t step = attrs.get_int(AttrKey::Step, 1);
 
-            auto output = input.clone();
-            int64_t ndim = static_cast<int64_t>(output.shape().size());
+            int64_t ndim = static_cast<int64_t>(input.shape().size());
             if (dim < 0) dim += ndim;
-            int64_t dim_size = output.shape()[dim];
+            int64_t dim_size = input.shape()[dim];
 
             if (start < 0) start += dim_size;
             if (end < 0) end += dim_size + 1;
             if (start < 0) start = 0;
             if (end > dim_size) end = dim_size;
+            if (step <= 0) step = 1;
 
-            auto dst_slice = output.slice(dim, start, end, step);
-            auto dst_sh = dst_slice.shape();
-            auto src_reshaped = src.reshape(std::vector<int64_t>(dst_sh.begin(), dst_sh.end())).contiguous();
+            int64_t n_idx = (end > start) ? ((end - start + step - 1) / step) : 0;
+            if (n_idx <= 0) return input.clone();
 
-            auto n = dst_slice.numel();
-            auto elem_size = static_cast<int64_t>(dtype_size(output.dtype()));
-            auto* dst_ptr = static_cast<char*>(dst_slice.data_ptr());
-            const auto* src_ptr = static_cast<const char*>(src_reshaped.data_ptr());
-            if (dst_slice.is_contiguous()) {
-                std::memcpy(dst_ptr, src_ptr, n * elem_size);
-            } else {
-                auto dst_shape_v = dst_slice.shape();
-                auto dst_strides = dst_slice.strides();
-                int64_t ndims = static_cast<int64_t>(dst_shape_v.size());
-                std::vector<int64_t> coord(ndims, 0);
-                for (int64_t i = 0; i < n; i++) {
-                    int64_t byte_offset = 0;
-                    for (int64_t d = 0; d < ndims; d++) {
-                        byte_offset += coord[d] * dst_strides[d] * elem_size;
-                    }
-                    std::memcpy(dst_ptr + byte_offset, src_ptr + i * elem_size, elem_size);
-                    for (int64_t d = ndims - 1; d >= 0; d--) {
-                        coord[d]++;
-                        if (coord[d] < dst_shape_v[d]) break;
-                        coord[d] = 0;
-                    }
-                }
-            }
-            return output;
+            auto idx_cpu = Tensor({n_idx}, DType::Int64, Device::cpu());
+            auto* idx_data = idx_cpu.data<int64_t>();
+            for (int64_t i = 0; i < n_idx; ++i) idx_data[i] = start + i * step;
+            auto idx = idx_cpu.to(input.device());
+
+            // Ensure src has shape matching [*, n_idx, *] along `dim`
+            auto src_contig = src.contiguous();
+            return get_vulkan_backend()->dispatchIndexCopy(input, dim, idx, src_contig);
         });
 
-    // DiagonalScatter: clone input, place src values along the diagonal
+    // DiagonalScatter: clone input, write src values along the (dim1, dim2)
+    // diagonal with the given offset. Encoded as AdvancedIndexPut using
+    // generated row/col indices — the underlying compute shader handles the
+    // scatter. Batch dims are flattened, and indices broadcast across them.
     table.register_single_output_kernel(OpId::DiagonalScatter,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             const auto& input = inputs[0];
@@ -3113,61 +3113,90 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             int64_t dim1 = attrs.get_int(AttrKey::Dim1, 0);
             int64_t dim2 = attrs.get_int(AttrKey::Dim2, 1);
 
-            auto output = input.clone();
-            int64_t ndim = static_cast<int64_t>(output.shape().size());
+            int64_t ndim = static_cast<int64_t>(input.shape().size());
             if (dim1 < 0) dim1 += ndim;
             if (dim2 < 0) dim2 += ndim;
 
-            auto shape = output.shape();
+            auto shape = input.shape();
             int64_t size1 = shape[dim1];
             int64_t size2 = shape[dim2];
 
             int64_t diag_len;
-            if (offset >= 0) {
-                diag_len = std::min(size1, size2 - offset);
-            } else {
-                diag_len = std::min(size1 + offset, size2);
-            }
-            if (diag_len <= 0) return output;
+            if (offset >= 0) diag_len = std::min(size1, size2 - offset);
+            else              diag_len = std::min(size1 + offset, size2);
+            if (diag_len <= 0) return input.clone();
 
-            auto strides = output.strides();
-            auto elem_size = static_cast<int64_t>(dtype_size(output.dtype()));
-            auto* out_ptr = static_cast<char*>(output.data_ptr());
-            auto src = src_in.contiguous();
-            const auto* src_ptr = static_cast<const char*>(src.data_ptr());
+            int64_t r0 = (offset >= 0) ? 0 : -offset;
+            int64_t c0 = (offset >= 0) ? offset : 0;
 
-            int64_t batch_size = 1;
+            // Build one index tensor per input dim. Batch axes get an arange,
+            // (dim1, dim2) get a 1-D vector of [r0..r0+diag_len) / [c0..c0+diag_len).
+            // Indices broadcast: each is shaped {batch_0, ..., batch_{m-1}, diag_len}.
+            std::vector<int64_t> batch_sizes;
             std::vector<int64_t> batch_dims;
-            for (int64_t d = 0; d < ndim; d++) {
-                if (d != dim1 && d != dim2) {
-                    batch_dims.push_back(d);
-                    batch_size *= shape[d];
-                }
+            int64_t batch_rank = 0;
+            for (int64_t d = 0; d < ndim; ++d) {
+                if (d == dim1 || d == dim2) continue;
+                batch_dims.push_back(d);
+                batch_sizes.push_back(shape[d]);
+                ++batch_rank;
             }
 
-            std::vector<int64_t> batch_coord(batch_dims.size(), 0);
-            for (int64_t b = 0; b < batch_size; b++) {
-                int64_t base = 0;
-                for (size_t i = 0; i < batch_dims.size(); i++) {
-                    base += batch_coord[i] * strides[batch_dims[i]];
-                }
+            // Shape of every index tensor: [batch..., diag_len]
+            std::vector<int64_t> idx_shape = batch_sizes;
+            idx_shape.push_back(diag_len);
 
-                int64_t r0 = (offset >= 0) ? 0 : -offset;
-                int64_t c0 = (offset >= 0) ? offset : 0;
-                for (int64_t k = 0; k < diag_len; k++) {
-                    int64_t out_elem_offset = base + (r0 + k) * strides[dim1] + (c0 + k) * strides[dim2];
-                    int64_t src_elem_idx = b * diag_len + k;
-                    std::memcpy(out_ptr + out_elem_offset * elem_size,
-                                src_ptr + src_elem_idx * elem_size, elem_size);
-                }
+            // Compute on CPU (these are small) and move to device.
+            int64_t total_idx = 1;
+            for (auto d : idx_shape) total_idx *= d;
 
-                for (int64_t i = static_cast<int64_t>(batch_dims.size()) - 1; i >= 0; i--) {
-                    batch_coord[i]++;
-                    if (batch_coord[i] < shape[batch_dims[i]]) break;
-                    batch_coord[i] = 0;
+            // Build batch index tensors with proper broadcasting
+            auto* vk = get_vulkan_backend();
+            std::vector<Tensor> indices(ndim);
+            for (int64_t d = 0; d < ndim; ++d) {
+                auto t_cpu = Tensor(idx_shape, DType::Int64, Device::cpu());
+                auto* data = t_cpu.data<int64_t>();
+                // Enumerate every position (b0,...,b_{m-1}, k)
+                std::vector<int64_t> coord(idx_shape.size(), 0);
+                for (int64_t i = 0; i < total_idx; ++i) {
+                    int64_t k = coord.back();
+                    int64_t value = 0;
+                    if (d == dim1)      value = r0 + k;
+                    else if (d == dim2) value = c0 + k;
+                    else {
+                        // Find batch position for axis d
+                        for (size_t bd = 0; bd < batch_dims.size(); ++bd) {
+                            if (batch_dims[bd] == d) { value = coord[bd]; break; }
+                        }
+                    }
+                    data[i] = value;
+                    // Increment coord in row-major order
+                    for (int64_t ax = static_cast<int64_t>(idx_shape.size()) - 1; ax >= 0; --ax) {
+                        coord[ax]++;
+                        if (coord[ax] < idx_shape[ax]) break;
+                        coord[ax] = 0;
+                    }
+                }
+                indices[d] = t_cpu.to(input.device());
+            }
+
+            // src has shape [batch..., diag_len] — same as idx_shape already.
+            auto src_broadcast = src_in;
+            auto src_shape = src_broadcast.shape();
+            bool shape_matches = (src_shape.size() == idx_shape.size());
+            if (shape_matches) {
+                for (size_t i = 0; i < idx_shape.size(); ++i) {
+                    if (src_shape[i] != idx_shape[i]) { shape_matches = false; break; }
                 }
             }
-            return output;
+            if (!shape_matches) {
+                src_broadcast = src_broadcast.reshape(idx_shape);
+            }
+            src_broadcast = src_broadcast.contiguous();
+
+            // AdvancedIndexPut: input[indices[0], indices[1], ..., indices[ndim-1]] = src
+            return vk->dispatchAdvancedIndexPut(input, indices, src_broadcast,
+                                                 static_cast<int64_t>(indices.size()));
         });
 
     // Bitwise shift ops: native Vulkan dispatch via standalone int32 shaders

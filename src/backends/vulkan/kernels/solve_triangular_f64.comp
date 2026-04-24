@@ -1,0 +1,51 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// SolveTriangular (Float64) — solve AX = B where A is triangular.
+// Each invocation handles one column of B. Mirrors solve_triangular.comp
+// but keeps all arithmetic in double precision — Float64 gradcheck of
+// cholesky_inverse showed that round-tripping through Float32 loses enough
+// precision for a 4x4 case to drift off the atol=1e-5 budget.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer MatA { double A_data[]; };
+layout(binding = 1) readonly buffer MatB { double B_data[]; };
+layout(binding = 2) buffer          MatX { double X_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint N;
+    uint M;
+    uint upper;
+    uint unitriangular;
+} params;
+
+void main() {
+    uint col = gl_GlobalInvocationID.x;
+    if (col >= params.M) return;
+
+    if (params.upper != 0) {
+        for (int i = int(params.N) - 1; i >= 0; i--) {
+            double sum = B_data[uint(i) * params.M + col];
+            for (uint j = uint(i) + 1; j < params.N; j++) {
+                sum -= A_data[uint(i) * params.N + j] * X_data[j * params.M + col];
+            }
+            if (params.unitriangular != 0) {
+                X_data[uint(i) * params.M + col] = sum;
+            } else {
+                X_data[uint(i) * params.M + col] = sum / A_data[uint(i) * params.N + uint(i)];
+            }
+        }
+    } else {
+        for (uint i = 0; i < params.N; i++) {
+            double sum = B_data[i * params.M + col];
+            for (uint j = 0; j < i; j++) {
+                sum -= A_data[i * params.N + j] * X_data[j * params.M + col];
+            }
+            if (params.unitriangular != 0) {
+                X_data[i * params.M + col] = sum;
+            } else {
+                X_data[i * params.M + col] = sum / A_data[i * params.N + i];
+            }
+        }
+    }
+}

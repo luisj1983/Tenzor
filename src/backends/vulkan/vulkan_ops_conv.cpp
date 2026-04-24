@@ -350,13 +350,16 @@ auto VulkanBackend::dispatchConv2dWinograd(const Tensor& input, const Tensor& we
     // Simpler: use element-wise multiplication. The standard Winograd approach does
     // pointwise multiplies M[i][j][k][n_tile] = sum_c U[i][j][k][c] * V[i][j][c][n_tile]
     // which is a batched matmul. We can use the existing matmul dispatch for each point.
+    // N_tiles is the total number of 2x2 output tiles across all batch elements.
+    // M is [16][N_tiles * K] — do NOT multiply by batch again; the batch factor
+    // is already folded into N_tiles.
     uint32_t N_tiles = static_cast<uint32_t>(batch * tiles_h * tiles_w);
 
     // Step 3: Fused batched matmul in Winograd domain.
     // For each of the 16 Winograd points p:
     //   M[p][n][k][tile] = sum_c U[p][k*C+c] * V[p][(n*C+c)*num_tiles+tile]
     // Single dispatch with sequential accumulation over C for deterministic results.
-    int64_t m_total = 16 * batch * out_channels * static_cast<int64_t>(N_tiles);
+    int64_t m_total = 16 * out_channels * static_cast<int64_t>(N_tiles);
     Tensor M({m_total}, input.dtype(), input.device());
 
     {
@@ -377,7 +380,9 @@ auto VulkanBackend::dispatchConv2dWinograd(const Tensor& input, const Tensor& we
         bm_pc.K = static_cast<uint32_t>(out_channels);
         bm_pc.C = static_cast<uint32_t>(in_channels);
         bm_pc.N = static_cast<uint32_t>(batch);
-        bm_pc.num_tiles = N_tiles;
+        // num_tiles is per-sample tile count (tiles_h * tiles_w), NOT the
+        // total across batches. The shader reconstructs N*num_tiles internally.
+        bm_pc.num_tiles = static_cast<uint32_t>(tiles_h * tiles_w);
 
         VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, bm_pipeline->pipeline());

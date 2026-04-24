@@ -27,55 +27,28 @@ layout(push_constant) uniform PushConstants {
     uint pass_id;        // 0 = compute mean, 1 = compute variance
 } params;
 
-// Shared memory for workgroup-level reduction
-shared float s_channel_sums[WORKGROUP_SIZE];
+// Direct per-channel global atomic add. A prior version used a shared-memory
+// workgroup aggregation indexed by (c % 256), which aliases channels ≥ 256 onto
+// the same slot and corrupts the reduction at any C > 256. The F16 variant of
+// this shader already does the direct-atomic approach; keep parity here.
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
-    uint local_id = gl_LocalInvocationID.x;
+    if (idx >= params.n_elements) return;
 
-    // Initialize shared memory
-    if (local_id < params.channels && local_id < 256) {
-        s_channel_sums[local_id] = 0.0;
-    }
-    barrier();
+    // Decode flat index to (b, c, h, w)
+    uint temp = idx;
+    uint w = temp % params.spatial_size;
+    temp /= params.spatial_size;
+    uint c = temp % params.channels;
 
-    // Accumulate if within bounds (no early return to avoid barrier divergence)
-    if (idx < params.n_elements) {
-        // Decode flat index to (b, c, h, w)
-        uint temp = idx;
-        uint w = temp % params.spatial_size;
-        temp /= params.spatial_size;
-        uint c = temp % params.channels;
+    float value = input_data[idx];
 
-        float value = input_data[idx];
-
-        if (params.pass_id == 0) {
-            // First pass: compute sum for mean
-            atomicAdd(s_channel_sums[c % 256], value);
-        } else {
-            // Second pass: compute sum of squared differences for variance
-            float mean = mean_data[c];
-            float diff = value - mean;
-            atomicAdd(s_channel_sums[c % 256], diff * diff);
-        }
-    }
-
-    // Wait for all threads in workgroup
-    barrier();
-
-    // First thread writes accumulated results to global memory
-    if (local_id == 0) {
-        for (uint i = 0; i < params.channels && i < 256; i++) {
-            if (s_channel_sums[i] != 0.0) {
-                if (params.pass_id == 0) {
-                    // Accumulate sum for mean computation
-                    atomicAdd(temp_sum[i], s_channel_sums[i]);
-                } else {
-                    // Accumulate sum of squared differences for variance
-                    atomicAdd(var_data[i], s_channel_sums[i]);
-                }
-            }
-        }
+    if (params.pass_id == 0) {
+        atomicAdd(temp_sum[c], value);
+    } else {
+        float mean = mean_data[c];
+        float diff = value - mean;
+        atomicAdd(var_data[c], diff * diff);
     }
 }

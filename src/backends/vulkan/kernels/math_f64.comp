@@ -139,6 +139,169 @@ double log_double(double x) {
     return exp_dbl * ln2_hi + (log_m + exp_dbl * ln2_lo);
 }
 
+// Double-precision erf via fdlibm-style rational approximations. The
+// Abramowitz & Stegun 7.1.26 approximation we used before caps out at
+// ~1.5e-7 absolute error, which sits right on the Float64 test tolerance
+// of 1e-7 — not good enough. Splits the domain at |x|=0.84375 and |x|=1.25
+// and uses a separate rational polynomial on each piece, matching fdlibm's
+// erf.c to ~1e-16 relative precision.
+double erf_double(double x);  // forward decl (used from erfc below)
+double erf_double(double x) {
+    // Handle NaN
+    if (x != x) return x;
+
+    // Sign and absolute value
+    double sign = (x < 0.0) ? -1.0 : 1.0;
+    double ax = (x < 0.0) ? -x : x;
+
+    // Saturate for very large |x|
+    if (ax >= 6.0) return sign * 1.0;
+
+    // Range 1: |x| < 0.84375 — series for erf itself.
+    if (ax < 0.84375) {
+        // Special-case tiny x to skip polynomial.
+        if (ax < 3.7252902984e-9) {
+            // First term of series: erf(x) ~= (2/sqrt(pi)) * x
+            return sign * ax * 1.1283791670955126;
+        }
+        double z = ax * ax;
+        // P,Q from fdlibm erf.c, domain |x| < 0.84375.
+        double pp0 =  1.28379167095512558561e-01;
+        double pp1 = -3.25042107247001499370e-01;
+        double pp2 = -2.84817495755985104766e-02;
+        double pp3 = -5.77027029648944159157e-03;
+        double pp4 = -2.37630166566501626084e-05;
+        double qq1 =  3.97917223959155352819e-01;
+        double qq2 =  6.50222499887672944485e-02;
+        double qq3 =  5.08130628187576562776e-03;
+        double qq4 =  1.32494738004321644526e-04;
+        double qq5 = -3.96022827877536812320e-06;
+        double r = pp0 + z * (pp1 + z * (pp2 + z * (pp3 + z * pp4)));
+        double s = 1.0 + z * (qq1 + z * (qq2 + z * (qq3 + z * (qq4 + z * qq5))));
+        return sign * (ax + ax * (r / s));
+    }
+
+    // Range 2: 0.84375 <= |x| < 1.25
+    if (ax < 1.25) {
+        double s_ = ax - 1.0;
+        double pa0 = -2.36211856075265944077e-03;
+        double pa1 =  4.14856118683748331666e-01;
+        double pa2 = -3.72207876035701323847e-01;
+        double pa3 =  3.18346619901161753674e-01;
+        double pa4 = -1.10894694282396677476e-01;
+        double pa5 =  3.54783043256182359371e-02;
+        double pa6 = -2.16637559486879084300e-03;
+        double qa1 =  1.06420880400844228286e-01;
+        double qa2 =  5.40397917702171048937e-01;
+        double qa3 =  7.18286544141962662868e-02;
+        double qa4 =  1.26171219808761642112e-01;
+        double qa5 =  1.36370839120290507362e-02;
+        double qa6 =  1.19844998467991074170e-02;
+        double P = pa0 + s_ * (pa1 + s_ * (pa2 + s_ * (pa3 + s_ * (pa4 + s_ * (pa5 + s_ * pa6)))));
+        double Q = 1.0 + s_ * (qa1 + s_ * (qa2 + s_ * (qa3 + s_ * (qa4 + s_ * (qa5 + s_ * qa6)))));
+        // erf(x) = erx + P/Q; erx = erf(1) as a split constant
+        double erx = 8.45062911510467529297e-01;
+        return sign * (erx + P / Q);
+    }
+
+    // Range 3: 1.25 <= |x| < 6 — compute via erfc-style rational.
+    // erfc(x) ≈ (1/x) * exp(-x² - 0.5625) * R(1/x²) / S(1/x²)
+    double s_ = 1.0 / (ax * ax);
+    double R, S;
+    if (ax < 2.857142857142857) {
+        // Medium |x|: Ra/Sa
+        double ra0 = -9.86494403484714822705e-03;
+        double ra1 = -6.93858572707181764372e-01;
+        double ra2 = -1.05586262253232909814e+01;
+        double ra3 = -6.23753324503260060396e+01;
+        double ra4 = -1.62396669462573470355e+02;
+        double ra5 = -1.84605092906711035994e+02;
+        double ra6 = -8.12874355063065934246e+01;
+        double ra7 = -9.81432934416256659757e+00;
+        double sa1 =  1.96512716674392571292e+01;
+        double sa2 =  1.37657754143519042600e+02;
+        double sa3 =  4.34565877475229228821e+02;
+        double sa4 =  6.45387271733267880336e+02;
+        double sa5 =  4.29008140027567833386e+02;
+        double sa6 =  1.08635005541779435134e+02;
+        double sa7 =  6.57024977031928170135e+00;
+        double sa8 = -6.04244152148580987438e-02;
+        R = ra0 + s_ * (ra1 + s_ * (ra2 + s_ * (ra3 + s_ * (ra4 + s_ * (ra5 + s_ * (ra6 + s_ * ra7))))));
+        S = 1.0 + s_ * (sa1 + s_ * (sa2 + s_ * (sa3 + s_ * (sa4 + s_ * (sa5 + s_ * (sa6 + s_ * (sa7 + s_ * sa8)))))));
+    } else {
+        // Large |x|: Rb/Sb
+        double rb0 = -9.86494292470009928597e-03;
+        double rb1 = -7.99283237680523006574e-01;
+        double rb2 = -1.77579549177547519889e+01;
+        double rb3 = -1.60636384855821916062e+02;
+        double rb4 = -6.37566443368389627722e+02;
+        double rb5 = -1.25029579241874196425e+03;
+        double rb6 = -1.05089778638312519582e+03;
+        double sb1 =  3.03380607434824582929e+01;
+        double sb2 =  3.25792512996573918826e+02;
+        double sb3 =  1.53672958608443695994e+03;
+        double sb4 =  3.19985821950859553908e+03;
+        double sb5 =  2.55305040643316442583e+03;
+        double sb6 =  4.74528541206955367215e+02;
+        double sb7 = -2.24409524465858183362e+01;
+        R = rb0 + s_ * (rb1 + s_ * (rb2 + s_ * (rb3 + s_ * (rb4 + s_ * (rb5 + s_ * rb6)))));
+        S = 1.0 + s_ * (sb1 + s_ * (sb2 + s_ * (sb3 + s_ * (sb4 + s_ * (sb5 + s_ * (sb6 + s_ * sb7))))));
+    }
+
+    // Bit-truncate ax to lose the low 32 bits → stabilizes exp(-ax² - 0.5625).
+    uvec2 ax_bits = unpackDouble2x32(ax);
+    ax_bits.x = 0u;  // zero low 32 bits
+    double z = packDouble2x32(ax_bits);
+    double r = exp_double(-z * z - 0.5625) * exp_double((z - ax) * (z + ax) + R / S);
+    double erfc_val = r / ax;
+    return sign * (1.0 - erfc_val);
+}
+
+// Double-precision atan via range-reduction + Maclaurin polynomial.
+// See kernels/trigonometric_f64.comp for derivation. Needed locally because
+// GLSL atan is single-precision.
+double atan_double(double x) {
+    if (x != x) return x;
+    const double PI = 3.141592653589793;
+
+    double sign = 1.0;
+    double ax = x;
+    if (ax < 0.0) { sign = -1.0; ax = -ax; }
+
+    bool inv = (ax > 1.0);
+    if (inv) ax = 1.0 / ax;
+
+    double add = 0.0;
+    const double TAN_PI_8 = 0.41421356237309503;
+    if (ax > TAN_PI_8) {
+        add = PI * 0.25;
+        ax = (ax - 1.0) / (ax + 1.0);
+    }
+
+    double x2 = ax * ax;
+    double p = (1.0/15.0) - x2 * ((1.0/17.0) - x2 * ((1.0/19.0) - x2 * ((1.0/21.0) - x2 * (1.0/23.0))));
+    p = (1.0/5.0) - x2 * ((1.0/7.0) - x2 * ((1.0/9.0) - x2 * ((1.0/11.0) - x2 * ((1.0/13.0) - x2 * p))));
+    double r = ax - ax * x2 * (1.0/3.0 - x2 * p);
+
+    double result = add + r;
+    if (inv) result = PI * 0.5 - result;
+    return sign * result;
+}
+
+// Double-precision atan2 with quadrant correction.
+double atan2_double(double y, double x) {
+    const double PI = 3.141592653589793;
+    if (x > 0.0) return atan_double(y / x);
+    if (x < 0.0) {
+        if (y >= 0.0) return atan_double(y / x) + PI;
+        return atan_double(y / x) - PI;
+    }
+    // x == 0
+    if (y > 0.0) return PI * 0.5;
+    if (y < 0.0) return -PI * 0.5;
+    return 0.0;
+}
+
 // Double-precision pow approximation
 double pow_double(double base, double exp_val) {
     // Fast paths for common integer exponents keep x^n finite when x<0
@@ -236,26 +399,14 @@ void main() {
         case 20: // expm1 (unary)
             result[idx] = exp_double(val_a) - 1.0;
             break;
-        case 21: { // erf (unary) - Abramowitz & Stegun approximation
-            double x = val_a;
-            double ax = abs(x);
-            double t = 1.0 / (1.0 + 0.3275911 * ax);
-            double y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp_double(-ax * ax);
-            result[idx] = x < 0.0 ? -y : y;
+        case 21: // erf (unary) — fdlibm double-precision rational
+            result[idx] = erf_double(val_a);
             break;
-        }
-        case 22: { // erfc (unary)
-            double x = val_a;
-            double ax = abs(x);
-            double t = 1.0 / (1.0 + 0.3275911 * ax);
-            double y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp_double(-ax * ax);
-            double erf_val = x < 0.0 ? -y : y;
-            result[idx] = 1.0 - erf_val;
+        case 22: // erfc (unary)
+            result[idx] = 1.0 - erf_double(val_a);
             break;
-        }
         case 23: // atan2 (binary)
-            // GLSL atan(y, x) computes atan2 — not available in f64, use float fallback
-            result[idx] = double(atan(float(val_a), float(val_b)));
+            result[idx] = atan2_double(val_a, val_b);
             break;
         case 24: // fmod (binary)
             result[idx] = val_a - trunc(val_a / val_b) * val_b;

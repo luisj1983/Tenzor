@@ -22,6 +22,48 @@ const float64_t SIN_2PI_5 = 0.95105651629515lf;
 const float64_t COS_4PI_5 = -0.80901699437148lf;
 const float64_t SIN_4PI_5 = 0.58778525229247lf;
 
+// Double-precision sin/cos to avoid float-cast twiddle precision loss.
+const float64_t TWO_OVER_PI_F = 0.6366197723675814lf;
+const float64_t PI_OVER_2_HI = 1.5707963267948966lf;
+const float64_t PI_OVER_2_LO = 6.123233995736766e-17lf;
+
+void trig_reduce_f(float64_t x, out float64_t r, out int q) {
+    float64_t j = floor(x * TWO_OVER_PI_F + 0.5lf);
+    q = int(j) & 3;
+    r = x - j * PI_OVER_2_HI;
+    r = r - j * PI_OVER_2_LO;
+}
+float64_t sin_poly_f(float64_t x) {
+    float64_t x2 = x * x;
+    return x * (1.0lf - x2 * (1.0lf/6.0lf - x2 * (1.0lf/120.0lf - x2 * (1.0lf/5040.0lf - x2 / 362880.0lf))));
+}
+float64_t cos_poly_f(float64_t x) {
+    float64_t x2 = x * x;
+    return 1.0lf - x2 * (0.5lf - x2 * (1.0lf/24.0lf - x2 * (1.0lf/720.0lf - x2 / 40320.0lf)));
+}
+float64_t sin_df(float64_t x) {
+    float64_t r; int q;
+    trig_reduce_f(x, r, q);
+    switch (q) {
+        case 0: return sin_poly_f(r);
+        case 1: return cos_poly_f(r);
+        case 2: return -sin_poly_f(r);
+        case 3: return -cos_poly_f(r);
+    }
+    return 0.0lf;
+}
+float64_t cos_df(float64_t x) {
+    float64_t r; int q;
+    trig_reduce_f(x, r, q);
+    switch (q) {
+        case 0: return cos_poly_f(r);
+        case 1: return -sin_poly_f(r);
+        case 2: return -cos_poly_f(r);
+        case 3: return sin_poly_f(r);
+    }
+    return 0.0lf;
+}
+
 void main() {
     uint tid = gl_GlobalInvocationID.x;
     uint n_butterflies = N / 5;
@@ -52,19 +94,19 @@ void main() {
     // Load with twiddle
     float64_t a0_re = data_in[(batch_idx * batch_stride+i0)*2], a0_im = data_in[(batch_idx * batch_stride+i0)*2+1];
 
-    float64_t w1_re = float64_t(cos(float(base_angle))), w1_im = float64_t(sin(float(base_angle)));
+    float64_t w1_re = cos_df(base_angle), w1_im = sin_df(base_angle);
     float64_t r1 = data_in[(batch_idx * batch_stride+i1)*2], j1 = data_in[(batch_idx * batch_stride+i1)*2+1];
     float64_t a1_re = r1*w1_re - j1*w1_im, a1_im = r1*w1_im + j1*w1_re;
 
-    float64_t w2_re = float64_t(cos(float(2.0lf*base_angle))), w2_im = float64_t(sin(float(2.0lf*base_angle)));
+    float64_t w2_re = cos_df(2.0lf*base_angle), w2_im = sin_df(2.0lf*base_angle);
     float64_t r2 = data_in[(batch_idx * batch_stride+i2)*2], j2 = data_in[(batch_idx * batch_stride+i2)*2+1];
     float64_t a2_re = r2*w2_re - j2*w2_im, a2_im = r2*w2_im + j2*w2_re;
 
-    float64_t w3_re = float64_t(cos(float(3.0lf*base_angle))), w3_im = float64_t(sin(float(3.0lf*base_angle)));
+    float64_t w3_re = cos_df(3.0lf*base_angle), w3_im = sin_df(3.0lf*base_angle);
     float64_t r3 = data_in[(batch_idx * batch_stride+i3)*2], j3 = data_in[(batch_idx * batch_stride+i3)*2+1];
     float64_t a3_re = r3*w3_re - j3*w3_im, a3_im = r3*w3_im + j3*w3_re;
 
-    float64_t w4_re = float64_t(cos(float(4.0lf*base_angle))), w4_im = float64_t(sin(float(4.0lf*base_angle)));
+    float64_t w4_re = cos_df(4.0lf*base_angle), w4_im = sin_df(4.0lf*base_angle);
     float64_t r4 = data_in[(batch_idx * batch_stride+i4)*2], j4 = data_in[(batch_idx * batch_stride+i4)*2+1];
     float64_t a4_re = r4*w4_re - j4*w4_im, a4_im = r4*w4_im + j4*w4_re;
 
