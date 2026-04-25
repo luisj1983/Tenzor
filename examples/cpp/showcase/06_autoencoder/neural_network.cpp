@@ -9,6 +9,9 @@
  */
 
 #include "../common.hpp"
+#include <cmath>
+#include <cstdlib>
+#include <vector>
 
 using namespace tenzor;
 
@@ -101,13 +104,29 @@ int main(int argc, char* argv[]) {
 
     manual_seed(42);
 
-    // Generate synthetic data
+    // Generate synthetic data with real low-dimensional structure so that
+    // a latent_dim=4 bottleneck is actually able to reconstruct it.
     int batch_size = 32;
     int input_dim = 16;
-    int hidden_dim = 8;
+    int hidden_dim = 12;
     int latent_dim = 4;
 
-    auto X = rand({batch_size, input_dim}, DType::Float32, device);
+    std::vector<float> X_data(batch_size * input_dim);
+    for (int b = 0; b < batch_size; ++b) {
+        float c[4];
+        for (int k = 0; k < 4; ++k) {
+            c[k] = ((rand() % 1000) / 1000.0f) - 0.5f;
+        }
+        for (int j = 0; j < input_dim; ++j) {
+            float t = static_cast<float>(j) / input_dim;
+            float signal = c[0] * std::sin(2.0f * 3.14159f * t) +
+                           c[1] * std::cos(2.0f * 3.14159f * t) +
+                           c[2] * std::sin(4.0f * 3.14159f * t) +
+                           c[3] * std::cos(4.0f * 3.14159f * t);
+            X_data[b * input_dim + j] = 0.5f + 0.25f * signal;
+        }
+    }
+    auto X = from_data(X_data.data(), {batch_size, input_dim}, device);
 
     showcase::print_tensor_info("Input X", X);
 

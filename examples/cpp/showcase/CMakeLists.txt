@@ -16,6 +16,16 @@ set(SHOWCASE_EXAMPLES
     09_dropout_regularization
     10_custom_loss
     11_chat_ai
+    12_residual_network
+    13_variational_autoencoder
+    14_gan
+    15_lstm_text
+    16_self_attention
+    17_word_embedding
+    18_transfer_learning
+    19_layer_normalization
+    20_multitask_learning
+    21_siamese_network
 )
 
 # Define abstraction levels for each example
@@ -91,10 +101,40 @@ add_custom_target(showcase_examples
         11_chat_ai_tensor_only
         11_chat_ai_autograd
         11_chat_ai_neural_network
+        12_residual_network_tensor_only
+        12_residual_network_autograd
+        12_residual_network_neural_network
+        13_variational_autoencoder_tensor_only
+        13_variational_autoencoder_autograd
+        13_variational_autoencoder_neural_network
+        14_gan_tensor_only
+        14_gan_autograd
+        14_gan_neural_network
+        15_lstm_text_tensor_only
+        15_lstm_text_autograd
+        15_lstm_text_neural_network
+        16_self_attention_tensor_only
+        16_self_attention_autograd
+        16_self_attention_neural_network
+        17_word_embedding_tensor_only
+        17_word_embedding_autograd
+        17_word_embedding_neural_network
+        18_transfer_learning_tensor_only
+        18_transfer_learning_autograd
+        18_transfer_learning_neural_network
+        19_layer_normalization_tensor_only
+        19_layer_normalization_autograd
+        19_layer_normalization_neural_network
+        20_multitask_learning_tensor_only
+        20_multitask_learning_autograd
+        20_multitask_learning_neural_network
+        21_siamese_network_tensor_only
+        21_siamese_network_autograd
+        21_siamese_network_neural_network
     COMMENT "Building all Tenzor showcase examples"
 )
 
 message(STATUS "Configured ${CMAKE_CURRENT_SOURCE_DIR} showcase examples")
 message(STATUS "  Examples: ${SHOWCASE_EXAMPLES}")
 message(STATUS "  Abstraction levels: ${ABSTRACTION_LEVELS}")
-message(STATUS "  Total executables: 33")
+message(STATUS "  Total executables: 63")

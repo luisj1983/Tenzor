@@ -30,21 +30,14 @@ public:
 
     auto forward_impl(const Variable& input) -> Variable override {
         // input shape: (batch, seq_len, input_size)
-        // RNN returns output and final hidden state
         auto rnn_out = rnn->forward(input);
 
-        // Use final hidden state for prediction
-        // rnn_out shape: (batch, seq_len, hidden_size)
-        // Get last timestep: rnn_out[:, -1, :]
-        auto batch_size = input.shape()[0];
+        // Take final timestep: rnn_out[:, -1, :] -> (batch, hidden_size)
+        // Using Variable-level slice/squeeze keeps the autograd graph intact.
         auto seq_len = input.shape()[1];
+        auto last_step = slice(rnn_out, 1, seq_len - 1, seq_len);  // (batch, 1, hidden)
+        auto last_h = squeeze(last_step, 1);                        // (batch, hidden)
 
-        // For simplicity, reshape and slice to get last timestep
-        auto last_hidden = rnn_out.tensor().slice(1, seq_len - 1, seq_len)
-                                          .reshape({batch_size, hidden_size_});
-
-        // FC layer for output
-        Variable last_h(last_hidden, rnn_out.requires_grad());
         return fc->forward(last_h);
     }
 
@@ -104,8 +97,8 @@ int main(int argc, char* argv[]) {
     std::cout << "\nTotal parameters: " << params.size() << "\n";
 
     // Training parameters
-    int num_epochs = 15000;
-    int print_every = 30;
+    int num_epochs = 500;
+    int print_every = 50;
 
     showcase::print_section("Training");
 
