@@ -302,6 +302,9 @@ auto IndexSelectBackward::backward(std::vector<Tensor> grad_outputs) -> std::vec
 
     // Build a full index tensor matching grad shape for scatter_add along dim
     auto grad_shape = std::vector<int64_t>(grad.shape().begin(), grad.shape().end());
+    // Forward `index_select` accepts negative dims, so the saved dim may be
+    // negative; normalise against grad rank before any vector indexing.
+    if (dim < 0) dim += static_cast<int64_t>(grad_shape.size());
     auto full_index = zeros(grad_shape, DType::Int64, Device::cpu());
     auto* idx_ptr = full_index.data<int64_t>();
     auto* src_idx_ptr = index.to(Device::cpu()).data<int64_t>();
@@ -338,6 +341,7 @@ auto IndexSelectBackward::backward_with_variables(std::vector<Variable> grad_out
 
     // Build full index tensor matching grad shape for scatter_add along dim
     auto grad_shape = std::vector<int64_t>(grad_var.tensor().shape().begin(), grad_var.tensor().shape().end());
+    if (dim < 0) dim += static_cast<int64_t>(grad_shape.size());
     auto full_index = zeros(grad_shape, DType::Int64, Device::cpu());
     auto* idx_ptr = full_index.data<int64_t>();
     auto* src_idx_ptr = index.to(Device::cpu()).data<int64_t>();
@@ -435,6 +439,9 @@ auto NarrowBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
     // Use scatter to place grad values at the correct positions
     // Build index tensor
     auto grad_shape = std::vector<int64_t>(grad.shape().begin(), grad.shape().end());
+    // Forward `narrow` accepts negative dims, so the saved dim may be
+    // negative; normalise against grad rank before any vector indexing.
+    if (dim < 0) dim += static_cast<int64_t>(grad_shape.size());
     int64_t narrow_len = grad_shape[dim];
     auto index = zeros(grad_shape, DType::Int64, Device::cpu());
     auto* idx_ptr = index.data<int64_t>();
@@ -471,6 +478,7 @@ auto NarrowBackward::backward_with_variables(std::vector<Variable> grad_outputs)
 
     auto grad_shape = std::vector<int64_t>(grad_var.tensor().shape().begin(),
                                             grad_var.tensor().shape().end());
+    if (dim < 0) dim += static_cast<int64_t>(grad_shape.size());
     int64_t narrow_len = grad_shape[dim];
     auto index = zeros(grad_shape, DType::Int64, Device::cpu());
     auto* idx_ptr = index.data<int64_t>();

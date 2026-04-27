@@ -26,6 +26,7 @@ set(SHOWCASE_EXAMPLES
     19_layer_normalization
     20_multitask_learning
     21_siamese_network
+    22_hierarchical_reasoning
 )
 
 # Define abstraction levels for each example
@@ -131,10 +132,13 @@ add_custom_target(showcase_examples
         21_siamese_network_tensor_only
         21_siamese_network_autograd
         21_siamese_network_neural_network
+        22_hierarchical_reasoning_tensor_only
+        22_hierarchical_reasoning_autograd
+        22_hierarchical_reasoning_neural_network
     COMMENT "Building all Tenzor showcase examples"
 )
 
 message(STATUS "Configured ${CMAKE_CURRENT_SOURCE_DIR} showcase examples")
 message(STATUS "  Examples: ${SHOWCASE_EXAMPLES}")
 message(STATUS "  Abstraction levels: ${ABSTRACTION_LEVELS}")
-message(STATUS "  Total executables: 63")
+message(STATUS "  Total executables: 66")

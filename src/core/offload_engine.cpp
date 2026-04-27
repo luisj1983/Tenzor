@@ -544,10 +544,7 @@ auto OffloadEngine::get_gpu_device(const Tensor& tensor) const -> Device {
 }
 
 auto OffloadEngine::is_gpu_device(const Device& device) const -> bool {
-    return device.type == Device::Type::CUDA ||
-           device.type == Device::Type::ROCm ||
-           device.type == Device::Type::OneAPI ||
-           device.type == Device::Type::Vulkan;
+    return device.type != Device::Type::CPU;
 }
 
 auto OffloadEngine::sort_auto_offload_registry() -> void {

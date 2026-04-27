@@ -518,8 +518,9 @@ QLearningACT::QLearningACT(int64_t d_model, int64_t max_segments,
 auto QLearningACT::pool_state(const Variable& state) -> Variable {
     // Mean pooling across sequence dimension
     // state: (batch, seq_len, d_model) -> (batch, d_model)
-    auto pooled = tenzor::mean(state.tensor(), {1}, false);
-    return Variable(pooled, state.requires_grad());
+    // Variable-level mean keeps the autograd chain so gradient from the
+    // Q-loss reaches the H-module state as well as q_head_'s own params.
+    return ::tenzor::mean(state, /*dim=*/1, /*keepdim=*/false);
 }
 
 auto QLearningACT::compute_q_values(const Variable& state)
@@ -530,19 +531,18 @@ auto QLearningACT::compute_q_values(const Variable& state)
     // Project to Q-values: (batch, 2)
     auto q_values = q_head_->forward(pooled);
 
-    // Split into Q_halt and Q_continue
-    auto q_tensor = q_values.tensor();
-
-    // Extract Q_halt (index 0) and Q_continue (index 1)
-    auto q_halt = tenzor::select(q_tensor, -1, 0);      // (batch,)
-    auto q_continue = tenzor::select(q_tensor, -1, 1);  // (batch,)
+    // Split into Q_halt and Q_continue along the class dim. Use the
+    // autograd-aware `narrow` so backprop from the Q-loss flows back
+    // through q_head_'s weights — `tenzor::select` on the raw tensor
+    // here previously severed that chain. Shape is (batch, 1) instead
+    // of (batch,); downstream consumers all reduce via mean so the
+    // extra trailing dim is harmless.
+    auto q_halt = ::tenzor::narrow(q_values, /*dim=*/-1, /*start=*/0, /*length=*/1);
+    auto q_continue = ::tenzor::narrow(q_values, /*dim=*/-1, /*start=*/1, /*length=*/1);
 
     // Apply sigmoid to bound Q-values to [0, 1] (since reward is 0 or 1)
-    // Use nn::sigmoid for Variable inputs
-    auto q_halt_var = Variable(q_halt, q_values.requires_grad());
-    auto q_continue_var = Variable(q_continue, q_values.requires_grad());
-    auto q_halt_bounded = nn::sigmoid(q_halt_var);
-    auto q_continue_bounded = nn::sigmoid(q_continue_var);
+    auto q_halt_bounded = nn::sigmoid(q_halt);
+    auto q_continue_bounded = nn::sigmoid(q_continue);
 
     return std::make_pair(q_halt_bounded, q_continue_bounded);
 }
@@ -614,50 +614,55 @@ auto QLearningACT::compute_loss(const std::vector<Variable>& states,
                                  const std::vector<double>& rewards,
                                  const std::vector<Variable>& next_states,
                                  const std::vector<bool>& dones) -> Variable {
+    auto device = states.empty() ? Device::cpu() : states[0].tensor().device();
+    auto dtype  = states.empty() ? DType::Float32 : states[0].tensor().dtype();
+
     if (states.empty()) {
-        // Return zero loss
-        return Variable(zeros({1}, DType::Float32, Device::cpu()), true);
+        return Variable(zeros({1}, dtype, device), false);
     }
 
-    // Compute Q-learning loss (MSE between predicted and target Q-values)
-    float total_loss = 0.0f;
+    // MSE between predicted Q for the taken action and the Bellman target.
+    // Predicted Q stays inside the autograd graph (so gradient reaches
+    // q_head_ and, via pool_state, the H-module). Target Q is built as a
+    // no-grad scalar — standard target-network treatment in DQN-style
+    // Q-learning. Tensors are constructed on the input's device so the
+    // returned loss can be added to a GPU-side supervision loss without a
+    // device-mismatch crash.
+    Variable total_loss;
+    bool first = true;
 
     for (size_t i = 0; i < states.size(); ++i) {
         auto [q_halt, q_continue] = compute_q_values(states[i]);
 
-        // Get predicted Q for taken action
-        float predicted_q;
-        if (actions[i]) {  // halt
-            predicted_q = tenzor::mean(q_halt.tensor()).item<float>();
-        } else {  // continue
-            predicted_q = tenzor::mean(q_continue.tensor()).item<float>();
-        }
+        Variable predicted_q = actions[i] ? ::tenzor::mean(q_halt)
+                                          : ::tenzor::mean(q_continue);
 
-        // Compute target
-        float target_q;
+        float target_val;
         if (dones[i] || actions[i]) {
-            target_q = static_cast<float>(rewards[i]);
+            target_val = static_cast<float>(rewards[i]);
         } else {
             auto [next_q_halt, next_q_continue] = compute_q_values(next_states[i]);
             float max_next_q = std::max(
-                tenzor::mean(next_q_halt.tensor()).item<float>(),
-                tenzor::mean(next_q_continue.tensor()).item<float>()
+                ::tenzor::mean(next_q_halt.tensor()).item<float>(),
+                ::tenzor::mean(next_q_continue.tensor()).item<float>()
             );
-            target_q = static_cast<float>(gamma_) * max_next_q;
+            target_val = static_cast<float>(gamma_) * max_next_q;
         }
+        Variable target_q(::tenzor::full({1}, target_val, dtype, device),
+                          /*requires_grad=*/false);
 
-        // Squared error
-        float error = predicted_q - target_q;
-        total_loss += error * error;
+        Variable err = predicted_q - target_q;
+        Variable sq  = err * err;
+
+        if (first) { total_loss = sq; first = false; }
+        else       { total_loss = total_loss + sq; }
     }
 
-    // Mean squared error
-    total_loss /= static_cast<float>(states.size());
-
-    Tensor loss_tensor({1}, DType::Float32, Device::cpu());
-    loss_tensor.data<float>()[0] = total_loss;
-
-    return Variable(loss_tensor, true);
+    Variable inv_n(::tenzor::full({1},
+                                   1.0f / static_cast<float>(states.size()),
+                                   dtype, device),
+                   /*requires_grad=*/false);
+    return total_loss * inv_n;
 }
 
 auto QLearningACT::decay_epsilon(double decay_rate, double min_epsilon) -> void {

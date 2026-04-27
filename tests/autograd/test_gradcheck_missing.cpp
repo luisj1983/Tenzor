@@ -261,11 +261,7 @@ TEST_P(GradCheckMissingTest, Expm1) {
 
 TEST_P(GradCheckMissingTest, Atan2) {
     // atan2 is non-linear in both arguments; test gradient w.r.t. the first.
-    if (device.type == Device::Type::Vulkan) {
-        // Tracked as J4: Vulkan atan2 backward kernel precision insufficient
-        // for Float64 gradcheck. Kernel lives in src/backends/vulkan/.
-        GTEST_SKIP() << "Vulkan atan2 Float64 precision (J4)";
-    }
+
     auto y_t = randn({6}, DType::Float64, Device::cpu());
     auto x_t = tenzor::abs(randn({6}, DType::Float64, Device::cpu())) + 1.0;
     Variable y(y_t.to(device), true);
@@ -291,11 +287,7 @@ TEST_P(GradCheckMissingTest, Cat) {
 }
 
 TEST_P(GradCheckMissingTest, Sinh) {
-    if (device.type == Device::Type::Vulkan) {
-        // Tracked as J4: Vulkan sinh backward kernel precision insufficient
-        // for Float64 gradcheck.
-        GTEST_SKIP() << "Vulkan sinh Float64 precision (J4)";
-    }
+
     auto x_t = randn({6}, DType::Float64, Device::cpu()) * 0.5;
     Variable x(x_t.to(device), true);
     auto f = [](const Variable& v) -> Variable { return tenzor::sinh(v); };
@@ -304,11 +296,7 @@ TEST_P(GradCheckMissingTest, Sinh) {
 }
 
 TEST_P(GradCheckMissingTest, Cosh) {
-    if (device.type == Device::Type::Vulkan) {
-        // Tracked as J4: Vulkan cosh backward kernel precision insufficient
-        // for Float64 gradcheck.
-        GTEST_SKIP() << "Vulkan cosh Float64 precision (J4)";
-    }
+
     auto x_t = randn({6}, DType::Float64, Device::cpu()) * 0.5;
     Variable x(x_t.to(device), true);
     auto f = [](const Variable& v) -> Variable { return tenzor::cosh(v); };
@@ -321,9 +309,7 @@ TEST_P(GradCheckMissingTest, Cosh) {
 // gated J4 (atan2/sinh/cosh). Skip Vulkan here until J4's shader audit lands.
 
 TEST_P(GradCheckMissingTest, Tan) {
-    if (device.type == Device::Type::Vulkan) {
-        GTEST_SKIP() << "Vulkan tan Float64 precision (J4 family)";
-    }
+
     auto x_t = randn({6}, DType::Float64, Device::cpu()) * 0.5;
     Variable x(x_t.to(device), true);
     auto f = [](const Variable& v) -> Variable { return tenzor::tan(v); };
@@ -332,9 +318,7 @@ TEST_P(GradCheckMissingTest, Tan) {
 }
 
 TEST_P(GradCheckMissingTest, Asin) {
-    if (device.type == Device::Type::Vulkan) {
-        GTEST_SKIP() << "Vulkan asin Float64 precision (J4 family)";
-    }
+
     auto x_t = randn({6}, DType::Float64, Device::cpu()) * 0.3;
     Variable x(x_t.to(device), true);
     auto f = [](const Variable& v) -> Variable { return tenzor::asin(v); };
@@ -343,9 +327,7 @@ TEST_P(GradCheckMissingTest, Asin) {
 }
 
 TEST_P(GradCheckMissingTest, Acos) {
-    if (device.type == Device::Type::Vulkan) {
-        GTEST_SKIP() << "Vulkan acos Float64 precision (J4 family)";
-    }
+
     auto x_t = randn({6}, DType::Float64, Device::cpu()) * 0.3;
     Variable x(x_t.to(device), true);
     auto f = [](const Variable& v) -> Variable { return tenzor::acos(v); };
@@ -354,9 +336,7 @@ TEST_P(GradCheckMissingTest, Acos) {
 }
 
 TEST_P(GradCheckMissingTest, Atan) {
-    if (device.type == Device::Type::Vulkan) {
-        GTEST_SKIP() << "Vulkan atan Float64 precision (J4 family)";
-    }
+
     auto x_t = randn({6}, DType::Float64, Device::cpu());
     Variable x(x_t.to(device), true);
     auto f = [](const Variable& v) -> Variable { return tenzor::atan(v); };
@@ -365,9 +345,7 @@ TEST_P(GradCheckMissingTest, Atan) {
 }
 
 TEST_P(GradCheckMissingTest, Tanh) {
-    if (device.type == Device::Type::Vulkan) {
-        GTEST_SKIP() << "Vulkan tanh Float64 precision (J4 family)";
-    }
+
     auto x_t = randn({6}, DType::Float64, Device::cpu()) * 0.5;
     Variable x(x_t.to(device), true);
     auto f = [](const Variable& v) -> Variable { return tenzor::tanh(v); };
@@ -389,6 +367,37 @@ TEST_P(GradCheckMissingTest, IndexSelect) {
     };
     EXPECT_TRUE(gradcheck(f, x, 1e-5, 1e-4, 1e-4))
         << "index_select gradcheck failed on " << device.to_string();
+}
+
+// Regression: forward narrow accepts dim=-1, but NarrowBackward used to use
+// the saved dim as a raw vector index and wrapped to size_t(-1) at backward
+// time, asserting deep in stl_vector. Confirm gradcheck (which calls
+// backward) succeeds with negative dim.
+TEST_P(GradCheckMissingTest, NarrowNegativeDim) {
+    auto x_t = randn({3, 5}, DType::Float64, Device::cpu());
+    Variable x(x_t.to(device), true);
+    auto f = [](const Variable& v) -> Variable {
+        return tenzor::narrow(v, /*dim=*/-1, /*start=*/1, /*length=*/3);
+    };
+    EXPECT_TRUE(gradcheck(f, x, 1e-5, 1e-4, 1e-4))
+        << "narrow(dim=-1) gradcheck failed on " << device.to_string();
+}
+
+// Regression: same wraparound bug also lived in IndexSelectBackward.
+TEST_P(GradCheckMissingTest, IndexSelectNegativeDim) {
+
+    auto x_t = randn({4, 6}, DType::Float64, Device::cpu());
+    auto idx_t = zeros({3}, DType::Int64, Device::cpu());
+    idx_t.data<int64_t>()[0] = 1;
+    idx_t.data<int64_t>()[1] = 4;
+    idx_t.data<int64_t>()[2] = 2;
+    Variable x(x_t.to(device), true);
+    Tensor idx_dev = idx_t.to(device);
+    auto f = [idx_dev](const Variable& v) -> Variable {
+        return tenzor::index_select(v, /*dim=*/-1, idx_dev);
+    };
+    EXPECT_TRUE(gradcheck(f, x, 1e-5, 1e-4, 1e-4))
+        << "index_select(dim=-1) gradcheck failed on " << device.to_string();
 }
 
 TEST_P(GradCheckMissingTest, Gather) {
@@ -516,11 +525,7 @@ TEST_P(GradCheckMissingTest, MinAxis) {
 }
 
 TEST_P(GradCheckMissingTest, Logsumexp) {
-    if (device.type == Device::Type::Vulkan) {
-        // Tracked as J4-family: Vulkan exp/log shader precision insufficient
-        // for Float64 gradcheck. logsumexp composes exp → log internally.
-        GTEST_SKIP() << "Vulkan logsumexp Float64 precision (J4 family)";
-    }
+
     auto x_t = randn({3, 5}, DType::Float64, Device::cpu());
     Variable x(x_t.to(device), true);
     auto f = [](const Variable& v) -> Variable {
