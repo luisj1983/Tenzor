@@ -45,7 +45,7 @@ TEST_P(HRMMultiDTypeTest, RMSNormForwardShape) {
 }
 
 TEST_P(HRMMultiDTypeTest, GLUForwardShape) {
-    GatedLinearUnit glu(64, 128, true, false);
+    GatedLinearUnit glu(64, 128, GateType::SiLU, false);
     convert_model(glu);
 
     auto input = createInput({2, 8, 64}, false);
@@ -57,7 +57,7 @@ TEST_P(HRMMultiDTypeTest, GLUForwardShape) {
 }
 
 TEST_P(HRMMultiDTypeTest, GLUParameterCount) {
-    GatedLinearUnit glu(64, 128, true, false);
+    GatedLinearUnit glu(64, 128, GateType::SiLU, false);
     convert_model(glu);
 
     auto params = glu.parameters();

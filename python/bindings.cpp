@@ -1776,9 +1776,6 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("in_features"), py::arg("hidden_features"),
              py::arg("gate_type") = tenzor::nn::GateType::SiLU,
              py::arg("bias") = false)
-        .def(py::init<int64_t, int64_t, bool, bool>(),
-             py::arg("in_features"), py::arg("hidden_features"),
-             py::arg("use_silu") = true, py::arg("bias") = false)
         .def_property_readonly("gate_type", &tenzor::nn::GatedLinearUnit::gate_type);
 
     // GeGLU convenience class

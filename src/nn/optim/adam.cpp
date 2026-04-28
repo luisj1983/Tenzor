@@ -32,32 +32,24 @@ auto Adam::step_impl() -> void {
             grad.device().type == Device::Type::CUDA &&
             (param.tensor().dtype() == DType::Float32 || param.tensor().dtype() == DType::Float64)) {
 
-            // Pack numeric params into a Float64 tensor to avoid string conversion overhead.
-            // Layout: [lr, beta1, beta2, eps, weight_decay, step, decoupled, amsgrad]
-            Tensor param_tensor({8}, DType::Float64, Device::cpu());
-            auto* p = param_tensor.data<double>();
-            p[0] = lr_;
-            p[1] = beta1_;
-            p[2] = beta2_;
-            p[3] = eps_;
-            p[4] = weight_decay_;
-            p[5] = static_cast<double>(step_count_);
-            p[6] = 0.0;  // decoupled = false (L2 regularization for Adam)
-            p[7] = amsgrad_ ? 1.0 : 0.0;
-
-            // Prepare inputs: [param, grad, exp_avg, exp_avg_sq, packed_params, max_exp_avg_sq?]
             std::vector<Tensor> inputs = {
-                param.tensor(), grad, exp_avg_[i], exp_avg_sq_[i], param_tensor
+                param.tensor(), grad, exp_avg_[i], exp_avg_sq_[i]
             };
             if (amsgrad_ && i < max_exp_avg_sq_.size()) {
                 inputs.push_back(max_exp_avg_sq_[i]);
             }
 
             NewOpAttributes attrs;
-            // Use dispatch_to_device to bypass device check: packed_params is a
-            // small CPU tensor read by the host-side kernel lambda, while the
-            // other inputs live on CUDA.
-            dispatch_to_device(OpId::FusedAdamStep, Device::Type::CUDA, inputs, attrs);
+            attrs.set(AttrKey::Lr, lr_);
+            attrs.set(AttrKey::Beta1, beta1_);
+            attrs.set(AttrKey::Beta2, beta2_);
+            attrs.set(AttrKey::Eps, eps_);
+            attrs.set(AttrKey::WeightDecay, weight_decay_);
+            attrs.set(AttrKey::Step, step_count_);
+            attrs.set(AttrKey::Decoupled, false);  // L2 regularization for Adam
+            attrs.set(AttrKey::Amsgrad, amsgrad_);
+
+            dispatch(OpId::FusedAdamStep, inputs, attrs);
             continue;
         }
 

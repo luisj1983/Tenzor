@@ -66,8 +66,6 @@ enum class AttrKey : uint16_t {
     // Input/output dimensions (for ops needing explicit sizes)
     InputH,
     InputW,
-    InputD,
-    InputL,
 
     // Numeric parameters
     Eps,
@@ -174,7 +172,7 @@ enum class AttrKey : uint16_t {
     // Stream handle
     Stream,
 
-    // Shape descriptors (stored as comma-separated strings for backward compat)
+    // Shape descriptors (stored as comma-separated strings; parsed via get_int_list)
     InputShape,
     WeightShape,
 
@@ -404,9 +402,6 @@ private:
  *
  * Stores up to SBO_SIZE (8) attribute pairs inline. For the vast majority
  * of operations (which have 1-6 attributes), this means zero heap allocation.
- *
- * Also provides a legacy string-map interface for backwards compatibility
- * during incremental migration.
  */
 class NewOpAttributes {
     static constexpr size_t SBO_SIZE = 8;

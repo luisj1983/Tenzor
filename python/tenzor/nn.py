@@ -34,9 +34,7 @@ from .tenzor_core.nn import *
 
 
 class RemovableHandle:
-    """Handle returned by ``Module.register_*_hook`` that supports both the
-    PyTorch-style ``handle.remove()`` API and the legacy integer hook_id
-    API via ``__int__`` / ``__index__``.
+    """Handle returned by ``Module.register_*_hook``.
 
     Matches torch.utils.hooks.RemovableHandle semantics: calling
     :meth:`remove` more than once is a no-op, and the handle holds the
@@ -54,11 +52,6 @@ class RemovableHandle:
         self._hook_id = int(hook_id)
         self._removed = False
 
-    @property
-    def id(self) -> int:
-        """Underlying hook id (same value returned by the raw C++ API)."""
-        return self._hook_id
-
     def remove(self) -> None:
         """Remove the registered hook. Idempotent and safe after the
         source module has been collected."""
@@ -66,23 +59,8 @@ class RemovableHandle:
             return
         module = self._module_ref()
         if module is not None:
-            # _CppModule.remove_hook is the raw C++ binding; going
-            # through it (rather than Module.remove_hook) keeps this
-            # method usable even if a subclass overrides remove_hook.
             _CppModule.remove_hook(module, self._hook_id)
         self._removed = True
-
-    # Backward compatibility: older code uses the raw int hook_id.
-    # `__int__` lets `int(handle)` succeed; `__index__` lets the handle
-    # flow through pybind11's size_t-typed `remove_hook(hook_id)` overload
-    # without an explicit cast. Existing tests that captured the return
-    # value as `hook_id = model.register_forward_hook(...)` and later
-    # called `model.remove_hook(hook_id)` continue to work unchanged.
-    def __int__(self) -> int:
-        return self._hook_id
-
-    def __index__(self) -> int:
-        return self._hook_id
 
     def __repr__(self) -> str:
         state = "removed" if self._removed else "active"
@@ -428,10 +406,7 @@ class Module(_CppModule):
             hook: Callable with signature ``hook(module, input, output) -> None or modified output``.
 
         Returns:
-            :class:`RemovableHandle` — call ``handle.remove()`` to detach
-            the hook. For backward compatibility the handle also acts as
-            an integer hook id, so ``model.remove_hook(handle)`` still
-            works for callers written against the pre-PyTorch-compat API.
+            :class:`RemovableHandle` — call ``handle.remove()`` to detach.
 
         Example::
 
@@ -454,21 +429,6 @@ class Module(_CppModule):
             :class:`RemovableHandle` — call ``handle.remove()`` to detach.
         """
         return RemovableHandle(self, _CppModule.register_forward_pre_hook(self, hook))
-
-    def register_backward_hook(self, hook: Callable) -> RemovableHandle:
-        """Register a backward hook on the module.
-
-        .. deprecated::
-            Use :meth:`register_full_backward_hook` instead. This method is
-            kept for backward compatibility but may be removed in a future release.
-
-        Args:
-            hook: Callable with signature ``hook(module, grad_input, grad_output)``.
-
-        Returns:
-            :class:`RemovableHandle` — call ``handle.remove()`` to detach.
-        """
-        return RemovableHandle(self, _CppModule.register_backward_hook(self, hook))
 
     def register_full_backward_hook(self, hook: Callable) -> RemovableHandle:
         """Register a backward hook on the module.

@@ -184,10 +184,6 @@ public:
     GatedLinearUnit(int64_t in_features, int64_t hidden_features,
                     GateType gate_type = GateType::SiLU, bool bias = false);
 
-    /// Backwards-compatible constructor
-    GatedLinearUnit(int64_t in_features, int64_t hidden_features,
-                    bool use_silu, bool bias = false);
-
     auto forward_impl(const Variable& input) -> Variable override;
 
     auto gate_type() const -> GateType { return gate_type_; }

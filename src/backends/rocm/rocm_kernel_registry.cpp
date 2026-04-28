@@ -1923,31 +1923,20 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // Fused Adam Optimizer Step
     // ========================================================================
     table.register_kernel(OpId::FusedAdamStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        double lr, beta1, beta2, eps, weight_decay;
-        int64_t step;
-        bool decoupled, amsgrad;
-
-        if (inputs.size() >= 5 && inputs[4].dtype() == DType::Float64 && inputs[4].numel() == 8) {
-            const double* p = inputs[4].data<double>();
-            lr = p[0]; beta1 = p[1]; beta2 = p[2]; eps = p[3];
-            weight_decay = p[4]; step = static_cast<int64_t>(p[5]);
-            decoupled = p[6] != 0.0; amsgrad = p[7] != 0.0;
-        } else {
-            lr = attrs.get_float(AttrKey::Lr, 0.001);
-            beta1 = attrs.get_float(AttrKey::Beta1, 0.9);
-            beta2 = attrs.get_float(AttrKey::Beta2, 0.999);
-            eps = attrs.get_float(AttrKey::Eps, 1e-8);
-            weight_decay = attrs.get_float(AttrKey::WeightDecay, 0.0);
-            step = attrs.get_int(AttrKey::Step, 1);
-            decoupled = attrs.get_bool(AttrKey::Decoupled, false);
-            amsgrad = attrs.get_bool(AttrKey::Amsgrad, false);
-        }
+        double lr = attrs.get_float(AttrKey::Lr, 0.001);
+        double beta1 = attrs.get_float(AttrKey::Beta1, 0.9);
+        double beta2 = attrs.get_float(AttrKey::Beta2, 0.999);
+        double eps = attrs.get_float(AttrKey::Eps, 1e-8);
+        double weight_decay = attrs.get_float(AttrKey::WeightDecay, 0.0);
+        int64_t step = attrs.get_int(AttrKey::Step, 1);
+        bool decoupled = attrs.get_bool(AttrKey::Decoupled, false);
+        bool amsgrad = attrs.get_bool(AttrKey::Amsgrad, false);
 
         Tensor& param = const_cast<Tensor&>(inputs[0]);
         Tensor& exp_avg = const_cast<Tensor&>(inputs[2]);
         Tensor& exp_avg_sq = const_cast<Tensor&>(inputs[3]);
-        Tensor* max_exp_avg_sq = (amsgrad && inputs.size() > 5)
-            ? &const_cast<Tensor&>(inputs[5]) : nullptr;
+        Tensor* max_exp_avg_sq = (amsgrad && inputs.size() > 4)
+            ? &const_cast<Tensor&>(inputs[4]) : nullptr;
 
         rocm::fused_adam_step_hip(param, inputs[1], exp_avg, exp_avg_sq,
             lr, beta1, beta2, eps, weight_decay, step, decoupled,

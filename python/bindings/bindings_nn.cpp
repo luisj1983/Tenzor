@@ -233,13 +233,8 @@ void register_nn(py::module_& m) {
         // ====================================================================
         // Hook system (PyTorch-compatible naming)
         //
-        // Each register_*_hook returns a RemovableHandle (defined a few
-        // lines above where tenzor::nn::Module itself is bound) instead
-        // of a raw integer hook_id. RemovableHandle supports:
-        //   - handle.remove()     — PyTorch-style removal
-        //   - handle.id           — raw int for legacy callers
-        //   - int(handle)         — implicit conversion to int
-        //   - model.remove_hook(handle) — legacy path via __index__
+        // Each register_*_hook returns a RemovableHandle (defined in
+        // python/tenzor/nn.py). Call handle.remove() to detach.
         // ====================================================================
         .def("register_forward_hook", [](py::object self, py::object hook) -> py::object {
             auto& mod = self.cast<tenzor::nn::Module&>();
@@ -265,18 +260,6 @@ void register_nn(py::module_& m) {
         }, py::arg("hook"),
            "Register hook called before forward pass. Returns a "
            "RemovableHandle.")
-        .def("register_backward_hook", [](py::object self, py::object hook) -> py::object {
-            auto& mod = self.cast<tenzor::nn::Module&>();
-            py::object hook_ref = hook;
-            size_t hook_id = mod.register_backward_post_hook(
-                [hook_ref](tenzor::nn::Module* m, const tenzor::Variable& grad_input, const tenzor::Variable& grad_output) {
-                    py::gil_scoped_acquire acquire;
-                    hook_ref(m, grad_input, grad_output);
-                });
-            return py::module_::import("tenzor.nn").attr("RemovableHandle")(self, hook_id);
-        }, py::arg("hook"),
-           "Register hook called after backward pass (PyTorch-compatible). "
-           "Returns a RemovableHandle.")
         .def("register_full_backward_hook", [](py::object self, py::object hook) -> py::object {
             auto& mod = self.cast<tenzor::nn::Module&>();
             py::object hook_ref = hook;

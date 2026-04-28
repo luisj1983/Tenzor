@@ -25,15 +25,6 @@ TEST_P(GatedActivationsTest, GatedLinearUnit_SwiGLU_Construction) {
     }) << "Failed on " << device.to_string();
 }
 
-TEST_P(GatedActivationsTest, GatedLinearUnit_BackwardsCompat) {
-    // Test bool constructor still works
-    GatedLinearUnit glu_silu(64, 128, true, false);
-    EXPECT_EQ(glu_silu.gate_type(), GateType::SiLU);
-
-    GatedLinearUnit glu_sigmoid(64, 128, false, false);
-    EXPECT_EQ(glu_sigmoid.gate_type(), GateType::Sigmoid);
-}
-
 TEST_P(GatedActivationsTest, GeGLU_Construction) {
     GeGLU geglu(64, 128);
     EXPECT_EQ(geglu.gate_type(), GateType::GELU);

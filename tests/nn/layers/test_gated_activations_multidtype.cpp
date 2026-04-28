@@ -70,16 +70,6 @@ TEST_P(GatedActivationsMultiDTypeTest, AllGateTypes_SameOutputShape) {
     }
 }
 
-TEST_P(GatedActivationsMultiDTypeTest, GatedLinearUnit_BackwardsCompat) {
-    GatedLinearUnit glu_silu(64, 128, true, false);
-    convert_model(glu_silu);
-    EXPECT_EQ(glu_silu.gate_type(), GateType::SiLU);
-
-    GatedLinearUnit glu_sigmoid(64, 128, false, false);
-    convert_model(glu_sigmoid);
-    EXPECT_EQ(glu_sigmoid.gate_type(), GateType::Sigmoid);
-}
-
 TEST_P(GatedActivationsMultiDTypeTest, OutputValuesFinite) {
     GeGLU geglu(32, 64);
     convert_model(geglu);

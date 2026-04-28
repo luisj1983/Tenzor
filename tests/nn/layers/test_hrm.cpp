@@ -244,7 +244,7 @@ TEST_F(HRMTest, StablemaxOutputIsProbability) {
 // ============================================================================
 
 TEST_F(HRMTest, GLUBasic) {
-    GatedLinearUnit glu(64, 128, true, false);
+    GatedLinearUnit glu(64, 128, GateType::SiLU, false);
 
     Tensor input = randn({2, 8, 64}, DType::Float32, Device::cpu());
     Variable x(input, true);
@@ -256,7 +256,7 @@ TEST_F(HRMTest, GLUBasic) {
 }
 
 TEST_F(HRMTest, GLUParameters) {
-    GatedLinearUnit glu(64, 128, true, false);
+    GatedLinearUnit glu(64, 128, GateType::SiLU, false);
 
     auto params = glu.parameters();
 
@@ -756,7 +756,7 @@ TEST_P(HRMMultiBackendTest, RMSNormOnDevice) {
 }
 
 TEST_P(HRMMultiBackendTest, GLUOnDevice) {
-    GatedLinearUnit glu(64, 128, true, false);
+    GatedLinearUnit glu(64, 128, GateType::SiLU, false);
     glu.to(device_);
 
     Tensor input = randn({2, 8, 64}, DType::Float32, device_);

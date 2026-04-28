@@ -215,11 +215,6 @@ GatedLinearUnit::GatedLinearUnit(int64_t in_features, int64_t hidden_features,
     register_module("down_proj", down_proj_);
 }
 
-GatedLinearUnit::GatedLinearUnit(int64_t in_features, int64_t hidden_features,
-                                  bool use_silu, bool bias)
-    : GatedLinearUnit(in_features, hidden_features,
-                       use_silu ? GateType::SiLU : GateType::Sigmoid, bias) {}
-
 auto GatedLinearUnit::forward_impl(const Variable& input) -> Variable {
     // GLU: gate(x) * up(x), then down projection
     auto gate = gate_proj_->forward(input);
@@ -377,7 +372,7 @@ HRMBlock::HRMBlock(int64_t d_model, int64_t n_heads, int64_t d_feedforward,
         d_model, n_heads, dropout, true, false, false, 0, 0, true);
 
     // Feed-forward with GLU
-    ffn_ = std::make_shared<GatedLinearUnit>(d_model, d_feedforward, true, false);
+    ffn_ = std::make_shared<GatedLinearUnit>(d_model, d_feedforward, GateType::SiLU, false);
 
     // RMS normalization layers
     norm1_ = std::make_shared<RMSNorm>(d_model);
